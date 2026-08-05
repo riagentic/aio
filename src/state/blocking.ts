@@ -51,6 +51,7 @@ const WORKER_URL = new URL("./blocking-worker.ts", import.meta.url);
 
 export function createBlockingPool(opts?: { size?: number }): BlockingPool {
   const size = Math.max(1, opts?.size ?? DEFAULT_SIZE);
+  const _warnedDupId = new Set<string>();
   const idle: Worker[] = [];
   const all = new Set<Worker>();
   const active = new Map<Worker, Task>();
@@ -128,6 +129,25 @@ export function createBlockingPool(opts?: { size?: number }): BlockingPool {
       if (disposed) {
         return Promise.reject(new Error("blocking pool disposed"));
       }
+      // A second task under an id that is already in flight is almost always a
+      // mistake: `schedule.after(id, …)` REPLACES by id, so an app reasonably
+      // reads an id as a slot. Here it is a group — both run, and their results
+      // are indistinguishable to the caller. Dev-only, once per id, observe-only.
+      if (
+        (globalThis as Record<string, unknown>).__aioDev === true &&
+        !_warnedDupId.has(id) &&
+        (queue.some((t) => t.id === id) ||
+          [...active.values()].some((t) => t.id === id))
+      ) {
+        _warnedDupId.add(id);
+        console.warn(
+          `[aio:blocking] a second task started under id '${id}' while the ` +
+            `first is still in flight. Unlike schedule.after(id, …), blocking ` +
+            `ids do NOT replace: both run, and cancel('${id}') stops BOTH. ` +
+            `Use a distinct id per task if you need to cancel them separately. ` +
+            `(dev only, once per id)`,
+        );
+      }
       return new Promise<T>((resolve, reject) => {
         queue.push({
           id,
@@ -141,24 +161,32 @@ export function createBlockingPool(opts?: { size?: number }): BlockingPool {
       });
     },
     cancel(id: string): boolean {
-      // Queued task → just drop it.
-      const qi = queue.findIndex((t) => t.id === id);
-      if (qi >= 0) {
-        const [t] = queue.splice(qi, 1);
+      // EVERY task under this id — queued and running alike.
+      //
+      // It used to stop at the first match: one queued task, or (only if none
+      // was queued) one running task. `blocking("scan", …)` called twice
+      // concurrently — which nothing prevents — left `cancel("scan")` reporting
+      // true with the other copy still burning a thread, and a caller who
+      // cancelled precisely to stop the work had no way to know. "Cancel by id"
+      // means the id, not one arbitrary holder of it.
+      let cancelled = false;
+      for (let i = queue.length - 1; i >= 0; i--) {
+        if (queue[i]!.id !== id) continue;
+        const [t] = queue.splice(i, 1);
         t!.reject(new Error(`blocking task '${id}' cancelled`));
-        return true;
+        cancelled = true;
       }
       // Running task → terminate its worker (can't interrupt a busy thread) and
       // spawn a fresh one to keep capacity, then re-feed the queue.
-      for (const [w, t] of active) {
+      for (const [w, t] of [...active]) {
         if (t.id === id) {
           t.reject(new Error(`blocking task '${id}' cancelled`));
           retire(w);
-          pump();
-          return true;
+          cancelled = true;
         }
       }
-      return false;
+      if (cancelled) pump();
+      return cancelled;
     },
     disposeIdle(): boolean {
       // An app shutting down must not leave worker threads alive (they keep

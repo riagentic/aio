@@ -5,6 +5,7 @@
 import {
   BACKOFF_BASE_MS,
   BACKOFF_MAX_MS,
+  backoffDelay,
 } from "../protocol/transport-shared.ts";
 import {
   type AioMeta,
@@ -151,8 +152,28 @@ app.on('ready', () => {
 ${tmplBoundsTracking()}
 
   // ── UDS connection — NDJSON over Unix socket ──
+  //
+  // The reconnect curve is EMITTED FROM THE AUTHORITY, not retyped here. This
+  // file used to import BACKOFF_BASE_MS/BACKOFF_MAX_MS from
+  // protocol/transport-shared.ts and then re-implement the formula inline —
+  // and the copy had already drifted: it dropped the ±20% jitter term, so the
+  // Electron client was the one client in the framework that reconnected on a
+  // bare exponential curve. Emitting the function's own source means a change
+  // to the shared curve reaches this generated script by construction, and a
+  // copy that cannot drift is worth more than a copy that is correct today.
+  const BACKOFF_BASE_MS = ${BACKOFF_BASE_MS}, BACKOFF_MAX_MS = ${BACKOFF_MAX_MS};
+  const backoffDelay = ${backoffDelay.toString()};
   const SOCK = ${JSON.stringify(socketPath)};
-  let buf = '', retry = 0, lastFullState = null, lastState = null, pageReady = false;
+  let buf = '', retry = 0, lastFullState = null;
+  // ONE decider for "the renderer can receive frames": its own __aio:ready
+  // signal. Readiness used to be decided TWICE — did-finish-load gated every
+  // relayed frame while __aio:ready gated a replay that carried only the last
+  // full-state frame — so everything that landed in the gap (the accept-time
+  // "proto" hello, the "cfg" frame that is sent EXACTLY ONCE and is the only
+  // way a build-time-templated shell learns its config, "tt-state", and every
+  // "patches" delta during a reload) was dropped forever. The socket connects
+  // long before a page finishes loading, so that gap was the normal path.
+  let rendererReady = false;
   // The kind of one NDJSON envelope, or null if it is not one. The prefix
   // match is exact for everything enc()/encRaw() produce ({"v":2,"t":"…"});
   // anything else falls back to a real parse rather than a guess.
@@ -166,36 +187,79 @@ ${tmplBoundsTracking()}
   const _ipcQueue = [], IPC_QUEUE_MAX = 100; // AIO-284: offline queue
   let closing = false;
   win.on('close', () => { closing = true; __aioQuitting = true; });
+
+  // Frames the renderer has not received yet, in order. Nothing is ever
+  // relayed straight past this queue — one path in, one path out, so a frame
+  // cannot overtake an older one that is still waiting.
+  const _pending = [], PENDING_MAX = 500;
+  function _queue(k, line) {
+    // A full snapshot supersedes every state/patches frame queued before it —
+    // that keeps the state stream O(1) here without dropping anything else.
+    if (k === 'state') {
+      for (let i = _pending.length - 1; i >= 0; i--) {
+        const pk = _pending[i].k;
+        if (pk === 'state' || pk === 'patches') _pending.splice(i, 1);
+      }
+    }
+    _pending.push({ k: k, line: line });
+    if (_pending.length > PENDING_MAX) {
+      const lost = _pending.splice(0, _pending.length - PENDING_MAX);
+      console.warn('[aio:electron] renderer has not signalled ready — dropped ' +
+        lost.length + ' undelivered frame(s) (queue limit ' + PENDING_MAX + ')');
+    }
+  }
+  function _pump() {
+    if (!rendererReady || closing || win.isDestroyed()) return;
+    while (_pending.length > 0) win.webContents.send('__aio:msg', _pending.shift().line);
+  }
   // MAIN-FRAME navigations only: a <webview> guest attaching/navigating also
-  // fires did-start-navigation on the embedder's webContents — gating on that
-  // flipped pageReady false forever (did-finish-load never re-fires for the
-  // main frame), silently freezing every server→renderer state message the
-  // moment a webview attached. Handles
-  // both Electron signatures: new (event-details object with isMainFrame) and
-  // legacy positional (4th arg).
+  // fires did-start-navigation on the embedder's webContents — clearing
+  // readiness on that would strand the relay forever (only a NEW document
+  // sends __aio:ready), silently freezing every server→renderer frame the
+  // moment a webview attached. Handles both Electron signatures: new
+  // (event-details object with isMainFrame) and legacy positional (4th arg).
   win.webContents.on('did-start-navigation', (e, _url, _inPlace, isMainFrame) => {
     const main = (e && typeof e.isMainFrame === 'boolean') ? e.isMainFrame: isMainFrame;
-    if (main !== false) pageReady = false;
+    if (main === false) return;
+    // A new document starts with no base state, so a queued DELTA is
+    // meaningless to it — replace the queued state stream with the latest
+    // snapshot. Connection-scoped frames (proto/cfg/…) still apply and stay.
+    rendererReady = false;
+    for (let i = _pending.length - 1; i >= 0; i--) {
+      const pk = _pending[i].k;
+      if (pk === 'state' || pk === 'patches') _pending.splice(i, 1);
+    }
+    if (lastFullState) _pending.push({ k: 'state', line: lastFullState });
   });
-  win.webContents.on('did-finish-load', () => { pageReady = true; });
 
   ipcMain.on('__aio:ready', () => {
     if (closing) return;
+    rendererReady = true;
     if (sock) {
       win.webContents.send('__aio:open');
+      _pump();
       sock.write('{"v":2,"t":"subs","d":{"subs":["*"]}}\\n');
-      if (lastFullState) win.webContents.send('__aio:msg', lastFullState);
+    } else {
+      // No backend right now. Saying nothing left the renderer to its own 10s
+      // watchdog — a window that looks connected and is not.
+      win.webContents.send('__aio:close');
     }
   });
 
   function connectUDS() {
+    // A connection that died mid-frame leaves half a line here. Carrying it
+    // into the NEXT connection glued it onto that connection's first frame —
+    // the "proto" hello — so a crash-mid-write silently destroyed the version
+    // gate and handed the renderer one undecodable line. The buffer is
+    // per-connection; reset it with the connection.
+    buf = '';
     sock = connect(SOCK);
     sock.setEncoding('utf8');
     sock.on('connect', () => {
       if (down) { console.info("[aio:electron] backend connection restored (" + SOCK + ")"); down = false; }
-      retry = 0; lastErrCode = null; lastFullState = null; lastState = null;
+      retry = 0; lastErrCode = null; lastFullState = null;
       while (_ipcQueue.length > 0 && sock && !sock.destroyed) sock.write(_ipcQueue.shift() + '\\n');
-      if (!closing && pageReady) win.webContents.send('__aio:open');
+      if (!closing && rendererReady) { win.webContents.send('__aio:open'); _pump(); }
     });
     sock.on('data', (chunk) => {
       buf += chunk;
@@ -210,10 +274,10 @@ ${tmplBoundsTracking()}
         // cached as the full-state replay and handed to the next renderer as
         // if it were a snapshot. dec()-then-switch removes the whole class.
         const kind = frameKind(line);
-        if (kind === 'state') { lastState = line; lastFullState = line; }
-        else if (kind === 'patches') lastState = line;
-        if (pageReady) win.webContents.send('__aio:msg', line);
+        if (kind === 'state') lastFullState = line;
+        _queue(kind, line);
       }
+      _pump();
     });
     // Capture the reason only — an 'error' is always followed by 'close', which
     // reports the outage ONCE with the true cause. Prevents a Node stack-trace
@@ -223,7 +287,7 @@ ${tmplBoundsTracking()}
     sock.on('close', () => {
       sock = null;
       if (closing) return;
-      if (pageReady) win.webContents.send('__aio:close');
+      if (rendererReady) win.webContents.send('__aio:close');
       if (!down) {
         down = true;
         const why = (lastErrCode === 'ECONNREFUSED' || lastErrCode === 'ENOENT')
@@ -231,7 +295,7 @@ ${tmplBoundsTracking()}
           : ("backend connection lost" + (lastErrCode ? " (" + lastErrCode + ")": ""));
         console.warn("[aio:electron] " + why + " at " + SOCK + " — reconnecting (backoff up to 8s)…");
       }
-      const delay = Math.min(${BACKOFF_BASE_MS} * Math.pow(2, retry), ${BACKOFF_MAX_MS});
+      const delay = backoffDelay(retry);
       retry++;
       reconnectTimer = setTimeout(connectUDS, delay);
     });
@@ -305,7 +369,7 @@ ${tmplBoundsTracking()}
         if (err && !closing && sock === s) {
           s.destroy();
           sock = null;
-          if (pageReady && !win.isDestroyed()) win.webContents.send('__aio:close');
+          if (rendererReady && !win.isDestroyed()) win.webContents.send('__aio:close');
         }
       });
     } else if (_ipcQueue.length < IPC_QUEUE_MAX) {

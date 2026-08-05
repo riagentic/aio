@@ -2,7 +2,7 @@
 // Phase logic lives in aio-boot, aio-dispatch, aio-server, aio-lifecycle, aio-run-helpers.
 // Cell composition logic lives in aio-composition and aio-cells-bridge.
 
-import { createShutdownOrchestrator } from "./shutdown.ts";
+import { createShutdownOrchestrator, registerRuntime } from "./shutdown.ts";
 import type { ServerHandle } from "./server-types.ts";
 import type { UDSHandle } from "./uds.ts";
 import {
@@ -28,6 +28,7 @@ import { bootStorage, replaySyncOps } from "./aio-boot.ts";
 import { replayJournal } from "./journal.ts";
 import { createTimeline } from "./timeline.ts";
 import { makeRedactor } from "../diagnostics/redact.ts";
+import { actionOrigin, isWriteSetAction } from "../diagnostics/action-kind.ts";
 import { setupDispatch } from "./aio-dispatch.ts";
 import { hostedCellName, startCellWorkerHost } from "./cell-worker-host.ts";
 import { createCellWorkerPool } from "./cell-worker-pool.ts";
@@ -81,7 +82,7 @@ import {
 import { openSessionStore, type SessionStore } from "./sessions.ts";
 import { openUserStore } from "./auth-users.ts";
 import { resolveAppId } from "./single-instance-lock.ts";
-import { resolveAppKey } from "./app-key.ts";
+import { appKeyPath, resolveAppKey } from "./app-key.ts";
 import { assertDenoVersion } from "./deno-version.ts";
 import { removalMessage, removalOf } from "../state/removals.ts";
 import { dirname, join, resolve } from "@std/path";
@@ -429,20 +430,82 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
     // `parseCli().expose` here instead would silence this warning for an app
     // exposed via `aio.run({ expose: true })`.
     const _exposed = _exposeOf(parseCli(), fc);
-    if (_exposed || fc.users || fc.resolveUser) {
-      const allUi = visibilityReport
-        .filter((r) => r.ui === "all")
-        .map((r) => r.cell);
-      if (allUi.length) {
-        const mode = _exposed
-          ? (parseCli().expose ? "--expose" : "expose: true")
-          : "multi-user auth";
+    // ── ONE line per cell whose ENTIRE state reaches every client ──
+    //
+    // Two independent signals land here. The audience one (this app is exposed
+    // or multi-user, so `ui: "all"` means strangers) was already warned about.
+    // The stronger one was not: a cell that declares `access` has had its WRITE
+    // side restricted by the author and its READ side left undecided.
+    //
+    // `access` gates method CALLS; `ui` gates what the state broadcast carries.
+    // Neither derives the other — "only admins may edit, everyone may read" is
+    // a real design, so the framework must not choose. But an author who writes
+    // `access: false` and never writes `ui` has answered half the question, and
+    // the unanswered half defaults to broadcasting the whole cell to every
+    // socket, authenticated or not. That is worth saying out loud: it is the
+    // one case where the author's own declaration contradicts what ships.
+    //
+    // Note the asymmetry this closes. Composition REFUSES TO BOOT on a guess (a
+    // field whose NAME matches a credential regex) while the strongest signal
+    // available — the author explicitly marking the cell restricted — was read
+    // by nothing. Guessing harder than we listen is backwards.
+    //
+    // Emitted from one loop so a cell tripping both signals is told once, and
+    // the `access` message wins because it is the more specific and the more
+    // actionable of the two.
+    const _openCells: string[] = [];
+    for (const r of visibilityReport) {
+      if (r.ui !== "all" || r.fields.length === 0) continue;
+      // An explicit `ui` — including `ui: "all"` — is an answer, and silences
+      // this forever. Acknowledging costs one word, so the warning can never
+      // become the kind of noise people mute wholesale.
+      if (r.access !== undefined && !r.uiDecided) {
+        const a = r.access;
+        const what = a === false
+          ? "access: false denies all network method calls on this cell, but it"
+          : a === true
+          ? "access: true requires an authenticated caller for method calls, " +
+            "but it"
+          : typeof a === "function"
+          ? "This cell's access predicate gates method calls, but it"
+          : `access: ${JSON.stringify(a)} restricts method calls to that ` +
+            `role, but it`;
+        const one = r.fields.length === 1;
         log.warn(
-          `${mode} with ui="all" on cells: ${
-            allUi.join(", ")
-          } — every authenticated client sees this state. Narrow with ui:{include:[...]} if needed.`,
+          `[${r.cell}] ${what} does NOT hide state. With no \`ui\` filter, ${
+            one ? "its field" : `all ${r.fields.length} fields`
+          } [${r.fields.map((k) => `"${k}"`).join(", ")}] ${
+            one ? "is" : "are"
+          } broadcast in full to every connected client — including ` +
+            `unauthenticated ones. ` +
+            // A sync cell CANNOT narrow its read side: CRDT replication sends
+            // ops to every peer by construction, and composition refuses to
+            // start a sync cell that hides state. Offering it a `ui` filter
+            // would be advice that hard-fails at the next boot.
+            (r.syncs
+              ? `This cell is sync: true, so its reads cannot be narrowed — ` +
+                `CRDT replication carries it to every peer, and a sync cell ` +
+                `that hides state is refused at boot. Either drop sync on it, ` +
+                `or confirm the audience is right and say so — ui: "all" — ` +
+                `and this notice goes away.`
+              : `Decide the read side too: ui: "none" (state stays ` +
+                `server-side), ui: { exclude: [...] }, or ui.forUser for a ` +
+                `per-user view. If everyone really may read it, say so — ` +
+                `ui: "all" — and this notice goes away.`),
         );
+        continue;
       }
+      if (_exposed || fc.users || fc.resolveUser) _openCells.push(r.cell);
+    }
+    if (_openCells.length) {
+      const mode = _exposed
+        ? (parseCli().expose ? "--expose" : "expose: true")
+        : "multi-user auth";
+      log.warn(
+        `${mode} with ui="all" on cells: ${
+          _openCells.join(", ")
+        } — every authenticated client sees this state. Narrow with ui:{include:[...]} if needed.`,
+      );
     }
 
     // Data directories FIRST: initLogger() resolves `~/.<appId>/logs` through
@@ -885,7 +948,8 @@ async function _run<S, A, E>(
   // opt-in diagnostic is not enabled. See src/vitals/cost-meter.ts.
   const costMeter = createCostMeter();
   costMeter.setKnownCells(config._cellNames ?? []);
-  const onPerf = buildOnPerf(tt, vitalsSystem, costMeter);
+  // A GETTER, not the value: `record()` swaps in a new TTState per action.
+  const onPerf = buildOnPerf(() => tt, vitalsSystem, costMeter);
 
   // Set once the worker pool exists (below); a jump before that has nothing
   // to re-seed.
@@ -988,15 +1052,15 @@ async function _run<S, A, E>(
     // are lifecycle, and replaying `__init` would reset a cell to its initial
     // state ON TOP of the restored snapshot — recovery that destroys data.
     // `__exec`/`__error` carry machine transitions, not the app's writes.
-    const isWriteSet = method.startsWith("__set");
+    const isWriteSet = isWriteSetAction(t);
     if (method.startsWith("__") && !isWriteSet) return;
     const payload = (action as { payload?: unknown }).payload;
-    // Who wrote it. The batcher stamps `_origin` with the method name.
-    const origin = isWriteSet
-      ? `${cell}:${
-        (payload as { _origin?: string } | undefined)?._origin ?? method
-      }`
-      : undefined;
+    // Who wrote it — from the ONE decider (diagnostics/action-kind.ts), which
+    // the action log and the logger resolve the same fact with. It was computed
+    // here by hand and again in the diagnostics sink, and the redactor depends
+    // on it: an exact `redactActions` pattern matches the CALL, so a sink whose
+    // copy of this drifts leaks the same secret under the write-set's type.
+    const origin = isWriteSet ? actionOrigin(t, payload) : undefined;
     const ts = Date.now();
     const seq = journal
       ? journal.append({ type: t, payload, origin }, ts)
@@ -1227,9 +1291,21 @@ async function _run<S, A, E>(
     log,
   });
 
-  /** Stop the worker threads before the rest of the runtime: their state is
-   *  already replicated here, so this can only cut an in-flight method short —
-   *  never lose a committed write. */
+  /** Stop the worker threads BEFORE the rest of the runtime, and note that the
+   *  order is load-bearing rather than incidental.
+   *
+   *  A worker's in-flight methods live in its own isolate, so Phase 1's
+   *  `abortAllInflight` cannot see them; the worker host runs its own
+   *  abort + settle on the `close` message and streams the final writes home as
+   *  patches, which the ack cannot overtake (FIFO). Those writes arrive as
+   *  ordinary dispatches — so they must land while dispatch is still OPEN,
+   *  i.e. before `_shutdownRuntime()` closes it and takes the final snapshot.
+   *  Closing the pool after the runtime would silently drop exactly the writes
+   *  the worker just drained to produce.
+   *
+   *  `tests/shutdown-worker-cell-durability.test.ts` pins this end to end with
+   *  a real worker (libraryMode runs worker cells in-isolate, so an in-process
+   *  test cannot reach this path). */
   const shutdown = async (): Promise<void> => {
     await workerPool.close();
     await _shutdownRuntime();
@@ -1243,7 +1319,13 @@ async function _run<S, A, E>(
       | (() => void)
       | undefined;
     release?.();
+    _unregisterRuntime();
   };
+
+  /** Tell the PROCESS about this app, so any process-wide exit (a signal,
+   *  `am stop`, the Electron window closing) waits for THIS app's final
+   *  snapshot too — not just for whichever app got there first. */
+  const _unregisterRuntime = registerRuntime(() => shutdown());
 
   const app = buildAppObject<S, A>({
     dispatch: appDispatch,
@@ -1279,9 +1361,36 @@ async function _run<S, A, E>(
   const sessionResolver = sessionStore
     ? (tok: string) => sessionStore.get(tok)
     : undefined;
+  // Per-user credentials (users / resolveUser / auth:true) and the shared app
+  // key are mutually exclusive — an app in per-user mode never authenticates
+  // anyone with `app.key`.
+  const _perUserAuth = !!users || !!_resolveUser || authEnabled;
+  // NOTE the condition here is deliberately NOT `_perUserAuth`. `token` means
+  // two things downstream — "the credential to enforce" and "the author asked
+  // for a shared key" — and server.ts's `key:`+`auth:` boot refusal reads the
+  // second. Skipping resolution for an `auth: true` app therefore silenced that
+  // refusal and booted an app whose advertised key gated nothing, which is the
+  // exact failure the refusal exists to prevent.
   const _keyRes = (expose && !users && !_resolveUser)
     ? resolveAppKey(appId, (config as { key?: string | boolean }).key)
     : { key: undefined, persisted: false, explicit: false };
+  // An app that MOVED from `key: true --expose` to per-user auth left its old
+  // `app.key` on disk, and nothing ever cleared it: `resolveAppKey` owns "the
+  // key file tells the truth" but only runs on the shared-key path. `am profile`
+  // reads that file directly, so it kept exporting a dead credential as the
+  // current one — and it would come back to life the moment the app switched
+  // back. Per-user mode is the ONLY safe place to clear it: "not exposed right
+  // now" does not mean the key is dead, and deleting it there would regenerate a
+  // different one on the next `--expose` and break every already-paired device
+  // ("one key, use forever").
+  if (_perUserAuth && !_keyRes.key) {
+    try {
+      Deno.removeSync(appKeyPath(appId));
+      log.debug(
+        `auth: removed stale app.key — this app uses per-user credentials`,
+      );
+    } catch { /* none present: the normal case */ }
+  }
   const token = _keyRes.key;
   const clientCounter = { value: 0 };
   const udsRef = { current: null as UDSHandle | null };
@@ -1431,7 +1540,6 @@ async function _run<S, A, E>(
       head: ui.head,
     },
     keepServer: config.keepServer,
-    shutdown,
     setElectronProc: (proc) => {
       _electronProc = proc;
     },

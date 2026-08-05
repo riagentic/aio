@@ -25,7 +25,6 @@ import { log } from "./diagnostics/logger-api.ts";
 import { createOwnManager, isOwnEffect, type OwnEffect } from "./state/own.ts";
 import { Listeners } from "./state/listeners.ts";
 import { signal } from "./state/signal.ts";
-import { useRef } from "./air/aio-renderer.ts";
 import { type ComponentFn, h } from "./air/vdom.ts";
 import { bindCell, bindCellReactive, type CellDef } from "./state/cell.ts";
 import { composeCells } from "./state/cell-compose.ts";
@@ -35,22 +34,121 @@ import {
   getRegisteredCells,
 } from "./state/cell-reactive.ts";
 import { _applyFullState, _resetSignals } from "./state/state-signals.ts";
+import {
+  abortAllInflight,
+  DRAIN_TIMEOUT_MS,
+  endShutdownAbort,
+  settlePending,
+} from "./state/method-cancel.ts";
 
 // Re-exports for user code
 export { msg };
-// The AIR component surface standalone apps share with server-backed ones:
-// the standalone runtime mounts through the same renderer, so the lifecycle
-// hooks work identically — they only need to be visible under the "aio/air"
-// alias the android bundle maps to this module.
+
+// ── The `aio/air` surface, on the android target ──────────────────────
+//
+// The android bundle maps BOTH "aio" and "aio/air" to this module
+// (src/build/build-bundle.ts), so everything an app imports from `aio/air` has
+// to be visible here — and has to be THE SAME symbol, never a second copy with
+// a narrower contract. It used to be a handful of lifecycle hooks plus a
+// private `useLocal` that lacked the documented tuple form and patch(): an app
+// written to the docs built green for browser and electron and threw
+// `useLocal(...) is not iterable` on android alone. tests/android-air-surface.
+// test.ts pins the parity and enumerates what android deliberately omits
+// (server transport, auth UI, the browser-history router, SSR/islands,
+// devtools) — none of which exist in a standalone app.
+//
+// Everything below is renderer/signal code with no transport dependency, so
+// re-exporting it costs the bundle nothing it does not use (esbuild tree-shakes
+// from the app entry).
 export {
+  afterRender,
+  type Context,
+  createContext,
+  hydrate,
+  mount,
+  type MountHandle,
   onCleanup,
   onMount,
+  // aio-renderer's setDevMode is the one `aio/air` exports — it turns on the
+  // renderer's dev checks AND forwards to vdom's flag.
+  setDevMode,
+  useContext,
+  useContextSelector,
   useId,
   useOptimistic,
   useRef,
   useSignal,
 } from "./air/aio-renderer.ts";
+export {
+  type Action,
+  type ComponentFn,
+  ErrorBoundary,
+  Fragment,
+  h,
+  lazy,
+  Portal,
+  type Ref,
+  renderToString,
+  Suspense,
+  type VChild,
+  type VNode,
+} from "./air/vdom.ts";
+export {
+  batch,
+  type Computed,
+  computed,
+  effect,
+  type Signal,
+  signal,
+  untrack,
+} from "./state/signal.ts";
+export { Show } from "./air/show.ts";
+export { on, watch } from "./state/watch.ts";
+export type { WatchOptions } from "./state/watch.ts";
+export { useFieldArray, useForm } from "./air/form.ts";
+export type {
+  FieldArrayState,
+  FieldState,
+  FormState,
+  ValidationRule,
+} from "./air/form.ts";
+export { useVirtualList } from "./air/virtual-list.ts";
+export type {
+  VirtualListConfig,
+  VirtualListState,
+} from "./air/virtual-list.ts";
+export {
+  Transition,
+  type TransitionProps,
+} from "./air/transition-component.ts";
+export {
+  TransitionGroup,
+  type TransitionGroupProps,
+} from "./air/transition-group.ts";
+export {
+  fade,
+  scale,
+  slide,
+  type TransitionFn,
+  type TransitionOptions,
+  type TransitionResult,
+} from "./air/transition.ts";
+export {
+  type SpringConfig,
+  type SpringValue,
+  useSpring,
+} from "./air/animation.ts";
+export { Defer, type DeferProps, type DeferTrigger } from "./air/defer.ts";
+export { type Resource, resource } from "./air/resource.ts";
+export { type DimensionsState, useDimensions } from "./air/dimensions.ts";
 export { useInterval, useRaf } from "./air/raf.ts";
+/** Auto-memo is built into the renderer — `memo()` is the identity function on
+ *  every target, and exists so React-shaped code compiles unchanged. */
+export { memo } from "./air/memo.ts";
+/** Client-only reactive state. ONE implementation, shared with every other
+ *  target — `{ local, set, patch }` and the preferred tuple form
+ *  `const [v, setV] = useLocal(init)`. */
+export { useLocal, type UseLocalResult } from "./adapters/air.ts";
 
 /** Extracts return types of all function members into a union */
 export type UnionOf<T> = {
@@ -79,6 +177,12 @@ export function draft<S, E>(
 
 const _listeners = new Listeners<unknown>();
 let _state: unknown = null;
+/** THIS runtime's cell names — late-bound by `bootStandalone`, exactly like the
+ *  server's `getCellNames`. `close()` aborts and waits for ITS OWN cells: the
+ *  in-process harnesses can hold a server app in the same process, and one
+ *  runtime shutting down must never cancel the other's methods mid-write.
+ *  Undefined (a raw `initStandalone`, no cells) has nothing to scope. */
+let _standaloneCells: Set<string> | undefined;
 let _app: AioApp | null = null;
 
 // Owned resources (`own.set`) acquired in this runtime. Lazily created so the
@@ -303,10 +407,43 @@ export function initStandalone<S, A, E>(
   const app: AioApp<S, A> = {
     dispatch,
     getState: () => state,
-    close: () => {
+    // THE SAME four steps as `src/server/shutdown.ts` Phase 1, in the same
+    // order, on the same budget: close the door, ABORT every in-flight async
+    // method so a stream takes its own `s.$signal.aborted` path, WAIT for the
+    // writes it makes on the way out, and only then write the snapshot.
+    //
+    // It used to close-and-flush in one breath, so the snapshot was the state
+    // as of the instant close() was called and everything an in-flight method
+    // still had to write rode on a debounce timer — in a process that is being
+    // torn down. On Android close() IS the process ending, so that timer never
+    // fires: the streamed reply was simply missing on the next launch, exactly
+    // the report `tests/shutdown-inflight.test.ts` exists for. What close()
+    // returns has to be what the next launch reads.
+    close: async () => {
       dispatch.close();
+      abortAllInflight(_standaloneCells);
+      try {
+        // ONE deadline for both waits — two budgets would double the time the
+        // window takes to disappear.
+        const deadline = Date.now() + DRAIN_TIMEOUT_MS;
+        const left = () => Math.max(1, deadline - Date.now());
+        const stuck = await settlePending(left(), _standaloneCells);
+        if (stuck > 0) {
+          standaloneLog.warn(
+            `close: ${stuck} call(s) still running at the ` +
+              `${DRAIN_TIMEOUT_MS}ms deadline (slow write, or an ignored ` +
+              `abort signal) — their remaining writes are lost`,
+          );
+        }
+        await dispatch.drain(left());
+      } catch (e) {
+        standaloneLog.error(`close: drain — ${e}`);
+      } finally {
+        // The drain is over: a later app in this process (every sequential
+        // test) may legitimately reuse these cell names.
+        endShutdownAbort(_standaloneCells);
+      }
       flushPersist();
-      return Promise.resolve();
     },
     mode: "standalone",
   };
@@ -354,24 +491,9 @@ export function useAio<S = unknown>(): {
   return { state, send };
 }
 
-/** Client-only signal state — not synced, not persisted */
-export function useLocal<T>(
-  initial: T,
-): { local: T; set: (next: T | ((prev: T) => T)) => void } {
-  const ref = useRef<ReturnType<typeof signal<T>> | null>(null);
-  if (!ref.current) ref.current = signal<T>(initial);
-  const sig = ref.current;
-  return {
-    get local() {
-      return sig.value;
-    },
-    set: (next: T | ((prev: T) => T)) => {
-      sig.set(
-        typeof next === "function" ? (next as (prev: T) => T)(sig.value) : next,
-      );
-    },
-  };
-}
+// `useLocal` used to be re-implemented here — see the re-export above. The copy
+// was missing the documented tuple form and patch(), so android alone threw on
+// the spelling docs call preferred.
 
 /** Renders the component matching the current page key */
 export function page<K extends string>(
@@ -394,6 +516,7 @@ export function _resetState(): void {
   _state = null;
   _app = null;
   _cellApp = null;
+  _standaloneCells = undefined;
   _stateSignal.set(null);
   _listeners.clear();
   _resetSignals();
@@ -530,6 +653,9 @@ function bootStandalone(
   });
   // seed the cell signals with the restored/initial state
   _applyFullState(app.getState() as Record<string, unknown>);
+  // Late-bind the cell names so `close()` can scope its abort + drain to this
+  // runtime's own cells (see `_standaloneCells`).
+  _standaloneCells = new Set(composed.cellNames);
   _cellApp = app;
   return app;
 }

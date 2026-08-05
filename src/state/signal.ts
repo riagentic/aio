@@ -97,15 +97,23 @@ const _pendingSubscribers = new Set<Subscriber>();
 /** Group multiple signal writes into one flush — subscribers notified once at the end. */
 export function batch(fn: () => void): void {
   _batchDepth++;
-  let threw = false;
   try {
     fn();
-  } catch (e) {
-    threw = true;
-    throw e;
   } finally {
     _batchDepth--;
-    if (!threw && _batchDepth === 0) _flush();
+    // Flush even when fn() THREW. The writes it made before throwing are
+    // already committed — the signals hold the new values — so skipping the
+    // flush does not undo anything, it only hides it: subscribers stay queued
+    // and the view keeps rendering pre-write state until some unrelated later
+    // write happens to flush them. Every DOM event handler and every
+    // server-state apply runs inside a batch (vdom-props.ts,
+    // state-signals.ts, state-message.ts), and the delta path CATCHES the
+    // throw and asks for a resync whose identical values are then skipped by
+    // `Object.is` — a permanently stale UI with nothing logged. "Value
+    // changed ⇒ subscribers told" must hold on every exit path; subscriber
+    // errors are contained inside _flush, so the original exception still
+    // propagates.
+    if (_batchDepth === 0) _flush();
   }
 }
 

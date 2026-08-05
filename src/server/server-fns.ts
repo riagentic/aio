@@ -17,6 +17,8 @@
 // fail-loud timeout). The hop is VISIBLE in code — the one seam.
 
 import type { AioUser } from "./aio-types.ts";
+import { serializeReturn } from "../protocol/return-value.ts";
+import { log } from "../diagnostics/logger.ts";
 
 // deno-lint-ignore no-explicit-any
 type FnMap = Record<string, (...args: any[]) => any>;
@@ -139,11 +141,43 @@ export async function invokeServerFn(
         `serverFn "${ns}.${name}" is not registered on the server (check the *.server.ts module is imported by the entry)`,
     };
   }
+  let value: unknown;
   try {
-    return { ok: true, value: await fn(...args) };
+    value = await fn(...args);
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
+  // THE RESULT MUST BE WIRE-SAFE *HERE*, not at the two send sites.
+  //
+  // Both callers do `socket.send(enc("sfnr", { cid, ...result }))` inside a
+  // `try { … } catch { /* client disconnected */ }`. `enc` THROWS on a BigInt
+  // or a circular structure — so a serverFn returning one sent nothing at all,
+  // the throw was swallowed as a disconnect, and the caller sat for 30s before
+  // rejecting with "server unreachable or the function hung": the wrong
+  // diagnosis for a value the server could have named. Everything else JSON
+  // silently rewrote (Date → string, Map → {}, NaN/undefined → null) with no
+  // warning, while the identical value returned from a CELL METHOD warned
+  // loudly — the same fact, guarded on one path and not the other.
+  //
+  // serializeReturn is that one guard. Vetting inside invokeServerFn covers
+  // every transport (WS + UDS) at their single shared entry; a DIRECT
+  // server-side call never comes through here, so in-process fidelity is
+  // untouched.
+  //
+  // `dropped` REJECTS rather than resolving undefined (the ack path's choice):
+  // an RPC's product is its return value, so handing back `undefined` as if it
+  // were the answer is the silent corruption this guard exists to remove. The
+  // message states plainly that the function did run.
+  const { value: safe, dropped } = serializeReturn(value, `${ns}.${name}`);
+  if (dropped) {
+    const error = `serverFn "${ns}.${name}" returned a value JSON cannot ` +
+      `carry (BigInt, a circular structure, or a bare function), so it ` +
+      `cannot cross the wire. The function DID run — only its result was ` +
+      `undeliverable. Return JSON-safe data (plain objects/arrays/primitives).`;
+    log.warn("sfn", error);
+    return { ok: false, error };
+  }
+  return { ok: true, value: safe };
 }
 
 /** Test isolation. */

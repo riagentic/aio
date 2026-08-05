@@ -248,14 +248,30 @@ Deno.test("electron: UDS script — socket destruction on window close", () => {
   assertStringIncludes(s, "clearTimeout(reconnectTimer)");
 });
 
-Deno.test("electron: UDS script — buffers state until page ready", () => {
+Deno.test("electron: UDS script — buffers frames until the renderer is ready", () => {
   const s = electronMainScriptUDS(
     "http://localhost:3000",
     "/tmp/test.sock",
     {},
   );
-  assertStringIncludes(s, "lastState");
-  assertStringIncludes(s, "pageReady");
+  // ONE readiness decider — the renderer's own __aio:ready. `did-finish-load`
+  // used to gate relayed frames independently of it, and everything that
+  // landed between the two was dropped (see tests/electron-main-relay.test.ts,
+  // which proves the behaviour rather than the spelling).
+  assertStringIncludes(s, "let rendererReady = false");
+  assertEquals(
+    s.includes("pageReady"),
+    false,
+    "a second readiness flag must not come back",
+  );
+  assertEquals(
+    s.includes("on('did-finish-load'"),
+    false,
+    "did-finish-load must not gate frame delivery — only __aio:ready does",
+  );
+  // Buffering is a queue, not a one-slot cache: every undelivered frame waits.
+  assertStringIncludes(s, "_pending.push(");
+  assertStringIncludes(s, "function _pump()");
 });
 
 Deno.test("electron: UDS script — reports a backend outage once, with the true reason", () => {

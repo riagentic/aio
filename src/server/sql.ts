@@ -86,12 +86,49 @@ export function ref(refTable: string, opts?: ColumnOpts): ColumnDef {
 
 /** Define a table schema — pass to aio.run({ db: { tableName: table({...}) } }) */
 export function table(columns: Record<string, ColumnDef>): TableDef {
+  // Two pk() columns render `CREATE TABLE t (a INTEGER PRIMARY KEY, b INTEGER
+  // PRIMARY KEY)`, which SQLite refuses at CREATE ("more than one primary
+  // key") — at BOOT, in a message that names neither the schema key nor the
+  // second column. Worse, `pkColumn` answers with the FIRST one, so the row
+  // diff and every `ref()` to this table quietly agree on a key the table was
+  // never going to have. Refuse at declaration, where both names are in hand.
+  const pks = Object.entries(columns).filter(([, c]) => c?.pk).map(([n]) => n);
+  if (pks.length > 1) {
+    throw new Error(
+      `table(): ${pks.length} primary keys declared (${
+        pks.join(", ")
+      }) — SQLite accepts exactly one. Keep one pk() and make the others ` +
+        `text({ unique: true }) / integer({ unique: true }).`,
+    );
+  }
   return { columns };
+}
+
+/** THE decider for "which column is this table's primary key", or null.
+ *
+ *  It used to be decided twice: the state diff looked for `pk: true`, while
+ *  `ref()` hard-coded `REFERENCES <table>(id)`. A table whose key column is
+ *  called anything else (`userId`) produced a schema SQLite happily CREATEs and
+ *  then refuses every write to — `foreign key mismatch`, on every persist
+ *  window, forever. One function, both call sites. */
+export function pkColumn(def: TableDef): string | null {
+  for (const [name, col] of Object.entries(def.columns)) {
+    if (col.pk) return name;
+  }
+  return null;
 }
 
 // ── SQL generation ──────────────────────────────────────────────────
 
-export function columnToSQL(name: string, def: ColumnDef): string {
+/** `schema` (the sibling tables) is what lets a `ref()` resolve its target's
+ *  real primary key. It is optional so a lone column still renders; when it is
+ *  absent, or the referenced table is not one aio declares (a table created by
+ *  hand-written SQL), the reference falls back to `id`. */
+export function columnToSQL(
+  name: string,
+  def: ColumnDef,
+  schema?: Record<string, TableDef>,
+): string {
   assertIdent(name, "column name");
   const parts = [name, def.sqlType];
   if (def.pk) {
@@ -117,15 +154,33 @@ export function columnToSQL(name: string, def: ColumnDef): string {
   }
   if (def.ref) {
     assertIdent(def.ref, "ref table");
-    parts.push(`REFERENCES ${def.ref}(id)`);
+    const target = schema?.[def.ref];
+    let refCol = "id";
+    if (target) {
+      const targetPk = pkColumn(target);
+      if (!targetPk) {
+        throw new Error(
+          `column "${name}" references table "${def.ref}", but "${def.ref}" ` +
+            `declares no primary key — a reference needs one. Give it a ` +
+            `pk() column, or drop the ref().`,
+        );
+      }
+      refCol = targetPk;
+    }
+    assertIdent(refCol, "ref column");
+    parts.push(`REFERENCES ${def.ref}(${refCol})`);
   }
   return parts.join(" ");
 }
 
-export function createTableSQL(name: string, tableDef: TableDef): string {
+export function createTableSQL(
+  name: string,
+  tableDef: TableDef,
+  schema?: Record<string, TableDef>,
+): string {
   assertIdent(name, "table name");
   const cols = Object.entries(tableDef.columns)
-    .map(([n, d]) => columnToSQL(n, d))
+    .map(([n, d]) => columnToSQL(n, d, schema))
     .join(", ");
   return `CREATE TABLE IF NOT EXISTS ${name} (${cols})`;
 }

@@ -5,6 +5,7 @@ import {
   buildReportOpts,
   createMemoizedUIState,
 } from "../src/server/aio-run-helpers.ts";
+import { createTT, record } from "../src/diagnostics/time-travel.ts";
 
 // ── createMemoizedUIState ──────────────────────────────────────────
 
@@ -247,36 +248,37 @@ Deno.test("buildAppObject: db is undefined when asyncDb is null", () => {
 
 // ── buildOnPerf ────────────────────────────────────────────────────
 
+// These used to hand `buildOnPerf` a hand-built TTState object and a bare
+// `{}` entry with no action on it. Both departures from reality hid the bug:
+// the real `record()` returns a NEW TTState per action (so the captured value
+// went stale immediately) and every real entry names an action (so the timing
+// can be matched to it). The tests below use the real TT functions and a
+// getter, i.e. exactly how the runtime holds it.
+
 Deno.test("buildOnPerf: returns undefined when no tt and no vitals", () => {
-  const result = buildOnPerf(null, undefined);
+  const result = buildOnPerf(() => null, undefined);
   assertEquals(result, undefined);
 });
 
 Deno.test("buildOnPerf: returns function when tt provided", () => {
-  const tt = {
-    entries: [{ perf: undefined }],
-    index: 0,
-    paused: false,
-    nextId: 1,
-  };
-  // deno-lint-ignore no-explicit-any
-  const result = buildOnPerf(tt as any, undefined);
+  let tt = createTT<{ n: number }, { type: string }>();
+  tt = record(tt, { type: "a:b" }, { n: 1 });
+  const result = buildOnPerf(() => tt, undefined);
   assertEquals(typeof result, "function");
 });
 
-Deno.test("buildOnPerf: writes perf to tt entry", () => {
-  const entry: { perf?: unknown } = {};
-  const tt = { entries: [entry], index: 0, paused: false, nextId: 1 };
-  // deno-lint-ignore no-explicit-any
-  const onPerf = buildOnPerf(tt as any, undefined)!;
-  const timing = {
+Deno.test("buildOnPerf: perf lands on the entry recorded AFTER it was built", () => {
+  let tt = createTT<{ n: number }, { type: string }>();
+  const onPerf = buildOnPerf(() => tt, undefined)!;
+  // The state object the runtime holds changes on every action.
+  tt = record(tt, { type: "test:action" }, { n: 1 });
+  onPerf({
     actionType: "test:action",
     reduce: 1.5,
     effects: 0.3,
     budget: { reduce: 10, effect: 5 },
-  };
-  onPerf(timing);
-  assertEquals(entry.perf, {
+  });
+  assertEquals(tt.entries[0]!.perf, {
     reduce: 1.5,
     effects: 0.3,
     budget: { reduce: 10, effect: 5 },
@@ -284,11 +286,28 @@ Deno.test("buildOnPerf: writes perf to tt entry", () => {
   });
 });
 
+Deno.test("buildOnPerf: a SKIPPED action's timing is dropped, not misfiled", () => {
+  let tt = createTT<{ n: number }, { type: string }>();
+  tt = record(tt, { type: "kept:action" }, { n: 1 });
+  const onPerf = buildOnPerf(() => tt, undefined)!;
+  // `cell:__exec` never enters history — its timing belongs to no entry.
+  onPerf({
+    actionType: "cell:__exec",
+    reduce: 99,
+    effects: 0,
+    budget: { reduce: 10, effect: 5 },
+  });
+  assertEquals(
+    tt.entries[0]!.perf,
+    undefined,
+    "a skipped action's numbers were printed against a different action",
+  );
+});
+
 Deno.test("buildOnPerf: includes breakdown when provided", () => {
-  const entry: { perf?: unknown } = {};
-  const tt = { entries: [entry], index: 0, paused: false, nextId: 1 };
-  // deno-lint-ignore no-explicit-any
-  const onPerf = buildOnPerf(tt as any, undefined)!;
+  let tt = createTT<{ n: number }, { type: string }>();
+  const onPerf = buildOnPerf(() => tt, undefined)!;
+  tt = record(tt, { type: "x:y" }, { n: 1 });
   const breakdown = {
     produce: 1,
     clone: 0.2,
@@ -303,10 +322,11 @@ Deno.test("buildOnPerf: includes breakdown when provided", () => {
     budget: { reduce: 10, effect: 5 },
     breakdown,
   });
-  assertEquals((entry.perf as { breakdown: unknown }).breakdown, breakdown);
+  assertEquals(tt.entries[0]!.perf!.breakdown, breakdown);
 });
 
 Deno.test("buildOnPerf: calls vitals onPerf when vitals provided", () => {
+  // (tt absent — vitals is the only consumer here)
   const perfCalls: unknown[] = [];
   const vitals = {
     loopProbe: {
@@ -320,7 +340,7 @@ Deno.test("buildOnPerf: calls vitals onPerf when vitals provided", () => {
     checkAndAlert: () => {},
   };
   // deno-lint-ignore no-explicit-any
-  const onPerf = buildOnPerf(null, vitals as any)!;
+  const onPerf = buildOnPerf(() => null, vitals as any)!;
   const timing = {
     actionType: "test:x",
     reduce: 1,
@@ -333,9 +353,8 @@ Deno.test("buildOnPerf: calls vitals onPerf when vitals provided", () => {
 });
 
 Deno.test("buildOnPerf: no-op when tt.entries is empty", () => {
-  const tt = { entries: [], index: 0, paused: false, nextId: 0 };
-  // deno-lint-ignore no-explicit-any
-  const onPerf = buildOnPerf(tt as any, undefined)!;
+  const tt = createTT<{ n: number }, { type: string }>();
+  const onPerf = buildOnPerf(() => tt, undefined)!;
   // Should not throw even though entries[0] is undefined
   onPerf({
     actionType: "x:y",
@@ -364,12 +383,17 @@ Deno.test("buildReportOpts: prod flag is passed through", () => {
   assertEquals(opts.prod, true);
 });
 
-Deno.test("buildReportOpts: tt is undefined when null passed", () => {
+// Was "tt is undefined when null passed", which pinned the bug: reportOpts is
+// built BEFORE time travel exists, so deciding from the getter at construction
+// time meant markError was never installed in a real app. The marker is always
+// installed and asks the getter per call — with TT off that is a safe no-op.
+Deno.test("buildReportOpts: markError is a safe no-op while TT is absent", () => {
   // deno-lint-ignore no-explicit-any
   const opts = buildReportOpts(
     { onError: undefined, getTT: () => null, prod: false } as any,
   );
-  assertEquals(opts.tt, undefined);
+  assertEquals(typeof opts.tt?.markError, "function");
+  opts.tt!.markError({ code: "REDUCE_ERROR", message: "x" });
 });
 
 Deno.test("buildReportOpts: tt.markError is provided when tt passed", () => {

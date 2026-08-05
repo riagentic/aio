@@ -29,6 +29,21 @@ export function outError(msg: string, mode: OutputMode): void {
   else console.error(`error: ${msg}`);
 }
 
+/** Report a failure and END the command with a non-zero exit — ONE act, so the
+ *  exit code cannot drift from the message.
+ *
+ *  `am` is scripted against (`am create x && cd x`, `am health && deploy`), and
+ *  the two halves used to be written separately at every call site: most did
+ *  `outError(…); Deno.exit(1)`, but `am create`, `am new` and `am log` did
+ *  `outError(…); return` — printing a refusal and then handing the shell a
+ *  SUCCESS. `am create x && cd x` cd'd into a directory that was never made.
+ *  Anything that is a failure goes through here; `outError` alone is for the
+ *  handful of places that genuinely carry on (a warning, a poll that retries). */
+export function fail(msg: string, mode: OutputMode): never {
+  outError(msg, mode);
+  Deno.exit(1);
+}
+
 /** Format seconds into human-readable uptime string (e.g. "2h 15m 30s") */
 export function formatUptime(seconds: number): string {
   if (seconds < 60) return `${seconds}s`;

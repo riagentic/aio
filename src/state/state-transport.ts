@@ -5,6 +5,7 @@
  * Owns: Transport interface, offline queue, send(), createSendProxy(), _trackingProxy().
  */
 
+import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { enc } from "../protocol/envelope.ts";
 import { _BLOCKED_KEYS } from "./state-array-utils.ts";
 import { _setSubsSendFn, trackPath } from "./state-subs.ts";
@@ -39,6 +40,21 @@ export interface CellRef {
 // ── Constants ────────────────────────────────────────────────────────
 
 const MAX_OFFLINE_QUEUE = 100;
+
+/** How full this queue is, 0..1. Read by the browser transport so
+ *  `isConnectionDegraded()` answers for BOTH offline queues.
+ *
+ *  There are two, for a structural reason: this one lives in the isomorphic
+ *  core (`useCell().send` / `useAio().send`), and the boundary matrix forbids
+ *  `state` importing `browser`, so it cannot delegate to the cell-method
+ *  queue in `browser/browser-air-transport.ts`. Two queues is therefore a
+ *  given — but "how healthy is this connection" is ONE fact, and reporting it
+ *  from only one of them made the documented indicator answer `false` no
+ *  matter how backed up a `send()` caller was.
+ *  @internal */
+export function _offlineQueueFullness(): number {
+  return _offlineQueue.length / MAX_OFFLINE_QUEUE;
+}
 
 // ── Module state ─────────────────────────────────────────────────────
 
@@ -111,10 +127,26 @@ export function send(action: { type: string; payload?: any }): boolean {
     _offlineQueue.push(tagged);
     return true;
   }
-  // AIO-196: warn instead of silent drop
+  // A drop here must be as loud as the same event on the cell-method queue.
+  // That one emits a diagnostic (so it reaches the diagnostic bus, the dev
+  // overlay and `am`); this one only ever reached the browser console, so an
+  // action lost through `useCell().send` was invisible to every tool that
+  // exists to surface exactly this.
   console.warn(
     `[aio:state] Action "${action.type}" dropped — offline queue full (${MAX_OFFLINE_QUEUE})`,
   );
+  diagEmit({
+    type: "state-transport:offline-queue-full",
+    severity: "error",
+    source: "state-transport",
+    message:
+      `Action "${action.type}" was DROPPED — the offline send queue is full ` +
+      `(${MAX_OFFLINE_QUEUE})`,
+    detail: { actionType: action.type, max: MAX_OFFLINE_QUEUE },
+    hint:
+      "send() returns false when it drops. Check the return value, or use a " +
+      "cell method (whose promise rejects) for actions that must not be lost.",
+  });
   return false;
 }
 

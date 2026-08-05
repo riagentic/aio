@@ -4,6 +4,7 @@
 // Fail-loud: server errors reject with the server's message; 30s timeout.
 
 import { enc, type SfnrPayload } from "../protocol/envelope.ts";
+import { serializeArgs } from "../protocol/wire-value.ts";
 
 const SFN_TIMEOUT_MS = 30_000;
 
@@ -52,6 +53,28 @@ export function serverFn<T extends FnMap>(ns: string): T {
               ),
             );
           }
+          // ARGUMENTS ARE VETTED BEFORE ANYTHING IS REGISTERED.
+          //
+          // They cross the same JSON wire as the result and had no guard at
+          // all: a Date arrived as a string, a Map as `{}`, NaN/undefined as
+          // null — silently, and only on the network path, so the same call
+          // behaved differently server-side. A BigInt was worse: `enc` threw
+          // from inside the executor AFTER the pending entry and its 30s timer
+          // were registered, so the call rejected with a bare
+          // "Do not know how to serialize a BigInt" (naming no function) and
+          // leaked the timer. Vet first: name the call, send nothing, register
+          // nothing.
+          const what = `serverFn("${ns}").${prop}`;
+          const { args: safeArgs, dropped } = serializeArgs(args, what);
+          if (dropped) {
+            return reject(
+              new Error(
+                `${what} was called with an argument JSON cannot carry ` +
+                  `(BigInt or a circular structure) — nothing was sent. Pass ` +
+                  `JSON-safe data across the wire.`,
+              ),
+            );
+          }
           const cid = `sfn-${++_cid}-${Date.now()}`;
           const timer = setTimeout(() => {
             _pending.delete(cid);
@@ -64,7 +87,7 @@ export function serverFn<T extends FnMap>(ns: string): T {
             );
           }, SFN_TIMEOUT_MS);
           _pending.set(cid, { resolve, reject, timer });
-          _send(enc("sfn", { cid, ns, name: prop, args }));
+          _send(enc("sfn", { cid, ns, name: prop, args: safeArgs }));
         });
     },
   });

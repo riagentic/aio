@@ -32,15 +32,10 @@
 
 import { log } from "../diagnostics/logger.ts";
 
-/** One value that changed shape on the way through JSON. */
-export interface LossyConversion {
-  /** Path from the returned root, e.g. `value.items[0].due`. */
-  path: string;
-  /** What it was: `Date`, `Map`, `NaN`, `undefined`, `function`, `Foo`… */
-  from: string;
-  /** What the caller actually receives: `string`, `object`, `null`, `absent`… */
-  to: string;
-}
+// The JSON round-trip comparison itself lives in wire-value.ts — ONE walk,
+// shared with the argument guard (the other direction of the same wire).
+export type { LossyConversion } from "./wire-value.ts";
+import { findLossy, formatLossy, type LossyConversion } from "./wire-value.ts";
 
 /** Result of vetting a return value for transport. */
 export interface SerializedReturn {
@@ -50,111 +45,6 @@ export interface SerializedReturn {
   dropped: boolean;
   /** Values that survived, but not intact. Empty when the trip was exact. */
   lossy: LossyConversion[];
-}
-
-/** Cap on reported paths and on the comparison walk, so a huge return value
- *  cannot turn a diagnostic into a performance problem. */
-const MAX_REPORTED = 8;
-const MAX_NODES = 20_000;
-
-function typeName(v: unknown): string {
-  if (v === null) return "null";
-  const t = typeof v;
-  if (t === "number") {
-    if (Number.isNaN(v as number)) return "NaN";
-    if (!Number.isFinite(v as number)) {
-      return (v as number) > 0 ? "Infinity" : "-Infinity";
-    }
-    if (Object.is(v, -0)) return "-0";
-    return "number";
-  }
-  if (t !== "object") return t;
-  const ctor = (v as { constructor?: { name?: string } }).constructor;
-  return ctor?.name || "object";
-}
-
-function isPlainObject(v: unknown): boolean {
-  if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
-  const proto = Object.getPrototypeOf(v);
-  return proto === Object.prototype || proto === null;
-}
-
-/** Walk the original beside its JSON round-trip and name every difference. */
-function findLossy(
-  orig: unknown,
-  round: unknown,
-  path: string,
-  out: LossyConversion[],
-  budget: { n: number },
-): void {
-  if (out.length >= MAX_REPORTED || budget.n++ > MAX_NODES) return;
-
-  const t = typeof orig;
-  if (orig === null || t === "boolean" || t === "string") {
-    if (orig !== round) {
-      out.push({ path, from: typeName(orig), to: typeName(round) });
-    }
-    return;
-  }
-  if (t === "number") {
-    // Object.is separates -0 from 0 as well as catching NaN → null.
-    if (!Object.is(orig, round)) {
-      out.push({
-        path,
-        from: typeName(orig),
-        // "number" says nothing when the change IS the value.
-        to: Object.is(round, 0) ? "0 (sign lost)" : typeName(round),
-      });
-    }
-    return;
-  }
-  if (
-    t === "bigint" || t === "function" || t === "symbol" || t === "undefined"
-  ) {
-    // Reachable only for a nested member; a bare one is handled by the caller.
-    if (round !== orig) out.push({ path, from: t, to: typeName(round) });
-    return;
-  }
-
-  // Objects. A custom toJSON means the receiver never sees this object at all.
-  const hasToJson = typeof (orig as { toJSON?: unknown }).toJSON === "function";
-  if (hasToJson) {
-    out.push({ path, from: typeName(orig), to: typeName(round) });
-    return;
-  }
-  if (Array.isArray(orig)) {
-    if (!Array.isArray(round)) {
-      out.push({ path, from: "Array", to: typeName(round) });
-      return;
-    }
-    for (let i = 0; i < orig.length; i++) {
-      findLossy(orig[i], (round as unknown[])[i], `${path}[${i}]`, out, budget);
-      if (out.length >= MAX_REPORTED) return;
-    }
-    return;
-  }
-  if (!isPlainObject(orig)) {
-    // Map / Set / RegExp / Error / TypedArray / class instance: the prototype
-    // and everything it carried is gone. `{}` for Map & friends, a plain
-    // object of fields for a class instance, {"0":1,…} for a Uint8Array.
-    out.push({ path, from: typeName(orig), to: typeName(round) });
-    return;
-  }
-  if (!isPlainObject(round)) {
-    out.push({ path, from: "object", to: typeName(round) });
-    return;
-  }
-  const r = round as Record<string, unknown>;
-  for (const [k, v] of Object.entries(orig as Record<string, unknown>)) {
-    const p = `${path}.${k}`;
-    if (!(k in r)) {
-      // undefined / function / symbol members are erased by JSON, key and all.
-      out.push({ path: p, from: typeName(v), to: "absent" });
-    } else {
-      findLossy(v, r[k], p, out, budget);
-    }
-    if (out.length >= MAX_REPORTED) return;
-  }
 }
 
 /** Vet a method's return value for the ack frame. Returns a JSON-clean value,
@@ -195,16 +85,12 @@ export function serializeReturn(
  *  Observe-only, so it is not a dev/prod behaviour fork. */
 function warnLossy(lossy: LossyConversion[], what?: string): void {
   const where = what ? `"${what}"` : "a method";
-  const list = lossy
-    .map((l) => `  ${l.path}: ${l.from} → ${l.to}`)
-    .join("\n");
   log.warn(
     "ack",
     `${where} returned a value JSON cannot carry intact — the caller ` +
-      `receives a DIFFERENT value than the method returned:\n${list}\n` +
-      `${
-        lossy.length >= MAX_REPORTED ? "  …(more)\n" : ""
-      }Return JSON-safe data across the wire (ISO strings for dates, arrays ` +
+      `receives a DIFFERENT value than the method returned:\n${
+        formatLossy(lossy)
+      }\nReturn JSON-safe data across the wire (ISO strings for dates, arrays ` +
       `for Map/Set, plain objects for class instances), or read the value ` +
       `from synced state instead.`,
   );

@@ -27,7 +27,10 @@ import {
   _setSubscribeTriggers,
   _setTeardownFn,
 } from "./browser-protocol.ts";
-import { _registerSyncTransport } from "./browser-protocol.ts";
+import {
+  _coreOfflineQueueFullness,
+  _registerSyncTransport,
+} from "./browser-protocol.ts";
 import {
   type AioIPCBridge,
   buildWsUrl,
@@ -55,15 +58,40 @@ let _queue: Array<{ type: string; payload?: unknown }> = [];
 const QUEUE_MAX = 1000;
 let _connectionDegraded = false;
 
+/** The one fraction that means "this connection is in trouble". Both offline
+ *  queues are measured against it; writing 0.8 in each place would be two
+ *  deciders for one threshold, and they would drift the first time anyone
+ *  tuned it. */
+const DEGRADED_AT = 0.8;
+
 function _updateDegraded(): void {
-  const degraded = _queue.length > QUEUE_MAX * 0.8;
+  const degraded = _queue.length > QUEUE_MAX * DEGRADED_AT;
   if (_connectionDegraded !== degraded) _connectionDegraded = degraded;
+}
+
+/** True when EITHER offline queue is past 80% full.
+ *
+ *  There are two queues for a structural reason (see `_offlineQueueFullness`):
+ *  cell-method dispatch queues here, while `useCell().send` / `useAio().send`
+ *  queue in the isomorphic core, which cannot import this module. But "is this
+ *  connection degraded" is ONE fact, and this used to answer for this queue
+ *  alone — so the indicator the docs tell you to render stayed `false` however
+ *  backed up a `send()` caller became. */
+function _anyQueueDegraded(): boolean {
+  if (_connectionDegraded) return true;
+  try {
+    return _coreOfflineQueueFullness() > DEGRADED_AT;
+  } catch {
+    // The core transport module is always present in a browser build; if a
+    // host ever lacks it, the local queue's answer still stands.
+    return false;
+  }
 }
 
 /** Returns true when the offline action queue is >80% full — UI can use this
  *  to show a "reconnecting / slow connection" indicator. */
 export function isConnectionDegraded(): boolean {
-  return _connectionDegraded;
+  return _anyQueueDegraded();
 }
 let _onSyncMessage: ((t: string, d: unknown) => void) | null = null;
 
@@ -410,6 +438,41 @@ function _connect() {
   _ws = ws;
 }
 
+/** THE way an action enters the offline queue — every path that cannot write
+ *  a frame goes through here.
+ *
+ *  The WS-throw path used to push straight onto `_queue`: past `QUEUE_MAX`
+ *  (a socket that reports OPEN and throws on every send grows it without any
+ *  bound), past the drop-rejection (the evicted action's caller waits out the
+ *  full 15s ack ceiling for a frame discarded locally and instantly), past the
+ *  `queue-drop` diagnostic and past the RAM-only offline notice. "How does an
+ *  action get queued" is one question; it had two answers, and only one of them
+ *  was the one everything else was written against. */
+function _enqueue(tagged: { type: string; payload?: unknown }): void {
+  if (_queue.length >= QUEUE_MAX) {
+    // The dropped action already has a pending ack with its timer running.
+    // Dropping it silently left its caller to wait out the full ceiling and
+    // then hear "no response after 15000ms" — a timeout story for something
+    // that was thrown away locally, instantly, and knowably.
+    const dropped = _queue.shift();
+    const dcid = (dropped as { cid?: string } | undefined)?.cid;
+    if (dcid) {
+      _rejectAck(dcid, new Error("action dropped — offline queue full"));
+    }
+    diagEmit({
+      type: "browser-air-transport:queue-drop",
+      severity: "warning",
+      source: "browser-air-transport",
+      message: "Queued action dropped (queue full)",
+      detail: { max: QUEUE_MAX },
+      hint: "Check network connectivity or reduce mutation rate",
+    });
+  }
+  _queue.push(tagged);
+  _updateDegraded();
+  _noteQueued();
+}
+
 function _send(action: { type: string; payload?: unknown }) {
   const tagged = { ...action, _source: "UI" };
   const json = enc("action", tagged);
@@ -419,35 +482,16 @@ function _send(action: { type: string; payload?: unknown }) {
       _ws.send(json);
       if (cid) _armAckTimer(cid);
     } catch {
-      _queue.push(tagged);
-      _updateDegraded();
+      // The socket says OPEN and refuses the write — it is offline in every
+      // way that matters to this action. Queue it exactly as the no-transport
+      // path does.
+      _enqueue(tagged);
     }
   } else if (_ipc && _ipcConnected) {
     _ipc.send(json);
     if (cid) _armAckTimer(cid);
   } else {
-    if (_queue.length >= QUEUE_MAX) {
-      // The dropped action already has a pending ack with its timer running.
-      // Dropping it silently left its caller to wait out the full ceiling and
-      // then hear "no response after 15000ms" — a timeout story for something
-      // that was thrown away locally, instantly, and knowably.
-      const dropped = _queue.shift();
-      const dcid = (dropped as { cid?: string } | undefined)?.cid;
-      if (dcid) {
-        _rejectAck(dcid, new Error("action dropped — offline queue full"));
-      }
-      diagEmit({
-        type: "browser-air-transport:queue-drop",
-        severity: "warning",
-        source: "browser-air-transport",
-        message: "Queued action dropped (queue full)",
-        detail: { max: QUEUE_MAX },
-        hint: "Check network connectivity or reduce mutation rate",
-      });
-    }
-    _queue.push(tagged);
-    _updateDegraded();
-    _noteQueued();
+    _enqueue(tagged);
   }
 }
 

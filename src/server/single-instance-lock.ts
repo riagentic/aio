@@ -218,8 +218,26 @@ export function readLock(appId: string): LockData | null {
   try {
     const raw = Deno.readTextFileSync(lockPath(appId));
     const data = JSON.parse(raw) as LockData;
-    // Validate minimum fields
-    if (!data.appId || !data.pid || !data.port) return null;
+    // Validate the SHAPE of each field, never its truthiness.
+    //
+    // This used to be `if (!data.appId || !data.pid || !data.port)`, and
+    // `port: 0` is falsy — while being the documented "pick a free port"
+    // setting, written into the lock verbatim. A port-0 app's lock therefore
+    // read back as INVALID, and every consequence compounded in the same
+    // direction: `release()` guards on this returning our record, so a
+    // GRACEFUL shutdown removed nothing; staleness is decided from this data,
+    // so the leftover could never be recognised as stale either; and the next
+    // launch refused to start, permanently, with "Already running". An app
+    // bricked by its own clean exit, recoverable only by finding a file in a
+    // runtime directory nobody has reason to know about.
+    //
+    // pid is checked as POSITIVE (no process is pid 0, and the not-ok branch
+    // below synthesises `pid: 0` for "someone holds it and we can't say who" —
+    // that placeholder must never validate as a real record), while port is
+    // checked only for being a number, because 0 is a real port value here.
+    if (typeof data.appId !== "string" || data.appId === "") return null;
+    if (typeof data.pid !== "number" || !(data.pid > 0)) return null;
+    if (typeof data.port !== "number" || data.port < 0) return null;
     return data;
   } catch {
     return null;
@@ -269,9 +287,25 @@ export class AppLock {
    *  acquire() exit path. Audit F-7: previously only registered in the
    *  last-ditch fallback, so normal startups leaked stale locks on hard exit. */
   private _registerCleanupHandlers(): void {
+    // TWO facts, and merging them was the bug: "are the process-wide listeners
+    // installed?" and "which locks must they release?".
+    //
+    // The flag is static (right — one set of listeners per process) but the
+    // handler used to close over ONE instance's `this`. So a second locked app
+    // in the same process — a supported shape (D2); `singleton` defaults to
+    // true outside libraryMode — saw the flag already set, returned early, and
+    // got no cleanup at all. On SIGTERM the first app's lock was released and
+    // the second's was left behind, to block that app's next launch.
+    //
+    // The live set is the second fact, held separately.
+    AppLock._live.add(this);
     if (AppLock._cleanupRegistered) return;
     AppLock._cleanupRegistered = true;
-    const cleanup = () => this.release();
+    // Snapshot the set: `release()` mutates it, and a Set must not be mutated
+    // while it is being iterated.
+    const cleanup = () => {
+      for (const lock of [...AppLock._live]) lock.release();
+    };
     try {
       addEventListener("unload", cleanup);
     } catch { /* skip if listener limit */ }
@@ -287,6 +321,11 @@ export class AppLock {
 
   /** Unregister signal handlers to prevent listener leaks (e.g. in tests). */
   private _unregisterCleanupHandlers(): void {
+    // This lock is done, but the LISTENERS belong to the process. Tearing them
+    // down while another app still holds a lock would silently un-protect it —
+    // the same class of bug as the one above, arrived at from the other side.
+    AppLock._live.delete(this);
+    if (AppLock._live.size > 0) return;
     try {
       AppLock._sigintHandler &&
         Deno.removeSignalListener("SIGINT", AppLock._sigintHandler);
@@ -301,6 +340,10 @@ export class AppLock {
   }
 
   // ── Shared cleanup state (only one set of handlers ever registered) ──
+  /** Every lock currently held in THIS process. The signal handlers release
+   *  all of them; see `_registerCleanupHandlers` for why this is separate from
+   *  the registration flag. */
+  private static _live = new Set<AppLock>();
   private static _cleanupRegistered = false;
   private static _sigintHandler?: () => void;
   private static _sigtermHandler?: () => void;

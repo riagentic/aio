@@ -2,7 +2,13 @@
 // Provides: hydrate, _hydrateNode, _hydrateProps.
 
 import { batch } from "../state/signal.ts";
-import { bindSignalProps, cleanupSignalBindings } from "./signal-binding.ts";
+import {
+  bindSignalProps,
+  cleanupSignalBindings,
+  isSignal,
+} from "./signal-binding.ts";
+import { _writeProp } from "./prop-write.ts";
+import { _DOM_PROPS } from "./vdom-types.ts";
 import type { ComponentFn, RenderCtx, VNode } from "./vdom.ts";
 import {
   _applyActions,
@@ -11,15 +17,21 @@ import {
   _cleanupSignalTextChildren,
   _ensureDelegation,
   _isDelegated,
+  _LAZY_PENDING,
   _mapEventName,
   _render,
   _setDelegationRoot,
   _setWrapped,
+  ErrorBoundary,
+  Fragment,
   getDom,
   h,
+  Suspense,
   SVG_TAGS,
 } from "./vdom.ts";
+import { _registerLazyListeners } from "./vdom-create.ts";
 import { _cleanupActions } from "./vdom-helpers.ts";
+import { applyChildDependentProps } from "./vdom-props.ts";
 import { _devWarn } from "./vdom-types.ts";
 import { _getExitHandler } from "./transition-component.ts";
 import { _getGroupExitHandler } from "./transition-group.ts";
@@ -155,11 +167,38 @@ export function _hydrateNode(
   childIndex: number,
 ): number {
   if (typeof vnode === "string" || typeof vnode === "number") {
+    const want = String(vnode);
     const domNode = parent.childNodes[childIndex];
-    if (!domNode) return -1;
-    if (domNode.nodeType !== 3) return -1;
-    if (domNode.textContent !== String(vnode)) {
-      domNode.textContent = String(vnode);
+    // Two text children are two nodes in the client tree but ONE node in parsed
+    // HTML — the parser merges adjacent character data, and `renderToString`
+    // has no separator to stop it. That made `{"Hello "}{name}` — the single
+    // most ordinary thing a template does — unhydratable: the second child
+    // found no node of its own, the whole tree reported a mismatch, and
+    // `hydrate()` threw the server HTML away and re-rendered the page from
+    // scratch (a dev warning, and in prod nothing at all).
+    //
+    // The merge is undone HERE, where the boundary is known exactly: the vnode
+    // says how much of the run belongs to this child, so the node is split at
+    // that offset and the remainder is left for the next child. One decider —
+    // the SSR writer keeps emitting plain text, and nothing about the wire
+    // format changes.
+    if (!domNode || domNode.nodeType !== 3) {
+      // SSR emits NOTHING for an empty text child while `createDom` makes an
+      // empty text node, so the client tree has a slot the markup does not.
+      // Materialize it rather than failing the whole tree.
+      if (want !== "") return -1;
+      const empty = (parent.ownerDocument ?? document).createTextNode("");
+      if (domNode) parent.insertBefore(empty, domNode);
+      else parent.appendChild(empty);
+      return 1;
+    }
+    const have = domNode.textContent ?? "";
+    if (have !== want) {
+      if (have.length > want.length && have.startsWith(want)) {
+        (domNode as Text).splitText(want.length);
+      } else {
+        domNode.textContent = want;
+      }
     }
     return 1;
   }
@@ -212,24 +251,55 @@ export function _hydrateNode(
   }
 
   // ErrorBoundary / Suspense / Fragment — children inline in parent DOM
-  const isFragment =
-    vnode.tag === (Symbol.for("aio.Fragment") as typeof vnode.tag);
-  if (
-    isFragment ||
-    vnode.tag === (Symbol.for("aio.ErrorBoundary") as typeof vnode.tag) ||
-    vnode.tag === (Symbol.for("aio.Suspense") as typeof vnode.tag)
-  ) {
+  const isFragment = vnode.tag === Fragment;
+  const isBoundary = vnode.tag === ErrorBoundary;
+  const isSuspense = vnode.tag === Suspense;
+  if (isFragment || isBoundary || isSuspense) {
     let idx = childIndex;
-    for (const child of vnode.children) {
-      const consumed = _hydrateNode(parent, child, ctx, isSvg, idx);
-      if (consumed < 0) return -1;
-      idx += consumed;
+    try {
+      for (const child of vnode.children) {
+        const consumed = _hydrateNode(parent, child, ctx, isSvg, idx);
+        if (consumed < 0) return -1;
+        idx += consumed;
+      }
+    } catch (thrown) {
+      // `createDom` and `renderToString` both catch here; hydrate did not, so a
+      // boundary that WORKS on the server and WORKS on a client mount let the
+      // error escape `hydrate()` on the one path that matters most. The server
+      // had already rendered the fallback, the page looked fine — and the app
+      // never booted: no handlers, no updates, a dead screenshot of itself.
+      // The markup at `childIndex` IS the fallback, so it is hydrated in place.
+      const claimFallback = (
+        fb: VNode | string | number | null,
+      ): number => {
+        vnode._rendered = fb;
+        if (fb == null) return 0;
+        const n = _hydrateNode(parent, fb, ctx, isSvg, childIndex);
+        if (n >= 0) {
+          vnode._dom = getDom(fb) ?? parent.childNodes[childIndex] ?? undefined;
+        }
+        return n;
+      };
+      if (isSuspense && thrown === _LAZY_PENDING) {
+        _registerLazyListeners(vnode.children, ctx);
+        return claimFallback(
+          (vnode.props.fallback as VNode | string | number | null) ?? null,
+        );
+      }
+      // A lazy child inside an ErrorBoundary belongs to the enclosing Suspense.
+      if (isBoundary && thrown !== _LAZY_PENDING) {
+        const fallback = vnode.props.fallback as
+          | ((e: Error) => VNode | string | number | null)
+          | undefined;
+        if (fallback) return claimFallback(fallback(thrown as Error));
+      }
+      throw thrown;
     }
-    if (idx === childIndex && isFragment) {
-      // An empty Fragment occupies a comment ANCHOR (AIO-195) — createDom makes
-      // one and renderToString emits one, so hydration must claim it. Without a
-      // `_dom` the fragment has no position, and the next diff anchored its
-      // whole region at the parent's first child.
+    if (idx === childIndex) {
+      // An empty Fragment / ErrorBoundary / Suspense occupies a comment ANCHOR
+      // (AIO-195) — createDom makes one and the SSR writers emit one, so
+      // hydration must claim it. Without a `_dom` the container has no position,
+      // and the next diff anchored its whole region at the parent's first child.
       const domNode = parent.childNodes[childIndex];
       if (domNode && domNode.nodeType === 8) {
         vnode._dom = domNode;
@@ -281,6 +351,12 @@ export function _hydrateNode(
     _bindSignalTextChildren(el, vnode._signalChildren);
   }
 
+  // `<select value>` selects an <option>, so it can only be written once the
+  // options are hydrated — and SSR cannot express it in markup at all (`value`
+  // is not a <select> attribute). Without this a server-rendered controlled
+  // select showed its FIRST option no matter what the state said.
+  applyChildDependentProps(el, vnode.props, {});
+
   return 1;
 }
 
@@ -308,6 +384,21 @@ function _hydrateProps(el: HTMLElement, props: Record<string, unknown>): void {
         _setWrapped(el, evt, wrapped);
       }
     }
+  }
+  // Form state is a DOM PROPERTY, and not every property has a content
+  // attribute for the markup to carry (`indeterminate` has none at all). The
+  // parser only infers `.value`/`.checked` from the attributes it recognizes,
+  // and hydration never ran `applyProps`, so anything markup could not express
+  // was simply never applied: the control came up in a state the vnode tree
+  // does not describe and no later render fixed it (the diff compares the new
+  // props against the old ones and skips what did not change). `_writeProp` is
+  // the same decider the mount path uses.
+  for (const [k, v] of Object.entries(props)) {
+    if (!_DOM_PROPS.has(k) || !(k in el) || isSignal(v)) continue;
+    // `<select>.value` needs its <option>s — applyChildDependentProps owns it
+    // and runs after the children are hydrated.
+    if (k === "value" && el.tagName === "SELECT") continue;
+    _writeProp(el, k, v);
   }
   bindSignalProps(el, props);
   if (props.ref) _callRef(props.ref, el, el.tagName?.toLowerCase());

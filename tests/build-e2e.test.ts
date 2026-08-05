@@ -107,6 +107,111 @@ async function waitFor<T>(probe: () => T | undefined, ms: number): Promise<T> {
   throw new Error("timed out");
 }
 
+// ── 0. the binary carries THIS app, and needs nothing else on the machine ────
+//
+// "It boots" is the weakest thing an artifact can prove, and it is all the rest
+// of this file asks for. Two failures walk straight past it:
+//
+//   WRONG APP — every target bundles to the same `dist/app.js`, and one repo can
+//   hold two apps (per-target `entry`). A binary serving the OTHER app's UI
+//   boots, serves HTML and exits clean. The cache key was `out` alone once, and
+//   that is exactly what shipped.
+//
+//   NEEDS THE BUILD TREE — a user downloads the binary and nothing else. Booting
+//   from a foreign cwd while the project still sits on the same disk cannot tell
+//   an embedded asset from one that was read back out of the source tree.
+//
+// So: mark the UI, delete the ENTIRE project after building, and read the
+// marker back out of what the running binary serves.
+Deno.test({
+  name:
+    "artifact: the binary serves THIS app's UI with the source tree DELETED",
+  ignore: !GATE,
+  fn: async () => {
+    const dir = await makeApp("counter", "build-e2e-identity-");
+    const keep = await Deno.makeTempDir({ prefix: "artifact-only-" });
+    try {
+      const marker = `UI_MARKER_${crypto.randomUUID().slice(0, 8)}`;
+      const app = await Deno.readTextFile(join(dir, "src", "App.tsx"));
+      await Deno.writeTextFile(
+        join(dir, "src", "App.tsx"),
+        app.replace("AIO Counter", marker),
+      );
+      assertEquals((await task(dir, "compile:browser")).code, 0);
+
+      // Move the artifact somewhere else, then destroy the project — sources,
+      // dist/, deno.json, node_modules, the framework symlink, all of it.
+      const bin = join(keep, "app");
+      await Deno.copyFile(findBinary(dir), bin);
+      await Deno.remove(dir, { recursive: true });
+
+      const { body, health } = await bootFromForeignCwd(bin, [
+        "--client=browser",
+      ]);
+      assert(health.length > 0, "artifact did not serve health");
+      assertServesApp(body);
+
+      // The decisive read: the JS the binary hands a browser is THIS app's
+      // bundle, stamped by THIS aio — not a leftover from another app or an
+      // older framework that happened to be sitting in dist/.
+      const port = freePort();
+      const { proc, log } = spawn(bin, [`--port=${port}`], keep);
+      try {
+        const js = await waitForHttp(
+          `http://127.0.0.1:${port}/app.js`,
+          45_000,
+        ).catch((e) => {
+          throw new Error(`${e}\n--- artifact log ---\n${log()}`);
+        });
+        assertStringIncludes(
+          js,
+          marker,
+          "the binary serves a bundle that is not this app's UI",
+        );
+        assertStringIncludes(js, versionStamp(VERSION).trim());
+      } finally {
+        await kill(proc);
+      }
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+      await Deno.remove(keep, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
+// The bundle is REPRODUCIBLE: same sources in, same bytes out. A build that
+// varies run to run makes every freshness/cache question unanswerable — you can
+// never tell a stale artifact from a differently-ordered fresh one — and it is
+// what lets a signed release manifest (`aio ship`) mean anything.
+Deno.test({
+  name: "artifact: two builds of the same sources produce the same bundle",
+  ignore: !GATE,
+  fn: async () => {
+    const dir = await makeApp("counter", "build-e2e-repro-");
+    try {
+      const build = () =>
+        new Deno.Command("deno", {
+          args: ["run", "-A", "./dep/aio/src/build.ts", "--force"],
+          cwd: dir,
+          stdout: "piped",
+          stderr: "piped",
+        }).output();
+      assertEquals((await build()).code, 0);
+      const first = await Deno.readFile(join(dir, "dist", "app.js"));
+      assertEquals((await build()).code, 0);
+      const second = await Deno.readFile(join(dir, "dist", "app.js"));
+      assertEquals(
+        [first.length, ...first].join(),
+        [second.length, ...second].join(),
+        "dist/app.js is not reproducible — rebuilding the same sources " +
+          "changed the bytes",
+      );
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
 // ── 1. every server-ish compile target ships a binary that boots elsewhere ────
 
 const SERVER_TARGETS = [

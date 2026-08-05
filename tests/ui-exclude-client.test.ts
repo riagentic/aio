@@ -143,8 +143,74 @@ Deno.test("B7: selectors in client context see the FILTERED slice (no leak)", ()
     masterKey: "k",
   });
   const v = vault as unknown as { leak: () => unknown; count: () => number };
-  assertEquals(v.count(), 2, "selector over visible fields works");
-  assertEquals(v.leak(), undefined, "selector cannot read excluded field");
+  // Not leaking is half the contract; SAYING SO is the other half. This test
+  // asserted only the undefined — the same silent `undefined`-as-data trap the
+  // direct-read seam throws/warns about — so a selector was the one client read
+  // that could quietly fabricate an answer.
+  const { warnings } = withWarnCapture(() => {
+    assertEquals(v.count(), 2, "selector over visible fields works");
+    assertEquals(v.leak(), undefined, "selector cannot read excluded field");
+    assertEquals(v.leak(), undefined, "second read also undefined");
+  });
+  const leakWarns = warnings.filter((w) => w.includes("b7-vault.masterKey"));
+  assertEquals(
+    leakWarns.length,
+    1,
+    `a selector that READS a hidden field must report exactly like ` +
+      `cell.masterKey does — once. Saw: ${JSON.stringify(warnings)}`,
+  );
+  assert(leakWarns[0]!.includes("ui.exclude"), "and say why");
+  reset();
+});
+
+Deno.test('B7: a selector on a ui:"none" cell reports instead of computing over {}', () => {
+  reset();
+  // `filterSlice` hands a fully hidden cell an EMPTY object, and the selector
+  // computed over it: `total()` returned NaN and `count()` returned 0 —
+  // plausible numbers, entirely fabricated — while `cell.balance` on the very
+  // same cell throws in dev. One seam, two loudness rules.
+  const secret = cell("b7-none", {
+    state: { balance: 100, items: [1, 2, 3] },
+    methods: {},
+    ui: "none",
+    selectors: {
+      total: (s: { balance: number; items: number[] }) => s.balance * 2,
+      count: (s: { balance: number; items: number[] }) =>
+        (s.items ?? []).length,
+      constant: () => 42, // reads nothing hidden → must stay silent
+    },
+  });
+  bindCellReactive(secret);
+  const c = secret as unknown as {
+    total: () => number;
+    count: () => number;
+    constant: () => number;
+  };
+
+  const { warnings } = withWarnCapture(() => {
+    assertEquals(
+      Number.isNaN(c.total()),
+      true,
+      "the value is garbage either way — what matters is that it is reported",
+    );
+    c.count();
+    assertEquals(c.constant(), 42, "a selector reading nothing hidden works");
+  });
+  assertEquals(
+    warnings.filter((w) => w.includes("b7-none.balance")).length,
+    1,
+    `total() read a hidden field and must say so: ${JSON.stringify(warnings)}`,
+  );
+  assertEquals(
+    warnings.filter((w) => w.includes("b7-none.items")).length,
+    1,
+    `count() read a hidden field and must say so: ${JSON.stringify(warnings)}`,
+  );
+  assertEquals(
+    warnings.filter((w) => w.includes("b7-none.constant")).length,
+    0,
+    "a selector that touches no hidden field stays quiet",
+  );
   reset();
 });
 

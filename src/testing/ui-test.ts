@@ -27,6 +27,7 @@ import {
 } from "../air/ui-surface.ts";
 import type { KeyModifiers } from "../air/ui-trigger.ts";
 import {
+  assertOperable,
   triggerAction,
   triggerChar,
   triggerClear,
@@ -165,9 +166,13 @@ export type TestUI = {
   surface(): UISurfaceNode;
   /** Wait until the app is quiescent (renders flushed, no pending updates). */
   settle(): Promise<void>;
-  /** Advance the virtual schedule clock by `ms` and fire every `schedule.after`
-   *  / `schedule.every` now due, then settle — makes toast auto-dismiss,
-   *  debounce, backoff, and poll deterministically testable without real timers. */
+  /** Advance the virtual schedule clock by `ms` and fire every **cell**
+   *  `schedule.after` / `schedule.every` now due, then settle — makes debounce,
+   *  backoff and poll deterministically testable without real timers.
+   *
+   *  It moves the SCHEDULE clock, not the platform's: anything on a raw
+   *  `setTimeout` (including `aio/ui`'s `toast()` auto-dismiss) is untouched by
+   *  it — give such a timer a short duration and `waitFor` its effect instead. */
   advance(ms: number): Promise<void>;
   /** Wait until a predicate over the UI holds (polls between settles) — for
    *  async flows (effects, schedules) that update the UI later. Throws with
@@ -721,26 +726,45 @@ async function _mountTestUI(
 
   function elementHandle(resolveInfo: () => UIElementInfo): UIElementHandle {
     const el = () => resolveInfo()._el! as AnyDoc;
-    // A real user cannot operate a disabled control — interacting with one
-    // fails loud with its state instead of firing a dead event or a bare
-    // "not a function" TypeError. Assert `ui.….X.disabled` instead.
-    const assertEnabled = (verb: string) => {
+    // A real user cannot operate a disabled control, nor change a readonly
+    // one — interacting fails loud with its state instead of firing a dead
+    // event or (worse) writing a value the browser would have refused. The RULE
+    // lives in ui-trigger.ts so the live `am trigger` tier enforces exactly the
+    // same one; this call site only adds the semantic name to the message.
+    const assertEnabled = (verb: string, write = false) => {
       const i = resolveInfo();
-      if (i.disabled) {
-        throw new Error(
-          `testUI: cannot ${verb} "${i.name}" — the ${i.tag} is disabled\n` +
-            `  assert it instead: ui.….${i.name}.disabled === true (or enable it first)`,
-        );
-      }
+      assertOperable(i._el, verb, {
+        name: i.name,
+        write,
+        prefix: "testUI: ",
+      });
     };
     // verb: user-gesture actions guard against disabled at action time
     // (queue-time, so un-awaited sequences fail at the next drain point).
-    const act = (verb: string | null, fn: (e: AnyDoc) => void) =>
+    // `write` marks the value-mutating gestures, which readonly also refuses.
+    const act = (
+      verb: string | null,
+      fn: (e: AnyDoc) => void,
+      write = false,
+    ) =>
       enqueue(async () => {
-        if (verb) assertEnabled(verb);
+        if (verb) assertEnabled(verb, write);
         fn(el());
         await settle();
       });
+    // check()/uncheck() only mean something on a checkbox/radio. On anything
+    // else `e.checked` is undefined, so `check()` used to CLICK a plain button
+    // and report success — a silent wrong-thing-done.
+    const assertCheckable = (verb: string) => {
+      const i = resolveInfo();
+      if (typeof i.checked !== "boolean") {
+        throw new Error(
+          `testUI: cannot ${verb} "${i.name}" — the ${i.tag} has no checked ` +
+            `state (only a checkbox/radio does)\n` +
+            `  use .click() for a plain control`,
+        );
+      }
+    };
     return {
       get info() {
         return resolveInfo();
@@ -753,7 +777,7 @@ async function _mountTestUI(
       },
       type(text: string) {
         return enqueue(async () => {
-          assertEnabled("type into");
+          assertEnabled("type into", true);
           el().focus?.();
           for (const ch of text) {
             triggerChar(el(), ch); // re-resolve — controlled inputs re-render
@@ -790,24 +814,26 @@ async function _mountTestUI(
         return act(null, (e) => triggerAction(e, "blur"));
       },
       select(value: string) {
-        return act("select on", (e) => triggerSelect(e, value));
+        return act("select on", (e) => triggerSelect(e, value), true);
       },
       check() {
         return act("check", (e) => {
+          assertCheckable("check");
           if (!e.checked) triggerAction(e, "click");
         });
       },
       uncheck() {
         return act("uncheck", (e) => {
+          assertCheckable("uncheck");
           if (e.checked) triggerAction(e, "click");
         });
       },
       clear() {
-        return act("clear", (e) => triggerClear(e));
+        return act("clear", (e) => triggerClear(e), true);
       },
       setValue(text: string) {
         return enqueue(async () => {
-          assertEnabled("set value on");
+          assertEnabled("set value on", true);
           triggerClear(el()); // replace, don't append
           handle._flush();
           el().focus?.();

@@ -208,20 +208,30 @@ Deno.test("logger: backupLogs rotates instead of wiping", async () => {
   assertEquals(rotated, "old content\n");
 });
 
-Deno.test("logger: observe skips internal actions", async () => {
+// Was "observe skips internal actions", and asserted NOTHING — it stat'ed
+// debug.log inside a try and let both outcomes pass, so it agreed with any
+// behaviour at all. Two real rules, now checked: the `__exec` marker is noise
+// (it changes nothing), and the `__setMethod` write-set is the opposite of
+// noise (it is the only record of what an async method wrote).
+Deno.test("logger: observe skips the __exec marker, keeps the write-set", async () => {
   const dir = tmpDir();
-  const l = mkLogger({ dir });
+  const l = mkLogger({ dir, level: "debug" });
   await l.init();
-  l.observe({ type: "counter:__FlowState" }, { counter: {} });
-  l.observe({ type: "counter:__exec" }, { counter: {} });
-  l.observe({ type: "counter:__setIncrement" }, { counter: {} });
-  await flush();
-  try {
-    await Deno.stat(`${dir}/debug.log`);
-    // If debug.log exists, it should NOT contain these internal types
-  } catch {
-    // File doesn't exist — correct, nothing was logged
-  }
+  l.observe({ type: "counter:__exec", payload: { _method: "increment" } }, {
+    counter: {},
+  });
+  l.observe({
+    type: "counter:__setIncrement",
+    payload: { mutations: [{ path: ["n"], value: 3 }], _origin: "increment" },
+  }, { counter: {} });
+  await l.flush();
+  const text = await Deno.readTextFile(`${dir}/debug.log`).catch(() => "");
+  assertEquals(
+    text.includes("__exec"),
+    false,
+    `the __exec marker is noise:\n${text}`,
+  );
+  assertStringIncludes(text, "__setIncrement");
 });
 
 Deno.test("logger: suppress types filters specified actions", async () => {

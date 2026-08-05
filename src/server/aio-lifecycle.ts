@@ -11,6 +11,7 @@ import { VERSION } from "./aio-cli.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { discoverySupported, startDiscoveryResponder } from "./discovery.ts";
 import { instances } from "./single-instance-lock.ts";
+import { shutdownAllRuntimes } from "./shutdown.ts";
 import { generatePin } from "./pairing.ts";
 import type { Log } from "../diagnostics/logger.ts";
 import type { DB } from "../db/mod.ts";
@@ -87,8 +88,7 @@ export interface LifecycleDeps<S, A> {
     head?: string;
   };
   keepServer: boolean | undefined;
-  // Shutdown & electron
-  shutdown: () => Promise<void>;
+  // Electron
   setElectronProc: (proc: Deno.ChildProcess | null) => void;
   /** Register the LAN-discovery responder stopper (called on shutdown). */
   setDiscoveryStop: (stop: (() => void) | null) => void;
@@ -136,7 +136,6 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     cli,
     ui,
     keepServer: configKeepServer,
-    shutdown,
     setElectronProc,
     log,
   } = deps;
@@ -386,7 +385,9 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
               );
             } else {
               log.info(`electron closed (${how}) — shutting down`);
-              shutdown().then(() => Deno.exit(0));
+              // This exits the PROCESS, so every app in it stops here —
+              // including one still writing its final snapshot.
+              shutdownAllRuntimes().then(() => Deno.exit(0));
             }
           })
           .catch((e) => log.error(`electron status: ${e}`));

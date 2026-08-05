@@ -41,13 +41,13 @@ const ordersTable = table({
 
 ### Column helpers
 
-| Helper              | SQL type                       | Notes                                   |
-| ------------------- | ------------------------------ | --------------------------------------- |
-| `pk()`              | `INTEGER PRIMARY KEY`          | One per table; enables incremental sync |
-| `text(opts?)`       | `TEXT NOT NULL`                | String columns                          |
-| `integer(opts?)`    | `INTEGER NOT NULL`             | Integer columns                         |
-| `real(opts?)`       | `REAL NOT NULL`                | Floating-point columns                  |
-| `ref(table, opts?)` | `INTEGER REFERENCES table(id)` | Foreign key to another table's `pk()`   |
+| Helper              | SQL type                             | Notes                                                              |
+| ------------------- | ------------------------------------ | ------------------------------------------------------------------ |
+| `pk()`              | `INTEGER PRIMARY KEY`                | One per table; enables incremental sync                            |
+| `text(opts?)`       | `TEXT NOT NULL`                      | String columns                                                     |
+| `integer(opts?)`    | `INTEGER NOT NULL`                   | Integer columns                                                    |
+| `real(opts?)`       | `REAL NOT NULL`                      | Floating-point columns                                             |
+| `ref(table, opts?)` | `INTEGER REFERENCES table(<its pk>)` | Foreign key to another table's `pk()` column, whatever it is named |
 
 ### Column options (`ColumnOpts`)
 
@@ -128,6 +128,39 @@ const orders = cell("orders", {
 
 Immer guarantees new array references on mutation. Framework detects via `!==`
 and syncs only affected tables.
+
+### What a bound row must look like
+
+A bound array is the table, so the table's rules are the array's rules. Each is
+checked before a single statement is built, and each names the table, the row
+index and the column:
+
+| Row shape                                                                             | What happens                                                                                            |
+| ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `pk` column missing or `null`                                                         | **throws** — a row with no key cannot be updated or deleted                                             |
+| two rows with the same `pk`                                                           | **throws** — naming the key and both row indices                                                        |
+| a value SQLite cannot store (`Date`, object, `true`, `NaN`, `undefined`)              | **throws** — convert it first (`.toISOString()`, `JSON.stringify`) or use `null`                        |
+| a field with no column (`{ id, title, pinned }`)                                      | **warns once** — SQLite owns these rows, so that field is persisted nowhere and is gone after a restart |
+| a value the column's type converts (`42` into `text()`, which reads back as `"42.0"`) | **warns once**                                                                                          |
+| rows not in ascending `pk` order                                                      | **warns once** — a SQL table is a set; the next boot restores them sorted by `pk`                       |
+
+A row field you want to keep but not store in SQL belongs in a field of the cell
+that is _not_ bound to a table.
+
+### Changing a table's schema
+
+`CREATE TABLE IF NOT EXISTS` cannot alter a table that already exists, so schema
+drift is reconciled at boot instead:
+
+- a column you **added** that is `nullable` or has a `default` is added to the
+  existing table
+- a column you added that is `NOT NULL` with no default is added when the table
+  is empty; when it holds rows, boot **throws** and names both ways out — SQLite
+  has no value to put in the existing rows and aio will not invent one
+- a column the database has that you **no longer declare** is reported, and
+  throws only when it is `NOT NULL` without a default (every `INSERT` would fail
+  on it). Dropping it, and its data, stays your call:
+  `ALTER TABLE t DROP COLUMN c`
 
 > **A table's rows can never overwrite a cell's slice.** Rows are only ever
 > written to the array field a table is BOUND to. A table named after a cell

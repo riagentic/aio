@@ -1,14 +1,15 @@
-// VDOM prop application — DOM attribute/property/event/style patching.
-// Imports from vdom-types.ts, vdom-events.ts, signal-binding.ts, ssr-utils.ts.
+// VDOM prop application — event wiring, prop diffing and the deferred
+// child-dependent props. The prop→DOM write itself lives in prop-write.ts, which
+// the signal binder shares: one rule, two callers.
 
 import { batch } from "../state/signal.ts";
 import { isSignal, resolveSignalProp } from "./signal-binding.ts";
 import {
-  camelToKebab as _camelToKebab,
-  resolveClassName as _resolveClassName,
-  styleValue as _styleValue,
-  svgAttrName as _attrName,
-} from "./ssr-utils.ts";
+  _attrNS,
+  _propAttr,
+  _RESERVED_PROPS,
+  _writeProp,
+} from "./prop-write.ts";
 import { _DOM_PROPS } from "./vdom-types.ts";
 import {
   _CHANGE_TARGETS,
@@ -21,15 +22,47 @@ import {
   _setWrapped,
 } from "./vdom-events.ts";
 
-// SVG namespaced attribute prefixes — require setAttributeNS/removeAttributeNS
-// so the attr lands in the correct namespace. Plain setAttribute puts it in the
-// null namespace, which xlink: consumers (e.g. <use xlink:href>) won't resolve.
-const _XLINK_NS = "http://www.w3.org/1999/xlink";
-const _XML_NS = "http://www.w3.org/XML/1998/namespace";
-function _attrNS(k: string): string | null {
-  if (k.startsWith("xlink:")) return _XLINK_NS;
-  if (k.startsWith("xml:")) return _XML_NS;
-  return null;
+// ── Child-dependent props ─────────────────────────────────────────────
+
+/** True for props whose write only LANDS once the element's children exist.
+ *
+ *  `<select>.value` picks the matching `<option>`. Assigned while the select is
+ *  still empty the assignment is discarded outright, and the control keeps
+ *  showing its first entry. Both commit paths apply props BEFORE the children
+ *  are there — `createDom` builds children after `applyProps`, `_diffElement`
+ *  diffs them after it — so a controlled `<select value={s.picked}>` rendered
+ *  the WRONG option on its first paint and after any render that created its
+ *  options in the same pass. That is every controlled select there is: the
+ *  options and the value always arrive together on mount. Silent, too — the DOM
+ *  is well-formed, it just shows a different choice than the state holds.
+ *
+ *  `applyProps` skips exactly these keys and every commit path calls
+ *  {@link applyChildDependentProps} once its children are in place, so the rule
+ *  "when does this prop get written" has ONE decider. */
+function _isChildDependent(el: HTMLElement, k: string): boolean {
+  return k === "value" && el.tagName === "SELECT";
+}
+
+/** Apply the props {@link _isChildDependent} deferred — call AFTER children are
+ *  built/diffed/hydrated. Same skip rule as `applyProps` (unchanged value is
+ *  not rewritten), so it never fights a user's in-between selection. */
+export function applyChildDependentProps(
+  el: HTMLElement,
+  next: Record<string, unknown>,
+  prev: Record<string, unknown>,
+): void {
+  if (el.tagName !== "SELECT") return;
+  if (!("value" in next)) {
+    // deno-lint-ignore no-explicit-any
+    if ("value" in prev) (el as any).value = "";
+    return;
+  }
+  const raw = next.value;
+  if (isSignal(raw)) return; // the signal binding owns it
+  const rv = resolveSignalProp(raw);
+  if ("value" in prev && resolveSignalProp(prev.value) === rv) return;
+  // deno-lint-ignore no-explicit-any
+  (el as any).value = rv ?? "";
 }
 
 // ── applyProps ────────────────────────────────────────────────────────
@@ -44,10 +77,7 @@ export function applyProps(
 
   // Remove old props not in next
   for (const k of Object.keys(prev)) {
-    if (
-      k === "key" || k === "children" || k === "ref" || k === "use" ||
-      k === "t"
-    ) continue;
+    if (_RESERVED_PROPS.has(k)) continue;
     if (!(k in next)) {
       if (k.startsWith("on")) {
         const evt = _mapEventName(
@@ -72,8 +102,22 @@ export function applyProps(
       } else if (k === "dangerouslySetInnerHTML") {
         el.innerHTML = ""; // AIO-80: clear stale innerHTML
       } else if (k in el && _DOM_PROPS.has(k)) {
+        if (_isChildDependent(el, k)) continue; // applyChildDependentProps
+        // Removing the prop must leave the element at its DEFAULT, and for a
+        // property that reads through its content attribute, clearing the
+        // property is not that. A checkbox's `.value` answers `"on"` only while
+        // it has no `value` attribute — so `<input type="checkbox" value="a">`
+        // losing its `value` prop reported `""` (and, on a hydrated page, the
+        // stale server value), while a fresh render of the same model reported
+        // `"on"`. The form then submitted a value the component no longer
+        // describes, with nothing in the DOM to show it. Drop the attribute the
+        // prop wrote. The property is reset FIRST and the attribute dropped
+        // after: on a checkbox the property write itself REFLECTS back into the
+        // attribute, so clearing them the other way round just puts it back.
         // deno-lint-ignore no-explicit-any
         (el as any)[k] = typeof (el as any)[k] === "boolean" ? false : "";
+        const attr = _propAttr(el.tagName.toLowerCase(), k);
+        if (attr) el.removeAttribute(attr);
       } else {
         const ns = _attrNS(k);
         if (ns) el.removeAttributeNS(ns, k.slice(k.indexOf(":") + 1));
@@ -84,10 +128,7 @@ export function applyProps(
 
   // Set new/changed props
   for (const [k, v] of Object.entries(next)) {
-    if (
-      k === "key" || k === "children" || k === "ref" || k === "use" ||
-      k === "t"
-    ) continue;
+    if (_RESERVED_PROPS.has(k)) continue;
     const rv = resolveSignalProp(v);
     if (isSignal(v)) continue; // Signal binding handles ongoing updates via effect
     if (prev[k] === rv) continue;
@@ -126,60 +167,34 @@ export function applyProps(
         el.addEventListener(evt, wrapped);
         _setWrapped(el, evt, wrapped);
       }
-    } else if (k === "className") {
-      const cls = _resolveClassName(rv);
-      if (cls) el.setAttribute("class", cls);
-      else el.removeAttribute("class");
-    } else if (k === "style" && typeof rv === "string") {
-      el.style.cssText = rv;
-    } else if (k === "style" && typeof rv === "object" && rv !== null) {
-      const style = el.style;
-      const newStyle = rv as Record<string, unknown>;
-      const prevIsString = typeof prev[k] === "string";
-      const oldStyle: Record<string, unknown> = prevIsString
-        ? {}
-        : ((prev[k] as Record<string, unknown>) ?? {});
-      // AIO-163: if old style was a string, clear all before applying object
-      if (prevIsString) {
-        style.cssText = "";
-      } else {
-        // Remove stale style properties not in new style
-        for (const sk of Object.keys(oldStyle)) {
-          if (!(sk in newStyle)) {
-            style.removeProperty(_camelToKebab(sk));
-          }
-        }
-      }
-      // Set new/changed style properties (resolve any signal values within style obj)
-      for (const [sk, sv] of Object.entries(newStyle)) {
-        const rsv = resolveSignalProp(sv);
-        if (isSignal(sv)) continue; // style-level signal binding handles via effect
-        const oldRsv = resolveSignalProp(oldStyle[sk]);
-        if (oldRsv !== rsv) {
-          style.setProperty(_camelToKebab(sk), _styleValue(sk, rsv));
-        }
-      }
-    } else if (k === "dangerouslySetInnerHTML") {
-      // AIO-200: handle both truthy object and null/false transition
-      if (rv && typeof rv === "object") {
-        el.innerHTML = (rv as { __html: string }).__html ?? "";
-      } else {
-        el.innerHTML = "";
-      }
-    } else if (k in el && _DOM_PROPS.has(k)) {
-      // DOM properties (form elements): assign directly instead of setAttribute
-      // deno-lint-ignore no-explicit-any
-      (el as any)[k] = rv ?? "";
-    } else if (rv === false || rv == null) {
-      const ns = _attrNS(k);
-      if (ns) el.removeAttributeNS(ns, k.slice(k.indexOf(":") + 1));
-      else el.removeAttribute(_attrName(k));
-    } else {
-      const ns = _attrNS(k);
-      if (ns) el.setAttributeNS(ns, k, String(rv));
-      else el.setAttribute(_attrName(k), String(rv));
+    } else if (!_isChildDependent(el, k)) {
+      // A style OBJECT may itself hold per-property signals; those are driven
+      // by their own effects (bindSignalProps) and must not be written here.
+      const value = (k === "style" && rv && typeof rv === "object")
+        ? _withoutSignals(rv as Record<string, unknown>)
+        : rv;
+      const before = (k === "style" && prev[k] && typeof prev[k] === "object")
+        ? _withoutSignals(prev[k] as Record<string, unknown>)
+        : prev[k];
+      _writeProp(el, k, value, before);
     }
   }
+}
+
+/** A style object with its signal-valued declarations dropped — those have
+ *  their own effects and writing their peeked value here would fight them. */
+function _withoutSignals(o: Record<string, unknown>): Record<string, unknown> {
+  let has = false;
+  for (const v of Object.values(o)) {
+    if (isSignal(v)) {
+      has = true;
+      break;
+    }
+  }
+  if (!has) return o;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(o)) if (!isSignal(v)) out[k] = v;
+  return out;
 }
 
 // ── Signal prop change detection ──────────────────────────────────────

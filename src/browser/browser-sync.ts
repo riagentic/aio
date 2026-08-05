@@ -91,13 +91,25 @@ export function handleSyncMessage(t: string, d: unknown): void {
   if (!_engine) return;
   switch (t) {
     case "sync-ack": {
-      const a = d as { cell: string; opId: string; serverHlc: unknown };
+      // `serverTs` MUST be forwarded. It is the op's position on the server's
+      // cursor, and `handleAck` uses it to tell "this ack is for an op the
+      // catch-up snapshot already contains" from "this is new" — the whole
+      // snapshot guard. Dropping it here left that guard inert on the ONLY
+      // surface it exists for, while every engine-level test stayed green
+      // because they call `handleAck` directly and pass it.
+      const a = d as {
+        cell: string;
+        opId: string;
+        serverHlc: unknown;
+        serverTs?: number;
+      };
       watch(
         "sync:ack",
         _engine.handleAck(
           a.cell,
           a.opId,
           a.serverHlc as [number, number, string],
+          a.serverTs,
         ),
       );
       return;

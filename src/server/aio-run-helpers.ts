@@ -2,6 +2,7 @@
 import type { AioApp, AioConfig, AioUser } from "./aio-types.ts";
 import type { ReportErrorOpts } from "../diagnostics/error.ts";
 import {
+  attachPerf,
   markError,
   record,
   type ReduceBreakdown,
@@ -120,21 +121,25 @@ export function buildReportOpts<S>(opts: {
           getLogger()!.pub("error", "aio", msg, data),
       }
       : undefined,
-    tt: opts.getTT()
-      ? {
-        markError: (
-          err: {
-            code: string;
-            message: string;
-            cellName?: string;
-            flowStep?: number;
-          },
-        ) => {
-          const t = opts.getTT();
-          if (t) markError(t, err);
+    // The shim is ALWAYS installed and asks the getter each time. Deciding once,
+    // by calling the getter here, is the same as capturing the value: this runs
+    // during boot, BEFORE time travel is created, so the getter answered null
+    // and the marker was never installed — no error reached a history entry in
+    // any running app, and an empty error column reads as "nothing failed".
+    // (`markError` itself no-ops when TT is off.)
+    tt: {
+      markError: (
+        err: {
+          code: string;
+          message: string;
+          cellName?: string;
+          actionType?: string;
         },
-      }
-      : undefined,
+      ) => {
+        const t = opts.getTT();
+        if (t) markError(t, err);
+      },
+    },
     prod: opts.prod,
   };
 }
@@ -233,9 +238,16 @@ export function buildAppObject<S, A>(refs: {
   };
 }
 
-/** Build onPerf callback for TT + vitals tracking */
+/** Build onPerf callback for TT + vitals tracking.
+ *
+ *  Takes a GETTER for time travel, for the same reason `buildReportOpts` does:
+ *  `record()` returns a NEW TTState per action, so a captured value is the boot
+ *  snapshot forever. It captured the value — and since the entries ARRAY is
+ *  copied but its entries are shared by reference, every action's timing was
+ *  written onto the one entry that snapshot held (`__init`). The panel showed
+ *  no timing on any real action and a stranger's timing on `__init`. */
 export function buildOnPerf<S>(
-  tt: TTState<S, { type: string }> | null,
+  getTT: () => TTState<S, { type: string }> | null,
   vitalsSystem: VitalsSystem | undefined,
   /** Cost meter — reduce time per cell for `am cost`. Reuses the timings the
    *  dispatch loop already produces; no new measurement on the hot path. */
@@ -249,7 +261,7 @@ export function buildOnPerf<S>(
     breakdown?: ReduceBreakdown;
   }) => void)
   | undefined {
-  if (!tt && !vitalsSystem && !costMeter) return undefined;
+  if (!getTT() && !vitalsSystem && !costMeter) return undefined;
   return (timing) => {
     if (costMeter) {
       // "cell:method" / "cell/ACTION" → cell. An action with no separator is
@@ -258,13 +270,16 @@ export function buildOnPerf<S>(
       const cut = at.indexOf(":") >= 0 ? at.indexOf(":") : at.indexOf("/");
       costMeter.recordReduce(cut > 0 ? at.slice(0, cut) : at, timing.reduce);
     }
+    const tt = getTT();
     if (tt && tt.entries.length > 0) {
-      tt.entries[tt.index]!.perf = {
+      // Matched by action type: an action time travel skipped has no entry, and
+      // its numbers must not be printed against someone else's.
+      attachPerf(tt, timing.actionType, {
         reduce: timing.reduce,
         effects: timing.effects,
         budget: timing.budget,
         breakdown: timing.breakdown,
-      };
+      });
     }
     if (vitalsSystem) {
       vitalsSystem.loopProbe.onPerf(timing);

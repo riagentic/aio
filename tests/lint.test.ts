@@ -315,3 +315,77 @@ Deno.test("boot lint: test files are not linted for browser imports", async () =
     await Deno.remove(dir, { recursive: true });
   }
 });
+
+Deno.test("lint: an npm package the import map DOES resolve is not warned about", async () => {
+  // The browser import map maps every `npm:` entry in the app's deno.json to
+  // the CDN (buildBrowserImportMap), so this import works. The linter kept its
+  // own hand-copied list of the framework defaults and could not see the app's
+  // packages, so it warned "won't work in browser — move this import to a
+  // server-side .ts file" about working code. Both now ask the same builder.
+  await withTmpDir(async (dir) => {
+    const app = join(dir, "src");
+    await Deno.mkdir(app);
+    await Deno.writeTextFile(
+      join(dir, "deno.json"),
+      JSON.stringify({ imports: { "chart.js": "npm:chart.js@4.4.0" } }),
+    );
+    await Deno.writeTextFile(
+      join(app, "App.tsx"),
+      "import { Chart } from 'chart.js'\nexport default function App() {}",
+    );
+    const r = await lint({}, { reduce: () => {}, execute: () => {} }, app);
+    assertEquals(
+      r.warn.filter((w) => w.includes("won't work in browser")),
+      [],
+    );
+    // …and a package that is NOT mapped is still called out.
+    await Deno.writeTextFile(
+      join(app, "Other.tsx"),
+      "import { marked } from 'marked'\nexport default function O() {}",
+    );
+    const r2 = await lint({}, { reduce: () => {}, execute: () => {} }, app);
+    assertEquals(
+      r2.warn.some((w) =>
+        w.includes('"marked"') && w.includes("won't work in browser")
+      ),
+      true,
+    );
+  });
+});
+
+Deno.test("import map: a deno.jsonc-only app is told why its imports vanish", async () => {
+  // The browser import map is built from deno.json ONLY. An app whose config is
+  // deno.jsonc (Deno accepts it, `am` and the file watcher accept it) got an
+  // import map with none of its packages and a browser that fails to resolve a
+  // specifier the server resolves fine — a blank screen caused by a file
+  // extension, with nothing said anywhere.
+  const { _resetImportMapWarnings, readAppDenoImports } = await import(
+    "../src/server/server-html-importmap.ts"
+  );
+  const dir = await Deno.makeTempDir({ prefix: "aio-jsonc-" });
+  const cwd = Deno.cwd();
+  const warned: string[] = [];
+  const origWarn = console.warn;
+  try {
+    await Deno.mkdir(join(dir, "src"));
+    await Deno.writeTextFile(
+      join(dir, "deno.jsonc"),
+      '{ // comment\n  "imports": { "chart.js": "npm:chart.js@4" }\n}',
+    );
+    _resetImportMapWarnings();
+    // cwd is the third candidate, so it has to be the app itself for this to
+    // be the real "no readable deno.json anywhere" case.
+    Deno.chdir(dir);
+    console.warn = (...a: unknown[]) =>
+      void warned.push(a.map(String).join(" "));
+    const imports = readAppDenoImports(join(dir, "src"));
+    assertEquals(imports, {});
+  } finally {
+    console.warn = origWarn;
+    Deno.chdir(cwd);
+    await Deno.remove(dir, { recursive: true });
+  }
+  const all = warned.join("\n");
+  assertEquals(all.includes("deno.jsonc"), true, all);
+  assertEquals(all.includes("Rename it to deno.json"), true, all);
+});

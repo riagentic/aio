@@ -129,6 +129,18 @@ function _pendingFor(cells?: Set<string>): Promise<unknown>[] {
   return out;
 }
 
+/** How long a shutting-down app waits, IN TOTAL, for aborted work to finish
+ *  writing — in-flight cell calls and effect promises share this one budget.
+ *  Long enough for an aborted fetch/subprocess to unwind, short enough that a
+ *  method which ignores its signal cannot hold the window open.
+ *
+ *  It lives HERE, next to the primitives it bounds, because BOTH runtimes end
+ *  a process: `src/server/shutdown.ts` Phase 1 and `src/standalone-air.ts`'s
+ *  `close()` (the Android/WebView build). Two copies of this number would be
+ *  two answers to "how long does closing take", and the second runtime already
+ *  proved what a second answer costs — it had no drain at all. */
+export const DRAIN_TIMEOUT_MS = 3000;
+
 /** Wait for every in-flight call to finish writing, up to `timeoutMs`.
  *  Returns how many were still running when the wait ended.
  *

@@ -53,19 +53,38 @@ Deno.test("browser-storage: save/load/confirm/prune round-trip", async () => {
   assertEquals(left[0]!.id, "b");
 });
 
-Deno.test("browser-storage: ops survive a reload (fresh instance, same store)", async () => {
+// This test used to assert that the CURSOR survived a reload too — encoding
+// the bug as the contract. The cursor describes the client's confirmed state,
+// and that state does not survive a reload (browser-sync re-seeds the engine
+// from the cell's initialState on every boot). A surviving cursor makes the
+// server answer "nothing new" to a client that has nothing; see
+// tests/sync/reload-cursor.test.ts for what that looks like to a user.
+Deno.test("browser-storage: ops survive a reload, the cursor does not", async () => {
   shimLocalStorage();
   const before = createLocalStorageOpStorage();
   await before.saveOp(op("x"));
-  await before.saveMeta("board", { lastHlc: [5, 0, "c1"] });
+  await before.saveMeta("board", { lastHlc: [5, 0, "c1"], lastServerTs: 42 });
+  assertEquals(
+    (await before.loadMeta("board"))?.lastHlc,
+    [5, 0, "c1"],
+    "within the session the cursor is a real cursor",
+  );
 
   // simulate a page reload: brand-new storage object over the same
   // localStorage backing
   const after = createLocalStorageOpStorage();
   const ops = await after.loadOps("board");
-  assertEquals(ops.length, 1);
+  assertEquals(
+    ops.length,
+    1,
+    "the offline op queue survives — that is the point",
+  );
   assertEquals(ops[0]!.id, "x");
-  assertEquals((await after.loadMeta("board"))?.lastHlc, [5, 0, "c1"]);
+  assertEquals(
+    await after.loadMeta("board"),
+    undefined,
+    "the cursor must not outlive the confirmed state it describes",
+  );
 });
 
 Deno.test("browser-storage: per-cell isolation + snapshot + clear", async () => {

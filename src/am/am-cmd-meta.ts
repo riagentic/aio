@@ -5,7 +5,7 @@
 
 import { VERSION } from "../server/aio.ts";
 import type { GlobalFlags } from "./am-types.ts";
-import { detectMode, out, outError } from "./am-output.ts";
+import { detectMode, fail, out, outError } from "./am-output.ts";
 import { repoRoot } from "./am-cmd-create.ts";
 import { resolve } from "@std/path";
 
@@ -214,6 +214,17 @@ export async function cmdUninstall(
   );
 }
 
+/** Does this path exist? A plain predicate, so the refusal that follows is not
+ *  written inside a `catch` that would swallow it. */
+async function exists(path: string): Promise<boolean> {
+  try {
+    await Deno.stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function cmdNew(
   args: string[],
   flags: GlobalFlags,
@@ -223,8 +234,7 @@ export async function cmdNew(
   const mode = detectMode(flags);
 
   if (!kind || !name) {
-    outError("usage: am new <cell|page> <name>", mode);
-    return;
+    fail("usage: am new <cell|page> <name>", mode);
   }
   // The name becomes BOTH a path segment and an identifier in generated
   // source, and it arrived from argv completely unchecked (`am create`
@@ -235,23 +245,20 @@ export async function cmdNew(
   // A cell/page name is an identifier, so require one: nothing else can be
   // either a traversal or a syntax break.
   if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(name)) {
-    outError(
+    fail(
       `invalid name '${name}' — start with a letter, then letters, digits, ` +
         `'-' or '_' (it becomes a file path AND an identifier in the ` +
         `generated code)`,
       mode,
     );
-    return;
   }
 
   if (kind === "cell") {
     const dir = `src/cells/${name}`;
     const file = `${dir}/index.ts`;
-    try {
-      await Deno.stat(file);
-      outError(`${file} already exists`, mode);
-      return;
-    } catch { /* ok */ }
+    // The exit lives OUTSIDE the try: `fail()` does not return, and a
+    // catch-all around it would swallow the very thing it is trying to do.
+    if (await exists(file)) fail(`${file} already exists`, mode);
     await Deno.mkdir(dir, { recursive: true });
     const symbol = name.replace(/-([a-z0-9])/gi, (_m, c) => c.toUpperCase());
     const content = `import { cell } from 'aio'
@@ -269,11 +276,7 @@ export const ${symbol} = cell('${name}', {
       .replace(/-([a-z0-9])/gi, (_m, c: string) => c.toUpperCase());
     const dir = "src/pages";
     const file = `${dir}/${pascal}.tsx`;
-    try {
-      await Deno.stat(file);
-      outError(`${file} already exists`, mode);
-      return;
-    } catch { /* ok */ }
+    if (await exists(file)) fail(`${file} already exists`, mode);
     await Deno.mkdir(dir, { recursive: true });
     const content = `import { useAio } from 'aio'
 
@@ -291,7 +294,7 @@ export function ${pascal}() {
     await Deno.writeTextFile(file, content);
     out(flags.json ? { created: file } : `created ${file}`, mode);
   } else {
-    outError(
+    fail(
       `unknown scaffold type: '${kind}' — use 'cell' or 'page'`,
       mode,
     );

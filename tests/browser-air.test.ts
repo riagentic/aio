@@ -3,7 +3,7 @@
 // Tests that ensureConnected wiring works and AIR hooks interact correctly
 // with protocol layer. No actual WebSocket — we test the wiring, not the network.
 
-import { assertEquals, assertExists } from "@std/assert";
+import { assert, assertEquals, assertExists } from "@std/assert";
 import {
   actions,
   effects,
@@ -113,6 +113,11 @@ Deno.test("browser-air: exports own (AIO-402 — cell modules import it at modul
   assertEquals(s.type, "__own");
   assertEquals(s.kind, "set");
   assertEquals(s.id, "w1");
+  // Narrow on the discriminant before reading `token` — `own` is no longer a
+  // browser-local stub with a loose `token?: number`, it IS src/state/own.ts,
+  // whose OwnEffect union puts `token` only on the "set" variant. Asserting
+  // the variant first is what makes that read legal (and checks it).
+  assert(s.kind === "set", "own.set must produce the 'set' variant");
   assertExists(s.token);
   const d = own.dispose("w1");
   assertEquals(d, { type: "__own", kind: "dispose", id: "w1" });

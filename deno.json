@@ -1,6 +1,6 @@
 {
   "name": "@riagentic/aio",
-  "version": "1.0.0-alpha49",
+  "version": "1.0.0-alpha50",
   "appId": "aio",
   "exports": {
     ".": "./mod.ts",
@@ -64,6 +64,8 @@
     "aio/jsx-runtime": "./src/jsx-runtime.ts",
     "aio/db": "./src/db/mod.ts",
     "aio/server": "./src/server-entry.ts",
+    "aio/state-core": "./src/state-core.ts",
+    "aio/extras": "./src/extras/mod.ts",
     "aio/sync": "./src/sync/mod.ts",
     "aio/testing": "./src/cell-test.ts",
     "aio/schedule": "./src/schedule.ts",
@@ -94,7 +96,7 @@
     ]
   },
   "tasks": {
-    "test": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno run --allow-read --allow-write --allow-env scripts/reset-test-home.ts && AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno test -A tests/",
+    "test": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno run --allow-read --allow-write --allow-env scripts/reset-test-home.ts && AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno test -A tests/ amui/src/",
     "test:onboard": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home AIO_ONBOARD_E2E=1 deno test -A --no-check=remote tests/onboarding-e2e.test.ts tests/run-sh-e2e.test.ts",
     "test:build": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home AIO_BUILD_E2E=1 deno test -A --no-check=remote tests/build-e2e.test.ts",
     "ship": "deno run -A src/build/ship.ts",
@@ -102,7 +104,7 @@
     "coverage:check": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno run --allow-read --allow-write --allow-env scripts/reset-test-home.ts && AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno test -A --coverage=coverage tests/ && deno cache mod.ts src/air.ts src/browser-air.ts src/standalone-air.ts src/cell-test.ts src/am.ts src/build.ts aiol/mod.ts && deno coverage coverage --lcov --output=coverage/lcov.info && deno run --allow-read scripts/check-coverage.ts",
     "test:core": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno test -A --ignore=tests/am.test.ts,tests/build.test.ts,tests/server.test.ts,tests/tls.test.ts,tests/single-instance-lock.test.ts,tests/cli.test.ts,tests/cli-client.test.ts,tests/electron-ipc.test.ts,tests/app-modes.test.ts,tests/examples.test.ts,tests/e2e-ui-chromium.test.ts,tests/e2e-remote-lan.test.ts,tests/zero-config.test.ts,tests/cli-bound-cells.test.ts,tests/e2e-blank-screen.test.ts,tests/e2e-bundle-smoke.test.ts,tests/e2e-sync-browser.test.ts tests/",
     "check": "deno check src/ mod.ts aiol/mod.ts examples/ && deno check -c amui/deno.json amui/src/",
-    "lint": "deno lint src/",
+    "lint": "deno lint src/ amui/src/",
     "lint:aio": "deno run -A aiol/mod.ts",
     "docs:check": "deno run --allow-read scripts/check-docs.ts",
     "docs:coverage": "deno run --allow-read --allow-run scripts/check-doc-coverage.ts",

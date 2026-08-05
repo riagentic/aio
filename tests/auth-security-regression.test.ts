@@ -383,3 +383,313 @@ Deno.test("regression: a session token in the URL does not authenticate HTTP", a
     await app.close();
   }
 });
+
+// ── alpha50: two doors into raw-state control that answered to nobody ────────
+
+// DELETING AN ACCOUNT MUST END IT.
+//
+// `sessions.get` re-reads the live role from the users row, so a demotion
+// reaches an open session — but a MISSING users row is indistinguishable from
+// "this app has no user table at all" (`sessions: true` without `auth: true`),
+// so it fell back to the role cached at login. `app.auth.remove(id)` — the
+// documented programmatic door for offboarding, a ban, breach response —
+// therefore deleted the account while its existing token kept authenticating,
+// with the old role, over HTTP and on already-open sockets, for up to the
+// 30-day TTL. `am auth rm` had always remembered to revoke; the programmatic
+// door had not — the same shape as `am auth passwd` forgetting it.
+Deno.test({
+  name: "regression: a deleted user's session stops authenticating at once",
+  sanitizeOps: false,
+  sanitizeResources: false,
+}, async () => {
+  _resetAuthFails();
+  const { cell, aio } = await import("../mod.ts");
+  const port = freePort();
+  const base = `http://127.0.0.1:${port}`;
+  const app = await aio.run({
+    cells: [cell("vaultrm", { state: { n: 0 }, methods: {} })],
+    appId: `test-authrm-${Deno.pid}`,
+    appVersion: "0.0.0",
+    client: "server-only",
+    persist: false,
+    libraryMode: true,
+    auth: true,
+    port,
+    baseDir: await Deno.makeTempDir(),
+  });
+  try {
+    const su = await fetch(`${base}/__aio/auth/signup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "carol", password: "password123" }),
+    });
+    const token = (await su.json()).token as string;
+    // Promote, so the surviving credential would be an ADMIN one — the worst
+    // case, and the one the role cache hands back.
+    assert(app.auth!.setRole("carol", "admin"), "promote for the test");
+
+    const me = async () =>
+      (await (await fetch(`${base}/__aio/auth/me`, {
+        headers: { authorization: `Bearer ${token}` },
+      })).json()).user;
+    assertEquals((await me())?.id, "carol", "precondition: the token works");
+
+    // A live socket, opened while the account still exists.
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=${token}`);
+    const closed = new Promise<void>((r) => {
+      ws.onclose = () => r();
+    });
+    await new Promise<void>((res, rej) => {
+      const t = setTimeout(() => rej(new Error("ws timeout")), 3000);
+      ws.onmessage = () => {
+        clearTimeout(t);
+        res();
+      };
+      ws.onerror = () => {
+        clearTimeout(t);
+        rej(new Error("ws error"));
+      };
+    });
+
+    // A one-shot token in flight (a mailed reset, a TOTP pending) MINTS
+    // sessions — deleting the account has to burn it too.
+    app.auth!.issueToken("reset", "carol", 60_000);
+    assertEquals(app.auth!.purgeTokens("__none__"), 0, "sanity: purge counts");
+
+    assert(app.auth!.remove("carol"), "the account is deleted");
+
+    assertEquals(
+      await me(),
+      null,
+      "a deleted user's token must not authenticate — it resolved as the " +
+        "role cached at login for up to the session TTL",
+    );
+    // …and the socket that was already open is disarmed, not left running
+    // until it happens to reconnect.
+    await Promise.race([
+      closed,
+      new Promise((_, rej) =>
+        setTimeout(() => rej(new Error("socket survived the deletion")), 4000)
+      ),
+    ]);
+    // The reset token issued above must be GONE — 0 left to purge. Without
+    // the burn this is 1: a token that mints a session for a deleted account.
+    assertEquals(
+      app.auth!.purgeTokens("carol"),
+      0,
+      "a one-shot token outlived the account it belongs to",
+    );
+  } finally {
+    _resetAuthFails();
+    await app.close();
+  }
+});
+
+// A `tt-cmd` FRAME IS RAW-STATE CONTROL, AND IT ANSWERED TO NOBODY.
+//
+// `/__aio/snapshot` and `/__aio/trojan/*` both require role "admin" in
+// per-user mode because they replace raw state. The `tt-cmd` frame on a live
+// WebSocket does the same thing through a different door and had NO check at
+// all: `handleTTCommand` assigns `state` directly, so one frame from the
+// lowest-privilege authenticated account rewound the WHOLE app (every
+// connected client) to an earlier action — and `pause` makes `dispatch`
+// REJECT every action from every user, with persistence stopped, until
+// someone resumes. Destruction and a whole-app write freeze, from `role:
+// "user"`, with nothing in the way.
+Deno.test({
+  name: "regression: a non-admin cannot rewind or freeze the app with tt-cmd",
+  sanitizeOps: false,
+  sanitizeResources: false,
+}, async () => {
+  _resetAuthFails();
+  const { cell, aio } = await import("../mod.ts");
+  const port = freePort();
+  const base = `http://127.0.0.1:${port}`;
+  const app = await aio.run({
+    cells: [
+      cell("ttvault", {
+        state: { reads: 0 },
+        methods: {
+          read(s: { reads: number }) {
+            s.reads += 1;
+          },
+        },
+      }),
+    ],
+    appId: `test-ttgate-${Deno.pid}`,
+    appVersion: "0.0.0",
+    client: "server-only",
+    persist: false,
+    libraryMode: true,
+    auth: true,
+    port,
+    baseDir: await Deno.makeTempDir(),
+  });
+  const settle = () => new Promise((r) => setTimeout(r, 120));
+  const reads = () =>
+    (app.getState() as unknown as { ttvault: { reads: number } }).ttvault.reads;
+  const login = async (id: string): Promise<WebSocket> => {
+    const su = await fetch(`${base}/__aio/auth/signup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, password: "password123" }),
+    });
+    const token = (await su.json()).token as string;
+    return await new Promise<WebSocket>((res, rej) => {
+      const s = new WebSocket(`ws://127.0.0.1:${port}/ws?token=${token}`);
+      const t = setTimeout(() => rej(new Error("ws timeout")), 3000);
+      s.onmessage = () => {
+        clearTimeout(t);
+        res(s);
+      };
+      s.onerror = () => {
+        clearTimeout(t);
+        rej(new Error("ws error"));
+      };
+    });
+  };
+  const read = (ws: WebSocket) =>
+    ws.send(JSON.stringify({
+      v: 2,
+      t: "action",
+      d: { type: "ttvault:read", payload: { args: [] } },
+    }));
+  const tt = (ws: WebSocket, cmd: string) =>
+    ws.send(JSON.stringify({ v: 2, t: "tt-cmd", d: { cmd } }));
+
+  try {
+    const mallory = await login("mallory"); // signup default role: "user"
+    read(mallory);
+    read(mallory);
+    read(mallory);
+    await settle();
+    const before = reads();
+    assert(before >= 1, "precondition: history exists to rewind");
+
+    // ① the rewind: the whole app back to its first action, for everyone.
+    tt(mallory, "goto:0");
+    await settle();
+    assertEquals(
+      reads(),
+      before,
+      "a non-admin rewound every client's state with one frame",
+    );
+
+    // ② the freeze: `pause` makes dispatch reject for EVERY user.
+    tt(mallory, "pause");
+    await settle();
+    read(mallory);
+    await settle();
+    assertEquals(
+      reads(),
+      before + 1,
+      "a non-admin froze the whole app's dispatch with one frame",
+    );
+    mallory.close();
+
+    // …and an ADMIN still drives it — the gate is a role bar, not a ban.
+    assert(app.auth!.setRole("root", "admin") === false, "no root yet");
+    const admin = await login("root");
+    assert(app.auth!.setRole("root", "admin"), "promote");
+    admin.close();
+    const admin2 = await login2(base, port, "root", "password123");
+    const now = reads();
+    tt(admin2, "goto:0");
+    await settle();
+    assert(
+      reads() < now,
+      `an admin must still be able to time-travel (reads stayed ${reads()})`,
+    );
+    admin2.close();
+  } finally {
+    _resetAuthFails();
+    await app.close();
+  }
+});
+
+/** Log in an EXISTING account and open its socket (signup would 409). */
+async function login2(
+  base: string,
+  port: number,
+  id: string,
+  password: string,
+): Promise<WebSocket> {
+  const r = await fetch(`${base}/__aio/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id, password }),
+  });
+  const token = (await r.json()).token as string;
+  return await new Promise<WebSocket>((res, rej) => {
+    const s = new WebSocket(`ws://127.0.0.1:${port}/ws?token=${token}`);
+    const t = setTimeout(() => rej(new Error("ws timeout")), 3000);
+    s.onmessage = () => {
+      clearTimeout(t);
+      res(s);
+    };
+    s.onerror = () => {
+      clearTimeout(t);
+      rej(new Error("ws error"));
+    };
+  });
+}
+
+// The gate is per-user-mode only: a PUBLIC dev app has no identity to check,
+// and the time-travel panel (Ctrl+.) is the whole point of the frame there.
+Deno.test({
+  name: "tt-cmd still works for an anonymous client on a public dev app",
+  sanitizeOps: false,
+  sanitizeResources: false,
+}, async () => {
+  const { cell, aio } = await import("../mod.ts");
+  const port = freePort();
+  const app = await aio.run({
+    cells: [
+      cell("ttpub", {
+        state: { reads: 0 },
+        methods: {
+          read(s: { reads: number }) {
+            s.reads += 1;
+          },
+        },
+      }),
+    ],
+    appId: `test-ttpub-${Deno.pid}`,
+    appVersion: "0.0.0",
+    client: "server-only",
+    persist: false,
+    libraryMode: true,
+    port,
+    baseDir: await Deno.makeTempDir(),
+  });
+  const settle = () => new Promise((r) => setTimeout(r, 120));
+  const reads = () =>
+    (app.getState() as unknown as { ttpub: { reads: number } }).ttpub.reads;
+  try {
+    const ws = await new Promise<WebSocket>((res, rej) => {
+      const s = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+      const t = setTimeout(() => rej(new Error("ws timeout")), 3000);
+      s.onmessage = () => {
+        clearTimeout(t);
+        res(s);
+      };
+      s.onerror = () => {
+        clearTimeout(t);
+        rej(new Error("ws error"));
+      };
+    });
+    ws.send(JSON.stringify({
+      v: 2,
+      t: "action",
+      d: { type: "ttpub:read", payload: { args: [] } },
+    }));
+    await settle();
+    assertEquals(reads(), 1);
+    ws.send(JSON.stringify({ v: 2, t: "tt-cmd", d: { cmd: "goto:0" } }));
+    await settle();
+    assertEquals(reads(), 0, "the dev panel must keep working in public mode");
+    ws.close();
+  } finally {
+    await app.close();
+  }
+});

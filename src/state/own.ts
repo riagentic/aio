@@ -42,6 +42,12 @@ let nextToken = 1;
  *  otherwise leak for the process lifetime, capturing its closure scope. */
 export function _resetPendingFactories(): void {
   pendingFactories.clear();
+  _leakWarned = false;
+}
+
+/** How many factories are parked, unconsumed — test seam for the leak bound. */
+export function _pendingFactoryCount(): number {
+  return pendingFactories.size;
 }
 
 /** Keyed disposer-slot API for cell-owned native resources. */
@@ -58,10 +64,47 @@ export interface Own {
  * id again disposes the previous resource first; all slots are disposed on
  * cell disable and app shutdown.
  */
+/** How many parked factories may pile up before the side-channel is treated as
+ *  leaking. A dispatch consumes its token in the same tick, so more than a
+ *  handful outstanding means effects are being created and never handled. */
+const MAX_PENDING = 64;
+let _leakWarned = false;
+
+/** Evict the oldest parked factories once the side-channel stops draining.
+ *
+ *  `own.set()` parks a closure and the manager consumes it when the effect is
+ *  handled. When the effect never gets there — a method that threw after
+ *  calling `own.set`, a cell disabled between reduce and execute, a dispatch
+ *  closed by shutdown — the closure (and everything it captured) was retained
+ *  for the life of the process, once per attempt, with nothing to bound it and
+ *  nothing to say so. Tokens are monotonic, so Map order IS age order. */
+function _evictStaleFactories(): void {
+  if (pendingFactories.size <= MAX_PENDING) return;
+  const overflow = pendingFactories.size - MAX_PENDING;
+  let dropped = 0;
+  for (const token of pendingFactories.keys()) {
+    if (dropped >= overflow) break;
+    pendingFactories.delete(token);
+    dropped++;
+  }
+  if (!_leakWarned) {
+    _leakWarned = true;
+    console.warn(
+      `[aio:own] more than ${MAX_PENDING} own.set() factories were parked and ` +
+        `never handled — dropping the oldest ${dropped}. An own.set effect was ` +
+        `created but never reached the runtime: a method that threw after ` +
+        `calling own.set, a cell disabled before its effects ran, or an effect ` +
+        `dropped during shutdown. Each unhandled factory retains its whole ` +
+        `closure. (warned once)`,
+    );
+  }
+}
+
 export const own: Own = {
   set(id: string, factory: () => OwnResource): OwnEffect {
     const token = nextToken++;
     pendingFactories.set(token, factory);
+    _evictStaleFactories();
     return { type: "__own", kind: "set", id, token };
   },
   dispose(id: string): OwnEffect {
@@ -184,8 +227,18 @@ export function createOwnManager(log: Log): {
     }
   }
 
+  /** Teardown is LIFO — the reverse of acquisition.
+   *
+   *  A resource acquired later may depend on one acquired earlier (a socket on
+   *  the server it belongs to, a watcher on the directory a previous slot
+   *  created); the reverse can never be true, because the earlier one did not
+   *  exist yet. Disposing in acquisition order therefore tears a dependency
+   *  down while its dependent is still live — and it disagreed with the
+   *  framework's own rule one level up, where `destroyAll` walks cells in
+   *  reverse dependency order. A Map preserves insertion order, so the fix is
+   *  to walk it backwards. */
   function disposeAll(): void {
-    for (const id of [...disposers.keys()]) runDisposer(id);
+    for (const id of [...disposers.keys()].reverse()) runDisposer(id);
   }
 
   /** Dispose all resources whose ID is `prefix` or starts with prefix + ":"
@@ -196,7 +249,8 @@ export function createOwnManager(log: Log): {
    *  disagreed about the most obvious id an app would pick. */
   function disposeByPrefix(prefix: string): void {
     const p = prefix + ":";
-    for (const id of [...disposers.keys()]) {
+    // LIFO, for the same reason as disposeAll.
+    for (const id of [...disposers.keys()].reverse()) {
       if (id === prefix || id.startsWith(p)) {
         runDisposer(id);
         log.debug(`own: disposed '${id}' (cell '${prefix}' disabled)`);

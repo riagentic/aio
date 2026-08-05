@@ -15,6 +15,11 @@ export interface ProjectMeta {
   tasks: Record<string, string>;
   /** Whether the deno.json imports the aio framework. */
   isAio: boolean;
+  /** The app's DECLARED entry point (deno.json `"entry"`), or null when it uses
+   *  the convention. This is the field `am start` resolves first
+   *  (src/am/am-utils.ts `resolveEntry`) — parsed HERE, once, so amui's start
+   *  button and `am start` can never pick different files. */
+  entry: string | null;
 }
 
 export interface DiscoveredProject {
@@ -74,6 +79,7 @@ const EMPTY_META: ProjectMeta = {
   target: null,
   tasks: {},
   isAio: false,
+  entry: null,
 };
 
 /** Parse a project's deno.json (or deno.jsonc). Never throws. */
@@ -88,6 +94,7 @@ export async function readProjectMeta(dir: string): Promise<ProjectMeta> {
         name?: string;
         version?: string;
         target?: string;
+        entry?: string;
         tasks?: Record<string, string>;
         imports?: Record<string, string>;
       };
@@ -101,6 +108,7 @@ export async function readProjectMeta(dir: string): Promise<ProjectMeta> {
         target: j.target ?? null,
         tasks: j.tasks ?? {},
         isAio,
+        entry: typeof j.entry === "string" && j.entry ? j.entry : null,
       };
     } catch { /* try next / not present */ }
   }

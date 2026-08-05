@@ -539,32 +539,49 @@ export const LIVE_RAW = Symbol("aio.liveRaw");
  *  those later mutations committed, exactly like the Immer draft;
  *  `ownedValue` still clones at apply time so replays stay safe. */
 function materializeValue(v: unknown): unknown {
-  if (v === null || typeof v !== "object") return v;
-  const raw = (v as Record<symbol, unknown>)[LIVE_RAW];
-  if (raw !== undefined) {
-    return raw !== null && typeof raw === "object"
-      ? cloneState(raw, "shallow")
-      : raw;
-  }
-  if (Array.isArray(v)) {
-    let out: unknown[] | null = null;
-    for (let i = 0; i < v.length; i++) {
-      const m = materializeValue(v[i]);
-      if (m !== v[i] && out === null) out = v.slice();
-      if (out !== null) out[i] = m;
+  // ONE object reached through two proxies must materialize to ONE clone.
+  // `s.items.fill(o)` puts the same object at every index (plain JS, and Immer
+  // does the same on a draft), so `[...s.items]` is an array of two proxies
+  // over one raw object. Cloning each proxy independently silently DE-ALIASED
+  // it: a later `delete s.items[0].q` then changed one slot where plain JS and
+  // the identical sync method change both. Memoized by the RAW object, so
+  // within one recorded value the alias survives — `ownedValue`'s
+  // structuredClone at apply time preserves internal aliasing too. Allocated
+  // lazily: a write with no proxy inside it costs nothing.
+  let memo: Map<object, unknown> | null = null;
+  const walk = (x: unknown): unknown => {
+    if (x === null || typeof x !== "object") return x;
+    const raw = (x as Record<symbol, unknown>)[LIVE_RAW];
+    if (raw !== undefined) {
+      if (raw === null || typeof raw !== "object") return raw;
+      memo ??= new Map();
+      const hit = memo.get(raw as object);
+      if (hit !== undefined) return hit;
+      const clone = cloneState(raw, "shallow");
+      memo.set(raw as object, clone);
+      return clone;
     }
-    return out ?? v;
-  }
-  let outObj: Record<string, unknown> | null = null;
-  for (const k of Object.keys(v as Record<string, unknown>)) {
-    const cur = (v as Record<string, unknown>)[k];
-    const m = materializeValue(cur);
-    if (m !== cur && outObj === null) {
-      outObj = { ...(v as Record<string, unknown>) };
+    if (Array.isArray(x)) {
+      let out: unknown[] | null = null;
+      for (let i = 0; i < x.length; i++) {
+        const m = walk(x[i]);
+        if (m !== x[i] && out === null) out = x.slice();
+        if (out !== null) out[i] = m;
+      }
+      return out ?? x;
     }
-    if (outObj !== null) outObj[k] = m;
-  }
-  return outObj ?? v;
+    let outObj: Record<string, unknown> | null = null;
+    for (const k of Object.keys(x as Record<string, unknown>)) {
+      const cur = (x as Record<string, unknown>)[k];
+      const m = walk(cur);
+      if (m !== cur && outObj === null) {
+        outObj = { ...(x as Record<string, unknown>) };
+      }
+      if (outObj !== null) outObj[k] = m;
+    }
+    return outObj ?? x;
+  };
+  return walk(v);
 }
 
 function setNestedValue(
@@ -814,6 +831,44 @@ const ARRAY_READ_METHODS = new Set([
   "toSpliced",
 ]);
 
+/** Read methods that hand the METHOD BODY its elements — and whose own return
+ *  value is `undefined`, a boolean, an index or an iterator, never a rebuilt
+ *  array. They run against LIVE elements, not the snapshot.
+ *
+ *  This is the `find` fix generalized. `find` was special-cased because a
+ *  detached snapshot element silently dropped a write that the identical sync
+ *  (Immer draft) method applied; every other element-yielding read method has
+ *  exactly that shape and was left on the snapshot. So:
+ *
+ *      for (const it of s.items) it.q = 0;        // ✅ worked (iterator trap)
+ *      s.items.forEach((it) => { it.q = 0; });    // ❌ silently did nothing
+ *
+ *  — the single most common bulk-update idiom in JavaScript, dropped without a
+ *  word, while the same body in a sync method updated every row. The methods
+ *  the interception list happens NOT to cover (`at`, `findLast`,
+ *  `findLastIndex`) already behaved correctly, because the raw prototype
+ *  function runs against the proxy and reaches elements through indexed access.
+ *  Snapshot interception was the thing that broke it.
+ *
+ *  Deliberately NOT here — every member above returns `undefined`, a boolean,
+ *  a number or an iterator, so nothing that escapes the call changes SHAPE:
+ *  the methods that hand back a rebuilt array or a user-built value (`map`,
+ *  `filter`, `slice`, `concat`, `flat`, `flatMap`, `reduce`, `toSorted`, …)
+ *  would start returning proxies, which `structuredClone` refuses in an effect
+ *  payload. Writing through an element THOSE return is still dropped; that is
+ *  the same class and a wider decision than this one.
+ *  `join`/`toString`/`toLocaleString` stay on the snapshot for a different
+ *  reason: they stringify each element, and `String(proxy)` throws the
+ *  canonical live-state error where the Immer draft yields "[object Object]". */
+const ARRAY_LIVE_ELEMENT_METHODS = new Set([
+  "forEach",
+  "some",
+  "every",
+  "findIndex",
+  "entries",
+  "values",
+]);
+
 /** Snapshot a value for read-method interception — the shared cloneState
  *  ladder with the `"shallow"` last rung: never returns the live value by
  *  reference (an identity fallback would let a `.map()`/`.find()` over the
@@ -991,6 +1046,19 @@ export function createLiveProxy<S extends Record<string, unknown>>(
         Array.isArray(fresh) && ARRAY_READ_METHODS.has(key) &&
         typeof value === "function"
       ) {
+        // Element-yielding methods with a non-array return: run them against
+        // the LIVE elements, so a write inside the callback batches exactly
+        // like `s.items[i].q = 0`. `[...receiver]` reuses the iterator trap,
+        // which already resolves each element through indexed access — so
+        // `forEach` and `for…of` finally mean the same thing.
+        if (ARRAY_LIVE_ELEMENT_METHODS.has(key)) {
+          return (...args: unknown[]) => {
+            noteRead?.(pathKey);
+            const live = [...(receiver as unknown as Iterable<unknown>)];
+            // deno-lint-ignore no-explicit-any
+            return (live as any)[key](...args);
+          };
+        }
         // `find` returns an ELEMENT the caller may hold across an await and
         // then MUTATE (`const u = s.users.find(…); u.salt = x`). A detached
         // snapshot element silently dropped that write in prod while

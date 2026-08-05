@@ -149,6 +149,7 @@
 - [Upgrade: alpha46 → alpha47](upgrade/from-alpha46-to-alpha47.md) — A second bug-hunt release: 17 more defects, found by pointing randomized
 - [Upgrade: alpha47 → alpha48](upgrade/from-alpha47-to-alpha48.md) — A third bug-hunt release: 19 defects across observability and the client
 - [Upgrade: alpha48 → alpha49](upgrade/from-alpha48-to-alpha49.md) — stopped every scheduled task on Android from ever firing.
+- [Upgrade: alpha49 → alpha50](upgrade/from-alpha49-to-alpha50.md) — A bug-hunt release (hunts 7, 8 and 9 — the same series that produced alpha46–49).
 - [Upgrade from v1.0.0-alpha5 to v1.0.0-alpha6](upgrade/from-alpha5-to-alpha6.md) — None.
 - [Upgrade from v1.0.0-alpha6 to v1.0.0-alpha7](upgrade/from-alpha6-to-alpha7.md) — mod.ts no longer re-exports renderer primitives.
 - [Upgrade from v1.0.0-alpha7 to v1.0.0-alpha8](upgrade/from-alpha7-to-alpha8.md) — None.

@@ -484,15 +484,21 @@ Deno.test("electronMainScriptUDS: closing flag prevents IPC after close", () => 
   assertEquals(script.includes("win.on('close'"), true);
 });
 
-Deno.test("electronMainScriptUDS: pageReady flag with did-finish-load", () => {
+Deno.test("electronMainScriptUDS: one readiness decider, and a real backlog", () => {
   const script = electronMainScriptUDS(
     "http://localhost:8000",
     "/tmp/test.sock",
     {},
   );
-  assertEquals(script.includes("pageReady"), true);
-  assertEquals(script.includes("did-finish-load"), true);
-  assertEquals(script.includes("lastState"), true);
+  // Readiness is the renderer's own __aio:ready signal and nothing else —
+  // did-finish-load used to gate delivery in parallel with it, and frames that
+  // landed between the two were lost (tests/electron-main-relay.test.ts).
+  assertEquals(script.includes("rendererReady"), true);
+  assertEquals(script.includes("pageReady"), false);
+  assertEquals(script.includes("on('did-finish-load'"), false);
+  // Undelivered frames wait in an ordered queue, not a single state slot.
+  assertEquals(script.includes("_pending"), true);
+  assertEquals(script.includes("lastFullState"), true);
 });
 
 Deno.test("electronMainScript: title with special chars", () => {

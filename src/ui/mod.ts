@@ -193,7 +193,10 @@ export function Checkbox(props: CheckboxProps): VNode {
     ...rest(props, ["checked", "label", "onChange", "class"]),
     type: "checkbox",
     checked,
-    class: "aio-checkbox",
+    // Unlabelled, the box IS the component, so the caller's `class` belongs on
+    // it — it used to be swallowed (only the label row ever received it), so
+    // `<Checkbox class="mine"/>` silently rendered without "mine".
+    class: label == null ? cx("aio-checkbox", cls) : "aio-checkbox",
     onChange: onChange
       ? (e: Event) => onChange((e.target as HTMLInputElement).checked, e)
       : undefined,
@@ -219,10 +222,51 @@ export interface FieldProps extends Common {
   children?: VChild;
 }
 
+/** Give the field's control the field's label as its accessible name.
+ *
+ *  A `<label>` that is a SIBLING of its control names nothing: without `for`/`id`
+ *  or wrapping, the browser makes no association, screen readers announce the
+ *  input as unnamed — and the semantic surface, which reads the same signals,
+ *  could only call it `Input`, `Input2`, … So a two-field form was addressable
+ *  only positionally (`ui.Field2.Input`), in the kit's own headline example.
+ *  Naming the control fixes both at once, and only when the caller hasn't
+ *  already named it (an explicit `t`/`aria-label` always wins).
+ *
+ *  Returns true once it has named a control, so a Field with several inputs
+ *  labels the first — exactly what a wrapping `<label>` would do. */
+function nameControl(child: unknown, label: string): boolean {
+  if (!child || typeof child !== "object") return false;
+  if (Array.isArray(child)) {
+    for (const c of child) if (nameControl(c, label)) return true;
+    return false;
+  }
+  const v = child as VNode;
+  if (!("tag" in v) || !v.props) return false;
+  const p = v.props as Record<string, unknown>;
+  const isControl = typeof v.tag === "string"
+    ? v.tag === "input" || v.tag === "select" || v.tag === "textarea"
+    : v.tag === Input || v.tag === Select || v.tag === Textarea ||
+      v.tag === Checkbox;
+  if (isControl) {
+    if (
+      p["aria-label"] === undefined && p.t === undefined &&
+      p["data-testid"] === undefined
+    ) p["aria-label"] = label;
+    return true;
+  }
+  for (const c of v.children ?? []) if (nameControl(c, label)) return true;
+  return false;
+}
+
 /** Wraps a control with a label, optional hint, and error message. Pass the
- *  same `invalid` to the control (or read `error`) to color it consistently. */
+ *  same `invalid` to the control (or read `error`) to color it consistently.
+ *  A string `label` also becomes the control's accessible name (and therefore
+ *  its semantic-surface name: `<Field label="Email">` → `ui.EmailInput`). */
 export function Field(props: FieldProps): VNode {
   const { label, hint, error, required, children, class: cls } = props;
+  if (typeof label === "string" && label.trim()) {
+    nameControl(children, label.trim());
+  }
   return h(
     "div",
     {
@@ -459,6 +503,12 @@ export function Modal(props: ModalProps): VNode | null {
   return h(
     "div",
     {
+      // The dismiss target needs a name of its own: an unlabelled clickable
+      // <div> is just "Button" on the semantic surface — indistinguishable from
+      // a real button, and the ONE thing a test wants to drive here ("click
+      // outside to close"). A caller-supplied `t` still wins (it comes from
+      // `rest`, spread after).
+      t: "modalBackdrop",
       ...rest(props, [
         "open",
         "onClose",
@@ -469,13 +519,20 @@ export function Modal(props: ModalProps): VNode | null {
         "class",
       ]),
       class: cx("aio-modal-backdrop", cls),
-      role: "dialog",
-      "aria-modal": "true",
       onClick: onBackdrop,
     },
     h(
       "div",
-      { class: "aio-modal", role: "document" },
+      {
+        class: "aio-modal",
+        // ARIA belongs on the dialog BOX, not on the backdrop that surrounds
+        // it: role="dialog" + aria-modal on the outer element told assistive
+        // tech the whole overlay was the dialog, and left the box itself
+        // announced as a generic group.
+        role: "dialog",
+        "aria-modal": "true",
+        ...(typeof title === "string" ? { "aria-label": title } : {}),
+      },
       title != null ? h("div", { class: "aio-modal__title" }, title) : null,
       h("div", { class: "aio-modal__body" }, children),
       footer != null ? h("div", { class: "aio-modal__footer" }, footer) : null,
@@ -603,9 +660,15 @@ export function Pagination(props: PaginationProps): VNode {
   const go = (p: number) => {
     if (p >= 1 && p <= pages && p !== page) onPage(p);
   };
+  // Every pager button carries an accessible name. "‹" and "›" are pure
+  // punctuation: a screen reader announces nothing, and the semantic surface
+  // (which derives a name from the same text) could only call them "Button" and
+  // "Button2" — prev and next indistinguishable, page numbers landing on
+  // identifiers like "1Button".
   const btn = (label: VChild, target: number, opts?: {
     disabled?: boolean;
     current?: boolean;
+    aria?: string;
   }) =>
     h("button", {
       type: "button",
@@ -614,6 +677,7 @@ export function Pagination(props: PaginationProps): VNode {
         opts?.current ? "aio-page__btn--current" : undefined,
       ),
       disabled: opts?.disabled,
+      "aria-label": opts?.aria,
       "aria-current": opts?.current ? "page" : undefined,
       onClick: () => go(target),
     }, label);
@@ -624,11 +688,11 @@ export function Pagination(props: PaginationProps): VNode {
       class: cx("aio-page", cls),
       "aria-label": "Pagination",
     },
-    btn("‹", page - 1, { disabled: page <= 1 }),
+    btn("‹", page - 1, { disabled: page <= 1, aria: "Previous page" }),
     ...pageWindow(page, pages, win).map((p) =>
-      btn(String(p), p, { current: p === page })
+      btn(String(p), p, { current: p === page, aria: `Page ${p}` })
     ),
-    btn("›", page + 1, { disabled: page >= pages }),
+    btn("›", page + 1, { disabled: page >= pages, aria: "Next page" }),
   );
 }
 

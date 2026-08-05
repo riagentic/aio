@@ -25,6 +25,7 @@ import { serializeReturn } from "../protocol/return-value.ts";
 import { writeClientLog } from "./client-log.ts";
 import { log } from "../diagnostics/logger.ts";
 import { parseTTCommand } from "../diagnostics/time-travel.ts";
+import { rawStateControlAllowed } from "./server-auth.ts";
 import type { ClientLogEntry } from "../air/dom-inspector-types.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
 import { VERSION } from "./aio-cli.ts";
@@ -188,6 +189,12 @@ export interface WsDeps {
   onConnect?: (user?: AioUser) => void;
   onDisconnect?: (user?: AioUser) => void;
   onTTCommand?: (cmd: string, arg?: number) => void;
+  /** True when this server authenticates INDIVIDUALS (sessions / `users:` /
+   *  `resolveUser` / login flows). It is the context `rawStateControlAllowed`
+   *  needs: in public mode there is no identity to check and the dev panel is
+   *  the point; in per-user mode a `tt-cmd` frame is raw-state control and
+   *  answers to the admin bar. */
+  perUserAuth?: boolean;
   getTTBroadcast?: () => unknown;
   syncHandler?: {
     handleOp: (
@@ -826,6 +833,22 @@ export function createWsManager(deps: WsDeps): WsManager {
       }
       case "tt-cmd":
         if (deps.onTTCommand) {
+          // Raw-state control, on a socket. Same admin bar as /__aio/snapshot
+          // and /__aio/trojan/* — see rawStateControlAllowed.
+          if (deps.perUserAuth && !rawStateControlAllowed(meta.user)) {
+            log.warn(
+              "ws",
+              `time-travel command '${
+                (frame.d as { cmd?: string } | undefined)?.cmd ?? ""
+              }' denied for ${
+                meta.user
+                  ? `user=${meta.user.id} role=${meta.user.role}`
+                  : "anonymous client"
+              } — it rewinds/freezes state for EVERY client and requires ` +
+                `role "admin"`,
+            );
+            return;
+          }
           _handleTTCommand(
             (frame.d as { cmd?: string } | undefined)?.cmd ?? "",
           );

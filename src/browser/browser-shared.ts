@@ -9,17 +9,14 @@ import {
   stampedVersion,
 } from "../protocol/protocol-version.ts";
 
-/** Creates { type, payload } action/effect objects */
-export function msg<T extends string>(
-  type: T,
-): { type: T; payload: Record<string, never> };
-export function msg<T extends string, P>(
-  type: T,
-  payload: P,
-): { type: T; payload: P };
-export function msg(type: string, payload?: unknown) {
-  return { type, payload: payload ?? {} };
-}
+/** Creates { type, payload } action/effect objects.
+ *
+ *  RE-EXPORTED, not re-implemented. It was an inlined copy, and a copy of a
+ *  fact is a fact that can drift; `msg` is trivial enough that it never did,
+ *  but the module it lived beside (`schedule`) drifted badly. Neither of these
+ *  pulls a single Deno-only dependency into the bundle, so there is no reason
+ *  for a second copy to exist. */
+export { msg } from "../state/msg.ts";
 
 // deno-lint-ignore no-explicit-any
 type _Creators = Record<string, (...args: any[]) => any>;
@@ -49,7 +46,20 @@ function _factory<T extends _Creators>(creators: T): _FactoryResult<T> {
 }
 export { _factory as actions, _factory as effects };
 
-// ── schedule stubs (browser-compatible — pure effect creators, no timers) ──
+// ── schedule (browser-compatible — pure effect creators, no timers) ──
+//
+// A stub rather than a re-export of `src/state/schedule.ts`, and for exactly
+// ONE reason: that module pulls in `blocking.ts`, a Deno worker pool, which has
+// no business in the page bundle. Every OTHER creator here is a pure function
+// of its arguments and MUST behave identically to the server's — client-scoped
+// cell methods and CRDT optimistic replay execute method bodies in the browser,
+// so a creator that is missing or subtly different is a production-only crash.
+//
+// `tests/browser-shared-inline-parity.test.ts` is what keeps that true: it
+// asserts key-set EQUALITY with the real `schedule` and fuzzes every creator's
+// output against it. Add a creator there and the gate fails until it exists
+// here too. (It was written because this copy had silently lost `backoff`,
+// `poll`, `next` and `blocking`, and dropped `every`'s `skipIfRunning`.)
 
 type _SchedResult = {
   type: string;
@@ -59,6 +69,8 @@ type _SchedResult = {
   [k: string]: any;
 };
 
+type _SchedAction = { type: string; payload?: unknown };
+
 const _schedEffect = (
   kind: string,
   id: string,
@@ -66,78 +78,113 @@ const _schedEffect = (
   extra: Record<string, any> = {},
 ): _SchedResult => ({ type: "__schedule", kind, id, ...extra });
 
+/** setTimeout's int32 ceiling — see MAX_TIMER_DELAY in src/state/schedule.ts.
+ *  The parity gate fuzzes `backoff`/`poll` past this bound, so a wrong value
+ *  here is a red test, not a silently different clamp. */
+const _MAX_TIMER_DELAY = 2_147_483_647;
+
+/** Blocking work needs a Deno worker pool; a browser has none. Absent, it read
+ *  as `schedule.blocking is not a function` at the call site — present and
+ *  loud, it names the platform and the fix. */
+const _blocking = (id: string): never => {
+  throw new Error(
+    `[aio] schedule.blocking is server-only (task id: ${id}) — it runs a Deno ` +
+      `worker pool, which does not exist in a browser/WebView runtime. Call ` +
+      `it from a server-side method and let the client read the result from ` +
+      `state.`,
+  );
+};
+_blocking.cancel = (id: string): never => _blocking(id);
+_blocking.disposeIdle = (): never => _blocking("disposeIdle");
+_blocking.dispose = (): never => _blocking("dispose");
+
 export const schedule: {
-  after(
-    id: string,
-    ms: number,
-    action: { type: string; payload?: unknown },
-  ): _SchedResult;
+  after(id: string, ms: number, action: _SchedAction): _SchedResult;
   every(
     id: string,
     ms: number,
-    action: { type: string; payload?: unknown },
+    action: _SchedAction,
+    opts?: { skipIfRunning?: boolean },
   ): _SchedResult;
-  at(
+  at(id: string, time: string, action: _SchedAction): _SchedResult;
+  cron(id: string, pattern: string, action: _SchedAction): _SchedResult;
+  backoff(
     id: string,
-    time: string,
-    action: { type: string; payload?: unknown },
+    attempt: number,
+    opts: { base: number; max?: number; factor?: number },
+    action: _SchedAction,
   ): _SchedResult;
-  cron(
+  poll(
     id: string,
-    pattern: string,
-    action: { type: string; payload?: unknown },
+    attempt: number,
+    opts: { every: number; backoff?: number; max?: number },
+    action: _SchedAction,
   ): _SchedResult;
+  next(id: string, action: _SchedAction): _SchedResult;
   cancel(id: string): _SchedResult;
+  blocking: typeof _blocking;
 } = {
-  after: (
-    id: string,
-    ms: number,
-    action: { type: string; payload?: unknown },
-  ): _SchedResult => _schedEffect("after", id, { ms, action }),
+  after: (id: string, ms: number, action: _SchedAction): _SchedResult =>
+    _schedEffect("after", id, { ms, action }),
   every: (
     id: string,
     ms: number,
-    action: { type: string; payload?: unknown },
-  ): _SchedResult => _schedEffect("every", id, { ms, action }),
-  at: (
+    action: _SchedAction,
+    opts?: { skipIfRunning?: boolean },
+  ): _SchedResult =>
+    _schedEffect("every", id, {
+      ms,
+      action,
+      ...(opts?.skipIfRunning ? { skipIfRunning: true } : {}),
+    }),
+  at: (id: string, time: string, action: _SchedAction): _SchedResult =>
+    _schedEffect("at", id, { time, action }),
+  cron: (id: string, pattern: string, action: _SchedAction): _SchedResult =>
+    _schedEffect("cron", id, { pattern, action }),
+  backoff: (
     id: string,
-    time: string,
-    action: { type: string; payload?: unknown },
-  ): _SchedResult => _schedEffect("at", id, { time, action }),
-  cron: (
+    attempt: number,
+    opts: { base: number; max?: number; factor?: number },
+    action: _SchedAction,
+  ): _SchedResult => {
+    const factor = opts.factor ?? 2;
+    const max = opts.max ?? _MAX_TIMER_DELAY;
+    const ms = Math.min(
+      opts.base * Math.pow(factor, Math.max(0, attempt)),
+      max,
+    );
+    return _schedEffect("after", id, {
+      ms: Math.max(1, Math.round(ms)),
+      action,
+    });
+  },
+  poll: (
     id: string,
-    pattern: string,
-    action: { type: string; payload?: unknown },
-  ): _SchedResult => _schedEffect("cron", id, { pattern, action }),
+    attempt: number,
+    opts: { every: number; backoff?: number; max?: number },
+    action: _SchedAction,
+  ): _SchedResult => {
+    const factor = opts.backoff ?? 1;
+    const max = opts.max ?? _MAX_TIMER_DELAY;
+    const ms = attempt <= 0
+      ? opts.every
+      : Math.min(opts.every * Math.pow(factor, attempt), max);
+    return _schedEffect("after", id, {
+      ms: Math.max(1, Math.round(ms)),
+      action,
+    });
+  },
+  next: (id: string, action: _SchedAction): _SchedResult =>
+    _schedEffect("after", id, { ms: 1, action }),
   cancel: (id: string): _SchedResult => _schedEffect("cancel", id),
+  blocking: _blocking,
 };
 
-// ── own stubs (browser-compatible — pure effect creators, no registry) ──
+// ── own ──────────────────────────────────────────────────────────────
 // Cell modules import `own` at module top; the browser loads them for typed
-// action creators, so the import must resolve. Methods only run server-side,
-// so the factory is never invoked here — no factory registry needed.
-
-type _OwnResult = {
-  type: "__own";
-  kind: string;
-  id: string;
-  token?: number;
-};
-
-let _ownToken = 1;
-
-export const own: {
-  set(id: string, factory: () => unknown): _OwnResult;
-  dispose(id: string): _OwnResult;
-} = {
-  set: (id: string, _factory: () => unknown): _OwnResult => ({
-    type: "__own",
-    kind: "set",
-    id,
-    token: _ownToken++,
-  }),
-  dispose: (id: string): _OwnResult => ({ type: "__own", kind: "dispose", id }),
-};
+// action creators, so the import must resolve. It is the REAL `own` — pure
+// effect creators plus a Map, no Deno API, nothing to gain from a second copy.
+export { own } from "../state/own.ts";
 
 // ── Transport helpers (shared between browser.ts and browser-air.ts) ──
 

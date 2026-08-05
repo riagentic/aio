@@ -26,13 +26,14 @@ export {
   TEXT_EXTENSIONS,
 } from "./server-html.ts";
 import { hasVendorImmer } from "./server-vendor.ts";
-import { verifyPin } from "./pairing.ts";
+import { PIN_TTL_MS, verifyPin } from "./pairing.ts";
 export type { ServerConfig, ServerHandle } from "./server-types.ts";
 export { _timingSafeEqual } from "./server-auth.ts";
 
 // ── Internal imports ──
 import type { ServerConfig, ServerHandle } from "./server-types.ts";
-import { matchRoute } from "./route.ts";
+import { isReservedRoutePath, matchRoute } from "./route.ts";
+import type { RawRouteHandler, RouteMatch } from "./route.ts";
 import {
   makeServerRequest,
   runWithRequest,
@@ -40,6 +41,7 @@ import {
 } from "./auth-context.ts";
 import type { AioUser } from "./aio-types.ts";
 import { buildBrowserImportMap } from "./server-html.ts";
+import { readAppDenoImports } from "./server-html-importmap.ts";
 import {
   _buildUserResolver,
   _extractTokenWithSource,
@@ -257,35 +259,37 @@ export function createServer(config: ServerConfig): ServerHandle {
 
   // Custom routes: reserve the framework namespaces loudly at boot.
   for (const key of Object.keys(config.routes ?? {})) {
-    if (!key.startsWith("/") || key.startsWith("/__aio") || key === "/ws") {
+    if (!key.startsWith("/") || isReservedRoutePath(key)) {
       throw new Error(
         `[aio] invalid custom route "${key}" — routes must start with "/" and ` +
           `cannot use the reserved /__aio or /ws namespaces`,
+      );
+    }
+    // A wildcard/param pattern can't be refused (an SPA catch-all is exactly
+    // what `"/*"` is for) — but it does NOT get the reserved namespace, and
+    // silently not-serving a route the app declared is the failure mode this
+    // whole check exists to prevent. Say so once, at boot, naming the pattern.
+    if (
+      (key.includes(":") || key.includes("*")) &&
+      (matchRoute(key, "/__aio/health") !== null ||
+        matchRoute(key, "/ws") !== null)
+    ) {
+      log.warn(
+        "http",
+        `custom route "${key}" matches the framework's reserved paths ` +
+          `(/__aio/*, /ws) — those keep being served by aio (health, metrics, ` +
+          `vitals, snapshot, and the dev module routes the page imports). ` +
+          `Your handler sees every OTHER path it matches.`,
       );
     }
   }
 
   const absBaseDir = resolve(config.baseDir);
 
-  // Read deno.json imports for browser import map. Scaffolded apps keep it at
-  // the project root (baseDir/..); flat apps (entry next to deno.json) and
-  // repo examples run from cwd — first readable config wins.
-  let denoImports: Record<string, string> = {};
-  for (
-    const candidate of [
-      join(absBaseDir, "..", "deno.json"),
-      join(absBaseDir, "deno.json"),
-      join(Deno.cwd(), "deno.json"),
-    ]
-  ) {
-    try {
-      const djText = Deno.readTextFileSync(candidate);
-      denoImports = JSON.parse(djText).imports ?? {};
-      break;
-    } catch {
-      /* try next — missing/invalid config falls through to defaults */
-    }
-  }
+  // The app's deno.json imports feed the browser import map (see
+  // readAppDenoImports — the startup linter reads the same thing, through the
+  // same function, so the two can never disagree about what resolves).
+  const denoImports = readAppDenoImports(absBaseDir);
   const importMapObj = buildBrowserImportMap(denoImports, {
     // prod serves bundles and the vendor route is dev-only — never point a
     // prod import map at it.
@@ -348,6 +352,9 @@ export function createServer(config: ServerConfig): ServerHandle {
     onConnect: config.onConnect,
     onDisconnect: config.onDisconnect,
     onTTCommand: config.onTTCommand,
+    // A `tt-cmd` frame rewinds/freezes state for every client — the same power
+    // /__aio/snapshot has, so in per-user mode it takes the same admin bar.
+    perUserAuth: _perUserAuth,
     getTTBroadcast: config.getTTBroadcast,
     syncHandler: config.syncHandler,
     // The same values the page shell embeds — the shell covers first paint,
@@ -609,10 +616,20 @@ export function createServer(config: ServerConfig): ServerHandle {
           return new Response(
             JSON.stringify({
               error: "invalid or expired pairing code",
-              // A PIN lives 3 minutes and is consumed on first use, and only
-              // boot generates one — so "wait and retry" is wrong advice.
+              // A PIN is consumed on first use, so "wait and retry" is wrong
+              // advice. It used to say "restart the app" because boot was the
+              // only thing that could mint one — downtime for every connected
+              // client to recover a missed 3-minute window. `am pair` mints one
+              // on a running app, so that is the honest answer now.
+              //
+              // The window comes from PIN_TTL_MS rather than a number typed
+              // here: this hint and the PIN's real lifetime are one fact, and
+              // the copy was already free to drift out of sync with it.
               hint:
-                "pairing codes expire after 3 minutes and are single-use — restart the app to get a new one",
+                `pairing codes expire after ${
+                  Math.round(PIN_TTL_MS / 60_000)
+                } minutes and are single-use — run \`am pair\` to mint a new one ` +
+                `without restarting the app`,
             }),
             { status: 401, headers: { "Content-Type": "application/json" } },
           );
@@ -813,6 +830,10 @@ export function createServer(config: ServerConfig): ServerHandle {
     addr: Deno.Addr | undefined,
   ): Promise<Response | null> {
     if (!config.routes) return null;
+    // The framework's own namespace is never routable — the SAME rule the boot
+    // check applies to a literal pattern, applied to the path a wildcard would
+    // otherwise have swallowed (see isReservedRoutePath).
+    if (isReservedRoutePath(pathname)) return null;
     const ip = addr && "hostname" in addr ? addr.hostname : undefined;
     // Ambient request + identity: a handler (and every cell method / serverFn
     // it calls, across awaits) can ask serverRequest() for the client IP,
@@ -820,13 +841,57 @@ export function createServer(config: ServerConfig): ServerHandle {
     const rc = makeServerRequest(req, ip, "http");
     const run = <T>(fn: () => T): T =>
       runWithRequest(rc, () => runWithUser(user, fn));
+    /** Invoke ONE matched handler. An app route is app code, and app code has
+     *  bugs — but a bug in it must not be a process event:
+     *
+     *  • a THROW reached Deno.serve, which answered a bare 500 naming neither
+     *    the route, the method nor the path — "Error: boom" in the terminal and
+     *    nothing to bisect from;
+     *  • returning a NON-Response (the raw `(req) => Response` form is public
+     *    API — forget a `return`, or return the object you meant to `json()`)
+     *    escaped as an UNHANDLED REJECTION at the serve boundary
+     *    ("Return value from serve handler must be a response…"), which the
+     *    crash handler reports as a process-level fault. One mistyped handler
+     *    could take the app down instead of failing one request.
+     *
+     *  Both now: 500 to the client, one attributed error line in the terminal,
+     *  server still up. Identical in dev and prod — no fork. */
+    async function invoke(
+      pattern: string,
+      handler: RawRouteHandler,
+      match: RouteMatch,
+    ): Promise<Response> {
+      let res: unknown;
+      try {
+        res = await run(() => handler(req, match));
+      } catch (e) {
+        log.error(
+          "http",
+          `route "${pattern}" (${req.method} ${pathname}) threw — ${
+            e instanceof Error ? (e.stack ?? e.message) : String(e)
+          }`,
+        );
+        return new Response("Internal Server Error", { status: 500 });
+      }
+      if (!(res instanceof Response)) {
+        log.error(
+          "http",
+          `route "${pattern}" (${req.method} ${pathname}) returned ` +
+            `${res === undefined ? "undefined" : typeof res} instead of a ` +
+            `Response — a routes handler must return one (use ctx.json/ctx.text/` +
+            `ctx.redirect from route(), or \`new Response(...)\`). Answered 500.`,
+        );
+        return new Response("Internal Server Error", { status: 500 });
+      }
+      return res;
+    }
     // Exact literal match first (fast + unambiguous).
     const exact = config.routes[pathname];
-    if (exact) return await run(() => exact(req, { params: {}, user, ip }));
+    if (exact) return await invoke(pathname, exact, { params: {}, user, ip });
     for (const [pattern, handler] of Object.entries(config.routes)) {
       if (!pattern.includes(":") && !pattern.includes("*")) continue;
       const params = matchRoute(pattern, pathname);
-      if (params) return await run(() => handler(req, { params, user, ip }));
+      if (params) return await invoke(pattern, handler, { params, user, ip });
     }
     return null;
   }

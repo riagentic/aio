@@ -173,6 +173,11 @@ export type DispatchDeps<S, A, E> = {
    *  owning app — with two apps in one process (D2), a closed queue must not
    *  stay open on the other app's in-flight calls. */
   cellNames?: Set<string>;
+  /** True while time travel is PAUSED (undo/redo/goto all pause). An action
+   *  dispatched then is not applied, so it must be refused HERE — at the queue
+   *  door, where a refusal can reject the caller's promise — rather than
+   *  swallowed later during reduce. See the gate in `dispatch()`. */
+  isPaused?: () => boolean;
 };
 
 /** Dispatch function with close() to reject further actions.
@@ -348,7 +353,45 @@ export function createDispatch<S, A, E>(
     return p;
   }
 
+  /** Action types already warned about while paused — one line per type, like
+   *  the closed-dispatch path. A paused app with a 1s clock cell would
+   *  otherwise fill the log while the developer reads the panel. */
+  const pausedWarnedTypes = new Set<string>();
+
   function dispatch(action: A): Promise<unknown> {
+    // TIME TRAVEL PAUSED — refuse, don't pretend.
+    //
+    // This drop used to happen inside `reduce`, which returned the state
+    // unchanged. By then the action had been accepted, so the caller's promise
+    // settled as SUCCESS with nothing applied — and an async method, whose
+    // result rides a later commit that now never comes, hung for the full call
+    // timeout and then rejected with a message that was simply false ("it may
+    // still be running... its writes will still commit"). `undo` pauses, so
+    // pressing undo in the debug panel put the app in that state.
+    //
+    // B-4's contract is that a dropped action REJECTS rather than resolving.
+    // The refusal has to happen at the door, because that is the only place
+    // that still owns the caller's promise. Time travel's own restore does not
+    // come through here — `handleTTCommand` assigns state directly — so this
+    // cannot block undo/redo itself.
+    if (deps.isPaused?.()) {
+      const t = String(
+        (action as Record<string, unknown>)?.type ?? "(unknown)",
+      );
+      if (!pausedWarnedTypes.has(t)) {
+        pausedWarnedTypes.add(t);
+        log.warn(
+          `time travel is PAUSED — '${t}' was not applied (further drops of ` +
+            `this type suppressed). Resume time travel to dispatch again.`,
+        );
+      }
+      return rejectDropped(createAioError(
+        "DISPATCH_CLOSED",
+        "time travel is paused — action dropped, not applied. Resume time " +
+          "travel (or close the debug panel) to dispatch again.",
+        { actionType: (action as Record<string, unknown>)?.type as string },
+      ));
+    }
     if (closed) {
       const t = String(
         (action as Record<string, unknown>)?.type ?? "(unknown)",

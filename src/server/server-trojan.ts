@@ -131,6 +131,35 @@ export function resetTrojanRateLimit(): void {
   disarmLocalControl();
 }
 
+/** THE reader for a numeric query param on the trojan API.
+ *
+ *  Absent ⇒ `undefined` (the route's own default applies). Present but
+ *  unparsable ⇒ an ERROR, never a default: `?after=abc` silently became NaN,
+ *  then `undefined`, then "no filter at all" — so a typo answered with the
+ *  entire timeline and looked like a query that had simply matched everything.
+ *  That is the exact swallow `parseNumArg` exists to prevent on the CLI side of
+ *  the same data, and the `cost` route had already grown its own private copy
+ *  of the check for its own param. One decider for the whole surface. */
+function numParam(
+  q: URLSearchParams,
+  name: string,
+  opts: { min?: number; gt?: number } = {},
+): { ok: true; value: number | undefined } | { ok: false; error: string } {
+  if (!q.has(name)) return { ok: true, value: undefined };
+  const raw = q.get(name) ?? "";
+  const n = Number(raw);
+  if (raw.trim() === "" || !Number.isFinite(n)) {
+    return { ok: false, error: `${name} must be a number (got "${raw}")` };
+  }
+  if (opts.min !== undefined && n < opts.min) {
+    return { ok: false, error: `${name} must be ≥ ${opts.min} (got ${n})` };
+  }
+  if (opts.gt !== undefined && n <= opts.gt) {
+    return { ok: false, error: `${name} must be > ${opts.gt} (got ${n})` };
+  }
+  return { ok: true, value: n };
+}
+
 /** Main trojan route handler — returns Response or null if path not matched */
 export function handleTrojan(
   pathname: string,
@@ -171,14 +200,39 @@ export function handleTrojan(
 
   const { trojan } = deps;
 
-  // Helper: send message to client (WS or UDS) and await response
+  // Send a message to client `idx` (WS or UDS) and await its response.
+  //
+  // The ROSTER decides whether that client exists — the same roster the
+  // `clients` route serves — and it decides ONCE, before either transport is
+  // asked. It used to be decided by `if (trojan.requestUdsClientState)`, a
+  // presence check on a function `aio-server.ts` ALWAYS supplies: with no UDS
+  // listener it resolves `{error:"UDS not active"}`, which was served as a
+  // 200. The `client not connected` 404 below it was therefore unreachable, and
+  // every client-addressed route (`client/N`, `surface/N`, `trigger/N`)
+  // answered a nonexistent client with a SUCCESS carrying an error string —
+  // `am surface 0` printed an empty surface and exited 0, `am trigger 0`
+  // reported a click that never happened, and `am surface`'s headless fallback
+  // never fired because the reply it falls back from looked fine.
   const sendToClient = async (idx: number, msg: string): Promise<Response> => {
     const wsResult = deps.sendToWsClient(idx, msg);
     if (wsResult.found) return wsResult.promise;
-    if (trojan.requestUdsClientState) {
+    const uds = trojan.udsClients?.() ?? [];
+    if (uds.some((c) => c.index === idx) && trojan.requestUdsClientState) {
       return json(await trojan.requestUdsClientState(idx, msg));
     }
-    return err(`client ${idx} not connected`, 404);
+    // Name the indices that DO exist — a miss is usually a stale index, and the
+    // caller can correct it without a second round-trip (same reasoning as the
+    // `available` paths a trigger miss returns).
+    const connected = [
+      ...deps.getWsClients().map((c) => c.meta.index),
+      ...uds.map((c) => c.index),
+    ].sort((a, b) => a - b);
+    return err(
+      `client ${idx} not connected (connected: ${
+        connected.join(", ") || "none"
+      })`,
+      404,
+    );
   };
 
   // GET endpoints — inspect
@@ -280,13 +334,17 @@ function handleGet(
   // ?after=<seq> (only newer) and ?limit=<n> (last n) query params.
   if (route === "timeline") {
     const q = new URL(req!.url).searchParams;
-    const after = q.has("after") ? Number(q.get("after")) : undefined;
-    const limit = q.has("limit") ? Number(q.get("limit")) : undefined;
+    // `?after=abc` used to become NaN → `undefined` → "no filter", so a typo
+    // answered with the WHOLE timeline and looked like a successful query that
+    // simply matched everything. Same swallow `parseNumArg` exists to prevent
+    // on the CLI side, and the `cost` route below already refuses its own
+    // unparsable `window` — one rule, one helper (numParam).
+    const after = numParam(q, "after");
+    if (!after.ok) return err(after.error, 400);
+    const limit = numParam(q, "limit", { min: 1 });
+    if (!limit.ok) return err(limit.error, 400);
     return json({
-      entries: trojan.getTimeline?.(
-        Number.isFinite(after) ? after : undefined,
-        Number.isFinite(limit) ? limit : undefined,
-      ) ?? [],
+      entries: trojan.getTimeline?.(after.value, limit.value) ?? [],
     });
   }
 
@@ -340,14 +398,11 @@ function handleGet(
       return err("cost metering unavailable in this build", 404);
     }
     const url = req ? new URL(req.url) : undefined;
-    const windowSec = Number(url?.searchParams.get("window") ?? "60");
-    const cell = url?.searchParams.get("cell") ?? undefined;
-    if (!Number.isFinite(windowSec) || windowSec <= 0) {
-      return err(
-        `invalid window (got "${url?.searchParams.get("window")}")`,
-        400,
-      );
-    }
+    const params = url?.searchParams ?? new URLSearchParams();
+    const cell = params.get("cell") ?? undefined;
+    const win = numParam(params, "window", { gt: 0 });
+    if (!win.ok) return err(win.error, 400);
+    const windowSec = win.value ?? 60;
     // State size per cell is the other half of "should I act on aiol's hint":
     // the push cost says what MOVES, this says what is THERE.
     const sizes: Record<string, number> = {};

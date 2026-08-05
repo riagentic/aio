@@ -135,3 +135,58 @@ Deno.test("on: deferred by default (skips first run)", () => {
   assertEquals(called, true);
   dispose();
 });
+
+// ── A computed that recomputed to the SAME value did not change ──────
+//
+// A computed's dependency edge propagates INVALIDATION, not change: recompute
+// is lazy, so nothing at propagation time can compare values. `watch` and `on`
+// therefore fired `3 → 3` every time any dependency moved —
+// `watch(computed(() => items.value.length), refetch)` re-ran on every keystroke
+// in an item's text. The comparison belongs here, and ONLY for a derived
+// source: a Signal's writer is the decider, and `set(v, { force: true })`
+// deliberately notifies with an identical value.
+
+Deno.test("watch: a computed that recomputes to the same value does NOT fire", () => {
+  const items = signal([{ id: 1, text: "a" }]);
+  const count = computed(() => items.value.length);
+  const log: [number, number | undefined][] = [];
+  const stop = watch(count, (next, prev) => log.push([next, prev]));
+
+  items.set([{ id: 1, text: "CHANGED" }]); // length unchanged
+  assertEquals(log, [], "invalidation is not a change");
+
+  items.set([{ id: 1, text: "x" }, { id: 2, text: "y" }]); // length 1 → 2
+  assertEquals(log, [[2, 1]], "a real change still fires, with the right prev");
+  stop();
+});
+
+Deno.test("on: a computed that recomputes to the same value does NOT fire", () => {
+  const items = signal(["a"]);
+  const count = computed(() => items.value.length);
+  const log: [number, number][] = [];
+  const dispose = effect(on(count, (next, prev) => log.push([next, prev])));
+
+  items.set(["b"]);
+  assertEquals(log, []);
+  items.set(["b", "c"]);
+  assertEquals(log, [[2, 1]]);
+  dispose();
+});
+
+Deno.test("watch: set(v, { force: true }) with an identical value STILL fires", () => {
+  // The force flag exists for values mutated in place: next and prev are the
+  // same reference, so a blanket Object.is guard would swallow exactly the
+  // notification the caller asked for.
+  const obj = { n: 1 };
+  const s = signal(obj);
+  const log: boolean[] = [];
+  const stop = watch(s, (next, prev) => log.push(next === prev));
+
+  obj.n = 2;
+  s.set(obj, { force: true });
+  assertEquals(log, [true], "a forced write notifies even with the same value");
+
+  s.set(obj); // not forced, identical → the writer drops it
+  assertEquals(log, [true]);
+  stop();
+});

@@ -9,7 +9,7 @@ import {
   _tagComponentError,
 } from "./vdom-create.ts";
 import { _componentName } from "./hook-error.ts";
-import { applyProps } from "./vdom-props.ts";
+import { applyChildDependentProps, applyProps } from "./vdom-props.ts";
 import { getDom } from "./vdom-remove.ts";
 import { _getActiveDelegationRoot, _setDelegationRoot } from "./vdom-events.ts";
 import {
@@ -41,6 +41,23 @@ export function _occupied(
   childDom: Node,
 ): Node | null {
   return childDom.nodeType === 11 ? getDom(child) : childDom;
+}
+
+/** An empty container holds its SLOT with a comment anchor (AIO-195).
+ *
+ *  Without one it has no `_dom`, so the next diff cannot tell where its region
+ *  begins and falls back to "the parent's first child" — a list that starts
+ *  empty and then fills renders ABOVE its header. That was fixed for `Fragment`
+ *  and left unfixed for `ErrorBoundary` and `Suspense`, which are the same kind
+ *  of thing: a region of the parent shared with siblings. `_domNodeCount` and
+ *  `_updateContainerDom` already counted the anchor for all three — only the
+ *  three CREATION paths (mount, SSR, hydrate) disagreed, so `<ErrorBoundary>`
+ *  around a list that starts empty put its rows in the wrong place on mount and
+ *  grew a stray comment on the first re-render. */
+function _anchorEmpty(ctx: RenderCtx, frag: Node, vnode: VNode): void {
+  const anchor = ctx.doc.createComment("");
+  frag.appendChild(anchor);
+  vnode._dom = anchor;
 }
 
 export function _render(
@@ -135,6 +152,7 @@ export function createDom(
         }
       }
       if (firstDom) vnode._dom = firstDom;
+      else _anchorEmpty(ctx, frag, vnode);
       return frag;
     } catch (error) {
       // AIO-178: re-throw _LAZY_PENDING so Suspense can handle it
@@ -144,7 +162,11 @@ export function createDom(
       vnode._rendered = fallbackVnode;
       if (fallbackVnode == null) return null;
       const dom = createDom(fallbackVnode, ctx, isSvg, parentDom);
-      vnode._dom = dom ?? undefined;
+      // The node the fallback OCCUPIES — never the DocumentFragment a Fragment
+      // fallback returns, which insertion empties and leaves detached (AIO-167
+      // for the happy path; the fallback branch had the same hole, so a
+      // boundary showing a multi-node fallback had no position at all).
+      vnode._dom = (dom ? _occupied(fallbackVnode, dom) : null) ?? undefined;
       return dom;
     }
   }
@@ -168,6 +190,7 @@ export function createDom(
         }
       }
       if (firstDom) vnode._dom = firstDom;
+      else _anchorEmpty(ctx, frag, vnode);
       return frag;
     } catch (thrown) {
       if (thrown !== _LAZY_PENDING) throw thrown;
@@ -177,7 +200,7 @@ export function createDom(
       vnode._rendered = fallback ?? null;
       if (fallback == null) return null;
       const dom = createDom(fallback, ctx, isSvg, parentDom);
-      vnode._dom = dom ?? undefined;
+      vnode._dom = (dom ? _occupied(fallback, dom) : null) ?? undefined;
       return dom;
     }
   }
@@ -214,14 +237,8 @@ export function createDom(
         frag.appendChild(childDom);
       }
     }
-    if (firstDom) {
-      vnode._dom = firstDom;
-    } else {
-      // AIO-195: empty Fragment gets comment anchor for correct positioning.
-      const anchor = ctx.doc.createComment("");
-      frag.appendChild(anchor);
-      vnode._dom = anchor;
-    }
+    if (firstDom) vnode._dom = firstDom;
+    else _anchorEmpty(ctx, frag, vnode);
     return frag;
   }
 
@@ -245,6 +262,9 @@ export function createDom(
   if (vnode._signalChildren) {
     _bindSignalTextChildren(el, vnode._signalChildren, vnode.children);
   }
+
+  // Props that only take effect once the children exist (`<select value>`).
+  applyChildDependentProps(el as HTMLElement, vnode.props, {});
 
   // Call ref after element + children are fully built
   if (vnode.props.ref) _callRef(vnode.props.ref, el, _componentName(vnode.tag));

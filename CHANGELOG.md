@@ -1,5 +1,126 @@
 # Changelog
 
+## 1.0.0-alpha50 — the quiet hunt (2026-08-05)
+
+A bug hunt — hunts 7, 8 and 9 in the same series that produced alpha46–49. No
+security holes this time, but a class of defects the security passes were good
+at hiding: tests that passed one run in sixteen, invariants held by comment
+rather than by gate, a `port: 0` app bricking itself on its own clean shutdown,
+and two deciders drifting apart until they disagreed in production.
+
+### A `port: 0` app bricked itself on a clean shutdown — HIGH
+
+`port: 0` is the documented "pick a free port" setting, and it was written into
+the lock file verbatim — then `readLock` validated the record with truthiness,
+so `port: 0` (falsy) made the lock look corrupt. Every consequence compounded:
+`release()` guards on re-reading our own record, so a graceful shutdown removed
+NOTHING; staleness is decided from the same data, so the leftover was never
+recognised as stale either; so the next launch refused to start forever with
+"Already running" — an app bricked by its own clean exit, recoverable only by
+deleting a file in a runtime dir nobody knows about. Fields are now validated by
+shape (`typeof`, `pid > 0`, `port >= 0`), not truthiness. Singleton enforcement
+itself was unaffected (a live second instance is still refused).
+
+### Only the first lock in a process was released on a signal
+
+The cleanup-handler registration is static (right — one listener per process)
+but the handler closed over one instance's `this`, so a second locked app leaked
+its lock on SIGTERM. The mirror case was live too: tearing the listeners down
+whenever ANY lock released un-protected apps still running. "Are the listeners
+installed?" and "which locks do they release?" are two facts, now held
+separately by a live-lock set.
+
+### Dispatch while time travel is paused lied to the caller
+
+The drop happened inside `reduce`, after the action had been ACCEPTED — so the
+caller's promise settled as SUCCESS with nothing applied, and an async method
+hung the full call timeout then rejected with a message that was simply false.
+`undo` pauses, so pressing undo in the debug panel put every subsequent call
+into that state. Refusal moved to the dispatch door, the only place that still
+owns the caller's promise: a dropped action now REJECTS, not resolves. Time
+travel's own restore bypasses the gate, so undo/redo keep working.
+
+### A deep-merge cycle branch was silent data loss
+
+`seen` was a global visited-set, so it answered "have I ever seen this object?"
+when the question that stops recursion is "am I INSIDE it right now?". The first
+also fires on a DAG — one object reachable by two paths — so the SECOND
+reference merged to the declared default: `{a: shared, b: shared}` holding
+`n: 99` restored `b.n` as `0`. Tracking the ancestor path fixes it (a DAG is no
+longer mistaken for a cycle) and lets a real cycle fail LOUD with its path;
+`MAX_NODES` bounds a shared-at-every-level DAG the same way `MAX_DEPTH` bounds
+depth.
+
+### Worker-cell shutdown durability: zero coverage, correct twice over
+
+The "an in-flight method finishes writing" contract is implemented twice — once
+for main-isolate cells, once for the worker host — and no in-process test CAN
+cover the worker path because `libraryMode` runs worker cells in-isolate. The
+implementation turned out correct, but three load-bearing facts were held only
+by comments. A real end-to-end test now spawns an app and reads the DB to pin
+them: the worker's post-abort write reaches disk, `workerPool.close()` must
+precede runtime shutdown (the worker's final writes are ordinary dispatches),
+and the drain bound must be below the close deadline.
+
+### Electron reconnected on a different curve from every other client
+
+The shared backoff authority's formula was RE-TYPED inline in the Electron main
+script — and the copy had already drifted, dropping the ±20% jitter term. The
+emitted `main.cjs` now embeds `backoffDelay.toString()`, so a change to the
+shared curve reaches Electron by construction. A copy that cannot drift beats a
+copy that is merely correct today.
+
+### Two offline queues, one health question
+
+Cell-method dispatch and `send()` queue independently (structural — the core
+cannot import the browser), but "is the connection degraded?" is one fact, and
+`isConnectionDegraded()` — freshly importable — consulted only the cell-method
+queue. A `send()` caller could back up to dropping actions with the indicator
+reporting healthy. Both queues feed it now, and a drop on the core side emits a
+diagnostic (it was console-only before).
+
+### The diagnostic bus went silent about going silent
+
+`diagEmit` dedups on `type` inside a 5s window, so a suppressed event could
+carry a DIFFERENT message — a second cell failing while the first is still in
+the window — and vanish. The window is a deliberate, tested contract and is
+unchanged; suppressions are now tallied per type and the next event through
+carries `suppressed: N`. "Was anything dropped?" is now something you see.
+
+### The rest
+
+`markAsync` on a client-scoped cell: server accepted it, the browser threw at
+module load — blank page for a rule whose job is to refuse the config early ·
+Electron's UDS backoff and the shared authority are now one decider (above) ·
+`/__aio/<framework src>.ts` was mounted in PROD, re-fetching + transpiling per
+request with `no-cache`; now gated on `!prod` · a stale `app.key` after a mode
+switch to per-user auth is cleared (and deliberately NOT on "unexposed" — "one
+key, use forever") · `access`-gated cells with no `ui` now warn at boot naming
+the exposed fields, so the read side of a gate cannot go undecided ·
+`_syncSqlite` re-diffed every table because a clone broke its reference
+pre-filter; now only changed tables clone · the shutdown flush's SQLite half was
+a drifted hand-copy (no error reporting, full-table clone, split baseline); it
+calls `_syncSqlite()` now · the `/__aio/pair` 401 hint says `am pair` and takes
+the real TTL · an `isConnectionDegraded()` promise in prose the doc-import gate
+couldn't see is now checked against the actual exports.
+
+### The tests were part of the problem
+
+Three tests were wrong in ways that hid real regressions: a security test built
+its "wrong credential" fixture as `real.slice(0,-1) + "0"`, so when the hex key
+already ended in `0` the bogus value WAS the real key — correct accepted, then
+the test failed claiming a leak (6.25% of runs, on a security assertion); a sync
+test's ordering premise was decided by two wall-clock reads that could tie, the
+tie then broken by a random client uuid — a coin flip; and "every harness arms
+dev-strict" was a hand-maintained invariant three of five had silently broken.
+All pinned behaviourally: near-misses that differ from the key, stamps pinned to
+one source, and a gate that fails when `aio/testing` grows a function in neither
+MUST_ARM nor EXEMPT.
+
+Suite 4000 (from 3637). Hunts 7/8/9 mutations verified red.
+
+Upgrade guide: `docs/upgrade/from-alpha49-to-alpha50.md`.
+
 ## 1.0.0-alpha49 — the perimeter (2026-08-05) — SECURITY
 
 A **security release**. Randomized probes against the auth stack and the

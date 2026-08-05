@@ -24,6 +24,12 @@ import {
   SEPARATOR,
 } from "@std/path";
 import { slugify } from "./build/build-helpers.ts";
+import {
+  flagVocabulary,
+  FLEET_BOOL_FLAGS,
+  FLEET_VALUE_FLAGS,
+  unknownFleetFlags,
+} from "./build/build-flags.ts";
 import { resolveAppDir, resolveEntry } from "./build/build-config.ts";
 import {
   crossCompileBlocker,
@@ -377,6 +383,20 @@ export async function buildAll(): Promise<number> {
     printTargets();
     return 0;
   }
+  const unknownFlags = unknownFleetFlags(Deno.args);
+  if (unknownFlags.length > 0) {
+    console.error(
+      `${C.red}✗ unknown flag(s): ${unknownFlags.join(", ")}${C.r}\n` +
+        `  ${C.dim}known: ${
+          flagVocabulary(FLEET_BOOL_FLAGS, FLEET_VALUE_FLAGS)
+        }${C.r}\n` +
+        `  ${C.dim}(an unrecognized flag is ignored, so this build would have ` +
+        `fanned out over a DIFFERENT set of targets/platforms than you asked ` +
+        `for.)${C.r}\n`,
+    );
+    printTargets();
+    return 1;
+  }
 
   const root = Deno.cwd();
   let denoJson: { title?: string; build?: BuildBlock; entry?: string };
@@ -522,6 +542,21 @@ export async function buildAll(): Promise<number> {
   const staging = join(root, ".aio", `build-staging-${crypto.randomUUID()}`);
   await Deno.mkdir(staging, { recursive: true });
 
+  // Move the PREVIOUS output out of the per-target builds' reach before any of
+  // them runs. `out` defaults to `dist/`, which those builds treat as their own
+  // scratch space — the bundle step removes it recursively, and the pre-compile
+  // sweep deletes everything in it but app.js/style.css/icon.png. So the last
+  // good release (its binaries AND manifest.json, the file a release pipeline
+  // reads to decide what to publish) was already gone by the time a failed
+  // fleet run reported "no artifacts produced — leaving dist/ untouched".
+  // Preserved here, restored on that path, discarded with `staging` otherwise.
+  const preservedOut = join(staging, "previous-out");
+  let preserved = false;
+  try {
+    await Deno.rename(outDir, preservedOut);
+    preserved = true;
+  } catch { /* nothing there yet, or not movable — nothing to protect */ }
+
   console.log(
     `${C.b}Building ${targetList.length} target(s) for ${C.blue}${title}${C.r}${C.b} → ${
       outDir.replace(root + "/", "")
@@ -621,10 +656,29 @@ export async function buildAll(): Promise<number> {
             bytes: (await Deno.stat(join(tdir, name))).size,
           });
         }
+        // A target that emitted nothing is a FAILED target, not a warning.
+        // It used to be `ok: true` with an empty artifact list: the summary
+        // printed a green ✓, the exit code stayed 0, and manifest.json — the
+        // file a release pipeline reads to decide what to publish — recorded
+        // the target as successful with nothing to publish. Every real target
+        // emits at least one file into the project root (binary, .service,
+        // .apk, .AppImage/.zip), so "nothing appeared" means the build did not
+        // do what it said, and that has to stop the fleet.
         if (artifacts.length === 0) {
-          console.warn(
-            `${C.yellow}⚠ ${label} built but produced no recognized artifact${C.r}`,
-          );
+          const why = `built but produced no recognized artifact for ` +
+            `"${targetBin}" in ${root}`;
+          console.error(`${C.red}✗ ${label} — ${why}${C.r}`);
+          results.push({
+            target,
+            role: spec.role,
+            platform,
+            binary: targetBin,
+            ...(t.entry ? { entry: t.entry } : {}),
+            ok: false,
+            error: why,
+            artifacts: [],
+          });
+          continue;
         }
         results.push({
           target,
@@ -646,6 +700,13 @@ export async function buildAll(): Promise<number> {
       0,
     );
     if (totalArtifacts === 0) {
+      // Put the previous release back exactly as it was. The per-target builds
+      // have been scribbling in `out` (that is why it was moved aside), so the
+      // directory standing there now is intermediate rubbish, not a release.
+      if (preserved) {
+        await Deno.remove(outDir, { recursive: true }).catch(() => {});
+        await Deno.rename(preservedOut, outDir);
+      }
       // Distinguish "everything was refused" from "everything failed" — a
       // build that skipped every combination is a REQUEST problem (asking for
       // Electron on a foreign OS), and saying "no artifacts produced" for it
@@ -664,10 +725,13 @@ export async function buildAll(): Promise<number> {
           `  ${C.dim}build those on their own OS, or drop them from --platforms${C.r}`,
         );
       } else {
+        const rel = outDir.replace(root + SEPARATOR, "");
         console.error(
-          `\n${C.red}✗ no artifacts produced — leaving ${
-            outDir.replace(root + SEPARATOR, "")
-          }/ untouched${C.r}`,
+          `\n${C.red}✗ no artifacts produced — ${
+            preserved
+              ? `the previous ${rel}/ is intact`
+              : `${rel}/ holds no release`
+          }${C.r}`,
         );
       }
       return 1;

@@ -838,35 +838,308 @@ exist.
 The hunt itself is in `CHANGELOG.md`; these are the items deliberately NOT
 fixed, each with the reason:
 
-- [ ] **`access`-gated sync cells broadcast ops to every socket.** `access`
-      gates writes only, so read visibility of a replicated cell is
-      unrestricted. Not a `ui` bypass (ui+sync is now refused at compose), but
-      the same question one layer over. Needs a decision, not a patch.
+- [x] **`access`-gated cells broadcast their whole state to every socket.**
+      DECIDED and closed (2026-08-05). `access` gates method CALLS, `ui` gates
+      reads; neither may derive the other, because "only admins may edit,
+      everyone may read" is a real design. So the semantics stay — what changed
+      is that the framework now refuses to let the read side go UNDECIDED: a
+      cell declaring `access` with no `ui` warns at boot, naming the exposed
+      fields, and any explicit `ui` (including `ui: "all"`) is an answer that
+      silences it. Sync cells get different advice, because a sync cell that
+      hides state is refused at compose — telling one to add `ui: "none"` would
+      be advice that hard-fails the next boot. Pinned by
+      `tests/access-vs-ui-visibility.test.ts`, which also asserts the WIRE truth
+      in both directions so the boundary can never move by accident. This closed
+      an asymmetry, not just a gap: composition REFUSES TO BOOT on a guess (a
+      field whose NAME matches a credential regex) while the author's own
+      explicit `access` declaration was read by nothing.
 - [ ] **Shared-key mode cannot serve a browser at all** — the shell loads with
       `?token=`, but `/App.tsx` and `/bundle.js` get no query and 401. Key mode
       is native-client-only today. A cookie-borne key (set on the `?token=`
       shell load) would fix it AND make `key:` + `auth:` reconcilable — which is
       currently refused at boot. Deserves its own review.
-- [ ] **Stale `app.key` after a mode switch** — `resolveAppKey` clears the file
-      only when called, and it is not called in per-user mode, so an app that
-      moved from `key: true --expose` to `auth: true` keeps a dead key that
-      `am profile` still exports as current. One line in `aio.ts`.
-- [ ] **`deep-merge`'s cycle branch** silently returns `initial` for a repeated
-      object reference — same silent-substitution class as the depth cap, but a
-      shared (non-cyclic) DAG reference would make a warning a false positive.
-- [ ] `/__aio/<framework src>.ts` is mounted in PROD and re-fetches+transpiles
-      per request with no cache — unnecessary prod surface + CPU amplifier.
-- [ ] `shapeDriftSummary` says "deepMerge preserves it" for a renamed field;
-      deepMerge actually drops it — the message misstates the mechanism.
-- [ ] `/__aio/pair`'s 401 hint still says "restart the app" — should now say
-      `am pair`.
-- [ ] `_syncSqlite` re-diffs every table because `structuredClone` breaks the
-      reference pre-filter. Behaviour-neutral, just wasteful.
+- [x] **Stale `app.key` after a mode switch** — FIXED (2026-08-05). Cleared on
+      the per-user path (`users` / `resolveUser` / `auth: true`), which is the
+      only signal that makes the shared key definitively dead. NOT on
+      "unexposed": a plain local boot of a `key: true --expose` app must keep
+      its key, or the next `--expose` mints a different one and breaks every
+      paired device ("one key, use forever").
+      `tests/app-key-mode-switch.test.ts` pins BOTH directions — the over-eager
+      fix fails it.
+- [x] **`deep-merge`'s cycle branch** — FIXED (2026-08-05), and it was worse
+      than recorded: not a diagnostic gap but SILENT DATA LOSS. `seen` was a
+      global visited-set, so it answered "have I ever seen this object?" when
+      the question that stops recursion is "am I INSIDE it right now?". The
+      first also fires on a DAG — one object reachable by two paths, which
+      `structuredClone` preserves — so the SECOND reference merged to the
+      declared default: `{a: shared, b: shared}` holding `n: 99` restored `b.n`
+      as `0`. Fixed by tracking the ancestor path (add on entry, delete on
+      exit), which also dissolves the false-positive worry recorded above: a DAG
+      is no longer mistaken for a cycle, so a real cycle can now fail LOUD with
+      its path. Correct cycle detection removed the visited-set's accidental
+      breadth bound (a shared-at-every-level DAG costs 2^depth), so MAX_NODES
+      was added with the same keep-the-DATA-and-say-where treatment as MAX_DEPTH
+      — 30 levels goes from heap exhaustion to 30ms.
+      `tests/deep-merge-shared-refs.test.ts` (6 blocks) pins both guards.
+- [x] `/__aio/<framework src>.ts` mounted in PROD — FIXED (2026-08-05). Gated on
+      `!prod`, so prod 404s the whole framework-source namespace. Safe because
+      `prodHTML` emits no import map and loads one bundled `/app.js` — nothing
+      in a prod page ever names these routes. It was not merely dead surface:
+      each hit was a file read + an esbuild transpile, with `no-cache` on the
+      response so nothing downstream absorbed a repeat — an unauthenticated
+      request costing the server far more than the caller, the same amplifier
+      shape as the alpha49 auth-budget DoS.
+      `tests/aio-namespace-prod-surface.test.ts` pins prod-404, dev-200, AND
+      that the prod shell emits no import map — so if a future change puts one
+      back, the removal is revisited instead of silently breaking.
+- [ ] `shapeDriftSummary`'s parenthetical misattributes the mechanism. Probed
+      2026-08-05 (declare {a,b} → narrow to {a} AND WRITE → re-declare): the
+      stored value SURVIVES, so the outcome claim "keeps the stale value" is
+      correct and this is not data loss. But deepMerge does not preserve it — it
+      drops the field from LIVE state (the narrowed boot really does see only
+      `a`); persistence is what keeps it on disk. Wording only.
+- [x] `/__aio/pair`'s 401 hint — FIXED (2026-08-05). Says `am pair`, and takes
+      the window from `PIN_TTL_MS` instead of a typed-out "3 minutes" that was
+      free to drift from the real lifetime.
+- [x] `_syncSqlite` re-diffed every table — FIXED (2026-08-05). `syncTables`
+      pre-filters on IDENTITY (`state[n] !== prev[n]`), which is the right test
+      because immer shares structure, but cloning the whole table set every
+      persist minted fresh objects so the check was always true. Now only
+      CHANGED tables are cloned; unchanged ones carry their existing baseline
+      through by reference. The clone's guarantee is untouched — no baseline
+      ever aliases live state — and a `getTableState` that rebuilds its arrays
+      degrades to exactly today's behaviour. Measured with a 500-row table over
+      6 persists that never touch it: 6 full re-diffs → 2 (boot + close).
+      Correctness covered by the 72 existing db tests; the CPU win itself is
+      measured, not gated (no seam exists to observe it without adding one).
 - [ ] `abortAllInflight`'s "commit what it has" rationale is now true only for
       NON-transactional cells (an interrupted transaction must not persist half
       of itself). Documented at the fix site; wants a doc line.
 - [ ] A call queued behind `serializeTail` that never runs leaves its controller
       in `_inflight` until `_resetMethodCancel` (unreachable in practice).
+
+## Hunt 7 (2026-08-05) — my own findings, alongside the four agent sweeps
+
+- [x] **Worker-cell shutdown durability had ZERO real coverage.** The contract
+      "an in-flight method finishes writing" is implemented TWICE — Phase 1 of
+      shutdown.ts for main-isolate cells, and the worker host's own abort+settle
+      for worker cells, because their method registries live in another isolate
+      where `abortAllInflight` cannot reach. Only the main-isolate half was
+      tested, and no in-process test CAN cover the other: `libraryMode`
+      deliberately runs worker cells in-isolate, so every existing test
+      exercised the main-isolate path while appearing to cover workers. The
+      implementation turned out CORRECT (negative evidence — no bug), but three
+      load-bearing facts were held only by comments. Now pinned by
+      `tests/shutdown-worker-cell-durability.test.ts`, which spawns a real app
+      with a real entry module and reads the DB: (1) the worker's post-abort
+      write reaches disk — red when the host's abort+settle is removed; (2)
+      `workerPool.close()` MUST precede `_shutdownRuntime()`, because the
+      worker's final writes arrive as ordinary dispatches and need dispatch
+      still open — red when the two lines are swapped; (3)
+      `WORKER_CLOSE_DRAIN_MS < WORKER_CLOSE_DEADLINE_MS`, or the main isolate
+      terminates the thread mid-drain. Fact (3) needs its own shape assertion:
+      the end-to-end test passes even with both equal, since a cooperative
+      worker acks in milliseconds and never approaches either bound.
+
+- [x] **Electron reconnected on a different curve from every other client.**
+      `electron-uds.ts` imported `BACKOFF_BASE_MS`/`BACKOFF_MAX_MS` from the
+      shared authority and then RE-TYPED the formula inline — and the copy had
+      already drifted, dropping the ±20% jitter term. Fixed by emitting
+      `backoffDelay.toString()` into the generated `main.cjs` (it cannot import
+      at runtime — it is a standalone CJS file in the packaged app), so a change
+      to the shared curve reaches it by construction. A copy that CANNOT drift
+      beats a copy that is merely correct today.
+      `tests/electron-backoff-one-decider.test.ts` asserts textual identity with
+      the authority, evaluates the emitted function and proves the jitter is
+      actually present (a bare exponential fails), and asserts the retyped
+      formula survives nowhere in the script.
+
+- [x] **A `port: 0` app bricked itself on a clean shutdown.** HIGH. `readLock`
+      validated with truthiness —
+      `if (!data.appId || !data.pid ||
+      !data.port) return null` — and
+      `port: 0` is falsy while being the documented "pick a free port" setting,
+      written into the lock verbatim. Every consequence compounded the same way:
+      `release()` guards on `readLock` returning our record, so a GRACEFUL
+      shutdown removed nothing; staleness is decided from that same data, so the
+      leftover could never be recognised as stale either; so the next launch
+      refused to start, permanently, with "Already running". An app bricked by
+      its own clean exit, recoverable only by deleting a file in a runtime dir
+      nobody knows about. Fixed by checking each field's SHAPE (`typeof`,
+      `pid > 0`, `port >= 0`) instead of its truthiness. Singleton enforcement
+      itself was NOT affected (verified: a second instance is still refused
+      while the first lives) — that path does not go through the validity check.
+
+- [x] **Only the FIRST lock in a process was released on a signal.** The
+      registration flag is static (right — one listener set per process) but the
+      handler closed over ONE instance's `this`, so a second locked app (a
+      supported shape: `singleton` defaults to true outside libraryMode) got no
+      cleanup at all and leaked its lock on SIGTERM. The mirror case was live
+      too: `_unregisterCleanupHandlers` tore the listeners down whenever ANY
+      lock released, un-protecting apps still running. Both are the same
+      conflation — "are the listeners installed?" and "which locks do they
+      release?" are two facts — now held separately by a live-lock set.
+      `tests/single-instance-lock-port-zero.test.ts` (6 blocks) pins all three,
+      3/3 mutations red. The multi-lock probes deliberately hold the child alive
+      with a real timer and INSPECT after signalling rather than waiting for it
+      to exit: an unresolved promise does not hold Deno's event loop open, so
+      the first draft passed (and regressed into a 400s HANG) for reasons that
+      had nothing to do with locks.
+
+- [x] **`isConnectionDegraded()` was a documented function you could not
+      import.** Two doc pages tell the reader to call it to drive a
+      "reconnecting / slow connection" indicator, and both import from
+      `aio/air`, which exported it from nowhere — following the documentation
+      produced a module-resolution error. The function was real and correct the
+      whole time; only the door was missing. Exported (strictly additive, one
+      symbol, `api:update` regenerated). The existing doc-imports gate could not
+      see it — it scans `import` statements inside fences, and this promise is
+      made in PROSE — so `tests/docs-promised-exports.test.ts` checks
+      framework-owned `name()` mentions in the prose of those pages against what
+      the entry actually exports.
+
+- [x] **`markAsync` on a client-scoped cell: server accepted, browser threw at
+      module load.** "Is this method async" was decided twice — the browser cell
+      stub asked the shared `isAsyncFunction` (which knows both a native
+      `AsyncFunction` and the `markAsync` mark a transpiled async body carries),
+      while `cell()` itself only tested `constructor.name === "AsyncFunction"`.
+      A transpiled async method therefore passed the server's guard and blew up
+      as the browser module loaded: server boots, app serves, page is blank —
+      the worst possible split for a rule whose whole job is to refuse the
+      configuration early and loudly. Collapsed onto `isAsyncFunction`;
+      `tests/client-cell-async-guard-parity.test.ts` pins both forms plus the
+      sync case (so the guard cannot become a blanket refusal).
+
+- [x] **A false wiring claim in a security-critical comment.**
+      `server-auth.ts`'s `armLocalControl` docblock still said the function was
+      "NOT yet called from `startServer`", that per-user apps therefore refuse
+      `am`/amui, and listed the two edits needed to finish it — long after both
+      landed (`server.ts:169` and `:568`). It described the opposite of what the
+      code does, in the one place a reader is auditing a trust boundary, and
+      invited someone to "complete" wiring that already exists. Rewritten to
+      describe the live wiring; the rationale for WHERE the branch sits is kept.
+
+- [x] **Dispatch while time travel is paused lied to the caller.** The drop
+      happened inside `reduce`, which returned state unchanged — but by then the
+      action had been ACCEPTED, so the caller's promise settled as SUCCESS with
+      nothing applied. An async method was worse: its result rides a later
+      commit that now never came, so it hung the full 30s call timeout and then
+      rejected with a message that was simply false ("it may still be running...
+      its writes will still commit") and advised raising `effectTimeoutMs`.
+      `undo` pauses, so pressing undo in the debug panel put every subsequent
+      call into that state. Refusal moved to the dispatch DOOR — the only place
+      that still owns the caller's promise — restoring B-4 ("a dropped action
+      must REJECT, not resolve"), with the reduce-time swallow removed so there
+      is one decider. Reuses `DISPATCH_CLOSED` (a new code would change the
+      public `AioErrorCode`), warns once per action type like the closed path,
+      and rejects through `rejectDropped` so a fire-and-forget schedule cannot
+      raise an unhandled rejection. Time travel's own restore assigns state
+      directly and never passes the gate, so undo/redo keep working.
+      `tests/time-travel-paused-dispatch.test.ts`, 2/2 mutations red.
+
+## Hunt 8 (2026-08-05) — my own findings
+
+- [x] **Two offline queues, one health question — and the indicator saw only
+      one.** Cell-method dispatch queues in `browser/browser-air-transport.ts`
+      (cap 1000, drop-oldest, promise rejection); `useCell().send` /
+      `useAio().send` queue in the isomorphic core (cap 100, drop-newest,
+      returns false). Two queues is STRUCTURAL — the boundary matrix forbids
+      `state` importing `browser`, so the core cannot delegate — but "is this
+      connection degraded" is one fact, and `isConnectionDegraded()` (which the
+      docs tell you to render as a reconnecting indicator, and which hunt 7 had
+      just made importable) consulted the cell-method queue alone. A `send()`
+      caller could back up to the point of dropping actions with the indicator
+      still reporting a healthy connection. Now both queues feed it. A drop on
+      the core side was also quieter than the same event on the other — console
+      only, invisible to the diagnostic bus, the dev overlay and `am` — so it
+      emits a diagnostic now too. `tests/offline-queue-both-paths.test.ts`, 2/2
+      mutations red. The remaining asymmetry (sync boolean vs rejected promise)
+      is inherent to the two APIs and is now DOCUMENTED rather than implied
+      away: docs/persistence/offline.md described the cell-method contract as if
+      it were universal.
+
+- [x] **`am timeline`/`am replay` claimed to expose "every state change".** They
+      do not: `afterActionHook` returns early for a `sync: true` cell (its
+      writes are durable in the CRDT op-log, not the dispatch journal), so no
+      sync-cell change has ever appeared in either. Doc corrected to say
+      DISPATCH history, with an explicit note pointing at `am state` and the
+      CRDT protocol page. NOT fixed in code deliberately: giving non-journalled
+      entries a seq risks colliding with the journal's next append, and that
+      allocation belongs with the journal/timeline owner — see below.
+
+- [x] **The diagnostic bus went silent about going silent.** `diagEmit` dedups
+      on `type` alone inside a 5s window, so a suppressed event may have carried
+      a DIFFERENT message — a second cell failing while the first is still in
+      the window — and it vanished without trace. In the one subsystem whose
+      whole job is to surface silent failures, that was the thing that had gone
+      quiet. The window itself is a deliberate, explicitly tested contract
+      (volume control), so it is UNCHANGED and no new events are emitted:
+      suppressions are tallied per type and the next event through carries
+      `suppressed: N`. Absent when nothing was lost, so "was anything dropped?"
+      stays something you see rather than read.
+      `tests/diagnostic-bus-suppression-count.test.ts`, 2/2 mutations red — the
+      second mutation covers always-attaching a 0, which would have made the
+      field noise. The tally is pruned alongside the dedup map so it cannot
+      leak.
+
+- [x] **The shutdown flush had its own drifted copy of the SQLite sync.** The KV
+      half of that block carries a comment explaining it was unified with the
+      scheduled path precisely to stop this, but the SQLite half stayed a
+      hand-copy — and had drifted three ways: it never called
+      `_reportPersistError`, so a table sync failing on SHUTDOWN (the app's last
+      chance to write anything, and the failure you most need to hear about)
+      reached the log and nothing else; it cloned every table rather than the
+      changed ones; and it advanced `prevDbState` without the live-reference map
+      beside it, leaving two halves of one baseline disagreeing. Now calls
+      `_syncSqlite()`. `tests/persist-flush-error-report.test.ts`, mutation red.
+
+- [ ] **Sync-cell writes are absent from the dispatch timeline.** Wanted, not
+      done. Needs a seq-allocation decision (the timeline and journal share a
+      sequence); until then the docs no longer promise it.
+
+## Hunt 9 (2026-08-05) — my own finding
+
+- [x] **"Every harness arms dev-strict" was a hand-maintained invariant that had
+      already broken once, and nothing gated it.** CLAUDE.md is explicit that
+      tests must be the STRICTEST environment; `_armTestStrict()` is how a
+      harness delivers that (frozen-state enforcement, the readonly hint, the
+      hidden-field read guard). It previously lived in `cell-test.ts`, the
+      harnesses import each other, and an import cycle meant THREE OF FIVE never
+      called it — so a component that illegally mutated committed state passed
+      `testComponent` and threw everywhere else. That was fixed by moving the
+      function and adding the call to each harness, i.e. by re-creating the same
+      hand-maintained invariant one layer along, with no gate.
+      `tests/harness-strictness-gate.test.ts` now (a) proves each in-process
+      harness arms, BEHAVIOURALLY — it clears the flag, invokes the harness with
+      deliberately invalid arguments so nothing heavy boots, and watches whether
+      the flag comes back set (not by grepping source, which is a named
+      anti-pattern here); (b) fails when `aio/testing` grows a function that is
+      in neither MUST_ARM nor EXEMPT, so the next harness cannot skip the
+      decision; and (c) pins the BEHAVIOUR the flag stands for, so the file
+      cannot pass while `__aioDev` means nothing. 2/2 mutations red — the first
+      reproduces the original three-harness regression exactly. NOT a bug today:
+      all six in-process harnesses currently arm. `testBrowser` is exempt with
+      its reason recorded (it owns only an external browser process; the app
+      under test boots via `testServer`, which arms).
+
+- [x] **A security test that was wrong one run in sixteen.**
+      `tests/local-control.test.ts` built its "wrong credential" fixture as
+      `real.slice(0, -1) + "0"`. The control key is hex, so whenever it already
+      ended in `0` the "bogus" value WAS the real key — correctly accepted, and
+      the test then failed claiming a wrong credential had been let through.
+      6.25% of runs, on a security assertion, which is the worst place for a
+      failure that reads as flakiness and gets waved through. The near-miss is
+      now built by CHANGING the last character, with an assert that it differs.
+      Proven by forcing a key ending in `0`: old fixture RED, new fixture GREEN.
+
+- [x] **A sync test whose premise was a coin flip.** The double-apply guard in
+      `tests/browser-sync.test.ts` stamped the snapshot's low-water mark and the
+      ack with `Date.now()` while its own comment said the ack sits "at or below
+      the snapshot's cursor". Two wall-clock reads can land in the same
+      millisecond, and the tie is then broken by node id — a random client uuid
+      compared against `"s"` — so the ordering the test depends on was decided
+      by chance. Both stamps pinned; the assertion is unchanged and still goes
+      red when `serverTs` forwarding is removed.
 
 ## Deliberate deferrals (with reasons, so they aren't re-litigated)
 
