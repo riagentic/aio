@@ -44,8 +44,8 @@ Deno.test("dev-restart: an opted-out app warns and keeps running", async () => {
   assertEquals(closed, false, "a blocked restart must not tear the app down");
 });
 
-Deno.test("dev-restart: the relaunch argv reproduces this process", () => {
-  const args = relaunchArgs();
+Deno.test("dev-restart: the relaunch argv reproduces this process", async () => {
+  const args = await relaunchArgs();
   assertEquals(args[0], "run");
   assertEquals(args[1], "-A");
   assert(args[2]!.endsWith(".ts"), args[2]);

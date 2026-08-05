@@ -596,6 +596,9 @@ async function _mountTestUI(
   const cells = opts.cells ?? [...getRegisteredCells().values()];
   if (cells.length > 0) {
     const standalone = await import("../standalone-air.ts");
+    // Opt into virtual time BEFORE anything registers a schedule — the same
+    // runtime ships on Android, where the default must be real timers.
+    standalone._useVirtualSchedules();
     advanceSchedules = standalone._advanceSchedules;
     // Hermetic by default: cells are module singletons, so both their signal
     // state AND the standalone dispatch store survive across mounts. Reset the

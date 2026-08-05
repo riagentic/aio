@@ -76,7 +76,10 @@ export function createAuthClient(base = ""): {
   reset(token: string, password: string): Promise<void>;
   verifyEmail(token: string): Promise<void>;
   totpSetup(token?: string): Promise<{ secret: string; uri: string }>;
-  totpEnable(code: string, token?: string): Promise<void>;
+  /** Confirm enrollment. The ACCOUNT PASSWORD is required: turning a second
+   *  factor ON must be exactly as hard as turning it off, or a stolen session
+   *  alone can enrol the thief's authenticator and lock the owner out. */
+  totpEnable(code: string, password: string, token?: string): Promise<void>;
   totpDisable(password: string, token?: string): Promise<void>;
 } {
   return {
@@ -131,8 +134,8 @@ export function createAuthClient(base = ""): {
         await post(base, "totp/setup", undefined, token),
       );
     },
-    async totpEnable(code, token?) {
-      await orThrow(await post(base, "totp/enable", { code }, token));
+    async totpEnable(code, password, token?) {
+      await orThrow(await post(base, "totp/enable", { code, password }, token));
     },
     async totpDisable(password, token?) {
       await orThrow(await post(base, "totp/disable", { password }, token));

@@ -5,6 +5,7 @@
 //   am auth passwd <id> [--password=…]     (omit --password → generate + print)
 //   am auth role <id> <role>
 //   am auth unlock <id>               clear a lockout (the rescue path)
+//   am auth totp <id> off             clear a second factor (lost device)
 //   am auth verify <id>               mark the email verified by hand
 //   am auth revoke <id>               kill every session of a user
 //   am auth rm <id>
@@ -15,7 +16,7 @@
 
 import { resolveAmAppId } from "./am-utils.ts";
 import { openUserStore, type UserStore } from "../server/auth-users.ts";
-import { openSessionStore } from "../server/sessions.ts";
+import { openSessionStore, type SessionStore } from "../server/sessions.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
 import { appDirs } from "../server/app-dirs.ts";
@@ -27,11 +28,13 @@ const USAGE = `am auth — manage the built-in auth (auth: true) of this app
   am auth passwd <id> [--password=…]
   am auth role <id> <role>
   am auth unlock <id>               clear a lockout
+  am auth totp <id> off             clear the second factor (lost device)
   am auth verify <id>               mark email verified
   am auth revoke <id>               revoke every session of a user
   am auth rm <id>
 
-Omitting --password generates a strong one and prints it once.`;
+Omitting --password generates a strong one and prints it once.
+"am auth passwd" also clears the lockout and kills every session.`;
 
 /** Random 16-char password (a–z A–Z 0–9, ~95 bits) for --password-less flows. */
 const generatePassword = (): string => {
@@ -74,7 +77,15 @@ export async function cmdAuth(
     Deno.exit(1);
   }
 
-  const users: UserStore = openUserStore(dbPath);
+  // Sessions live in the SAME auth.db. Binding them into the user store is
+  // what makes `am auth passwd` a real breach-response command: the password
+  // change itself revokes every session (and burns every outstanding reset /
+  // verify / TOTP-pending token) instead of leaving the attacker logged in.
+  // Opened lazily — listing users must not create a sessions table.
+  const sessions: { store: SessionStore | null } = { store: null };
+  const sessionStore =
+    (): SessionStore => (sessions.store ??= openSessionStore(dbPath));
+  const users: UserStore = openUserStore(dbPath, { sessions: sessionStore });
   const positional = rest.filter((a) => !a.startsWith("--"));
   const id = positional[0];
   const need = (what: string): string => {
@@ -134,18 +145,21 @@ export async function cmdAuth(
       case "passwd": {
         need("");
         const password = flag(rest, "password") ?? generatePassword();
+        // setPassword is the one decider: new hash, lockout cleared, one-shot
+        // tokens burned, every session revoked. Nothing to remember here.
         if (!(await users.setPassword(id!, password))) {
           outError(`no such user: ${id}`, mode);
           Deno.exit(1);
         }
-        users.unlock(id!); // a fresh password also clears any lockout
         out(
           mode === "json"
             ? {
               ok: true,
+              unlocked: true,
+              sessionsRevoked: true,
               password: flag(rest, "password") ? undefined : password,
             }
-            : `password set for ${id}${
+            : `password set for ${id} (lockout cleared, sessions revoked)${
               flag(rest, "password") ? "" : ` — password: ${password}`
             }`,
           mode,
@@ -163,7 +177,50 @@ export async function cmdAuth(
           outError(`no such user: ${id}`, mode);
           Deno.exit(1);
         }
-        out(`${id} → role ${role}`, mode);
+        // Live sessions resolve their role from THIS row on every request
+        // (sessions.ts `roleOf`), so a demotion is effective immediately —
+        // including on already-open WebSockets, which revalidate. Said out
+        // loud because the old behavior was the opposite: the role was frozen
+        // at login time for up to the 30-day session TTL.
+        out(
+          mode === "json"
+            ? { id, role, appliesToLiveSessions: true }
+            : `${id} → role ${role} (live sessions included — no re-login)`,
+          mode,
+        );
+        return;
+      }
+      case "totp": {
+        need(" off");
+        // The ONLY way back from a lost/stolen authenticator: enabling a
+        // factor needs the account password (so a stolen session cannot enrol
+        // one), and disabling needs it too — which leaves the operator, whose
+        // credential is being able to read this app's data directory at all.
+        // There are no user-held recovery codes; this is the recovery path.
+        if (positional[1] !== "off") {
+          outError(
+            `usage: am auth totp <id> off  (there is no "on" — a user enrolls ` +
+              `their own factor with their password)`,
+            mode,
+          );
+          Deno.exit(1);
+        }
+        if (!users.get(id!)) {
+          outError(`no such user: ${id}`, mode);
+          Deno.exit(1);
+        }
+        const had = users.disableTotp(id!);
+        // A pending TOTP login token outlives the factor it belongs to unless
+        // it is burned here.
+        users.purgeTokens(id!);
+        out(
+          mode === "json"
+            ? { id, totp: false, cleared: had }
+            : `${id} — second factor cleared${
+              had ? "" : " (none was enrolled)"
+            }`,
+          mode,
+        );
         return;
       }
       case "unlock": {
@@ -186,13 +243,17 @@ export async function cmdAuth(
       }
       case "revoke": {
         need("");
-        const sessions = openSessionStore(dbPath);
-        try {
-          const n = sessions.revokeUser(id!);
-          out(`revoked ${n} session(s) for ${id}`, mode);
-        } finally {
-          sessions.close();
-        }
+        const n = sessionStore().revokeUser(id!);
+        // Sessions are not the only thing that authenticates: a reset token or
+        // a TOTP `pending` captured before the revocation would mint a BRAND
+        // NEW session afterwards. "Revoke everything" has to mean everything.
+        const t = users.purgeTokens(id!);
+        out(
+          mode === "json"
+            ? { id, sessionsRevoked: n, tokensBurned: t }
+            : `revoked ${n} session(s) and ${t} pending token(s) for ${id}`,
+          mode,
+        );
         return;
       }
       case "rm": {
@@ -201,12 +262,8 @@ export async function cmdAuth(
           outError(`no such user: ${id}`, mode);
           Deno.exit(1);
         }
-        const sessions = openSessionStore(dbPath);
-        try {
-          sessions.revokeUser(id!);
-        } finally {
-          sessions.close();
-        }
+        sessionStore().revokeUser(id!);
+        users.purgeTokens(id!);
         out(`${id} removed (sessions revoked)`, mode);
         return;
       }
@@ -216,5 +273,6 @@ export async function cmdAuth(
     }
   } finally {
     users.close();
+    sessions.store?.close();
   }
 }

@@ -15,7 +15,12 @@ import {
   type ReportErrorOpts,
 } from "./diagnostics/error.ts";
 import type { AioApp } from "./server/aio.ts";
-import { isScheduleEffect, type ScheduleEffect } from "./state/schedule.ts";
+import {
+  createScheduleManager,
+  createVirtualTimers,
+  isScheduleEffect,
+  type ScheduleEffect,
+} from "./state/schedule.ts";
 import { log } from "./diagnostics/logger-api.ts";
 import { createOwnManager, isOwnEffect, type OwnEffect } from "./state/own.ts";
 import { Listeners } from "./state/listeners.ts";
@@ -75,9 +80,6 @@ export function draft<S, E>(
 const _listeners = new Listeners<unknown>();
 let _state: unknown = null;
 let _app: AioApp | null = null;
-// Once-per-process dedup for the "effect ignored in standalone" notices — a
-// toast that returns schedule.after otherwise floods every test.
-const _warnedStandalone = { schedule: false };
 
 // Owned resources (`own.set`) acquired in this runtime. Lazily created so the
 // module stays side-effect-free, and disposed by _resetState() so a test that
@@ -89,45 +91,63 @@ function _ownManager(): ReturnType<typeof createOwnManager> {
 }
 
 // ── Virtual-clock scheduler (test/standalone) ──────────────────────────
-// Schedule effects have no timer runtime in standalone/test mode, so instead of
-// firing on the wall clock (non-deterministic) or dropping them (untestable —
-// a field report), we hold `after`/`every` on a virtual clock. `_advanceSchedules(ms)`
-// fires everything now due — so a test can drive toast auto-dismiss, debounce,
-// backoff, poll, etc. deterministically.
-interface PendingSched {
-  id: string;
-  kind: "after" | "every";
-  ms: number;
-  action: Msg;
-  dueAt: number;
-}
-let _vclock = 0;
-const _pendingScheds = new Map<string, PendingSched>();
+// The REAL `createScheduleManager`, driven by a virtual clock: firing on the
+// wall clock would be non-deterministic and dropping the effects would be
+// untestable (a field report), so the clock is swapped — and NOTHING ELSE is.
+//
+// It used to be a second, hand-written scheduler living right here, and every
+// rule it did not re-implement became a rule tests could not see:
+// `Math.max(1, ms)` where production THROWS below 1 (`after`) and below 10
+// (`every`), no id validation, `skipIfRunning` ignored, `at`/`cron` dropped
+// with a once-per-process console warn. An `every` with a 5ms period and a
+// spaced id was green in the harness and refused twice over in production — a test
+// environment more permissive than production, the one thing CLAUDE.md
+// forbids outright ("tests are the STRICTEST environment").
+//
+// `_advanceSchedules(ms)` moves the virtual clock, so a test can still drive
+// toast auto-dismiss, debounce, backoff and poll deterministically.
+let _clock: ReturnType<typeof createVirtualTimers> | null = null;
+let _sched: ReturnType<typeof createScheduleManager> | null = null;
+/** Virtual time is a TEST affordance and must be opted into. This runtime is
+ *  also the REAL Android standalone runtime: with a virtual clock as the
+ *  default, nothing in a shipped APK ever advanced it, so every `after`,
+ *  `every`, `at` and `cron` was registered and then silently never fired —
+ *  a dead timer with no error anywhere. The harness opts in (below); an app
+ *  gets the platform's timers. */
+let _wantVirtual = false;
 
-/** Advance the virtual clock by `ms` and dispatch every schedule that comes
- *  due, in order. `every` schedules re-arm; `after` schedules fire once. */
-export function _advanceSchedules(ms: number): void {
-  if (!_cellApp) return;
-  const target = _vclock + Math.max(0, ms);
-  let guard = 0;
-  while (guard++ < 1_000_000) {
-    let next: PendingSched | null = null;
-    for (const s of _pendingScheds.values()) {
-      if (s.dueAt <= target && (!next || s.dueAt < next.dueAt)) next = s;
-    }
-    if (!next) break;
-    _vclock = next.dueAt;
-    if (next.kind === "every") next.dueAt += Math.max(1, next.ms);
-    else _pendingScheds.delete(next.id);
-    _cellApp.dispatch(next.action as Msg);
+/** Test-only: use a virtual clock so `advance(ms)` drives schedules
+ *  deterministically. MUST be called before the first schedule is registered
+ *  — after that the manager exists and its timer host is fixed. */
+export function _useVirtualSchedules(): void {
+  _wantVirtual = true;
+}
+
+function _scheduler(): ReturnType<typeof createScheduleManager> {
+  if (!_sched) {
+    _clock = _wantVirtual ? createVirtualTimers() : null;
+    _sched = createScheduleManager(
+      // The manager AWAITS this to know when a tick settles (skipIfRunning)
+      // and to see a rejection — so hand back the dispatch promise itself.
+      (action) => Promise.resolve(_cellApp?.dispatch(action as Msg)),
+      log,
+      _clock ? { timers: _clock } : undefined,
+    );
   }
-  _vclock = target;
+  return _sched;
+}
+
+/** Advance the virtual clock by `ms`, firing every schedule that comes due —
+ *  `after` once, `every`/`cron` re-arming, exactly as production would. */
+export function _advanceSchedules(ms: number): void {
+  _clock?.advance(ms);
 }
 
 /** Reset the virtual clock + pending schedules (per-mount test isolation). */
 export function _resetSchedules(): void {
-  _vclock = 0;
-  _pendingScheds.clear();
+  _sched?.cancelAll();
+  _sched = null;
+  _clock = null;
 }
 
 // Signal for AIR reactivity — updated on every state change
@@ -247,25 +267,7 @@ export function initStandalone<S, A, E>(
       // Schedule effects: hold on the virtual clock so tests can fire them
       // deterministically with ui.advance(ms) / handle.advance(ms).
       if (isScheduleEffect(effect)) {
-        const e = effect as ScheduleEffect;
-        if (e.kind === "cancel") {
-          _pendingScheds.delete(e.id);
-        } else if (e.kind === "after" || e.kind === "every") {
-          _pendingScheds.set(e.id, {
-            id: e.id,
-            kind: e.kind,
-            ms: e.ms,
-            action: e.action as Msg,
-            dueAt: _vclock + Math.max(1, e.ms),
-          });
-        } else if (!_warnedStandalone.schedule) {
-          // at/cron have no virtual-clock analogue — warn once.
-          _warnedStandalone.schedule = true;
-          console.warn(
-            "[aio] schedule.at/cron are not supported in standalone/test mode " +
-              "(warns once); after/every are testable via .advance(ms).",
-          );
-        }
+        _scheduler().handle(effect as ScheduleEffect);
         return;
       }
       if (isOwnEffect(effect)) {
@@ -510,6 +512,22 @@ function bootStandalone(
     // per-cell signal — keeps the bound methods from bindCell intact
     bindCellReactive(f);
   }
+  // A disabled cell must stop owning things — the same contract the server
+  // runtime wires in `aio.ts` (`config._onScheduleReady`), which nothing wired
+  // here: a cell the registry disabled kept its timers ticking and its
+  // resources open in the harness while production cancelled and disposed them
+  // by prefix.
+  //
+  // Note this closes only half the gap: the standalone runtime never calls
+  // `composed.initAll`, so `setCbApp` is unset and the circuit breaker cannot
+  // TRIP in-process at all (a second, wider parity gap — the harness also
+  // skips `onInit`/`onDestroy` — that belongs to src/testing, not here).
+  // Wiring the callback is still right: the day disable becomes reachable,
+  // the two runtimes must not disagree about what a disabled cell owns.
+  composed.registry.setOnDisable((prefix: string) => {
+    _scheduler().cancelByPrefix(prefix);
+    _ownManager().disposeByPrefix(prefix);
+  });
   // seed the cell signals with the restored/initial state
   _applyFullState(app.getState() as Record<string, unknown>);
   _cellApp = app;

@@ -89,6 +89,46 @@ function _warnTokenInUrl(): void {
   );
 }
 
+/** Headers a reverse proxy adds to say "the real client is someone else". */
+const _FORWARD_HEADERS = [
+  "x-forwarded-for",
+  "forwarded",
+  "x-real-ip",
+  "cf-connecting-ip",
+  "true-client-ip",
+] as const;
+
+// A proxy in front + `trustProxyHeader` unset = EVERY client shares one abuse
+// bucket, because the only address this process sees is the proxy's. The
+// per-IP fail budget, the pairing-PIN budget and the WS denylist all key off
+// it, so one attacker's failures land on everyone. That was silent: the docs'
+// own nginx/Caddy snippet sets no forwarded header and never mentions the
+// setting. Warn ONCE, from evidence (a request actually carrying a forwarding
+// header), naming the header we saw and what to set.
+let _proxyCollapseWarned = false;
+function _warnProxyBucketCollapse(req: Request): void {
+  if (_proxyCollapseWarned) return;
+  const seen = _FORWARD_HEADERS.find((h) => req.headers.get(h) !== null);
+  if (!seen) return;
+  _proxyCollapseWarned = true;
+  console.warn(
+    `[aio] security: request carried "${seen}" but trustProxyHeader is not ` +
+      `set — this app is behind a proxy, so every client collapses into ONE ` +
+      `abuse bucket (per-IP auth budget, pairing PIN, WS denylist). One ` +
+      `attacker's failures then throttle every user. Set ` +
+      `trustProxyHeader: "${seen}" in aio.run(), and make sure the proxy ` +
+      `OVERWRITES that header (nginx: proxy_set_header X-Forwarded-For ` +
+      `$remote_addr;) — an app that trusts a client-settable header lets an ` +
+      `attacker forge a fresh bucket per request instead.`,
+  );
+}
+
+/** Test isolation — re-arm the one-shot security warnings. @internal */
+export function _resetSecurityWarnings(): void {
+  _proxyCollapseWarned = false;
+  _tokenInUrlWarned = false;
+}
+
 /** True when a request originates from the SAME MACHINE — loopback TCP or a
  *  Unix socket. The trojan control plane uses this to stay off the network
  *  entirely: it is never reachable remotely, even under `--expose`. Unknown or
@@ -149,6 +189,43 @@ export function createServer(config: ServerConfig): ServerHandle {
       (urlBlocked ? null : _sessionResolver(tok)) ??
         (_baseResolver ? await _baseResolver(tok) : null)
     : _baseResolver;
+
+  /** This server authenticates INDIVIDUALS (sessions, users:, resolveUser,
+   *  login flows) — the mode where a collapsed abuse bucket hurts users. */
+  const _perUserAuth = !!_userResolver || !!config.authFlows;
+
+  // Boot-time half of the bucket-collapse warning (the runtime half fires on
+  // the first request that actually carries a forwarding header). An exposed
+  // per-user app is the deployment the docs prescribe a reverse proxy for, so
+  // "exposed + per-user auth + no trustProxyHeader" is worth saying out loud
+  // even before the first client arrives.
+  if (_perUserAuth && config.expose && !config.trustProxyHeader) {
+    console.warn(
+      "[aio] security: --expose with per-user auth and no trustProxyHeader. " +
+        "Direct-to-internet is fine (the TCP peer IS the client), but behind " +
+        "a reverse proxy every client shares ONE abuse bucket and one " +
+        "attacker throttles everybody. Behind a proxy set trustProxyHeader: " +
+        '"x-forwarded-for" (and have the proxy OVERWRITE that header).',
+    );
+  }
+
+  // `auth: { totp: false }` turns ENROLLMENT off. It no longer turns
+  // VERIFICATION off (that was a silent factor drop — see the login route),
+  // so an app restarted with the flag on an auth.db that already has enrolled
+  // accounts still challenges them. That is the safe behavior AND the
+  // surprising one, so it is stated at boot rather than discovered.
+  if (config.authFlows?.totp === false) {
+    const enrolled = config.authFlows.users.list().filter((u) => u.totpEnabled);
+    if (enrolled.length > 0) {
+      console.warn(
+        `[aio] auth: totp: false disables ENROLLMENT only — ${enrolled.length} ` +
+          `account(s) already enrolled (${
+            enrolled.slice(0, 5).map((u) => u.id).join(", ")
+          }) still require their second factor to log in. Clear one with ` +
+          `\`am auth totp <id> off\` if a user has lost their device.`,
+      );
+    }
+  }
 
   // A shared app KEY and the login FLOWS cannot both gate this server, and a
   // gate that silently gates nothing is the worst of the three outcomes.
@@ -461,6 +538,10 @@ export function createServer(config: ServerConfig): ServerHandle {
       const fwd = req.headers.get(config.trustProxyHeader);
       const first = fwd?.split(",")[0]?.trim();
       if (first) clientKey = first;
+    } else if (_perUserAuth && !config.trustProxyHeader) {
+      // Bucket collapse used to be SILENT. Warn from EVIDENCE — a forwarding
+      // header on a real request — not from a guess about the deployment.
+      _warnProxyBucketCollapse(req);
     }
 
     // The trojan control plane is same-machine-ONLY — never reachable over the
@@ -508,6 +589,20 @@ export function createServer(config: ServerConfig): ServerHandle {
     // is asking FOR the key, so it can't present it). PIN-gated instead:
     // POST { pin } → the app profile (cert + key) when the PIN is valid.
     if (pathname === "/__aio/pair" && req.method === "POST" && config.token) {
+      // Same class as the auth routes' body cap: this is reachable BEFORE any
+      // credential (that is the point of it), and a `{ pin }` payload is a few
+      // dozen bytes. An unbounded `req.json()` here was an anonymous memory
+      // pump on every exposed app.
+      const declared = Number(req.headers.get("content-length") ?? NaN);
+      if (!Number.isFinite(declared) || declared > 4096) {
+        req.body?.cancel().catch(() => {});
+        return new Response(
+          JSON.stringify({
+            error: "pairing body must be a small { pin } JSON",
+          }),
+          { status: 413, headers: { "Content-Type": "application/json" } },
+        );
+      }
       try {
         const body = await req.json() as { pin?: unknown };
         if (!verifyPin(body?.pin, clientKey)) {
@@ -544,12 +639,25 @@ export function createServer(config: ServerConfig): ServerHandle {
 
     // Auth path 1: per-user auth — resolveUser hook or static users map (AIO-171)
     if (_userResolver) {
-      // Brute-force budget: a key with too many recent failures is refused
-      // BEFORE the resolver runs (resolveUser may hit a JWKS/DB — don't let
-      // an attacker drive that). 429, not 401: "back off", not "wrong token".
-      if (authFailBudgetExceeded(clientKey)) {
-        return new Response("Too Many Requests", { status: 429 });
-      }
+      // THE BUDGET GATES FAILED AUTHENTICATION, NEVER SERVICE.
+      //
+      // This used to be `if (authFailBudgetExceeded(clientKey)) return 429`
+      // right here, ahead of token resolution — so a key over budget was
+      // refused EVERY request, not just its bad ones. Cost to weaponize:
+      // 10 × `POST /auth/login {id:"anyone", password:"wrong"}` (unknown ids
+      // record a failure too), ~2 requests/minute to sustain. Effect: the
+      // victim's shell request WITH A VALID SESSION got 429, their
+      // authenticated HTTP calls got 429, and their WS handshake was refused.
+      // Behind the reverse proxy the docs prescribe, every client shares one
+      // bucket (see `_warnProxyBucketCollapse`), so that is the whole app,
+      // off the air, from one unauthenticated attacker.
+      //
+      // The rule now: resolve the credential FIRST; a caller presenting a
+      // valid one is served no matter what the budget says, and only a
+      // request whose credential is absent or wrong can be throttled.
+      // Resolution is not free (a `resolveUser` hook may hit a DB/JWKS) —
+      // but it is exactly one credential check, the same one a legitimate
+      // request performs, and refusing to make it was refusing service.
       const { token, fromUrl, source } = _extractTokenWithSource(url, req);
       // AUTH-2: with the login flows enabled, the app SHELL is public — a
       // browser must load the UI (code, not state) to show SignIn before it
@@ -580,7 +688,8 @@ export function createServer(config: ServerConfig): ServerHandle {
         // ambient cookie is attached by the browser to every subresource, so
         // charging it to the budget meant one reload after a session expired
         // locked the legitimate user out of /login for 5 minutes.
-        if (token && _isPresented(source)) {
+        const presented = !!token && _isPresented(source);
+        if (presented) {
           recordAuthFail(clientKey, "invalid token (per-user mode)");
         }
         // Fail LOUD rather than silently forever: tell the browser to drop the
@@ -588,6 +697,17 @@ export function createServer(config: ServerConfig): ServerHandle {
         const extra = source === "cookie"
           ? { "Set-Cookie": clearSessionCookie(!!config.cert) }
           : undefined;
+        // Over budget AND presenting a bad credential → "back off", not
+        // "wrong token". A request that presented NOTHING is not an attack
+        // signal and is answered exactly as it would be with an empty budget
+        // (401, or the public shell) — throttling anonymous shell loads is
+        // how the refusal became a whole-app outage in the first place.
+        if (presented && authFailBudgetExceeded(clientKey)) {
+          return new Response("Too Many Requests", {
+            status: 429,
+            headers: extra,
+          });
+        }
         if (!shellIsPublic || pathname === "/ws") {
           return new Response("Unauthorized", { status: 401, headers: extra });
         }
@@ -636,9 +756,10 @@ export function createServer(config: ServerConfig): ServerHandle {
 
     // Auth path 2: single shared token (--expose without users)
     if (config.token) {
-      if (authFailBudgetExceeded(clientKey)) {
-        return new Response("Too Many Requests", { status: 429 });
-      }
+      // Same rule as the per-user path above: compare the key FIRST (two
+      // timing-safe string compares — nothing an attacker can drive), so the
+      // holder of the correct key is served even while someone else on the
+      // same bucket is being throttled. Only a wrong key meets the budget.
       const qToken = url.searchParams.get("token");
       const auth = req.headers.get("authorization");
       const hToken = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
@@ -649,6 +770,9 @@ export function createServer(config: ServerConfig): ServerHandle {
         // (health check, crawler) is a plain 401, not an attack signal.
         if (qToken !== null || hToken !== null) {
           recordAuthFail(clientKey, "invalid token (shared-key mode)");
+          if (authFailBudgetExceeded(clientKey)) {
+            return new Response("Too Many Requests", { status: 429 });
+          }
         }
         return new Response("Unauthorized", { status: 401 });
       }

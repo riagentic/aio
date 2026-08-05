@@ -33,6 +33,9 @@ export type BlockingPool = {
   cancel(id: string): boolean;
   /** Terminate every worker and reject all in-flight/queued tasks. */
   dispose(): Promise<void>;
+  /** Terminate IDLE workers when nothing is running or queued; keeps the pool
+   *  usable (it respawns on demand). Returns false when work is in flight. */
+  disposeIdle(): boolean;
   /** Max concurrent workers. */
   readonly size: number;
 };
@@ -157,6 +160,18 @@ export function createBlockingPool(opts?: { size?: number }): BlockingPool {
       }
       return false;
     },
+    disposeIdle(): boolean {
+      // An app shutting down must not leave worker threads alive (they keep
+      // the process — and a `testServer()` test run — from exiting), but the
+      // pool is process-global: a SECOND app in the same isolate (D2,
+      // libraryMode, every testServer pair) shares it, and a full dispose
+      // would reject its in-flight tasks with "pool disposed". So: retire the
+      // idle threads only, and only when nobody is using the pool at all. The
+      // pool stays live and spawns again on the next run().
+      if (active.size > 0 || queue.length > 0) return false;
+      for (const w of [...all]) retire(w);
+      return true;
+    },
     async dispose(): Promise<void> {
       disposed = true;
       for (const t of queue.splice(0)) {
@@ -185,6 +200,11 @@ export function blocking<T = unknown>(
 }
 /** Cancel a running/queued blocking task by id. */
 blocking.cancel = (id: string): boolean => (_pool ? _pool.cancel(id) : false);
+/** Terminate the global pool's IDLE workers (no-op when work is in flight, and
+ *  when no pool was ever created). What app shutdown calls: threads must not
+ *  outlive the app that spawned them, but the pool is process-global and a
+ *  co-hosted app may still be using it. */
+blocking.disposeIdle = (): boolean => (_pool ? _pool.disposeIdle() : true);
 /** Tear down the global pool (terminate workers) — call on shutdown/in tests. */
 blocking.dispose = async (): Promise<void> => {
   if (_pool) {

@@ -232,9 +232,18 @@ Deno.test("auth e2e: email verify, reset, password rotation, totp, lockout", asy
     // way a real user does (enrol with the code on screen, log in with the
     // next one) instead of re-submitting the same one.
     const step = Math.floor(Date.now() / 30_000);
-    const en = await post(
+    // Enabling a factor takes the ACCOUNT PASSWORD, exactly like disabling it
+    // (a stolen session alone must not be able to enrol one).
+    const noPw = await post(
       "totp/enable",
       { code: await totpCode(secret, step - 1) },
+      session3,
+    );
+    assertEquals(noPw.status, 400, "no password → refused");
+    assertEquals((await noPw.json()).error, "password_required");
+    const en = await post(
+      "totp/enable",
+      { code: await totpCode(secret, step - 1), password: "password-three-3" },
       session3,
     );
     assertEquals(en.status, 200);
@@ -424,7 +433,12 @@ Deno.test("auth e2e: OIDC login — discovery, PKCE, RS256 JWKS verify, session"
     const me = await (await fetch(`${BASE}/__aio/auth/me`, {
       headers: { authorization: `Bearer ${token}` },
     })).json();
-    assertEquals(me.user, { id: "google|alice", role: "reader" });
+    // The account id is NAMESPACED by issuer: an external identity can never
+    // land on (or create) a local account whose name equals the IdP's `sub`.
+    assertEquals(me.user, {
+      id: `oidc:127.0.0.1:${IDP_PORT}:google|alice`,
+      role: "reader",
+    });
 
     // CSRF binding: a callback WITHOUT the browser binder cookie is refused,
     // even with a valid (code, state). Defeats login-CSRF / session fixation.

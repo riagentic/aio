@@ -121,7 +121,7 @@
         },
         "createAuthClient": {
           "kind": "function",
-          "sig": "4edd7a0d35275fb0"
+          "sig": "a43c003a0ef7c810"
         },
         "createSelector": {
           "kind": "function",
@@ -385,7 +385,7 @@
         },
         "UserStore": {
           "kind": "interface",
-          "sig": "f405f1dee3cbec00"
+          "sig": "6c7d2236349f9de5"
         },
         "verifyTotp": {
           "kind": "function",
@@ -393,7 +393,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "b276a9f6fe7297c4"
+          "sig": "03785c2489c8fe5c"
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -697,7 +697,7 @@
         },
         "SignInProps": {
           "kind": "interface",
-          "sig": "dde78772f5628522"
+          "sig": "c232d2fdf223c00a"
         },
         "signOut": {
           "kind": "function",
