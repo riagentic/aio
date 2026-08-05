@@ -11,8 +11,8 @@ import {
 import { _callRef, _staticEqual, _tagComponentError } from "./vdom-create.ts";
 import { _componentName } from "./hook-error.ts";
 import { _hasSignalPropChange, applyProps } from "./vdom-props.ts";
-import { getDom, isChildOf, removeDom } from "./vdom-remove.ts";
-import { _render, createDom } from "./vdom-render.ts";
+import { _advance, getDom, isChildOf, removeDom } from "./vdom-remove.ts";
+import { createDom } from "./vdom-render.ts";
 import { _getActiveDelegationRoot, _setDelegationRoot } from "./vdom-events.ts";
 import {
   _devMode,
@@ -59,6 +59,17 @@ function _copyStaticDom(nv: VNode, ov: VNode): void {
   }
 }
 
+/** The node a freshly-created vnode occupies: its `_dom` when it tracks one,
+ *  otherwise the created node itself (bare text — the one kind that cannot).
+ *  Never the DocumentFragment a Fragment/boundary returns: that is emptied by
+ *  insertion and is nobody's position. */
+function _realized(v: VNode | string | number, created: Node | null):
+  | Node
+  | null {
+  if (typeof v === "object" && v !== null) return v._dom ?? null;
+  return created;
+}
+
 /** Wrapper that binds _diff into diffChildren (breaks circular dep). */
 function _diffChildren(
   parent: Node,
@@ -67,8 +78,8 @@ function _diffChildren(
   ctx: RenderCtx,
   isSvg: boolean,
   startAnchor: Node | null = null,
-): void {
-  _diffChildrenRaw(
+): Node | null {
+  return _diffChildrenRaw(
     parent,
     nextChildren,
     oldChildren,
@@ -79,25 +90,54 @@ function _diffChildren(
   );
 }
 
+/** Reconcile `old` → `next` inside `parent`; returns the FIRST DOM node `next`
+ *  occupies afterwards, or null when it occupies none.
+ *
+ *  `oldDom` is the node `old` positionally occupies — or, when `old` occupies
+ *  no node at all (null, a Portal, a component that rendered null), the node
+ *  that FOLLOWS its empty slot, which is exactly the right insertion anchor.
+ *
+ *  Position is threaded rather than searched for because a bare string/number
+ *  child is a primitive: it has nowhere to hold a `_dom`. The reconciler used
+ *  to recover by scanning `parent.childNodes` for a text node with equal
+ *  content (AIO-156/AIO-416) — which finds the FIRST equal-valued text node,
+ *  not the right one. Two siblings with the same text (`{" "}` separators,
+ *  repeated labels, equal numbers) were therefore reconciled into each other's
+ *  nodes: `["a",<div/>] ← [<div/>,"a"]` re-rendered byte-identical DOM while
+ *  the model had changed, with no warning. The caller always knows the
+ *  position; nothing else does. */
 export function _diff(
   parent: Node,
   next: VNode | string | number | null,
   old: VNode | string | number | null,
   ctx: RenderCtx,
   isSvg = false,
-): void {
-  if (old === next) return;
+  oldDom: Node | null = null,
+): Node | null {
+  if (old === next) {
+    return typeof next === "object" && next !== null
+      ? (next._dom ?? null)
+      : (next == null ? null : oldDom);
+  }
 
   // Remove
   if (next == null) {
-    if (old != null) removeDom(parent, old, ctx);
-    return;
+    if (old != null) removeDom(parent, old, ctx, oldDom);
+    return null;
   }
 
-  // Add
+  // Add — `oldDom` is the node following the empty slot, so the new content
+  // lands in the slot instead of at the parent's end.
   if (old == null) {
-    _render(parent, next, null, ctx, isSvg);
-    return;
+    const created = createDom(next, ctx, isSvg, parent);
+    if (created) {
+      if (oldDom && isChildOf(oldDom, parent)) {
+        parent.insertBefore(created, oldDom);
+      } else {
+        parent.appendChild(created);
+      }
+    }
+    return _realized(next, created);
   }
 
   // Text nodes
@@ -105,22 +145,29 @@ export function _diff(
     (typeof next === "string" || typeof next === "number") &&
     (typeof old === "string" || typeof old === "number")
   ) {
-    let dom = getDom(old);
-    // AIO-156: bare strings have no _dom — scan parent's childNodes as fallback
+    const dom = oldDom && oldDom.nodeType === 3 ? oldDom : null;
     if (!dom) {
-      const oldStr = String(old);
-      for (let i = 0; i < parent.childNodes.length; i++) {
-        const cn = parent.childNodes[i]!;
-        if (cn.nodeType === 3 && cn.textContent === oldStr) {
-          dom = cn;
-          break;
-        }
+      // No position, or the caller's cursor points at something that is not a
+      // text node: the old text cannot be located, so the update would be
+      // silently dropped. Replace it positionally rather than pretend.
+      const fresh = ctx.doc.createTextNode(String(next));
+      if (oldDom && isChildOf(oldDom, parent)) {
+        parent.insertBefore(fresh, oldDom);
+      } else {
+        parent.appendChild(fresh);
+        _devWarn(
+          "text-no-position",
+          `A text child (${JSON.stringify(String(old))} → ${
+            JSON.stringify(String(next))
+          }) was diffed without its DOM position, so it was appended instead ` +
+            `of updated in place. This is an aio bug; please report the ` +
+            `component's child shape.`,
+        );
       }
+      return fresh;
     }
-    if (dom && String(next) !== String(old)) {
-      dom.textContent = String(next);
-    }
-    return;
+    if (String(next) !== String(old)) dom.textContent = String(next);
+    return dom;
   }
 
   // Type mismatch (text vs vnode or different tags)
@@ -129,35 +176,15 @@ export function _diff(
     (typeof next === "object" && typeof old === "object" &&
       (next as VNode).tag !== (old as VNode).tag)
   ) {
-    let anchor = getDom(old);
-    // AIO-416: bare strings/numbers carry no _dom, so getDom() misses them —
-    // scan for the matching text node (same AIO-156 fallback the text→text
-    // branch uses). Without this, a text→vnode transition (e.g. "mid" → null
-    // placeholder) appended the replacement at the parent's END and left the
-    // stale text node in place (removeDom can't locate bare text either).
-    let bareTextDom: Node | null = null;
-    if (!anchor && (typeof old === "string" || typeof old === "number")) {
-      const oldStr = String(old);
-      for (let i = 0; i < parent.childNodes.length; i++) {
-        const cn = parent.childNodes[i]!;
-        if (cn.nodeType === 3 && cn.textContent === oldStr) {
-          bareTextDom = cn;
-          break;
-        }
-      }
-      anchor = bareTextDom;
-    }
+    const anchor = getDom(old) ?? oldDom;
     const newDom = createDom(next, ctx, isSvg, parent);
     if (newDom && anchor && isChildOf(anchor, parent)) {
       parent.insertBefore(newDom, anchor);
     } else if (newDom) {
       parent.appendChild(newDom);
     }
-    removeDom(parent, old, ctx);
-    if (bareTextDom && isChildOf(bareTextDom, parent)) {
-      parent.removeChild(bareTextDom);
-    }
-    return;
+    removeDom(parent, old, ctx, oldDom);
+    return _realized(next, newDom);
   }
 
   // Same tag VNodes — patch in place
@@ -167,55 +194,76 @@ export function _diff(
   // Static VNode short-circuit
   if (nv._static && ov._static && nv.tag === ov.tag && _staticEqual(nv, ov)) {
     _copyStaticDom(nv, ov);
-    return;
+    return nv._dom ?? null;
   }
 
   // Null placeholder — transfer DOM reference (AIO-107)
   if (nv.tag === _Null) {
     nv._dom = ov._dom;
-    return;
+    return nv._dom ?? null;
   }
 
   // Components
   if (typeof nv.tag === "function") {
-    _diffComponent(parent, nv, ov, ctx, isSvg);
-    return;
+    return _diffComponent(parent, nv, ov, ctx, isSvg, oldDom);
   }
 
-  // ErrorBoundary
-  if (nv.tag === ErrorBoundary) {
-    _diffErrorBoundary(parent, nv, ov, ctx, isSvg, _diff, _diffChildren);
-    return;
-  }
-
-  // Suspense
-  if (nv.tag === Suspense) {
-    _diffSuspense(parent, nv, ov, ctx, isSvg, _diff, _diffChildren);
-    return;
+  // ErrorBoundary / Suspense / Fragment — a REGION of `parent` shared with
+  // siblings. The region starts after `startAnchor`; every child insert, move
+  // and the container's own `_dom` are resolved against it (AIO-395).
+  if (
+    nv.tag === ErrorBoundary || nv.tag === Suspense || nv.tag === Fragment
+  ) {
+    const firstDom = getDom(ov) ?? oldDom;
+    const startAnchor = firstDom && isChildOf(firstDom, parent)
+      ? firstDom.previousSibling
+      : null;
+    if (nv.tag === ErrorBoundary) {
+      _diffErrorBoundary(
+        parent,
+        nv,
+        ov,
+        ctx,
+        isSvg,
+        _diff,
+        _diffChildren,
+        startAnchor,
+      );
+    } else if (nv.tag === Suspense) {
+      _diffSuspense(
+        parent,
+        nv,
+        ov,
+        ctx,
+        isSvg,
+        _diff,
+        _diffChildren,
+        startAnchor,
+      );
+    } else {
+      const regionFirst = _diffChildren(
+        parent,
+        nv.children,
+        ov.children,
+        ctx,
+        isSvg,
+        startAnchor,
+      );
+      _updateContainerDom(parent, nv, ov, ctx, regionFirst);
+    }
+    if (_devMode) _assertRegionAlignment(nv, nv._dom ?? null, false);
+    return nv._dom ?? null;
   }
 
   // Portal
   if (nv.tag === Portal) {
     _diffPortal(nv, ov, ctx);
-    return;
-  }
-
-  // Fragment
-  if (nv.tag === Fragment) {
-    // AIO-395: a Fragment shares `parent` with its siblings — anchor the
-    // children diff at the node preceding the fragment's current region so
-    // keyed moves stay inside the region instead of jumping to parent start.
-    const firstDom = getDom(ov);
-    const startAnchor = firstDom && isChildOf(firstDom, parent)
-      ? firstDom.previousSibling
-      : null;
-    _diffChildren(parent, nv.children, ov.children, ctx, isSvg, startAnchor);
-    _updateContainerDom(parent, nv, ov, ctx);
-    return;
+    return null;
   }
 
   // Element
   _diffElement(parent, nv, ov, ctx, isSvg);
+  return nv._dom ?? null;
 }
 
 function _diffComponent(
@@ -224,7 +272,8 @@ function _diffComponent(
   ov: VNode,
   ctx: RenderCtx,
   isSvg: boolean,
-): void {
+  oldDom: Node | null = null,
+): Node | null {
   nv._instance = ov._instance;
   const hookState = ctx.hooks?.beforeComponent(nv, ov, parent, isSvg);
 
@@ -233,7 +282,7 @@ function _diffComponent(
     nv._rendered = ov._rendered;
     nv._dom = ov._dom;
     ctx.hooks?.afterComponent(nv, nv._rendered ?? null, hookState);
-    return;
+    return nv._dom ?? null;
   }
 
   let rendered: VNode | string | number | null;
@@ -252,14 +301,28 @@ function _diffComponent(
   nv._rendered = rendered;
   try {
     ctx.hooks?.afterComponent(nv, rendered, hookState);
+    let dom: Node | null;
     try {
-      _diff(parent, rendered ?? null, ov._rendered ?? null, ctx, isSvg);
+      // A component that renders a bare string owns a TEXT node, which
+      // `getDom(rendered)` can never see — `nv._dom` was therefore dropped on
+      // the first diff and the next one had no position at all, so the
+      // component wrote into whichever sibling happened to hold equal text.
+      // The reconciler hands the node back instead.
+      dom = _diff(
+        parent,
+        rendered ?? null,
+        ov._rendered ?? null,
+        ctx,
+        isSvg,
+        ov._dom ?? oldDom,
+      );
     } catch (e) {
       // A child's render failed — record this component on the chain.
       if (e !== _LAZY_PENDING) _tagComponentError(e, nv.tag);
       throw e;
     }
-    nv._dom = rendered ? (getDom(rendered) ?? undefined) : undefined;
+    nv._dom = dom ?? undefined;
+    return dom;
   } finally {
     ctx.hooks?.afterSubtree?.(nv);
   }
@@ -276,7 +339,12 @@ function _diffPortal(nv: VNode, ov: VNode, ctx: RenderCtx): void {
   }
   try {
     if (oldTarget && oldTarget !== target) {
-      for (const child of ov.children) removeDom(oldTarget, child, ctx);
+      let cursor: Node | null = oldTarget.firstChild;
+      for (const child of ov.children) {
+        const at = getDom(child) ?? cursor;
+        cursor = _advance(at, _domNodeCount(child));
+        removeDom(oldTarget, child, ctx, at);
+      }
       for (const child of nv.children) {
         const dom = createDom(child, ctx, false, target);
         if (dom) target.appendChild(dom);
@@ -289,33 +357,67 @@ function _diffPortal(nv: VNode, ov: VNode, ctx: RenderCtx): void {
   }
 }
 
-/** Dev-only reactivity invariant (AIO-412): an element that exclusively owns its
- *  children must, after a diff, hold exactly Σ _domNodeCount(child) DOM nodes. A
- *  mismatch means the child-reconciliation cursor desynced — nodes lost, dupli-
- *  cated, or dynamic text written to the wrong slot: the silent-corruption /
- *  frozen-node class. Catching it here surfaces the defect at its source in dev
+/** Dev-only reactivity invariant (AIO-412): after a diff, the region a vnode
+ *  owns must hold its children's realized nodes IN ORDER — child i's node is
+ *  the n-th node of the region, where n = Σ _domNodeCount(children before it).
+ *
+ *  The original check compared COUNTS only, and only for elements. Every defect
+ *  this class produces is an order/identity error at a perfectly correct count
+ *  — a text node reconciled into a sibling's slot, a fragment that adopted a
+ *  detached anchor, two equal-valued strings swapped — so it fired for one
+ *  reproduction in eight and the class shipped. Walking positions catches them
+ *  at the source in dev, where the diff that caused it is still on the stack,
  *  instead of via a user's "the value isn't updating" report.
+ *
+ *  Bare text is verified by node type + content (a primitive has no identity to
+ *  compare); everything that carries a `_dom` is verified by identity.
  *
  *  Skipped when the element opts out of vnode-owned children — a `ref` or `use`
  *  action may mutate the DOM imperatively, and dangerouslySetInnerHTML injects
- *  untracked nodes — so the check never cries wolf on legitimate escape hatches. */
-function _assertChildAlignment(dom: Node, nv: VNode): void {
+ *  untracked nodes — so the check never cries wolf on legitimate escape hatches.
+ *
+ *  `exact` (elements only) additionally requires the region to END with the
+ *  last child: an element owns ALL of its childNodes, a fragment does not. */
+function _assertRegionAlignment(
+  nv: VNode,
+  first: Node | null,
+  exact: boolean,
+): void {
   const p = nv.props;
   if (p.ref || p.use || p.dangerouslySetInnerHTML) return;
-  let expected = 0;
-  for (const c of nv.children) expected += _domNodeCount(c);
-  const actual = dom.childNodes.length;
-  if (expected !== actual) {
+  const label = `<${_componentName(nv.tag)}>`;
+  const bad = (why: string) =>
     _devWarn(
       `child-desync-${String(nv.tag)}`,
-      `<${
-        String(nv.tag)
-      }> has ${actual} DOM children after diff but its vnode tree expects ` +
-        `${expected} — the child reconciler desynced (nodes lost/duplicated or ` +
-        `dynamic text mis-placed). This is an aio bug; please report the ` +
-        `component's child shape.`,
+      `${label} ${why} after diff — the child reconciler desynced (nodes ` +
+        `lost/duplicated, or dynamic text written to the wrong slot). This ` +
+        `is an aio bug; please report the component's child shape.`,
     );
+  let cursor: Node | null = first;
+  for (let i = 0; i < nv.children.length; i++) {
+    const child = nv.children[i]!;
+    const count = _domNodeCount(child);
+    if (count === 0) continue; // Portal / component that rendered nothing
+    if (!cursor) return bad(`ran out of DOM nodes at child ${i}`);
+    if (typeof child === "object") {
+      const d = getDom(child);
+      if (d && d !== cursor) {
+        return bad(`holds the wrong node at child ${i}`);
+      }
+    } else if (
+      cursor.nodeType !== 3 || cursor.textContent !== String(child)
+    ) {
+      return bad(
+        `holds ${
+          cursor.nodeType === 3
+            ? JSON.stringify(cursor.textContent)
+            : `a <${(cursor as Element).nodeName?.toLowerCase()}>`
+        } where the text child ${i} (${JSON.stringify(String(child))}) belongs`,
+      );
+    }
+    cursor = _advance(cursor, count);
   }
+  if (exact && cursor) bad("has leftover DOM children");
 }
 
 function _diffElement(
@@ -365,7 +467,7 @@ function _diffElement(
 
   _diffChildren(dom, nv.children, ov.children, ctx, nowSvg);
 
-  if (_devMode) _assertChildAlignment(dom, nv);
+  if (_devMode) _assertRegionAlignment(nv, dom.firstChild, true);
 
   if (nv._signalChildren || ov._signalChildren) {
     _cleanupSignalTextChildren(dom);

@@ -2,7 +2,7 @@
  * @module
  * Build configuration — parses CLI flags, reads deno.json, derives all shared build state.
  */
-import { dirname, join, resolve } from "@std/path";
+import { basename, dirname, join, resolve } from "@std/path";
 import { slugify } from "./build-helpers.ts";
 import {
   crossCompileBlocker,
@@ -80,6 +80,12 @@ export interface BuildConfig {
    *  read this field — a second hardcoded path is the bug class that shipped
    *  a stylesheet in dev and silently dropped it from the prod bundle. */
   appDir: string;
+  /** The raw `--entry=` value when THIS build was given one (a per-target entry
+   *  from build-all), else undefined. `configEntry` already folds it in; this
+   *  field only answers "did the caller NAME a module?", which is the one
+   *  question a target with its own conventional default (`--cli --remote` →
+   *  `src/client.ts`) has to ask before falling back. */
+  entryOverride: string | undefined;
   rendererMode: "aio";
 
   // Platform
@@ -155,9 +161,12 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
   );
   const configEntry = resolveEntry(mainConfig, entryArg);
   const appDir = resolveAppDir(root, configEntry);
-  const defaultName = appTitle
-    ? slugify(appTitle)
-    : (root.split("/").pop() || "myapp");
+  // ONE slugify decider for the binary name. Without a `title`, the fallback
+  // used the raw directory name, so a project folder called `My App` produced
+  // a binary literally named `My App` under `deno task compile` while
+  // `deno task build` (which slugifies the same fallback) produced `my-app` —
+  // two names for one artifact, and a shell-hostile one at that.
+  const defaultName = slugify(appTitle ?? basename(root));
   const rawName = Deno.args.find((a) => a.startsWith("--name="))?.slice(7);
   const binaryName = rawName ? slugify(rawName) : defaultName;
 
@@ -213,6 +222,7 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
     appTitle,
     configEntry,
     appDir,
+    entryOverride: entryArg,
     rendererMode,
     os,
     arch,

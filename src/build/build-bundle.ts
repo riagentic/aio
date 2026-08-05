@@ -2,7 +2,7 @@
  * @module
  * Build bundle — esbuild bundling step, freshness cache check, asset copying.
  */
-import { dirname, join, relative } from "@std/path";
+import { dirname, join, relative, resolve } from "@std/path";
 import { ESBUILD_JSX } from "./esbuild-shared.ts";
 import { aioBrowserPlugin } from "./esbuild-plugin.ts";
 import { makeHttpPlugin } from "./build-integrity.ts";
@@ -10,63 +10,91 @@ import type { BuildConfig } from "./build-config.ts";
 import { VERSION } from "../server/aio-cli.ts";
 import { VERSION_STAMP } from "../protocol/protocol-version.ts";
 
-/** Directories a source walk must never descend into. `dist` holds the walk's
- *  OWN output (freshly copied files there would flag the bundle stale
- *  forever), the rest are vendored or generated. Named here rather than
- *  avoided by not-walking, so a flat-layout app — entry at the project root,
- *  components in `components/` — is walked to the same depth as a `src/` one.
- *  It used to be walked one level deep, so an edit below the root silently
- *  kept serving a cached bundle. */
-/*  Deliberately SHORT. Skipping a directory that turns out to hold real
- *  sources would hide an edit behind a cached bundle — the exact failure this
- *  walk exists to prevent — so only trees that are generated output (`dist`,
- *  `coverage`) or vendored (`node_modules`) are listed. `vendor/` is NOT: an
- *  app may legitimately import from it. The Android project the build writes
- *  is not listed either — it lives under the out dir, which the caller skips
- *  by PATH (a name-based "android" skip here once hid a real `src/android/`
- *  source tree from the walk). */
-const WALK_SKIP_DIRS = new Set([
-  "dist",
-  "node_modules",
-  "coverage",
-]);
-
-/** Recursively yields .ts/.tsx/.css mtimes under a directory, skipping build
- *  output, vendored code, dot-directories, and `skipPaths` (absolute paths —
- *  the configured out dir, which may not be named `dist`). */
-async function* walkSrcFiles(
-  dir: string,
-  skipPaths?: Set<string>,
-): AsyncGenerator<number> {
-  try {
-    for await (const entry of Deno.readDir(dir)) {
-      const path = join(dir, entry.name);
-      if (entry.isDirectory) {
-        if (
-          entry.name.startsWith(".") || WALK_SKIP_DIRS.has(entry.name) ||
-          skipPaths?.has(path)
-        ) {
-          continue;
-        }
-        yield* walkSrcFiles(path, skipPaths);
-      } else if (entry.isFile && /\.(tsx?|css)$/.test(entry.name)) {
-        const s = await Deno.stat(path);
-        if (s.mtime) yield s.mtime.getTime();
-      }
-    }
-  } catch { /* no dir — skip */ }
+/** Where the bundle's REAL input list is recorded — esbuild's own metafile,
+ *  reduced to the local files it actually read.
+ *
+ *  Not inside `dist/`: the compile step embeds `dist/` verbatim into the
+ *  binary (absolute build-machine paths have no business shipping), and
+ *  `build.ts` sweeps everything but app.js/style.css/icon.png out of it before
+ *  compiling — the record would be gone before the next freshness check. */
+function inputsManifestPath(root: string): string {
+  return join(root, ".aio", "bundle-inputs.json");
 }
 
-/** Checks if dist/app.js is newer than all bundle inputs */
-async function isBundleFresh(cfg: BuildConfig): Promise<boolean> {
-  const {
-    out,
-    doForce,
-    doAndroid,
-    isRemote,
-    frameworkSrcDir,
-    root,
-  } = cfg;
+interface BundleInputs {
+  v: 1;
+  /** The artifact these inputs produced — a record for another out path says
+   *  nothing about this one. */
+  out: string;
+  inputs: string[];
+}
+
+/** Persist esbuild's input set (absolute paths) next to the build state.
+ *
+ *  This is the ONLY honest dependency set. The heuristic it replaces walked
+ *  the project tree for `.ts/.tsx/.css` FROM THE CWD, so it was wrong in two
+ *  directions at once: `App.tsx` importing `./helper.js` or `./data.json` had
+ *  those edits invisible (wrong extensions), and a monorepo app at
+ *  `apps/web/` importing `../../packages/shared/lib.ts` had the whole sibling
+ *  package invisible (wrong root) — both printed "cached — use --force" and
+ *  shipped the OLD code, which `--compile` then embedded verbatim.
+ *
+ *  Every recorded path is stat'ed here, so entries that are not real local
+ *  files (esbuild plugin namespaces, `http:`/`npm:` specifiers, the generated
+ *  temp entry, which is deleted before this runs) never enter the list. */
+async function writeBundleInputs(
+  root: string,
+  out: string,
+  metafileInputs: Record<string, unknown> | undefined,
+): Promise<void> {
+  const inputs: string[] = [];
+  for (const key of Object.keys(metafileInputs ?? {})) {
+    // esbuild reports paths relative to the cwd it ran in (this process's).
+    const abs = resolve(root, key);
+    try {
+      if ((await Deno.stat(abs)).isFile) inputs.push(abs);
+    } catch { /* virtual/namespaced/remote input — nothing to stat */ }
+  }
+  const rec: BundleInputs = { v: 1, out, inputs: [...new Set(inputs)].sort() };
+  const path = inputsManifestPath(root);
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(path, JSON.stringify(rec) + "\n");
+  } catch (e) {
+    // A record we cannot write is a CACHE we cannot use — the next build
+    // rebuilds, which is correct, just slower. Say so rather than leave the
+    // "cached" line unexplainably absent forever.
+    console.warn(
+      `[build] \u26a0 could not record the bundle's inputs at ${path}: ${e} — ` +
+        `every build will re-run esbuild until this is writable`,
+    );
+  }
+}
+
+/** The recorded input set for `out`, or null when there is no usable record. */
+async function readBundleInputs(
+  root: string,
+  out: string,
+): Promise<string[] | null> {
+  try {
+    const rec = JSON.parse(
+      await Deno.readTextFile(inputsManifestPath(root)),
+    ) as BundleInputs;
+    if (rec?.v !== 1 || rec.out !== out || !Array.isArray(rec.inputs)) {
+      return null;
+    }
+    return rec.inputs;
+  } catch {
+    return null;
+  }
+}
+
+/** Is `out` newer than every input esbuild actually read to produce it?
+ *
+ *  No record → NOT fresh. A guess about what the bundle depends on is what
+ *  shipped stale code; the absence of the honest answer means rebuild. */
+export async function isBundleFresh(cfg: BuildConfig): Promise<boolean> {
+  const { out, doForce, doAndroid, root } = cfg;
   if (doForce) return false;
   // Framework identity + target shape beat every mtime heuristic: a bundle
   // built by another aio version — or for the OTHER target, since all targets
@@ -78,40 +106,24 @@ async function isBundleFresh(cfg: BuildConfig): Promise<boolean> {
     if (!outStat.mtime) return false; // AIO-227: can't verify freshness → rebuild
     const outMtime = outStat.mtime.getTime();
 
+    // deno.json is an input esbuild never sees: it supplies the import map and
+    // compilerOptions the bundle was built with.
     const dj = await Deno.stat(join(root, "deno.json"));
     if (dj.mtime && dj.mtime.getTime() >= outMtime) return false;
 
-    // Framework sources (skipped for remote — the JSR version is pinned, and
-    // the stamp check above already catches a version change).
-    //
-    // This used to be a HANDPICKED list of six paths, one of which
-    // (`state/factory.ts`) stopped existing in the methods restructure. The
-    // stat threw, the outer catch turned it into "not fresh", and the cache
-    // was dead from that day on: every build re-ran esbuild and the
-    // "cached — use --force to rebuild" line could never print. Nothing
-    // failed, so nothing was noticed. A walk cannot rot the way a list of
-    // paths does, and it is strictly more correct — ANY framework edit
-    // invalidates the bundle, not just the six files someone once picked.
-    if (!isRemote) {
-      for await (const mtime of walkSrcFiles(frameworkSrcDir)) {
-        if (mtime >= outMtime) return false;
-      }
-    }
-
-    // Walk the WHOLE project tree, not just src/ + the app dir: the bundle's
-    // inputs are whatever the entry imports, and an app whose entry lives at
-    // `apps/web/main.ts` may import from `packages/shared/` or `vendor/` —
-    // dirs no shortlist can guess. The generated out dir is skipped by PATH
-    // (it may not be named `dist`); node_modules, coverage and dot-dirs by
-    // name. Equal mtimes count as stale (`>=`): a coarse-granularity fs can
-    // land an edit in the artifact's own timestamp.
-    const skipPaths = new Set([dirname(out)]);
-    for await (const mtime of walkSrcFiles(root, skipPaths)) {
-      if (mtime >= outMtime) return false;
+    const inputs = await readBundleInputs(root, out);
+    if (!inputs || inputs.length === 0) return false;
+    for (const path of inputs) {
+      // A DELETED input is a change too — stat throws, the catch below turns
+      // it into "not fresh".
+      const s = await Deno.stat(path);
+      // Equal mtimes count as stale (`>=`): a coarse-granularity fs can land
+      // an edit in the artifact's own timestamp.
+      if (!s.mtime || s.mtime.getTime() >= outMtime) return false;
     }
     return true;
   } catch {
-    return false; /* no dist/app.js — needs build */
+    return false; /* no dist/app.js, or an input vanished — needs build */
   }
 }
 
@@ -170,21 +182,155 @@ export function mount(el) { ensureConnected(); _mount(el, App) }
 `;
 }
 
-/** True when dist/app.js was built by THIS aio version (reads the stamp back).
- *  A framework upgrade must invalidate the bundle even when every mtime says
- *  it's fresh — otherwise the shipped client keeps speaking the old wire
- *  protocol against a new server. */
+/** What a `dist/app.js` on disk SAYS it is: the aio version that built it and
+ *  the target shape it was built for. `null` when there is no bundle at all.
+ *
+ *  THE stamp reader — both the path that REBUILDS ({@link isBundleFresh}) and
+ *  the path that PACKAGES ({@link ensureEmbeddedBundle}) read it here. It was
+ *  read by the rebuild path only, so a target that skips bundling embedded
+ *  whatever `dist/` happened to hold: `compile:android` then `compile:service`
+ *  shipped a server binary serving an IIFE that the prod shell mounts with
+ *  `const { mount } = await import('/app.js')` → `mount` undefined → blank
+ *  page, exit 0. */
+export async function readBundleStamps(
+  out: string,
+): Promise<{ version?: string; target?: string } | null> {
+  let js: string;
+  try {
+    js = await Deno.readTextFile(out);
+  } catch {
+    return null;
+  }
+  const pick = (name: string): string | undefined =>
+    js.match(
+      new RegExp(`globalThis\\.${name}\\s*=\\s*"([^"]*)"`),
+    )?.[1];
+  return { version: pick(VERSION_STAMP), target: pick("__aioBundleTarget") };
+}
+
+/** True when dist/app.js was built by THIS aio version AND for this target's
+ *  shape (reads the stamps back). A framework upgrade must invalidate the
+ *  bundle even when every mtime says it's fresh — otherwise the shipped client
+ *  keeps speaking the old wire protocol against a new server. */
 async function bundleMatchesFramework(
   out: string,
   doAndroid: boolean,
 ): Promise<boolean> {
-  try {
-    const js = await Deno.readTextFile(out);
-    return js.includes(versionStamp(VERSION).trim()) &&
-      js.includes(targetStamp(doAndroid).trim());
-  } catch {
-    return false;
+  const s = await readBundleStamps(out);
+  return !!s && s.version === VERSION &&
+    s.target === (doAndroid ? "android" : "browser");
+}
+
+/** Human name for a bundle shape, for a message that has to name BOTH. */
+function shapeName(t: string | undefined): string {
+  return t === "android"
+    ? "android (IIFE, auto-mounts, no `export`)"
+    : t === "browser"
+    ? "browser (ESM exporting mount())"
+    : `${JSON.stringify(t ?? null)} (no target stamp — built by an older aio)`;
+}
+
+/** What the packaging path must DO about the bundle it is about to embed.
+ *  Pure, so the whole table is a unit test instead of a claim about a code
+ *  path that only runs inside a real `deno compile`. */
+export type EmbedVerdict =
+  | { action: "embed" }
+  | { action: "rebuild"; message: string }
+  | { action: "refuse"; message: string };
+
+/** Decide whether `dist/app.js` may be embedded as-is by a target that did NOT
+ *  build it.
+ *
+ *  `--headless`/server targets skip the bundle step but still
+ *  `deno compile --include dist/`, so whatever `dist/` holds is what the binary
+ *  serves — forever, since that target never rebuilds one. Two ways that goes
+ *  wrong, both silent until a user opens the app:
+ *
+ *   1. WRONG SHAPE — `compile:android` leaves an IIFE in `dist/app.js`;
+ *      `compile:service` then ships a server whose prod shell does
+ *      `const { mount } = await import('/app.js')` → `mount` undefined → blank
+ *      page, exit 0.
+ *   2. STALE — an arbitrarily old browser bundle from some earlier build, since
+ *      the server target never rebuilds one.
+ *
+ *  No bundle at all (`stamps === null`) is NOT an error: that is the headless
+ *  build, and the prod server answers with the loud 503 "Headless build — no
+ *  browser UI" page. */
+export function embedVerdict(opts: {
+  /** Stamps read off the artifact, or null when there is no artifact. */
+  stamps: { version?: string; target?: string } | null;
+  /** The shape THIS target embeds and serves. */
+  want: "browser" | "android";
+  /** The aio version doing the packaging. */
+  version: string;
+  /** Inputs-based freshness (irrelevant when the stamps already disagree). */
+  fresh: boolean;
+  /** Is there an App.tsx at the app dir to rebuild from? */
+  canRebuild: boolean;
+  /** For the message. */
+  out: string;
+  appEntry: string;
+}): EmbedVerdict {
+  const { stamps, want, version, out } = opts;
+  if (!stamps) return { action: "embed" }; // no UI → the 503 page, unchanged
+  const why = stamps.target !== want
+    ? `holds a ${shapeName(stamps.target)} bundle, but this target embeds ` +
+      `and serves the ${shapeName(want)} shape`
+    : stamps.version !== version
+    ? `was built by aio ${stamps.version ?? "(unstamped)"} — this build is ` +
+      version
+    : !opts.fresh
+    ? "is older than the sources it was built from"
+    : null;
+  if (why === null) return { action: "embed" };
+  if (!opts.canRebuild) {
+    return {
+      action: "refuse",
+      message:
+        `[build] \u2717 ${out} ${why}, and there is no ${opts.appEntry} ` +
+        `to rebuild it from.\n` +
+        `        This target embeds dist/ verbatim — the binary would serve ` +
+        `that bundle as-is.\n` +
+        `        Rebuild the ${
+          shapeName(want)
+        } bundle for this app, or delete ` +
+        `dist/ (a UI-less build serves the "no browser UI" page instead).`,
+    };
   }
+  return {
+    action: "rebuild",
+    message: `[build] \u26a0 ${out} ${why} — rebuilding the ${
+      shapeName(want)
+    } bundle before packaging`,
+  };
+}
+
+/** Apply {@link embedVerdict} for a build that skipped the bundle step. */
+export async function ensureEmbeddedBundle(
+  cfg: BuildConfig,
+  mainConfig: Record<string, unknown>,
+): Promise<void> {
+  const appEntry = join(cfg.appDir, "App.tsx");
+  let canRebuild = false;
+  try {
+    canRebuild = (await Deno.stat(appEntry)).isFile;
+  } catch { /* no UI source here */ }
+  const verdict = embedVerdict({
+    stamps: await readBundleStamps(cfg.out),
+    want: cfg.doAndroid ? "android" : "browser",
+    version: VERSION,
+    fresh: await isBundleFresh({ ...cfg, doForce: false }),
+    canRebuild,
+    out: cfg.out,
+    appEntry,
+  });
+  if (verdict.action === "embed") return;
+  if (verdict.action === "refuse") {
+    console.error(verdict.message);
+    Deno.exit(1);
+  }
+  console.warn(verdict.message);
+  await runBundle({ ...cfg, doForce: true }, mainConfig);
 }
 
 /** Run the esbuild bundle step. Exits process on failure. */
@@ -289,6 +435,7 @@ export async function runBundle(
     }
 
     let bundleOk = false;
+    let metaInputs: Record<string, unknown> | undefined;
     try {
       // B-6: pin the EXACT version deno.json pins (esbuild@0.24.2) so dev
       // transpile and prod bundle never resolve a different esbuild than tested.
@@ -311,8 +458,16 @@ export async function runBundle(
           : [aioBrowserPlugin()],
         nodePaths: [join(root, "node_modules")],
         logLevel: "warning",
+        // The module graph esbuild actually read — the freshness cache stats
+        // THESE, instead of guessing extensions and roots (a guess shipped
+        // stale bundles for `.js`/`.json` imports and for every monorepo
+        // sibling package).
+        metafile: true,
       });
       bundleOk = (result.errors?.length ?? 0) === 0;
+      metaInputs = result.metafile?.inputs as
+        | Record<string, unknown>
+        | undefined;
     } catch (e) {
       console.error(`[build] \u2717 esbuild failed: ${e}`);
     } finally {
@@ -324,6 +479,10 @@ export async function runBundle(
       console.error("[build] \u2717 bundle failed");
       Deno.exit(1);
     }
+
+    // Record the REAL inputs (after the temp entry/config are gone, so they
+    // cannot enter the list and make every later build look stale).
+    await writeBundleInputs(root, out, metaInputs);
 
     const stat = await Deno.stat(out);
     console.log(

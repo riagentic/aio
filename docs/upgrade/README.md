@@ -7,6 +7,10 @@ One guide per version migration. Find your current version and follow the steps.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha46 → alpha47](from-alpha46-to-alpha47.md) — the second hunt: a build
+  that deleted your sources and reported success, four renderer defects that
+  committed the wrong DOM in silence, a freshness cache that guessed at its
+  inputs, and a binary that took its identity from the launch directory
 - [alpha45 → alpha46](from-alpha45-to-alpha46.md) — the hunt: 27 defects, most
   silent — a flagship example that never booted, `ui.forUser` failing open, an
   unauthenticated control plane, migrations that deleted the data they failed to

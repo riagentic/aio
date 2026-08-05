@@ -26,6 +26,23 @@ import type { ComponentFn, RenderCtx, VNode } from "./vdom-types.ts";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
+/** The node a just-created child actually OCCUPIES once appended.
+ *
+ *  `createDom` returns a DocumentFragment for a Fragment/boundary child — a
+ *  carrier that `appendChild` empties and leaves detached. Recording it as the
+ *  container's first node (`_dom`) therefore anchored the container to a node
+ *  that is not in the document: every later diff found `isChildOf` false, fell
+ *  back to "the region starts at parent.firstChild", and reconciled the
+ *  fragment's children against its EARLIER SIBLINGS' nodes. The component
+ *  branch already unwrapped this (AIO-167); the Fragment/EB/Suspense child
+ *  loops did not. */
+export function _occupied(
+  child: VNode | string | number,
+  childDom: Node,
+): Node | null {
+  return childDom.nodeType === 11 ? getDom(child) : childDom;
+}
+
 export function _render(
   parent: Node,
   vnode: VNode | string | number | null,
@@ -113,7 +130,7 @@ export function createDom(
       for (const child of vnode.children) {
         const childDom = createDom(child, ctx, isSvg, parentDom);
         if (childDom) {
-          if (!firstDom) firstDom = childDom;
+          if (!firstDom) firstDom = _occupied(child, childDom);
           frag.appendChild(childDom);
         }
       }
@@ -146,7 +163,7 @@ export function createDom(
       for (const child of vnode.children) {
         const childDom = createDom(child, ctx, isSvg, parentDom);
         if (childDom) {
-          if (!firstDom) firstDom = childDom;
+          if (!firstDom) firstDom = _occupied(child, childDom);
           frag.appendChild(childDom);
         }
       }
@@ -193,7 +210,7 @@ export function createDom(
     for (const child of vnode.children) {
       const childDom = createDom(child, ctx, isSvg, parentDom);
       if (childDom) {
-        if (!firstDom) firstDom = childDom;
+        if (!firstDom) firstDom = _occupied(child, childDom);
         frag.appendChild(childDom);
       }
     }

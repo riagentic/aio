@@ -2,7 +2,7 @@
  * @module
  * Build compile — withDevExcluded symlink manager + deno compile step + systemd service file.
  */
-import { dirname, fromFileUrl, join, relative } from "@std/path";
+import { dirname, fromFileUrl, isAbsolute, join, relative } from "@std/path";
 import { artifactName } from "./platforms.ts";
 import type { BuildConfig } from "./build-config.ts";
 
@@ -165,19 +165,47 @@ export async function assetIncludes(root: string): Promise<string[]> {
   await walk(root, 0);
 
   // 2) declarative deno.json `compile.include` — files/dirs the app wants
-  //    embedded (any asset kind). Kept inside the project (no traversal out).
+  //    embedded (any asset kind). Kept inside the project (no traversal out),
+  //    and a path that breaks that rule is REFUSED, never dropped: a silently
+  //    skipped entry ships a binary without the asset it was told to carry,
+  //    and the failure surfaces in the user's hands as a missing model/data
+  //    file. (A path that does not exist, or a glob, already makes
+  //    `deno compile` fail hard — this closes the one silent case.)
+  let decl: unknown;
   try {
     const cfg = JSON.parse(await Deno.readTextFile(join(root, "deno.json")));
-    const decl = (cfg as { compile?: { include?: unknown } })?.compile?.include;
-    if (Array.isArray(decl)) {
-      for (const p of decl) {
-        if (typeof p !== "string" || !p.trim()) continue;
-        const rel = relative(root, join(root, p.trim()));
-        if (rel.startsWith("..") || rel.startsWith("/")) continue; // stay in-project
-        add(rel);
+    decl = (cfg as { compile?: { include?: unknown } })?.compile?.include;
+  } catch { /* no deno.json / unparsable — nothing declared */ }
+  if (Array.isArray(decl)) {
+    for (const [i, p] of decl.entries()) {
+      if (typeof p !== "string" || !p.trim()) {
+        throw new Error(
+          `[compile] \u2717 deno.json compile.include[${i}] is ${
+            JSON.stringify(p)
+          } — every entry must be a non-empty path relative to the project root.`,
+        );
       }
+      const entry = p.trim();
+      const rel = relative(root, join(root, entry));
+      // An ABSOLUTE entry is silently reinterpreted by `join` as a
+      // root-relative one (`/etc/passwd` → `<root>/etc/passwd`), so it would
+      // embed a DIFFERENT file than the one declared — refuse both that and a
+      // `../` escape, and say which of the two it is.
+      const absolute = isAbsolute(entry);
+      if (absolute || rel.startsWith("..") || isAbsolute(rel)) {
+        throw new Error(
+          `[compile] \u2717 deno.json compile.include[${i}] ("${p}") is ` +
+            (absolute
+              ? `absolute; paths are relative to the project root, and this ` +
+                `one would silently embed ${join(root, entry)} instead`
+              : `outside the project (${join(root, entry)})`) +
+            `. deno compile embeds paths relative to the project root — copy ` +
+            `the asset into the project and reference it from there.`,
+        );
+      }
+      add(rel);
     }
-  } catch { /* no deno.json / no compile.include — fine */ }
+  }
 
   // 3) deno.json itself — the app's IDENTITY (version, title, target). The
   //    runtime reads it relative to the entry module, so a binary knows its own
