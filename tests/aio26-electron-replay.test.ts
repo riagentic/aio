@@ -118,19 +118,49 @@ Deno.test("aio29: __aio:ready sends subs:* to request fresh state from server", 
 
 // ── AIO-26: full state detection still works ─────────────────────
 
-Deno.test("aio26: full state detected by the v2 state frame kind", () => {
+Deno.test("aio26: full state detected by the DECODED v2 frame kind", () => {
   // Only "state" frames may become lastFullState — never "patches" deltas.
-  const hasFullStateDetection = script.includes('\'"t":"state"\'') &&
-    script.includes("lastFullState = line");
   assertEquals(
-    hasFullStateDetection,
+    script.includes("const kind = frameKind(line)") &&
+      script.includes(
+        "if (kind === 'state') { lastState = line; lastFullState = line; }",
+      ),
     true,
-    'Data handler must detect full state via the "state" frame kind',
+    "Data handler must classify by the decoded frame kind",
   );
-  const patchesNeverFull = script.includes('\'"t":"patches"\'');
   assertEquals(
-    patchesNeverFull,
+    script.includes("else if (kind === 'patches') lastState = line"),
     true,
     '"patches" frames must be tracked as lastState only',
   );
+  // The class this replaced: classification by SUBSTRING. A frame whose
+  // payload merely contains the text of another kind must not be misread.
+  assertEquals(
+    script.includes('line.indexOf(\'"t":"state"\')'),
+    false,
+    "frames must never be classified by substring search",
+  );
+});
+
+Deno.test("aio26: a patches frame CONTAINING the text of a state frame is not cached as full state", () => {
+  // Run the generated classifier for real — the bug was invisible to any test
+  // that only read the source.
+  const src = script.match(/const frameKind = (\(line\) => \{[\s\S]*?\n  \});/);
+  assertEquals(src !== null, true, "generated script must define frameKind");
+  const frameKind = eval(`(${src![1]})`) as (line: string) => string | null;
+
+  const patchesWithStateText = JSON.stringify({
+    v: 2,
+    t: "patches",
+    d: [{ op: "replace", path: "/last", value: '{"v":2,"t":"state","d":{}}' }],
+  });
+  assertEquals(frameKind(patchesWithStateText), "patches");
+  assertEquals(
+    frameKind(JSON.stringify({ v: 2, t: "state", d: { n: 1 } })),
+    "state",
+  );
+  assertEquals(frameKind('{"v":2,"t":"ack","d":{"cid":"x","ok":true}}'), "ack");
+  // Key order the fast path does not expect still classifies correctly.
+  assertEquals(frameKind('{"t":"state","v":2,"d":{}}'), "state");
+  assertEquals(frameKind("not json"), null);
 });

@@ -175,7 +175,12 @@ export function buildMethodsReducer(
     // plain object, data array, `[]`) is a transported VALUE, wrapped in a
     // RETURN_TAG envelope so compose-reduce never mistakes it for a `Msg[]`
     // effects array.
-    if (result == null) return undefined;
+    // `undefined` — and ONLY undefined — means "this method returned nothing".
+    // A loose `== null` also swallowed `null`, so a sync method returning the
+    // standard not-found sentinel resolved its caller with `undefined` while
+    // the identical async method resolved `null`: a sync/async parity break on
+    // the documented return contract, on every transport.
+    if (result === undefined) return undefined;
     if (isScheduleEffect(result) || isOwnEffect(result)) return [result];
     if (
       Array.isArray(result) && result.length > 0 &&

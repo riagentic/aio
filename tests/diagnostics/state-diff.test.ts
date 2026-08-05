@@ -86,3 +86,32 @@ Deno.test("formatDiff: an unserializable value degrades to a label", () => {
   const line = formatDiff("cell", [{ key: "k", from: 1, to: hostile }]);
   assertEquals(line, "cell: k 1→[unserializable object]");
 });
+
+// ─── The diff must be unambiguous, and must not go blind on removals ─────────
+
+Deno.test("formatDiff: a string is distinguishable from the value it looks like", () => {
+  // Unquoted, this rendered `n 1→1` — a diff that says a change happened and
+  // then shows two identical-looking values is worse than no diff.
+  assertEquals(
+    formatDiff("c", [{ key: "n", from: "1", to: 1 }]),
+    'c: n "1"→1',
+  );
+  assertEquals(
+    formatDiff("c", [{ key: "v", from: null, to: "null" }]),
+    'c: v null→"null"',
+  );
+  assertEquals(
+    formatDiff("c", [{ key: "b", from: "true", to: true }]),
+    'c: b "true"→true',
+  );
+});
+
+Deno.test("computeDiffs: a cell REMOVED from state is a change", () => {
+  const diffs = computeDiffs(
+    { gone: { n: 1 }, kept: { n: 1 } },
+    { kept: { n: 1 } },
+  );
+  assertEquals(diffs.length, 1, "the removal must be reported");
+  assertEquals(diffs[0]!.cell, "gone");
+  assertEquals(diffs[0]!.changes[0]!.to, undefined);
+});

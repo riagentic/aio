@@ -128,12 +128,28 @@ export function connectCli<S>(
     }
     if (queue.length < WS_MAX_QUEUE) {
       queue.push(action);
+      _noteQueued();
       return { written: false, queued: true };
     }
     console.warn(
       `[aio:cli] offline queue full (${WS_MAX_QUEUE}) — action "${action.type}" was NOT sent`,
     );
     return { written: false, queued: false };
+  }
+
+  /** Say — once per offline period — that actions are being held rather than
+   *  sent. A queued call's promise stays PENDING until its frame is written
+   *  (it has not failed; it has not happened), so the one thing that must
+   *  never happen is for that wait to be unexplained. */
+  let _queueNoted = false;
+  function _noteQueued(): void {
+    if (_queueNoted) return;
+    _queueNoted = true;
+    console.warn(
+      `[aio:cli] offline — actions are queued in memory (max ${WS_MAX_QUEUE}) ` +
+        `and sent on reconnect; awaited calls stay pending until then, and ` +
+        `close() rejects whatever is still queued`,
+    );
   }
 
   let _readyResolve: ((s: S) => void) | null = null;
@@ -161,10 +177,18 @@ export function connectCli<S>(
       wasConnected = true;
       // A3: announce our wire-protocol version before anything else.
       socket.send(enc("proto", protoHello(VERSION)));
-      // Drain queued actions
+      // Drain queued actions. Each frame's ack clock starts HERE, when it is
+      // actually written — not at dispatch time, or an action queued for
+      // longer than the ceiling times out while still sitting in the queue and
+      // is then delivered anyway.
       const q = [...queue];
       queue.length = 0;
-      for (const a of q) socket.send(enc("action", a));
+      _queueNoted = false;
+      for (const a of q) {
+        socket.send(enc("action", a));
+        const cid = (a as { cid?: string }).cid;
+        if (cid) _pending.armTimer(cid);
+      }
     };
 
     socket.onmessage = (e: MessageEvent) => {
@@ -263,7 +287,13 @@ export function connectCli<S>(
       // work whose fate is unknown, and an app that awaited one carried on as
       // though its write had landed. Rejecting is the honest answer — the
       // error says what is and is not known, and `state` remains the truth.
-      const lost = _pending.rejectAll(
+      //
+      // IN-FLIGHT ONLY. `queue` survives this close and is drained by the next
+      // `onopen`, so rejecting a still-queued call — with a message that
+      // promises "the action is not resent automatically" — was a guarantee
+      // this very client then broke: the app retried as invited and the server
+      // applied one user intent twice.
+      const lost = _pending.rejectInFlight(
         new Error(
           "connection lost before the server confirmed this action — it may " +
             "or may not have been applied; re-check state before retrying " +
@@ -322,12 +352,17 @@ export function connectCli<S>(
         // succeeded (see SETTLES_CALLS in protocol/ack-registry.ts).
         const dispatch = (action: Msg): Promise<unknown> => {
           const cid = crypto.randomUUID();
+          // deferTimer: the clock belongs to the FRAME, not to the call. It
+          // starts in `armTimer` below when the write happens (here, or at the
+          // queue drain in `onopen`) — never while the action is still queued.
           const ackd = _pending.register(cid, {
             methodKey: ackMethodKey(action),
+            deferTimer: true,
           });
           const sent = _trySend(
             { ...action, cid } as { type: string; payload?: unknown },
           );
+          if (sent.written) _pending.armTimer(cid);
           // Queued while offline: the ack clock must not run against a call
           // that has not been written yet, and if we close still holding it,
           // close() rejects it rather than reporting a success that never
@@ -370,6 +405,16 @@ export function connectCli<S>(
       ws?.close();
       ws = null;
       listeners.clear();
+      // close() DISCARDS the queue — nothing will ever drain it — so here the
+      // queued calls really are dead and rejectAll (not rejectInFlight) is the
+      // truthful settlement. Say how many frames went with it.
+      if (queue.length > 0) {
+        console.warn(
+          `[aio:cli] closed with ${queue.length} action(s) still queued — ` +
+            `they were never sent; their callers reject`,
+        );
+        queue.length = 0;
+      }
       // Outstanding calls REJECT, never resolve: closing does not make an
       // unconfirmed action succeed, and a bound call that quietly resolved on
       // close reported work the server may never have seen.
@@ -407,7 +452,6 @@ export function connectCliUDS<S>(
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   const queue: Array<{ type: string; payload?: unknown }> = [];
   const listeners = new Set<(state: S) => void>();
-  const _pending = new Map<string, () => void>();
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
 
@@ -415,6 +459,47 @@ export function connectCliUDS<S>(
   const ready = new Promise<S>((r) => {
     _readyResolve = r;
   });
+
+  let _udsQueueNoted = false;
+  /** Write an action, or queue it while the socket is down — the ONE writer,
+   *  and it reports which happened.
+   *
+   *  A closure, not a method on the returned object: `bind`'s dispatcher used
+   *  to call `this.send(...)`, so `const { bind } = connectCliUDS(...)` made
+   *  every bound method throw SYNCHRONOUSLY (uncatchable through the awaited
+   *  promise) while its ack sat registered until `close()` turned it into an
+   *  unhandled rejection that killed the process. `connectCli` has always used
+   *  a closure; this is that same shape.
+   *
+   *  It also has to REPORT the over-cap discard: swallowing it left the caller
+   *  to wait out the full ack ceiling and hear "the server never confirmed the
+   *  call" about a frame this client threw away instantly and knowably. */
+  function _udsTrySend(
+    action: { type: string; payload?: unknown },
+  ): { written: boolean; queued: boolean } {
+    if (writer) {
+      writer.write(encoder.encode(enc("action", action) + "\n")).catch(
+        () => {},
+      );
+      return { written: true, queued: false };
+    }
+    if (queue.length < WS_MAX_QUEUE) {
+      queue.push(action);
+      if (!_udsQueueNoted) {
+        _udsQueueNoted = true;
+        console.warn(
+          `[aio:cli] UDS offline — actions are queued in memory (max ` +
+            `${WS_MAX_QUEUE}) and sent on reconnect; awaited calls stay ` +
+            `pending until then, and close() rejects whatever is still queued`,
+        );
+      }
+      return { written: false, queued: true };
+    }
+    console.warn(
+      `[aio:cli] UDS offline queue full (${WS_MAX_QUEUE}) — action "${action.type}" was NOT sent`,
+    );
+    return { written: false, queued: false };
+  }
 
   function connect(): void {
     if (conn || closed) return;
@@ -429,13 +514,17 @@ export function connectCliUDS<S>(
           encoder.encode(enc("proto", protoHello(VERSION)) + "\n"),
         ).catch(() => {});
 
-        // Drain queued actions
+        // Drain queued actions. The ack clock starts HERE — at the write —
+        // not at dispatch time (see connectCli's drain).
         const q = [...queue];
         queue.length = 0;
+        _udsQueueNoted = false;
         for (const a of q) {
           writer!.write(encoder.encode(enc("action", a) + "\n")).catch(
             () => {},
           );
+          const cid = (a as { cid?: string }).cid;
+          if (cid) _udsPending.armTimer(cid);
         }
 
         // Read NDJSON
@@ -513,7 +602,19 @@ export function connectCliUDS<S>(
                     continue;
                   case "state":
                   case "patches": {
-                    state = applyServerFrame(state, frame) as S;
+                    // onResync is NOT optional: without it a patch that fails
+                    // to apply left this client frozen at its last good state
+                    // — no error, no log, permanent divergence from a server
+                    // that kept moving. The UDS server answers `resync` with a
+                    // full snapshot exactly like the WS one.
+                    state = applyServerFrame(state, frame, () => {
+                      console.warn(
+                        "[aio:cli] UDS patch did not apply (desync) — " +
+                          "requesting a full snapshot",
+                      );
+                      writer?.write(encoder.encode(enc("resync") + "\n"))
+                        .catch(() => {});
+                    }) as S;
                     if (state != null && _readyResolve) {
                       _readyResolve(state);
                       _readyResolve = null;
@@ -533,7 +634,8 @@ export function connectCliUDS<S>(
           {
             // Reject, never resolve — an unconfirmed action did not succeed
             // just because the socket died (see connectCli's onclose).
-            const lost = _udsPending.rejectAll(
+            // IN-FLIGHT ONLY: `queue` survives and is drained on reconnect.
+            const lost = _udsPending.rejectInFlight(
               new Error(
                 "connection lost before the server confirmed this action — " +
                   "it may or may not have been applied; re-check state " +
@@ -576,13 +678,7 @@ export function connectCliUDS<S>(
     ready,
 
     send(action: { type: string; payload?: unknown }): void {
-      if (writer) {
-        writer.write(encoder.encode(enc("action", action) + "\n")).catch(
-          () => {},
-        );
-      } else if (queue.length < WS_MAX_QUEUE) {
-        queue.push(action);
-      }
+      _udsTrySend(action);
     },
 
     bind(...cells: CellDef[]): void {
@@ -592,10 +688,25 @@ export function connectCliUDS<S>(
         // waited on a local promise nobody would ever settle.
         const dispatch = (action: Msg): Promise<unknown> => {
           const cid = crypto.randomUUID();
+          // deferTimer + arm-on-write: identical rule to connectCli — the
+          // clock belongs to the frame, never to a queued action.
           const ackd = _udsPending.register(cid, {
             methodKey: ackMethodKey(action),
+            deferTimer: true,
           });
-          this.send({ ...action, cid } as { type: string; payload?: unknown });
+          const sent = _udsTrySend(
+            { ...action, cid } as { type: string; payload?: unknown },
+          );
+          if (sent.written) _udsPending.armTimer(cid);
+          else if (!sent.queued) {
+            _udsPending.reject(
+              cid,
+              new Error(
+                "not connected and the offline queue is full — the action " +
+                  "was NOT sent",
+              ),
+            );
+          }
           return ackd;
         };
         (dispatch as unknown as Record<symbol, boolean>)[SETTLES_CALLS] = true;
@@ -624,6 +735,15 @@ export function connectCliUDS<S>(
       conn = null;
       writer = null;
       listeners.clear();
+      // close() discards the queue — those frames are dead, so rejectAll is
+      // the truthful settlement here (see connectCli.close).
+      if (queue.length > 0) {
+        console.warn(
+          `[aio:cli] UDS closed with ${queue.length} action(s) still queued — ` +
+            `they were never sent; their callers reject`,
+        );
+        queue.length = 0;
+      }
       _udsPending.rejectAll(
         new Error("client closed before the server confirmed this action"),
       );

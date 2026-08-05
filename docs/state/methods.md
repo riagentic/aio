@@ -113,12 +113,37 @@ const id = await cart.addItem({ name: "Book", price: 12 })
   const id = await cart.addItem({ name: "Book", price: 12 }); // ← "a1b2-…"
   ```
 - **The value must be JSON-serializable to cross the wire.** Plain
-  objects/arrays/primitives transport fine. A non-serializable return (a
-  function, class instance, `BigInt`, or circular structure) can't — the client
-  `await` resolves `undefined` and dev logs a warning. In-process callers still
-  get the raw value; only the network boundary requires JSON. (Reading the
-  resulting **state reactively** remains the idiomatic choice when what you need
-  is already synced to the client.)
+  objects/arrays/primitives transport fine. In-process callers always get the
+  raw value; only the network boundary requires JSON. (Reading the resulting
+  **state reactively** remains the idiomatic choice when what you need is
+  already synced to the client.) Two distinct failures, both loud:
+
+  - **Cannot travel at all** — a bare function or symbol, a `BigInt` anywhere in
+    the value, or a circular structure. The client `await` resolves `undefined`
+    and the server warns.
+  - **Travels, but CHANGED.** JSON silently rewrites more than it refuses, and
+    the framework names every conversion by path (`value.due: Date → string`) in
+    a warning rather than letting the caller receive a different value than the
+    method returned:
+
+    | Returned                               | The caller actually receives    |
+    | -------------------------------------- | ------------------------------- |
+    | `Date`                                 | ISO string                      |
+    | `Map` / `Set` / `RegExp` / `Error`     | `{}`                            |
+    | a class instance                       | a plain object (prototype gone) |
+    | `Uint8Array`                           | `{"0":1,"1":2,…}`               |
+    | `NaN` / `±Infinity`                    | `null`                          |
+    | `-0`                                   | `0`                             |
+    | `undefined` / function / symbol member | the key is absent               |
+    | an object with `toJSON()`              | whatever `toJSON()` returned    |
+
+  Return JSON-safe data across the wire (ISO strings for dates, arrays for
+  `Map`/`Set`, plain objects for class instances).
+
+- **`null` is a value, `undefined` is "nothing".** A method returning `null`
+  resolves its caller with `null` — sync and async alike, in process and over
+  the wire — so it works as a "not found" sentinel. Only `undefined` (or no
+  `return` at all) resolves `undefined`.
 
 ### Returning schedule effects
 

@@ -130,6 +130,31 @@ async function pollDom(
   return val;
 }
 
+/** Source surgery that CANNOT silently no-op.
+ *
+ *  The negative control used to be a `.replace()` of a multi-line literal
+ *  copied out of electron-uds.ts. That file moved on (the did-start-navigation
+ *  handler gained arguments), the literal stopped matching, and `.replace`
+ *  returned the input unchanged — so the "broken" script was byte-identical to
+ *  the fixed one. The control was inert: it could only ever fail, and it did,
+ *  claiming the test "is not simulating the race correctly" while the real
+ *  chain was healthy. A guard that silently stops perturbing anything is worse
+ *  than no guard, so this one throws. */
+function perturb(src: string, find: string, replace: string): string {
+  const at = src.indexOf(find);
+  if (at === -1) {
+    throw new Error(
+      `electron negative control is inert: anchor not found in the generated ` +
+        `main script — ${JSON.stringify(find)}. Update the anchor in ` +
+        `tests/electron-ipc.test.ts to match src/electron/electron-uds.ts.`,
+    );
+  }
+  if (src.indexOf(find, at + find.length) !== -1) {
+    throw new Error(`anchor is ambiguous (appears twice): ${find}`);
+  }
+  return src.slice(0, at) + replace + src.slice(at + find.length);
+}
+
 async function launchElectron(
   mainFile: string,
   cdpPort: number,
@@ -188,37 +213,29 @@ Deno.test({
     try {
       await Deno.writeTextFile(join(dir, "App.tsx"), APP_TSX);
 
-      // ── Part 1: broken version (timeout, not handshake) ──────────────────
-      // Generate main script with the OLD broken behavior: did-finish-load + 1ms timeout.
-      // The App.tsx busy-waits 300ms, so the 1ms timeout fires long before IPC listeners register.
-      // State should NOT arrive → DOM stays "Loading".
-      const brokenScript = electronMainScriptUDS(
+      // ── Part 1: broken version (no __aio:ready handshake) ────────────────
+      // The renderer signals readiness on '__aio:ready' AFTER registering its
+      // IPC listeners; main answers by opening the bridge, subscribing, and
+      // replaying the cached full state. Cut that one wire and nothing else:
+      // the state frame that arrives while the page is still busy-waiting is
+      // cached and never replayed, so the DOM must stay "Loading". That is the
+      // v0.9.4 failure this handshake exists to prevent, reproduced
+      // deterministically instead of by racing a 1ms timer.
+      const fixedScript = electronMainScriptUDS(
         `http://localhost:${DEV_PORT}`,
         socketPath,
         { title: "IPC Test" },
-      )
-        .replace(
-          // Inject broken behavior: replace __aio:ready handler with a 1ms did-finish-load timeout
-          `  win.webContents.on('did-start-navigation', () => { pageReady = false; });
-  win.webContents.on('did-finish-load', () => { pageReady = true; });
-
-  ipcMain.on('__aio:ready', () => {
-    if (closing) return;
-    if (sock) {
-      win.webContents.send('__aio:open');
-      sock.write('{"v":2,"t":"subs","d":{"subs":["*"]}}\\n');
-      if (lastFullState) win.webContents.send('__aio:msg', lastFullState);
-    }
-  });`,
-          `  win.webContents.on('did-finish-load', () => {
-    setTimeout(() => {
-      pageReady = true;
-      if (closing) return;
-      if (sock) win.webContents.send('__aio:open');
-      if (lastState) win.webContents.send('__aio:msg', lastState);
-    }, 1);  // 1ms — fires before 300ms busy-wait completes
-  });`,
-        );
+      );
+      const brokenScript = perturb(
+        fixedScript,
+        "ipcMain.on('__aio:ready', () => {",
+        "ipcMain.on('__aio:ready-DISABLED-BY-TEST', () => {",
+      );
+      assertEquals(
+        brokenScript === fixedScript,
+        false,
+        "negative control did not perturb the script",
+      );
       const brokenFile = join(dir, "main-broken.cjs");
       await Deno.writeTextFile(brokenFile, brokenScript);
 
@@ -234,19 +251,17 @@ Deno.test({
       assertEquals(
         statusBroken === "Loading" || statusBroken === "",
         true,
-        `Broken version unexpectedly showed "${statusBroken}" — test is not simulating the race correctly`,
+        `Broken version unexpectedly showed "${statusBroken}" — with the ` +
+          `__aio:ready handshake removed, state must never reach the ` +
+          `renderer. If it does, something ELSE is delivering state and this ` +
+          `test no longer proves the handshake carries it.`,
       );
 
       // ── Part 2: fixed version (__aio:ready handshake) ────────────────────
       // The fixed script waits for __aio:ready before sending state.
       // Even with a 300ms module load delay, state must arrive after the handshake.
       const fixedFile = join(dir, "main-fixed.cjs");
-      await Deno.writeTextFile(
-        fixedFile,
-        electronMainScriptUDS(`http://localhost:${DEV_PORT}`, socketPath, {
-          title: "IPC Test",
-        }),
-      );
+      await Deno.writeTextFile(fixedFile, fixedScript);
 
       proc = await launchElectron(fixedFile, CDP_PORT);
       const target2 = await waitForCdpPage(CDP_PORT);

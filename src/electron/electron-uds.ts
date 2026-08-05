@@ -153,6 +153,15 @@ ${tmplBoundsTracking()}
   // ── UDS connection — NDJSON over Unix socket ──
   const SOCK = ${JSON.stringify(socketPath)};
   let buf = '', retry = 0, lastFullState = null, lastState = null, pageReady = false;
+  // The kind of one NDJSON envelope, or null if it is not one. The prefix
+  // match is exact for everything enc()/encRaw() produce ({"v":2,"t":"…"});
+  // anything else falls back to a real parse rather than a guess.
+  const frameKind = (line) => {
+    const m = /^\\{"v":2,"t":"([a-z-]+)"/.exec(line);
+    if (m) return m[1];
+    try { const f = JSON.parse(line); return (f && f.v === 2) ? f.t : null; }
+    catch { return null; }
+  };
   let down = false, lastErrCode = null; // report a backend outage ONCE, not per retry
   const _ipcQueue = [], IPC_QUEUE_MAX = 100; // AIO-284: offline queue
   let closing = false;
@@ -195,8 +204,14 @@ ${tmplBoundsTracking()}
       for (const line of lines) {
         if (!line || closing) continue;
         // v2 envelope: cache the latest full-state frame for late renderers.
-        if (line.indexOf('"t":"state"') !== -1) { lastState = line; lastFullState = line; }
-        else if (line.indexOf('"t":"patches"') !== -1) lastState = line;
+        // Classify by the frame's DECODED kind, never by a substring: any
+        // frame whose payload merely CONTAINS the text '"t":"state"' — a chat
+        // message, a field named t, a serialized frame inside state — was
+        // cached as the full-state replay and handed to the next renderer as
+        // if it were a snapshot. dec()-then-switch removes the whole class.
+        const kind = frameKind(line);
+        if (kind === 'state') { lastState = line; lastFullState = line; }
+        else if (kind === 'patches') lastState = line;
         if (pageReady) win.webContents.send('__aio:msg', line);
       }
     });

@@ -2,9 +2,44 @@
 
 import type { CheckpointData } from "./types.ts";
 import { log } from "./logger.ts";
+import { noRedaction, REDACTED } from "./redact.ts";
+import type { Redactor } from "./redact.ts";
 
 const FILE = "checkpoint.json";
 const TMP = "checkpoint.json.tmp";
+
+/** Owner-only. The checkpoint holds FULL application state — every value the
+ *  journal and the action log are careful not to keep. It was written at the
+ *  process umask (0644/0664), so the one artifact carrying the most was also
+ *  the most readable. */
+const MODE: Deno.WriteFileOptions = { mode: 0o600 };
+
+/** Withhold the slices of cells that `redactActions` covers.
+ *
+ *  `docs/persistence/where-files-live.md` promises a redacted action's payload
+ *  "and the before/after values it wrote" are kept nowhere. The checkpoint has
+ *  no action attached — it is current state — so it cannot redact per action,
+ *  and the values a redacted action wrote are sitting in its cell's slice. A
+ *  sweep with `redactActions: ["vault:*"]` found the journal clean, the action
+ *  log clean, and the passphrase in `logs/checkpoint.json`. The timeline
+ *  already redacts diff VALUES for exactly this reason — "redacting the payload
+ *  alone would have been theatre". So does this: the whole slice is withheld,
+ *  and its absence is stated rather than implied. */
+export function _redactCheckpointState(
+  state: Record<string, unknown>,
+  redact: Redactor,
+): Record<string, unknown> {
+  if (redact.cells.size === 0) return state;
+  let touched = false;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(state)) {
+    if (redact.cells.has(k)) {
+      out[k] = REDACTED;
+      touched = true;
+    } else out[k] = v;
+  }
+  return touched ? out : state;
+}
 
 let _warnedDegraded = false;
 
@@ -75,8 +110,13 @@ export function readCheckpoint(dir: string): CheckpointData | null {
   }
 }
 
-/** Create a checkpoint writer. Debounce=0 means immediate write. */
-export function createCheckpoint(dir: string, debounceMs: number) {
+/** Create a checkpoint writer. Debounce=0 means immediate write.
+ *  `redact` is the SAME predicate the journal, timeline and action log use. */
+export function createCheckpoint(
+  dir: string,
+  debounceMs: number,
+  redact: Redactor = noRedaction,
+) {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let pending: CheckpointData | null = null;
 
@@ -90,12 +130,21 @@ export function createCheckpoint(dir: string, debounceMs: number) {
     return chain;
   }
 
+  const scrub = (data: CheckpointData): CheckpointData =>
+    redact.cells.size === 0
+      ? data
+      : { ...data, state: _redactCheckpointState(data.state, redact) };
+
   function write(data: CheckpointData): Promise<void> {
     return enqueue(async () => {
       const tmp = `${dir}/${TMP}`;
       const target = `${dir}/${FILE}`;
-      const json = _safeStringify(data);
-      await Deno.writeTextFile(tmp, json);
+      const json = _safeStringify(scrub(data));
+      // `mode` only applies at CREATE time, so a leftover tmp from an earlier
+      // crash — or an existing checkpoint written by an older, laxer build —
+      // would keep its old permissions through the rename. Remove both first.
+      await Deno.remove(tmp).catch(() => {});
+      await Deno.writeTextFile(tmp, json, MODE);
       await Deno.rename(tmp, target);
     });
   }
@@ -103,7 +152,11 @@ export function createCheckpoint(dir: string, debounceMs: number) {
   /** Synchronous emergency write — for crash handler. */
   function writeSync(data: CheckpointData): void {
     try {
-      Deno.writeTextFileSync(`${dir}/${FILE}`, _safeStringify(data));
+      const path = `${dir}/${FILE}`;
+      try {
+        Deno.removeSync(path);
+      } catch { /* nothing to clear */ }
+      Deno.writeTextFileSync(path, _safeStringify(scrub(data)), MODE);
     } catch { /* best effort during crash */ }
   }
 

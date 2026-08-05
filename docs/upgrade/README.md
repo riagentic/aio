@@ -7,6 +7,10 @@ One guide per version migration. Find your current version and follow the steps.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha47 → alpha48](from-alpha47-to-alpha48.md) — the third hunt: a skewed
+  clock cut a client off from every update, a rejected call was delivered
+  anyway, async writes were missing from every observability sink, and the
+  durable offline queue was never wired
 - [alpha46 → alpha47](from-alpha46-to-alpha47.md) — the second hunt: a build
   that deleted your sources and reported success, four renderer defects that
   committed the wrong DOM in silence, a freshness cache that guessed at its

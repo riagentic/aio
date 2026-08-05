@@ -14,7 +14,10 @@ export function computeDiffs(
 ): CellDiff[] {
   if (prev === next) return [];
   const diffs: CellDiff[] = [];
-  for (const cell of Object.keys(next)) {
+  // BOTH key sets. Iterating `next` alone meant a cell that existed in `prev`
+  // and is gone in `next` produced no diff at all — a removal is a change, and
+  // the one it is most important not to report as "nothing happened".
+  for (const cell of new Set([...Object.keys(prev), ...Object.keys(next)])) {
     const prevSlice = prev[cell];
     const nextSlice = next[cell];
     if (prevSlice === nextSlice) continue;
@@ -53,7 +56,12 @@ function truncate(v: unknown): string {
   if (v === undefined) return "undefined";
   if (v === null) return "null";
   if (typeof v === "string") {
-    return v.length > MAX_VAL ? v.slice(0, MAX_VAL) + "…" : v;
+    // QUOTED. Unquoted, `"1"→1` and `1→1` render identically, and so do
+    // `"null"→x` and `null→x` — a reader cannot tell a string from the value it
+    // looks like, which is precisely the diff you are staring at when a type
+    // coercion is the bug.
+    const s = v.length > MAX_VAL ? v.slice(0, MAX_VAL) + "…" : v;
+    return JSON.stringify(s);
   }
   if (typeof v === "number" || typeof v === "boolean") return String(v);
   if (typeof v === "bigint") return `${v}n`;

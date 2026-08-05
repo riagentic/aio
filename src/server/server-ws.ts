@@ -956,7 +956,9 @@ export function createWsManager(deps: WsDeps): WsManager {
     actionType: string,
     value: unknown,
   ): void {
-    const { value: safe, dropped } = serializeReturn(value);
+    // Pass the method name so a lossy-conversion warning names it (the UDS
+    // path already did) — "a method" is not a diagnosis.
+    const { value: safe, dropped } = serializeReturn(value, actionType);
     if (dropped && !deps.prod) {
       console.warn(
         `[aio] method "${actionType}" returned a non-serializable value — ` +
@@ -1014,7 +1016,11 @@ export function createWsManager(deps: WsDeps): WsManager {
       if (!ping || typeof ping.t1 !== "number") throw new Error("malformed");
       const vmeta = connections.get(socket);
       if (vmeta && deps.vitalsSystem) {
-        deps.vitalsSystem.serverTransport.onClientPing(vmeta.id, ping.t1);
+        // Liveness is stamped by the probe from the SERVER's clock. `ping.t1`
+        // is the browser's `Date.now()` and is echoed back in the pong for the
+        // client to compute its own RTT — it is never used as a server-side
+        // timestamp (see the one-clock invariant in transport-probe.ts).
+        deps.vitalsSystem.serverTransport.onClientPing(vmeta.id);
         const staleness = typeof ping.ms === "number" ? ping.ms : 0;
         const prevMul = vmeta.bpMultiplier;
         if (staleness > BP_STALENESS_HIGH) {

@@ -1,4 +1,4 @@
-// Browser-side pending-ack map — used by browser-transport-send to
+// Browser-side pending-ack map — used by the AIR transport to
 // resolve the Promise returned by an awaited method call.
 //
 // The MECHANISM lives in ack-registry.ts (one implementation, shared with the
@@ -78,10 +78,18 @@ export function _registerAck(
   return _registry.register(cid, opts);
 }
 
-/** Start the clock for a deferred registration — called when a queued action
- *  is actually sent. No-op if the timer already runs or the ack has settled. */
+/** The frame for `cid` is now on the wire: mark the call in flight and start
+ *  its clock. Every transport calls this at the moment it writes — on the
+ *  direct send AND when draining the offline queue. No-op if the timer already
+ *  runs or the ack has settled. */
 export function _armAckTimer(cid: string): void {
   _registry.armTimer(cid);
+}
+
+/** True when `cid`'s frame has actually been written (as opposed to sitting in
+ *  a transport's offline queue). */
+export function _isAckWritten(cid: string): boolean {
+  return _registry.isWritten(cid);
 }
 
 /** Settle a pending ack with the method's transported return value (undefined
@@ -95,9 +103,18 @@ export function _rejectAck(cid: string, err: Error): boolean {
   return _registry.reject(cid, err);
 }
 
-/** Reject all pending acks with the given error. Used on WS close / shutdown. */
+/** Reject all pending acks with the given error — for a teardown that also
+ *  DISCARDS the offline queue (page teardown, protocol mismatch). */
 export function _rejectAllPending(err: Error): number {
   return _registry.rejectAll(err);
+}
+
+/** Reject only the calls already written to the wire — for a disconnect whose
+ *  offline queue survives and flushes on reconnect. A queued call keeps its
+ *  promise: it has not been sent, so nothing can have applied it, and
+ *  rejecting it would be contradicted by the very next flush. */
+export function _rejectInFlight(err: Error): number {
+  return _registry.rejectInFlight(err);
 }
 
 /** Number of currently-pending acks — for tests and diagnostics. */

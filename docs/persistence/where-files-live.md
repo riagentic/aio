@@ -68,11 +68,34 @@ await aio.run({
 ```
 
 A listed action keeps its type, sequence, timestamp and the state **paths** it
-changed — replay ordering and "what did it touch" both still work — while its
-payload and the before/after values it wrote become `"[redacted]"`. One list
-governs all three sinks; they cannot disagree. A trailing `*` matches by prefix,
-because a list of individual method names is the list that goes stale the day
-someone adds another unlock method — and a stale redaction list fails open.
+changed — "what did it touch" still works — while its payload and the
+before/after values it wrote become `"[redacted]"`. One list governs every sink;
+they cannot disagree. That includes the diagnostic **checkpoint**, which holds
+current state rather than actions and so cannot redact per action: the whole
+slice of a listed cell is withheld (`"[redacted]"` in place of the state), and
+the file is created `0600` like the journal. An async method's write-set commit
+(`cell:__setMethod`) is covered by whichever pattern covers the method itself,
+so an exact `"vault:unlockWith"` protects both. A trailing `*` matches by
+prefix, because a list of individual method names is the list that goes stale
+the day someone adds another unlock method — and a stale redaction list fails
+open.
+
+**A redacted action cannot be replayed.** Its payload _is_ its arguments, and
+they were deliberately never written, so boot **skips** it and says so:
+
+```
+journal: 1 action(s) COULD NOT be replayed — their payload was dropped by
+redactActions … Whatever those actions wrote after the last snapshot is NOT in
+the recovered state.
+```
+
+That is the cost of redaction, stated rather than hidden: the app still boots
+(it must — the journal tail persists, so a boot that failed on it would fail on
+every restart), and recovery never silently reports success for state it did not
+reconstruct. `am replay` refuses the same entries (`⊘`) and `am record` emits a
+commented, unreproducible gap instead of a call with no arguments. Redact
+narrowly — an action whose payload you need for crash recovery should not be on
+the list.
 
 The journal file is created `0600`. Turning the action log or checkpoint **off**
 also deletes what it already wrote — a flag that only stops new writes leaves

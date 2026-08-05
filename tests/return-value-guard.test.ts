@@ -8,7 +8,7 @@ import { serializeReturn } from "../src/protocol/return-value.ts";
 
 Deno.test("serializeReturn: undefined passes as undefined, not dropped", () => {
   const r = serializeReturn(undefined);
-  assertEquals(r, { value: undefined, dropped: false });
+  assertEquals(r, { value: undefined, dropped: false, lossy: [] });
 });
 
 Deno.test("serializeReturn: primitives round-trip", () => {
@@ -27,19 +27,19 @@ Deno.test("serializeReturn: plain objects/arrays round-trip by value", () => {
 
 Deno.test("serializeReturn: a bare function is dropped to undefined", () => {
   const r = serializeReturn(() => 42);
-  assertEquals(r, { value: undefined, dropped: true });
+  assertEquals(r, { value: undefined, dropped: true, lossy: [] });
 });
 
 Deno.test("serializeReturn: BigInt (JSON.stringify throws) is dropped", () => {
   const r = serializeReturn(10n);
-  assertEquals(r, { value: undefined, dropped: true });
+  assertEquals(r, { value: undefined, dropped: true, lossy: [] });
 });
 
 Deno.test("serializeReturn: a circular structure is dropped, never throws", () => {
   const a: Record<string, unknown> = {};
   a.self = a;
   const r = serializeReturn(a);
-  assertEquals(r, { value: undefined, dropped: true });
+  assertEquals(r, { value: undefined, dropped: true, lossy: [] });
 });
 
 Deno.test("serializeReturn: functions nested in an object are stripped by JSON", () => {

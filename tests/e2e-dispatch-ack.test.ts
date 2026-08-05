@@ -3,7 +3,7 @@
 // method; the promise only settles when the server sends an ack frame back
 // over the socket. This exercises the whole wire path that the in-process
 // harness can't see: cid minting (cell-reactive), the pending-ack registry
-// (browser-ack), the send pipeline (browser-transport-send), the server's
+// (browser-ack), the send pipeline (browser-air-transport), the server's
 // cid→ack emit (server-ws), and the client's __ack router (browser-air-commands).
 import { assert } from "@std/assert";
 import { BROWSER, waitFor, withE2E } from "./e2e-harness.ts";

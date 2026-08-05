@@ -12,7 +12,11 @@
 // diff is retained, so `prev`/`next` are free to GC — memory stays bounded to
 // the ring capacity regardless of state size.
 
-import { noRedaction, REDACTED } from "../diagnostics/redact.ts";
+import {
+  isRedactedAction,
+  noRedaction,
+  REDACTED,
+} from "../diagnostics/redact.ts";
 import type { Redactor } from "../diagnostics/redact.ts";
 
 /** One changed leaf: a dotted path and its before/after values. */
@@ -25,6 +29,12 @@ export type TimelineEntry = {
   type: string;
   payload?: unknown;
   diff: DiffEntry[];
+  /** For a write-set commit (`cell:__setFoo`), the action that produced it
+   *  (`cell:foo`). `type` stays the action that really ran — a timeline that
+   *  renames what happened is a timeline that lies — and `origin` says who is
+   *  responsible for it, so `am timeline` can show "the async method `foo`
+   *  wrote this" instead of an opaque framework symbol. */
+  origin?: string;
 };
 
 /** Safety caps so a pathological action (e.g. replacing a 10k-row array) can't
@@ -32,8 +42,20 @@ export type TimelineEntry = {
 const MAX_DIFF_ENTRIES = 200;
 const MAX_DEPTH = 12;
 
-const isObj = (v: unknown): v is Record<string, unknown> =>
-  typeof v === "object" && v !== null;
+/** A container the diff may RECURSE into: a plain object (or a null-prototype
+ *  one). Anything else with `typeof === "object"` — Date, Map, Set, RegExp, a
+ *  class instance — is a LEAF.
+ *
+ *  This is not a nicety. `Object.keys(new Date())` is `[]`, so treating every
+ *  object as a plain container made the walker descend into a changed Date,
+ *  find no keys, and emit NOTHING: `am timeline` reported `"diff": []` for an
+ *  action that moved a timestamp. Silence is the one output a diff must never
+ *  produce for a real change, so an un-traversable object is reported whole. */
+const isPlainObj = (v: unknown): v is Record<string, unknown> => {
+  if (typeof v !== "object" || v === null) return false;
+  const p = Object.getPrototypeOf(v);
+  return p === Object.prototype || p === null;
+};
 
 /** Compute the compact leaf-diff between two immutable states. Relies on
  *  reference equality (Immer structural sharing) to skip unchanged subtrees.
@@ -49,11 +71,11 @@ export function diffState(prev: unknown, next: unknown): DiffEntry[] {
       truncated = true;
       return;
     }
-    // Recurse only when BOTH sides are same-kind containers; otherwise it's a
-    // leaf change (including type changes, null↔object, array↔object).
+    // Recurse only when BOTH sides are same-kind TRAVERSABLE containers;
+    // otherwise it's a leaf change (type changes, null↔object, array↔object,
+    // and every non-plain object — Date, Map, Set, class instances).
     const bothArr = Array.isArray(a) && Array.isArray(b);
-    const bothObj = !bothArr && isObj(a) && isObj(b) && !Array.isArray(a) &&
-      !Array.isArray(b);
+    const bothObj = !bothArr && isPlainObj(a) && isPlainObj(b);
     if (depth < MAX_DEPTH && (bothArr || bothObj)) {
       const keys = new Set<string>([
         ...Object.keys(a as object),
@@ -97,6 +119,8 @@ export type Timeline = {
     prev: unknown,
     next: unknown,
     ts: number,
+    /** Originating action type, for a write-set commit. Redaction honours it. */
+    origin?: string,
   ): void;
   /** Entries with seq > `after` (default all), newest last, capped at `limit`. */
   entries(after?: number, limit?: number): TimelineEntry[];
@@ -126,14 +150,15 @@ export function createTimeline(
   let last = 0;
 
   return {
-    record(seq, type, payload, prev, next, ts) {
+    record(seq, type, payload, prev, next, ts, origin) {
       last = Math.max(last, seq);
-      const hide = redact(type);
+      const hide = isRedactedAction(redact, type, origin);
       const diff = diffState(prev, next);
       ring.push({
         seq,
         ts,
         type,
+        ...(origin !== undefined ? { origin } : {}),
         payload: hide ? REDACTED : payload,
         diff: hide
           ? diff.map((d) => ({

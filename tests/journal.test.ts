@@ -42,7 +42,10 @@ Deno.test("replayJournal: reconstructs exact state from snapshot + tail", () => 
     { seq: 1, type: "add", payload: 5, ts: 0 },
     { seq: 2, type: "add", payload: 7, ts: 0 },
   ];
-  assertEquals(replayJournal(snapshot, entries, reduce), { n: 22 });
+  const r = replayJournal(snapshot, entries, reduce);
+  assertEquals(r.state, { n: 22 });
+  assertEquals(r.replayed, 2);
+  assertEquals(r.skipped, []);
 });
 
 Deno.test("journal: watermark prunes the persisted prefix", async () => {
@@ -82,7 +85,8 @@ Deno.test("journal: crash recovery — reopen replays the unpersisted tail", asy
       j2.readSince(j2.watermark()),
       reduce,
     );
-    assertEquals(recovered, { n: 111 }, "1 + 10 + 100");
+    assertEquals(recovered.state, { n: 111 }, "1 + 10 + 100");
+    assertEquals(recovered.replayed, 2);
   });
 });
 
