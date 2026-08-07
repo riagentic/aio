@@ -58,6 +58,8 @@ async function boot(name: string, dir: string, defs: unknown[]) {
 async function defineCell(name: string) {
   const { cell } = await import("../mod.ts");
   return cell(name, {
+    // alpha52: pins incremental/abort-path write semantics — the opt-out.
+    transaction: false,
     state: { applied: [] as string[], n: 0 } as Doc,
     methods: {
       // Sync: applies inside reduce, resolves when the queue drains.

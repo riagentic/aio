@@ -39,7 +39,7 @@ Deno.test("B7: ui.exclude field reads undefined in client context + warns once",
   const members = cell("b7-members", {
     state: { roster: ["alice"], pins: { alice: "1234" } },
     methods: {},
-    ui: { exclude: ["pins"] },
+    visible: { exclude: ["pins"] },
   });
   bindCellReactive(members);
   // Simulate live client state (standalone commit / broadcast slice).
@@ -68,7 +68,7 @@ Deno.test("B7: dot-path exclude strips the nested value on client reads", () => 
   const accounts = cell("b7-accounts", {
     state: { accounts: [{ name: "a", encSecKey: "s3cret" }] },
     methods: {},
-    ui: { exclude: ["accounts.encSecKey"] },
+    visible: { exclude: ["accounts.encSecKey"] },
   });
   bindCellReactive(accounts);
   getCellSignal("b7-accounts", accounts.__aio.state).set({
@@ -90,7 +90,7 @@ Deno.test("B7: ui.include hides non-included fields on client reads", () => {
   const stats = cell("b7-stats", {
     state: { publicCount: 1, internalBuffer: "x" },
     methods: {},
-    ui: { include: ["publicCount"] },
+    visible: { include: ["publicCount"] },
   });
   bindCellReactive(stats);
   const { warnings } = withWarnCapture(() => {
@@ -115,7 +115,7 @@ Deno.test('B7: ui "none" hides every field on client reads', () => {
   const internal = cell("b7-internal", {
     state: { queue: [1, 2] },
     methods: {},
-    ui: "none",
+    visible: "none",
   });
   bindCellReactive(internal);
   const { result, warnings } = withWarnCapture(() =>
@@ -131,7 +131,7 @@ Deno.test("B7: selectors in client context see the FILTERED slice (no leak)", ()
   const vault = cell("b7-vault", {
     state: { items: ["a"], masterKey: "k" },
     methods: {},
-    ui: { exclude: ["masterKey"] },
+    visible: { exclude: ["masterKey"] },
     selectors: {
       leak: (s: { items: string[]; masterKey?: string }) => s.masterKey,
       count: (s: { items: string[] }) => s.items.length,
@@ -172,7 +172,7 @@ Deno.test('B7: a selector on a ui:"none" cell reports instead of computing over 
   const secret = cell("b7-none", {
     state: { balance: 100, items: [1, 2, 3] },
     methods: {},
-    ui: "none",
+    visible: "none",
     selectors: {
       total: (s: { balance: number; items: number[] }) => s.balance * 2,
       count: (s: { balance: number; items: number[] }) =>
@@ -228,7 +228,7 @@ Deno.test("B7: server-side reads (bindCell) still see EVERYTHING", async () => {
         s.pins[name] = pin;
       },
     },
-    ui: { exclude: ["pins"] },
+    visible: { exclude: ["pins"] },
   });
 
   // A minimal server store — same contract bindCell gets from aio.run.
@@ -279,7 +279,7 @@ Deno.test("B7: standalone wiring (bindCell → bindCellReactive) filters reads",
         s.items.push(v);
       },
     },
-    ui: { exclude: ["apiSecret"] },
+    visible: { exclude: ["apiSecret"] },
   });
   let state: Record<string, unknown> = {
     "b7-standalone": vault.__aio.state,
@@ -326,7 +326,7 @@ Deno.test("B7: client-scoped cells are exempt (state never leaves the client)", 
         s.member = { id };
       },
     },
-    ui: { exclude: ["member"] },
+    visible: { exclude: ["member"] },
   });
   bindCellReactive(session);
   (session as unknown as { signIn: (id: string) => Promise<void> }).signIn(
@@ -349,7 +349,7 @@ Deno.test("B7: a hidden read THROWS in dev, degrades in prod", () => {
   const seeds = cell("b7-dev-seeds", {
     state: { hasVault: true, vaultCheck: "secret" },
     methods: {},
-    ui: { exclude: ["vaultCheck"] },
+    visible: { exclude: ["vaultCheck"] },
   });
   bindCellReactive(seeds);
   const s = seeds as unknown as { hasVault: boolean; vaultCheck?: unknown };
@@ -400,7 +400,7 @@ Deno.test("B7: re-binding a cell with ui.exclude does not trip its own guard", (
   const vault = cell("b7-rebind", {
     state: { hasVault: true, vaultCheck: "secret" },
     methods: { noop(_s: Record<string, unknown>) {} },
-    ui: { exclude: ["vaultCheck"] },
+    visible: { exclude: ["vaultCheck"] },
   });
   const dev = (globalThis as Record<string, unknown>).__aioDev;
   try {
@@ -454,7 +454,7 @@ Deno.test("B7: a DEEP excluded field read is loud — dev throws, prod warns onc
   const wallet = cell("b7-deep-loud", {
     state: { accounts: [{ name: "a", encSecKey: "s3cret" }] },
     methods: {},
-    ui: { exclude: ["accounts.encSecKey"] },
+    visible: { exclude: ["accounts.encSecKey"] },
   });
   bindCellReactive(wallet);
   const list =

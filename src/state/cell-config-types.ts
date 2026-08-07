@@ -3,15 +3,22 @@
 import type { Method } from "./cell-impl.ts";
 
 /** Selector definition. Plain form receives the cell's own slice; deps form
- *  receives the cell's own slice plus the current slices of the named dep
- *  cells in the order listed. The cell slice is passed to the selector fresh
- *  on every read — `bindCell` re-evaluates whenever a dep cell changes. */
+ *  receives the cell's own slice plus a TUPLE of the named dep cells' current
+ *  slices (alpha52): `{ deps: ["prices"], fn: (s, [prices], ...args) => … }` —
+ *  so parameterized selectors and deps compose. The old spread signature
+ *  `(s, ...deps)` is detected by shape and still works through beta, with a
+ *  one-time hint. The cell slice is passed to the selector fresh on every
+ *  read — `bindCell` re-evaluates whenever a dep cell changes. */
 export type SelectorDef<S> =
   // Plain form may take extra ARGS after the slice — a parameterized selector
   // (`byId: (s, id) => …`) surfaces as `cell.byId(id)`.
   // deno-lint-ignore no-explicit-any
   | ((s: S, ...args: any[]) => unknown)
-  | { deps: readonly string[]; fn: (s: S, ...deps: unknown[]) => unknown };
+  | {
+    deps: readonly string[];
+    // deno-lint-ignore no-explicit-any
+    fn: (s: S, deps: any[], ...args: any[]) => unknown;
+  };
 
 /** The value a bound selector accessor returns (the selector's own return). */
 // deno-lint-ignore no-explicit-any
@@ -24,7 +31,9 @@ export type SelectorReturn<D> = D extends (s: infer _S, ...a: any[]) => infer R
 /** Bound selectors surface on the cell as accessors. A plain selector's EXTRA
  *  params (beyond the state slice) become the accessor's args —
  *  `byId: (s, id: string) => T` → `cell.byId(id)`; `total: (s) => n` →
- *  `cell.total()`. Deps-form selectors are always zero-arg. */
+ *  `cell.total()`. Deps-form selectors take the args after `(s, [deps])`
+ *  (alpha52 tuple form) — typed loosely so the deprecated spread form keeps
+ *  compiling through beta. */
 export type SelectorAccessors<Sel> = {
   [K in keyof Sel]: SelectorAccessorFn<Sel[K]>;
 };
@@ -33,10 +42,10 @@ export type SelectorAccessors<Sel> = {
 type SelectorAccessorFn<D> = D extends (s: any, ...args: infer A) => infer R
   ? (...args: A) => R
   // deno-lint-ignore no-explicit-any
-  : D extends { fn: (...a: any[]) => infer R } ? () => R
+  : D extends { fn: (...a: any[]) => infer R } ? (...args: any[]) => R
   : () => unknown;
 import type {
-  CellAccess,
+  Access,
   CellFieldFilter,
   CellVisibility,
   ScopedApp,
@@ -56,8 +65,9 @@ export type MethodsCellConfig<
   /** Cell scope. `"client"` cells live in the browser only — never registered
    *  with the server, never synced, never server-persisted. Methods are bound
    *  locally against a signal-backed slice; each tab has its own copy. Sync
-   *  methods only in v1 — async methods throw at `cell()` time. */
-  scope?: "client";
+   *  methods only in v1 — async methods throw at `cell()` time.
+   *  `"server"` (the default) may be stated explicitly (alpha52). */
+  scope?: "client" | "server";
   /** Cancellation triggers per ASYNC METHOD — { methodKey: [actionsOrTypes] }.
    *  A trigger action aborts the method's in-flight calls; the method observes
    *  it via `s.$signal` (perfect-aio D1). Accepts bound methods (.type) or
@@ -86,27 +96,42 @@ export type MethodsCellConfig<
   selectors?: Sel & Record<string, SelectorDef<S>>;
   /** React to FOREIGN actions (decoupled pub/sub — the source cell never
    *  knows about this one).
-   *  Object form (recommended): `{ myHandler: other.method }` — the named
-   *  SYNC method runs with the foreign action's payload when it dispatches.
-   *  Array form: routes the action through this cell (status/machine tick)
-   *  WITHOUT running a handler — use the object form when you want code to
-   *  run. Accepts bound methods (.type) or plain type strings. */
+   *  Object form (the form): `{ myHandler: other.method }` — the named SYNC
+   *  method runs with the foreign action's payload when it dispatches. Values
+   *  may be ARRAYS of sources (alpha52): `{ onChange: [a.set, b.set] }`.
+   *  Array form (@deprecated alpha52 — one-time hint, dies at beta): routes
+   *  the action through this cell WITHOUT running a handler.
+   *  Accepts bound methods (.type) or plain type strings. */
   listensTo?:
     | (string | { type: string })[]
-    | Record<string, string | { type: string }>;
+    | Record<
+      string,
+      string | { type: string } | (string | { type: string })[]
+    >;
   /** Optional state validator — called after every reduce. Return true to accept, or a string error message to reject. */
   validate?: (state: S) => true | string;
   /** Persistence filter — "all" (default) persists everything, "none" persists nothing.
    *  { include: [...] } or { exclude: [...] } for field-level control. */
   persist?: CellFieldFilter<keyof NoInfer<S> & string>;
-  /** Network access rule (AUTH-1): who may call this cell's methods over the
+  /** Network access rule (AUTH-1): who may CALL this cell's methods over the
    *  network. `true` = any authenticated user, `"admin"` = that exact role,
    *  `(user, method) => boolean` = custom. Absent = open (connection-level
-   *  auth only). Server-side code always bypasses. */
-  access?: CellAccess;
-  /** UI visibility — "all" (default) exposes everything, "none" hides cell from clients.
-   *  { include: [...] } or { exclude: [...] } for field-level control.
-   *  Add forUser for per-user filtering on the already-filtered state. */
+   *  auth only). Server-side code always bypasses.
+   *  `access` gates calls, `visible` gates reads — declare both on an
+   *  exposed/multi-user app (composition refuses `access` with no `visible`
+   *  there, because the unanswered read side broadcasts the whole cell). */
+  access?: Access;
+  /** Visibility — the READ side (alpha52; renamed from `ui`): what of this
+   *  cell's state the broadcast carries to clients. "all" (default) exposes
+   *  everything, "none" hides the cell from clients. { include: [...] } or
+   *  { exclude: [...] } for field-level control; add forUser for per-user
+   *  filtering on the already-filtered state.
+   *  `access` gates calls, `visible` gates reads. */
+  visible?: CellVisibility<keyof NoInfer<S> & string, NoInfer<S>>;
+  /** @deprecated alpha52 — renamed `visible` (one-time hint at boot; alias
+   *  through beta; `aiol --safe-fix` renames it). App-level
+   *  `aio.run({ ui: {...} })` (window config) is a different key and is
+   *  unchanged. */
   ui?: CellVisibility<keyof NoInfer<S> & string, NoInfer<S>>;
   /** CRDT sync — true for defaults, or partial config to override merge
    *  strategies, identity keys, retention.
@@ -132,19 +157,26 @@ export type MethodsCellConfig<
   worker?: boolean;
   /** Transactional async methods: reads see a STABLE snapshot taken
    *  at method entry (an `await` never changes them), and writes commit
-   *  ATOMICALLY at return — one batch, all-or-nothing (a throw/cancel discards).
-   *  Kills the read-after-await class. Opt-in; sync methods are already atomic.
-   *  `{ serialize: true }` runs this cell's transactional ASYNC methods one at a
-   *  time (a per-cell mutex) when read-modify-write correctness matters — it
-   *  does NOT hold off sync methods, which are reducers and commit whenever
-   *  they are dispatched.
+   *  ATOMICALLY at return — one batch, all-or-nothing (a throw/cancel
+   *  discards). Kills the read-after-await class; sync methods are already
+   *  atomic.
+   *
+   *  THE DEFAULT since alpha52. `transaction: false` opts a cell back into
+   *  live reads + incremental commits (every write publishes on the next
+   *  microtask). Under the default, publish mid-method with `s.$commit()`
+   *  (the spinner idiom: `s.busy = true; s.$commit();`) and read current
+   *  state on purpose with `s.$live` (e.g. `until(() => s.$live.ready)`).
+   *
+   *  `{ serialize: true }` additionally runs this cell's transactional ASYNC
+   *  methods one at a time (a per-cell mutex) when read-modify-write
+   *  correctness matters — it does NOT hold off sync methods, which are
+   *  reducers and commit whenever they are dispatched.
    *
    *  Because reads are pinned, a field a SYNC method writes mid-await is
    *  invisible to the running async one. That is checked, not hoped for: every
    *  commit validates the method's read-set against live state, and
    *  `conflict` decides the outcome — `"abort"` (default: reject the call,
-   *  commit nothing) or `"warn"` (report loudly, commit anyway). Use `s.$live`
-   *  to read current state on purpose.
+   *  commit nothing) or `"warn"` (report loudly, commit anyway).
    *  See docs/state/transactional-methods.md. */
   transaction?:
     | boolean

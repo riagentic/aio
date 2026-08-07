@@ -13,7 +13,7 @@
 import { assert } from "@std/assert";
 import { cell } from "../src/state/cell-create.ts";
 import { _resetAioRuntime } from "../src/state/runtime-reset.ts";
-import { schedule } from "../src/schedule.ts";
+import { schedule } from "../src/state/schedule.ts";
 
 Deno.test({
   name:

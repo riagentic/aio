@@ -173,3 +173,49 @@ Deno.test("browser-shared: schedule effect creators are output-identical (random
   }
   assertEquals(checked, rounds, "every round must compare one creator");
 });
+
+Deno.test("alpha52 hint parity: the browser twin hints ONCE on old backoff/poll spellings, like the server", async () => {
+  const { _resetBrowserScheduleHints } = await import(
+    "../src/browser/browser-shared.ts"
+  );
+  _resetBrowserScheduleHints();
+  const warns: string[] = [];
+  const orig = console.warn;
+  console.warn = (...args: unknown[]) => {
+    warns.push(args.map(String).join(" "));
+  };
+  try {
+    const A = { type: "t:tick" };
+    // Old order, twice per id — hint once each.
+    browserSchedule.backoff("bh", 1, { base: 100 }, A);
+    browserSchedule.backoff("bh", 2, { base: 100 }, A);
+    browserSchedule.poll("ph", 1, { every: 100, backoff: 2 }, A);
+    browserSchedule.poll("ph", 2, { every: 100, backoff: 2 }, A);
+    // New order — silent.
+    browserSchedule.backoff("bnew", 1, A, { base: 100 });
+    browserSchedule.poll("pnew", 1, A, { every: 100, factor: 2 });
+  } finally {
+    console.warn = orig;
+  }
+  assertEquals(
+    warns.filter((w) => w.includes("backoff 'bh'")).length,
+    1,
+    "old backoff order: one hint per id",
+  );
+  assertEquals(
+    warns.filter((w) => w.includes("poll 'ph'") && w.includes("3rd argument"))
+      .length,
+    1,
+    "old poll order: one hint per id",
+  );
+  assertEquals(
+    warns.filter((w) => w.includes("`backoff` option key")).length,
+    1,
+    "backoff→factor key: one hint per id",
+  );
+  assertEquals(
+    warns.filter((w) => w.includes("'bnew'") || w.includes("'pnew'")).length,
+    0,
+    "the new spelling is silent",
+  );
+});

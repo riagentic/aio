@@ -550,6 +550,17 @@ export async function bootStorage<S>(
         asyncDb = null;
       }
     }
+    // Versioned schema ladder (private `aio_schema` table, src/db/ddl.ts —
+    // deliberately NOT `PRAGMA user_version`, which belongs to the APP):
+    // apply any registered strictly-once move BEFORE the epoch reconcilers
+    // touch the file. Empty ladder today — this call is what makes a future
+    // registered step LIVE at boot instead of "registered in one surface,
+    // invoked in none" (the key-in-2-of-3 trap). Fatal on failure, like all
+    // DDL.
+    if (asyncDb) {
+      const { runDdlSteps } = await import("../db/ddl.ts");
+      await runDdlSteps(asyncDb);
+    }
     // Creating the DECLARED TABLES is not degradable, and never shared that
     // catch again. A schema SQLite refuses (a keyword column, a bad ref, a
     // migration that cannot apply) used to become one `sqlite: unavailable`

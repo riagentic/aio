@@ -17,7 +17,9 @@ export type Lint = {
   fail: string[];
 };
 
-/** Checks state, config, App.tsx existence, and common mistakes */
+/** Checks state, config, App.tsx existence, and common mistakes.
+ *  Public name (alpha52): `checkCells` — `lint` collided with aiol's project
+ *  linter of the same name and is the deprecated alias through beta. */
 export async function lint(
   state: unknown,
   config: { reduce?: unknown; execute?: unknown },
@@ -267,3 +269,8 @@ export function printLint(r: Lint): void {
     throw new Error(`${r.fail.length} error(s) — fix and restart`);
   }
 }
+
+/** Validate cell defs / startup config without booting — the alpha52 name of
+ *  {@linkcode lint} (renamed: extras' `lint` collided with aiol's project
+ *  linter; `lint` stays a working deprecated alias through beta). */
+export const checkCells = lint;

@@ -31,7 +31,7 @@ import {
   _setAckTimeoutMs,
   ARMS_ACK_TIMER,
   armsAckTimer,
-} from "../src/protocol/browser-ack.ts";
+} from "../src/browser/browser-ack.ts";
 import { _makeSendWrapper } from "../src/browser/browser-protocol.ts";
 import {
   _resetCellRegistry,

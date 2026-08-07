@@ -1,6 +1,6 @@
 import { assertEquals, assertNotEquals } from "@std/assert";
-import { aio, bridge, cell } from "../src/protocol/protocol-cell.ts";
-import { matchPath } from "../src/protocol/protocol-router.ts";
+import { aio, cell } from "../src/browser/protocol-cell.ts";
+import { matchPath } from "../src/browser/protocol-router.ts";
 
 // ── protocol-cell: cell() — method catalog builder ─────────────────
 
@@ -104,94 +104,6 @@ Deno.test("protocol-cell: multiple methods each get unique types", () => {
   assertEquals(a.type, "multi:a");
   assertEquals(b.type, "multi:b");
   assertEquals(cMethod.type, "multi:c");
-});
-
-// ── protocol-cell: bridge() — channel catalog ──────────────────────
-
-Deno.test("bridge: generates Request/Response/Timeout action types", () => {
-  const b = bridge("api", {
-    channels: {
-      fetch: {
-        request: (url: string) => ({ url }),
-        response: (data: unknown) => ({ data }),
-      },
-    },
-  });
-  const fetchRequest = b.fetchRequest as { type: string };
-  const fetchResponse = b.fetchResponse as { type: string };
-  const fetchTimeout = b.fetchTimeout as { type: string };
-  assertEquals(fetchRequest.type, "api:fetchRequest");
-  assertEquals(fetchResponse.type, "api:fetchResponse");
-  assertEquals(fetchTimeout.type, "api:fetchTimeout");
-});
-
-Deno.test("bridge: request creator includes _channel", () => {
-  const b = bridge("api", {
-    channels: {
-      fetch: {
-        request: (url: string) => ({ url }),
-        response: () => ({}),
-      },
-    },
-  });
-  const fetchRequest = b.fetchRequest as (
-    url: string,
-  ) => { type: string; payload: Record<string, unknown> };
-  const msg = fetchRequest("/data");
-  assertEquals(msg.type, "api:fetchRequest");
-  assertEquals(msg.payload.url, "/data");
-  assertEquals(msg.payload._channel, "fetch");
-});
-
-Deno.test("bridge: timeout creator includes _channel", () => {
-  const b = bridge("api", {
-    channels: {
-      fetch: {
-        request: () => ({}),
-        response: () => ({}),
-      },
-    },
-  });
-  const fetchTimeout = b.fetchTimeout as () => {
-    type: string;
-    payload: Record<string, unknown>;
-  };
-  const msg = fetchTimeout();
-  assertEquals(msg.type, "api:fetchTimeout");
-  assertEquals(msg.payload._channel, "fetch");
-});
-
-Deno.test("bridge: multiple channels each get their own types", () => {
-  const b = bridge("svc", {
-    channels: {
-      getUser: { request: (id: string) => ({ id }), response: () => ({}) },
-      saveUser: { request: () => ({}), response: () => ({}) },
-    },
-  });
-  assertEquals(
-    (b.getUserRequest as { type: string }).type,
-    "svc:getUserRequest",
-  );
-  assertEquals(
-    (b.saveUserRequest as { type: string }).type,
-    "svc:saveUserRequest",
-  );
-  assertEquals(
-    (b.getUserResponse as { type: string }).type,
-    "svc:getUserResponse",
-  );
-  assertEquals(
-    (b.saveUserResponse as { type: string }).type,
-    "svc:saveUserResponse",
-  );
-  assertEquals(
-    (b.getUserTimeout as { type: string }).type,
-    "svc:getUserTimeout",
-  );
-  assertEquals(
-    (b.saveUserTimeout as { type: string }).type,
-    "svc:saveUserTimeout",
-  );
 });
 
 // ── protocol-cell: aio stub ─────────────────────────────────────────

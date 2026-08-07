@@ -15,17 +15,6 @@ type DiskState = {
   error: string | null;
 };
 
-/** An aborted scan leaves the spinner alone unless it is still the CURRENT one.
- *
- *  This is the rule that makes concurrent runs safe, and it is worth stating
- *  once: after an `await`, a method is writing into state that other calls have
- *  moved on from. Cancelled by the user → this scan still owns `s.path`, so it
- *  clears the flag. Superseded by a newer `open()` → `s.path` belongs to that
- *  one now, and clearing its spinner would be a lie about work still running. */
-function done(s: DiskState, target: string): void {
-  if (s.path === target) s.scanning = false;
-}
-
 export const disk = cell("disk", {
   // Live measurements — a size read five minutes ago is a lie, so nothing is
   // worth restoring. One word, and this app never persists a byte.
@@ -44,26 +33,38 @@ export const disk = cell("disk", {
   cancelOn: { open: ["self", "disk:stop"] },
 
   methods: {
-    /** Scan a folder. Minutes-long on a big tree — hence everything below. */
+    /** Scan a folder. Minutes-long on a big tree — hence everything below.
+     *
+     *  Async methods are TRANSACTIONAL by default (alpha52): a cancelled or
+     *  superseded call's buffered writes are discarded wholesale, so the old
+     *  "check the signal, then carefully un-write" dance is gone — no stale
+     *  write can land, by construction. */
     async open(s: DiskState & Partial<MethodDraftMeta>, path?: string) {
       const io = await import("./disk.server.ts");
       const target = path ?? io.homeDir();
 
-      // Before the first await: the UI shows a spinner from here on.
+      // Already cancelled or superseded during the import await? Then this
+      // call owns nothing — publishing its spinner would overwrite the state
+      // of whoever cancelled it.
+      if (s.$signal!.aborted) return;
+
+      // The spinner idiom: publish the "working" state NOW, mid-transaction —
+      // without $commit the write-set would buffer until the scan finishes.
       s.path = target;
       s.entries = [];
       s.error = null;
       s.scanning = true;
+      s.$commit!();
 
       try {
         const entries = await io.scanFolders(target, s.$signal!);
-        // Superseded or cancelled while we were away? Then these results are
-        // for a folder the user has already left — dropping them is the whole
-        // discipline of long-running work.
-        if (s.$signal!.aborted) return done(s, target);
+        // Superseded or cancelled while we were away? Just leave: the
+        // transaction discards everything this call buffered after $commit —
+        // the newer open() (or stop()) owns the state now.
+        if (s.$signal!.aborted) return;
         s.entries = entries;
       } catch (e) {
-        if (s.$signal!.aborted) return done(s, target);
+        if (s.$signal!.aborted) return;
         s.error = e instanceof Error ? e.message : String(e);
       }
       s.scanning = false;

@@ -31,6 +31,9 @@ export {
 } from "./browser-air.ts";
 
 // ── Rendering primitives + lifecycle ─────────────────────────────────
+// `NodeAction` is the `use`-prop signature (alpha52 rename; `Action` is its
+// deprecated alias through beta — the bare name collided with the state
+// layer's action vocabulary).
 export {
   type Action,
   afterRender,
@@ -41,6 +44,7 @@ export {
   hydrate,
   mount,
   type MountHandle,
+  type NodeAction,
   onCleanup,
   onMount,
   setDevMode,
@@ -66,11 +70,10 @@ export {
   useSignal,
 } from "./browser-air.ts";
 export type { UseLocalResult } from "./browser-air.ts";
-// useCell lives in the adapters layer; docs reference `import { useCell } from
-// "aio/air"`, so it must be reachable here (was missing — a field report).
-// It is @deprecated at the source: `.state` is a LIVE view, and the natural
-// stash-and-diff idiom silently compares state to itself. aiol flags it too.
-export { useCell } from "./adapters/air.ts";
+// `useCell` was REMOVED in alpha52 (deprecated since alpha41): `.state` was a
+// LIVE proxy, so the natural stash-and-diff idiom silently compared state to
+// itself. Read the cell directly (`counter.count`) — aiol reports remaining
+// uses and `--safe-fix` rewrites the mechanical `useCell(c).state.x` form.
 
 // ── Time travel ──────────────────────────────────────
 export { useTimeTravel } from "./browser-air.ts";

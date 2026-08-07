@@ -56,6 +56,9 @@ Deno.test({
     const dir = await Deno.makeTempDir({ prefix: "aio-shutdown-inflight-" });
     const make = () =>
       cell("stream", {
+        // alpha52: streaming = incremental by nature — the documented opt-out
+        // (a transaction would buffer every chunk and discard on abort).
+        transaction: false,
         state: { chunks: [] as string[], status: "idle" } as StreamState,
         methods: {
           // The shape of every streaming reply: an open-ended loop that only

@@ -70,7 +70,6 @@ const ABSENT_ON_ANDROID: Record<string, string> = {
   // Server transport: a standalone app has no WS/IPC connection to report on.
   isConnectionDegraded: "no server transport in a standalone app",
   useConnected: "no server transport in a standalone app",
-  useCell: "server-backed cell subscription (use direct cell access)",
   useProjection: "built on the transport's reference-sharing projector",
   // Auth UI talks to /__aio/auth/* on a server.
   SignIn: "server auth endpoints",

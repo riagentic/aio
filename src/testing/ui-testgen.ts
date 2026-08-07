@@ -113,18 +113,18 @@ export function generateUITypes(
  * ```ts
  * // scripts/testgen.ts (in your app)
  * import { Window } from "happy-dom";
- * import { testgen } from "aio/testing";
+ * import { testGen } from "aio/testing";
  * import App from "../src/App.tsx";
  * import { todo } from "../src/cell/todo.ts";
  *
- * const src = await testgen(App, {
+ * const src = await testGen(App, {
  *   document: new Window().document,
  *   cells: [todo],
  * });
  * await Deno.writeTextFile("tests/ui.gen.ts", src);
  * ```
  */
-export async function testgen(
+export async function testGen(
   App: ComponentFn,
   opts: TestUIOptions & { importFrom?: string } = {},
 ): Promise<string> {
@@ -135,3 +135,7 @@ export async function testgen(
     ui.unmount();
   }
 }
+
+/** @deprecated alpha52 — renamed {@linkcode testGen} (camelCase, matching
+ *  testUI/testCell). Alias through beta. */
+export const testgen = testGen;

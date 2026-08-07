@@ -242,9 +242,14 @@ const VIOLATIONS: Case[] = [
     expect: 'no "test" task',
   },
   {
-    name: "no compile tasks",
+    name: "no build task",
     files: app({ "deno.json": denoJson({ tasks: { dev: "x", test: "y" } }) }),
-    expect: "no compile tasks defined",
+    expect: "no build task defined",
+  },
+  {
+    name: "deprecated deno.json target key",
+    files: app({ "deno.json": denoJson({ target: "browser" }) }),
+    expect: 'is now spelled "client"',
   },
   // structure
   {
@@ -268,9 +273,16 @@ const VIOLATIONS: Case[] = [
     expect: "no App.tsx found",
   },
   {
+    // Since alpha52 a dev task that runs the app entry keeps App.tsx one
+    // pass-through flag away (`deno task dev --client=browser`, CLI beats
+    // config), so the "unused" hint fires only when NOTHING can mount it:
+    // headless client, no UI build target, and a dev task that never runs
+    // the entry.
     name: "App.tsx with no UI target",
     files: app({
-      "deno.json": denoJson({ tasks: { dev: "deno run -A src/app.ts" } }),
+      "deno.json": denoJson({
+        tasks: { dev: "deno run -A scripts/serve.ts" },
+      }),
       "src/app.ts":
         `import { aio } from "aio";\nimport { counter } from "./cell.ts";\nawait aio.run({ appId: "p", client: "server-only", cells: { counter } });\n`,
     }),
@@ -515,12 +527,15 @@ const VIOLATIONS: Case[] = [
     expect: "hardcoded API key",
   },
   {
-    name: "--expose without auth",
+    name: "--expose without auth (pre-alpha52 pin — the key-default migration)",
     files: app({
       "src/app.ts":
         `import { aio } from "aio";\nimport { counter } from "./cell.ts";\nawait aio.run({ appId: "p", expose: true, cells: { counter } });\n`,
+      "deno.json": denoJson({
+        imports: { ...IMPORTS, "aio": "jsr:@riagentic/aio@1.0.0-alpha51" },
+      }),
     }),
-    expect: "--expose without explicit user auth",
+    expect: "generates a persisted shared key",
   },
   {
     name: "committed .env",
@@ -656,7 +671,7 @@ const VIOLATIONS: Case[] = [
       "src/W.tsx":
         `import { useCell } from "aio/air";\nimport { counter } from "./cell.ts";\nexport function W() { const c = useCell(counter); return <div>Loading{c.count}</div>; }\n`,
     }),
-    expect: "useCell() is deprecated",
+    expect: "useCell() was REMOVED",
   },
   // testing
   {
@@ -821,7 +836,7 @@ const VIOLATIONS: Case[] = [
       "src/c.ts":
         `import { call } from "aio";\nexport const f = () => call({ timeout: 5000 }, () => {});\n`,
     }),
-    expect: "deprecated alias",
+    expect: "was REMOVED in alpha52",
   },
   {
     name: "server-only symbol imported from aio",
@@ -866,6 +881,170 @@ const VIOLATIONS: Case[] = [
       "dep/aio": "symlink:/nonexistent/aio/versions/v1.0.0-alpha2",
     }),
     expect: "does not match dep/aio",
+  },
+  // alpha52 — the effect channel deprecations + the transaction MIGRATION
+  {
+    name: "alpha52: return-ed single effect",
+    files: app({
+      "src/cell.ts": cellFile(
+        "counter",
+        `{
+  state: { count: 0 },
+  methods: {
+    arm(s: { count: number }) {
+      return schedule.after("t", 10, { type: "counter:arm" });
+    },
+  },
+}`,
+      ).replace(
+        'import { cell } from "aio";',
+        'import { cell, schedule } from "aio";',
+      ),
+    }),
+    expect: "returning effects from a method is deprecated",
+  },
+  {
+    name: "alpha52: return-ed effects ARRAY",
+    files: app({
+      "src/cell.ts": cellFile(
+        "counter",
+        `{
+  state: { count: 0 },
+  methods: {
+    arm(s: { count: number }) {
+      return [schedule.after("t", 10, { type: "counter:arm" }), own.dispose("h")];
+    },
+  },
+}`,
+      ).replace(
+        'import { cell } from "aio";',
+        'import { cell, own, schedule } from "aio";',
+      ),
+    }),
+    expect: "returning an effects ARRAY is deprecated",
+  },
+  {
+    name: "alpha52: async cell with no transaction key (MIGRATION)",
+    files: app({
+      "src/cell.ts": cellFile(
+        "counter",
+        `{
+  state: { count: 0 },
+  methods: {
+    async load(s: { count: number }) {
+      await Promise.resolve();
+      s.count += 1;
+    },
+  },
+}`,
+      ),
+    }),
+    expect: "alpha52 made `transaction: true` the async default",
+  },
+  {
+    name: "alpha52: listensTo array form",
+    files: app({
+      "src/cell.ts": cellFile(
+        "counter",
+        `{
+  state: { count: 0 },
+  listensTo: ["other:bump"],
+  methods: {},
+}`,
+      ),
+    }),
+    expect: "listensTo array form is deprecated",
+  },
+  {
+    name: "alpha52: selector deps spread signature",
+    files: app({
+      "src/cell.ts": cellFile(
+        "counter",
+        `{
+  state: { count: 0 },
+  methods: {},
+  selectors: {
+    scaled: { deps: ["other"], fn: (s, other) => s.count },
+  },
+}`,
+      ),
+    }),
+    expect: "selector deps now arrive as a TUPLE",
+  },
+  {
+    name: "alpha52: schedule old argument order (opts 3rd)",
+    files: app({
+      "src/cell.ts": cellFile(
+        "counter",
+        `{
+  state: { attempt: 0 },
+  methods: {
+    tick(s: { attempt: number }) {
+      s.$do(schedule.backoff("rpc", s.attempt, { base: 1000 }, { type: "counter:tick" }));
+    },
+  },
+}`,
+      ).replace(
+        'import { cell } from "aio";',
+        'import { cell, schedule } from "aio";',
+      ),
+    }),
+    expect: "is the deprecated order",
+  },
+  {
+    name: "alpha52: poll `backoff` option key",
+    files: app({
+      "src/cell.ts": cellFile(
+        "counter",
+        `{
+  state: { attempt: 0 },
+  methods: {
+    tick(s: { attempt: number }) {
+      s.$do(schedule.poll("rpc", s.attempt, { type: "counter:tick" }, { every: 5000, backoff: 2 }));
+    },
+  },
+}`,
+      ).replace(
+        'import { cell } from "aio";',
+        'import { cell, schedule } from "aio";',
+      ),
+    }),
+    expect: "`backoff` option key",
+  },
+  // alpha52 — the surface diet (Package 4)
+  {
+    name: "cell ui: key (renamed visible:)",
+    files: app({
+      "src/v.ts":
+        `import { cell } from "aio";\nexport const v = cell("v", {\n  state: { a: 1, b: 2 },\n  methods: {},\n  ui: { exclude: ["b"] },\n});\n`,
+    }),
+    expect: "was renamed `visible:`",
+  },
+  {
+    name: "access without visible on an exposed app",
+    files: app({
+      "src/app.ts":
+        `import { aio } from "aio";\nimport { counter } from "./cell.ts";\nawait aio.run({ appId: "p", expose: true, key: true, cells: [counter] });\n`,
+      "src/gated.ts":
+        `import { cell } from "aio";\nexport const gated = cell("gated", {\n  state: { rows: [] },\n  methods: {},\n  access: "admin",\n});\n`,
+    }),
+    expect: "REFUSES to boot",
+  },
+  {
+    name: "aio/db VALUE import (types-only entry since alpha52)",
+    files: app({
+      "src/d.ts":
+        `import { createDB } from "aio/db";\nexport const open = createDB;\n`,
+    }),
+    expect: "types + pure helpers since",
+  },
+  {
+    name: "import from the deleted aio/schedule entry",
+    files: app({
+      "src/s.ts":
+        `import { schedule } from "aio/schedule";\nexport const x = schedule;\n`,
+    }),
+    expect: "was DELETED in",
   },
 ];
 
@@ -930,7 +1109,7 @@ const LEGAL: Clean[] = [
   },
   {
     name: "useCell named in a comment is not a use",
-    forbid: "useCell() is deprecated",
+    forbid: "useCell() was REMOVED",
     files: app({
       "src/note.ts":
         `// migrated off useCell(counter) — direct access now\nexport const x = 1;\n`,

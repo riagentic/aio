@@ -56,32 +56,11 @@ export default function App() {
   },
 });
 
-Deno.test({
-  name: "e2e sub: useCell(a) partial-sub does not starve directly-read b",
-  ignore,
-  sanitizeResources: false,
-  sanitizeOps: false,
-  async fn() {
-    // The exact bug shape, broadened: one cell via useCell (narrows the
-    // subscription), the other via direct access — both must update.
-    await withE2E({
-      cells: TWO_CELLS,
-      appTs: TICKER(),
-      app: `import { useCell } from "aio/air";
-import { a, b } from "./cells.ts";
-export default function App() {
-  const { state } = useCell(a);
-  return (<div><span t="av">{String(state.n)}</span><span t="bv">{String(b.m)}</span></div>);
-}`,
-    }, async ({ tab }) => {
-      await waitFor("mount", () => tab.text("bv"));
-      await waitFor("directly-read b climbs despite partial sub", async () => {
-        return Number(await tab.text("bv")) >= 3 ? true : null;
-      }, 15_000);
-      assert(Number(await tab.text("bv")) >= 3, "b must not be starved");
-    });
-  },
-});
+// (alpha52) The useCell(a)-narrows-the-subscription variant of this scenario
+// was retired with useCell itself: direct reads are the one subscription
+// mechanism now, and the two remaining tests cover both halves — full-page
+// direct reads (above) and a subscription that WIDENS on a late first read
+// (below), which is the partial-set shape.
 
 Deno.test({
   name: "e2e sub: a cell read only after a conditional mount still subscribes",

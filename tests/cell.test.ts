@@ -3,7 +3,8 @@
 // execute/machine) to methods-style. Machine guards became status-field guards
 // inside methods; effect creators became schedule-effect returns.
 import { assertEquals, assertThrows } from "@std/assert";
-import { cell, composeCells, testCell } from "../src/state/cell.ts";
+import { cell, composeCells } from "../src/state/cell.ts";
+import { testCell } from "../src/cell-test.ts";
 import type { CellEntry } from "../src/state/cell-types.ts";
 import { schedule } from "../src/state/schedule.ts";
 
@@ -454,7 +455,7 @@ Deno.test("cell ui: 'all' sets ui on internals", () => {
         s.count++;
       },
     },
-    ui: "all",
+    visible: "all",
   });
   assertEquals(f.__aio.ui, "all");
 });
@@ -467,7 +468,7 @@ Deno.test("cell ui: { include } sets ui on internals", () => {
         s.count++;
       },
     },
-    ui: { include: ["count"] },
+    visible: { include: ["count"] },
   });
   assertEquals(f.__aio.ui, { include: ["count"] });
 });
@@ -480,7 +481,7 @@ Deno.test("cell ui: { exclude } sets ui on internals", () => {
         s.count++;
       },
     },
-    ui: { exclude: ["cache"] },
+    visible: { exclude: ["cache"] },
   });
   assertEquals(f.__aio.ui, { exclude: ["cache"] });
 });
@@ -494,7 +495,7 @@ Deno.test("cell ui: forUser is extracted", () => {
         s.users.push(u);
       },
     },
-    ui: { include: ["users"], forUser: fn },
+    visible: { include: ["users"], forUser: fn },
   });
   assertEquals(f.__aio.ui, { include: ["users"] });
   assertEquals(f.__aio.uiForUser, fn);
@@ -566,7 +567,7 @@ Deno.test("compose: ui 'all' cell visible, ui absent cell hidden", () => {
         s.count++;
       },
     },
-    ui: "all",
+    visible: "all",
   });
   const hidden = cell("bg", {
     state: { queue: [] as string[] },
@@ -609,7 +610,7 @@ Deno.test("cell with explicit config is not overridden by cellDefaults", () => {
       },
     },
     persist: { include: ["count"] },
-    ui: { exclude: ["secret"] },
+    visible: { exclude: ["secret"] },
   });
 
   assertEquals(f.__aio.persist, { include: ["count"] });

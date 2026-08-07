@@ -79,16 +79,16 @@ If you're wiring a project by hand instead of `am create`, this is the shape:
     "esbuild": "npm:esbuild@^0.24",
     "electron": "npm:electron"
   },
+  "client": "browser",
+  "build": { "targets": ["browser"], "platforms": ["host"], "out": "dist" },
   "tasks": {
     "dev": "deno run -A src/app.ts",
-    "install:electron": "deno install --allow-scripts=npm:electron",
-    "am": "deno run -A jsr:@riagentic/aio/am",
+    "build": "deno run -A jsr:@riagentic/aio/build-all --build-spec=jsr:@riagentic/aio/build",
+    "compile": "deno run -A jsr:@riagentic/aio/build-all --build-spec=jsr:@riagentic/aio/build --targets=browser",
     "test": "deno test -A tests/",
-    "compile:browser": "deno run -A jsr:@riagentic/aio/build --compile",
-    "compile:electron": "deno run -A jsr:@riagentic/aio/build --compile --electron",
-    "compile:cli": "deno run -A jsr:@riagentic/aio/build --compile --cli",
-    "compile:service": "deno run -A jsr:@riagentic/aio/build --compile --service --headless",
-    "compile:android": "deno run -A jsr:@riagentic/aio/build --android"
+    "check": "deno check src/",
+    "fmt": "deno fmt",
+    "am": "deno run -A jsr:@riagentic/aio/am"
   }
 }
 ```
@@ -127,16 +127,16 @@ fetch them transitively without a JSR manifest):
     "esbuild": "npm:esbuild@^0.24",
     "electron": "npm:electron"
   },
+  "client": "browser",
+  "build": { "targets": ["browser"], "platforms": ["host"], "out": "dist" },
   "tasks": {
     "dev": "deno run -A src/app.ts",
-    "install:electron": "deno install --allow-scripts=npm:electron",
-    "am": "deno run -A ./dep/aio/src/am.ts",
+    "build": "deno run -A ./dep/aio/src/build-all.ts --build-spec=./dep/aio/src/build.ts",
+    "compile": "deno run -A ./dep/aio/src/build-all.ts --build-spec=./dep/aio/src/build.ts --targets=browser",
     "test": "deno test -A tests/",
-    "compile:browser": "deno run -A ./dep/aio/src/build.ts --compile",
-    "compile:electron": "deno run -A ./dep/aio/src/build.ts --compile --electron",
-    "compile:cli": "deno run -A ./dep/aio/src/build.ts --compile --cli",
-    "compile:service": "deno run -A ./dep/aio/src/build.ts --compile --service --headless",
-    "compile:android": "deno run -A ./dep/aio/src/build.ts --android"
+    "check": "deno check src/",
+    "fmt": "deno fmt",
+    "am": "deno run -A ./dep/aio/src/am.ts"
   }
 }
 ```
@@ -279,7 +279,7 @@ export const api = cell("api", {
     async fetch(s, url: string) {
       // `call` adds timeout/retry around any async work
       const text = await call(
-        { timeout: 5000, retries: 2 },
+        { timeoutMs: 5000, retries: 2 },
         async () => (await fetch(url)).text(),
       );
       s.data = text;

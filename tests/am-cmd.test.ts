@@ -750,9 +750,9 @@ Deno.test("cmdFix: sibling vendoring is 'custom', not a dep/aio symlink", async 
 
 Deno.test("cmdFix: adds missing standard tasks, never overwrites existing ones", async () => {
   // Hand-rolled apps (or ones predating the scaffold) miss the task set the
-  // docs assume (`deno task compile:electron`, the dev:*/compile:* matrix).
-  // am fix appends the missing ones from the SAME producer am create uses —
-  // and an existing task is user customization: it must survive untouched.
+  // docs assume (`deno task build`, `check`, `fmt`, …). am fix appends the
+  // missing ones from the SAME producer am create uses — and an existing task
+  // is user customization: it must survive untouched.
   const orig = Deno.cwd();
   const logs: string[] = [];
   const realLog = console.log;
@@ -775,9 +775,9 @@ Deno.test("cmdFix: adds missing standard tasks, never overwrites existing ones",
       await Deno.readTextFile(joinPath(dir, "deno.json")),
     ) as { tasks: Record<string, string> };
     // Missing standard tasks were added — for the targets this app declares…
-    assert(cfg.tasks["compile:electron"], "compile:electron added");
+    assert(cfg.tasks["install:electron"], "electron's install task added");
     assert(cfg.tasks["compile"], "default compile added");
-    assert(cfg.tasks["dev:browser"], "dev matrix added for browser");
+    assert(cfg.tasks["build"] && cfg.tasks["check"], "the diet is repaired");
     // …existing ones were NOT touched.
     assertEquals(cfg.tasks.dev, "deno run -A my-custom-entry.ts");
     assertEquals(cfg.tasks.seed, "echo seed");
@@ -824,29 +824,34 @@ Deno.test("cmdFix: a browser-only app gets no android/cli/service tasks", async 
 
     for (
       const t of [
+        // The pre-alpha52 per-target matrix must never be added back…
         "dev:android",
         "dev:cli",
         "dev:service",
+        "dev:server",
+        "dev:browser",
         "compile:android",
         "compile:cli",
         "compile:service",
+        "compile:server",
+        "compile:browser",
         "dev:electron",
         "compile:electron",
-        "install:electron",
         "dev:client",
+        // …and install:electron is electron-only.
+        "install:electron",
       ]
     ) {
       assertEquals(
         cfg.tasks[t],
         undefined,
-        `${t} is for a target this app does not ship`,
+        `${t} is for a target this app does not ship (or a retired matrix task)`,
       );
     }
-    // What it DOES ship, plus the universally useful ones, is still repaired.
-    assert(cfg.tasks["dev:browser"], "the browser target's tasks are added");
-    assert(cfg.tasks["compile:browser"], "compile:browser added");
+    // The universal diet is still repaired.
     assert(cfg.tasks["compile"], "compile is universal");
     assert(cfg.tasks["build"], "build is universal");
+    assert(cfg.tasks["check"] && cfg.tasks["fmt"], "check/fmt are universal");
     assert(cfg.tasks["test"] && cfg.tasks["am"] && cfg.tasks["lint"]);
     // Nothing curated was removed or rewritten.
     assertEquals(cfg.tasks.dev, "deno run -A src/app.ts --port=9000");
@@ -881,7 +886,7 @@ Deno.test("cmdFix: build.targets in OBJECT form declares the same fleet as the a
         build: {
           targets: {
             server: { entry: "src/relay/app.ts", name: "relay" },
-            cli: { entry: "src/app.ts" },
+            "electron-client": {},
           },
         },
         tasks: {},
@@ -892,9 +897,12 @@ Deno.test("cmdFix: build.targets in OBJECT form declares the same fleet as the a
     const cfg = JSON.parse(
       await Deno.readTextFile(joinPath(dir, "deno.json")),
     ) as { tasks: Record<string, string> };
-    assert(cfg.tasks["dev:service"], "the object form is read, not ignored");
-    assert(cfg.tasks["compile:service"]);
-    assert(cfg.tasks["dev:cli"]);
+    // The object form is read, not ignored: electron-client's target task is
+    // added (proof the keys were walked), plus the universal diet — and none
+    // of the retired per-target matrix.
+    assert(cfg.tasks["install:electron"], "the object form is read");
+    assert(cfg.tasks["dev"] && cfg.tasks["build"] && cfg.tasks["compile"]);
+    assertEquals(cfg.tasks["dev:service"], undefined);
     assertEquals(cfg.tasks["dev:android"], undefined);
     assertEquals(cfg.tasks["dev:browser"], undefined);
   } finally {
@@ -949,14 +957,20 @@ Deno.test("tasksForTargets: every standard task stays reachable from some target
 
 Deno.test("tasksForTargets: an unknown target is reported, an empty fleet is assumed", () => {
   const all = standardTasks(true, "browser");
-  const bad = tasksForTargets(all, ["browser", "webassembly"]);
+  const bad = tasksForTargets(all, ["electron", "webassembly"]);
   assertEquals(bad.unknown, ["webassembly"], "named, never silently dropped");
-  assert(bad.tasks["dev:browser"], "the known target is still repaired");
+  assert(
+    bad.tasks["install:electron"],
+    "the known target is still repaired",
+  );
 
   const none = tasksForTargets(all, []);
   assertEquals(none.assumed, true);
-  assert(none.tasks["dev:browser"], "falls back to the framework default");
-  assertEquals(none.tasks["dev:android"], undefined);
+  assertEquals(
+    none.tasks["install:electron"],
+    undefined,
+    "the browser fallback carries no electron-only task",
+  );
   assertEquals(none.tasks["dev"], all["dev"], "universal tasks always apply");
 });
 
@@ -1282,13 +1296,13 @@ Deno.test("installFromArgv: the one dev-install recipe", () => {
   ]);
 });
 
-// `am new <kind> <name>` took the name straight from argv into BOTH a
-// file path and generated source. `am new cell "../etc/x"` escaped src/, and a
+// `am add <kind> <name>` takes the name straight from argv into BOTH a
+// file path and generated source. `am add cell "../etc/x"` escaped src/, and a
 // name containing `}` closed the generated `cell(` literal so everything after
 // it became executable code in the developer's own project.
-Deno.test("am new: a name that is not an identifier is refused", async () => {
-  const { cmdNew } = await import("../src/am/am-cmd-meta.ts");
-  const dir = await Deno.makeTempDir({ prefix: "am-new-" });
+Deno.test("am add: a name that is not an identifier is refused", async () => {
+  const { cmdAdd, cmdNew } = await import("../src/am/am-cmd-meta.ts");
+  const dir = await Deno.makeTempDir({ prefix: "am-add-" });
   const cwd = Deno.cwd();
   const errors: string[] = [];
   const origErr = console.error;
@@ -1308,10 +1322,10 @@ Deno.test("am new: a name that is not an identifier is refused", async () => {
       ]
     ) {
       errors.length = 0;
-      // A refusal is also a non-zero exit — `am new cell x && git add …`
+      // A refusal is also a non-zero exit — `am add cell x && git add …`
       // must not run the second half.
       const code = await withExitStub(() =>
-        cmdNew(["cell", bad], { json: false } as never)
+        cmdAdd(["cell", bad], { json: false } as never)
       );
       assertEquals(code, 1, `"${bad}" must exit 1`);
       assert(
@@ -1327,10 +1341,29 @@ Deno.test("am new: a name that is not an identifier is refused", async () => {
     } catch { /* expected */ }
     assertEquals(wrote, false, "a refused name creates no files");
 
-    // A good name still works, and '-' becomes a valid identifier.
-    await cmdNew(["cell", "my-widget"], { json: false } as never);
-    const src = await Deno.readTextFile(`${dir}/src/cells/my-widget/index.ts`);
-    assertStringIncludes(src, "export const myWidget = cell('my-widget'");
+    // A good name still works, and '-' becomes a valid identifier — in the
+    // scaffold's own style (src/cell/<name>.ts, direct cell reads).
+    await cmdAdd(["cell", "my-widget"], { json: false } as never);
+    const src = await Deno.readTextFile(`${dir}/src/cell/my-widget.ts`);
+    assertStringIncludes(src, 'export const myWidget = cell("my-widget"');
+    // The deprecated `am new` alias still works, and names the rename.
+    errors.length = 0;
+    await cmdNew(["cell", "other"], { json: false } as never);
+    await Deno.stat(`${dir}/src/cell/other.ts`);
+    assert(
+      errors.some((e) => e.includes("am add")),
+      "`am new` must name the new spelling",
+    );
+    // `am add page` was removed — refused with guidance, nothing written.
+    errors.length = 0;
+    const pageCode = await withExitStub(() =>
+      cmdAdd(["page", "settings"], { json: false } as never)
+    );
+    assertEquals(pageCode, 1, "am add page must exit 1");
+    assert(
+      errors.some((e) => e.includes("removed")),
+      `page removal must be named, got: ${errors.join(" | ")}`,
+    );
   } finally {
     console.error = origErr;
     Deno.chdir(cwd);

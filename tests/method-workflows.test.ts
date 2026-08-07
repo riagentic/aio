@@ -62,6 +62,10 @@ Deno.test("race: first branch wins; timeout sugar works", async () => {
 
 const wf = cell("wf-demo", {
   state: { status: "idle", waited: false },
+  // These tests PIN the opted-out semantics (alpha52: transaction is the
+  // default): live reads for `until(() => s.waited)` and a write recorded
+  // AFTER the abort ("cancelled") — a transaction would discard both.
+  transaction: false,
   cancelOn: { slowWork: ["wf-demo:stop"] },
   methods: {
     async slowWork(
@@ -139,6 +143,10 @@ testCell(wf, "sync method: $signal is safely optional", async (t) => {
 
 const scanner = cell("wf-scan", {
   state: { current: null as string | null, done: [] as string[], aborted: 0 },
+  // Pins the opted-out shape: the superseded call still RECORDS its abort
+  // (s.aborted += 1 after the signal fired) — a transaction discards a
+  // cancelled call's writes by design.
+  transaction: false,
   cancelOn: { open: "self" },
   methods: {
     async open(

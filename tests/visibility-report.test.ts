@@ -26,7 +26,7 @@ const counter = cell("counter", {
 
 const notes = cell("notes", {
   state: { items: [] as string[] },
-  ui: "none",
+  visible: "none",
   methods: {
     add(s, t: string) {
       s.items.push(t);
@@ -36,7 +36,7 @@ const notes = cell("notes", {
 
 const trading = cell("trading", {
   state: { orders: [] as unknown[], positions: [] as unknown[], cache: {} },
-  ui: { include: ["orders", "positions"] },
+  visible: { include: ["orders", "positions"] },
   persist: { exclude: ["cache"] },
   methods: {
     place(s, o: unknown) {

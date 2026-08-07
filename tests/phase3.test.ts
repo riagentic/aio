@@ -12,10 +12,9 @@ import {
   _getState,
   _injectState,
   _reset as _resetAio,
-  type CellRef,
   handleMessage,
 } from "../src/state-core.ts";
-import { useAio, useCell, useLocal } from "../src/adapters/air.ts";
+import { useAio, useLocal } from "../src/adapters/air.ts";
 
 function createDOM(): {
   document: Document;
@@ -483,89 +482,6 @@ Deno.test({
 
     _unmount(handle);
     await cleanup();
-  },
-});
-
-// ── AIO Hooks: useCell ───────────────────────────────────────────
-
-Deno.test({
-  name: "aio-hooks: useCell — reads injected state reactively",
-  async fn() {
-    const { document, root, cleanup } = createDOM();
-    _setDocument(document);
-    _resetAio();
-
-    // CellRef interface requires __aio — this is the public type shape
-    const counter: CellRef = {
-      __aio: { id: "counter", state: { count: 0 } },
-    };
-    _injectState({ counter: { count: 42 } });
-
-    const App = () => {
-      const { state } = useCell(counter);
-      return h("div", null, `Count: ${state.count}`);
-    };
-
-    const handle = mount(root, App);
-    assertEquals(root.innerHTML, "<div>Count: 42</div>");
-
-    // Delta update (Immer patches)
-    handleMessage({
-      $patches: [{ op: "replace", path: ["counter", "count"], value: 99 }],
-    });
-    handle._flush();
-    assertEquals(root.innerHTML, "<div>Count: 99</div>");
-
-    _unmount(handle);
-    _resetAio();
-    await cleanup();
-  },
-});
-
-Deno.test({
-  name: "aio-hooks: useCell — fallback to initial state",
-  async fn() {
-    const { document, root, cleanup } = createDOM();
-    _setDocument(document);
-    _resetAio();
-
-    const counter: CellRef = {
-      __aio: { id: "counter", state: { count: 0 } },
-    };
-    // No state injected — should use fallback from ref
-
-    const App = () => {
-      const { state } = useCell(counter);
-      return h("div", null, `Count: ${state.count}`);
-    };
-
-    const handle = mount(root, App);
-    assertEquals(root.innerHTML, "<div>Count: 0</div>");
-
-    _unmount(handle);
-    _resetAio();
-    await cleanup();
-  },
-});
-
-Deno.test({
-  name: "aio-hooks: useCell — send proxy dispatches actions",
-  async fn() {
-    _resetAio();
-
-    const counter: CellRef = {
-      __aio: { id: "counter", state: { count: 0 } },
-    };
-    const { send } = useCell(counter);
-
-    // Can't test WebSocket sending without mock, but verify send is callable
-    assertEquals(typeof send.increment, "function");
-    assertEquals(typeof send.reset, "function");
-
-    // Calling should not throw (queues offline)
-    send.increment!(5);
-
-    _resetAio();
   },
 });
 

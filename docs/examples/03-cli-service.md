@@ -24,11 +24,14 @@ Create a new directory and `deno.json`:
   "imports": {
     "aio": "jsr:@riagentic/aio@^1.0.0-alpha17"
   },
+  "client": "server",
+  "build": { "targets": ["server"], "out": "dist" },
   "tasks": {
     "dev": "deno run -A src/app.ts --client=server-only",
     "am": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha17/am",
     "test": "deno test -A tests/",
-    "compile:service": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha17/build --compile --service --headless"
+    "build": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha17/build-all --build-spec=jsr:@riagentic/aio@^1.0.0-alpha17/build",
+    "compile": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha17/build-all --build-spec=jsr:@riagentic/aio@^1.0.0-alpha17/build --targets=server"
   }
 }
 ```

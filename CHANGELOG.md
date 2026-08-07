@@ -1,5 +1,92 @@
 # Changelog
 
+## 1.0.0-alpha52 — the last call (2026-08-07)
+
+The one big break window before beta, all at once — four design audits, five
+work packages, and every approved breaking change front-loaded so beta (and 1.0)
+can promise stability. **Every break ships with a working deprecated alias
+through beta + a one-time hint at the old spelling + an automated rewrite**
+(`aiol --safe-fix` / `am fix --migrate-tasks`). The whole migration was
+field-tested end to end on two real apps (1089 tests) — three tooling blockers
+found and fixed, then independently re-verified: unmigrated apps run untouched
+with accurate hints; migrated apps pass every gate on the new spellings; the
+migration is idempotent.
+
+### The honest layer (bugs + guardrails, no breaks)
+
+Sync/async effect-classifier disagreement fixed (mixed `[effect, data]` returns
+now fail loud on both paths) · standalone runtime (testUI/testCell/ Android) now
+runs `onInit`/`onDestroy` + the circuit breaker — the harness is no longer more
+permissive than prod · `--expose` no-auth warning no longer cries wolf on
+`auth: true`/`resolveUser` apps · config help table tells the truth (19 missing
+keys added, `key`/`dbPath` defaults corrected) · `onMigrate` without `version`
+throws at `cell()` · persistence DDL failures are fatal, never warn-and-continue
+· `cdiag` health frames now arrive over UDS (Electron) · **big-data
+guardrails**: per-cell serialized-size warn (~1MB) / hard error (16MB) naming
+the right tier; new doc `docs/persistence/big-data.md` (state / `db:` rows /
+blobs / pipelines) · **measured perf**: 10MB-state persist flush 22ms → 0.2ms
+(~100×), broadcast ~340× (unchanged-cell skip, deduped serialization) ·
+`PRAGMA user_version` belongs to the APP — aio's own schema tracking moved to a
+private `aio_schema` table (aio ≤alpha51 wrote user_version; see the docs
+caveat).
+
+### One vocabulary (breaking, auto-migrated)
+
+`service` → `server` everywhere · deno.json `target` → `client` · the
+`compile:remote:*`/`dev:remote:*` task families retire — `deno task build` over
+`build.targets` is THE fleet path · scaffold task diet 30 → ~10 (+ `check`,
+`fmt`) · `am new` → `am add` (and it stops generating deprecated code;
+`add page` removed) · am's `--client=N` → `--client-index`/`-i` ·
+`--kill-existing` → `--takeover` · bare `--server-url` → `--connect` ·
+`am fix --migrate-tasks` migrates a repo in one run — and derives
+`build.targets` from the tasks it retires, so no fleet information is lost.
+
+### The effect channel (breaking, auto-migrated)
+
+Effects move off the return: `s.$do(effect)` — `return` is always a value now
+(returned effects keep working through beta with a hint) ·
+`self(method,
+...args)` kills the `: CellEffect` TS7022 annotation wart ·
+`transaction: true` is the async default (safety: rollback-on-throw, conflict
+detection; `--safe-fix` inserts `transaction: false` into undecided cells, and
+an undecided async cell hints once at `cell()`) · `$`-prefixed state keys
+reserved · `listensTo` array form retires; object form accepts arrays · selector
+deps form takes a tuple so deps + parameterized compose ·
+`schedule.backoff/poll` argument order fixed (action third), poll's `backoff`
+option → `factor`, `blocking` exported top-level.
+
+### Surface diet + safety defaults (breaking, auto-migrated)
+
+Cell `ui:` → `visible:` ("access gates calls, visible gates reads") · **an
+exposed app with no per-user auth now gets a generated shared key by default**
+(`key: false` is the loud opt-out; loopback unchanged) · `access` without
+`visible` REFUSES to boot on exposed/multi-user apps (was a warning) · `aio/db`
+runtime values live on `aio/server` (deprecated re-exports remain) ·
+`aio/schedule` + `aio/selectors` entries deleted · ~59 sync/state-core engine
+internals `@internal` (public surface 479 → 417 symbols) · `call({timeout})` and
+`useCell` removed (registry errors name the fix) · renames with aliases:
+`checkCells`, `NodeAction`, `testGen`, `StateOf`, one `Access` type · `AioUser`
+opens for custom claims · `aio.run<S>()` typed overload · **`app.blobs`**:
+content-addressed binary store under the app's files dir, HTTP Range streaming,
+dedup by construction — bytes never ride the state channel.
+
+### Internals (invisible, now-or-never)
+
+`protocol/` decomposed to a leaf (browser runtime moved to `browser/`) ·
+boundary matrix trimmed 81 → 54 honest edges + root-file conduit rule (edge
+laundering impossible) + dead-edge-is-error self-ratchet · ONE offline queue
+(one drop policy: oldest, with immediate ack rejection) · `routeEffect` — a new
+effect kind is a compile error at all three runtimes · frame×transport `SERVES`
+matrix + ignorable-kind tier reserved for wire evolution · dead alpha27 relics
+deleted (browser `actions`/`effects`, legacy config branch).
+
+Suite 4190/0 · build-E2E 14/0 · onboard 15/0 · publish dry-run green · all
+static gates green. Field verification: risoto-aio 1018/0 + nftpass 71/0,
+unmigrated AND migrated.
+
+Upgrade guide: `docs/upgrade/from-alpha51-to-alpha52.md` — or just run
+`aiol --safe-fix` + `am fix --migrate-tasks`.
+
 ## 1.0.0-alpha51 — zero inbox (2026-08-07)
 
 Every open field-report item across five reports (geng-market, spacy, fezor,

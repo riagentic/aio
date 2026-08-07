@@ -169,6 +169,8 @@ export async function issueSnapshotTs(db: DB): Promise<number> {
  * Returns the issued server_ts when the row was newly inserted, or null for a
  * duplicate — callers must not re-dispatch/re-broadcast a duplicate, and must
  * stamp broadcasts with the returned ts so peers can advance their cursor.
+
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
  */
 export async function persistOp(
   db: DB,
@@ -263,6 +265,8 @@ export async function getOpServerTs(
  * client-side op-id dedup. `_hlc` is kept in the signature for call-site
  * stability; it must never be used as a delivery filter again (it remains
  * valid as a conservative compaction watermark — see server-handler).
+
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
  */
 export async function loadOpsSince(
   db: DB,
@@ -351,6 +355,8 @@ export async function seedSyncSnapshot(
 
 /**
  * Read the compaction low_water mark for a cell, or null if none.
+
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
  */
 export async function getLowWater(
   db: DB,

@@ -11,6 +11,8 @@ import { mergeField } from "./merge.ts";
 
 /**
  * Dependencies injected into the client-side sync engine.
+
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
  */
 export interface SyncEngineDeps {
   clientId: string;
@@ -32,6 +34,8 @@ export interface SyncEngineDeps {
 
 /**
  * Client-side CRDT sync engine that buffers local ops, rebases on acks, and manages online/offline state.
+
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
  */
 export interface SyncEngine {
   handleLocalAction(
@@ -70,6 +74,8 @@ export interface SyncEngine {
 
 /**
  * Create a client-side sync engine that coordinates op buffering, HLC clocks, and rebase.
+
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
  */
 export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
   let _opCounter = 0;

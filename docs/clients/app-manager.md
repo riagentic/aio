@@ -50,13 +50,27 @@ Auto-fixed (safe):
 | missing standard tasks     | add-only, and only for the targets the app declares    |
 | dependency cache           | warms `deno cache` — surfaces any resolution error     |
 
-Task repair is **add-only and scoped to the fleet**: `am fix` adds the
-universally useful tasks (`dev`, `build`, `compile`, `test`, `am`, `doctor`,
-`lint`) plus the ones the app's declared targets need — read from `target` and
-`build.targets` (either spelling: the array `["browser"]` or the object form
-with per-target overrides). A browser-only app never gets `dev:android`,
-`dev:cli` or `dev:service`. A task the app already has is never rewritten or
-removed, so a curated task list survives every repair.
+Task repair is **add-only and scoped to the fleet**: `am fix` adds the universal
+tasks (`dev`, `build`, `compile`, `test`, `check`, `fmt`, `am`, `doctor`,
+`lint`) plus `install:electron` when the app's declared targets need it — read
+from `client` (formerly `target`) and `build.targets` (either spelling: the
+array `["browser"]` or the object form with per-target overrides). A task the
+app already has is never rewritten or removed, so a curated task list survives
+every repair.
+
+`am fix` also renames the deprecated deno.json `target` key to `client`
+(mechanical, value untouched), and when it sees the pre-alpha52 task matrix
+(`dev:service`, `compile:remote:*`, …) it points at the migration:
+
+```sh
+am fix --migrate-tasks
+```
+
+`--migrate-tasks` converts an old scaffold to the one vocabulary: pristine
+old-scaffold tasks are **deleted** (the new matrix covers them — dev flags pass
+through, `deno task build` builds the fleet) or rewritten; `*:service` names
+rename to `*:server`; anything whose command you customized is **kept** and
+reported as "review manually" — it never deletes a user-edited task.
 
 ### The seal: an unpinned app gets pinned
 
@@ -529,8 +543,7 @@ deno task am log --follow         # stream (like tail -f), also: -f
 deno task am log --client         # tail client log (~/.<appId>/logs/client.log)
 deno task am errors               # last transpile error (dev mode)
 deno task am watch                # hot-restart on file change in src/
-deno task am new cell payments # scaffold cell
-deno task am new page settings    # scaffold page
+deno task am add cell payments    # scaffold src/cell/payments.ts (was: am new)
 ```
 
 ## Trojan — Control REST API

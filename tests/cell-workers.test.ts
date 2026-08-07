@@ -44,8 +44,9 @@ export const heavy = cell("heavy", {
       s.lastMs = ms;
       return "burned:" + ms;
     },
-    async twoPhase(s: { note: string }) {
-      s.note = "phase1";            // commits + streams home before the await
+    async twoPhase(s: { note: string; $commit: () => void }) {
+      s.note = "phase1";
+      s.$commit();                  // alpha52 spinner idiom: publish mid-method
       await new Promise((r) => setTimeout(r, 60));
       s.note = "phase2";
     },

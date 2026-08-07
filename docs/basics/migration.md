@@ -43,8 +43,7 @@ resolves to an old stable).
     "dev": "deno run -A src/app.ts",
     "am": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha17/am",
     "test": "deno test -A tests/",
-    "compile:browser": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha17/build --compile",
-    "compile:electron": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha17/build --compile --electron"
+    "build": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha17/build-all --build-spec=jsr:@riagentic/aio@^1.0.0-alpha17/build"
   }
 }
 ```
@@ -230,7 +229,7 @@ async fetchPrice(s) {
 import { call } from "aio";
 import { dc } from "./cell/dc/index.ts";
 
-const price = await call({ timeout: 5000 }, () => dc.getPrice("BTC"));
+const price = await call({ timeoutMs: 5000 }, () => dc.getPrice("BTC"));
 ```
 
 ---

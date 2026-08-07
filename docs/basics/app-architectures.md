@@ -22,8 +22,9 @@ architecture 2.
 ## 1. One app, many surfaces
 
 One codebase, one `cell()` set, one server. Every client renders the same server
-state and dispatches into it. This is aio's default story, and the scaffold
-already carries the whole task matrix (`dev:remote:*`, `compile:remote:*`).
+state and dispatches into it. This is aio's default story: one `dev` task (flags
+pass through — `deno task dev --expose` for the server side) and one `build`
+task fanning out over `build.targets`.
 
 ### Build
 
@@ -60,8 +61,8 @@ already carries the whole task matrix (`dev:remote:*`, `compile:remote:*`).
 
 ### What to get right (all documented, all tested)
 
-- Per-user visibility: `access` gates who may **call**, `ui: { forUser }` gates
-  who may **see** — a multi-user app needs both ([auth](../auth/auth.md)).
+- Per-user visibility: `access` gates who may **call**, `visible: { forUser }`
+  gates who may **see** — a multi-user app needs both ([auth](../auth/auth.md)).
 - TLS under `--expose`: browsers accept the generated self-signed cert with a
   click-through; non-browser clients need the real cert
   (`--tls-cert`/`--tls-key`) or the app's generated CA — the boot warning names

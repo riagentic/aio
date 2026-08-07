@@ -216,6 +216,8 @@ Deno.test("integration: selectors work across composed cell(methods) cells", () 
 
 Deno.test("integration: batching produces correct action count across awaits", async () => {
   const store = cell("store", {
+    // alpha52: pins the incremental micro-batching machinery — the opt-out.
+    transaction: false,
     state: { a: 0, b: 0, c: 0, d: 0 },
     methods: {
       async multiStep(s) {

@@ -75,6 +75,19 @@ async function main(): Promise<void> {
     }`,
   );
 
+  // Retired spellings must not survive in LIVE docs. The snippet type-check
+  // gate cannot catch these: a deprecated-but-still-working form (the old
+  // selector spread signature) type-checks by design, and prose/tables
+  // (`call({ timeout })` in an API table) are invisible to it. This is the
+  // prose-level complement — a small denylist of spellings the one-vocabulary
+  // work retired, hard-gated outside the historical dirs.
+  const retiredIssues = await checkRetiredSpellings();
+  console.log(
+    `Retired spellings: ${
+      retiredIssues.length ? `${retiredIssues.length} found` : "none"
+    }`,
+  );
+
   // R2.2: every AioErrorCode must be documented in docs/debugging/errors.md, so
   // a new code can never ship without an operator-facing explanation.
   const codeIssues = await checkErrorCodes();
@@ -108,7 +121,59 @@ async function main(): Promise<void> {
     );
     Deno.exit(1);
   }
+  if (retiredIssues.length) {
+    console.log(
+      `\nRetired spellings in live docs (must fix — teach the current ` +
+        `vocabulary, or move the page to upgrade/):\n${
+          retiredIssues.join("\n")
+        }`,
+    );
+    Deno.exit(1);
+  }
   console.log("\n✓ All error codes documented.");
+}
+
+/** Spellings the framework retired that live docs must not teach. Each entry
+ *  is [pattern, why]. Lines that TALK ABOUT the rename (naming the new
+ *  spelling too) are allowed — a migration note is not a stale teaching. */
+const RETIRED_SPELLINGS: Array<[RegExp, string]> = [
+  [/\bcompile:remote:/, "the compile:remote:* task family → `deno task build`"],
+  [/\bdev:remote:/, "the dev:remote:* task family → `deno task dev` + flags"],
+  [/\b(?:dev|compile):service\b/, "`service` is spelled `server` (alpha52)"],
+  [/\bcall\(\s*\{\s*timeout\s*[,:}?]/, "call()'s `timeout` → `timeoutMs`"],
+  [/\{\s*timeout\?,\s*retries\?/, "call()'s `timeout` → `timeoutMs`"],
+];
+
+/** Historical dirs may show old APIs on purpose; everything else is live. */
+async function checkRetiredSpellings(): Promise<string[]> {
+  const issues: string[] = [];
+  for await (
+    const entry of walk(DOCS_DIR, {
+      exts: [".md"],
+      includeDirs: false,
+      skip: [/\/upgrade\//, /\/specs\//, /\/release-notes\//],
+    })
+  ) {
+    const rel = entry.path.replace(DOCS_DIR, "");
+    if (rel === "content.md") continue; // generated index — mirrors sources
+    const lines = (await Deno.readTextFile(entry.path)).split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]!;
+      for (const [re, why] of RETIRED_SPELLINGS) {
+        if (!re.test(line)) continue;
+        // A line that also carries the NEW spelling (or explicitly talks
+        // about migrating off the old one) is a migration note, not teaching.
+        if (
+          /timeoutMs|--migrate-tasks|deprecated|retired|alpha52|migration/
+            .test(line)
+        ) {
+          continue;
+        }
+        issues.push(`  ${rel}:${i + 1}  ${why}  →  ${line.trim()}`);
+      }
+    }
+  }
+  return issues;
 }
 
 /** Every `docs/….md` path mentioned in src/ code must exist on disk. */

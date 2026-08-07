@@ -26,6 +26,8 @@ function parseRetention(retention: string): number {
 
 /**
  * Storage abstraction for op buffer persistence
+
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
  */
 export interface OpBufferStorage {
   loadOps(cell: string): Promise<SyncOp[]>;
@@ -157,6 +159,8 @@ export function createMemoryStorage(): OpBufferStorage {
 
 /**
  * Client-side operation buffer that caps pending ops and delegates to storage.
+
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
  */
 export interface OpBuffer {
   add(op: SyncOp): Promise<boolean>;
@@ -197,6 +201,8 @@ export interface OpBufferDropCallback {
 
 /**
  * Configuration options for the op buffer.
+
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
  */
 export interface OpBufferOptions {
   pendingCap?: number;
@@ -208,6 +214,8 @@ export interface OpBufferOptions {
 
 /**
  * Create an op buffer backed by the given storage implementation.
+
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
  */
 export function createOpBuffer(
   storage: OpBufferStorage,

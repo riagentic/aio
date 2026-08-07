@@ -63,9 +63,9 @@ folders. The folder dependency matrix is CI-enforced by `deno task boundaries`
 | Folder         | Purpose                                                     | Key files                                       |
 | -------------- | ----------------------------------------------------------- | ----------------------------------------------- |
 | `state/`       | Isomorphic core: cells, signals, dispatch, schedule         | `cell-create.ts`, `signal.ts`, `dispatch.ts`    |
-| `protocol/`    | Wire protocol messages + cid/ack + version handshake        | `protocol-types.ts`, `browser-ack.ts`           |
+| `protocol/`    | Wire protocol messages + cid/ack + version handshake        | `protocol-types.ts`, `ack-registry.ts`          |
 | `air/`         | AIR renderer: vdom, hooks, hydration, SSR, transitions      | `vdom.ts`, `renderer-flush.ts`, `ssr-stream.ts` |
-| `browser/`     | Browser client: transport, router, client boot              | `browser-transport.ts`, `browser-air-hooks.ts`  |
+| `browser/`     | Browser client: transport, router, cell stub, client boot   | `browser-air-transport.ts`, `browser-ack.ts`    |
 | `server/`      | App bootstrap, HTTP/WS/UDS server, persistence, doctor      | `aio.ts`, `server-ws.ts`, `persistence.ts`      |
 | `diagnostics/` | Logger, error codes, diagnostic bus, time-travel core       | `error.ts`, `logger.ts`, `diagnostic-bus.ts`    |
 | `sync/`        | CRDT sync engine: HLC, merge, rebase, compaction            | `sync-engine.ts`, `merge.ts`, `hlc.ts`          |

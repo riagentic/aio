@@ -11,7 +11,7 @@ import {
   _rejectAllPending,
   _resolveAck,
   _setAckTimeoutMs,
-} from "../src/protocol/browser-ack.ts";
+} from "../src/browser/browser-ack.ts";
 
 // ── Registration ─────────────────────────────────────────────────────
 

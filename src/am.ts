@@ -6,7 +6,7 @@
  * Thin facade — delegates to split command modules:
  * - am-cmd-process.ts: start, stop, restart, watch, status, instances
  * - am-cmd-inspect.ts: clients, sql, log, errors, metrics, health, config
- * - am-cmd-meta.ts:    version, new, help
+ * - am-cmd-meta.ts:    version, add, help
  * - am-cmd-state.ts:   state, ui, dispatch, actions, tt, persist, snapshot
  * - am-cmd-auth.ts:    auth (users, create, unlock, revoke, …)
  *
@@ -51,6 +51,7 @@ import {
 } from "./am/am-cmd-inspect.ts";
 
 import {
+  cmdAdd,
   cmdHelp,
   cmdNew,
   cmdUninstall,
@@ -134,7 +135,8 @@ const COMMANDS: Record<string, CmdHandler> = {
   auth: cmdAuth,
   // Meta
   create: cmdCreate,
-  new: cmdNew,
+  add: cmdAdd,
+  new: cmdNew, // deprecated alias of `add` — prints the rename, still works
   pin: cmdPin, // which aio version this app builds against
   link: cmdLink, // just the dep/aio symlink
   fix: cmdFix, // full clone repair (symlink + env + electron + config + …)

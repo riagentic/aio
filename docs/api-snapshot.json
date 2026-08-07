@@ -3,13 +3,17 @@
   "entries": {
     ".": {
       "symbols": {
+        "Access": {
+          "kind": "typeAlias",
+          "sig": "a8a8be406ddf2e6c"
+        },
         "aio": {
           "kind": "variable",
           "sig": "e296a8e4aba60d9f"
         },
         "AioApp": {
           "kind": "typeAlias",
-          "sig": "b9db52073b4d17ef"
+          "sig": "a02eef716b369f86"
         },
         "AioError": {
           "kind": "class",
@@ -25,11 +29,11 @@
         },
         "AioUser": {
           "kind": "typeAlias",
-          "sig": "c19ee2f6f38ee13b"
+          "sig": "cd4c2b619920db14"
         },
         "AsyncMethod": {
           "kind": "typeAlias",
-          "sig": "804ef9b69025525f"
+          "sig": "d4ab00be8aff187f"
         },
         "authClient": {
           "kind": "variable",
@@ -47,13 +51,17 @@
           "kind": "function",
           "sig": "1b3133f368c07b54"
         },
+        "blocking": {
+          "kind": "function+namespace",
+          "sig": "3bb310eee8c46842"
+        },
         "call": {
           "kind": "function",
           "sig": "b1d462c046f3c5f1"
         },
         "CallOptions": {
           "kind": "typeAlias",
-          "sig": "d57957dd0afc2024"
+          "sig": "4ba6b0574897514f"
         },
         "Catalog": {
           "kind": "typeAlias",
@@ -65,11 +73,11 @@
         },
         "CellAccess": {
           "kind": "typeAlias",
-          "sig": "8c1aff61be6dcd36"
+          "sig": "58a9988def3ae94a"
         },
         "CellAio": {
           "kind": "typeAlias",
-          "sig": "c1bee3b7cce5417f"
+          "sig": "9ac8f4e265b71033"
         },
         "CellDef": {
           "kind": "typeAlias",
@@ -89,7 +97,7 @@
         },
         "CellsConfig": {
           "kind": "typeAlias",
-          "sig": "6d3e1fc0c5b3004e"
+          "sig": "6dba30c88bf11339"
         },
         "CellStatus": {
           "kind": "typeAlias",
@@ -165,7 +173,7 @@
         },
         "ExtractState": {
           "kind": "typeAlias",
-          "sig": "0dd54b78645f3c68"
+          "sig": "3953a406f0db45c2"
         },
         "generateTotpSecret": {
           "kind": "function",
@@ -205,11 +213,15 @@
         },
         "MethodDraftMeta": {
           "kind": "typeAlias",
-          "sig": "363c4400bce44182"
+          "sig": "c1d2568d0c3dd9a9"
+        },
+        "MethodDraftServed": {
+          "kind": "typeAlias",
+          "sig": "94a71464cefd5a2a"
         },
         "MethodsCellConfig": {
           "kind": "typeAlias",
-          "sig": "14a4c96bc683383e"
+          "sig": "3a315d182cb205a1"
         },
         "Msg": {
           "kind": "typeAlias",
@@ -261,7 +273,7 @@
         },
         "ResolveUserFn": {
           "kind": "typeAlias",
-          "sig": "ef2280406b96879a"
+          "sig": "76c4cc5d499af5de"
         },
         "route": {
           "kind": "function",
@@ -277,11 +289,11 @@
         },
         "schedule": {
           "kind": "variable",
-          "sig": "50d9745ee9dc44ea"
+          "sig": "762f00fcc354295a"
         },
         "ScheduleDef": {
           "kind": "typeAlias",
-          "sig": "f2a698a107fdc291"
+          "sig": "877949ab993b041a"
         },
         "ScheduleEffect": {
           "kind": "typeAlias",
@@ -294,6 +306,14 @@
         "Selector": {
           "kind": "typeAlias",
           "sig": "442cb03055401d58"
+        },
+        "self": {
+          "kind": "function",
+          "sig": "5b3b3c046c897df3"
+        },
+        "SelfAction": {
+          "kind": "typeAlias",
+          "sig": "1ea9ecfb43edaa63"
         },
         "SendOf": {
           "kind": "typeAlias",
@@ -309,11 +329,11 @@
         },
         "ServerFnAccess": {
           "kind": "typeAlias",
-          "sig": "92fa5d9d806507f9"
+          "sig": "883b4f39e722db09"
         },
         "serverFns": {
           "kind": "function",
-          "sig": "4e0945f075359d8d"
+          "sig": "b2e63f0b4dc3bef5"
         },
         "serverRequest": {
           "kind": "function",
@@ -345,7 +365,7 @@
         },
         "SyncMethod": {
           "kind": "typeAlias",
-          "sig": "501a5830e6052eaf"
+          "sig": "68c80e79026f61a2"
         },
         "table": {
           "kind": "function",
@@ -401,7 +421,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "0e3c59894607095e"
+          "sig": "ae9d67a880cc2434"
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -421,7 +441,7 @@
       "symbols": {
         "Issue": {
           "kind": "typeAlias",
-          "sig": "d748c63317bc3c9f"
+          "sig": "fa4758707dcbab94"
         },
         "lint": {
           "kind": "function",
@@ -449,7 +469,7 @@
       "symbols": {
         "Action": {
           "kind": "typeAlias",
-          "sig": "f2a4c206a9fba7c6"
+          "sig": "da36c7b2db6d60b5"
         },
         "afterRender": {
           "kind": "function",
@@ -598,6 +618,10 @@
         "NavLink": {
           "kind": "function",
           "sig": "dbe2cd9dd4ecac0f"
+        },
+        "NodeAction": {
+          "kind": "typeAlias",
+          "sig": "f2a4c206a9fba7c6"
         },
         "on": {
           "kind": "function",
@@ -778,10 +802,6 @@
         "useAio": {
           "kind": "function",
           "sig": "c82915ce358d200f"
-        },
-        "useCell": {
-          "kind": "function",
-          "sig": "fdba0dc05040d48d"
         },
         "useConnected": {
           "kind": "function",
@@ -1013,10 +1033,6 @@
           "kind": "variable",
           "sig": "87f729d7048bfa2b"
         },
-        "TargetSpec": {
-          "kind": "interface",
-          "sig": "4c46f204f6103cb8"
-        },
         "unsafeOutDir": {
           "kind": "function",
           "sig": "b7591e182ccb7028"
@@ -1080,10 +1096,6 @@
     },
     "./doctor": {
       "symbols": {
-        "Check": {
-          "kind": "interface",
-          "sig": "ec6b92fb8d6d2607"
-        },
         "extractAioVersion": {
           "kind": "function",
           "sig": "753450496c9fd1fa"
@@ -1124,6 +1136,10 @@
           "kind": "typeAlias",
           "sig": "30637abd8920251c"
         },
+        "checkCells": {
+          "kind": "variable",
+          "sig": "1588a0f075829371"
+        },
         "CheckpointData": {
           "kind": "typeAlias",
           "sig": "af564f3e397a1901"
@@ -1159,6 +1175,10 @@
         "instances": {
           "kind": "function",
           "sig": "74e480462c4ecf80"
+        },
+        "isScheduleEffect": {
+          "kind": "function",
+          "sig": "d0dfbe85574db6a4"
         },
         "LayerThreshold": {
           "kind": "typeAlias",
@@ -1236,98 +1256,6 @@
     },
     "./jsx-runtime": {
       "symbols": {
-        "AioAnchorAttributes": {
-          "kind": "typeAlias",
-          "sig": "0fb3e7d75aab6c1e"
-        },
-        "AioButtonAttributes": {
-          "kind": "typeAlias",
-          "sig": "b307430caacbf4b4"
-        },
-        "AioCanvasAttributes": {
-          "kind": "typeAlias",
-          "sig": "8206179f26a3017d"
-        },
-        "AioDetailsAttributes": {
-          "kind": "typeAlias",
-          "sig": "7e2cdefd26ba93de"
-        },
-        "AioDialogAttributes": {
-          "kind": "typeAlias",
-          "sig": "95606a24b2d87372"
-        },
-        "AioEventMap": {
-          "kind": "typeAlias",
-          "sig": "d0e3c41acd9dedc6"
-        },
-        "AioFieldSetAttributes": {
-          "kind": "typeAlias",
-          "sig": "6264e2c11c19c16b"
-        },
-        "AioFormAttributes": {
-          "kind": "typeAlias",
-          "sig": "5a69d539e6b4ac9c"
-        },
-        "AioHTMLAttributes": {
-          "kind": "typeAlias",
-          "sig": "4d2a68565a933660"
-        },
-        "AioIframeAttributes": {
-          "kind": "typeAlias",
-          "sig": "54c0498a82796349"
-        },
-        "AioImgAttributes": {
-          "kind": "typeAlias",
-          "sig": "65ce695e966dc246"
-        },
-        "AioInputAttributes": {
-          "kind": "typeAlias",
-          "sig": "75daf7517ab8c8fe"
-        },
-        "AioLabelAttributes": {
-          "kind": "typeAlias",
-          "sig": "20cdb2697b1d16b3"
-        },
-        "AioMappedEventHandlers": {
-          "kind": "typeAlias",
-          "sig": "d47cd19afd56b873"
-        },
-        "AioMediaAttributes": {
-          "kind": "typeAlias",
-          "sig": "87ee3fa96de2e8ac"
-        },
-        "AioMeterAttributes": {
-          "kind": "typeAlias",
-          "sig": "39c3b9d2bb13138a"
-        },
-        "AioOptGroupAttributes": {
-          "kind": "typeAlias",
-          "sig": "a83c727c9f563506"
-        },
-        "AioOptionAttributes": {
-          "kind": "typeAlias",
-          "sig": "0b8834825640a706"
-        },
-        "AioProgressAttributes": {
-          "kind": "typeAlias",
-          "sig": "818d522a91f50a02"
-        },
-        "AioSelectAttributes": {
-          "kind": "typeAlias",
-          "sig": "a605489b5b2c0e3e"
-        },
-        "AioSVGAttributes": {
-          "kind": "typeAlias",
-          "sig": "76efd3e9e54391f8"
-        },
-        "AioTableCellAttributes": {
-          "kind": "typeAlias",
-          "sig": "5437f5003890feab"
-        },
-        "AioTextAreaAttributes": {
-          "kind": "typeAlias",
-          "sig": "c3278ae0be5b10aa"
-        },
         "AirEvent": {
           "kind": "typeAlias",
           "sig": "8f42e0e209205a30"
@@ -1350,42 +1278,6 @@
         }
       }
     },
-    "./schedule": {
-      "symbols": {
-        "isScheduleEffect": {
-          "kind": "function",
-          "sig": "d0dfbe85574db6a4"
-        },
-        "schedule": {
-          "kind": "variable",
-          "sig": "50d9745ee9dc44ea"
-        },
-        "ScheduleDef": {
-          "kind": "typeAlias",
-          "sig": "f2a698a107fdc291"
-        },
-        "ScheduleEffect": {
-          "kind": "typeAlias",
-          "sig": "22abfd1632d227e0"
-        }
-      }
-    },
-    "./selectors": {
-      "symbols": {
-        "createSelector": {
-          "kind": "function",
-          "sig": "750f3eefd5ec534c"
-        },
-        "createSliceSelector": {
-          "kind": "function",
-          "sig": "f2a9973661f27b24"
-        },
-        "Selector": {
-          "kind": "typeAlias",
-          "sig": "442cb03055401d58"
-        }
-      }
-    },
     "./server": {
       "symbols": {
         "appDirs": {
@@ -1399,6 +1291,14 @@
         "AppMeta": {
           "kind": "typeAlias",
           "sig": "fa302fc2d813d586"
+        },
+        "BlobInfo": {
+          "kind": "typeAlias",
+          "sig": "6bf65597d79be13c"
+        },
+        "BlobStore": {
+          "kind": "interface",
+          "sig": "d9c6c11b88650ef0"
         },
         "connectCli": {
           "kind": "function",
@@ -1424,6 +1324,18 @@
           "kind": "variable",
           "sig": "68b3405a06dc5203"
         },
+        "initSchema": {
+          "kind": "function",
+          "sig": "1f8a6574b6d74ca9"
+        },
+        "loadTables": {
+          "kind": "function",
+          "sig": "9e104c76a335fd51"
+        },
+        "openBlobStore": {
+          "kind": "function",
+          "sig": "82451cd20aaf2ea0"
+        },
         "openExternal": {
           "kind": "function",
           "sig": "3b01332a3d226191"
@@ -1431,6 +1343,22 @@
         "QueryResult": {
           "kind": "typeAlias",
           "sig": "4d451b3b1c2af191"
+        },
+        "reactiveDB": {
+          "kind": "function",
+          "sig": "22415cb7814bd71b"
+        },
+        "ReactiveDB": {
+          "kind": "typeAlias",
+          "sig": "ca20e1cc4562491d"
+        },
+        "ReactiveQuery": {
+          "kind": "typeAlias",
+          "sig": "f6c36923a5dd3ea4"
+        },
+        "syncTables": {
+          "kind": "function",
+          "sig": "8dabef027d9a3a7a"
         },
         "Tx": {
           "kind": "typeAlias",
@@ -1440,41 +1368,9 @@
     },
     "./state-core": {
       "symbols": {
-        "AioIPC": {
-          "kind": "interface",
-          "sig": "874fe534857f2839"
-        },
-        "ArrayRefStats": {
-          "kind": "interface",
-          "sig": "8103e5ed1c0439a6"
-        },
-        "cancelSubsTimer": {
-          "kind": "function",
-          "sig": "ff0cb91d2aded3d3"
-        },
-        "CellRef": {
-          "kind": "interface",
-          "sig": "ad415a137c39f3a3"
-        },
-        "collapsePaths": {
-          "kind": "function",
-          "sig": "02240d2eefef802d"
-        },
-        "createSendProxy": {
-          "kind": "function",
-          "sig": "8b49bf3199ba6b83"
-        },
-        "flushOfflineQueue": {
-          "kind": "function",
-          "sig": "ff0cb91d2aded3d3"
-        },
         "getCellSignal": {
           "kind": "function",
           "sig": "02fef0b1b617ff54"
-        },
-        "getConnectedSignal": {
-          "kind": "function",
-          "sig": "966295cb65a07da5"
         },
         "getStateSignal": {
           "kind": "function",
@@ -1484,41 +1380,17 @@
           "kind": "function",
           "sig": "04817fd582165e1e"
         },
-        "HandleResult": {
-          "kind": "typeAlias",
-          "sig": "84acce82a8bda3f7"
-        },
-        "isInitialStateReceived": {
-          "kind": "function",
-          "sig": "209ed045c0221c65"
-        },
         "ready": {
           "kind": "function",
           "sig": "d146c7a9b1c05fb1"
-        },
-        "resendSubscriptions": {
-          "kind": "function",
-          "sig": "ff0cb91d2aded3d3"
         },
         "send": {
           "kind": "function",
           "sig": "2ab6526003a801c3"
         },
-        "setConnected": {
-          "kind": "function",
-          "sig": "6ec4134858750042"
-        },
-        "setSyncHandler": {
-          "kind": "function",
-          "sig": "5c66ae12ae5fb2bb"
-        },
         "setTransport": {
           "kind": "function",
           "sig": "ef67c3c4d431fc90"
-        },
-        "trackPath": {
-          "kind": "function",
-          "sig": "871f6a7c43ff8ab1"
         },
         "Transport": {
           "kind": "interface",
@@ -1528,113 +1400,21 @@
     },
     "./sync": {
       "symbols": {
-        "AckMessage": {
-          "kind": "interface",
-          "sig": "3b110e8002088d41"
-        },
-        "CompactDeps": {
-          "kind": "interface",
-          "sig": "d3835fca6ffa099a"
-        },
-        "compactSyncOps": {
-          "kind": "function",
-          "sig": "cfc51d802b9b7b99"
-        },
         "compareHLC": {
           "kind": "function",
           "sig": "72c3b1b435e80d74"
-        },
-        "createHLC": {
-          "kind": "function",
-          "sig": "7dfeb0177eac71c5"
-        },
-        "createOpBuffer": {
-          "kind": "function",
-          "sig": "bcb998a059cdbcb9"
-        },
-        "createServerSyncHandler": {
-          "kind": "function",
-          "sig": "4c1b6e4de33775d1"
-        },
-        "createSyncEngine": {
-          "kind": "function",
-          "sig": "0da042da2c3c6c76"
-        },
-        "getLowWater": {
-          "kind": "function",
-          "sig": "a6889ea24f7b8887"
         },
         "HLC": {
           "kind": "typeAlias",
           "sig": "ad43865540693aa7"
         },
-        "HLClock": {
-          "kind": "interface",
-          "sig": "531767fb101cca11"
-        },
-        "isValidSyncOp": {
-          "kind": "function",
-          "sig": "7d6a1a879cb2fa47"
-        },
-        "loadOpsSince": {
-          "kind": "function",
-          "sig": "04eaf666be0acc62"
-        },
-        "mergeField": {
-          "kind": "function",
-          "sig": "bc8c7172d99e8414"
-        },
-        "MergeResult": {
-          "kind": "interface",
-          "sig": "a84e99fea82d1677"
-        },
         "MergeStrategy": {
           "kind": "typeAlias",
           "sig": "2ee8a419d0cf354e"
         },
-        "normalizeSyncConfig": {
-          "kind": "function",
-          "sig": "49fa9a60be148f28"
-        },
-        "OpBuffer": {
-          "kind": "interface",
-          "sig": "e9f3f182ea536085"
-        },
-        "OpBufferOptions": {
-          "kind": "interface",
-          "sig": "2ff2da0f9ac23673"
-        },
-        "OpBufferStorage": {
-          "kind": "interface",
-          "sig": "fe054262359a5a2f"
-        },
-        "OpMessage": {
-          "kind": "interface",
-          "sig": "3b1df58e45475d8c"
-        },
-        "persistOp": {
-          "kind": "function",
-          "sig": "6dc783af5d6434ce"
-        },
-        "rebase": {
-          "kind": "function",
-          "sig": "c8177659fa8af4f2"
-        },
-        "RebaseResult": {
-          "kind": "interface",
-          "sig": "5fb51c5eefef8bd1"
-        },
-        "ServerSyncHandler": {
-          "kind": "interface",
-          "sig": "6435b8d8dbf70d65"
-        },
         "SYNC_DEFAULTS": {
           "kind": "variable",
           "sig": "6feac054ea43abc7"
-        },
-        "SYNC_SCHEMA": {
-          "kind": "variable",
-          "sig": "68b3405a06dc5203"
         },
         "SyncConfig": {
           "kind": "interface",
@@ -1643,34 +1423,6 @@
         "SyncConflict": {
           "kind": "interface",
           "sig": "979b03ebd9130f0a"
-        },
-        "SyncEngine": {
-          "kind": "interface",
-          "sig": "0e61f6f3de292f9c"
-        },
-        "SyncEngineDeps": {
-          "kind": "interface",
-          "sig": "e3df313bd7539022"
-        },
-        "SyncHandlerDeps": {
-          "kind": "interface",
-          "sig": "dfb176052e0efd82"
-        },
-        "SyncOp": {
-          "kind": "interface",
-          "sig": "d3978ac17d9a3b19"
-        },
-        "SyncReducer": {
-          "kind": "typeAlias",
-          "sig": "9bec4195d692a8c2"
-        },
-        "SyncRequest": {
-          "kind": "interface",
-          "sig": "8d34b3e3a15c0028"
-        },
-        "SyncResponse": {
-          "kind": "typeAlias",
-          "sig": "51d40dca920ab3fa"
         },
         "SyncStats": {
           "kind": "interface",
@@ -1777,6 +1529,10 @@
           "sig": "f9e4f47330041090"
         },
         "testgen": {
+          "kind": "variable",
+          "sig": "1588a0f075829371"
+        },
+        "testGen": {
           "kind": "function",
           "sig": "165470dc07800697"
         },
@@ -1859,10 +1615,6 @@
         "Column": {
           "kind": "interface",
           "sig": "ed2514c14d9e6094"
-        },
-        "Common": {
-          "kind": "interface",
-          "sig": "7bddaaa4575934a8"
         },
         "Confirm": {
           "kind": "function",
@@ -1951,10 +1703,6 @@
         "StackProps": {
           "kind": "interface",
           "sig": "e5cf331c3815d0e4"
-        },
-        "Style": {
-          "kind": "typeAlias",
-          "sig": "0b754a0a63099501"
         },
         "Table": {
           "kind": "function",

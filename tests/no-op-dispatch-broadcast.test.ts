@@ -24,7 +24,7 @@ Deno.test("a dispatch with no patches broadcasts nothing", async () => {
       },
     },
     persist: "none",
-    ui: "all",
+    visible: "all",
   });
 
   const sent: string[] = [];

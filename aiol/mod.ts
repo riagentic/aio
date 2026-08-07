@@ -68,12 +68,20 @@ function formatIssue(issue: Issue, showFixable = false): string {
     : "";
   const loc = location ? ` ${c(C.dim, location)}` : "";
   const fix = issue.fix ? `\n     ${c(C.dim, `→ ${issue.fix}`)}` : "";
+  // `[fixable]` = --safe-fix rewrites it. `[manual]` = the safe fix DECLINES
+  // this site on purpose (with the reason) — without the distinction, a
+  // declined site kept rendering [fixable] forever and read as a broken tool.
   const fixable = showFixable && issue.safeFix
     ? ` ${c(C.green, "[fixable]")}`
+    : issue.manual
+    ? ` ${c(C.yellow, "[manual]")}`
+    : "";
+  const manual = issue.manual
+    ? `\n     ${c(C.yellow, `⚑ ${issue.manual}`)}`
     : "";
   return `  ${c(color, `${icon} ${label}`)}  ${
     c(C.dim, `[${issue.area}]`)
-  } ${issue.message}${fixable}${loc}${fix}`;
+  } ${issue.message}${fixable}${loc}${manual}${fix}`;
 }
 
 // ── Output ──────────────────────────────────────────────────────────
@@ -284,6 +292,13 @@ Only harmless changes: missing config, unused imports. Never changes behavior.
 
   const report = await lint(projectDir);
 
+  // The report the EXIT CODE and the final printout are computed from. With
+  // --safe-fix this is a RE-LINT of the now-fixed tree: the pre-fix report
+  // used to decide the exit, so a run that successfully fixed every error
+  // still exited 1 — and the report-only leftovers were never shown at all
+  // (the owner saw "N fixes applied", a red exit, and no way to tell which).
+  let finalReport = report;
+
   if (safeFix) {
     const fixable = report.issues.filter((i) => i.safeFix).length;
     if (fixable === 0) {
@@ -300,12 +315,16 @@ Only harmless changes: missing config, unused imports. Never changes behavior.
           )
         }\n`,
       );
+      // What REMAINS is the truth the caller acts on — print it (report-only
+      // findings must stay visible) and judge the exit from it.
+      finalReport = await lint(projectDir);
+      printReport(finalReport, json, true, hideHints);
     }
   } else {
     printReport(report, json, true, hideHints);
   }
 
-  // Exit code: 1 if errors, 0 otherwise
-  const hasErrors = report.issues.some((i) => i.severity === "error");
+  // Exit code: 1 if errors REMAIN, 0 otherwise.
+  const hasErrors = finalReport.issues.some((i) => i.severity === "error");
   Deno.exit(hasErrors ? 1 : 0);
 }

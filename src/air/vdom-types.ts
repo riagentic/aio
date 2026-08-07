@@ -202,8 +202,12 @@ export interface RenderCtx {
 /** Ref type — callback or object. */
 export type Ref<T = Node> = ((value: T | null) => void) | { current: T | null };
 
-/** Action function signature for `use` prop. */
-export type Action = (node: HTMLElement) => { cleanup?(): void } | void;
+/** Node-action function signature for the `use` prop (alpha52 name — the bare
+ *  `Action` collided with the state-layer's action vocabulary). */
+export type NodeAction = (node: HTMLElement) => { cleanup?(): void } | void;
+
+/** @deprecated alpha52 — renamed {@linkcode NodeAction}. Alias through beta. */
+export type Action = NodeAction;
 
 // ── Dev mode ───────────────────────────────────────────────────────
 

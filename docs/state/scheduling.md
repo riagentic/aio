@@ -207,42 +207,47 @@ A failing cron tick is logged and the schedule keeps its cadence (one bad tick
 does not switch a nightly job off). If the dispatch loop is closing — the app is
 shutting down — the schedule stops instead of re-arming into the drain.
 
-### `schedule.backoff(id, attempt, opts, action)` — exponential retry delay
+### `schedule.backoff(id, attempt, action, opts)` — exponential retry delay
 
 A one-shot `after` whose delay grows exponentially with `attempt`:
 `base * factor^attempt`, capped at `max` (`factor` defaults to 2). Track the
-attempt counter in state — reset it on success, bump it on failure.
+attempt counter in state — reset it on success, bump it on failure. The action
+is the 3rd argument, same as after/every (alpha52 — the old
+`(id, attempt, opts, action)` order is detected by shape and still accepted,
+with a one-time hint).
 
 `max` is optional; omitted, it caps at the timer ceiling (~24.85 days). Give it
 a real value — `60_000` is the usual one — or a runaway `attempt` counter buys
 you a delay measured in weeks.
 
 ```ts
-return schedule.backoff(
+s.$do(schedule.backoff(
   "prices:refresh",
   s.attempt, // 0 → base, 1 → base*2, 2 → base*4, … capped at max
-  { base: 5_000, max: 60_000 },
   prices.refresh.action(),
-);
+  { base: 5_000, max: 60_000 },
+));
 ```
 
-### `schedule.poll(id, attempt, opts, action)` — self-pacing poller
+### `schedule.poll(id, attempt, action, opts)` — self-pacing poller
 
 The first-class polling loop: constant `every` interval while healthy (`attempt`
-= 0), backing off by `backoff^attempt` (capped at `max`) while failing. Re-issue
+= 0), backing off by `factor^attempt` (capped at `max`) while failing. Re-issue
 it each cycle with the current attempt — the delay self-adjusts, no hand-rolled
-after-chain or backoff clock in state.
+after-chain or backoff clock in state. (alpha52: the option key is `factor`; the
+old `backoff` key still works with a hint, and `aiol --safe-fix` renames it. The
+action moved to the 3rd argument, old order accepted with a hint.)
 
 ```ts
 methods: {
-  async tick(s): Promise<ScheduleEffect> {
+  async tick(s) {
     try {
       s.data = await call(() => api.poll())
       s.attempt = 0                       // healthy → constant cadence
     } catch {
       s.attempt += 1                      // failing → back off
     }
-    return schedule.poll('rpc', s.attempt, { every: 5000, backoff: 2, max: 60000 }, rpc.tick.action())
+    s.$do(schedule.poll('rpc', s.attempt, self('tick'), { every: 5000, factor: 2, max: 60000 }))
   },
 }
 ```
@@ -250,12 +255,12 @@ methods: {
 ### `schedule.next(id, action)` — defer to the next tick
 
 Runs the action right after the current method returns — the honest primitive
-for "not now, but immediately after this commit" (replaces the
-`schedule.after(id, 1, …)` sentinel). Same-id replace applies, so repeated calls
-dedup.
+for "not now, but immediately after this commit". A true 0ms timer since alpha52
+(`schedule.after` accepts 0 now, so the 1ms sentinel is gone). Same-id replace
+applies, so repeated calls dedup.
 
 ```ts
-return schedule.next("recalc", totals.recalc.action());
+s.$do(schedule.next("recalc", totals.recalc.action()));
 ```
 
 ### `schedule.cancel(id)` — cancel any timer
@@ -273,11 +278,13 @@ methods: {
 }
 ```
 
-### `schedule.blocking(id, fn, arg?)` — run it off the main thread
+### `blocking(id, fn, arg?)` — run it off the main thread
 
 The odd one out: imperative (returns a Promise) because it moves **work**, not
-an action. The function runs on a worker pool — a real thread — so CPU-bound or
-FFI work can't freeze rendering, the dispatch loop, or anyone else's actions.
+an action — which is why it is ALSO exported top-level from `"aio"` as
+`blocking` (alpha52; `schedule.blocking` remains the same function). The
+function runs on a worker pool — a real thread — so CPU-bound or FFI work can't
+freeze rendering, the dispatch loop, or anyone else's actions.
 
 ```ts
 methods: {
@@ -435,7 +442,7 @@ live scheduler, so it checks the _effect_, not the eventual timer fire.)
 ```ts
 import { assertEquals } from "@std/assert";
 import { testCell } from "aio/testing";
-import { isScheduleEffect } from "aio/schedule";
+import { isScheduleEffect } from "aio/extras";
 import { notifications } from "./cell/notifications/index.ts";
 
 testCell(notifications, "queues autosave", (t) => {

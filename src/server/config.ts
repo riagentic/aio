@@ -167,7 +167,11 @@ export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
   "onCheckpointRestore",
 ]);
 
-const CONFIG_DOCS: Record<string, [string, string]> = {
+/** [default, description] per config key. Exported for the docs-completeness
+ *  gate (tests/config-docs.test.ts): every public allowlisted key must have a
+ *  row here AND be printed by formatValidConfig(), so a new option cannot ship
+ *  undocumented in the "Valid configuration" help table. */
+export const CONFIG_DOCS: Record<string, [string, string]> = {
   appId: ["", "unique app identity — lock file, UDS socket, KV/SQLite paths"],
   appVersion: ["", "app version string — logged on startup"],
   cells: ["", "cell definitions array"],
@@ -181,9 +185,21 @@ const CONFIG_DOCS: Record<string, [string, string]> = {
   ],
   reduce: ["", "state reducer (legacy API)"],
   execute: ["", "effect executor (legacy API)"],
-  persist: ["true", "persist state to SQLite (data.db)"],
+  persist: ["true", "persist state to SQLite (state.db)"],
   persistKey: ['"state"', "KV key prefix"],
-  dbPath: ["./data.db", 'override the SQLite file (":memory:" for tests)'],
+  dbPath: [
+    "<appDir>/data/state.db",
+    'override the SQLite file (":memory:" for tests)',
+  ],
+  appDir: [
+    "~/.<appId>",
+    "where this app keeps everything it owns (data/, logs/, dist/) — the author's choice; AIO_APPS_DIR moves all apps",
+  ],
+  dbPragmas: ["", "extra SQLite PRAGMAs applied on open"],
+  checkIntegrityOnBoot: [
+    "false",
+    "PRAGMA quick_check on boot; auto-restore the newest db.snapshot() on corruption",
+  ],
   persistDebounceMs: ["100", "ms between KV writes"],
   persistMode: [
     '"single"',
@@ -216,11 +232,60 @@ const CONFIG_DOCS: Record<string, [string, string]> = {
   maxConnections: ["100", "max concurrent WebSocket clients"],
   allowedOrigins: ["", "extra allowed WS origins beyond localhost + own host"],
   strictOrigin: ["false", "require Origin header on WS upgrade in expose mode"],
+  trustProxyHeader: [
+    "",
+    'behind a trusted reverse proxy: read the real client IP from this header (e.g. "x-forwarded-for") for lockout/abuse bucketing',
+  ],
+  wsLimits: [
+    "hardened",
+    "per-client WS rate/size limits (advanced — defaults are hardened)",
+  ],
   beforeReduce: ["", "intercept actions before reduce — return null to drop"],
+  cellDefaults: [
+    "",
+    "default visible/persist config for all cells (visible takes full CellVisibility incl. forUser) — individual cells override; `ui` is the deprecated alias of visible",
+  ],
+  fatalOnStart: [
+    "false",
+    "exit the process when the onStart hook throws (default: log and continue)",
+  ],
+  dispatchStorm: [
+    "true",
+    "dispatch feedback-loop detector — object to tune, breaker to auto-drop, false to disable",
+  ],
+  strictCells: [
+    "false",
+    "fail boot if a defined cell was not passed to aio.run({ cells }) — its dispatches would be silent no-ops",
+  ],
+  guardDispatches: [
+    "false",
+    "supervised runtime — an unhandled dispatch rejection is logged loudly and the process survives",
+  ],
+  journal: [
+    "false",
+    "durable action journal — replay the persist-debounce tail after SIGKILL/power cut",
+  ],
+  redactActions: [
+    "",
+    'action types whose payload is "[redacted]" in journal/diagnostics/timeline (trailing * = prefix match)',
+  ],
+  childWindows: [
+    "false",
+    "allow Electron child windows via __aioIPC.openWindow (off — real attack surface)",
+  ],
+  libraryMode: [
+    "false",
+    "no exit/signals/instance lock; app.close() leaves the process alive (embedding, tests)",
+  ],
+  renderBudget: [
+    "",
+    "client render staleness/patch thresholds (sent to browser) — see sub-keys",
+  ],
+  ui: ["", "window + page-shell config — see the UI table below"],
   users: ["", "static token→user map for auth"],
   key: [
-    "auto",
-    "--expose auth key: string=fixed, false=open, omitted=persisted",
+    "omitted",
+    "--expose auth key: string=fixed, true=generated+persisted; omitted defaults to a generated key when exposed without per-user auth (alpha52); false=OPEN (explicit opt-out)",
   ],
   resolveUser: [
     "",
@@ -270,14 +335,30 @@ const CONFIG_DOCS: Record<string, [string, string]> = {
   onCheckpointRestore: ["", "handle diagnostics checkpoint on startup"],
 };
 
-const UI_DOCS: Record<string, [string, string]> = {
+/** [default, description] per `ui: {}` key — same completeness gate as
+ *  CONFIG_DOCS (every VALID_UI_KEYS entry must have a row). */
+export const UI_DOCS: Record<string, [string, string]> = {
   title: ['"AIO App"', "window title"],
   width: ["800", "window width (px)"],
   height: ["600", "window height (px)"],
   showStatus: ["true", "show connection status indicator"],
+  renderer: ['"aio"', "accepted for compat — AIR is the only renderer"],
+  entry: ['"App.tsx"', "UI entry file, relative to baseDir"],
+  viewport: [
+    "responsive",
+    "<meta viewport> content override (false = omit it)",
+  ],
+  head: ["", "verbatim extra <head> content (meta/OG/favicon/fonts)"],
 };
 
-const CONFIG_GROUPS: [string, string[]][] = [
+/** Keys printed in the IDENTITY table (see formatValidConfig). */
+export const IDENTITY_KEYS = ["appId", "appVersion", "cells"] as const;
+
+/** The printed help-table groups. Exported for the docs-completeness gate:
+ *  IDENTITY_KEYS + these groups + the UI table are exactly what
+ *  formatValidConfig() prints, so the gate can prove every allowlisted key
+ *  appears once and only once. */
+export const CONFIG_GROUPS: [string, string[]][] = [
   ["Server & transport", [
     "port",
     "expose",
@@ -289,17 +370,32 @@ const CONFIG_GROUPS: [string, string[]][] = [
     "killExisting",
     "serverUrl",
     "singleton",
-    "users",
-    "key",
-    "key",
+    "libraryMode",
     "syncIntervalMs",
     "fullStateThreshold",
     "routes",
     "maxConnections",
+    "wsLimits",
+    "allowedOrigins",
+    "strictOrigin",
+    "trustProxyHeader",
+    "childWindows",
+    "ui",
+  ]],
+  ["Auth", [
+    "users",
+    "key",
+    "resolveUser",
+    "sessions",
+    "auth",
   ]],
   ["App logic", [
     "beforeReduce",
     "isolate",
+    "localFirst",
+    "cellDefaults",
+    "strictCells",
+    "guardDispatches",
     "persist",
     "persistKey",
     "dbPath",
@@ -308,9 +404,12 @@ const CONFIG_GROUPS: [string, string[]][] = [
     "checkIntegrityOnBoot",
     "persistDebounceMs",
     "persistMode",
+    "journal",
+    "redactActions",
     "onRestore",
     "db",
     "schedules",
+    "fatalOnStart",
     "onAction",
     "onEffect",
     "onConnect",
@@ -323,12 +422,14 @@ const CONFIG_GROUPS: [string, string[]][] = [
   ["Performance & monitoring", [
     "perfCheck",
     "perfBudget",
+    "renderBudget",
     "renderBudget.staleness",
     "renderBudget.pendingPatches",
     "effectTimeoutMs",
     "freezeState",
     "memory",
     "circuitBreaker",
+    "dispatchStorm",
     "diagnostics",
     "logging",
   ]],
@@ -371,7 +472,7 @@ export function formatValidConfig(): string {
   lines.push(
     ...table(
       "IDENTITY (all inferred when omitted — deno.json / cell registry)",
-      ["appId", "appVersion", "cells"],
+      [...IDENTITY_KEYS],
       CONFIG_DOCS,
     ),
   );

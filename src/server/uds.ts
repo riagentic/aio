@@ -9,6 +9,10 @@ import { compactPatches } from "../state/patch-compact.ts";
 import { writeClientLog } from "./client-log.ts";
 import { log } from "../diagnostics/logger.ts";
 import {
+  _recordClientDegraded,
+  type DegradedChange,
+} from "../diagnostics/degraded.ts";
+import {
   _isFrameworkInternalActionType,
   sanitizeClientAction,
 } from "./server-ws.ts";
@@ -18,6 +22,7 @@ import {
   dec,
   enc,
   encRaw,
+  isIgnorableKind,
   type SfnPayload,
   unsupportedOnUds,
 } from "../protocol/envelope.ts";
@@ -475,6 +480,30 @@ function _handleUDSConn(
               }
               continue;
             }
+            case "cdiag": {
+              // A client's degraded() escalation — mirrors server-ws.ts.
+              // Electron speaks UDS, so a health escalation from its renderer
+              // MUST land here too, or /__aio/health reports "healthy" while
+              // the window's subsystem is failing forever (the exact silent
+              // fork the cdiag frame exists to close). Values are capped
+              // inside _recordClientDegraded; malformed frames are dropped.
+              const client = clientMap.get(conn);
+              const d = frame.d as DegradedChange | undefined;
+              if (
+                client && d && typeof d.name === "string" &&
+                d.name.length > 0 &&
+                (d.kind === "down" || d.kind === "up")
+              ) {
+                _recordClientDegraded(client.id, {
+                  name: d.name,
+                  kind: d.kind,
+                  failures: typeof d.failures === "number" ? d.failures : 0,
+                  since: typeof d.since === "number" ? d.since : Date.now(),
+                  lastError: typeof d.lastError === "string" ? d.lastError : "",
+                });
+              }
+              continue;
+            }
             case "subs": {
               const client = clientMap.get(conn);
               if (!client) continue;
@@ -655,8 +684,11 @@ function _handleUDSConn(
               continue;
             }
             default:
-              // Vitals/time-travel are WS-only diagnostics; anything else
-              // S→C-only. Loud, never silent (dev/prod equivalency).
+              // Reserved-ignorable kinds ("x" extension frames) skip silently
+              // BY CONTRACT — see IGNORABLE in envelope.ts.
+              if (isIgnorableKind(frame.t)) continue;
+              // Vitals are WS-only diagnostics; anything else S→C-only.
+              // Loud, never silent (dev/prod equivalency).
               log.warn(
                 "uds",
                 unsupportedOnUds(frame.t)

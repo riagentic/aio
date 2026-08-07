@@ -17,6 +17,11 @@ export interface ServerConfig {
   dispatch: DispatchFn;
   getSnapshot?: () => string;
   loadSnapshot?: (json: string) => void;
+  /** Content-addressed blob store — served at /__aio/blobs/<id> (GET/HEAD,
+   *  Range). Gated by the app's auth exactly like app state: key mode gates
+   *  every path already; per-user mode 401s anonymous blob reads even when
+   *  the login flows make the SHELL public (see server.ts). */
+  blobs?: import("./blobs.ts").BlobStore;
   baseDir: string;
   debug: (msg: string) => void;
   prod?: boolean; // serve pre-built dist/ instead of live-transpiling

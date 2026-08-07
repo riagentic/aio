@@ -425,6 +425,70 @@ message names `perfBudget.methods`; and every aio app lost the ~8px white border
 it never asked for (the shell shipped no CSS reset and no template ships a
 stylesheet).
 
+## The last-call plan (2026-08-07 audit → alpha52–56, then beta)
+
+Four design audits (API/config, cell semantics, architecture, DX) ran at
+alpha51; user approved the package with the rule: **perfect aio is the goal,
+break burden must be bearable** — every break = deprecated alias through beta
+
+- `am fix`/`aiol --safe-fix` rewrite + loud hint at the old spelling.
+
+* [ ] **alpha52 — the honest release (bugs + guardrails, no breaks).**
+      Effect-classifier unification (sync vs async disagree on
+      `return [effect, data]` — make mixed arrays a LOUD error both paths);
+      standalone runtime calls `initAll`/`destroyAll` + breaker arms (testUI/
+      testCell/Android currently more permissive than prod); `--expose` no-auth
+      warning false-positives on `auth:true`/`resolveUser`; config help table
+      (19 missing keys, `key` default documented wrong, `dbPath` wrong, dup
+      row); `onMigrate` without `version` throws at `cell()`; persistence DDL
+      failures fatal not warn-continue; `cdiag` over UDS decided + SERVES matrix
+      test; api-snapshot phantom types filtered. PLUS big-data guardrails:
+      per-cell serialized-size warn ~1MB / error ~16MB (configurable) at the
+      flush/broadcast seams, naming the right tier; wsLimits refusal points at
+      the tier doc; new doc "Big data: the four tiers" (state / db: / blobs /
+      pipelines).
+* [ ] **alpha53 — one vocabulary.** Fleet names win: `service` dies (→
+      `server`), `compile:remote:*` dies (→ `deno task build`), deno.json
+      `target` → `client`; scaffold 30 tasks → ~9 (+`check`/`fmt`); `am new` →
+      `am add` (stops generating deprecated code); scaffold writes explicit
+      `appId` (title leaves the inference chain w/ boot warning);
+      `am fix
+      --migrate-tasks` is the vehicle; am flags:
+      `--client-index`/-i (am), `--takeover` alias for `--kill-existing`,
+      `--connect` for bare `--server-url`, stale help text.
+* [ ] **alpha54 — the effect channel.** Effects off the return via
+      `s.$do(effect)` (kills `: CellEffect` wart, own.set token registry,
+      RETURN_TAG; `self("method", ...)` builder for residual self-refs);
+      `transaction: true` default (codemod writes `transaction: false` into
+      existing async cells — behaviour-preserving); `$`-prefixed + reserved
+      state keys throw at `cell()` (drop dead A/E); `listensTo` array form dies,
+      object form accepts arrays; selector deps-form takes tuple so
+      parameterized+deps compose; `schedule.backoff/poll` arg order + `factor`
+      key; `schedule.blocking` → top-level `blocking`.
+* [ ] **alpha55 — the surface diet + safety defaults.** Cell `ui:` → `visible:`
+      (alias through beta; "access gates calls, visible gates reads"); `key:`
+      auto-generates when exposed w/o per-user auth (codemod inserts
+      `key: false` to preserve today's behaviour); `access`-without- visibility
+      REFUSES on exposed/multi-user; `aio/db` types-only (`createDB` →
+      `aio/server` only); delete `aio/schedule` + `aio/
+      selectors`
+      entries; `@internal` sweep of aio/sync + aio/state-core (~40 symbols);
+      remove browser `actions`/`effects` + `timeout` + `useCell`; renames:
+      `extras.lint`→`checkCells`, air `Action`→ `NodeAction`,
+      `testgen`→`testGen`, drop `ExtractState`; `AioUser` opens
+      (`& Record<string, unknown>`); `AioApp` typed overload; browser-surface
+      snapshot twin of android-air-surface test.
+* [ ] **alpha56 — internals + blobs.** `protocol/`↔`state` decomposition
+      (browser runtime files → `browser/`); boundary gate: trim 12 unused edges,
+      error on unused permission, root files stop laundering (state/cell.ts
+      testCell re-export dies); offline-queue unification (one factory, one drop
+      policy); `routeEffect` exhaustive router (3 runtimes);
+      `PRAGMA user_version` + one ordered fatal DDL runner; wire: ignorable-
+      kind tier + reserved binary lane; shared SERVER_ONLY_AIO_SYMBOLS;
+      `app.blobs` (content-addressed under appDirs().files, HTTP Range
+      streaming, `put/get/stream/url`) + windowed-query example. Then:
+      stabilization hunt → hardware week (B5/B4/A6) → **beta1**.
+
 Deferred from the alpha51 architecture pass (docs/basics/app-architectures.md
 names the two shapes; these are the remaining gaps, from the geng-market + dm
 analyses, ranked):
@@ -625,10 +689,20 @@ repo = production build + run of the default target; `--dev` for the dev server;
         (it was validator-legal but untypeable). A full physical merge of
         AioConfig into CellsConfig remains possible later, but the trap class
         this item existed for is dead.
-  - [ ] Split the 1016-line `server-ws.ts` factory (abuse / backpressure /
-        routing).
-* [ ] **B1 — the beta1 release itself.** API snapshot locked ✓, semver +
-      deprecation policy ✓, codemod ✓. Remaining: the freeze decision.
+  - [x] Split the 1016-line `server-ws.ts` factory — REFUSED (2026-08-02,
+        `feedback/refused.md`): the boundary gate + tests already constrain it;
+        pure churn with regression risk. Revisit only if a change there becomes
+        hard to make.
+* [ ] **B1 — the beta1 release itself.** Semver + deprecation policy ✓, codemod
+      ✓, snapshot machinery ✓. REDEFINED 2026-08-07 (user decision — beta is a
+      QUALITY statement, not a freeze): no API freeze required for beta entry;
+      beta may break when quality demands it, with an upgrade guide + codemod,
+      never silently. Entry bar instead: **two consecutive full-effort hunts +
+      one field report with zero major/critical findings** (replaces the
+      streak-of-10, which adversarial hunts reset structurally — 7/10 at
+      alpha40, 0 ever since), plus A6 + B4 + B5 below. Target: beta well before
+      alpha100; **1.0.0 by end of 2026**, then service versions only (1.0.1
+      fixes / 1.1.0 additive).
 
 ## Remaining before 1.0 — physical (needs the user's machines)
 
@@ -639,7 +713,11 @@ repo = production build + run of the default target; `--dev` for the dev server;
 - [ ] **B4 — the 72h soak run.** Harness ready (`deno task soak:72h`, heap-slope
       leak gate); 30-minute runs are clean.
 - [ ] **B5 physical matrix** — Windows, macOS, a real Android device.
-- [ ] **B6 — beta2+ = fixes only** + 2 more field-report apps on the frozen API.
+- [ ] **B6 — beta discipline** (set 2026-08-07): fixes + non-breaking
+      improvements; a break is the exception (budget: one or two, isolated, with
+      upgrade guide + codemod, never silent — no API refactoring). 2 more
+      field-report apps during beta. Beta may run long — 1.0.0 by end of 2026,
+      only when the C gates are truly met.
 
 ## Phase C — 1.0.0 exit criteria (defined now, not negotiated later)
 

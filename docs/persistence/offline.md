@@ -47,13 +47,13 @@ Nothing is dropped quietly:
 
 **Two send paths, two queues.** The contract above is the one for CELL METHODS
 (`await counter.increment()`), which is what most code uses. The lower-level
-`useCell().send()` / `useAio().send()` are fire-and-forget: they are synchronous
-and return `false` rather than rejecting a promise, and they queue separately —
-up to 100 actions, dropping the NEWEST (the one you just sent) when full. Both
-queues feed `isConnectionDegraded()`, and both emit a diagnostic on a drop, so
-nothing is invisible either way. If an action must not be lost, prefer a cell
-method — its promise is what tells you the outcome. If you use `send()`, check
-the return value.
+Direct method calls (`cell.method()`) and `useAio().send()` are fire-and-forget:
+they are synchronous and return `false` rather than rejecting a promise, and
+they queue separately — up to 100 actions, dropping the NEWEST (the one you just
+sent) when full. Both queues feed `isConnectionDegraded()`, and both emit a
+diagnostic on a drop, so nothing is invisible either way. If an action must not
+be lost, prefer a cell method — its promise is what tells you the outcome. If
+you use `send()`, check the return value.
 
 ### What `await cell.method()` means while offline
 

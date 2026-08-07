@@ -123,23 +123,29 @@ const dashboard = cell("dashboard", {
   state: { theme: "dark" },
   selectors: {
     summary: {
-      // List the cell names you want to read. The order is the order
-      // of the extra arguments to fn.
+      // List the cell names you want to read. Their slices arrive as ONE
+      // tuple (second argument), in `deps` order — so any further arguments
+      // are the selector's own parameters and deps + parameters compose.
       deps: ["counter", "wallet"],
-      fn: (s, counter, wallet) =>
+      fn: (s, [counter, wallet]) =>
         `Count: ${counter.count}, Balance: ${wallet.balance}, theme=${s.theme}`,
     },
   },
 });
 ```
 
+> The pre-alpha52 spread signature (`fn: (s, counter, wallet) => …`) is
+> deprecated — it still works through beta with a one-time hint, and
+> `aiol --safe-fix` rewrites it to the tuple form.
+
 Dep names are validated at `aio.run()` (composition time). An unknown dep throws
 a clear error like
 `[dashboard] selector 'summary' depends on unknown
 cell 'walet' — known cells: counter, wallet`.
 
-> The selector's first argument is always the cell's **own** slice. The
-> remaining arguments are the dep cells' current slices in `deps` order.
+> The selector's first argument is always the cell's **own** slice; the second
+> is the tuple of dep slices in `deps` order; anything after that is the
+> caller's arguments (`dashboard.summary(arg)`).
 
 ---
 

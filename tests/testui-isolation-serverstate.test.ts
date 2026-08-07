@@ -55,7 +55,7 @@ Deno.test("testUI: the shim supports clear()/key()/length", async () => {
 Deno.test("testUI: serverState()/fullState() expose ui.exclude'd fields", async () => {
   const acct = cell("acct", {
     state: { name: "ada", secret: "hunter2" },
-    ui: { exclude: ["secret"] }, // hidden from the client view
+    visible: { exclude: ["secret"] }, // hidden from the client view
     methods: {
       rename(s: { name: string }, n: string) {
         s.name = n;

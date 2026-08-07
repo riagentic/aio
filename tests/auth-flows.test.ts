@@ -77,6 +77,7 @@ Deno.test("auth e2e: shell public, signup→login→ws→logout lifecycle", asyn
   const c = cell("shop", {
     state: { orders: 0 },
     access: true,
+    visible: "all", // alpha52: the read side must be decided on a multi-user app
     methods: {
       order(s: { orders: number }) {
         s.orders += 1;

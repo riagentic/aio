@@ -12,7 +12,51 @@ import {
 import type { ReportErrorOpts } from "../diagnostics/error.ts";
 import type { Log } from "../diagnostics/logger.ts";
 import { PERSIST_SCHEMA_VERSION } from "./persist-schema.ts";
-import { describeIssues, stringifyWithIssues } from "./persist-guard.ts";
+import {
+  describeIssues,
+  type PersistIssue,
+  stringifyWithIssues,
+} from "./persist-guard.ts";
+
+// ── Per-cell size guardrails ─────────────────────────────────────────
+//
+// Cell state is the reactive WORKING SET: it is serialized on every persist
+// flush and broadcast to every connected client, so an oversized cell does not
+// fail here — it fails later, as slow flushes and dropped WS frames, far from
+// the write that caused it. These thresholds make the wrong tier fail loudly
+// AT WRITE TIME, naming the right tier instead (bulk rows → `db:` tables,
+// binaries → files — see docs/persistence/big-data.md).
+//
+// Sizes are measured on the JSON the flush ALREADY produces (string length ≈
+// bytes for the ASCII-dominant JSON that state serializes to) — no extra
+// serialization pass.
+// A config knob (`persist: { warnBytes, hardBytes }`) lands in alpha53; until
+// then these exported constants are the single source of truth.
+
+/** Warn threshold: a cell whose serialized state exceeds this gets ONE warning
+ *  per process naming the cell, the size and the right tier. Chosen to match
+ *  the default 1MB WS frame budget (`wsLimits`) — state that cannot ride in
+ *  one frame is state in the wrong tier. */
+export const PERSIST_CELL_WARN_BYTES = 1024 * 1024; // 1 MiB
+/** Hard threshold: a cell over this is reported as an ERROR on EVERY flush.
+ *  The write is never dropped — data loss is worse than any warning — but an
+ *  app in this regime is degraded on every flush and every broadcast, so it
+ *  stays loud until fixed. */
+export const PERSIST_CELL_HARD_BYTES = 16 * 1024 * 1024; // 16 MiB
+/** The tier guide every size guardrail points at. */
+export const BIG_DATA_DOC = "docs/persistence/big-data.md";
+
+/** The teachable part, shared by warn and hard messages (and mirrored at the
+ *  broadcast seam in server-broadcast.ts). */
+export const CELL_SIZE_TIER_HINT =
+  `Cell state is the reactive working set — it is serialized on every ` +
+  `persist flush and broadcast to every client. Bulk rows belong in db: ` +
+  `tables, binaries in files — see ${BIG_DATA_DOC}.`;
+
+const _fmtBytes = (n: number): string =>
+  n >= 1024 * 1024
+    ? `${(n / (1024 * 1024)).toFixed(1)}MB`
+    : `${(n / 1024).toFixed(0)}KB`;
 
 /** Configuration for the persistence manager — KV/SQLite handles, debounce timing, and state accessors. */
 export interface PersistenceConfig {
@@ -127,6 +171,46 @@ export function createPersistenceManager(
   // the same bad field would otherwise log on every one of them.
   const _warnedPersistPaths = new Set<string>();
 
+  // Size guardrail bookkeeping: one WARN per cell per process; the HARD
+  // overrun deliberately has no such set — it reports on every flush.
+  const _warnedBigCells = new Set<string>();
+  function _guardCellSize(cellName: string, size: number): void {
+    if (size > PERSIST_CELL_HARD_BYTES) {
+      // Loud on EVERY flush, and the write still happens: refusing it would
+      // turn "too big" into data loss, which is strictly worse.
+      const err = new Error(
+        `persist: cell "${cellName}" serializes to ${_fmtBytes(size)} — over ` +
+          `the ${_fmtBytes(PERSIST_CELL_HARD_BYTES)} hard limit. The write ` +
+          `is NOT dropped (state is never lost), but every flush and every ` +
+          `broadcast now pays this size. ${CELL_SIZE_TIER_HINT}`,
+      );
+      log.error(err.message);
+      _reportPersistError(err);
+    } else if (
+      size > PERSIST_CELL_WARN_BYTES && !_warnedBigCells.has(cellName)
+    ) {
+      _warnedBigCells.add(cellName);
+      log.warn(
+        `persist: cell "${cellName}" serializes to ${_fmtBytes(size)} ` +
+          `(warn threshold ${_fmtBytes(PERSIST_CELL_WARN_BYTES)}). ` +
+          CELL_SIZE_TIER_HINT,
+      );
+    }
+  }
+
+  // Per-cell serialization cache, advanced ONLY when a write COMMITS.
+  //
+  // Committed state is frozen (immer autoFreeze is never disabled), so an
+  // unchanged reference cannot hide changed contents — the same identity
+  // argument `prevLiveTables` above rests on. A cell whose slice reference is
+  // unchanged since the last committed write therefore serializes to the same
+  // JSON, and re-stringifying (and re-upserting) it every debounce window was
+  // pure waste: one small cell changing in an app with one big cell paid the
+  // big cell's full serialization on every flush. A snapshot pipeline that
+  // rebuilds its objects each call simply never hits the cache and gets the
+  // old behaviour.
+  const _cellSer = new Map<string, { ref: unknown; size: number }>();
+
   function _reportPersistError(e: unknown): void {
     const err = createAioError("PERSIST_ERROR", e, {});
     reportAioError(err, getReportOpts());
@@ -234,20 +318,47 @@ export function createPersistenceManager(
         ...(getDBState(kvGetState(snap)) as Record<string, unknown>),
       }
       : getDBState(kvGetState(snap));
-    // Name every value JSON would corrupt on the way to disk. The failure
-    // this catches is invisible at write time and only appears on the NEXT
-    // boot — a Date that came back a string, a field that vanished.
-    //
-    // Observe-only, identically in dev and prod: it reports (once per
-    // offending path) and still writes. Refusing the write would turn one
-    // corrupted field into total data loss, and throwing here would surface
-    // inside a debounced background timer — far from the code that put the
-    // value in state, and wearing the label of whatever catch caught it.
-    // The report carries the exact path and the fix, which is what the
-    // developer actually needs.
+    // ONE per-cell scan of the document about to be written, feeding three
+    // consumers from the same pass:
+    //   1. round-trip issues — name every value JSON would corrupt on the way
+    //      to disk (observe-only, identically in dev and prod: it reports once
+    //      per offending path and still writes — refusing the write would turn
+    //      one corrupted field into total data loss);
+    //   2. the size guardrail (_guardCellSize);
+    //   3. in multi mode, the changed-cell set the write below is narrowed to.
+    // A cell whose committed reference is unchanged (see _cellSer) skips
+    // serialization entirely — its size is already known and its row already
+    // holds exactly these bytes.
+    const doc = dbState as Record<string, unknown>;
+    const perCell = doc !== null && typeof doc === "object" &&
+      !Array.isArray(doc);
+    const changed: Record<string, unknown> = {};
+    const pendingSer: [string, { ref: unknown; size: number }][] = [];
+    const freshIssues: PersistIssue[] = [];
+    if (perCell) {
+      for (const [cellName, v] of Object.entries(doc)) {
+        const hit = _cellSer.get(cellName);
+        if (hit && hit.ref === v) {
+          _guardCellSize(cellName, hit.size); // hard overruns stay loud
+          continue;
+        }
+        const { json, issues } = stringifyWithIssues(v);
+        for (const i of issues) {
+          // Same dotted-from-the-root paths the whole-document scan produced.
+          freshIssues.push({
+            ...i,
+            path: i.path ? `${cellName}.${i.path}` : cellName,
+          });
+        }
+        _guardCellSize(cellName, json.length);
+        changed[cellName] = v;
+        pendingSer.push([cellName, { ref: v, size: json.length }]);
+      }
+    } else {
+      freshIssues.push(...stringifyWithIssues(dbState).issues);
+    }
     {
-      const { issues } = stringifyWithIssues(dbState);
-      const fresh = issues.filter((i) => !_warnedPersistPaths.has(i.path));
+      const fresh = freshIssues.filter((i) => !_warnedPersistPaths.has(i.path));
       if (fresh.length > 0) {
         for (const i of fresh) _warnedPersistPaths.add(i.path);
         const err = new Error(`persist: ${describeIssues(fresh)}`);
@@ -257,26 +368,41 @@ export function createPersistenceManager(
     }
 
     if (persistMode === "multi") {
-      // Multi mode: one SQLite row per top-level cell (setMulti is atomic and
-      // rewrites only changed cells). No size ceiling — the store is SQLite,
-      // whose TEXT values hold ~1GB. (The old ~64KB "over-limit degrade" was
-      // a Deno.Kv-era vestige; Deno.Kv was retired in D4 precisely to escape
-      // that limit, so refusing large cells only lost data SQLite would keep.)
-      const obj = dbState as Record<string, unknown>;
-      const keys = Object.keys(obj);
-      const prevKeys = prevPersistedKeys;
+      // Multi mode: one SQLite row per top-level cell, and ONLY the changed
+      // cells are rewritten (the cache above). No size ceiling — the store is
+      // SQLite, whose TEXT values hold ~1GB. (The old ~64KB "over-limit
+      // degrade" was a Deno.Kv-era vestige; Deno.Kv was retired in D4
+      // precisely to escape that limit, so refusing large cells only lost
+      // data SQLite would keep.)
+      const keys = Object.keys(doc);
+      // Keys that left the document entirely (a consumed/renamed cell) — the
+      // ONLY deletes. Unchanged cells must NOT ride in the prev-keys list:
+      // planSetMulti deletes every prev key absent from its object, so the
+      // full prev list next to the narrowed object would delete every
+      // unchanged cell's row.
+      const removedKeys = prevPersistedKeys.filter((k) => !(k in doc));
+      const toWrite = perCell ? changed : doc;
       return {
-        stmts: kvDb.planSetMulti?.(persistKey, obj, prevKeys) ?? null,
-        write: async () => (await kvDb!.setMulti(persistKey, obj, prevKeys)).ok,
+        stmts: kvDb.planSetMulti?.(persistKey, toWrite, removedKeys) ?? null,
+        write: async () =>
+          (await kvDb!.setMulti(persistKey, toWrite, removedKeys)).ok,
         commit: async () => {
           prevPersistedKeys = keys;
+          for (const [k, e] of pendingSer) _cellSer.set(k, e);
+          for (const k of removedKeys) _cellSer.delete(k);
           await _stampVersions();
           cfg.onPersisted?.(seq); // watermark advances only on a committed write
-          log.debug(`persist: saved multi (${keys.length} keys)`);
+          log.debug(
+            `persist: saved multi (${
+              Object.keys(toWrite).length
+            }/${keys.length} cells written)`,
+          );
         },
       };
     }
-    // Single mode: one JSON blob. Any size — SQLite, not Deno.Kv.
+    // Single mode: one JSON blob. Any size — SQLite, not Deno.Kv. The write
+    // is the whole document by contract (one row), so only the scan above
+    // benefits from the cache.
     return {
       stmts: kvDb.planSet?.(persistKey, dbState) ?? null,
       write: async () => {
@@ -284,6 +410,7 @@ export function createPersistenceManager(
         return true;
       },
       commit: async () => {
+        for (const [k, e] of pendingSer) _cellSer.set(k, e);
         await _stampVersions();
         cfg.onPersisted?.(seq); // watermark advances only on a committed write
         log.debug("persist: saved single");

@@ -32,7 +32,7 @@ const ROOT = new URL("..", import.meta.url).pathname;
  *  config area is drift and fails the gate. */
 const ALLOWED_HINTS = [
   'no "test" task',
-  "no compile tasks defined",
+  "no build task defined",
 ];
 
 /** Every example app: a directory under examples/ (or examples/targets/) that

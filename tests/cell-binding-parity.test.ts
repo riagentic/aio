@@ -1,6 +1,6 @@
 // A cell has THREE bindings — the server catalog (`cell-create.ts`), the
 // reactive client binding (`cell-reactive.ts`), and the browser's own `cell()`
-// stub (`protocol/protocol-cell.ts`) — and the browser stub is a separate
+// stub (`browser/protocol-cell.ts`) — and the browser stub is a separate
 // implementation, not a wrapper. Every time a per-cell fact the CLIENT branches
 // on has been added, it has been added to two of the three:
 //
@@ -17,7 +17,7 @@
 // held that line for the server config.
 import { assert, assertEquals } from "@std/assert";
 import { cell as serverCell } from "../src/state/cell-create.ts";
-import { cell as browserCell } from "../src/protocol/protocol-cell.ts";
+import { cell as browserCell } from "../src/browser/protocol-cell.ts";
 import { _resetAioRuntime } from "../src/state/runtime-reset.ts";
 
 /** Client-side sources: whatever these read off `__aio`, the stub must supply.
@@ -70,7 +70,7 @@ async function readAll(paths: string[]): Promise<string> {
 Deno.test("cell binding: every __aio key the client reads is produced by the browser stub", async () => {
   const clientSrc = await readAll(CLIENT_SOURCES);
   const stubSrc = await Deno.readTextFile(
-    new URL("../src/protocol/protocol-cell.ts", import.meta.url),
+    new URL("../src/browser/protocol-cell.ts", import.meta.url),
   );
   const keys = new Set<string>();
   for (const m of clientSrc.matchAll(/__aio\.([a-zA-Z_]\w*)/g)) keys.add(m[1]!);

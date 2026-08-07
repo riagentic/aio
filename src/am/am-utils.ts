@@ -247,12 +247,16 @@ export function parseGlobalFlags(
     "--entry",
     "--transport",
     "--app",
+    "--client-index",
   ]);
   const expanded: string[] = [];
   for (let i = 0; i < raw.length; i++) {
     const a = raw[i]!;
     if (takesValue.has(a) && i + 1 < raw.length) {
       expanded.push(`${a}=${raw[++i]}`);
+    } else if (a === "-i" && i + 1 < raw.length) {
+      // `-i N` — the short form of `--client-index=N`.
+      expanded.push(`--client-index=${raw[++i]}`);
     } else expanded.push(a);
   }
 
@@ -280,12 +284,28 @@ export function parseGlobalFlags(
     else if (a.startsWith("--entry=")) flags.entry = a.slice(8);
     else if (a.startsWith("--transport=")) flags.transport = a.slice(12);
     else if (a.startsWith("--app=")) flags.app = a.slice(6);
+    else if (a.startsWith("--client-index=")) {
+      flags.client = num(a.slice(15), "--client-index");
+    } else if (a === "--client-index") flags.client = 0;
+    else if (a.startsWith("-i") && a.length > 2) {
+      // `-i2` — attached short form of `--client-index=2`.
+      flags.client = num(a.slice(2), "-i (client index)");
+    } // ── deprecated spellings of the client INDEX (renamed in alpha52:
+    // `--client=N` collides with the runtime's `--client=<kind>`, so an
+    // `am`-vs-app confusion read as a valid flag on both sides). Accepted
+    // through beta, with a hint naming the new one. ──
     else if (a.startsWith("--client=")) {
+      console.error(
+        "am: --client=N is now --client-index=N (or -i N) — the old " +
+          "spelling still works, but collides with the app runtime's " +
+          "--client=<kind>",
+      );
       flags.client = num(a.slice(9), "--client");
     } else if (a.startsWith("-c") && a.length > 2) {
-      // `-c2` is the short form of `--client=2`. `-c2x` used to fail the
+      // `-c2` was the short form of `--client=2`. `-c2x` used to fail the
       // isNaN test and fall through to the POSITIONAL args, where it became a
       // command argument — the same NaN class, silent one step further along.
+      console.error("am: -cN is now -i N (client index)");
       flags.client = num(a.slice(2), "-c (client index)");
     } else if (a === "--client") flags.client = 0;
     else if (a === "--all") flags.all = true;

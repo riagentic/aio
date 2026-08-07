@@ -45,10 +45,11 @@ If a method "randomly doesn't work", check its guard against the current
 derived data, session junk included. Opt out per field
 (`persist: { exclude: ["cache"] }`) or per cell (`persist: "none"`).
 
-**Everything broadcasts by default.** Same for `ui: "all"` — every connected
-client sees the whole cell. Secrets need `ui: { exclude: […] }` (dot-paths reach
-into arrays: `"accounts.encSecKey"`), `forUser`, or `ui: "none"`. Boot warnings
-flag secret-looking exposed fields — don't ignore them.
+**Everything broadcasts by default.** Same for `visible: "all"` — every
+connected client sees the whole cell. Secrets need `visible: { exclude: […] }`
+(dot-paths reach into arrays: `"accounts.encSecKey"`), `forUser`, or
+`visible: "none"`. Boot warnings flag secret-looking exposed fields — don't
+ignore them.
 
 **`include` is top-level only.** `include: ["a.b"]` warns and matches nothing.
 Deep paths are for `exclude`.

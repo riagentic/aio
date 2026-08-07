@@ -28,7 +28,9 @@ let _readyTimeout: ReturnType<typeof setTimeout> | null = null;
 
 // ── Types ────────────────────────────────────────────────────────────
 
-/** Result of handleMessage — tells caller what happened. */
+/** Result of handleMessage — tells caller what happened.
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
+ */
 export type HandleResult = "full" | "delta" | "noop" | "dropped";
 
 // ── Message handling ─────────────────────────────────────────────────
@@ -151,7 +153,9 @@ export function ready(): Promise<unknown> {
   return _readyPromise;
 }
 
-/** Whether initial state has been received. */
+/** Whether initial state has been received.
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
+ */
 export function isInitialStateReceived(): boolean {
   return _initialStateReceived;
 }

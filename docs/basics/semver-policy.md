@@ -53,13 +53,30 @@ match documented behavior are patch — even when someone depended on the bug.
 
 ## Release phases
 
-| Phase  | May break                                                        | Gate                                           |
-| ------ | ---------------------------------------------------------------- | ---------------------------------------------- |
-| alpha  | anything, flagged BREAKING in the CHANGELOG                      | all CI gates green                             |
-| beta   | nothing — API frozen at beta1; bugfixes only                     | api-snapshot diff = additive-or-empty          |
-| 1.0.0  | —                                                                | exit criteria in todo.md (field reports, soak) |
-| 1.x    | additive only                                                    | api:check + this policy                        |
-| 2.0.0+ | breaking allowed, with upgrade guide + deprecation cycle honored | docs/upgrade/ guide mandatory                  |
+| Phase  | May break                                                                                                                        | Gate                                           |
+| ------ | -------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| alpha  | anything, flagged BREAKING in the CHANGELOG                                                                                      | all CI gates green                             |
+| beta   | very rarely — an isolated break when quality demands it (upgrade guide + `am fix`/codemod mandatory); never a broad API refactor | api-snapshot diff reviewed per release         |
+| 1.0.0  | —                                                                                                                                | exit criteria in todo.md (field reports, soak) |
+| 1.x    | additive only (1.1.0) / fixes only (1.0.1)                                                                                       | api:check + this policy                        |
+| 2.0.0+ | breaking allowed, with upgrade guide + deprecation cycle honored                                                                 | docs/upgrade/ guide mandatory                  |
+
+Beta is a **quality** statement, not a stability freeze (decision 2026-08-07):
+it means the physical gates passed and adversarial hunts come back clean — not
+that the API stopped moving. But the moving is bounded: **one or two isolated
+breaks across the whole beta phase is the budget** — wild API refactoring is
+alpha behaviour and stays there.
+
+**The beta promise: an app that worked will work — or will work after
+`am fix`.** Every beta-phase break ships with its migration, in this order of
+preference: (1) `aiol --safe-fix`/`am fix` rewrites it automatically — the
+default expectation; (2) where automation genuinely can't, a precise
+step-by-step upgrade-guide recipe. In BOTH cases the running app must say what
+is going on: a loud, actionable message at the old spelling naming the change
+and pointing at the fix — a break a developer discovers by debugging is a broken
+promise regardless of what the guide says. Stability hardens progressively: the
+last two betas before 1.0.0 must be break-free (that is C1), and from 1.0.0 the
+table above is a promise.
 
 ## Experimental surface
 

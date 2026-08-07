@@ -58,6 +58,8 @@ Deno.test({
     const { cell } = sa;
     sa._reset();
     const streamer = cell("sastream", {
+      // alpha52: streaming cell — incremental commits, the documented opt-out.
+      transaction: false,
       state: { chunks: [] as string[], status: "idle" } as Doc,
       methods: {
         // The shape of every streaming reply: only its abort signal ends it.

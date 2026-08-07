@@ -283,3 +283,58 @@ Deno.test("am pin reports how far behind the pin is", async () => {
     await s.cleanup();
   }
 });
+
+Deno.test("am fix seals a local-checkout link with a path: pin, and the pin decider agrees", async () => {
+  // Field case: dep/aio already links a LOCAL WORKING TREE (am link <path> /
+  // am create --mirror). Sealing that with a VERSION string is
+  // self-contradictory — linkDepAio keeps the working link, so aiol/doctor
+  // (linkSatisfiesPin: a version pin must resolve to the versions store)
+  // warned "pin does not match dep/aio" immediately after the fix that wrote
+  // it. The local-dev pin exists for exactly this shape.
+  const { linkSatisfiesPin } = await import("../src/server/framework-pin.ts");
+  const s = await sandbox();
+  try {
+    await Deno.mkdir(join(s.app, "dep"), { recursive: true });
+    await Deno.symlink(s.install, join(s.app, "dep", "aio"));
+
+    const r = await amFix(s);
+    const pin = pinResult(r);
+    assert(pin, "am fix reports on the pin");
+    assertEquals(pin.outcome, "fixed", `expected a seal, got: ${pin.note}`);
+    const sealed = await readPin(s.app);
+    assert(
+      sealed?.startsWith("path:"),
+      `a local-tree link must seal as a path: pin, got ${sealed}`,
+    );
+    // …and the seal SAYS it is machine-specific, with the way out.
+    assertStringIncludes(pin.note, "path:");
+    assertStringIncludes(pin.note, "am pin --latest");
+
+    // THE decider every reporter asks (aiol, doctor, am pin) agrees by
+    // construction — no "pin does not match dep/aio" the moment fix exits.
+    const link = await Deno.readLink(join(s.app, "dep", "aio"));
+    assert(
+      linkSatisfiesPin(sealed!, link),
+      `pin ${sealed} contradicts the link ${link}`,
+    );
+
+    // aiol's own pin check passes on the app am fix just repaired.
+    const { lint } = await import("../aiol/mod.ts");
+    const report = await lint(s.app);
+    const mismatch = report.issues.filter((i) =>
+      i.message.includes("does not match dep/aio")
+    );
+    assertEquals(
+      mismatch.map((i) => i.message),
+      [],
+      "aiol must not warn about the pin am fix just wrote",
+    );
+
+    // Idempotent: a second fix reports, never re-seals.
+    const second = await amFix(s);
+    assertEquals(pinResult(second)?.outcome, "ok");
+    assertEquals(await readPin(s.app), sealed);
+  } finally {
+    await s.cleanup();
+  }
+});

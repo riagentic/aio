@@ -6,7 +6,7 @@
 import { handleTTMessage } from "../air/time-travel-panel.ts";
 import { getSerializedSurfaces, runUITrigger } from "../air/ui-remote.ts";
 import { _vitalsTransportProbe, _w } from "./browser-protocol.ts";
-import { _rejectAck, _resolveAck } from "../protocol/browser-ack.ts";
+import { _rejectAck, _resolveAck } from "./browser-ack.ts";
 import { _deliverDiag } from "../protocol/protocol-diagnostics.ts";
 import { type AckPayload, enc, type Frame } from "../protocol/envelope.ts";
 import type { VitalsPong } from "../vitals/transport-probe.ts";

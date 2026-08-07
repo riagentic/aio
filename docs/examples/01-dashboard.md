@@ -216,7 +216,7 @@ Per-user filtering is configured on the cell itself:
 ```ts
 export const metrics = cell("metrics", {
   state: { cpu: 0, mem: 0, requests: 0, history: [] as Snapshot[] },
-  ui: {
+  visible: {
     forUser: (exposed, user?) => {
       if (user?.role === "admin") return exposed;
       // Viewers get current values but not the history array

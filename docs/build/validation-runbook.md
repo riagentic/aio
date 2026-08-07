@@ -41,7 +41,8 @@ deno task dev:expose          # binds 0.0.0.0, prints the share link + key
 On machine B (same LAN, then ideally a different network):
 
 - open the share link in a browser → counter increments, updates live ✚
-- `deno task compile:cli --remote` a cli-remote build, connect with the link
+- `deno task build --targets=cli-client` a cli-client build, connect with the
+  link
 - kill the server → client shows the reconnect state loudly; restart → client
   recovers without reload
 
@@ -59,18 +60,19 @@ deno task test       # starter test green
 
 ## 4. macOS (~20 min)
 
-Same as Windows with the curl installer. Additionally: `deno task
-dev:electron`
-(auto-install path) and `compile:electron`.
+Same as Windows with the curl installer. Additionally:
+`deno task dev --client=electron` (auto-install path) and
+`deno task build --targets=electron`.
 
 ## 5. Android — real device (~30 min)
 
 ```sh
 am create droid-check && cd droid-check
-deno task compile:android          # APK builds
+deno task build --targets=android  # APK builds
 adb install app-release.apk        # on the REAL device (not emulator)
 # launch: counter works offline; with `deno task dev` running on the same
-# network + dev:android against the device: live reload reaches it
+# network + the android dev flow (deno run -A jsr:@riagentic/aio/dev-android)
+# against the device: live reload reaches it
 ```
 
 ## Results ledger

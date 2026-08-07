@@ -179,7 +179,7 @@ Deno.test("call resolves with return value", async () => {
 
   // With timeout/retry
   const result = await call(
-    { timeout: 1000, retries: 2 },
+    { timeoutMs: 1000, retries: 2 },
     () => inventory.checkStock("widget"),
   );
   assertEquals(result, 10);

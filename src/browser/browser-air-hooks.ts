@@ -1,54 +1,12 @@
-// browser-air-hooks: AIR signal-based hooks (useCell, useAio, useLocal, useConnected, useProjection, memo)
+// browser-air-hooks: AIR signal-based hooks (useAio, useLocal, useConnected, useProjection, memo)
+// (`useCell` was REMOVED in alpha52 — read cells directly; see src/state/removals.ts)
 
 import {
   useAio as _airUseAio,
-  useCell as _airUseCell,
   useConnected as _airUseConnected,
 } from "../adapters/air.ts";
 import { useRef } from "../air/aio-renderer.ts";
 import { _projectWithSharing, ensureConnected } from "./browser-protocol.ts";
-import type { _CoreCellRef as CellRef } from "./browser-protocol.ts";
-import type {
-  CellDef,
-  DirectCalling,
-  ExtractState,
-  SendOf,
-} from "../state/cell-types.ts";
-
-// AIO-67 + AIO-75: Typed overloads -- infer State and Send from CellDef
-/** Subscribe to a cell — use direct cell access instead for new code. */
-export function useCell<
-  // deno-lint-ignore no-explicit-any
-  F extends CellDef<any, any, any, any> & DirectCalling<any, any>,
->(
-  ref: F,
-): {
-  state: ExtractState<F>;
-  send: SendOf<F>;
-  status: string | undefined;
-};
-/** Subscribe to a cell — use direct cell access instead for new code. */
-export function useCell<
-  S extends Record<string, unknown> = Record<string, unknown>,
->(
-  ref: CellRef,
-): {
-  state: S;
-  send: Record<string, (...args: unknown[]) => void>;
-  status: string | undefined;
-};
-/** Subscribe to a cell — use direct cell access instead for new code. */
-// deno-lint-ignore no-explicit-any
-export function useCell(ref: any): any {
-  ensureConnected();
-  const result = _airUseCell(ref);
-  const status = result.state
-    ? (result.state as Record<string, unknown>).__aio_status as
-      | string
-      | undefined
-    : undefined;
-  return { state: result.state, send: result.send, status };
-}
 
 /** AIR useAio -- full global state, signal-based. Calls ensureConnected(). */
 export function useAio<

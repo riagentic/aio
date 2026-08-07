@@ -20,6 +20,7 @@ import {
 } from "./server-transpile.ts";
 import { handleTrojan as _handleTrojanRoute } from "./server-trojan.ts";
 import { loadVendorImmer } from "./server-vendor.ts";
+import { BLOB_ID_RE, BLOB_URL_PREFIX, type BlobStore } from "./blobs.ts";
 
 // Framework module URLs — this file lives in src/server/, so entry files at the
 // src/ root and folderized modules are one level up. The /__aio/ namespace
@@ -86,6 +87,39 @@ export function aioModuleUrl(
 /** Safety limits — prevent resource exhaustion */
 const SNAPSHOT_MAX_SIZE = 10_000_000; // 10MB — reject oversized snapshot uploads
 
+/** Parse a single-range `Range` header against a resource of `size` bytes.
+ *
+ *  Returns the byte window `{ start, end }` (end EXCLUSIVE), the string
+ *  `"unsatisfiable"` (→ 416 with a Content-Range naming the total size), or
+ *  null when the header is absent/malformed/multi-range — per RFC 7233 an
+ *  unreadable Range is IGNORED (a full 200), never guessed at. Pure +
+ *  exported for tests. */
+export function parseByteRange(
+  header: string | null,
+  size: number,
+): { start: number; end: number } | "unsatisfiable" | null {
+  if (!header) return null;
+  const m = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+  if (!m) return null; // malformed or multi-range — serve the full resource
+  const [, rawStart, rawEnd] = m;
+  if (rawStart === "" && rawEnd === "") return null;
+  if (rawStart === "") {
+    // Suffix range: last N bytes.
+    const n = Number(rawEnd);
+    if (!Number.isSafeInteger(n)) return null;
+    if (n === 0 || size === 0) return "unsatisfiable";
+    const start = Math.max(0, size - n);
+    return { start, end: size };
+  }
+  const start = Number(rawStart);
+  if (!Number.isSafeInteger(start)) return null;
+  if (start >= size) return "unsatisfiable";
+  if (rawEnd === "") return { start, end: size };
+  const endIncl = Number(rawEnd);
+  if (!Number.isSafeInteger(endIncl) || endIncl < start) return null;
+  return { start, end: Math.min(endIncl + 1, size) };
+}
+
 /** Dependencies injected from server.ts — no mutable state owned */
 export interface StaticDeps {
   prod: boolean;
@@ -118,6 +152,11 @@ export interface StaticDeps {
   // Snapshot support
   getSnapshot?: () => string;
   loadSnapshot?: (json: string) => void;
+  /** Content-addressed blob store — serves `/__aio/blobs/<id>` (GET/HEAD,
+   *  single-range, immutable caching). Auth-gated upstream in server.ts
+   *  exactly like every other app resource — see the per-user anonymous
+   *  gate there. */
+  blobs?: BlobStore;
   // Health endpoint
   getHealth?: () => unknown;
   // Vitals
@@ -383,6 +422,11 @@ export function createStaticHandler(deps: StaticDeps): {
       }
     }
 
+    // ── Blob bytes (content-addressed, Range-capable) ──
+    if (pathname.startsWith(BLOB_URL_PREFIX) && deps.blobs) {
+      return handleBlob(pathname, req);
+    }
+
     // ── Snapshot endpoint ──
     if (
       pathname === "/__aio/snapshot" && deps.getSnapshot && deps.loadSnapshot
@@ -469,6 +513,69 @@ export function createStaticHandler(deps: StaticDeps): {
         },
       );
     }
+  }
+
+  /** Serve `/__aio/blobs/<id>` — GET/HEAD, single-range (206/416), immutable
+   *  caching. The id IS the sha256 of the content, so the response can never
+   *  go stale: `immutable` + a matching ETag are correct BY CONSTRUCTION. */
+  async function handleBlob(
+    pathname: string,
+    req?: Request,
+  ): Promise<Response> {
+    const method = req?.method ?? "GET";
+    if (method !== "GET" && method !== "HEAD") {
+      return new Response("Method Not Allowed", {
+        status: 405,
+        headers: { Allow: "GET, HEAD" },
+      });
+    }
+    const id = pathname.slice(BLOB_URL_PREFIX.length);
+    // Not a well-formed id → same 404 as an absent blob (no probe surface).
+    if (!BLOB_ID_RE.test(id)) return new Response("Not Found", { status: 404 });
+    const blob = await deps.blobs!.info(id);
+    if (!blob) return new Response("Not Found", { status: 404 });
+
+    const etag = `"${id}"`;
+    const baseHeaders: Record<string, string> = {
+      // Content-addressed: the bytes behind this URL can never change.
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "ETag": etag,
+      "Accept-Ranges": "bytes",
+      "Content-Type": (blob.name ? MIME[extname(blob.name)] : undefined) ??
+        "application/octet-stream",
+    };
+    if (req?.headers.get("if-none-match") === etag) {
+      return new Response(null, { status: 304, headers: baseHeaders });
+    }
+
+    const range = parseByteRange(req?.headers.get("range") ?? null, blob.size);
+    if (range === "unsatisfiable") {
+      return new Response("Range Not Satisfiable", {
+        status: 416,
+        headers: { ...baseHeaders, "Content-Range": `bytes */${blob.size}` },
+      });
+    }
+    // HEAD carries the SAME response (headers included) — the HTTP runtime
+    // strips the body and cancels the stream, and building it identically is
+    // what keeps a HEAD's Content-Length from drifting to 0 (a null-body
+    // Response gets its declared length overwritten by the server runtime).
+    if (range) {
+      const len = range.end - range.start;
+      const headers = {
+        ...baseHeaders,
+        "Content-Range": `bytes ${range.start}-${range.end - 1}/${blob.size}`,
+        "Content-Length": String(len),
+      };
+      return new Response(await deps.blobs!.stream(id, range), {
+        status: 206,
+        headers,
+      });
+    }
+    const headers = { ...baseHeaders, "Content-Length": String(blob.size) };
+    return new Response(await deps.blobs!.stream(id), {
+      status: 200,
+      headers,
+    });
   }
 
   /** Handle GET/POST snapshot endpoint */

@@ -1,7 +1,7 @@
 // deno-lint-ignore-file
 // Redux DevTools integration.
 
-import type { DevToolsConnection } from "./protocol-types.ts";
+import type { DevToolsConnection } from "../protocol/protocol-types.ts";
 import {
   _getState as _coreGetState,
   isInitialStateReceived as _coreHasState,

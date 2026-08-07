@@ -4,13 +4,12 @@
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
 import { defaultJournalPath, resolveAmAppId } from "./am-utils.ts";
+// THE sentinel, not a copy of it — one decider for "this payload was
+// redacted" across every sink (journal, timeline, am). am → diagnostics is an
+// allowed boundary edge.
+import { REDACTED } from "../diagnostics/redact.ts";
 
 type Action = { type: string; payload?: unknown; redacted?: true };
-
-/** The sentinel a redacted payload was replaced with. Kept in sync with
- *  `src/diagnostics/redact.ts` — `am` must not import from `src/server`'s
- *  diagnostics tree, and this is the whole contract. */
-const REDACTED_PAYLOAD = "[redacted]";
 
 /** A journal entry whose arguments the redactor dropped. Nothing downstream can
  *  reproduce it: `am replay` would re-dispatch the literal string
@@ -19,7 +18,7 @@ const REDACTED_PAYLOAD = "[redacted]";
 export function isRedactedRow(
   r: { payload?: unknown; redacted?: true },
 ): boolean {
-  return r.redacted === true || r.payload === REDACTED_PAYLOAD;
+  return r.redacted === true || r.payload === REDACTED;
 }
 
 /** Generate a bootCells replay test from recorded actions — pure + unit-tested.

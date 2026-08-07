@@ -10,7 +10,7 @@
 //
 // The trap this file mainly guards is the SECOND DECIDER: `expose` was read
 // twice — `cli.expose ?? false` for the transport, and `parseCli().expose` for
-// the `ui:"all"` privacy warning. Adding a config key to only the first would
+// the `visible:"all"` privacy warning. Adding a config key to only the first would
 // have bound an app to 0.0.0.0 with the privacy warning silently switched off.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
@@ -115,8 +115,12 @@ Deno.test({
       assertStringIncludes(out, "wss://0.0.0.0:");
       // THE SECOND-DECIDER TRAP: the privacy warning must fire for an app
       // exposed from config, exactly as it does for --expose.
-      assertStringIncludes(out, 'ui="all" on cells: board');
+      assertStringIncludes(out, 'visible="all" on cells: board');
       assertStringIncludes(out, "expose: true");
+      // alpha52: exposed with no auth story → a shared key is GENERATED (and
+      // the share link carries it) instead of an open port.
+      assertStringIncludes(out, "generated a shared app key");
+      assertStringIncludes(out, "?token=");
     } finally {
       await Deno.remove(dir, { recursive: true }).catch(() => {});
     }
@@ -133,7 +137,16 @@ Deno.test({
     try {
       const { out, code } = await boot(dir, []);
       assertEquals(code, 0, `app exited ${code}\n${out}`);
-      assert(!out.includes('ui="all" on cells'), `warned on loopback\n${out}`);
+      assert(
+        !out.includes('visible="all" on cells'),
+        `warned on loopback\n${out}`,
+      );
+      // loopback: no key is generated, nothing changes (alpha52 key default
+      // is scoped to EXPOSED apps).
+      assert(
+        !out.includes("generated a shared app key"),
+        `loopback must not generate a key\n${out}`,
+      );
       assertStringIncludes(out, "ws://localhost:");
     } finally {
       await Deno.remove(dir, { recursive: true }).catch(() => {});
@@ -238,6 +251,38 @@ Deno.test({
       assert(line, `no probe output\n${out}`);
       // Pre-fix: depth-2 lookup missed `src/relay/../../deno.json` → "0.0.0".
       assertEquals(JSON.parse(line.slice(6)).version, "4.5.6");
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "expose: key: false is the explicit opt-out — app stays OPEN, with a loud warning",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  async fn() {
+    const appId = `expose-open-${crypto.randomUUID().slice(0, 8)}`;
+    const dir = await scaffold({
+      appId,
+      runOpts: `expose: true, key: false, port: ${freePort()}`,
+    });
+    try {
+      const { out, code } = await boot(dir, []);
+      assertEquals(code, 0, `app exited ${code}\n${out}`);
+      // No generated key, share link carries no token…
+      assert(
+        !out.includes("generated a shared app key"),
+        `key: false must not generate a key\n${out}`,
+      );
+      assert(
+        !out.includes("?token="),
+        `share link must carry no token\n${out}`,
+      );
+      // …and the openness is said OUT LOUD, not assumed.
+      assertStringIncludes(out, "key: false");
+      assertStringIncludes(out, "OPEN");
     } finally {
       await Deno.remove(dir, { recursive: true }).catch(() => {});
     }

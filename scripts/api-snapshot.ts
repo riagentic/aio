@@ -123,6 +123,20 @@ async function buildSnapshot(): Promise<{
     const symbolEntries: Record<string, SymbolEntry> = {};
     for (const sym of symbols) {
       const decls = sym.declarations ?? [];
+      // `deno doc` also emits NON-exported local symbols that are merely
+      // reachable from an exported type (e.g. a private `interface Common`
+      // behind `export interface ButtonProps extends Common`). Those are not
+      // importable, so they are not surface — skip symbols whose every
+      // declaration is `declarationKind: "private"`. Deliberately NOT
+      // `!== "export"`: if a future deno drops the field, nothing matches
+      // "private" and the snapshot stays over-inclusive (visible in review)
+      // instead of silently emptying the surface.
+      if (
+        decls.length > 0 &&
+        decls.every((d) => d.declarationKind === "private")
+      ) {
+        continue;
+      }
       const internal = decls.some((d) => hasTag(d, "internal"));
       if (internal) {
         continue; // excluded from the public surface by tag

@@ -4,6 +4,8 @@ import { compareHLC } from "./hlc.ts";
 
 /**
  * Outcome of merging a single field: resolved value and whether a conflict occurred.
+
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
  */
 export interface MergeResult {
   value: unknown;
@@ -12,6 +14,8 @@ export interface MergeResult {
 
 /**
  * Merge a field using the specified CRDT strategy, returning the resolved value.
+
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
  */
 export function mergeField(
   strategy: MergeStrategy,

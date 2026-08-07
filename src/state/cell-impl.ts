@@ -9,6 +9,7 @@
 
 import type { Msg } from "./cell-types.ts";
 import { cloneState } from "./immutable.ts";
+import { removalMessage, removalOf } from "./removals.ts";
 import type { ScheduleEffect } from "./schedule.ts";
 import type { OwnEffect } from "./own.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
@@ -30,19 +31,31 @@ export type CellEffect =
   | OwnEffect
   | (ScheduleEffect | OwnEffect)[];
 
+/** The draft members served on EVERY method invocation, sync AND async
+ *  (alpha52) — unlike the Partial meta below, `s.$do(...)` needs no `!`:
+ *  sync drafts get it from the invocation wrapper, async proxies serve it at
+ *  the root. */
+export type MethodDraftServed = {
+  /** Run effect(s) — the effect channel. See {@linkcode MethodDraftMeta.$do}. */
+  readonly $do: (
+    effect: ScheduleEffect | OwnEffect,
+    ...more: (ScheduleEffect | OwnEffect)[]
+  ) => void;
+};
+
 /** Synchronous cell method — mutates state; may return a `CellEffect` (to
  *  schedule work) OR a plain VALUE that `await cell.method()` resolves with
  *  (AIO-427). Effects are tagged (`type: "__schedule"/"__own"`), so a returned
  *  value is unambiguous at runtime. `unknown` keeps the constraint permissive;
  *  the caller-side return type is inferred precisely by DirectCalling. */
 export type SyncMethod<S> = (
-  s: S & Partial<MethodDraftMeta<S>>,
+  s: S & Partial<MethodDraftMeta<S>> & MethodDraftServed,
   // deno-lint-ignore no-explicit-any
   ...args: any[]
 ) => unknown;
 /** Async cell method — runs in executor, mutations batched via proxy */
 export type AsyncMethod<S> = (
-  s: S & Partial<MethodDraftMeta<S>>,
+  s: S & Partial<MethodDraftMeta<S>> & MethodDraftServed,
   // deno-lint-ignore no-explicit-any
   ...args: any[]
   // deno-lint-ignore no-explicit-any
@@ -64,6 +77,16 @@ export type MethodDraftMeta<S = Record<string, unknown>> = {
    *  transaction's atomic commit; reads through it are deliberately fresh, so
    *  they never trip conflict detection. Off `transaction` it is just `s`. */
   readonly $live: S;
+  /** Run effect(s) — `s.$do(schedule.after(...), own.set(...))` (alpha52).
+   *  The effect channel: `return` is for VALUES, `$do` is for effects, so a
+   *  method can do both in one call. Sync methods: captured and executed with
+   *  the commit. Async methods: dispatched immediately (an `own.set` factory
+   *  registers in the same tick). Returning effects still works through beta,
+   *  with a one-time deprecation hint. */
+  readonly $do: (
+    effect: ScheduleEffect | OwnEffect,
+    ...more: (ScheduleEffect | OwnEffect)[]
+  ) => void;
 };
 /** Cell method — sync or async */
 export type Method<S> = SyncMethod<S> | AsyncMethod<S>;
@@ -85,12 +108,11 @@ const _pending = new Map<
 
 /** Options for call() — `timeoutMs` (the `...Ms` suffix every other duration
  *  in the API uses, matching `until({ timeoutMs })`), retries on failure.
- *  `timeout` is a deprecated alias kept working so old code doesn't silently
- *  lose its timeout, but only `timeoutMs` is documented. */
+ *  (alpha52: the long-deprecated `timeout` alias was REMOVED — passing it
+ *  throws with the rename, never silently drops the timeout;
+ *  `aiol --safe-fix` rewrites it.) */
 export type CallOptions = {
   timeoutMs?: number;
-  /** @deprecated use `timeoutMs` */
-  timeout?: number;
   retries?: number;
 };
 
@@ -120,7 +142,13 @@ export function callWithOpts(
   fn: () => unknown | Promise<unknown>,
   opts: CallOptions,
 ): Promise<unknown> {
-  const timeoutMs = opts.timeoutMs ?? opts.timeout; // deprecated alias
+  // alpha52: `timeout` (the pre-alpha alias) is REMOVED. Silently ignoring it
+  // would drop a timeout the caller believes is armed — fail loud, with the
+  // ONE registry-sourced message every removal surface prints.
+  if ("timeout" in opts && (opts as { timeout?: unknown }).timeout != null) {
+    throw new Error(removalMessage(removalOf("call({ timeout })")));
+  }
+  const timeoutMs = opts.timeoutMs;
   const attempt = (): Promise<unknown> => {
     let p: Promise<unknown>;
     try {
@@ -538,7 +566,7 @@ export const LIVE_RAW = Symbol("aio.liveRaw");
  *  method that assigns an array and keeps mutating its local reference sees
  *  those later mutations committed, exactly like the Immer draft;
  *  `ownedValue` still clones at apply time so replays stay safe. */
-function materializeValue(v: unknown): unknown {
+export function materializeValue(v: unknown): unknown {
   // ONE object reached through two proxies must materialize to ONE clone.
   // `s.items.fill(o)` puts the same object at every index (plain JS, and Immer
   // does the same on a draft), so `[...s.items]` is an array of two proxies
@@ -949,6 +977,10 @@ export function createLiveProxy<S extends Record<string, unknown>>(
   // pinned snapshot, sharing this batcher so writes still commit atomically.
   // Root-level only; its reads are deliberately fresh, so they are not watched.
   _live?: () => S,
+  // `s.$do(effect, ...)` — the effect channel (alpha52). Root-level only; the
+  // executor wires it to an immediate `__effects` dispatch so an own.set
+  // factory is consumed in the same tick.
+  _do?: (...effects: unknown[]) => void,
 ): S {
   const pathKey = path.join(PATH_SEP);
   const noteRead = _watch ? (k: string) => _watch.reads.add(k) : undefined;
@@ -1037,6 +1069,11 @@ export function createLiveProxy<S extends Record<string, unknown>>(
       // transactional method it is the same proxy, so the spelling is portable.
       if (key === "$live" && path.length === 0) {
         return _live ? _live() : receiver;
+      }
+      // `s.$do(effect, ...)` — the effect channel (alpha52). Root-level only,
+      // like $commit/$live.
+      if (key === "$do" && path.length === 0 && _do) {
+        return _do;
       }
       const fresh = effectiveAt();
       const value = (fresh as Record<string, unknown>)[key];
@@ -1266,6 +1303,54 @@ export function createLiveProxy<S extends Record<string, unknown>>(
   };
 
   return new Proxy(target, handler);
+}
+
+// ── Sync-draft $do wrapper (alpha52 — the effect channel) ──────────
+//
+// Sync methods run on a raw Immer draft, which has no interception seam of its
+// own (defineProperty on a draft throws), so `s.$do` is served by a thin
+// forwarding Proxy installed at invocation. Every other trap forwards straight
+// to the draft — writes, deletes, key walks and nested reads behave EXACTLY as
+// on the bare draft (the sync/async parity fuzzer pins this).
+
+/** Identity through which the wrapper exposes the underlying draft — so
+ *  `return s` still resolves to the real draft (snapshotReturn needs isDraft
+ *  to see it). @internal */
+export const DRAFT_DO_TARGET = Symbol("aio.draftDoTarget");
+
+/** Wrap a sync-method draft so `s.$do(...)` exists. @internal */
+export function withDraftDo<S extends object>(
+  draft: S,
+  doFn: (...effects: unknown[]) => void,
+): S {
+  return new Proxy(draft, {
+    get(t, p, _r) {
+      if (p === "$do") return doFn;
+      if (p === DRAFT_DO_TARGET) return t;
+      // Receiver = the draft itself: Immer's internal getters must see their
+      // own proxy, never this wrapper.
+      return Reflect.get(t, p, t);
+    },
+    set: (t, p, v) => Reflect.set(t, p, v, t),
+    has: (t, p) => p === "$do" || Reflect.has(t, p),
+    deleteProperty: (t, p) => Reflect.deleteProperty(t, p),
+    ownKeys: (t) => Reflect.ownKeys(t),
+    getOwnPropertyDescriptor: (t, p) => Reflect.getOwnPropertyDescriptor(t, p),
+    defineProperty: (t, p, d) => Reflect.defineProperty(t, p, d),
+    getPrototypeOf: (t) => Reflect.getPrototypeOf(t),
+    setPrototypeOf: (t, proto) => Reflect.setPrototypeOf(t, proto),
+    isExtensible: (t) => Reflect.isExtensible(t),
+    preventExtensions: (t) => Reflect.preventExtensions(t),
+  });
+}
+
+/** The draft behind a `withDraftDo` wrapper, or the value itself. @internal */
+export function unwrapDraftDo(v: unknown): unknown {
+  if (v !== null && typeof v === "object") {
+    const t = (v as Record<symbol, unknown>)[DRAFT_DO_TARGET];
+    if (t !== undefined) return t;
+  }
+  return v;
 }
 
 // ── Method classification ──────────────────────────────────────────

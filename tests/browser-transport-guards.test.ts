@@ -12,9 +12,9 @@ import {
   ackMethodKey,
   ARMS_ACK_TIMER,
   armsAckTimer,
-} from "../src/protocol/browser-ack.ts";
+} from "../src/browser/browser-ack.ts";
 import { backoffDelay } from "../src/protocol/transport-shared.ts";
-import { cell as browserCell } from "../src/protocol/protocol-cell.ts";
+import { cell as browserCell } from "../src/browser/protocol-cell.ts";
 import { markAsync } from "../src/state/cell-impl.ts";
 
 // ── the ack registry's terms are set by whoever registers FIRST ───────────

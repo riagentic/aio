@@ -24,7 +24,6 @@ import {
   unknownFleetFlags,
 } from "../src/build/build-flags.ts";
 import { standardTasks, TARGETS } from "../src/am/am-cmd-create.ts";
-import type { Target } from "../src/am/am-cmd-create.ts";
 
 // ── 1. the vocabularies ─────────────────────────────────────────────────────
 
@@ -149,45 +148,39 @@ Deno.test("build-all: an unknown flag is refused before anything is built", asyn
   assertStringIncludes(r.out, "--targets", "names the real flag");
 });
 
-// ── 3. `deno task compile` == `deno task compile:<target>` ──────────────────
+// ── 3. `deno task compile` == `deno task build --targets=<target>` ──────────
+// The one-decider contract, one step stronger since alpha52: `compile` is not
+// a SECOND flag table that must be kept equal to the fleet's — it IS the fleet
+// pipeline, narrowed. There is exactly one producer of build flags
+// (build-all's TARGETS map), so the runtime-flag drift can't recur.
 
-/** The explicit per-target task that `deno task compile` must equal. `server`
- *  is spelled `service` in the task set (aio's name for "no client UI"). */
-const EXPLICIT: Record<Target, string> = {
-  browser: "compile:browser",
-  electron: "compile:electron",
-  android: "compile:android",
-  cli: "compile:cli",
-  server: "compile:service",
-};
-
-Deno.test("scaffold: `deno task compile` builds the SAME artifact as `compile:<target>`", () => {
+Deno.test("scaffold: `compile` is the fleet build narrowed to the default target", () => {
   for (const source of [true, false]) {
     for (const target of TARGETS) {
       const tasks = standardTasks(source, target);
       assertEquals(
         tasks.compile,
-        tasks[EXPLICIT[target]],
-        `target "${target}" (source=${source}): the default compile task and ` +
-          `${EXPLICIT[target]} must be one command, not two spellings`,
+        `${tasks.build} --targets=${target}`,
+        `target "${target}" (source=${source}): compile must be the build ` +
+          `task plus --targets — one pipeline, not two spellings`,
       );
     }
   }
 });
 
-Deno.test("scaffold: every compile task uses flags the build understands", () => {
+Deno.test("scaffold: the build/compile tasks use flags the FLEET understands", () => {
   for (const target of TARGETS) {
-    for (const [name, cmd] of Object.entries(standardTasks(true, target))) {
-      if (!name.startsWith("compile")) continue;
-      // Each `&&`-joined build invocation, minus `deno run -A <script>`.
-      for (const part of cmd.split("&&")) {
-        const args = part.trim().split(/\s+/).slice(4);
-        assertEquals(
-          unknownBuildFlags(args),
-          [],
-          `task "${name}" (target ${target}) passes a flag the build ignores: ${part.trim()}`,
-        );
-      }
+    const tasks = standardTasks(true, target);
+    for (const name of ["build", "compile"] as const) {
+      // Minus `deno run -A <script>` — everything after is fleet argv.
+      const args = tasks[name]!.trim().split(/\s+/).slice(4);
+      assertEquals(
+        unknownFleetFlags(args),
+        [],
+        `task "${name}" (target ${target}) passes a flag the fleet ignores: ${
+          tasks[name]
+        }`,
+      );
     }
   }
 });

@@ -54,6 +54,8 @@ const EXEMPT: Record<string, string> = {
   findChromium: "pure helper — locates a binary",
   setDocument: "pure helper — swaps the document reference",
   testgen: "codegen — emits types, never boots an app",
+  testGen:
+    "codegen (alpha52 name of testgen) — emits types, never boots an app",
   generateUITypes: "codegen — emits types, never boots an app",
   appDirs: "path resolution, no app code",
   ensureAppDirs: "path resolution, no app code",

@@ -86,6 +86,7 @@ Deno.test("cell access: network callers gated, server code bypasses (e2e)", asyn
   const vault = cell("vault", {
     state: { writes: 0 },
     access: "admin",
+    visible: "all", // alpha52: the read side must be decided on a multi-user app
     methods: {
       bump(s: { writes: number }) {
         s.writes += 1;
@@ -166,6 +167,7 @@ Deno.test("cell access: row-level predicate sees method args over the wire (e2e)
   const owners: Record<string, string> = { d1: "alice", d2: "bob" };
   const docs = cell("docs", {
     state: { edited: [] as string[] },
+    visible: "all", // alpha52: the read side must be decided on a multi-user app
     access: (u: { id?: string } | undefined, _m: string, docId?: unknown) =>
       typeof docId === "string" && owners[docId] === u?.id,
     methods: {

@@ -3,9 +3,15 @@
 // (the framework symlink, .env, electron runtime, submodules) plus a few config
 // safety nets. `am doctor` diagnoses config; `am fix` repairs. `--dry-run`
 // (alias `--check`) reports what it WOULD do without changing anything.
-import { standardTasks, type Target, TARGETS } from "./am-cmd-create.ts";
-import { join } from "@std/path";
+import {
+  legacyStandardTasks,
+  standardTasks,
+  type Target,
+  TARGETS,
+} from "./am-cmd-create.ts";
+import { join, resolve } from "@std/path";
 import { parse as parseJsonc } from "@std/jsonc";
+import { refOfLink } from "../server/framework-pin.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
 import { linkDepAio, probeDepAio, resolveAioRoot } from "./am-cmd-link.ts";
@@ -45,76 +51,210 @@ const exists = (p: string) => Deno.stat(p).then(() => true).catch(() => false);
 //
 // Still add-only. Nothing here removes or rewrites a task the app already has.
 
-/** Tasks every aio app wants, whatever it ships. */
+/** Tasks every aio app wants, whatever it ships (the alpha52 task diet —
+ *  other shells are one flag away: `deno task dev --client=X`,
+ *  `deno task build --targets=X`). */
 const UNIVERSAL_TASKS = [
   "dev",
   "build",
   "compile",
   "test",
+  "check",
+  "fmt",
   "am",
   "doctor",
   "lint",
 ] as const;
 
 /** Task keys each declared target needs, keyed by the names accepted in
- *  deno.json `build.targets` (plus the `target` defaults, which share the same
- *  vocabulary — `server` is the headless one, spelled `service` in tasks).
+ *  deno.json `build.targets` (plus the `client` default, which shares the same
+ *  vocabulary — `server` is the headless one). After the alpha52 task diet the
+ *  only target-specific task left is electron's install convenience; the keys
+ *  stay so a declared fleet name is still "known" here.
  *
  *  Every key of `standardTasks()` must be reachable from here or from
  *  {@link UNIVERSAL_TASKS}, or `am fix` could never add it again; a test pins
  *  exactly that, so growing the task set cannot silently orphan a task. */
 const TARGET_TASKS: Record<string, readonly string[]> = {
-  browser: [
-    "dev:browser",
-    "compile:browser",
-    "dev:remote:browser",
-    "compile:remote:browser",
-  ],
-  electron: [
-    "dev:electron",
-    "compile:electron",
-    "dev:remote:electron",
-    "compile:remote:electron",
-    "install:electron",
-  ],
-  android: [
-    "dev:android",
-    "compile:android",
-    "dev:remote:android",
-    "compile:remote:android",
-  ],
-  cli: ["dev:cli", "compile:cli", "dev:remote:cli", "compile:remote:cli"],
-  server: [
-    "dev:service",
-    "compile:service",
-    "dev:remote:service",
-    "compile:remote:service",
-  ],
-  "electron-client": ["dev:client", "compile:client", "install:electron"],
-  "android-client": [
-    "dev:android",
-    "compile:android",
-    "compile:remote:android",
-  ],
-  "cli-client": ["dev:remote:cli", "compile:remote:cli"],
+  browser: [],
+  electron: ["install:electron"],
+  android: [],
+  cli: [],
+  server: [],
+  "electron-client": ["install:electron"],
+  "android-client": [],
+  "cli-client": [],
 };
 
-/** Read the fleet an app declares: `target` (the default one) plus
- *  `build.targets` in EITHER spelling — the array form `["server","browser"]`
- *  or the object form `{"server":{"entry":…}}` (per-target overrides). Both are
- *  live spellings, so reading only one would quietly under-repair the other.
- *  Pure. */
+/** Read the fleet an app declares: `client` (the default shell; `target` is
+ *  its pre-alpha52 spelling, still read) plus `build.targets` in EITHER
+ *  spelling — the array form `["server","browser"]` or the object form
+ *  `{"server":{"entry":…}}` (per-target overrides). All are live spellings, so
+ *  reading only one would quietly under-repair the others. Pure. */
 export function declaredTargets(cfg: unknown): string[] {
   const seen = new Set<string>();
   const push = (v: unknown) => {
     if (typeof v === "string" && v.trim()) seen.add(v.trim());
   };
   const c = (cfg ?? {}) as Record<string, unknown>;
-  push(c.target);
+  push(c.client);
+  push(c.target); // deprecated spelling of `client` — still declares the fleet
   const raw = (c.build as Record<string, unknown> | undefined)?.targets;
   if (Array.isArray(raw)) raw.forEach(push);
   else if (raw && typeof raw === "object") Object.keys(raw).forEach(push);
   return [...seen];
+}
+
+/** THE decider for "which fleet targets does a legacy task-name matrix
+ *  encode?" — shared by the declared-build-targets check AND `--migrate-tasks`.
+ *
+ *  A hand-rolled pre-alpha52 app (no `build` key) often carried its target
+ *  list ONLY as `compile:*`/`dev:*` task names — an Electron wallet's four
+ *  compile tasks were the one record that it ships electron. A migration that
+ *  deletes those tasks without persisting what they encoded leaves
+ *  `deno task build` with "no targets to build" and no task able to build the
+ *  app: capability deleted, not migrated. One table, so the check can never
+ *  read information the migration fails to preserve. Pure. */
+export function targetsFromLegacyTasks(
+  taskNames: Iterable<string>,
+): string[] {
+  const ENCODES: Record<string, readonly string[]> = {
+    "dev:browser": ["browser"],
+    "compile:browser": ["browser"],
+    "dev:electron": ["electron"],
+    "compile:electron": ["electron"],
+    "dev:android": ["android"],
+    "compile:android": ["android"],
+    "dev:cli": ["cli"],
+    "compile:cli": ["cli"],
+    // `service` (and its alpha52 spelling `server`) — the headless role, whose
+    // build carries `--headless` — maps to the fleet's `server` target.
+    "dev:service": ["server"],
+    "compile:service": ["server"],
+    "dev:server": ["server"],
+    "compile:server": ["server"],
+    // The unified client + remote family: exposed server and/or thin client.
+    "dev:client": ["electron-client"],
+    "compile:client": ["electron-client"],
+    "dev:remote:browser": ["server"],
+    "compile:remote:browser": ["server"],
+    "dev:remote:electron": ["electron-client"],
+    "compile:remote:electron": ["server", "electron-client"],
+    "dev:remote:android": ["server"],
+    "compile:remote:android": ["server", "android-client"],
+    "dev:remote:cli": ["cli-client"],
+    "compile:remote:cli": ["server", "cli-client"],
+    "dev:remote:service": ["server"],
+    "compile:remote:service": ["server"],
+    "dev:remote:server": ["server"],
+    "compile:remote:server": ["server"],
+  };
+  const out = new Set<string>();
+  for (const n of taskNames) for (const t of ENCODES[n] ?? []) out.add(t);
+  return [...out];
+}
+
+// ── Old-vocabulary task migration (`am fix --migrate-tasks`) ────────────────
+//
+// The pre-alpha52 scaffold emitted a ~30-task dev:*/compile:* matrix; alpha52's
+// "one vocabulary" replaced it with the diet above (dev flags pass through, the
+// fleet build is the one way to build). `--migrate-tasks` converts an app:
+// pristine old-scaffold tasks are deleted or rewritten; anything the user
+// customized is KEPT (service→server renamed only) and reported for review.
+// Targets the retired tasks ENCODED are persisted into `build.targets` first
+// (see targetsFromLegacyTasks) — deletion must never lose a capability.
+
+/** Old task names whose `service` spelling renames to `server`. */
+const SERVICE_RENAMES: Record<string, string> = {
+  "dev:service": "dev:server",
+  "compile:service": "compile:server",
+  "dev:remote:service": "dev:remote:server",
+  "compile:remote:service": "compile:remote:server",
+};
+
+/** Version-insensitive equality for task values: an old scaffold pinned
+ *  `jsr:@riagentic/aio@<its version>/…`, and a byte-compare against today's pin
+ *  would misread every JSR app as "customized". Only the pin is wildcarded —
+ *  any other edit still counts as a customization. */
+function normTask(v: string): string {
+  return v.replace(/jsr:@riagentic\/aio@[^/\s]+/g, "jsr:@riagentic/aio@*")
+    .trim();
+}
+
+export interface MigrateTasksResult {
+  tasks: Record<string, string>;
+  /** old→new names of customized `*:service` tasks (value untouched). */
+  renamed: [string, string][];
+  /** pristine old-scaffold tasks the new matrix covers otherwise. */
+  deleted: string[];
+  /** tasks whose pristine old value was updated to the new one. */
+  rewritten: string[];
+  /** new-matrix tasks that were missing and got added. */
+  added: string[];
+  /** old-vocabulary tasks with user customizations — kept, review manually. */
+  kept: string[];
+}
+
+/** Convert one app's task map to the alpha52 vocabulary. Pure — the whole
+ *  contract ("never delete a customized task") is a unit test, not a claim.
+ *
+ *  A task is PRISTINE when some legacy scaffold table has the same name with
+ *  the same command (modulo the JSR version pin). Pristine tasks the new
+ *  matrix doesn't carry are deleted; pristine tasks it carries under a new
+ *  value are rewritten; everything else is kept (with `*:service` names
+ *  renamed to `*:server`) and reported. */
+export function migrateTasks(
+  current: Record<string, string>,
+  expected: Record<string, string>,
+  legacy: readonly Record<string, string>[],
+): MigrateTasksResult {
+  const res: MigrateTasksResult = {
+    tasks: {},
+    renamed: [],
+    deleted: [],
+    rewritten: [],
+    added: [],
+    kept: [],
+  };
+  const legacyNames = new Set(legacy.flatMap((t) => Object.keys(t)));
+  const pristine = (k: string, v: string) =>
+    legacy.some((t) => t[k] !== undefined && normTask(t[k]!) === normTask(v));
+  for (const [k, v] of Object.entries(current)) {
+    if (k in expected) {
+      if (pristine(k, v) && v !== expected[k]) {
+        res.tasks[k] = expected[k]!;
+        res.rewritten.push(k);
+      } else res.tasks[k] = v;
+    } else if (pristine(k, v)) {
+      res.deleted.push(k); // the new matrix covers it via dev flags / build
+    } else if (k in SERVICE_RENAMES) {
+      const nk = SERVICE_RENAMES[k]!;
+      res.tasks[nk] = v;
+      res.renamed.push([k, nk]);
+      res.kept.push(nk);
+    } else {
+      res.tasks[k] = v;
+      // A customized OLD-matrix task (a name we used to scaffold) deserves a
+      // "review manually"; the user's own tasks are none of our business.
+      if (legacyNames.has(k)) res.kept.push(k);
+    }
+  }
+  for (const [k, v] of Object.entries(expected)) {
+    if (!(k in res.tasks)) {
+      res.tasks[k] = v;
+      res.added.push(k);
+    }
+  }
+  return res;
+}
+
+/** The legacy scaffold tables migration recognizes pristine tasks against:
+ *  every target × both consumption modes — an old app may have been scaffolded
+ *  as any of them. */
+export function legacyTaskTables(): Record<string, string>[] {
+  return (TARGETS as readonly Target[]).flatMap((
+    t,
+  ) => [legacyStandardTasks(true, t), legacyStandardTasks(false, t)]);
 }
 
 /** Narrow the standard task set to what this app's targets need.
@@ -174,6 +314,9 @@ export async function cmdFix(
 ): Promise<void> {
   const mode = detectMode(flags);
   const dry = args.includes("--dry-run") || args.includes("--check");
+  // `--migrate-tasks`: convert a pre-alpha52 task matrix to the one vocabulary
+  // (see migrateTasks). Opt-in because it DELETES pristine old-scaffold tasks.
+  const migrate = args.includes("--migrate-tasks");
   const dir = Deno.cwd();
   const res: Res[] = [];
   const add = (name: string, outcome: Outcome, note = "") =>
@@ -218,9 +361,57 @@ export async function cmdFix(
   }
   const imports: Record<string, string> = cfg.imports ?? {};
   const tasks: Record<string, string> = cfg.tasks ?? {};
+
+  // deno.json `target` → `client` (alpha52 rename: the key names the default
+  // client SHELL, and "target" collided with build.targets — a different
+  // axis). Mechanical key rename, value untouched; `client` wins if both
+  // exist. The runtime still reads `target` with a boot hint, so a dry run or
+  // a jsonc app keeps working meanwhile.
+  if (typeof cfg.target === "string") {
+    if (jsonPath.endsWith(".jsonc")) {
+      add(
+        'deno.json "target" → "client"',
+        "advise",
+        'deno.jsonc — rename the "target" key to "client" by hand ' +
+          "(comments would be lost in a rewrite)",
+      );
+    } else {
+      await repair(
+        'deno.json "target" → "client"',
+        true,
+        async () => {
+          const raw = JSON.parse(await Deno.readTextFile(jsonPath)) as Record<
+            string,
+            unknown
+          >;
+          const out: Record<string, unknown> = {};
+          for (const [k, v] of Object.entries(raw)) {
+            if (k === "target") {
+              if (!("client" in raw)) out.client = v; // rename in place
+            } else out[k] = v;
+          }
+          await Deno.writeTextFile(
+            jsonPath,
+            JSON.stringify(out, null, 2) + "\n",
+          );
+        },
+        `"target": "${cfg.target}" is the pre-alpha52 spelling of "client"`,
+      );
+      if (!dry) {
+        cfg.client ??= cfg.target;
+        delete cfg.target;
+      }
+    }
+  }
+  // `install:electron` alone is NOT evidence the app ships electron — it is
+  // the optional pre-fetch convenience, and counting it made it self-keeping:
+  // a browser app with a stray install:electron looked electron-shaped, so
+  // the migration kept the very task that caused the look.
   const usesElectron =
     Object.values(imports).some((v) => v.includes("electron")) ||
-    Object.keys(tasks).some((t) => t.includes("electron"));
+    Object.keys(tasks).some((t) =>
+      t.includes("electron") && t !== "install:electron"
+    );
   const hasTsx = await exists(join(dir, "src", "App.tsx")) ||
     await exists(join(dir, "App.tsx"));
 
@@ -281,28 +472,68 @@ export async function cmdFix(
     // aspirational. It is the one committed-source edit am fix makes, it is
     // additive, and `am pin` overrides it whenever the author disagrees.
     if (!pin && honorPin && install) {
-      const want = await latestTag(install) ?? MAIN;
-      if (dry) {
-        add(
-          "aio version pin",
-          "would-fix",
-          `unpinned — would record "aioVersion": "${want}" in deno.json`,
-        );
-      } else {
-        const res = await ensureVersion(install, want);
-        if (!res.ok) add("aio version pin", "manual", res.error);
-        else {
-          await writePin(dir, res.ref);
-          root = res.path;
-          pin = res.ref;
+      // Where does dep/aio ALREADY point? A WORKING link to a checkout
+      // outside the versions store means the developer linked a local working
+      // tree (`am create --mirror`, `am link <path>`) — and linkDepAio keeps
+      // a working link. Sealing THAT with a version string is
+      // self-contradictory: the pin would claim a store worktree while the
+      // link names a working tree, so aiol/doctor (via linkSatisfiesPin, THE
+      // decider) warn "pin does not match dep/aio" forever. The local-dev pin
+      // (`path:<target>`) exists for exactly this — seal with it, and pin and
+      // link agree by construction.
+      const linkTarget = await Deno.readLink(join(dir, "dep", "aio"))
+        .then((t) => resolve(dir, "dep", t))
+        .catch(() => null);
+      const localTree = linkTarget !== null &&
+        refOfLink(linkTarget) === null &&
+        await exists(join(linkTarget, "mod.ts"));
+      if (localTree) {
+        const ref = `path:${linkTarget}`;
+        if (dry) {
+          add(
+            "aio version pin",
+            "would-fix",
+            `unpinned — dep/aio links a local checkout (${linkTarget}); ` +
+              `would record "aioVersion": "${ref}" (local-dev pin)`,
+          );
+        } else {
+          await writePin(dir, ref);
+          root = linkTarget;
+          pin = ref;
           sealed = true;
           add(
             "aio version pin",
             "fixed",
-            `was unpinned — recorded "aioVersion": "${res.ref}" in deno.json ` +
-              `so every future clone rebuilds against this exact framework ` +
-              `(change it with \`am pin <version>\`)`,
+            `was unpinned — recorded "aioVersion": "${ref}" (dep/aio links a ` +
+              `local checkout, so a version pin would contradict the link). ` +
+              `Machine-specific by design — pin a release with ` +
+              `\`am pin --latest\` before sharing the app`,
           );
+        }
+      } else {
+        const want = await latestTag(install) ?? MAIN;
+        if (dry) {
+          add(
+            "aio version pin",
+            "would-fix",
+            `unpinned — would record "aioVersion": "${want}" in deno.json`,
+          );
+        } else {
+          const res = await ensureVersion(install, want);
+          if (!res.ok) add("aio version pin", "manual", res.error);
+          else {
+            await writePin(dir, res.ref);
+            root = res.path;
+            pin = res.ref;
+            sealed = true;
+            add(
+              "aio version pin",
+              "fixed",
+              `was unpinned — recorded "aioVersion": "${res.ref}" in ` +
+                `deno.json so every future clone rebuilds against this ` +
+                `exact framework (change it with \`am pin <version>\`)`,
+            );
+          }
         }
       }
     }
@@ -499,16 +730,44 @@ export async function cmdFix(
       "deno.jsonc — not auto-edited (comments would be lost); compare with `am create` output",
     );
   } else if (aioMode === "dep" || aioMode === "registry") {
-    const all = standardTasks(
-      aioMode === "dep",
-      (TARGETS as readonly string[]).includes(cfg.target as string)
-        ? cfg.target as Target
-        : undefined,
-    );
+    // Targets the app's LEGACY task names encode — the same decider the
+    // migration persists from, so this check can never see information the
+    // migration would delete.
+    const taskTargets = targetsFromLegacyTasks(Object.keys(tasks));
+    // Does the app declare a fleet of its own? (`build.targets`, either
+    // spelling.) If so, it is authoritative and never derived over.
+    const rawFleet = (cfg.build as Record<string, unknown> | undefined)
+      ?.targets;
+    const hasFleet = Array.isArray(rawFleet)
+      ? rawFleet.length > 0
+      : !!rawFleet && typeof rawFleet === "object" &&
+        Object.keys(rawFleet).length > 0;
+    // The app's PRIMARY target — what `deno task dev`/`compile` default to.
+    // `client` (or the deprecated `target`) wins, then the declared fleet's
+    // first buildable app target, then the one the legacy tasks encode. Never
+    // a hardcoded browser while the app says otherwise (an Electron app whose
+    // only record was its compile:electron task must not migrate to a
+    // browser-building `compile`).
+    const primaryTarget = [
+      cfg.client as string,
+      cfg.target as string,
+      ...declaredTargets(cfg),
+      ...taskTargets,
+    ].find((t) => (TARGETS as readonly string[]).includes(t)) as
+      | Target
+      | undefined;
+    const all = standardTasks(aioMode === "dep", primaryTarget);
     // The app's declared fleet decides which of them apply. Electron is also
     // inferred from imports/tasks: an app already running Electron ships it,
-    // whether or not it says so in `target`/`build.targets`.
-    const declared = declaredTargets(cfg);
+    // whether or not it says so in `client`/`build.targets`.
+    // The fleet the app STATES (config + what its legacy tasks encode) —
+    // kept apart from the electron-imports inference below, because a
+    // migration treats the fleet as authoritative.
+    const fleetDeclared = declaredTargets(cfg);
+    for (const t of taskTargets) {
+      if (!fleetDeclared.includes(t)) fleetDeclared.push(t);
+    }
+    const declared = [...fleetDeclared];
     if (usesElectron && !declared.includes("electron")) {
       declared.push("electron");
     }
@@ -516,6 +775,12 @@ export async function cmdFix(
       all,
       declared,
     );
+    // A fleet whose only shape is a CLIENT target (a cli-client-only repo has
+    // no `client`/app target at all): `compile` still must not hardcode
+    // browser — narrow it to the fleet's head instead.
+    if (primaryTarget === undefined && taskTargets.length > 0) {
+      expected["compile"] = `${all["build"]} --targets=${taskTargets[0]}`;
+    }
     // An unrecognized target name is louder than a missing one: `deno task
     // build` fails on it too, and a silent "no tasks added" would read as
     // am fix having nothing to do.
@@ -534,29 +799,150 @@ export async function cmdFix(
     } else {
       add("declared build targets", "ok", declared.join(", "));
     }
-    const missingTasks = Object.keys(expected).filter((k) => !(k in tasks));
-    await repair(
-      "standard deno tasks",
-      missingTasks.length > 0,
-      async () => {
-        const raw = JSON.parse(await Deno.readTextFile(jsonPath)) as Record<
-          string,
-          unknown
-        >;
-        const cur = (raw.tasks ?? {}) as Record<string, string>;
-        for (const k of missingTasks) cur[k] = expected[k]!;
-        raw.tasks = cur;
-        await Deno.writeTextFile(
-          jsonPath,
-          JSON.stringify(raw, null, 2) + "\n",
+    if (migrate) {
+      // Full conversion to the alpha52 vocabulary — see migrateTasks for the
+      // contract (pristine old-scaffold tasks deleted/rewritten, customized
+      // ones kept and reported).
+      const m = migrateTasks(tasks, expected, legacyTaskTables());
+      // PRESERVE what the retired tasks encoded: an app with no `build.targets`
+      // carried its fleet only as task names, and deleting those without
+      // writing the list down would leave `deno task build` with "no targets
+      // to build" and no way to build the app at all. Written in the same
+      // atomic rewrite as the deletion — never delete first. The primary
+      // target leads the list, so `compile` (--targets=build.targets[0])
+      // builds what the app IS, not a hardcoded browser. An existing
+      // `build.targets` is the author's word and is never touched.
+      const deriveFleet = !hasFleet && taskTargets.length > 0;
+      const derivedTargets = primaryTarget !== undefined
+        ? [
+          primaryTarget as string,
+          ...taskTargets.filter((t) => t !== primaryTarget),
+        ]
+        : taskTargets;
+      // The PERSISTED fleet is authoritative for install:electron: when
+      // neither `electron` nor `electron-client` is in what deno.json will
+      // say after this run, the electron install convenience is matrix
+      // residue, not a capability — drop it (pristine only; a customized
+      // command is the user's and stays). Persisted, not ephemeral: deciding
+      // from a task-derived signal that this same migration deletes made run
+      // 1 add the task and run 2 remove it. Without the drop, the electron
+      // import mapping every old scaffold carries kept install:electron
+      // alive on pure browser/cli/server apps.
+      const persistedFleet = new Set<string>([
+        ...(hasFleet
+          ? declaredTargets({ build: cfg.build })
+          : (deriveFleet ? derivedTargets : [])),
+        ...(typeof cfg.client === "string" ? [cfg.client as string] : []),
+        ...(typeof cfg.target === "string" ? [cfg.target as string] : []),
+      ]);
+      const fleetHasElectron = persistedFleet.has("electron") ||
+        persistedFleet.has("electron-client");
+      if (!fleetHasElectron && m.tasks["install:electron"] !== undefined) {
+        const v = m.tasks["install:electron"]!;
+        const added = m.added.indexOf("install:electron");
+        const pristine = legacyTaskTables().some((t) =>
+          t["install:electron"] !== undefined &&
+          normTask(t["install:electron"]!) === normTask(v)
         );
-      },
-      missingTasks.length
-        ? `added ${missingTasks.length} missing task(s): ${
-          missingTasks.slice(0, 5).join(", ")
-        }${missingTasks.length > 5 ? ", …" : ""}`
-        : "",
-    );
+        if (added >= 0) {
+          m.added.splice(added, 1);
+          delete m.tasks["install:electron"];
+        } else if (pristine) {
+          delete m.tasks["install:electron"];
+          m.deleted.push("install:electron");
+        }
+      }
+      const changed = m.renamed.length + m.deleted.length +
+        m.rewritten.length + m.added.length + (deriveFleet ? 1 : 0);
+      await repair(
+        "task vocabulary migration",
+        changed > 0,
+        async () => {
+          const raw = JSON.parse(await Deno.readTextFile(jsonPath)) as Record<
+            string,
+            unknown
+          >;
+          if (deriveFleet) {
+            const build = (raw.build ?? {}) as Record<string, unknown>;
+            build.targets = derivedTargets;
+            raw.build = build;
+          }
+          raw.tasks = m.tasks;
+          await Deno.writeTextFile(
+            jsonPath,
+            JSON.stringify(raw, null, 2) + "\n",
+          );
+        },
+        [
+          deriveFleet
+            ? `recorded "build": { "targets": [${
+              derivedTargets.map((t) => `"${t}"`).join(", ")
+            }] } (derived from the retired tasks — review the list)`
+            : "",
+          m.deleted.length
+            ? `deleted ${m.deleted.length} old scaffold task(s): ${
+              m.deleted.join(", ")
+            }`
+            : "",
+          m.renamed.length
+            ? `renamed: ${m.renamed.map(([o, n]) => `${o}→${n}`).join(", ")}`
+            : "",
+          m.rewritten.length ? `rewrote: ${m.rewritten.join(", ")}` : "",
+          m.added.length ? `added: ${m.added.join(", ")}` : "",
+        ].filter(Boolean).join("; ") || "already on the one vocabulary",
+      );
+      if (m.kept.length) {
+        add(
+          "customized old-matrix tasks",
+          "advise",
+          `kept, review manually (their commands were user-edited): ${
+            m.kept.join(", ")
+          }`,
+        );
+      }
+    } else {
+      const missingTasks = Object.keys(expected).filter((k) => !(k in tasks));
+      await repair(
+        "standard deno tasks",
+        missingTasks.length > 0,
+        async () => {
+          const raw = JSON.parse(await Deno.readTextFile(jsonPath)) as Record<
+            string,
+            unknown
+          >;
+          const cur = (raw.tasks ?? {}) as Record<string, string>;
+          for (const k of missingTasks) cur[k] = expected[k]!;
+          raw.tasks = cur;
+          await Deno.writeTextFile(
+            jsonPath,
+            JSON.stringify(raw, null, 2) + "\n",
+          );
+        },
+        missingTasks.length
+          ? `added ${missingTasks.length} missing task(s): ${
+            missingTasks.slice(0, 5).join(", ")
+          }${missingTasks.length > 5 ? ", …" : ""}`
+          : "",
+      );
+      // Old task vocabulary present? Point at the migration — plain fix stays
+      // add-only, so it will never delete/rename these itself.
+      const legacyNames = new Set(
+        legacyTaskTables().flatMap((t) => Object.keys(t)),
+      );
+      const oldVocab = Object.keys(tasks).filter((k) =>
+        (legacyNames.has(k) && !(k in expected)) || k in SERVICE_RENAMES
+      );
+      if (oldVocab.length) {
+        add(
+          "task vocabulary",
+          "advise",
+          `${oldVocab.length} pre-alpha52 task(s) (${
+            oldVocab.slice(0, 4).join(", ")
+          }${oldVocab.length > 4 ? ", …" : ""}) — run \`am fix ` +
+            "--migrate-tasks` to convert them to the one vocabulary",
+        );
+      }
+    }
   } else {
     add(
       "standard deno tasks",
@@ -586,7 +972,8 @@ export async function cmdFix(
       cfgAdvise(
         !/appId\s*:/.test(src),
         "appId set in aio.run()",
-        "add appId to aio.run() — the app won't start without it",
+        "add appId to aio.run() — without it the identity is inferred from " +
+          "title/dirname, so renaming either orphans the app's stored state",
       );
     }
   }

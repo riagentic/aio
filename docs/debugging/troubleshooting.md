@@ -17,7 +17,7 @@ catches it **before you debug**:
 | Server dies when a client connects  | Deno version behavior change (headers after WS upgrade) | covered by every WS test incl. real-chromium e2e                               |
 | App won't start / "already running" | stale lock from a crashed process                       | lock liveness (pid + port) self-heals; `am status` shows the holder            |
 | Doc example throws on paste         | docs drifted from the API                               | doc-imports gate: every `aio` import in docs must exist in the API snapshot    |
-| Secret visible in a client          | `ui: "all"` default on a sensitive cell                 | boot warnings (secret-looking fields, filter typos); deep-path `exclude`       |
+| Secret visible in a client          | `visible: "all"` default on a sensitive cell            | boot warnings (secret-looking fields, filter typos); deep-path `exclude`       |
 | Tests flake across files            | shared persisted state                                  | `testUI` is hermetic by default (persist off, unique key)                      |
 | `deno.json` mystery failures        | missing jsx / nodeModulesDir lines                      | `deno task doctor`                                                             |
 
