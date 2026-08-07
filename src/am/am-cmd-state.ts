@@ -175,6 +175,9 @@ export async function cmdState(
   args: string[],
   flags: GlobalFlags,
 ): Promise<void> {
+  // `--ui`: the filtered UI-state projection (optionally per user) instead of
+  // raw state — the command that used to be spelled `am ui`.
+  if (flags.ui) return uiProjection(args, flags);
   const mode = detectMode(flags);
   const appId = resolveAmAppId(flags.app);
   const port = resolvePort(flags.port, appId);
@@ -230,7 +233,13 @@ export async function cmdState(
 /** `am ui [user]` — server-side UI state (the projected state tree). For live
  *  client inspection use `am surface` (semantic UI surface, the same facility
  *  `testUI` drives). */
-export async function cmdUi(args: string[], flags: GlobalFlags): Promise<void> {
+/** The server-side UI-STATE PROJECTION — `am state --ui [user]`. It was
+ *  `am ui` before alpha52; that name now opens amui (the visual manager), and
+ *  the projection is a VIEW of state, so it lives on the state command. */
+async function uiProjection(
+  args: string[],
+  flags: GlobalFlags,
+): Promise<void> {
   const mode = detectMode(flags);
   const appId = resolveAmAppId(flags.app);
   const port = resolvePort(flags.port, appId);

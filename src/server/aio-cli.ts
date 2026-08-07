@@ -2,7 +2,7 @@
 import { log } from "../diagnostics/logger.ts";
 
 /** Framework version — printed by --version, checked in tests */
-export const VERSION = "1.0.0-alpha52";
+export const VERSION = "1.0.0-alpha53";
 
 /** What `--version` prints: what this artifact IS, and what it was built with.
  *
@@ -45,6 +45,9 @@ export type CliFlags = {
   isolate?: string[];
   transport?: "uds" | "ws";
   killExisting?: boolean;
+  /** Explicit bind address for the HTTP/WS listener — overrides the
+   *  expose-derived default (0.0.0.0 exposed, 127.0.0.1 not). */
+  host?: string;
   dbPath?: string;
   backupLogs?: boolean;
   /** Skip the legacy→`~/.<appId>` data move (app-dirs-migrate.ts). */
@@ -85,6 +88,7 @@ export function parseCli(args: readonly string[] = Deno.args): CliFlags {
     "--takeover",
     "--backup-logs",
     "--db-path=",
+    "--host=",
   ];
   for (const arg of args) {
     if (arg.startsWith("--port=")) {
@@ -153,6 +157,14 @@ export function parseCli(args: readonly string[] = Deno.args): CliFlags {
       const v = arg.slice(12);
       if (v === "uds" || v === "ws") r.transport = v;
       else log.warn(`invalid --transport value: ${v} (must be 'uds' or 'ws')`);
+    } else if (arg.startsWith("--host=")) {
+      // An address, not an authority — the port has its own flag. Deeper
+      // validation belongs to the bind itself: Deno.serve refuses a bad
+      // hostname loudly, which beats a regex that has to know every IPv6
+      // spelling.
+      const v = arg.slice(7).trim();
+      if (v !== "") r.host = v;
+      else log.warn("invalid --host value: empty (an IP or hostname)");
     } else if (
       arg.startsWith("--") &&
       !known.some((k) => k.endsWith("=") ? arg.startsWith(k) : arg === k)
@@ -179,6 +191,9 @@ Flags:
   --prod           Serve pre-built dist/app.js
   --expose         Bind 0.0.0.0 + HTTPS + generate auth token for LAN access
                    (also settable in code: aio.run({ expose: true }))
+  --host=ADDR      Bind ONE address instead of the expose default (0.0.0.0
+                   exposed, 127.0.0.1 not) — e.g. --host=192.168.1.20 serves
+                   only that interface (also: aio.run({ host: "…" }))
   --no-tls         With --expose: serve PLAIN HTTP/WS — everything on the wire
                    is readable by the LAN. Only for already-encrypted payloads
                    or behind a TLS-terminating proxy

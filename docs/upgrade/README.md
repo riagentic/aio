@@ -7,6 +7,9 @@ One guide per version migration. Find your current version and follow the steps.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha52 → alpha53](from-alpha52-to-alpha53.md) — one address, one manager:
+  `am ui` opens amui (the projection moved to `am state --ui`), `--host=`/
+  `host:` binds one interface with a single bind-address decider
 - [alpha51 → alpha52](from-alpha51-to-alpha52.md) — the last-call release: every
   approved break in one version, each with a working deprecated alias + one-time
   hint + mechanical fix (`aiol --safe-fix` / `am fix`): `s.$do` effect channel,

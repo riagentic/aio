@@ -19,6 +19,7 @@ import {
   writeLock,
 } from "../server/single-instance-lock.ts";
 import { detectMode, formatUptime, out, outError } from "./am-output.ts";
+import { repoRoot } from "./am-cmd-create.ts";
 import {
   readPid,
   removePid,
@@ -224,6 +225,90 @@ export function detachedSpawnSpec(
       } 2>&1 & echo $!`,
     ],
   };
+}
+
+// ── am ui — open amui, the visual app manager ───────────────────────────────
+//
+// `am ui` used to print the server-side UI-STATE PROJECTION — the worst-named
+// command of the fifty (the break review's words), because "ui" reads as "the
+// visual manager". It now IS that: it launches amui detached. The old
+// projection lives on as `am state --ui`.
+
+/** The amui entry beside this am's framework root (the checkout am runs from —
+ *  a versions-store install included, since that store IS a checkout), or null
+ *  when there is none (a bare JSR global install ships no amui/ tree). */
+export function amuiEntry(root: string | undefined): string | null {
+  if (!root) return null;
+  const entry = join(root, "amui", "src", "app.ts");
+  try {
+    Deno.statSync(entry);
+    return entry;
+  } catch {
+    return null;
+  }
+}
+
+/** The deno argv `am ui` launches amui with. No `--client` is forced — amui's
+ *  own deno.json declares its default (electron); extra `am ui` args pass
+ *  straight through, so `am ui --client=browser` opens a tab instead. Pure,
+ *  pinned by a test — CI must never actually spawn Electron. */
+export function amuiDenoArgs(entry: string, extra: string[]): string[] {
+  return ["run", "-A", entry, ...extra];
+}
+
+export async function cmdUi(
+  args: string[],
+  flags: GlobalFlags,
+): Promise<void> {
+  const mode = detectMode(flags);
+  // The OLD spelling: `am ui [user]` printed the UI-state projection. A bare
+  // token here is that usage, not an amui argument — misreading it and
+  // launching a desktop app instead would be the confusing-rename trap this
+  // command was renamed to escape.
+  const bare = args.find((a) => !a.startsWith("-"));
+  if (bare !== undefined) {
+    outError(
+      `am ui now opens amui (the visual manager) — the UI-state projection ` +
+        `moved: am state --ui ${bare}`,
+      mode,
+    );
+    Deno.exit(1);
+  }
+  const entry = amuiEntry(repoRoot());
+  if (!entry) {
+    outError(
+      "amui not found beside this am (a bare JSR install ships no amui/ " +
+        "tree) — run it directly: deno run -A jsr:@riagentic/aio/amui",
+      mode,
+    );
+    Deno.exit(1);
+  }
+  // Detached, like `am start`: amui must survive am's exit. Output lands in a
+  // log file so a boot failure is diagnosable, not vanished.
+  const logFile = await Deno.makeTempFile({
+    prefix: "amui-",
+    suffix: ".log",
+  });
+  const spec = detachedSpawnSpec(
+    Deno.build.os,
+    amuiDenoArgs(entry, args),
+    logFile,
+  );
+  const proc = new Deno.Command(spec.cmd, {
+    args: spec.args,
+    stdin: "null",
+    stdout: "piped",
+    stderr: "null",
+  }).spawn();
+  const output = await proc.output();
+  const childPid = parseInt(new TextDecoder().decode(output.stdout).trim(), 10);
+  const pid = Number.isFinite(childPid) ? childPid : proc.pid;
+  out(
+    mode === "pretty"
+      ? `✓ amui launched (pid ${pid}) — ${entry}\n  log: ${logFile}`
+      : { launched: entry, pid, log: logFile },
+    mode,
+  );
 }
 
 export async function cmdStart(

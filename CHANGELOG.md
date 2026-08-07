@@ -1,5 +1,60 @@
 # Changelog
 
+## 1.0.0-alpha53 — one address, one manager (2026-08-08)
+
+Small and additive: the visual manager gets a front door, and binding a single
+interface becomes sayable — with the bind address reduced to ONE decider after
+the same second-decider trap `expose` fell into in alpha45 reappeared in the new
+`host` option.
+
+### `am ui` opens amui
+
+`am ui` now launches **amui**, the visual app manager (detached, Electron by
+default, `--client=browser` for a tab) — from any aio app directory, with a loud
+fallback naming `jsr:@riagentic/aio/amui` if the install has no amui. The name
+finally does what everyone assumed it did.
+
+The UI-state projection it used to print moved to **`am state --ui [user]`**,
+where it belongs beside `am state`. The old spelling doesn't guess:
+`am ui
+alice` refuses with a one-line pointer instead of surprising you with a
+window. `deno task amui` no longer forces the browser client, and amui's own
+config was migrated to the alpha52 `client:` key.
+
+### `--host=ADDR` / `host:` — bind one interface
+
+`--expose` binds every interface; `host` binds exactly one (a private LAN NIC, a
+VPN address, an interface behind a reverse proxy), from the flag or from
+`aio.run({ host })`, flag winning.
+
+**It shipped mid-flight with three deciders and only the listener knew about
+it** — the boot report re-derived the address from the flag alone (so a
+config-set host was reported as `localhost`), the share/local URLs ignored
+`host` entirely, and `host` was missing from the `CellsConfig` allowlist, so
+`aio.run({ host })` was boot-fatal. On a non-loopback bind that is not cosmetic:
+aio printed — and opened a client window at — an address nothing was listening
+on. `setupTransport` now resolves the bind once; every consumer reads that one
+answer, and `localhost` is only ever printed when the bind truly answers there.
+Pinned by boot tests on a real 127.0.0.2 bind (config form and flag-wins form),
+and the alpha52 config-docs gate caught the unprinted key on its own.
+
+### The UDS frame ceiling follows the app's WS limit
+
+An app that raises `wsLimits.maxMessageBytes` for large payloads (a base64
+attachment) got that ceiling on the WS hop and a hardcoded 10MB cap on the
+Electron/UDS hop — the same payload reset the connection mid-send, with no
+refusal logged anywhere. `createUDSListener` now takes the app's limit, and
+`udsFrameCeiling()` is the one rule both halves read: raise freely, never below
+the 10MB floor. Additive; default behaviour unchanged.
+
+### The rest
+
+`aiol` marks a finding `[manual]` (with the reason) when a safe-fix deliberately
+declines it, so repeated `--safe-fix` runs converge visibly instead of leaving
+`[fixable]` items that never move · `am fix` seals a local-checkout link with a
+`path:` pin instead of a version pin, so `am fix` no longer produces a tree
+`aiol` immediately calls mismatched.
+
 ## 1.0.0-alpha52 — the last call (2026-08-07)
 
 The one big break window before beta, all at once — four design audits, five

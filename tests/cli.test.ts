@@ -573,3 +573,11 @@ Deno.test("versionLine: an app with no version of its own still identifies itsel
 Deno.test("versionLine: defaults to the running framework version", () => {
   assertStringIncludes(versionLine("app", undefined), `(aio ${VERSION})`);
 });
+
+Deno.test("parseCli: --host= binds one address; empty is refused", () => {
+  assertEquals(parseCli(["--host=192.168.1.20"]).host, "192.168.1.20");
+  assertEquals(parseCli(["--host=[::1]"]).host, "[::1]");
+  // Empty is a warning, not a bind to "" — the expose default stays in force.
+  assertEquals(parseCli(["--host="]).host, undefined);
+  assertEquals(parseCli([]).host, undefined);
+});

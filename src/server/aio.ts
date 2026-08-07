@@ -1605,6 +1605,7 @@ async function _run<S, A, E>(
     tlsCert: transport.tlsCert,
     shareUrl: transport.shareUrl,
     localUrl: transport.localUrl,
+    advertiseHost: transport.advertiseHost,
     server,
     udsHandle,
     app,

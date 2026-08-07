@@ -158,6 +158,11 @@ export type AioConfig<S, A, E> = {
    *  from code. `--expose` still wins when both are set. Resolved exactly once
    *  in aio.ts (`_exposeOf`); nothing else may re-decide it. */
   expose?: boolean;
+  /** Bind ONE address instead of the expose-derived default (0.0.0.0 when
+   *  exposed, 127.0.0.1 when not) — a multi-homed machine (VPN + LAN) often
+   *  wants the relay on the LAN interface only. Config twin of `--host=`;
+   *  the flag wins when both are set. */
+  host?: string;
   baseDir?: string; // default: ./src
   /** Extra READ-ONLY roots the DEV server may serve, mapped to a URL prefix:
    *  `{ "/shared": "../core/lib" }`. Browser-reachable imports may not leave

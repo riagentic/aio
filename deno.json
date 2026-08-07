@@ -1,6 +1,6 @@
 {
   "name": "@riagentic/aio",
-  "version": "1.0.0-alpha52",
+  "version": "1.0.0-alpha53",
   "appId": "aio",
   "exports": {
     ".": "./mod.ts",
@@ -115,7 +115,7 @@
     "api:update": "deno run --allow-read --allow-write --allow-run scripts/api-snapshot.ts",
     "example": "deno run -A examples/counter/app.ts",
     "am": "deno run -A src/am.ts",
-    "amui": "deno run -A amui/src/app.ts --client=browser",
+    "amui": "deno run -A amui/src/app.ts",
     "compile:client": "deno run -A src/build.ts --client",
     "discover": "deno run -A src/am.ts discover",
     "doctor": "deno run -A src/server/doctor.ts",

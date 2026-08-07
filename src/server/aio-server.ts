@@ -6,7 +6,7 @@ import { shutdownAllRuntimes } from "./shutdown.ts";
 import { restartForCellChange } from "./dev-restart.ts";
 import { loadOrCreateCert, type TlsCert } from "./tls.ts";
 import { createServer } from "./server.ts";
-import { VERSION } from "./aio-cli.ts";
+import { parseCli, VERSION } from "./aio-cli.ts";
 import type { ServerHandle } from "./server-types.ts";
 import { _getCallTimeouts, registerCall } from "../state/cell-impl.ts";
 import { createUDSListener, type UDSHandle } from "./uds.ts";
@@ -48,6 +48,9 @@ import type { Access } from "../state/cell-types.ts";
  *  mechanical passthrough. */
 export interface TransportConfig {
   transport?: "uds" | "ws" | "auto";
+  /** Bind ONE address instead of the expose-derived default — see
+   *  `AioConfig.host`. */
+  host?: string;
   renderBudget?: import("../vitals/types.ts").RenderBudget;
   fullStateThreshold?: number;
   routes?: Record<string, import("./route.ts").RawRouteHandler>;
@@ -172,6 +175,16 @@ export interface ServerSetupResult {
   skipHttp: boolean;
   shareUrl: string;
   localUrl: string;
+  /** The address the listener is ACTUALLY bound to — `host` when set, else the
+   *  expose-derived default. THE one decider: every consumer (boot report,
+   *  share link, the launched client window) reads this, never `parseCli()`
+   *  again. Three places used to derive it independently and only the bind
+   *  knew about `host`, so a `--host=192.168.1.20` app advertised (and opened
+   *  a window at) `localhost`, where nothing was listening. */
+  bindHost: string;
+  /** How the bind address is NAMED in output (`localhost` for a loopback
+   *  bind, `0.0.0.0` for the wildcard, the address itself otherwise). */
+  advertiseHost: string;
 }
 
 /** Resolve TLS, create HTTP server, wire sync broadcast, set up UDS & signal handlers */
@@ -218,6 +231,28 @@ export async function setupTransport<S, A>(
     clientCounter,
     log,
   } = deps;
+
+  // THE bind-address decider, resolved once: the operator's flag wins over the
+  // author's config, and the expose-derived default fills in. Everything that
+  // NAMES the address downstream (boot report, share link, the client window
+  // aio opens) reads `bindHost` from the result — deriving it a second time is
+  // how an app came to advertise `localhost` while listening only on a LAN
+  // address, so `deno task dev --host=…` opened a window at a dead URL.
+  const _host = parseCli().host ?? config.host;
+  const bindHost = _host ?? (expose ? "0.0.0.0" : "127.0.0.1");
+  // `localhost` resolves to 127.0.0.1 (or ::1) SPECIFICALLY — an app bound to
+  // 127.0.0.2 or a LAN address does not answer there. So the friendly name is
+  // used only when the bind really is reachable by it; any other address is
+  // printed as itself.
+  const _isLocalhostAddr = bindHost === "127.0.0.1" || bindHost === "::1" ||
+    bindHost === "[::1]";
+  const _isWildcard = bindHost === "0.0.0.0" || bindHost === "::";
+  /** What a URL must say to reach this app from HERE (this machine). */
+  const _selfHost = _isLocalhostAddr || _isWildcard ? "localhost" : bindHost;
+  /** What to advertise: the wildcard stays `0.0.0.0` (it means "every
+   *  interface — substitute your LAN IP"), a loopback bind reads friendlier as
+   *  `localhost`, and a chosen address is quoted verbatim. */
+  const _advertiseHost = _isLocalhostAddr ? "localhost" : bindHost;
 
   // TLS: auto-generate self-signed cert when exposed (or use user-provided
   // --tls-cert/--tls-key). `--no-tls` is the one way out, and it costs a loud
@@ -416,6 +451,9 @@ export async function setupTransport<S, A>(
       prod,
       distDir: prod ? distDir : undefined,
       expose,
+      // Same one-source rule as expose: the flag wins over config, decided
+      // here and nowhere downstream (`bindHost`, returned below).
+      host: _host,
       token,
       users,
       resolveUser,
@@ -612,6 +650,9 @@ export async function setupTransport<S, A>(
       tt
         ? { onCommand: tt.handleTTCommand, getBroadcast: tt.getTTBroadcast }
         : undefined,
+      // The UDS twin of wsLimits.maxMessageBytes — an app that raised its WS
+      // frame ceiling for large payloads gets the same ceiling on this path.
+      config.wsLimits?.maxMessageBytes,
     );
     udsRef.current = uds;
     const u = uds;
@@ -620,14 +661,12 @@ export async function setupTransport<S, A>(
   }
 
   const useHttps = expose && !!tlsCert;
-  const shareUrl = useHttps
-    ? `https://0.0.0.0:${port}`
-    : expose
-    ? `http://0.0.0.0:${port}`
-    : `http://localhost:${port}`;
-  const localUrl = useHttps
-    ? `https://localhost:${port}`
-    : `http://localhost:${port}`;
+  // Both URLs name the address the listener is ACTUALLY on. `shareUrl` is what
+  // you hand to another machine (the bound address as-is); `localUrl` is what
+  // THIS machine opens — `localhost` only when the bind really answers there.
+  const _scheme = useHttps ? "https" : "http";
+  const shareUrl = `${_scheme}://${_advertiseHost}:${port}`;
+  const localUrl = `${_scheme}://${_selfHost}:${port}`;
 
   // Update lock file with runtime info
   if (appLock) {
@@ -646,5 +685,7 @@ export async function setupTransport<S, A>(
     skipHttp,
     shareUrl,
     localUrl,
+    bindHost,
+    advertiseHost: _advertiseHost,
   };
 }

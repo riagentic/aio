@@ -35,6 +35,8 @@ export type GlobalFlags = {
   app?: string;
   client?: number;
   all?: boolean;
+  /** `am state --ui` — the filtered UI-state projection (was `am ui`). */
+  ui?: boolean;
   /** `--help`/`-h` anywhere → print usage and exit 0. Without this the flag
    *  fell through to the subcommand's positionals and was silently ignored —
    *  `am dispatch --help` answered `{"ok":true}`, which reads as "your
