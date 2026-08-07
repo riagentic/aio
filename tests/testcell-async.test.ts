@@ -47,6 +47,10 @@ testCell(
 let sideEffectRuns = 0;
 
 const loader = cell("loader379", {
+  // alpha52: these tests pin the opted-out semantics — "writes before the
+  // throw were applied" is the incremental-commit contract; the transactional
+  // default discards a throwing method's write-set (pinned elsewhere).
+  transaction: false,
   state: {
     data: null as string | null,
     count: 0,

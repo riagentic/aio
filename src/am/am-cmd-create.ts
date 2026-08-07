@@ -33,12 +33,13 @@ const PKG = "@riagentic/aio";
 const TEMPLATES = ["counter", "todo"] as const;
 export type Template = (typeof TEMPLATES)[number];
 
-/** Build target — what `deno task dev` / `deno task compile` produce by default.
- *  Every target is always available via the explicit `dev:<target>` /
- *  `compile:<target>` task; `--target` only picks the default. `browser` is the
- *  zero-toolchain default (instant, no download); `electron` auto-installs
- *  Electron on first run; `android` needs the Android SDK + Gradle (the one
- *  toolchain aio can't fetch for you); `cli`/`server` are headless. */
+/** Build target — what `deno task dev` / `deno task compile` produce by
+ *  default. Other shells stay one flag away (`deno task dev --client=X`,
+ *  `deno task build --targets=X`); `--target` only picks the default.
+ *  `browser` is the zero-toolchain default (instant, no download); `electron`
+ *  auto-installs Electron on first run; `android` needs the Android SDK +
+ *  Gradle (the one toolchain aio can't fetch for you); `cli`/`server` are
+ *  headless (`server` was spelled `service` before alpha52). */
 export const TARGETS = [
   "browser",
   "electron",
@@ -95,7 +96,17 @@ export function parseCreateArgs(args: string[]): CreateOpts {
     else if (a.startsWith("--template=")) {
       opts.template = a.slice(11) as Template;
     } else if (a.startsWith("--target=")) {
-      const v = a.slice(9) as Target;
+      let v = a.slice(9) as Target;
+      // One vocabulary: the headless role is spelled `server` everywhere.
+      // `service` is the deprecated alias — accepted, loudly renamed.
+      if ((v as string) === "service") {
+        console.error(
+          "am create: --target=service is now --target=server (one " +
+            "vocabulary — the headless role is `server`); scaffolding a " +
+            "server app.",
+        );
+        v = "server";
+      }
       // Loud on a typo — silently falling back to browser would ship the
       // wrong default and the user wouldn't know until `deno task dev`.
       if (!TARGETS.includes(v)) {
@@ -166,11 +177,12 @@ export function frameworkSpecs(source: boolean): {
  *    fetch for you — fails loud with guidance if absent).
  *  - `cli`/`server`: headless.
  *
- *  `--target` picks the DEFAULT for `dev` / `compile`. Every target remains
- *  reachable via the explicit `dev:<target>` / `compile:<target>` task.
+ *  `--target` picks the DEFAULT for `dev` / `compile`. Every other target
+ *  stays one flag away: `deno task dev --client=X` (flags pass through) and
+ *  `deno task build --targets=X` / deno.json `build.targets`.
  *
- *  The chosen `target` is also written to deno.json so `aio.run()` can read it
- *  (the framework's own `client` default falls back to it). */
+ *  The chosen target is also written to deno.json as `client` so `aio.run()`
+ *  can read it (the framework's own client default falls back to it). */
 /** THE standard task set for an aio app — one producer, used by `am create`
  *  (scaffold) AND `am fix` (add-only repair for apps missing them: hand-rolled
  *  or pre-dating the tasks). Values depend on how the app consumes the
@@ -180,33 +192,59 @@ export function standardTasks(
   target: Target = DEFAULT_TARGET,
 ): Record<string, string> {
   const fw = frameworkSpecs(source);
-  // `electron` is declared in imports so the npm specifier resolves, but the
-  // Electron binary itself is fetched lazily by the framework (dev) or the
-  // build pipeline (compile) — no `install:electron` task needed.
   // The `--client=X` arg is omitted for the default browser target (matches
-  // the framework default) and for headless targets (also framework defaults).
-  // Explicit `dev:<target>` / `compile:<target>` tasks always pass the flag so
-  // they remain target-accurate regardless of the configured default.
+  // the framework default). Other targets/flags are a PASS-THROUGH, not a task
+  // matrix: `deno task dev --client=electron`, `deno task dev --expose` — the
+  // 30-task dev:*/compile:* matrix this replaced was noise nobody could scan
+  // (alpha52 "one vocabulary" diet).
   // `android` has no client flag — its dev default IS the emulator
-  // orchestrator (identical to the explicit `dev:android` task).
+  // orchestrator (boots an AVD, builds+installs+launches; needs the SDK).
   const devDefault = target === "android"
     ? `deno run -A ${fw.devAndroid}`
     : `deno run -A src/app.ts${
       target === "browser" ? "" : ` --client=${clientFlagFor(target)}`
     }`;
-  // THE compile-flag decider: what BUILD flags each target is built with, in
-  // one table that both the default `compile` task and the explicit
-  // `compile:<target>` task read.
-  //
-  // Written twice, they drifted — and drifted SILENTLY, because build.ts reads
-  // its flags with `Deno.args.includes()`: the default task passed the RUNTIME
-  // flags `--client=cli` / `--client=server-only` (what `aio.run()` reads),
-  // which the build simply did not recognize, so `deno task compile` on a
-  // cli/server app built the browser-shaped binary — a browser bundle embedded,
-  // no systemd unit written, exit 0, and a different artifact from
-  // `deno task compile:cli` / `compile:service` for the same app. build.ts now
-  // refuses an unknown flag (build-config.ts `unknownBuildFlags`); this makes
-  // the two spellings ONE.
+  // ONE way to build: the fleet pipeline (`build-all` reading deno.json
+  // `build.targets`). `compile` is the same pipeline narrowed to the default
+  // target — not a second flag table that can drift from the first (the old
+  // per-target COMPILE_FLAGS copy shipped exactly that drift).
+  const fleet = `deno run -A ${fw.buildAll} --build-spec=${fw.build}`;
+  return {
+    // dev runs the configured default; flags pass through:
+    //   deno task dev --client=electron   (any shell)
+    //   deno task dev --expose            (LAN server side)
+    dev: devDefault,
+    // build = every target in deno.json `build.targets` → dist/ + manifest.
+    build: fleet,
+    // compile = build, narrowed to the default target.
+    compile: `${fleet} --targets=${target}`,
+    test: "deno test -A",
+    check: "deno check src/",
+    fmt: "deno fmt",
+    lint: `deno run -A ${fw.aiol}`,
+    doctor: `deno run -A ${fw.doctor}`,
+    am: `deno run -A ${fw.am}`,
+    // Convenience: pre-fetch the Electron binary without launching. Not
+    // required — dev/compile auto-install on demand. Scaffolded only for
+    // electron apps (see denoJson()).
+    "install:electron": "deno install --allow-scripts=npm:electron",
+  };
+}
+
+/** The task set the PRE-alpha52 scaffold emitted — kept only so
+ *  `am fix --migrate-tasks` can recognize a pristine old-scaffold task (and
+ *  delete/rewrite it) versus a user-customized one (never touched). The live
+ *  producer is {@link standardTasks}; nothing scaffolds from this table. */
+export function legacyStandardTasks(
+  source: boolean,
+  target: Target = DEFAULT_TARGET,
+): Record<string, string> {
+  const fw = frameworkSpecs(source);
+  const devDefault = target === "android"
+    ? `deno run -A ${fw.devAndroid}`
+    : `deno run -A src/app.ts${
+      target === "browser" ? "" : ` --client=${clientFlagFor(target)}`
+    }`;
   const COMPILE_FLAGS: Record<Target, string> = {
     browser: "--compile",
     electron: "--compile --electron",
@@ -217,44 +255,27 @@ export function standardTasks(
   const compileFor = (t: Target) =>
     `deno run -A ${fw.build} ${COMPILE_FLAGS[t]}`;
   return {
-    // ── dev: `deno task dev` runs the configured target. Explicit per-target
-    // tasks always pass --client so they work regardless of `target`. ──
     dev: devDefault,
     "dev:browser": "deno run -A src/app.ts --client=browser",
-    // Electron auto-installs on first run — no `install:electron` prefix.
     "dev:electron": "deno run -A src/app.ts --client=electron",
-    // Runs the app in an Android emulator against the live dev server
-    // (boots an AVD, builds+installs+launches). Needs the Android SDK + an AVD.
     "dev:android": `deno run -A ${fw.devAndroid}`,
     "dev:cli": "deno run -A src/app.ts --client=cli",
     "dev:service": "deno run -A src/app.ts --client=server-only",
-    // Unified aio client: Electron connect page (enter any server URL).
     "dev:client": "deno run -A src/app.ts --server-url",
-    // ── dev:remote — the same app, split across the network: the server
-    // side runs --expose (share token + pair code); the client side is a
-    // thin client (connect page / src/client.ts) pointed at that server. ──
     "dev:remote:browser": "deno run -A src/app.ts --client=browser --expose",
     "dev:remote:electron": "deno run -A src/app.ts --server-url",
     "dev:remote:android": "deno run -A src/app.ts --client=browser --expose",
     "dev:remote:cli": "deno run -A src/client.ts",
     "dev:remote:service":
       "deno run -A src/app.ts --client=server-only --expose",
-    // ── build: one command builds every target in deno.json `build.targets`
-    // into dist/ (+ manifest.json). The `compile:*` tasks below build one
-    // target at a time; `build` fans out over the fleet. ──
     build: `deno run -A ${fw.buildAll} --build-spec=${fw.build}`,
-    // ── compile: `deno task compile` builds the configured target. ──
     compile: compileFor(target),
     "compile:browser": compileFor("browser"),
     "compile:electron": compileFor("electron"),
     "compile:android": compileFor("android"),
     "compile:cli": compileFor("cli"),
     "compile:service": compileFor("server"),
-    // Unified aio client: standalone Electron connect-page AppImage.
     "compile:client": `deno run -A ${fw.build} --client`,
-    // ── compile:remote — server binary (+ systemd unit) and, where the
-    // client is a separate artifact, that too (server FIRST: its dist clean
-    // would delete a client artifact built before it). ──
     "compile:remote:browser":
       `deno run -A ${fw.build} --compile --service --remote`,
     "compile:remote:electron":
@@ -265,8 +286,6 @@ export function standardTasks(
       `deno run -A ${fw.build} --compile --service --headless --remote && deno run -A ${fw.build} --compile --cli --remote`,
     "compile:remote:service":
       `deno run -A ${fw.build} --compile --service --headless --remote`,
-    // Convenience: pre-fetch the Electron binary without launching. Not
-    // required — `dev:electron` / `compile:electron` auto-install on demand.
     "install:electron": "deno install --allow-scripts=npm:electron",
     test: "deno test -A",
     am: `deno run -A ${fw.am}`,
@@ -281,13 +300,19 @@ export function denoJson(
   target: Target = DEFAULT_TARGET,
 ): string {
   const fw = frameworkSpecs(source);
+  // The task diet keeps `install:electron` an electron-only convenience —
+  // scaffolding it into a browser/cli/server app is the noise the diet removed.
+  const tasks = standardTasks(source, target);
+  if (target !== "electron") delete tasks["install:electron"];
   const obj = {
     title: name,
     version: "0.1.0",
-    // `target` is read by aio.run() to pick the default client when no
-    // --client flag is passed. Editable by hand; `am` regenerates only on
-    // `am create` / `am update` (never silently).
-    target,
+    // `client` is read by aio.run() to pick the default client shell when no
+    // --client flag is passed (it was called `target` before alpha52 — same
+    // meaning, renamed because deno.json also has build.targets, a DIFFERENT
+    // axis). Editable by hand; `am` regenerates only on `am create` /
+    // `am update` (never silently).
+    client: target,
     // `deno task build` builds every target listed here into `out`/ (with a
     // manifest.json). Edit `targets` to fan out — e.g. for a LAN app:
     //   "targets": ["server", "electron-client", "android-client"],
@@ -308,7 +333,7 @@ export function denoJson(
       jsxImportSource: "aio",
     },
     imports: { ...fw.imports, electron: "npm:electron" },
-    tasks: standardTasks(source, target),
+    tasks,
   };
   return JSON.stringify(obj, null, 2) + "\n";
 }
@@ -338,8 +363,9 @@ export function scaffold(
     "src/app.ts": template === "todo" ? TODO_APP : COUNTER_APP,
     "src/cell.ts": template === "todo" ? TODO_CELL : COUNTER_CELL,
     "src/App.tsx": template === "todo" ? TODO_UI : COUNTER_UI,
-    // Thin CLI client — dev:remote:cli runs it; compile:remote:cli compiles it
-    // (build-cli.ts hard-codes src/client.ts as the --cli --remote entry).
+    // Thin CLI client — `deno run -A src/client.ts` in dev; the `cli-client`
+    // fleet target compiles it (build-cli.ts's conventional --cli --remote
+    // entry is src/client.ts).
     "src/client.ts": CLIENT_TS,
     "src/cell.test.ts": template === "todo" ? TODO_TEST : COUNTER_TEST,
     "README.md": readme(name, template, target),
@@ -487,9 +513,8 @@ export async function cmdCreate(
   const cyan = (s: string) => C ? `\x1b[36m${s}\x1b[0m` : s;
   const grn = (s: string) => C ? `\x1b[32m${s}\x1b[0m` : s;
   // Show the chosen target's dev command + a hint about other targets.
-  const otherTargets = TARGETS.filter((t) => t !== opts.target);
   const devHint = opts.target === "browser"
-    ? `→ ${opts.target} (· ${otherTargets.map((t) => `dev:${t}`).join(" · ")})`
+    ? `→ ${opts.target} (others: --client=electron|cli|server-only)`
     : `→ ${opts.target}`;
   out(
     [
@@ -506,10 +531,12 @@ export async function cmdCreate(
           "",
           `  ${dim("ship it")}`,
           `    ${cyan("deno task compile")}        ${dim("→ a single binary")}`,
-          `    ${cyan("deno task compile:electron")} ${
+          `    ${cyan("deno task build --targets=electron")} ${
             dim("→ desktop AppImage")
           }`,
-          `    ${cyan("deno task compile:android")}  ${dim("→ Android APK")}`,
+          `    ${cyan("deno task build --targets=android")}  ${
+            dim("→ Android APK")
+          }`,
         ]
         : []),
       "",
@@ -576,12 +603,26 @@ An [aio](https://github.com/riagentic/aio) app (${template} template).
 > script) to repair them, then \`deno task dev\` works.
 
 \`\`\`sh
-deno task dev              # run — ${target} (also dev:browser, dev:electron, dev:android)
+deno task dev              # run — ${target} (flags pass through, see below)
 deno task test             # run the starter test
-deno task compile          # build a single binary (also compile:browser)
-deno task compile:electron # build a desktop AppImage
-deno task compile:android  # build an Android APK (needs ANDROID_HOME + Gradle)
+deno task compile          # build the default target (${target})
+deno task build            # build every target in deno.json build.targets → dist/
+deno task check            # type-check src/
 \`\`\`
+
+**\`dev\` flags pass through** — one task, any shell:
+
+\`\`\`sh
+deno task dev --client=electron     # desktop window (auto-installs Electron)
+deno task dev --client=cli          # terminal client
+deno task dev --client=server-only  # headless server
+deno task dev --expose              # reachable on the LAN (prints pair PIN)
+\`\`\`
+
+**Ship more targets** by listing them in deno.json —
+\`"build": { "targets": ["${target}", "electron", "android"] }\` — then
+\`deno task build\` (or one-off: \`deno task build --targets=electron\`).
+Run \`deno task build --list\` for every target name.
 
 State lives in \`src/cell.ts\`, UI in \`src/App.tsx\`, entry in \`src/app.ts\`.
 Manage a running app with \`deno task am\` (status, state, logs, …).
@@ -624,8 +665,9 @@ await aio.run();
 
 const CLIENT_TS =
   `// Thin CLI client — live view of a running server's state over WebSocket.
-// Used by \`deno task dev:remote:cli\` (against a dev server) and compiled by
-// \`compile:remote:cli\` into a standalone client binary. No local server.
+// Run it against a dev server (\`deno run -A src/client.ts\`); the
+// \`cli-client\` build target compiles it into a standalone client binary
+// (add "cli-client" to build.targets, then \`deno task build\`). No local server.
 import { connectCli } from "aio/server";
 
 const url = Deno.args[0] || "ws://localhost:8000/ws";

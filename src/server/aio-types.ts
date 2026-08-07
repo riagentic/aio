@@ -18,11 +18,13 @@ import type { RenderBudget } from "../vitals/types.ts";
 import type { ReduceBreakdown } from "../diagnostics/time-travel.ts";
 
 /** User identity — resolved from static token map or dynamic resolveUser hook.
- *  Defined in protocol/ (it crosses the wire; the browser's auth UI needs it
- *  too) and re-exported here, which is where server code and the public API
- *  have always imported it from. */
-import type { AioUser } from "../protocol/protocol-types.ts";
-export type { AioUser };
+ *  The wire shape (`{ id, role }`) is defined in protocol/ (it crosses the
+ *  wire; the browser's auth UI needs it too); the PUBLIC type is opened
+ *  (alpha52) with `& Record<string, unknown>` so the extra fields a
+ *  `resolveUser`/`users` entry attaches are readable without casting — the
+ *  one opened definition lives in state/cell-types.ts (`AccessUser`). */
+import type { AccessUser } from "../state/cell-types.ts";
+export type AioUser = AccessUser;
 
 /** AUTH-2/3 options for `auth: {...}` (auth: true = all defaults). */
 export type AuthOptions = {
@@ -297,6 +299,13 @@ export type AioApp<S = unknown, A = unknown> = {
   snapshot?: () => string; // server-only (undefined in standalone)
   loadSnapshot?: (json: string) => void; // server-only (undefined in standalone)
   db?: DB; // async SQLite — query/execute/transaction (undefined in standalone)
+  /** Content-addressed binary store (tier ③ — docs/persistence/big-data.md).
+   *  put/stream/info/url/delete/list under `appDirs(appId).files/blobs/`;
+   *  bytes are served over HTTP at `blobs.url(id)` (Range-capable, immutable
+   *  caching) and NEVER ride the WS/UDS state channel. Undefined in
+   *  standalone (no filesystem). Headless: `openBlobStore(appId)` from
+   *  `aio/server` opens the same store. */
+  blobs?: import("./blobs.ts").BlobStore;
   /** AUTH-1 session API — present when `sessions:` is enabled in aio.run().
    *  issue/get/refresh/revoke/revokeUser bearer-token sessions (SQLite). */
   sessions?: import("./sessions.ts").SessionStore;
@@ -339,9 +348,15 @@ export type CellsConfig = {
    *  Opt-in while it earns field mileage — it changes WHERE your methods run.
    *  See docs/specs/2026-07-22-local-first.md. */
   localFirst?: boolean;
-  /** Default persist and ui config for all cells — individual cells override these */
+  /** Default persist and visibility config for all cells — individual cells
+   *  override these. `visible` takes the FULL CellVisibility vocabulary
+   *  (alpha52): include/exclude/"all"/"none" plus `forUser`/`publicFields`,
+   *  so a per-user default view is expressible app-wide. */
   cellDefaults?: {
-    ui?: import("../state/cell-types.ts").CellFieldFilter;
+    visible?: import("../state/cell-types.ts").CellVisibility;
+    /** @deprecated alpha52 — renamed `visible` (one-time hint; alias through
+     *  beta; `aiol --safe-fix` renames it). */
+    ui?: import("../state/cell-types.ts").CellVisibility;
     persist?: import("../state/cell-types.ts").CellFieldFilter;
   };
   port?: number;

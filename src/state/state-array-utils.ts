@@ -38,7 +38,9 @@ export function _shallowEqual(a: unknown, b: unknown): boolean {
 
 // ── Array ref stats (AIO-11 wasted render detection) ────────────────
 
-/** Stats from `_preserveArrayRefs` — tracks how many references were preserved vs changed. */
+/** Stats from `_preserveArrayRefs` — tracks how many references were preserved vs changed.
+ *  @internal Framework wiring (alpha52 sweep) — not public API.
+ */
 export interface ArrayRefStats {
   preserved: number;
   changed: number;

@@ -60,66 +60,54 @@ Deno.test("frameworkSpecs: source mode uses the dep/aio symlink + carries source
   assertStringIncludes(fw.build, "./dep/aio/src/build.ts");
 });
 
-// ── generated deno.json: the target build tasks (onboard#4/#5) ──────────────
+// ── generated deno.json: the alpha52 task diet (one vocabulary) ─────────────
 
-Deno.test("denoJson: dev defaults to browser + per-target dev/compile tasks", () => {
+Deno.test("denoJson: the scaffold emits the dieted task set EXACTLY", () => {
   const dj = JSON.parse(denoJson("demo", true)) as {
     tasks: Record<string, string>;
     compilerOptions: Record<string, unknown>;
+    client: string;
   };
+  // The whole set, pinned exactly — a new task is a deliberate diff here, and
+  // the 30-task dev:*/compile:* matrix must never creep back (dev flags pass
+  // through; the fleet build is the one way to build).
+  assertEquals(Object.keys(dj.tasks).sort(), [
+    "am",
+    "build",
+    "check",
+    "compile",
+    "dev",
+    "doctor",
+    "fmt",
+    "lint",
+    "test",
+  ]);
   // dev works out of the box (browser — no toolchain, no electron download).
   // The --client flag is OMITTED for the default target: it matches the
-  // framework default, and per-target tasks stay accurate regardless.
+  // framework default; other shells pass through (`deno task dev --client=X`).
   assertEquals(dj.tasks.dev, "deno run -A src/app.ts");
-  assertStringIncludes(dj.tasks["dev:browser"]!, "--client=browser");
-  // Electron auto-installs on first run — no install prefix chained into the
-  // task; `install:electron` exists as an optional pre-fetch convenience.
-  assertStringIncludes(dj.tasks["dev:electron"]!, "--client=electron");
-  assertEquals(
-    dj.tasks["install:electron"],
-    "deno install --allow-scripts=npm:electron",
-  );
-  assertStringIncludes(dj.tasks["dev:android"]!, "dev-android.ts");
-  // compile: default binary + per-target
-  assertStringIncludes(dj.tasks.compile!, "--compile");
-  assertStringIncludes(dj.tasks["compile:browser"]!, "--compile");
-  assertStringIncludes(dj.tasks["compile:electron"]!, "--electron");
-  assertStringIncludes(dj.tasks["compile:android"]!, "--android");
+  // build = the fleet; compile = the fleet narrowed to the default target.
+  assertStringIncludes(dj.tasks.build!, "build-all");
+  assertStringIncludes(dj.tasks.compile!, "--targets=browser");
   assertEquals(dj.tasks.test, "deno test -A");
+  assertEquals(dj.tasks.check, "deno check src/");
+  assertEquals(dj.tasks.fmt, "deno fmt");
   assertEquals(dj.compilerOptions.jsxImportSource, "aio");
+  // The default shell is recorded under the alpha52 key name.
+  assertEquals(dj.client, "browser");
 });
 
-// The FULL target matrix (katana targets kata): every dev/compile task for
-// every target — local, remote, and the unified client — must be scaffolded.
-Deno.test("denoJson: full dev/compile task matrix is scaffolded", () => {
-  const dj = JSON.parse(denoJson("demo", true)) as {
-    tasks: Record<string, string>;
-  };
-  const expect: Record<string, string[]> = {
-    "dev:cli": ["--client=cli"],
-    "dev:service": ["--client=server-only"],
-    "dev:client": ["--server-url"],
-    "dev:remote:browser": ["--client=browser", "--expose"],
-    "dev:remote:electron": ["--server-url"],
-    "dev:remote:android": ["--client=browser", "--expose"],
-    "dev:remote:cli": ["src/client.ts"],
-    "dev:remote:service": ["--client=server-only", "--expose"],
-    "compile:cli": ["--compile", "--cli"],
-    "compile:service": ["--compile", "--service", "--headless"],
-    "compile:client": ["--client"],
-    "compile:remote:browser": ["--compile", "--service", "--remote"],
-    // Two-artifact targets build the server FIRST (its dist/ clean would
-    // delete a client artifact built before it), then the client.
-    "compile:remote:electron": ["--service --remote &&", "--client"],
-    "compile:remote:android": ["--service --remote &&", "--android --remote"],
-    "compile:remote:cli": ["--headless --remote &&", "--cli --remote"],
-    "compile:remote:service": ["--service", "--headless", "--remote"],
-  };
-  for (const [task, frags] of Object.entries(expect)) {
-    const cmd = dj.tasks[task];
-    assert(cmd, `missing scaffolded task ${task}`);
-    for (const f of frags) assertStringIncludes(cmd, f, `task ${task}`);
-  }
+Deno.test("denoJson: install:electron is scaffolded ONLY for electron", () => {
+  const tasks = (t?: "browser" | "electron" | "cli") =>
+    (JSON.parse(denoJson("demo", true, t)) as {
+      tasks: Record<string, string>;
+    }).tasks;
+  assertEquals(tasks().hasOwnProperty("install:electron"), false);
+  assertEquals(tasks("cli").hasOwnProperty("install:electron"), false);
+  assertEquals(
+    tasks("electron")["install:electron"],
+    "deno install --allow-scripts=npm:electron",
+  );
 });
 
 Deno.test("denoJson: --target picks the dev/compile DEFAULT per target", () => {
@@ -127,29 +115,42 @@ Deno.test("denoJson: --target picks the dev/compile DEFAULT per target", () => {
     (JSON.parse(denoJson("demo", true, t)) as {
       tasks: Record<string, string>;
     }).tasks;
-  // electron: explicit client flag; compile builds the desktop app.
+  // electron: explicit client flag; compile narrows the fleet to electron.
   assertStringIncludes(tasks("electron").dev!, "--client=electron");
-  assertStringIncludes(tasks("electron").compile!, "--electron");
-  // android has NO client flag — its dev default IS the emulator
-  // orchestrator (identical to the explicit dev:android task).
+  assertStringIncludes(tasks("electron").compile!, "--targets=electron");
+  // android has NO client flag — its dev default IS the emulator orchestrator.
   assertStringIncludes(tasks("android").dev!, "dev-android.ts");
-  assertStringIncludes(tasks("android").compile!, "--android");
+  assertStringIncludes(tasks("android").compile!, "--targets=android");
   // headless targets map cli → cli, server → server-only — at DEV time, where
   // `--client=X` is the flag `aio.run()` reads.
   assertStringIncludes(tasks("cli").dev!, "--client=cli");
   assertStringIncludes(tasks("server").dev!, "--client=server-only");
-  // …and NOT at build time: `--client=X` is a runtime flag that build.ts does
-  // not parse, so passing it there silently built the browser-shaped binary
-  // instead (no `--cli`, no `--service`, no systemd unit — exit 0). This line
-  // used to assert `--client=server-only` in the COMPILE task, pinning that
-  // drift as the contract. The build spelling is the only thing valid here.
-  assertStringIncludes(tasks("cli").compile!, "--cli");
-  assertStringIncludes(tasks("server").compile!, "--service --headless");
+  // …and NOT at build time: `--client=X` is a runtime flag the build does not
+  // parse. `compile` delegates to the fleet pipeline (its per-target flag
+  // table), so the two spellings cannot drift — there is only one.
+  assertStringIncludes(tasks("cli").compile!, "--targets=cli");
+  assertStringIncludes(tasks("server").compile!, "--targets=server");
   for (const t of ["electron", "android", "cli", "server"] as const) {
     assert(
       !tasks(t).compile!.includes("--client="),
       `${t}: a runtime --client= flag has no meaning in a compile task`,
     );
+  }
+});
+
+Deno.test("parseCreateArgs: --target=service is the deprecated alias of server", () => {
+  const errs: string[] = [];
+  const orig = console.error;
+  console.error = (...a: unknown[]) => errs.push(a.map(String).join(" "));
+  try {
+    const o = parseCreateArgs(["app", "--target=service"]);
+    assertEquals(o.target, "server");
+    assert(
+      errs.some((e) => e.includes("--target=server")),
+      "the alias must name the new spelling",
+    );
+  } finally {
+    console.error = orig;
   }
 });
 
@@ -164,7 +165,7 @@ Deno.test("scaffold: counter + todo emit the expected src/-based files", () => {
         "src/app.ts",
         "src/cell.ts",
         "src/App.tsx",
-        "src/client.ts", // thin CLI client — dev:remote:cli / compile:remote:cli entry
+        "src/client.ts", // thin CLI client — the cli-client target's entry
         "src/cell.test.ts",
         ".gitignore",
         "README.md",
@@ -234,22 +235,26 @@ Deno.test({
         0,
         `compile failed:\n${new TextDecoder().decode(stderr)}`,
       );
-      // A binary (not a .ts/.json) must exist.
-      const bin = [...Deno.readDirSync(dir)].some((e) =>
-        e.isFile && !e.name.includes(".")
+      // `compile` is the fleet pipeline narrowed to the default target, so the
+      // binary (a file with no extension) + manifest.json land in dist/.
+      const dist = [...Deno.readDirSync(resolve(dir, "dist"))];
+      const bin = dist.some((e) => e.isFile && !e.name.includes("."));
+      assert(bin, "no compiled binary produced in dist/");
+      assert(
+        dist.some((e) => e.name === "manifest.json"),
+        "fleet build wrote no manifest.json",
       );
-      assert(bin, "no compiled binary produced");
     } finally {
       await Deno.remove(dir, { recursive: true });
     }
   },
 });
 
-// Matrix build smoke — the new task-matrix targets yield real binaries from a
-// scaffold: cli (local), service (headless), remote cli client (src/client.ts).
+// Matrix build smoke — the single-target build flags yield real binaries from
+// a scaffold: cli (local), server (headless), cli-client (src/client.ts).
 // Same opt-in as the counter smoke: three deno compiles, minutes not seconds.
 Deno.test({
-  name: "build smoke: compile:cli, compile:service, remote cli client",
+  name: "build smoke: cli, server, and cli-client binaries via build.ts",
   ignore: Deno.env.get("AIO_BUILD_SMOKE") !== "1",
   fn: async () => {
     const dir = await Deno.makeTempDir({ prefix: "am-matrix-" });
@@ -278,9 +283,9 @@ Deno.test({
           }`,
         );
       };
-      await build(["--compile", "--cli"]); // compile:cli → ./app
-      await build(["--compile", "--service", "--headless"]); // compile:service
-      await build(["--compile", "--cli", "--remote"]); // remote cli client → ./app-client
+      await build(["--compile", "--cli"]); // cli target → ./app
+      await build(["--compile", "--service", "--headless"]); // server target
+      await build(["--compile", "--cli", "--remote"]); // cli-client → ./app-client
       const names = [...Deno.readDirSync(dir)].map((e) => e.name);
       assert(names.includes("app"), `no cli/service binary in ${names}`);
       assert(

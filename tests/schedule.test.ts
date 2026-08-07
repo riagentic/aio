@@ -1,6 +1,7 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import {
   createScheduleManager,
+  createVirtualTimers,
   isScheduleEffect,
   nextCronTime,
   parseCron,
@@ -441,7 +442,9 @@ Deno.test("schedule.next: defers to next tick", () => {
     id: string;
   };
   assertEquals(e.kind, "after");
-  assertEquals(e.ms, 1);
+  // alpha52: a TRUE 0ms timer — `after` accepts 0 now, so `next` no longer
+  // carries a 1ms sentinel.
+  assertEquals(e.ms, 0);
   assertEquals(e.id, "rescan");
 });
 
@@ -484,4 +487,78 @@ Deno.test("schedule.poll: constant while healthy, backs off on failure", () => {
   };
   assertEquals(e.kind, "after");
   assertEquals(e.id, "rpc");
+});
+
+// ── alpha52: backoff/poll argument order + `factor` key + 0ms after ──────
+
+Deno.test("schedule.backoff NEW order: (id, attempt, action, opts)", () => {
+  const A = { type: "poll" };
+  const e = schedule.backoff("rpc2", 3, A, { base: 1000, max: 60_000 }) as {
+    kind: string;
+    ms: number;
+    action: { type: string };
+  };
+  assertEquals(e.kind, "after");
+  assertEquals(e.ms, 8000); // 1000 * 2^3
+  assertEquals(e.action.type, "poll");
+  // custom factor in the new order
+  assertEquals(
+    (schedule.backoff("x2", 2, A, { base: 100, factor: 3 }) as { ms: number })
+      .ms,
+    900,
+  );
+});
+
+Deno.test("schedule.poll NEW order + `factor` key: (id, attempt, action, opts)", () => {
+  const A = { type: "tick" };
+  assertEquals(
+    (schedule.poll("rpc3", 0, A, { every: 5000, factor: 2, max: 60_000 }) as {
+      ms: number;
+    }).ms,
+    5000,
+  );
+  assertEquals(
+    (schedule.poll("rpc3", 3, A, { every: 5000, factor: 2, max: 60_000 }) as {
+      ms: number;
+    }).ms,
+    40_000,
+  );
+});
+
+Deno.test("schedule.backoff/poll OLD order still computes identically (deprecated)", () => {
+  const A = { type: "poll" };
+  // Old order (opts 3rd) — accepted by shape detection; identical arithmetic.
+  const oldB = schedule.backoff("legacy-b", 3, { base: 1000 }, A) as {
+    ms: number;
+  };
+  const newB = schedule.backoff("legacy-b2", 3, A, { base: 1000 }) as {
+    ms: number;
+  };
+  assertEquals(oldB.ms, newB.ms);
+  const oldP = schedule.poll("legacy-p", 2, { every: 100, backoff: 2 }, A) as {
+    ms: number;
+  };
+  const newP = schedule.poll("legacy-p2", 2, A, { every: 100, factor: 2 }) as {
+    ms: number;
+  };
+  assertEquals(oldP.ms, newP.ms, "old `backoff` key === new `factor` key");
+});
+
+Deno.test("schedule.after accepts 0ms (alpha52) and still rejects negatives", () => {
+  const dispatched: string[] = [];
+  const noop = { info() {}, warn() {}, error() {}, debug() {} };
+  const timers = createVirtualTimers();
+  const m = createScheduleManager(
+    (a) => void dispatched.push(a.type),
+    noop,
+    { timers },
+  );
+  m.handle(schedule.next("n0", { type: "x:go" })); // ms: 0 — a real timer now
+  timers.advance(0);
+  assertEquals(dispatched, ["x:go"], "0ms fires on the next tick");
+  assertThrows(
+    () => m.handle(schedule.after("neg", -1, { type: "x:go" })),
+    Error,
+    ">= 0",
+  );
 });

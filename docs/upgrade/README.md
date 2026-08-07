@@ -7,6 +7,12 @@ One guide per version migration. Find your current version and follow the steps.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha51 → alpha52](from-alpha51-to-alpha52.md) — the last-call release: every
+  approved break in one version, each with a working deprecated alias + one-time
+  hint + mechanical fix (`aiol --safe-fix` / `am fix`): `s.$do` effect channel,
+  `self()`, `transaction: true` async default, `ui:` → `visible:`,
+  exposed-by-key default, entry diet, the one config/CLI/task vocabulary
+  (`target` → `client`, `service` → `server`)
 - [alpha50 → alpha51](from-alpha50-to-alpha51.md) — zero inbox: every open
   field-report item resolved or refused (testUI `{ user }`, denials reject,
   `serverAuth()`, `openExternal`, am/aiol honesty) + the two app architectures

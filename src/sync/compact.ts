@@ -1,11 +1,14 @@
 // src/sync/compact.ts — Server-side op-log compaction
 import type { DB } from "../db/types.ts";
+import { applyDdl } from "../db/ddl.ts";
 import type { HLC } from "./types.ts";
 import { SYNC_DEFAULTS } from "./types.ts";
 import { issueSnapshotTs } from "./server-store.ts";
 
 /**
  * Dependencies for server-side op-log compaction.
+
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
  */
 export interface CompactDeps {
   db: DB;
@@ -31,6 +34,8 @@ export const COMPACTED_ID_RETENTION_MS = 24 * 3600_000;
 
 /**
  * Compact sync_ops into a snapshot when op count exceeds threshold.
+
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
  */
 export async function compactSyncOps(deps: CompactDeps): Promise<void> {
   const threshold = deps.compactOps ?? SYNC_DEFAULTS.compactOps;
@@ -128,6 +133,8 @@ export async function compactSyncOps(deps: CompactDeps): Promise<void> {
 
 /**
  * SQL to initialize sync tables. Run once during aio.run().
+
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
  */
 export const SYNC_SCHEMA: string[] = [
   `CREATE TABLE IF NOT EXISTS sync_ops (
@@ -171,19 +178,30 @@ export const SYNC_MIGRATIONS: string[] = [
 ];
 
 /** Apply {@linkcode SYNC_MIGRATIONS}, tolerating the already-applied case.
- *  Anything else is a real schema problem and is reported, not swallowed. */
+ *
+ *  Anything else is FATAL. This used to warn and continue — after which the
+ *  app ran against a schema it did not have: every query on the missing
+ *  column failed at some random later moment (or worse, a compaction wrote a
+ *  cursor position the tombstone table could not hold), far from the boot
+ *  that knew. A schema the app cannot evolve is a boot failure, named at
+ *  boot.
+ *
+ *  The tolerate-duplicate-column / fatal-on-anything-else rule lives in ONE
+ *  decider ({@linkcode applyDdl}, src/db/ddl.ts) shared with the `db:` table
+ *  reconciler — it regressed per-seam when each carried its own copy. These
+ *  are epoch-1 reconcilers: idempotent, run on EVERY boot; a strictly-once
+ *  future move belongs on the versioned ladder (`AIO_DDL_STEPS`) instead. */
 export async function applySyncMigrations(
   db: DB,
   log?: { debug: (m: string) => void; warn: (m: string) => void },
 ): Promise<void> {
   for (const sql of SYNC_MIGRATIONS) {
-    try {
-      await db.execute(sql);
-      log?.debug(`[sync:schema] applied: ${sql}`);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      if (/duplicate column name/i.test(msg)) continue; // already applied
-      log?.warn(`[sync:schema] migration failed: ${sql} — ${msg}`);
-    }
+    const table = /ALTER TABLE\s+(\S+)/i.exec(sql)?.[1] ?? "(unknown)";
+    const outcome = await applyDdl(db, sql, {
+      ns: "sync",
+      subject: `table "${table}"`,
+      source: "applySyncMigrations, src/sync/compact.ts",
+    });
+    if (outcome === "applied") log?.debug(`[sync:schema] applied: ${sql}`);
   }
 }

@@ -223,7 +223,7 @@ import type { CartItem } from "./cell/cart/index.ts";
 
 const items: CartItem[] = [{ id: "w1", name: "Widget", price: 9.99, qty: 2 }];
 const reserved = await call(
-  { timeout: 5000, retries: 2 },
+  { timeoutMs: 5000, retries: 2 },
   () => inventory.reserve(items),
 );
 ```

@@ -58,7 +58,7 @@ Use `forUser` to filter per-client. See
 ```ts
 const orders = cell("orders", {
   state: { page: "", orders: [], internal: [] },
-  ui: {
+  visible: {
     include: ["page", "orders"],
     forUser: (exposed, user) => {
       if (user?.role === "admin") return exposed;

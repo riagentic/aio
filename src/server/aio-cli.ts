@@ -2,7 +2,7 @@
 import { log } from "../diagnostics/logger.ts";
 
 /** Framework version — printed by --version, checked in tests */
-export const VERSION = "1.0.0-alpha51";
+export const VERSION = "1.0.0-alpha52";
 
 /** What `--version` prints: what this artifact IS, and what it was built with.
  *
@@ -51,6 +51,10 @@ export type CliFlags = {
   noDataMigrate?: boolean;
 };
 
+// Deprecation hints fire ONCE per process — parseCli is re-invoked several
+// times in one boot, and the same line five times reads as an error loop.
+let _hintedBareServerUrl = false;
+
 /** Parses CLI flags from Deno.args (or custom array for testing) */
 export function parseCli(args: readonly string[] = Deno.args): CliFlags {
   const r: CliFlags = { verbose: false };
@@ -68,6 +72,7 @@ export function parseCli(args: readonly string[] = Deno.args): CliFlags {
     "--no-tls",
     "--help",
     "--server-url",
+    "--connect",
     "--width=",
     "--height=",
     "--tls-cert=",
@@ -77,6 +82,7 @@ export function parseCli(args: readonly string[] = Deno.args): CliFlags {
     "--isolate=",
     "--transport=",
     "--kill-existing",
+    "--takeover",
     "--backup-logs",
     "--db-path=",
   ];
@@ -103,10 +109,28 @@ export function parseCli(args: readonly string[] = Deno.args): CliFlags {
     else if (arg === "--expose") r.expose = true;
     else if (arg === "--no-tls") r.noTls = true;
     else if (arg === "--help") r.help = true;
-    else if (arg === "--server-url") r.serverUrl = "";
-    else if (arg.startsWith("--server-url=")) r.serverUrl = arg.slice(13);
-    else if (arg === "--kill-existing") r.killExisting = true;
-    else if (arg.startsWith("--db-path=")) r.dbPath = arg.slice(10);
+    // `--connect` opens the connect page (a thin client with no baked-in
+    // server). It was spelled bare `--server-url` before alpha52 — a flag that
+    // reads like it needs a value and does something else without one. The
+    // VALUED form `--server-url=X` keeps its name (it really is a server URL).
+    else if (arg === "--connect") r.serverUrl = "";
+    else if (arg === "--server-url") {
+      // One-time: parseCli runs several times in one boot (help, boot,
+      // electron child probes) and the hint printed once per parse.
+      if (!_hintedBareServerUrl) {
+        _hintedBareServerUrl = true;
+        log.warn(
+          "bare --server-url is now --connect (the old spelling still works; " +
+            "--server-url=<url> is unchanged)",
+        );
+      }
+      r.serverUrl = "";
+    } else if (arg.startsWith("--server-url=")) r.serverUrl = arg.slice(13);
+    // `--takeover` is the preferred spelling; `--kill-existing` stays as the
+    // accepted alias so existing scripts don't break.
+    else if (arg === "--kill-existing" || arg === "--takeover") {
+      r.killExisting = true;
+    } else if (arg.startsWith("--db-path=")) r.dbPath = arg.slice(10);
     else if (arg === "--backup-logs") r.backupLogs = true;
     // Opt out of the one-time move to ~/.<appId> (app-dirs-migrate.ts).
     else if (arg === "--no-data-migrate") r.noDataMigrate = true;
@@ -161,15 +185,18 @@ Flags:
   --tls-cert=PATH  TLS certificate file (PEM) — used with --expose (auto-generated if omitted)
   --tls-key=PATH   TLS private key file (PEM) — used with --expose (auto-generated if omitted)
                    (--cert / --key are accepted as deprecated aliases)
-  --server-url[=X] Connect to remote aio server (Electron thin client)
-  --kill-existing  Kill running instance and take over
+  --connect        Open the Electron thin-client connect page (enter any server
+                   URL; bare --server-url is the deprecated alias)
+  --server-url=X   Connect to a specific remote aio server (Electron thin client)
+  --takeover       Kill running instance and take over
+                   (--kill-existing is the deprecated alias)
   --db-path=PATH   Override the SQLite file (":memory:" for throwaway runs)
   --backup-logs    Keep previous logs on restart (rotate to .1, .2, etc.)
   --no-data-migrate Skip moving a legacy data layout into ~/.<appId>
   --width=N        Initial window width (default: 800)
   --height=N       Initial window height (default: 600)
   --transport=X    Transport: 'uds' or 'ws' (default: auto — UDS for electron on linux/mac)
-  --isolate=a,b    Only activate specified cells (v0.5)
+  --isolate=a,b    Only activate the specified cells
   --version        Print version and exit
   --help           Show this help`);
 }

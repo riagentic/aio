@@ -11,10 +11,17 @@ import {
   type PatchFilterFields,
 } from "../state/state-filter.ts";
 import type {
-  CellAccess,
+  Access,
+  AccessUser,
   CellFieldFilter,
-  FilterUser,
+  CellVisibility,
 } from "../state/cell-types.ts";
+import {
+  extractForUser,
+  extractPublicFields,
+  normalizeUiFilter,
+  resolveVisibility,
+} from "../state/cell-helpers.ts";
 import type { AioError, ReportErrorOpts } from "../diagnostics/error.ts";
 import { reportError as reportAioError } from "../diagnostics/error.ts";
 import { log } from "../diagnostics/logger.ts";
@@ -28,7 +35,14 @@ type User = { id: string; role: string };
 /** Inputs for cell composition — subset of CellsConfig relevant to wiring */
 export type ComposeCellsInput = {
   cellEntries: CellEntry[];
-  cellDefaults?: { ui?: CellFieldFilter; persist?: CellFieldFilter };
+  /** `visible` (alpha52) takes full CellVisibility — forUser/publicFields are
+   *  settable as app-wide defaults; `ui` is the deprecated alias. */
+  cellDefaults?: {
+    visible?: CellVisibility;
+    /** @deprecated alpha52 — renamed `visible`. */
+    ui?: CellVisibility;
+    persist?: CellFieldFilter;
+  };
   /** Local-first execution (perfect-aio D3) — see applyLocalFirst. */
   localFirst?: boolean;
   circuitBreaker?: CircuitBreakerConfig;
@@ -52,7 +66,7 @@ export type VisibilityRow = {
    *  gates calls, `ui` gates what the broadcast carries. Seeing
    *  `access=admin ui=all` on one line is how an author notices that
    *  "admin-only" cell is readable by everyone. */
-  access?: CellAccess;
+  access?: Access;
   /** Whether `ui` was actually DECIDED (by the cell or by cellDefaults).
    *  `ui` above reports `"all"` for both "explicitly everyone" and "never
    *  said"; a warning that cannot tell those apart nags the author who already
@@ -178,7 +192,7 @@ function warnFieldFilters(composed: ComposedCells): void {
               "visibility",
               `[${f.__aio.id}] ${kind} include key "${key}" — include filters ` +
                 `are top-level only (an allowlist). To hide a nested field, ` +
-                `use exclude: ["${key}"] (deep removal) or ui.forUser.`,
+                `use exclude: ["${key}"] (deep removal) or visible.forUser.`,
             );
           } else if (!topSet.has(key.split(".")[0]!)) {
             log.warn(
@@ -194,7 +208,7 @@ function warnFieldFilters(composed: ComposedCells): void {
             `[${f.__aio.id}] ${kind} filter key "${key}" is not a top-level ` +
               `field of the cell, so this is silently ignored. For a nested ` +
               `field use a dot-path exclude (e.g. "items.${key}") or ` +
-              `ui.forUser.`,
+              `visible.forUser.`,
           );
         }
       }
@@ -258,12 +272,12 @@ function warnFieldFilters(composed: ComposedCells): void {
           } secret and ${
             one ? "is" : "are"
           } exposed to the UI — broadcast to every connected client. Restrict ` +
-            `${one ? "it" : "them"}: ui: { exclude: ${
+            `${one ? "it" : "them"}: visible: { exclude: ${
               list(softKeys)
             } } (or a ` +
-            `nested ui.exclude of the secret sub-path, ui.forUser, or ui: "none"). ` +
+            `nested visible.exclude of the secret sub-path, visible.forUser, or visible: "none"). ` +
             `If genuinely public, declare ${one ? "it" : "them"}: ` +
-            `ui: { publicFields: ${list(softKeys)} }.`,
+            `visible: { publicFields: ${list(softKeys)} }.`,
         );
       }
       if (hardKeys.length) {
@@ -273,12 +287,12 @@ function warnFieldFilters(composed: ComposedCells): void {
             one ? "is a credential" : "are credentials"
           } exposed to the UI — broadcast to every connected client. Hide ${
             one ? "it" : "them"
-          }: ui: { exclude: ${
+          }: visible: { exclude: ${
             list(hardKeys)
-          } } (or ui.forUser / ui: "none"). ` +
+          } } (or visible.forUser / visible: "none"). ` +
           `If genuinely NOT ${one ? "a secret" : "secrets"}, declare ${
             one ? "it" : "them"
-          } public: ui: { publicFields: ${list(hardKeys)} }.`;
+          } public: visible: { publicFields: ${list(hardKeys)} }.`;
         // REFUSE to boot in dev (a warning is too soft — you can ship it); in
         // prod, log loud (don't crash a live deployment on a heuristic).
         if (isDev) {
@@ -363,18 +377,31 @@ export function composeCellsWiring(
   };
 }
 
-/** Apply cellDefaults to cells missing explicit persist/ui config */
+/** Apply cellDefaults to cells missing explicit persist/visible config.
+ *  `visible` (alpha52) carries the FULL CellVisibility vocabulary, so each of
+ *  its three parts — structural filter, forUser, publicFields — fills in
+ *  independently wherever the cell itself left that part undecided. Per-part
+ *  (not all-or-nothing) is the pre-alpha52 behavior preserved: a cell with
+ *  only `forUser` always picked up a structural default. */
 function applyCellDefaults(
   composed: ComposedCells,
-  cellDefaults?: { ui?: CellFieldFilter; persist?: CellFieldFilter },
+  cellDefaults?: ComposeCellsInput["cellDefaults"],
 ): void {
   if (!cellDefaults) return;
+  // Same decider as the per-cell config: both spellings set throws, the old
+  // one hints once (`cellDefaults` is the hint key — it is app-level).
+  const vis = resolveVisibility("cellDefaults", cellDefaults);
+  const struct = normalizeUiFilter(vis);
+  const forUser = extractForUser(vis);
+  const publicFields = extractPublicFields(vis);
   for (const f of composed.cells) {
     if (!f.__aio.persist && cellDefaults.persist) {
       f.__aio.persist = cellDefaults.persist;
     }
-    if (!f.__aio.ui && cellDefaults.ui) {
-      f.__aio.ui = cellDefaults.ui;
+    if (!f.__aio.ui && struct) f.__aio.ui = struct;
+    if (!f.__aio.uiForUser && forUser) f.__aio.uiForUser = forUser;
+    if (!f.__aio.uiPublicFields?.length && publicFields?.length) {
+      f.__aio.uiPublicFields = publicFields;
     }
   }
 }
@@ -385,16 +412,16 @@ function applyCellDefaults(
  *  Read `f.__aio.ui` AFTER applyCellDefaults: a `cellDefaults.ui` hides exactly
  *  as much as a per-cell one, so it must count the same. */
 function uiHidesState(f: ComposedCells["cells"][number]): string | null {
-  if (f.__aio.uiForUser) return "ui.forUser — a per-user view";
+  if (f.__aio.uiForUser) return "visible.forUser — a per-user view";
   const ui = f.__aio.ui;
-  if (ui === "none") return 'ui: "none"';
+  if (ui === "none") return 'visible: "none"';
   if (ui && typeof ui === "object") {
     if ("include" in ui) {
-      return `ui.include(${
+      return `visible.include(${
         ui.include.join(", ")
       }) — every other field is hidden`;
     }
-    if ("exclude" in ui) return `ui.exclude(${ui.exclude.join(", ")})`;
+    if ("exclude" in ui) return `visible.exclude(${ui.exclude.join(", ")})`;
   }
   return null;
 }
@@ -429,11 +456,11 @@ function refuseFilteredSyncCells(composed: ComposedCells): void {
         `AND hides state from clients (${why}).\n` +
         `  CRDT sync replicates the cell to EVERY client — ops are broadcast ` +
         `verbatim to all peers and catch-up snapshots carry the cell's state — ` +
-        `so a ui filter on it cannot hold: the hidden data would reach every ` +
+        `so a visible filter on it cannot hold: the hidden data would reach every ` +
         `connected client anyway.\n` +
         `  Pick one:\n` +
         `    • drop sync from "${f.__aio.id}" (server-authoritative, filter enforced), or\n` +
-        `    • drop the ui filter (fully replicated, and public to every client), or\n` +
+        `    • drop the visible filter (fully replicated, and public to every client), or\n` +
         `    • move the private fields into their own non-sync cell.`,
     );
   }
@@ -499,7 +526,7 @@ function applyLocalFirst(composed: ComposedCells, enabled: boolean): void {
         }`
         : "") +
       (filtered.length
-        ? `; server-only (a ui filter cannot survive CRDT replication): ${
+        ? `; server-only (a visible filter cannot survive CRDT replication): ${
           filtered.join(", ")
         }`
         : ""),
@@ -537,7 +564,7 @@ type UiEntry = {
   filter: CellFieldFilter;
   forUser?: (
     exposed: Record<string, unknown>,
-    user?: FilterUser,
+    user?: AccessUser,
   ) => Record<string, unknown>;
 };
 
@@ -641,7 +668,7 @@ function buildUIStateGetter(composed: ComposedCells): UIStateResult {
         try {
           const view = entry.forUser(
             structuredClone(result[cellName] as Record<string, unknown>),
-            user as Record<string, unknown> | undefined,
+            user as AccessUser | undefined,
           );
           // Same rule as a throw: a filter that did not return a state object
           // did not decide what this client may see. (A missing `return` in an
@@ -649,7 +676,7 @@ function buildUIStateGetter(composed: ComposedCells): UIStateResult {
           if (!view || typeof view !== "object" || Array.isArray(view)) {
             delete result[cellName];
             log.error(
-              `[${cellName}] ui.forUser returned ${
+              `[${cellName}] visible.forUser returned ${
                 Array.isArray(view) ? "an array" : typeof view
               }, not a state object — omitting the cell for this client (fail ` +
                 `closed). A per-user filter must return the slice the client may see.`,
@@ -677,10 +704,10 @@ function buildUIStateGetter(composed: ComposedCells): UIStateResult {
           // one broken filter must not mute the rest of the app.
           delete result[cellName];
           log.error(
-            `[${cellName}] ui.forUser threw — omitting the cell for this ` +
+            `[${cellName}] visible.forUser threw — omitting the cell for this ` +
               `client (fail closed; nothing is sent for it)` +
               (entry.filter === "all"
-                ? `. This cell has NO structural ui filter, so the pre-filter ` +
+                ? `. This cell has NO structural visible filter, so the pre-filter ` +
                   `value is its ENTIRE state — it must never be sent.`
                 : "") +
               `: ${e}`,
@@ -740,7 +767,7 @@ function logComposition(
         typeof row.access === "function" ? "predicate" : String(row.access)
       }`;
     log.info(
-      `cells: ${row.cell}${accStr} ui=${uiStr} persist=${
+      `cells: ${row.cell}${accStr} visible=${uiStr} persist=${
         renderFilter(row.persist)
       }`,
     );

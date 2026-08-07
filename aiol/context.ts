@@ -412,6 +412,7 @@ export async function buildContext(
         line: opts?.line,
         fix: opts?.fix,
         safeFix: opts?.safeFix,
+        manual: opts?.manual,
       });
     },
     pass: (message) => {

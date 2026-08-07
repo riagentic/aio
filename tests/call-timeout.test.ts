@@ -132,7 +132,7 @@ Deno.test("call timeout: effectTimeoutMs from aio.run() reaches the caller's cei
 
 Deno.test("browser ack: the ceiling comes from __aioConfig.callTimeouts", async () => {
   const { _registerAck, _rejectAllPending, _setAckGraceMs } = await import(
-    "../src/protocol/browser-ack.ts"
+    "../src/browser/browser-ack.ts"
   );
   const w = globalThis as { __aioConfig?: unknown };
   const prev = w.__aioConfig;
@@ -161,7 +161,7 @@ Deno.test("browser ack: the ceiling comes from __aioConfig.callTimeouts", async 
 
 Deno.test("browser ack: a deferred (queued) call starts its clock at SEND, not at queue time", async () => {
   const { _registerAck, _armAckTimer, _rejectAllPending, _setAckGraceMs } =
-    await import("../src/protocol/browser-ack.ts");
+    await import("../src/browser/browser-ack.ts");
   const w = globalThis as { __aioConfig?: unknown };
   const prev = w.__aioConfig;
   _setAckGraceMs(5);

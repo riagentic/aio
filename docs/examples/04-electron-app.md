@@ -11,7 +11,7 @@ cloud, no accounts — just your notes on your machine.
   "version": "0.1.0",
   "tasks": {
     "dev": "deno run -A src/app.ts",
-    "compile:electron": "deno run -A src/app.ts --compile"
+    "compile": "deno run -A jsr:@riagentic/aio/build-all --build-spec=jsr:@riagentic/aio/build --targets=electron"
   },
   "imports": {
     "aio": "jsr:@riagentic/aio@^1.0.0-alpha17"
@@ -154,7 +154,7 @@ Sending all note content to the UI on every keystroke is wasteful. Configure
 ```ts
 export const notes = cell("notes", {
   state: { notes: [], active: null, search: "" } satisfies NotesState,
-  ui: {
+  visible: {
     forUser: (exposed) => {
       const activeNote = exposed.notes.find((n: Note) =>
         n.id === exposed.active

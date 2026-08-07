@@ -1,7 +1,8 @@
 // reactive.test.ts — tests for cell({ methods }) reactive style
 // (formerly reactive() — removed in v0.8, cell({ methods }) is identical)
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
-import { bindCell, cell, composeCells, testCell } from "../src/state/cell.ts";
+import { bindCell, cell, composeCells } from "../src/state/cell.ts";
+import { testCell } from "../src/cell-test.ts";
 import { schedule } from "../src/state/schedule.ts";
 import { call } from "../src/state/cell-impl.ts";
 
@@ -325,6 +326,9 @@ Deno.test("cell(methods): async consecutive writes are batched into one action",
 
 Deno.test("cell(methods): writes separated by await produce separate batches", async () => {
   const counter = cell("counter", {
+    // Pins the incremental-batching machinery itself (alpha52: transaction is
+    // the async default, so the opt-out is explicit here).
+    transaction: false,
     state: { a: 0, b: 0 },
     methods: {
       async staggered(s) {
@@ -856,7 +860,7 @@ Deno.test("call: timeout option rejects after specified ms", async () => {
 
   let timedOut = false;
   try {
-    await call({ timeout: 20 }, () => slow.slowOp());
+    await call({ timeoutMs: 20 }, () => slow.slowOp());
   } catch (e) {
     timedOut = (e as Error).message.includes("timeout");
   }
@@ -910,6 +914,9 @@ Deno.test("cell(workflows): async method runs when action dispatched", async () 
 
 Deno.test("cell(workflows): async method stages state writes across awaits", async () => {
   const order = cell("order", {
+    // Pins mid-method staging visibility — the pre-alpha52 incremental
+    // semantics, opted into explicitly now that transaction is the default.
+    transaction: false,
     state: { status: "idle" as string },
     methods: {
       async place(s) {
@@ -1170,7 +1177,7 @@ Deno.test("direct calling: call(opts, fn) callback form with timeout", {
 
   let timedOut = false;
   try {
-    await call({ timeout: 20 }, () => slow.slowOp() as Promise<unknown>);
+    await call({ timeoutMs: 20 }, () => slow.slowOp() as Promise<unknown>);
   } catch (e) {
     if (e instanceof Error && e.message.includes("timeout")) timedOut = true;
   }

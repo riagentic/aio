@@ -79,7 +79,7 @@ function fakeClient(
 function ordersCell() {
   return cell("orders", {
     state: { items: [] as Order[], note: "" },
-    ui: {
+    visible: {
       forUser: (
         s: { items: Order[]; note: string },
         user?: { id?: string },
@@ -262,7 +262,7 @@ Deno.test("forUser: a filter that throws sends NOTHING for that cell (fail close
   type Row = { id: string; org: string; body: string };
   const orgs = cell("tenant-orders", {
     state: { rows: [] as Row[] },
-    ui: {
+    visible: {
       // The exact shape of the exploit: it reads a field that not every user
       // record carries, so it throws for u2 and only for u2.
       forUser: (s: { rows: Row[] }, user?: unknown) => ({
@@ -471,7 +471,7 @@ Deno.test("sync + a hiding ui filter is refused at compose, by name", () => {
       `${label}: the refusal must name the cell — got: ${err.message}`,
     );
     assert(
-      /sync/i.test(err.message) && /ui/i.test(err.message),
+      /sync/i.test(err.message) && /visible/i.test(err.message),
       `${label}: the refusal must name the conflict — got: ${err.message}`,
     );
   }
@@ -503,7 +503,7 @@ Deno.test("localFirst never adopts a per-user-filtered cell into sync", () => {
   _resetAioRuntime();
   const priv = cell("lf-private", {
     state: { rows: [] as { owner: string }[] },
-    ui: {
+    visible: {
       forUser: (s: { rows: { owner: string }[] }, u?: { id?: string }) => ({
         rows: s.rows.filter((r) => r.owner === u?.id),
       }),
@@ -548,7 +548,7 @@ Deno.test("forUser: a filter that returns nothing omits the cell too", () => {
   const c = cell("no-return-filter", {
     state: { rows: ["PRIVATE"] },
     // deno-lint-ignore no-explicit-any
-    ui: { forUser: (() => {}) as any },
+    visible: { forUser: (() => {}) as any },
     methods: { noop() {} },
   });
   // deno-lint-ignore no-explicit-any

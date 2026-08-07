@@ -5,6 +5,15 @@
 > framework repo's own `deno.json` (which has no app to build). Test the task
 > list against the scaffold generator's task map.
 
+One vocabulary (alpha52): the scaffold ships ONE `dev` task (runtime flags pass
+through) and ONE build pipeline (`build` = every target in deno.json
+`build.targets`; `compile` = the same pipeline narrowed to the default target,
+recorded in deno.json `"client"`). There is no per-target task matrix — a target
+name (`server`, `browser`, `electron`, `android`, `cli`, `electron-client`,
+`android-client`, `cli-client`) is the one spelling, shared by `build.targets`,
+`--targets=`, and the manifest. The headless role is spelled `server` (never
+`service`).
+
 - you can build server application
 - you can build electron application
 - you can build browser application
@@ -13,40 +22,31 @@
 - you can build remote application (server + thin clients)
 - you can build unified aio client
 
-## Dev builds
+## Dev
 
-- default dev build, whatever the default target is: `deno task dev`
-- local browser dev build: `deno task dev:browser`
-- local electron dev build: `deno task dev:electron`
-- local android dev build running in emulator: `deno task dev:android`
-- local cli app dev build: `deno task dev:cli`
-- local service dev build: `deno task dev:service`
-- unified aio client dev build: `deno task dev:client`
-- remote server/browser dev build (exposed server):
-  `deno task dev:remote:browser`
-- electron thin client that connects to a remote server:
-  `deno task dev:remote:electron`
-- android dev against an exposed server: `deno task dev:remote:android`
-- cli thin client that connects to a remote aio server:
-  `deno task dev:remote:cli`
-- remote service dev build (exposed headless server):
-  `deno task dev:remote:service`
+- default dev, whatever the default target is: `deno task dev`
+- any other shell is a FLAG, not a task: `deno task dev --client=browser`,
+  `--client=electron`, `--client=cli`, `--client=server-only`
+- exposed (LAN/remote server side): `deno task dev --expose`
+- electron thin client / connect page: `deno task dev --connect`
+- cli thin client against a running server: `deno run -A src/client.ts`
+- android dev in an emulator: the android-default app's `deno task dev` (the
+  emulator orchestrator); other apps run `deno run -A <aio>/dev-android`
 
 ## Production builds
 
-- default production build: `deno task compile`
-- local browser production build: `deno task compile:browser`
-- local electron production build: `deno task compile:electron`
-- local android production build (apk): `deno task compile:android`
-- local cli app production build: `deno task compile:cli`
-- local service production build: `deno task compile:service`
-- unified aio client production build: `deno task compile:client`
-- remote server/browser production build: `deno task compile:remote:browser`
-- electron app that connects to a remote server (builds both, server and
-  client): `deno task compile:remote:electron`
-- android app that connects to a remote server (builds both, server and client):
-  `deno task compile:remote:android`
-- cli app that connects to a remote aio server (builds both, server and client):
-  `deno task compile:remote:cli`
-- remote service production build (headless remote server):
-  `deno task compile:remote:service`
+- default production build: `deno task compile` (→ `dist/` + manifest.json)
+- the declared fleet: `deno task build` (deno.json
+  `"build": { "targets": [...] }`)
+- any one-off target: `deno task build --targets=<name>` — names: `server` ·
+  `browser` · `electron` · `android` · `cli` · `electron-client` ·
+  `android-client` · `cli-client` (`deno task build --list`)
+
+## Migration
+
+- the pre-alpha52 matrix (`dev:<target>`, `compile:<target>`, `dev:remote:*`,
+  `compile:remote:*`, `*:service` spellings) is retired;
+  `am fix --migrate-tasks` converts an app and never deletes a user-customized
+  task
+- deno.json `target` (the default-shell key) is spelled `client`; the old key
+  still works with a boot hint, and `am fix` / `aiol --safe-fix` rewrite it

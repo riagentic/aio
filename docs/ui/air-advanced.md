@@ -272,19 +272,20 @@ Build adapters for any framework using `aio/state-core`:
 
 ```ts
 import {
-  createSendProxy,
   getCellSignal,
-  getConnectedSignal,
   getStateSignal,
+  handleMessage,
+  ready,
   send,
   setTransport,
-  trackPath,
 } from "aio/state-core";
 ```
 
 **Minimal contract:** `getCellSignal()` for cell state, `getStateSignal()` for
-full state, `useLocal(initial)` as framework-local state, `useConnected()` via
-`getConnectedSignal()`.
+full state, `send()` to dispatch, `setTransport()`/`handleMessage()` to wire a
+custom transport, `ready()` for the first-state gate. (This IS the supported
+`aio/state-core` surface — everything else on the entry is framework wiring,
+`@internal` since alpha52.)
 
 ### Svelte 5 (Runes)
 

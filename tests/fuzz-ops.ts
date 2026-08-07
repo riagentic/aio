@@ -330,6 +330,25 @@ export function applyOp(s: { data: Data }, op: Op, log: unknown[]): void {
     case "root_spread":
       s.data = { ...d, a: op.v };
       break;
+    // ── the effect channel (alpha52): s.$do interleaved with mutations ──
+    // The effect never fires (far-future one-shot on the virtual clock); what
+    // this op pins is that $do exists on BOTH backends, that calling it
+    // mid-program perturbs NO other op's semantics (the sync side serves it
+    // through a forwarding wrapper over the Immer draft), and that a payload
+    // referencing live state is accepted on both sides (draft detach vs proxy
+    // materialization).
+    case "do_effect": {
+      const doFn = (s as { $do?: (...fx: unknown[]) => void }).$do;
+      log.push(typeof doFn);
+      doFn?.({
+        type: "__schedule",
+        kind: "after",
+        id: `fz:${op.i % 4}`,
+        ms: 600_000,
+        action: { type: "fznoop:tick", payload: { snap: d.items } },
+      });
+      break;
+    }
   }
 }
 
@@ -404,6 +423,7 @@ export const KINDS = [
   "read_find_last",
   "read_array_from",
   "root_spread",
+  "do_effect",
   "objarr_foreach_write",
   "objarr_values_write",
   "objarr_entries_write",

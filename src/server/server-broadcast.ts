@@ -7,6 +7,14 @@ import { createCoalescer } from "./broadcast-coalescer.ts";
 /** How often time-travel metadata may go out. Deliberately slower than the
  *  state stream: it feeds a debug panel, and no user action waits on it. */
 const TT_THROTTLE_MS = 250;
+
+/** Full-state frames larger than this get a ONE-TIME warning naming the
+ *  offending cell(s) and the right tier — the broadcast-seam mirror of
+ *  `PERSIST_CELL_WARN_BYTES` (persistence.ts). Matches the default 1MB WS
+ *  frame budget (`wsLimits`): a full state that cannot ride in one frame is
+ *  state in the wrong tier. Config knob lands in alpha53 with the persist
+ *  thresholds. */
+export const BROADCAST_FULL_WARN_BYTES = 1024 * 1024; // 1 MiB
 import {
   filterPatchesBySubs,
   filterStateBySubs,
@@ -78,6 +86,57 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
     getTTBroadcast,
   } = deps;
   const fullStateThreshold = deps.fullStateThreshold ?? 0.5;
+  // One encoder for the byte-stats below — a fresh TextEncoder per send was
+  // pure allocation churn on the hottest path in the file.
+  const _encoder = new TextEncoder();
+
+  // Big-frame guardrail bookkeeping: one warning per offending cell, and the
+  // per-cell breakdown (an extra serialization pass) only runs when the frame
+  // has GROWN past everything already analyzed — a chronic offender is
+  // analyzed once, not on every round.
+  const _warnedBigCells = new Set<string>();
+  let _analyzedFrameLen = 0;
+
+  /** One-time warning when a full-state frame exceeds the 1MB budget, naming
+   *  the cell(s) responsible and the right tier. Observe-only, identical in
+   *  dev and prod — it must never break a send. */
+  function _warnBigFullState(json: string, meta: ClientMeta): void {
+    if (json.length <= BROADCAST_FULL_WARN_BYTES) return;
+    if (json.length <= _analyzedFrameLen) return; // already analyzed this size
+    try {
+      _analyzedFrameLen = json.length;
+      const ui = filterStateBySubs(getUIState(meta.user), meta.subscriptions);
+      if (ui === null || typeof ui !== "object") return;
+      const sizes = Object.entries(ui as Record<string, unknown>).map(
+        ([cellName, v]) => {
+          let n = 0;
+          try {
+            n = JSON.stringify(v)?.length ?? 0;
+          } catch { /* unserializable — 0 */ }
+          return [cellName, n] as const;
+        },
+      );
+      const over = sizes.filter(([, n]) => n > BROADCAST_FULL_WARN_BYTES);
+      // No single cell over the line but the sum is → name the biggest one.
+      const biggest = sizes.sort((a, b) => b[1] - a[1])[0];
+      const offenders = over.length > 0 ? over : biggest ? [biggest] : [];
+      const fresh = offenders.filter(([cellName]) =>
+        !_warnedBigCells.has(cellName)
+      );
+      if (fresh.length === 0) return;
+      for (const [cellName] of fresh) _warnedBigCells.add(cellName);
+      const mb = (n: number) => `${(n / (1024 * 1024)).toFixed(1)}MB`;
+      console.warn(
+        `[aio] broadcast: a full-state frame is ${mb(json.length)} — over ` +
+          `the ${mb(BROADCAST_FULL_WARN_BYTES)} WS frame budget. Largest ` +
+          `cell(s): ${
+            fresh.map(([c, n]) => `"${c}" (${mb(n)})`).join(", ")
+          }. Cell state is broadcast to every client on change — bulk rows ` +
+          `belong in db: tables, binaries in files — see ` +
+          `docs/persistence/big-data.md.`,
+      );
+    } catch { /* observe-only */ }
+  }
 
   /** Get filtered full-state JSON for a client (respects subscriptions) */
   function _getFilteredFullJson(meta: ClientMeta): string | undefined {
@@ -153,7 +212,25 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
           );
           if (allOps.length > 0) {
             const patchJson = JSON.stringify(allOps);
-            fullJsonForTracking = _getFilteredFullJson(meta);
+            // Serialize the full state ONLY when the decision needs it. The
+            // patch-vs-full comparison used to stringify the ENTIRE state per
+            // client on EVERY patch round — with a 10MB cell, a 50-byte patch
+            // cost a 10MB serialization each broadcast. The last computed
+            // full-json length (refreshed on every round that does compute
+            // one, and on every full send) stands in as the estimate: when
+            // the patch is clearly below the threshold against it, send the
+            // patch without measuring. The estimate can be stale, but only
+            // ever in the SAFE direction — a patch is always a correct frame;
+            // the worst case is a patch larger than an ideal full resend,
+            // never a wrong state. Any patch near the threshold recomputes
+            // (and thereby refreshes) the real number.
+            const knownLen = meta.lastFullJson?.length;
+            if (
+              knownLen === undefined ||
+              patchJson.length > knownLen * fullStateThreshold
+            ) {
+              fullJsonForTracking = _getFilteredFullJson(meta);
+            }
             // Send full state when the patch payload exceeds the configured
             // fraction of the full-state size (default 0.5 → patch > 50%).
             // Previously this compared against 100% of full state, so the
@@ -169,6 +246,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
                 }% of full state (${fullJsonForTracking.length}B) — sending full state`,
               );
               if (fullJsonForTracking !== meta.lastFullJson) {
+                _warnBigFullState(fullJsonForTracking, meta);
                 msgToSend = encRaw("state", fullJsonForTracking);
                 sentKind = "full";
               }
@@ -200,6 +278,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
                 : "no patch matched this client's subscriptions"
             }`,
           );
+          _warnBigFullState(fullJsonForTracking, meta);
           msgToSend = encRaw("state", fullJsonForTracking);
         }
 
@@ -216,7 +295,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
           if (fullJsonForTracking) meta.lastFullJson = fullJsonForTracking;
           meta.bpLastSentAt = Date.now();
           vitalsSystem?.serverTransport.onClientStateSent(meta.id);
-          const _bytes = new TextEncoder().encode(msgToSend).byteLength;
+          const _bytes = _encoder.encode(msgToSend).byteLength;
           const _ps = payloadStats.get(meta.id);
           if (_ps) {
             _ps.lastPayloadBytes = _bytes;

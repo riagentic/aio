@@ -513,7 +513,9 @@ Deno.test('transaction: conflict "warn" commits anyway, loudly', async () => {
 
 Deno.test("control: WITHOUT transaction, a read after await sees LIVE state", async () => {
   const c = cell("txn_control", {
-    // no transaction — today's behavior
+    // alpha52: transaction is the DEFAULT — this control pins the opt-OUT
+    // (live reads + incremental commits), so it says so explicitly.
+    transaction: false,
     state: { a: 0, b: -1 },
     methods: {
       async readback(s: { a: number; b: number }) {

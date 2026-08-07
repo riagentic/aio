@@ -19,10 +19,13 @@ const dec = new TextDecoder();
 export async function makeApp(
   tpl: "counter" | "todo" = "counter",
   prefix = "onboard-",
+  target?: Parameters<typeof scaffold>[3],
 ): Promise<string> {
   const name = `app-${crypto.randomUUID().slice(0, 8)}`;
   const dir = await Deno.makeTempDir({ prefix });
-  for (const [rel, content] of Object.entries(scaffold(name, tpl, true))) {
+  for (
+    const [rel, content] of Object.entries(scaffold(name, tpl, true, target))
+  ) {
     const path = resolve(dir, rel);
     await Deno.mkdir(resolve(path, ".."), { recursive: true });
     await Deno.writeTextFile(path, content);
@@ -30,6 +33,24 @@ export async function makeApp(
   await Deno.mkdir(resolve(dir, "dep"), { recursive: true });
   await Deno.symlink(REPO_ROOT, resolve(dir, "dep/aio"));
   return dir;
+}
+
+/** Run the single-target build pipeline (`dep/aio/src/build.ts`) with raw
+ *  flags — artifacts land in the project ROOT, exactly what `deno task build`
+ *  runs per target under the hood. The scaffold no longer carries a task per
+ *  target (alpha52 one-vocabulary diet: `build`/`compile` are the tasks), so
+ *  target-specific artifact tests invoke the pipeline directly. */
+export async function buildFlags(
+  dir: string,
+  ...flags: string[]
+): Promise<{ code: number; out: string; err: string }> {
+  const p = await new Deno.Command("deno", {
+    args: ["run", "-A", "dep/aio/src/build.ts", ...flags],
+    cwd: dir,
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  return { code: p.code, out: dec.decode(p.stdout), err: dec.decode(p.stderr) };
 }
 
 /** Run `deno task <name> [args…]` in dir, capture output. */
@@ -79,11 +100,15 @@ export function spawn(
 
 /** Poll a URL until it answers 200 (returns the body) or the deadline passes.
  *  `client` carries the CA for a server exposing HTTPS with its own self-signed
- *  cert (`--expose`) — the only way to probe it without disabling TLS checks. */
+ *  cert (`--expose`) — the only way to probe it without disabling TLS checks.
+ *  `headers` carries credentials: an exposed app is KEYED by default
+ *  (alpha52), and health sits behind the key like every route
+ *  (docs/state/lifecycle.md) — probes send `Authorization: Bearer <key>`. */
 export async function waitForHttp(
   url: string,
   timeoutMs: number,
   client?: Deno.HttpClient,
+  headers?: Record<string, string>,
 ): Promise<string> {
   const deadline = Date.now() + timeoutMs;
   let lastErr = "";
@@ -92,7 +117,10 @@ export async function waitForHttp(
       // `client` is a Deno-only RequestInit field (absent from the DOM type).
       const res = await fetch(
         url,
-        client ? { client } as unknown as RequestInit : undefined,
+        {
+          ...(headers ? { headers } : {}),
+          ...(client ? { client } : {}),
+        } as unknown as RequestInit,
       );
       const body = await res.text();
       if (res.ok) return body;

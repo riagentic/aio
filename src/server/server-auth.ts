@@ -350,14 +350,14 @@ function _staleCredentialHint(): string {
 
 // ── Cell access evaluation (AUTH-1) ──────────────────────────────────────────
 
-import type { CellAccess } from "../state/cell-types.ts";
+import type { Access } from "../state/cell-types.ts";
 
 /** Evaluate a cell's declarative access rule for a network caller.
- *  Same vocabulary as ServerFnAccess: true = any authenticated user,
+ *  Same vocabulary as serverFns' access (one `Access` type, alpha52): true = any authenticated user,
  *  string = exact role, predicate = custom (also sees the method name).
  *  `false` = server-side only. */
 export function cellAccessAllowed(
-  rule: CellAccess,
+  rule: Access,
   user: AioUser | undefined,
   method: string,
   args: unknown[] = [],

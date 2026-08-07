@@ -15,7 +15,7 @@
   which should create simple counter app, basically (almost) empty app to start
   building aio framework
 
-## am new
+## am create
 
 - `am create` crates minimial counter aio app, that is executable (deno task
   dev) and buildable into binary (deno compile)

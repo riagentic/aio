@@ -12,8 +12,8 @@ Import cells and use their properties directly — reactive and auto-tracked.
 Reading `cell.field` does **two** things: it registers a re-render dependency
 (the component updates when the value changes) **and** it registers a server
 subscription for that cell (so its live deltas are broadcast back to this
-client). You do not need a `useAio`/`useCell` anchor for a directly-read cell to
-receive live updates — the read itself subscribes.
+client). You do not need a `useAio` anchor for a directly-read cell to receive
+live updates — the read itself subscribes.
 
 For full-state access, `useAio()` is also available but re-renders on any
 change. For scoped re-render optimization, import and read from specific cells.
@@ -145,8 +145,8 @@ unmount from the old route before mounting on the new route.
 
 - Keep at least one connected component mounted at the layout/root level if your
   app has routes that don't use state, to avoid connection churn. Any direct
-  cell read (`cell.field`) or `useAio`/`useCell` counts — a directly-read cell
-  in the root layout is enough; you don't need `useAio` specifically.
+  cell read (`cell.field`) or `useAio` counts — a directly-read cell in the root
+  layout is enough; you don't need `useAio` specifically.
 
 Connection is cleaned up when the last connected component unmounts — with the
 300ms grace period to prevent transient teardown during component reconciliation
@@ -228,7 +228,7 @@ Use cell-level `ui` config to control what the browser sees:
 const myCell = cell("myCell", {
   state: { counter: 0, username: "", apiKey: "secret" },
   methods: {/* ... */},
-  ui: { exclude: ["apiKey"] }, // apiKey is NOT sent to the browser
+  visible: { exclude: ["apiKey"] }, // apiKey is NOT sent to the browser
 });
 ```
 
@@ -237,7 +237,7 @@ Or use `cellDefaults` to expose all cells, then tighten per-cell:
 ```ts
 await aio.run({
   cells: [myCell],
-  cellDefaults: { ui: "all" },
+  cellDefaults: { visible: "all" },
 });
 ```
 
@@ -249,7 +249,7 @@ Add `forUser` for role-based state filtering:
 const orders = cell("orders", {
   state: { items: [], internal: {} },
   methods: {/* ... */},
-  ui: {
+  visible: {
     include: ["items"],
     forUser: (exposed, user?) =>
       user?.role === "admin"

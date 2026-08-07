@@ -1,6 +1,6 @@
 {
   "name": "@riagentic/aio",
-  "version": "1.0.0-alpha51",
+  "version": "1.0.0-alpha52",
   "appId": "aio",
   "exports": {
     ".": "./mod.ts",
@@ -14,8 +14,6 @@
     "./extras": "./src/extras/mod.ts",
     "./sync": "./src/sync/mod.ts",
     "./testing": "./src/cell-test.ts",
-    "./schedule": "./src/schedule.ts",
-    "./selectors": "./src/selector.ts",
     "./build": "./src/build.ts",
     "./build-all": "./src/build-all.ts",
     "./dev-android": "./src/dev-android.ts",
@@ -68,8 +66,6 @@
     "aio/extras": "./src/extras/mod.ts",
     "aio/sync": "./src/sync/mod.ts",
     "aio/testing": "./src/cell-test.ts",
-    "aio/schedule": "./src/schedule.ts",
-    "aio/selectors": "./src/selector.ts",
     "aio/build": "./src/build.ts",
     "esbuild": "npm:esbuild@0.24.2",
     "immer": "npm:immer@10.2.0",

@@ -17,34 +17,31 @@
 // fail-loud timeout). The hop is VISIBLE in code — the one seam.
 
 import type { AioUser } from "./aio-types.ts";
+import type { Access } from "../state/cell-types.ts";
 import { serializeReturn } from "../protocol/return-value.ts";
 import { log } from "../diagnostics/logger.ts";
 
 // deno-lint-ignore no-explicit-any
 type FnMap = Record<string, (...args: any[]) => any>;
 
-/** Access rule for NETWORK invocations of a namespace:
- *  `true` = any authenticated user, `"role"` = that exact role,
- *  predicate = custom check. Absent = connection-level auth only (as before).
- *  Direct server-side calls (via serverFn()/the returned map) never pass
- *  through this gate — the server trusts its own code. */
-export type ServerFnAccess =
-  | boolean
-  | string
-  | ((user: AioUser | undefined, fn: string, ...args: unknown[]) => boolean);
+/** @deprecated alpha52 — unified as {@linkcode Access} (one network-access
+ *  vocabulary for cells and serverFns: true / role-string / predicate).
+ *  Alias through beta. Direct server-side calls (via serverFn()/the returned
+ *  map) never pass through this gate — the server trusts its own code. */
+export type ServerFnAccess = Access;
 
 const _registry = new Map<string, FnMap>();
-const _access = new Map<string, ServerFnAccess>();
+const _access = new Map<string, Access>();
 
 /** Register a namespace of server functions (call in a *.server.ts file —
  *  the browser bundle must never contain the bodies). Returns the map for
  *  direct server-side use. Duplicate namespaces fail loudly.
- *  `opts.access` gates network calls; inside a fn, `serverUser()` (from
- *  "aio") answers who is calling. */
+ *  `opts.access` (an `Access` rule — true / role / predicate) gates network
+ *  calls; inside a fn, `serverUser()` (from "aio") answers who is calling. */
 export function serverFns<T extends FnMap>(
   ns: string,
   fns: T,
-  opts?: { access?: ServerFnAccess },
+  opts?: { access?: Access },
 ): T {
   if (_registry.has(ns)) {
     throw new Error(

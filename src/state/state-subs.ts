@@ -25,7 +25,9 @@ export function _setSubsSendFn(fn: ((msg: string) => void) | null): void {
 
 // ── Path collapsing ──────────────────────────────────────────────────
 
-/** Collapse paths: if "a.b" and "a.b.c.d" both tracked, keep only "a.b" */
+/** Collapse paths: if "a.b" and "a.b.c.d" both tracked, keep only "a.b"
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
+ */
 export function collapsePaths(paths: Set<string> | string[]): string[] {
   const arr = Array.isArray(paths) ? paths : [...paths];
   const sorted = [...arr].sort();
@@ -65,7 +67,9 @@ function _scheduleSyncSubs(): void {
 
 // ── Public API ───────────────────────────────────────────────────────
 
-/** Cancel the pending subscription update timer. */
+/** Cancel the pending subscription update timer.
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
+ */
 export function cancelSubsTimer(): void {
   if (_subsTimer !== null) {
     clearTimeout(_subsTimer);
@@ -73,14 +77,18 @@ export function cancelSubsTimer(): void {
   }
 }
 
-/** Track a path for subscription syncing. */
+/** Track a path for subscription syncing.
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
+ */
 export function trackPath(path: string): void {
   if (_accessedPaths.has(path)) return;
   _accessedPaths.add(path);
   _scheduleSyncSubs();
 }
 
-/** Re-send current subscription paths (call after reconnect). */
+/** Re-send current subscription paths (call after reconnect).
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
+ */
 export function resendSubscriptions(): void {
   if (_currentSubs.length > 0) _sendSubsMessage(_currentSubs);
 }

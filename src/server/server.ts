@@ -428,6 +428,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     getGraphResult: () => graphValidation?.getResult() ?? null,
     getSnapshot: config.getSnapshot,
     loadSnapshot: config.loadSnapshot,
+    blobs: config.blobs,
     getHealth: config.getHealth,
     vitalsSystem: config.vitalsSystem,
     getVitalsExtra: () => {
@@ -732,6 +733,13 @@ export function createServer(config: ServerConfig): ServerHandle {
         if (pathname === "/__aio/snapshot") {
           return new Response("Unauthorized", { status: 401, headers: extra });
         }
+        // Blob BYTES are app data, not app shell. The login flows make the
+        // shell (code) public so SignIn can render — but an anonymous client
+        // must not read stored binaries through the same door.
+        if (pathname.startsWith("/__aio/blobs/")) {
+          return new Response("Unauthorized", { status: 401, headers: extra });
+        }
+
         // …but NEVER to the control plane. serveStatic mounts the trojan, and
         // the trojan has no auth of its own: without this the login flows made
         // raw-state read, arbitrary dispatch, SQL and full-state overwrite

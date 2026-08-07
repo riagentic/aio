@@ -9,6 +9,7 @@ import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { enc } from "../protocol/envelope.ts";
 import { _BLOCKED_KEYS } from "./state-array-utils.ts";
 import { _setSubsSendFn, trackPath } from "./state-subs.ts";
+import { offlineQueue } from "./offline-queue.ts";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -18,7 +19,8 @@ export interface Transport {
   close(): void;
 }
 
-/** IPC bridge for Electron (injected by preload script). */
+/** IPC bridge for Electron (injected by preload script).
+ *  @internal Cross-module wiring — not public API, stripped from the snapshot. */
 export interface AioIPC {
   send: (json: string) => void;
   ready: () => void;
@@ -27,7 +29,8 @@ export interface AioIPC {
   onClose: (fn: () => void) => void;
 }
 
-/** Cell reference — the __aio metadata from cell() factory. */
+/** Cell reference — the __aio metadata from cell() factory.
+ *  @internal Cross-module wiring — not public API, stripped from the snapshot. */
 export interface CellRef {
   __aio: {
     id: string;
@@ -53,15 +56,36 @@ const MAX_OFFLINE_QUEUE = 100;
  *  matter how backed up a `send()` caller was.
  *  @internal */
 export function _offlineQueueFullness(): number {
-  return _offlineQueue.length / MAX_OFFLINE_QUEUE;
+  return _offlineQueue.fullness();
 }
 
 // ── Module state ─────────────────────────────────────────────────────
 
 let _transport: Transport | null = null;
 
-// Offline action queue (memory-only, no IndexedDB — framework-agnostic)
-const _offlineQueue: any[] = [];
+// Offline action queue (memory-only, no IndexedDB — framework-agnostic).
+// The ONE implementation + drop policy shared with the browser transport's
+// cell-method queue: at cap the OLDEST action is dropped, loudly (see
+// offline-queue.ts). A drop here must be as visible as the same event on the
+// cell-method queue — it reaches the diagnostic bus (dev overlay, `am`), not
+// just the browser console.
+const _offlineQueue = offlineQueue(MAX_OFFLINE_QUEUE, (dropped) => {
+  console.warn(
+    `[aio:state] Action "${dropped.type}" dropped — offline queue full (${MAX_OFFLINE_QUEUE}), newest wins`,
+  );
+  diagEmit({
+    type: "state-transport:offline-queue-full",
+    severity: "error",
+    source: "state-transport",
+    message:
+      `Action "${dropped.type}" was DROPPED — the offline send queue is full ` +
+      `(${MAX_OFFLINE_QUEUE}); the oldest queued action gives way to the newest`,
+    detail: { actionType: dropped.type, max: MAX_OFFLINE_QUEUE },
+    hint: "The queue drops OLDEST-first (newest data wins). Use a cell " +
+      "method (whose promise rejects on drop) for actions that must not be " +
+      "lost.",
+  });
+});
 
 /** Sync engine hook — set by sync-engine.ts when sync cells exist */
 let _syncHandler:
@@ -75,7 +99,8 @@ export function _getTransport(): Transport | null {
   return _transport;
 }
 
-/** Install (or clear with null) the CRDT sync intercept — returns true to claim an action before normal dispatch. */
+/** Install (or clear with null) the CRDT sync intercept — returns true to claim an action before normal dispatch.
+ *  @internal Cross-module wiring — not public API, stripped from the snapshot. */
 export function setSyncHandler(
   handler: ((action: { type: string; payload?: unknown }) => boolean) | null,
 ): void {
@@ -99,19 +124,22 @@ export function setTransport(
 
 // ── Offline queue ────────────────────────────────────────────────────
 
-/** Flush queued offline actions through the current transport. */
+/** Flush queued offline actions through the current transport.
+ *  @internal Cross-module wiring — not public API, stripped from the snapshot. */
 export function flushOfflineQueue(): void {
   if (!_transport) return;
-  for (const action of _offlineQueue) {
+  for (const action of _offlineQueue.drain()) {
     _transport.send(enc("action", action));
   }
-  _offlineQueue.length = 0;
 }
 
 // ── Send ─────────────────────────────────────────────────────────────
 
-/** Send an action via transport. Queues offline if no transport.
- *  Returns false if the action was dropped (offline queue full). */
+/** Send an action via transport. Queues offline if no transport. The action
+ *  is always accepted: at cap the OLDEST queued action is dropped instead
+ *  (newest wins — the one policy, see offline-queue.ts), with a loud
+ *  diagnostic naming what was lost. Returns true when handed to the
+ *  transport or queued. */
 export function send(action: { type: string; payload?: any }): boolean {
   // Sync cells route through CRDT engine
   if (_syncHandler && _syncHandler(action)) return true;
@@ -122,38 +150,16 @@ export function send(action: { type: string; payload?: any }): boolean {
     _transport.send(enc("action", tagged));
     return true;
   }
-  // Queue for later
-  if (_offlineQueue.length < MAX_OFFLINE_QUEUE) {
-    _offlineQueue.push(tagged);
-    return true;
-  }
-  // A drop here must be as loud as the same event on the cell-method queue.
-  // That one emits a diagnostic (so it reaches the diagnostic bus, the dev
-  // overlay and `am`); this one only ever reached the browser console, so an
-  // action lost through `useCell().send` was invisible to every tool that
-  // exists to surface exactly this.
-  console.warn(
-    `[aio:state] Action "${action.type}" dropped — offline queue full (${MAX_OFFLINE_QUEUE})`,
-  );
-  diagEmit({
-    type: "state-transport:offline-queue-full",
-    severity: "error",
-    source: "state-transport",
-    message:
-      `Action "${action.type}" was DROPPED — the offline send queue is full ` +
-      `(${MAX_OFFLINE_QUEUE})`,
-    detail: { actionType: action.type, max: MAX_OFFLINE_QUEUE },
-    hint:
-      "send() returns false when it drops. Check the return value, or use a " +
-      "cell method (whose promise rejects) for actions that must not be lost.",
-  });
-  return false;
+  // Queue for later — the drop policy + diagnostics live in the shared queue.
+  _offlineQueue.push(tagged);
+  return true;
 }
 
 /** Create a typed send proxy for a cell.
  *  Uses action creators from ref.__aio.actions when available (structured payloads),
  *  falls back to { args } wrapper for method-style dispatch.
- *  Optional sendFn overrides the default send (e.g. browser.ts injects its own for DevTools/vitals). */
+ *  Optional sendFn overrides the default send (e.g. browser.ts injects its own for DevTools/vitals).
+ *  @internal Cross-module wiring — not public API, stripped from the snapshot. */
 export function createSendProxy(
   cellName: string,
   ref: CellRef,
@@ -247,7 +253,7 @@ export function _resolveWithFallback<S>(
 /** Reset transport state (for test isolation). */
 export function _resetTransport(): void {
   _transport = null;
-  _offlineQueue.length = 0;
+  _offlineQueue.drain();
   _syncHandler = null;
   _setSubsSendFn(null);
 }

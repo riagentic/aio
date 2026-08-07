@@ -47,7 +47,9 @@ export interface SyncStatus {
   lastSync: number;
 }
 
-/** A stamped operation in the op-log */
+/** A stamped operation in the op-log
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
+ */
 export interface SyncOp {
   id: string;
   cell: string;
@@ -65,6 +67,8 @@ export interface SyncOp {
 /**
  * "op" frame payload: client→server or server→client op (v2: the envelope
  * kind is the discriminator — no wrapper key).
+
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
  */
 export interface OpMessage {
   id: string;
@@ -91,6 +95,8 @@ export interface OpRejectedMessage {
 
 /**
  * "sync-ack" frame payload: server→client per-op CRDT ack.
+
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
  */
 export interface AckMessage {
   cell: string;
@@ -108,6 +114,8 @@ export interface AckMessage {
 
 /**
  * "sync-req" frame payload: client→server sync request.
+
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
  */
 export interface SyncRequest {
   clientId: string;
@@ -118,6 +126,8 @@ export interface SyncRequest {
 /**
  * "sync-res" frame payload: ops since the client's cursor. lowWater is a
  * per-cell map when the server tracks multiple cells (see server-handler.ts).
+
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
  */
 export type SyncResponse =
   | {
@@ -150,6 +160,8 @@ export const SYNC_DEFAULTS = {
 
 /**
  * Normalize sync: true | SyncConfig → SyncConfig
+
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
  */
 export function normalizeSyncConfig(
   raw: true | Partial<SyncConfig>,

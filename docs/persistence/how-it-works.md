@@ -54,7 +54,7 @@ cell("user", {
   persist: { exclude: ["sessionToken", "tempCache"] },
   // and out of the browser: exclude secrets from ui too — see the security
   // note in docs/auth/auth.md (a secret needs BOTH excludes)
-  ui: { exclude: ["sessionToken"] },
+  visible: { exclude: ["sessionToken"] },
 });
 ```
 

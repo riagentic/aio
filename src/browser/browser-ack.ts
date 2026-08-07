@@ -7,10 +7,14 @@
 // module-level functions below keep exactly the names and semantics every
 // browser call site already uses.
 
-import { ACK_TIMEOUT_MS, type AioWindow } from "./protocol-types.ts";
-import { type AckRegistry, createAckRegistry } from "./ack-registry.ts";
+import { ACK_TIMEOUT_MS, type AioWindow } from "../protocol/protocol-types.ts";
+import {
+  type AckRegistry,
+  createAckRegistry,
+} from "../protocol/ack-registry.ts";
+import { _ackSink } from "../state/ack-sink.ts";
 
-export { ackMethodKey } from "./ack-registry.ts";
+export { ackMethodKey } from "../protocol/ack-registry.ts";
 
 /** Test/dev override for the NO-CONFIG fallback ceiling. Pass `0` to disable
  *  the timer. */
@@ -121,3 +125,15 @@ export function _rejectInFlight(err: Error): number {
 export function _pendingAckCount(): number {
   return _registry.size();
 }
+
+// ── state/ seam ──────────────────────────────────────────────────────
+// The cell binding (state/cell-reactive.ts) and the shared offline queue
+// (state/offline-queue.ts) settle call promises through this singleton, but
+// the boundary matrix forbids state → browser — so this module hands its
+// implementation to the late-bound sink instead (see state/ack-sink.ts).
+_ackSink.impl = {
+  register: _registerAck,
+  armTimer: _armAckTimer,
+  reject: _rejectAck,
+  armsAckTimer,
+};

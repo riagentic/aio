@@ -6,8 +6,9 @@
  * (`"build": { "targets": [...] }`, or `--targets=a,b,c`), builds each target
  * by invoking the single-target pipeline ({@link build} in `build.ts`) as a
  * subprocess, and collects every artifact into a predictable `dist/` with a
- * `manifest.json`. The per-target builds are unchanged — this only orchestrates
- * and gathers, so the existing `compile:*` tasks keep working exactly as before.
+ * `manifest.json`. This is THE build path (alpha52 one vocabulary): the
+ * scaffolded `compile` task is this same pipeline narrowed to the default
+ * target (`--targets=<client>`).
  *
  * ```sh
  * deno run -A jsr:@riagentic/aio/build-all               # build.targets

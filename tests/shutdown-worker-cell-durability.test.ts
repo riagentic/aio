@@ -33,6 +33,8 @@ function appSource(port: number): string {
 
 export const stream = cell("stream", {
   worker: true,
+  // alpha52: streaming cell — incremental commits, the documented opt-out.
+  transaction: false,
   state: { chunks: [], status: "idle" },
   methods: {
     async reply(s) {

@@ -46,6 +46,13 @@ export interface LifecycleDeps<S, A> {
   port: number;
   token: string | undefined;
   users: Record<string, AioUser> | undefined;
+  /** True when ANY per-user auth is configured (`users`, `resolveUser`, or
+   *  `auth: true`) — the deciders that make an exposed app secured WITHOUT a
+   *  `token`. Gates the "no authentication with --expose" warning: `auth: true`
+   *  and `resolveUser` apps set neither `users` nor `token`, and the strongest
+   *  security warning crying wolf on the two correctly-secured configs teaches
+   *  people to ignore it. */
+  perUserAuth: boolean;
   /** AUTH-2/3: pre-built auth-mode label ("password+totp+oidc") for the boot
    *  report — undefined falls back to users/token detection. */
   authMode?: string;
@@ -119,6 +126,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     port,
     token,
     users,
+    perUserAuth,
     tlsCert,
     shareUrl,
     localUrl,
@@ -195,7 +203,9 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
       "⚠ token auth via URL query parameter is insecure in expose mode — use Authorization header instead",
     );
   }
-  if (expose && !users && !token) {
+  // `!perUserAuth` covers users/resolveUser/auth:true; `!token` covers the
+  // shared app key. Only an app with NONE of them is actually open.
+  if (expose && !perUserAuth && !token) {
     log.warn(
       "⚠ no authentication configured with --expose — any website can connect via WebSocket",
     );

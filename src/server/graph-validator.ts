@@ -175,17 +175,10 @@ export function resolveSpecifier(
   return { kind: "external", url: mapped };
 }
 
-/** Server-only SYMBOLS exported from the isomorphic "aio"/"aio/db" entry. The
- *  browser build OMITS them, so a static import into a client-reachable module
- *  is an eager ES link failure — a blank screen every boot (AIO-424).
- *  Pure schema helpers (table/pk/text/…) are browser-safe and stay out.
- *  Keep in sync with aiol/checks.ts `SERVER_ONLY_AIO_SYMBOLS`. */
-const SERVER_ONLY_AIO_SYMBOLS = new Set([
-  "createDB",
-  "DEFAULT_PRAGMAS",
-  "connectCli",
-  "connectCliUDS",
-]);
+// Server-only SYMBOLS exported from the isomorphic "aio"/"aio/db" entries —
+// THE list lives in src/entries.ts (alpha52 one-decider; aiol imports the
+// same set, so the dev-server diagnostic and the linter can never disagree).
+import { SERVER_ONLY_AIO_SYMBOLS } from "../entries.ts";
 
 /** Detect server-only APIs in browser-bound code.
  *  AIO-427: severity is split by CERTAINTY of breakage —

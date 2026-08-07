@@ -118,7 +118,7 @@ Deno.test({
     await Deno.writeTextFile(
       src,
       `import { aio, cell } from "${REPO}/mod.ts";
-const c = cell("p", { state: { n: 0 }, ui: "all", methods: {} });
+const c = cell("p", { state: { n: 0 }, visible: "all", methods: {} });
 const app = await aio.run({
   cells: [c], appId: ${JSON.stringify(appId)}, appVersion: "0.0.0",
   client: "server-only", persist: false, port: 0, appDir: ${

@@ -46,22 +46,23 @@ effects run → deltas broadcast back.
 
 ## cell() config
 
-| Key         | Type                       | Required | Description                                                                                                   |
-| ----------- | -------------------------- | -------- | ------------------------------------------------------------------------------------------------------------- |
-| `state`     | `Record<string, unknown>`  | Yes      | Initial state                                                                                                 |
-| `methods`   | `Record<string, Function>` | Yes      | Sync or async methods — `(s, ...args) => void`                                                                |
-| `selectors` | `Record<string, (s) => T>` | No       | Derived values, auto-scoped to cell state                                                                     |
-| `cancelOn`  | `{ method: [triggers] }`   | No       | Foreign actions that abort a running async method — see [Methods](methods.md#cancellation--cancelon--ssignal) |
-| `listensTo` | `(Function \| string)[]`   | No       | Declare foreign actions this cell observes — pass bound methods                                               |
-| `validate`  | `(s) => true \| string`    | No       | State validator, runs after every mutation — string = rejection message                                       |
-| `sync`      | `true \| SyncConfig`       | No       | Enable CRDT sync — see [CRDT docs](../persistence/crdt.md)                                                    |
-| `worker`    | `boolean`                  | No       | Run this cell's methods on their own thread — see [cell workers](cell-workers.md)                             |
-| `persist`   | `CellFieldFilter`          | No       | `"all"`, `"none"`, `{ include: [...] }`, `{ exclude: [...] }` — default `"all"`                               |
-| `ui`        | `CellVisibility`           | No       | Same as persist, plus optional `forUser` for per-user filtering — default `"all"`                             |
-| `version`   | `number`                   | No       | State-shape version — pairs with `onMigrate`                                                                  |
-| `onMigrate` | `(state, from) => state`   | No       | Migration hook when persisted version < `version`                                                             |
-| `onInit`    | `(app) => void`            | No       | Called when cell initializes                                                                                  |
-| `onDestroy` | `(app) => void`            | No       | Called when cell destroys                                                                                     |
+| Key         | Type                       | Required | Description                                                                                                                                                       |
+| ----------- | -------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `state`     | `Record<string, unknown>`  | Yes      | Initial state                                                                                                                                                     |
+| `methods`   | `Record<string, Function>` | Yes      | Sync or async methods — `(s, ...args) => void`                                                                                                                    |
+| `selectors` | `Record<string, (s) => T>` | No       | Derived values, auto-scoped to cell state                                                                                                                         |
+| `cancelOn`  | `{ method: [triggers] }`   | No       | Foreign actions that abort a running async method — see [Methods](methods.md#cancellation--cancelon--ssignal)                                                     |
+| `listensTo` | `{ handler: source(s) }`   | No       | Run a sync method on foreign actions — `{ onX: other.m }`, values may be arrays (array form deprecated)                                                           |
+| `validate`  | `(s) => true \| string`    | No       | State validator, runs after every mutation — string = rejection message                                                                                           |
+| `sync`      | `true \| SyncConfig`       | No       | Enable CRDT sync — see [CRDT docs](../persistence/crdt.md)                                                                                                        |
+| `worker`    | `boolean`                  | No       | Run this cell's methods on their own thread — see [cell workers](cell-workers.md)                                                                                 |
+| `access`    | `Access`                   | No       | CALL side: who may call methods over the network — `true`/role/predicate; absent = open. On an exposed/multi-user app, `access` without `visible` refuses to boot |
+| `persist`   | `CellFieldFilter`          | No       | `"all"`, `"none"`, `{ include: [...] }`, `{ exclude: [...] }` — default `"all"`                                                                                   |
+| `visible`   | `CellVisibility`           | No       | READ side (`access` gates calls, `visible` gates reads): as persist, plus `forUser`/`publicFields` — default `"all"`. `ui` is the deprecated alpha52 alias        |
+| `version`   | `number`                   | No       | State-shape version — pairs with `onMigrate`                                                                                                                      |
+| `onMigrate` | `(state, from) => state`   | No       | Migration hook when persisted version < `version`                                                                                                                 |
+| `onInit`    | `(app) => void`            | No       | Called when cell initializes                                                                                                                                      |
+| `onDestroy` | `(app) => void`            | No       | Called when cell destroys                                                                                                                                         |
 
 > ### ⚠️ Two TypeScript traps to know first
 >
@@ -119,7 +120,9 @@ Every method has a `.type` string property for cross-cell wiring:
 cancelOn: {
   place: [cart.clear];
 } // abort a running async method
-listensTo: [inventory.reserve]; // observe foreign actions
+listensTo: {
+  onReserve: inventory.reserve;
+} // run onReserve on that action
 ```
 
 ### What you cannot access
@@ -192,9 +195,11 @@ selectors: {
 ```
 
 **Can:** read own cell state; take runtime arguments (parameterized form above);
-read other cells via the **deps form**
-(`{ deps: ["other"], fn: (s, other) => … }` — always zero-arg); compose.
-**Cannot:** mutate, dispatch, or run async.
+read other cells via the **deps form** — deps arrive as a TUPLE, so
+parameterized + deps compose: `{ deps: ["prices"], fn: (s, [prices], id) => … }`
+→ `cell.cost(id)`. (The old spread signature `(s, ...deps)` works through beta
+with a one-time hint; `aiol --safe-fix` rewrites it.) **Cannot:** mutate,
+dispatch, or run async.
 
 ### Lifecycle hooks
 
@@ -264,16 +269,18 @@ const gateway = cell("gateway", {
 });
 ```
 
-| Collision                        | Allowed? | Reason                                  |
-| -------------------------------- | -------- | --------------------------------------- |
-| state ↔ method                   | ❌       | Callable wins, state unreachable (AIO4) |
-| state ↔ selector                 | ❌       | Selector wins, state unreachable        |
-| method ↔ method                  | ❌       | Duplicate — which runs?                 |
-| method ↔ selector                | ❌       | Both flatten onto cell                  |
-| any ↔ `__aio`, `A`, `E`, `state` | ❌       | Reserved for framework                  |
+| Collision                    | Allowed? | Reason                                                                 |
+| ---------------------------- | -------- | ---------------------------------------------------------------------- |
+| state ↔ method               | ❌       | Callable wins, state unreachable (AIO4)                                |
+| state ↔ selector             | ❌       | Selector wins, state unreachable                                       |
+| method ↔ method              | ❌       | Duplicate — which runs?                                                |
+| method ↔ selector            | ❌       | Both flatten onto cell                                                 |
+| any ↔ `__aio`, `fx`, `state` | ❌       | Reserved for framework                                                 |
+| state key starting with `$`  | ❌       | The method draft meta-namespace (`$signal`, `$commit`, `$live`, `$do`) |
 
 **Rule of thumb:** every name in a cell — state key or behavior — must be
-unique. Collisions throw at `cell()` time with a rename suggestion.
+unique, `$`-free, and off the reserved list. Collisions throw at `cell()` time
+with a rename suggestion.
 
 ## Troubleshooting
 

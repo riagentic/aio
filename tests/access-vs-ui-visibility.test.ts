@@ -1,8 +1,8 @@
-// `access` gates method CALLS; `ui` gates what the state broadcast CARRIES.
+// `access` gates method CALLS; `visible` gates what the state broadcast CARRIES.
 //
 // Those are two different facts and neither is derived from the other — "only
 // admins may edit, everyone may read" is a legitimate design. But an author who
-// declares a cell restricted and never mentions `ui` has decided only half of
+// declares a cell restricted and never mentions `visible` has decided only half of
 // it, and the half they did not decide defaults to "broadcast everything to
 // every socket, authenticated or not". These tests pin both halves: the real
 // wire behaviour (so nobody mistakes the warning below for an access check),
@@ -62,7 +62,7 @@ Deno.test("access does NOT hide state — ui does (wire truth, both directions)"
   const gated = cell("gatedRead", {
     state: { note: "VISIBLE-ANYWAY" },
     access: "admin",
-    ui: "all", // explicit: this test asserts the wire, not the warning
+    visible: "all", // explicit: this test asserts the wire, not the warning
     methods: {
       edit(s: { note: string }) {
         s.note = "edited";
@@ -73,7 +73,7 @@ Deno.test("access does NOT hide state — ui does (wire truth, both directions)"
   const hidden = cell("hiddenRead", {
     state: { note: "TRULY-HIDDEN" },
     access: "admin",
-    ui: "none",
+    visible: "none",
     methods: {},
   });
 
@@ -100,11 +100,11 @@ Deno.test("access does NOT hide state — ui does (wire truth, both directions)"
       "VISIBLE-ANYWAY",
       "access gates CALLS, not reads — a viewer still receives the state",
     );
-    // `ui: "none"` is the mechanism that actually withholds it.
+    // `visible: "none"` is the mechanism that actually withholds it.
     assertEquals(
       seen.hiddenRead,
       undefined,
-      'ui: "none" must withhold the cell entirely',
+      'visible: "none" must withhold the cell entirely',
     );
   } finally {
     await app.close();
@@ -119,7 +119,7 @@ Deno.test("boot warns when a cell restricts access but never decides ui", async 
     const secrets = cell("undecidedSecrets", {
       state: { internalNotes: "n", ledger: [1] },
       access: false, // "no client may call its methods"
-      // ui: NOT specified — the read side was never decided
+      // visible: NOT specified — the read side was never decided
       methods: {},
     });
     const app = await aio.run({
@@ -147,14 +147,14 @@ Deno.test("boot warns when a cell restricts access but never decides ui", async 
   assertStringIncludes(hit, "does NOT hide state");
   assertStringIncludes(hit, '"internalNotes"');
   assertStringIncludes(hit, '"ledger"');
-  assertStringIncludes(hit, 'ui: "none"');
-  assertStringIncludes(hit, 'ui: "all"'); // the acknowledgement escape hatch
+  assertStringIncludes(hit, 'visible: "none"');
+  assertStringIncludes(hit, 'visible: "all"'); // the acknowledgement escape hatch
 });
 
-Deno.test("an explicit ui is an answer — no warning, including ui: 'all'", async () => {
+Deno.test("an explicit visible is an answer — no warning, including visible: 'all'", async () => {
   const { cell, aio } = await import("../mod.ts");
 
-  // Every explicit `ui` shape must silence it. `ui: "all"` is the important one:
+  // Every explicit `visible` shape must silence it. `visible: "all"` is the important one:
   // it means "yes, everyone may read this", and an author who has said so must
   // never be nagged again — otherwise the warning becomes noise and gets muted
   // wholesale, taking the real findings with it.
@@ -176,7 +176,7 @@ Deno.test("an explicit ui is an answer — no warning, including ui: 'all'", asy
         state: { internalNotes: "n", ledger: [1] },
         access: "admin",
         // deno-lint-ignore no-explicit-any
-        ui: ui as any,
+        visible: ui as any,
         methods: {},
       });
       const app = await aio.run({
@@ -197,7 +197,9 @@ Deno.test("an explicit ui is an answer — no warning, including ui: 'all'", asy
     assertEquals(
       nag,
       undefined,
-      `ui: ${JSON.stringify(ui)} is an explicit answer and must silence the ` +
+      `visible: ${
+        JSON.stringify(ui)
+      } is an explicit answer and must silence the ` +
         `warning, got: ${nag}`,
     );
   }
@@ -237,7 +239,7 @@ Deno.test("a sync cell is told the truth: its reads CANNOT be narrowed", async (
   const port = freePort();
 
   // A sync cell that hides state is REFUSED at boot (CRDT replicates to every
-  // peer, so a ui filter cannot hold). Telling its author to "add ui: none"
+  // peer, so a visible filter cannot hold). Telling its author to "add visible: none"
   // would therefore be advice that hard-fails the next boot — the warning has
   // to know the difference and offer the two options that actually exist.
   const warnings = await captureWarnings(async () => {
@@ -245,7 +247,7 @@ Deno.test("a sync cell is told the truth: its reads CANNOT be narrowed", async (
       state: { rows: [1, 2] },
       access: "admin",
       sync: true,
-      // ui: NOT specified
+      // visible: NOT specified
       methods: {},
     });
     const app = await aio.run({
@@ -266,10 +268,10 @@ Deno.test("a sync cell is told the truth: its reads CANNOT be narrowed", async (
   );
   assert(hit, `expected the warning; got:\n${warnings.join("\n")}`);
   assertStringIncludes(hit, "cannot be narrowed");
-  assertStringIncludes(hit, 'ui: "all"');
+  assertStringIncludes(hit, 'visible: "all"');
   // The dead-end advice must NOT appear — it is refused at boot for this cell.
   assert(
-    !hit.includes('ui: "none"'),
-    `a sync cell must not be told to use ui: "none" — composition refuses it:\n${hit}`,
+    !hit.includes('visible: "none"'),
+    `a sync cell must not be told to use visible: "none" — composition refuses it:\n${hit}`,
   );
 });

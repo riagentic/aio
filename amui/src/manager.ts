@@ -486,6 +486,12 @@ export const manager = cell("manager", {
   // Live dashboard — nothing here is worth persisting, and foreign app states
   // can be large; persisting them would bloat amui's DB and slow every write.
   persist: "none",
+  // alpha52: transaction became the async default. This cell is the
+  // incremental-commit shape on purpose — a 1s tick RMW-ing rolling histories
+  // CONCURRENTLY with user-triggered loads, and a dozen `s.xLoading = true`
+  // spinner writes that must publish before their awaits. Pinned rather than
+  // sprinkled with $commit.
+  transaction: false,
   // cancelTask aborts an in-flight runTask (the method sees it via s.$signal).
   cancelOn: { runTask: [{ type: "manager:cancelTask" }] },
   state: {

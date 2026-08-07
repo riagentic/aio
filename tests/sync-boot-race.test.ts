@@ -12,7 +12,7 @@ import { cell } from "aio";
 import {
   _rejectAllPending,
   _setAckTimeoutMs,
-} from "../src/protocol/browser-ack.ts";
+} from "../src/browser/browser-ack.ts";
 import {
   _resetCellRegistry,
   getRegisteredCells,

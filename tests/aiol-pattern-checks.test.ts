@@ -405,7 +405,7 @@ export const c = cell('c', {
   });
 });
 
-Deno.test("aiol: useCell() is flagged as deprecated", async () => {
+Deno.test("aiol: useCell() is flagged as REMOVED (alpha52)", async () => {
   await withTmpDir(async (dir) => {
     await project(
       dir,
@@ -420,10 +420,12 @@ export function App() { const { state } = useCell(c); return state.n }
     const { checkUseCell } = await import("../aiol/checks.ts");
     await checkUseCell(ctx);
     const hits = report.issues.filter((i) =>
-      i.message.includes("useCell() is deprecated")
+      i.message.includes("useCell() was REMOVED")
     );
     assertEquals(hits.length, 1, JSON.stringify(report.issues));
     assert(hits[0]!.message.includes("LIVE view"));
+    assertEquals(hits[0]!.severity, "error");
+    assert(hits[0]!.safeFix, "carries the mechanical rewrite");
   });
 });
 

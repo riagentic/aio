@@ -1,6 +1,7 @@
 // Async versions of schema init, table loading, and incremental state sync
 
 import type { DB } from "./types.ts";
+import { applyDdl } from "./ddl.ts";
 import {
   assertIdent,
   type ColumnDef,
@@ -115,11 +116,27 @@ async function reconcileTable(
       );
     }
     for (const c of missing) {
-      await db.execute(
-        `ALTER TABLE ${name} ADD COLUMN ${
-          columnToSQL(c, def.columns[c]!, schema)
-        }`,
-      );
+      const stmt = `ALTER TABLE ${name} ADD COLUMN ${
+        columnToSQL(c, def.columns[c]!, schema)
+      }`;
+      // ONE decider (applyDdl, src/db/ddl.ts) for what a refused DDL means:
+      // "duplicate column name" → already there (a raced boot, or added
+      // out-of-band) — the goal state is reached, not a failure. Anything
+      // else is FATAL, named with the statement and this site: a DDL SQLite
+      // refuses (a UNIQUE column ALTER cannot add, a non-constant default,
+      // …) must stop the boot — continuing runs the app against a schema it
+      // does not have, and every write to this table fails at some random
+      // later moment.
+      const outcome = await applyDdl(db, stmt, {
+        ns: "db",
+        subject: `table "${name}"`,
+        source: "reconcileTable, src/db/state-sync.ts",
+        remedy: `SQLite cannot apply this column change to the existing ` +
+          `table. Migrate it yourself with app.db (add the column without ` +
+          `the refused constraint, backfill, then recreate), or drop and ` +
+          `recreate the table if its rows are disposable.`,
+      });
+      if (outcome === "already-applied") continue;
       reportOnce(
         `added:${name}.${c}`,
         `table "${name}" gained column "${c}" — added to the existing table.`,

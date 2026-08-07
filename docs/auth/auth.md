@@ -15,22 +15,25 @@ deno task dev --expose
 2. A self-signed TLS cert is auto-generated (cached in `~/.<appId>/data/tls/`,
    regenerated if deleted)
 3. Main server listens on HTTPS — `wss://` WebSocket included
-4. **No framework auth by default** — any device on the LAN can connect (the app
-   does its own user auth, or is deliberately open for a trusted network)
+4. **A key by default when exposed** (alpha52) — an app that is `--expose`d with
+   no per-user auth and no `key` decision gets a GENERATED shared key
+   (persisted, 0600; the share link carries it). Loopback apps stay open — the
+   default only changes where strangers can reach the port.
 
 **Choosing the key** — the `key` option, three modes plus the default:
 
 ```ts
-await aio.run(); // default: NO framework auth (open on the LAN)
+await aio.run(); // loopback: open; EXPOSED: behaves as key: true (alpha52)
 await aio.run({ key: true }); // a key generated ONCE and persisted
 // (same across restarts — "one key, use forever")
 await aio.run({ key: "team-2024" }); // a fixed key you choose
-await aio.run({ key: false }); // explicit: no framework auth
+await aio.run({ key: false }); // explicit opt-out: OPEN, even exposed (loud warning)
 ```
 
 `key: true` persists the key in the data dir, so it doesn't churn on every
 restart. `users` / `resolveUser` (below) still take precedence for multi-user
-auth.
+auth — a per-user app never authenticates anyone with the shared key, and the
+exposed-key default never applies to it.
 
 **Pairing the aio client** — when a key is set, `--expose` prints a **pair
 code** on startup. In the aio client, click the app under "Apps on your network"
@@ -105,7 +108,7 @@ const users: Record<string, AioUser> = {
 const myCell = cell("myCell", {
   state: { publicData: {}, secret: {} },
   methods: {/* ... */},
-  ui: {
+  visible: {
     include: ["publicData", "secret"],
     forUser: (exposed, user?) =>
       user?.role === "admin" ? exposed : { publicData: exposed.publicData },
@@ -228,26 +231,29 @@ look like a working button that does nothing.) Server-side code (effects,
 schedules, your own calls) always bypasses `access` — the server trusts its own
 code.
 
-> **`access` gates calls. `ui` gates reads.** These are two different facts and
-> neither implies the other. `access` decides who may CALL a cell's methods over
-> the network; `ui` decides what the state broadcast CARRIES. A cell with
-> `access: "admin"` and no `ui` filter still ships its entire state to every
-> connected client, including unauthenticated ones — that is by design ("only
-> admins may edit, everyone may read" is a common shape), but it is not what
-> `access: false` looks like it means. To keep state off the wire, use `ui`:
+> **`access` gates calls. `visible` gates reads.** These are two different facts
+> and neither implies the other. `access` decides who may CALL a cell's methods
+> over the network; `visible` decides what the state broadcast CARRIES. A cell
+> with `access: "admin"` and no `visible` filter still ships its entire state to
+> every connected client, including unauthenticated ones — that is by design
+> ("only admins may edit, everyone may read" is a common shape), but it is not
+> what `access: false` looks like it means. To keep state off the wire, use
+> `visible`:
 >
 > ```ts
 > cell("secrets", {
 >   state: { token: "…" },
 >   access: false, // no client may CALL its methods
->   ui: "none", // …and no client receives its STATE
+>   visible: "none", // …and no client receives its STATE
 >   methods: {/* server-side only */},
 > });
 > ```
 >
-> Declaring `access` without `ui` warns at boot, naming the exposed fields. Any
-> explicit `ui` — including `ui: "all"` ("yes, everyone may read this") — is an
-> answer and silences it.
+> Declaring `access` without `visible` warns at boot on a loopback single-user
+> app, and REFUSES to boot (alpha52) when the app is exposed or multi-user —
+> there the unanswered read side ships. Any explicit `visible` — including
+> `visible: "all"` ("yes, everyone may read this") — is an answer and silences
+> it.
 
 **Row-level access.** The predicate also receives the method's call args, so
 "edit only your own row" is one line — no per-method owner re-check:
@@ -283,7 +289,7 @@ cell("cart", {
   // access gates WRITES only — without a per-user view every connected
   // client would receive every user's cart over the wire. forUser makes the
   // read side match the write side (anonymous clients see an empty cart).
-  ui: {
+  visible: {
     forUser: (s, user) => {
       const id = user?.id;
       return { items: id ? { [id]: s.items[id] ?? [] } : {} };
@@ -301,10 +307,10 @@ cell("cart", {
 `undefined` means anonymous client (public/shared-key mode) or server-origin
 execution.
 
-> **`access` and `ui` are two different gates.** `access` decides who may
-> _call_; `ui` (and `ui: { forUser }`) decides who may _see_. A per-user cell
-> needs both — the cart above without `forUser` is a working checkout that
-> broadcasts every basket to every client.
+> **`access` and `visible` are two different gates.** `access` decides who may
+> _call_; `visible` (and `visible: { forUser }`) decides who may _see_. A
+> per-user cell needs both — the cart above without `forUser` is a working
+> checkout that broadcasts every basket to every client.
 
 #### Testing a method that reads `serverUser()`
 

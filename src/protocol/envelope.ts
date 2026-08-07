@@ -16,6 +16,17 @@
 // The ONE deliberate v1 shim: a version-mismatch reply is still sent as the
 // legacy `__proto-err:<reason>` string (a v1 peer must be able to READ why
 // it was refused before the 4505 close).
+//
+// Unknown kinds have exactly TWO tiers — nothing in between:
+//   • not in FRAME_KINDS and not in IGNORABLE → `dec()` returns null and the
+//     caller treats it as a protocol violation (loud, never silent);
+//   • in IGNORABLE → `dec()` decodes it and every router SKIPS it silently.
+//     This is the additive-extension reservation: kind "x" is reserved so a
+//     future peer can attach experimental/extension frames that an older
+//     binary ignores by contract instead of logging a violation per frame.
+// SERVES below records which kinds each transport router actually handles;
+// tests/wire-serves.test.ts parses the routers' `case "…":` labels and pins
+// them against it, so a new kind cannot ship silently unrouted.
 
 import type { Patch } from "immer";
 
@@ -102,6 +113,98 @@ export const FRAME_KINDS: readonly Kind[] = [
 
 const KIND_SET: ReadonlySet<string> = new Set(FRAME_KINDS);
 
+/** Kinds a receiver must SKIP SILENTLY instead of treating as a protocol
+ *  violation. This is the additive wire reservation: `"x"` (extension) is
+ *  reserved so a newer peer can send frames an older binary drops by
+ *  contract — no log line per frame, no 4505. Everything NOT listed here and
+ *  not in FRAME_KINDS stays a loud violation (`dec()` → null). */
+export const IGNORABLE: ReadonlySet<Kind | string> = new Set(["x"]);
+
+/** True when `t` is a reserved-ignorable kind — routers check this in their
+ *  default arm and skip without logging. ONE decider for the tier. */
+export function isIgnorableKind(t: string): boolean {
+  return IGNORABLE.has(t);
+}
+
+/** Which frame kinds each transport ROUTER handles (its `case "…":` labels).
+ *  Pinned against the live routers by tests/wire-serves.test.ts, so adding a
+ *  kind to FRAME_KINDS without routing it (or routing one without recording
+ *  it) is a red gate, not a silent drop at runtime.
+ *
+ *  Deliberate omissions, per transport:
+ *  • ws (server-ws.ts, C→S): everything a client sends EXCEPT "ping" — WS has
+ *    protocol-level ping/pong frames; the app-level "ping" keepalive exists
+ *    only for UDS/IPC, which has no transport heartbeat of its own.
+ *  • uds (uds.ts, C→S): everything EXCEPT "type" (the only UDS client is the
+ *    Electron shell — the transport itself identifies the client kind) and
+ *    "vitals-ping" (vitals are WS-only diagnostics — see unsupportedOnUds,
+ *    which rejects them LOUDLY rather than dropping them).
+ *  • browser (browser-air-transport + browser-shared handleControlFrame +
+ *    browser-air-commands routeCommand, S→C): every server-sent kind. No
+ *    omissions — a server frame the client cannot route is a bug.
+ *  S→C-only kinds are absent from ws/uds and C→S-only kinds from browser by
+ *  direction, not by choice. */
+export const SERVES: Record<"ws" | "uds" | "browser", ReadonlySet<Kind>> = {
+  ws: new Set<Kind>([
+    "proto",
+    "type",
+    "subs",
+    "resync",
+    "client-state",
+    "log",
+    "cdiag",
+    "tt-cmd",
+    "ui-surface-result",
+    "ui-trigger-result",
+    "vitals-ping",
+    "action",
+    "op",
+    "sync-req",
+    "sfn",
+  ]),
+  uds: new Set<Kind>([
+    "proto",
+    "ping",
+    "subs",
+    "resync",
+    "client-state",
+    "log",
+    "cdiag",
+    "tt-cmd",
+    "ui-surface-result",
+    "ui-trigger-result",
+    "action",
+    "op",
+    "sync-req",
+    "sfn",
+  ]),
+  browser: new Set<Kind>([
+    "proto",
+    "proto-err",
+    "boot",
+    "reload",
+    "css",
+    "get-state",
+    "diag",
+    "cfg",
+    "graph-error",
+    "graph-clear",
+    "tt-state",
+    "ui-surface",
+    "ui-trigger",
+    "vitals-pong",
+    "ack",
+    "state",
+    "patches",
+    "op",
+    "sync-res",
+    "sync-ack",
+    "op-rejected",
+    "sync-err",
+    "sfnr",
+  ]),
+};
+
 /** One decoded wire frame. `d` is kind-specific (see payload types below). */
 export type Frame = { v: 2; t: Kind; d?: unknown };
 
@@ -120,12 +223,19 @@ export function encRaw(t: Kind, dJson: string): string {
 
 /** Decode one wire message. Null for anything that is not a well-formed v2
  *  envelope — callers treat null as a protocol violation, never as state
- *  (the v1 bare-JSON fallthrough is gone by design). */
+ *  (the v1 bare-JSON fallthrough is gone by design).
+ *
+ *  Reserved-ignorable kinds (see {@linkcode IGNORABLE}) DO decode: they are
+ *  well-formed by contract, and the routers' default arms skip them silently
+ *  via {@linkcode isIgnorableKind} instead of logging a violation. */
 export function dec(raw: string): Frame | null {
   if (raw.length === 0 || raw[0] !== "{") return null;
   try {
     const p = JSON.parse(raw) as { v?: unknown; t?: unknown; d?: unknown };
-    if (p && p.v === 2 && typeof p.t === "string" && KIND_SET.has(p.t)) {
+    if (
+      p && p.v === 2 && typeof p.t === "string" &&
+      (KIND_SET.has(p.t) || IGNORABLE.has(p.t))
+    ) {
       return p as Frame;
     }
     return null;

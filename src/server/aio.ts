@@ -41,6 +41,7 @@ import {
   resolveAppDirs,
   writeAppMeta,
 } from "./app-dirs.ts";
+import { openBlobStore } from "./blobs.ts";
 import { resolveDataDirLegacy } from "./paths.ts";
 import { describeMigration, migrateLegacyLayout } from "./app-dirs-migrate.ts";
 import { DEV_FRAME_BUDGET_MS } from "../state/dispatch.ts";
@@ -83,7 +84,7 @@ import {
 import { openSessionStore, type SessionStore } from "./sessions.ts";
 import { openUserStore } from "./auth-users.ts";
 import { resolveAppId } from "./single-instance-lock.ts";
-import { appKeyPath, resolveAppKey } from "./app-key.ts";
+import { appKeyPath, defaultAppKeyConfig, resolveAppKey } from "./app-key.ts";
 import { assertDenoVersion } from "./deno-version.ts";
 import { removalMessage, removalOf } from "../state/removals.ts";
 import { dirname, join, resolve } from "@std/path";
@@ -96,7 +97,7 @@ export type { CliFlags } from "./aio-cli.ts";
 export { createUDSListener, type UDSHandle } from "./uds.ts";
 export type { AioError } from "../diagnostics/error.ts";
 export type { PerfBudget, PerfCheck } from "../state/dispatch.ts";
-export { type Lint, lint } from "./lint.ts";
+export { checkCells, type Lint, lint } from "./lint.ts";
 export {
   type CellDef,
   type CellEntry,
@@ -212,26 +213,46 @@ export function _resolveAppVersion(
       "appVersion to aio.run())";
 }
 
-/** The app's `target` from ITS OWN deno.json (written by `am create
+/** The app's `client` from ITS OWN deno.json (written by `am create
  *  --target=…`) as a client-mode default. Makes the scaffolded `deno task dev`
  *  (no --client flag) run the CHOSEN target instead of the framework's electron
  *  fallback. `server` → `server-only` (aio's name for "no client UI");
- *  `android` → the browser client (dev:android's emulator connects to the same
- *  dev server).
+ *  `android` → the browser client (the android dev flow's emulator connects to
+ *  the same dev server).
+ *
+ *  The key was called `target` before alpha52 (renamed: deno.json also carries
+ *  `build.targets`, a DIFFERENT axis — two meanings of "target" in one file).
+ *  The old spelling still works, with a one-time boot hint; `client` wins when
+ *  both are present.
  *
  *  Entry-relative via {@link appDenoJson}, like `version` and `title`: read
- *  from the launch cwd, a compiled `"target": "browser"` app started anywhere
+ *  from the launch cwd, a compiled `"client": "browser"` app started anywhere
  *  else fell back to ELECTRON and began downloading a ~100MB runtime on a
  *  headless server — or picked up an unrelated project's target. */
 /** @internal exported for its test — the mapping AND its entry-relative source
  *  are both load-bearing, and a compiled binary cannot be asked from inside. */
+let _hintedDenoJsonTargetKey = false;
 export function _denoJsonTargetClient():
   | "browser"
   | "electron"
   | "cli"
   | "server-only"
   | undefined {
-  switch (appDenoJson()?.target) {
+  const dj = appDenoJson();
+  const raw = dj?.client ?? dj?.target;
+  if (dj?.target !== undefined && !_hintedDenoJsonTargetKey) {
+    _hintedDenoJsonTargetKey = true;
+    // Two spellings at once must not resolve SILENTLY — say which one won.
+    log.warn(
+      dj?.client !== undefined
+        ? `deno.json has BOTH "client" (${JSON.stringify(dj.client)}) and ` +
+          `the deprecated "target" (${JSON.stringify(dj.target)}) — ` +
+          `"client" wins; delete "target" (\`am fix\` does it)`
+        : 'deno.json "target" is now "client" (same value — renamed so it ' +
+          "can't be confused with build.targets) — `am fix` rewrites it",
+    );
+  }
+  switch (raw) {
     case "browser":
     case "android":
       return "browser";
@@ -260,9 +281,20 @@ function _inferBaseDir(): string {
 /** Single entry point — boots KV, server, electron, wires everything. CLI
  *  args override config. (perfect-aio D9: the legacy 2-arg
  *  `aio.run(initialState, config)` overload was removed — zero callers
- *  existed; `aio.run({ cells })` / zero-config `aio.run()` is the API.) */
+ *  existed; `aio.run({ cells })` / zero-config `aio.run()` is the API.)
+ *
+ *  Optionally TYPED (alpha52, additive): `aio.run<MyAppState>({ cells })`
+ *  types `app.state` / `app.getState()` instead of `any`. The default stays
+ *  `any` for compatibility — existing untyped calls infer exactly as before. */
 // deno-lint-ignore no-explicit-any
 async function run(fc?: CellsConfig): Promise<AioApp<any, any>>;
+// Typed overload — selected only by an explicit type argument, so untyped
+// calls keep the exact pre-alpha52 `any` inference (no new circularity in
+// configs whose closures reference the resulting app).
+async function run<S extends Record<string, unknown>>(
+  fc?: CellsConfig,
+  // deno-lint-ignore no-explicit-any
+): Promise<AioApp<S, any>>;
 // deno-lint-ignore no-explicit-any
 async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
   // Fail fast on an unsupported Deno — aio uses ≥2.9 behavior directly.
@@ -454,12 +486,15 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
     // Emitted from one loop so a cell tripping both signals is told once, and
     // the `access` message wins because it is the more specific and the more
     // actionable of the two.
+    // Per-user auth in ANY form (users map, resolveUser hook, auth flows)
+    // means strangers with different privileges share this app's broadcast.
+    const _multiUser = !!fc.users || !!fc.resolveUser || !!fc.auth;
     const _openCells: string[] = [];
     for (const r of visibilityReport) {
       if (r.ui !== "all" || r.fields.length === 0) continue;
-      // An explicit `ui` — including `ui: "all"` — is an answer, and silences
-      // this forever. Acknowledging costs one word, so the warning can never
-      // become the kind of noise people mute wholesale.
+      // An explicit `visible` — including `visible: "all"` — is an answer, and
+      // silences this forever. Acknowledging costs one word, so the warning can
+      // never become the kind of noise people mute wholesale.
       if (r.access !== undefined && !r.uiDecided) {
         const a = r.access;
         const what = a === false
@@ -472,40 +507,58 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
           : `access: ${JSON.stringify(a)} restricts method calls to that ` +
             `role, but it`;
         const one = r.fields.length === 1;
-        log.warn(
-          `[${r.cell}] ${what} does NOT hide state. With no \`ui\` filter, ${
+        const msg =
+          `[${r.cell}] ${what} does NOT hide state. With no \`visible\` ` +
+          `declaration, ${
             one ? "its field" : `all ${r.fields.length} fields`
           } [${r.fields.map((k) => `"${k}"`).join(", ")}] ${
             one ? "is" : "are"
           } broadcast in full to every connected client — including ` +
-            `unauthenticated ones. ` +
-            // A sync cell CANNOT narrow its read side: CRDT replication sends
-            // ops to every peer by construction, and composition refuses to
-            // start a sync cell that hides state. Offering it a `ui` filter
-            // would be advice that hard-fails at the next boot.
-            (r.syncs
-              ? `This cell is sync: true, so its reads cannot be narrowed — ` +
-                `CRDT replication carries it to every peer, and a sync cell ` +
-                `that hides state is refused at boot. Either drop sync on it, ` +
-                `or confirm the audience is right and say so — ui: "all" — ` +
-                `and this notice goes away.`
-              : `Decide the read side too: ui: "none" (state stays ` +
-                `server-side), ui: { exclude: [...] }, or ui.forUser for a ` +
-                `per-user view. If everyone really may read it, say so — ` +
-                `ui: "all" — and this notice goes away.`),
+          `unauthenticated ones. ` +
+          // A sync cell CANNOT narrow its read side: CRDT replication sends
+          // ops to every peer by construction, and composition refuses to
+          // start a sync cell that hides state. Offering it a `visible`
+          // filter would be advice that hard-fails at the next boot.
+          (r.syncs
+            ? `This cell is sync: true, so its reads cannot be narrowed — ` +
+              `CRDT replication carries it to every peer, and a sync cell ` +
+              `that hides state is refused at boot. Either drop sync on it, ` +
+              `or confirm the audience is right and say so — visible: "all".`
+            : `Decide the read side too: visible: "none" (state stays ` +
+              `server-side), visible: { exclude: [...] }, or visible.forUser ` +
+              `for a per-user view. If everyone really may read it, say so — ` +
+              `visible: "all".`);
+        // alpha52: on an app whose audience is real (exposed to the network,
+        // or multi-user) an author-declared `access` with an undecided read
+        // side REFUSES to boot — the author's own declaration contradicts what
+        // would ship, and a warning under a real audience is shippable. On a
+        // loopback single-user app the same finding stays a warning (dev
+        // stays stricter than nothing, but a local tool must not brick).
+        if (_exposed || _multiUser) {
+          throw new Error(
+            `[aio] refusing to start (${
+              _exposed
+                ? "this app is exposed to the network"
+                : "multi-user auth is on"
+            }). ${msg} One-word acknowledgement: visible: "all".`,
+          );
+        }
+        log.warn(
+          `${msg} (This becomes a boot refusal under --expose or ` +
+            `multi-user auth.)`,
         );
         continue;
       }
-      if (_exposed || fc.users || fc.resolveUser) _openCells.push(r.cell);
+      if (_exposed || _multiUser) _openCells.push(r.cell);
     }
     if (_openCells.length) {
       const mode = _exposed
         ? (parseCli().expose ? "--expose" : "expose: true")
         : "multi-user auth";
       log.warn(
-        `${mode} with ui="all" on cells: ${
+        `${mode} with visible="all" on cells: ${
           _openCells.join(", ")
-        } — every authenticated client sees this state. Narrow with ui:{include:[...]} if needed.`,
+        } — every authenticated client sees this state. Narrow with visible:{include:[...]} if needed.`,
       );
     }
 
@@ -1331,6 +1384,10 @@ async function _run<S, A, E>(
    *  snapshot too — not just for whichever app got there first. */
   const _unregisterRuntime = registerRuntime(() => shutdown());
 
+  // Content-addressed blob store (tier ③) — resolved through the SAME
+  // registered app dirs everything else uses; lazy (no dirs until first put).
+  const blobStore = openBlobStore(appId, config.appDir);
+
   const app = buildAppObject<S, A>({
     dispatch: appDispatch,
     getState: () => state,
@@ -1352,6 +1409,7 @@ async function _run<S, A, E>(
     shutdown,
     sessionStore,
     userStore,
+    blobs: blobStore,
   });
 
   // --- Phase 4: start transport + lifecycle ---
@@ -1375,9 +1433,37 @@ async function _run<S, A, E>(
   // second. Skipping resolution for an `auth: true` app therefore silenced that
   // refusal and booted an app whose advertised key gated nothing, which is the
   // exact failure the refusal exists to prevent.
+  // alpha52: exposed with NO auth story at all (no users/resolveUser/auth,
+  // `key` undecided) now defaults to `key: true` — a generated shared key,
+  // persisted 0600, carried by the share link — instead of an app open to
+  // everyone on the network. `key: false` is the explicit opt-out (aiol's
+  // migration fix inserts it to preserve a pre-alpha52 open app).
+  const _cfgKey = (config as { key?: string | boolean }).key;
+  const { key: _effKey, defaulted: _keyDefaulted } = defaultAppKeyConfig({
+    expose,
+    perUserAuth: _perUserAuth,
+    key: _cfgKey,
+  });
   const _keyRes = (expose && !users && !_resolveUser)
-    ? resolveAppKey(appId, (config as { key?: string | boolean }).key)
+    ? resolveAppKey(appId, _effKey)
     : { key: undefined, persisted: false, explicit: false };
+  if (_keyDefaulted && _keyRes.key) {
+    log.warn(
+      `--expose with no \`key\` configured — generated a shared app key ` +
+        `(persisted at ${appKeyPath(appId)}, mode 0600; stable across ` +
+        `restarts). The share link below carries it; devices pair by PIN. ` +
+        `This is the alpha52 default. To run OPEN to everyone on the ` +
+        `network, say so explicitly: key: false.`,
+    );
+  }
+  if (_cfgKey === false && expose && !_perUserAuth) {
+    log.warn(
+      `--expose with key: false — this app is OPEN: anyone who can reach ` +
+        `the port can read broadcast state and call methods. If that is not ` +
+        `intended, delete \`key: false\` (a shared key is generated) or add ` +
+        `per-user auth (users/resolveUser/auth).`,
+    );
+  }
   // An app that MOVED from `key: true --expose` to per-user auth left its old
   // `app.key` on disk, and nothing ever cleared it: `resolveAppKey` owns "the
   // key file tells the truth" but only runs on the shared-key path. `am profile`
@@ -1451,6 +1537,7 @@ async function _run<S, A, E>(
       snapshot: () => app.snapshot!(),
       loadSnapshot: (json) => app.loadSnapshot!(json),
     },
+    blobs: blobStore,
     vitalsSystem,
     costMeter,
     useElectron,
@@ -1514,6 +1601,7 @@ async function _run<S, A, E>(
     port,
     token,
     users,
+    perUserAuth: _perUserAuth,
     tlsCert: transport.tlsCert,
     shareUrl: transport.shareUrl,
     localUrl: transport.localUrl,

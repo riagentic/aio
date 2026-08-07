@@ -13,6 +13,8 @@ How AIO stores, syncs, and transports state.
 - [Auto-Persist](auto-persist.md) — automatic state persistence to SQLite
   (`aio_kv`)
 - [SQLite](sqlite.md) — schema, queries, transactions, WAL
+- [Big Data: The Four Tiers](big-data.md) — what belongs in cell state vs `db:`
+  tables vs files vs `.server.ts` pipelines, and the size guardrails
 
 ## Sync
 

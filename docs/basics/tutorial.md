@@ -25,7 +25,7 @@ const counter = cell("counter", {
 await aio.run({
   appId: "tutorial",
   cells: [counter],
-  cellDefaults: { persist: "all", ui: "all" },
+  cellDefaults: { persist: "all", visible: "all" },
 });
 ```
 
@@ -185,7 +185,7 @@ Both `persist` and `ui` accept: `"all"` (default), `"none"`,
 const settings = cell("settings", {
   state: { theme: "dark", apiKey: "", cache: {} },
   persist: { exclude: ["apiKey"] }, // don't write the secret to disk…
-  ui: { exclude: ["apiKey"] }, // …and don't sync it to clients
+  visible: { exclude: ["apiKey"] }, // …and don't sync it to clients
   methods: {/* ... */},
 });
 ```

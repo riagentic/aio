@@ -5,8 +5,6 @@
 
 import { assert, assertEquals, assertExists } from "@std/assert";
 import {
-  actions,
-  effects,
   ensureConnected,
   Link,
   matchPath,
@@ -89,13 +87,8 @@ Deno.test("browser-air: exports msg without payload", () => {
   assertEquals(m.payload, {});
 });
 
-Deno.test("browser-air: exports actions/effects factory", () => {
-  const a = actions({ Inc: (n: number) => ({ by: n }) });
-  assertEquals(a.Inc, "Inc");
-  assertEquals(typeof a.inc, "function");
-  const action = a.inc(5);
-  assertEquals(action, { type: "Inc", payload: { by: 5 } });
-});
+// (`actions`/`effects` — the alpha27 factory relic — were deleted in alpha52;
+// tests/browser-air-surface.test.ts now gates the entry's whole export set.)
 
 Deno.test("browser-air: exports schedule", () => {
   assertExists(schedule.after);

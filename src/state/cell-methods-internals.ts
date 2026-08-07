@@ -21,8 +21,112 @@ import {
   type Msg,
   type ScopedApp,
 } from "./cell-types.ts";
+import { resolveSelfAction } from "./self.ts";
+import { materializeValue, withDraftDo } from "./cell-impl.ts";
+import { current, type Draft, isDraft } from "immer";
 import { type AioError, createAioError } from "../diagnostics/error.ts";
 import { log } from "../diagnostics/logger.ts";
+
+// ── The effect channel: s.$do (alpha52) ────────────────────────────────
+
+type Effect = ScheduleEffect | OwnEffect;
+
+/** One-time-per-method deprecation hints for the old return-effects channel. */
+const _returnHinted = new Set<string>();
+/** @internal test seam — re-arm the one-time hints. */
+export function _resetReturnEffectHints(): void {
+  _returnHinted.clear();
+}
+
+function hintReturnedEffects(cellName: string, methodKey: string): void {
+  const k = `${cellName}:${methodKey}`;
+  if (_returnHinted.has(k)) return;
+  _returnHinted.add(k);
+  log.warn(
+    "cell",
+    `[${cellName}] method '${methodKey}' returned effect(s) — return-ed ` +
+      `effects are deprecated: call s.$do(effect) inside the method and use ` +
+      `\`return\` for values only. aiol --safe-fix rewrites this. ` +
+      `(hinted once per method)`,
+  );
+}
+
+function describeNonEffect(v: unknown): string {
+  if (v === null) return "null";
+  if (Array.isArray(v)) return "an array";
+  const t = typeof v;
+  if (t === "object") {
+    const type = (v as { type?: unknown }).type;
+    return typeof type === "string"
+      ? `an object with type "${type}"`
+      : "an object";
+  }
+  return t === "function" ? "a function" : `${t} ${JSON.stringify(v)}`;
+}
+
+/** Detach Immer drafts anywhere inside an effect (payloads referencing the
+ *  method's `s` — `payload: { args: [s.items] }`). A draft is a Proxy, which
+ *  structuredClone REFUSES, so an un-detached ref meant the effect was
+ *  loudly dropped at the clone seam. `current()` snapshots the draft's value
+ *  at capture time — exactly what the author meant. Untouched subtrees keep
+ *  their identity (zero cost for the common plain-payload case). */
+function detachDrafts(v: unknown): unknown {
+  if (v === null || typeof v !== "object") return v;
+  // deno-lint-ignore no-explicit-any
+  if (isDraft(v)) return current(v as Draft<any>);
+  if (Array.isArray(v)) {
+    let out: unknown[] | null = null;
+    for (let i = 0; i < v.length; i++) {
+      const m = detachDrafts(v[i]);
+      if (m !== v[i] && out === null) out = v.slice();
+      if (out !== null) out[i] = m;
+    }
+    return out ?? v;
+  }
+  let outObj: Record<string, unknown> | null = null;
+  for (const k of Object.keys(v as Record<string, unknown>)) {
+    const cur = (v as Record<string, unknown>)[k];
+    const m = detachDrafts(cur);
+    if (m !== cur && outObj === null) {
+      outObj = { ...(v as object) } as Record<string, unknown>;
+    }
+    if (outObj !== null) outObj[k] = m;
+  }
+  return outObj ?? v;
+}
+
+/** Validate + self-resolve one `$do` argument — the shared gate for the sync
+ *  collector and the async immediate-dispatch path. Throws loud on anything
+ *  that is not a schedule/own effect. */
+function toDoneEffect(
+  cellName: string,
+  methodKey: string,
+  v: unknown,
+  hasMethod: (m: string) => boolean,
+  knownMethods: () => string[],
+): Effect {
+  if (!isScheduleEffect(v) && !isOwnEffect(v)) {
+    throw new Error(
+      `[${cellName}] ${methodKey}(): s.$do(...) only takes effects ` +
+        `(schedule.* / own.*) — got ${describeNonEffect(v)}. To run another ` +
+        `method, call it directly (or schedule it: ` +
+        `s.$do(schedule.next("id", self("method")))); to hand a value to the ` +
+        `caller, just \`return\` it.`,
+    );
+  }
+  // Resolve self("m") at the capture site — the only place the owning cell is
+  // known — so an unknown method throws HERE, in the method's own stack.
+  if (isScheduleEffect(v) && v.kind !== "cancel") {
+    const action = resolveSelfAction(
+      v.action,
+      cellName,
+      hasMethod,
+      knownMethods,
+    );
+    if (action !== v.action) return { ...v, action };
+  }
+  return v;
+}
 
 // ── Machine builder ────────────────────────────────────────────────────
 
@@ -122,6 +226,36 @@ export function buildMethodsMachine(
   return machine;
 }
 
+// ── Return-array classification ────────────────────────────────────────
+
+/** ONE decider for what a method's returned ARRAY means — shared by the sync
+ *  reducer and the async executor. The two paths used to disagree: sync looked
+ *  only at element[0] (so `[effect, data]` dispatched the data as a bogus
+ *  effect), async required `every(isEffect)` (so the same return silently never
+ *  armed the timer and handed the whole array back as a value). All elements
+ *  effects → effects; none → value; a MIX has no coherent meaning, so it throws
+ *  the same teachable error on both paths (sync: REDUCE_ERROR rejects the
+ *  caller; async: the catch rejects the caller — loud either way). */
+export function classifyReturnedArray(
+  cellName: string,
+  methodKey: string,
+  value: readonly unknown[],
+): "effects" | "value" {
+  let effects = 0;
+  for (const v of value) {
+    if (isScheduleEffect(v) || isOwnEffect(v)) effects++;
+  }
+  if (effects === 0) return "value";
+  if (effects === value.length) return "effects";
+  throw new Error(
+    `[${cellName}] method '${methodKey}' returned an array mixing ${effects} ` +
+      `effect(s) with ${value.length - effects} plain value(s) — effects and ` +
+      `values cannot share a return array. Return ONLY effects ` +
+      `(schedule.*/own.*) to run them, or ONLY data to hand the array to the ` +
+      `caller; to do both, write the data to state and return the effects.`,
+  );
+}
+
 // ── Reducer builder ────────────────────────────────────────────────────
 
 /** Build the CellReduceFn for a methods-based cell. */
@@ -144,9 +278,14 @@ export function buildMethodsReducer(
   // ran it), a returned DATA array was misclassified as effects and blamed on
   // the FOREIGN action, and a dropped `own.set(...)` leaked its factory in
   // pendingFactories for the process lifetime.
+  // The dispatching cell's method set — what self("m") resolves against.
+  const hasMethod = (m: string) => typeof methods[m] === "function";
+  const knownMethods = () => Object.keys(methods);
   const classify = (
     key: string,
     result: unknown,
+    // Effects the method ran via `s.$do(...)` — already validated + resolved.
+    captured: Effect[] = [],
   ): ReturnType<CellReduceFn> => {
     // AIO-8.2: a sync-classified method returning a thenable means the build
     // transpiled async functions (constructor.name check defeated). The
@@ -171,24 +310,86 @@ export function buildMethodsReducer(
       );
     }
     // A single tagged effect → wrapped to the reducer's effects array; an
-    // all-effect array → passed through as effects; anything else (primitive,
-    // plain object, data array, `[]`) is a transported VALUE, wrapped in a
-    // RETURN_TAG envelope so compose-reduce never mistakes it for a `Msg[]`
-    // effects array.
+    // all-effect array (classifyReturnedArray — shared with the async path) →
+    // passed through as effects; anything else (primitive, plain object, data
+    // array, `[]`) is a transported VALUE, wrapped in a RETURN_TAG envelope so
+    // compose-reduce never mistakes it for a `Msg[]` effects array. A MIXED
+    // array throws (see classifyReturnedArray).
+    //
+    // alpha52: effects the method ran via `s.$do(...)` ride alongside EITHER
+    // outcome — with a value they travel in the envelope (`markReturn(value,
+    // captured)`), with the deprecated return-effects they merge in front.
+    // Returning effects keeps working through beta, with a one-time hint.
+    //
     // `undefined` — and ONLY undefined — means "this method returned nothing".
     // A loose `== null` also swallowed `null`, so a sync method returning the
     // standard not-found sentinel resolved its caller with `undefined` while
     // the identical async method resolved `null`: a sync/async parity break on
     // the documented return contract, on every transport.
-    if (result === undefined) return undefined;
-    if (isScheduleEffect(result) || isOwnEffect(result)) return [result];
+    if (result === undefined) {
+      return captured.length > 0 ? captured : undefined;
+    }
+    if (isScheduleEffect(result) || isOwnEffect(result)) {
+      hintReturnedEffects(prefix, key);
+      return [
+        ...captured,
+        detachDrafts(
+          toDoneEffect(prefix, key, result, hasMethod, knownMethods),
+        ) as Effect,
+      ];
+    }
     if (
       Array.isArray(result) && result.length > 0 &&
-      (isScheduleEffect(result[0]) || isOwnEffect(result[0]))
+      classifyReturnedArray(prefix, key, result) === "effects"
     ) {
-      return result as (Msg | ScheduleEffect | OwnEffect)[];
+      hintReturnedEffects(prefix, key);
+      return [
+        ...captured,
+        ...result.map((e) =>
+          detachDrafts(toDoneEffect(prefix, key, e, hasMethod, knownMethods))
+        ),
+      ] as (Msg | ScheduleEffect | OwnEffect)[];
     }
-    return markReturn(result);
+    return markReturn(result, captured.length > 0 ? captured : undefined);
+  };
+  /** Run a sync method with `s.$do` served on its draft, then classify. */
+  const runSync = (
+    key: string,
+    fn: SyncMethod<Record<string, unknown>>,
+    s: Record<string, unknown>,
+    args: unknown[],
+  ): ReturnType<CellReduceFn> => {
+    const captured: Effect[] = [];
+    const doFn = (...effects: unknown[]) => {
+      if (effects.length === 0) {
+        throw new Error(
+          `[${prefix}] ${key}(): s.$do() called with no effect — pass one or ` +
+            `more schedule.*/own.* effects.`,
+        );
+      }
+      for (const e of effects) {
+        captured.push(
+          detachDrafts(
+            toDoneEffect(prefix, key, e, hasMethod, knownMethods),
+          ) as Effect,
+        );
+      }
+    };
+    // A missing slice (a raw `composed.reduce` on a state that never booted
+    // the cell) hands a non-object draft through — a Proxy target must be an
+    // object, and the method's own error (not a proxy TypeError) is the
+    // informative one.
+    const wrapped = s !== null && typeof s === "object"
+      ? withDraftDo(s, doFn)
+      : s;
+    let result: unknown = fn(
+      wrapped as Parameters<SyncMethod<Record<string, unknown>>>[0],
+      ...args,
+    );
+    // `return s` must hand back the real draft, not the wrapper (snapshotReturn
+    // relies on isDraft).
+    if (result === wrapped) result = s;
+    return classify(key, result, captured);
   };
   return (
     state: unknown,
@@ -206,9 +407,11 @@ export function buildMethodsReducer(
         //. Non-method triggers pass payload as-is.
         const p = action.payload as { args?: unknown[] } | undefined;
         const args = p && Array.isArray(p.args) ? p.args : [action.payload];
-        return classify(
+        return runSync(
           foreignKey,
-          (handler as SyncMethod<Record<string, unknown>>)(s, ...args),
+          handler as SyncMethod<Record<string, unknown>>,
+          s,
+          args,
         );
       }
     }
@@ -241,12 +444,11 @@ export function buildMethodsReducer(
         const args =
           ((action.payload as Record<string, unknown>)?.args as unknown[]) ??
             [];
-        return classify(
+        return runSync(
           ownKey,
-          (method as SyncMethod<Record<string, unknown>>)(
-            s as Record<string, unknown>,
-            ...args,
-          ),
+          method as SyncMethod<Record<string, unknown>>,
+          s as Record<string, unknown>,
+          args,
         );
       }
       if (asyncMethods.has(ownKey)) {
@@ -312,10 +514,13 @@ export function buildMethodsExecutor(
 
       // Transactional methods: reads see a STABLE snapshot captured
       // at entry (an `await` never changes them), and writes buffer + commit
-      // atomically at return. Opt-in via `transaction: true`; off ⇒ today's
-      // live-read/incremental-commit behavior, byte-identical.
-      const transactional = !!(config as { transaction?: unknown } | undefined)
-        ?.transaction;
+      // atomically at return. alpha52: this is the DEFAULT for async methods —
+      // `transaction: false` opts out into the old live-read/incremental-commit
+      // behavior. Mid-method publishing is spelled `s.$commit()`; deliberately
+      // fresh reads are `s.$live`.
+      const transactional =
+        (config as { transaction?: unknown } | undefined)?.transaction !==
+          false;
       // Cancellation (perfect-aio D1): every async call gets an
       // AbortController; cancelOn triggers abort it, the method observes it via
       // `s.$signal`. Untracked on settle either way.
@@ -468,6 +673,37 @@ export function buildMethodsExecutor(
           }
           : undefined;
         const live = () => app.getState() as Record<string, unknown>;
+        // `s.$do(effect, ...)` — the effect channel (alpha52). Dispatched
+        // IMMEDIATELY (not buffered to method return): the effect rides the
+        // cell's `__effects` bridge in the same tick, so an `own.set` factory
+        // is consumed while its token is fresh — the parked-factory registry
+        // only carries the deprecated return path now. Validation and self()
+        // resolution are the same gate the sync collector uses.
+        const doDispatch = (...effects: unknown[]) => {
+          if (effects.length === 0) {
+            throw new Error(
+              `[${name}] ${_method}(): s.$do() called with no effect — pass ` +
+                `one or more schedule.*/own.* effects.`,
+            );
+          }
+          const resolved = effects.map((e) =>
+            // materializeValue: a payload referencing the live proxy
+            // (`payload: { args: [s.items] }`) becomes plain data — a Proxy
+            // would be refused by structuredClone at the effect-clone seam.
+            materializeValue(toDoneEffect(
+              name,
+              _method,
+              e,
+              (m) => typeof methods[m] === "function",
+              () => Object.keys(methods),
+            ))
+          );
+          app.dispatch({
+            type: `${prefix}:__effects`,
+            payload: { effects: resolved },
+            _source: "Effect",
+          } as Msg);
+        };
         // `s.$live` — the sanctioned way out of snapshot isolation: same
         // batcher (so writes still commit atomically), unwatched reads (they
         // are current by construction), built only if the method asks for it.
@@ -486,6 +722,9 @@ export function buildMethodsExecutor(
             // Same commit closure as the pinned proxy — `s.$live.$commit()`
             // must publish, not silently no-op.
             commit,
+            undefined,
+            undefined,
+            doDispatch,
           );
         const proxy = createLiveProxy(
           name,
@@ -500,9 +739,10 @@ export function buildMethodsExecutor(
           commit,
           watch,
           transactional ? liveView : undefined,
+          doDispatch,
         );
         return (method as AsyncMethod<Record<string, unknown>>)(
-          proxy as Record<string, unknown>,
+          proxy as Parameters<AsyncMethod<Record<string, unknown>>>[0],
           ..._args,
         )
           .finally(() => untrack())
@@ -566,19 +806,33 @@ export function buildMethodsExecutor(
             // AIO-381/382: async methods can return schedule + own effects,
             // same as sync methods. Detection is conservative — only
             // `__schedule`/`__own`-typed values count, so data returns to
-            // direct callers are never eaten.
-            const isRuntimeEffect = (v: unknown) =>
-              isScheduleEffect(v) || isOwnEffect(v);
-            const retEffects = isRuntimeEffect(value)
+            // direct callers are never eaten. Arrays go through the SAME
+            // classifier as the sync path (classifyReturnedArray): all
+            // effects → effects, none → value, mixed → throws into the
+            // .catch below, which rejects the caller.
+            const retEffects = isScheduleEffect(value) || isOwnEffect(value)
               ? [value as ScheduleEffect | OwnEffect]
               : Array.isArray(value) && value.length > 0 &&
-                  value.every(isRuntimeEffect)
+                  classifyReturnedArray(name, _method, value) === "effects"
               ? value as (ScheduleEffect | OwnEffect)[]
               : [];
             if (retEffects.length > 0) {
+              // Deprecated channel (alpha52): still works through beta, with a
+              // one-time hint — `s.$do(...)` is the way. self() descriptors in
+              // it resolve here (same gate as $do), so they stay loud.
+              hintReturnedEffects(name, _method);
+              const resolved = retEffects.map((e) =>
+                materializeValue(toDoneEffect(
+                  name,
+                  _method,
+                  e,
+                  (m) => typeof methods[m] === "function",
+                  () => Object.keys(methods),
+                ))
+              );
               app.dispatch({
                 type: `${prefix}:__effects`,
-                payload: { effects: retEffects },
+                payload: { effects: resolved },
                 _source: "Effect",
               } as Msg);
             }
@@ -641,11 +895,10 @@ export function buildMethodsExecutor(
       return;
     }
 
-    // Handle effects — methods-style execute config and/or explicit execute handlers
-    const executeHandlers = {
-      ...(typeof config.execute === "object" ? config.execute : {}),
-      ...(explicitExecute ?? {}),
-    } as Record<
+    // Handle effects — explicit execute handlers only. User-config `execute:`
+    // died in alpha27 (cell() throws via removals.ts), so `config.execute` can
+    // never reach here; the sole source is the map a factory passes in.
+    const executeHandlers = (explicitExecute ?? {}) as Record<
       string,
       (app: ScopedApp, payload: unknown) => void | Promise<void>
     >;
@@ -673,14 +926,6 @@ export function buildMethodsExecutor(
           });
         }
       }
-    } else if (config.execute && typeof config.execute === "function") {
-      const emitMap: Record<string, string> = {};
-      for (const k of effectKeys) emitMap[k] = `${prefix}:${k}`;
-      (config.execute as (
-        app: ScopedApp,
-        effect: Msg,
-        ctx: { emit: Record<string, unknown> },
-      ) => void)(app, effect, { emit: emitMap });
     }
   };
 }

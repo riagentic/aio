@@ -13,6 +13,8 @@ export function compareHLC(a: HLC, b: HLC): number {
 
 /**
  * Mutable hybrid logical clock instance bound to a node ID.
+
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
  */
 export interface HLClock {
   now(): HLC;
@@ -24,6 +26,8 @@ export interface HLClock {
 
 /**
  * Create a hybrid logical clock for the given node.
+
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
  */
 export function createHLC(
   nodeId: string,

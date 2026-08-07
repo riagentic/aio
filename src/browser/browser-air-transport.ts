@@ -37,25 +37,46 @@ import {
   detectIPC,
   handleControlFrame,
 } from "./browser-shared.ts";
-import { dec, enc, v1PeerReason } from "../protocol/envelope.ts";
+import {
+  dec,
+  enc,
+  isIgnorableKind,
+  v1PeerReason,
+} from "../protocol/envelope.ts";
 import {
   _armAckTimer,
   _rejectAck,
   _rejectAllPending,
   _rejectInFlight,
   ARMS_ACK_TIMER,
-} from "../protocol/browser-ack.ts";
+} from "./browser-ack.ts";
 import { backoffDelay } from "../protocol/transport-shared.ts";
 import { _showStatus } from "../protocol/protocol-status.ts";
 import { _setDegradedRelay, degradedReport } from "../diagnostics/degraded.ts";
+import { offlineQueue } from "../state/offline-queue.ts";
 
 let _ws: WebSocket | null = null;
 let _closed = false;
 let _connecting = false;
 let _wasConnected = false;
 let _retry = 0;
-let _queue: Array<{ type: string; payload?: unknown }> = [];
 const QUEUE_MAX = 1000;
+// The ONE queue implementation + drop policy, shared with the isomorphic
+// core's send() queue (state/state-transport.ts): at cap the OLDEST action is
+// dropped — its pending ack rejects immediately inside the factory (its
+// caller would otherwise wait out the full 15s ceiling for a frame that was
+// thrown away locally, instantly, and knowably) — and this instance's
+// diagnostic fires.
+const _queue = offlineQueue(QUEUE_MAX, () => {
+  diagEmit({
+    type: "browser-air-transport:queue-drop",
+    severity: "warning",
+    source: "browser-air-transport",
+    message: "Queued action dropped (queue full)",
+    detail: { max: QUEUE_MAX },
+    hint: "Check network connectivity or reduce mutation rate",
+  });
+});
 let _connectionDegraded = false;
 
 /** The one fraction that means "this connection is in trouble". Both offline
@@ -65,7 +86,7 @@ let _connectionDegraded = false;
 const DEGRADED_AT = 0.8;
 
 function _updateDegraded(): void {
-  const degraded = _queue.length > QUEUE_MAX * DEGRADED_AT;
+  const degraded = _queue.fullness() > DEGRADED_AT;
   if (_connectionDegraded !== degraded) _connectionDegraded = degraded;
 }
 
@@ -197,6 +218,9 @@ function _route(line: string): void {
       _handleState({ $patches: f.d });
       return;
     default:
+      // Reserved-ignorable kinds ("x" extension frames) skip silently BY
+      // CONTRACT — see IGNORABLE in envelope.ts.
+      if (isIgnorableKind(f.t)) return;
       console.warn(`[aio:air] unexpected "${f.t}" frame — dropped`);
       return;
   }
@@ -226,8 +250,7 @@ function _protoMismatch(reason: string) {
  *  disconnect (and flushes on reconnect) but nothing else, so every path that
  *  discards it owes those callers an error instead of silence. */
 function _dropQueue(why: string): void {
-  const q = _queue;
-  _queue = [];
+  const q = _queue.drain();
   _connectionDegraded = false;
   _offlineWarned = false;
   if (q.length === 0) return;
@@ -236,8 +259,7 @@ function _dropQueue(why: string): void {
       `never sent; their callers reject.`,
   );
   for (const a of q) {
-    const cid = (a as { cid?: string }).cid;
-    if (cid) _rejectAck(cid, new Error(`action was never sent — ${why}`));
+    if (a.cid) _rejectAck(a.cid, new Error(`action was never sent — ${why}`));
   }
 }
 
@@ -261,15 +283,13 @@ function _noteQueued(): void {
 }
 
 function _flushQueue(send: (d: string) => void) {
-  const q = _queue;
-  _queue = [];
+  const q = _queue.drain();
   _connectionDegraded = false;
   _offlineWarned = false;
   for (const a of q) {
     send(enc("action", a));
     // The frame is out now — this is when a queued call's ack clock starts.
-    const cid = (a as { cid?: string }).cid;
-    if (cid) _armAckTimer(cid);
+    if (a.cid) _armAckTimer(a.cid);
   }
 }
 
@@ -449,25 +469,8 @@ function _connect() {
  *  action get queued" is one question; it had two answers, and only one of them
  *  was the one everything else was written against. */
 function _enqueue(tagged: { type: string; payload?: unknown }): void {
-  if (_queue.length >= QUEUE_MAX) {
-    // The dropped action already has a pending ack with its timer running.
-    // Dropping it silently left its caller to wait out the full ceiling and
-    // then hear "no response after 15000ms" — a timeout story for something
-    // that was thrown away locally, instantly, and knowably.
-    const dropped = _queue.shift();
-    const dcid = (dropped as { cid?: string } | undefined)?.cid;
-    if (dcid) {
-      _rejectAck(dcid, new Error("action dropped — offline queue full"));
-    }
-    diagEmit({
-      type: "browser-air-transport:queue-drop",
-      severity: "warning",
-      source: "browser-air-transport",
-      message: "Queued action dropped (queue full)",
-      detail: { max: QUEUE_MAX },
-      hint: "Check network connectivity or reduce mutation rate",
-    });
-  }
+  // The drop policy (oldest-first + reject-that-ack) and its diagnostic live
+  // in the shared factory — see offline-queue.ts.
   _queue.push(tagged);
   _updateDegraded();
   _noteQueued();

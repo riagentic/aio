@@ -10,7 +10,7 @@ import {
   _registerAck,
   _rejectAllPending,
   _setAckTimeoutMs,
-} from "../src/protocol/browser-ack.ts";
+} from "../src/browser/browser-ack.ts";
 
 const ack = (cid: string, ok: boolean) =>
   dec(JSON.stringify({ v: 2, t: "ack", d: { cid, ok } }))!;

@@ -41,8 +41,12 @@ enablePatches();
 // ── Re-exports (public API) ──────────────────────────────────────────
 
 // Types
-export type { AioIPC, CellRef, Transport } from "./state/state-transport.ts";
+export type { Transport } from "./state/state-transport.ts";
+/** @internal Adapter plumbing — not public API, stripped from the snapshot. */
+export type { AioIPC, CellRef } from "./state/state-transport.ts";
+/** @internal Adapter plumbing — not public API, stripped from the snapshot. */
 export type { HandleResult } from "./state/state-message.ts";
+/** @internal Adapter plumbing — not public API, stripped from the snapshot. */
 export type { ArrayRefStats } from "./state/state-array-utils.ts";
 
 // Array utilities
@@ -57,14 +61,14 @@ export {
 } from "./state/state-array-utils.ts";
 
 // Signals
-export {
-  getCellSignal,
-  getConnectedSignal,
-  getStateSignal,
-  setConnected,
-} from "./state/state-signals.ts";
+export { getCellSignal, getStateSignal } from "./state/state-signals.ts";
+/** @internal Framework wiring (alpha52 sweep) — not public API, stripped from
+ *  the snapshot. The public custom-transport set is: getStateSignal,
+ *  getCellSignal, send, setTransport, Transport, ready, handleMessage. */
+export { getConnectedSignal, setConnected } from "./state/state-signals.ts";
 
 // Subscriptions
+/** @internal Framework wiring (alpha52 sweep) — not public API, stripped from the snapshot. */
 export {
   cancelSubsTimer,
   collapsePaths,
@@ -75,10 +79,11 @@ export {
 export { _accessedPaths } from "./state/state-subs.ts";
 
 // Transport & dispatch
+export { send } from "./state/state-transport.ts";
+/** @internal Framework wiring (alpha52 sweep) — not public API, stripped from the snapshot. */
 export {
   createSendProxy,
   flushOfflineQueue,
-  send,
   setSyncHandler,
 } from "./state/state-transport.ts";
 /** @internal Cross-module wiring — not public API, stripped from the snapshot. */
@@ -89,11 +94,9 @@ export {
 } from "./state/state-transport.ts";
 
 // Message handling & lifecycle
-export {
-  handleMessage,
-  isInitialStateReceived,
-  ready,
-} from "./state/state-message.ts";
+export { handleMessage, ready } from "./state/state-message.ts";
+/** @internal Framework wiring (alpha52 sweep) — not public API, stripped from the snapshot. */
+export { isInitialStateReceived } from "./state/state-message.ts";
 
 // ── setTransport (orchestrates initialStateReceived reset + queue flush) ──
 

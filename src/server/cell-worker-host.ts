@@ -25,8 +25,8 @@ import { nameIsTaken } from "../state/cell-helpers.ts";
 import { composeCells } from "../state/cell-compose.ts";
 import { getRegisteredCells } from "../state/cell-reactive.ts";
 import { createDispatch } from "../state/dispatch.ts";
-import { isScheduleEffect } from "../state/schedule.ts";
-import { createOwnManager, isOwnEffect } from "../state/own.ts";
+import { createOwnManager } from "../state/own.ts";
+import { routeEffect } from "../state/route-effect.ts";
 import type { CellDef, Msg } from "../state/cell-types.ts";
 import {
   type AmbientContext,
@@ -199,31 +199,32 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
       }
       return r;
     },
-    execute: (effect) => {
-      // Resources are acquired and disposed on the thread that owns them.
-      if (isOwnEffect(effect)) {
-        ownWorker.handle(effect);
-        return;
-      }
-      // The scheduler is a main-isolate singleton — timers stay there.
-      if (isScheduleEffect(effect)) {
-        post({ t: "effects", list: [effect as unknown as Msg] });
-        return;
-      }
-      const type = (effect as Msg).type;
-      const prefix = typeof type === "string"
-        ? type.slice(0, type.indexOf(":"))
-        : "";
-      if (prefix === name) {
-        // Our own machinery (async-method triggers) — must run here.
-        composed.execute(
-          { dispatch: (a: Msg) => void dispatch(a), getState: () => state },
-          effect as Msg,
-        );
-        return;
-      }
-      post({ t: "effects", list: [effect as Msg] }); // cross-cell → main
-    },
+    execute: (effect) =>
+      // ONE exhaustive classifier for all three effect runtimes — a new
+      // framework effect kind is a compile error here (see route-effect.ts).
+      // This host's SEMANTICS stay its own: resources local, timers forwarded,
+      // app effects split by own-prefix.
+      routeEffect<Msg>(effect, {
+        // Resources are acquired and disposed on the thread that owns them.
+        own: (e) => ownWorker.handle(e),
+        // The scheduler is a main-isolate singleton — timers stay there.
+        schedule: (e) => post({ t: "effects", list: [e as unknown as Msg] }),
+        app: (e) => {
+          const type = e.type;
+          const prefix = typeof type === "string"
+            ? type.slice(0, type.indexOf(":"))
+            : "";
+          if (prefix === name) {
+            // Our own machinery (async-method triggers) — must run here.
+            composed.execute(
+              { dispatch: (a: Msg) => void dispatch(a), getState: () => state },
+              e,
+            );
+            return;
+          }
+          post({ t: "effects", list: [e] }); // cross-cell → main
+        },
+      }),
     getState: () => state,
     setState: (s) => {
       state = s;

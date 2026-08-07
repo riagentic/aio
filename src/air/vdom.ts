@@ -4,6 +4,7 @@
 export type {
   Action,
   ComponentFn,
+  NodeAction,
   Ref,
   RenderCtx,
   VChild,

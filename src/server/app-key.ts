@@ -18,11 +18,32 @@ export interface KeyResolution {
 /**
  * Resolve the app's auth key:
  * - `key: "secret"` → that fixed key (auth on).
- * - `key: false` / omitted → **no framework auth** (the default — the app
- *   does its own user auth, or is deliberately open on a trusted LAN).
+ * - `key: false` / `undefined` → **no framework auth** (open — the app does
+ *   its own user auth, or is deliberately open on a trusted LAN). NOTE the
+ *   CALLER decides the default: since alpha52, aio.ts passes `true` for an
+ *   exposed app with no per-user auth and `key` unset, so "exposed + nothing"
+ *   gets a generated key rather than an open port; `key: false` stays the
+ *   explicit opt-out.
  * - `key: true` → a stable key generated once and persisted in the data dir,
- *   the same across restarts (opt in to framework auth).
+ *   the same across restarts.
  */
+/** THE alpha52 key-default decision, as one pure function so it is pinned by
+ *  a test instead of inferred from boot plumbing: an app that is EXPOSED with
+ *  no per-user auth (users/resolveUser/auth) and no `key` decision behaves as
+ *  `key: true` — a generated, persisted shared key — instead of an app open
+ *  to everyone on the network. `key: false` stays the explicit opt-out;
+ *  loopback (not exposed) and per-user apps are untouched. */
+export function defaultAppKeyConfig(opts: {
+  expose: boolean;
+  perUserAuth: boolean;
+  key: string | boolean | undefined;
+}): { key: string | boolean | undefined; defaulted: boolean } {
+  if (opts.expose && !opts.perUserAuth && opts.key === undefined) {
+    return { key: true, defaulted: true };
+  }
+  return { key: opts.key, defaulted: false };
+}
+
 export function resolveAppKey(
   appId: string,
   configKey: string | boolean | undefined,

@@ -18,6 +18,8 @@ import {
 
 /**
  * Dependencies injected into the server-side sync handler.
+
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
  */
 export interface SyncHandlerDeps {
   /** Apply an accepted op to the live app state (normal dispatch path) —
@@ -73,6 +75,8 @@ export interface SyncHandlerDeps {
 
 /**
  * Server-side handler that persists ops, sends acks, and broadcasts to peers.
+
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
  */
 export interface ServerSyncHandler {
   handleOp: (
@@ -101,6 +105,8 @@ const FORBIDDEN = ["__proto__", "constructor", "prototype"];
 
 /**
  * Validate a sync op has required fields and no proto-pollution vectors.
+
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
  */
 export function isValidSyncOp(
   op: unknown,
@@ -125,6 +131,8 @@ export function isValidSyncOp(
 
 /**
  * Create a server-side sync handler that relays CRDT ops between clients.
+
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
  */
 export function createServerSyncHandler(
   deps: SyncHandlerDeps,

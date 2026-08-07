@@ -15,14 +15,19 @@ Deno.test("call: timeoutMs is the canonical key; bare timeout still works", asyn
   }
   assert(msg.includes("timeout after 20ms"), msg);
 
-  // Deprecated `timeout` alias must still be honored (no silent no-timeout).
+  // alpha52: the `timeout` alias is REMOVED — it must fail LOUD (naming the
+  // rename), never silently run without a timeout.
   msg = "";
   try {
-    await call({ timeout: 20 }, () => new Promise((r) => setTimeout(r, 200)));
+    await call(
+      // deno-lint-ignore no-explicit-any
+      { timeout: 20 } as any,
+      () => new Promise((r) => setTimeout(r, 200)),
+    );
   } catch (e) {
     msg = (e as Error).message;
   }
-  assert(msg.includes("timeout after 20ms"), `alias ignored: ${msg}`);
+  assert(msg.includes("timeoutMs"), `old key must throw the rename: ${msg}`);
 
   // Fast call under the budget resolves normally.
   assertEquals(await call({ timeoutMs: 500 }, () => Promise.resolve(42)), 42);

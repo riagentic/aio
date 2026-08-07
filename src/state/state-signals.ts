@@ -125,12 +125,16 @@ export function getCellSignal(name: string, fallback?: any): Signal<any> {
   return _getOrCreateCellSignal(name, fallback);
 }
 
-/** Returns the connection status signal — `true` when transport is connected. */
+/** Returns the connection status signal — `true` when transport is connected.
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
+ */
 export function getConnectedSignal(): Signal<boolean> {
   return _connected;
 }
 
-/** Update connection status signal. */
+/** Update connection status signal.
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
+ */
 export function setConnected(v: boolean): void {
   _connected.set(v);
 }

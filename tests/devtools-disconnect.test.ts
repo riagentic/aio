@@ -1,5 +1,5 @@
 // tests/devtools-disconnect.test.ts
-// Behavior tests for disconnectDevTools (src/protocol/protocol-devtools.ts,
+// Behavior tests for disconnectDevTools (src/browser/protocol-devtools.ts,
 // public via src/air.ts `connectDevTools, disconnectDevTools`).
 //
 // Strategy: stub window.__REDUX_DEVTOOLS_EXTENSION__ with a fake extension
@@ -17,7 +17,7 @@ import {
   _sendDevTools,
   connectDevTools,
   disconnectDevTools,
-} from "../src/protocol/protocol-devtools.ts";
+} from "../src/browser/protocol-devtools.ts";
 import type { DevToolsConnection } from "../src/protocol/protocol-types.ts";
 import { _reset as _coreReset } from "../src/state-core.ts";
 
