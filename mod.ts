@@ -80,7 +80,8 @@ export type { AioMeta } from "./src/electron/electron.ts";
 // slugify — internal (used by build.ts, not app code)
 
 /** Bind a cell to an app instance; test a cell in isolation with testCell. */
-export { bindCell, testCell } from "./src/state/cell.ts";
+export { bindCell } from "./src/state/cell.ts";
+export { testCell } from "./src/cell-test.ts";
 /** True inside a `worker: true` cell's worker (the app entry is re-imported
  *  there) — guard boot-time work in the entry with it. */
 export { isCellWorker } from "./src/server/cell-worker-protocol.ts";
@@ -104,8 +105,8 @@ export type {
   ScopedApp,
   SendOf,
   StateOf,
-  TestContext,
 } from "./src/state/cell.ts";
+export type { TestContext } from "./src/cell-test.ts";
 
 /**
  * Inter-cell coordination — async methods return Promises with the correct type.
@@ -134,6 +135,11 @@ export type {
 /** Draft annotation for cancellation-aware async methods —
  *  `async place(s: State & Partial<MethodDraftMeta>) { … s.$signal … }` */
 export type { MethodDraftMeta } from "./src/state/cell-impl.ts";
+/** The draft members served on EVERY method invocation (alpha52) — intersect
+ *  it when you annotate `s` yourself and call `s.$do(...)`:
+ *  `tick(s: State & MethodDraftServed) { s.$do(…) }`. An unannotated `s`
+ *  already carries it contextually. */
+export type { MethodDraftServed } from "./src/state/cell-impl.ts";
 
 /**
  * Connect to a remote aio server from a CLI app.
@@ -164,7 +170,10 @@ export type {
   RouteContext,
   RouteOptions,
 } from "./src/server/route.ts";
-export type { CellAccess } from "./src/state/cell-types.ts";
+/** ONE network-access vocabulary (alpha52) for cells (`access:`) and
+ *  serverFns (`{ access }`): true / role-string / predicate. `CellAccess`
+ *  and `ServerFnAccess` are its deprecated aliases (through beta). */
+export type { Access, CellAccess } from "./src/state/cell-types.ts";
 export type { SessionInfo, SessionStore } from "./src/server/sessions.ts";
 export type { AuthUserRecord, UserStore } from "./src/server/auth-users.ts";
 /** The `features` object `/__aio/auth/me` returns — the shape a test's
@@ -203,6 +212,15 @@ export {
 export { schedule } from "./src/state/schedule.ts";
 /** Schedule definition and effect types for timers, intervals, and cron */
 export type { ScheduleDef, ScheduleEffect } from "./src/state/schedule.ts";
+/** Run a self-contained function OFF the main isolate (named, cancellable,
+ *  backpressured worker pool) — the honest top-level home of
+ *  `schedule.blocking` (alpha52; both spellings work). */
+export { blocking } from "./src/state/blocking.ts";
+/** Self-referencing action descriptor — `self("tick")` resolves to THIS cell's
+ *  `tick` action when the effect it rides is captured (alpha52). Kills the
+ *  `: CellEffect` TS7022 annotation for self-scheduling methods. */
+export { self } from "./src/state/self.ts";
+export type { SelfAction } from "./src/state/self.ts";
 
 /**
  * Keyed disposer slots — own native resources (watchers, sockets) from

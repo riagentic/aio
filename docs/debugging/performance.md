@@ -184,7 +184,7 @@ and at `/__aio/vitals`.
 | Blocking FFI / sync-only API           | `schedule.blocking(...)`                                              |
 | A whole CELL that does dangerous work  | `worker: true` on the cell ([cell workers](../state/cell-workers.md)) |
 | Slow work on a timer                   | `schedule.every(...)` whose action does the above                     |
-| Big state clients don't need           | `ui: { exclude: [...] }` — don't ship it at all                       |
+| Big state clients don't need           | `visible: { exclude: [...] }` — don't ship it at all                  |
 
 ## Budget configuration
 
@@ -219,7 +219,7 @@ functional while surfacing issues.
 
 aio warns that your state may be too big in three places (`aiol`'s typed-array
 hint, its state-key count, and the pressure monitor) and ships three remedies
-(`ui:` filters, `cellDefaults`, `syncIntervalMs`). This is how you find out
+(`visible:` filters, `cellDefaults`, `syncIntervalMs`). This is how you find out
 whether any of it applies to you.
 
 ```sh
@@ -270,7 +270,7 @@ separately and never added.
   cell, or patches exceeding `fullStateThreshold` (default: patch > 50% of
   full). A small state often resends fully — that is cheaper, not a bug.
 - A big `state` with a small `bytes/s` is fine: it is _there_, not moving.
-- A big `bytes/s` from one key is the case `ui:` filters exist for.
+- A big `bytes/s` from one key is the case `visible:` filters exist for.
 - `(idle)` means the cell pushed nothing. A cell can burn reduce time and cost
   the wire nothing — "busy but free" is a real and useful answer.
 

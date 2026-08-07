@@ -13,6 +13,8 @@
 // are imported directly by sibling files and NOT exposed here.
 
 export {
+  type Access,
+  type AccessUser,
   type ActionSource,
   type ActionUnion,
   type Catalog,
@@ -44,7 +46,10 @@ export {
   type ComposedCells,
 } from "./cell-compose.ts";
 
-export { testCell, type TestContext } from "../cell-test.ts";
+// NOTE: `testCell` deliberately NOT re-exported here (it lives in
+// src/cell-test.ts, published via `aio/testing` and mod.ts). Re-exporting it
+// made state/ reach server/+testing/ through the root-file conduit —
+// scripts/check-boundaries.ts now errors on exactly that laundering.
 
 export {
   _resetCellRegistry,

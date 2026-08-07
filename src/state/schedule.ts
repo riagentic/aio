@@ -2,6 +2,7 @@
 // Two use cases: config-level always-on schedules, dynamic effects from reducer
 
 import { blocking } from "./blocking.ts";
+import { selfMethodOf } from "./self.ts";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -42,19 +43,20 @@ export type ScheduleEffect =
 /** Config-level schedule definition — passed to aio.run({ schedules: [...] }) */
 export type ScheduleDef =
   & { id: string; action: { type: string; payload?: unknown } }
-  & {
-    /** Skip a tick while the previous one is still running (`every` only).
-     *
-     *  Declared here as well as on `schedule.every()` because THIS is the shape
-     *  apps actually use: `aio.run({ schedules: [...] })` is what `am create`
-     *  scaffolds and what the docs show. Shipping the option only on the
-     *  imperative form meant every declarative poller kept the hand-rolled
-     *  `if (s.refreshing) return` the feature exists to delete — the fix landed
-     *  on the API nobody was using. */
-    skipIfRunning?: boolean;
-  }
   & (
-    | { every: number }
+    | {
+      every: number;
+      /** Skip a tick while the previous one is still running (`every` only —
+       *  alpha52 narrowed the type to say so: a one-shot `after`/`at`/`cron`
+       *  has no "previous tick", so the option was dead weight there).
+       *
+       *  Declared here as well as on `schedule.every()` because THIS is the
+       *  shape apps actually use: `aio.run({ schedules: [...] })` is what
+       *  `am create` scaffolds and what the docs show. Shipping the option
+       *  only on the imperative form meant every declarative poller kept the
+       *  hand-rolled `if (s.refreshing) return` the feature exists to delete. */
+      skipIfRunning?: boolean;
+    }
     | { after: number }
     | { at: string }
     | { cron: string }
@@ -92,6 +94,161 @@ type SA<A> = A extends PromiseLike<unknown> ? {
       "use cell.method.action(...) (or { type: 'cell:method', payload }) instead of cell.method()";
   }
   : ScheduleAction;
+
+/** Options for {@linkcode schedule.backoff}. */
+export type BackoffOpts = {
+  base: number;
+  max?: number;
+  factor?: number;
+};
+/** Options for {@linkcode schedule.poll}. `factor` is the backoff multiplier
+ *  (the old `backoff` key still works, with a one-time hint). */
+export type PollOpts = {
+  every: number;
+  factor?: number;
+  max?: number;
+  /** @deprecated renamed to `factor` (alpha52) — same meaning. */
+  backoff?: number;
+};
+
+// One-time deprecation hints (per id) for the old backoff/poll spellings.
+// console.warn, not the diagnostics logger: the effect creators are
+// isomorphic (inlined browser twin in browser-shared.ts), and the logger's
+// rotation pulls @std/path into the browser graph (browser-deps gate).
+const _schedHinted = new Set<string>();
+function _hintOnce(key: string, msg: string): void {
+  if (_schedHinted.has(key)) return;
+  _schedHinted.add(key);
+  console.warn(`[aio:schedule] ${msg} (hinted once)`);
+}
+
+/** Is this positional arg the ACTION (has a string `.type`) rather than an
+ *  options object? The old order put opts third; the new order puts the action
+ *  third — an opts object never carries `.type`, an action always does. */
+function _isAction(v: unknown): v is ScheduleAction {
+  return !!v && typeof v === "object" &&
+    typeof (v as { type?: unknown }).type === "string";
+}
+
+function _backoffEffect(
+  id: string,
+  attempt: number,
+  opts: BackoffOpts,
+  action: ScheduleAction,
+): ScheduleEffect {
+  const factor = opts.factor ?? 2;
+  const max = opts.max ?? MAX_TIMER_DELAY;
+  const ms = Math.min(
+    opts.base * Math.pow(factor, Math.max(0, attempt)),
+    max,
+  );
+  return {
+    type: "__schedule",
+    kind: "after",
+    id,
+    ms: Math.max(1, Math.round(ms)),
+    action,
+  };
+}
+
+function _pollEffect(
+  id: string,
+  attempt: number,
+  opts: PollOpts,
+  action: ScheduleAction,
+): ScheduleEffect {
+  if (opts.backoff !== undefined && opts.factor === undefined) {
+    _hintOnce(
+      `poll-backoff:${id}`,
+      `schedule.poll '${id}': the \`backoff\` option key is deprecated — ` +
+        `use \`factor\` (same meaning). aiol --safe-fix rewrites this.`,
+    );
+  }
+  const factor = opts.factor ?? opts.backoff ?? 1;
+  const max = opts.max ?? MAX_TIMER_DELAY;
+  const ms = attempt <= 0
+    ? opts.every
+    : Math.min(opts.every * Math.pow(factor, attempt), max);
+  return {
+    type: "__schedule",
+    kind: "after",
+    id,
+    ms: Math.max(1, Math.round(ms)),
+    action,
+  };
+}
+
+/** backoff — both argument orders (see {@linkcode schedule.backoff}). */
+export interface BackoffFn {
+  <A>(
+    id: string,
+    attempt: number,
+    action: ScheduleAction & SA<A> | A & SA<A>,
+    opts: BackoffOpts,
+  ): ScheduleEffect;
+  /** @deprecated the action moved to the 3rd position (alpha52):
+   *  `schedule.backoff(id, attempt, action, opts)`. */
+  (
+    id: string,
+    attempt: number,
+    opts: BackoffOpts,
+    action: ScheduleAction,
+  ): ScheduleEffect;
+}
+
+/** poll — both argument orders (see {@linkcode schedule.poll}). */
+export interface PollFn {
+  <A>(
+    id: string,
+    attempt: number,
+    action: ScheduleAction & SA<A> | A & SA<A>,
+    opts: PollOpts,
+  ): ScheduleEffect;
+  /** @deprecated the action moved to the 3rd position (alpha52):
+   *  `schedule.poll(id, attempt, action, opts)`. */
+  (
+    id: string,
+    attempt: number,
+    opts: PollOpts,
+    action: ScheduleAction,
+  ): ScheduleEffect;
+}
+
+const _backoff: BackoffFn = ((
+  id: string,
+  attempt: number,
+  a3: unknown,
+  a4: unknown,
+): ScheduleEffect => {
+  if (_isAction(a3)) {
+    return _backoffEffect(id, attempt, a4 as BackoffOpts, a3);
+  }
+  _hintOnce(
+    `backoff-order:${id}`,
+    `schedule.backoff '${id}': the (id, attempt, opts, action) order is ` +
+      `deprecated — the action is now the 3rd argument, like after/every: ` +
+      `schedule.backoff(id, attempt, action, opts). aiol reports every site.`,
+  );
+  return _backoffEffect(id, attempt, a3 as BackoffOpts, a4 as ScheduleAction);
+}) as BackoffFn;
+
+const _poll: PollFn = ((
+  id: string,
+  attempt: number,
+  a3: unknown,
+  a4: unknown,
+): ScheduleEffect => {
+  if (_isAction(a3)) {
+    return _pollEffect(id, attempt, a4 as PollOpts, a3);
+  }
+  _hintOnce(
+    `poll-order:${id}`,
+    `schedule.poll '${id}': the (id, attempt, opts, action) order is ` +
+      `deprecated — the action is now the 3rd argument, like after/every: ` +
+      `schedule.poll(id, attempt, action, opts). aiol reports every site.`,
+  );
+  return _pollEffect(id, attempt, a3 as PollOpts, a4 as ScheduleAction);
+}) as PollFn;
 
 /** Effect creators for declarative scheduling — use in reducers to schedule/cancel timers.
  * @example
@@ -165,71 +322,43 @@ export const schedule = {
    *  cycle. Owns the retry arithmetic so pollers stop re-deriving the backoff
    *  dance by hand.
    *
+   *  The action is the 3rd argument, same as after/every/at/cron (alpha52 —
+   *  the old `(id, attempt, opts, action)` order is detected by shape and
+   *  still accepted, with a one-time hint).
+   *
    *  `max` is optional and defaults to the timer ceiling (`MAX_TIMER_DELAY`,
    *  ~24.85 days) — an unbounded `base * factor^attempt` reaches 10^15 ms by
    *  attempt 40, which is not a delay anyone means. Pass an explicit `max`
    *  (60_000 is the usual one) for a real ceiling.
    * @example
    * ```ts
-   * // reducer, on tick: poll; on failure bump attempt and reschedule
-   * return [schedule.backoff('rpc', s.attempt, { base: 1000, max: 60000 }, A.poll())]
+   * // on tick: poll; on failure bump attempt and reschedule
+   * s.$do(schedule.backoff('rpc', s.attempt, A.poll(), { base: 1000, max: 60000 }))
    * ``` */
-  backoff: (
-    id: string,
-    attempt: number,
-    opts: { base: number; max?: number; factor?: number },
-    action: ScheduleAction,
-  ): ScheduleEffect => {
-    const factor = opts.factor ?? 2;
-    const max = opts.max ?? MAX_TIMER_DELAY;
-    const ms = Math.min(
-      opts.base * Math.pow(factor, Math.max(0, attempt)),
-      max,
-    );
-    return {
-      type: "__schedule",
-      kind: "after",
-      id,
-      ms: Math.max(1, Math.round(ms)),
-      action,
-    };
-  },
+  backoff: _backoff,
   /** A self-pacing poller. Re-issue each cycle with the current
    *  `attempt` — 0 while healthy, bumped on failure. It polls every `every` ms,
-   *  and on repeated failures backs off by `backoff`^attempt up to `max`. A
+   *  and on repeated failures backs off by `factor`^attempt up to `max`. A
    *  first-class replacement for the hand-rolled after-chain that RPC
-   *  rate-limit foot-guns come from. `backoff` defaults to 1 (constant polling),
-   *  and `max` to the timer ceiling (`MAX_TIMER_DELAY`, ~24.85 days) so a
-   *  runaway `attempt` cannot compute a delay no timer can hold.
+   *  rate-limit foot-guns come from. `factor` defaults to 1 (constant polling;
+   *  the old `backoff` key is a deprecated alias), and `max` to the timer
+   *  ceiling (`MAX_TIMER_DELAY`, ~24.85 days) so a runaway `attempt` cannot
+   *  compute a delay no timer can hold.
+   *
+   *  The action is the 3rd argument, same as after/every/at/cron (alpha52 —
+   *  the old `(id, attempt, opts, action)` order is detected by shape and
+   *  still accepted, with a one-time hint).
    * @example
    * ```ts
    * // on tick: do the poll; on success set attempt=0, on failure attempt+1,
    * // then reschedule — the delay self-adjusts.
-   * return [schedule.poll('rpc', s.attempt, { every: 5000, backoff: 2, max: 60000 }, A.tick())]
+   * s.$do(schedule.poll('rpc', s.attempt, A.tick(), { every: 5000, factor: 2, max: 60000 }))
    * ``` */
-  poll: (
-    id: string,
-    attempt: number,
-    opts: { every: number; backoff?: number; max?: number },
-    action: { type: string; payload?: unknown },
-  ): ScheduleEffect => {
-    const factor = opts.backoff ?? 1;
-    const max = opts.max ?? MAX_TIMER_DELAY;
-    const ms = attempt <= 0
-      ? opts.every
-      : Math.min(opts.every * Math.pow(factor, attempt), max);
-    return {
-      type: "__schedule",
-      kind: "after",
-      id,
-      ms: Math.max(1, Math.round(ms)),
-      action,
-    };
-  },
+  poll: _poll,
   /** Defer an action to the next tick — the honest primitive for "run this
-   *  right after the current method returns" (a field report: apps were writing
-   *  `schedule.after(id, 1, …)` as a sentinel because a 0ms delay is rejected).
-   *  Same-id replace still applies, so it dedups. */
+   *  right after the current method returns". A true 0ms timer (alpha52 —
+   *  it used to arm 1ms because `after` rejected 0; `after` now takes 0
+   *  properly). Same-id replace still applies, so it dedups. */
   next: (
     id: string,
     action: { type: string; payload?: unknown },
@@ -237,7 +366,7 @@ export const schedule = {
     type: "__schedule",
     kind: "after",
     id,
-    ms: 1,
+    ms: 0,
     action,
   }),
   cancel: (id: string): ScheduleEffect => ({
@@ -683,8 +812,10 @@ export function createScheduleManager(
     ms: number,
     action: { type: string; payload?: unknown },
   ): void {
-    if (ms < 1) {
-      throw new Error(`schedule.after '${id}': ms must be >= 1, got ${ms}`); // AIO-252
+    // 0 is a real delay ("next tick" — schedule.next arms it); negatives are a
+    // caller bug. The old floor of 1 forced `next` to carry a 1ms sentinel.
+    if (ms < 0) {
+      throw new Error(`schedule.after '${id}': ms must be >= 0, got ${ms}`); // AIO-252
     }
     if (!Number.isFinite(ms)) {
       throw new Error(`schedule.after '${id}': ms must be finite, got ${ms}`);
@@ -862,8 +993,28 @@ export function createScheduleManager(
     scheduleNext(true);
   }
 
+  /** A `self("m")` descriptor that reached the scheduler unresolved names no
+   *  cell — dispatching it would be a silent no-op. Refuse loudly instead. */
+  function rejectUnresolvedSelf(
+    id: string,
+    action: { type: string; payload?: unknown },
+  ): void {
+    const m = selfMethodOf(action);
+    if (m !== null) {
+      throw new Error(
+        `schedule '${id}': action self("${m}") was never resolved to a cell ` +
+          `method — self() only works from inside a cell method (s.$do, a ` +
+          `returned effect, or cancelOn). Use the cell's own action type ` +
+          `(e.g. myCell.${m}.action()) here.`,
+      );
+    }
+  }
+
   function handle(effect: ScheduleEffect): void {
     validateId(effect.id);
+    if (effect.kind !== "cancel") {
+      rejectUnresolvedSelf(effect.id, effect.action);
+    }
     // a dynamic schedule reusing a static id silently replaces it
     if (
       effect.kind !== "cancel" && staticIds.has(effect.id) &&
@@ -910,6 +1061,7 @@ export function createScheduleManager(
   function start(defs: ScheduleDef[]): void {
     for (const def of defs) {
       validateId(def.id); // AIO-251: validate config-level schedule IDs
+      rejectUnresolvedSelf(def.id, def.action); // no owning cell here — refuse
       staticIds.add(def.id);
       if ("every" in def) {
         handleEvery(def.id, def.every, def.action, def.skipIfRunning === true);

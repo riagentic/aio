@@ -15,6 +15,7 @@ async function bootApp() {
     state: { deleted: 0, reads: 0 },
     // read allowed for any user; delete allowed for admins only.
     access: (user, method) => method !== "wipe" || user?.role === "admin",
+    visible: "all", // alpha52: the read side must be decided on a multi-user app
     methods: {
       read(s: { reads: number }) {
         s.reads += 1;

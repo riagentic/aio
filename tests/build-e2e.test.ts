@@ -20,6 +20,7 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import {
   assertServesApp,
+  buildFlags,
   freePort,
   kill,
   makeApp,
@@ -66,6 +67,7 @@ async function bootFromForeignCwd(
     // `--expose` refuses to serve plaintext: it generates a self-signed cert and
     // serves HTTPS. Probing it means trusting the cert the server just made —
     // which also proves the cert it generated is actually usable.
+    let headers: Record<string, string> | undefined;
     if (opts.tls) {
       const certPath = await waitFor(
         () => log().match(/tls: (?:self-signed cert at|using cert) (\S+)/)?.[1],
@@ -76,13 +78,35 @@ async function bootFromForeignCwd(
       client = Deno.createHttpClient({
         caCerts: [await Deno.readTextFile(certPath)],
       });
+      // An exposed app is KEYED by default (alpha52): every route — health
+      // included (docs/state/lifecycle.md) — sits behind the generated shared
+      // key. Read the key the binary just persisted and present it, which
+      // also proves the keyed default really engages in a compiled artifact
+      // and that the persisted key file is the working credential.
+      const keyPath = await waitFor(
+        () => log().match(/shared app key \(persisted at (\S+),/)?.[1],
+        timeoutMs,
+      ).catch(() => {
+        throw new Error(
+          `exposed artifact never reported its generated app key ` +
+            `(alpha52 keyed-by-default):\n${log()}`,
+        );
+      });
+      headers = {
+        Authorization: `Bearer ${(await Deno.readTextFile(keyPath)).trim()}`,
+      };
     }
     const base = `${opts.tls ? "https" : "http"}://127.0.0.1:${port}`;
-    const health = await waitForHttp(`${base}/__aio/health`, timeoutMs, client)
-      .catch((e) => {
-        throw new Error(`${e}\n--- artifact log ---\n${log()}`);
-      });
-    const body = await waitForHttp(`${base}/`, 10_000, client).catch(() => "");
+    const health = await waitForHttp(
+      `${base}/__aio/health`,
+      timeoutMs,
+      client,
+      headers,
+    ).catch((e) => {
+      throw new Error(`${e}\n--- artifact log ---\n${log()}`);
+    });
+    const body = await waitForHttp(`${base}/`, 10_000, client, headers)
+      .catch(() => "");
     // A binary that fell back to dev mode is the portability bug resurfacing.
     assert(
       !/App\.tsx|dev lint|not found/i.test(log()) || !log().includes("✗"),
@@ -137,7 +161,7 @@ Deno.test({
         join(dir, "src", "App.tsx"),
         app.replace("AIO Counter", marker),
       );
-      assertEquals((await task(dir, "compile:browser")).code, 0);
+      assertEquals((await buildFlags(dir, "--compile")).code, 0);
 
       // Move the artifact somewhere else, then destroy the project — sources,
       // dist/, deno.json, node_modules, the framework symlink, all of it.
@@ -215,13 +239,24 @@ Deno.test({
 // ── 1. every server-ish compile target ships a binary that boots elsewhere ────
 
 const SERVER_TARGETS = [
-  // task, runtime flags (as the target is meant to be launched), serves HTML,
-  // and whether the target exposes HTTPS instead of HTTP
-  { task: "compile:browser", flags: ["--client=browser"], html: true },
-  { task: "compile:service", flags: ["--client=server-only"], html: false },
+  // target label, single-target build flags, runtime flags (as the target is
+  // meant to be launched), serves HTML, and whether it exposes HTTPS
+  {
+    target: "browser",
+    build: ["--compile"],
+    flags: ["--client=browser"],
+    html: true,
+  },
+  {
+    target: "server (local)",
+    build: ["--compile", "--service", "--headless"],
+    flags: ["--client=server-only"],
+    html: false,
+  },
   // --expose serves HTTPS with a self-signed cert (it refuses plaintext).
   {
-    task: "compile:remote:service",
+    target: "server",
+    build: ["--compile", "--service", "--headless", "--remote"],
     flags: ["--client=server-only", "--expose"],
     html: false,
     tls: true,
@@ -230,13 +265,13 @@ const SERVER_TARGETS = [
 
 for (const t of SERVER_TARGETS) {
   Deno.test({
-    name: `artifact: \`${t.task}\` binary boots + serves from a foreign cwd`,
+    name: `artifact: \`${t.target}\` binary boots + serves from a foreign cwd`,
     ignore: !GATE,
     fn: async () => {
       const dir = await makeApp("counter", "build-e2e-");
       try {
-        const r = await task(dir, t.task);
-        assertEquals(r.code, 0, `${t.task} failed:\n${r.out}\n${r.err}`);
+        const r = await buildFlags(dir, ...t.build);
+        assertEquals(r.code, 0, `${t.target} failed:\n${r.out}\n${r.err}`);
 
         const bin = findBinary(dir);
         assert(
@@ -265,7 +300,7 @@ for (const t of SERVER_TARGETS) {
 }
 
 // ── 2. the systemd unit we ship actually launches the binary ─────────────────
-// `compile:service` writes a .service file users copy verbatim into
+// The server target's build writes a .service file users copy verbatim into
 // /etc/systemd/system. If its ExecStart flags don't match the binary's CLI, the
 // app dies on `systemctl start` — on the user's server, not here. So: parse the
 // unit we generated and boot the binary with EXACTLY those flags.
@@ -276,11 +311,11 @@ Deno.test({
   fn: async () => {
     const dir = await makeApp("counter", "build-e2e-");
     try {
-      const r = await task(dir, "compile:service");
-      assertEquals(r.code, 0, `compile:service failed:\n${r.err}`);
+      const r = await buildFlags(dir, "--compile", "--service", "--headless");
+      assertEquals(r.code, 0, `server build failed:\n${r.err}`);
 
       const unitName = rootFiles(dir).find((n) => n.endsWith(".service"));
-      assert(unitName, "compile:service wrote no .service unit");
+      assert(unitName, "the server build wrote no .service unit");
       const unit = await Deno.readTextFile(join(dir, unitName));
       const exec = unit.match(/^ExecStart=(.*)$/m)?.[1];
       assert(exec, "unit has no ExecStart");
@@ -307,13 +342,13 @@ Deno.test({
 // ── 3. the CLI target ships a runnable binary ────────────────────────────────
 
 Deno.test({
-  name: "artifact: `compile:cli` binary runs from a foreign cwd",
+  name: "artifact: `cli` binary runs from a foreign cwd",
   ignore: !GATE,
   fn: async () => {
     const dir = await makeApp("counter", "build-e2e-");
     try {
-      const r = await task(dir, "compile:cli");
-      assertEquals(r.code, 0, `compile:cli failed:\n${r.out}\n${r.err}`);
+      const r = await buildFlags(dir, "--compile", "--cli");
+      assertEquals(r.code, 0, `cli build failed:\n${r.out}\n${r.err}`);
 
       const bin = findBinary(dir);
       await Deno.chmod(bin, 0o755);
@@ -379,7 +414,19 @@ Deno.test({
       // discovery step regressed even if a stale binary still works.
       assertStringIncludes(r.out + r.err, "probe.wasm");
 
-      const bin = findBinary(dir);
+      // `compile` is the fleet pipeline narrowed to the default target: the
+      // binary lands in dist/ (flat), beside manifest.json.
+      const distFiles = [...Deno.readDirSync(join(dir, "dist"))]
+        .filter((e) => e.isFile && !e.name.includes("."))
+        .map((e) => e.name);
+      assertEquals(
+        distFiles.length,
+        1,
+        `expected exactly one compiled binary in dist/, got: ${
+          distFiles.join(", ") || "none"
+        }`,
+      );
+      const bin = join(dir, "dist", distFiles[0]!);
       await Deno.chmod(bin, 0o755);
       const runCwd = await Deno.makeTempDir({ prefix: "foreign-cwd-" });
       const port = freePort();
@@ -493,14 +540,14 @@ Deno.test({
 // catches the failure that shipped (assets missing from the image).
 
 Deno.test({
-  name: "artifact: `compile:electron` packages a complete AppImage " +
+  name: "artifact: `electron` packages a complete AppImage " +
     "(AIO_BUILD_ELECTRON=1)",
   ignore: !GATE || !ELECTRON,
   fn: async () => {
     const dir = await makeApp("counter", "build-e2e-electron-");
     try {
-      const r = await task(dir, "compile:electron");
-      assertEquals(r.code, 0, `compile:electron failed:\n${r.out}\n${r.err}`);
+      const r = await buildFlags(dir, "--compile", "--electron");
+      assertEquals(r.code, 0, `electron build failed:\n${r.out}\n${r.err}`);
 
       const image = rootFiles(dir).find((n) =>
         n.toLowerCase().endsWith(".appimage")
@@ -609,8 +656,8 @@ Deno.exit(0);
 `,
       );
 
-      const r = await task(dir, "compile:cli");
-      assertEquals(r.code, 0, `compile:cli failed:\n${r.out}\n${r.err}`);
+      const r = await buildFlags(dir, "--compile", "--cli");
+      assertEquals(r.code, 0, `cli build failed:\n${r.out}\n${r.err}`);
       const bin = findBinary(dir);
       await Deno.chmod(bin, 0o755);
 
@@ -671,8 +718,8 @@ Deno.test({
       ).title as string;
       assert(declared, "the scaffold declares a title");
 
-      const r = await task(dir, "compile:browser");
-      assertEquals(r.code, 0, `compile:browser failed:\n${r.out}\n${r.err}`);
+      const r = await buildFlags(dir, "--compile");
+      assertEquals(r.code, 0, `browser build failed:\n${r.out}\n${r.err}`);
       const bin = findBinary(dir);
       await Deno.chmod(bin, 0o755);
 

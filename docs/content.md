@@ -23,7 +23,7 @@
 ## State — cells — the core: cells, methods, workflows, scheduling
 
 - [State Management](state/README.md) — Defining cells, managing state, and coordinating workflows.
-- [Cell-Level Visibility & Persistence](state/cell-visibility.md) — Control what state each cell exposes to clients (ui) and persists to disk
+- [Cell-Level Visibility & Persistence](state/cell-visibility.md) — Control what state each cell exposes to clients (visible) and persists to disk
 - [Cell workers (`worker: true`)](state/cell-workers.md) — A cell can run its methods in its own Deno worker — a separate isolate on a
 - [Cells — Config Shape and Anatomy](state/cells.md) — Everything is a cell.
 - [Composition — Cross-Cell Communication](state/composition.md) — Cells don't share state — they communicate through three interaction patterns.
@@ -32,7 +32,7 @@
 - [Real-time and high-frequency state](state/real-time.md) — The one question that decides everything: at what cadence does this state
 - [Scheduling](state/scheduling.md) — aio has a built-in scheduler for timers, intervals, daily triggers, and cron
 - [The bridge — what crosses, what doesn't, what freezes](state/the-bridge.md) — A shared cell's methods run on the server; the browser holds a live,
-- [Spec: Transactional cell methods](state/transactional-methods.md) — Status: SHIPPED — opt-in transaction: true; this page is the contract, not
+- [Spec: Transactional cell methods](state/transactional-methods.md) — Status: SHIPPED, and THE DEFAULT since alpha52 — every async method runs
 
 ## UI — AIR renderer — components, signals, routing, forms
 
@@ -55,6 +55,7 @@
 
 - [Persistence & Data](persistence/README.md) — How AIO stores, syncs, and transports state.
 - [Auto-Persist](persistence/auto-persist.md) — AIO auto-persists your entire state to SQLite — the aiokv table in the app's
+- [Big Data: The Four Tiers](persistence/big-data.md) — Cell state is serialized to JSON on every persist flush and broadcast to every
 - [CRDT Internals](persistence/crdt-protocol.md) — Wire protocol, client-side flow, server compaction, and framework integration
 - [CRDT Sync Layer](persistence/crdt.md) — Offline-first collaborative state for AIO cells.
 - [Delta & Data Transport](persistence/delta.md) — How data flows from server to browser and how to optimize it.
@@ -94,7 +95,7 @@
 - [Run any aio app from source — one line](build/run-from-source.md) — Point one command at an aio app and it takes care of everything between a source
 - [Runtime differences](build/runtime-differences.md) — The same cell code runs in three places.
 - [Scaling](build/scaling.md) — aio runs as a single Deno process with SQLite and WebSocket broadcast.
-- [Compile Targets](build/targets.md) — Build targets follow compile:<shell>:<topology> — two axes: shell (what
+- [Build Targets](build/targets.md) — deno task build (the fleet build) is the one way to build them — locally
 - [Full-matrix validation runbook (perfect-aio D6/B5)](build/validation-runbook.md) — D6 promises FULL support: 5 local targets + 6 remote forms, on
 
 ## Debugging & production — errors, vitals, monitoring
@@ -153,6 +154,7 @@
 - [Upgrade: alpha49 → alpha50](upgrade/from-alpha49-to-alpha50.md) — A bug-hunt release (hunts 7, 8 and 9 — the same series that produced
 - [Upgrade from v1.0.0-alpha5 to v1.0.0-alpha6](upgrade/from-alpha5-to-alpha6.md) — None.
 - [Upgrade: alpha50 → alpha51](upgrade/from-alpha50-to-alpha51.md) — The zero-inbox release: every open field-report item resolved or refused, plus
+- [Upgrade: alpha51 → alpha52](upgrade/from-alpha51-to-alpha52.md) — in one version — and every old spelling keeps working through beta:
 - [Upgrade from v1.0.0-alpha6 to v1.0.0-alpha7](upgrade/from-alpha6-to-alpha7.md) — mod.ts no longer re-exports renderer primitives.
 - [Upgrade from v1.0.0-alpha7 to v1.0.0-alpha8](upgrade/from-alpha7-to-alpha8.md) — None.
 - [Upgrade from v1.0.0-alpha8 to v1.0.0-alpha9](upgrade/from-alpha8-to-alpha9.md) — The internal machine state field is renamed.

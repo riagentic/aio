@@ -196,3 +196,32 @@ Deno.test("safe-fix: the JSX fix fills in a MISSING jsxImportSource with aio", a
   assertEquals(co["jsx"], "react-jsx");
   assertEquals(co["jsxImportSource"], "aio");
 });
+
+Deno.test("safe-fix: deno.json `target` renames to `client`, value intact", async () => {
+  const dj = JSON.parse(project({})["deno.json"]!) as Record<string, unknown>;
+  dj.target = "electron";
+  const { files } = await safeFixed(project({
+    "deno.json": JSON.stringify(dj, null, 2),
+  }));
+  const fixed = JSON.parse(files["deno.json"]!) as {
+    target?: string;
+    client?: string;
+  };
+  assertEquals(fixed.target, undefined, "the old key is gone");
+  assertEquals(fixed.client, "electron", "the value moved, unchanged");
+});
+
+Deno.test("safe-fix: an existing `client` key wins over a stale `target`", async () => {
+  const dj = JSON.parse(project({})["deno.json"]!) as Record<string, unknown>;
+  dj.target = "electron";
+  dj.client = "browser";
+  const { files } = await safeFixed(project({
+    "deno.json": JSON.stringify(dj, null, 2),
+  }));
+  const fixed = JSON.parse(files["deno.json"]!) as {
+    target?: string;
+    client?: string;
+  };
+  assertEquals(fixed.target, undefined);
+  assertEquals(fixed.client, "browser", "the explicit client is not clobbered");
+});

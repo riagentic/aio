@@ -99,6 +99,27 @@ export const REMOVALS: readonly Removal[] = [
       "cancelOn + s.$signal for cancellation",
     ...RESTRUCTURE,
   },
+  // alpha52 — the surface diet: two aliases deprecated for multiple alphas
+  // went out with loud throws (call) / a compile error (useCell).
+  {
+    key: "call({ timeout })",
+    kind: "api",
+    removedIn: "alpha52",
+    lastGood: "v1.0.0-alpha51",
+    hint:
+      "rename the option: call({ timeoutMs: 5000 }, fn) — aiol --safe-fix does it",
+    guide: "docs/upgrade/from-alpha51-to-alpha52.md",
+  },
+  {
+    key: "useCell()",
+    kind: "api",
+    removedIn: "alpha52",
+    lastGood: "v1.0.0-alpha51",
+    hint:
+      "read the cell directly — counter.count (reactive) / counter.increment(); " +
+      "aiol --safe-fix rewrites useCell(c).state.x",
+    guide: "docs/upgrade/from-alpha51-to-alpha52.md",
+  },
 ] as const;
 
 /** Look a key up. Returns null for anything still supported. */

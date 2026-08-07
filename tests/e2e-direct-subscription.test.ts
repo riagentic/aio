@@ -102,13 +102,12 @@ export const nav = cell("nav", { state: { panel: "home" }, methods: { go(s, p) {
     );
     await Deno.writeTextFile(
       `${dir}/src/App.tsx`,
-      `import { useCell } from "aio/air";
-import { data, nav } from "./cells.ts";
-// useCell(nav) narrows this client's server subscription to a partial set.
-// data.n is read via DIRECT cell access — must still receive live deltas.
+      `import { data, nav } from "./cells.ts";
+// Direct reads narrow this client's server subscription to exactly the cells
+// the page reads (alpha52: useCell was removed — direct access is the idiom).
+// data.n is server-driven — it must keep receiving live deltas.
 export default function App() {
-  const { state: navState } = useCell(nav);
-  return (<div><span t="panel">{navState.panel}</span><span t="nval">{String(data.n)}</span></div>);
+  return (<div><span t="panel">{nav.panel}</span><span t="nval">{String(data.n)}</span></div>);
 }`,
     );
     await Deno.writeTextFile(
@@ -184,7 +183,7 @@ await aio.run({ persist: false, schedules: [{ id: "tick", every: 600, action: da
       await waitFor("mounted", async () => (await clientN()) !== null);
 
       // The server scheduler increments data.n independently. The client reads
-      // it via direct access while subscribed (via useCell) only to `nav`.
+      // it via direct access with a subscription narrowed to the cells it reads.
       // The client DOM must climb with the server — not freeze at 0.
       await waitFor(
         "client tracks server-initiated data change",

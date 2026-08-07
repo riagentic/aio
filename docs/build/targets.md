@@ -1,46 +1,45 @@
-# Compile Targets
+# Build Targets
 
-Build targets follow `compile:<shell>:<topology>` — two axes: **shell** (what
-renders the UI) x **topology** (local or remote).
+**One vocabulary**: every buildable artifact is a **target name**, and
+`deno task build` (the fleet build) is the one way to build them — locally
+runnable apps and remote/thin-client artifacts alike. Two axes, expressed in the
+names themselves:
 
-- **Local** (default) — self-contained binary, 127.0.0.1 or client-locked
-- **Remote** — exposed server (0.0.0.0, optional `key` auth) or client-only
-  binary
+- **App / server targets** (`browser`, `electron`, `android`, `cli`, `server`) —
+  self-contained artifacts. `server` is the headless role (it was spelled
+  `service` before alpha52); it builds the exposed `--remote` binary + systemd
+  unit.
+- **Client targets** (`electron-client`, `android-client`, `cli-client`) — thin
+  clients that connect to a separately-running aio server.
 
 ```
-                    local (default)              remote
-┌────────────┬─────────────────────────┬──────────────────────────┐
-│ browser    │ compile:browser         │ compile:remote:browser   │
-│            │ binary + system browser │ exposed server + systemd │
-├────────────┼─────────────────────────┼──────────────────────────┤
-│ electron   │ compile:electron        │ compile:remote:electron  │
-│            │ AppImage/zip, server    │ client AppImage (Linux)  │
-├────────────┼─────────────────────────┼──────────────────────────┤
-│ cli        │ compile:cli             │ compile:remote:cli       │
-│            │ binary + WS client API  │ client binary, no server │
-├────────────┼─────────────────────────┼──────────────────────────┤
-│ android    │ compile:android         │ compile:remote:android   │
-│            │ APK, server inside      │ client APK, no Deno      │
-├────────────┼─────────────────────────┼──────────────────────────┤
-│ service    │ compile:service         │ compile:remote:service   │
-│            │ headless, 127.0.0.1     │ headless, 0.0.0.0 + auth │
-└────────────┴─────────────────────────┴──────────────────────────┘
-
-Aliases: compile = compile:browser
+┌──────────────────┬─────────────────────────────────────────────┐
+│ browser          │ binary + system browser (127.0.0.1)         │
+│ electron         │ desktop AppImage/zip, server inside         │
+│ android          │ APK, standalone (no server)                 │
+│ cli              │ headless binary + WS client API             │
+│ server           │ headless exposed server + systemd unit      │
+├──────────────────┼─────────────────────────────────────────────┤
+│ electron-client  │ connect-page AppImage (no app code)         │
+│ android-client   │ client APK — connects to a server           │
+│ cli-client       │ client binary — connects to a server        │
+└──────────────────┴─────────────────────────────────────────────┘
 ```
 
-All 10 targets ship in a single binary.
+The scaffold ships two build tasks: `deno task build` (every target in deno.json
+`build.targets`) and `deno task compile` (the same pipeline, only the default
+target — the one in deno.json `"client"`). One-off:
+`deno task build --targets=electron`.
 
-> **Remote targets.** The five `remote` / thin-client targets (`browser:remote`,
-> `service:remote`, `electron:remote`, `cli:remote`, `android:remote`) build,
-> boot, and are exercised by CI (per-target boot + WS-increment smoke in
-> `tests/examples.test.ts`, LAN e2e in `tests/e2e-remote-lan.test.ts`).
+> **Remote / thin-client targets** build, boot, and are exercised by CI
+> (per-target boot + WS-increment smoke in `tests/examples.test.ts`, LAN e2e in
+> `tests/e2e-remote-lan.test.ts`).
 
 ## Build a fleet — `deno task build`
 
-The `compile:*` tasks build **one** target at a time. When you ship more than
-one — a LAN server plus the clients that connect to it, say — declare the set
-once and build it all with a single command:
+`deno task compile` builds **one** target (your default). When you ship more
+than one — a LAN server plus the clients that connect to it, say — declare the
+set once and build it all with a single command:
 
 ```jsonc
 // deno.json
@@ -189,38 +188,47 @@ with a host binary under a foreign name.
 > android-local shell. It carries the app title, stylesheet, icon, and the
 > standard viewport; the other targets (browser, electron) render the full `ui`
 > shell config. If your app depends on `ui.head` on android, use
-> `android:remote` (the WebView then loads the live server's shell).
+> `android-client` (the WebView then loads the live server's shell).
 
-Each target maps to the same single-target flags as its `compile:*` task, run as
-a subprocess — so `build` is purely additive: the individual `compile:*` tasks
-keep working unchanged. A failed target is reported in the summary and marked
+Each target maps to a set of single-target `build.ts` flags (the table below),
+run as a subprocess. A failed target is reported in the summary and marked
 `ok: false` in the manifest; the exit code is non-zero if any target failed.
 
 ## Dev mode
 
 ```sh
-deno task dev
+deno task dev                       # the default target (deno.json "client")
+deno task dev --client=electron     # flags pass through — any shell
+deno task dev --client=server-only  # headless
+deno task dev --expose              # reachable on the LAN (server side)
 ```
 
-Live-transpiles `.ts`/`.tsx` via esbuild on each request. React loaded from CDN
-via import map. File watcher auto-reloads the browser on save. Error overlay
-shows **Build Error** or **Runtime Error**. Opens Electron or browser.
+Live-transpiles `.ts`/`.tsx` via esbuild on each request. File watcher
+auto-reloads the browser on save. Error overlay shows **Build Error** or
+**Runtime Error**. Opens the default target's shell. There is ONE dev task —
+every other shell/topology is a flag, not another task; a thin dev client is
+`deno run -A src/client.ts` (CLI) or `deno task dev --connect` (Electron connect
+page).
 
-## Build flags
+## Build flags (single-target `build.ts`)
+
+`deno task build` invokes these for you (one set per target). Call `build.ts`
+directly only for a one-off artifact outside the fleet. `--service` here means
+"emit a systemd `.service` unit", not a target name.
 
 | Flag                                      | Effect                                                                                |
 | ----------------------------------------- | ------------------------------------------------------------------------------------- |
 | `--compile`                               | Compile standalone Deno binary                                                        |
 | `--electron`                              | Build Electron package: AppImage (Linux), zip (macOS/Windows) — implies `--compile`   |
-| `--client`                                | Build client-only AppImage — no Deno runtime, Linux only (`compile:remote:electron`)  |
-| `--cli`                                   | Build CLI binary — no browser bundle, headless server (`compile:cli`)                 |
-| `--cli --remote`                          | Build client-only CLI binary — no server (`compile:remote:cli`)                       |
+| `--client`                                | Build client-only AppImage — no Deno runtime, Linux only (target `electron-client`)   |
+| `--cli`                                   | Build CLI binary — no browser bundle, headless server (target `cli`)                  |
+| `--cli --remote`                          | Build client-only CLI binary — no server (target `cli-client`)                        |
 | `--android`                               | Build APK via Gradle                                                                  |
-| `--android --remote`                      | Build client-only APK — connect page, no local dispatch (`compile:remote:android`)    |
+| `--android --remote`                      | Build client-only APK — connect page, no local dispatch (target `android-client`)     |
 | `--compile --service`                     | Compile binary + generate systemd unit file                                           |
-| `--compile --service --remote`            | Same, with `--expose` in systemd ExecStart (`compile:remote:browser`)                 |
-| `--compile --service --headless`          | Same, with `--headless` in systemd ExecStart (`compile:service`)                      |
-| `--compile --service --headless --remote` | Same, with `--expose --headless` (`compile:remote:service`)                           |
+| `--compile --service --remote`            | Same, with `--expose` in systemd ExecStart                                            |
+| `--compile --service --headless`          | Same, with `--headless` in systemd ExecStart                                          |
+| `--compile --service --headless --remote` | Same, with `--expose --headless` (target `server`)                                    |
 | `--name=X`                                | Override binary name (default: from deno.json `"title"`)                              |
 | `--force`                                 | Skip bundle cache — always rebuild `dist/app.js`                                      |
 | `--release`                               | Android release build (default: debug) — emits `myapp-unsigned.apk`; sign it yourself |
@@ -243,7 +251,7 @@ name and window title; add `ui.title` when you want a spaced, human-readable
 window title over a slugged binary (`"a field report Master"` vs
 `a field report`).
 
-## compile:browser (standalone binary)
+## browser (standalone binary)
 
 ```sh
 deno task compile
@@ -261,9 +269,8 @@ The binary name comes from deno.json `"title"` (lowercased, spaces to hyphens).
 ./my-app --port=3000           # custom port
 ```
 
-> Scaffolds ship **one** `compile` task — their own target. To build a different
-> target, invoke `build.ts` directly with the flags shown below (or add your own
-> task).
+> Scaffolds ship `compile` (the default target) and `build` (the declared
+> fleet). Another target is one flag away: `deno task build --targets=X`.
 
 ### Data assets (WASM, etc.) are embedded
 
@@ -342,7 +349,7 @@ deno compile -A --node-modules-dir=none --exclude-unused-npm \
 `aio build` already excludes the dev-only packages (electron, esbuild) for every
 target, which is why its binaries are small without either flag.
 
-## compile:electron (desktop app)
+## electron (desktop app)
 
 ```sh
 deno run -A dep/aio/src/build.ts --compile --electron
@@ -368,7 +375,7 @@ persisted to the OS user data directory.
 git tag vX.Y.Z && git push origin vX.Y.Z   # triggers build on all 3 platforms
 ```
 
-## compile:remote:electron (thin client AppImage)
+## electron-client (thin client AppImage)
 
 ```sh
 deno run -A dep/aio/src/build.ts --client
@@ -378,7 +385,7 @@ Standalone Electron app with a connect page — no Deno runtime, no app code.
 Users type a server address and connect. Linux only. Output:
 `aio-client-x86_64.AppImage` (~80MB).
 
-## compile:cli (terminal binary)
+## cli (terminal binary)
 
 ```sh
 deno run -A dep/aio/src/build.ts --compile --cli
@@ -446,7 +453,7 @@ try {
 > `am profile`. A browser's click-through has no equivalent here: the connection
 > simply fails.
 
-## compile:remote:cli (client-only binary)
+## cli-client (client-only binary)
 
 ```sh
 deno run -A dep/aio/src/build.ts --compile --cli --remote
@@ -471,7 +478,7 @@ For Android builds, aio uses a client-side dispatch loop instead of a server:
 
 ```ts no-check
 // In android builds, the bundler resolves "aio" to the standalone runtime —
-// this import only exists inside a compile:android bundle.
+// this import only exists inside an android bundle.
 import { initStandalone } from "aio";
 
 const app = initStandalone(initialState, {
@@ -488,7 +495,7 @@ const app = initStandalone(initialState, {
 in the browser. Persistence via `localStorage` instead of SQLite.
 `app.mode === 'standalone'`.
 
-## compile:android (standalone APK)
+## android (standalone APK)
 
 ```sh
 deno run -A dep/aio/src/build.ts --android
@@ -513,7 +520,7 @@ methods: {
 },
 ```
 
-## compile:remote:android (client APK)
+## android-client (client APK)
 
 ```sh
 deno run -A dep/aio/src/build.ts --android --remote
@@ -523,7 +530,7 @@ Thin client APK — no local state, no reducer, no Deno runtime. Shows a connect
 page where the user enters the server URL. The remote server must run with
 `--expose`.
 
-## compile:remote:browser (exposed server + systemd)
+## Exposed server with browser UI (+ systemd)
 
 ```sh
 deno run -A dep/aio/src/build.ts --compile --service --remote
@@ -539,14 +546,15 @@ sudo systemctl enable --now aio-counter
 journalctl -u aio-counter -f  # view logs + auth token
 ```
 
-## compile:remote:service (headless exposed server)
+## server (headless exposed server)
 
 ```sh
 deno run -A dep/aio/src/build.ts --compile --service --headless --remote
 ```
 
-Same as `compile:remote:browser` but headless — no browser auto-open. **Systemd
-ExecStart:** `--expose --headless --port=3000`
+Same as the exposed browser server but headless — no browser auto-open. This is
+the fleet's `server` target. **Systemd ExecStart:**
+`--expose --headless --port=3000`
 
-> **Note:** `compile:service` (local) generates `--headless --port=3000` without
-> `--expose` — binds 127.0.0.1 only.
+> **Note:** without `--remote`, `--compile --service --headless` generates
+> `--headless --port=3000` and no `--expose` — binds 127.0.0.1 only.

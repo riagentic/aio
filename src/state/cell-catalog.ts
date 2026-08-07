@@ -195,13 +195,23 @@ export function bindCell(
     }
   }
 
-  // Bind selectors: wrap with getState. Called WITH args → parameterized
-  // selector (`cell.byId(id)`); called with NO args → pass full state as arg 2
-  // so deps-form / `(s, fullState)` selectors read other cells' slices.
+  // Bind selectors: wrap with getState. A deps-form selector ALWAYS gets the
+  // full state as arg 2 (its scoped wrapper builds the dep tuple from it) plus
+  // any accessor args (alpha52: parameterized + deps compose). A plain
+  // selector called WITH args is parameterized (`cell.byId(id)`); with NO args
+  // it gets full state as arg 2 (`(s, fullState)` cross-cell plain selectors).
   for (const [key, selectorFn] of Object.entries(f.__aio.selectors)) {
+    const isDeps = key in (f.__aio.selectorDeps ?? {});
     (f as Record<string, unknown>)[key] = (...args: unknown[]) => {
       const state = getState();
       const own = state[f.__aio.id];
+      if (isDeps) {
+        return (selectorFn as (
+          s: unknown,
+          full: unknown,
+          ...a: unknown[]
+        ) => unknown)(own, state, ...args);
+      }
       return args.length > 0
         ? (selectorFn as (s: unknown, ...a: unknown[]) => unknown)(own, ...args)
         : selectorFn(own, state);

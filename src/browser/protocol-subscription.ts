@@ -6,7 +6,7 @@ import {
   _getState as _coreGetState,
   isInitialStateReceived as _coreHasState,
 } from "../state-core.ts";
-import { _diagEmit } from "./protocol-diagnostics.ts";
+import { _diagEmit } from "../protocol/protocol-diagnostics.ts";
 import type { RenderMeterAPI } from "../vitals/render-meter.ts";
 import type { createTransportProbeClient } from "../vitals/transport-probe.ts";
 

@@ -23,6 +23,7 @@ import {
   isReturnEnvelope,
   type Msg,
   readReturn,
+  readReturnEffects,
 } from "./cell-types.ts";
 import type { ReduceBreakdown } from "../diagnostics/time-travel.ts";
 
@@ -145,9 +146,13 @@ export function reduceCell(
           });
           // Clone effects NOW — while the draft is still alive. AIO-427: a
           // RETURN_TAG envelope is the sync method's transported value; every
-          // other array is effects (the historic contract).
+          // other array is effects (the historic contract). alpha52: the
+          // envelope may ALSO carry `s.$do`-captured effects — cloned here for
+          // the same draft-revocation reason.
           if (isReturnEnvelope(result)) {
             methodReturn = snapshotReturn(readReturn(result));
+            const fx = readReturnEffects(result);
+            if (fx.length > 0) effects = cloneEffects(fx, action.type);
           } else if (Array.isArray(result)) {
             effects = cloneEffects(result, action.type);
           }
@@ -270,9 +275,12 @@ export function reduceCell(
         // After produceWithPatches returns, Immer revokes the draft proxy,
         // making any state refs in effect payloads unreadable. AIO-427: a
         // RETURN_TAG envelope is the sync method's transported value; every
-        // other array is effects (the historic contract).
+        // other array is effects (the historic contract). alpha52: the
+        // envelope may ALSO carry `s.$do`-captured effects.
         if (isReturnEnvelope(result)) {
           methodReturn = snapshotReturn(readReturn(result));
+          const fx = readReturnEffects(result);
+          if (fx.length > 0) effects = cloneEffects(fx, action.type);
         } else if (Array.isArray(result)) {
           effects = cloneEffects(result, action.type);
         }

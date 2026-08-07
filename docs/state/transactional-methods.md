@@ -1,16 +1,30 @@
 # Spec: Transactional cell methods
 
-Status: **SHIPPED** — opt-in `transaction: true`; this page is the contract, not
-a proposal. Conflict detection (§4) is the part that makes it safe rather than
-merely stable. Tests: `tests/transactional-methods.test.ts`.
+Status: **SHIPPED, and THE DEFAULT since alpha52** — every async method runs
+transactionally unless the cell says `transaction: false`; this page is the
+contract, not a proposal. Conflict detection (§4) is the part that makes it safe
+rather than merely stable. Tests: `tests/transactional-methods.test.ts`,
+`tests/transaction-default.test.ts`.
 
 **The one rule, if you read nothing else:** a cell where a wrong merge costs
 something real — money, inventory, a ledger, anything a user would dispute —
-gets `transaction: { serialize: true }`. Everything else keeps the default (no
-transaction). Plain `transaction: true` is the advanced middle setting: snapshot
-isolation, cheaper than serialize, but it permits write skew — reach for it
-deliberately or not at all. The isolation-model detail below exists to justify
-that rule, not to be memorized.
+gets `transaction: { serialize: true }`. Everything else keeps the default
+(`transaction: true` — snapshot isolation: cheaper than serialize, but it
+permits write skew). `transaction: false` is the opt-OUT into live reads +
+incremental commits — reach for it only when a method's whole point is observing
+foreign commits mid-flight without `s.$live`, or writing state after its own
+cancellation. Under the default:
+
+- **spinner idiom** — publish mid-method deliberately:
+  `s.busy = true; s.$commit();`
+- **live waits** — `await until(() => s.$live.ready)` (a pinned `s` read never
+  changes across awaits, by design).
+- **migration** — `aiol` reports every async cell that never declared
+  `transaction`, and `--safe-fix` inserts `transaction: false,` to preserve
+  pre-alpha52 behavior byte-for-byte.
+
+The isolation-model detail below exists to justify the rule, not to be
+memorized.
 
 ## 1. The problem
 
@@ -46,8 +60,9 @@ Consequences one app hit repeatedly (all real, all silent):
 
 ## 3. Non-goals / constraints
 
-- **Opt-in.** Existing async methods keep today's live-read semantics unless the
-  cell (or method) opts in. No behavior change for anyone who doesn't ask.
+- **The default, with an explicit opt-out** (alpha52; it shipped opt-in). A cell
+  that needs live reads + incremental commits declares `transaction: false` —
+  the old semantics are a spelling away, never gone.
 - **Sync methods are unchanged** — already atomic.
 - Must compose with: schedule/own effects returned from methods, cancellation
   (`s.$signal` / `cancelOn`), sync cells (CRDT op-log), persistence + the #3

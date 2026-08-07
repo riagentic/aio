@@ -8,10 +8,10 @@ gets recorded, and the blessed patterns for handling secrets.**
 
 ## The two channels a value can escape through
 
-| Channel         | What flows                                                             | Reaches                                                  |
-| --------------- | ---------------------------------------------------------------------- | -------------------------------------------------------- |
-| **Sync (`ui`)** | Each cell's state slice, filtered by `ui: { include/exclude/forUser }` | **Every connected client**                               |
-| **Action log**  | Every method call's **arguments** + the resulting state patches        | Time-travel, dev tools, `am tt`, and any `onAction` hook |
+| Channel              | What flows                                                                  | Reaches                                                  |
+| -------------------- | --------------------------------------------------------------------------- | -------------------------------------------------------- |
+| **Sync (`visible`)** | Each cell's state slice, filtered by `visible: { include/exclude/forUser }` | **Every connected client**                               |
+| **Action log**       | Every method call's **arguments** + the resulting state patches             | Time-travel, dev tools, `am tt`, and any `onAction` hook |
 
 A field is safe only when it's out of **both**. They're independent:
 
@@ -19,7 +19,7 @@ A field is safe only when it's out of **both**. They're independent:
 cell("settings", {
   state: { theme: "dark", apiKey: "" },
   persist: { exclude: ["apiKey"] }, // not written to disk
-  ui: { exclude: ["apiKey"] }, // not synced to clients
+  visible: { exclude: ["apiKey"] }, // not synced to clients
 });
 ```
 
@@ -84,7 +84,7 @@ the network-touching lines become coverable.
 
 - [ ] No plaintext secret in any `state:` — module vault holder instead.
 - [ ] No plaintext secret as a method argument — module function instead.
-- [ ] Secret fields `ui: { exclude }` **and** `persist: { exclude }`.
+- [ ] Secret fields `visible: { exclude }` **and** `persist: { exclude }`.
 - [ ] Authority-changing methods validate their precondition.
 - [ ] Network/device calls take an injectable transport for tests.
 - [ ] `/__aio/snapshot` returns **raw** state — treat snapshots as backups.

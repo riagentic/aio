@@ -568,7 +568,7 @@ export {
   type UIComponentHandle,
   type UIElementHandle,
 } from "./ui-test.ts";
-export { generateUITypes, testgen } from "./ui-testgen.ts";
+export { generateUITypes, testGen, testgen } from "./ui-testgen.ts";
 export {
   findChromium,
   freePort,

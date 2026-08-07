@@ -11,10 +11,9 @@ Rendering: `import { signal } from "aio/air"`
 Focused imports:
 
 ```ts
-import { createDB } from "aio/db"; // SQLite only
+import { createDB } from "aio/server"; // server-only values (SQLite, CLI)
 import { testCell } from "aio/testing"; // Test harness only
-import { schedule } from "aio/schedule"; // Scheduling only
-import { createSelector } from "aio/selectors"; // Selectors only
+import { createSelector, schedule } from "aio"; // scheduling + selectors live on the core entry
 ```
 
 ### Start Here
@@ -45,7 +44,7 @@ Everything below is the full reference, organized by category.
 | API               | Description                                                                            |
 | ----------------- | -------------------------------------------------------------------------------------- |
 | `aio.run(config)` | Start the app — see [Lifecycle](../state/lifecycle.md) and [Cell Config](#cell-config) |
-| `call(opts, fn)`  | Call with `{ timeout?, retries? }` -- wraps inter-cell calls                           |
+| `call(opts, fn)`  | Call with `{ timeoutMs?, retries? }` -- wraps inter-cell calls                         |
 | `markAsync(fn)`   | Mark a method as async for minified bundles                                            |
 
 ### Dispatch Introspection
@@ -188,13 +187,13 @@ Method-native workflow tools — see
 
 ## Persistence
 
-| Config                                                   | Description                                    |
-| -------------------------------------------------------- | ---------------------------------------------- |
-| `persist: true`                                          | Auto-persist state to SQLite (`state.db`)      |
-| `persist: "all" \| "none" \| { include } \| { exclude }` | Per-cell persistence filter                    |
-| `ui: "all" \| "none" \| { include } \| { exclude }`      | Per-cell UI visibility filter                  |
-| `ui: { include, forUser }`                               | Per-cell UI visibility with per-user transform |
-| `cellDefaults: { ui, persist }`                          | App-level defaults for all cells               |
+| Config                                                   | Description                                           |
+| -------------------------------------------------------- | ----------------------------------------------------- |
+| `persist: true`                                          | Auto-persist state to SQLite (`state.db`)             |
+| `persist: "all" \| "none" \| { include } \| { exclude }` | Per-cell persistence filter                           |
+| `visible: "all" \| "none" \| { include } \| { exclude }` | Per-cell visibility filter (`ui:` = deprecated alias) |
+| `visible: { include, forUser }`                          | Per-cell visibility with per-user transform           |
+| `cellDefaults: { ui, persist }`                          | App-level defaults for all cells                      |
 
 ## Action Interception
 
@@ -281,6 +280,6 @@ log.error("db", "connection lost", { error: "ECONNREFUSED" });
 | --------------------- | ------------------------------------------------------------ |
 | `VERSION`             | Framework version string                                     |
 | `parseCli(args)`      | Parse CLI flags                                              |
-| `lint(cells)`         | Validate cell definitions                                    |
+| `checkCells(cells)`   | Validate cell definitions (`lint` = deprecated alias)        |
 | `instances()`         | List running aio instances                                   |
 | `resolveAppId(appId)` | Canonical app slug from the appId string (throws if missing) |

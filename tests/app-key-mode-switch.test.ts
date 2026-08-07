@@ -31,7 +31,7 @@ async function boot(
   const { cell, aio } = await import("../mod.ts");
   const c = cell(`k-${crypto.randomUUID().slice(0, 8)}`, {
     state: { n: 0 },
-    ui: "all",
+    visible: "all",
     methods: {},
   });
   const app = await aio.run({

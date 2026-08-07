@@ -224,6 +224,20 @@ methods: {
 
 `app.db` is `undefined` in standalone/Android mode.
 
+### What aio owns in the file — and what it doesn't
+
+The state database is shared ground: aio keeps its bookkeeping in **private
+tables** (`aio_kv` for the state snapshot, `sync_*` for the CRDT op-log,
+`aio_schema` for its own schema version) and treats everything else as yours. In
+particular, **aio reserves nothing in `PRAGMA user_version`** — that integer is
+the standard SQLite idiom for an _app's_ own "have I run this migration" marker,
+and it is entirely the app's to read and write; aio tracks its schema era in
+`aio_schema` instead.
+
+History caveat: aio ≤alpha51 wrote `user_version`, so a value found on an
+EXISTING database may not be yours — an app that used the idiom against an
+aio-created file should move its marker to its own table and accept one re-run.
+
 ## Integrity & snapshots
 
 A file that holds data a user would miss eventually meets a power cut mid-write,

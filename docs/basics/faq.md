@@ -55,13 +55,13 @@ through an aio cell.
 
 ### Why no `retry()` or `withTimeout()` helpers?
 
-`call()` already accepts `{ timeout?, retries? }`:
+`call()` already accepts `{ timeoutMs?, retries? }`:
 
 ```ts
 import { call } from "aio";
 import { submitOrder } from "./api.ts";
 
-const r = await call({ timeout: 5000, retries: 2 }, () => submitOrder());
+const r = await call({ timeoutMs: 5000, retries: 2 }, () => submitOrder());
 ```
 
 For custom timeout behavior, use `race` (its `timeout: ms` sugar is built in):

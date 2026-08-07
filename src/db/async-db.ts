@@ -270,6 +270,13 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
     );
     writerWorker = w;
 
+    // NOTE deliberately NO `PRAGMA user_version` write here (or anywhere in
+    // aio). `user_version` is the standard SQLite idiom for an APP's own
+    // "have I run this migration" marker — stamping it on open silently
+    // defeated exactly that in the field (a fresh file opened at 1, so every
+    // `at >= version` app correction skipped). One integer cannot serve two
+    // owners; the app owns it. aio tracks its own schema era in its private
+    // `aio_schema` table instead (src/db/ddl.ts).
     ready = writerOpen.then(() => {
       const readerOpenings: Promise<QueryResult>[] = [];
       for (let i = 0; i < numReaders; i++) {

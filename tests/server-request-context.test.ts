@@ -16,6 +16,10 @@ type S = { probe: { seen: Seen; hops: number } };
  *  app (perfect-aio D2), so the probe is built fresh inside boot(). */
 function makeProbe() {
   return cell("probe", {
+    // alpha52: four deliberately-concurrent RMW calls (`s.hops++`) — under the
+    // transactional default they would conflict-abort; the ambient-isolation
+    // property under test wants the old interleaving.
+    transaction: false,
     state: { seen: null as Seen, hops: 0 },
     methods: {
       async record(s) {
@@ -40,7 +44,12 @@ function makeProbe() {
 async function boot() {
   const port = freePort();
   const probe = makeProbe();
-  const state = () => (app.getState() as S).probe;
+  // Explicit return type: `state` ↔ `app` reference each other (the route
+  // closure below calls state()), and aio.run() gained a typed overload in
+  // alpha52 — overload resolution needs the args' types, so the circular
+  // inference must be broken by an annotation HERE (one line, and exactly
+  // what the compiler error tells an app to do).
+  const state = (): S["probe"] => (app.getState() as S).probe;
   const app = await aio.run({
     cells: [probe],
     appId: `test-serverreq-${port}`,

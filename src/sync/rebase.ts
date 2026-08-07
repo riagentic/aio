@@ -1,7 +1,9 @@
 // src/sync/rebase.ts — Replay unconfirmed ops on confirmed state (CRDT rebase)
 import type { SyncOp } from "./types.ts";
 
-/** Reducer that applies a sync action to state, returning null if the op is invalid. */
+/** Reducer that applies a sync action to state, returning null if the op is invalid.
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
+ */
 export type SyncReducer = (
   state: Record<string, unknown>,
   action: string,
@@ -12,6 +14,8 @@ export type SyncReducer = (
 
 /**
  * Result of replaying unconfirmed ops: optimistic state, dropped and surviving ops.
+
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
  */
 export interface RebaseResult {
   optimistic: Record<string, unknown>;
@@ -23,6 +27,8 @@ export interface RebaseResult {
  *  Ops returning null are dropped (invalid after rebase). */
 /**
  * Replay unconfirmed local ops on top of freshly confirmed server state.
+
+ *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
  */
 export function rebase(
   confirmed: Record<string, unknown>,

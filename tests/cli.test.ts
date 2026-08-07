@@ -1,4 +1,4 @@
-import { assertEquals, assertStringIncludes } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { parseCli, VERSION } from "../src/server/aio.ts";
 import { versionLine } from "../src/server/aio-cli.ts";
 import {
@@ -334,6 +334,42 @@ Deno.test("parseCli: --client with invalid value ignored", () => {
 Deno.test("parseCli: --kill-existing", () => {
   const r = parseCli(["--kill-existing"]);
   assertEquals(r.killExisting, true);
+});
+
+Deno.test("parseCli: --takeover is the preferred spelling of --kill-existing", () => {
+  const r = parseCli(["--takeover"]);
+  assertEquals(r.killExisting, true);
+});
+
+Deno.test("parseCli: --connect opens the connect page (bare --server-url is the alias)", () => {
+  // Both spell "thin client, no baked-in server" — serverUrl set but empty.
+  assertEquals(parseCli(["--connect"]).serverUrl, "");
+  assertEquals(parseCli(["--server-url"]).serverUrl, "");
+  // The VALUED form keeps its name — it really is a server URL.
+  assertEquals(
+    parseCli(["--server-url=http://h:1"]).serverUrl,
+    "http://h:1",
+  );
+});
+
+Deno.test("parseCli: the bare --server-url hint fires at most once per process", () => {
+  // parseCli runs several times in one boot (help, boot, electron probes) —
+  // the deprecation line printed 5× before the dedupe.
+  const lines: string[] = [];
+  const orig = console.log;
+  console.log = (...a: unknown[]) => lines.push(a.map(String).join(" "));
+  try {
+    parseCli(["--server-url"]);
+    parseCli(["--server-url"]);
+    parseCli(["--server-url"]);
+    const hints = lines.filter((l) => l.includes("now --connect"));
+    assert(
+      hints.length <= 1,
+      `hint printed ${hints.length}× across three parses — must be once`,
+    );
+  } finally {
+    console.log = orig;
+  }
 });
 
 // ── electronMainScriptUDS ──────────────────────────────────────────

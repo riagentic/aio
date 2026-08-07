@@ -160,7 +160,7 @@ Deno.test("async: read-your-writes survives a no-op write + flush (stale overlay
 // breaking the other, so the contract is DOCUMENTED (docs/state/methods.md
 // "Error handling") — and pinned here, because a doc claim with no gate is how
 // it silently drifts.
-Deno.test("throw: a SYNC method's writes are rolled back, an ASYNC method's are kept", async () => {
+Deno.test("throw: SYNC and ASYNC methods BOTH roll back (alpha52 default); transaction:false keeps async writes", async () => {
   const c = cell("thr-sem", {
     state: { syncNote: "", syncN: 0, asyncNote: "", asyncPost: "" },
     methods: {
@@ -179,7 +179,21 @@ Deno.test("throw: a SYNC method's writes are rolled back, an ASYNC method's are 
       },
     },
   });
-  const App = () => h("div", null, `${c.syncNote}${c.asyncNote}`);
+  // The opted-out twin — pins the incremental-commit escape hatch.
+  const legacy = cell("thr-sem-legacy", {
+    transaction: false,
+    state: { note: "", post: "" },
+    methods: {
+      // deno-lint-ignore no-explicit-any
+      async refuse(s: any) {
+        s.note = "refused: too large";
+        await sleep(2);
+        s.post = "written after the await";
+        throw new Error("async refusal");
+      },
+    },
+  });
+  const App = () => h("div", null, `${c.syncNote}${c.asyncNote}${legacy.note}`);
   const ui = await testUI(App, { document: doc() });
 
   // deno-lint-ignore no-explicit-any
@@ -197,8 +211,19 @@ Deno.test("throw: a SYNC method's writes are rolled back, an ASYNC method's are 
   await sleep(20);
   assertEquals(
     [c.asyncNote, c.asyncPost],
+    ["", ""],
+    "alpha52: async methods are transactional by default — a throw discards " +
+      "the whole write-set, same as sync",
+  );
+
+  // deno-lint-ignore no-explicit-any
+  await (legacy as any).refuse().catch(() => {});
+  await ui.settle();
+  await sleep(20);
+  assertEquals(
+    [legacy.note, legacy.post],
     ["refused: too large", "written after the await"],
-    "an async method commits incrementally — its writes survive its throw",
+    "transaction: false — incremental commits survive the throw (the opt-out)",
   );
   await ui.dispose();
 });

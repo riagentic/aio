@@ -49,7 +49,6 @@ export {
   _w,
   _waitForState,
   aio,
-  bridge,
   cell,
   client,
   connectDevTools,
@@ -90,6 +89,7 @@ export {
   type Action,
   type ComponentFn,
   h,
+  type NodeAction,
   type VChild,
   type VNode,
 } from "./air/vdom.ts";
@@ -154,13 +154,7 @@ export {
 export { renderToStream } from "./air/ssr-stream.ts";
 
 // ── Shared utilities (AIO-47) ──────────────────────────────────────
-export {
-  actions,
-  effects,
-  msg,
-  own,
-  schedule,
-} from "./browser/browser-shared.ts";
+export { msg, own, schedule } from "./browser/browser-shared.ts";
 
 // ── AIR hooks (signal-based) ────────────────────────────────────────
 export {

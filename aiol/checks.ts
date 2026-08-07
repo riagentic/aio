@@ -4,7 +4,10 @@ import type { CellInfo, Checker } from "./types.ts";
 import { join, resolve } from "@std/path";
 import * as fix from "./fixes.ts";
 import { RESERVED_KEYS } from "../src/state/cell-types.ts";
-import { AIO_LIBRARY_ENTRIES } from "../src/entries.ts";
+import {
+  AIO_LIBRARY_ENTRIES,
+  SERVER_ONLY_AIO_SYMBOLS,
+} from "../src/entries.ts";
 import { removalMessage, removalOf } from "../src/state/removals.ts";
 import { linkSatisfiesPin } from "../src/server/framework-pin.ts";
 import { codeMatches, codeText } from "./scan.ts";
@@ -65,6 +68,23 @@ export const checkConfig: Checker = (ctx) => {
         // Only offer the codemod when the value isn't already in the entry —
         // otherwise --safe-fix would "fix" a correct app.
         ...(passesAppId ? {} : { safeFix: fix.fixRemoveAppId }),
+      },
+    );
+  }
+
+  // deno.json `target` → `client` (alpha52 one-vocabulary rename). The old
+  // key still works — the runtime reads it with a one-time boot hint — but the
+  // linter names the new spelling and offers the mechanical rename.
+  if (typeof dj.target === "string") {
+    report(
+      "warn",
+      "config",
+      `deno.json "target": "${dj.target}" is now spelled "client" ` +
+        "(it names the default client shell; build.targets is the build axis)",
+      {
+        fix: 'Rename the "target" key to "client" (same value) — ' +
+          "--safe-fix or `am fix` does it",
+        safeFix: fix.fixRenameTargetToClient,
       },
     );
   }
@@ -155,15 +175,19 @@ export const checkConfig: Checker = (ctx) => {
       { safeFix: fix.fixAddTestTask },
     );
   }
-  const compileTargets = Object.keys(tasks).filter((k) =>
-    k.startsWith("compile:")
+  // One vocabulary (alpha52): `build` (the fleet) / `compile` (the default
+  // target) are the build tasks; the old per-target compile:* matrix still
+  // counts so a not-yet-migrated app isn't told it can't build.
+  const buildTasks = Object.keys(tasks).filter((k) =>
+    k === "build" || k === "compile" || k.startsWith("compile:")
   );
-  if (compileTargets.length) {
-    pass(`compile targets: ${compileTargets.join(", ")}`);
+  if (buildTasks.length) {
+    pass(`build tasks: ${buildTasks.join(", ")}`);
   } else {report(
       "hint",
       "config",
-      "no compile tasks defined — add compile:browser, compile:electron, etc. for production builds",
+      'no build task defined — add "build" (aio\'s build-all reading ' +
+        "build.targets) for production builds; `am fix` adds it",
     );}
 
   // Framework pin vs dep/aio — the promise `am pin` seals. `doctor` checked
@@ -270,17 +294,21 @@ export const checkStructure: Checker = async (ctx) => {
       );
     }
   } else {
-    // "Unused" only if NOTHING in the project builds a UI. One app is many
-    // targets: the scaffold's `dev` runs server-only while `dev:browser`,
-    // `dev:electron` and `compile:android` all mount App.tsx — calling it
-    // unused told a brand-new app to delete a file its own tasks need
-    //.
+    // "Unused" only if NOTHING in the project can mount it. One app is many
+    // targets, and since alpha52 the scaffold ships ONE `dev` task whose flags
+    // pass through (`deno task dev --client=browser`) with the CLI flag beating
+    // aio.run() config (src/server/aio.ts client resolution) — so any dev task
+    // that runs the app entry keeps App.tsx one flag away from mounting.
+    // Calling it unused told a brand-new server-target app to delete a file
+    // its own README documents using.
     const uiTargets = (denoJson?.build as { targets?: string[] } | undefined)
       ?.targets ?? [];
     const uiTask = Object.values(tasks).some((t) =>
       /--client[= ](?:browser|electron)|--electron\b|--android\b/.test(t)
     );
-    const buildsUI = uiTask ||
+    // Pass-through reachability: dev runs the app entry → --client=X works.
+    const devRunsEntry = /\bsrc\/app\.ts\b|\bapp\.ts\b/.test(devTask);
+    const buildsUI = uiTask || devRunsEntry ||
       uiTargets.some((t) => ["browser", "electron", "android"].includes(t));
     if (appTsx && !buildsUI) {
       report(
@@ -804,23 +832,12 @@ export const checkSecurity: Checker = (ctx) => {
     }
   }
 
-  // --expose without auth
+  // --expose with no auth story: reported (with the alpha52 key-default
+  // migration + safe-fix) by checkAlpha52Surface — ONE decider. Here only the
+  // pass line remains.
   if (appEntry) {
     const hasExpose = appEntry.content.includes("expose") ||
       appEntry.content.includes("--expose");
-    const hasUsers = appEntry.content.includes("users:") ||
-      appEntry.content.includes("users :");
-    if (hasExpose && !hasUsers) {
-      // Check if there's a token config
-      if (!appEntry.content.includes("token")) {
-        report(
-          "warn",
-          "security",
-          "app uses --expose without explicit user auth — auto-generated token will be printed to console but not persisted",
-          { file: appEntry.relative },
-        );
-      }
-    }
     if (!hasExpose) pass("localhost-only (no --expose)");
   }
 
@@ -1058,18 +1075,12 @@ export const checkUI: Checker = (ctx) => {
   // is server-only, so a STATIC import into a cell-shared file is the boundary
   // violation — flag it like @std/ / node:.
   const SERVER_ONLY_PREFIXES = ["@std/", "node:", "aio/server"];
-  // AIO-424: server-only SYMBOLS that live in the isomorphic "aio"
-  // entry — the browser build of "aio" omits them, so a STATIC import into a
+  // AIO-424: server-only SYMBOLS that live in the isomorphic "aio"/"aio/db"
+  // entries — the browser build omits them, so a STATIC import into a
   // cell (shared with the browser bundle) link-fails at boot with an anonymous
   // "does not provide an export named X" blank screen that every server-side
-  // check (check/test/lint) passes. Pure schema helpers (table/pk/text/…) stay
-  // out of this set — they're browser-safe.
-  const SERVER_ONLY_AIO_SYMBOLS = new Set([
-    "createDB",
-    "DEFAULT_PRAGMAS",
-    "connectCli",
-    "connectCliUDS",
-  ]);
+  // check (check/test/lint) passes. THE set is SERVER_ONLY_AIO_SYMBOLS from
+  // src/entries.ts (alpha52 one-decider — graph-validator imports the same).
   for (const file of cellFiles) {
     // Skip .tsx files — already checked above
     if (file.ext === ".tsx") continue;
@@ -1755,14 +1766,16 @@ export const checkBuild: Checker = async (ctx) => {
           "build",
           "Electron package exists but its binary (node_modules/electron/dist) is missing — " +
             "run: deno install --allow-scripts=npm:electron npm:electron " +
-            "(or just `deno task dev:electron` / `compile:electron` — they auto-install)",
+            "(or just `deno task dev --client=electron` / `deno task build " +
+            "--targets=electron` — they auto-install)",
         );
       } catch {
         report(
           "hint",
           "build",
-          "Electron not installed — it auto-installs on the first `deno task dev:electron` " +
-            "or `compile:electron` run (if you need desktop builds)",
+          "Electron not installed — it auto-installs on the first " +
+            "`deno task dev --client=electron` or `deno task build " +
+            "--targets=electron` run (if you need desktop builds)",
         );
       }
     }
@@ -2110,9 +2123,10 @@ export const checkUpgrade: Checker = (ctx) => {
     if (!m) continue;
     found++;
     report(
-      "warn",
+      "error",
       "upgrade",
-      `${file.relative}: \`call({ timeout })\` is a deprecated alias — use \`timeoutMs\``,
+      `${file.relative}: \`call({ timeout })\` was REMOVED in alpha52 — ` +
+        `call() now throws on the old key; use \`timeoutMs\``,
       {
         file: file.relative,
         line: code.slice(0, m.index).split("\n").length,
@@ -2125,7 +2139,10 @@ export const checkUpgrade: Checker = (ctx) => {
   // Server-only symbols moved to the `aio/server` entry (alpha37). A static
   // import of one from `"aio"` in a cell-shared file was the classic
   // blank-screen: it link-fails only when a real browser links the graph.
-  const SERVER_ONLY = /\b(createDB|DEFAULT_PRAGMAS|connectCli|connectCliUDS)\b/;
+  // Derived from THE set (src/entries.ts) — never restated.
+  const SERVER_ONLY = new RegExp(
+    `\\b(${[...SERVER_ONLY_AIO_SYMBOLS].join("|")})\\b`,
+  );
   for (const file of [...tsFiles, ...tsxFiles]) {
     // NOT codeText() here: it blanks string bodies, and the module specifier
     // IS a string — the check would match nothing. Anchored to a real import
@@ -2340,18 +2357,608 @@ export const checkUseCell: Checker = (ctx) => {
   const { tsFiles, tsxFiles, report } = ctx;
   for (const file of [...tsFiles, ...tsxFiles]) {
     // Code only — a migration note that NAMES useCell( in a comment is the
-    // opposite of a use of it, and it was warned about anyway.
-    const [m] = codeMatches(file.content, /\buseCell\s*\(/g);
+    // opposite of a use of it, and it was warned about anyway. A DECLARATION
+    // (`function useCell(` — the framework's own compat shim) is not a use.
+    const [m] = codeMatches(
+      file.content,
+      /(?<!function\s)\buseCell\s*\(/g,
+    );
     if (!m) continue;
     const line = file.content.slice(0, m.index).split("\n").length;
+    if (isSuppressed(file.lines, line - 1)) continue;
+    report(
+      "error",
+      "patterns",
+      `${file.relative}:${line} — useCell() was REMOVED in alpha52 ` +
+        `(deprecated since alpha41): use direct cell access (cell.field / ` +
+        `cell.method()). Its .state was a LIVE view — stashing it and ` +
+        `diffing later compared current state to itself.`,
+      {
+        file: file.relative,
+        line,
+        fix: "useCell(c).state.x → c.x (direct read, reactive)",
+        safeFix: fix.fixUseCellStateReads(file.path),
+      },
+    );
+  }
+};
+
+// ══════════════════════════════════════════════════════════════════════
+// ALPHA52 — the effect channel (deprecations + the transaction MIGRATION)
+// ══════════════════════════════════════════════════════════════════════
+
+/** alpha52 breaks, each with its migration:
+ *  • effects off the return channel → `s.$do(...)` (safe-fix, conservative)
+ *  • `transaction: true` async default → MIGRATION inserts `transaction:
+ *    false,` into undeclared async cells (behaviour-preserving; safe-fix)
+ *  • listensTo array form deprecated (report — the object form needs the
+ *    author to pick a handler method)
+ *  • selector deps spread signature → tuple (safe-fix when untyped)
+ *  • schedule.backoff/poll old arg order + poll `backoff` key → `factor` */
+export const checkAlpha52: Checker = (ctx) => {
+  const { tsFiles, tsxFiles, report, pass } = ctx;
+  let found = 0;
+  const files = [...tsFiles, ...tsxFiles];
+
+  for (const file of files) {
+    const code = codeText(file.content);
+    const lineOf = (idx: number) => code.slice(0, idx).split("\n").length;
+
+    // The safe fix rewrites `return effect` → `s.$do(...)` ONLY when the
+    // method's draft param is literally `s` — `startPoll(_s)` would need a
+    // rename the fix must not make. Same predicate the fix uses, asked at
+    // report time, so a declined-by-design site says [manual] + why instead
+    // of wearing a [fixable] that survives every --safe-fix run.
+    const effectSiteOpts = (at: number, line: number) => {
+      const param = fix.enclosingMethodParam(file.content, at);
+      return param === "s"
+        ? {
+          file: file.relative,
+          line,
+          fix: "s.$do(schedule.after(...)); return;",
+          safeFix: fix.fixReturnEffectsToDo(file.path),
+        }
+        : {
+          file: file.relative,
+          line,
+          fix: param === null
+            ? "rewrite by hand: draft.$do(effect); return;"
+            : `rename the draft param '${param}' to 's' and rerun ` +
+              `--safe-fix, or rewrite by hand: ${param}.$do(effect); return;`,
+          manual: param === null
+            ? "the safe fix declines: not inside a recognizable cell method"
+            : `the safe fix declines: the draft param is '${param}', not 's'`,
+        };
+    };
+
+    // return-ed effects → s.$do
+    for (
+      const m of codeMatches(
+        file.content,
+        /\breturn\s+(?:schedule|own)\.\w+\s*\(/g,
+      )
+    ) {
+      const line = lineOf(m.index!);
+      if (isSuppressed(file.lines, line - 1)) continue;
+      found++;
+      report(
+        "warn",
+        "alpha52",
+        `${file.relative}:${line} — returning effects from a method is ` +
+          `deprecated (works through beta): call s.$do(effect) and use ` +
+          `\`return\` for values only`,
+        effectSiteOpts(m.index! + m[0].length, line),
+      );
+    }
+
+    // return-ed effect ARRAYS → s.$do (only when provably all effects).
+    // Depth walk over the STRIPPED code — braces/brackets inside comments or
+    // strings must not move `end` (same defect class as _balancedClose).
+    for (const m of codeMatches(file.content, /\breturn\s+\[/g)) {
+      const open = m.index! + m[0].length - 1;
+      let depth = 0;
+      let end = -1;
+      for (let i = open; i < code.length; i++) {
+        const ch = code[i];
+        if ("([{".includes(ch!)) depth++;
+        else if (")]}".includes(ch!)) {
+          depth--;
+          if (depth === 0) {
+            end = i;
+            break;
+          }
+        }
+      }
+      if (end === -1) continue;
+      const inner = code.slice(open + 1, end).trim();
+      if (inner.length === 0) continue; // `return []` is a VALUE
+      const parts: string[] = [];
+      let d = 0;
+      let start = 0;
+      for (let i = 0; i < inner.length; i++) {
+        const ch = inner[i]!;
+        if ("([{".includes(ch)) d++;
+        else if (")]}".includes(ch)) d--;
+        else if (ch === "," && d === 0) {
+          parts.push(inner.slice(start, i));
+          start = i + 1;
+        }
+      }
+      parts.push(inner.slice(start));
+      if (
+        !parts.every((p) =>
+          /^\s*(schedule|own)\.\w+\s*\(/.test(p) && p.trim().length > 0
+        )
+      ) {
+        continue;
+      }
+      const line = lineOf(m.index!);
+      if (isSuppressed(file.lines, line - 1)) continue;
+      found++;
+      report(
+        "warn",
+        "alpha52",
+        `${file.relative}:${line} — returning an effects ARRAY is deprecated ` +
+          `(works through beta): call s.$do(effect, ...) and use \`return\` ` +
+          `for values only`,
+        effectSiteOpts(m.index! + m[0].length, line),
+      );
+    }
+
+    // transaction MIGRATION: async methods with no transaction key
+    for (
+      const m of codeMatches(
+        file.content,
+        /\bcell\s*\(\s*["'`][\w\-]+["'`]\s*,\s*\{/g,
+      )
+    ) {
+      // Balanced-scan the config to scope the async/transaction probes —
+      // over the STRIPPED code: the raw walk counted braces inside comments
+      // and strings, so a commented cell could scope the probes to the wrong
+      // span (same defect class as _balancedClose, fixed together).
+      const open = code.indexOf("{", m.index! + m[0].length - 1);
+      let depth = 0;
+      let end = -1;
+      for (let i = open; i < code.length; i++) {
+        const ch = code[i];
+        if (ch === "{") depth++;
+        else if (ch === "}") {
+          depth--;
+          if (depth === 0) {
+            end = i;
+            break;
+          }
+        }
+      }
+      if (end === -1) continue;
+      const body = code.slice(open, end + 1);
+      if (!/\basync\s+[\w$]+\s*\(/.test(body)) continue;
+      if (/\btransaction\s*:/.test(body)) continue;
+      // Already written to the transactional world: a cell that reaches for
+      // the $-meta draft members ($commit/$live/$do) has made its choice —
+      // hinting it toward `transaction: false` would MIGRATE it backwards.
+      if (/\$commit\b|\$live\b|\$do\b/.test(body)) continue;
+      const line = lineOf(m.index!);
+      if (isSuppressed(file.lines, line - 1)) continue;
+      found++;
+      report(
+        "warn",
+        "alpha52",
+        `${file.relative}:${line} — this cell has async methods and no ` +
+          `\`transaction\` key: alpha52 made \`transaction: true\` the async ` +
+          `default (snapshot reads + atomic commit). Add \`transaction: ` +
+          `false,\` to keep the old incremental-commit behavior, or adopt ` +
+          `the default (publish mid-method with s.$commit(), read live with ` +
+          `s.$live)`,
+        {
+          file: file.relative,
+          line,
+          fix: "transaction: false,  // or adopt: s.$commit() / s.$live",
+          safeFix: fix.fixInsertTransactionFalse(file.path),
+        },
+      );
+    }
+
+    // listensTo array form
+    for (const m of codeMatches(file.content, /\blistensTo\s*:\s*\[/g)) {
+      const line = lineOf(m.index!);
+      if (isSuppressed(file.lines, line - 1)) continue;
+      found++;
+      report(
+        "warn",
+        "alpha52",
+        `${file.relative}:${line} — listensTo array form is deprecated ` +
+          `(routes without running code): use the object form, ` +
+          `\`listensTo: { onThing: other.method }\` (values may be arrays)`,
+        {
+          file: file.relative,
+          line,
+          fix: "listensTo: { myHandler: other.method }",
+        },
+      );
+    }
+
+    // selector deps spread signature → tuple
+    for (
+      const m of codeMatches(
+        file.content,
+        /deps\s*:\s*\[([^\]]*)\]\s*,\s*fn\s*:\s*(?:async\s*)?\(([^)]*)\)/g,
+      )
+    ) {
+      const depCount = m[1]!.split(",").map((s) => s.trim()).filter(Boolean)
+        .length;
+      const ps = m[2]!.split(",").map((s) => s.trim()).filter(Boolean);
+      if (depCount === 0 || ps.length !== depCount + 1) continue;
+      if ((ps[1] ?? "").startsWith("[")) continue; // already tuple form
+      const line = lineOf(m.index!);
+      if (isSuppressed(file.lines, line - 1)) continue;
+      found++;
+      report(
+        "warn",
+        "alpha52",
+        `${file.relative}:${line} — selector deps now arrive as a TUPLE: ` +
+          `fn: (s, [${
+            ps.slice(1).map((p) => p.split(":")[0]!.trim()).join(", ")
+          }], ...args) => … (the spread form works through beta with a hint)`,
+        {
+          file: file.relative,
+          line,
+          fix: "fn: (s, [dep1, dep2], ...args) => …",
+          safeFix: fix.fixSelectorDepsTuple(file.path),
+        },
+      );
+    }
+
+    // schedule.backoff/poll old argument order (opts 3rd). The NEW spelling
+    // may ALSO put an object literal third — the action, `{ type: "..." }` —
+    // so a literal with a top-level `type:` key is the CORRECT order and must
+    // never be flagged (a checker that warns forever on migrated code teaches
+    // people to skim past the real findings).
+    for (
+      const m of codeMatches(
+        file.content,
+        /\bschedule\.(backoff|poll)\s*\(\s*[^,()]+,\s*[^,()]+,\s*\{/g,
+      )
+    ) {
+      const litOpen = m.index! + m[0].length - 1;
+      let d = 0;
+      let litEnd = -1;
+      for (let i = litOpen; i < file.content.length; i++) {
+        const ch = file.content[i];
+        if (ch === "{") d++;
+        else if (ch === "}") {
+          d--;
+          if (d === 0) {
+            litEnd = i;
+            break;
+          }
+        }
+      }
+      if (litEnd === -1) continue;
+      const inner = code.slice(litOpen + 1, litEnd);
+      // Top-level `type:` key ⇒ this third arg is the ACTION (new order).
+      let depth = 0;
+      let isAction = false;
+      let segStart = 0;
+      const segs: string[] = [];
+      for (let i = 0; i < inner.length; i++) {
+        const ch = inner[i]!;
+        if ("([{".includes(ch)) depth++;
+        else if (")]}".includes(ch)) depth--;
+        else if (ch === "," && depth === 0) {
+          segs.push(inner.slice(segStart, i));
+          segStart = i + 1;
+        }
+      }
+      segs.push(inner.slice(segStart));
+      for (const seg of segs) {
+        if (/^\s*["']?type["']?\s*:/.test(seg)) isAction = true;
+      }
+      if (isAction) continue;
+      const line = lineOf(m.index!);
+      if (isSuppressed(file.lines, line - 1)) continue;
+      found++;
+      report(
+        "warn",
+        "alpha52",
+        `${file.relative}:${line} — schedule.${m[1]}(id, attempt, opts, ` +
+          `action) is the deprecated order: the action moved to the 3rd ` +
+          `position, like after/every — schedule.${
+            m[1]
+          }(id, attempt, action, opts)`,
+        {
+          file: file.relative,
+          line,
+          fix: `schedule.${m[1]}("id", s.attempt, A.tick(), { ... })`,
+        },
+      );
+    }
+
+    // poll's `backoff` option key → `factor`. Scoped to the OPTS literal (the
+    // one carrying `every:`) — an action payload may have a `backoff` field of
+    // its own, and that one is data, not the deprecated key.
+    for (
+      const m of codeMatches(
+        file.content,
+        /\bschedule\.poll\s*\([^;]*?\{[^{}]*\bevery\s*:[^{}]*\bbackoff\s*:|\bschedule\.poll\s*\([^;]*?\{[^{}]*\bbackoff\s*:[^{}]*\bevery\s*:/g,
+      )
+    ) {
+      const line = lineOf(m.index!);
+      if (isSuppressed(file.lines, line - 1)) continue;
+      found++;
+      report(
+        "warn",
+        "alpha52",
+        `${file.relative}:${line} — schedule.poll's \`backoff\` option key ` +
+          `is deprecated: renamed \`factor\` (same meaning)`,
+        {
+          file: file.relative,
+          line,
+          fix: "{ every: 5000, factor: 2, max: 60000 }",
+          safeFix: fix.fixPollBackoffKey(file.path),
+        },
+      );
+    }
+  }
+
+  if (found === 0) {
+    pass("alpha52: no deprecated effect-channel/selector/schedule spellings");
+  }
+};
+
+// ══════════════════════════════════════════════════════════════════════
+// ALPHA52 — the surface diet + safety defaults (Package 4)
+// ══════════════════════════════════════════════════════════════════════
+
+/** Balanced-scan from an opening `{` to its close; -1 when unbalanced.
+ *
+ *  Takes STRIPPED text (`codeText()` — comments/strings/regex bodies blanked,
+ *  offsets preserved), so a plain depth walk is exact. It USED to take raw
+ *  text with its own string tracking — which was comment-BLIND: one unpaired
+ *  apostrophe in a comment ("don't") flipped the string state and swallowed
+ *  every brace until the next quote, so `end` landed wrong and whole cells
+ *  were silently skipped (a 33-cell field app got 11 of 33 findings — and the
+ *  access-without-visible SECURITY branch under-reported identically).
+ *  Offsets in stripped text equal offsets in the raw source. */
+function _balancedClose(stripped: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < stripped.length; i++) {
+    const ch = stripped[i]!;
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/** TOP-LEVEL identifier keys of an object literal body (incl. braces).
+ *  Takes a STRIPPED slice (see _balancedClose) — identifiers are code and
+ *  survive stripping, so a depth walk with no string state is exact. */
+function _topLevelKeys(body: string): Set<string> {
+  const keys = new Set<string>();
+  let depth = 0;
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i]!;
+    if ("({[".includes(ch)) depth++;
+    else if (")}]".includes(ch)) depth--;
+    else if (depth === 1 && /[$\w]/.test(ch)) {
+      if (/[$\w.]/.test(body[i - 1] ?? "")) continue;
+      const m = /^([$\w]+)\s*:/.exec(body.slice(i));
+      if (m) keys.add(m[1]!);
+      while (i + 1 < body.length && /[$\w]/.test(body[i + 1]!)) i++;
+    }
+  }
+  return keys;
+}
+
+/** alpha52 surface-diet + safety-default migrations:
+ *  • cell/cellDefaults `ui:` → `visible:` (alias through beta; safe-fix)
+ *  • deleted entries `aio/schedule`/`aio/selectors` (safe-fix re-routes)
+ *  • exposed app with no auth + no `key` → key now DEFAULTS to a generated
+ *    shared key; MIGRATION inserts `key: false` (behaviour-preserving)
+ *  • `access:` with no `visible` on an exposed/multi-user app → the boot
+ *    REFUSAL, reported pre-boot (one-word fix: visible: "all") */
+export const checkAlpha52Surface: Checker = (ctx) => {
+  const { sourceFiles, tsFiles, tsxFiles, appEntry, denoJson, report, pass } =
+    ctx;
+  let found = 0;
+  const files = [...tsFiles, ...tsxFiles];
+
+  // Audience: exposed to the network, or multi-user auth — resolved once.
+  const entryCode = appEntry ? codeText(appEntry.content) : "";
+  const taskExpose = Object.values(denoJson?.tasks ?? {}).some((c) =>
+    typeof c === "string" && /(?<![\w-])--expose(?![\w-])/.test(c)
+  );
+  const cfgExpose = /\bexpose\s*:\s*true/.test(entryCode);
+  const multiUser = /\busers\s*:|\bresolveUser\s*[:(]|\bauth\s*:\s*(true|\{)/
+    .test(
+      entryCode,
+    );
+  const exposedOrMulti = taskExpose || cfgExpose || multiUser;
+
+  for (const file of files) {
+    const code = codeText(file.content);
+    const lineOf = (idx: number) => code.slice(0, idx).split("\n").length;
+
+    // cell `ui:` → `visible:` (and cellDefaults.ui) — key rename, aliased.
+    // NOTE the block regex runs on RAW content (the cell NAME is a string —
+    // stripping would blank it) with codeMatches filtering comment mentions;
+    // everything STRUCTURAL below runs on the stripped `code`, same offsets.
+    const blockRe =
+      /\bcell\s*\(\s*["'`][\w\-]+["'`]\s*,\s*\{|\bcellDefaults\s*:\s*\{/g;
+    for (const m of codeMatches(file.content, blockRe)) {
+      const open = code.indexOf("{", m.index! + m[0].length - 1);
+      const end = _balancedClose(code, open);
+      if (end === -1) continue;
+      const keys = _topLevelKeys(code.slice(open, end + 1));
+      const isCell = !m[0].startsWith("cellDefaults");
+      if (!keys.has("ui")) {
+        // access-without-visible: only meaningful on cell blocks, and only
+        // when the audience is real — mirrors aio.run()'s boot refusal.
+        if (
+          isCell && exposedOrMulti && keys.has("access") &&
+          !keys.has("visible")
+        ) {
+          const line = lineOf(m.index!);
+          if (isSuppressed(file.lines, line - 1)) continue;
+          found++;
+          report(
+            "error",
+            "security",
+            `${file.relative}:${line} — this cell declares \`access\` (the ` +
+              `CALL side) but no \`visible\` (the READ side). This app is ` +
+              `${taskExpose || cfgExpose ? "exposed" : "multi-user"}, so ` +
+              `aio.run() REFUSES to boot (alpha52): with no \`visible\`, ` +
+              `the whole cell is broadcast to every connected client. ` +
+              `Decide reads: visible: "none" / { exclude: [...] } / ` +
+              `forUser — or acknowledge in one word: visible: "all"`,
+            {
+              file: file.relative,
+              line,
+              fix:
+                'visible: "all"  // or "none" / { exclude: [...] } / forUser',
+            },
+          );
+        }
+        continue;
+      }
+      const line = lineOf(m.index!);
+      if (isSuppressed(file.lines, line - 1)) continue;
+      found++;
+      report(
+        "warn",
+        "alpha52",
+        `${file.relative}:${line} — ${
+          isCell ? "cell config" : "cellDefaults"
+        } key \`ui:\` was renamed \`visible:\` (access gates calls, ` +
+          `visible gates reads; the alias works through beta with a one-time ` +
+          `hint). App-level aio.run({ ui: {...} }) window config is unchanged.`,
+        {
+          file: file.relative,
+          line,
+          fix: "visible: { exclude: [...] }  // was ui:",
+          safeFix: fix.fixUiKeyToVisible(file.path),
+        },
+      );
+    }
+  }
+
+  // Deleted entries: aio/schedule + aio/selectors (alpha52 entry diet).
+  for (const file of sourceFiles) {
+    const m =
+      /(?:^|\n)\s*import\s[^\n]*from\s*["']aio\/(schedule|selectors)["']/
+        .exec(file.content);
+    if (!m) continue;
+    found++;
+    const line = file.content.slice(0, m.index).split("\n").length + 1;
+    report(
+      "error",
+      "upgrade",
+      `${file.relative}:${line} — the \`aio/${m[1]}\` entry was DELETED in ` +
+        `alpha52: its symbols live on \`aio\` (schedule, createSelector, ` +
+        `types) and \`aio/extras\` (isScheduleEffect, createSliceSelector)`,
+      {
+        file: file.relative,
+        line,
+        fix: m[1] === "schedule"
+          ? 'import { schedule } from "aio"'
+          : 'import { createSelector } from "aio"',
+        safeFix: fix.fixDeadEntrySpecifiers(file.path),
+      },
+    );
+  }
+
+  // aio/db went types-only (alpha52): VALUE imports move to aio/server (the
+  // aio/db re-exports are deprecated through beta — rewrite now).
+  for (const file of sourceFiles) {
+    const m = /(?:^|\n)\s*import\s*\{([^}]*)\}\s*from\s*["']aio\/db["']/.exec(
+      file.content,
+    );
+    if (!m) continue;
+    const hasValue = m[1]!.split(",").some((raw) => {
+      const t = raw.trim();
+      if (!t || /^type\s/.test(t)) return false;
+      const bare = t.split(/\s+as\s+/)[0]!.trim();
+      return [
+        "createDB",
+        "DEFAULT_PRAGMAS",
+        "initSchema",
+        "loadTables",
+        "syncTables",
+        "reactiveDB",
+      ].includes(bare);
+    });
+    if (!hasValue) continue;
+    found++;
+    const line = file.content.slice(0, m.index).split("\n").length + 1;
     report(
       "warn",
-      "patterns",
-      `${file.relative}:${line} — useCell() is deprecated: use direct cell ` +
-        `access (cell.field / cell.method()). Its .state is a LIVE view — ` +
-        `stashing it and diffing later compares current state to itself.`,
-      { file: file.relative, line },
+      "upgrade",
+      `${file.relative}:${line} — \`aio/db\` is types + pure helpers since ` +
+        `alpha52: its runtime values (createDB, initSchema, reactiveDB, …) ` +
+        `live on \`aio/server\`; the aio/db re-exports are deprecated and ` +
+        `die at beta`,
+      {
+        file: file.relative,
+        line,
+        fix: 'import { createDB } from "aio/server"',
+        safeFix: fix.fixDbEntryImports(file.path),
+      },
     );
+  }
+
+  // MIGRATION: exposed + no per-user auth + no `key` → alpha52 generates a
+  // shared key by default. Insert `key: false` to pin the old OPEN behavior.
+  // Fires ONLY for a project still pinned to pre-alpha52 aio — that is the
+  // one population whose behavior the default changes. A fresh scaffold (or
+  // an already-upgraded app) is SAFE by default now, and warning it would be
+  // pure noise: the boot log already explains the generated key.
+  // The pin can live in TWO places: a jsr specifier in `imports.aio`
+  // (`jsr:@riagentic/aio@1.0.0-alphaNN`), or — the am-created population,
+  // which is the MAIN one — a `dep/aio` link with the recorded version in
+  // deno.json `aioVersion` ("v1.0.0-alphaNN"). Consult both; an unversioned
+  // source checkout stays exempt (can't tell → the boot log explains).
+  const aioPin = denoJson?.imports?.["aio"] ?? "";
+  const pinAlpha = /@1\.0\.0-alpha(\d+)/.exec(aioPin);
+  const verAlpha = /^v?1\.0\.0-alpha(\d+)$/.exec(
+    String((denoJson as Record<string, unknown> | null)?.aioVersion ?? ""),
+  );
+  const alphaNum = pinAlpha
+    ? Number(pinAlpha[1])
+    : verAlpha
+    ? Number(verAlpha[1])
+    : null;
+  const preAlpha52 = alphaNum !== null && alphaNum < 52;
+  if (preAlpha52 && appEntry && (taskExpose || cfgExpose) && !multiUser) {
+    // entryCode is the stripped entry (computed above) — scan structure there.
+    const m = /\baio\.run\s*\(\s*\{/.exec(entryCode);
+    const open = m ? entryCode.indexOf("{", m.index + m[0].length - 1) : -1;
+    const end = open === -1 ? -1 : _balancedClose(entryCode, open);
+    const keys = end === -1
+      ? new Set<string>()
+      : _topLevelKeys(entryCode.slice(open, end + 1));
+    if (!keys.has("key")) {
+      found++;
+      report(
+        "warn",
+        "security",
+        `${appEntry.relative} — this app is exposed with no per-user auth ` +
+          `and no \`key\`: since alpha52 aio generates a persisted shared ` +
+          `key by default (the share link carries it). To keep the app OPEN ` +
+          `on the network, pin it explicitly: key: false`,
+        {
+          file: appEntry.relative,
+          fix: "key: false  // explicit opt-out, pre-alpha52 behavior",
+          safeFix: fix.fixInsertKeyFalse(appEntry.path),
+        },
+      );
+    }
+  }
+
+  if (found === 0) {
+    pass("alpha52 surface: no ui:-key, dead-entry, or exposed-open findings");
   }
 };
 
@@ -2374,4 +2981,6 @@ export const ALL_CHECKS: Checker[] = [
   checkPostAwaitRead,
   checkWorkerPeerReads,
   checkUseCell,
+  checkAlpha52,
+  checkAlpha52Surface,
 ];

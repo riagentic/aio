@@ -193,6 +193,7 @@ export function buildAppObject<S, A>(refs: {
   shutdown: () => Promise<void>;
   sessionStore?: import("./sessions.ts").SessionStore | null;
   userStore?: import("./auth-users.ts").UserStore | null;
+  blobs?: import("./blobs.ts").BlobStore;
 }): AioApp<S, A> {
   return {
     dispatch: refs.dispatch,
@@ -201,6 +202,7 @@ export function buildAppObject<S, A>(refs: {
     sessions: refs.sessionStore ?? undefined,
     auth: refs.userStore ?? undefined,
     db: (refs.asyncDb ?? undefined) as AioApp<S, A>["db"],
+    blobs: refs.blobs,
     snapshot: () => JSON.stringify(refs.getState()),
     loadSnapshot: (json: string) => {
       const parsed = JSON.parse(json);

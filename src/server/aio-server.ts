@@ -28,7 +28,7 @@ import {
   degradedReport,
 } from "../diagnostics/degraded.ts";
 import { cellAccessAllowed } from "./server-auth.ts";
-import type { CellAccess } from "../state/cell-types.ts";
+import type { Access } from "../state/cell-types.ts";
 
 /** The slice of `AioConfig` the transport layer reads — HOP 2 of the config
  *  bridge (`aio.run({…})` → `setupTransport`).
@@ -67,7 +67,7 @@ export interface TransportConfig {
   _cellNames?: string[];
   _cellPatchStrategies?: Map<string, CellPatchStrategy>;
   _cellFilterFields?: Map<string, PatchFilterFields>;
-  _cellAccess?: Map<string, CellAccess>;
+  _cellAccess?: Map<string, Access>;
   onConnect?: (user?: AioUser) => void;
   onDisconnect?: (user?: AioUser) => void;
   libraryMode?: boolean;
@@ -122,6 +122,8 @@ export interface ServerSetupDeps<S, A> {
   getUIState: (s: S, user?: AioUser) => unknown;
   dispatch: (action: A) => Promise<unknown> | void;
   app: { snapshot: () => string; loadSnapshot: (json: string) => void };
+  /** Content-addressed blob store (`app.blobs`) — served at /__aio/blobs/. */
+  blobs?: import("./blobs.ts").BlobStore;
   // Server features
   vitalsSystem?: VitalsSystem;
   useElectron: boolean;
@@ -407,6 +409,7 @@ export async function setupTransport<S, A>(
       dispatch: dispatchNetwork,
       getSnapshot: () => app.snapshot(),
       loadSnapshot: (json: string) => app.loadSnapshot(json),
+      blobs: deps.blobs,
       baseDir,
       serveDirs: config.serveDirs,
       debug: (msg: string) => log.debug(msg),

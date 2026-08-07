@@ -1,6 +1,6 @@
 /**
  * @module
- * Meta commands for am — version, new, help.
+ * Meta commands for am — version, add, help.
  */
 
 import { VERSION } from "../server/aio.ts";
@@ -225,7 +225,7 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-export async function cmdNew(
+export async function cmdAdd(
   args: string[],
   flags: GlobalFlags,
 ): Promise<void> {
@@ -234,15 +234,15 @@ export async function cmdNew(
   const mode = detectMode(flags);
 
   if (!kind || !name) {
-    fail("usage: am new <cell|page> <name>", mode);
+    fail("usage: am add cell <name>", mode);
   }
   // The name becomes BOTH a path segment and an identifier in generated
   // source, and it arrived from argv completely unchecked (`am create`
-  // validates its own, this never did). `am new cell "../etc/x"` wrote outside
+  // validates its own, this never did). `am add cell "../etc/x"` wrote outside
   // src/, and a name carrying `}` closed the generated `cell(` literal and let
   // the rest run as code — in the developer's own project file.
   //
-  // A cell/page name is an identifier, so require one: nothing else can be
+  // A cell name is an identifier, so require one: nothing else can be
   // either a traversal or a syntax break.
   if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(name)) {
     fail(
@@ -254,51 +254,52 @@ export async function cmdNew(
   }
 
   if (kind === "cell") {
-    const dir = `src/cells/${name}`;
-    const file = `${dir}/index.ts`;
+    // One flat file per cell, in the scaffold's own style (src/cell.ts):
+    // pure state + methods, imported directly by UI and server alike.
+    const dir = "src/cell";
+    const file = `${dir}/${name}.ts`;
     // The exit lives OUTSIDE the try: `fail()` does not return, and a
     // catch-all around it would swallow the very thing it is trying to do.
     if (await exists(file)) fail(`${file} already exists`, mode);
     await Deno.mkdir(dir, { recursive: true });
     const symbol = name.replace(/-([a-z0-9])/gi, (_m, c) => c.toUpperCase());
-    const content = `import { cell } from 'aio'
+    const content =
+      `// Cell — pure state + methods; UI and server both import from here.
+import { cell } from "aio";
 
-export const ${symbol} = cell('${name}', {
+export const ${symbol} = cell("${name}", {
   state: {},
-  methods: {
-  },
-})
+  methods: {},
+});
 `;
     await Deno.writeTextFile(file, content);
     out(flags.json ? { created: file } : `created ${file}`, mode);
   } else if (kind === "page") {
-    const pascal = (name.charAt(0).toUpperCase() + name.slice(1))
-      .replace(/-([a-z0-9])/gi, (_m, c: string) => c.toUpperCase());
-    const dir = "src/pages";
-    const file = `${dir}/${pascal}.tsx`;
-    if (await exists(file)) fail(`${file} already exists`, mode);
-    await Deno.mkdir(dir, { recursive: true });
-    const content = `import { useAio } from 'aio'
-
-export function ${pascal}() {
-  const { state } = useAio()
-  if (!state) return <div>Loading\u2026</div>
-
-  return (
-    <div>
-      <h1>${pascal}</h1>
-    </div>
-  )
-}
-`;
-    await Deno.writeTextFile(file, content);
-    out(flags.json ? { created: file } : `created ${file}`, mode);
+    // `am new page` generated a useAio() component wired to nothing — code
+    // the framework deprecated. A page is a plain component; there is nothing
+    // an aio-specific generator adds.
+    fail(
+      "`am add page` was removed — a page is a plain component: create " +
+        "src/<Name>.tsx exporting one, import your cells and read their " +
+        "state directly (see the scaffold's src/App.tsx)",
+      mode,
+    );
   } else {
     fail(
-      `unknown scaffold type: '${kind}' — use 'cell' or 'page'`,
+      `unknown scaffold type: '${kind}' — use 'cell'`,
       mode,
     );
   }
+}
+
+/** Deprecated alias — `am new` became `am add` (alpha52). Kept working
+ *  through beta, with a loud line naming the new spelling. */
+export function cmdNew(
+  args: string[],
+  flags: GlobalFlags,
+): Promise<void> {
+  console.error("am: `am new` is now `am add` — the old name still works");
+  return cmdAdd(args, flags);
 }
 
 /** Show help text. Accepts command keys to list available commands. */
@@ -390,14 +391,13 @@ Inspect:
   config                  Server configuration
 
 Scaffold:
-  new cell <name>      Generate src/cells/<name>/index.ts
-  new page <name>         Generate src/pages/<Name>.tsx
+  add cell <name>         Generate src/cell/<name>.ts
 
 Other:
   version                 Print version
   help                    This message
 
-Flags: --app=X  --port=N  --entry=<path>  --wait[=N]  --json  --quiet  --body='{...}'  --args='[...]'  --filter=X  --lines=N  --follow/-f  --transport=ws|uds  --client=N/-cN  --all
+Flags: --app=X  --port=N  --entry=<path>  --wait[=N]  --json  --quiet  --body='{...}'  --args='[...]'  --filter=X  --lines=N  --follow/-f  --transport=ws|uds  --client-index=N/-i N  --all
 
 --app: target specific app by ID (default: resolved from deno.json name)
 --entry: override entry point (default: deno.json "entry" > src/app.ts > src/main.ts)

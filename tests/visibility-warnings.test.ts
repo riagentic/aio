@@ -40,7 +40,7 @@ Deno.test("visibility #1: exclude key that isn't a top-level field warns", () =>
 Deno.test("visibility #1: a valid top-level exclude does NOT warn", () => {
   const c = cell("wallet2", {
     state: { encSecKey: "x", pub: "y" },
-    ui: { exclude: ["encSecKey"] }, // top-level — legit
+    visible: { exclude: ["encSecKey"] }, // top-level — legit
     methods: { noop(_s) {} },
   });
   const w = warningsFor([c]);
@@ -104,12 +104,12 @@ Deno.test("visibility (AIO-426): an exposed credential REFUSES to boot in dev", 
 Deno.test("visibility (AIO-426): a credential that's excluded or declared public boots fine", () => {
   const excluded = cell("cred_excl", {
     state: { password: "x", ok: 1 },
-    ui: { exclude: ["password"] },
+    visible: { exclude: ["password"] },
     methods: { noop(_s) {} },
   });
   const publicOk = cell("cred_pub", {
     state: { apiKey: "public-token", ok: 1 },
-    ui: { publicFields: ["apiKey"] },
+    visible: { publicFields: ["apiKey"] },
     methods: { noop(_s) {} },
   });
   // Neither should throw.
@@ -122,7 +122,7 @@ Deno.test("visibility: a deep-excluded container no longer warns", () => {
   // secret heuristic on the container field.
   const c = cell("seedvault", {
     state: { seeds: [] as { encSeed: string }[], seedNextId: 0 },
-    ui: { exclude: ["seeds.encSeed"] },
+    visible: { exclude: ["seeds.encSeed"] },
     methods: { noop(_s) {} },
   });
   const w = warningsFor([c]);
@@ -136,7 +136,7 @@ Deno.test("visibility: a deep-excluded container no longer warns", () => {
 Deno.test("visibility: ui.publicFields explicitly silences the heuristic", () => {
   const c = cell("navcell", {
     state: { masterKey: "public-id", n: 0 },
-    ui: { publicFields: ["masterKey"] },
+    visible: { publicFields: ["masterKey"] },
     methods: { noop(_s) {} },
   });
   const w = warningsFor([c]);
@@ -184,7 +184,7 @@ Deno.test("visibility #2: a secret-looking exposed field warns", () => {
 Deno.test("visibility #2: excluding the secret field silences the warning", () => {
   const c = cell("wallet4", {
     state: { encSecKey: "cipher", pub: "y" },
-    ui: { exclude: ["encSecKey"] },
+    visible: { exclude: ["encSecKey"] },
     methods: { noop(_s) {} },
   });
   const w = warningsFor([c]);
@@ -194,7 +194,7 @@ Deno.test("visibility #2: excluding the secret field silences the warning", () =
 Deno.test("visibility #2: forUser transform suppresses the secret heuristic", () => {
   const c = cell("wallet5", {
     state: { encSecKey: "cipher", pub: "y" },
-    ui: {
+    visible: {
       include: ["encSecKey", "pub"],
       forUser: (s: { encSecKey: string; pub: string }) => ({
         ...s,

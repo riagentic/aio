@@ -1,5 +1,5 @@
 // deno-lint-ignore-file
-// cell(), bridge(), and aio stub — browser-side action creator factories.
+// cell() and aio stub — browser-side action creator factories.
 
 import { registerCell } from "../state/cell-reactive.ts";
 import { isAsyncFunction } from "../state/cell-impl.ts";
@@ -10,10 +10,42 @@ import { normalizeSyncConfig } from "../sync/types.ts";
 // stub that stores the raw config instead of the normalized shape is a
 // divergence only production can see. `tests/browser-cell-stub-parity.test.ts`
 // pins every `__aio` key the browser reads against this file.
-import { normalizeUiFilter, scopeSelectors } from "../state/cell-helpers.ts";
+import {
+  normalizeUiFilter,
+  resolveVisibility,
+  scopeSelectors,
+} from "../state/cell-helpers.ts";
 
 // deno-lint-ignore no-explicit-any
 type _Creators = Record<string, (...args: any[]) => any>;
+
+/** Per-selector dep lists (deps-form only) — the browser twin of the map
+ *  cell-methods-factory builds. */
+function selectorDepsOf(
+  selectors: unknown,
+): Record<string, readonly string[]> {
+  const out: Record<string, readonly string[]> = {};
+  if (!selectors || typeof selectors !== "object") return out;
+  for (const [key, def] of Object.entries(selectors)) {
+    if (def && typeof def === "object" && Array.isArray((def as any).deps)) {
+      out[key] = (def as any).deps;
+    }
+  }
+  return out;
+}
+
+/** `s.$do` exists on every method draft (alpha52). During an optimistic
+ *  REPLAY the effects already ran on the server — re-firing them here would
+ *  double them — so the replay serves a swallow-everything $do. A thin
+ *  forwarding proxy, same shape as the server's withDraftDo (cell-impl.ts). */
+function withReplayDo<S extends object>(draft: S): S {
+  return new Proxy(draft, {
+    get: (t, p) => (p === "$do" ? _noopDo : Reflect.get(t, p, t)),
+    set: (t, p, v) => Reflect.set(t, p, v, t),
+    has: (t, p) => p === "$do" || Reflect.has(t, p),
+  });
+}
+function _noopDo(): void {}
 
 // deno-lint-ignore no-explicit-any
 export function cell(
@@ -23,19 +55,20 @@ export function cell(
     scope?: "client";
     /** CRDT sync config — routed through the client engine when set. */
     sync?: true | false | Record<string, unknown>;
-    actions?: _Creators;
     methods?: Record<string, unknown>;
     generators?: Record<string, unknown>;
     effects?: _Creators;
     machine?: any;
-    reduce?: any;
-    execute?: any;
     selectors?: any;
     /** Client-read visibility. bindCellReactive enforces it on EVERY client
      *  read; dropping it here meant a `ui.exclude`d field read as a plain
      *  `undefined` in the browser (no throw in dev, no warning in prod) while
      *  standalone/testUI threw — the "undefined as data" trap the tripwire
-     *  exists to stop, live only where nobody was testing. */
+     *  exists to stop, live only where nobody was testing. Resolved through
+     *  resolveVisibility — the SAME decider the server factory uses — so
+     *  `visible:` (alpha52) and the deprecated `ui:` alias mean the same
+     *  thing in both runtimes. */
+    visible?: any;
     ui?: any;
   },
 ): Record<string, unknown> {
@@ -60,9 +93,13 @@ export function cell(
     }
     return cat;
   };
-  if (config.methods) {
+  // Methods style — the ONE style, exactly like the server factory
+  // (cell-create.ts): an empty or omitted methods map is valid; the legacy
+  // actions/machine/reduce/execute style was removed with it (alpha52).
+  const methods = (config.methods ?? {}) as Record<string, unknown>;
+  {
     const allKeys = [
-      ...Object.keys(config.methods),
+      ...Object.keys(methods),
       ...Object.keys(config.generators ?? {}),
     ];
     const cat: Record<string, unknown> = {};
@@ -92,7 +129,7 @@ export function cell(
     // return value, and optimistic rebase "replayed" it by calling an async
     // function synchronously and dropping the promise.
     const asyncMethods = new Set<string>();
-    for (const [key, fn] of Object.entries(config.methods)) {
+    for (const [key, fn] of Object.entries(methods)) {
       if (typeof fn === "function" && isAsyncFunction(fn)) {
         asyncMethods.add(key);
       }
@@ -106,7 +143,11 @@ export function cell(
         // selector threw `selectorFn is not a function` in the browser bundle
         // and nowhere else.
         selectors: scopeSelectors(prefix, config.selectors),
-        ui: normalizeUiFilter(config.ui),
+        // Which selectors are deps-form — bindCellReactive routes their calls
+        // (full state + args) differently from plain parameterized ones
+        // (alpha52 tuple form). Mirrors cell-methods-factory.
+        selectorDeps: selectorDepsOf(config.selectors),
+        ui: normalizeUiFilter(resolveVisibility(name, config)),
         actionKeys: allKeys,
         effectKeys: Object.keys(config.effects ?? {}),
         id: prefix,
@@ -120,7 +161,7 @@ export function cell(
     // cell signal — mark the def so bindCellReactive takes the client branch
     // instead of wiring server dispatch (parity with cell-create.ts).
     if (config.scope === "client") {
-      for (const [key, fn] of Object.entries(config.methods)) {
+      for (const [key, fn] of Object.entries(methods)) {
         if (typeof fn === "function" && isAsyncFunction(fn)) {
           throw new Error(
             `[${name}] client-scoped cells support sync methods only (no ` +
@@ -130,7 +171,7 @@ export function cell(
         }
       }
       (def.__aio as Record<string, unknown>).scope = "client";
-      (def.__aio as Record<string, unknown>).clientMethods = config.methods;
+      (def.__aio as Record<string, unknown>).clientMethods = methods;
     }
     // A sync cell needs two extras for the client CRDT engine: the normalized
     // config (which cells route through the engine) and a replayable reducer
@@ -152,7 +193,7 @@ export function cell(
         sync as true | Record<string, unknown>,
       );
       const syncMethods: Record<string, unknown> = {};
-      for (const [key, fn] of Object.entries(config.methods!)) {
+      for (const [key, fn] of Object.entries(methods)) {
         if (typeof fn !== "function" || !isAsyncFunction(fn)) {
           syncMethods[key] = fn;
         }
@@ -165,7 +206,9 @@ export function cell(
         const m = syncMethods[key];
         if (typeof m === "function") {
           const args = (msg.payload as { args?: unknown[] })?.args ?? [];
-          m(draft, ...args);
+          // $do served as a no-op: the server already ran the effects; a
+          // replay must be state-deterministic and re-fire nothing.
+          m(withReplayDo(draft), ...args);
         }
       };
     };
@@ -182,46 +225,6 @@ export function cell(
     registerCell(def as unknown as CellDef);
     return def;
   }
-  const aCat = buildCat(config.actions ?? {});
-  const def: Record<string, unknown> = {
-    __aio: {
-      state: config.state ?? {},
-      machine: config.machine ?? false,
-      selectors: scopeSelectors(prefix, config.selectors),
-      ui: normalizeUiFilter(config.ui),
-      actionKeys: Object.keys(config.actions ?? {}),
-      effectKeys: Object.keys(config.effects ?? {}),
-      id: prefix,
-      actions: aCat,
-      effects: buildCat(config.effects ?? {}),
-      bound: false,
-    },
-  };
-  for (const [key, value] of Object.entries(aCat)) {
-    def[key] = value;
-  }
-  registerCell(def as unknown as CellDef);
-  return def;
-}
-
-// deno-lint-ignore no-explicit-any
-export function bridge(name: string, config: any): Record<string, unknown> {
-  const channels = Object.keys(config.channels ?? {});
-  // deno-lint-ignore no-explicit-any
-  const actions: Record<string, (...args: any[]) => Record<string, unknown>> =
-    {};
-  for (const ch of channels) {
-    actions[`${ch}Request`] = (...args: unknown[]) => ({
-      ...(config.channels[ch]?.request?.(...args) ?? {}),
-      _channel: ch,
-    });
-    actions[`${ch}Response`] = (...args: unknown[]) => ({
-      ...(config.channels[ch]?.response?.(...args) ?? {}),
-      _channel: ch,
-    });
-    actions[`${ch}Timeout`] = () => ({ _channel: ch });
-  }
-  return cell(name, { actions, machine: false, reduce: () => {} });
 }
 
 // deno-lint-ignore no-explicit-any

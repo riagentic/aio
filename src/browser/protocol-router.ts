@@ -3,7 +3,11 @@
 
 import { Listeners } from "../state/listeners.ts";
 import { type Signal, signal } from "../state/signal.ts";
-import type { LinkProps, RouteProps, RouteState } from "./protocol-types.ts";
+import type {
+  LinkProps,
+  RouteProps,
+  RouteState,
+} from "../protocol/protocol-types.ts";
 
 export type { LinkProps, RouteProps, RouteState };
 

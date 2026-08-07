@@ -27,6 +27,7 @@ import {
   extractPublicFields,
   normalizePersistFilter,
   normalizeUiFilter,
+  resolveVisibility,
   scopeSelectors,
   validateFieldFilters,
 } from "./cell-helpers.ts";
@@ -35,6 +36,63 @@ import {
   buildMethodsMachine,
   buildMethodsReducer,
 } from "./cell-methods-internals.ts";
+import { resolveSelfAction } from "./self.ts";
+import { log } from "../diagnostics/logger.ts";
+
+/** One-time-per-cell hint for the deprecated listensTo ARRAY form. */
+const _listensToHinted = new Set<string>();
+/** @internal test seam. */
+export function _resetListensToHints(): void {
+  _listensToHinted.clear();
+}
+
+/** One-time-per-cell hint for the SILENT alpha52 transaction-default flip:
+ *  an async cell that never declared `transaction` changed semantics on a
+ *  pin-bump with zero signal — every other alpha52 break hints at the old
+ *  spelling, so this one must too. Observe-only. */
+const _transactionHinted = new Set<string>();
+/** @internal test seam. */
+export function _resetTransactionHints(): void {
+  _transactionHinted.clear();
+}
+function hintTransactionDefault(
+  name: string,
+  methods: Record<string, unknown>,
+): void {
+  if (_transactionHinted.has(name)) return;
+  // A cell already reaching for the $-meta draft members has made its choice
+  // for the new world — hinting it would be noise.
+  for (const fn of Object.values(methods)) {
+    if (
+      typeof fn === "function" &&
+      /\$commit\b|\$live\b|\$do\b/.test(String(fn))
+    ) {
+      return;
+    }
+  }
+  _transactionHinted.add(name);
+  log.warn(
+    "cell",
+    `[cell:${name}] has async methods and no \`transaction\` key — since ` +
+      `alpha52 the default is \`transaction: true\` (snapshot reads + atomic ` +
+      `commit; a throw or cancel discards the write-set). Add ` +
+      `\`transaction: false\` to keep the pre-alpha52 incremental commits, ` +
+      `or adopt the default: publish mid-method with s.$commit(), read live ` +
+      `with s.$live. aiol --safe-fix pins the old behavior. ` +
+      `(hinted once per cell)`,
+  );
+}
+function hintListensToArray(name: string): void {
+  if (_listensToHinted.has(name)) return;
+  _listensToHinted.add(name);
+  log.warn(
+    "cell",
+    `[cell:${name}] listensTo array form is deprecated — it routes the ` +
+      `action without running any code. Use the object form, which names the ` +
+      `sync method that reacts: listensTo: { onThing: other.method } (values ` +
+      `may be arrays for multiple sources). (hinted once per cell)`,
+  );
+}
 
 export function createCellFromMethods<
   N extends string,
@@ -54,6 +112,22 @@ export function createCellFromMethods<
   // Validate names against reserved keys — fail fast with clear message
   checkReservedKeys(name, methodNames, "method");
   checkReservedKeys(name, selectorNames, "selector");
+
+  // alpha52: state keys are validated too. The `$` prefix is the method draft
+  // meta-namespace ($signal/$commit/$live/$do) — a state key there would be
+  // shadowed by the interception on every read inside a method, silently.
+  const stateKeyList = Object.keys(config.state ?? {});
+  for (const key of stateKeyList) {
+    if (key.startsWith("$")) {
+      throw new Error(
+        `[cell:${name}] state key '${key}' starts with '$' — the $-prefix is ` +
+          `reserved for method draft meta ($signal, $commit, $live, $do), so ` +
+          `this field would be shadowed inside methods. Rename it (e.g. ` +
+          `'${key.slice(1) || "value"}').`,
+      );
+    }
+  }
+  checkReservedKeys(name, stateKeyList, "state key");
 
   // AUTH-1 footgun guard: `access` is boolean | role-string | predicate, so a
   // string is read as a ROLE NAME. `access: "none"` would silently grant only
@@ -76,7 +150,8 @@ export function createCellFromMethods<
           `not a sentinel. Use access: true (any authenticated user), ` +
           `access: false (no client may CALL its methods), or a real role ` +
           `like access: "admin". Note access gates method calls only — to ` +
-          `hide the cell's STATE from clients use ui ("none"/exclude/forUser).`,
+          `hide the cell's STATE from clients use visible ` +
+          `("none"/exclude/forUser).`,
       );
     }
   }
@@ -102,34 +177,45 @@ export function createCellFromMethods<
     }
   }
 
+  // `visible:` is the key; `ui:` the deprecated alias (alpha52 — one decider,
+  // both-set throws, one-time hint). Resolve ONCE, up front.
+  const visibility = resolveVisibility(name, config);
+
   // Field-filter keys must resolve to real state — a non-matching filter
   // silently leaks. Fail loud at creation.
   validateFieldFilters(
     name,
     config.state as Record<string, unknown>,
-    config.ui,
+    visibility,
     config.persist,
   );
 
-  // listensTo (D1): normalize both forms. Object form maps a foreign action
-  // type → a SYNC method that handles it; array form only routes (status).
+  // listensTo (D1): normalize both forms. Object form maps ONE OR MORE foreign
+  // action types → a SYNC method that handles them (alpha52: values may be
+  // arrays — `{ onX: [a.m, b.m] }`). The array form is deprecated (it only
+  // routes, running no code — the thing people always expected it to do): it
+  // keeps working through beta with a one-time hint.
   const foreignHandlers = new Map<string, string>();
   const listensToTriggers: (string | { type: string })[] = [];
   if (config.listensTo) {
     if (Array.isArray(config.listensTo)) {
+      hintListensToArray(name);
       listensToTriggers.push(...config.listensTo);
     } else {
       for (const [methodKey, trigger] of Object.entries(config.listensTo)) {
-        const t = typeof trigger === "string" ? trigger : trigger.type;
-        if (!methods[methodKey]) {
-          throw new Error(
-            `[cell:${name}] listensTo: { ${methodKey}: "${t}" } — no method ` +
-              `named '${methodKey}'. The object form maps an EXISTING sync ` +
-              `method to the foreign action that triggers it.`,
-          );
+        const triggers = Array.isArray(trigger) ? trigger : [trigger];
+        for (const tr of triggers) {
+          const t = typeof tr === "string" ? tr : tr.type;
+          if (!methods[methodKey]) {
+            throw new Error(
+              `[cell:${name}] listensTo: { ${methodKey}: "${t}" } — no method ` +
+                `named '${methodKey}'. The object form maps an EXISTING sync ` +
+                `method to the foreign action(s) that trigger it.`,
+            );
+          }
+          foreignHandlers.set(t, methodKey);
+          listensToTriggers.push(t);
         }
-        foreignHandlers.set(t, methodKey);
-        listensToTriggers.push(t);
       }
     }
   }
@@ -138,6 +224,15 @@ export function createCellFromMethods<
   const { syncMethods, asyncMethods } = classifyMethods(
     methods as CellMethods<Record<string, unknown>>,
   );
+
+  // alpha52: transaction became the async default — say so ONCE per cell that
+  // never decided, at the definition site where the one-line fix goes.
+  if (
+    asyncMethods.size > 0 &&
+    (config as { transaction?: unknown }).transaction === undefined
+  ) {
+    hintTransactionDefault(name, methods);
+  }
   for (const [t, mk] of foreignHandlers) {
     if (asyncMethods.has(mk)) {
       throw new Error(
@@ -160,6 +255,45 @@ export function createCellFromMethods<
           `nothing in flight to cancel. Only async methods take a cancelOn.`
         : `[cell:${name}] cancelOn: no method '${mk}'. Known async methods: ` +
           `${[...asyncMethods].join(", ") || "(none)"}.`,
+    );
+  }
+  // alpha52: cancelOn triggers may be self("method") descriptors — the one
+  // place a self-reference is STATICALLY present, so an unknown method throws
+  // right here, at cell() definition.
+  let cancelTriggers = config.cancelOn as
+    | Record<string, "self" | (string | { type: string })[]>
+    | undefined;
+  if (cancelTriggers) {
+    const resolved: typeof cancelTriggers = {};
+    for (const [mk, trig] of Object.entries(cancelTriggers)) {
+      resolved[mk] = trig === "self"
+        ? trig
+        : trig.map((t) =>
+          typeof t === "string" ? t : resolveSelfAction(
+            t as { type: string },
+            name,
+            (m) => typeof methods[m] === "function",
+            () => methodNames,
+          )
+        );
+    }
+    cancelTriggers = resolved;
+  }
+
+  // `onMigrate` with no `version >= 1` is a DEAD hook: boot skips migration
+  // entirely at version 0 (the default), so the migration the developer wrote
+  // would silently never run — against every persisted profile. Fail at
+  // cell() time, where the fix is one line away.
+  if (
+    config.onMigrate !== undefined &&
+    (config.version === undefined || config.version < 1)
+  ) {
+    throw new Error(
+      `[cell:${name}] onMigrate is declared but version is ${
+        config.version === undefined ? "unset" : String(config.version)
+      } — migrations only run when version >= 1 (persisted vN < version), ` +
+        `so this hook would never fire. Add \`version: 1\` (and bump it on ` +
+        `every state-shape change).`,
     );
   }
 
@@ -272,16 +406,17 @@ export function createCellFromMethods<
     asyncMethods,
     // Cancellation triggers (perfect-aio D1) — DEF data; the runtime registry
     // is (re)built from this at compose time, so a runtime reset + fresh
-    // compose (the testCell pattern) re-registers naturally.
-    cancelTriggers: config.cancelOn,
+    // compose (the testCell pattern) re-registers naturally. self()
+    // descriptors are already resolved (above).
+    cancelTriggers: cancelTriggers,
     // Dropping these silently disables persist/ui filters, validation and
     // migrations for methods-style cells.
     validate: config.validate,
     access: config.access,
     persist: normalizePersistFilter(config.persist),
-    ui: normalizeUiFilter(config.ui),
-    uiForUser: extractForUser(config.ui),
-    uiPublicFields: extractPublicFields(config.ui),
+    ui: normalizeUiFilter(visibility),
+    uiForUser: extractForUser(visibility),
+    uiPublicFields: extractPublicFields(visibility),
     syncConfig: config.sync ? normalizeSyncConfig(config.sync) : undefined,
     // `sync: false` is a DECISION, not the absence of one — under localFirst it
     // is the only thing standing between a cell and optimistic local execution,

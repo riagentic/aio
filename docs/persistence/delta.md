@@ -31,7 +31,7 @@ The biggest server-side win. Controls what the server _sends_ per client:
 ```ts
 const orders = cell("orders", {
   state: { items: [], internal: [] },
-  ui: {
+  visible: {
     exclude: ["internal"],
     forUser: (exposed, user?) => {
       if (user?.role === "admin") return exposed;
@@ -179,7 +179,7 @@ recovery, normal delta mechanism handles catch-up.
 ### `createSelector` — server-side
 
 ```ts
-import { createSelector } from "aio/selectors";
+import { createSelector } from "aio";
 
 type Position = { qty: number; price: number };
 type Order = { status: string };

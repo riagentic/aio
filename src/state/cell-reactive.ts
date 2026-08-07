@@ -8,12 +8,8 @@ import type { CellDef, CellFieldFilter } from "./cell-types.ts";
 import { randomUuid } from "../rand.ts";
 import { attachMeta } from "./cell-catalog.ts";
 import { _cellSignals, getCellSignal } from "./state-signals.ts";
-import {
-  _armAckTimer,
-  _registerAck,
-  ackMethodKey,
-  armsAckTimer,
-} from "../protocol/browser-ack.ts";
+import { ackMethodKey } from "../protocol/ack-registry.ts";
+import { _ackSink } from "./ack-sink.ts";
 import { trackPath } from "./state-subs.ts";
 import { nameIsTaken } from "./cell-helpers.ts";
 import { applyCellFieldFilter, uiKeyVisibility } from "./state-filter.ts";
@@ -351,6 +347,9 @@ export function bindCellReactive(
     // READ, so a selector that never touches a hidden field stays silent (and
     // a deps-form selector over other cells keeps working).
     for (const [key, selectorFn] of Object.entries(selectors)) {
+      const isDeps = key in
+        ((def.__aio as { selectorDeps?: Record<string, unknown> })
+          .selectorDeps ?? {});
       Object.defineProperty(def, key, {
         value: (...args: unknown[]) => {
           trackPath(cellName);
@@ -364,8 +363,10 @@ export function bindCellReactive(
               (sig.value ?? initialState) as Record<string, unknown>,
             ),
           );
-          // Called WITH args → parameterized selector (`cell.byId(id)`).
-          if (args.length > 0) {
+          // Called WITH args on a PLAIN selector → parameterized
+          // (`cell.byId(id)`). A deps-form selector always needs the full
+          // state (built below), with args riding behind it (alpha52).
+          if (!isDeps && args.length > 0) {
             return (selectorFn as (s: unknown, ...a: unknown[]) => unknown)(
               own,
               ...args,
@@ -392,7 +393,13 @@ export function bindCellReactive(
                 : otherSlice;
             },
           });
-          return selectorFn(own, full);
+          return isDeps
+            ? (selectorFn as (
+              s: unknown,
+              f: unknown,
+              ...a: unknown[]
+            ) => unknown)(own, full, ...args)
+            : selectorFn(own, full);
         },
         enumerable: false,
         configurable: true,
@@ -409,7 +416,23 @@ export function bindCellReactive(
       const fn = (...args: unknown[]) => {
         const cur = (sig.value ?? initialState) as Record<string, unknown>;
         const next = structuredClone(cur);
+        // `s.$do` exists on every draft (alpha52) — but a client-scoped cell
+        // has no effect runtime (no scheduler, no own manager, no dispatch),
+        // so running one here would be a silent no-op. Loud instead.
+        Object.defineProperty(next, "$do", {
+          value: () => {
+            throw new Error(
+              `[${cellName}] ${key}(): s.$do(...) is not available in a ` +
+                `scope: "client" cell — client cells have no effect runtime. ` +
+                `Do timer work in the component (useInterval), or move the ` +
+                `method to a server cell.`,
+            );
+          },
+          enumerable: false,
+          configurable: true,
+        });
         method(next, ...args);
+        delete (next as Record<string, unknown>)["$do"];
         sig.set(next);
         return Promise.resolve();
       };
@@ -500,8 +523,23 @@ function _registerAndSend(
   //   • `methodKey` stayed undefined, so per-method call budgets
   //     (`perfBudget.methods["cell:method"].timeout`) never applied to
   //     anything.
-  // The transports arm the clock (`_armAckTimer`) once the frame is out.
-  const promise = _registerAck(tagged.cid, {
+  // The transports arm the clock (`armTimer`) once the frame is out.
+  //
+  // The ack registry itself lives in the browser runtime (browser-ack.ts) and
+  // reaches this module through the late-bound sink (ack-sink.ts) — state may
+  // not import browser. Every transport that hands a sendFn to this binding
+  // imports browser-ack, so a missing sink here is a wiring bug: fail LOUD
+  // instead of returning a promise nothing can ever settle.
+  const ack = _ackSink.impl;
+  if (!ack) {
+    throw new Error(
+      `[aio] cannot dispatch "${tagged.type}" — no ack registry is installed ` +
+        `(state/ack-sink.ts is empty). The browser transport module ` +
+        `(browser-ack.ts) installs it on load; a sendFn-bound cell without it ` +
+        `would return a promise that can never settle.`,
+    );
+  }
+  const promise = ack.register(tagged.cid, {
     deferTimer: true,
     methodKey: ackMethodKey(tagged),
   });
@@ -515,7 +553,7 @@ function _registerAndSend(
     // aio's own transports arm the clock when the frame goes out. Anything
     // else — a custom or legacy `sendFn` — never would, and a deferred timer
     // that is never armed is a call that can hang forever, so start it here.
-    if (!armsAckTimer(sendFn)) _armAckTimer(tagged.cid);
+    if (!ack.armsAckTimer(sendFn)) ack.armTimer(tagged.cid);
   });
   return promise;
 }

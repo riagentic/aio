@@ -7,6 +7,7 @@ import type { ScheduleEffect } from "./schedule.ts";
 import type { OwnEffect } from "./own.ts";
 import type { CellEffect, CellMethods } from "./cell-impl.ts";
 import type { SyncConfig } from "../sync/types.ts";
+import type { AioUser as WireAioUser } from "../protocol/protocol-types.ts";
 
 /** Map of named action/effect creator functions */
 export type Creators = Record<
@@ -72,10 +73,18 @@ export type MachineConfig<States extends string = string> = {
 /** Action source — auto-tagged at dispatch time for logging/debugging */
 export type ActionSource = "UI" | "Effect" | "System" | "Test";
 
-/** Minimal user shape for forUser — avoids importing from aio.ts */
+/** The caller identity access rules and `visible.forUser` receive —
+ *  structurally `AioUser` (alpha52): the framework fields `id`/`role` plus an
+ *  open record for whatever your `users` map / `resolveUser` attached. THE
+ *  opened definition — `AioUser` on the main entry is an alias of this. */
+export type AccessUser = WireAioUser & Record<string, unknown>;
+
+/** Loose user shape (all-optional) — predates {@linkcode AccessUser}; kept for
+ *  predicates/filters annotated against it (assignable in both directions that
+ *  matter: `AccessUser` ⊂ `FilterUser`). */
 export type FilterUser = { id?: string; role?: string; [k: string]: unknown };
 
-/** Shared filter type — used by both persist and ui cell config.
+/** Shared filter type — used by both persist and visible cell config.
  *  K generic enables autocomplete on state field names when used as keyof S.
  *  `exclude` also accepts dot-paths ("accounts.encSecKey") — deep removal,
  *  arrays traversed element-wise. */
@@ -85,7 +94,8 @@ export type CellFieldFilter<K extends string = string> =
   | { include: K[] }
   | { exclude: (K | `${K}.${string}`)[] };
 
-/** Cell-level UI visibility — CellFieldFilter + optional per-user transform.
+/** Cell-level visibility (`visible:` — READ side; `access:` gates CALLS) —
+ *  CellFieldFilter + optional per-user transform.
  *
  *  One callback-bearing shape ON PURPOSE: a union with two `forUser` members
  *  (the old Pick/Omit-precise design) breaks TypeScript's contextual typing —
@@ -105,10 +115,12 @@ export type CellVisibility<
    *  heuristic, instead of a no-op `forUser`. */
   publicFields?: K[];
   /** Per-user transform of the (already filtered) exposed state. Runs per
-   *  client per broadcast on a structuredClone — mutate freely. */
+   *  client per broadcast on a structuredClone — mutate freely. `user` is the
+   *  resolved caller identity (`AioUser`, open record — alpha52), `undefined`
+   *  for anonymous/server-origin. */
   forUser?: (
     exposed: S,
-    user?: FilterUser,
+    user?: AccessUser,
   ) => Record<string, unknown>;
 };
 
@@ -163,15 +175,32 @@ export type CellExecuteFn = (app: ScopedApp, effect: Msg) => void;
  *  symbol-keyed envelope at the one ambiguous source (the sync-method branch);
  *  everything else keeps the "array = effects" contract untouched. */
 const RETURN_TAG: unique symbol = Symbol("aioReturn");
-export type ReturnEnvelope = { [RETURN_TAG]: unknown };
-export function markReturn(value: unknown): ReturnEnvelope {
-  return { [RETURN_TAG]: value };
+export type ReturnEnvelope = {
+  [RETURN_TAG]: unknown;
+  /** Effects captured via `s.$do(...)` during the method run (alpha52) — a
+   *  method can now transport a VALUE and run effects in the same call, which
+   *  the deprecated return channel could never express. */
+  effects?: (ScheduleEffect | OwnEffect)[];
+};
+export function markReturn(
+  value: unknown,
+  effects?: (ScheduleEffect | OwnEffect)[],
+): ReturnEnvelope {
+  return effects && effects.length > 0
+    ? { [RETURN_TAG]: value, effects }
+    : { [RETURN_TAG]: value };
 }
 export function isReturnEnvelope(r: unknown): r is ReturnEnvelope {
   return typeof r === "object" && r !== null && RETURN_TAG in r;
 }
 export function readReturn(env: ReturnEnvelope): unknown {
   return env[RETURN_TAG];
+}
+/** The `s.$do`-captured effects riding a value return ([] when none). */
+export function readReturnEffects(
+  env: ReturnEnvelope,
+): (ScheduleEffect | OwnEffect)[] {
+  return env.effects ?? [];
 }
 
 /** Framework internals — all stored under cell.__aio, not for user code */
@@ -242,13 +271,14 @@ export type CellAio<
   /** Persistence filter — matches user-facing `persist` config key */
   persist?: CellFieldFilter;
   /** Network access rule — matches user-facing `access` config key (AUTH-1) */
-  access?: CellAccess;
-  /** UI visibility filter — matches user-facing `ui` config key */
+  access?: Access;
+  /** Visibility filter — matches user-facing `visible` config key (alpha52;
+   *  `ui` is the deprecated alias, and stays this slot's name internally) */
   ui?: CellFieldFilter;
-  /** Optional per-user UI transform — receives structuredClone of filtered state */
+  /** Optional per-user transform — receives structuredClone of filtered state */
   uiForUser?: (
     exposed: Record<string, unknown>,
-    user?: FilterUser,
+    user?: AccessUser,
   ) => Record<string, unknown>;
   /** Fields explicitly acknowledged as public — silences the "looks secret and
    *  is exposed" heuristic for names that merely resemble a secret. */
@@ -278,8 +308,11 @@ export type CellAio<
   stateType?: State;
 };
 
-/** Reserved property names on CellDef — user-defined names must not collide */
-export const RESERVED_KEYS = new Set(["A", "E", "__aio", "fx", "state"]);
+/** Reserved property names on CellDef — user-defined names must not collide.
+ *  (alpha52: dead "A"/"E" dropped — the Style-B catalogs they guarded died in
+ *  alpha27; state keys are now checked against this set too, plus the whole
+ *  `$` prefix, which is the method draft meta-namespace.) */
+export const RESERVED_KEYS = new Set(["__aio", "fx", "state"]);
 
 /** Validate that user-defined keys don't collide with reserved CellDef properties.
  *  Throws with a clear explanation if collision found. */
@@ -303,21 +336,27 @@ export function checkReservedKeys(
 
 /** Cell definition returned by cell() — public surface is methods/generators/selectors only.
  *  Framework internals live under __aio. */
-/** Declarative cell access rule (AUTH-1) — who may act on this cell over the
- *  NETWORK. `true` = any authenticated user, `"role"` = that exact role,
- *  predicate = custom check per (user, method, ...args). The method's call
- *  args are forwarded so a predicate can do ROW-LEVEL authz — e.g.
- *  `(u, m, id) => isOwner(u, id)` — instead of re-checking ownership inside
- *  every method. Absent = open (as before). Server-origin dispatches
- *  (effects, schedules, server code) always bypass — the server trusts itself. */
-export type CellAccess =
+/** Declarative network access rule — ONE vocabulary for cells (`access:`) and
+ *  serverFns (`{ access }`), alpha52. Who may CALL over the NETWORK:
+ *  `true` = any authenticated user, `"role"` = that exact role, predicate =
+ *  custom check per (user, name, ...args). The call args are forwarded so a
+ *  predicate can do ROW-LEVEL authz — e.g. `(u, m, id) => isOwner(u, id)` —
+ *  instead of re-checking ownership inside every method. Absent = open.
+ *  Server-origin dispatches (effects, schedules, server code) always bypass —
+ *  the server trusts itself. `access` gates CALLS; `visible` gates READS —
+ *  neither derives the other. */
+export type Access =
   | boolean
   | string
   | ((
-    user: FilterUser | undefined,
-    method: string,
+    user: AccessUser | undefined,
+    name: string,
     ...args: unknown[]
   ) => boolean);
+
+/** @deprecated alpha52 — unified as {@linkcode Access} (one rule vocabulary
+ *  for cells and serverFns). Alias through beta. */
+export type CellAccess = Access;
 
 /** What `cell()` returns: the callable cell handle — its typed method proxy,
  *  effect creators (`fx`), selectors, and the framework plumbing under
@@ -398,15 +437,14 @@ export type MethodMeta<
     ) => { type: `${N}:${K}`; payload: { args: P } };
   };
 
-/** Extract the state type from a CellDef — useful for typing selectors and external consumers. */
-// deno-lint-ignore no-explicit-any
-export type ExtractState<F> = F extends CellDef<any, any, any, infer S> ? S
-  : Record<string, unknown>;
-
-/** Alias for ExtractState — `StateOf<typeof counter>` reads naturally in app code. */
+/** Extract the state type from a CellDef — `StateOf<typeof counter>` types
+ *  selectors and external consumers. */
 // deno-lint-ignore no-explicit-any
 export type StateOf<F> = F extends CellDef<any, any, any, infer S> ? S
   : Record<string, unknown>;
+
+/** @deprecated alpha52 — renamed {@linkcode StateOf}. Alias through beta. */
+export type ExtractState<F> = StateOf<F>;
 
 /**
  * Build a typed send proxy from raw methods M (before DirectCalling transform).

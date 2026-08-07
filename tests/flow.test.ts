@@ -287,6 +287,8 @@ Deno.test("flow: multiple staged writes execute in order", async () => {
 // ── until(): wait for a signal ───────────────────────────────────────
 
 const waiter = cell("waiter", {
+  // alpha52: pins pre-transaction live/incremental semantics explicitly.
+  transaction: false,
   state: { received: "", inbox: "" },
   methods: {
     signal(s, msg: string) {
@@ -366,6 +368,8 @@ Deno.test("flow: workflow reads fresh state after a write", async () => {
 // ── cancelOn + s.$signal ─────────────────────────────────────────────
 
 const cancellable = cell("cancellable", {
+  // alpha52: pins pre-transaction live/incremental semantics explicitly.
+  transaction: false,
   state: { running: false, finished: false },
   cancelOn: { start: ["cancellable:stop"] },
   methods: {
@@ -877,6 +881,8 @@ Deno.test("flow: workflow with two sequential waits (condition then signal)", as
   });
 
   const whenAndWaitFor = cell("whenAndWaitFor", {
+    // alpha52: live until()-waits — the opted-out shape.
+    transaction: false,
     state: { phase: "init", signalled: false },
     methods: {
       signal(s) {

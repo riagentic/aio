@@ -154,7 +154,7 @@ export const orders = cell("orders", {
   methods: {
     async placeOrder(s, items: Item[]) {
       const reserved = await call(
-        { timeout: 5000, retries: 2 },
+        { timeoutMs: 5000, retries: 2 },
         (): Promise<{ orderId: string }> => inventory.reserve(items),
       );
       s.orderId = reserved.orderId;

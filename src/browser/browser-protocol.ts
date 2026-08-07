@@ -3,13 +3,13 @@
 // browser-air.ts (AIR renderer) imports from here.
 //
 // This file is the thin orchestrator. Logic lives in:
-//   protocol-types.ts         — types + constants
-//   protocol-diagnostics.ts   — _diagEmit, state integrity
-//   protocol-status.ts        — DOM connection status widget
-//   protocol-devtools.ts      — Redux DevTools integration
-//   protocol-router.ts        — client-side router
-//   protocol-cell.ts          — cell(), bridge(), aio stubs
-//   protocol-subscription.ts  — listeners, vitals state, state readiness
+//   ../protocol/protocol-types.ts        — types + constants
+//   ../protocol/protocol-diagnostics.ts  — _diagEmit, state integrity
+//   ../protocol/protocol-status.ts       — DOM connection status widget
+//   ./protocol-devtools.ts               — Redux DevTools integration
+//   ./protocol-router.ts                 — client-side router
+//   ./protocol-cell.ts                   — cell(), aio stubs
+//   ./protocol-subscription.ts           — listeners, vitals state, readiness
 
 import {
   _accessedPaths as _coreAccessedPaths,
@@ -118,7 +118,7 @@ export {
   _sendDevTools,
   connectDevTools,
   disconnectDevTools,
-} from "../protocol/protocol-devtools.ts";
+} from "./protocol-devtools.ts";
 
 export {
   _getRPath,
@@ -135,9 +135,9 @@ export {
   navigate,
   routePath,
   routeSearch,
-} from "../protocol/protocol-router.ts";
+} from "./protocol-router.ts";
 
-export { aio, bridge, cell } from "../protocol/protocol-cell.ts";
+export { aio, cell } from "./protocol-cell.ts";
 
 export {
   _cleanupTimer,
@@ -168,7 +168,7 @@ export {
   _vitalsTransportProbe,
   _vitalsUrlLogged,
   _waitForState,
-} from "../protocol/protocol-subscription.ts";
+} from "./protocol-subscription.ts";
 
 // ── Constants (re-export from state-core) ───────────────────────────
 
@@ -290,12 +290,12 @@ import {
   _getRSearch,
   _rListeners,
   navigate as _navigate,
-} from "../protocol/protocol-router.ts";
+} from "./protocol-router.ts";
 import {
   _callConnectFn,
   _subscribe,
   _vitalsRenderMeter as _vmRenderMeter,
-} from "../protocol/protocol-subscription.ts";
+} from "./protocol-subscription.ts";
 
 export const client: {
   subscribe(fn: (state: unknown) => void): () => void;

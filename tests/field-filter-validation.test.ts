@@ -11,7 +11,7 @@ Deno.test("filter: exclude key not in state throws (would silently leak)", () =>
       C("ff1", {
         state: { pub: 1, encSecretKey: "s" },
         methods: {},
-        ui: { exclude: ["encSecKey"] },
+        visible: { exclude: ["encSecKey"] },
       }),
     Error,
     "silently exposing",
@@ -45,7 +45,7 @@ Deno.test("filter: nested path in include throws (unsupported)", () => {
       C("ff4", {
         state: { accounts: [] },
         methods: {},
-        ui: { include: ["accounts.pubKey"] },
+        visible: { include: ["accounts.pubKey"] },
       }),
     Error,
     "does not support nested",
@@ -56,7 +56,7 @@ Deno.test("filter: valid nested exclude is accepted (head resolves)", () => {
   C("ff5", {
     state: { accounts: [] },
     methods: {},
-    ui: { exclude: ["accounts.encSecKey"] },
+    visible: { exclude: ["accounts.encSecKey"] },
   });
 });
 
@@ -64,7 +64,7 @@ Deno.test("filter: valid top-level include/exclude accepted", () => {
   C("ff6", {
     state: { pub: 1, secret: "s" },
     methods: {},
-    ui: { include: ["pub"] },
+    visible: { include: ["pub"] },
     persist: { exclude: ["secret"] },
   });
 });
@@ -75,7 +75,7 @@ Deno.test("filter: ui.publicFields naming a non-field throws (typo'd opt-out)", 
       C("ffp", {
         state: { a: 1 },
         methods: {},
-        ui: { publicFields: ["notAField"] },
+        visible: { publicFields: ["notAField"] },
       }),
     Error,
     "not a state field",
@@ -86,7 +86,7 @@ Deno.test("filter: valid ui.publicFields is accepted", () => {
   C("ffp2", {
     state: { pubKey: "", n: 0 },
     methods: {},
-    ui: { publicFields: ["pubKey"] },
+    visible: { publicFields: ["pubKey"] },
   });
 });
 

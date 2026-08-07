@@ -1,4 +1,4 @@
-// The BROWSER cell stub (src/protocol/protocol-cell.ts) is a second, hand-kept
+// The BROWSER cell stub (src/browser/protocol-cell.ts) is a second, hand-kept
 // implementation of `cell()`. It is what the shipped browser bundle runs —
 // `aio` resolves to src/browser-air.ts, whose `cell` is this stub — while every
 // in-process harness (testUI/testCell/standalone) runs the REAL factory
@@ -12,7 +12,7 @@
 // produces each one — with the same SHAPE the reader expects.
 import { assert, assertEquals } from "@std/assert";
 import { cell as serverCell } from "../src/state/cell-create.ts";
-import { cell as browserCell } from "../src/protocol/protocol-cell.ts";
+import { cell as browserCell } from "../src/browser/protocol-cell.ts";
 import {
   _resetCellRegistry,
   bindCellReactive,
@@ -54,7 +54,7 @@ async function browserAioReads(): Promise<Map<string, Set<string>>> {
     }
     const rel = url.slice(SRC.href.length);
     // The stub itself declares the keys; reading it would be circular.
-    if (rel === "protocol/protocol-cell.ts") continue;
+    if (rel === "browser/protocol-cell.ts") continue;
     for (const m of text.matchAll(AIO_READ_RE)) {
       if (!reads.has(m[1]!)) reads.set(m[1]!, new Set());
       reads.get(m[1]!)!.add(rel);
@@ -151,7 +151,7 @@ Deno.test("browser cell stub mirrors every __aio key the browser bundle reads", 
     `the browser bundle reads __aio key(s) the browser cell stub never sets — ` +
       `each one is a silent client/server divergence:\n  ` +
       missing.join("\n  ") +
-      `\nfix: set them in src/protocol/protocol-cell.ts (or add an explicit ` +
+      `\nfix: set them in src/browser/protocol-cell.ts (or add an explicit ` +
       `reason to NOT_MIRRORED here).`,
   );
   reset();
@@ -197,6 +197,51 @@ Deno.test("browser cell stub: a ui-hidden field read is LOUD in the browser too"
       `reading a ui-excluded field from client context must fail loud in dev ` +
         `in the BROWSER build exactly as it does in standalone/testUI — got ` +
         `${threw === "" ? "a silent undefined" : threw}`,
+    );
+  } finally {
+    (globalThis as Record<string, unknown>).__aioDev = dev;
+    reset();
+  }
+});
+
+Deno.test("browser cell stub: a `visible:`-declared exclude is enforced client-side too", () => {
+  // alpha52 renamed `ui:` → `visible:`. The stub must route BOTH spellings
+  // through resolveVisibility — the same decider the server factory uses —
+  // or a `visible:` cell would lose its hidden-read guard only in the shipped
+  // browser bundle.
+  reset();
+  const dev = (globalThis as Record<string, unknown>).__aioDev;
+  (globalThis as Record<string, unknown>).__aioDev = true;
+  try {
+    const cfg = { ...makeConfig() } as Record<string, unknown>;
+    delete cfg.ui;
+    cfg.visible = { exclude: ["secret"] };
+    // deno-lint-ignore no-explicit-any
+    const sDef = serverCell("parity-visible-s", cfg as any);
+    // deno-lint-ignore no-explicit-any
+    const bDef = browserCell("parity-visible", cfg as any);
+    assertEquals(
+      (bDef.__aio as Record<string, unknown>).ui,
+      // deno-lint-ignore no-explicit-any
+      (sDef.__aio as any).ui,
+      "`visible:` must normalize into __aio.ui identically in both factories",
+    );
+    // deno-lint-ignore no-explicit-any
+    bindCellReactive(bDef as any);
+    getCellSignal("parity-visible", { n: 1, note: "hi" }).set({
+      n: 1,
+      note: "hi",
+    });
+    let threw = "";
+    try {
+      void (bDef as Record<string, unknown>).secret;
+    } catch (e) {
+      threw = (e as Error).message;
+    }
+    assert(
+      threw.includes("parity-visible.secret"),
+      `a \`visible:\`-excluded field must fail loud on client read in the ` +
+        `BROWSER build — got ${threw === "" ? "a silent undefined" : threw}`,
     );
   } finally {
     (globalThis as Record<string, unknown>).__aioDev = dev;

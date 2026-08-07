@@ -18,6 +18,7 @@ import {
   dec,
   enc,
   encRaw,
+  isIgnorableKind,
   type SfnPayload,
 } from "../protocol/envelope.ts";
 import { filterStateBySubs, parseSubs } from "../protocol/broadcast-utils.ts";
@@ -907,6 +908,9 @@ export function createWsManager(deps: WsDeps): WsManager {
       case "action":
         break; // falls through to the dispatch path below
       default:
+        // Reserved-ignorable kinds ("x" extension frames) skip silently BY
+        // CONTRACT — see IGNORABLE in envelope.ts.
+        if (isIgnorableKind(frame.t)) return;
         // S→C-only kinds arriving C→S, or future kinds — loud, never silent.
         log.warn(
           "ws",

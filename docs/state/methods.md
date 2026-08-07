@@ -98,9 +98,10 @@ const id = await cart.addItem({ name: "Book", price: 12 })
 
 - The type is inferred: `addItem` → `Promise<string>`, a void method →
   `Promise<void>`. Annotate the return (`: string`) when TS can't infer it.
-- Returning a **schedule/own effect** (or an array of them) still schedules that
-  effect — it is _not_ treated as a value, so `await` resolves `undefined`. A
-  method can't both schedule an effect and return a value in the same call.
+- Effects go through `s.$do(...)`, never the return — so a method can schedule
+  an effect **and** return a value in the same call. (Deprecated: returning a
+  schedule/own effect still schedules it — `await` resolves `undefined` — with a
+  one-time hint; `aiol --safe-fix` rewrites it.)
 - Returning a slice of draft state (`return s.items[id]`) is safe — the value is
   snapshotted, so it survives past the method (no revoked-proxy surprises).
 - **Return values cross the network bridge.** When a **browser or Electron
@@ -145,29 +146,46 @@ const id = await cart.addItem({ name: "Book", price: 12 })
   the wire — so it works as a "not found" sentinel. Only `undefined` (or no
   `return` at all) resolves `undefined`.
 
-### Returning schedule effects
+### Running effects: `s.$do(effect, ...)`
 
-Methods — sync **and** async (AIO-381) — can return schedule effects:
+Methods — sync **and** async — run schedule/own effects through the draft's
+`$do` member. `return` is for **values**; `$do` is for **effects** — so one
+method can do both:
 
 ```ts
 methods: {
-  startPolling(s): ScheduleEffect {
+  startPolling(s) {
     s.polling = true
-    return schedule.every('poll', 30_000, poller.refresh.action())
+    s.$do(schedule.every('poll', 30_000, poller.refresh.action()))
   },
   stopPolling(s) {
     s.polling = false
-    return schedule.cancel('poll')
+    s.$do(schedule.cancel('poll'))
+    return s.stoppedCount   // a VALUE — resolves the caller's await
   },
 }
 ```
 
-### Referencing the cell inside its own methods (the `: CellEffect` annotation)
+`$do` takes one or more effects (`schedule.*` / `own.*`) and throws loudly on
+anything else. In a sync method the effects run with the commit; in an async
+method they dispatch **immediately** (an `own.set` factory registers in the same
+tick). Payloads may reference `s` freely — they are snapshotted to plain data at
+capture.
 
-When a method schedules an action on **its own cell**, it names the cell that is
-still being defined:
+> **Deprecated:** `return schedule.after(...)` (the pre-alpha52 effect channel)
+> still works through beta and prints a one-time hint per method.
+> `aiol --safe-fix` rewrites it to `s.$do(...)`.
+
+### Referencing the cell inside its own methods: `self()`
+
+When a method schedules an action on **its own cell**, naming the cell inside
+its own initializer used to trip TypeScript's self-referential-inference guard
+(TS7022/7023) and require a `: CellEffect` return annotation. `self()` removes
+the self-reference entirely:
 
 ```ts
+import { cell, schedule, self } from "aio";
+
 const cycle = cell("cycle", {
   state: { phase: "work", n: 0 },
   methods: {
@@ -175,51 +193,29 @@ const cycle = cell("cycle", {
       s.n += 1;
     },
     skip(s) {
-      // ⛔ references `cycle` inside `cycle`'s own initializer
-      return schedule.after("cycle.next", 0, cycle.tick.action());
+      // self("tick") resolves to THIS cell's tick action at capture — no
+      // `cycle.` reference, no TS7022, no annotation.
+      s.$do(schedule.after("cycle.next", 0, self("tick")));
     },
-  },
-});
-// TS7022: 'cycle' implicitly has type 'any' … referenced in its own initializer
-// TS7023: 'skip' implicitly has return type 'any' …
-```
-
-This is a **TypeScript limitation**, not an aio bug: to infer `cycle`'s type TS
-must infer `skip`'s return type, which evaluates `cycle.tick.action()`, which
-needs `cycle`'s type — a cycle. (It can't be fixed framework-side without fixing
-every method's return type and thereby losing real return types like
-`await cell.checkStock()` → `Promise<Stock>`.)
-
-**Fix: annotate the method's return** — that gives TS the type directly, so it
-no longer infers it from the body. Use `CellEffect` (exported from `aio`), the
-union of every effect a method may return:
-
-```ts
-import { cell, type CellEffect, schedule } from "aio";
-
-const cycle = cell("cycle", {
-  state: { phase: "work", n: 0 },
-  methods: {
-    tick(s) {
-      s.n += 1;
+    maybeStop(s) {
+      if (s.n > 3) s.$do(schedule.cancel("cycle.next"));
     },
-    skip(s): CellEffect { // ← breaks the cycle
-      return schedule.after("cycle.next", 0, cycle.tick.action());
-    },
-    maybeStop(s): CellEffect | void { // ← conditional returns
-      if (s.n > 3) return schedule.cancel("cycle.next");
-    },
-    async poll(s): Promise<CellEffect | void> { // ← async methods
+    async poll(s) {
       await Promise.resolve();
-      return schedule.after("cycle.retry", 500, cycle.tick.action());
+      s.$do(schedule.after("cycle.retry", 500, self("tick")));
     },
   },
 });
 ```
 
-Scheduling **another** cell's action needs no annotation — only self-reference
-does. The same applies to a free helper that references the cell before its
-declaration: annotate it `(): CellEffect`.
+`self(method, ...args)` builds the `{ type, payload }` descriptor and is
+resolved by the dispatching cell; an unknown method name throws at `cell()` when
+statically present (`cancelOn: { search: [self("clear")] }`), else at dispatch —
+loud both ways. Scheduling **another** cell's action keeps using
+`otherCell.method.action(...)`.
+
+(The `CellEffect` type is still exported for code on the deprecated
+return-effects channel.)
 
 ---
 
@@ -364,25 +360,26 @@ The fix is to take a plain snapshot of what you need before calling the
 unsupported op: `const items = [...s.items]`, `const config = { ...s.config }`,
 then call the op on the snapshot.
 
-### Returning schedule effects from async methods (AIO-381)
+### Effects from async methods
 
-Async methods can return schedule effects too — same as sync methods:
+`s.$do` works identically in async methods — and dispatches the effect
+**immediately**, so a retry can be armed mid-method:
 
 ```ts
-async fetchData(s): Promise<ScheduleEffect | void> {
+async fetchData(s) {
   try {
     s.data = await api.getData()
   } catch {
     s.retries += 1
-    return schedule.after('fetch.retry', s.retries * 2000, data.fetchData.action())
+    s.$do(schedule.after('fetch.retry', s.retries * 2000, self('fetchData')))
   }
 }
 ```
 
-Detection is conservative: only values that _are_ schedule effects (or an array
-of them) count. Any other return value passes through untouched to direct
-callers (`const stock = await inventory.checkStock(...)`), so data returns and
-effect returns never collide.
+The method's `return` stays a pure value channel: whatever it returns resolves
+the caller's `await inventory.checkStock(...)`. (The deprecated return-an-effect
+channel still works through beta, with a one-time hint; `aiol --safe-fix`
+rewrites it.)
 
 ### Follow-up actions: don't reach for setTimeout
 
@@ -390,12 +387,12 @@ To trigger another action when a method finishes, **never** write
 `setTimeout(() => cell.other(), 0)` — it escapes the action log, time-travel,
 and cancellation. The sanctioned tools:
 
-| You want…                           | Use                                                   |
-| ----------------------------------- | ----------------------------------------------------- |
-| "after this, dispatch X"            | `return schedule.after('id', 0, cell.other.action())` |
-| a multi-step sequential workflow    | an [async method](#workflows-in-async-methods)        |
-| debounce / retry / polling          | `schedule.after` / `schedule.every` (id = replace)    |
-| own a watcher / socket / subprocess | `return own.set('cell:id', factory)` (AIO-382)        |
+| You want…                           | Use                                                |
+| ----------------------------------- | -------------------------------------------------- |
+| "after this, dispatch X"            | `s.$do(schedule.next('id', self('other')))`        |
+| a multi-step sequential workflow    | an [async method](#workflows-in-async-methods)     |
+| debounce / retry / polling          | `schedule.after` / `schedule.every` (id = replace) |
+| own a watcher / socket / subprocess | `s.$do(own.set('cell:id', factory))` (AIO-382)     |
 
 ### Owning native resources: `own.set` (AIO-382)
 
@@ -415,10 +412,10 @@ const workspace = cell("workspace", {
       s.dir = dir;
       // Same id ⇒ the previous watcher's disposer runs first. All slots are
       // disposed on cell disable and on app shutdown — no manual teardown.
-      return own.set("workspace:watcher", () => watchDir(dir, onChange));
+      s.$do(own.set("workspace:watcher", () => watchDir(dir, onChange)));
     },
-    close(_s) {
-      return own.dispose("workspace:watcher");
+    close(s) {
+      s.$do(own.dispose("workspace:watcher"));
     },
   },
 });
@@ -443,11 +440,11 @@ runtime, so it calls a method with what it learned:
 methods: {
   start(s: { pid: number | null }) {
     s.pid = null;
-    return own.set("srv:proc", () => {
+    s.$do(own.set("srv:proc", () => {
       const proc = spawnServer();
       srv.started(proc.pid); // ← a normal method call: tracked, patched, replayable
       return () => proc.kill();
-    });
+    }));
   },
   started(s: { pid: number | null }, pid: number) {
     s.pid = pid;

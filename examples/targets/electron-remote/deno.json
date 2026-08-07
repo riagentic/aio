@@ -20,7 +20,7 @@
     "electron": "npm:electron"
   },
   "tasks": {
-    "dev": "deno run -A src/app.ts --server-url",
+    "dev": "deno run -A src/app.ts --connect",
     "install:electron": "deno install --allow-scripts=npm:electron",
     "compile": "deno run -A ../../../src/build.ts --client"
   }

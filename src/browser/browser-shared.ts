@@ -18,34 +18,6 @@ import {
  *  for a second copy to exist. */
 export { msg } from "../state/msg.ts";
 
-// deno-lint-ignore no-explicit-any
-type _Creators = Record<string, (...args: any[]) => any>;
-type _LowerFirst<S extends string> = S extends `${infer C}${infer Rest}`
-  ? `${Lowercase<C>}${Rest}`
-  : S;
-type _FactoryResult<T extends _Creators> =
-  & { readonly [K in keyof T]: K }
-  & {
-    readonly [K in keyof T as _LowerFirst<K & string>]: (
-      ...args: Parameters<T[K]>
-    ) => { type: K; payload: ReturnType<T[K]> };
-  };
-function _lowerFirst(s: string): string {
-  return s.charAt(0).toLowerCase() + s.slice(1);
-}
-function _factory<T extends _Creators>(creators: T): _FactoryResult<T> {
-  const result: Record<string, unknown> = {};
-  for (const key of Object.keys(creators)) {
-    result[key] = key;
-    result[_lowerFirst(key)] = (...args: unknown[]) => ({
-      type: key,
-      payload: creators[key]!(...args) ?? {},
-    });
-  }
-  return result as _FactoryResult<T>;
-}
-export { _factory as actions, _factory as effects };
-
 // ── schedule (browser-compatible — pure effect creators, no timers) ──
 //
 // A stub rather than a re-export of `src/state/schedule.ts`, and for exactly
@@ -83,6 +55,21 @@ const _schedEffect = (
  *  here is a red test, not a silently different clamp. */
 const _MAX_TIMER_DELAY = 2_147_483_647;
 
+// One-time deprecation hints (per id) — the browser twin of the server's
+// `_hintOnce` (src/state/schedule.ts). console.warn on purpose: this module
+// IS the browser graph, and the diagnostics logger drags @std/path into it
+// (the browser-deps gate pins that).
+const _schedHinted = new Set<string>();
+function _hintOnce(key: string, msg: string): void {
+  if (_schedHinted.has(key)) return;
+  _schedHinted.add(key);
+  console.warn(`[aio:schedule] ${msg} (hinted once)`);
+}
+/** @internal test seam — re-arm the one-time hints. */
+export function _resetBrowserScheduleHints(): void {
+  _schedHinted.clear();
+}
+
 /** Blocking work needs a Deno worker pool; a browser has none. Absent, it read
  *  as `schedule.blocking is not a function` at the call site — present and
  *  loud, it names the platform and the fix. */
@@ -111,14 +98,18 @@ export const schedule: {
   backoff(
     id: string,
     attempt: number,
-    opts: { base: number; max?: number; factor?: number },
-    action: _SchedAction,
+    a3: _SchedAction | { base: number; max?: number; factor?: number },
+    a4?: _SchedAction | { base: number; max?: number; factor?: number },
   ): _SchedResult;
   poll(
     id: string,
     attempt: number,
-    opts: { every: number; backoff?: number; max?: number },
-    action: _SchedAction,
+    a3:
+      | _SchedAction
+      | { every: number; factor?: number; backoff?: number; max?: number },
+    a4?:
+      | _SchedAction
+      | { every: number; factor?: number; backoff?: number; max?: number },
   ): _SchedResult;
   next(id: string, action: _SchedAction): _SchedResult;
   cancel(id: string): _SchedResult;
@@ -141,12 +132,36 @@ export const schedule: {
     _schedEffect("at", id, { time, action }),
   cron: (id: string, pattern: string, action: _SchedAction): _SchedResult =>
     _schedEffect("cron", id, { pattern, action }),
+  // alpha52: action 3rd, opts 4th — the old (opts, action) order is detected
+  // by shape (an action has a string `.type`; an opts object never does),
+  // exactly like the real module — INCLUDING the one-time deprecation hints
+  // (a browser twin that accepts the old spelling silently would be a hint
+  // parity gap). console.warn, never the diagnostics logger: this module IS
+  // the browser graph (the @std/path gotcha the browser-deps gate pins).
+  // MUST stay output-identical to src/state/schedule.ts (the parity gate
+  // fuzzes both orders).
   backoff: (
     id: string,
     attempt: number,
-    opts: { base: number; max?: number; factor?: number },
-    action: _SchedAction,
+    a3: _SchedAction | { base: number; max?: number; factor?: number },
+    a4?: _SchedAction | { base: number; max?: number; factor?: number },
   ): _SchedResult => {
+    const isAction = !!a3 && typeof (a3 as { type?: unknown }).type ===
+        "string";
+    if (!isAction) {
+      _hintOnce(
+        `backoff-order:${id}`,
+        `schedule.backoff '${id}': the (id, attempt, opts, action) order is ` +
+          `deprecated — the action is now the 3rd argument, like after/every: ` +
+          `schedule.backoff(id, attempt, action, opts). aiol reports every site.`,
+      );
+    }
+    const opts = (isAction ? a4 : a3) as {
+      base: number;
+      max?: number;
+      factor?: number;
+    };
+    const action = (isAction ? a3 : a4) as _SchedAction;
     const factor = opts.factor ?? 2;
     const max = opts.max ?? _MAX_TIMER_DELAY;
     const ms = Math.min(
@@ -161,10 +176,39 @@ export const schedule: {
   poll: (
     id: string,
     attempt: number,
-    opts: { every: number; backoff?: number; max?: number },
-    action: _SchedAction,
+    a3:
+      | _SchedAction
+      | { every: number; factor?: number; backoff?: number; max?: number },
+    a4?:
+      | _SchedAction
+      | { every: number; factor?: number; backoff?: number; max?: number },
   ): _SchedResult => {
-    const factor = opts.backoff ?? 1;
+    const isAction = !!a3 && typeof (a3 as { type?: unknown }).type ===
+        "string";
+    if (!isAction) {
+      _hintOnce(
+        `poll-order:${id}`,
+        `schedule.poll '${id}': the (id, attempt, opts, action) order is ` +
+          `deprecated — the action is now the 3rd argument, like after/every: ` +
+          `schedule.poll(id, attempt, action, opts). aiol reports every site.`,
+      );
+    }
+    const opts = (isAction ? a4 : a3) as {
+      every: number;
+      factor?: number;
+      backoff?: number;
+      max?: number;
+    };
+    const action = (isAction ? a3 : a4) as _SchedAction;
+    // `factor` (alpha52) wins; the deprecated `backoff` key still computes.
+    if (opts.backoff !== undefined && opts.factor === undefined) {
+      _hintOnce(
+        `poll-backoff:${id}`,
+        `schedule.poll '${id}': the \`backoff\` option key is deprecated — ` +
+          `use \`factor\` (same meaning). aiol --safe-fix rewrites this.`,
+      );
+    }
+    const factor = opts.factor ?? opts.backoff ?? 1;
     const max = opts.max ?? _MAX_TIMER_DELAY;
     const ms = attempt <= 0
       ? opts.every
@@ -175,7 +219,7 @@ export const schedule: {
     });
   },
   next: (id: string, action: _SchedAction): _SchedResult =>
-    _schedEffect("after", id, { ms: 1, action }),
+    _schedEffect("after", id, { ms: 0, action }),
   cancel: (id: string): _SchedResult => _schedEffect("cancel", id),
   blocking: _blocking,
 };

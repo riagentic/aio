@@ -88,7 +88,8 @@ Deno ↔ UDS/NDJSON ↔ Electron main (net.connect) ↔ IPC ↔ renderer (window
 - Windows (no UDS support) — always falls back to WS
 - `--expose` mode — needs real HTTP for remote access
 - Browser mode — no Electron IPC bridge available
-- `--server-url` thin client — connects to remote server over HTTP/WS
+- `--server-url=X` thin client — connects to a remote server over HTTP/WS
+  (`--connect` opens the connect page without a URL)
 
 **CLI apps** can use `connectCliUDS(socketPath)` for headless UDS transport.
 
@@ -116,7 +117,7 @@ Electron remembers window size and position across runs. Bounds are saved to
 from the slugified title (e.g. "My Dashboard" → `my-dashboard`), ensuring each
 app gets its own persistent state.
 
-## Thin client (`--server-url`)
+## Thin client (`--server-url=X` / `--connect`)
 
 Connect to a remote aio server without running a local server:
 
@@ -145,7 +146,7 @@ task for it:
 
 ```sh
 deno task install:electron   # once — the client needs Electron
-deno task compile:client     # (re)builds aio-client-<arch>.AppImage
+deno task build --targets=electron-client   # (re)builds aio-client-<arch>.AppImage
 ```
 
 Or invoke the builder directly (from the repo, or via JSR):

@@ -37,7 +37,7 @@ const scan = cell("scan", {
     },
   },
   persist: "none",
-  ui: "all",
+  visible: "all",
 });
 
 const item = (id: number) => ({ id, blob: "x".repeat(200) });

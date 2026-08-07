@@ -25,8 +25,16 @@ other way. The rules below are the checkable expression of that vision.
   unnecessary code
 - the latest two external field reports contain zero P1/P2 issues
   (loved-by-developers proxy)
-- every breaking change ships in an alpha; beta and final releases never break
-  existing apps
+- breaking changes ship freely in alpha; in beta they are VERY RARE — one or two
+  isolated breaks across the whole phase when quality demands it, never a broad
+  API refactor; the last two betas before 1.0.0 and every 1.x release never
+  break existing apps
+- THE BETA PROMISE: an app that worked will work — or will work after `am fix`.
+  Automated migration (`aiol --safe-fix`/`am fix`) is the default expectation;
+  where automation genuinely can't, a precise upgrade-guide recipe is
+  acceptable. Either way the app HINTS at runtime — a loud, actionable message
+  at the old spelling naming the change and the fix; a break discovered by
+  debugging is a broken promise
 - aio framework contains no unfixed bugs or issues
 - aio frameworks never hide any errors or flaws, all is reported to developer
 - aio framework doesn't accept any unrported issues

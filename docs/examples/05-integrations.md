@@ -112,14 +112,14 @@ delay (see [scheduling](../state/scheduling.md)):
 
 ```ts
 methods: {
-  async refresh(s): Promise<ScheduleEffect> {
+  async refresh(s) {
     try {
       s.rates = await call(() => api.rates());
       s.attempt = 0;
-      return schedule.after("rates:refresh", 60_000, fx.refresh.action());
+      s.$do(schedule.after("rates:refresh", 60_000, self("refresh")));
     } catch {
       s.attempt = (s.attempt ?? 0) + 1;
-      return schedule.backoff("rates:refresh", s.attempt, { base: 5_000, max: 300_000 }, fx.refresh.action());
+      s.$do(schedule.backoff("rates:refresh", s.attempt, self("refresh"), { base: 5_000, max: 300_000 }));
     }
   },
 },
@@ -143,8 +143,9 @@ await aio.run({
 });
 ```
 
-Combine with `ui.forUser` / `ui: { exclude }` for per-role visibility — see
-[auth](../auth/auth.md) and [cell visibility](../state/cell-visibility.md).
+Combine with `visible.forUser` / `visible: { exclude }` for per-role visibility
+— see [auth](../auth/auth.md) and
+[cell visibility](../state/cell-visibility.md).
 
 ## Production monitoring
 

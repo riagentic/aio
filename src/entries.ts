@@ -33,8 +33,10 @@ export const AIO_ENTRY_PATHS: Readonly<Record<string, string>> = {
   "aio/extras": "src/extras/mod.ts",
   "aio/sync": "src/sync/mod.ts",
   "aio/testing": "src/cell-test.ts",
-  "aio/schedule": "src/schedule.ts",
-  "aio/selectors": "src/selector.ts",
+  // `aio/schedule` and `aio/selectors` were DELETED in alpha52 (entry diet):
+  // everything they carried lives on `aio` (schedule, createSelector) or
+  // `aio/extras` (isScheduleEffect, createSliceSelector). aiol reports the
+  // dead specifiers and `--safe-fix` rewrites the imports.
   "aio/build": "src/build.ts",
   "aio/build-all": "src/build-all.ts",
   "aio/dev-android": "src/dev-android.ts",
@@ -80,3 +82,25 @@ export function entrySubpath(spec: string): string {
 export function entryExportKey(spec: string): string {
   return spec === "aio" ? "." : `.${entrySubpath(spec)}`;
 }
+
+/** Server-only SYMBOLS exported from the isomorphic `aio`/`aio/db` entries.
+ *  The browser build OMITS them, so a static import into a client-reachable
+ *  module is an eager ES link failure — a blank screen every boot (AIO-424).
+ *  Pure schema helpers (table/pk/text/…) are browser-safe and stay out.
+ *
+ *  THE one decider (alpha52): `src/server/graph-validator.ts` (the dev-server
+ *  diagnostic) and `aiol` (checks + safe-fixes) both import THIS set — they
+ *  used to carry hand-synced copies with a "keep in sync" comment and no
+ *  gate. `initSchema`/`loadTables`/`syncTables`/`reactiveDB` joined in
+ *  alpha52 when `aio/db` went types+pure-helpers (their values moved to
+ *  `aio/server`; the `aio/db` re-exports are deprecated through beta). */
+export const SERVER_ONLY_AIO_SYMBOLS: ReadonlySet<string> = new Set([
+  "createDB",
+  "DEFAULT_PRAGMAS",
+  "connectCli",
+  "connectCliUDS",
+  "initSchema",
+  "loadTables",
+  "syncTables",
+  "reactiveDB",
+]);

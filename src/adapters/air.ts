@@ -5,7 +5,10 @@
  * Preferred: use cells directly — `counter.count` (reactive),
  * `counter.increment()` (dispatches). No hooks needed.
  *
- * `useCell`/`useAio` still available for backward compat.
+ * `useAio` still available for backward compat. (`useCell` was REMOVED in
+ * alpha52 — its `.state` was a LIVE proxy, so the natural stash-and-diff
+ * idiom silently compared state to itself. Read `cell.field` directly;
+ * `aiol --safe-fix` rewrites the mechanical `useCell(c).state.x` form.)
  *
  * @example
  * ```ts
@@ -18,94 +21,14 @@
 import { signal } from "../state/signal.ts";
 import { useRef } from "../air/aio-renderer.ts";
 import {
-  type CellRef,
-  createSendProxy,
-  getCellSignal,
   getConnectedSignal,
   getStateSignal,
   send,
   trackPath,
 } from "../state-core.ts";
-import type {
-  CellDef,
-  DirectCalling,
-  ExtractState,
-  SendOf,
-} from "../state/cell-types.ts";
 
-/** @deprecated Use direct cell access (`counter.count`,
- *  `counter.increment()`) — the AIO4 pattern. `useCell(...).state` is a LIVE
- *  Proxy over the cell signal: every property read returns the CURRENT value,
- *  so stashing it ("remember the previous frame") and diffing later compares
- *  state against itself — silently (a field report: it cost every
- *  explosion, sound and the music, with a green test suite). If you must keep
- *  it, copy what you need before comparing:
- *  `const prev = { ...useCell(c).state }`. */
-export function useCell<
-  // deno-lint-ignore no-explicit-any
-  F extends CellDef<any, any, any, any> & DirectCalling<any, any>,
->(
-  ref: F,
-): { state: ExtractState<F>; send: SendOf<F> };
-/** @deprecated Use direct cell access (`counter.count`,
- *  `counter.increment()`) — the AIO4 pattern. `useCell(...).state` is a LIVE
- *  Proxy over the cell signal: every property read returns the CURRENT value,
- *  so stashing it ("remember the previous frame") and diffing later compares
- *  state against itself — silently (a field report: it cost every
- *  explosion, sound and the music, with a green test suite). If you must keep
- *  it, copy what you need before comparing:
- *  `const prev = { ...useCell(c).state }`. */
-export function useCell<
-  S extends Record<string, unknown> = Record<string, unknown>,
->(
-  ref: CellRef,
-): { state: S; send: Record<string, (...args: unknown[]) => void> };
-// Implementation
-// deno-lint-ignore no-explicit-any
-export function useCell(ref: any): any {
-  const name = ref.__aio.id;
-  const sig = getCellSignal(name, ref.__aio.state);
-  trackPath(name);
-
-  // deno-lint-ignore no-explicit-any
-  const state = new Proxy({} as any, {
-    get(_target, prop: string | symbol): unknown {
-      if (typeof prop === "symbol") return undefined;
-      const s = sig.value; // tracked read — auto-tracked by AIR renderer
-      if (s == null) {
-        const fallback = ref.__aio.state as Record<string, unknown> | undefined;
-        return fallback ? fallback[prop] : undefined;
-      }
-      return (s as Record<string, unknown>)[prop];
-    },
-    ownKeys(): string[] {
-      const s = sig.value;
-      return s ? Object.keys(s as Record<string, unknown>) : [];
-    },
-    has(_target, prop: string | symbol): boolean {
-      if (typeof prop === "symbol") return false;
-      const s = sig.value;
-      return s ? prop in (s as Record<string, unknown>) : false;
-    },
-    getOwnPropertyDescriptor(
-      _target,
-      prop: string | symbol,
-    ): PropertyDescriptor | undefined {
-      if (typeof prop === "symbol") return undefined;
-      const s = sig.value;
-      if (!s || !(prop in (s as Record<string, unknown>))) return undefined;
-      return {
-        configurable: true,
-        enumerable: true,
-        value: (s as Record<string, unknown>)[prop as string],
-      };
-    },
-  });
-
-  return { state, send: createSendProxy(name, ref) };
-}
-
-/** Subscribe to the full app state. Prefer `useCell` for scoped access. */
+/** Subscribe to the full app state. Prefer direct cell access
+ *  (`counter.count` — reactive, scoped) over the full-state proxy. */
 export function useAio<
   S extends Record<string, unknown> = Record<string, unknown>,
 >(): {

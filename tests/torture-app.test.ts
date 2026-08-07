@@ -273,6 +273,9 @@ Deno.test("torture: 50 cells — fan-out to 10 + diamond A→(B,C)→D all settl
 Deno.test("torture: async method calls ITSELF (bounded) — call count exact, state converges", async () => {
   _resetAioRuntime();
   const rec: any = cell("t-rec", {
+    // alpha52: nested self-calls are read-modify-write across commits — the
+    // pre-transaction interleaving this test tortures needs the opt-out.
+    transaction: false,
     state: { calls: 0, floor: -1 },
     methods: {
       async grow(s, remaining: number) {
@@ -301,6 +304,8 @@ Deno.test("torture: async method calls ITSELF (bounded) — call count exact, st
 Deno.test("torture: two async methods on the SAME cell interleave via until() — deterministic final state", async () => {
   _resetAioRuntime();
   const duo = cell("t-duo", {
+    // alpha52: live until()-waits between two methods — opted-out semantics.
+    transaction: false,
     state: { flag: false, log: [] as string[] },
     methods: {
       async waitThenMark(s) {
@@ -338,6 +343,8 @@ Deno.test("torture: two async methods on the SAME cell interleave via until() �
 Deno.test("torture: cancelOn fires from the method's OWN sync prefix — state stays consistent", async () => {
   _resetAioRuntime();
   const canc: any = cell("t-canc-sync", {
+    // alpha52: writes recorded AFTER the abort — a transaction discards them.
+    transaction: false,
     state: { syncSteps: 0, outcome: "idle", stops: 0 },
     cancelOn: { work: ["t-canc-sync:stop"] },
     methods: {
@@ -377,6 +384,8 @@ Deno.test("torture: cancelOn fires from the method's OWN sync prefix — state s
 Deno.test("torture: cancelOn fires DURING an await — abort observed, no partial writes after", async () => {
   _resetAioRuntime();
   const canc: any = cell("t-canc-await", {
+    // alpha52: writes recorded AFTER the abort — a transaction discards them.
+    transaction: false,
     state: { phase: "idle", tail: 0 },
     cancelOn: { work: ["t-canc-await:stop"] },
     methods: {

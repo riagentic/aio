@@ -16,6 +16,12 @@ export type Issue = {
   fix?: string;
   /** If set, --safe-fix can auto-fix this issue */
   safeFix?: SafeFixFn;
+  /** Declined-by-design: the safe fix DELIBERATELY does not rewrite this site
+   *  (renders `[manual]`, never `[fixable]`). The string is the reason —
+   *  what the author must do by hand. Set by the RULE, which knows the fix's
+   *  decline conditions; a `[fixable]` that survives every --safe-fix run is
+   *  indistinguishable from a broken tool. */
+  manual?: string;
 };
 
 /** Lint report — issues found, checks passed, and scan statistics. */
@@ -89,7 +95,13 @@ export type LintContext = {
     severity: Severity,
     area: string,
     message: string,
-    opts?: { file?: string; line?: number; fix?: string; safeFix?: SafeFixFn },
+    opts?: {
+      file?: string;
+      line?: number;
+      fix?: string;
+      safeFix?: SafeFixFn;
+      manual?: string;
+    },
   ) => void;
   pass: (message: string) => void;
 };

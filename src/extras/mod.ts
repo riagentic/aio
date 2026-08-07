@@ -12,8 +12,10 @@
  * ```
  */
 
-/** Validate cell defs without booting — `lint(cells)` returns findings. */
-export { lint, parseCli } from "../server/aio.ts";
+/** Validate cell defs without booting — `checkCells(cells)` returns findings
+ *  (alpha52 name; `lint` — which collided with aiol's project linter — stays
+ *  the deprecated alias through beta). */
+export { checkCells, lint, parseCli } from "../server/aio.ts";
 export type { CliFlags, Lint } from "../server/aio.ts";
 
 // (`connectCliUDS` moved to `aio/server` and `DEFAULT_PRAGMAS` to `aio/db` in
@@ -43,6 +45,10 @@ export { deepFreeze } from "../state/dispatch.ts";
 
 /** Memoized selector scoped to one cell slice. */
 export { createSliceSelector } from "../selector.ts";
+
+/** Type guard for schedule effects — advanced effect-routing tooling.
+ *  (Moved here from the deleted `aio/schedule` entry, alpha52.) */
+export { isScheduleEffect } from "../state/schedule.ts";
 
 /** Deep diagnostic detail types — the shapes vitals/diagnostics emit.
  *  (The CONFIG types stay on the main entry with `aio.run()`.) */

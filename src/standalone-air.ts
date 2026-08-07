@@ -18,11 +18,11 @@ import type { AioApp } from "./server/aio.ts";
 import {
   createScheduleManager,
   createVirtualTimers,
-  isScheduleEffect,
   type ScheduleEffect,
 } from "./state/schedule.ts";
 import { log } from "./diagnostics/logger-api.ts";
-import { createOwnManager, isOwnEffect, type OwnEffect } from "./state/own.ts";
+import { createOwnManager, type OwnEffect } from "./state/own.ts";
+import { routeEffect } from "./state/route-effect.ts";
 import { Listeners } from "./state/listeners.ts";
 import { signal } from "./state/signal.ts";
 import { type ComponentFn, h } from "./air/vdom.ts";
@@ -86,6 +86,7 @@ export {
   Fragment,
   h,
   lazy,
+  type NodeAction,
   Portal,
   type Ref,
   renderToString,
@@ -367,25 +368,22 @@ export function initStandalone<S, A, E>(
 
   const dispatch = createDispatch<S, A, E>({
     reduce,
-    execute: (effect) => {
-      // Schedule effects: hold on the virtual clock so tests can fire them
-      // deterministically with ui.advance(ms) / handle.advance(ms).
-      if (isScheduleEffect(effect)) {
-        _scheduler().handle(effect as ScheduleEffect);
-        return;
-      }
-      if (isOwnEffect(effect)) {
+    execute: (effect) =>
+      // ONE exhaustive classifier for all three effect runtimes — a new
+      // framework effect kind is a compile error here (see route-effect.ts).
+      routeEffect<E>(effect, {
+        // Schedule effects: hold on the virtual clock so tests can fire them
+        // deterministically with ui.advance(ms) / handle.advance(ms).
+        schedule: (e) => _scheduler().handle(e),
         // Really acquire and dispose. Ignoring `own` here made the in-process
         // harnesses (testCell / testUI / bootCells) more permissive than
         // production — a leaked or misfiring resource could not surface in the
-        // one place a test boots and disposes cells, converting a whole class of
-        // bug into a production-only bug. Tests are the strictest
+        // one place a test boots and disposes cells, converting a whole class
+        // of bug into a production-only bug. Tests are the strictest
         // environment; a warning that says "ignored" is not strictness.
-        _ownManager().handle(effect);
-        return;
-      }
-      execute(app, effect as E);
-    },
+        own: (e) => _ownManager().handle(e),
+        app: (e) => execute(app, e),
+      }),
     getState: () => state,
     setState: (s) => {
       state = s;
@@ -513,6 +511,13 @@ export function page<K extends string>(
  * mount start clean without dropping the module-singleton cells themselves.
  */
 export function _resetState(): void {
+  // Destroy the booted cells FIRST, while the app and its signals are still
+  // alive — onDestroy hooks may read state or dispatch (dispatch is
+  // synchronous here, so everything commits before the teardown below).
+  // Nulled before the call so a re-entrant reset cannot loop.
+  const destroyCells = _destroyCells;
+  _destroyCells = null;
+  destroyCells?.();
   _state = null;
   _app = null;
   _cellApp = null;
@@ -554,6 +559,13 @@ let _cellApp: AioApp<Record<string, unknown>, Msg> | null = null;
 // Set by the running standalone app (see `_seed` above); cleared on reset.
 let _seed: ((partial: Record<string, unknown>) => void) | null = null;
 
+// Tears down the booted cells (composed.destroyAll — onDestroy hooks + the
+// `:__destroy` reset dispatches). Installed by bootStandalone, idempotent, and
+// fired from BOTH exits: `app.close()` (the production Android path) and
+// `_resetState()` (the harness dispose/re-mount path). Null when no cell
+// runtime is up.
+let _destroyCells: (() => void) | null = null;
+
 /** Install a starting state for the booted cells — harness only.
  *
  *  Throws when a key names no booted cell: a silently-ignored seed is a test
@@ -587,10 +599,17 @@ function bootStandalone(
     appId?: string;
     persist?: boolean | string;
     onRestore?: (s: Record<string, unknown>) => Record<string, unknown>;
+    circuitBreaker?: import("./state/cell-compose.ts").CircuitBreakerConfig;
   } = {},
 ): AioApp<Record<string, unknown>, Msg> {
   if (_cellApp) return _cellApp; // idempotent — first caller wins
-  const composed = composeCells(cells);
+  // `circuitBreaker` rides through exactly like the server composition
+  // (aio-composition.ts) — an app that configures a breaker gets the SAME
+  // auto-disable behaviour on Android and in the in-process harnesses.
+  const composed = composeCells(
+    cells,
+    opts.circuitBreaker ? { circuitBreaker: opts.circuitBreaker } : undefined,
+  );
   // Client-scoped cells own their signal state locally (bindCellReactive runs
   // their methods against the signal directly, bypassing the dispatch loop).
   // The composed reducer never updates their slice, so a blanket
@@ -640,13 +659,6 @@ function bootStandalone(
   // here: a cell the registry disabled kept its timers ticking and its
   // resources open in the harness while production cancelled and disposed them
   // by prefix.
-  //
-  // Note this closes only half the gap: the standalone runtime never calls
-  // `composed.initAll`, so `setCbApp` is unset and the circuit breaker cannot
-  // TRIP in-process at all (a second, wider parity gap — the harness also
-  // skips `onInit`/`onDestroy` — that belongs to src/testing, not here).
-  // Wiring the callback is still right: the day disable becomes reachable,
-  // the two runtimes must not disagree about what a disabled cell owns.
   composed.registry.setOnDisable((prefix: string) => {
     _scheduler().cancelByPrefix(prefix);
     _ownManager().disposeByPrefix(prefix);
@@ -657,6 +669,35 @@ function bootStandalone(
   // runtime's own cells (see `_standaloneCells`).
   _standaloneCells = new Set(composed.cellNames);
   _cellApp = app;
+  // ── Cell lifecycle — the SAME contract as the server (aio-cells-bridge
+  // onStart/onStop) and the worker host (cell-worker-host.ts): initAll at
+  // boot, destroyAll on teardown. This used to be skipped entirely, so
+  // `onInit`/`onDestroy` never ran on this runtime AND `setCbApp` stayed
+  // unset — the circuit breaker could not TRIP in-process. testUI/testCell/
+  // bootCells boot through here, which made the harness MORE permissive than
+  // production (the one thing CLAUDE.md forbids outright).
+  const lifecycleApp = {
+    dispatch: (a: Msg) => void app.dispatch(a),
+    getState: () => app.getState() as unknown,
+  };
+  composed.initAll(lifecycleApp); // wires setCbApp, runs each cell's onInit
+  let destroyed = false;
+  _destroyCells = () => {
+    if (destroyed) return; // close() then _resetState() must not destroy twice
+    destroyed = true;
+    // The `:__destroy` dispatches ride the System-teardown exception in
+    // dispatch.ts, so they still apply after `dispatch.close()` — exactly like
+    // the server's onStop destroyAll.
+    composed.destroyAll(lifecycleApp);
+  };
+  // Production Android path: close() drains in-flight work first (see
+  // initStandalone), THEN the cells are destroyed — the worker-host ordering
+  // (abort → settle → destroyAll).
+  const innerClose = app.close;
+  app.close = async () => {
+    await innerClose();
+    _destroyCells?.();
+  };
   return app;
 }
 
@@ -675,6 +716,7 @@ type StandaloneRunConfig = {
   cells?: CellDef[];
   persist?: boolean | string;
   onRestore?: (state: Record<string, unknown>) => Record<string, unknown>;
+  circuitBreaker?: import("./state/cell-compose.ts").CircuitBreakerConfig;
   // server-only options (ui, baseDir, port, schedules, …) are accepted and
   // ignored so one app.ts can serve both server and standalone builds
   [key: string]: unknown;
@@ -695,6 +737,7 @@ function runStandalone(
       appId: cfg.appId,
       persist: cfg.persist,
       onRestore: cfg.onRestore,
+      circuitBreaker: cfg.circuitBreaker,
     }),
   );
 }

@@ -15,8 +15,9 @@ import {
   type ReduceBreakdown,
   type TTState,
 } from "../diagnostics/time-travel.ts";
-import { isScheduleEffect, type ScheduleEffect } from "../state/schedule.ts";
-import { isOwnEffect, type OwnEffect } from "../state/own.ts";
+import type { ScheduleEffect } from "../state/schedule.ts";
+import type { OwnEffect } from "../state/own.ts";
+import { routeEffect } from "../state/route-effect.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { runWithUser } from "./auth-context.ts";
 
@@ -276,17 +277,14 @@ export function setupDispatch<S, A, E, App = any>(
         _collectPatches(result);
         return result;
       },
-    execute: (effect) => {
-      if (isScheduleEffect(effect)) {
-        scheduleManager.handle(effect as ScheduleEffect);
-        return;
-      }
-      if (isOwnEffect(effect)) {
-        ownManager.handle(effect);
-        return;
-      }
-      hookedExecute(getApp(), effect as E);
-    },
+    execute: (effect) =>
+      // ONE exhaustive classifier for all three effect runtimes — a new
+      // framework effect kind is a compile error here (see route-effect.ts).
+      routeEffect<E>(effect, {
+        schedule: (e) => scheduleManager.handle(e),
+        own: (e) => ownManager.handle(e),
+        app: (e) => hookedExecute(getApp(), e),
+      }),
     getState,
     setState,
     onDone: () => {
