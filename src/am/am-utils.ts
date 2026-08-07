@@ -295,12 +295,17 @@ export function parseGlobalFlags(
     // `am`-vs-app confusion read as a valid flag on both sides). Accepted
     // through beta, with a hint naming the new one. ──
     else if (a.startsWith("--client=")) {
-      console.error(
-        "am: --client=N is now --client-index=N (or -i N) — the old " +
-          "spelling still works, but collides with the app runtime's " +
-          "--client=<kind>",
-      );
-      flags.client = num(a.slice(9), "--client");
+      // Numeric = the deprecated am client INDEX. Anything else is the
+      // RUNTIME's --client=<kind> — forwarded as a positional so commands
+      // that launch an app (`am ui --client=browser`) can pass it through.
+      if (/^\d+$/.test(a.slice(9).trim())) {
+        console.error(
+          "am: --client=N is now --client-index=N (or -i N) — the old " +
+            "spelling still works, but collides with the app runtime's " +
+            "--client=<kind>",
+        );
+        flags.client = num(a.slice(9), "--client");
+      } else rest.push(a);
     } else if (a.startsWith("-c") && a.length > 2) {
       // `-c2` was the short form of `--client=2`. `-c2x` used to fail the
       // isNaN test and fall through to the POSITIONAL args, where it became a
@@ -308,6 +313,7 @@ export function parseGlobalFlags(
       console.error("am: -cN is now -i N (client index)");
       flags.client = num(a.slice(2), "-c (client index)");
     } else if (a === "--client") flags.client = 0;
+    else if (a === "--ui") flags.ui = true;
     else if (a === "--all") flags.all = true;
     else if (a === "--help" || a === "-h") flags.help = true;
     else rest.push(a);

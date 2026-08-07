@@ -74,6 +74,12 @@ export function createUDSListener(
     onCommand: (cmd: string, arg?: number) => void;
     getBroadcast: () => unknown;
   },
+  /** Raise the per-frame buffer ceiling (default 10 MB) — the UDS twin of
+   *  `wsLimits.maxMessageBytes`. An app that raises its WS frame limit for
+   *  large payloads (a base64 attachment) hits the same wall here when the
+   *  Electron window talks over UDS instead, and the failure was a silent
+   *  connection reset mid-send. Never lowers the default. */
+  maxFrameBytes?: number,
 ): UDSHandle {
   try {
     Deno.removeSync(socketPath);
@@ -140,6 +146,7 @@ export function createUDSListener(
           sendTo,
           syncHandler ?? null,
           tt,
+          maxFrameBytes,
         );
       } catch (e) {
         log.error("uds", `client handshake failed — ${e}`);
@@ -333,6 +340,18 @@ export function createUDSListener(
   };
 }
 
+/** The per-frame buffer ceiling for a UDS connection.
+ *
+ *  10MB floor — it prevents an OOM from a peer that never sends a newline. An
+ *  app may RAISE it via `wsLimits.maxMessageBytes` (the WS frame limit; this is
+ *  its twin, so one transport cannot refuse a payload the other accepts — a
+ *  ~9MB base64 attachment travelled over WS and reset the Electron/UDS
+ *  connection mid-send), and may never LOWER it below the floor. Pure, so the
+ *  rule is unit-tested rather than reasoned about. */
+export function udsFrameCeiling(maxFrameBytes?: number): number {
+  return Math.max(10 * 1024 * 1024, maxFrameBytes ?? 0);
+}
+
 function _handleUDSConn(
   conn: Deno.Conn,
   connections: Set<Deno.Conn>,
@@ -355,9 +374,10 @@ function _handleUDSConn(
     onCommand: (cmd: string, arg?: number) => void;
     getBroadcast: () => unknown;
   },
+  maxFrameBytes?: number,
 ): void {
   const decoder = new TextDecoder();
-  const MAX_BUF = 10 * 1024 * 1024; // 10MB — prevent OOM from missing newlines
+  const MAX_BUF = udsFrameCeiling(maxFrameBytes);
   let buf = "";
 
   // Minimal structural WebSocket stand-in for the sync handler — it only

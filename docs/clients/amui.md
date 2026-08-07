@@ -14,7 +14,9 @@ cell + an AIR/JSX UI).
 ## Run it
 
 ```sh
-deno task amui            # from the aio repo — browser shell (instant)
+am ui                     # from anywhere — launches amui detached
+                          # (Electron by default; `am ui --client=browser` for a tab)
+deno task amui            # from the aio repo — amui's declared default (Electron)
 ```
 
 Or from anywhere via the export:

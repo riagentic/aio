@@ -9,6 +9,23 @@ share with other devices on your local network:
 deno task dev --expose
 ```
 
+**Binding one interface (`host`).** `--expose` binds every interface
+(`0.0.0.0`). To serve exactly one — a private LAN NIC, a VPN address, an
+interface behind a reverse proxy — name it:
+
+```sh
+deno task dev --expose --host=192.168.1.20     # only that interface
+```
+
+```ts
+await aio.run({ expose: true, host: "192.168.1.20" }); // same, from code
+```
+
+The flag wins over the config value, and everything aio prints or opens (the
+boot report, the share link, the window it launches) names the address it
+actually bound — a host-bound app never advertises `localhost` it isn't
+listening on.
+
 **What happens:**
 
 1. Server binds to `0.0.0.0` (all network interfaces)

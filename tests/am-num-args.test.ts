@@ -66,7 +66,7 @@ Deno.test("parseGlobalFlags: a numeric global flag that does not parse is an ERR
       [["--port=80a0", "status"], "--port"],
       [["--lines=1O0", "logs"], "--lines"],
       [["--wait=5s", "start", "app"], "--wait"],
-      [["--client=x", "surface"], "--client"],
+      [["--client-index=x", "surface"], "--client-index"],
     ] as const
   ) {
     const { flags } = parseGlobalFlags([...argv]);
@@ -81,4 +81,10 @@ Deno.test("parseGlobalFlags: a numeric global flag that does not parse is an ERR
   assertEquals(ok.flags.error, undefined);
   assertEquals(ok.flags.port, 9000);
   assertEquals(ok.flags.lines, 50);
+  // A NON-numeric `--client=` is NOT the (deprecated) index flag misparsed —
+  // it is the app runtime's `--client=<kind>`, forwarded as a positional so
+  // launcher commands (`am ui --client=browser`) can pass it through.
+  const fwd = parseGlobalFlags(["ui", "--client=browser"]);
+  assertEquals(fwd.flags.error, undefined);
+  assertEquals(fwd.args, ["--client=browser"]);
 });

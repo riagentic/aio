@@ -59,6 +59,9 @@ export interface LifecycleDeps<S, A> {
   tlsCert: TlsCert | null;
   shareUrl: string;
   localUrl: string;
+  /** How the bound address is NAMED (`setupTransport`'s one decider) — the
+   *  boot report prints THIS, never a second derivation. */
+  advertiseHost: string;
   // Server & UDS
   server: ServerHandle;
   udsHandle: UDSHandle | null;
@@ -130,6 +133,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     tlsCert,
     shareUrl,
     localUrl,
+    advertiseHost,
     server,
     udsHandle,
     app,
@@ -215,9 +219,11 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
   } else {
     log.info(`running (${mode}, ${shell}${transportLabel})`);
     const wsProto = useHttps ? "wss" : "ws";
-    const wsHost = expose ? `0.0.0.0:${port}` : `localhost:${port}`;
+    // `bindHost` is the transport's OWN resolved answer — re-deriving it here
+    // (from the flag only) made the report contradict the bind for an app
+    // that set `host` in config.
     log.info(`${p("web")}${url}`);
-    log.info(`${p("ws")}${wsProto}://${wsHost}/ws`);
+    log.info(`${p("ws")}${wsProto}://${advertiseHost}:${port}/ws`);
   }
   if (udsHandle) log.info(`${p("uds")}${udsHandle.socketPath}`);
   if (server.trojanPort) {

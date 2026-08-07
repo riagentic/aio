@@ -421,7 +421,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "ae9d67a880cc2434"
+          "sig": "4e8cede8b038c236"
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -1146,7 +1146,7 @@
         },
         "CliFlags": {
           "kind": "typeAlias",
-          "sig": "a33f6f789698bc7c"
+          "sig": "bea40c3dc6c60d30"
         },
         "createSliceSelector": {
           "kind": "function",

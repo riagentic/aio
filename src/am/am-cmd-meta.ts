@@ -319,6 +319,10 @@ Onboard:
   update                  Update am to the latest release
   uninstall               Remove am (your aio apps are untouched)
 
+Visual manager:
+  ui                      Open amui, the visual app manager (Electron;
+                          \`am ui --client=browser\` opens a browser tab instead)
+
 Process (singleton — one instance per app identity):
   start                   Start app (kills zombies, refuses if already running)
   stop                    Graceful shutdown (SIGTERM → SIGKILL)
@@ -329,9 +333,10 @@ Process (singleton — one instance per app identity):
 
 State:
   state [path] [--wait=N] State query (dot-path, [*] wildcard, {pick})
+  state --ui [user]       Server-side UI-state projection (was \`am ui\`; for
+                          live client UI use: surface)
   expect <path> <op> [v]  Assert on state (eq/ne/gt/lt/contains/exists…); e2e; --wait=N
   record [out] --from=J  Generate a bootCells replay test from a journal
-  ui [user]               Server-side UI state (for live client UI use: surface)
   dispatch <cell:method> [a b …]  Call a method with POSITIONAL args (setHost "1.2.3.4")
   dispatch <cell:method> --args='["1.2.3.4"]'  …the same, JSON-exact (values with '=', exact types)
   dispatch <Type> [k=v]   Dispatch a plain action with a named payload
