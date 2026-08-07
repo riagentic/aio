@@ -1,11 +1,12 @@
 // aiol — all lint checks organized by area
 
 import type { CellInfo, Checker } from "./types.ts";
-import { join } from "@std/path";
+import { join, resolve } from "@std/path";
 import * as fix from "./fixes.ts";
 import { RESERVED_KEYS } from "../src/state/cell-types.ts";
 import { AIO_LIBRARY_ENTRIES } from "../src/entries.ts";
 import { removalMessage, removalOf } from "../src/state/removals.ts";
+import { linkSatisfiesPin } from "../src/server/framework-pin.ts";
 import { codeMatches, codeText } from "./scan.ts";
 
 // ══════════════════════════════════════════════════════════════════════
@@ -164,6 +165,39 @@ export const checkConfig: Checker = (ctx) => {
       "config",
       "no compile tasks defined — add compile:browser, compile:electron, etc. for production builds",
     );}
+
+  // Framework pin vs dep/aio — the promise `am pin` seals. `doctor` checked
+  // it, but doctor is the diagnostic nobody runs on a green build: lint, test
+  // and dev all stayed green while dep/aio sat one version past the pin (a
+  // field report). aiol walks deno.json for every other fact it reports; the
+  // pin is one more. `linkSatisfiesPin` is THE decider (shared with doctor,
+  // `am pin`, `am fix`), so the verdicts cannot contradict each other.
+  const pin = typeof (dj as { aioVersion?: unknown }).aioVersion === "string"
+    ? (dj as { aioVersion: string }).aioVersion
+    : null;
+  if (pin) {
+    let linked: string | null = null;
+    try {
+      // A relative link target is relative to the link's own directory.
+      linked = resolve(
+        join(ctx.projectDir, "dep"),
+        Deno.readLinkSync(join(ctx.projectDir, "dep", "aio")),
+      );
+    } catch { /* not linked yet — a fresh clone; `am fix` creates it */ }
+    if (linked !== null && !linkSatisfiesPin(pin, linked)) {
+      report(
+        "warn",
+        "config",
+        `framework pin ${pin} does not match dep/aio (→ ${linked}) — ` +
+          "the app runs a version it does not declare. " +
+          "Run `am pin <version>` to move the pin, or `am fix` to relink",
+      );
+    } else {
+      pass(
+        `framework pin ${pin}${linked === null ? " (dep/aio unlinked)" : ""}`,
+      );
+    }
+  }
 };
 
 // ══════════════════════════════════════════════════════════════════════
@@ -1711,16 +1745,24 @@ export const checkBuild: Checker = async (ctx) => {
     } catch {
       try {
         await Deno.stat(join(projectDir, "node_modules", "electron"));
+        // The binary half of the package is fetched by its postinstall
+        // script, which plain `deno install` skips. Name the command that
+        // actually runs it — the previously-advised `install:electron` task
+        // does not exist in generated apps (Electron auto-installs on the
+        // first `dev`/`compile:electron` run).
         report(
           "warn",
           "build",
-          "Electron package exists but dist/ missing — run: deno task install:electron",
+          "Electron package exists but its binary (node_modules/electron/dist) is missing — " +
+            "run: deno install --allow-scripts=npm:electron npm:electron " +
+            "(or just `deno task dev:electron` / `compile:electron` — they auto-install)",
         );
       } catch {
         report(
           "hint",
           "build",
-          "Electron not installed — run: deno task install:electron (if you need desktop builds)",
+          "Electron not installed — it auto-installs on the first `deno task dev:electron` " +
+            "or `compile:electron` run (if you need desktop builds)",
         );
       }
     }

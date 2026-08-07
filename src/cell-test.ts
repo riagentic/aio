@@ -37,3 +37,11 @@ export {
   ensureAppDirs,
   registerAppDirs,
 } from "./server/app-dirs.ts";
+
+// TOTP code generator — HERE, not in `aio`: an integration test of a
+// `totp: true` login must SUBMIT a valid second factor, and this is the only
+// way to make one (a field report imported it through the framework's
+// internals). Kept out of the app-facing surface so it cannot be mistaken
+// for an enrollment primitive (`generateTotpSecret`/`totpUri`/`verifyTotp`
+// in `aio` are that).
+export { totpCode } from "./server/auth-totp.ts";

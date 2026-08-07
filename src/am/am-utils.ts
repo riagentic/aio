@@ -289,6 +289,7 @@ export function parseGlobalFlags(
       flags.client = num(a.slice(2), "-c (client index)");
     } else if (a === "--client") flags.client = 0;
     else if (a === "--all") flags.all = true;
+    else if (a === "--help" || a === "-h") flags.help = true;
     else rest.push(a);
   }
 

@@ -10,19 +10,19 @@ renders the UI) x **topology** (local or remote).
 ```
                     local (default)              remote
 ┌────────────┬─────────────────────────┬──────────────────────────┐
-│ browser    │ compile:browser         │ compile:browser:remote   │
+│ browser    │ compile:browser         │ compile:remote:browser   │
 │            │ binary + system browser │ exposed server + systemd │
 ├────────────┼─────────────────────────┼──────────────────────────┤
-│ electron   │ compile:electron        │ compile:electron:remote  │
+│ electron   │ compile:electron        │ compile:remote:electron  │
 │            │ AppImage/zip, server    │ client AppImage (Linux)  │
 ├────────────┼─────────────────────────┼──────────────────────────┤
-│ cli        │ compile:cli             │ compile:cli:remote       │
+│ cli        │ compile:cli             │ compile:remote:cli       │
 │            │ binary + WS client API  │ client binary, no server │
 ├────────────┼─────────────────────────┼──────────────────────────┤
-│ android    │ compile:android         │ compile:android:remote   │
+│ android    │ compile:android         │ compile:remote:android   │
 │            │ APK, server inside      │ client APK, no Deno      │
 ├────────────┼─────────────────────────┼──────────────────────────┤
-│ service    │ compile:service         │ compile:service:remote   │
+│ service    │ compile:service         │ compile:remote:service   │
 │            │ headless, 127.0.0.1     │ headless, 0.0.0.0 + auth │
 └────────────┴─────────────────────────┴──────────────────────────┘
 
@@ -212,15 +212,15 @@ shows **Build Error** or **Runtime Error**. Opens Electron or browser.
 | ----------------------------------------- | ------------------------------------------------------------------------------------- |
 | `--compile`                               | Compile standalone Deno binary                                                        |
 | `--electron`                              | Build Electron package: AppImage (Linux), zip (macOS/Windows) — implies `--compile`   |
-| `--client`                                | Build client-only AppImage — no Deno runtime, Linux only (`compile:electron:remote`)  |
+| `--client`                                | Build client-only AppImage — no Deno runtime, Linux only (`compile:remote:electron`)  |
 | `--cli`                                   | Build CLI binary — no browser bundle, headless server (`compile:cli`)                 |
-| `--cli --remote`                          | Build client-only CLI binary — no server (`compile:cli:remote`)                       |
+| `--cli --remote`                          | Build client-only CLI binary — no server (`compile:remote:cli`)                       |
 | `--android`                               | Build APK via Gradle                                                                  |
-| `--android --remote`                      | Build client-only APK — connect page, no local dispatch (`compile:android:remote`)    |
+| `--android --remote`                      | Build client-only APK — connect page, no local dispatch (`compile:remote:android`)    |
 | `--compile --service`                     | Compile binary + generate systemd unit file                                           |
-| `--compile --service --remote`            | Same, with `--expose` in systemd ExecStart (`compile:browser:remote`)                 |
+| `--compile --service --remote`            | Same, with `--expose` in systemd ExecStart (`compile:remote:browser`)                 |
 | `--compile --service --headless`          | Same, with `--headless` in systemd ExecStart (`compile:service`)                      |
-| `--compile --service --headless --remote` | Same, with `--expose --headless` (`compile:service:remote`)                           |
+| `--compile --service --headless --remote` | Same, with `--expose --headless` (`compile:remote:service`)                           |
 | `--name=X`                                | Override binary name (default: from deno.json `"title"`)                              |
 | `--force`                                 | Skip bundle cache — always rebuild `dist/app.js`                                      |
 | `--release`                               | Android release build (default: debug) — emits `myapp-unsigned.apk`; sign it yourself |
@@ -368,7 +368,7 @@ persisted to the OS user data directory.
 git tag vX.Y.Z && git push origin vX.Y.Z   # triggers build on all 3 platforms
 ```
 
-## compile:electron:remote (thin client AppImage)
+## compile:remote:electron (thin client AppImage)
 
 ```sh
 deno run -A dep/aio/src/build.ts --client
@@ -446,7 +446,7 @@ try {
 > `am profile`. A browser's click-through has no equivalent here: the connection
 > simply fails.
 
-## compile:cli:remote (client-only binary)
+## compile:remote:cli (client-only binary)
 
 ```sh
 deno run -A dep/aio/src/build.ts --compile --cli --remote
@@ -513,7 +513,7 @@ methods: {
 },
 ```
 
-## compile:android:remote (client APK)
+## compile:remote:android (client APK)
 
 ```sh
 deno run -A dep/aio/src/build.ts --android --remote
@@ -523,7 +523,7 @@ Thin client APK — no local state, no reducer, no Deno runtime. Shows a connect
 page where the user enters the server URL. The remote server must run with
 `--expose`.
 
-## compile:browser:remote (exposed server + systemd)
+## compile:remote:browser (exposed server + systemd)
 
 ```sh
 deno run -A dep/aio/src/build.ts --compile --service --remote
@@ -539,13 +539,13 @@ sudo systemctl enable --now aio-counter
 journalctl -u aio-counter -f  # view logs + auth token
 ```
 
-## compile:service:remote (headless exposed server)
+## compile:remote:service (headless exposed server)
 
 ```sh
 deno run -A dep/aio/src/build.ts --compile --service --headless --remote
 ```
 
-Same as `compile:browser:remote` but headless — no browser auto-open. **Systemd
+Same as `compile:remote:browser` but headless — no browser auto-open. **Systemd
 ExecStart:** `--expose --headless --port=3000`
 
 > **Note:** `compile:service` (local) generates `--headless --port=3000` without

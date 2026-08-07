@@ -246,16 +246,17 @@ Deno.test("am log --client: no client log is an error, not a zero exit", async (
     launch: join(home, "launch.json"),
   });
   try {
-    const { errors } = await capture(async () => {
+    const { logs } = await capture(async () => {
       const code = await exitCodeOf(() =>
         cmdLog([], { app, client: 0, json: true } as GlobalFlags)
       );
       assertEquals(code, 1);
     });
-    // The message names the path it looked at — "(no client log yet)" named none.
+    // The message names the path it looked at — "(no client log yet)" named
+    // none. --json errors land on STDOUT (the stream a script parses).
     assert(
-      errors.some((e) => e.includes("client.log")),
-      `must name the path searched, got: ${errors.join(" | ")}`,
+      logs.some((e) => e.includes("client.log")),
+      `must name the path searched, got: ${logs.join(" | ")}`,
     );
   } finally {
     await Deno.remove(home, { recursive: true }).catch(() => {});
@@ -422,8 +423,9 @@ export default function App() {
         const code = await exitCodeOf(fn);
         assertEquals(code, 1, `${name} against no client must exit 1`);
       });
+      // --json errors land on STDOUT (the stream a script parses).
       assert(
-        errors.join(" ").includes("not connected"),
+        (logs.join(" ") + errors.join(" ")).includes("not connected"),
         `${name} must say the client is not connected, got: ` +
           `${errors.join(" | ")} / ${logs.join(" | ")}`,
       );

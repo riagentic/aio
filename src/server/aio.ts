@@ -3,6 +3,7 @@
 // Cell composition logic lives in aio-composition and aio-cells-bridge.
 
 import { createShutdownOrchestrator, registerRuntime } from "./shutdown.ts";
+import { _registerAuthStore } from "./auth-context.ts";
 import type { ServerHandle } from "./server-types.ts";
 import type { UDSHandle } from "./uds.ts";
 import {
@@ -1177,6 +1178,8 @@ async function _run<S, A, E>(
       sessions: () => sessionStore,
     })
     : null;
+  // serverAuth() ambience — released in shutdown() below.
+  const _unregisterAuthStore = userStore ? _registerAuthStore(userStore) : null;
   sessionStore = (config.sessions || authEnabled)
     ? openSessionStore(
       appDirs(appId, config.appDir).authDb,
@@ -1319,6 +1322,7 @@ async function _run<S, A, E>(
       | (() => void)
       | undefined;
     release?.();
+    _unregisterAuthStore?.();
     _unregisterRuntime();
   };
 

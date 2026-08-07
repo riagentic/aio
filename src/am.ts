@@ -190,6 +190,11 @@ async function main(): Promise<void> {
     outError(flags.error, detectMode(flags));
     Deno.exit(1);
   }
+  // `am <anything> --help` answers with usage, never with a command result.
+  if (flags.help) {
+    await COMMANDS.help!(command === "help" ? args : [command, ...args], flags);
+    Deno.exit(0);
+  }
   const handler = COMMANDS[command];
   if (!handler) {
     outError(

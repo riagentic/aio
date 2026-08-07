@@ -23,9 +23,15 @@ export function out(data: unknown, mode: OutputMode): void {
   }
 }
 
-/** Error output — JSON or plain depending on mode */
+/** Error output — JSON or plain depending on mode.
+ *
+ *  In `--json` the error object goes to STDOUT: that is the stream a script
+ *  (or an agent) parses, and an empty stdout + stderr-only error made the
+ *  first diagnostic a JSONDecodeError with no cause (a field report). The
+ *  non-zero exit still says "failed"; `--json` output is a superset of plain
+ *  mode, never a mode that loses information. */
 export function outError(msg: string, mode: OutputMode): void {
-  if (mode === "json") console.error(JSON.stringify({ error: msg }));
+  if (mode === "json") console.log(JSON.stringify({ error: msg }));
   else console.error(`error: ${msg}`);
 }
 

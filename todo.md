@@ -425,6 +425,32 @@ message names `perfBudget.methods`; and every aio app lost the ~8px white border
 it never asked for (the shell shipped no CSS reset and no template ships a
 stylesheet).
 
+Deferred from the alpha51 architecture pass (docs/basics/app-architectures.md
+names the two shapes; these are the remaining gaps, from the geng-market + dm
+analyses, ranked):
+
+- [ ] **Two-app test harness.** `testMultiClient` is one-server/N-clients;
+      "service app + client app in one process" is hand-rolled per repo (~80
+      lines: dual `aio.run` + raw `connectCli` + until()-loops). The doc recipe
+      shipped (app-architectures.md); a `testApps([svc, client])` helper is the
+      candidate API once a second repo asks.
+- [ ] **Build-time server-URL bake for shipped clients.** `build.server` is
+      manifest metadata only; a consumer APK/AppImage still asks the user to
+      type an address. Candidate: default the connect page / `--server-url` from
+      the manifest.
+- [ ] **Android `applicationId` is hardcoded** (`app.aio.<slug>`,
+      build-android.ts) — no deno.json knob, so a client APK cannot ship to Play
+      under its own package.
+- [ ] **Android + self-signed TLS**: Electron's client handles the cert
+      (`certificate-error` hook); the APK has no network_security_config — a
+      self-signed VPS is a hard fail on Android.
+- [ ] **CA/asset distribution API**: "give clients this CA / serve the client
+      binaries" needed a hand-built second HTTP server + build-time constant
+      rewriting in dm (~330 lines). Wants a design pass, not a quick patch.
+- [ ] **Remote target naming**: scaffold says `compile:remote:X`, fleet says
+      `X-client` (docs now match the scaffold). A one-name story (or aliases)
+      wants deciding before beta.
+
 Deferred from the alpha45 work (alpha46 candidates, none data-loss):
 
 - [ ] `afterRender()` called OUTSIDE a render is silently dropped
@@ -638,10 +664,10 @@ caller-side post-await-read lint, and append-in-place guidance for array
 patches. Verified already-fixed: browser return values (alpha34 ack transport),
 the 64KB KV ceiling (gone with the SQLite move), `am restart` flag replay.
 
-- [ ] **`persist: "db"` for big slices.** The KV size ceiling is gone, but a
-      cell holding megabytes still round-trips as one JSON blob per flush. A
-      first-class "this slice lives in SQLite rows" strategy is the real fix;
-      every app with a large cell currently hand-rolls it via `createDB`.
+- [x] **`persist: "db"` for big slices.** REFUSED (2026-08-02,
+      `feedback/refused.md`) — bulk data belongs in SQLite rows via `db:` /
+      `app.db` (`examples/contacts` is the shape); a second persistence strategy
+      for the same data would be two ways to lose it.
 - [x] **Array patch granularity.** DONE (alpha39, completed in alpha40) — a
       whole-array `replace` is rewritten as the ops that produce it, at
       patch-generation time: appends first, then any identity-matched shrink,
@@ -662,22 +688,19 @@ it too; `dbPath` outside the app home warns about the split. Fixed by the
 reporter in-tree: journal `0600`, electron stderr filtering, `timeTravel`
 honoured, `broadcastTT` coalesced, `am cost` weighing unattributed bytes.
 
-- [ ] **Profile integrity.** `quick_check` at boot → restore from a rolling
-      `VACUUM INTO` snapshot → quarantine the damaged file. ~150 lines every app
-      that persists user data eventually wants; a field report wrote its own.
-      Would be `db.snapshot(path)` + `checkIntegrityOnBoot: true`.
-      Feature-sized, so it waits for a second app to ask — but it is the
-      strongest remaining ask.
+- [x] **Profile integrity.** DONE (alpha43) — `db.snapshot(path)`
+      (`VACUUM INTO`) + `db.checkIntegrity()` + `checkIntegrityOnBoot: true`:
+      damaged file quarantined beside itself, boot falls back to the snapshot
+      with the loss stated.
 - [x] **A "degraded" escalation hook.** DONE (alpha40) — `degraded(name)` /
       `degradedReport()`: N consecutive failures of a named best-effort op
       escalate exactly once (one structured event, not per-occurrence spam) plus
       one on recovery, and `/__aio/health` reports `status: "degraded"` and
       names them. aio's own browser sync frames — a wall of `.catch(() => {})` —
       were the first user.
-- [ ] **Time-travel subscribe-on-open.** Coalescing + the no-client gate cover
-      the realistic cases; the honest fix is that a client which never opens the
-      panel should receive nothing at all. Needs a `tt-subscribe` frame and a
-      touch of every transport — a protocol change, so not on a whim.
+- [x] **Time-travel subscribe-on-open.** REFUSED (2026-08-02,
+      `feedback/refused.md`) — a protocol change bought for an optimisation
+      nobody can measure in production, where the feature is off.
 
 Refused this round, with reasons:
 

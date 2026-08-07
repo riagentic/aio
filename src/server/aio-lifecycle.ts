@@ -2,6 +2,7 @@
 // Extracted from aio.ts _run() to keep the orchestrator lean.
 
 import { join } from "@std/path";
+import { openExternalBestEffort } from "./open-external.ts";
 import { type AioMeta, launchElectron } from "../electron/electron.ts";
 import type { ServerHandle } from "./server-types.ts";
 import type { UDSHandle } from "./uds.ts";
@@ -353,20 +354,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
           log.error(
             `install manually with: deno install --allow-scripts=npm:electron npm:electron (then re-run) — serving at ${electronUrl}`,
           );
-          const cmd = Deno.build.os === "darwin"
-            ? "open"
-            : Deno.build.os === "windows"
-            ? "start"
-            : "xdg-open";
-          try {
-            new Deno.Command(cmd, {
-              args: [electronUrl],
-              stdout: "null",
-              stderr: "null",
-            }).spawn();
-          } catch {
-            log.info(`open ${electronUrl} in your browser`);
-          }
+          openExternalBestEffort(electronUrl);
           return;
         }
         setElectronProc(proc);
@@ -400,20 +388,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
         log.debug("browser: existing client connected — skipping open");
         return;
       }
-      const cmd = Deno.build.os === "darwin"
-        ? "open"
-        : Deno.build.os === "windows"
-        ? "start"
-        : "xdg-open";
-      try {
-        new Deno.Command(cmd, {
-          args: [localUrl],
-          stdout: "null",
-          stderr: "null",
-        }).spawn();
-      } catch {
-        log.info(`open ${localUrl} in your browser`);
-      }
+      openExternalBestEffort(localUrl);
     }, 1500);
   }
 }

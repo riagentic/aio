@@ -220,9 +220,13 @@ cell("billing", {
 });
 ```
 
-A denied network action is dropped before dispatch and audit-logged
-(`[aio] auth: …`). Server-side code (effects, schedules, your own calls) always
-bypasses `access` — the server trusts its own code.
+A denied network action is refused before dispatch, audit-logged
+(`[aio] auth: …`) — **and the caller is told**: an awaited call rejects with
+`cell "name.method" — access denied`, exactly as a denied serverFn answers its
+caller. (It used to resolve like a success, which made a mis-written predicate
+look like a working button that does nothing.) Server-side code (effects,
+schedules, your own calls) always bypasses `access` — the server trusts its own
+code.
 
 > **`access` gates calls. `ui` gates reads.** These are two different facts and
 > neither implies the other. `access` decides who may CALL a cell's methods over
@@ -260,6 +264,11 @@ cell("docs", {
 });
 ```
 
+> The predicate sees the method's **positional args as they were passed**. For a
+> method that takes an object — `place(s, order: Order)` — destructure it:
+> `(user, _m, order) => user?.id === (order as Order)?.userId`. Comparing arg 0
+> itself to a user id would deny every call.
+
 ### Who is calling? (`serverUser`)
 
 Anywhere on the server — cell methods, serverFns, effects — `serverUser()`
@@ -271,6 +280,15 @@ import { cell, serverUser } from "aio";
 cell("cart", {
   state: { items: {} as Record<string, string[]> },
   access: true,
+  // access gates WRITES only — without a per-user view every connected
+  // client would receive every user's cart over the wire. forUser makes the
+  // read side match the write side (anonymous clients see an empty cart).
+  ui: {
+    forUser: (s, user) => {
+      const id = user?.id;
+      return { items: id ? { [id]: s.items[id] ?? [] } : {} };
+    },
+  },
   methods: {
     addItem(s: { items: Record<string, string[]> }, sku: string) {
       const me = serverUser()!; // access:true guarantees a user
@@ -282,6 +300,11 @@ cell("cart", {
 
 `undefined` means anonymous client (public/shared-key mode) or server-origin
 execution.
+
+> **`access` and `ui` are two different gates.** `access` decides who may
+> _call_; `ui` (and `ui: { forUser }`) decides who may _see_. A per-user cell
+> needs both — the cart above without `forUser` is a working checkout that
+> broadcasts every basket to every client.
 
 #### Testing a method that reads `serverUser()`
 
@@ -403,6 +426,22 @@ const app = await aio.run({ cells: [/* … */], auth: true });
   flows unauthenticated.
 - `auth: { signup: false }` disables open registration — seed accounts with
   `app.auth.create("root", password, "admin")`.
+- **Admin screens: `serverAuth()`.** The same store, ambient — usable inside any
+  serverFn or cell method like `serverUser()`, so an account-management panel
+  needs no `onStart(app)` plumbing:
+
+  ```ts
+  import { serverAuth, serverFns } from "aio";
+
+  serverFns("admin", {
+    users: () => serverAuth().list(),
+    setRole: (id: string, role: string) => serverAuth().setRole(id, role),
+  }, { access: "admin" });
+  ```
+
+  It throws (never a silent null) when the app runs without per-user auth — and
+  when several authed apps share one process, where `app.auth` is the
+  unambiguous handle.
 - Failed logins burn the per-IP budget below.
 
 Client side, the typed wrapper drives the same endpoints:
@@ -500,6 +539,20 @@ Both `totp/enable` and `totp/disable` re-authenticate. Without that, a single
 stolen session token was a permanent account takeover — the thief enrolled their
 own authenticator, and from then on the owner's password login demanded the
 thief's device.
+
+**Testing the 2FA round-trip.** An integration test must _submit a valid code_,
+and the generator lives in `aio/testing` (not `aio` — it is a test tool, not an
+enrollment primitive):
+
+```ts
+import { authClient } from "aio";
+import { totpCode } from "aio/testing";
+
+const { secret } = await authClient.totpSetup(); // enrollment, as above
+const code = await totpCode(secret); // 6 digits, current 30s step
+// POST it exactly as a user would — the full login→challenge→code round trip
+// runs against real crypto in an in-process testServer.
+```
 
 `auth: { totp: false }` turns **enrollment** off app-wide. It does **not** turn
 verification off: accounts already enrolled still have to present their code,

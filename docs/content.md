@@ -7,6 +7,7 @@
 
 - [Basics](basics/README.md) — Getting started with AIO — concepts, setup, and reference.
 - [API Reference](basics/api-reference.md) — Universal: import { aio, cell, log } from "aio" (state, lifecycle, logging)
+- [App architectures — the two canonical shapes](basics/app-architectures.md) — Almost every aio deployment is one of two shapes.
 - [Architecture](basics/architecture.md) — AIO is a full-stack Deno/TypeScript application framework built around cells
 - [Core Concepts](basics/concepts.md) — Everything you need to understand about how aio works.
 - [FAQ](basics/faq.md) — Common questions about what aio does, doesn't do, and why.
@@ -149,8 +150,9 @@
 - [Upgrade: alpha46 → alpha47](upgrade/from-alpha46-to-alpha47.md) — A second bug-hunt release: 17 more defects, found by pointing randomized
 - [Upgrade: alpha47 → alpha48](upgrade/from-alpha47-to-alpha48.md) — A third bug-hunt release: 19 defects across observability and the client
 - [Upgrade: alpha48 → alpha49](upgrade/from-alpha48-to-alpha49.md) — stopped every scheduled task on Android from ever firing.
-- [Upgrade: alpha49 → alpha50](upgrade/from-alpha49-to-alpha50.md) — A bug-hunt release (hunts 7, 8 and 9 — the same series that produced alpha46–49).
+- [Upgrade: alpha49 → alpha50](upgrade/from-alpha49-to-alpha50.md) — A bug-hunt release (hunts 7, 8 and 9 — the same series that produced
 - [Upgrade from v1.0.0-alpha5 to v1.0.0-alpha6](upgrade/from-alpha5-to-alpha6.md) — None.
+- [Upgrade: alpha50 → alpha51](upgrade/from-alpha50-to-alpha51.md) — The zero-inbox release: every open field-report item resolved or refused, plus
 - [Upgrade from v1.0.0-alpha6 to v1.0.0-alpha7](upgrade/from-alpha6-to-alpha7.md) — mod.ts no longer re-exports renderer primitives.
 - [Upgrade from v1.0.0-alpha7 to v1.0.0-alpha8](upgrade/from-alpha7-to-alpha8.md) — None.
 - [Upgrade from v1.0.0-alpha8 to v1.0.0-alpha9](upgrade/from-alpha8-to-alpha9.md) — The internal machine state field is renamed.

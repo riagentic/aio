@@ -58,21 +58,12 @@ export async function scanFolders(
   return out.sort((a, b) => b.bytes - a.bytes);
 }
 
-/** Open a folder in the desktop file manager — a subprocess spawned from a cell
- *  method. The command differs per platform; the shape does not. */
+/** Open a folder in the desktop file manager. The per-OS launcher is the
+ *  framework's — `openExternal` covers files, folders and URLs, and rejects
+ *  loudly when the desktop refuses. */
 export async function reveal(path: string): Promise<void> {
-  const cmd = Deno.build.os === "darwin"
-    ? "open"
-    : Deno.build.os === "windows"
-    ? "explorer"
-    : "xdg-open";
-  // Detached and unawaited output: the file manager outlives this call.
-  const child = new Deno.Command(cmd, {
-    args: [path],
-    stdout: "null",
-    stderr: "null",
-  }).spawn();
-  await child.status;
+  const { openExternal } = await import("aio/server");
+  await openExternal(path);
 }
 
 /** The starting point: the user's home directory, or `/` if that is unknown. */

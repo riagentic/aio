@@ -7,6 +7,10 @@ One guide per version migration. Find your current version and follow the steps.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha50 → alpha51](from-alpha50-to-alpha51.md) — zero inbox: every open
+  field-report item resolved or refused (testUI `{ user }`, denials reject,
+  `serverAuth()`, `openExternal`, am/aiol honesty) + the two app architectures
+  named, documented and build-checked
 - [alpha49 → alpha50](from-alpha49-to-alpha50.md) — the quiet hunt: a `port: 0`
   app bricking itself on its own clean shutdown, dispatch-while-paused lying to
   the caller, deep-merge silent data loss, worker-cell shutdown durability with

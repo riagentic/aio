@@ -235,7 +235,7 @@ const price = await call({ timeout: 5000 }, () => dc.getPrice("BTC"));
 
 ---
 
-## Breaking change: `AioDB` -> `DB` (v0.9.0)
+## Breaking change: `AioDB` -> `DB` (pre-1.0)
 
 All `app.db` calls are now async. `AioDB`/`AioTable<T>` removed, replaced by
 `DB` interface:

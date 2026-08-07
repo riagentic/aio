@@ -20,8 +20,15 @@ export type { CliFlags, Lint } from "../server/aio.ts";
 // alpha41 — see docs/upgrade/from-alpha40-to-alpha41.md. Their doc comments
 // were left behind here, describing exports this entry no longer has.)
 
-/** Single-instance lock introspection — list running apps, normalize IDs. */
-export { instances, resolveAppId } from "../server/single-instance-lock.ts";
+/** Single-instance lock introspection — list running apps, normalize IDs.
+ *  `readLock(appId)` reads one app's live lock (pid, port, socketPath,
+ *  status): what a service's own `--status`/`--stop` flags are built on — a
+ *  field report deep-imported it from `src/` for exactly that. */
+export {
+  instances,
+  readLock,
+  resolveAppId,
+} from "../server/single-instance-lock.ts";
 export type {
   InstanceInfo,
   LockData,
