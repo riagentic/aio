@@ -9,7 +9,8 @@ deno task am <command> [args] [--flags]
 
 > Prefer a GUI? **amui** (Aio Manager UI) is the visual app manager — discover,
 > inspect (cells, merged state with persist/UI flags, metrics, files), and
-> start/stop every aio app on your machine. See [amui](amui.md).
+> start/stop every aio app on your machine. Launch it with `am ui`
+> (`--client=browser` for a tab). See [amui](amui.md).
 
 Output auto-detects: terminal -> pretty text, piped -> JSON. Override with
 `--json` or `--quiet`.
@@ -278,13 +279,14 @@ deno task am state fleet[0].{name,active}   # pick specific fields
 deno task am state fleet[*].{pair,status}   # wildcard: pluck from every element
 deno task am state {counter,page}           # pick from root
 deno task am state counter --wait=5         # poll every 5s
-deno task am ui                             # UI state (cell-level ui filtered)
-deno task am ui alice                       # UI state for specific user
+deno task am state --ui                     # UI state (cell-level ui filtered)
+deno task am state --ui alice               # UI state for specific user
 ```
 
 Path syntax: `fleet[0].stats.pnl` for traversal, `{id,name}` for field picking,
-`[*]` for wildcard over arrays. `am state` = raw server state. `am ui` = what
-the browser sees.
+`[*]` for wildcard over arrays. `am state` = raw server state. `am state --ui` =
+what the browser sees (it was spelled `am ui` before alpha52 — `am ui` now opens
+**amui**, the visual app manager).
 
 ## Action dispatch
 
@@ -495,7 +497,7 @@ the same facility `testUI` uses, so what you do here and what a test does behave
 identically. Elements are addressed by component/name, not CSS selectors.
 
 ```sh
-deno task am ui                              # server-side UI state
+deno task am state --ui                      # server-side UI state
 deno task am surface                         # semantic surface (client 0): every component + triggerable element
 deno task am surface 1                       # surface for a specific client
 deno task am trigger 0 App:SubmitButton click        # click by component:name path

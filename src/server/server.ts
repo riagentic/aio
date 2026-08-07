@@ -916,7 +916,7 @@ export function createServer(config: ServerConfig): ServerHandle {
       handleRequest,
     );
   } else {
-    const hostname = config.expose ? "0.0.0.0" : "127.0.0.1";
+    const hostname = config.host ?? (config.expose ? "0.0.0.0" : "127.0.0.1");
     const tlsOpts = config.cert && config.key
       ? { cert: config.cert, key: config.key }
       : {};

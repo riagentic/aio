@@ -44,6 +44,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "ui",
   "port",
   "expose",
+  "host",
   "baseDir",
   "serveDirs",
   "client",
@@ -104,6 +105,7 @@ export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
   "localFirst",
   "port",
   "expose",
+  "host",
   "persist",
   "persistKey",
   "dbPath",
@@ -209,6 +211,10 @@ export const CONFIG_DOCS: Record<string, [string, string]> = {
   expose: [
     "false",
     "serve on 0.0.0.0 + TLS for LAN access (same as --expose; the flag wins)",
+  ],
+  host: [
+    "undefined",
+    "bind ONE address instead of the expose default (same as --host=; the flag wins)",
   ],
   baseDir: ['"./src"', "source directory for transpilation"],
   client: ['"electron"', '"electron" | "browser" | "cli" | "server-only"'],
@@ -362,6 +368,7 @@ export const CONFIG_GROUPS: [string, string[]][] = [
   ["Server & transport", [
     "port",
     "expose",
+    "host",
     "baseDir",
     "serveDirs",
     "client",

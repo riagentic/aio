@@ -288,3 +288,69 @@ Deno.test({
     }
   },
 });
+
+// ── `host`: the bind address has ONE decider ──────────────────────────
+//
+// `host` shipped with the same second-decider shape this file exists to guard,
+// three ways over: the LISTENER bound `host ?? (expose ? 0.0.0.0 : 127.0.0.1)`,
+// the boot report re-derived the address from the FLAG only (so a config-set
+// host was reported as `localhost`), and the share/local URLs ignored `host`
+// entirely. On a non-loopback bind that is not cosmetic: aio prints — and
+// OPENS A CLIENT WINDOW AT — `localhost:PORT`, where nothing is listening.
+// `setupTransport` now resolves `bindHost` once and every consumer reads it.
+
+Deno.test({
+  name: "host: a config-set bind address reaches the boot report and the URLs",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  async fn() {
+    const appId = `host-cfg-${crypto.randomUUID().slice(0, 8)}`;
+    const port = freePort();
+    // 127.0.0.2 is loopback on Linux and binds without privileges, so the app
+    // really listens on an address that is NOT the `localhost` the report used
+    // to print — the exact divergence, provable in CI.
+    const dir = await scaffold({
+      appId,
+      runOpts: `host: "127.0.0.2", port: ${port}`,
+    });
+    try {
+      const { out, code } = await boot(dir, []);
+      assertEquals(code, 0, `app exited ${code}\n${out}`);
+      // The report names where it actually bound…
+      assertStringIncludes(out, `ws://127.0.0.2:${port}/ws`);
+      assertStringIncludes(out, `http://127.0.0.2:${port}`);
+      // …and never advertises an address it is not listening on.
+      assert(
+        !out.includes(`http://localhost:${port}`),
+        `a 127.0.0.2-bound app must not advertise localhost\n${out}`,
+      );
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
+Deno.test({
+  name: "host: the CLI flag wins over config, and the report follows the flag",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  async fn() {
+    const appId = `host-flag-${crypto.randomUUID().slice(0, 8)}`;
+    const port = freePort();
+    const dir = await scaffold({
+      appId,
+      runOpts: `host: "127.0.0.2", port: ${port}`,
+    });
+    try {
+      const { out, code } = await boot(dir, ["--host=127.0.0.3"]);
+      assertEquals(code, 0, `app exited ${code}\n${out}`);
+      assertStringIncludes(out, `ws://127.0.0.3:${port}/ws`);
+      assert(
+        !out.includes("127.0.0.2"),
+        `--host must win over config host\n${out}`,
+      );
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});

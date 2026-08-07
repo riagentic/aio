@@ -4,10 +4,10 @@
  * am — aio manager: process management and runtime inspection CLI.
  *
  * Thin facade — delegates to split command modules:
- * - am-cmd-process.ts: start, stop, restart, watch, status, instances
+ * - am-cmd-process.ts: start, stop, restart, watch, status, instances, ui
  * - am-cmd-inspect.ts: clients, sql, log, errors, metrics, health, config
  * - am-cmd-meta.ts:    version, add, help
- * - am-cmd-state.ts:   state, ui, dispatch, actions, tt, persist, snapshot
+ * - am-cmd-state.ts:   state (+--ui), dispatch, actions, tt, persist, snapshot
  * - am-cmd-auth.ts:    auth (users, create, unlock, revoke, …)
  *
  * ```sh
@@ -28,6 +28,7 @@ import {
   cmdStart,
   cmdStatus,
   cmdStop,
+  cmdUi,
   cmdWatch,
 } from "./am/am-cmd-process.ts";
 
@@ -74,7 +75,6 @@ import {
   cmdSnapshot,
   cmdState,
   cmdTT,
-  cmdUi,
 } from "./am/am-cmd-state.ts";
 
 import type { CmdHandler } from "./am/am-types.ts";
@@ -101,7 +101,7 @@ const COMMANDS: Record<string, CmdHandler> = {
   record: cmdRecord,
   timeline: cmdTimeline,
   replay: cmdReplay,
-  ui: cmdUi,
+  ui: cmdUi, // opens amui (the visual manager); the projection is `state --ui`
   dispatch: cmdDispatch,
   actions: cmdActions,
   tt: cmdTT,

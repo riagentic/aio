@@ -28,6 +28,7 @@ export interface ServerConfig {
   distDir?: string; // absolute path to dist/ (required when prod=true)
   appId?: string; // app identity — for the discovery profile endpoint
   expose?: boolean; // bind 0.0.0.0 instead of 127.0.0.1
+  host?: string; // explicit bind address — overrides the expose-derived default
   token?: string; // access token required when expose=true (no users)
   cert?: string; // PEM cert string — enables HTTPS when set (auto-generated when --expose)
   key?: string; // PEM key string — required when cert is set
