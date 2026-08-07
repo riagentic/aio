@@ -6,6 +6,8 @@ Getting started with AIO — concepts, setup, and reference.
 
 - [Quickstart](quickstart.md) — install and run your first app
 - [Core Concepts](concepts.md) — mental model and framework rules
+- [App Architectures](app-architectures.md) — one app many surfaces · service +
+  rich clients
 - [Project Structure](project-structure.md) — file organization
 - [Migration](migration.md) — adopting aio in an existing app
 

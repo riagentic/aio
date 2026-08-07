@@ -56,7 +56,7 @@ export function totpUri(
 /** The 6-digit code for a secret at a given step (default: now). */
 export async function totpCode(
   secretB32: string,
-  step = Math.floor(Date.now() / 30_000),
+  step: number = Math.floor(Date.now() / 30_000),
 ): Promise<string> {
   const key = await crypto.subtle.importKey(
     "raw",

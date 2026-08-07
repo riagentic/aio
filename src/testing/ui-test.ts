@@ -12,6 +12,8 @@
 // faithful to a user, never calling handlers directly.
 
 import { _armTestStrict } from "./test-strict.ts";
+import { _pendingCallPromises } from "../state/method-cancel.ts";
+import type { AioUser, AuthFeatures } from "../protocol/protocol-types.ts";
 import { _setDocument, _unmount, mount } from "../air/aio-renderer.ts";
 import { getRegisteredCells } from "../state/cell-reactive.ts";
 import type { ComponentFn } from "../air/vdom-types.ts";
@@ -69,6 +71,18 @@ export interface TestUIOptions {
    *  An unknown cell name throws, listing what booted: a silently-ignored seed
    *  would look like a pinned fixture while testing nothing. */
   seed?: Record<string, Record<string, unknown>>;
+  /** Ambient signed-in user for this mount — `useUser()` resolves to it on
+   *  the FIRST render, with no `/__aio/auth/me` fetch (testUI boots no
+   *  server, so there is nobody to answer one; without this, every UI test
+   *  of an `auth: true` app renders `<SignIn/>` instead of the app).
+   *  `null` mounts anonymous (`useUser()` → `null`, the SignIn branch).
+   *  Omit for today's behaviour (identity stays unresolved). Reset on
+   *  dispose, so the next mount cannot inherit this test's user. */
+  user?: AioUser | null;
+  /** Auth features the mount advertises — what a real `/me` would return
+   *  (`<SignIn/>` adapts to them). Defaults all-false; only read when
+   *  `user` is set. */
+  authFeatures?: Partial<AuthFeatures>;
 }
 
 /** A triggerable element of the semantic UI surface. Actions run on an
@@ -628,6 +642,27 @@ async function _mountTestUI(
     resetRuntime = standalone._resetState;
   }
 
+  // Ambient identity — installed BEFORE the first render so the very first
+  // pass is already signed in (or anonymous), and the /me fetch is marked
+  // done so a real fetch cannot race the injected user. Lazy import: the
+  // auth UI must not ride into bundles of apps that never use auth.
+  if (opts.user !== undefined) {
+    const auth = await import("../browser/browser-auth-ui.ts");
+    auth._resetAuthUi();
+    auth._setAuthUser(opts.user);
+    auth._setAuthFeatures({
+      signup: false,
+      oidc: false,
+      totp: false,
+      mail: false,
+      ...opts.authFeatures,
+    });
+    // Reset on teardown — the NEXT mount must not inherit this user (the
+    // second test in a file inheriting the first test's identity is the exact
+    // trap the option exists to close).
+    _restoreGlobals.push(() => auth._resetAuthUi());
+  }
+
   _setDocument(doc);
   const root = doc.createElement("div");
   doc.body.appendChild(root);
@@ -639,6 +674,20 @@ async function _mountTestUI(
     for (let i = 0; i < maxIter; i++) {
       handle._flush();
       await tick();
+      // A cell-method dispatch set in motion WITHOUT an await (an outer
+      // method firing a follow-up, `void fs.open(parent)`) is still in
+      // flight when the HTML goes quiet — the quiescence early-exit read
+      // that gap as settled and the UI showed the old state (a field
+      // report). Await what is actually pending — bounded by the iteration
+      // budget, so a deliberately long-running call (a stream driving
+      // progressive UI) degrades to plain quiescence instead of wedging
+      // settle().
+      const pending = _pendingCallPromises();
+      if (pending.length > 0) {
+        await Promise.race([Promise.allSettled(pending), tick()]);
+        prev = "in-flight"; // never valid HTML — forces ≥1 more quiet round
+        continue;
+      }
       const now = root.innerHTML as string;
       if (now === prev && i > 0) return;
       prev = now;

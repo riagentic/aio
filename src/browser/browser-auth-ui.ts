@@ -18,7 +18,7 @@
 import { h, type VNode } from "../air/vdom.ts";
 import { type Signal, signal } from "../state/signal.ts";
 import { authClient } from "./auth-client.ts";
-import type { AioUser } from "../protocol/protocol-types.ts";
+import type { AioUser, AuthFeatures } from "../protocol/protocol-types.ts";
 
 /** Current identity — undefined: not yet resolved, null: anonymous. */
 export const authUser: Signal<AioUser | null | undefined> = signal<
@@ -27,11 +27,9 @@ export const authUser: Signal<AioUser | null | undefined> = signal<
 
 /** Server auth features (from /me) — <SignIn/> adapts to them automatically:
  *  no signup toggle when signup is off, an SSO button when OIDC is on. */
-const _features: Signal<
-  { signup: boolean; oidc: boolean; totp: boolean; mail: boolean } | null
-> = signal<
-  { signup: boolean; oidc: boolean; totp: boolean; mail: boolean } | null
->(null);
+const _features: Signal<AuthFeatures | null> = signal<AuthFeatures | null>(
+  null,
+);
 
 let _fetched = false;
 
@@ -76,10 +74,16 @@ export function _resetAuthUi(): void {
 }
 
 /** Test hook — inject server features without a fetch. */
-export function _setAuthFeatures(
-  f: { signup: boolean; oidc: boolean; totp: boolean; mail: boolean },
-): void {
+export function _setAuthFeatures(f: AuthFeatures): void {
   _features.set(f);
+}
+
+/** Test hook — set the ambient user WITHOUT a `/me` round-trip. Marks the
+ *  fetch as done so a later `useUser()` cannot race a real fetch over the
+ *  injected identity (`testUI({ user })` uses this). */
+export function _setAuthUser(user: AioUser | null): void {
+  _fetched = true;
+  authUser.set(user);
 }
 
 // ── SignIn component state (module signals — one auth form per page) ────────

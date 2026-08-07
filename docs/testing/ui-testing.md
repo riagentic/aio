@@ -94,12 +94,33 @@ Deno.test("two flows", async () => {
 
 Options — only when you need control (all optional):
 
-| Option             | Default                        | Use when                  |
-| ------------------ | ------------------------------ | ------------------------- |
-| `document`         | auto happy-dom window          | jsdom / a shared window   |
-| `cells`            | all registered (App's imports) | restrict the booted set   |
-| `persist`          | `false` (hermetic)             | testing persistence flows |
-| `settleIterations` | `20`                           | very slow cascades        |
+| Option             | Default                        | Use when                       |
+| ------------------ | ------------------------------ | ------------------------------ |
+| `document`         | auto happy-dom window          | jsdom / a shared window        |
+| `cells`            | all registered (App's imports) | restrict the booted set        |
+| `persist`          | `false` (hermetic)             | testing persistence flows      |
+| `settleIterations` | `20`                           | very slow cascades             |
+| `seed`             | —                              | pin machine-dependent state    |
+| `user`             | — (identity unresolved)        | mount an authenticated app     |
+| `authFeatures`     | all `false`                    | `<SignIn/>` feature adaptation |
+
+### Testing an authenticated app (`user`)
+
+An app that opens with `useUser()` renders `<SignIn/>` for `null` — so without
+an identity, every UI test of every authenticated screen renders the login form.
+`user` mounts the app already signed in, mirroring `serverUser()`'s ambience —
+no `/__aio/auth/me` stub, no reaching into auth-UI internals:
+
+```ts
+await using ui = await testUI(App, { user: { id: "sita", role: "customer" } });
+// the FIRST render is signed in — role tests read as claims:
+if (ui.surface().includes("AdminPanel")) throw new Error("customer saw admin");
+```
+
+`user: null` mounts anonymous (the `<SignIn/>` branch — pass `authFeatures` to
+shape what it offers). The identity resets on dispose, so the next mount cannot
+inherit this test's user. Omit `user` entirely for today's behaviour (identity
+unresolved until a real `/me` answers).
 
 ## How names are derived (deterministic)
 

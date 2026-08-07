@@ -17,6 +17,7 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { AioUser } from "./aio-types.ts";
+import type { UserStore } from "./auth-users.ts";
 import { parseCookies } from "./route.ts";
 
 const _als = typeof AsyncLocalStorage === "function"
@@ -95,3 +96,44 @@ export const runWithRequest = <T>(
  *  ``` */
 export const serverRequest = (): ServerRequest | undefined =>
   _reqAls?.getStore();
+
+// ── serverAuth(): the running app's user store, ambient ─────────────────────
+// `app.auth` was reachable only from `onStart(app)`, so every app with an
+// admin screen carried the same snippet: a mutable module-global set at boot,
+// read per call, with a "not ready" throw for a race that cannot happen (a
+// field report — the one impure module-scoped mutable in an otherwise pure
+// codebase). Registered at boot, released on shutdown.
+const _authStores: UserStore[] = [];
+
+/** Framework-internal: announce a booted app's user store. Returns the
+ *  disposer the shutdown path calls. */
+export function _registerAuthStore(store: UserStore): () => void {
+  _authStores.push(store);
+  return () => {
+    const i = _authStores.indexOf(store);
+    if (i >= 0) _authStores.splice(i, 1);
+  };
+}
+
+/** The running app's user store — list/create/remove accounts, set roles —
+ *  usable in cell methods, serverFns and effects, like `serverUser()` /
+ *  `serverRequest()`. Throws (never a silent null) when this app runs
+ *  without per-user auth, or when several authed apps share one process —
+ *  there `app.auth` (from `aio.run()` / `onStart`) is the unambiguous
+ *  handle. */
+export function serverAuth(): UserStore {
+  const first = _authStores[0];
+  if (first === undefined) {
+    throw new Error(
+      "[aio] serverAuth(): no user store — this app runs without per-user " +
+        "auth (`auth: true` / `users:` / `resolveUser`), or it has not booted yet",
+    );
+  }
+  if (_authStores.length > 1) {
+    throw new Error(
+      "[aio] serverAuth(): ambiguous — several authed apps share this " +
+        "process; use `app.auth` from `aio.run()`/`onStart(app)` instead",
+    );
+  }
+  return first;
+}

@@ -561,7 +561,8 @@ Deno.test("am-cli: state — missing path error", async () => {
   await withTrojanServer(async () => {
     const r = await runAm(["state", "nonexistent"]);
     assertEquals(r.code, 1);
-    assertEquals(r.stderr.includes("not found"), true);
+    // json-mode errors land on STDOUT (the stream a script parses) + exit 1.
+    assertEquals((r.stdout + r.stderr).includes("not found"), true);
   });
 });
 

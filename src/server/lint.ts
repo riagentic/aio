@@ -240,7 +240,9 @@ export async function lint(
         // electron package exists but dist/ missing → scripts not approved
         await Deno.stat(join(Deno.cwd(), "node_modules", "electron"));
         r.hint.push(
-          "electron installed but dist/ missing — run `deno task install:electron`",
+          "electron installed but its binary is missing (postinstall skipped) — " +
+            "run `deno install --allow-scripts=npm:electron npm:electron`, " +
+            "or `deno task dev:electron`/`compile:electron` (they auto-install)",
         );
       } catch { /* electron not installed at all — handled by electron.ts */ }
     }

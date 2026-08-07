@@ -746,6 +746,11 @@ See [`examples/disk`](../../examples/disk/) for the whole shape — subprocesses
 from a cell, supersession, cancel, and the `.server.ts` boundary — and
 [imports](../build/imports.md) for why the Deno-only half lives in its own file.
 
+For the desktop pattern "reveal in file manager" / "open in browser", don't
+re-derive the per-OS launcher — `openExternal(target)` from `aio/server` covers
+files, folders and URLs (`open`/`start`/`xdg-open`), and rejects loudly when the
+desktop refuses.
+
 ## Guard lines — machine states without a machine
 
 A status guard is one line of plain code, with the same guarantee the old

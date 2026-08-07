@@ -66,7 +66,12 @@ async function lintFixture(
     for (const [rel, src] of Object.entries(files)) {
       const p = join(dir, rel);
       await Deno.mkdir(p.replace(/[^/\\]+$/, ""), { recursive: true });
-      await Deno.writeTextFile(p, src);
+      // `symlink:<target>` materializes a symlink (dangling is fine) — the
+      // framework-pin rule reads `dep/aio` as a link, which no text file can
+      // fake.
+      if (src.startsWith("symlink:")) {
+        await Deno.symlink(src.slice("symlink:".length), p);
+      } else await Deno.writeTextFile(p, src);
     }
     const { ctx, report } = await buildContext(dir);
     const orig = ctx.report;
@@ -740,7 +745,7 @@ const VIOLATIONS: Case[] = [
       }),
       "node_modules/electron/package.json": `{ "name": "electron" }`,
     }),
-    expect: "dist/ missing",
+    expect: "node_modules/electron/dist) is missing",
   },
   {
     name: "electron not installed",
@@ -851,6 +856,16 @@ const VIOLATIONS: Case[] = [
       }),
     }),
     expect: "is a BUILD flag",
+  },
+  {
+    // The pin is the promise (alpha42) — dep/aio pointing at a version the
+    // deno.json does not declare must be reported by lint, not only doctor.
+    name: "framework pin does not match dep/aio",
+    files: app({
+      "deno.json": denoJson({ aioVersion: "v1.0.0-alpha1" }),
+      "dep/aio": "symlink:/nonexistent/aio/versions/v1.0.0-alpha2",
+    }),
+    expect: "does not match dep/aio",
   },
 ];
 

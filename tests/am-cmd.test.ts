@@ -215,11 +215,12 @@ Deno.test("am: ensureSingleton — responding instance refuses with exit 1", asy
   const server = fakeControlServer(state);
   writePid(makePf(app, { pid: Deno.pid, port: server.addr.port }));
   try {
-    const { errors } = await capture(async () => {
+    const { logs } = await capture(async () => {
       const code = await withExitStub(() => ensureSingleton(app, "json"));
       assertEquals(code, 1);
     });
-    assert(errors.some((l) => l.includes("already running")));
+    // --json errors land on STDOUT (the stream a script parses) + exit 1.
+    assert(logs.some((l) => l.includes("already running")));
   } finally {
     removePid(app);
     await server.shutdown();
@@ -401,22 +402,22 @@ Deno.test("am: inspect usage errors exit 1 without touching the server", async (
     ["trigger-bad", () => cmdTrigger(["x", "", "click"], flags)],
   ];
   for (const [name, fn] of cases) {
-    const { errors } = await capture(async () => {
+    const { logs } = await capture(async () => {
       const code = await withExitStub(fn);
       assertEquals(code, 1, `${name} exits 1`);
     });
-    assert(errors.length > 0, `${name} prints usage`);
+    assert(logs.length > 0, `${name} prints usage (stdout in --json)`);
   }
 });
 
 Deno.test("am: unreachable server → clean error + exit 1", async () => {
   const app = `am-cmd-unreach-${Deno.pid}`;
   const flags = flagsFor(1, app);
-  const { errors } = await capture(async () => {
+  const { logs } = await capture(async () => {
     const code = await withExitStub(() => cmdClients([], flags));
     assertEquals(code, 1);
   });
-  assert(errors.length > 0, "reports the connection failure");
+  assert(logs.length > 0, "reports the connection failure (stdout in --json)");
 });
 
 Deno.test("am: cmdHealth — unreachable reports unhealthy, exit 1", async () => {
@@ -430,13 +431,13 @@ Deno.test("am: cmdHealth — unreachable reports unhealthy, exit 1", async () =>
 
 Deno.test("am: cmdProfile — no running app → error + exit 1", async () => {
   const app = `am-cmd-profile-none-${Deno.pid}`;
-  const { errors } = await capture(async () => {
+  const { logs } = await capture(async () => {
     const code = await withExitStub(() =>
       cmdProfile([], { json: true, app } as GlobalFlags)
     );
     assertEquals(code, 1);
   });
-  assert(errors.some((l) => l.includes("no running app")));
+  assert(logs.some((l) => l.includes("no running app")));
 });
 
 // ── cmdLog ───────────────────────────────────────────────────
@@ -468,13 +469,13 @@ Deno.test("am: cmdLog — missing log file reports cleanly (and exits 1)", async
     Deno.chdir(tmp);
     // Nothing to tail is a FAILURE, not a quiet note: `am log | grep …` in a
     // script must not see a success. The message names the path it searched.
-    const { errors } = await capture(async () => {
+    const { logs } = await capture(async () => {
       const code = await withExitStub(() =>
         cmdLog([], { json: true } as GlobalFlags)
       );
       assertEquals(code, 1);
     });
-    assert(errors.some((l) => l.includes("no log file at")));
+    assert(logs.some((l) => l.includes("no log file at")));
   } finally {
     Deno.chdir(cwd);
     await Deno.remove(tmp, { recursive: true });
@@ -485,13 +486,13 @@ Deno.test("am: cmdLog — missing log file reports cleanly (and exits 1)", async
 
 Deno.test("am: cmdStop — no lock and no --port refuses with exit 1", async () => {
   const app = `am-cmd-stop-none-${Deno.pid}`;
-  const { errors } = await capture(async () => {
+  const { logs } = await capture(async () => {
     const code = await withExitStub(() =>
       cmdStop([], { json: true, app } as GlobalFlags)
     );
     assertEquals(code, 1);
   });
-  assert(errors.some((l) => l.includes("not running")));
+  assert(logs.some((l) => l.includes("not running")));
 });
 
 Deno.test("am: cmdStop — SIGTERM fallback stops an unresponsive child", async () => {
@@ -1291,7 +1292,11 @@ Deno.test("am new: a name that is not an identifier is refused", async () => {
   const cwd = Deno.cwd();
   const errors: string[] = [];
   const origErr = console.error;
+  const origLog = console.log;
+  // json-mode errors go to STDOUT now; non-terminal stdout means detectMode
+  // resolves "json" even with json:false — capture both streams.
   console.error = (...a: unknown[]) => errors.push(a.map(String).join(" "));
+  console.log = (...a: unknown[]) => errors.push(a.map(String).join(" "));
   try {
     Deno.chdir(dir);
     for (

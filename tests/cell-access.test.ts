@@ -4,7 +4,7 @@
 // server-side code always bypasses.
 import { assert, assertEquals } from "@std/assert";
 import { cellAccessAllowed } from "../src/server/server-auth.ts";
-import { enc } from "../src/protocol/envelope.ts";
+import { dec, enc } from "../src/protocol/envelope.ts";
 import { freePort } from "../src/testing/server-test.ts";
 
 const PORT = freePort();
@@ -120,6 +120,26 @@ Deno.test("cell access: network callers gated, server code bypasses (e2e)", asyn
     send(eve);
     await settle();
     assertEquals(writes(), 0, "viewer action must be dropped");
+
+    // …and a denial is TOLD to the caller: an action carrying a cid gets an
+    // ack {ok:false, error} instead of resolving like a success (a denied
+    // call that looks identical to a working one is a silent drop).
+    const denied = new Promise<{ ok?: boolean; error?: string }>((resolve) => {
+      eve.onmessage = (ev) => {
+        const f = dec(String(ev.data));
+        if (f?.t === "ack") resolve(f.d as { ok?: boolean; error?: string });
+      };
+    });
+    eve.send(
+      enc("action", { type: "vault:bump", payload: {}, cid: "deny-1" }),
+    );
+    const ack = await denied;
+    assertEquals(ack.ok, false, "denial must ack ok:false");
+    assert(
+      String(ack.error).includes("access denied"),
+      `denial error names the cause: ${ack.error}`,
+    );
+    assertEquals(writes(), 0, "denied action still must not write");
     eve.close();
 
     // Admin's network action passes.

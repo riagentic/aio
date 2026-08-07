@@ -167,6 +167,9 @@ export type {
 export type { CellAccess } from "./src/state/cell-types.ts";
 export type { SessionInfo, SessionStore } from "./src/server/sessions.ts";
 export type { AuthUserRecord, UserStore } from "./src/server/auth-users.ts";
+/** The `features` object `/__aio/auth/me` returns — the shape a test's
+ *  stubbed `/me` must answer. */
+export type { AuthFeatures } from "./src/protocol/protocol-types.ts";
 /** Client-side auth API — login/signup/logout/me against /__aio/auth/*. */
 export { authClient, createAuthClient } from "./src/browser/auth-client.ts";
 /** Ambient caller identity — who is invoking the current cell method /
@@ -177,6 +180,11 @@ export { serverUser } from "./src/server/auth-context.ts";
  *  undefined = server-origin work (schedules, boot, internal dispatch). */
 export { serverRequest } from "./src/server/auth-context.ts";
 export type { ServerRequest } from "./src/server/auth-context.ts";
+/** Ambient user store — list/create/remove accounts, set roles — for admin
+ *  screens: `serverAuth().create(...)` from any serverFn or cell method,
+ *  no `onStart(app)` plumbing. Throws when the app runs without per-user
+ *  auth (never a silent null). */
+export { serverAuth } from "./src/server/auth-context.ts";
 /** TOTP (2FA) primitives — for a fully hand-rolled 2FA UI/flow when the
  *  built-in <SignIn/> isn't enough. Enrollment: `generateTotpSecret`
  *  + `totpUri` (→ QR); verification: `verifyTotp`. */

@@ -186,10 +186,15 @@ async function _writeConnectPage(
   <div class="card">
     <h1>aio</h1>
     <form id="f">
-      <input id="addr" type="text" placeholder="192.168.1.100:8000" autofocus spellcheck="false" />
+      <input id="addr" type="text" placeholder="server address or share link" autofocus spellcheck="false" />
       <button type="submit">Connect</button>
     </form>
     <div id="err"></div>
+    <div style="margin-top:.8rem;font-size:.8rem;color:#888">
+      A keyed server needs its full share link (the <code>?token=…</code> URL
+      the server prints at boot / <code>am pair</code>) — a bare address will
+      be refused.
+    </div>
   </div>
   <script>
     var s=localStorage.getItem('aio_server');

@@ -61,6 +61,7 @@ const EXEMPT: Record<string, string> = {
   _resetAppDirs: "path resolution, no app code",
   createCassette: "transport recording, no app code",
   openCassette: "transport recording, no app code",
+  totpCode: "pure code generator (HMAC over a secret) — runs no app code",
   testBrowser:
     "launches an EXTERNAL browser process against a URL and owns only that " +
     "process; the app under test boots in its own server (via testServer, " +

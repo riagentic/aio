@@ -13,7 +13,53 @@ import {
   recordAuthFail,
 } from "../src/server/server-auth.ts";
 
+import { serverAuth } from "../src/server/auth-context.ts";
+import { freePort } from "../src/testing/server-test.ts";
+
 const alice = { id: "alice", role: "admin" };
+
+Deno.test("serverAuth: throws without auth, is the live store with it, released on close", async () => {
+  // No authed app booted → loud, named error (never a silent null).
+  let threw = "";
+  try {
+    serverAuth();
+  } catch (e) {
+    threw = (e as Error).message;
+  }
+  assertStringIncludes(threw, "no user store");
+
+  const { aio, cell } = await import("../mod.ts");
+  const c = cell("sa-probe", { state: { n: 0 }, methods: {} });
+  const app = await aio.run({
+    cells: [c],
+    appId: "test-server-auth",
+    appVersion: "0.0.0",
+    client: "server-only",
+    persist: false,
+    libraryMode: true,
+    auth: true,
+    port: freePort(),
+    baseDir: await Deno.makeTempDir(),
+  });
+  try {
+    // The ambient store IS app.auth — an admin serverFn can create and list
+    // accounts with no onStart plumbing (a field report #5: every app with an
+    // admin screen carried a module-global set at boot).
+    assertEquals(serverAuth(), app.auth);
+    await serverAuth().create("root", "password123", { role: "admin" });
+    assertEquals(serverAuth().get("root")?.role, "admin");
+  } finally {
+    await app.close();
+  }
+  // Released on close — a later test cannot reach a dead store.
+  let after = "";
+  try {
+    serverAuth();
+  } catch (e) {
+    after = (e as Error).message;
+  }
+  assertStringIncludes(after, "no user store");
+});
 
 Deno.test("serverUser: undefined outside, set inside runWithUser", () => {
   assertEquals(serverUser(), undefined);

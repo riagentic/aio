@@ -35,6 +35,10 @@
           "kind": "variable",
           "sig": "b778e51ff0b2684e"
         },
+        "AuthFeatures": {
+          "kind": "typeAlias",
+          "sig": "05d3140c1c899cab"
+        },
         "AuthUserRecord": {
           "kind": "interface",
           "sig": "60d486d14ce02d44"
@@ -295,6 +299,10 @@
           "kind": "typeAlias",
           "sig": "9cfd03e42e51aeb5"
         },
+        "serverAuth": {
+          "kind": "function",
+          "sig": "92e7adb6fce7413b"
+        },
         "serverFn": {
           "kind": "function",
           "sig": "6f636ae25631fe54"
@@ -393,7 +401,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "0dd620c14c184849"
+          "sig": "0e3c59894607095e"
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -1184,6 +1192,10 @@
           "kind": "typeAlias",
           "sig": "52e19c72c7d3b8dd"
         },
+        "readLock": {
+          "kind": "function",
+          "sig": "267dd388234e499d"
+        },
         "ReduceBreakdown": {
           "kind": "typeAlias",
           "sig": "79cf47368c05a016"
@@ -1390,7 +1402,7 @@
         },
         "connectCli": {
           "kind": "function",
-          "sig": "220099b57da61533"
+          "sig": "a95e833af63e850f"
         },
         "connectCliUDS": {
           "kind": "function",
@@ -1411,6 +1423,10 @@
         "DEFAULT_PRAGMAS": {
           "kind": "variable",
           "sig": "68b3405a06dc5203"
+        },
+        "openExternal": {
+          "kind": "function",
+          "sig": "3b01332a3d226191"
         },
         "QueryResult": {
           "kind": "typeAlias",
@@ -1790,7 +1806,11 @@
         },
         "TestUIOptions": {
           "kind": "interface",
-          "sig": "ccb9454786cb26fa"
+          "sig": "cb7b7ace4249f770"
+        },
+        "totpCode": {
+          "kind": "function",
+          "sig": "83ffe83084ff0003"
         },
         "UIComponentHandle": {
           "kind": "typeAlias",

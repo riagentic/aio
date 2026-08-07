@@ -173,6 +173,24 @@ Each mapped root gets exactly the guards `baseDir` has — no traversal, no
 escaping symlink, no dotfiles, no server-only paths — and the option has no
 effect in production, where the bundle is already self-contained.
 
+## Browser-reachable WASM (wasm-bindgen)
+
+Two rules, both needed — the dev server serves each module raw (per-file esbuild
+transform, never a full bundle), so bundler-flavoured output blanks the app (a
+field report lost a session to this):
+
+1. **Build with `wasm-bindgen --target web`, not `--target bundler`.** The
+   bundler target emits an ES-module `.wasm` import only a bundler resolves; the
+   web target fetches its `.wasm` at runtime via
+   `new URL("pkg_bg.wasm", import.meta.url)`, which works in a plain browser,
+   Deno and Electron alike. Its API needs one `await init()` before the first
+   call. (Deno tests pass either way — Deno's own loader resolves `.wasm`
+   imports — so the blank screen is a dev-server-only surprise.)
+2. **Map the wasm directory with `serveDirs`** when it lives outside `baseDir`:
+   `serveDirs: { "/crypto": "./crypto" }` — otherwise even the JS bindings 404
+   in dev. Prod bundling follows the relative import and needs no mapping;
+   compiled binaries embed `.wasm` files as data assets automatically.
+
 ## Quick reference
 
 | What                                  | Rule                                                            |

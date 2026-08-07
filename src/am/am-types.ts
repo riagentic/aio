@@ -35,6 +35,11 @@ export type GlobalFlags = {
   app?: string;
   client?: number;
   all?: boolean;
+  /** `--help`/`-h` anywhere → print usage and exit 0. Without this the flag
+   *  fell through to the subcommand's positionals and was silently ignored —
+   *  `am dispatch --help` answered `{"ok":true}`, which reads as "your
+   *  dispatch worked" (a field report). */
+  help?: boolean;
 };
 
 /** Command handler signature */
