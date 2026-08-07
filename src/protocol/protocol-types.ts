@@ -7,6 +7,17 @@
  *  code keeps importing it from `server/aio-types.ts`, which re-exports it. */
 export type AioUser = { id: string; role: string };
 
+/** Auth features `/__aio/auth/me` advertises — `<SignIn/>` adapts to them
+ *  (no signup toggle under `signup: false`, an SSO button only with `oidc`).
+ *  A test that stubs `/me` must answer this shape; it was previously
+ *  reverse-engineered from what `<SignIn/>` reads (a field report). */
+export type AuthFeatures = {
+  signup: boolean;
+  oidc: boolean;
+  totp: boolean;
+  mail: boolean;
+};
+
 export const WS_MAX_QUEUE = 100;
 
 /** Maximum time a client waits for an ack before rejecting the method promise. */

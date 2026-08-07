@@ -42,6 +42,23 @@ export function aioBrowserPlugin(): {
         },
       );
 
+      // The `aio/server` and `aio/build` ENTRIES are the specifier-shaped
+      // version of the same convention — `await import("aio/server")` inside
+      // a method is the documented lazy pattern (imports.md rule 2b), and
+      // without this rule esbuild statically resolved it anyway, dragging the
+      // whole server entry into the client graph (one field report kept an
+      // opaque-specifier trick purely to defeat that). Dynamic only: a STATIC
+      // import stays a loud build error, as it must.
+      build.onResolve(
+        { filter: /^aio\/(server|build)$/ },
+        (args: { path: string; kind: string }) => {
+          if (args.kind === "dynamic-import") {
+            return { path: args.path, external: true };
+          }
+          return undefined;
+        },
+      );
+
       // AIO-55: Return CJS stub module for server-only imports.
       // Using CJS (not ESM) is critical: esbuild resolves named imports from CJS
       // via the exports object at runtime, not static analysis at build time.

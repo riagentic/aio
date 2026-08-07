@@ -120,6 +120,14 @@ export function pendingCallsFor(cells?: Set<string>): number {
   return _pendingFor(cells).length;
 }
 
+/** Framework-internal: the pending method-call promises themselves. The
+ *  testUI settle loop awaits these so "settled" includes a dispatch a method
+ *  set in motion without awaiting it — HTML quiescence alone reads the gap
+ *  between the outer and the nested call as done (a field report). */
+export function _pendingCallPromises(): Promise<unknown>[] {
+  return _pendingFor();
+}
+
 /** The pending calls belonging to `cells` (every call when `cells` is
  *  undefined — the process-wide view). */
 function _pendingFor(cells?: Set<string>): Promise<unknown>[] {

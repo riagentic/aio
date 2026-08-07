@@ -218,3 +218,47 @@ Deno.test("cli-client: delta patches applied correctly", async () => {
     },
   );
 });
+
+Deno.test("cli-client: a FUNCTION token is resolved per connect (expiring tokens)", async () => {
+  // a field report: their token is a 5-minute signed assertion — a static
+  // string 401s forever on the first silent reconnect past its window, so
+  // the app hand-rolled a refresh loop. `token: () => mint()` is that loop,
+  // in the framework, on the normal backoff.
+  const state = { n: 7 };
+  let minted = 0;
+  const dir = await Deno.makeTempDir();
+  await Deno.mkdir(join(dir, "dist"), { recursive: true });
+  await Deno.writeTextFile(
+    join(dir, "dist", "app.js"),
+    "export function mount(){}",
+  );
+  const port = freePort();
+  const server = createServer({
+    port,
+    title: "CLI token test",
+    getUIState: () => state,
+    dispatch: () => {},
+    baseDir: dir,
+    debug: () => {},
+    prod: true,
+    distDir: join(dir, "dist"),
+    expose: true,
+    users: { "fresh-token": { id: "cli", role: "user" } },
+  });
+  await new Promise((r) => setTimeout(r, 50));
+  try {
+    const cli = connectCli<{ n: number }>(`http://127.0.0.1:${port}`, {
+      token: () => {
+        minted++;
+        return Promise.resolve("fresh-token");
+      },
+    });
+    await waitFor(() => cli.state !== null && cli.connected);
+    assertEquals(cli.state?.n, 7);
+    assertEquals(minted >= 1, true, "token() must be consulted, not frozen");
+    cli.close();
+  } finally {
+    await server.shutdown();
+    await Deno.remove(dir, { recursive: true });
+  }
+});

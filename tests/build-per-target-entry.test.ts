@@ -407,3 +407,61 @@ Deno.test("build-all: an `out` INSIDE the app dir is refused — sources survive
   assertEquals(run.code, 1);
   assert(run.survivors.includes("src/ui/Button.tsx"), "nested sources live");
 });
+
+// ── fleet sanity: clients with nothing to dial ──────────────────────────────
+
+Deno.test("buildAll: client targets without a server role or build.server warn loud", async () => {
+  // a field report shipped ["browser", "electron-client", "android-client"] —
+  // `browser` is a LOCAL app binary, so the two client artifacts recorded no
+  // server to dial. Builds fine, ships broken: exactly the class that must
+  // say so at build time.
+  const errors: string[] = [];
+  const orig = console.error;
+  console.error = (...a: unknown[]) => {
+    errors.push(a.map(String).join(" "));
+    orig(...a);
+  };
+  try {
+    await runBuildAll(
+      {
+        title: "fleet-warn",
+        build: { targets: ["browser", "cli-client"], out: "dist" },
+      },
+      ["src/app.ts", "src/client.ts"],
+    );
+    const all = errors.join("\n");
+    if (!all.includes('no "server" target')) {
+      throw new Error(`expected the fleet warning, got:\n${all}`);
+    }
+  } finally {
+    console.error = orig;
+  }
+});
+
+Deno.test("buildAll: build.server (or a server target) silences the fleet warning", async () => {
+  const errors: string[] = [];
+  const orig = console.error;
+  console.error = (...a: unknown[]) => {
+    errors.push(a.map(String).join(" "));
+    orig(...a);
+  };
+  try {
+    await runBuildAll(
+      {
+        title: "fleet-ok",
+        build: {
+          targets: ["cli-client"],
+          out: "dist",
+          server: "192.168.1.50:8000",
+        },
+      },
+      ["src/app.ts", "src/client.ts"],
+    );
+    const all = errors.join("\n");
+    if (all.includes('no "server" target')) {
+      throw new Error(`warning must not fire with build.server set:\n${all}`);
+    }
+  } finally {
+    console.error = orig;
+  }
+});

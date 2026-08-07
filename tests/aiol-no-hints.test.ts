@@ -65,7 +65,11 @@ Deno.test("aiol --no-hints: JSON output ALWAYS includes hints (machine-readable)
   assertEquals(parsed.summary.hints, 1, "JSON keeps the hint regardless");
 });
 
-Deno.test("aiol: a genuinely clean project keeps its original message", () => {
+Deno.test("aiol: a clean project's verdict claims only what was checked", () => {
   const out = capture(() => printReport(reportWith([]), false, false, true));
-  assert(out.includes("No issues found — clean project!"));
+  // "clean project!" overstated aiol's scope: it is fmt-agnostic, and the
+  // strong claim taught "commit without deno fmt" (a field report). The
+  // verdict now names its scope and points at fmt.
+  assert(out.includes("No architectural issues found"));
+  assert(out.includes("deno fmt"));
 });

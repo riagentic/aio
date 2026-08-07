@@ -37,6 +37,13 @@ everything. Keep true secrets out of cell state entirely when possible;
   directly).
 - **Standalone:** `onRestore` does not run; seed in `onStart`.
 - Idempotent seeding (check-then-write) is safest — `onStart` runs every boot.
+- **Import the cell _inside_ `onStart`** when the entry file itself calls a
+  method:
+  `onStart: async () => { const { fezor } = await import("./cell.ts");
+  await fezor.open(); }`.
+  A static import at the top of the entry does not guarantee the cell is
+  registered before `aio.run` reads the config (a field report found this by
+  trial); the dynamic import inside the hook always runs after binding.
 
 ## See also
 

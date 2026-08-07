@@ -111,6 +111,13 @@ un-awaited actions, observe through `await ui.settle()` / `expectCell` /
 **Forms don't navigate.** AIR auto-prevents the default on handled submits. If
 you _want_ native form submission, add `data-native-submit`.
 
+**A green test suite does not check the bundle boundary.** Cells run server-side
+under `deno task test`, where a server-only import (`@std/path`, `Deno.*`) is
+legal — the suite stays green while the browser bundle is broken. That class is
+`deno task lint`'s (aiol's) job: it reports the whole transitive chain
+(`App.tsx → cell.ts → disk.ts:5`) with the fix. Run **both** before shipping;
+neither alone is the "means what production means" gate for this.
+
 ## Config
 
 **Unknown config keys are boot-fatal.** `validateConfig` exits with the full key

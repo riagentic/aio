@@ -10,6 +10,7 @@ import {
   AppLock,
   instances,
   isProcessAlive,
+  isSocketAlive,
   type LockData,
   lockDir,
   readLaunchInfo,
@@ -744,6 +745,14 @@ export async function cmdStatus(
     await resp.body?.cancel();
     portResponds = resp.ok;
   } catch { /* not responding */ }
+
+  // A compiled (prod, zero-TCP) app listens on its Unix socket and NOWHERE
+  // else, so the TCP probe above can never succeed — `status` sat on
+  // `starting` (exit 2) forever for an app that had been drawing pixels for a
+  // minute (a field report). The lock records the socket; probe it.
+  if (!portResponds && pf.socketPath) {
+    portResponds = await isSocketAlive(pf.socketPath);
+  }
 
   if (portResponds) {
     // Port responds → started (auto-fix lock if stuck at 'starting')

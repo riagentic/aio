@@ -85,7 +85,13 @@ export type CliApp<S> = {
 export function connectCli<S>(
   url: string,
   opts?: {
-    token?: string;
+    /** Auth token — a string, or a FUNCTION resolved before every (re)connect.
+     *  Pass a function when tokens expire (a 5-minute signed assertion): a
+     *  static string 401s forever on the first silent reconnect past its
+     *  window, which no retry can fix (a field report hand-rolled a refresh
+     *  loop for exactly this). A rejected token() follows the normal
+     *  reconnect backoff. */
+    token?: string | (() => string | Promise<string>);
     /** Ceiling for one bound-cell call, ms (0 = wait indefinitely). Defaults
      *  to the shared `ACK_TIMEOUT_MS`. A CLI client has no page shell, so the
      *  server's per-method budgets cannot be bridged to it — an app whose
@@ -157,15 +163,40 @@ export function connectCli<S>(
     _readyResolve = r;
   });
 
+  let connecting = false;
   function connect(): void {
-    if (ws || closed) return;
+    if (ws || closed || connecting) return;
+    const t = opts?.token;
+    if (typeof t !== "function") return _openSocket(t);
+    // A function token is resolved fresh before EVERY (re)connect — this is
+    // the whole point (an expiring assertion must not be frozen at connect
+    // #1). A rejection is a failed attempt, not a dead client: same backoff.
+    connecting = true;
+    Promise.resolve().then(t).then(
+      (tok) => {
+        connecting = false;
+        if (ws || closed) return;
+        _openSocket(tok);
+      },
+      (e) => {
+        connecting = false;
+        if (closed) return;
+        console.error(`[aio:cli] token() failed: ${e} — retrying`);
+        reconnectTimer = setTimeout(connect, backoffDelay(retry));
+        retry++;
+      },
+    );
+  }
+
+  function _openSocket(explicitToken: string | undefined): void {
     const parsed = new URL(url);
     // wss:/https: stay secure — a TLS server never answers plain ws:
     const proto = parsed.protocol === "https:" || parsed.protocol === "wss:"
       ? "wss:"
       : "ws:";
     // token: explicit option wins, else the ?token= from the share-link URL
-    const token = opts?.token ?? parsed.searchParams.get("token") ?? undefined;
+    const token = explicitToken ?? parsed.searchParams.get("token") ??
+      undefined;
     const wsUrl = `${proto}//${parsed.host}/ws${
       token ? `?token=${token}` : ""
     }`;

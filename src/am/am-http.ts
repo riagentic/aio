@@ -6,6 +6,7 @@
 
 import type { Result } from "./am-types.ts";
 import { readPid } from "./am-utils.ts";
+import { isProcessAlive } from "../server/single-instance-lock.ts";
 import {
   appKeyPath,
   controlKeyPath,
@@ -254,8 +255,23 @@ export async function probePort(port: number): Promise<PortProbe> {
 }
 
 /** Map a fetch error to a Result with a descriptive message */
-export function fetchError(e: unknown, port: number): Result {
+export function fetchError(e: unknown, port: number, appId?: string): Result {
   if (e instanceof TypeError && String(e).includes("onnect")) {
+    // "app not running" sent one field reporter looking for a crash that did
+    // not happen: their compiled app was alive on its Unix socket, with no
+    // TCP listener for this probe to reach. When the lock says exactly that,
+    // say exactly that.
+    if (appId) {
+      const pf = readPid(appId);
+      if (pf?.socketPath && isProcessAlive(pf.pid)) {
+        return {
+          ok: false,
+          error: `app "${appId}" is running over UDS (production build, ` +
+            `pid ${pf.pid}) — the dev control plane is not served there; ` +
+            `\`am status\` still works`,
+        };
+      }
+    }
     return { ok: false, error: `app not running on port ${port}` };
   }
   if (e instanceof DOMException && e.name === "TimeoutError") {
@@ -303,7 +319,7 @@ export async function trojanGet(
     }
     return { ok: true, data: await resp.json() };
   } catch (e) {
-    return fetchError(e, ctrl);
+    return fetchError(e, ctrl, appId);
   }
 }
 
@@ -343,7 +359,7 @@ export async function trojanPost(
     }
     return { ok: true, data: await resp.json() };
   } catch (e) {
-    return fetchError(e, ctrl);
+    return fetchError(e, ctrl, appId);
   }
 }
 
@@ -373,6 +389,6 @@ export async function httpGet(
     }
     return { ok: true, data: await resp.text() };
   } catch (e) {
-    return fetchError(e, ctrl) as Result<string>;
+    return fetchError(e, ctrl, appId) as Result<string>;
   }
 }

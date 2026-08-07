@@ -1,5 +1,88 @@
 # Changelog
 
+## 1.0.0-alpha51 — zero inbox (2026-08-07)
+
+Every open field-report item across five reports (geng-market, spacy, fezor,
+aicontrol, llama-master leftovers) is now resolved or refused — `feedback/`
+holds exactly two files again. Plus the first pass of first-class support for
+the two canonical app architectures, driven by deep analyses of two real apps.
+
+### The auth seam (geng-market, all seven items)
+
+- **`testUI({ user })`** — mounts an authenticated app signed in on the FIRST
+  render, no `/me` stub, no auth-UI internals; `user: null` mounts anonymous;
+  identity resets on dispose. `authFeatures` shapes what `<SignIn/>` offers.
+- **A denied cell action now REJECTS its caller**
+  (`cell "name.method" —
+  access denied`) instead of resolving like a success —
+  the same contract serverFns always had. A mis-written `access` predicate is a
+  one-minute bug now, not a working button that does nothing.
+- **`serverAuth()`** — the running app's user store, ambient like
+  `serverUser()`: admin screens need no `onStart(app)` plumbing. Throws (never a
+  silent null) without per-user auth.
+- **`totpCode` on `aio/testing`** — the 2FA round-trip is testable without
+  internal imports. **`AuthFeatures`** is a named, exported type.
+- The docs' cart example no longer teaches a privacy bug (`ui: { forUser }`
+  added, "access gates calls / ui gates reads" called out); aiol checks the
+  `aioVersion` pin (doctor was the only checker, and doctor is the diagnostic
+  nobody runs on a green build); aiol's Electron advice names commands that
+  exist.
+
+### `am` and `aiol` honesty (spacy, all five items)
+
+- `am status` probes the Unix socket a compiled (zero-TCP) app actually listens
+  on — no more eternal "starting" for a running production app, and "app not
+  running" names the UDS/prod truth when the process is alive.
+- `--json` errors go to STDOUT (the stream a script parses) with the non-zero
+  exit; `am <cmd> --help` prints usage instead of `{"ok":true}`; aiol's clean
+  verdict claims exactly its scope ("No architectural issues found", fmt is
+  `deno fmt`'s job); pitfalls.md states which gate covers the bundle boundary
+  and why a green suite cannot.
+
+### The two app architectures (new: docs/basics/app-architectures.md)
+
+"One app, many surfaces" (server + thin clients) and "service + rich clients"
+(headless service + self-sufficient client apps) are now named, documented end
+to end, and supported by analysis-driven fixes:
+
+- **A fleet of clients with nothing to dial warns at build time** — client
+  targets with no `server` role and no `build.server` shipped artifacts that
+  recorded no address (a real app shipped exactly this).
+- **`connectCli` `token:` accepts a function**, resolved before every
+  (re)connect — an expiring assertion no longer 401s forever on the first silent
+  reconnect; a rejected `token()` follows the normal backoff.
+- **`await import("aio/server")` is now external in client bundles** (same rule
+  as `*.server.ts`) — the documented lazy pattern no longer drags the server
+  entry into the client graph; a static import still fails loud.
+- **`readLock` exported from `aio/extras`** — a service's own
+  `--status`/`--stop` flags without internal imports.
+- targets.md now uses the task names the scaffold actually writes
+  (`compile:remote:X`); the Android connect page says to paste the full share
+  link against a keyed server. Remaining gaps (two-app test harness API,
+  server-URL bake, Android applicationId/TLS, CA distribution) are ranked in
+  `todo.md`.
+
+### The rest
+
+- **`openExternal(target)` on `aio/server`** — the per-OS
+  open/`cmd /c start`/xdg-open launcher three apps re-derived (and the two
+  internal copies had drifted; the bare-`start` Windows form never worked).
+  Fail-loud; the disk example uses it.
+- **testUI `settle()` drains a fire-and-forget nested dispatch** — a method's
+  un-awaited follow-up (`void fs.open(parent)`) left the UI on the old state
+  after settle; pending method calls are awaited (bounded, so a deliberate
+  long-runner degrades to quiescence, never a wedge). Mutation-verified.
+- Doc gaps closed: wasm-bindgen `--target web` + `serveDirs` recipe;
+  onMount-without-DOM guard (the doc's own example was unguarded);
+  cell-method-from-`onStart` dynamic import; `access` predicate positional args.
+- Refused with reasons (feedback/refused.md): `own.setUnique`, a streaming WASM
+  crossing, `writeFileAtomic`.
+- Housekeeping: ~700 MB of stale local artifacts removed (old coverage,
+  AppImage, test homes); the last docs version straggler fixed — docs:check is
+  fully quiet; three stale todo entries reconciled with what actually shipped.
+
+Upgrade guide: `docs/upgrade/from-alpha50-to-alpha51.md`.
+
 ## 1.0.0-alpha50 — the quiet hunt (2026-08-05)
 
 A bug hunt — hunts 7, 8 and 9 in the same series that produced alpha46–49. No

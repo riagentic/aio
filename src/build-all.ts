@@ -431,6 +431,30 @@ export async function buildAll(): Promise<number> {
     printTargets();
     return 1;
   }
+  // A fleet of clients with nothing to connect to is a config that BUILDS
+  // fine and ships broken: `*-client` artifacts dial a server, and a fleet
+  // declaring clients but no `server` target and no `build.server` address
+  // records nothing for them to dial (a field report shipped exactly this —
+  // `["browser", "electron-client", "android-client"]`, where `browser` is a
+  // LOCAL app binary, not the exposed server the clients need). Loud warning,
+  // not an error: the server may legitimately be built elsewhere.
+  const clientTargets = targetList.filter((t) =>
+    TARGETS[t.name]?.role === "client"
+  );
+  const hasServerTarget = targetList.some((t) =>
+    TARGETS[t.name]?.role === "server"
+  );
+  if (clientTargets.length > 0 && !hasServerTarget && !block.server) {
+    console.error(
+      `${C.yellow}⚠ fleet declares client target(s) (${
+        clientTargets.map((t) => t.name).join(", ")
+      }) but no "server" target and no "build": { "server": "host:port" }.${C.r}\n` +
+        `  Clients dial a server; this fleet records none. Add the ${C.blue}server${C.r} target ` +
+        `(builds the exposed --remote binary), or set ${C.blue}"build": { "server": "192.168.1.50:8000" }${C.r} ` +
+        `if it is built/hosted elsewhere.\n  ${C.dim}(browser/electron/android without -client are LOCAL app binaries, not servers)${C.r}`,
+    );
+  }
+
   // A per-target `entry` that names no file compiles nothing useful and is a
   // typo you find minutes later in a deno compile error — check it here, where
   // the target it belongs to can be named.

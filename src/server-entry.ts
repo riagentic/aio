@@ -23,3 +23,8 @@ export { connectCli, connectCliUDS } from "./server/cli-client.ts";
 // the problem the layout exists to end. Server-only: it reads $HOME and the
 // process environment.
 export { type AppDirs, appDirs, type AppMeta } from "./server/app-dirs.ts";
+
+// "Reveal in file manager" / "open in browser" — the per-OS launcher every
+// desktop app was re-deriving (three field reports). Fail-loud: rejects when
+// the launcher is missing or refuses the target.
+export { openExternal } from "./server/open-external.ts";

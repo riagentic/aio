@@ -331,7 +331,16 @@ export async function setupTransport<S, A>(
               user ? `user=${user.id} role=${user.role}` : "anonymous client"
             }`,
           );
-          return; // drop — network caller lacks access
+          // The caller is TOLD (serverFns already answer denials; a denial
+          // that resolves like a success is a silent drop the client cannot
+          // distinguish from a working call). The ack path turns this into
+          // an error frame; pre-caught so a fire-and-forget action without a
+          // cid cannot become an unhandled rejection.
+          const denial = Promise.reject(
+            new Error(`cell "${cellName}.${method}" — access denied`),
+          );
+          denial.catch(() => {});
+          return denial;
         }
       }
     }

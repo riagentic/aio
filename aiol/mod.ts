@@ -162,8 +162,15 @@ export function printReport(
     }`
     : "";
   if (total === 0) {
+    // The verdict claims exactly what was checked: aiol is fmt-agnostic on
+    // purpose, and "clean project!" read as a stronger promise than it was —
+    // a contributor who trusted it committed an unformatted tree that CI then
+    // rejected (a field report). Architecture is aiol's scope; formatting is
+    // `deno fmt`'s.
     console.log(
-      `  ${c(C.green + C.bold, "✓ No issues found — clean project!")}`,
+      `  ${c(C.green + C.bold, "✓ No architectural issues found")}  ${
+        c(C.dim, "(formatting is deno fmt's job — run it before a commit)")
+      }`,
     );
   } else if (hideHints && e === 0 && w === 0) {
     console.log(
