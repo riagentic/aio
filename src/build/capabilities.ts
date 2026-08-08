@@ -32,8 +32,13 @@ const EMPTY: Capabilities = {
 // Signal → capability. Matched against comment-stripped source.
 const SIGNALS: [keyof Capabilities, RegExp][] = [
   [
+    // `updates:` is in here on purpose. An app whose source never calls fetch
+    // scans to net:false, and its least-privilege binary then cannot reach its
+    // own release host — the update check fails in PRODUCTION ONLY, silently,
+    // at the moment a user most needs it. Configuring updates IS a declaration
+    // of network use.
     "net",
-    /\bfetch\s*\(|\bDeno\.(?:connect|listen|serve|connectTls|listenTls)\b|new\s+WebSocket\b/,
+    /\bfetch\s*\(|\bDeno\.(?:connect|listen|serve|connectTls|listenTls)\b|new\s+WebSocket\b|\bupdates\s*:\s*[{"'`]/,
   ],
   [
     "read",

@@ -88,6 +88,34 @@ Deno.test({
       const page = await (await fetch(`http://127.0.0.1:${port}/`)).text();
       assert(page.includes("app.js"), "prod shell serves the bundle");
       assert(!page.includes("importmap"), "no dev import map in prod");
+
+      // The launcher prepared a private unpack dir before exec'ing. Asserted
+      // on the compile target because the WIRING is what regresses — an
+      // AppImage would then unpack into it instead of shared /tmp.
+      const printed = await new Deno.Command("deno", {
+        args: [
+          "run",
+          "-A",
+          join(REPO_ROOT, "src", "build.ts"),
+          "--print-app-tmpdir",
+        ],
+        cwd: dir,
+        env,
+        stdout: "piped",
+        stderr: "null",
+      }).output();
+      const payload = dec.decode(printed.stdout).trim();
+      assert(
+        payload.startsWith(join(root, "apps")),
+        `the unpack dir must sit under the app's own home, got ${payload}`,
+      );
+      const st = await Deno.stat(payload);
+      assert(st.isDirectory, `run.sh did not create ${payload}`);
+      assertEquals(
+        st.mode! & 0o777,
+        0o700,
+        "the unpack dir must be owner-only",
+      );
     } finally {
       await kill(proc);
       await Deno.remove(dir, { recursive: true }).catch(() => {});

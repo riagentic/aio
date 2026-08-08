@@ -748,6 +748,27 @@ Deno.test("appimageEnv: extract-and-run is always set (FUSE-less hosts)", () => 
   assertEquals(env.PATH, Deno.env.get("PATH"));
 });
 
+Deno.test("appimageEnv: the tool unpacks somewhere private, never /tmp", () => {
+  // Extract-and-run names its directory after a digest of the AppImage and
+  // creates it 0755 — so the default left a world-readable, predictably-named
+  // copy of the packaging tool in /tmp on every build, at a path another user
+  // could create first. Same rule a packaged app gets at launch (AppDirs.app).
+  const env = appimageEnv("x86_64");
+  assert(env.TMPDIR, "a private TMPDIR must be chosen for the unpack");
+  assert(
+    !env.TMPDIR.startsWith("/tmp/") && env.TMPDIR !== "/tmp",
+    `must not stage in shared /tmp, got ${env.TMPDIR}`,
+  );
+  const mode = Deno.statSync(env.TMPDIR).mode;
+  if (Deno.build.os !== "windows") {
+    assertEquals(
+      mode! & 0o777,
+      0o700,
+      `the unpack dir must be owner-only, got ${(mode! & 0o777).toString(8)}`,
+    );
+  }
+});
+
 Deno.test("appimageEnv: every appimagetool invocation uses it", async () => {
   // A second packaging site that hand-rolled its env would silently lose the
   // flag — and only break on a FUSE-less machine. Assert the shared helper is

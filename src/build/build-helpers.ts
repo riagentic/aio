@@ -326,12 +326,32 @@ export function formatMb(bytes: number): string {
  *  dir instead, so packaging works with OR without FUSE on the host.
  *
  *  Pure + shared by every packaging site so the flag can't be lost from one of
- *  them (that regression only shows up on a FUSE-less machine — i.e. a user's). */
+ *  them (that regression only shows up on a FUSE-less machine — i.e. a user's).
+ *
+ *  `TMPDIR` then decides WHERE that unpack lands, and the default is not
+ *  acceptable: extract-and-run names its directory after a digest of the
+ *  AppImage and creates it 0755, so every build left a world-readable copy of
+ *  the packaging tool at a path any other user on the host could predict — and
+ *  pre-create. A private dir beside the cached tool keeps the whole thing in one
+ *  place the build already owns. Same rule aio hands to a packaged APP at launch
+ *  (`AppDirs.app`); a build host is not a lesser machine. */
 export function appimageEnv(arch: string): Record<string, string> {
+  const tmp = join(toolCacheDir(), "run");
+  let priv = false;
+  try {
+    Deno.mkdirSync(tmp, { recursive: true });
+    if (Deno.build.os !== "windows") Deno.chmodSync(tmp, 0o700);
+    priv = true;
+  } catch {
+    /* unwritable cache — keep the OS default rather than break the build */
+  }
   return {
     ...Deno.env.toObject(),
     ARCH: arch,
     APPIMAGE_EXTRACT_AND_RUN: "1",
+    // Only when it exists: pointing TMPDIR at a directory we failed to create
+    // trades a privacy nit for a dead build.
+    ...(priv ? { TMPDIR: tmp } : {}),
   };
 }
 

@@ -129,6 +129,7 @@ export function cmdData(args: string[], flags: GlobalFlags): void {
     data: d.data,
     logs: d.logs,
     cache: d.cache,
+    app: d.app,
     launch: d.launch,
     runtime: lockDir(),
     backup: d.data,
@@ -136,6 +137,7 @@ export function cmdData(args: string[], flags: GlobalFlags): void {
       data: dirSize(d.data),
       logs: dirSize(d.logs),
       cache: dirSize(d.cache),
+      app: dirSize(d.app),
     },
   };
   out(mode === "pretty" ? renderData(info) : info, mode);
@@ -149,10 +151,14 @@ export type DataInfo = {
   data: string;
   logs: string;
   cache: string;
+  /** ②b where a packaged app unpacks itself — regenerable, but not while it
+   *  runs (see AppDirs.app). Listed because it EXISTS on disk: a directory this
+   *  command does not name is a directory nobody knows to look in. */
+  app: string;
   launch: string;
   runtime: string;
   backup: string;
-  sizes: { data: number; logs: number; cache: number };
+  sizes: { data: number; logs: number; cache: number; app: number };
 };
 
 /** The pretty rendering, pure so it is testable without a terminal (`am` falls
@@ -163,6 +169,7 @@ export function renderData(info: DataInfo): string {
     ["data ①", info.data, human(info.sizes.data)],
     ["logs ②", info.logs, human(info.sizes.logs)],
     ["cache ②", info.cache, human(info.sizes.cache)],
+    ["app ②b", info.app, human(info.sizes.app)],
     ["launch ②", info.launch, ""],
     ["runtime ③", info.runtime, ""],
   ];
@@ -173,6 +180,7 @@ export function renderData(info: DataInfo): string {
     "",
     `  ① back this up — everything the app cannot recreate`,
     `  ② regenerable — delete any time`,
+    `  ②b the unpacked app — regenerable, but not while it is running`,
     `  ③ must not survive a reboot (socket, pid, lock)`,
     "",
     `  am backup            → copy ① somewhere safe`,

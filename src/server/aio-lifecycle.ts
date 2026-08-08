@@ -9,6 +9,7 @@ import type { UDSHandle } from "./uds.ts";
 import type { TlsCert } from "./tls.ts";
 import type { AioUser } from "./aio.ts";
 import { VERSION } from "./aio-cli.ts";
+import { type BootExtras, bootLines, buildFacts } from "./boot-facts.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { discoverySupported, startDiscoveryResponder } from "./discovery.ts";
 import { instances } from "./single-instance-lock.ts";
@@ -56,6 +57,9 @@ export interface LifecycleDeps<S, A> {
   /** AUTH-2/3: pre-built auth-mode label ("password+totp+oidc") for the boot
    *  report — undefined falls back to users/token detection. */
   authMode?: string;
+  /** Facts the boot report cannot derive from the process itself (data dir,
+   *  cell ids, resolved update config). Everything else it reads directly. */
+  bootExtras?: BootExtras;
   tlsCert: TlsCert | null;
   shareUrl: string;
   localUrl: string;
@@ -232,6 +236,11 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
   log.info(`${p("id")}${appId}`);
   log.info(`${p("version")}${appVersion}`);
   log.info(`${p("aio")}${VERSION}`);
+  // What this process actually IS — read from the process, never from config,
+  // so the report cannot describe a different app than the one running.
+  for (const [label, value] of bootLines(buildFacts(), deps.bootExtras)) {
+    log.info(`${p(label)}${value}`);
+  }
   log.info(`${p("title")}${title}`);
   log.info(`${p("singleton")}${String(singletonMode)}`);
   log.info(`${p("persist")}${shouldPersist ? persistMode : "false"}`);

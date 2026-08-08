@@ -28,6 +28,11 @@ export const BUILD_BOOL_FLAGS = [
   "--headless",
   "--force",
   "--release",
+  // Builds nothing: prints the TMPDIR a launcher must hand this project's
+  // packaged artifact (`AppDirs.app`) and exits. Part of the vocabulary because
+  // an unknown flag here is silently ignored — a launcher asking with a typo
+  // would get an empty answer and fall back to shared /tmp without a word.
+  "--print-app-tmpdir",
 ] as const;
 
 /** Every `--flag=value` the single-target build understands. */
