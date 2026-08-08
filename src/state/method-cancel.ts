@@ -188,6 +188,14 @@ export async function settlePending(
  *  its own documented cancellation path (`s.$signal.aborted`) and commit what
  *  it has, which is exactly what the final persist should capture.
  *
+ *  "Commit what it has" is true for NON-TRANSACTIONAL cells only, and that
+ *  distinction is the point rather than a caveat: a `transaction: true` method
+ *  commits atomically at the end, so an interrupted one commits NOTHING —
+ *  which is the correct outcome, because half a transaction on disk is the
+ *  state the transaction exists to prevent. Aborting still matters there: it
+ *  ends the wait instead of holding the drain open for a reply that is not
+ *  coming.
+ *
  *  `cells` scopes it to one app's cells — omitting it aborts the whole
  *  process. Two apps can share a process (D2: an instance-scoped runtime, and
  *  every `testServer()` pair does it), so an unscoped abort would have one

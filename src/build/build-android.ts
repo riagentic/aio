@@ -68,10 +68,16 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
   // androidApplicationId below) — dev:android derives the same id from the
   // APK's filename, so both must share the rule or drift.
   const label = apkLabel(cfg);
-  const applicationId = androidApplicationId(label);
+  const applicationId = androidApplicationId(label, cfg.androidApplicationId);
   if (!applicationId) {
     console.error(
-      `[android] \u2717 APK name "${label}" produces invalid applicationId — must start with a letter`,
+      cfg.androidApplicationId !== undefined
+        ? `[android] \u2717 android.applicationId ${
+          JSON.stringify(cfg.androidApplicationId)
+        } is not a valid Android package name — it needs at least two ` +
+          `dot-separated segments, each starting with a letter ` +
+          `(e.g. "com.example.wallet")`
+        : `[android] \u2717 APK name "${label}" produces invalid applicationId — must start with a letter`,
     );
     Deno.exit(1);
   }
@@ -267,15 +273,42 @@ export function apkLabel(
   return cfg.doRemote ? `${cfg.binaryName}-client` : cfg.binaryName;
 }
 
-/** THE applicationId rule: `app.aio.<label sans non-alphanumerics>`, or null
- *  when the label cannot make a valid id (must start with a letter). Shared
- *  by the build (from {@link apkLabel}) and `dev:android` (from the APK's
- *  filename, which IS that label) — one rule, or the installed dev app and the
- *  built APK disagree on identity. */
-export function androidApplicationId(label: string): string | null {
+/** THE applicationId rule: an explicit `android.applicationId` from deno.json
+ *  when present, else `app.aio.<label sans non-alphanumerics>`; null when
+ *  neither can make a valid id.
+ *
+ *  Shared by the build (from {@link apkLabel}) and `dev:android` (from the
+ *  APK's filename, which IS that label) — one rule, or the installed dev app
+ *  and the built APK disagree on identity.
+ *
+ *  The explicit form exists because an applicationId is a PUBLIC, permanent
+ *  identity on Android: it is the Play Store listing's primary key and can
+ *  never be changed for a published app. `app.aio.*` is aio's namespace, not
+ *  the app author's, so a derived-only id meant no aio app could ship to Play
+ *  under its own name. Validated, not trusted: Android requires at least two
+ *  dot-separated segments, each starting with a letter, or the install fails
+ *  with a manifest error nobody can read. */
+export function androidApplicationId(
+  label: string,
+  explicit?: string,
+): string | null {
+  if (explicit !== undefined) {
+    return isValidApplicationId(explicit) ? explicit : null;
+  }
   const sanitized = label.replace(/[^a-z0-9]/g, "");
   if (!sanitized || !/^[a-z]/.test(sanitized)) return null;
   return `app.aio.${sanitized}`;
+}
+
+/** Android's own rule for a package name: ≥2 segments, each starting with a
+ *  letter and made of letters/digits/underscore. Java keywords are also
+ *  rejected by the toolchain, but the shapes below are what people actually
+ *  get wrong (a single segment, a leading digit, a trailing dot). */
+export function isValidApplicationId(id: string): boolean {
+  if (!/^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)+$/.test(id)) {
+    return false;
+  }
+  return id.length <= 255;
 }
 
 export function safeDevUrl(devUrl: string): string {

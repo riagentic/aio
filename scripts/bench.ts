@@ -69,6 +69,11 @@ const bootOpts = {
 // ── 2. dispatch: sync method throughput + async round-trips ───────────
 {
   const d = cell("bench-dispatch", {
+    // Explicit, not inherited: alpha52 made this the async default, so the
+    // numbers below silently changed meaning when it landed. A benchmark that
+    // does not state its semantics measures whatever the default happened to be
+    // the day the baseline was recorded.
+    transaction: true,
     state: { count: 0 },
     methods: {
       inc(s, by = 1) {
@@ -254,6 +259,7 @@ const bootOpts = {
 {
   const N = 10_000;
   const big = cell("bench-proxy-arr", {
+    transaction: true, // explicit — see bench-dispatch
     state: {
       items: Array.from({ length: N }, (_, i) => ({ id: i, q: i % 97 })),
       sum: 0,

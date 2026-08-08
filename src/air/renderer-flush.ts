@@ -32,6 +32,26 @@ export function afterRender(fn: () => void): void {
       fn,
       component: _currentCollector?._component,
     });
+    return;
+  }
+  // No active root: there is no render cycle to run after, so the callback can
+  // only be dropped. Dropping it SILENTLY is the bug — called from a
+  // `setTimeout`, a promise continuation or an event handler (all of which run
+  // outside the render pass) the callback simply never fired, and the symptom
+  // was "my DOM measurement never happens" with nothing to search for.
+  //
+  // Observe-only, so dev and prod behave identically: prod drops it exactly as
+  // before, dev additionally says so. Not a throw — this is reachable from
+  // legitimate transition paths where the root has already unmounted, and
+  // breaking those to report a no-op would be the worse trade.
+  if ((globalThis as Record<string, unknown>).__aioDev === true) {
+    console.warn(
+      "[aio] afterRender() called outside a render — no render cycle is " +
+        "active, so the callback was DROPPED. It only works during a " +
+        "component's render pass; from a timer, a promise continuation or an " +
+        "event handler there is nothing to run after. Move the call into the " +
+        "component body, or do the work directly.",
+    );
   }
 }
 

@@ -3,6 +3,7 @@
 import type { CellInfo, Checker } from "./types.ts";
 import { join, resolve } from "@std/path";
 import * as fix from "./fixes.ts";
+import { isToolingPath } from "./context.ts";
 import { RESERVED_KEYS } from "../src/state/cell-types.ts";
 import {
   AIO_LIBRARY_ENTRIES,
@@ -53,7 +54,10 @@ export const checkConfig: Checker = (ctx) => {
   //. A deno.json `appId` alongside an explicit one is
   // redundant, not broken — `am` reads it to find the app — so that case is a
   // hint about the duplication, not a warning about a missing move.
-  if (dj.appId) {
+  // …and only for an APP. `appId: "aio"` in the framework's own deno.json is
+  // the framework's package identity; "move it into aio.run()" names a call
+  // that does not exist in this repo.
+  if (dj.appId && ctx.isApp) {
     const passesAppId = /\bappId\s*:/.test(ctx.appEntry?.content ?? "");
     report(
       passesAppId ? "hint" : "warn",
@@ -267,11 +271,16 @@ export const checkStructure: Checker = async (ctx) => {
         `entry point is "${altEntry.relative}" — convention is "src/app.ts"`,
         { file: altEntry.relative },
       );
-    } else {report(
+    } else if (ctx.isApp) {
+      // Not for a project that never consumes aio: advising the framework repo
+      // to "create an entry point with aio.run()" is the rule describing
+      // itself, not the code.
+      report(
         "warn",
         "structure",
         "no entry point found (src/app.ts) — create one with aio.run()",
-      );}
+      );
+    }
   }
 
   // App.tsx
@@ -655,8 +664,18 @@ export const checkPerformance: Checker = (ctx) => {
     "Deno.removeSync",
     "Deno.mkdirSync",
   ];
+  // Only where the message is TRUE. "Every client's next action waits behind
+  // it" presupposes a dispatch loop with clients on it. Against a project that
+  // is not an app — the framework repo, a tool, a library — the rule fired on
+  // boot-once pre-flight, shutdown checkpoints, CLI-once key reads, and on the
+  // journal, whose synchrony is the POINT (each append fsyncs so it survives
+  // SIGKILL; "use the async version" would delete the guarantee). That was 84
+  // of 85 warnings, which is how a true warning gets trained away.
   for (const file of sourceFiles) {
+    if (!ctx.isApp) break;
     if (file.name.endsWith(".test.ts")) continue;
+    // A build script has no clients, and blocking until it finishes is its job.
+    if (isToolingPath(file.relative)) continue;
     for (const api of syncApis) {
       // Code only — the API named in a comment or a string isn't a call.
       if (codeText(file.content).includes(api)) {
@@ -681,6 +700,9 @@ export const checkPerformance: Checker = (ctx) => {
   // timer schedule would replace — and any line carrying `aiol-ok`.
   for (const file of sourceFiles) {
     if (file.name.endsWith(".test.ts") || file.name === "app.ts") continue;
+    // A cell defined in a benchmark is a fixture — nobody observes or cancels
+    // its timers.
+    if (isToolingPath(file.relative)) continue;
     if (!file.content.includes("cell(")) continue;
     for (let i = 0; i < file.lines.length; i++) {
       const line = file.lines[i]!;
@@ -764,8 +786,11 @@ export const checkPerformance: Checker = (ctx) => {
     return /\bcell\s*\(\s*['"`]/.test(code) ||
       /\baio\s*\.\s*run\s*\(/.test(code);
   };
+  // The path rule wins over the content heuristic: a benchmark that defines a
+  // cell still reads as `isAppSurface`, and it is still tooling.
   const isTooling = (f: typeof sourceFiles[number]) =>
-    !isAppSurface(f) && (!inAppSourceDir(f) || /^#!/.test(f.content));
+    isToolingPath(f.relative) ||
+    (!isAppSurface(f) && (!inAppSourceDir(f) || /^#!/.test(f.content)));
   const isCliClient = (f: typeof sourceFiles[number]) =>
     /\bconnectCli\b/.test(codeText(f.content));
   for (const file of sourceFiles) {
@@ -1307,7 +1332,11 @@ export const checkTesting: Checker = (ctx) => {
     }
   }
 
-  const untestedCells = cells.filter((f) => !testedCells.has(f.name));
+  // A cell defined under scripts/ or tools/ is a fixture (a benchmark's
+  // workload), not a shipped surface waiting for a test file.
+  const untestedCells = cells.filter((f) =>
+    !testedCells.has(f.name) && !isToolingPath(f.file.relative)
+  );
   if (untestedCells.length === 0) {
     pass(`all ${cells.length} cells have tests`);
   } else {

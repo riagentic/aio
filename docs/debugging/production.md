@@ -102,6 +102,18 @@ await aio.run({
 
 ### How it works
 
+Three different problems wear the same symptom, so the monitor names which one
+it saw (`report.reason`):
+
+- **`pressure`** — near the V8 ceiling; the app is about to OOM.
+- **`machine`** — a large share of the WHOLE machine (default: half), even
+  though the ceiling is not close. This is the one that freezes a desktop: with
+  a 47 GB ceiling, 75%-of-ceiling is 35 GB, and a 64 GB machine is already
+  swapping by then. Tune with `memory.machineWarnFraction`.
+- **`growth`** — climbing steadily with nothing near a threshold. A leak shows
+  up here hours before it shows up anywhere else; reporting it only at 75% turns
+  a slow diagnosis into an emergency. Tune with `memory.growthReportRatio`.
+
 - Samples `Deno.memoryUsage()` every `interval` ms (near-zero cost)
 - At/above threshold: measures per-cell state sizes, reports largest cell and
   growing field
@@ -112,14 +124,34 @@ await aio.run({
 
 ### V8 heap limits
 
-`--v8-flags=--max-old-space-size=16384` only applies to the main V8 isolate.
-Deno Workers get their own isolate with the default ~1.7 GB heap limit.
-`DENO_V8_FLAGS` does not propagate to Workers.
+aio sizes the heap for you: **25% of physical RAM, never below 4 GB**. V8's own
+default is ~4 GB regardless of the machine, which is how an app dies of "out of
+memory" on a 32 GB box with 28 GB free.
+
+- `am start`, `run.sh` and the test harness resolve it for the machine they are
+  on and pass `--v8-flags=--max-old-space-size=N`.
+- A compiled binary bakes it at build time — measured: a compiled artifact
+  **ignores `DENO_V8_FLAGS`**, so `deno compile --v8-flags=` is the only way in.
+  The baked number comes from the BUILD machine, so treat it as headroom rather
+  than a measurement of the user's hardware.
+- A bare `deno run src/app.ts` gets V8's default; the app warns at boot, naming
+  the flag to add.
+- Override per app with `"memory": { "maxHeap": "12GB" }` in deno.json (`"25%"`,
+  `"512MB"`, a number of MB, or `"default"`). An explicit value is still clamped
+  to 25% — the cap protects the machine.
+
+**Workers inherit the ceiling.** Measured on Deno 2.9 in both `deno run` and a
+compiled binary: a Worker isolate reports the same `heap_size_limit` as the main
+one (4192 MB by default, 16480 MB with the flag). Earlier versions of this page
+claimed workers were stuck at ~1.7 GB and that `DENO_V8_FLAGS` did not
+propagate; both were wrong.
 
 Key points:
 
-- AIO's DB Worker runs in a Worker isolate -- heavy SQLite workloads can hit the
-  default limit
+- SQLite's page cache is NATIVE memory (`PRAGMA cache_size`, 64 MB per
+  connection), outside the JS heap: no V8 flag governs it and the memory monitor
+  cannot see it. Raise it deliberately with `dbPragmas` if a workload needs it,
+  remembering it is per reader as well as the writer.
 - Keep Worker-resident data small -- push bulk results back to main isolate
 - Memory monitor runs in the main isolate and reports main-isolate stats only
 - Monitor uses `heap_size_limit` from `node:v8` as the correct denominator

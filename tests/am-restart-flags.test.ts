@@ -4,6 +4,10 @@
 // Deno actually honors them, and (2) the launch is recorded so restart replays.
 import { assert, assertEquals } from "@std/assert";
 import { buildDenoArgs } from "../src/am/am-cmd-process.ts";
+import {
+  physicalMemoryBytes,
+  resolveMaxHeapMB,
+} from "../src/server/heap-policy.ts";
 import { join } from "@std/path";
 import { appDirs } from "../src/server/app-dirs.ts";
 import {
@@ -32,13 +36,42 @@ Deno.test("buildDenoArgs: --env-file lands BEFORE the entry, app flags after", (
   assertEquals(argv.slice(0, 3), ["run", "-A", "--unstable-kv"]);
 });
 
-Deno.test("buildDenoArgs: no flags → just run the entry", () => {
+Deno.test("buildDenoArgs: no flags → the entry, plus this machine's heap ceiling", () => {
+  // The ceiling is not optional garnish: V8's default is ~4 GB whatever the
+  // machine, it is fixed at isolate creation, and a launcher is the only thing
+  // that can set it in time. `am start` is the managed launch, so it does.
+  const want = resolveMaxHeapMB(physicalMemoryBytes());
   assertEquals(buildDenoArgs("src/app.ts", []), [
     "run",
     "-A",
     "--unstable-kv",
+    ...(want === null ? [] : [`--v8-flags=--max-old-space-size=${want}`]),
     "src/app.ts",
   ]);
+});
+
+Deno.test("buildDenoArgs: an explicit --v8-flags outranks the computed one", () => {
+  // Two --v8-flags would leave V8 silently taking the last; an operator who
+  // typed the flag means it.
+  const argv = buildDenoArgs("src/app.ts", [
+    "--v8-flags=--max-old-space-size=2048",
+  ]);
+  assertEquals(
+    argv.filter((a) => a.startsWith("--v8-flags")),
+    ["--v8-flags=--max-old-space-size=2048"],
+  );
+});
+
+Deno.test("buildDenoArgs: the ceiling precedes the entry, like every runtime flag", () => {
+  const argv = buildDenoArgs("src/app.ts", ["--port=8000"]);
+  const entryIdx = argv.indexOf("src/app.ts");
+  const heapIdx = argv.findIndex((a) => a.startsWith("--v8-flags"));
+  if (heapIdx >= 0) {
+    assert(
+      heapIdx < entryIdx,
+      "a runtime flag after the entry reaches the APP",
+    );
+  }
 });
 
 // These tests write real files at real resolved paths, so they pin the app root

@@ -1292,7 +1292,13 @@ export function shapeDriftSummary(drift: ShapeDriftEntry[]): string {
       `declared shape — ${
         show.join(", ")
       }${more}. A rename/removal without a ` +
-      `version bump keeps the stale value (deepMerge preserves it). Bump the ` +
+      // Probed 2026-08-05: the stored value survives, but NOT via deepMerge —
+      // deepMerge drops the undeclared field from LIVE state (a narrowed boot
+      // really does see only the declared shape). Persistence is what keeps it
+      // on disk. Right outcome, wrong mechanism named, and the mechanism is
+      // what someone reads to predict the NEXT case.
+      `version bump keeps the stale value on disk (persistence preserves it; ` +
+      `live state does not carry it). Bump the ` +
       `cell's version + add onMigrate to transform it, or clear the stored data.`,
   );
   return lines.join("\n");

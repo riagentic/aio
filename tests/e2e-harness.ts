@@ -14,6 +14,8 @@
 // coverage run the var is unset, so we use a throwaway.
 const _childCovDir = Deno.env.get("DENO_COVERAGE_DIR") ??
   Deno.makeTempDirSync({ prefix: "aio-e2e-cov-" });
+import { testDisplayEnv } from "../src/testing/test-display.ts";
+
 const ROOT = new URL("..", import.meta.url).pathname;
 
 export function findBrowser(): string | null {
@@ -93,6 +95,10 @@ export interface Server {
   stop(): Promise<void>;
   /** Read the server's authoritative state via the trojan channel. */
   state(): Promise<Record<string, unknown>>;
+  /** `fetch` that blames the SERVER when it fails — attaches the child's
+   *  output and whether it had already exited. A bare `fetch` here reports
+   *  `TypeError: error sending request`, which says nothing about why. */
+  fetch(path: string, init?: RequestInit): Promise<Response>;
   dir: string;
 }
 
@@ -191,7 +197,11 @@ export async function boot(spec: E2eApp): Promise<Server> {
       );
     }
     try {
-      const r = await fetch(`${base}/`);
+      // Per-attempt ceiling. Without it a server that ACCEPTS the connection
+      // and then never answers (a wedged worker, a blocked boot) parks the
+      // whole 120s inside one fetch, and the loop above never gets to notice
+      // the child died.
+      const r = await fetch(`${base}/`, { signal: AbortSignal.timeout(5_000) });
       await r.body?.cancel();
       if (r.ok) {
         up = true;
@@ -223,9 +233,43 @@ export async function boot(spec: E2eApp): Promise<Server> {
       await proc.status;
     },
     async state() {
-      return await (await fetch(`${base}/__aio/trojan/state`)).json();
+      return await (await guardedFetch("/__aio/trojan/state")).json();
     },
+    /** `fetch` against the server that BLAMES THE SERVER when it fails.
+     *
+     *  A crash after readiness used to surface as a bare
+     *  `TypeError: error sending request` — the child's stack trace was
+     *  captured all along (`serverOutput`) and simply never attached, so the
+     *  one thing that said WHY was the one thing the failure did not print. */
+    fetch: guardedFetch,
   };
+
+  async function guardedFetch(
+    path: string,
+    init?: RequestInit,
+  ): Promise<Response> {
+    {
+      try {
+        return await fetch(
+          path.startsWith("http") ? path : `${base}${path}`,
+          { signal: AbortSignal.timeout(30_000), ...init },
+        );
+      } catch (e) {
+        const st = ex.st;
+        throw new Error(
+          `request to ${path} failed: ${e instanceof Error ? e.message : e}` +
+            (st
+              ? ` — the server had EXITED (code ${st.code}${
+                st.signal ? `, signal ${st.signal}` : ""
+              })`
+              : " — the server is still running") +
+            `\n--- server output (last ${CHILD_LOG_CAP}B) ---\n` +
+            serverOutput(proc),
+          { cause: e },
+        );
+      }
+    }
+  }
 }
 
 /** The last N KB a spawned server wrote. Enough to carry a stack trace, small
@@ -259,7 +303,11 @@ async function settleOutput(proc: Deno.ChildProcess): Promise<void> {
 
 export function spawnServer(dir: string, port: number): Deno.ChildProcess {
   const proc = new Deno.Command(Deno.execPath(), {
-    env: { DENO_COVERAGE_DIR: _childCovDir },
+    // DISPLAY comes from the nested test display, not the developer's session:
+    // this harness passes --client=server-only so nothing opens today, but
+    // `aio.run()`'s DEFAULT client is electron, and one spawned app that
+    // forgets the flag is a window in your face mid-keystroke.
+    env: { DENO_COVERAGE_DIR: _childCovDir, ...testDisplayEnv() },
     args: [
       "run",
       "-A",

@@ -317,7 +317,11 @@ export function extractUserFrames(stack: string | undefined): string[] {
 
 // ─── Tip generator ──────────────────────────────────────────────────────────
 
-function generateTip(err: AioError): string | undefined {
+/** THE remedy for a code, in one place. Exported so a test can pin the advice
+ *  at its single source: the dispatcher states facts (and the per-method
+ *  hatch, which only it knows), and everything about what to DO is here.
+ *  @internal */
+export function generateTip(err: AioError): string | undefined {
   switch (err.code) {
     case "REDUCE_ERROR": {
       const msg = err.message;
@@ -388,12 +392,16 @@ function generateTip(err: AioError): string | undefined {
         `doesn't help (the isolate is still blocked) — move it off-thread with ` +
         `schedule.blocking("id", fn, arg). See docs/debugging/performance.md.`;
     case "BUDGET_EFFECT":
+      // THE remedy for this code. The dispatcher states the facts and the
+      // per-method escape hatch (it is the only thing that knows the method
+      // key); everything about what to DO about it is here, once.
       return `Tip: Sync effect took ${
         err.context.duration?.toFixed(0) ?? "?"
       }ms (budget: ${
         err.context.budget ?? 5
-      }ms). Return immediately: kick off async I/O, or hand CPU work to ` +
-        `schedule.blocking("id", fn, arg).`;
+      }ms). An effect must return immediately: kick off async I/O without ` +
+        `awaiting it here, or hand CPU work to schedule.blocking("id", fn, ` +
+        `arg). See docs/debugging/performance.md.`;
     case "PERSIST_ERROR":
       return "Tip: State persist failed — changes are in memory but will be lost on restart. Check disk space and file permissions.";
     case "PERSIST_SCHEMA":

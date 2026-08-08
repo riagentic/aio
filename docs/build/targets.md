@@ -306,18 +306,62 @@ skips the pipeline above — so the two things it does for you have to be passed
 by hand. Both are exported, so nothing has to be rediscovered:
 
 ```ts
-import { assetIncludes, compileArgs, dbWorkerInclude } from "aio/build";
+import {
+  assetIncludes,
+  compileArgs,
+  dbWorkerInclude,
+  v8FlagsArg,
+} from "aio/build";
 
 const args = compileArgs({
   hasDist: true, // embed dist/ (the browser bundle)
   workerInclude: dbWorkerInclude(), // ← the SQLite worker
   assets: await assetIncludes(Deno.cwd()), // ← .wasm + compile.include + deno.json
+  v8Flags: await v8FlagsArg(Deno.cwd()), // ← compile.v8Flags
   excludes: [],
   out: "myapp",
   entry: "src/app.ts",
 });
 await new Deno.Command("deno", { args }).output();
 ```
+
+### Memory: `compile.v8Flags`
+
+V8 caps its old-space heap at roughly **4 GB regardless of installed RAM**. For
+most apps that is irrelevant — but if peak memory scales with the input (a large
+index, a big in-memory table, a batch job), that cap, not the machine, is the
+real limit.
+
+The trap is that the fix does not survive packaging. **A compiled binary ignores
+`DENO_V8_FLAGS`**, because V8 options are fixed when the isolate is created:
+
+| binary                                           | `DENO_V8_FLAGS` set? | heap limit |
+| ------------------------------------------------ | -------------------- | ---------- |
+| `deno run`                                       | yes                  | raised ✅  |
+| `deno compile`, no flags                         | yes                  | 4 GB ❌    |
+| `deno compile --v8-flags=--max-old-space-size=…` | —                    | raised ✅  |
+
+So an app that raises its heap in the `dev` task silently reverts to the default
+once packaged, and only discovers it under load. Declare it instead, and the
+build bakes it into every target:
+
+```jsonc
+// deno.json — under aio's "build" block, NOT under "compile"
+"build": { "v8Flags": ["--max-old-space-size=16384"] }
+```
+
+`compile` is Deno's own block and rejects unknown keys, aborting the build with
+`Failed to parse compile configuration` — which names neither the key nor the
+fix. aio detects that spelling and redirects you here instead.
+
+One flag per entry (the list is comma-joined); an entry that is not a `--` flag,
+or that contains a comma, is **refused at build time** rather than silently
+producing a binary that keeps the default. The build prints the flag it baked
+in.
+
+This is a **ceiling, not a reservation** — the heap still grows on demand, and
+an idle app declaring 16 GB sits at the same ~50 MB RSS as one declaring
+nothing.
 
 **The SQLite worker is not optional.** Persistence always opens the
 worker-thread DB, and the worker is started with

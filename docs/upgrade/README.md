@@ -7,6 +7,12 @@ One guide per version migration. Find your current version and follow the steps.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha54 → alpha55](from-alpha54-to-alpha55.md) — the memory a machine
+  actually has: the heap ceiling scales with physical RAM (25%, floor 4 GB)
+  instead of V8's flat ~4 GB, so an app stops dying with memory to spare;
+  `memory.maxHeap` overrides it; the monitor separates pressure from
+  machine-share from a leak. Nothing to migrate — rebuild to bake the new
+  ceiling into a compiled artifact
 - [alpha53 → alpha54](from-alpha53-to-alpha54.md) — the last mile: opt-in app
   updates (`updates: "<url>"`) with a signed data contract that never offers a
   release which cannot migrate your data, problem reports (`feedback: true`),

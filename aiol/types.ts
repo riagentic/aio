@@ -84,6 +84,10 @@ export type LintContext = {
   denoJson: DenoJsonConfig | null;
   denoJsonPath: string | null;
   sourceFiles: SourceFile[];
+  /** False for a project that does not CONSUME aio (the framework repo itself,
+   *  a tool, a library). App-shaped rules must not fire there — see
+   *  `looksLikeApp`. */
+  isApp: boolean;
   tsxFiles: SourceFile[];
   tsFiles: SourceFile[];
   testFiles: SourceFile[];

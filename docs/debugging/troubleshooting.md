@@ -192,7 +192,9 @@ methods: {
 ```
 
 For large datasets, move to SQLite. Increase V8 heap:
-`deno run --v8-flags=--max-old-space-size=16384 main.ts`.
+`deno run --v8-flags=--max-old-space-size=16384 main.ts` — though `am start`,
+`run.sh` and compiled builds already size it at 25% of RAM (floor 4 GB); see
+[production](./production.md#v8-heap-limits).
 
 ---
 

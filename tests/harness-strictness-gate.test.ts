@@ -79,6 +79,8 @@ const MUST_ARM = [
   "testComponent",
   "testServer",
   "testMultiClient",
+  // Boots N real apps in this process — same exposure as testServer, N times.
+  "testApps",
 ] as const;
 
 Deno.test("every in-process harness arms dev-strict", async () => {
