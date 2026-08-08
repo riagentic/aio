@@ -286,3 +286,119 @@ Deno.test("createMemoryMonitor: stop() clears interval", async () => {
   await new Promise((r) => setTimeout(r, 60));
   assertEquals(count, countAfterStop); // no more callbacks after stop
 });
+
+// ── three different problems, three different signals ────────────────────────
+// The ceiling protects the APP; it says nothing about the MACHINE, and neither
+// notices a leak that is still far from any threshold. Ceiling-relative
+// thresholds alone report all three as one thing, too late.
+
+/** Drive the monitor deterministically: no timers, no real memory. */
+function drive(
+  heapSeries: number[],
+  opts: {
+    heapLimit: number;
+    total?: number;
+    warn?: number;
+    critical?: number;
+    machineWarnFraction?: number;
+    growthReportRatio?: number;
+    trendWindow?: number;
+  },
+): Array<{ reason: string; level: string; machinePct: number }> {
+  const out: Array<{ reason: string; level: string; machinePct: number }> = [];
+  let i = 0;
+  const timers: Array<() => void> = [];
+  const realSet = globalThis.setInterval;
+  const realClear = globalThis.clearInterval;
+  // deno-lint-ignore no-explicit-any
+  (globalThis as any).setInterval = (fn: () => void) => {
+    timers.push(fn);
+    return 1;
+  };
+  // deno-lint-ignore no-explicit-any
+  (globalThis as any).clearInterval = () => {};
+  try {
+    const m = createMemoryMonitor({
+      enabled: true,
+      interval: 1,
+      warnThreshold: opts.warn ?? 0.75,
+      criticalThreshold: opts.critical ?? 0.9,
+      trendWindow: opts.trendWindow ?? 4,
+      machineWarnFraction: opts.machineWarnFraction,
+      growthReportRatio: opts.growthReportRatio,
+      onReport: (r) =>
+        out.push({
+          reason: r.reason,
+          level: r.level,
+          machinePct: r.machinePct,
+        }),
+      getMemoryUsage: () => ({
+        heapUsed: heapSeries[i]!,
+        heapTotal: heapSeries[i]!,
+        rss: heapSeries[i]!,
+        external: 0,
+      }),
+      getHeapLimit: () => opts.heapLimit,
+      getTotalMemory: () => opts.total ?? 0,
+      getCellStates: () => [],
+    });
+    for (; i < heapSeries.length; i++) timers.forEach((t) => t());
+    m.stop();
+  } finally {
+    globalThis.setInterval = realSet;
+    globalThis.clearInterval = realClear;
+  }
+  return out;
+}
+
+const GB_ = 1024 * 1024 * 1024;
+
+Deno.test("monitor: near the ceiling → pressure (the app is about to OOM)", () => {
+  const reports = drive([7.6 * GB_, 7.9 * GB_], {
+    heapLimit: 8 * GB_,
+    total: 32 * GB_,
+  });
+  assertEquals(reports.map((r) => r.reason), ["pressure", "pressure"]);
+  assertEquals(reports[1]!.level, "critical");
+});
+
+Deno.test("monitor: a big share of the MACHINE reports, ceiling nowhere near", () => {
+  // The desktop-freezing case. On a 47 GB ceiling, 75%-of-ceiling is 35 GB —
+  // a 64 GB machine is already swapping long before that fires.
+  // 33 GB: 70% of the ceiling (under the pressure threshold, so THAT check
+  // stays quiet) but 52% of the machine — which is the problem.
+  const reports = drive([33 * GB_], {
+    heapLimit: 47 * GB_,
+    total: 64 * GB_,
+    machineWarnFraction: 0.5,
+  });
+  assertEquals(reports.length, 1);
+  assertEquals(reports[0]!.reason, "machine");
+  assertEquals(reports[0]!.machinePct > 0.5, true, "over half the machine");
+});
+
+Deno.test("monitor: steady growth reports as a LEAK, long before any threshold", () => {
+  // 1 → 9 GB against a 47 GB ceiling: every sample is under 20% of the ceiling
+  // and under 20% of the machine, so both other checks stay silent. Reporting
+  // this only at 75% turns a slow diagnosis into an emergency.
+  const series = [1, 3, 5, 7, 9].map((g) => g * GB_);
+  const reports = drive(series, {
+    heapLimit: 47 * GB_,
+    total: 192 * GB_,
+    growthReportRatio: 0.1,
+  });
+  assertEquals(reports.length >= 1, true, "a steady climb must be reported");
+  assertEquals(reports[0]!.reason, "growth");
+});
+
+Deno.test("monitor: flat usage says nothing at all", () => {
+  // The whole value of a leak signal is that it is quiet when there is no leak.
+  const flat = [2 * GB_, 2 * GB_, 2 * GB_, 2 * GB_, 2 * GB_, 2 * GB_];
+  assertEquals(drive(flat, { heapLimit: 47 * GB_, total: 192 * GB_ }), []);
+});
+
+Deno.test("monitor: an unmeasurable machine disables only the machine check", () => {
+  // total = 0 → machinePct 0 → never fires, and nothing throws.
+  const reports = drive([20 * GB_], { heapLimit: 47 * GB_, total: 0 });
+  assertEquals(reports, []);
+});

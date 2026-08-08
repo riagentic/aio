@@ -7,6 +7,12 @@ export {
   testMultiClient,
 } from "./testing/multi-client-test.ts";
 
+// The OTHER architecture shape: a service plus rich clients, where the client
+// is itself an app. Its properties (identity/lock/store isolation, cell-bind
+// exclusivity, a client of app A living inside app B) only exist with more than
+// one app booted, so one-app harnesses cannot express them.
+export { type TestApps, testApps } from "./testing/apps-test.ts";
+
 // Transport cassettes: record a real device/network session once,
 // replay it in CI forever. Record in prod against the real device; replay in tests.
 export {

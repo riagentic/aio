@@ -5,6 +5,7 @@
 import { basename, dirname, join, resolve } from "@std/path";
 import { slugify } from "./build-helpers.ts";
 import { appIdFromConfig } from "../server/single-instance-lock.ts";
+import { resolveEntryPath } from "../server/paths.ts";
 import {
   BUILD_BOOL_FLAGS,
   BUILD_VALUE_FLAGS,
@@ -37,8 +38,8 @@ export function resolveEntry(
   mainConfig: Record<string, unknown>,
   override?: string,
 ): string {
-  return override?.trim() || (mainConfig.entry as string | undefined) ||
-    "src/app.ts";
+  // Delegates: `am` needs the same answer and cannot import the build.
+  return resolveEntryPath(mainConfig, override);
 }
 
 /** THE app-dir decider (WYSIDIWYSIP), as one named rule rather than an
@@ -75,6 +76,13 @@ export interface BuildConfig {
    *  (http://localhost:PORT, tunneled via `adb reverse`) instead of bundling
    *  assets. Enables cleartext. */
   androidDevUrl: string | undefined;
+  /** deno.json `android.applicationId` — the app's PERMANENT Play Store
+   *  identity. Undefined means "derive it" (`app.aio.<name>`), which is aio's
+   *  namespace and therefore unpublishable under someone else's name. */
+  androidApplicationId: string | undefined;
+  /** True when `configEntry` came from `--entry=` rather than deno.json — so an
+   *  error can blame the place the value ACTUALLY came from. */
+  entryFromFlag: boolean;
 
   // App identity
   binaryName: string;
@@ -203,6 +211,9 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
   const rawName = Deno.args.find((a) => a.startsWith("--name="))?.slice(7);
   const binaryName = rawName ? slugify(rawName) : defaultName;
 
+  const androidApplicationId =
+    (mainConfig.android as { applicationId?: string } | undefined)
+      ?.applicationId;
   const androidDevUrl = Deno.args.find((a) =>
     a.startsWith("--android-dev-url=")
   )?.slice("--android-dev-url=".length);
@@ -251,6 +262,8 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
     doService,
     doHeadless,
     androidDevUrl,
+    androidApplicationId,
+    entryFromFlag: entryArg !== undefined,
     binaryName,
     appTitle,
     configEntry,

@@ -34,43 +34,6 @@ export function devWsScript(): string {
     _devWs()`;
 }
 
-/** React error boundary class — catches render errors, auto-recovers on state update. */
-export function errorBoundaryScript(): string {
-  return `
-    const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')
-    let _aioMod = null
-    class _AioBoundary extends Component {
-      constructor(p) { super(p); this.state = { error: null }; this._unsub = null }
-      static getDerivedStateFromError(e) { return { error: e } }
-      componentDidCatch(e, info) { console.error('[aio] Render error:', e, info) }
-      componentDidMount() {
-        if (_aioMod && _aioMod._subscribe) {
-          this._unsub = _aioMod._subscribe(() => {
-            if (this.state.error) this.setState({ error: null })
-          })
-        }
-      }
-      componentWillUnmount() {
-        if (this._unsub) { this._unsub(); this._unsub = null }
-      }
-      render() {
-        if (this.state.error) {
-          const e = this.state.error
-          return createElement('div', { style: {padding:'2rem',font:'13px/1.7 monospace',color:'#ff6b6b',background:'#141414',minHeight:'100vh'} },
-            createElement('div', { style: {fontWeight:700,fontSize:'1.1rem',marginBottom:'1rem'} }, '\\u26A0 Render Error'),
-            createElement('div', { style: {color:'#f1fa8c',whiteSpace:'pre-wrap',marginBottom:'1rem'} }, String(e.message || e)),
-            createElement('div', { style: {color:'#888',fontSize:'11px'} }, 'Waiting for state update to retry\\u2026'),
-            createElement('button', {
-              style: {marginTop:'1rem',padding:'.4rem 1rem',background:'#2a2a2a',color:'#ccc',border:'1px solid #444',borderRadius:'4px',cursor:'pointer',font:'inherit'},
-              onClick: () => this.setState({ error: null })
-            }, 'Retry Now')
-          )
-        }
-        return this.props.children
-      }
-    }`;
-}
-
 /** Health overlay dot + panel — displays diagnostic events in bottom-right corner. */
 export function healthOverlayScript(): string {
   return `

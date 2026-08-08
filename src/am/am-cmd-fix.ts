@@ -12,6 +12,7 @@ import {
 import { join, resolve } from "@std/path";
 import { parse as parseJsonc } from "@std/jsonc";
 import { refOfLink } from "../server/framework-pin.ts";
+import { resolveEntryPath } from "../server/paths.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
 import { linkDepAio, probeDepAio, resolveAioRoot } from "./am-cmd-link.ts";
@@ -302,10 +303,15 @@ async function run(
 }
 
 async function resolveEntry(dir: string): Promise<string | null> {
-  for (const e of ["src/app.ts", "src/main.ts", "app.ts", "main.ts"]) {
-    if (await exists(join(dir, e))) return e;
-  }
-  return null;
+  // THE rule, not a probe list. `src/main.ts` / `main.ts` used to count here
+  // and nowhere else, so `am fix` could pronounce a project fine on the
+  // strength of a file the build would never compile.
+  let cfg: Record<string, unknown> | null = null;
+  try {
+    cfg = JSON.parse(await Deno.readTextFile(join(dir, "deno.json")));
+  } catch { /* no deno.json — the default below still applies */ }
+  const entry = resolveEntryPath(cfg);
+  return (await exists(join(dir, entry))) ? entry : null;
 }
 
 export async function cmdFix(

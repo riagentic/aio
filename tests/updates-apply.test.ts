@@ -9,6 +9,7 @@ import {
   judgePending,
   MAX_BOOT_ATTEMPTS,
   type PendingUpdate,
+  pruneKeepingNewest,
   pruneOld,
   readPending,
   RELAUNCH_FLAG,
@@ -299,4 +300,47 @@ Deno.test("unpack: a missing tool is named, not swallowed", async () => {
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
+});
+
+Deno.test("pruneKeepingNewest: pre-migration store backups do not accumulate", async () => {
+  // Superseded ARTIFACTS were pruned from the start; the store backups a
+  // migrating update takes were not. On an app with a multi-gigabyte store that
+  // is unbounded growth inside `data/` — the backup unit — so every `am backup`
+  // then copied every historical snapshot as well. One retention rule, both
+  // kinds.
+  const dir = await Deno.makeTempDir({ prefix: "aio-prune-" });
+  try {
+    const names = [
+      "pre-1.0.0-state.db",
+      "pre-1.1.0-state.db",
+      "pre-1.2.0-state.db",
+      "pre-1.3.0-state.db",
+      "pre-1.4.0-state.db",
+    ];
+    for (const [i, n] of names.entries()) {
+      const p = join(dir, n);
+      await Deno.writeTextFile(p, n);
+      // Distinct mtimes: newest last, so "newest kept" is a real assertion and
+      // not filesystem-ordering luck.
+      await Deno.utime(p, new Date(), new Date(1_700_000_000_000 + i * 60_000));
+    }
+    // A file that is not ours stays, whatever the retention.
+    await Deno.writeTextFile(join(dir, "state.db"), "live");
+
+    await pruneKeepingNewest(dir, "pre-", 3);
+
+    const left = [...Deno.readDirSync(dir)].map((e) => e.name).sort();
+    assertEquals(left, [
+      "pre-1.2.0-state.db",
+      "pre-1.3.0-state.db",
+      "pre-1.4.0-state.db",
+      "state.db",
+    ]);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("pruneKeepingNewest: a directory that never existed is not an error", async () => {
+  await pruneKeepingNewest("/nonexistent-aio-prune-dir", "pre-", 3);
 });

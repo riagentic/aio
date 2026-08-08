@@ -9,6 +9,8 @@ function makeCtx(tsxFiles: SourceFile[]): LintContext & { _issues: Issue[] } {
     denoJson: null,
     denoJsonPath: null,
     sourceFiles: tsxFiles,
+    // Hand-built context: app-shaped rules apply here (see looksLikeApp).
+    isApp: true,
     tsxFiles,
     tsFiles: [],
     testFiles: [],

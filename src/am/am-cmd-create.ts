@@ -320,6 +320,11 @@ export function denoJson(
     // Target names: server · browser · electron · android · cli ·
     // electron-client · android-client · cli-client (run `deno task build --list`).
     //
+    // Per-target overrides use the OBJECT form, which the array form above
+    // hides completely — nothing in a scaffolded project hints it exists:
+    //   "targets": { "electron": { "platforms": ["host"] },
+    //                "server":   { "platforms": ["linux"], "entry": "src/svc.ts" } }
+    //
     // `platforms` is the OTHER axis — which OS each target is built FOR.
     // Default is just this machine; add more to ship from one command:
     //   "platforms": ["host", "windows", "macos-arm64"]

@@ -1,6 +1,6 @@
 // Memory Pressure Monitor — threshold alerts + trend detection
 
-/** Heap usage report emitted when memory exceeds thresholds — includes per-cell breakdown and trend. */
+/** Heap usage report — per-cell breakdown, trend, and WHY it fired. */
 export type MemoryReport = {
   level: "warn" | "critical";
   heapUsed: number;
@@ -11,6 +11,20 @@ export type MemoryReport = {
   gcReclaimedPct: number;
   cellStates: CellStateSize[];
   trend: "rising" | "stable" | "falling";
+  /** WHY this report exists. Three different problems wear the same symptom,
+   *  and the fix differs for each:
+   *
+   *  • `pressure` — near the V8 ceiling. The app is about to OOM.
+   *  • `machine` — a large share of the WHOLE machine, even though the ceiling
+   *    is not close. This is the one that freezes a desktop: on a 47 GB
+   *    ceiling, 75%-of-ceiling is 35 GB, and by then the machine is already
+   *    swapping. Ceiling-relative thresholds cannot see it.
+   *  • `growth` — climbing steadily with nothing near a threshold. A leak
+   *    announces itself here, hours before either of the above. */
+  reason: "pressure" | "machine" | "growth";
+  /** Heap as a fraction of PHYSICAL RAM (0 when the machine is unmeasurable) —
+   *  the number that matters for the machine's health, as opposed to the app's. */
+  machinePct: number;
 };
 
 /** Per-cell memory size entry — name, serialized byte size, and largest field info. */
@@ -28,6 +42,15 @@ export type MemoryConfig = {
   criticalThreshold?: number;
   gcStressRatio?: number;
   trendWindow?: number; // number of samples for trend detection (default: 10)
+  /** Report when the heap passes this fraction of PHYSICAL RAM, whatever the
+   *  V8 ceiling says. Default 0.5. The ceiling protects the app; this protects
+   *  the machine, and on a big-ceiling build they are nowhere near each other. */
+  machineWarnFraction?: number;
+  /** Report sustained growth once the heap has risen by at least this fraction
+   *  of the ceiling across the trend window while still below every threshold.
+   *  Default 0.15. This is the leak signal: silence until 75% means a leak is
+   *  only ever reported as an emergency. */
+  growthReportRatio?: number;
   onMemoryPressure?: (report: MemoryReport) => void;
 };
 
@@ -46,9 +69,14 @@ type MonitorDeps = {
   criticalThreshold: number;
   gcStressRatio?: number;
   trendWindow?: number;
+  machineWarnFraction?: number;
+  growthReportRatio?: number;
   onReport: (report: MemoryReport) => void;
   getMemoryUsage: () => MemoryUsage;
   getHeapLimit: () => number; // V8 heap_size_limit — the actual max, not lazily-allocated heapTotal
+  /** Physical RAM in bytes, or 0 when unmeasurable. Ceiling-relative thresholds
+   *  say nothing about the machine, and the machine is what freezes. */
+  getTotalMemory?: () => number;
   getCellStates: () => CellEntry[];
 };
 
@@ -133,6 +161,7 @@ export function createMemoryMonitor(deps: MonitorDeps): { stop: () => void } {
   const windowSize = deps.trendWindow ?? 10;
   let prevHeapUsed = 0;
   const samples: number[] = []; // sliding window of heapPct samples
+  const usedSamples: number[] = []; // …and of absolute bytes, for growth
 
   const id = setInterval(() => {
     const mem = deps.getMemoryUsage();
@@ -153,7 +182,33 @@ export function createMemoryMonitor(deps: MonitorDeps): { stop: () => void } {
     samples.push(heapPct);
     if (samples.length > windowSize) samples.shift();
 
-    if (heapPct < deps.warnThreshold) return;
+    // Absolute samples too: the growth check must not be expressed as a
+    // fraction of the ceiling, or a leak on a 47 GB ceiling stays "0.02 →
+    // 0.04" and reads as noise while it eats 20 GB.
+    usedSamples.push(mem.heapUsed);
+    if (usedSamples.length > windowSize) usedSamples.shift();
+
+    const total = deps.getTotalMemory?.() ?? 0;
+    const machinePct = total > 0 ? mem.heapUsed / total : 0;
+
+    // THREE reasons to speak, and they are genuinely different problems.
+    const pressure = heapPct >= deps.warnThreshold;
+    // …a large share of the whole machine, whatever the ceiling allows. On a
+    // 47 GB ceiling the pressure threshold is 35 GB, by which point a 64 GB
+    // desktop is already swapping — this is the check that sees it first.
+    const machine = machinePct >= (deps.machineWarnFraction ?? 0.5);
+    // …or climbing steadily while comfortably below both. That is a leak, and
+    // reporting it only at 75% turns a slow diagnosis into an emergency.
+    const growth = !pressure && !machine && usedSamples.length >= windowSize &&
+      detectTrend(samples) === "rising" &&
+      (usedSamples[usedSamples.length - 1]! - usedSamples[0]!) >
+        (heapLimit > 0 ? heapLimit : mem.heapTotal) *
+          (deps.growthReportRatio ?? 0.15);
+
+    if (!pressure && !machine && !growth) return;
+    // Once a growth report has gone out, do not repeat it every interval — the
+    // window has to climb again by the same amount to earn a second one.
+    if (growth) usedSamples.length = 0;
 
     // Measure cell states
     const entries = deps.getCellStates();
@@ -165,8 +220,15 @@ export function createMemoryMonitor(deps: MonitorDeps): { stop: () => void } {
       ? "critical"
       : "warn";
     const trend = detectTrend(samples);
+    const reason: MemoryReport["reason"] = pressure
+      ? "pressure"
+      : machine
+      ? "machine"
+      : "growth";
 
     deps.onReport({
+      reason,
+      machinePct,
       level,
       heapUsed: mem.heapUsed,
       heapTotal: mem.heapTotal,

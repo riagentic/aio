@@ -5,6 +5,11 @@
 
 import { dirname, join } from "@std/path";
 import { appDirs } from "../server/app-dirs.ts";
+import {
+  maxHeapFlagArgs,
+  physicalMemoryBytes,
+  resolveMaxHeapMB,
+} from "../server/heap-policy.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import {
   AppLock,
@@ -49,7 +54,23 @@ const isDenoRuntimeFlag = (a: string): boolean => DENO_RUNTIME_FLAG.test(a);
 export function buildDenoArgs(entry: string, passthrough: string[]): string[] {
   const denoFlags = passthrough.filter(isDenoRuntimeFlag);
   const appFlags = passthrough.filter((a) => !isDenoRuntimeFlag(a));
-  return ["run", "-A", "--unstable-kv", ...denoFlags, entry, ...appFlags];
+  // The heap ceiling, resolved for THIS machine (25% of RAM, floor 4 GB).
+  // A launcher is the only place that can size it correctly: V8 freezes the
+  // ceiling at isolate creation, so by the time the app runs it is far too
+  // late. Skipped when the caller already passed `--v8-flags` — an explicit
+  // choice at the command line outranks a computed default.
+  const heap = denoFlags.some((f) => f.startsWith("--v8-flags"))
+    ? []
+    : maxHeapFlagArgs(resolveMaxHeapMB(physicalMemoryBytes()));
+  return [
+    "run",
+    "-A",
+    "--unstable-kv",
+    ...heap,
+    ...denoFlags,
+    entry,
+    ...appFlags,
+  ];
 }
 
 /** Raw stdout+stderr of an app `am` launched: `~/.<appId>/logs/stdout.log`.

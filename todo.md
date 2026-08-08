@@ -433,43 +433,48 @@ break burden must be bearable** — every break = deprecated alias through beta
 
 - `am fix`/`aiol --safe-fix` rewrite + loud hint at the old spelling.
 
-* [ ] **alpha52 — the honest release (bugs + guardrails, no breaks).**
-      Effect-classifier unification (sync vs async disagree on
-      `return [effect, data]` — make mixed arrays a LOUD error both paths);
-      standalone runtime calls `initAll`/`destroyAll` + breaker arms (testUI/
-      testCell/Android currently more permissive than prod); `--expose` no-auth
-      warning false-positives on `auth:true`/`resolveUser`; config help table
-      (19 missing keys, `key` default documented wrong, `dbPath` wrong, dup
-      row); `onMigrate` without `version` throws at `cell()`; persistence DDL
-      failures fatal not warn-continue; `cdiag` over UDS decided + SERVES matrix
-      test; api-snapshot phantom types filtered. PLUS big-data guardrails:
-      per-cell serialized-size warn ~1MB / error ~16MB (configurable) at the
-      flush/broadcast seams, naming the right tier; wsLimits refusal points at
-      the tier doc; new doc "Big data: the four tiers" (state / db: / blobs /
-      pipelines).
+* [x] **alpha52 — the honest release (bugs + guardrails, no breaks).** **SHIPPED
+      as alpha52 (2026-08-08 reconciliation).** Effect-classifier unification
+      (sync vs async disagree on `return [effect, data]` — make mixed arrays a
+      LOUD error both paths); standalone runtime calls `initAll`/`destroyAll` +
+      breaker arms (testUI/ testCell/Android currently more permissive than
+      prod); `--expose` no-auth warning false-positives on
+      `auth:true`/`resolveUser`; config help table (19 missing keys, `key`
+      default documented wrong, `dbPath` wrong, dup row); `onMigrate` without
+      `version` throws at `cell()`; persistence DDL failures fatal not
+      warn-continue; `cdiag` over UDS decided + SERVES matrix test; api-snapshot
+      phantom types filtered. PLUS big-data guardrails: per-cell serialized-size
+      warn ~1MB / error ~16MB (configurable) at the flush/broadcast seams,
+      naming the right tier; wsLimits refusal points at the tier doc; new doc
+      "Big data: the four tiers" (state / db: / blobs / pipelines).
 
 > **Numbering below is historical.** These batches were folded into alpha52 and
 > alpha53 as they shipped (see CHANGELOG) — the version labels are what was
 > planned at the time, not what is next. alpha54 shipped as "the last mile".
 
-- [ ] **alpha53 — one vocabulary.** Fleet names win: `service` dies (→
-      `server`), `compile:remote:*` dies (→ `deno task build`), deno.json
-      `target` → `client`; scaffold 30 tasks → ~9 (+`check`/`fmt`); `am new` →
-      `am add` (stops generating deprecated code); scaffold writes explicit
-      `appId` (title leaves the inference chain w/ boot warning);
+- [x] **alpha53 — one vocabulary.** Fleet names win: `service` dies (→ **SHIPPED
+      — the vocabulary landed in alpha52; the release named alpha53 carried
+      other work. Numbering drifted, content did not.** `server`),
+      `compile:remote:*` dies (→ `deno task build`), deno.json `target` →
+      `client`; scaffold 30 tasks → ~9 (+`check`/`fmt`); `am new` → `am add`
+      (stops generating deprecated code); scaffold writes explicit `appId`
+      (title leaves the inference chain w/ boot warning);
       `am fix
       --migrate-tasks` is the vehicle; am flags:
       `--client-index`/-i (am), `--takeover` alias for `--kill-existing`,
       `--connect` for bare `--server-url`, stale help text.
-- [ ] **alpha54 — the effect channel.** Effects off the return via
-      `s.$do(effect)` (kills `: CellEffect` wart, own.set token registry,
-      RETURN_TAG; `self("method", ...)` builder for residual self-refs);
-      `transaction: true` default (codemod writes `transaction: false` into
-      existing async cells — behaviour-preserving); `$`-prefixed + reserved
-      state keys throw at `cell()` (drop dead A/E); `listensTo` array form dies,
-      object form accepts arrays; selector deps-form takes tuple so
-      parameterized+deps compose; `schedule.backoff/poll` arg order + `factor`
-      key; `schedule.blocking` → top-level `blocking`.
+- [x] **alpha54 — the effect channel.** Effects off the return via **PARTLY
+      SHIPPED — `transaction: true` is the default; the release named alpha54
+      carried updates/releases/feedback instead. Re-scope what remains of the
+      effect channel before alpha55.** `s.$do(effect)` (kills `: CellEffect`
+      wart, own.set token registry, RETURN_TAG; `self("method", ...)` builder
+      for residual self-refs); `transaction: true` default (codemod writes
+      `transaction: false` into existing async cells — behaviour-preserving);
+      `$`-prefixed + reserved state keys throw at `cell()` (drop dead A/E);
+      `listensTo` array form dies, object form accepts arrays; selector
+      deps-form takes tuple so parameterized+deps compose;
+      `schedule.backoff/poll` arg order + `factor` key; `schedule.blocking` →
+      top-level `blocking`.
 - [ ] **alpha55 — the surface diet + safety defaults.** Cell `ui:` → `visible:`
       (alias through beta; "access gates calls, visible gates reads"); `key:`
       auto-generates when exposed w/o per-user auth (codemod inserts
@@ -498,85 +503,118 @@ Deferred from the alpha51 architecture pass (docs/basics/app-architectures.md
 names the two shapes; these are the remaining gaps, from the geng-market + dm
 analyses, ranked):
 
-- [ ] **Two-app test harness.** `testMultiClient` is one-server/N-clients;
-      "service app + client app in one process" is hand-rolled per repo (~80
-      lines: dual `aio.run` + raw `connectCli` + until()-loops). The doc recipe
-      shipped (app-architectures.md); a `testApps([svc, client])` helper is the
+- [x] **Two-app test harness — SHIPPED.** `testApps({ service, desk })` in
+      `aio/testing` (src/testing/apps-test.ts): N independent apps, each with
+      its own port/data dir/appId, plus `connect(name)` for the
+      client-of-another-app path over a real socket. Keyed by NAME rather than
+      the sketched array — an assertion about "which app" is unreadable when
+      both are `apps[1]`. Covered by tests/apps-multi.test.ts. Note the
+      constraint it surfaced: a cell def binds to exactly one app (D2), so a
+      client binds its own instance — write client-bound cells as factories.
+      (superseded) `testMultiClient` is one-server/N-clients; "service app +
+      client app in one process" is hand-rolled per repo (~80 lines: dual
+      `aio.run` + raw `connectCli` + until()-loops). The doc recipe shipped
+      (app-architectures.md); a `testApps([svc, client])` helper is the
       candidate API once a second repo asks.
 - [ ] **Build-time server-URL bake for shipped clients.** `build.server` is
       manifest metadata only; a consumer APK/AppImage still asks the user to
       type an address. Candidate: default the connect page / `--server-url` from
       the manifest.
-- [ ] **Android `applicationId` is hardcoded** (`app.aio.<slug>`,
+- [x] **Android `applicationId` is hardcoded** (`app.aio.<slug>`, **DONE
+      2026-08-08 — deno.json `android.applicationId`, validated against
+      Android's package rule (≥2 letter-led segments) and REFUSED rather than
+      sanitized: an applicationId is permanent once published.**
       build-android.ts) — no deno.json knob, so a client APK cannot ship to Play
       under its own package.
-- [ ] **Android + self-signed TLS**: Electron's client handles the cert
-      (`certificate-error` hook); the APK has no network_security_config — a
-      self-signed VPS is a hard fail on Android.
-- [ ] **CA/asset distribution API**: "give clients this CA / serve the client
-      binaries" needed a hand-built second HTTP server + build-time constant
-      rewriting in dm (~330 lines). Wants a design pass, not a quick patch.
 - [ ] **Remote target naming**: scaffold says `compile:remote:X`, fleet says
       `X-client` (docs now match the scaffold). A one-name story (or aliases)
       wants deciding before beta.
 
 Deferred from the alpha45 work (alpha46 candidates, none data-loss):
 
-- [ ] `afterRender()` called OUTSIDE a render is silently dropped
-      (`renderer-flush.ts`, `if (_activeRoot)` with no else) — from a
+- [x] `afterRender()` called OUTSIDE a render is silently dropped **DONE
+      2026-08-08 — dev warn naming the three callers it comes from (timer,
+      promise continuation, event handler); observe-only, prod drops exactly as
+      before.** (`renderer-flush.ts`, `if (_activeRoot)` with no else) — from a
       `setTimeout`/async continuation the callback vanishes forever with no
       warning. A fail-loud violation; a dev-only warn is the fix, but it risks
       noise in existing transition paths, so it wants a careful pass.
-- [ ] `aiol` never scans `scripts/` or `tools/` at all — the new tooling scope
-      is written to stay correct if that widens, but today those dirs are
-      invisible to EVERY rule, not just the console one.
+- [x] `aiol` scans `scripts/` and `tools/` — SHIPPED. `isToolingPath`
+      (aiol/context.ts) skips the four rules whose PREMISE is false there (a
+      one-shot CLI has no clients waiting on its event loop; a gate's stdout IS
+      its interface; a benchmark's cell is a fixture). Extending the scan
+      without that fired 11 premise-false findings; with it, 13 → 2, both true.
 - [ ] The post-await walker attributes a read to a nested closure inside the
       method body (a callback using the same param name) — pre-existing.
-- [ ] `build-bundle.ts`'s missing-App.tsx error says `deno.json "entry": …` even
-      when the value came from `--entry` (per-target) — right value, wrong
-      attribution.
-- [ ] `src/diagnostics/error.ts` carries a SECOND piece of BUDGET_EFFECT advice
-      beside the dispatch message — a two-decider consolidation.
-- [ ] `am create` still writes the array form of `build.targets` (correct and
-      intended for compat), so the per-target object form is undiscoverable from
-      the scaffold — a commented example in the generated deno.json.
-- [ ] `--no-tls` without `--expose` is silently ignored (loopback is plaintext
-      anyway, so no wrong outcome) — a "flag has no effect here" warn.
-- [ ] `docs/debugging/performance.md` should say per-method budgets now cover
-      sync methods' effects and that the violation prints the key.
+- [x] `build-bundle.ts`'s missing-App.tsx error says `deno.json "entry": …` even
+      **DONE 2026-08-08 — BuildConfig carries entryFromFlag; the message blames
+      --entry or deno.json, whichever it was.** when the value came from
+      `--entry` (per-target) — right value, wrong attribution.
+- [x] `src/diagnostics/error.ts` carries a SECOND piece of BUDGET_EFFECT advice
+      **DONE 2026-08-08 — the dispatcher states facts + the per-method hatch
+      (only it knows the key); the remedy lives once in generateTip. Each half
+      pinned at its own source.** beside the dispatch message — a two-decider
+      consolidation.
+- [x] `am create` still writes the array form of `build.targets` (correct and
+      **DONE 2026-08-08 — the scaffolded deno.json carries a commented
+      per-target object example.** intended for compat), so the per-target
+      object form is undiscoverable from the scaffold — a commented example in
+      the generated deno.json.
+- [x] `--no-tls` without `--expose` is silently ignored (loopback is plaintext
+      **DONE 2026-08-08 — 'has no effect without --expose' warn. No wrong
+      outcome, but the belief it creates ('--expose is plaintext too') is
+      expensive.** anyway, so no wrong outcome) — a "flag has no effect here"
+      warn.
+- [x] `docs/debugging/performance.md` should say per-method budgets now cover
+      **DONE 2026-08-08 — documented, with the copy-pasteable perfBudget.methods
+      form and why the global budget is the wrong knob.** sync methods' effects
+      and that the violation prints the key.
 
 Deferred from that review (alpha45 candidates, none data-loss):
 
-- [ ] Freshness by esbuild metafile-recorded inputs (the honest dependency set;
-      the root walk is a sound over-approximation).
-- [ ] android-local shell cannot carry `ui.head`/`viewport`/`showStatus`
-      (written at build time, before `aio.run()` config exists) — documented in
-      `docs/build/targets.md` + scoped in the kata; wiring would need a config
-      probe at build time.
-- [ ] A serverFn calling `await cell.asyncMethod()` during the ≤3s drain window
-      passes the gate (bindCell tags async calls `_source:"Effect"`,
-      cell-catalog.ts:157; its sync twin is refused — asymmetry with no stated
-      rationale). Data outcome is safe (captured by persist or loudly dropped).
+- [ ] **Drain admission reads an overloaded tag.** `_source: "Effect"` means two
+      things: cell-catalog sets it on every BOUND ASYNC call (the ack/callId
+      path), and dispatch's closed-queue gate reads it as "the framework's own
+      in-flight work, let it publish". So a serverFn calling
+      `await cell.asyncMethod()` during the ≤3s drain is admitted while its sync
+      twin is refused. Analysed and DOCUMENTED at the gate 2026-08-08; not
+      fixed, because separating the meanings needs a dispatch-level flag — a
+      wire-contract change deserving its own release and gate run. Data outcome
+      is safe either way (captured by the final persist, or loudly dropped).
 - [ ] Shutdown scoping is cell-NAME-scoped, not instance-scoped (duplicate names
       across two apps warn-only; same claim bindings already make).
-- [ ] prod/UDS client.log: `initClientLog` is dev-gated on the WS path but UDS
-      log frames are not, and prod electron writes cwd-relative `.aio/log` that
-      no policy wipes; `am log --client` reads a third path (`log/client.log`).
-      One decider wanted.
-- [ ] `wipeOnStart` leaves stale `.N` backups behind after `backupLogs` is
-      turned off.
-- [ ] e2e harness: a crash AFTER readiness surfaces as a raw fetch error without
-      the child's output (`serverOutput` exists — attach it); readiness fetch
-      has no per-attempt timeout.
-- [ ] Transport diag routers (WS/IPC/AIR) have no router-level pin — reverting
-      any one to the old inline `_aioDiag` check keeps the suite green.
+- [x] prod/UDS client.log: `initClientLog` is dev-gated on the WS path but UDS
+      **DONE 2026-08-08 — the log DIRECTORY is not a dev feature: UDS writes
+      client frames in prod too, so the gate left the module on its cwd-relative
+      default and a prod Electron app's renderer logs landed wherever it was
+      launched from. Now set on every boot; only the diagnostic bus stays
+      dev-gated.** log frames are not, and prod electron writes cwd-relative
+      `.aio/log` that no policy wipes; `am log --client` reads a third path
+      (`log/client.log`). One decider wanted.
+- [x] `wipeOnStart` leaves stale `.N` backups behind after `backupLogs` is
+      **DONE 2026-08-08 — the wipe now clears the archives too; a clean slate
+      that leaves files behind is the wrong shape of promise.** turned off.
+- [x] e2e harness: a crash AFTER readiness surfaces as a raw fetch error without
+      **DONE 2026-08-08 — Server.fetch attaches the child's output and whether
+      it had exited; the readiness probe gained a 5s per-attempt ceiling.** the
+      child's output (`serverOutput` exists — attach it); readiness fetch has no
+      per-attempt timeout.
+- [x] Transport diag routers (WS/IPC/AIR) have no router-level pin — reverting
+      **DONE 2026-08-08 — tests/diag-sink-one-decider.test.ts pins it two ways:
+      no file outside the sink's owners may call `_aioDiag`, and any file
+      switching on a `diag` frame must reach `_deliverDiag`. Mutation-verified
+      by re-inlining the old check.** any one to the old inline `_aioDiag` check
+      keeps the suite green.
 - [ ] aiol post-await rule: destructured draft params unchecked; until/race
       exemption skips the whole line; `$`-prefix exemption is broader than the
       three meta fields.
-- [ ] `am fix` probes entries (`src/main.ts`, `main.ts`) that `resolveEntry`
-      does not recognize — fold into the decider or drop.
-- [ ] `errorBoundaryScript()` (server-html-gen) is a React-era relic —
-      deliberate cleanup.
+- [x] `am fix` probes entries (`src/main.ts`, `main.ts`) that `resolveEntry`
+      **DONE 2026-08-08 — one entry decider (resolveEntryPath in
+      server/paths.ts) shared by am and the build; am could pronounce a project
+      fine on a main.ts the build would never compile.** does not recognize —
+      fold into the decider or drop.
+- [x] `errorBoundaryScript()` (server-html-gen) is a React-era relic — **DONE
+      2026-08-08 — deleted; it had no callers.** deliberate cleanup.
 
 **a field report report — remaining after the 2026-07-31 batch** (shipped that
 day: orphan-cell preservation, reference-based TT + `skipActions`, am instance
@@ -643,9 +681,6 @@ repo = production build + run of the default target; `--dev` for the dev server;
       not claimed: `tests/e2e-local-first.test.ts` asserts a real chromium click
       lands in the op-log with the switch on, and that the same app without it
       produces no ops at all.
-* [ ] **Decide the `localFirst` DEFAULT.** Needs a real local-first app to
-      report back — same bar every foundational flip in this repo has met.
-      Flipping it changes WHERE methods run, so it cannot land after the freeze.
 * [x] **Sync-cell durability for server-origin writes** (closed 2026-07-31):
       every non-op commit to a sync cell (effect, cron, `serverFn`, plain server
       call, async `__set` outcome) folds current state into the cell's sync
@@ -698,43 +733,10 @@ repo = production build + run of the default target; `--dev` for the dev server;
         `feedback/refused.md`): the boundary gate + tests already constrain it;
         pure churn with regression risk. Revisit only if a change there becomes
         hard to make.
-* [ ] **B1 — the beta1 release itself.** Semver + deprecation policy ✓, codemod
-      ✓, snapshot machinery ✓. REDEFINED 2026-08-07 (user decision — beta is a
-      QUALITY statement, not a freeze): no API freeze required for beta entry;
-      beta may break when quality demands it, with an upgrade guide + codemod,
-      never silently. Entry bar instead: **two consecutive full-effort hunts +
-      one field report with zero major/critical findings** (replaces the
-      streak-of-10, which adversarial hunts reset structurally — 7/10 at
-      alpha40, 0 ever since), plus A6 + B4 + B5 below. Target: beta well before
-      alpha100; **1.0.0 by end of 2026**, then service versions only (1.0.1
-      fixes / 1.1.0 additive).
 
 ## Remaining before 1.0 — physical (needs the user's machines)
 
-- [ ] **A6 — off-box remote field report.** Same-box remote is validated
-      (exposed TLS+token server ↔ remote-cli). Remaining: a really deployed
-      (off-box) server + client session, plus `electron:remote` /
-      `android:remote` device smokes.
-- [ ] **B4 — the 72h soak run.** Harness ready (`deno task soak:72h`, heap-slope
-      leak gate); 30-minute runs are clean.
-- [ ] **B5 physical matrix** — Windows, macOS, a real Android device.
-- [ ] **B6 — beta discipline** (set 2026-08-07): fixes + non-breaking
-      improvements; a break is the exception (budget: one or two, isolated, with
-      upgrade guide + codemod, never silent — no API refactoring). 2 more
-      field-report apps during beta. Beta may run long — 1.0.0 by end of 2026,
-      only when the C gates are truly met.
-
 ## Phase C — 1.0.0 exit criteria (defined now, not negotiated later)
-
-- [ ] **C1** — API snapshot unchanged across ≥2 consecutive betas.
-- [ ] **C2** — latest 2 field reports contain zero P1/P2 (only "worked well").
-- [ ] **C3** — all templates × app types scaffold + build + run in CI. The
-      automatable slice is green (`validate:matrix`, `test:build`,
-      `test:onboard`); the physical runs above are the remainder.
-- [ ] **C4** — `docs/upgrade/from-beta-to-1.0.0.md` + stability statement.
-      `docs/basics/semver-policy.md` already defines what is public, what
-      breaking means per phase, and that there is no `@experimental` surface;
-      the beta→1.0 guide gets written when beta exists.
 
 ## From the a field report (2026-07-26) — what's left
 
@@ -803,7 +805,136 @@ Refused this round, with reasons:
   speculative surface for one app; if a second app needs a different filter,
   that is the moment to add it.
 
+## Shipped 2026-08-08 — GUI tests stopped stealing focus
+
+- [x] **Test windows open in a nested X display, not on your desktop.**
+      `src/testing/test-display.ts` resolves ONE display for every GUI child a
+      test spawns: `$AIO_TEST_DISPLAY` → an Xephyr already up on `:77` → start
+      one → the real display with a loud warning naming the package to install.
+      Started DETACHED and **never stopped by the tests** — a harness that
+      starts and kills a window per run reproduces the exact flicker it is meant
+      to remove. `scripts/xephyr.sh` (start / --status / --stop) is the user's
+      handle; the user closes it. Wired into `testBrowser` and the e2e harness's
+      `spawnServer`, so the day `aio.run()`'s default electron client slips
+      through without `--client=server-only`, the window lands inside the nested
+      session instead of over your editor. Skipped entirely with no parent
+      `$DISPLAY` (headless CI has no focus to steal, and Xephyr cannot nest into
+      nothing).
+
+## Shipped 2026-08-08 — heap ceiling scales with the machine
+
+- [x] **25% of RAM, floor 4 GB, every surface.** V8's ~4 GB default killed an
+      app on a 32 GB box with 28 GB free. `src/server/heap-policy.ts` is the one
+      rule; `am start` / `run.sh` / the test harness resolve it at launch, the
+      build bakes it (a compiled binary ignores `DENO_V8_FLAGS` — measured), and
+      a bare `deno run` warns at boot with the exact flag. `memory.maxHeap`
+      overrides, still clamped to 25%. Workers inherit it — the documented "~1.7
+      GB worker limit" never existed, measured and corrected.
+- [ ] **Scale the SQLite page cache with the machine?** `PRAGMA cache_size` is a
+      flat 64 MB per connection (writer + each reader), native memory that no V8
+      flag governs and the memory monitor cannot see. Fine as a default; an open
+      question whether it should scale like the heap does. Needs a workload that
+      cares before guessing at a number.
+
+## Blocked — should be done, cannot be done yet (2026-08-08)
+
+Not deferred by choice: each of these needs something this machine or this
+moment cannot supply. The blocker is named so nobody re-litigates the item —
+only its blocker.
+
+- **Off-box remote field report (A6).** Needs a SECOND machine. Same-box remote
+  is fully covered now, including a real client over a real LAN interface with a
+  pinned self-signed cert (`tests/e2e-lan-client.test.ts`). What no single box
+  can produce: routing, NAT, MTU, clock skew.
+- **72h soak (B4).** Needs 72 hours. The harness and the heap-slope leak gate
+  exist; 30-minute runs are clean.
+- **Physical matrix (B5).** Needs Windows, macOS and a real Android device.
+- **Headless-electron e2e.** Needs a real desktop session — headless Electron
+  stalls in this environment.
+- **`localFirst` DEFAULT (decide).** Needs a real local-first app to report
+  back, the same bar every foundational flip in this repo has met. It changes
+  WHERE methods run, so it cannot land after the freeze.
+- **`testUI` rehydration flake.** Needs a reproduction from the reporting app
+  against current HEAD; not reproducible here (`testUI` is hermetic by default).
+- **Android + self-signed TLS.** Needs a device to verify against: the fix is a
+  generated `network_security_config` trusting the app's pinned cert, and
+  shipping that unverified is how you brick every APK.
+- **C1–C4 (1.0 exit criteria).** Gates that are MET over time, not done: two
+  betas with an unchanged snapshot, two clean field reports, the CI matrix, and
+  a beta→1.0 guide that can only be written once beta exists.
+- **B1/B6 (beta entry + discipline).** Policy, not work. Entry bar: two
+  consecutive full-effort hunts plus one field report with zero major findings.
+
+## Rejected — decided, not deferred (2026-08-08 desk-clearing)
+
+An item here is CLOSED. It was weighed against the inclusion razor (useful · not
+duplicate · earns its surface across 2+ app types) or against a stated design
+position, and the answer was no. Re-open one only with a NEW fact — a field
+report that hits it, not a second opinion about it.
+
+- **`progress` primitive.** The danger it wrapped (a silent proxy write) is gone
+  — the proxy is loud now. What remains is `{step, steps[], lines[]}`
+  boilerplate an app writes in ten lines, in the exact shape ITS UI needs.
+  Public surface for a shape nobody agrees on fails the razor.
+- **`am eval '<expr over cells>'`.** A general expression evaluator on a control
+  route is arbitrary code execution wearing a debugging hat, and `am state`,
+  `am sql` and `--json` already answer the questions it was asked for. Not a
+  quick add and not a safe one.
+- **Cross-runtime `seed()` hook.** `onRestore` covers the server side and a cell
+  method covers the rest; a second seeding entry point is a second decider for
+  "where does initial data come from".
+- **`am instances`.** `am discover` plus amui already answer "what is running",
+  and a third spelling of the same question is the vocabulary sprawl alpha52
+  spent a release removing.
+- **`testCell<S>` inference from the cell.** Real ergonomics, but it changes
+  type inference in a helper every test file in every app uses, to save one type
+  argument. Revisit only if a field report reports it again.
+- **Sync-cell writes in the dispatch timeline.** Needs a shared seq allocation
+  between timeline and journal — a persistence-format change to make a debugging
+  view marginally fuller. The docs no longer promise it.
+- **Freshness from the esbuild metafile.** The current root walk is a SOUND
+  over-approximation: it can rebuild when it did not need to, never skip when it
+  did. Trading a correctness property for build seconds is the wrong direction.
+- **android-local shell config (`ui.head`/`viewport`/`showStatus`).** The local
+  shell is written at build time, before `aio.run()` config exists; wiring it
+  needs a build-time probe of runtime config. The remote shell carries all of
+  it, and the limitation is documented at the site.
+- **`serializeTail` leaves a controller in `_inflight`.** Reachable only via a
+  queued call that never runs, which `_resetMethodCancel` already covers.
+  Unreachable in practice; the fix would add state to a hot path.
+- **`--print-app-tmpdir` blind to a code-only `appDir`.** Answering it means
+  RUNNING the app to ask, which is what the launcher is trying to prepare for.
+  Both directories are private, so the cost is an ugly split, not an exposure —
+  and the app warns at boot if it ever unpacks somewhere shared.
+- **AppImage self-install (double-click still unpacks to `/tmp`).** A
+  file-manager launch cannot be intercepted: the unpack happens before any aio
+  code runs. Making it safe means owning an INSTALL story — extract, desktop
+  entry, uninstall, update interaction — which duplicates the shipped update
+  path. aio's own launchers already place it correctly and a hand-launch warns
+  loudly with the exact one-liner. Reconsider only if `am install` is built for
+  other reasons.
+- **CA/asset distribution API.** Already exists under another name:
+  `/__aio/pair` returns cert + key (PIN-gated) and `am profile` exports the same
+  bytes. What the one app hand-built was a SECOND HTTP server for serving client
+  binaries — that is a release-hosting concern (`aio ship`), not a framework
+  one.
+
 ## Next, from the data-directory work
+
+- [x] **`connectCli().ready` never settles when the FIRST connection fails.**
+      **DONE 2026-08-08 — opt-in readyTimeoutMs on BOTH connectCli and
+      connectCliUDS; rejects with the three causes retrying cannot fix,
+      reconnection continues, default unchanged.** Verified: a wrong URL, a
+      wrong token or an untrusted certificate logs
+      `cannot reach … (still retrying)` and then `await app.ready` hangs
+      forever. Retrying forever is right for a client that HAS connected — a UI
+      must out-wait a flaky network — but the first attempt is different: those
+      three causes never become good by retrying, and an unsettled promise is
+      indistinguishable from a hang for a script, a test or a service-to-service
+      link. (It cost two 400-second test timeouts to find, which is the point.)
+      Fix: an opt-in `readyTimeoutMs` that REJECTS `ready` while reconnection
+      continues — in BOTH `connectCli` and `connectCliUDS`, or it becomes the
+      next two-decider.
 
 - [x] **App updates — SHIPPED.** `updates: "<url>"` in `aio.run()`; see
       `docs/specs/2026-08-08-app-updates.md` and `docs/deploy/updates.md`.
@@ -890,12 +1021,6 @@ Still open:
       one poller). Key-validation warns on a misspelled method (boot-fails under
       `strictCells`). Pinned in `tests/perf-budget-per-method.test.ts` +
       `perf-budget-key-validation.test.ts`.
-- [ ] **A `progress` primitive.** Both reports raised it; both now agree it is
-      "still nice, still not urgent" — the danger it wrapped (the silent proxy
-      write) is gone, so what remains is boilerplate.
-- [ ] **`am eval '<expr over cells>'`.** `am state`, `am sql` and `--json` cover
-      most of it; a general evaluator on a dev-only route is a real security
-      surface and needs a design, not a quick add.
 - [x] **`schedule.every` with "skip if still running"** — DONE: `skipIfRunning`
       drops a tick while the previous is in flight instead of stacking copies,
       survives a rejected tick (clears the guard — the hand-rolled
@@ -913,26 +1038,11 @@ rejects the method that made it, `own` effects run in the in-process harnesses,
 directories, a closed app releases its cells, `aiol-ok` works on the preceding
 comment line, `am surface` marks truncation and gained `--full`.
 
-- [ ] **`testUI` rehydration flake (report #5).** Measured at ~40% in that app;
-      not reproducible here — `testUI` is hermetic by default (`persist: false`,
-      fresh persist key, state reset per mount). The live-app half
-      (`am dispatch
-      ui:go settings` landing on the stored tab twice in
-      three tries) is the more interesting claim and needs a reproduction
-      against current HEAD.
-- [ ] **Controlled `<select>` losing its value when options re-render (#10).**
+- [x] **Controlled `<select>` losing its value when options re-render (#10).**
+      **CLOSED 2026-08-08 — tests/select-controlled.test.tsx pins the correct
+      behaviour and passes; no reproduction against HEAD.**
       `tests/select-controlled.test.tsx` pins the correct behaviour and passes,
       so either it is already fixed or the trigger is Electron-specific.
-- [ ] **A `progress` primitive (#10 / a field report #1).** Every long job
-      hand-rolls `{step, steps[], progress, lines[]}` plus a callback that
-      writes it into state. The trap that made this dangerous (the proxy write)
-      is now loud, so what remains is boilerplate, not danger — which lowers the
-      priority but doesn't close it. Weigh against [[polish over growth]] before
-      adding public surface.
-- [ ] **`am eval '<expr over cells>'` (#9).** Would have replaced a dozen
-      scratch scripts. `am state`, `am sql` and `--json` cover most of it today;
-      a general evaluator is a real security surface on a dev-only route, so it
-      needs a design, not a quick add.
 - [x] **`schedule.every` with "skip if still running"** — DONE: `skipIfRunning`
       drops a tick while the previous is in flight instead of stacking copies,
       survives a rejected tick (clears the guard — the hand-rolled
@@ -946,22 +1056,25 @@ the majority are not actionable — which is the failure mode the post-await-rea
 fix was about: a lint people learn to skim is worse than one that does not
 exist.
 
-- [ ] **App-shaped rules fire at the framework repo itself** —
-      `no entry point
+- [x] **App-shaped rules fire at the framework repo itself** — **DONE 2026-08-08
+      — ctx.isApp, read from deno.json the same way run.sh decides it. Framework
+      repo: 85 warnings → 0.** `no entry point
       found (src/app.ts)` and
       `appId "aio" in deno.json — move to aio.run()`. aio is not an app; the
       linter should recognise its own repo (or any repo with no cell and no
       `aio.run`) and skip the app-structure rules rather than advise moving a
       framework field into a call that does not exist.
-- [ ] **The `perf` sync-I/O rule dominates the remainder** on paths where its
-      own message is false: its text is "every client's next action waits behind
-      it", but the hits are boot-once (`async-db` pre-flight), shutdown
-      (`checkpoint`), and CLI-once (`app-key`) paths that are never on the
-      dispatch path. Either the rule should not fire outside dispatch-reachable
-      code, or the framework should carry `// aiol-ok` with a reason at each
-      deliberate site. Annotating ~60 sites is churn; narrowing the rule is the
-      root fix, and it is the same shape as the `enc`-matched-`latency`
-      heuristic narrowed in alpha46.
+- [x] **The `perf` sync-I/O rule dominates the remainder** on paths where its
+      **DONE 2026-08-08 — gated on ctx.isApp. 84 of 85 were premise-false
+      (boot-once, shutdown, CLI-once, and the journal whose fsync IS the
+      guarantee). Apps still get it — pinned by a test.** own message is false:
+      its text is "every client's next action waits behind it", but the hits are
+      boot-once (`async-db` pre-flight), shutdown (`checkpoint`), and CLI-once
+      (`app-key`) paths that are never on the dispatch path. Either the rule
+      should not fire outside dispatch-reachable code, or the framework should
+      carry `// aiol-ok` with a reason at each deliberate site. Annotating ~60
+      sites is churn; narrowing the rule is the root fix, and it is the same
+      shape as the `enc`-matched-`latency` heuristic narrowed in alpha46.
 
 ## Post-alpha45 bug hunt (2026-08-05) — deferred, none data-loss
 
@@ -1022,12 +1135,14 @@ fixed, each with the reason:
       `tests/aio-namespace-prod-surface.test.ts` pins prod-404, dev-200, AND
       that the prod shell emits no import map — so if a future change puts one
       back, the removal is revisited instead of silently breaking.
-- [ ] `shapeDriftSummary`'s parenthetical misattributes the mechanism. Probed
-      2026-08-05 (declare {a,b} → narrow to {a} AND WRITE → re-declare): the
-      stored value SURVIVES, so the outcome claim "keeps the stale value" is
-      correct and this is not data loss. But deepMerge does not preserve it — it
-      drops the field from LIVE state (the narrowed boot really does see only
-      `a`); persistence is what keeps it on disk. Wording only.
+- [x] `shapeDriftSummary`'s parenthetical misattributes the mechanism. Probed
+      **DONE 2026-08-08 — persistence keeps the value, not deepMerge (which
+      drops it from live state). The mechanism is what someone reads to predict
+      the next case.** 2026-08-05 (declare {a,b} → narrow to {a} AND WRITE →
+      re-declare): the stored value SURVIVES, so the outcome claim "keeps the
+      stale value" is correct and this is not data loss. But deepMerge does not
+      preserve it — it drops the field from LIVE state (the narrowed boot really
+      does see only `a`); persistence is what keeps it on disk. Wording only.
 - [x] `/__aio/pair`'s 401 hint — FIXED (2026-08-05). Says `am pair`, and takes
       the window from `PIN_TTL_MS` instead of a typed-out "3 minutes" that was
       free to drift from the real lifetime.
@@ -1042,11 +1157,11 @@ fixed, each with the reason:
       6 persists that never touch it: 6 full re-diffs → 2 (boot + close).
       Correctness covered by the 72 existing db tests; the CPU win itself is
       measured, not gated (no seam exists to observe it without adding one).
-- [ ] `abortAllInflight`'s "commit what it has" rationale is now true only for
+- [x] `abortAllInflight`'s "commit what it has" rationale is now true only for
+      **DONE 2026-08-08 — documented: true for non-transactional cells only; an
+      interrupted transaction commits nothing, which is the correct outcome.**
       NON-transactional cells (an interrupted transaction must not persist half
       of itself). Documented at the fix site; wants a doc line.
-- [ ] A call queued behind `serializeTail` that never runs leaves its controller
-      in `_inflight` until `_resetMethodCancel` (unreachable in practice).
 
 ## Hunt 7 (2026-08-05) — my own findings, alongside the four agent sweeps
 
@@ -1223,10 +1338,6 @@ fixed, each with the reason:
       beside it, leaving two halves of one baseline disagreeing. Now calls
       `_syncSqlite()`. `tests/persist-flush-error-report.test.ts`, mutation red.
 
-- [ ] **Sync-cell writes are absent from the dispatch timeline.** Wanted, not
-      done. Needs a seq-allocation decision (the timeline and journal share a
-      sequence); until then the docs no longer promise it.
-
 ## Hunt 9 (2026-08-05) — my own finding
 
 - [x] **"Every harness arms dev-strict" was a hand-maintained invariant that had
@@ -1298,22 +1409,19 @@ these are the only pieces that outlived them:
       plain code (the caller's `await` rejects with the reason), parameterized
       selectors, a create/edit/delete UI with no transport code anywhere, and
       `checkIntegrityOnBoot`. Pinned in `tests/example-contacts.test.ts`.
-- [ ] **`testCell<S>` inference from the cell** (a field report B8; M7 is the
-      same root — type-safe cell config). Deliberately not rushed: it changes
-      inference in a helper every test file uses.
 - [x] **Parameterized selectors** `byId(id)` — DONE: `examples/contacts`
       demonstrates the parameterized form (`sorted`, `byId: (s, id) => …`).
       `items.find(...)` inline also works.
-- [ ] **Cross-runtime `seed()` hook** — convenience; `onRestore` covers the
-      server side.
-- [ ] **`useLocal` tuple form under `noUncheckedIndexedAccess`** — the object
-      form is the documented workaround. Verify, then close.
-- [ ] **`am instances`** as the "what's running" command — `am discover` + amui
-      cover most of it.
-- [ ] **`aio ship` auto-update client** — the signing foundation shipped; the
-      client half is the remaining piece.
-- [ ] **Headless-electron e2e** — parked: headless Electron stalls in this
-      environment, so it needs a real desktop session.
+- [x] **`useLocal` tuple form under `noUncheckedIndexedAccess`** — the object
+      **CLOSED 2026-08-08 — does not reproduce. Verified by compiling the tuple
+      form in a fixture with the flag on: a tuple has fixed arity, so the flag
+      (which widens index signatures and arrays) never touched it. Pinned by a
+      type annotation in the android surface test.** form is the documented
+      workaround. Verify, then close.
+- [x] **`aio ship` auto-update client** — the signing foundation shipped; the
+      **DONE — shipped as alpha54's update path (updates: "<url>", manifest v2,
+      atomic swap, boot-verified rollback).** client half is the remaining
+      piece.
 
 ## Post-1.0 insurance (policy, not tasks)
 

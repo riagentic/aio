@@ -153,10 +153,15 @@ export function createServer(config: ServerConfig): ServerHandle {
 
   // Diagnostic bus — dev-only event system for surfacing silent failures
   initDiagnosticBus(!prod);
-  if (!prod) {
-    setDiagEmit(diagEmit);
-    initClientLog(getLogDir());
-  }
+  // The log DIRECTORY is not a dev feature — the UDS transport writes client
+  // log frames whether or not this is prod (uds.ts), and with this call gated
+  // behind `!prod` the module kept its default `".aio/log"`: a CWD-RELATIVE
+  // path, in prod, that nothing wipes and that `am log --client` does not read
+  // (it reads `~/.<appId>/logs/client.log`). An Electron app's renderer logs
+  // went to a fourth place depending on where it was launched from. Setting a
+  // path costs nothing; only the dev-only diagnostic BUS stays gated.
+  initClientLog(getLogDir());
+  if (!prod) setDiagEmit(diagEmit);
 
   // Unified user resolver — one code path for both static map and dynamic hook (AIO-171)
   // AUTH-1: session tokens resolve FIRST (cheap indexed lookup, revocable),

@@ -135,3 +135,21 @@ export function findFreePort(): number {
     "no free port found in 49152-65535 after 50 attempts — the ephemeral range looks exhausted. Set an explicit port via aio.run({ port }) or --port=N.",
   );
 }
+
+/** THE entry rule: an explicit `entry` (deno.json, or a per-target override),
+ *  else `src/app.ts`.
+ *
+ *  Here rather than in `build/` because `am` needs the same answer and cannot
+ *  import the build (folder matrix). It had its own probe list —
+ *  `src/app.ts`, `src/main.ts`, `app.ts`, `main.ts` — so `am fix` could report
+ *  a project healthy on the strength of a `main.ts` the build does not
+ *  recognise and would never compile. Two spellings of "where does this app
+ *  start" is one too many. */
+export function resolveEntryPath(
+  mainConfig: Record<string, unknown> | null | undefined,
+  override?: string,
+): string {
+  return override?.trim() ||
+    ((mainConfig?.entry as string | undefined) ?? "") ||
+    "src/app.ts";
+}

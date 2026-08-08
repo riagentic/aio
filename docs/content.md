@@ -158,6 +158,7 @@
 - [Upgrade: alpha51 → alpha52](upgrade/from-alpha51-to-alpha52.md) — in one version — and every old spelling keeps working through beta:
 - [Upgrade: alpha52 → alpha53](upgrade/from-alpha52-to-alpha53.md) — Small and additive after the big one.
 - [alpha53 → alpha54](upgrade/from-alpha53-to-alpha54.md) — app that adds nothing to its config behaves exactly as it did on alpha53.
+- [alpha54 → alpha55](upgrade/from-alpha54-to-alpha55.md) — additive or a behaviour improvement your app gets for free.
 - [Upgrade from v1.0.0-alpha6 to v1.0.0-alpha7](upgrade/from-alpha6-to-alpha7.md) — mod.ts no longer re-exports renderer primitives.
 - [Upgrade from v1.0.0-alpha7 to v1.0.0-alpha8](upgrade/from-alpha7-to-alpha8.md) — None.
 - [Upgrade from v1.0.0-alpha8 to v1.0.0-alpha9](upgrade/from-alpha8-to-alpha9.md) — The internal machine state field is renamed.

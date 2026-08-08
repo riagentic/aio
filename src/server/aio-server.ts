@@ -267,6 +267,16 @@ export async function setupTransport<S, A>(
         `encrypted or a TLS-terminating proxy fronts this port. Drop ` +
         `--no-tls for HTTPS.`,
     );
+  } else if (!expose && cliNoTls) {
+    // A flag that does nothing must say so. Loopback is plain HTTP either way,
+    // so there is no wrong OUTCOME here — but someone passing --no-tls believes
+    // they changed something, and the next step in that belief is assuming
+    // --expose would also be plaintext-by-default. Cheap to say, expensive to
+    // discover.
+    log.warn(
+      `tls: --no-tls has no effect without --expose — a loopback server is ` +
+        `plain HTTP already. The flag only matters when exposing to a network.`,
+    );
   } else if (expose) {
     // Tier ① — a private key belongs in the backup unit, and in ONE place
     // whether or not this is a compiled binary (it used to be ./.aio-tls in dev

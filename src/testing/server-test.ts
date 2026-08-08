@@ -6,6 +6,7 @@
 
 import { aio } from "../server/aio.ts";
 import { _armTestStrict } from "./test-strict.ts";
+import { testDisplayEnv } from "./test-display.ts";
 import type { AioApp, CellsConfig } from "../server/aio-types.ts";
 
 /** A booted test app — its URL, the app handle, and fetch/state/close helpers.
@@ -149,6 +150,11 @@ export function testBrowser(
       stdin: "null",
       stdout: "null",
       stderr: "null",
+      // Contained even though `--headless=new` opens nothing today: the day
+      // someone drops that flag to debug a test, the window must land in the
+      // nested display and not on the developer's desktop. Cheap now,
+      // impossible to remember later.
+      env: { ...Deno.env.toObject(), ...testDisplayEnv() },
     }).spawn();
 
     let killed = false;

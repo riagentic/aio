@@ -30,14 +30,26 @@ const KINDS: LogKind[] = [
   "client",
 ];
 
-/** Wipe all log files — clean slate for new run (default behavior) */
+/** Wipe all log files — clean slate for new run (default behavior).
+ *
+ *  Including the `<base>.<n>` archives. Wiping only the live files left every
+ *  archive a previous `backupLogs` run had made sitting there forever: turning
+ *  the option OFF stopped new ones appearing but never removed the old, so
+ *  "clean slate" quietly meant "clean slate plus whatever you accumulated
+ *  before". A wipe that leaves files behind is the wrong shape of promise. */
 export async function wipeOnStart(
   pathFn: (kind: LogKind) => string,
 ): Promise<void> {
   for (const kind of KINDS) {
+    const base = pathFn(kind);
     try {
-      await Deno.remove(pathFn(kind));
+      await Deno.remove(base);
     } catch { /* absent — fine */ }
+    for (const n of await archiveIndices(base)) {
+      try {
+        await Deno.remove(`${base}.${n}`);
+      } catch { /* raced with another wipe — fine */ }
+    }
   }
 }
 

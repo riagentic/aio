@@ -212,12 +212,32 @@ export async function restoreArtifact(
  *  rollback is then a rename, not a re-download. */
 export async function pruneOld(current: string, keep: number): Promise<void> {
   const dir = dirname(current);
-  const prefix = `${current.slice(dir.length + 1)}.old-`;
+  await pruneKeepingNewest(dir, `${current.slice(dir.length + 1)}.old-`, keep);
+}
+
+/** Keep the `keep` newest files named `<prefix>*` in `dir`, delete the rest.
+ *
+ *  ONE answer to "how much history does an update leave behind", because there
+ *  are two kinds and only one of them used to be answered. Superseded ARTIFACTS
+ *  were pruned; the pre-migration STORE BACKUPS were not — every migrating
+ *  update copied the whole database into `data/backups/` and nothing ever
+ *  removed it. On an app with a multi-gigabyte store that is unbounded growth
+ *  inside the backup unit itself, so each `am backup` then copied every
+ *  historical snapshot too. Silent, and it compounds. */
+export async function pruneKeepingNewest(
+  dir: string,
+  prefix: string,
+  keep: number,
+): Promise<void> {
   const found: { name: string; mtime: number }[] = [];
-  for await (const e of Deno.readDir(dir)) {
-    if (!e.isFile || !e.name.startsWith(prefix)) continue;
-    const st = await Deno.stat(join(dir, e.name)).catch(() => null);
-    found.push({ name: e.name, mtime: st?.mtime?.getTime() ?? 0 });
+  try {
+    for await (const e of Deno.readDir(dir)) {
+      if (!e.isFile || !e.name.startsWith(prefix)) continue;
+      const st = await Deno.stat(join(dir, e.name)).catch(() => null);
+      found.push({ name: e.name, mtime: st?.mtime?.getTime() ?? 0 });
+    }
+  } catch {
+    return; // no such directory — nothing was ever kept here
   }
   found.sort((a, b) => b.mtime - a.mtime);
   for (const f of found.slice(keep)) {

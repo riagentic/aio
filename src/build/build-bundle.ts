@@ -406,7 +406,11 @@ export async function runBundle(
   } catch {
     console.error(
       `[build] ✗ ${appEntry} not found — the app dir is the entry's directory ` +
-        `(deno.json "entry": ${cfg.configEntry}), the same place the dev server loads the UI from. ` +
+        `(${
+          cfg.entryFromFlag
+            ? `--entry=${cfg.configEntry}`
+            : `deno.json "entry": ${cfg.configEntry}`
+        }), the same place the dev server loads the UI from. ` +
         `Put App.tsx next to your entry, or set "entry" in deno.json to where the app lives.`,
     );
     Deno.exit(1);

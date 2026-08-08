@@ -111,6 +111,19 @@ has_task() {
     console.log((c.tasks ?? {})['$1'] ? 'yes' : 'no');
   " 2>/dev/null || echo no
 }
+# Heap ceiling for this machine: 25% of RAM, never below 4 GB (V8's default,
+# which is ~4 GB whatever the machine — the reason an app died of "out of
+# memory" on a 32 GB box with 28 GB free). V8 fixes the ceiling at startup, so
+# only a launcher can set it; the framework owns the RULE, this just asks.
+# A compiled artifact bakes its own at build time and ignores DENO_V8_FLAGS,
+# so this applies to the dev path.
+if [ -z "${DENO_V8_FLAGS:-}" ] && [ -r /proc/meminfo ]; then
+  _kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+  _mb=$((_kb / 1024 / 4))
+  [ "$_mb" -lt 4096 ] && _mb=4096
+  [ "$_kb" -gt 0 ] && export DENO_V8_FLAGS="--max-old-space-size=$_mb"
+fi
+
 if [ "$DEV" = 1 ]; then
   if [ "$(has_task dev)" = "yes" ]; then
     info "dev run: deno task dev $*"
