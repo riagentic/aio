@@ -48,6 +48,7 @@ import {
   detectTarget,
   installableTargets,
   installDir,
+  pruneKeepingNewest,
   pruneOld,
   relaunch,
   swapArtifact,
@@ -236,6 +237,10 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
     await Deno.mkdir(dir, { recursive: true });
     const path = join(dir, `pre-${version}-state.db`);
     await deps.snapshot(path);
+    // Same retention as the superseded artifacts, and for the same reason: a
+    // rollback needs the LAST one, not every one ever taken. Pruned after the
+    // new snapshot exists, so the count never dips below what a rollback needs.
+    await pruneKeepingNewest(dir, "pre-", KEEP_OLD);
     log.info("updates", `backed up the store before migrating → ${path}`);
     return path;
   }

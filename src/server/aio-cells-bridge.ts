@@ -1,6 +1,7 @@
 // Cells-to-legacy config bridge — converts CellsConfig → AioConfig for _run()
 // Also wraps the returned AioApp with memory monitor, cells API, and bindCell.
 
+import { physicalMemoryBytes } from "./heap-policy.ts";
 import type { CellDef, ComposedCells } from "../state/cell.ts";
 import { _releaseCellBindings } from "../state/cell-reactive.ts";
 import { bindCell } from "../state/cell.ts";
@@ -392,8 +393,14 @@ export async function wrapAppWithCells(
       reportAioError(err, _cellReportOpts);
       fc.memory?.onMemoryPressure?.(report);
     },
+    machineWarnFraction: fc.memory?.machineWarnFraction ?? 0.5,
+    growthReportRatio: fc.memory?.growthReportRatio ?? 0.15,
     getMemoryUsage: () => Deno.memoryUsage(),
     getHeapLimit: () => _heapLimit,
+    // The machine, not just the ceiling: 75%-of-a-47 GB-ceiling is 35 GB, and a
+    // desktop is long gone by then. Without this denominator the monitor can
+    // only ever warn about the app's health, never the machine's.
+    getTotalMemory: () => physicalMemoryBytes() ?? 0,
     getCellStates: () => {
       const fullState = app.getState() as Record<string, unknown>;
       return composed.cells.map((f) => ({

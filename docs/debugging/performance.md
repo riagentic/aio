@@ -17,6 +17,17 @@ Every action is timed:
 
 Async methods suspend at `await` -- only sync stretches are measured.
 
+Per-method budgets cover a **sync method's effects** too, not just its reduce:
+an effect returned by a sync method is billed to that method's key. A violation
+prints the key it was billed to, so the fix is a copy-paste rather than a hunt:
+
+```ts
+perfBudget: { methods: { "importer:run": { effect: 250 } } }
+```
+
+Raising the global budget to accommodate one slow method blinds every tight
+reducer at once, which is why the violation names the narrow escape hatch.
+
 ```ts
 methods: {
   // GOOD -- awaits, each sync stretch returns in < 1ms

@@ -34,6 +34,7 @@ import { setupDispatch } from "./aio-dispatch.ts";
 import { hostedCellName, startCellWorkerHost } from "./cell-worker-host.ts";
 import { createCellWorkerPool } from "./cell-worker-pool.ts";
 import { isScheduleEffect } from "../state/schedule.ts";
+import { reportHeapCeiling } from "./heap-policy.ts";
 import {
   appDirs,
   checkUnpackLocation,
@@ -733,6 +734,13 @@ async function _run<S, A, E>(
     // way), never silent (running world-readable is not a detail), identical in
     // dev and prod. The sweep clears the empty mount stubs a crash leaves in
     // our own payload dir — the one upkeep `/tmp` used to do for us.
+    // The heap ceiling this process actually got, against the policy. V8 fixed
+    // it at isolate creation, so this can only REPORT — but running on the
+    // ~4 GB default when the machine allows 47 GB is exactly the setup that
+    // ends in "out of memory" with most of the machine free, and it must not be
+    // discovered then. `am start`, run.sh and the build all size it correctly;
+    // a bare `deno run src/app.ts` is the case that lands here.
+    await reportHeapCeiling(log);
     sweepAppPayloadDir(_dirs);
     const unsafeUnpack = checkUnpackLocation(_dirs);
     if (unsafeUnpack) log.warn("security", unsafeUnpack);

@@ -23,6 +23,66 @@ const IGNORE_DIRS = new Set([
 ]);
 const MAX_FILE_SIZE = 512 * 1024; // 512KB — skip huge generated files
 
+/** Directories beyond `src/` that hold a project's own code, scanned when they
+ *  exist. `cells/` is an app shape; `scripts/` and `tools/` are the build,
+ *  release-gate and dev-tool code that decides what ships — unlinted until now
+ *  purely because the scan started and stopped at `src/`. */
+const OPTIONAL_ROOTS = ["cells", "scripts", "tools"] as const;
+
+/** Is this project an aio APP, or something else that happens to sit next to
+ *  aio (the framework repo itself, a tool, a library)?
+ *
+ *  App-shaped rules — "no entry point found (src/app.ts)", "move appId into
+ *  aio.run()", "sync I/O blocks every client's next action" — all presuppose a
+ *  dispatch loop with clients on it. Run against the framework repo they advise
+ *  moving a framework field into a call that does not exist there, and they
+ *  flag sync I/O whose synchrony is the POINT (the journal fsyncs every append
+ *  so it survives SIGKILL; "use the async version" would delete the guarantee).
+ *  That was 84 of the framework's 85 warnings — which is how a true warning
+ *  gets trained away.
+ *
+ *  The test is CONSUMPTION, read from `deno.json` — the same rule `run.sh` uses
+ *  to decide "is this an aio app repo", so there is one answer and not two. It
+ *  cannot be read from the source: the framework's own test helpers call
+ *  `aio.run()` (booting apps is what they do), so a code scan classifies the
+ *  framework as an app.
+ *
+ *  Unknown → treated as an APP. Mis-silencing a real app's warnings is the
+ *  worse error of the two; a false positive is visible, a false negative is not. */
+export function looksLikeApp(cfg: DenoJsonConfig | null): boolean {
+  if (!cfg) return true;
+  // aio's own repo maps `aio` to its OWN root module. An app maps it to a
+  // published version (`jsr:@riagentic/aio@…`) or to a vendored copy
+  // (`./dep/aio/mod.ts`) — never to `./mod.ts`, because that file is the
+  // framework. The package name is the second, blunter half of the same test:
+  // this is the one repo the linter ships inside and must recognise.
+  if (cfg.name === "@riagentic/aio") return false;
+  const aioImport = (cfg.imports ?? {})["aio"];
+  if (aioImport === "./mod.ts" || aioImport === "mod.ts") return false;
+  return true;
+}
+
+/** True for a project's own TOOLING — build scripts, release gates, benchmarks,
+ *  dev utilities.
+ *
+ *  Tooling is real code and most rules apply to it. What differs is the PREMISE
+ *  a handful of rules are built on:
+ *
+ *  • "sync I/O blocks the event loop — every client's next action waits behind
+ *    it": a one-shot CLI has no clients, and its whole job is to finish.
+ *  • "use structured logging instead of console.log": a gate script's stdout IS
+ *    its interface.
+ *  • "this cell has no test file" / "use schedule instead of setTimeout": a cell
+ *    defined in a benchmark is a fixture, not a shipped surface.
+ *
+ *  Those rules must skip tooling. Scanning these directories while firing
+ *  premise-false rules in them would make the linter loudest exactly where the
+ *  stakes are lowest — the failure mode that keeps a linter from being read. */
+export function isToolingPath(relative: string): boolean {
+  const p = relative.replaceAll("\\", "/");
+  return p.startsWith("scripts/") || p.startsWith("tools/");
+}
+
 /** Recursively collect source files */
 async function collectFiles(
   dir: string,
@@ -304,12 +364,21 @@ export async function buildContext(
   // Collect source files from src/ and project root
   const srcDir = join(projectDir, "src");
   await collectFiles(srcDir, projectDir, sourceFiles);
-  // Also scan cells/ if it exists at root level
-  const cellsDir = join(projectDir, "cells");
-  try {
-    await Deno.stat(cellsDir);
-    await collectFiles(cellsDir, projectDir, sourceFiles);
-  } catch { /* no cells/ */ }
+  // …and every other directory a project keeps REAL code in. `src/` + root was
+  // the whole scan, so a project's build scripts, release gates and dev tools —
+  // the code that decides what ships — were the one part the linter never read.
+  // A linter that skips the tooling is loudest exactly where the stakes are
+  // lowest. Directories are optional by design: a missing one is not an error,
+  // it is a project that does not have that shape.
+  for (const dir of OPTIONAL_ROOTS) {
+    const path = join(projectDir, dir);
+    try {
+      if (!(await Deno.stat(path)).isDirectory) continue;
+    } catch {
+      continue; // this project has no such directory
+    }
+    await collectFiles(path, projectDir, sourceFiles);
+  }
   // Scan root .ts/.tsx files
   try {
     for await (const entry of Deno.readDir(projectDir)) {
@@ -396,6 +465,7 @@ export async function buildContext(
     denoJson,
     denoJsonPath,
     sourceFiles,
+    isApp: looksLikeApp(denoJson),
     tsxFiles,
     tsFiles,
     testFiles,

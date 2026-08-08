@@ -1,5 +1,150 @@
 # Changelog
 
+## 1.0.0-alpha55 — the memory a machine actually has (2026-08-09)
+
+An app that needs 12 GB on a 32 GB machine should get it. One that leaks should
+say so hours early. Neither should be able to freeze the desk it runs on. This
+release is those three sentences, plus the seams found on the way there.
+
+Strictly additive: no removals, no renames, nothing to migrate.
+
+### Seams: what an app looks like from outside its own directory
+
+Three findings in one pass were the same shape — nobody had asked that question.
+`tests/seam-paths.test.ts` now boots a real app with `$HOME` and
+`$XDG_RUNTIME_DIR` redirected and asserts on the FILESYSTEM: everything under
+the app's two homes, nothing in the working directory, nothing of ours in
+`/tmp`, secrets 0700/0600. It found two on its first run:
+
+- the **TLS private key was world-readable** — openssl writes with the process
+  umask, and the mode was inherited rather than stated. Now 0600, `data/tls`
+  0700.
+- the **openssl config was written to `/tmp`** on every first TLS boot, which
+  also made TLS depend on a writable `/tmp`. Now beside the key.
+
+And in prod + UDS, **client logs went to a cwd-relative `.aio/log`**:
+`initClientLog` sat behind `if (!prod)` while the UDS transport writes client
+frames regardless, so an Electron app's renderer logs landed wherever it was
+launched from — a fourth location, wiped by no policy, not the one
+`am log --client` reads.
+
+### Testing the shape aio documents but could not exercise
+
+- **`testApps({ service, desk })`** (`aio/testing`) — N independent apps, own
+  ports/dirs/appIds, plus `connect(name)` for the client-of-another-app path
+  over a real socket. Every property of the service+clients architecture is
+  cross-app, so a one-app harness could not express any of them.
+- **A real client over a real interface** — `connectCli` over `wss://` against a
+  self-signed cert it must pin, in a separate process. Every client assertion
+  before this was `fetch` over loopback, where TLS does not happen.
+- **GUI tests stopped stealing focus.** Test windows open in a nested X display
+  (`scripts/xephyr.sh`), started detached and **never stopped by the tests** — a
+  harness that starts and kills a window per run reproduces the flicker it is
+  meant to remove.
+
+### Loud where it was silent
+
+- **`afterRender()` outside a render** no longer vanishes. From a timer, a
+  promise continuation or an event handler the callback was simply dropped; dev
+  now says so, naming those three callers.
+- **`connectCli().ready` never settled** when the first connection failed: a
+  wrong address, token or certificate logged "still retrying" forever while the
+  caller hung. Opt-in `readyTimeoutMs` on both `connectCli` and `connectCliUDS`.
+- **Client-side diagnostics are pinned at the ROUTER**, not just the sink —
+  reverting any one transport to the old inline `_aioDiag` check used to keep
+  the suite green while every diagnostic went silent.
+- **`--no-tls` without `--expose`** says it has no effect.
+
+### One app, one identity — and one entry
+
+- **dev and compiled resolved DIFFERENT appIds.** The build named the binary
+  from `title ?? basename(root)` and ignored `appId`, while a compiled app takes
+  its identity from that filename — so a `deno.json` with `appId: "wallet"` in a
+  directory called `thing` was `~/.wallet` in dev and `~/.thing` compiled. The
+  data directory moved when you compiled. One `appIdFromConfig` now decides
+  both, pinned by a differential test.
+- **`am fix` probed entries the build does not recognise** (`src/main.ts`,
+  `main.ts`) — it could pronounce a project healthy on the strength of a file
+  that would never compile. One `resolveEntryPath`, shared.
+
+### Smaller, and worth having
+
+- **Android `applicationId`** is no longer aio's to choose:
+  `android.applicationId` in deno.json, validated and REFUSED rather than
+  sanitized — the id is permanent once published.
+- **Pre-migration store backups are pruned** (3 kept). One full `state.db` copy
+  per migrating update accumulated forever, inside the backup unit.
+- **`wipeOnStart` clears the archives too** — a clean slate that leaves files
+  behind is the wrong shape of promise.
+- **The e2e harness blames the server** when a request fails after readiness,
+  attaching the child's output instead of a bare "error sending request".
+- **aiol scans `scripts/` and `tools/`** — with a tooling scope, so the eleven
+  premise-false findings that came with them do not. It caught two real ones.
+  And it stopped crying wolf at the framework itself: 84 of 85 warnings were one
+  app-shaped rule firing where its premise is false. Apps still get every one.
+
+### An app gets the machine it is running on
+
+V8 fixes its heap ceiling when an isolate starts and never revisits it, and
+Deno's default is ~4 GB whatever the hardware. So an aio app on a 32 GB machine
+died with "out of memory" while 28 GB sat free. Nothing in aio set that limit —
+which is exactly why nobody had chosen it.
+
+**The rule: 25% of physical RAM, never below 4 GB.** A quarter leaves room for
+the rest of the machine; the floor is V8's current default, so this can only
+raise a ceiling, never lower one. The ceiling is not an allocation — V8 reserves
+nothing — but it is not free either: V8 collects less eagerly when it believes
+it has room, which is why the rule is a fraction of the machine rather than
+simply a big number.
+
+Applied wherever aio starts something:
+
+- **`am start`, `run.sh`, the test harness** resolve it for the machine they are
+  on and pass `--v8-flags=--max-old-space-size=N`.
+- **Compiled artifacts** bake it at build time — measured: a compiled binary
+  ignores `DENO_V8_FLAGS` entirely, so `deno compile --v8-flags=` is the only
+  way in. On this machine a build went from a 4192 MB ceiling to 47790 MB.
+- **A bare `deno run src/app.ts`** gets V8's default, and now says so at boot,
+  naming the exact flag to add. Observe-only: the ceiling is fixed long before
+  any of our code runs, so a warning is all that is available — but discovering
+  it at boot beats discovering it under load.
+- Override per app: `"memory": { "maxHeap": "12GB" }` (also `"25%"`, `"512MB"`,
+  a number of MB, or `"default"`). An explicit value is still clamped to 25% —
+  the cap protects the machine, and an app cannot opt out by asking.
+
+**Workers were never the problem.** The docs claimed Worker isolates were stuck
+at ~1.7 GB and that `DENO_V8_FLAGS` did not propagate to them. Both were false:
+measured on Deno 2.9, a Worker reports the same ceiling as the main isolate, in
+`deno run` and in a compiled binary alike. One flag covers the DB worker and
+every `worker: true` cell. The page now says so.
+
+Still outside the JS heap, and stated rather than implied: SQLite's page cache
+is native memory (`PRAGMA cache_size`, 64 MB per connection), governed by no V8
+flag and invisible to the memory monitor.
+
+### Three memory failures, three different signals
+
+A ceiling alone answers one of them. The monitor now names which problem it saw
+(`report.reason`), because the fix differs for each:
+
+- **`pressure`** — near the V8 ceiling; the app is about to run out.
+- **`machine`** — a large share of the whole machine (default: half) while the
+  ceiling is nowhere near. This is the one that freezes a desktop: with a 47 GB
+  ceiling, 75%-of-ceiling is 35 GB, and a 64 GB machine is already swapping
+  before that fires. Ceiling-relative thresholds are structurally blind to it.
+- **`growth`** — climbing steadily with nothing near any threshold. A leak
+  announces itself here hours earlier; reporting it only at 75% turned a slow
+  diagnosis into an emergency.
+
+And the ceiling stopped fighting the first failure it was built to fix: an
+explicit `memory.maxHeap` is now **honoured above 25%**. The automatic share
+protects a machine from an app nobody has thought about, but an app that
+legitimately needs 12 GB on a 32 GB box is not misbehaving — clamping it to 8 GB
+reproduced the original crash with the framework's fingerprints on it. The
+author who writes the number has thought about it; boot says so loudly instead,
+and points at `systemd MemoryMax=` for a hard total, which is the only place a
+real one can live.
+
 ## 1.0.0-alpha54 — the last mile (2026-08-08)
 
 Everything between a built artifact and a person using it: updates, releases,

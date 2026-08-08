@@ -11,7 +11,7 @@
  */
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { createDispatch, type DispatchDeps } from "../src/state/dispatch.ts";
-import type { AioError } from "../src/diagnostics/error.ts";
+import { type AioError, generateTip } from "../src/diagnostics/error.ts";
 
 type S = { n: number };
 // deno-lint-ignore no-explicit-any
@@ -65,9 +65,19 @@ Deno.test("perf: an async method's violation names perfBudget.methods for ITSELF
   assertEquals(errors.length, 1);
   const err = errors[0]!;
   assertEquals(err.code, "BUDGET_EFFECT");
-  // the substance that caught the real 1400ms freeze is untouched
+  // the substance that caught the real 1400ms freeze is untouched — but each
+  // half is now pinned where it is DECIDED. The dispatcher states the facts
+  // (including which part of an async method was measured); the remedy lives
+  // once in generateTip, because two half-overlapping pieces of advice on one
+  // violation read as two different problems.
   assertStringIncludes(err.message, "exceeded budget");
-  assertStringIncludes(err.message, "move heavy sync work off the dispatch");
+  assertStringIncludes(
+    err.message,
+    "only the SYNC prefix before the first await",
+  );
+  const tip = generateTip(err) ?? "";
+  assertStringIncludes(tip, "return immediately");
+  assertStringIncludes(tip, "schedule.blocking");
   // …and the self-service fix is spelled out, keyed to THIS method
   assertStringIncludes(
     err.message,

@@ -13,6 +13,7 @@ the part you back up is one subdirectory of it.
     tls/            self-signed cert + key    🔒 secret
     files/          whatever your app writes
     app.key         the persisted access token (key: true)  🔒 secret
+    backups/        pre-update store snapshots (3 kept) — see updates
   logs/     ← ② regenerable: app.log, error.log, client.log, stdout.log …
   cache/    ← ② regenerable BULK your app writes: downloads, build trees, thumbnails
   app/      ← ② the unpacked binaries a packaged app RUNS from (AppImage) 🔒 0700

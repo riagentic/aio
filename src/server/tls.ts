@@ -1,7 +1,7 @@
 // Auto TLS — generates a self-signed cert via openssl, cached on disk
 // Used by aio.run() when --expose is active (zero-config HTTPS)
 
-import { join } from "@std/path";
+import { dirname, join } from "@std/path";
 
 export type TlsCert = {
   cert: string;
@@ -55,7 +55,13 @@ async function generateWithOpenssl(
   const ipLines = ["127.0.0.1", "::1", ...ips].map((ip, i) =>
     `IP.${i + 1} = ${ip}`
   ).join("\n");
-  const tmpCfg = await Deno.makeTempFile({ suffix: ".cnf" });
+  // Beside the key it configures, NOT in /tmp. `Deno.makeTempFile` put an
+  // openssl config in a world-readable directory on every first TLS boot: the
+  // file itself is 0600 and holds no secret (a CN and this host's IPs), but the
+  // rule an app is held to is "write inside your own two homes", and a rule
+  // with an exception nobody can see is not a rule. It also made TLS depend on
+  // a writable /tmp, which a hardened or read-only host may not have.
+  const tmpCfg = join(dirname(keyPath), ".openssl-req.cnf");
   try {
     await Deno.writeTextFile(
       tmpCfg,
@@ -142,6 +148,11 @@ export async function loadOrCreateCert(
   }
 
   Deno.mkdirSync(certDir, { recursive: true });
+  try {
+    // The directory holding a private key is owner-only, independently of the
+    // parent it happens to sit under.
+    if (Deno.build.os !== "windows") Deno.chmodSync(certDir, 0o700);
+  } catch { /* best-effort */ }
   const certPath = join(certDir, "tls-cert.pem");
   const keyPath = join(certDir, "tls-key.pem");
 
@@ -153,6 +164,14 @@ export async function loadOrCreateCert(
   } catch { /* generate */ }
 
   await generateWithOpenssl(certPath, keyPath, appId);
+  // openssl writes the key with the process umask — 0644 on a default box, so
+  // the PRIVATE KEY was readable by every other local user of a machine whose
+  // data dir was ever relocated somewhere laxer than the 0700 default. The mode
+  // has to be stated at the site that creates it, not inherited from whatever
+  // the parent directory happens to be today. (The cert is public — left alone.)
+  try {
+    if (Deno.build.os !== "windows") await Deno.chmod(keyPath, 0o600);
+  } catch { /* best-effort — an odd FS may refuse */ }
   const cert = await Deno.readTextFile(certPath);
   const key = await Deno.readTextFile(keyPath);
   return { cert, key, certPath, keyPath, selfSigned: true };

@@ -297,7 +297,12 @@ export function createDispatch<S, A, E>(
       code,
       `${source} exceeded budget: ${duration.toFixed(1)}ms > ${budget}ms` +
         (source === "effect"
-          ? " (async method: only the SYNC prefix before the first await counts here — move heavy sync work off the dispatch path or into awaited chunks)"
+          // FACT only. The remedy for this code lives in ONE place —
+          // `errorTip()` in diagnostics/error.ts — because two half-overlapping
+          // pieces of advice on one violation read as two different problems.
+          // What belongs here is what only the dispatcher knows: which part of
+          // an async method was measured, and the per-method hatch below.
+          ? " (async method: only the SYNC prefix before the first await counts here)"
           : "") +
         hatch,
       { cellName: type?.split(":")[0], actionType: type, duration, budget },
@@ -414,6 +419,20 @@ export function createDispatch<S, A, E>(
       // chatting with a streaming model when the window closed got a stack
       // trace instead of their reply. Late CLIENT input is what close() is
       // for, and that still drops; the framework's own drain does not.
+      //
+      // KNOWN ASYMMETRY, stated rather than left to be rediscovered: this reads
+      // `_source: "Effect"`, which cell-catalog sets on every BOUND ASYNC call
+      // for a different reason (the ack/callId path). So a serverFn that calls
+      // `await cell.asyncMethod()` DURING the drain is admitted as if it were
+      // in-flight work, while its sync twin — which carries no `_source` — is
+      // refused. One tag, two meanings: "a bound async call" and "the
+      // framework's own draining work", and the gate wants only the second.
+      //
+      // Left alone deliberately. The data outcome is safe either way (the write
+      // is captured by the final persist or loudly dropped), and separating the
+      // meanings means a new dispatch-level flag — a wire-contract change that
+      // deserves its own release and its own gate run, not a quiet widening
+      // here. See todo.md.
       const isDraining = !sealed &&
         (effectPromises.size > 0 || pendingCallsFor(deps.cellNames) > 0) &&
         (action as Record<string, unknown>)?._source === "Effect";

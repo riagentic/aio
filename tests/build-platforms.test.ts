@@ -6,7 +6,8 @@
 // rule, the refusals, and the `deno compile` argv are all pure and asserted
 // here; `tests/build-e2e.test.ts` then proves a real cross-compiled artifact
 // is genuinely the other platform's format.
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertRejects } from "@std/assert";
+import { join } from "@std/path";
 import {
   artifactName,
   CROSS_COMPILABLE,
@@ -16,7 +17,15 @@ import {
   PLATFORMS,
   resolvePlatforms,
 } from "../src/build/platforms.ts";
-import { compileArgs } from "../src/build/build-compile.ts";
+import { compileArgs, v8FlagsArg } from "../src/build/build-compile.ts";
+import {
+  physicalMemoryBytes,
+  resolveMaxHeapMB,
+} from "../src/server/heap-policy.ts";
+import {
+  androidApplicationId,
+  isValidApplicationId,
+} from "../src/build/build-android.ts";
 
 Deno.test("platforms: every entry is a real deno compile triple shape", () => {
   for (const [name, spec] of Object.entries(PLATFORMS)) {
@@ -174,4 +183,199 @@ Deno.test("build-all: cross-compiled artifact names are recognised", async () =>
   assertEquals(isArtifactName("src", "myapp"), false);
   assertEquals(isArtifactName("README.md", "myapp"), false);
   assertEquals(isArtifactName("otherapp", "myapp"), false);
+});
+
+// ── applicationId: an app's PERMANENT public identity ────────────────────────
+// `app.aio.<name>` is aio's namespace, not the author's, and an applicationId
+// can never change once an app is published — so a derived-only id meant no aio
+// app could ship to Play under its own name.
+
+Deno.test("androidApplicationId: derived by default, explicit when given", () => {
+  assertEquals(androidApplicationId("wallet"), "app.aio.wallet");
+  assertEquals(androidApplicationId("my-wallet"), "app.aio.mywallet");
+  assertEquals(
+    androidApplicationId("wallet", "com.example.wallet"),
+    "com.example.wallet",
+    "an explicit id is used verbatim — it is the Play listing's primary key",
+  );
+});
+
+Deno.test("androidApplicationId: an invalid explicit id is refused, not sanitized", () => {
+  // Silently "fixing" a package name would change the app's identity behind the
+  // author's back — the one thing that can never be undone after publishing.
+  for (const bad of ["wallet", "1com.example", "com.example.", "com..x", ""]) {
+    assertEquals(
+      androidApplicationId("wallet", bad),
+      null,
+      `${JSON.stringify(bad)} is not a valid Android package name`,
+    );
+  }
+});
+
+Deno.test("isValidApplicationId: Android's own shape rule", () => {
+  assert(isValidApplicationId("com.example.wallet"));
+  assert(isValidApplicationId("io.a.b_c1"));
+  assert(!isValidApplicationId("single"), "needs ≥2 segments");
+  assert(
+    !isValidApplicationId("com.9lives"),
+    "each segment starts with a letter",
+  );
+  assert(!isValidApplicationId("com.example."), "no trailing dot");
+});
+
+// ── compile.v8Flags ──────────────────────────────────────────────────────────
+// V8 options are fixed at isolate creation, so a compiled binary cannot pick
+// them up from the environment the way `deno run` does — it ignores
+// DENO_V8_FLAGS outright. Baking them at compile time is the ONLY way, which
+// makes this wiring the difference between an app's dev and prod memory
+// ceilings matching or silently diverging.
+
+async function withDenoJson<T>(
+  cfg: unknown,
+  fn: (root: string) => Promise<T>,
+): Promise<T> {
+  const root = await Deno.makeTempDir({ prefix: "aio-v8flags-" });
+  try {
+    if (cfg !== undefined) {
+      await Deno.writeTextFile(
+        join(root, "deno.json"),
+        JSON.stringify(cfg, null, 2),
+      );
+    }
+    return await fn(root);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+}
+
+Deno.test("v8FlagsArg: an app that declares nothing still gets a heap ceiling", async () => {
+  // This USED to assert "no flag at all". That default is what killed an app on
+  // a 32 GB machine with 28 GB free: V8's ceiling is ~4 GB whatever the box, a
+  // compiled binary ignores DENO_V8_FLAGS, and `deno compile --v8-flags=` is
+  // the only way in. So the absent case is precisely the one that needs it.
+  const want = resolveMaxHeapMB(physicalMemoryBytes());
+  const expected = want === null
+    ? [] // a machine we cannot measure — leave V8 alone rather than guess
+    : [`--v8-flags=--max-old-space-size=${want}`];
+  assertEquals(await withDenoJson({ name: "x" }, v8FlagsArg), expected);
+  assertEquals(await withDenoJson({ build: {} }, v8FlagsArg), expected);
+  assertEquals(await withDenoJson(undefined, v8FlagsArg), expected);
+});
+
+Deno.test("v8FlagsArg: an explicit max-old-space-size is never second-guessed", async () => {
+  // An author who states the number owns it — adding ours too would produce two
+  // values for one flag, and V8 takes the last silently.
+  assertEquals(
+    await withDenoJson(
+      { build: { v8Flags: ["--max-old-space-size=2048"] } },
+      v8FlagsArg,
+    ),
+    ["--v8-flags=--max-old-space-size=2048"],
+  );
+});
+
+Deno.test("v8FlagsArg: other declared flags keep the ceiling alongside them", async () => {
+  const want = resolveMaxHeapMB(physicalMemoryBytes());
+  const got = await withDenoJson(
+    { build: { v8Flags: ["--expose-gc"] } },
+    v8FlagsArg,
+  );
+  assertEquals(got.length, 1);
+  assertEquals(got[0]!.includes("--expose-gc"), true);
+  assertEquals(
+    got[0]!.includes(`--max-old-space-size=${want}`),
+    want !== null,
+    "a declared flag must not cost the app its heap ceiling",
+  );
+});
+
+Deno.test("v8FlagsArg: declared flags are comma-joined into one --v8-flags", async () => {
+  assertEquals(
+    await withDenoJson(
+      { build: { v8Flags: ["--max-old-space-size=16384"] } },
+      v8FlagsArg,
+    ),
+    ["--v8-flags=--max-old-space-size=16384"],
+  );
+  assertEquals(
+    await withDenoJson(
+      { build: { v8Flags: ["--max-old-space-size=16384", "--expose-gc"] } },
+      v8FlagsArg,
+    ),
+    ["--v8-flags=--max-old-space-size=16384,--expose-gc"],
+  );
+});
+
+Deno.test("v8FlagsArg: a malformed entry is refused, never silently dropped", async () => {
+  // Each of these would otherwise produce a binary that keeps the default the
+  // app was trying to change — the failure only shows up under load.
+  const bad: [unknown, RegExp][] = [
+    [{ build: { v8Flags: "--max-old-space-size=16384" } }, /must be an ARRAY/],
+    [{ build: { v8Flags: [""] } }, /non-empty V8 flag/],
+    [{ build: { v8Flags: [42] } }, /non-empty V8 flag/],
+    [{ build: { v8Flags: ["max-old-space-size=16384"] } }, /must start/],
+    [{ build: { v8Flags: ["--a,--b"] } }, /comma/],
+  ];
+  for (const [cfg, re] of bad) {
+    await assertRejects(
+      () => withDenoJson(cfg, v8FlagsArg),
+      Error,
+      undefined,
+      `expected ${JSON.stringify(cfg)} to be refused`,
+    );
+    const err = await withDenoJson(cfg, async (r) => {
+      try {
+        await v8FlagsArg(r);
+        return null;
+      } catch (e) {
+        return e as Error;
+      }
+    });
+    assert(err && re.test(err.message), `wrong message: ${err?.message}`);
+  }
+});
+
+Deno.test("v8FlagsArg: the `compile` spelling is redirected, not left to deno", async () => {
+  // Under Deno's own `compile` block an unknown key aborts the build with
+  // "Failed to parse compile configuration", which names neither the offending
+  // key nor the fix. Catch it first and say both.
+  const err = await withDenoJson(
+    { compile: { v8Flags: ["--max-old-space-size=16384"] } },
+    async (r) => {
+      try {
+        await v8FlagsArg(r);
+        return null;
+      } catch (e) {
+        return e as Error;
+      }
+    },
+  );
+  assert(err, "compile.v8Flags must be refused");
+  assert(/belongs under/.test(err.message), `unhelpful: ${err.message}`);
+  assert(/"build"/.test(err.message), "must name the correct block");
+});
+
+Deno.test("compileArgs: --v8-flags precedes the entry and leaves the argv otherwise intact", () => {
+  const base = {
+    hasDist: false,
+    workerInclude: [],
+    assets: [],
+    excludes: [],
+    out: "app",
+    entry: "src/app.ts",
+  };
+  assertEquals(
+    compileArgs(base).some((a) => a.startsWith("--v8-flags")),
+    false,
+  );
+
+  const withFlags = compileArgs({
+    ...base,
+    v8Flags: ["--v8-flags=--max-old-space-size=16384"],
+  });
+  const i = withFlags.indexOf("--v8-flags=--max-old-space-size=16384");
+  assert(i > 0, "flag is present");
+  assert(i < withFlags.indexOf("src/app.ts"), "must precede the entry");
+  assertEquals(withFlags[0], "compile");
+  assertEquals(withFlags[withFlags.length - 1], "src/app.ts");
 });

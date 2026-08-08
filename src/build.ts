@@ -124,6 +124,10 @@ export async function build(cfg?: BuildConfig): Promise<void> {
  *    compiled aio binary needs it (persistence always opens the worker DB).
  *  - {@link assetIncludes} — `--include` args for the app's runtime data assets
  *    (`.wasm`, `deno.json`, anything in `compile.include`).
+ *  - {@link v8FlagsArg} — `--v8-flags=…` from `compile.v8Flags`. A COMPILED
+ *    binary ignores `DENO_V8_FLAGS`, so an app that raises its heap for `deno
+ *    run` silently reverts to V8's ~4 GB default once packaged unless the flag
+ *    is baked in here.
  *  - {@link compileArgs} — the whole argv, assembled the way aio assembles it.
  *
  * ```ts
@@ -133,6 +137,7 @@ export async function build(cfg?: BuildConfig): Promise<void> {
  *   hasDist: true,
  *   workerInclude: dbWorkerInclude(),
  *   assets: await assetIncludes(Deno.cwd()),
+ *   v8Flags: await v8FlagsArg(Deno.cwd()),
  *   excludes: [],
  *   out: "myapp",
  *   entry: "src/app.ts",
@@ -144,6 +149,7 @@ export {
   assetIncludes,
   compileArgs,
   dbWorkerInclude,
+  v8FlagsArg,
 } from "./build/build-compile.ts";
 
 // `aio ship` core: verifiable release manifest — SHA-256 +

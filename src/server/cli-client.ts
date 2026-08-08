@@ -82,6 +82,46 @@ export type CliApp<S> = {
 };
 
 /** Connect to an aio server. URL can be http:// or ws:// — protocol is auto-detected. */
+/** Wire the first-connect deadline onto a `ready` promise.
+ *
+ *  Shared by both transports so "can I detect a connection that never
+ *  happened" does not depend on which one an app picked. Returns the settle
+ *  function each client calls on its first state frame — settling clears the
+ *  deadline, so a slow-but-successful connect never rejects afterwards. */
+function _readyDeadline<S>(
+  what: string,
+  ms: number | undefined,
+  resolve: (s: S) => void,
+  reject: (e: Error) => void,
+): (s: S) => void {
+  let done = false;
+  let timer: number | undefined;
+  if (ms && ms > 0) {
+    timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      reject(
+        new Error(
+          `[aio:cli] no connection to ${what} after ${ms}ms — the address, ` +
+            `the token or the certificate is wrong (a reachable server sends ` +
+            `state immediately). Reconnection continues in the background; ` +
+            `call close() to stop it.`,
+        ),
+      );
+    }, ms) as unknown as number;
+    // Never hold a process open just to report a failure.
+    try {
+      Deno.unrefTimer(timer);
+    } catch { /* not Deno (browser bundle) — nothing to unref */ }
+  }
+  return (s: S) => {
+    if (done) return;
+    done = true;
+    if (timer !== undefined) clearTimeout(timer);
+    resolve(s);
+  };
+}
+
 export function connectCli<S>(
   url: string,
   opts?: {
@@ -97,6 +137,19 @@ export function connectCli<S>(
      *  server's per-method budgets cannot be bridged to it — an app whose
      *  methods legitimately run for minutes raises this. */
     ackTimeoutMs?: number;
+    /** Reject `ready` if the FIRST connection has not succeeded within this
+     *  many ms. Off by default: a client that HAS connected should out-wait a
+     *  flaky network, and that is the common case.
+     *
+     *  The first attempt is a different question. A wrong URL, a wrong token
+     *  and an untrusted certificate never become right by retrying, and with
+     *  `ready` unsettled a caller cannot tell them from a slow server — the
+     *  console said "still retrying" while `await app.ready` simply never
+     *  returned, which reads as a hang. Set this wherever a failure has to be
+     *  REPORTABLE rather than waited on: a script, a test, a service-to-service
+     *  link. Reconnection continues regardless; this is about the caller
+     *  getting an answer, not about giving up. */
+    readyTimeoutMs?: number;
   },
 ): CliApp<S> {
   let state: S | null = null;
@@ -159,9 +212,12 @@ export function connectCli<S>(
   }
 
   let _readyResolve: ((s: S) => void) | null = null;
-  const ready = new Promise<S>((r) => {
-    _readyResolve = r;
+  const ready = new Promise<S>((r, j) => {
+    _readyResolve = _readyDeadline<S>(url, opts?.readyTimeoutMs, r, j);
   });
+  // An unhandled rejection is not the point of the deadline — a caller that
+  // never awaits `ready` (the normal UI case) must not crash the process.
+  ready.catch(() => {});
 
   let connecting = false;
   function connect(): void {
@@ -468,7 +524,10 @@ export function connectCli<S>(
  *  Uses Deno.connect({ transport: 'unix' }) — no TCP port needed. */
 export function connectCliUDS<S>(
   socketPath: string,
-  opts?: { ackTimeoutMs?: number },
+  /** Same contract as `connectCli` — including `readyTimeoutMs`, which must
+   *  exist on BOTH clients or the answer to "can I detect a dead connection"
+   *  depends on which transport you happened to pick. */
+  opts?: { ackTimeoutMs?: number; readyTimeoutMs?: number },
 ): CliApp<S> {
   // Same per-connection registry as the WS client — see connectCli.
   const _udsPending = createAckRegistry(() =>
@@ -487,9 +546,10 @@ export function connectCliUDS<S>(
   const decoder = new TextDecoder();
 
   let _readyResolve: ((s: S) => void) | null = null;
-  const ready = new Promise<S>((r) => {
-    _readyResolve = r;
+  const ready = new Promise<S>((r, j) => {
+    _readyResolve = _readyDeadline<S>(socketPath, opts?.readyTimeoutMs, r, j);
   });
+  ready.catch(() => {}); // see connectCli — an unawaited ready must not crash
 
   let _udsQueueNoted = false;
   /** Write an action, or queue it while the socket is down — the ONE writer,

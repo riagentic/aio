@@ -4,6 +4,10 @@
  */
 import { dirname, fromFileUrl, isAbsolute, join, relative } from "@std/path";
 import { artifactName } from "./platforms.ts";
+import {
+  physicalMemoryBytes,
+  resolveMaxHeapMB,
+} from "../server/heap-policy.ts";
 import type { BuildConfig } from "./build-config.ts";
 
 // Dev-only packages excluded from all compile targets
@@ -219,6 +223,116 @@ export async function assetIncludes(root: string): Promise<string[]> {
   return rels.flatMap((r) => ["--include", r]);
 }
 
+/** `--v8-flags` for the binary, from deno.json `compile.v8Flags`.
+ *
+ *  V8 options are fixed at isolate creation, so a COMPILED binary cannot pick
+ *  them up the way `deno run` does: it ignores `DENO_V8_FLAGS` entirely, and
+ *  the only way in is `deno compile --v8-flags=`. Without this an app that
+ *  raises its heap in the `dev` task silently reverts to V8's ~4 GB default
+ *  once packaged — dev and prod get different memory ceilings, and the app
+ *  finds out under load, in the user's hands.
+ *
+ *  Declared per app because the right value is a property of the workload
+ *  (an app whose peak memory scales with its input needs it; most do not):
+ *
+ *    "build": { "v8Flags": ["--max-old-space-size=16384"] }
+ *
+ *  It lives under aio's own `build` block, NOT under `compile`: `compile` is
+ *  Deno's, and `deno compile` rejects the whole config on an unknown key there
+ *  with "Failed to parse compile configuration" — so that spelling is detected
+ *  and redirected rather than left to fail cryptically at build time.
+ *
+ *  Returns `["--v8-flags=a,b"]`, or `[]` when nothing is declared. */
+export async function v8FlagsArg(root: string): Promise<string[]> {
+  let decl: unknown;
+  let misplaced = false;
+  try {
+    const cfg = JSON.parse(
+      await Deno.readTextFile(join(root, "deno.json")),
+    ) as {
+      build?: { v8Flags?: unknown };
+      compile?: { v8Flags?: unknown };
+    };
+    decl = cfg?.build?.v8Flags;
+    misplaced = decl === undefined && cfg?.compile?.v8Flags !== undefined;
+  } catch { /* no deno.json / unparsable — nothing declared */ }
+  // `compile` is Deno's own block and it validates strictly, so this spelling
+  // never reaches us as a working build — it makes `deno compile` abort with
+  // "Failed to parse compile configuration", which names neither the key nor
+  // the fix. Say both here instead.
+  if (misplaced) {
+    throw new Error(
+      `[compile] ✗ deno.json has compile.v8Flags — it belongs under aio's ` +
+        `"build" block, not "compile" (which is Deno's own, and rejects ` +
+        `unknown keys). Move it: "build": { "v8Flags": [...] }`,
+    );
+  }
+  // NOT an early return: an app that declares no v8Flags at all is the common
+  // case, and it is exactly the one that needs the heap ceiling added below.
+  if (decl !== undefined && !Array.isArray(decl)) {
+    throw new Error(
+      `[compile] ✗ deno.json build.v8Flags is ${
+        JSON.stringify(decl)
+      } — it must be an ARRAY of flags, e.g. ["--max-old-space-size=16384"].`,
+    );
+  }
+  const flags: string[] = [];
+  for (const [i, f] of (Array.isArray(decl) ? decl : []).entries()) {
+    if (typeof f !== "string" || !f.trim()) {
+      throw new Error(
+        `[compile] ✗ deno.json build.v8Flags[${i}] is ${
+          JSON.stringify(f)
+        } — every entry must be a non-empty V8 flag string.`,
+      );
+    }
+    const flag = f.trim();
+    // Refused rather than repaired: a flag without `--` is silently ignored by
+    // V8, so the binary would ship with the default it was meant to change.
+    if (!flag.startsWith("--")) {
+      throw new Error(
+        `[compile] ✗ deno.json build.v8Flags[${i}] ("${f}") must start ` +
+          `with "--" — V8 ignores anything else, so the binary would keep the ` +
+          `default this was meant to raise.`,
+      );
+    }
+    // The list is comma-joined, so an embedded comma would split one flag into
+    // two — both wrong, and neither reported by V8.
+    if (flag.includes(",")) {
+      throw new Error(
+        `[compile] ✗ deno.json build.v8Flags[${i}] ("${f}") contains a ` +
+          `comma. Pass one flag per array entry — the list is comma-joined.`,
+      );
+    }
+    flags.push(flag);
+  }
+  // The heap ceiling is added unless the app already set one. V8 freezes it at
+  // isolate creation and a COMPILED binary ignores DENO_V8_FLAGS entirely
+  // (measured) — so `deno compile --v8-flags=` is the ONLY way a shipped
+  // artifact gets anything but the ~4 GB default, whatever the machine it lands
+  // on. That default is what killed an app on a 32 GB box with 28 GB free.
+  //
+  // Resolved against the BUILD machine, which is the honest limit of a baked
+  // number: it is a headroom choice, not a measurement of the user's hardware.
+  // The runtime monitor is what keeps it safe on a smaller one, and it applies
+  // to worker isolates too — a Worker inherits the flag (measured, in both
+  // `deno run` and a compiled binary), contrary to what these docs long said.
+  if (!flags.some((f) => f.startsWith("--max-old-space-size"))) {
+    const mb = resolveMaxHeapMB(physicalMemoryBytes(), declaredMaxHeap(root));
+    if (mb !== null) flags.push(`--max-old-space-size=${mb}`);
+  }
+  return flags.length ? [`--v8-flags=${flags.join(",")}`] : [];
+}
+
+/** `memory.maxHeap` from deno.json, when the app states one. */
+function declaredMaxHeap(root: string): string | number | undefined {
+  try {
+    const cfg = JSON.parse(Deno.readTextFileSync(join(root, "deno.json")));
+    return (cfg as { memory?: { maxHeap?: string | number } })?.memory?.maxHeap;
+  } catch {
+    return undefined; // no deno.json — the rule's default applies
+  }
+}
+
 /** The exact `deno compile` argv for a target — pure, so the WIRING is testable.
  *  Every include here is a runtime dependency that `deno compile` cannot trace
  *  on its own (the embedded `dist/`, the SQLite worker, the app's data assets);
@@ -228,6 +342,8 @@ export async function assetIncludes(root: string): Promise<string[]> {
 export function compileArgs(opts: {
   hasDist: boolean;
   workerInclude: string[];
+  /** `--v8-flags=…` from {@link v8FlagsArg}; `[]` when the app declares none. */
+  v8Flags?: string[];
   assets: string[];
   excludes: string[];
   out: string;
@@ -240,6 +356,7 @@ export function compileArgs(opts: {
     "compile",
     "-A",
     ...(opts.target ? ["--target", opts.target] : []),
+    ...(opts.v8Flags ?? []),
     ...(opts.hasDist ? ["--include", "dist/"] : []),
     ...opts.workerInclude,
     ...opts.assets,
@@ -280,6 +397,8 @@ export async function runDenoCompile(cfg: BuildConfig): Promise<boolean> {
   // deno compile can't trace `Deno.readFile(new URL(…, import.meta.url))`, so
   // without this a WASM app runs degraded in the binary/AppImage.
   const assets = await assetIncludes(root);
+  const v8Flags = await v8FlagsArg(root);
+  if (v8Flags.length) console.log(`[compile] ${v8Flags[0]}`);
   if (assets.length) {
     console.log(
       `[compile] embedding ${assets.length / 2} data asset(s): ${
@@ -294,6 +413,7 @@ export async function runDenoCompile(cfg: BuildConfig): Promise<boolean> {
         hasDist,
         workerInclude,
         assets,
+        v8Flags,
         excludes,
         out: compileTarget,
         entry: configEntry,

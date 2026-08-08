@@ -205,7 +205,7 @@
         },
         "MemoryConfig": {
           "kind": "typeAlias",
-          "sig": "a3099cec6195c83c"
+          "sig": "1381c783ec4001c3"
         },
         "Method": {
           "kind": "typeAlias",
@@ -421,7 +421,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "a81dc7cb871a52f8"
+          "sig": "7a6a8c0ccc8c16ec"
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -967,7 +967,7 @@
         },
         "compileArgs": {
           "kind": "function",
-          "sig": "b829562cce4d7b15"
+          "sig": "b0c0cc17e116bc32"
         },
         "dbWorkerInclude": {
           "kind": "function",
@@ -996,6 +996,10 @@
         "ShipManifest": {
           "kind": "typeAlias",
           "sig": "9cdb74799c421f12"
+        },
+        "v8FlagsArg": {
+          "kind": "function",
+          "sig": "b8e01ade1de480ee"
         },
         "verifyShipManifest": {
           "kind": "function",
@@ -1202,7 +1206,7 @@
         },
         "MemoryReport": {
           "kind": "typeAlias",
-          "sig": "a2273daea93b0285"
+          "sig": "3f0d80955c47aac5"
         },
         "parseCli": {
           "kind": "function",
@@ -1338,11 +1342,11 @@
         },
         "connectCli": {
           "kind": "function",
-          "sig": "a95e833af63e850f"
+          "sig": "9f06b00e5ff8aeea"
         },
         "connectCliUDS": {
           "kind": "function",
-          "sig": "9103d610b0de9e75"
+          "sig": "953974e0aa538093"
         },
         "createDB": {
           "kind": "function",
@@ -1587,6 +1591,14 @@
         "setDocument": {
           "kind": "function",
           "sig": "84317e7760a7e7de"
+        },
+        "testApps": {
+          "kind": "function",
+          "sig": "1e28408e4fc4b642"
+        },
+        "TestApps": {
+          "kind": "interface",
+          "sig": "841c2b5afb5629f8"
         },
         "testBrowser": {
           "kind": "function",

@@ -35,6 +35,13 @@ Deno.test("android aio/air: useLocal honours the documented tuple form", () => {
   const [value, set] = android.useLocal("a");
   assertEquals(value, "a");
   assertEquals(typeof set, "function");
+  // …and its TYPE survives `noUncheckedIndexedAccess` (this repo compiles with
+  // it on, so the annotation below is the assertion). A field report suspected
+  // the tuple widened to `string | undefined` there, which would have made the
+  // documented spelling unusable in a strict app; it does not — a tuple has
+  // fixed arity, and the flag only widens index signatures and arrays.
+  const strict: string = value;
+  assertEquals(strict, "a");
 });
 
 Deno.test("android aio/air: useLocal exposes patch() for object state", () => {

@@ -17,6 +17,10 @@ const LEVEL_PAD: Record<ClientLogEntry["level"], string> = {
 // Rate tracking: clientIndex → { count within current second, warned flag }
 const _rate = new Map<number, { count: number; warned: boolean }>();
 
+// Overwritten at every server boot (`initClientLog`). The literal survives only
+// for a direct caller that never booted a server — kept cwd-relative rather
+// than guessing a home directory, because a wrong absolute path is harder to
+// notice than a visibly local one.
 let _logDir = ".aio/log";
 let _resetTimer: ReturnType<typeof setTimeout> | null = null;
 let _writeErrors = 0;
