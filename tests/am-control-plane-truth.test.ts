@@ -18,7 +18,7 @@ import { join } from "@std/path";
 import { cmdLog, cmdTrigger } from "../src/am/am-cmd-inspect.ts";
 import { cmdNew } from "../src/am/am-cmd-meta.ts";
 import { cmdCreate } from "../src/am/am-cmd-create.ts";
-import { registerAppDirs } from "../src/server/app-dirs.ts";
+import { appDirs, registerAppDirs } from "../src/server/app-dirs.ts";
 import type { GlobalFlags } from "../src/am/am-types.ts";
 
 // ── harness ──────────────────────────────────────────────────
@@ -195,20 +195,9 @@ Deno.test("am log --client: reads the app's real client.log", async () => {
   const home = await Deno.makeTempDir({ prefix: "am-clientlog-" });
   const logs = join(home, "logs");
   await Deno.mkdir(logs, { recursive: true });
-  registerAppDirs(app, {
-    home,
-    data: join(home, "data"),
-    cache: join(home, "cache"),
-    logs,
-    stateDb: join(home, "data/state.db"),
-    authDb: join(home, "data/auth.db"),
-    journal: join(home, "data/journal"),
-    tls: join(home, "data/tls"),
-    files: join(home, "data/files"),
-    appKey: join(home, "data/app.key"),
-    meta: join(home, "data/meta.json"),
-    launch: join(home, "launch.json"),
-  });
+  // The shape has ONE owner (appDirs) — a hand-built literal here was a
+  // second copy that broke the day the real one grew a field.
+  registerAppDirs(app, appDirs(app, home));
   await Deno.writeTextFile(
     join(logs, "client.log"),
     "[t] [INFO ] [client:0] boot\n[t] [ERROR] [client:0] boom\n",
@@ -231,20 +220,9 @@ Deno.test("am log --client: reads the app's real client.log", async () => {
 Deno.test("am log --client: no client log is an error, not a zero exit", async () => {
   const app = `am-clientlog-none-${Deno.pid}`;
   const home = await Deno.makeTempDir({ prefix: "am-clientlog-none-" });
-  registerAppDirs(app, {
-    home,
-    data: join(home, "data"),
-    cache: join(home, "cache"),
-    logs: join(home, "logs"),
-    stateDb: join(home, "data/state.db"),
-    authDb: join(home, "data/auth.db"),
-    journal: join(home, "data/journal"),
-    tls: join(home, "data/tls"),
-    files: join(home, "data/files"),
-    appKey: join(home, "data/app.key"),
-    meta: join(home, "data/meta.json"),
-    launch: join(home, "launch.json"),
-  });
+  // The shape has ONE owner (appDirs) — a hand-built literal here was a
+  // second copy that broke the day the real one grew a field.
+  registerAppDirs(app, appDirs(app, home));
   try {
     const { logs } = await capture(async () => {
       const code = await exitCodeOf(() =>

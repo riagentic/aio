@@ -97,7 +97,7 @@
         },
         "CellsConfig": {
           "kind": "typeAlias",
-          "sig": "6dba30c88bf11339"
+          "sig": "2c9f4c198a643ac7"
         },
         "CellStatus": {
           "kind": "typeAlias",
@@ -421,7 +421,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "4e8cede8b038c236"
+          "sig": "a81dc7cb871a52f8"
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -959,7 +959,7 @@
         },
         "buildShipManifest": {
           "kind": "function",
-          "sig": "94e6b09336ed2227"
+          "sig": "7747ea6601590c9e"
         },
         "Capabilities": {
           "kind": "typeAlias",
@@ -991,15 +991,15 @@
         },
         "shipApp": {
           "kind": "function",
-          "sig": "7ab005fe7e0e8cdf"
+          "sig": "4ed030a7714e19e9"
         },
         "ShipManifest": {
           "kind": "typeAlias",
-          "sig": "06e1cfa2ba365682"
+          "sig": "9cdb74799c421f12"
         },
         "verifyShipManifest": {
           "kind": "function",
-          "sig": "e88c8d5105fd8249"
+          "sig": "d0d90b7c82e8dd93"
         }
       }
     },
@@ -1146,7 +1146,7 @@
         },
         "CliFlags": {
           "kind": "typeAlias",
-          "sig": "bea40c3dc6c60d30"
+          "sig": "7da2d1fdd335b30f"
         },
         "createSliceSelector": {
           "kind": "function",
@@ -1254,6 +1254,42 @@
         }
       }
     },
+    "./feedback": {
+      "symbols": {
+        "feedback": {
+          "kind": "variable",
+          "sig": "fcf82a6cf5b53684"
+        },
+        "FeedbackCell": {
+          "kind": "typeAlias",
+          "sig": "a47ab7d72b95c733"
+        },
+        "FeedbackState": {
+          "kind": "typeAlias",
+          "sig": "46ed4dd09c6a71a5"
+        },
+        "FeedbackStatus": {
+          "kind": "typeAlias",
+          "sig": "2f6b9530f485d1cf"
+        },
+        "Report": {
+          "kind": "typeAlias",
+          "sig": "fe6ed016366e741d"
+        },
+        "ReportKind": {
+          "kind": "typeAlias",
+          "sig": "f3fd1fce8fca7a78"
+        },
+        "ReportSources": {
+          "kind": "typeAlias",
+          "sig": "ba88a17d0b094bc3"
+        },
+        "SubmittedReport": {
+          "kind": "typeAlias",
+          "sig": "2d089fc9a103e734"
+        }
+      }
+    },
     "./jsx-runtime": {
       "symbols": {
         "AirEvent": {
@@ -1286,7 +1322,7 @@
         },
         "AppDirs": {
           "kind": "typeAlias",
-          "sig": "ff4dc10a4e683e51"
+          "sig": "c373a4f479975d72"
         },
         "AppMeta": {
           "kind": "typeAlias",
@@ -1366,6 +1402,62 @@
         }
       }
     },
+    "./ship": {
+      "symbols": {
+        "buildShipManifest": {
+          "kind": "function",
+          "sig": "7747ea6601590c9e"
+        },
+        "CellContract": {
+          "kind": "typeAlias",
+          "sig": "ed73536ca3ee2457"
+        },
+        "DataContract": {
+          "kind": "typeAlias",
+          "sig": "ea78670033e797b3"
+        },
+        "generateSigningKey": {
+          "kind": "function",
+          "sig": "3fa468fe7e07a2c0"
+        },
+        "githubWorkflow": {
+          "kind": "function",
+          "sig": "764b5503991ec79e"
+        },
+        "manifestCore": {
+          "kind": "function",
+          "sig": "d792e46fb22db38d"
+        },
+        "sha256Hex": {
+          "kind": "function",
+          "sig": "2196aabb6f87489b"
+        },
+        "shipApp": {
+          "kind": "function",
+          "sig": "4ed030a7714e19e9"
+        },
+        "ShipExpectations": {
+          "kind": "typeAlias",
+          "sig": "5a106b7dce39e96a"
+        },
+        "ShipManifest": {
+          "kind": "typeAlias",
+          "sig": "9cdb74799c421f12"
+        },
+        "UpdateTarget": {
+          "kind": "typeAlias",
+          "sig": "1fb6ec6de1e2aa04"
+        },
+        "verifyManifestClaims": {
+          "kind": "function",
+          "sig": "8a93fe9c57640b8b"
+        },
+        "verifyShipManifest": {
+          "kind": "function",
+          "sig": "d0d90b7c82e8dd93"
+        }
+      }
+    },
     "./state-core": {
       "symbols": {
         "getCellSignal": {
@@ -1442,7 +1534,7 @@
         },
         "AppDirs": {
           "kind": "typeAlias",
-          "sig": "ff4dc10a4e683e51"
+          "sig": "c373a4f479975d72"
         },
         "bootCells": {
           "kind": "function",
@@ -1739,6 +1831,50 @@
         "UiStyles": {
           "kind": "function",
           "sig": "2603d94e2d37fc0a"
+        }
+      }
+    },
+    "./updates": {
+      "symbols": {
+        "AvailableUpdate": {
+          "kind": "typeAlias",
+          "sig": "dc316007c4c74e84"
+        },
+        "BlockedUpdate": {
+          "kind": "typeAlias",
+          "sig": "00223f278dc486fc"
+        },
+        "CompatVerdict": {
+          "kind": "typeAlias",
+          "sig": "2d2d636640102202"
+        },
+        "updates": {
+          "kind": "variable",
+          "sig": "1fa1a2b30259eb50"
+        },
+        "UpdatesCell": {
+          "kind": "typeAlias",
+          "sig": "8203a45b6833b44d"
+        },
+        "UpdatesConfig": {
+          "kind": "typeAlias",
+          "sig": "ca4015692480d9be"
+        },
+        "UpdatesInput": {
+          "kind": "typeAlias",
+          "sig": "cfb871764f9f427d"
+        },
+        "UpdateSourceKind": {
+          "kind": "typeAlias",
+          "sig": "b15231178a63080d"
+        },
+        "UpdatesState": {
+          "kind": "typeAlias",
+          "sig": "79684d9329b99b6c"
+        },
+        "UpdateStatus": {
+          "kind": "typeAlias",
+          "sig": "1afe297ea4fd49f5"
         }
       }
     }

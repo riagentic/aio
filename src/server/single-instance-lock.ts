@@ -40,6 +40,24 @@ export function slugify(s: string): string {
     "aio-app";
 }
 
+/** The identity fields of a project's `deno.json`, in the ONE order that decides
+ *  an app's id. Null when the file names none of them.
+ *
+ *  Shared with the BUILD (`build-config.ts` names the binary with it) because a
+ *  compiled app takes its identity from its own filename — so the build's
+ *  naming rule and this chain are the same decision seen from two sides. They
+ *  used to be two: the build read `title ?? basename(root)` and ignored `appId`
+ *  outright, so a `deno.json` with `appId: "wallet"` in a directory called
+ *  `thing` was `~/.wallet` in dev and `~/.thing` once compiled. The data
+ *  directory MOVED when you compiled — the one asterisk `app-dirs.ts` promises
+ *  it does not have. */
+export function appIdFromConfig(
+  cfg: { appId?: string; title?: string; name?: string } | null | undefined,
+): string | null {
+  const raw = cfg?.appId ?? cfg?.title ?? cfg?.name?.split("/").pop();
+  return raw ? slugify(raw) : null;
+}
+
 /** Resolve app ID — explicit `appId` wins; otherwise inferred. */
 export function resolveAppId(appId?: string): string {
   if (appId) return slugify(appId);
@@ -63,8 +81,8 @@ export function resolveAppId(appId?: string): string {
     const cfg = JSON.parse(
       Deno.readTextFileSync(join(Deno.cwd(), "deno.json")),
     ) as { appId?: string; title?: string; name?: string };
-    const fromCfg = cfg.appId ?? cfg.title ?? cfg.name?.split("/").pop();
-    if (fromCfg) return slugify(fromCfg);
+    const fromCfg = appIdFromConfig(cfg);
+    if (fromCfg) return fromCfg;
   } catch { /* no deno.json — fall through */ }
   try {
     const main = new URL(Deno.mainModule);
@@ -108,6 +126,15 @@ export function lockDir(): string {
   try {
     Deno.mkdirSync(_lockDir, { recursive: true });
   } catch { /* already exists */ }
+  try {
+    // 0700, and NOT only for tidiness: the base is `$XDG_RUNTIME_DIR` (already
+    // 0700, so this is a no-op) OR `/tmp` when that is unset — containers,
+    // no-systemd hosts, plain ssh. There the default 0755 left every app's
+    // control socket at a predictable path any local user could traverse to and
+    // connect to, i.e. dispatch methods into someone else's app. The mode has to
+    // assume the /tmp case, because that is the one where it matters.
+    if (Deno.build.os !== "windows") Deno.chmodSync(_lockDir, 0o700);
+  } catch { /* best-effort — not ours to chmod (shared dir, odd FS) */ }
   return _lockDir;
 }
 

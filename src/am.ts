@@ -66,6 +66,7 @@ import { cmdAuth } from "./am/am-cmd-auth.ts";
 
 import { cmdRecord } from "./am/record.ts";
 import { cmdReplay, cmdTimeline } from "./am/am-cmd-timeline.ts";
+import { cmdReport } from "./am/am-cmd-report.ts";
 import {
   cmdActions,
   cmdDispatch,
@@ -112,6 +113,7 @@ const COMMANDS: Record<string, CmdHandler> = {
   backup: cmdBackup,
   restore: cmdRestore,
   migrations: cmdMigrations,
+  report: cmdReport,
   // Inspect
   clients: cmdClients,
   client: cmdClient,

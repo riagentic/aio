@@ -102,6 +102,7 @@
 
 - [Debugging](debugging/README.md) — When things go wrong — errors, diagnostics, and recovery.
 - [Errors](debugging/errors.md) — AioError format, error codes, correlation IDs, log files, and the onError hook.
+- [Problem reports](debugging/feedback.md) — That is the whole configuration.
 - [Performance](debugging/performance.md) — Performance budgets, slow reducer/effect diagnosis, and budget configuration.
 - [Production](debugging/production.md) — Memory monitoring, cell health, common error patterns, and production failure
 - [Time travel](debugging/time-travel.md) — A dev inspector with a bounded window — not a replay mechanism, not
@@ -156,6 +157,7 @@
 - [Upgrade: alpha50 → alpha51](upgrade/from-alpha50-to-alpha51.md) — The zero-inbox release: every open field-report item resolved or refused, plus
 - [Upgrade: alpha51 → alpha52](upgrade/from-alpha51-to-alpha52.md) — in one version — and every old spelling keeps working through beta:
 - [Upgrade: alpha52 → alpha53](upgrade/from-alpha52-to-alpha53.md) — Small and additive after the big one.
+- [alpha53 → alpha54](upgrade/from-alpha53-to-alpha54.md) — app that adds nothing to its config behaves exactly as it did on alpha53.
 - [Upgrade from v1.0.0-alpha6 to v1.0.0-alpha7](upgrade/from-alpha6-to-alpha7.md) — mod.ts no longer re-exports renderer primitives.
 - [Upgrade from v1.0.0-alpha7 to v1.0.0-alpha8](upgrade/from-alpha7-to-alpha8.md) — None.
 - [Upgrade from v1.0.0-alpha8 to v1.0.0-alpha9](upgrade/from-alpha8-to-alpha9.md) — The internal machine state field is renamed.
@@ -180,6 +182,11 @@
 - [Local-first execution (perfect-aio D3) — design](specs/2026-07-22-local-first.md) — Status: design + prototype phase (the D3 gate: no mass migration before this
 - [Cell workers (`worker: true`) — design](specs/2026-07-25-cell-workers.md) — Status: design (nothing built).
 - [One data directory, and updating a deployed app — design](specs/2026-07-26-data-dir-and-updates.md) — Status: Part 1 SHIPPED in 1.0.0-alpha38 (see
+- [Channelled app updates — design](specs/2026-08-08-app-updates.md) — Status: SHIPPED and wired — updates: "<url>" in aio.run() turns it on.
+
+## deploy
+
+- [Keeping an app up to date](deploy/updates.md) — One line turns it on:
 
 ## release-notes
 

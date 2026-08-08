@@ -1,10 +1,12 @@
 // app-dirs.ts — ONE answer to "where does this app keep its files".
 //
-// Three tiers, and the only thing that distinguishes them is what a backup
+// Four tiers, and the only thing that distinguishes them is what a backup
 // should contain:
 //
 //   ① critical   ~/.<appId>/data/     state, users, journal, keys, user files
 //   ② expendable ~/.<appId>/logs|cache/ + launch.json  regenerable — delete freely
+//   ②b payload   ~/.<appId>/app/      the unpacked binaries the app is RUNNING
+//                                     from — regenerable, but not while it runs
 //   ③ temporary  $XDG_RUNTIME_DIR/aio/    socket, pid, lock — must NOT survive a
 //                                          reboot (see single-instance-lock.ts)
 //
@@ -64,6 +66,38 @@ export type AppDirs = {
    *  in `data/` and doubles the size of every backup. The framework not writing a
    *  directory is not a reason to stop offering it. */
   cache: string;
+  /** ②b `<home>/app` (mode 0700) — where a packaged app UNPACKS ITSELF: the
+   *  `TMPDIR` every aio launcher hands to an AppImage, so both of the AppImage
+   *  runtime's staging paths (`$TMPDIR/.mount_XXXXXX` for the FUSE mount,
+   *  `$TMPDIR/appimage_extracted_<digest>` for the FUSE-less extract) land here
+   *  instead of `/tmp`.
+   *
+   *  Not `cache/`, though it is equally regenerable: `cache/` promises "delete
+   *  at any time", and deleting the tree a live process is executing from is not
+   *  that. `app/` is regenerable-when-stopped.
+   *
+   *  The default `/tmp` was wrong on four counts, all measured on the runtime
+   *  aio ships (`appimagetool` 1.9.1), not assumed:
+   *
+   *  • the extract path's directory name is a DIGEST OF THE APPIMAGE, not a
+   *    mkdtemp random — so it is predictable to anyone on the host, in a
+   *    world-writable directory. Planting a symlink at a name the extractor
+   *    writes gets that write followed, as the launching user.
+   *  • it is created 0755, so the unpacked app is world-READABLE (the FUSE
+   *    mount is not — it is 0700 + user-only; only the extract path leaks).
+   *  • the digest is per-FILE, not per-user, so a second user running the same
+   *    AppImage collides with the first user's directory — and the runtime does
+   *    not fail there. It warns ("could not create symlink"), EXITS 0, and runs
+   *    whatever tree is already present. A silent partial extraction that then
+   *    executes is the fail-loud violation that settled this.
+   *  • `/tmp` is `noexec` on hardened hosts (the app simply won't start) and
+   *    tmpfs on most distros (a ~200 MB Electron unpack goes to RAM), and
+   *    tmp-cleaners delete underneath long-running apps.
+   *
+   *  Under `<home>/app` every one of those is structural rather than patched:
+   *  the path is per-user by construction, ownership always matches, and an
+   *  app's whole footprint stays one `rm -rf ~/.<appId>`. */
+  app: string;
   /** ② `<home>/logs` — rotation-capped; excluded from a backup by default.
    *  Includes `stdout.log`, the raw stdout+stderr capture when `am`/`amui`
    *  launched the app (it used to be `<project>/.aio.log`, which split an app's
@@ -130,6 +164,7 @@ export function appDirs(appId: string, configured?: string): AppDirs {
     home,
     data,
     cache: join(home, "cache"),
+    app: join(home, "app"),
     logs: join(home, "logs"),
     stateDb: join(data, "state.db"),
     authDb: join(data, "auth.db"),
@@ -177,6 +212,93 @@ export function ensureAppDirs(dirs: AppDirs): void {
     // Windows has no POSIX mode; chmod throws there.
     if (Deno.build.os !== "windows") Deno.chmodSync(dirs.data, 0o700);
   } catch { /* best-effort — a restrictive umask or FS may refuse */ }
+}
+
+/** Create `<home>/app` and lock it to its owner. Returns the path.
+ *
+ *  The 0700 is the point, not a detail: `$HOME` itself is 0755 on most distros,
+ *  so moving an unpack out of `/tmp` without narrowing the mode swaps one
+ *  world-readable location for another and fixes nothing. */
+export function ensureAppPayloadDir(dirs: AppDirs): string {
+  Deno.mkdirSync(dirs.app, { recursive: true });
+  try {
+    // Windows has no POSIX mode; chmod throws there.
+    if (Deno.build.os !== "windows") Deno.chmodSync(dirs.app, 0o700);
+  } catch { /* best-effort — a restrictive umask or FS may refuse */ }
+  return dirs.app;
+}
+
+/** Remove the empty `.mount_XXXXXX` stubs a crashed AppImage leaves behind.
+ *
+ *  `/tmp` cleaned these for us; `<home>/app` does not, and that is the one real
+ *  cost of the move — so it is paid here rather than left to grow.
+ *
+ *  Non-recursive `removeSync` BY DESIGN: it succeeds only on an EMPTY directory,
+ *  so a still-mounted squashfs or a live extraction is refused by the kernel
+ *  instead of by a heuristic of ours guessing which sibling instance is alive.
+ *  Extracted trees are deliberately never collected — they are the warm-start
+ *  cache, and another process may be executing one right now. */
+export function sweepAppPayloadDir(dirs: AppDirs): void {
+  let entries: Deno.DirEntry[];
+  try {
+    entries = [...Deno.readDirSync(dirs.app)];
+  } catch {
+    return; // no payload dir — nothing was ever unpacked here
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory || !entry.name.startsWith(".mount_")) continue;
+    try {
+      Deno.removeSync(join(dirs.app, entry.name));
+    } catch { /* mounted, or another instance is using it — leave it */ }
+  }
+}
+
+/** THE rule for "this app unpacked itself somewhere other users can reach",
+ *  pure so it is testable without building an AppImage.
+ *
+ *  Only a packaged app can be in this state (`appImage` is the runtime's
+ *  `$APPIMAGE`), and only when its unpack root (`$APPDIR`) sits outside the
+ *  app's own payload dir AND under a world-writable parent — the `/tmp` shape.
+ *  A deliberate `TMPDIR=/srv/apps` is not world-writable and draws no warning:
+ *  the hazard is the shared directory, not the disagreement with our default.
+ *
+ *  Observe-only by contract — identical in dev and prod. The app runs either
+ *  way; what it must not do is run there SILENTLY. */
+export function unsafeUnpackWarning(opts: {
+  appImage?: string;
+  appDir?: string;
+  expected: string;
+  parentWorldWritable: boolean;
+}): string | null {
+  const { appImage, appDir, expected, parentWorldWritable } = opts;
+  if (!appImage || !appDir) return null;
+  if (resolve(appDir) === resolve(expected)) return null;
+  if (resolve(appDir).startsWith(resolve(expected) + "/")) return null;
+  if (!parentWorldWritable) return null;
+  return `this AppImage unpacked itself into ${appDir}, inside a ` +
+    `world-writable directory — other users on this host can read it, and ` +
+    `(on the FUSE-less extract path) the directory name is a predictable ` +
+    `digest they can create first. Launch it as: ` +
+    `TMPDIR=${expected} ${appImage}   (aio's own launchers do this)`;
+}
+
+/** `unsafeUnpackWarning` against the live environment. Returns the message, or
+ *  null when the app is not packaged / already unpacks somewhere private. */
+export function checkUnpackLocation(dirs: AppDirs): string | null {
+  const appDir = Deno.env.get("APPDIR");
+  let parentWorldWritable = false;
+  if (appDir) {
+    try {
+      const mode = Deno.statSync(join(appDir, "..")).mode;
+      parentWorldWritable = mode !== null && (mode & 0o002) !== 0;
+    } catch { /* unreadable parent — cannot claim it is world-writable */ }
+  }
+  return unsafeUnpackWarning({
+    appImage: Deno.env.get("APPIMAGE"),
+    appDir,
+    expected: dirs.app,
+    parentWorldWritable,
+  });
 }
 
 /** What `meta.json` records: enough for `am restore` to refuse the wrong archive

@@ -33,11 +33,22 @@ export const AIO_ENTRY_PATHS: Readonly<Record<string, string>> = {
   "aio/extras": "src/extras/mod.ts",
   "aio/sync": "src/sync/mod.ts",
   "aio/testing": "src/cell-test.ts",
+  // The built-in updates cell. Its own entry because `cell()` self-registers:
+  // re-exporting it from `mod.ts` would register it in every app ever written,
+  // including the ones that never update themselves. Importing it IS opting in.
+  "aio/updates": "src/updates.ts",
+  // Same opt-in rule as aio/updates: a self-registering cell behind its own
+  // entry, so an app that never reports problems carries no feedback state.
+  "aio/feedback": "src/feedback.ts",
   // `aio/schedule` and `aio/selectors` were DELETED in alpha52 (entry diet):
   // everything they carried lives on `aio` (schedule, createSelector) or
   // `aio/extras` (isScheduleEffect, createSliceSelector). aiol reports the
   // dead specifiers and `--safe-fix` rewrites the imports.
   "aio/build": "src/build.ts",
+  // `aio ship` — run-only: it is a CLI that turns a built artifact into a
+  // signed, channel-bound release. Without an entry it was reachable only from
+  // inside this repo, which made the published release story unusable.
+  "aio/ship": "src/build/ship.ts",
   "aio/build-all": "src/build-all.ts",
   "aio/dev-android": "src/dev-android.ts",
   "aio/am": "src/am.ts",
@@ -53,6 +64,7 @@ export const AIO_ENTRY_PATHS: Readonly<Record<string, string>> = {
  *  (`import { assetIncludes, compileArgs, dbWorkerInclude } from "aio/build"` —
  *  docs/build/targets.md, docs/persistence/sqlite.md), so it must be mapped. */
 export const AIO_RUN_ONLY_ENTRIES: ReadonlySet<string> = new Set([
+  "aio/ship",
   "aio/build-all",
   "aio/dev-android",
   "aio/am",

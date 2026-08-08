@@ -36,9 +36,11 @@ import { createCellWorkerPool } from "./cell-worker-pool.ts";
 import { isScheduleEffect } from "../state/schedule.ts";
 import {
   appDirs,
+  checkUnpackLocation,
   ensureAppDirs,
   registerAppDirs,
   resolveAppDirs,
+  sweepAppPayloadDir,
   writeAppMeta,
 } from "./app-dirs.ts";
 import { openBlobStore } from "./blobs.ts";
@@ -75,6 +77,17 @@ import { createCostMeter } from "../vitals/cost-meter.ts";
 
 // CLI + path resolution
 import { parseCli, printHelp, VERSION, versionLine } from "./aio-cli.ts";
+import { awaitPredecessor } from "./updates-apply.ts";
+import { startFeedback } from "./feedback-boot.ts";
+import {
+  beginUpdates,
+  confirmPendingUpdate,
+  judgePendingUpdate,
+  startUpdates,
+  ttyPrompt,
+} from "./updates-boot.ts";
+import { PERSIST_SCHEMA_VERSION } from "./persist-schema.ts";
+import { deriveDataContract } from "./updates-core.ts";
 import {
   distCandidates,
   findFreePort,
@@ -322,6 +335,14 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
   // must pass explicit disjoint `cells:` lists — the bind error says so).
 
   try {
+    // Configuring `updates` registers the built-in cell — BEFORE the registry
+    // is read below, because a cell that registers afterwards is never
+    // composed and never bound. Dynamic on purpose: `cell()` self-registers on
+    // import, so a static import anywhere in the server would put this cell in
+    // every app that never asked for it.
+    if (fc.updates) await import("../state/updates-cell.ts");
+    if (fc.feedback) await import("../state/feedback-cell.ts");
+
     // Isolate filter
     const cliIsolate = parseCli().isolate;
     const isolate = fc.isolate ?? cliIsolate;
@@ -606,6 +627,10 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
     // Post-run: memory monitor, cells API, bindCell
     await wrapAppWithCells(app, composed, fc, cellReportOpts);
 
+    // Cells are bound — the update check can now call cell methods. Armed in
+    // _run, fired here, because dispatching before binding throws.
+    beginUpdates();
+
     // AIO-418: fire the user's onStart NOW — after the callable cell
     // method surface is bound — so seeding via a cell method (members.seed())
     // works instead of throwing "cell runtime not booted". Error-guarded: a
@@ -651,6 +676,28 @@ async function _run<S, A, E>(
     Deno.exit(0);
   }
 
+  if (cli.dataContract) {
+    // What this build promises about data already on disk. Derived from the
+    // very same cell versions and onMigrate hooks the boot path uses, so a
+    // published contract cannot drift from what the binary actually does.
+    console.log(JSON.stringify(
+      deriveDataContract(
+        config._cellMigrations ?? new Map(),
+        PERSIST_SCHEMA_VERSION,
+      ),
+      null,
+      2,
+    ));
+    Deno.exit(0);
+  }
+
+  // An update hands over by starting the new artifact and exiting. aio refuses
+  // to boot while another instance holds the app lock, so the successor is
+  // launched with its predecessor's pid and waits here — BEFORE the lock is
+  // taken, and before anything else can fail for a reason that is really just
+  // this race.
+  await awaitPredecessor(Deno.args);
+
   const appId = resolveAppId(config.appId);
   log.debug(`app-id: ${appId}`);
 
@@ -673,7 +720,22 @@ async function _run<S, A, E>(
   registerAppDirs(appId, _dirs);
   // Always create them: auth.db / app.key / state.db all open files inside.
   ensureAppDirs(_dirs);
+  // Did the last boot install something? Count this attempt, or — having spent
+  // them — put the old artifact back and let the supervisor start it. Runs in
+  // the NEW build, because it is the only thing present to judge itself.
+  if (!config.libraryMode && await judgePendingUpdate(_dirs.data, log)) {
+    Deno.exit(1);
+  }
   if (!config.libraryMode) {
+    // A packaged app unpacks itself BEFORE any of our code runs, so this can
+    // only observe where that happened — and say so when it happened somewhere
+    // other users on the host can reach. Never fatal (the app works either
+    // way), never silent (running world-readable is not a detail), identical in
+    // dev and prod. The sweep clears the empty mount stubs a crash leaves in
+    // our own payload dir — the one upkeep `/tmp` used to do for us.
+    sweepAppPayloadDir(_dirs);
+    const unsafeUnpack = checkUnpackLocation(_dirs);
+    if (unsafeUnpack) log.warn("security", unsafeUnpack);
     if (!cli.noDataMigrate) {
       const _m = migrateLegacyLayout({
         appId,
@@ -1567,6 +1629,69 @@ async function _run<S, A, E>(
   udsHandle = transport.udsHandle;
   udsRef.current = udsHandle;
 
+  // `asyncDb` is optional; bind it once so the narrowing survives into the
+  // callback that takes the pre-migration backup.
+  const _snap = asyncDb?.snapshot?.bind(asyncDb);
+  const _snapshotDb = _snap ? (path: string) => _snap(path) : undefined;
+
+  // Whatever was pending has now booted far enough to serve — confirm it, so a
+  // later boot does not roll back a version that works.
+  if (!config.libraryMode) confirmPendingUpdate(_dirs.data, log);
+
+  // Updates: opt-in, and off by default in libraryMode (a test or a host app
+  // owns this process; nothing it did should replace a binary).
+  const _updates = config.updates && !config.libraryMode
+    ? await startUpdates({
+      updates: config.updates,
+      dataDir: _dirs.data,
+      appVersion: _resolveAppVersion(
+        config.appVersion,
+        _denoJsonVersion(),
+        isCompiled(),
+      ),
+      stamp: (appDenoJson()?.build as { channel?: string } | undefined)
+        ?.channel,
+      flag: cli.channel,
+      local: {
+        schema: PERSIST_SCHEMA_VERSION,
+        cells: migrationSummary?.stored ?? {},
+      },
+      exposed: expose,
+      log,
+      argv: Deno.args,
+      snapshot: _snapshotDb,
+      shutdown: () => _shutdownRuntime().catch(() => {}),
+      prompt: ttyPrompt(),
+    })
+    : undefined;
+
+  // Problem reports: user-filed and automatic. Off in libraryMode — a test or
+  // a host app owns this process, and its failures are not the app's to file.
+  const _feedback = config.feedback && !config.libraryMode
+    ? await startFeedback({
+      feedback: config.feedback,
+      log,
+      redact,
+      sources: {
+        appId,
+        appVersion: _resolveAppVersion(
+          config.appVersion,
+          _denoJsonVersion(),
+          isCompiled(),
+        ),
+        aioVersion: VERSION,
+        dataDir: _dirs.data,
+        logsDir: _dirs.logs,
+        exposed: expose,
+        persist: shouldPersist,
+        cells: Object.keys(config._cellMethods ?? {}),
+        channel: _updates?.channel,
+        getState: () => app.getState() as Record<string, unknown>,
+        getTimeline: () => timeline.entries(),
+      },
+    })
+    : undefined;
+
   // Lifecycle: globals, onStart, schedules, logging, client launch
   startLifecycle({
     // Boot-report auth label — "password+totp+oidc", "sessions", or fallback.
@@ -1580,6 +1705,29 @@ async function _run<S, A, E>(
       : sessionStore
       ? "sessions"
       : undefined,
+    // Facts the report cannot read off the process: where this app keeps what
+    // it owns, and what it is actually running.
+    bootExtras: {
+      dataDir: _dirs.home,
+      cells: Object.keys(config._cellMethods ?? {}),
+      feedback: _feedback
+        ? {
+          auto: _feedback.auto,
+          keep: _feedback.keep,
+          destination: _feedback.url ??
+            (_feedback.hasSink ? "custom sink" : undefined),
+        }
+        : undefined,
+      updates: _updates
+        ? {
+          source: _updates.source,
+          kind: _updates.kind,
+          channel: _updates.channel,
+          intervalMs: _updates.intervalMs,
+          auto: _updates.auto,
+        }
+        : undefined,
+    },
     appId,
     appVersion: _resolveAppVersion(
       config.appVersion,

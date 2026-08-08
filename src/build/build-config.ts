@@ -4,6 +4,7 @@
  */
 import { basename, dirname, join, resolve } from "@std/path";
 import { slugify } from "./build-helpers.ts";
+import { appIdFromConfig } from "../server/single-instance-lock.ts";
 import {
   BUILD_BOOL_FLAGS,
   BUILD_VALUE_FLAGS,
@@ -192,7 +193,13 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
   // a binary literally named `My App` under `deno task compile` while
   // `deno task build` (which slugifies the same fallback) produced `my-app` —
   // two names for one artifact, and a shell-hostile one at that.
-  const defaultName = slugify(appTitle ?? basename(root));
+  //
+  // The chain itself belongs to `appIdFromConfig`, not here: a compiled app
+  // infers its APP ID from this very filename, so naming the binary and
+  // resolving the id are one decision. Reading `title` while ignoring `appId`
+  // made them two, and an app that set `appId` changed data directories the
+  // moment it was compiled.
+  const defaultName = appIdFromConfig(mainConfig) ?? slugify(basename(root));
   const rawName = Deno.args.find((a) => a.startsWith("--name="))?.slice(7);
   const binaryName = rawName ? slugify(rawName) : defaultName;
 

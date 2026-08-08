@@ -15,20 +15,22 @@ the part you back up is one subdirectory of it.
     app.key         the persisted access token (key: true)  🔒 secret
   logs/     ← ② regenerable: app.log, error.log, client.log, stdout.log …
   cache/    ← ② regenerable BULK your app writes: downloads, build trees, thumbnails
+  app/      ← ② the unpacked binaries a packaged app RUNS from (AppImage) 🔒 0700
   launch.json ← ② the flags `am` started it with, so `am restart` replays them
 
 $XDG_RUNTIME_DIR/aio/   ← ③ must NOT survive a reboot
   wallet.sock  wallet.pid  wallet.lock
 ```
 
-Three tiers, and the only question that separates them is **what a backup
+Four tiers, and the only question that separates them is **what a backup
 contains**:
 
-| Tier         | Lose it and…                        | Where                                   |
-| ------------ | ----------------------------------- | --------------------------------------- |
-| ① critical   | the data is gone                    | `~/.<appId>/data/`                      |
-| ② expendable | the app recreates it                | `~/.<appId>/logs⎪cache/`, `launch.json` |
-| ③ temporary  | it must not survive a reboot at all | `$XDG_RUNTIME_DIR/aio/`                 |
+| Tier         | Lose it and…                          | Where                                   |
+| ------------ | ------------------------------------- | --------------------------------------- |
+| ① critical   | the data is gone                      | `~/.<appId>/data/`                      |
+| ② expendable | the app recreates it                  | `~/.<appId>/logs⎪cache/`, `launch.json` |
+| ②b payload   | it re-unpacks — but not while it runs | `~/.<appId>/app/`                       |
+| ③ temporary  | it must not survive a reboot at all   | `$XDG_RUNTIME_DIR/aio/`                 |
 
 **Why tier ③ isn't in the app directory** — it's the one deliberate split, and
 it buys three things: a `.sock`/`.lock` must NOT survive a reboot (in `$HOME`
@@ -44,6 +46,35 @@ the mode assumes the worst file in the tree.
 downloads, generated thumbnails. It is deliberately OUTSIDE `data/` so it never
 enters a backup: `am backup` copies `data/` only, and losing `cache/` costs
 time, not information. Reach it with `appDirs(appId).cache` (`aio/server`).
+
+`app/` is where a **packaged app unpacks itself**. An AppImage stages its
+contents into `$TMPDIR` before a single line of your app runs, so the launcher
+is the only place that can choose where — every aio launcher points it here, at
+mode `0700`.
+
+The default (`/tmp`) is not merely untidy. Measured on the runtime aio ships:
+
+- the FUSE-less **extract** path names its directory after a **digest of the
+  AppImage** — predictable to anyone on the host — and creates it `0755`, so the
+  unpacked app is world-readable. (The FUSE mount path is `0700` and user-only;
+  only the extract path leaks.)
+- the digest is per-**file**, not per-user, so a second user running the same
+  AppImage lands in the first user's directory. The runtime does not fail there:
+  it warns, exits 0, and runs whatever tree is already present.
+- `/tmp` is `noexec` on hardened hosts (the app won't start), tmpfs on most
+  distros (a ~200 MB unpack goes to RAM), and tmp-cleaners delete underneath
+  long-running apps.
+
+Launching an AppImage yourself? Do what the launchers do:
+
+```sh
+TMPDIR=~/.wallet/app ./wallet-x86_64.AppImage      # the path: deno run -A jsr:@riagentic/aio/build --print-app-tmpdir
+```
+
+An app that finds itself unpacked somewhere world-writable says so at boot (a
+`security` warning naming the path and the fix) — it still runs; it just never
+does it silently. Empty `.mount_*` stubs left by a crash are swept on the next
+start; extracted trees are kept deliberately, as a warm start.
 
 `logs/stdout.log` is the raw stdout+stderr of an app that `am start` launched —
 where a bare `console.log` in a cell and the stack trace of a crash _before the

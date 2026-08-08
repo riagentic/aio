@@ -7,6 +7,12 @@ One guide per version migration. Find your current version and follow the steps.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha53 → alpha54](from-alpha53-to-alpha54.md) — the last mile: opt-in app
+  updates (`updates: "<url>"`) with a signed data contract that never offers a
+  release which cannot migrate your data, problem reports (`feedback: true`),
+  `aio ship github`, and `aio/ship` as a published entry. Breaking only for
+  anyone who already published `ship` manifests: v1 manifests signed the binary
+  digest but not the channel, so they are refused and must be re-published
 - [alpha52 → alpha53](from-alpha52-to-alpha53.md) — one address, one manager:
   `am ui` opens amui (the projection moved to `am state --ui`), `--host=`/
   `host:` binds one interface with a single bind-address decider

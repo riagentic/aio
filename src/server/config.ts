@@ -45,6 +45,8 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "port",
   "expose",
   "host",
+  "updates",
+  "feedback",
   "baseDir",
   "serveDirs",
   "client",
@@ -106,6 +108,8 @@ export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
   "port",
   "expose",
   "host",
+  "updates",
+  "feedback",
   "persist",
   "persistKey",
   "dbPath",
@@ -174,6 +178,14 @@ export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
  *  row here AND be printed by formatValidConfig(), so a new option cannot ship
  *  undocumented in the "Valid configuration" help table. */
 export const CONFIG_DOCS: Record<string, [string, string]> = {
+  feedback: [
+    "off",
+    "capture problem reports into <data>/reports/ — true, or { auto, url, sink, keep }",
+  ],
+  updates: [
+    "off",
+    'release source URL ("https://…" / "file://…" / a git repo) — or { source, auto, check, channel, key }',
+  ],
   appId: ["", "unique app identity — lock file, UDS socket, KV/SQLite paths"],
   appVersion: ["", "app version string — logged on startup"],
   cells: ["", "cell definitions array"],
@@ -369,6 +381,8 @@ export const CONFIG_GROUPS: [string, string[]][] = [
     "port",
     "expose",
     "host",
+    "updates",
+    "feedback",
     "baseDir",
     "serveDirs",
     "client",

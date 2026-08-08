@@ -166,5 +166,30 @@ if [ "$NO_RUN" = 1 ]; then
   exit 0
 fi
 info "running $artifact $*"
+
+# An AppImage unpacks itself into $TMPDIR before a single line of the app runs,
+# so this is the ONLY moment anything can choose where that lands. Default
+# /tmp is shared: the extract path's directory name is a digest of the AppImage
+# (predictable, and 0755 = world-readable), a second user running the same file
+# collides with the first user's copy, and the runtime warns-but-continues into
+# whatever tree is already there. ~/.<appId>/app is private to its owner by
+# construction. The build tells us the path — deriving an app's identity here
+# would be a second copy of a rule the framework already owns.
+app_tmpdir=$(deno run -A "$AIO_HOME/src/build.ts" --print-app-tmpdir 2>/dev/null)
+if [ -n "$app_tmpdir" ] && mkdir -p "$app_tmpdir" 2>/dev/null; then
+  chmod 700 "$app_tmpdir" 2>/dev/null || :
+  export TMPDIR="$app_tmpdir"
+else
+  # Loud, not silent: falling back to /tmp is a real (if minor) exposure, and a
+  # user who cannot see it cannot decide about it.
+  info "could not prepare a private unpack dir — falling back to \$TMPDIR/tmp"
+fi
+# The commit this artifact was built FROM. An app configured with a git update
+# source compares against it to notice the ref has moved; without it the app
+# has nothing to compare and says so rather than guessing. Recorded here
+# because this script is the only thing that knows which commit was built.
+if [ -d .git ]; then
+  AIO_BUILD_COMMIT=$(git rev-parse HEAD 2>/dev/null) && export AIO_BUILD_COMMIT
+fi
 # AppImages need FUSE; extract-and-run works everywhere (containers included).
 APPIMAGE_EXTRACT_AND_RUN=1 exec "$artifact" "$@"

@@ -121,6 +121,29 @@ export type AioConfig<S, A, E> = {
    *  user would miss need it. Take the snapshots it restores from with
    *  `db.snapshot(path)`. */
   checkIntegrityOnBoot?: boolean;
+  /** Keep this app up to date from a release source.
+   *
+   *  A bare URL is the whole configuration; the object form adds the switches
+   *  a default cannot decide for you:
+   *
+   *  ```ts
+   *  updates: "https://releases.example.com/wallet"      // published artifacts
+   *  updates: "https://github.com/you/app"               // the repo itself
+   *  updates: { source, auto: true }                     // unattended service
+   *  ```
+   *
+   *  Omitted ⇒ nothing polls, nothing is registered, nothing ships. An update
+   *  is only ever OFFERED when the release can migrate the data already on
+   *  disk — see docs/deploy/updates.md. */
+  updates?: import("./updates-core.ts").UpdatesInput;
+  /** Capture problem reports — what is running, what state it was in, what had
+   *  just happened, and the recent log — into `<data>/reports/`.
+   *
+   *  `true` is the whole configuration: user reports via the `feedback` cell,
+   *  plus automatic capture when the app breaks. `{ url }` also POSTs them;
+   *  `{ sink }` hands them anywhere else. Reports honour the SAME `redactActions`
+   *  rule as the journal and the timeline. See docs/debugging/feedback.md. */
+  feedback?: import("./feedback-boot.ts").FeedbackInput;
   fullStateThreshold?: number; // 0-1: ratio of changed keys that triggers full state broadcast (default: 0.5)
   /** Custom HTTP routes — exact path or "/prefix/*" wildcard → handler. The
    *  escape hatch for uploads, webhooks, and API endpoints that don't belong
@@ -392,6 +415,29 @@ export type CellsConfig = {
    *  user would miss need it. Take the snapshots it restores from with
    *  `db.snapshot(path)`. */
   checkIntegrityOnBoot?: boolean;
+  /** Keep this app up to date from a release source.
+   *
+   *  A bare URL is the whole configuration; the object form adds the switches
+   *  a default cannot decide for you:
+   *
+   *  ```ts
+   *  updates: "https://releases.example.com/wallet"      // published artifacts
+   *  updates: "https://github.com/you/app"               // the repo itself
+   *  updates: { source, auto: true }                     // unattended service
+   *  ```
+   *
+   *  Omitted ⇒ nothing polls, nothing is registered, nothing ships. An update
+   *  is only ever OFFERED when the release can migrate the data already on
+   *  disk — see docs/deploy/updates.md. */
+  updates?: import("./updates-core.ts").UpdatesInput;
+  /** Capture problem reports — what is running, what state it was in, what had
+   *  just happened, and the recent log — into `<data>/reports/`.
+   *
+   *  `true` is the whole configuration: user reports via the `feedback` cell,
+   *  plus automatic capture when the app breaks. `{ url }` also POSTs them;
+   *  `{ sink }` hands them anywhere else. Reports honour the SAME `redactActions`
+   *  rule as the journal and the timeline. See docs/debugging/feedback.md. */
+  feedback?: import("./feedback-boot.ts").FeedbackInput;
   persist?: boolean;
   persistKey?: string;
   persistDebounceMs?: number;
