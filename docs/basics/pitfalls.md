@@ -12,6 +12,11 @@ directory name — rename any of those and the app starts with FRESH state (the
 old data files still exist under the old id). Pin `appId` in `deno.json` (or
 `aio.run({ appId })`) before you have data you care about.
 
+The chain is the same one the build names the binary with, so `deno run` and the
+compiled artifact resolve the **same** id — compiling never moves your data
+directory. (It used to: the build read `title` and ignored `appId`, so an app
+that pinned `appId` got one id in dev and another once compiled.)
+
 **Cell names are wire/persistence identity.** `cell("counter", …)` — the string,
 not the variable, keys the persisted state, the action prefix
 (`counter:increment`), and the registry. Renaming it orphans persisted state

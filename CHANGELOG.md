@@ -1,5 +1,171 @@
 # Changelog
 
+## 1.0.0-alpha54 — the last mile (2026-08-08)
+
+Everything between a built artifact and a person using it: updates, releases,
+and problem reports. Three mechanisms aio already had the data for and every app
+had to invent badly.
+
+### Channelled app updates
+
+```ts
+aio.run({ cells: [wallet], updates: "https://releases.example.com/wallet" });
+```
+
+One line. The app follows a release channel, and the update state is a **cell**
+(`aio/updates`), so a banner is an ordinary reactive read — no transport, no
+polling loop, no version comparison, no dialog framework.
+
+**An update never breaks the app or its data.** Every release carries a _signed_
+data contract stating, per cell, the schema version it writes and the oldest it
+can migrate from — **measured** from the binary
+(`<binary> --aio-data-contract`), never guessed from source. Bump a cell
+`version` without an `onMigrate` and the release is simply never offered to
+anyone holding older data; it surfaces as `updates.blocked` with the reason, and
+there is no code path from blocked to installed. A migrating update takes a
+consistent `VACUUM INTO` backup **first**.
+
+**The signature moved.** `aio ship` used to sign only the binary's digest, which
+authenticated the bytes and none of the coordinates: a genuine, correctly-signed
+**test** build copied onto the **prod** path verified perfectly and installed.
+The signature now covers the whole manifest core — version, digest, channel,
+target, platform, data contract — and v1 manifests are refused rather than
+downgraded to. Verification also demands a _trusted_ key (pinned on first use):
+a self-signed manifest shipping its own public key is internally consistent and
+worthless.
+
+Sources are agnostic. Published artifacts over `https://` or `file://` (three
+static files per channel — S3, a Pages site, a mounted share, a USB stick), or a
+**git repository**, where a moved ref is the new version: aio clones it, runs
+the repo's `compile`, gates the built binary's data contract, then swaps.
+Ambiguous URLs are refused rather than guessed — "no updates available" is
+indistinguishable from being up to date, and that is the failure this project
+bans.
+
+Every target installs. A single-file binary or AppImage is replaced by `rename`
+under the running process (writing to a busy executable gets `ETXTBSY`; renaming
+one does not). An Electron `.zip` install is a **directory**, which cannot be
+moved from inside itself — and on Windows the running `.exe` in it is locked —
+so the swap is handed to the system shell, which lives in neither directory.
+Android detects and points at the OS; running from source detects identically
+and refuses to swap, loudly, so an update banner can be built in dev.
+
+Services get `auto: true`: detect, verify, install, restart, nobody asked. The
+failure that shapes it is the 3am one — a new build that will not come up and a
+supervisor restarting it forever — so the **new build verifies itself**,
+counting its own failed boots and putting the previous artifact back when they
+run out.
+
+Channels default to the one **stamped into the artifact at build time**, because
+the alternative is silent: a test build following `prod` updates itself into the
+public release and vanishes; a prod build following `dev` ships unreviewed code
+to users. Overridable by `--channel=`, `AIO_UPDATE_CHANNEL`, or a pin.
+
+Configuring `updates` forces the `net` capability into the compiled binary's
+least-privilege flags — without it the check dies in production only.
+
+### Problem reports
+
+```ts
+aio.run({ cells: [wallet], feedback: true });
+```
+
+A report answers what a maintainer asks anyway: which build (version, target,
+channel, commit, platform, artifact path), how it was configured, what state it
+was in, what had just happened, recent diagnostics, and the log tail. Plain JSON
+in `<data>/reports/`, so a maintainer, a script, an issue tracker and a coding
+agent read it identically with no aio installed. `am report list|show|path`.
+
+**Reports honour the app's existing `redactActions` list** — the same one the
+journal, timeline and checkpoint honour — withholding a redacted cell's slice
+whole and _naming_ it, so absence reads as a decision. A report that ignored
+that list would be the leak the list exists to prevent.
+
+Automatic capture on error is the point: the reports worth having are the ones
+nobody was there to file. Deduped by message, capped at 10 per session. Optional
+`url`/`sink` delivery is attempted only **after** the report is safely on disk.
+
+Everything is capped, and truncation is stated: state above 256 KB is _dropped_
+rather than truncated, because half a state tree misleads in a way none does
+not.
+
+### Publishing a release
+
+`aio ship github` writes a GitHub Actions workflow that builds Linux/macOS/
+Windows, signs each artifact, and publishes into the channel layout the updater
+already reads. Emitted, not integrated — the layout is aio's, the forge API is
+not. `aio/ship` is now a published run-only entry; it was previously reachable
+only from inside this repo, which made the release story unusable for real apps.
+
+### The boot report says what you are running
+
+`build` (source vs compiled, and the artifact kind), `artifact` (inside an
+AppImage, the `.AppImage`, not the squashfs mount), `platform` + runtime,
+`data`, `cells`, `updates` (channel · kind · cadence · ask-vs-auto) and
+`feedback`. Every value read from the running process, never from configuration
+— configuration gets copied between machines. An app with no update path prints
+`updates  not configured`, once, where somebody will see it.
+
+### A packaged app unpacks itself under its own home, not `/tmp`
+
+An AppImage stages its contents into `$TMPDIR` **before a single line of the app
+runs**, so the launcher is the only thing that can decide where. Every aio
+launcher now points it at **`~/.<appId>/app` (mode 0700)** — a fourth tier in
+the one-directory layout (`AppDirs.app`, listed by `am data`, ②b: regenerable,
+but not while the app is running).
+
+`/tmp` was wrong on four counts, measured on the AppImage runtime aio ships
+rather than assumed:
+
+- the FUSE-less **extract** path names its directory after a **digest of the
+  AppImage** — predictable to anyone on the host — and creates it `0755`, so the
+  unpacked app is world-readable. (The FUSE mount path is `0700` and user-only;
+  only the extract path leaks.) A symlink planted at a name the extractor writes
+  is followed, as the launching user.
+- the digest is per-**file**, not per-user: a second user running the same
+  AppImage lands in the first user's directory, and the runtime does not fail
+  there — it warns, **exits 0, and runs whatever tree is already present**.
+- `/tmp` is `noexec` on hardened hosts (the app won't start) and tmpfs on most
+  distros (a ~200 MB unpack goes to RAM).
+- tmp-cleaners delete underneath long-running apps.
+
+An app that finds itself unpacked somewhere world-writable now says so at boot —
+a `security` warning naming the path and the runnable fix. Observe-only and
+identical in dev and prod: it still runs, it just never does it silently. Empty
+`.mount_*` stubs from a crash are swept on the next start; extracted trees are
+kept deliberately (warm start).
+
+Launching one by hand: `TMPDIR=~/.<appId>/app ./app-x86_64.AppImage`, and
+`aio/build --print-app-tmpdir` prints that path so a launcher never re-derives
+an app's identity itself.
+
+### One app, one id — in dev and once compiled
+
+A compiled binary must never read the cwd's `deno.json` (it would adopt an
+unrelated project's identity), so it infers its `appId` from its own filename —
+which the build chose. That made "name the binary" and "resolve the appId" one
+decision, and it was being made twice: the build read `title ?? basename(root)`
+and **ignored `appId` outright**. A `deno.json` with `appId: "wallet"` in a
+directory called `thing` was `~/.wallet` in dev and `~/.thing` compiled — the
+data directory moved the moment you compiled, which is the one asterisk the
+one-directory layout promises it does not have. Worse, the shipping checklist's
+advice ("pin `appId` before you ship") was what triggered it.
+
+Both sides now resolve through one `appIdFromConfig` — `appId` → `title` →
+`name` → directory — so the binary's name **is** the app's id. Pinned by a
+differential test that runs both resolvers over the same project shapes, plus a
+guard that fails if the build ever grows its own chain again.
+
+Artifact names change only for apps this bug was already mis-identifying (one
+that sets `appId`, or a `name` with no `title`); a scaffolded app is unaffected.
+
+Same class, two more places: **`appimagetool`** now unpacks into a private dir
+beside its cache instead of leaving a world-readable copy of the packaging tool
+in `/tmp` on every build, and the **lock/socket directory** is created `0700` —
+which is a no-op under `$XDG_RUNTIME_DIR` and the whole point under its `/tmp`
+fallback (containers, no-systemd hosts), where every app's control socket sat at
+a predictable path any local user could traverse to and connect to.
+
 ## 1.0.0-alpha53 — one address, one manager (2026-08-08)
 
 Small and additive: the visual manager gets a front door, and binding a single

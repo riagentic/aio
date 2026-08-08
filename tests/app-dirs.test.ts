@@ -7,7 +7,10 @@ import {
   appDirs,
   appHome,
   ensureAppDirs,
+  ensureAppPayloadDir,
   resolveAppDirs,
+  sweepAppPayloadDir,
+  unsafeUnpackWarning,
   writeAppMeta,
 } from "../src/server/app-dirs.ts";
 import { homedir } from "../src/server/paths.ts";
@@ -150,5 +153,127 @@ Deno.test("resolveAppDirs: libraryMode never resolves into the home", () => {
       appDir: "/srv/wallet",
     });
     assertEquals(pinned.home, "/srv/wallet");
+  });
+});
+
+// ── The unpack payload dir (`<home>/app`) ────────────────────────────────────
+// A packaged app unpacks ITSELF before any aio code runs, so the only defence
+// is where its launcher points TMPDIR. `/tmp` was the wrong answer on four
+// measured counts (see AppDirs.app) — these pin the properties that replaced it.
+
+Deno.test("app/: private to its owner — $HOME is 0755, so 0700 is the fix", async () => {
+  const base = await Deno.makeTempDir({ prefix: "aio-dirs-" });
+  try {
+    const d = appDirs("wallet", join(base, ".wallet"));
+    assertEquals(d.app, join(base, ".wallet", "app"));
+    assertEquals(ensureAppPayloadDir(d), d.app);
+    if (Deno.build.os !== "windows") {
+      const mode = (await Deno.stat(d.app)).mode! & 0o777;
+      assertEquals(
+        mode,
+        0o700,
+        `app/ must be owner-only, got ${mode.toString(8)}`,
+      );
+    }
+  } finally {
+    await Deno.remove(base, { recursive: true });
+  }
+});
+
+Deno.test("app/: is NOT in the backup unit, and is NOT cache/", () => {
+  const d = appDirs("wallet", "/tmp/x-wallet");
+  assert(!d.app.includes("/data/"), "app/ is regenerable — never in a backup");
+  assert(
+    d.app !== d.cache,
+    "app/ must be its own tier: cache/ promises delete-at-any-time, and the " +
+      "tree a live process executes from cannot honour that",
+  );
+});
+
+Deno.test("sweepAppPayloadDir: clears empty mount stubs, never a live tree", async () => {
+  const base = await Deno.makeTempDir({ prefix: "aio-dirs-" });
+  try {
+    const d = appDirs("wallet", join(base, ".wallet"));
+    ensureAppPayloadDir(d);
+    // A crashed run's leftover: an EMPTY mount point.
+    Deno.mkdirSync(join(d.app, ".mount_walletABC123"));
+    // A mount point that is still populated — a live instance, or a real mount.
+    Deno.mkdirSync(join(d.app, ".mount_walletLIVE99"));
+    Deno.writeTextFileSync(
+      join(d.app, ".mount_walletLIVE99", "AppRun"),
+      "#!/bin/sh\n",
+    );
+    // The warm-start extraction: regenerable, but never collected — another
+    // process may be executing it right now.
+    Deno.mkdirSync(join(d.app, "appimage_extracted_deadbeef"));
+
+    sweepAppPayloadDir(d);
+
+    const left = [...Deno.readDirSync(d.app)].map((e) => e.name).sort();
+    assertEquals(left, [".mount_walletLIVE99", "appimage_extracted_deadbeef"]);
+  } finally {
+    await Deno.remove(base, { recursive: true });
+  }
+});
+
+Deno.test("sweepAppPayloadDir: a never-unpacked app is not an error", () => {
+  const d = appDirs("wallet", "/tmp/aio-does-not-exist-" + crypto.randomUUID());
+  sweepAppPayloadDir(d); // must not throw
+});
+
+Deno.test("unsafeUnpackWarning: warns only for a shared unpack location", async (t) => {
+  const expected = "/home/u/.wallet/app";
+
+  await t.step("not packaged → nothing to say", () => {
+    assertEquals(
+      unsafeUnpackWarning({
+        appDir: "/tmp/.mount_walletXY",
+        expected,
+        parentWorldWritable: true,
+      }),
+      null,
+    );
+  });
+
+  await t.step("unpacked where we asked → silent", () => {
+    for (const appDir of [expected, expected + "/.mount_walletXY"]) {
+      assertEquals(
+        unsafeUnpackWarning({
+          appImage: "/opt/wallet.AppImage",
+          appDir,
+          expected,
+          parentWorldWritable: true,
+        }),
+        null,
+      );
+    }
+  });
+
+  await t.step("a deliberate private TMPDIR is not a warning", () => {
+    // Disagreeing with our default is not the hazard — a SHARED directory is.
+    assertEquals(
+      unsafeUnpackWarning({
+        appImage: "/opt/wallet.AppImage",
+        appDir: "/srv/apps/.mount_walletXY",
+        expected,
+        parentWorldWritable: false,
+      }),
+      null,
+    );
+  });
+
+  await t.step("/tmp → loud, and says exactly how to fix it", () => {
+    const msg = unsafeUnpackWarning({
+      appImage: "/opt/wallet.AppImage",
+      appDir: "/tmp/appimage_extracted_deadbeef",
+      expected,
+      parentWorldWritable: true,
+    });
+    assert(msg, "a world-writable unpack must never be silent");
+    assert(msg.includes("/tmp/appimage_extracted_deadbeef"), "names the place");
+    assert(
+      msg.includes(`TMPDIR=${expected} /opt/wallet.AppImage`),
+      `must carry the runnable fix, got: ${msg}`,
+    );
   });
 });

@@ -19,6 +19,7 @@ runtime-tested (`tests/examples.test.ts`), UI-tested
 | ----------- | ------------------------------------------------------------------------- |
 | `contacts/` | End-to-end CRUD — cell state ↔ `db:` table, validation, selectors         |
 | `disk/`     | Folder-size scanner — the filesystem, subprocesses, and long-running work |
+| `updates/`  | Shipping to users — an update banner, a blocked release, problem reports  |
 
 `contacts/` is the one to read first: it is the whole integration in ~120 lines
 — one array in cell state, one `db:` table of the same name kept in step with
@@ -37,6 +38,16 @@ It is also the reference for
 `cancelOn: { open: ["self", "disk:stop"] }` (a new folder supersedes the scan
 still running, Cancel stops it), a `scanning` flag, and the rule that a
 superseded run never writes. Tested in `tests/example-disk.test.ts`.
+
+`updates/` is the one to read when your app has to reach people who are not you.
+Two config lines (`updates: "<url>"`, `feedback: true`) and a component that
+renders from cell state: an update offer with its release notes, the separate
+**blocked** case (a newer version that cannot migrate this install's data —
+shown with the reason and deliberately no button), download progress, and a
+"report a problem" path. The point of reading it is what is NOT there — no
+transport, no polling, no version comparison, no dialog framework. See
+[updates](../docs/deploy/updates.md) and
+[problem reports](../docs/debugging/feedback.md).
 
 ## Target build smoke fixtures
 

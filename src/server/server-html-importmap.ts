@@ -79,6 +79,11 @@ export function buildBrowserImportMap(
     "aio/air": "/__aio/air.js",
     "aio/browser": "/__aio/ui.js",
     "aio/jsx-runtime": "/__aio/jsx-runtime.ts",
+    // The built-in updates cell. A separate entry because importing it is how
+    // an app opts in — it must resolve in the browser for a UI to bind
+    // `updates.available`, and nowhere else.
+    "aio/updates": "/__aio/updates.ts",
+    "aio/feedback": "/__aio/feedback.ts",
   };
   for (const [name, specifier] of Object.entries(denoImports)) {
     if (!specifier.startsWith("npm:")) continue;

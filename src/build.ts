@@ -14,6 +14,8 @@
  */
 import { join } from "@std/path";
 import { type BuildConfig, loadBuildConfig } from "./build/build-config.ts";
+import { appDirs } from "./server/app-dirs.ts";
+import { slugify } from "./server/single-instance-lock.ts";
 import { ensureEmbeddedBundle, runBundle } from "./build/build-bundle.ts";
 import { buildClient } from "./build/build-client.ts";
 import { buildCli } from "./build/build-cli.ts";
@@ -161,4 +163,18 @@ export {
   scanCapabilities,
 } from "./build/capabilities.ts";
 
-if (import.meta.main) await build();
+if (import.meta.main) {
+  // `--print-app-tmpdir` answers ONE question and builds nothing: "what TMPDIR
+  // should this project's packaged artifact be launched with?" It exists so a
+  // launcher (run.sh) never has to re-derive an app's identity in shell — the
+  // build already owns the one rule that names the binary, and the compiled
+  // binary's appId is that name. A shell-side copy of the rule would silently
+  // split an app's address (payload under one directory, data under another)
+  // the moment either rule moved.
+  if (Deno.args.includes("--print-app-tmpdir")) {
+    const cfg = await loadBuildConfig();
+    console.log(appDirs(slugify(cfg.binaryName)).app);
+    Deno.exit(0);
+  }
+  await build();
+}

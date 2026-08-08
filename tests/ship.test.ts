@@ -35,7 +35,7 @@ Deno.test("ship manifest: capabilities + least-privilege run flags, no -A", asyn
   assert(!m.runFlags.includes("-A"));
 });
 
-Deno.test("ship manifest: unsigned verifies by SHA-256; a tampered binary fails", async () => {
+Deno.test("ship manifest: unsigned is REFUSED unless explicitly allowed", async () => {
   const binary = bin("v1.0.0-artifact");
   const m = await buildShipManifest({
     name: "app",
@@ -43,11 +43,122 @@ Deno.test("ship manifest: unsigned verifies by SHA-256; a tampered binary fails"
     binary,
     sources: [],
   });
-  assertEquals((await verifyShipManifest(binary, m)).ok, true);
+  // An unsigned manifest authenticates nothing, so it is not a quiet "ok".
+  const refused = await verifyShipManifest(binary, m);
+  assertEquals(refused.ok, false);
+  assert(refused.reason.includes("unsigned"));
+
+  const allowed = await verifyShipManifest(binary, m, { allowUnsigned: true });
+  assertEquals(allowed.ok, true);
+  assert(allowed.reason.includes("UNSIGNED"));
+
   const tampered = bin("v1.0.0-artifact-EVIL");
-  const bad = await verifyShipManifest(tampered, m);
+  const bad = await verifyShipManifest(tampered, m, { allowUnsigned: true });
   assertEquals(bad.ok, false);
   assert(bad.reason.includes("sha256"));
+});
+
+Deno.test("ship manifest: unsigned is refused outright once a key is pinned", async () => {
+  const binary = bin("stripped-signature");
+  const keys = await generateSigningKey();
+  const m = await buildShipManifest({
+    name: "app",
+    version: "1",
+    binary,
+    sources: [],
+  });
+  // Stripping a signature must never downgrade an app that trusts a key —
+  // otherwise every signature is optional to an attacker in the middle.
+  const r = await verifyShipManifest(binary, m, {
+    key: keys.publicKey,
+    allowUnsigned: true,
+  });
+  assertEquals(r.ok, false);
+  assert(r.reason.includes("pinned"));
+});
+
+Deno.test("ship manifest: a self-signed manifest fails against a pinned key", async () => {
+  const binary = bin("forged-release");
+  const mine = await generateSigningKey();
+  const theirs = await generateSigningKey();
+  // The forger signs their own manifest and ships their own public key with
+  // it — internally consistent, and worthless. Verification must compare the
+  // key against the one the app already trusts.
+  const forged = await buildShipManifest({
+    name: "app",
+    version: "9.9.9",
+    binary,
+    sources: [],
+    sign: theirs,
+  });
+  assertEquals((await verifyShipManifest(binary, forged)).ok, true);
+  const r = await verifyShipManifest(binary, forged, { key: mine.publicKey });
+  assertEquals(r.ok, false);
+  assert(r.reason.includes("untrusted key"));
+});
+
+Deno.test("ship manifest: channel/target/platform are inside the signature", async () => {
+  const binary = bin("channel-bound");
+  const keys = await generateSigningKey();
+  const m = await buildShipManifest({
+    name: "app",
+    version: "1.2.0",
+    binary,
+    sources: [],
+    sign: keys,
+    channel: "test",
+    target: "appimage",
+    platform: { os: "linux", arch: "x86_64" },
+  });
+
+  // The client asked for prod and got a test build — the realistic failure.
+  const wrongChannel = await verifyShipManifest(binary, m, {
+    key: keys.publicKey,
+    channel: "prod",
+  });
+  assertEquals(wrongChannel.ok, false);
+  assert(wrongChannel.reason.includes("channel mismatch"));
+
+  const wrongPlatform = await verifyShipManifest(binary, m, {
+    key: keys.publicKey,
+    channel: "test",
+    platform: { os: "darwin", arch: "aarch64" },
+  });
+  assertEquals(wrongPlatform.ok, false);
+  assert(wrongPlatform.reason.includes("platform mismatch"));
+
+  // Editing the channel in transit breaks the signature rather than the check.
+  const relabelled = { ...m, channel: "prod" };
+  const tamperedChannel = await verifyShipManifest(binary, relabelled, {
+    key: keys.publicKey,
+    channel: "prod",
+  });
+  assertEquals(tamperedChannel.ok, false);
+  assert(tamperedChannel.reason.includes("signature invalid"));
+
+  const good = await verifyShipManifest(binary, m, {
+    key: keys.publicKey,
+    channel: "test",
+    target: "appimage",
+    platform: { os: "linux", arch: "x86_64" },
+  });
+  assertEquals(good.ok, true);
+});
+
+Deno.test("ship manifest: a v1 (digest-only) manifest is refused, not downgraded to", async () => {
+  const binary = bin("legacy");
+  const keys = await generateSigningKey();
+  const m = await buildShipManifest({
+    name: "app",
+    version: "1",
+    binary,
+    sources: [],
+    sign: keys,
+  });
+  const legacy = { ...m, manifestVersion: 1 as unknown as 2 };
+  const r = await verifyShipManifest(binary, legacy, { key: keys.publicKey });
+  assertEquals(r.ok, false);
+  assert(r.reason.includes("predates channel binding"));
 });
 
 Deno.test("ship manifest: Ed25519 sign → verify round-trip", async () => {
@@ -186,4 +297,40 @@ Deno.test("shipApp: scans THE app dir (from the entry) and refuses an unmeasured
     Deno.chdir(cwd);
     await Deno.remove(dir, { recursive: true });
   }
+});
+
+Deno.test("ship github: the workflow publishes into the layout the updater reads", async () => {
+  const { githubWorkflow } = await import("../src/build/ship.ts");
+  const yml = githubWorkflow({ name: "wallet", channel: "prod" });
+
+  // Valid YAML with both halves of the pipeline — a workflow that does not
+  // parse is a release process that fails on the day you need it.
+  const { parse } = await import("@std/yaml");
+  const doc = parse(yml) as { jobs: Record<string, unknown>; on: unknown };
+  assertEquals(Object.keys(doc.jobs), ["build", "publish"]);
+
+  // The layout is the part aio owns; it must match what the client fetches.
+  assert(yml.includes("out/prod"), "publishes under the channel directory");
+  assert(
+    yml.includes("$(deno eval 'console.log(Deno.build.os"),
+    "names the manifest <os>-<arch>.json, which is what a client asks for",
+  );
+  // Reachable for a consuming app, not just inside this repo.
+  assert(yml.includes("jsr:@riagentic/aio/ship"));
+  // Signing key comes from a secret, never the repo.
+  assert(yml.includes("secrets.AIO_SIGNING_KEY"));
+  // A draft release has no public download path — the app would only ever see
+  // "no updates available".
+  assert(yml.includes("draft: false"));
+  // Three platforms, and one failing must not hide the others.
+  for (const os of ["ubuntu-latest", "macos-latest", "windows-latest"]) {
+    assert(yml.includes(os), `builds on ${os}`);
+  }
+  assert(yml.includes("fail-fast: false"));
+
+  assert(
+    githubWorkflow({ name: "w" }).includes("out/prod"),
+    "defaults to prod",
+  );
+  assert(githubWorkflow({ name: "w", channel: "test" }).includes("out/test"));
 });

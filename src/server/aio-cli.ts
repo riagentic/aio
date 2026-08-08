@@ -2,7 +2,7 @@
 import { log } from "../diagnostics/logger.ts";
 
 /** Framework version — printed by --version, checked in tests */
-export const VERSION = "1.0.0-alpha53";
+export const VERSION = "1.0.0-alpha54";
 
 /** What `--version` prints: what this artifact IS, and what it was built with.
  *
@@ -30,6 +30,14 @@ export type CliFlags = {
   prod?: boolean;
   version?: boolean;
   expose?: boolean;
+  /** `--channel=<name>` — follow a different release channel for THIS run.
+   *  Beats the artifact's baked-in stamp and the pinned choice; see
+   *  docs/deploy/updates.md. */
+  channel?: string;
+  /** `--aio-data-contract` — print this build's persisted-schema promise as
+   *  JSON and exit. `aio ship` runs it to publish a contract that is MEASURED
+   *  from the cells rather than guessed from the source. */
+  dataContract?: boolean;
   /** Serve `--expose` over PLAIN HTTP (no TLS). Only sound when the payload is
    *  already end-to-end encrypted or a TLS-terminating proxy sits in front —
    *  boot warns loudly either way. CLI-only on purpose: "ship this app without
@@ -72,6 +80,8 @@ export function parseCli(args: readonly string[] = Deno.args): CliFlags {
     "--prod",
     "--version",
     "--expose",
+    "--channel=",
+    "--aio-data-contract",
     "--no-tls",
     "--help",
     "--server-url",
@@ -111,6 +121,8 @@ export function parseCli(args: readonly string[] = Deno.args): CliFlags {
     else if (arg === "--prod") r.prod = true;
     else if (arg === "--version") r.version = true;
     else if (arg === "--expose") r.expose = true;
+    else if (arg.startsWith("--channel=")) r.channel = arg.slice(10);
+    else if (arg === "--aio-data-contract") r.dataContract = true;
     else if (arg === "--no-tls") r.noTls = true;
     else if (arg === "--help") r.help = true;
     // `--connect` opens the connect page (a thin client with no baked-in
@@ -190,6 +202,7 @@ Flags:
   --verbose        Verbose logging (actions, state, effects, WS, HTTP)
   --prod           Serve pre-built dist/app.js
   --expose         Bind 0.0.0.0 + HTTPS + generate auth token for LAN access
+  --channel=X      Follow release channel X for updates (dev|test|prod|…)
                    (also settable in code: aio.run({ expose: true }))
   --host=ADDR      Bind ONE address instead of the expose default (0.0.0.0
                    exposed, 127.0.0.1 not) — e.g. --host=192.168.1.20 serves

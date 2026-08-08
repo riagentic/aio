@@ -447,7 +447,12 @@ break burden must be bearable** — every break = deprecated alias through beta
       flush/broadcast seams, naming the right tier; wsLimits refusal points at
       the tier doc; new doc "Big data: the four tiers" (state / db: / blobs /
       pipelines).
-* [ ] **alpha53 — one vocabulary.** Fleet names win: `service` dies (→
+
+> **Numbering below is historical.** These batches were folded into alpha52 and
+> alpha53 as they shipped (see CHANGELOG) — the version labels are what was
+> planned at the time, not what is next. alpha54 shipped as "the last mile".
+
+- [ ] **alpha53 — one vocabulary.** Fleet names win: `service` dies (→
       `server`), `compile:remote:*` dies (→ `deno task build`), deno.json
       `target` → `client`; scaffold 30 tasks → ~9 (+`check`/`fmt`); `am new` →
       `am add` (stops generating deprecated code); scaffold writes explicit
@@ -456,7 +461,7 @@ break burden must be bearable** — every break = deprecated alias through beta
       --migrate-tasks` is the vehicle; am flags:
       `--client-index`/-i (am), `--takeover` alias for `--kill-existing`,
       `--connect` for bare `--server-url`, stale help text.
-* [ ] **alpha54 — the effect channel.** Effects off the return via
+- [ ] **alpha54 — the effect channel.** Effects off the return via
       `s.$do(effect)` (kills `: CellEffect` wart, own.set token registry,
       RETURN_TAG; `self("method", ...)` builder for residual self-refs);
       `transaction: true` default (codemod writes `transaction: false` into
@@ -465,7 +470,7 @@ break burden must be bearable** — every break = deprecated alias through beta
       object form accepts arrays; selector deps-form takes tuple so
       parameterized+deps compose; `schedule.backoff/poll` arg order + `factor`
       key; `schedule.blocking` → top-level `blocking`.
-* [ ] **alpha55 — the surface diet + safety defaults.** Cell `ui:` → `visible:`
+- [ ] **alpha55 — the surface diet + safety defaults.** Cell `ui:` → `visible:`
       (alias through beta; "access gates calls, visible gates reads"); `key:`
       auto-generates when exposed w/o per-user auth (codemod inserts
       `key: false` to preserve today's behaviour); `access`-without- visibility
@@ -478,7 +483,7 @@ break burden must be bearable** — every break = deprecated alias through beta
       `testgen`→`testGen`, drop `ExtractState`; `AioUser` opens
       (`& Record<string, unknown>`); `AioApp` typed overload; browser-surface
       snapshot twin of android-air-surface test.
-* [ ] **alpha56 — internals + blobs.** `protocol/`↔`state` decomposition
+- [ ] **alpha56 — internals + blobs.** `protocol/`↔`state` decomposition
       (browser runtime files → `browser/`); boundary gate: trim 12 unused edges,
       error on unused permission, root files stop laundering (state/cell.ts
       testCell re-export dies); offline-queue unification (one factory, one drop
@@ -800,12 +805,36 @@ Refused this round, with reasons:
 
 ## Next, from the data-directory work
 
-- [ ] **`am update-app`** — Part 2 of
-      `docs/specs/2026-07-26-data-dir-and-updates.md`, still design: verify
-      (sha256 + the Ed25519 manifest `aio ship` already produces) → stage → flip
-      a symlink → restart → health check → auto-rollback. Part 1 was its
-      prerequisite: "swap the binary, keep the data" is only honest now that the
-      data is in one place the binary never touches.
+- [x] **App updates — SHIPPED.** `updates: "<url>"` in `aio.run()`; see
+      `docs/specs/2026-08-08-app-updates.md` and `docs/deploy/updates.md`.
+      Manifest v2 binds channel/target/platform/data-contract INSIDE the
+      signature (v1 signed the bytes but none of the coordinates, so a genuine
+      `test` build moved onto the `prod` path verified perfectly); verification
+      demands a trusted key; the data gate makes a version bump without
+      `onMigrate` an update nobody is ever offered; atomic swap + boot-verified
+      rollback + the relaunch handshake around the single-instance lock. Sources
+      are agnostic: published artifacts (http/file) or a git repo.
+- [x] **Problem reports (`feedback: true`).** `<data>/reports/*.json` carrying
+      build identity, environment, state, timeline, diagnostics and the log tail
+      — honouring the SAME `redactActions` rule as the journal/timeline (a
+      report that ignored it would be the leak that list prevents). User reports
+      via the `feedback` cell (`aio/feedback`), automatic capture on error
+      (deduped, capped at 10/session), optional `url`/`sink` delivery that never
+      replaces the on-disk copy. `am report list|show|path`.
+      docs/debugging/feedback.md.
+- [x] **Release workflow (`aio ship github`).** Emits a GitHub Actions matrix
+      that builds Linux/macOS/Windows, signs each artifact, and publishes into
+      the channel layout the updater already reads. Emitted, not integrated —
+      the layout is what aio owns; a forge API is not. Also published `aio/ship`
+      as a run-only entry: `aio ship` was previously reachable only from inside
+      this repo, which made the release story unusable for real apps.
+- [x] **Updates — the last two targets.** `electron-zip` unpacks and swaps the
+      install DIRECTORY via the system shell (a process cannot move the
+      directory it runs from; Windows locks the running .exe inside it), and a
+      git source now clones the ref, runs the repo's `compile`, gates the built
+      binary's data contract, and swaps. `run.sh` exports `AIO_BUILD_COMMIT` so
+      a git install has a commit to compare against. Every target installs
+      except Android (OS-mediated) and source (refuses, loudly).
 
 ## From the a field report — what's left
 
