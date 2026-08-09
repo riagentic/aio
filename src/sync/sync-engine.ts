@@ -639,9 +639,17 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
               // Same argument for a held ack, except it must still RUN: the op
               // has to be confirmed and the buffer drained. Carrying the
               // snapshot's watermark tells `foldAck` the fold is already done.
-              const ts = snapTs !== undefined
-                ? Math.min(h.serverTs ?? snapTs, snapTs)
-                : h.serverTs;
+              //
+              // ONLY when the ack has no serverTs of its own. This used to
+              // `Math.min` a KNOWN serverTs down to the watermark, and a known
+              // serverTs ABOVE the watermark means the op was persisted AFTER
+              // the snapshot — it is precisely the op the snapshot does not
+              // contain. Clamping it made `foldAck` compute
+              // `serverTs <= snapTs` → "already folded" → skip the apply, and
+              // the user's own change vanished from confirmed state. Reachable
+              // whenever the server serialises a `sync-req` before an op whose
+              // ack arrives while the catch-up gate is closed.
+              const ts = h.serverTs ?? snapTs;
               batch.push({
                 ts,
                 run: () => foldAck(cell, h.opId, h.serverHlc, ts),

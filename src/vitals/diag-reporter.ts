@@ -76,7 +76,16 @@ export function createServerDiagReporter(config: ServerDiagReporterConfig) {
         alert.status === "frozen")
     ) return "slow";
 
-    if (alert.status === "healthy") return "recovered";
+    // BOTH spellings. `VitalStatus` has "healthy" and "recovered", and the one
+    // place that fires a recovery (`vitals/mod.ts` onClientRecovered) uses
+    // "recovered" — so matching only "healthy" meant every recovery event fell
+    // through to `null` and never reached the console or `onDiagnostic`. The
+    // reporter has a recovered branch and dedup logic for events it could not
+    // receive. Recovery is the event the fail-loud ethos most needs to surface,
+    // and it was the one that went quiet.
+    if (alert.status === "healthy" || alert.status === "recovered") {
+      return "recovered";
+    }
 
     return null;
   }
