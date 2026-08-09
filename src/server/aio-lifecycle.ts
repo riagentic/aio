@@ -238,7 +238,19 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
   log.info(`${p("aio")}${VERSION}`);
   // What this process actually IS — read from the process, never from config,
   // so the report cannot describe a different app than the one running.
-  for (const [label, value] of bootLines(buildFacts(), deps.bootExtras)) {
+  // Two facts the lifecycle owns and the boot report could not derive: the
+  // interface actually bound (0.0.0.0 and 127.0.0.1 are a different security
+  // posture, and `expose: true` only implied it), and whether TLS is real.
+  const _bootExtras = {
+    ...deps.bootExtras,
+    bind: expose ? "0.0.0.0 — every interface" : "127.0.0.1 — loopback only",
+    tls: skipHttp
+      ? undefined
+      : useHttps
+      ? (deps.tlsCert?.selfSigned ? "self-signed" : "provided cert")
+      : "off (plain http)",
+  };
+  for (const [label, value] of bootLines(buildFacts(), _bootExtras)) {
     log.info(`${p(label)}${value}`);
   }
   log.info(`${p("title")}${title}`);
