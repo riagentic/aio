@@ -168,12 +168,12 @@ export function describeHeapPolicy(
   mb: number | null,
   totalBytes: number | null,
 ): string {
-  if (mb === null) return "heap: V8 default (machine memory unknown)";
+  if (mb === null) return "V8 default (machine memory unknown)";
   const gb = (n: number) => `${(n / 1024).toFixed(1)} GB`;
   const of = totalBytes === null
     ? ""
     : ` of ${gb(totalBytes / (1024 * 1024))} RAM`;
-  return `heap: ${gb(mb)} max${of}`;
+  return `${gb(mb)} max${of}`;
 }
 
 /** This isolate's heap ceiling in bytes, or null when `node:v8` is absent. */

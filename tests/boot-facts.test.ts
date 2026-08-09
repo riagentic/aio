@@ -123,3 +123,81 @@ Deno.test("boot report: order is stable, so logs diff cleanly across boots", () 
     "source",
   ]);
 });
+
+// ── "Where is it defined?" ───────────────────────────────────────────────────
+// The question that prompted this: an app's client target can come from a
+// --flag, aio.run(), deno.json, or nothing at all — and the running app was the
+// one thing that could not say which. A value without its source sends someone
+// to grep three files for the one that won.
+
+const linesOf = (extra: Parameters<typeof bootLines>[1]) =>
+  Object.fromEntries(bootLines(facts, extra));
+
+Deno.test("boot: a resolved value names who decided it", () => {
+  const l = linesOf({
+    client: { value: "electron", from: "deno.json" },
+    port: { value: 8000, from: "flag" },
+  });
+  assertEquals(l.client, "electron (deno.json)");
+  assertEquals(l.port, "8000 (flag)");
+});
+
+Deno.test("boot: `default` is spelled out, never implied by silence", () => {
+  // "The default" is exactly the case people misremember, so it is the one
+  // that most needs saying.
+  const l = linesOf({ client: { value: "electron", from: "default" } });
+  assertEquals(l.client, "electron (default)");
+});
+
+Deno.test("boot: the bind address says what it MEANS", () => {
+  // `expose: true` only implied the posture; 0.0.0.0 vs 127.0.0.1 is the whole
+  // security difference and deserves words, not inference.
+  assertEquals(
+    linesOf({ bind: "0.0.0.0 — every interface" }).bind,
+    "0.0.0.0 — every interface",
+  );
+});
+
+Deno.test("boot: what is NOT ordinary about the cells is stated", () => {
+  // A worker cell runs on its own thread and a synced cell has a second
+  // writer. Both change how a symptom is read, and neither was visible without
+  // opening the source.
+  const l = linesOf({
+    cells: ["ledger", "index", "prefs"],
+    workers: ["index"],
+    syncCells: ["ledger"],
+  });
+  assertEquals(l.cells, "3 (ledger, index, prefs)");
+  assertEquals(l.workers, "index");
+  assertEquals(l.sync, "ledger");
+});
+
+Deno.test("boot: nothing extra is invented when there is nothing to say", () => {
+  // An empty extras block must not produce empty lines — "absent" and
+  // "unknown" read identically in a log, which is the thing being removed.
+  const l = linesOf({ cells: [], workers: [], syncCells: [], routes: 0 });
+  assertEquals("workers" in l, false);
+  assertEquals("sync" in l, false);
+  assertEquals("routes" in l, false);
+  assertEquals("client" in l, false);
+  assertEquals("pid" in l, false);
+});
+
+Deno.test("boot: the operational lines a support thread starts with", () => {
+  const l = linesOf({
+    pid: 4242,
+    heap: "8.0 GB max of 32.0 GB RAM",
+    logs: { dir: "/home/u/.wallet/logs", level: "debug" },
+    journal: "/home/u/.wallet/data/journal",
+    tls: "self-signed",
+    routes: 3,
+    serverFns: ["billing", "admin"],
+  });
+  assertEquals(l.pid, "4242");
+  assertEquals(l.heap, "8.0 GB max of 32.0 GB RAM");
+  assertEquals(l.logs, "/home/u/.wallet/logs · debug");
+  assertEquals(l.journal, "/home/u/.wallet/data/journal");
+  assertEquals(l.tls, "self-signed");
+  assertEquals(l.routes, "3");
+  assertEquals(l.serverfns, "billing, admin");
+});

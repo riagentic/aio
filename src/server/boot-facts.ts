@@ -36,8 +36,59 @@ export function buildFacts(): BuildFacts {
   };
 }
 
+/** Where a resolved value came from. The value alone answers "what is it";
+ *  this answers "why is it that", which is the question someone actually has
+ *  when the value surprises them — and the one a log has never answered, so
+ *  they go read three config files to find out which one won. */
+export type Provenance =
+  | "flag" // a --flag on the command line
+  | "config" // aio.run({ … })
+  | "deno.json" // the project file
+  | "env" // an environment variable
+  | "default"; // nobody said — this is the framework's answer
+
+/** A resolved value and the reason it holds. */
+export type Sourced<T> = { value: T; from: Provenance };
+
+/** `value (from)` — with `(default)` spelled out rather than implied, because
+ *  "the default" is precisely the case people misremember. */
+export function sourced(s: Sourced<unknown> | undefined): string | undefined {
+  if (!s || s.value === undefined || s.value === null) return undefined;
+  return `${s.value} (${s.from})`;
+}
+
 /** The optional extras the boot sequence knows and this module cannot derive. */
 export type BootExtras = {
+  /** Which client shell this app runs — and who decided. The question that
+   *  started this: "default target… where is it defined?" */
+  client?: Sourced<string>;
+  /** The entry module actually running. */
+  entry?: Sourced<string>;
+  /** TCP port, and whether it was asked for or picked. */
+  port?: Sourced<number>;
+  /** The interface the server bound, in words — `127.0.0.1` and `0.0.0.0` are
+   *  a different security posture, and the banner used to leave that to be
+   *  inferred from `expose`. */
+  bind?: string;
+  /** TLS state in words: `off`, `self-signed`, `provided cert`. */
+  tls?: string;
+  /** OS process id — for `kill`, for attaching a debugger, for finding it in
+   *  `ps` when two builds are running. */
+  pid?: number;
+  /** Where the logs are, and at what level. */
+  logs?: { dir: string; level: string };
+  /** JS heap ceiling for this process, already resolved. */
+  heap?: string;
+  /** Durable action journal, when on. */
+  journal?: string;
+  /** Cells that run in their own worker thread. */
+  workers?: string[];
+  /** Cells with CRDT sync enabled. */
+  syncCells?: string[];
+  /** Custom HTTP routes registered by the app. */
+  routes?: number;
+  /** serverFn namespaces registered by the app. */
+  serverFns?: string[];
   /** Where everything this app owns lives — the one directory to back up. */
   dataDir?: string;
   /** Wire protocol version this build speaks. */
@@ -81,15 +132,47 @@ export function bootLines(
     ["artifact", facts.artifact],
     ["platform", `${facts.platform} · ${facts.runtime}`],
   ];
+  if (extra.pid !== undefined) lines.push(["pid", String(extra.pid)]);
+  // WHO DECIDED, not just what. `client` is the line that prompted all of
+  // this — a target can come from a flag, deno.json, aio.run() or nothing at
+  // all, and the running app was the one thing that could not say which.
+  const client = sourced(extra.client);
+  if (client) lines.push(["client", client]);
+  const entry = sourced(extra.entry);
+  if (entry) lines.push(["entry", entry]);
+  if (extra.bind) lines.push(["bind", extra.bind]);
+  const portLine = sourced(extra.port);
+  if (portLine) lines.push(["port", portLine]);
+  if (extra.tls) lines.push(["tls", extra.tls]);
   if (extra.protocol !== undefined) {
     lines.push(["protocol", `v${extra.protocol}`]);
   }
+  if (extra.heap) lines.push(["heap", extra.heap]);
   if (extra.dataDir) lines.push(["data", extra.dataDir]);
+  if (extra.logs) {
+    lines.push(["logs", `${extra.logs.dir} · ${extra.logs.level}`]);
+  }
+  if (extra.journal) lines.push(["journal", extra.journal]);
   if (extra.cells?.length) {
     lines.push([
       "cells",
       `${extra.cells.length} (${extra.cells.join(", ")})`,
     ]);
+  }
+  // Which cells are NOT ordinary: a worker cell runs on its own thread and a
+  // synced cell has a second writer. Both change how a symptom is read, and
+  // neither was visible without opening the source.
+  if (extra.workers?.length) {
+    lines.push(["workers", extra.workers.join(", ")]);
+  }
+  if (extra.syncCells?.length) {
+    lines.push(["sync", extra.syncCells.join(", ")]);
+  }
+  if (extra.routes !== undefined && extra.routes > 0) {
+    lines.push(["routes", String(extra.routes)]);
+  }
+  if (extra.serverFns?.length) {
+    lines.push(["serverfns", extra.serverFns.join(", ")]);
   }
   if (extra.updates) {
     const u = extra.updates;

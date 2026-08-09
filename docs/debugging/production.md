@@ -57,6 +57,50 @@ aio_broadcast_bytes_total{kind} / aio_broadcast_messages_total{kind}
 
 Pairs with `/__aio/health` (JSON, per-cell detail) and `am metrics` (CLI).
 
+## What an app tells you at startup
+
+The boot report answers "what exactly am I running?" without anyone opening a
+config file — and, for the decisions that have more than one possible source,
+**who decided**:
+
+```
+running (dev, server-only)
+  web       http://localhost:8000
+  ws        ws://localhost:8000/ws
+  id        wallet
+  version   1.4.0
+  aio       1.0.0-alpha55
+  build     compiled (appimage)
+  artifact  /opt/wallet/wallet-x86_64.AppImage
+  platform  linux/x86_64 · deno 2.9.1
+  pid       4242
+  client    electron (deno.json)      ← flag / config / deno.json / default
+  entry     /opt/wallet/src/app.ts (default)
+  bind      127.0.0.1 — loopback only
+  port      8000 (flag)
+  tls       off (plain http)
+  heap      8.0 GB max of 32.0 GB RAM
+  data      /home/u/.wallet
+  logs      /home/u/.wallet/logs · info
+  journal   /home/u/.wallet/data/journal
+  cells     3 (ledger, index, prefs)
+  workers   index
+  sync      ledger
+  routes    3
+  serverfns billing, admin
+  updates   stable · manifest · every 6h · ask first
+```
+
+`client (deno.json)` is the shape that matters: a target can come from a
+`--client=` flag, `aio.run({ client })`, deno.json, or the framework's default,
+and the running app used to be the one thing that could not say which. `bind`
+spells out the security posture that `expose` only implied; `workers` and `sync`
+name the cells that are not ordinary (own thread, second writer), because both
+change how a symptom is read.
+
+A line is omitted only when the thing does not exist — never when it is merely
+inconvenient, since "absent" and "unknown" read identically in a log.
+
 ## Memory pressure monitor
 
 AIO monitors heap usage and alerts before OOM. Critical for long-running apps.
