@@ -32,7 +32,7 @@ export { _timingSafeEqual } from "./server-auth.ts";
 
 // ── Internal imports ──
 import type { ServerConfig, ServerHandle } from "./server-types.ts";
-import { isReservedRoutePath, matchRoute } from "./route.ts";
+import { isReservedRoutePath, matchRoute, parseCookies } from "./route.ts";
 import type { RawRouteHandler, RouteMatch } from "./route.ts";
 import {
   makeServerRequest,
@@ -147,9 +147,43 @@ export function _isLocalRequest(addr: Deno.Addr | undefined): boolean {
 }
 
 /** Starts HTTP + WS server, returns broadcast handle for state pushes and shutdown */
+/** The shared-key cookie's name, scoped to the app.
+ *
+ *  Cookies ignore the PORT, so two aio apps on one host share a cookie jar: a
+ *  single `aio_key` would have them overwriting each other's credential all day
+ *  (and each 401-ing on the other's). The appId keeps them apart. */
+export function keyCookieNameFor(appId: string | undefined): string {
+  const slug = (appId ?? "app").toLowerCase().replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "app";
+  return `aio_key_${slug}`;
+}
+
+/** The `Set-Cookie` value handing a browser the shared key for its follow-up
+ *  requests.
+ *
+ *  HttpOnly: script cannot read it — strictly better than the `?token=` URL it
+ *  replaces, which leaks into history, referrers and proxy logs (the server
+ *  already warns about that). SameSite=Strict: never sent cross-site, so the
+ *  ambient authority a cookie creates cannot be driven from another origin.
+ *  Secure whenever the page itself is https, taken from the request rather than
+ *  from config so it is right per request. Session-scoped (no Max-Age): the
+ *  credential lasts as long as the window, and a shared key is not something to
+ *  persist on disk for a user who closed the app. */
+export function keyCookieHeader(url: URL, token: string): string {
+  const secure = url.protocol === "https:" ? "; Secure" : "";
+  return `${keyCookieNameFor(_cookieAppId)}=${
+    encodeURIComponent(token)
+  }; Path=/; HttpOnly; SameSite=Strict${secure}`;
+}
+
+/** The appId the cookie name is derived from, set once per server. */
+let _cookieAppId: string | undefined;
+
 export function createServer(config: ServerConfig): ServerHandle {
   const { port, title, getUIState, dispatch, debug, prod = false, distDir } =
     config;
+  _cookieAppId = config.appId;
+  const keyCookieName = keyCookieNameFor(config.appId);
 
   // Diagnostic bus — dev-only event system for surfacing silent failures
   initDiagnosticBus(!prod);
@@ -784,6 +818,18 @@ export function createServer(config: ServerConfig): ServerHandle {
       return resp;
     }
 
+    // Set on the ONE request that proved it holds the key; attached to whatever
+    // response the paths below produce. Request-SCOPED deliberately: a
+    // module-level carrier would hand one request's cookie to another's
+    // response the first time two arrived together.
+    let setKeyCookie: string | null = null;
+    /** Attach the shared-key cookie when this request earned one. `append`,
+     *  never `set`: an app route may have set cookies of its own. */
+    const withKeyCookie = (r: Response): Response => {
+      if (setKeyCookie) r.headers.append("Set-Cookie", setKeyCookie);
+      return r;
+    };
+
     // Auth path 2: single shared token (--expose without users)
     if (config.token) {
       // Same rule as the per-user path above: compare the key FIRST (two
@@ -793,12 +839,20 @@ export function createServer(config: ServerConfig): ServerHandle {
       const qToken = url.searchParams.get("token");
       const auth = req.headers.get("authorization");
       const hToken = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
+      // …and the cookie this mode sets on the shell load. Without it, shared-key
+      // mode could not serve a BROWSER at all: the page loads with `?token=`,
+      // then requests `/App.tsx` and `/bundle.js` with no query and no header —
+      // nothing carries the credential — so every asset 401'd and the shell
+      // rendered nothing. Key mode was native-clients-only by accident.
+      const cToken = parseCookies(req.headers.get("cookie"))[keyCookieName];
       const validQ = qToken !== null && _timingSafeEqual(qToken, config.token);
       const validH = hToken !== null && _timingSafeEqual(hToken, config.token);
-      if (!validQ && !validH) {
+      const validC = cToken !== undefined &&
+        _timingSafeEqual(cToken, config.token);
+      if (!validQ && !validH && !validC) {
         // Only PRESENTED-and-wrong tokens burn budget — a tokenless probe
         // (health check, crawler) is a plain 401, not an attack signal.
-        if (qToken !== null || hToken !== null) {
+        if (qToken !== null || hToken !== null || cToken !== undefined) {
           recordAuthFail(clientKey, "invalid token (shared-key mode)");
           if (authFailBudgetExceeded(clientKey)) {
             return new Response("Too Many Requests", { status: 429 });
@@ -807,6 +861,16 @@ export function createServer(config: ServerConfig): ServerHandle {
         return new Response("Unauthorized", { status: 401 });
       }
       if (validQ && !validH) _warnTokenInUrl();
+      // Hand the browser the credential for its follow-up requests, once, on
+      // the request that proved it has the key. HttpOnly so script cannot read
+      // it (strictly better than the `?token=` URL it replaces, which leaks to
+      // history, referrers and proxy logs); SameSite=Strict so it is never sent
+      // cross-site, which is what keeps ambient cookie authority from becoming
+      // CSRF; Secure whenever the page itself is https. The control plane
+      // additionally requires the `X-AIO` header, which a cross-origin form
+      // post cannot set — so the cookie widens READS to the browser, not the
+      // ability to drive the app from another site.
+      if (validQ && !validC) setKeyCookie = keyCookieHeader(url, config.token);
     }
 
     // Snapshot dumps/overwrites RAW unfiltered state (bypasses ui.exclude /
@@ -821,15 +885,17 @@ export function createServer(config: ServerConfig): ServerHandle {
       );
     }
 
+    // A 101 upgrade carries no useful Set-Cookie, and a socket authenticated
+    // by its own query token needs none.
     if (pathname === "/ws") return wsMgr.handleWs(req, undefined, clientKey);
     debug(`http: ${req.method} ${pathname}`);
     // ── Custom user routes (uploads, webhooks, API endpoints) ──
     const routed = await tryRoutes(req, pathname, undefined, addr);
-    if (routed) return routed;
+    if (routed) return withKeyCookie(routed);
 
     const resp = await staticHandler.serveStatic(pathname, req);
     resp.headers.set("X-Content-Type-Options", "nosniff");
-    return resp;
+    return withKeyCookie(resp);
   };
 
   /** Match config.routes and invoke the handler with a route match (params +
