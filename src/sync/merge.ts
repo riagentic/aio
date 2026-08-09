@@ -185,6 +185,13 @@ function mergeSetAdd(
   return { value: [...merged.values()], conflict };
 }
 
+/** Did this side change the item, or merely carry it along unchanged? A remove
+ *  that races an EDIT is a real disagreement; a remove that races "nothing
+ *  happened" is not, and reporting the second would make the first invisible. */
+function edited(base: unknown, side: unknown): boolean {
+  return stableJSONStringify(base) !== stableJSONStringify(side);
+}
+
 function mergeSetRemove(
   local: unknown[],
   localHlc: HLC,
@@ -202,6 +209,7 @@ function mergeSetRemove(
   const remoteIds = new Set(safeRemote.map(getId));
   const localMap = new Map(safeLocal.map((i) => [getId(i), i]));
   const remoteMap = new Map(safeRemote.map((i) => [getId(i), i]));
+  const baseMap = new Map(safeBase.map((i) => [getId(i), i]));
 
   const result: unknown[] = [];
   const allIds = new Set([...localIds, ...remoteIds]);
@@ -213,8 +221,29 @@ function mergeSetRemove(
     const inLocal = localIds.has(id);
     const inRemote = remoteIds.has(id);
 
-    if (inBase && !inLocal) continue; // locally removed
-    if (inBase && !inRemote) continue; // remotely removed
+    // Remove-wins, SYMMETRICALLY: an item that was in base and is gone from
+    // either side is gone. That is a deliberate set-merge rule, not an
+    // oversight, and a 3-way ARRAY diff could not do better — "remote re-added
+    // it" and "remote left it alone" produce the identical array, so telling
+    // them apart needs per-item tombstones this structure does not carry.
+    //
+    // What it CAN tell apart is remove-vs-EDIT: if the side that kept the item
+    // also changed it, the two sides made incompatible decisions about the same
+    // item, and resolving that to "removed" without a word is the silent half.
+    // The value still resolves the same way — the merge stays predictable —
+    // but the conflict is now reported, so `onConflict` sees it.
+    if (inBase && !inLocal) {
+      if (inRemote && edited(baseMap.get(id), remoteMap.get(id))) {
+        conflict = true;
+      }
+      continue; // locally removed
+    }
+    if (inBase && !inRemote) {
+      if (inLocal && edited(baseMap.get(id), localMap.get(id))) {
+        conflict = true;
+      }
+      continue; // remotely removed
+    }
 
     // Both sides have same id — LWW on content divergence
     if (inLocal && inRemote) {
