@@ -75,84 +75,106 @@ export type FeedbackCell = Readonly<FeedbackState> & CellEntry & {
   dismiss(): void;
 };
 
-export const feedback: FeedbackCell = cell("feedback", {
-  state: {
-    enabled: false,
-    status: "idle" as FeedbackStatus,
-    last: null as SubmittedReport | null,
-    pending: 0,
-    error: null as string | null,
-  },
+let _feedback: FeedbackCell | null = null;
 
-  // Nothing here is worth surviving a restart: the reports themselves are the
-  // durable artifact, and `pending` is re-derived from disk at boot. Persisting
-  // a stale "saved" banner would outlive the thing it described.
-  persist: "none",
-
-  // Report contents are the app's own state, already redacted by the same rule
-  // the journal uses — but the FACT that a report exists, and its path, are
-  // fine to show. Nothing secret is broadcast: the report body lives on disk,
-  // never in this cell.
-  visible: "all",
-
-  // Anyone using the app may report a problem — that is the point of a feedback
-  // button, and refusing anonymous reports on an exposed app would silence the
-  // people most likely to hit something. What it CANNOT do is read anything
-  // back: a report is written to disk, and only the local maintainer reads it.
-  transaction: true,
-
-  methods: {
-    async report(s, title: string, body?: string, contact?: string) {
-      if (!runtime) {
-        s.error = "feedback is not configured for this app";
-        s.status = "error";
-        return;
-      }
-      if (!title.trim()) {
-        // A report with no title is a row nobody triages.
-        s.error = "a report needs a one-line description of the problem";
-        s.status = "error";
-        return;
-      }
-      s.status = "capturing";
-      s.error = null;
-      try {
-        const saved = await runtime.capture({
-          kind: "user",
-          title,
-          body,
-          contact,
-        });
-        s.last = saved;
-        s.pending = await runtime.count();
-        s.status = "saved";
-      } catch (e) {
-        s.status = "error";
-        s.error = e instanceof Error ? e.message : String(e);
-      }
+/** Create (once) the built-in `feedback` cell.
+ *
+ *  A FACTORY, not a module-level `cell(…)`, and that distinction is
+ *  load-bearing. `cell()` self-registers on evaluation, so a module that builds
+ *  it at import time can only be pulled in for its SIDE EFFECT — which is what
+ *  `aio.run()` used to do, with `await import(…)` from inside the call an app
+ *  top-level-awaits. A dynamic import of a module whose graph is still
+ *  evaluating cannot complete, and Deno reports it as
+ *  "module evaluation is still pending … This is a bug in Deno": the app hangs
+ *  at boot with no banner and nothing to search for.
+ *
+ *  Registering on CALL instead keeps the property the dynamic import existed
+ *  for — an app that never asked for feedback never gets the cell — and lets
+ *  every caller use a plain static import. Memoised because the cell binds to
+ *  exactly one app (D2): `aio/feedback` and the boot path must get the same
+ *  object, not two. */
+export function createFeedbackCell(): FeedbackCell {
+  if (_feedback) return _feedback;
+  _feedback = cell("feedback", {
+    state: {
+      enabled: false,
+      status: "idle" as FeedbackStatus,
+      last: null as SubmittedReport | null,
+      pending: 0,
+      error: null as string | null,
     },
 
-    async refresh(s) {
-      if (!runtime) return;
-      try {
-        s.pending = await runtime.count();
-        // A previous failure must not outlive its cause.
-        if (s.status === "error") {
-          s.status = "idle";
-          s.error = null;
+    // Nothing here is worth surviving a restart: the reports themselves are the
+    // durable artifact, and `pending` is re-derived from disk at boot. Persisting
+    // a stale "saved" banner would outlive the thing it described.
+    persist: "none",
+
+    // Report contents are the app's own state, already redacted by the same rule
+    // the journal uses — but the FACT that a report exists, and its path, are
+    // fine to show. Nothing secret is broadcast: the report body lives on disk,
+    // never in this cell.
+    visible: "all",
+
+    // Anyone using the app may report a problem — that is the point of a feedback
+    // button, and refusing anonymous reports on an exposed app would silence the
+    // people most likely to hit something. What it CANNOT do is read anything
+    // back: a report is written to disk, and only the local maintainer reads it.
+    transaction: true,
+
+    methods: {
+      async report(s, title: string, body?: string, contact?: string) {
+        if (!runtime) {
+          s.error = "feedback is not configured for this app";
+          s.status = "error";
+          return;
         }
-      } catch (e) {
-        // `refresh()` is a public method, not an observe-only hook: swallowing
-        // this left `pending` silently stale with nothing in state to see. Its
-        // sibling `report()` already records failures the same way.
-        s.status = "error";
-        s.error = e instanceof Error ? e.message : String(e);
-      }
-    },
+        if (!title.trim()) {
+          // A report with no title is a row nobody triages.
+          s.error = "a report needs a one-line description of the problem";
+          s.status = "error";
+          return;
+        }
+        s.status = "capturing";
+        s.error = null;
+        try {
+          const saved = await runtime.capture({
+            kind: "user",
+            title,
+            body,
+            contact,
+          });
+          s.last = saved;
+          s.pending = await runtime.count();
+          s.status = "saved";
+        } catch (e) {
+          s.status = "error";
+          s.error = e instanceof Error ? e.message : String(e);
+        }
+      },
 
-    dismiss(s) {
-      s.last = null;
-      s.status = "idle";
+      async refresh(s) {
+        if (!runtime) return;
+        try {
+          s.pending = await runtime.count();
+          // A previous failure must not outlive its cause.
+          if (s.status === "error") {
+            s.status = "idle";
+            s.error = null;
+          }
+        } catch (e) {
+          // `refresh()` is a public method, not an observe-only hook: swallowing
+          // this left `pending` silently stale with nothing in state to see. Its
+          // sibling `report()` already records failures the same way.
+          s.status = "error";
+          s.error = e instanceof Error ? e.message : String(e);
+        }
+      },
+
+      dismiss(s) {
+        s.last = null;
+        s.status = "idle";
+      },
     },
-  },
-}) as unknown as FeedbackCell;
+  }) as unknown as FeedbackCell;
+  return _feedback;
+}
