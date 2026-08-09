@@ -758,8 +758,20 @@ export function createDispatch<S, A, E>(
                     asyncCid,
                   );
                   reportAioError(err, _reportOpts);
+                  // "Abandoned" has to mean abandoned. The tracked promise was
+                  // only removed from `effectPromises` when the underlying
+                  // promise SETTLED — so an effect that never settles (a hung
+                  // await that ignores its signal) left the set non-empty
+                  // forever and `drain()` waited on work the timeout had
+                  // already given up on: a shutdown that hangs on an effect
+                  // nobody is waiting for. Two words, two behaviours, one of
+                  // them silent.
+                  if (_trackedRef) effectPromises.delete(_trackedRef);
                 }, thisEffectTimeout)
                 : null;
+              // Assigned immediately below; the timeout closure needs the same
+              // reference the set holds.
+              let _trackedRef: Promise<void> | null = null;
               const tracked = promise
                 .then(() => {
                   if (tid !== null) clearTimeout(tid);
@@ -793,6 +805,7 @@ export function createDispatch<S, A, E>(
                   );
                   reportAioError(err, _reportOpts);
                 }).finally(() => effectPromises.delete(tracked));
+              _trackedRef = tracked;
               effectPromises.add(tracked);
             }
           } catch (e) {

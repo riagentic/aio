@@ -111,8 +111,14 @@ export function island<M = unknown>(config: IslandConfig<M>): ComponentFn {
     // — leaking the external framework's mount (no unmount() ever fires).
     const disposedRef = useRef(false);
 
+    // Did the LOAD succeed? Without this, a `config.mount()` throw was reported
+    // as "Failed to load module" — the real error wearing the wrong label,
+    // pointing at the wrong half of the feature.
+    const loadedRef = useRef(false);
+
     onMount(() => {
       loadModule().then((mod) => {
+        loadedRef.current = true;
         if (disposedRef.current) return; // unmounted while loading — bail
         const container = containerRef.current;
         if (!container) return;
@@ -143,7 +149,19 @@ export function island<M = unknown>(config: IslandConfig<M>): ComponentFn {
           }
         });
       }).catch((err) => {
-        console.error("[aio:island] Failed to load module:", err);
+        // "Failed to load module" was printed for a module that loaded fine and
+        // a `config.mount()` that threw — the real error wearing the wrong
+        // label, with the island left as a permanent placeholder and no
+        // handle/dispose ever set. Name which half failed.
+        const mounted = handleRef.current !== null;
+        console.error(
+          mounted
+            ? "[aio:island] mounted module threw while updating props:"
+            : loadedRef.current
+            ? "[aio:island] module loaded but mount() threw — the island stays empty:"
+            : "[aio:island] Failed to load module:",
+          err,
+        );
       });
     });
 

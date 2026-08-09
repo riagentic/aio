@@ -144,12 +144,19 @@ export function useEffect(
       if (typeof cleanup === "function") {
         cleanupRef.current = cleanup;
       }
-    });
-    onCleanup(() => {
-      if (cleanupRef.current) {
-        cleanupRef.current();
-        cleanupRef.current = null;
-      }
+      // INSIDE onMount, exactly as the deps-form above does and for exactly the
+      // reason written there: registered in the component body, `onCleanup`
+      // fires before EVERY re-render. With empty deps the effect never re-runs,
+      // so the first unrelated re-render tore it down permanently —
+      // `useEffect(() => subscribe(), [])` silently unsubscribed and nothing
+      // put it back. The deps-form branch was fixed for this; this one was
+      // missed, which is what a comment on one of two twins tends to produce.
+      onCleanup(() => {
+        if (cleanupRef.current) {
+          cleanupRef.current();
+          cleanupRef.current = null;
+        }
+      });
     });
   } else {
     // No deps or non-empty deps → effect with fresh closure each render.

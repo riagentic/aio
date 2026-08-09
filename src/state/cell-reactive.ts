@@ -549,7 +549,18 @@ function _registerAndSend(
   queueMicrotask(() => {
     try {
       sendFn(tagged);
-    } catch { /* sendFn errors are surfaced via the ack timeout */ }
+    } catch (e) {
+      // The frame never left. Waiting out the 15s ack clock to discover that
+      // turns a send error into a near-silent hang, and the timeout then
+      // reports a generic "stopped waiting" instead of the actual failure.
+      // Reject NOW, with the real cause: a transport that throws
+      // synchronously has already told us everything the clock could.
+      ack.reject(
+        tagged.cid,
+        e instanceof Error ? e : new Error(`send failed: ${String(e)}`),
+      );
+      return;
+    }
     // aio's own transports arm the clock when the frame goes out. Anything
     // else — a custom or legacy `sendFn` — never would, and a deferred timer
     // that is never armed is a call that can hang forever, so start it here.

@@ -456,6 +456,19 @@ export function buildRootReducer(
       if (!owner || !ops || ops.length === 0) {
         return { state: currentState, effects: [] };
       }
+      // A DISABLED owner drops the worker's committed patches. Every other
+      // refusal in this file records itself (`recordRejection` / `log.warn`);
+      // this one returned an unchanged state and said nothing, so a worker cell
+      // whose breaker had tripped went on computing and committing into
+      // silence — the patches gone, the worker none the wiser.
+      if (disabledCells.has(owner.__aio.id)) {
+        recordRejection(action, {
+          cell: owner.__aio.id,
+          reason:
+            `cell is disabled — ${ops.length} worker patch(es) were dropped`,
+        });
+        return { state: currentState, effects: [] };
+      }
       const slice = (currentState[cell!] ?? {}) as Record<string, unknown>;
       const next = applyPatches(slice, ops);
       currentState = { ...currentState, [cell!]: next };
