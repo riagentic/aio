@@ -176,7 +176,22 @@ export const updates: UpdatesCell = cell("updates", {
       }
       s.status = "checking";
       s.error = null;
-      const r = await runtime.check();
+      // Guarded like `apply()` is. Without this a throwing `runtime.check()`
+      // rolled the "checking" write back (transaction: true) and propagated to
+      // the caller — so a UI that calls `updates.check()` without awaiting saw
+      // NOTHING: no error in state, no status change, no trace that a check had
+      // even been attempted. Two sibling methods, two different answers to the
+      // same failure.
+      let r: CheckResult;
+      try {
+        r = await runtime.check();
+      } catch (e) {
+        const error = e instanceof Error ? e.message : String(e);
+        s.status = "error";
+        s.error = error;
+        s.lastChecked = new Date().toISOString();
+        return { kind: "error", error } as CheckResult;
+      }
       s.lastChecked = new Date().toISOString();
       s.channel = runtime.channel;
       s.current = runtime.current;
