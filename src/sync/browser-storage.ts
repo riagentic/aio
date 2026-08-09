@@ -34,10 +34,30 @@ export function createLocalStorageOpStorage(
   // a reload re-syncs from scratch.
   const session = randomUuid();
   const read = (cell: string): CellDoc => {
+    let raw: string | null = null;
     try {
-      const raw = localStorage.getItem(key(cell));
-      return raw ? JSON.parse(raw) as CellDoc : { ops: [] };
+      raw = localStorage.getItem(key(cell));
     } catch {
+      return { ops: [] }; // storage unavailable (private mode) — documented
+    }
+    if (!raw) return { ops: [] };
+    try {
+      return JSON.parse(raw) as CellDoc;
+    } catch (e) {
+      // A corrupt document is NOT the same as no document. Returning `{ops: []}`
+      // silently made the next `saveOp` overwrite it, discarding every pending
+      // offline mutation — in the subsystem whose entire purpose is not losing
+      // them. The ops are unrecoverable either way (the JSON is broken), but
+      // the user is owed the fact, and the bytes are worth keeping for anyone
+      // who wants to look.
+      try {
+        localStorage.setItem(`${key(cell)}.corrupt`, raw);
+      } catch { /* no room for the copy — the warning still goes out */ }
+      console.error(
+        `[aio:sync] offline queue for "${cell}" is corrupt and was discarded ` +
+          `— any unsent changes in it are lost (${e}). The raw document was ` +
+          `kept at "${key(cell)}.corrupt".`,
+      );
       return { ops: [] };
     }
   };

@@ -61,6 +61,19 @@ async function discover(issuer: string): Promise<Discovery> {
   return d;
 }
 
+/** THE key-selection rule, extracted so it can be tested without an issuer.
+ *  A declared `kid` must MATCH; only a token that declares none may fall back
+ *  to a sole published key. @internal */
+export function _selectJwk<T>(
+  keys: T[],
+  kid: string | undefined,
+): T | undefined {
+  if (kid !== undefined) {
+    return keys.find((k) => (k as { kid?: string }).kid === kid);
+  }
+  return keys.length === 1 ? keys[0] : undefined;
+}
+
 async function jwksKeys(jwksUri: string): Promise<JsonWebKey[]> {
   const hit = _jwks.get(jwksUri);
   if (hit && Date.now() - hit.at < CACHE_MS) return hit.keys;
@@ -91,9 +104,15 @@ export async function verifyIdToken(
   };
   if (header.alg !== "RS256") throw new Error("oidc_alg_unsupported");
   const keys = await jwksKeys(jwksUri);
-  const jwk = keys.find((k) =>
-    (k as { kid?: string }).kid === header.kid || keys.length === 1
-  );
+  // `kid` binds a token to the key that signed it. The old `|| keys.length === 1`
+  // dropped that binding whenever the issuer happened to publish one key: any
+  // token verified against the sole key regardless of the kid it declared.
+  // Signature verification still ran (a wrong key fails), so this was never an
+  // auth bypass — but the binding is what makes key ROTATION meaningful, and
+  // "correct until the issuer adds a second key" is not a property worth
+  // having. A key set with no kid at all is still matched by position, because
+  // some issuers publish none and refusing them would break a working setup.
+  const jwk = _selectJwk(keys, header.kid);
   if (!jwk) throw new Error("oidc_unknown_kid");
   const key = await crypto.subtle.importKey(
     "jwk",

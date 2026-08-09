@@ -304,8 +304,26 @@ export function createServer(config: ServerConfig): ServerHandle {
           `cannot use the reserved /__aio or /ws namespaces`,
       );
     }
-    // A wildcard/param pattern can't be refused (an SPA catch-all is exactly
-    // what `"/*"` is for) — but it does NOT get the reserved namespace, and
+    // A `*` that is not the LAST segment is refused, because `matchRoute`
+    // returns the moment it reaches one: `/files/*/x` matches `/files/foo` and
+    // `/files/a/b/c` alike, and the `/x` it demands is never checked. The
+    // docstring only ever advertised a trailing wildcard, but nothing enforced
+    // it, so a pattern that silently over-matches was accepted and then
+    // answered requests it was never meant to. Loud at boot beats wrong at
+    // runtime.
+    const star = key.split("/").indexOf("*");
+    if (star !== -1 && star !== key.split("/").length - 1) {
+      throw new Error(
+        `[aio] invalid custom route "${key}" — "*" must be the LAST segment. ` +
+          `A wildcard captures everything after it, so anything written after ` +
+          `the "*" can never be matched: this pattern would answer requests it ` +
+          `does not describe. Use "${
+            key.split("/").slice(0, star + 1).join("/")
+          }" and branch inside the handler.`,
+      );
+    }
+    // A trailing wildcard/param pattern can't be refused (an SPA catch-all is
+    // exactly what `"/*"` is for) — but it does NOT get the reserved namespace, and
     // silently not-serving a route the app declared is the failure mode this
     // whole check exists to prevent. Say so once, at boot, naming the pattern.
     if (

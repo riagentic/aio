@@ -120,7 +120,22 @@ export function reactiveDB(db: DB): ReactiveDB {
         const res = await db.query<T>(sql, params);
         rows.length = 0;
         rows.push(...res.rows);
-        for (const cb of subs) cb(rows);
+        // Subscribers are APP code, and app code has bugs. A throw here used
+        // to propagate out of `rerun` → `invalidate` → `execute`/`transaction`,
+        // so `db.execute()` REJECTED for a write that had already committed:
+        // the caller either retries (duplicate write) or reports a failure that
+        // did not happen. The write is done; a listener's bug cannot un-do it,
+        // and must not be able to describe it as undone.
+        for (const cb of subs) {
+          try {
+            cb(rows);
+          } catch (e) {
+            console.error(
+              `[aio:db] a live-query subscriber threw — the write is COMMITTED ` +
+                `and the other subscribers still ran: ${e}`,
+            );
+          }
+        }
       };
       await rerun(); // initial fill (no subscribers yet → no spurious notify)
       const entry: Entry = { tables, rerun };
