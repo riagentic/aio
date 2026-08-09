@@ -5,7 +5,7 @@
 import { basename, dirname, join, resolve } from "@std/path";
 import { slugify } from "./build-helpers.ts";
 import { appIdFromConfig } from "../server/single-instance-lock.ts";
-import { resolveEntryPath } from "../server/paths.ts";
+import { bakedServerUrl, resolveEntryPath } from "../server/paths.ts";
 import {
   BUILD_BOOL_FLAGS,
   BUILD_VALUE_FLAGS,
@@ -83,6 +83,9 @@ export interface BuildConfig {
   /** True when `configEntry` came from `--entry=` rather than deno.json — so an
    *  error can blame the place the value ACTUALLY came from. */
   entryFromFlag: boolean;
+  /** deno.json `build.server` as a URL — the address a shipped CLIENT defaults
+   *  to. Null when the app declares none (see `bakedServerUrl`). */
+  bakedServer: string | null;
 
   // App identity
   binaryName: string;
@@ -264,6 +267,9 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
     androidDevUrl,
     androidApplicationId,
     entryFromFlag: entryArg !== undefined,
+    bakedServer: bakedServerUrl(
+      (mainConfig.build as { server?: string } | undefined)?.server,
+    ),
     binaryName,
     appTitle,
     configEntry,

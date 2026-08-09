@@ -46,7 +46,7 @@ set once and build it all with a single command:
 "build": {
   "targets": ["server", "electron-client", "android-client"],
   "out": "dist",
-  "server": "192.168.1.50:8000" // recorded in the manifest (clients connect here)
+  "server": "192.168.1.50:8000" // BAKED into every client artifact (see below)
 }
 ```
 
@@ -116,6 +116,23 @@ without discarding its declared entry.
 > cleans the shared `dist/`, so the first binary is gone by the time the second
 > finishes. That is what the orchestrator is for — it moves each target's
 > artifacts out to staging before the next build starts.
+
+## `build.server` — the address a shipped client starts with
+
+A client artifact used to open a box asking for a server address the build
+already knew. `build.server` is now baked into what the build produces:
+
+- **Electron client** — connects straight to it. `--server-url=` and an imported
+  `.aioapp` profile still win (both are someone choosing THIS run), and
+  `--connect` always reaches the picker for when the server has moved.
+- **Android client** — the field is prefilled and the first launch connects
+  without a form. Only on a fresh install: once the user has chosen a server,
+  including changing it, their choice wins.
+- **CLI client** — takes the address as its first argument, which a launching
+  script already controls; nothing is baked.
+
+Write it the way you would say it — `192.168.1.50:8000` — the scheme is inferred
+when you leave it out, and an explicit `https://` is honoured.
 
 ## Build for other operating systems — `--platforms`
 

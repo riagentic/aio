@@ -3,8 +3,15 @@
 import { CONNECT_HTML, tmplBounds, tmplCrashGuard } from "./electron-shared.ts";
 
 /** Generates a self-contained Electron main.cjs with a connect page for aio-client */
-export function electronClientScript(): string {
+export function electronClientScript(bakedUrl?: string | null): string {
+  // The address the BUILD already knew. Without it a shipped client opens a box
+  // asking the user to type a server they were never told — the build recorded
+  // `build.server`, printed it, refused the build without it, and then dropped
+  // it on the floor. It is a DEFAULT, not a lock: an explicit --server-url or an
+  // imported profile still wins, and --connect always reaches the picker.
+  const baked = bakedUrl ? JSON.stringify(bakedUrl) : "null";
   return `
+const __AIO_BAKED_URL = ${baked};
 const { app, BrowserWindow, Menu, nativeImage } = require('electron');
 const http = require('http');
 const https = require('https');
@@ -351,6 +358,15 @@ app.on('ready', () => {
       process.exit(1);
     }
     connectTo(win, directUrl);
+    return;
+  }
+
+  // The address baked in at build time (deno.json build.server). Last in
+  // precedence behind an explicit flag and an imported profile — both of which
+  // are someone choosing THIS run — and skipped entirely by --connect, so the
+  // picker is always one flag away when the baked server has moved.
+  if (__AIO_BAKED_URL && !process.argv.includes('--connect')) {
+    connectTo(win, __AIO_BAKED_URL);
     return;
   }
 

@@ -140,7 +140,7 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
     await Deno.mkdir(assetsDir, { recursive: true });
 
     if (doRemote) {
-      await _writeConnectPage(assetsDir, appNameXml);
+      await _writeConnectPage(assetsDir, appNameXml, cfg.bakedServer);
     } else {
       await _writeLocalAssets(cfg, assetsDir);
     }
@@ -165,9 +165,14 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
   Deno.exit(0);
 }
 
-async function _writeConnectPage(
+export async function _writeConnectPage(
   assetsDir: string,
   appNameXml: string,
+  /** deno.json `build.server` — the address this APK was built to talk to.
+   *  Prefilled and auto-connected on first launch, because an installed client
+   *  asking its user to type a server the build already recorded is the gap
+   *  `build.server` was supposed to close. */
+  bakedServer?: string | null,
 ): Promise<void> {
   const connectHtml = `<!DOCTYPE html>
 <html>
@@ -203,8 +208,13 @@ async function _writeConnectPage(
     </div>
   </div>
   <script>
-    var s=localStorage.getItem('aio_server');
+    var baked=${JSON.stringify(bakedServer ?? "")};
+    var s=localStorage.getItem('aio_server')||baked;
     if(s)document.getElementById('addr').value=s;
+    // Straight in on a fresh install: the build knew the address, so the first
+    // launch should not be a form. Only when the user has never chosen one —
+    // a stored choice, including a deliberate change, always wins.
+    if(baked&&!localStorage.getItem('aio_server')){localStorage.setItem('aio_server',baked);location.href=baked;}
     document.getElementById('f').onsubmit=function(e){
       e.preventDefault();
       var v=document.getElementById('addr').value.trim();
