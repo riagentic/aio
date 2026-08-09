@@ -33,7 +33,12 @@ export async function buildClient(cfg: BuildConfig): Promise<void> {
 
   // Generate client main.cjs
   const { electronClientScript } = await import("../electron/electron.ts");
-  const clientScript = electronClientScript();
+  // The address the build already knows, handed to the artifact instead of
+  // being printed and forgotten.
+  const clientScript = electronClientScript(cfg.bakedServer);
+  if (cfg.bakedServer) {
+    console.log(`[client] \u2713 default server ${cfg.bakedServer}`);
+  }
   await Deno.writeTextFile(join(appDir, "main.cjs"), clientScript);
   console.log("[client] \u2713 main.cjs");
 

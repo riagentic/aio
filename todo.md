@@ -526,16 +526,17 @@ analyses, ranked):
       `aio.run` + raw `connectCli` + until()-loops). The doc recipe shipped
       (app-architectures.md); a `testApps([svc, client])` helper is the
       candidate API once a second repo asks.
-- [ ] **Build-time server-URL bake for shipped clients.** `build.server` is
-      manifest metadata only; a consumer APK/AppImage still asks the user to
-      type an address. Candidate: default the connect page / `--server-url` from
-      the manifest.
-- [x] **Android `applicationId` is hardcoded** (`app.aio.<slug>`, **DONE
-      2026-08-08 — deno.json `android.applicationId`, validated against
-      Android's package rule (≥2 letter-led segments) and REFUSED rather than
-      sanitized: an applicationId is permanent once published.**
-      build-android.ts) — no deno.json knob, so a client APK cannot ship to Play
-      under its own package.
+- [x] **Build-time server-URL bake for shipped clients — DONE 2026-08-09.**
+      `build.server` was recorded in the manifest, printed at the end of a build
+      and used to REFUSE a client-only build — and then the artifact still asked
+      the user to type the address the build already knew (one field deployment
+      rewrote a build-time constant to work around it). Now baked: the Electron
+      client connects straight to it (`--server-url` and an imported profile
+      still win; `--connect` always reaches the picker), and the Android client
+      prefills + auto-connects on a FRESH install only, so a user's own choice
+      always outranks it. The CLI client takes its address as argv[0] — a
+      launching script already controls that, so nothing is baked there. Scheme
+      inferred (`192.168.1.50:8000` works), `bakedServerUrl` is the one rule.
 - [ ] **Remote target naming — DECIDED 2026-08-09, batched not rushed.** The
       fleet names win: `server`, `electron-client`, `android-client`,
       `cli-client` are what `deno task build --targets=` takes and what
