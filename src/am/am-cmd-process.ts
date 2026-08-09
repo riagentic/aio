@@ -387,7 +387,7 @@ export async function cmdStart(
     Deno.exit(1);
   } catch { /* port free — good */ }
 
-  // Resolve entry point — --entry flag > deno.json "entry" > src/app.ts > src/main.ts
+  // Resolve entry point — --entry flag > deno.json "entry" > src/app.ts
   const entry = resolveEntry(flags.entry);
   if (!entry) {
     outError(
