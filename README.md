@@ -52,6 +52,12 @@ That's it. A working counter (or todo) app, runnable and buildable to a native
 binary, desktop (Electron), or Android APK. (Windows:
 `irm …/install.ps1 | iex`.)
 
+**Read this second:** [Common pitfalls](docs/basics/pitfalls.md) — the traps
+people actually hit, each with the rule that avoids it. Two field reports in a
+row hit a trap that page already documented, which says more about where the
+link was than about the readers. Every `am` command also takes `--json`; that is
+the scripting interface.
+
 ## The whole app is state
 
 ```ts

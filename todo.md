@@ -427,6 +427,12 @@ stylesheet).
 
 ## The last-call plan (2026-08-07 audit → alpha52–56, then beta)
 
+> **Numbering note (2026-08-09).** These rows once named alpha52–56 and the
+> releases went out in a different order with different content, so a row's
+> number stopped meaning anything. Rows now name the WORK; the version is
+> whatever it lands in. Check `CHANGELOG.md` for what a released number actually
+> contains.
+
 Four design audits (API/config, cell semantics, architecture, DX) ran at
 alpha51; user approved the package with the rule: **perfect aio is the goal,
 break burden must be bearable** — every break = deprecated alias through beta
@@ -475,7 +481,10 @@ break burden must be bearable** — every break = deprecated alias through beta
       deps-form takes tuple so parameterized+deps compose;
       `schedule.backoff/poll` arg order + `factor` key; `schedule.blocking` →
       top-level `blocking`.
-- [ ] **alpha55 — the surface diet + safety defaults.** Cell `ui:` → `visible:`
+- [ ] **The surface diet + safety defaults** (was "alpha55" — renumbered
+      2026-08-09: alpha55 SHIPPED as the memory release, and a plan row naming a
+      version that already exists is how 52/53/54 drifted. These rows now name
+      the WORK, and take whatever number they land on.) Cell `ui:` → `visible:`
       (alias through beta; "access gates calls, visible gates reads"); `key:`
       auto-generates when exposed w/o per-user auth (codemod inserts
       `key: false` to preserve today's behaviour); `access`-without- visibility
@@ -488,16 +497,17 @@ break burden must be bearable** — every break = deprecated alias through beta
       `testgen`→`testGen`, drop `ExtractState`; `AioUser` opens
       (`& Record<string, unknown>`); `AioApp` typed overload; browser-surface
       snapshot twin of android-air-surface test.
-- [ ] **alpha56 — internals + blobs.** `protocol/`↔`state` decomposition
-      (browser runtime files → `browser/`); boundary gate: trim 12 unused edges,
-      error on unused permission, root files stop laundering (state/cell.ts
-      testCell re-export dies); offline-queue unification (one factory, one drop
-      policy); `routeEffect` exhaustive router (3 runtimes);
-      `PRAGMA user_version` + one ordered fatal DDL runner; wire: ignorable-
-      kind tier + reserved binary lane; shared SERVER_ONLY_AIO_SYMBOLS;
-      `app.blobs` (content-addressed under appDirs().files, HTTP Range
-      streaming, `put/get/stream/url`) + windowed-query example. Then:
-      stabilization hunt → hardware week (B5/B4/A6) → **beta1**.
+- [ ] **Internals + blobs** (was "alpha56" — see the note above.)
+      `protocol/`↔`state` decomposition (browser runtime files → `browser/`);
+      boundary gate: trim 12 unused edges, error on unused permission, root
+      files stop laundering (state/cell.ts testCell re-export dies);
+      offline-queue unification (one factory, one drop policy); `routeEffect`
+      exhaustive router (3 runtimes); `PRAGMA user_version` + one ordered fatal
+      DDL runner; wire: ignorable- kind tier + reserved binary lane; shared
+      SERVER_ONLY_AIO_SYMBOLS; `app.blobs` (content-addressed under
+      appDirs().files, HTTP Range streaming, `put/get/stream/url`) +
+      windowed-query example. Then: stabilization hunt → hardware week
+      (B5/B4/A6) → **beta1**.
 
 Deferred from the alpha51 architecture pass (docs/basics/app-architectures.md
 names the two shapes; these are the remaining gaps, from the geng-market + dm
@@ -526,9 +536,15 @@ analyses, ranked):
       sanitized: an applicationId is permanent once published.**
       build-android.ts) — no deno.json knob, so a client APK cannot ship to Play
       under its own package.
-- [ ] **Remote target naming**: scaffold says `compile:remote:X`, fleet says
-      `X-client` (docs now match the scaffold). A one-name story (or aliases)
-      wants deciding before beta.
+- [ ] **Remote target naming — DECIDED 2026-08-09, batched not rushed.** The
+      fleet names win: `server`, `electron-client`, `android-client`,
+      `cli-client` are what `deno task build --targets=` takes and what
+      `build-all.ts` documents, so the scaffold's `compile:remote:electron`
+      becomes `compile:electron-client`, with `am fix --migrate-tasks` carrying
+      the rename exactly as it already carries the alpha52 vocabulary. NOT
+      shipped as a standalone change: it rewrites task names in every app, and
+      doing it now migrates users twice for one vocabulary — once here, and
+      again with the surface diet's renames. It goes WITH the diet.
 
 Deferred from the alpha45 work (alpha46 candidates, none data-loss):
 
@@ -544,8 +560,10 @@ Deferred from the alpha45 work (alpha46 candidates, none data-loss):
       one-shot CLI has no clients waiting on its event loop; a gate's stdout IS
       its interface; a benchmark's cell is a fixture). Extending the scan
       without that fired 11 premise-false findings; with it, 13 → 2, both true.
-- [ ] The post-await walker attributes a read to a nested closure inside the
-      method body (a callback using the same param name) — pre-existing.
+- [x] The post-await walker attributes a read to a nested closure inside the
+      **DONE 2026-08-09 — a callback whose own parameter shares the draft's name
+      is no longer blamed on the method (nestedShadowLine).** method body (a
+      callback using the same param name) — pre-existing.
 - [x] `build-bundle.ts`'s missing-App.tsx error says `deno.json "entry": …` even
       **DONE 2026-08-08 — BuildConfig carries entryFromFlag; the message blames
       --entry or deno.json, whichever it was.** when the value came from
@@ -581,31 +599,22 @@ Deferred from that review (alpha45 candidates, none data-loss):
       fixed, because separating the meanings needs a dispatch-level flag — a
       wire-contract change deserving its own release and gate run. Data outcome
       is safe either way (captured by the final persist, or loudly dropped).
-- [ ] Shutdown scoping is cell-NAME-scoped, not instance-scoped (duplicate names
-      across two apps warn-only; same claim bindings already make).
-- [x] prod/UDS client.log: `initClientLog` is dev-gated on the WS path but UDS
-      **DONE 2026-08-08 — the log DIRECTORY is not a dev feature: UDS writes
-      client frames in prod too, so the gate left the module on its cwd-relative
-      default and a prod Electron app's renderer logs landed wherever it was
-      launched from. Now set on every boot; only the diagnostic bus stays
-      dev-gated.** log frames are not, and prod electron writes cwd-relative
-      `.aio/log` that no policy wipes; `am log --client` reads a third path
-      (`log/client.log`). One decider wanted.
-- [x] `wipeOnStart` leaves stale `.N` backups behind after `backupLogs` is
-      **DONE 2026-08-08 — the wipe now clears the archives too; a clean slate
-      that leaves files behind is the wrong shape of promise.** turned off.
-- [x] e2e harness: a crash AFTER readiness surfaces as a raw fetch error without
-      **DONE 2026-08-08 — Server.fetch attaches the child's output and whether
-      it had exited; the readiness probe gained a 5s per-attempt ceiling.** the
-      child's output (`serverOutput` exists — attach it); readiness fetch has no
-      per-attempt timeout.
-- [x] Transport diag routers (WS/IPC/AIR) have no router-level pin — reverting
-      **DONE 2026-08-08 — tests/diag-sink-one-decider.test.ts pins it two ways:
-      no file outside the sink's owners may call `_aioDiag`, and any file
-      switching on a `diag` frame must reach `_deliverDiag`. Mutation-verified
-      by re-inlining the old check.** any one to the old inline `_aioDiag` check
-      keeps the suite green.
-- [ ] aiol post-await rule: destructured draft params unchecked; until/race
+- [ ] **Shutdown scoping is by cell NAME, one step short of right.** Two apps in
+      one process cannot share a cell DEF (bindCell refuses), but each can hold
+      a different def with the same id — a factory returning
+      `cell("ledger", …)`, which is precisely what a client binding a remote
+      cell does. App A's shutdown then counts and aborts app B's `ledger:`
+      calls. Analysed and DOCUMENTED at `_pendingFor` 2026-08-09. The fix keys
+      the registry by app identity instead of name, which threads an app id
+      through `registerCall` and every dispatch reaching it: a hot-path change
+      to cancellation semantics, its own release and gate run.
+- [x] aiol post-await rule: destructured draft params unchecked; until/race
+      **DONE 2026-08-09 (2 of 3) — the until/race exemption now belongs to the
+      CALL not the line (a genuine read after `await until(…);` on the same line
+      reports), and the `$` exemption is the four real meta fields instead of
+      any `$`-prefixed name. Also fixed the older whole-await-line skip: reads
+      to the RIGHT of the await run post-suspension like any other. Destructured
+      draft params still unanalysed — aliasing needs more than a regex.**
       exemption skips the whole line; `$`-prefix exemption is broader than the
       three meta fields.
 - [x] `am fix` probes entries (`src/main.ts`, `main.ts`) that `resolveEntry`
@@ -1026,10 +1035,13 @@ Still open:
       survives a rejected tick (clears the guard — the hand-rolled
       `s.refreshing` flag leaks on throw), and sync ticks never skip. Pinned in
       `tests/schedule-skip-if-running.test.ts`.
-- [ ] **Discoverability, twice over.** `pitfalls.md` existed and they didn't
-      find it; `am --json` was documented and they didn't find it. Both were
-      read-the- docs failures, and two in one report is a signal about the docs'
-      entry points rather than about one reader.
+- [x] **Discoverability, twice over.** `pitfalls.md` existed and they didn't
+      **DONE 2026-08-09 — README points at pitfalls.md right after the
+      get-started block (where the readers who missed it actually were), and
+      `am --help` gives `--json` its own line instead of burying it in a 14-flag
+      row.** find it; `am --json` was documented and they didn't find it. Both
+      were read-the- docs failures, and two in one report is a signal about the
+      docs' entry points rather than about one reader.
 
 Closed in alpha38: selector reads are reactive everywhere (the report's #1,
 which had cost it a whole `derive.ts` layer — now unnecessary), a refused write
