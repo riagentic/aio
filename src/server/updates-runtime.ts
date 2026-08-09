@@ -22,7 +22,7 @@ import {
 } from "../build/ship.ts";
 import {
   type CheckResult,
-  updates,
+  createUpdatesCell,
   type UpdatesRuntime,
 } from "../state/updates-cell.ts";
 import {
@@ -280,7 +280,8 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       // never breaks the thing it reports on.
       onProgress: (f) => {
         try {
-          void Promise.resolve(updates.setProgress(f)).catch(() => {});
+          void Promise.resolve(createUpdatesCell().setProgress(f))
+            .catch(() => {});
         } catch { /* not bound — the download continues either way */ }
       },
     });

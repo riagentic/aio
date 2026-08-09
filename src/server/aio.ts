@@ -80,6 +80,8 @@ import {
   wrapAppWithCells,
 } from "./aio-cells-bridge.ts";
 import { getRegisteredCells } from "../state/cell-reactive.ts";
+import { createUpdatesCell } from "../state/updates-cell.ts";
+import { createFeedbackCell } from "../state/feedback-cell.ts";
 import { createCostMeter } from "../vitals/cost-meter.ts";
 
 // CLI + path resolution
@@ -343,12 +345,19 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
 
   try {
     // Configuring `updates` registers the built-in cell — BEFORE the registry
-    // is read below, because a cell that registers afterwards is never
-    // composed and never bound. Dynamic on purpose: `cell()` self-registers on
-    // import, so a static import anywhere in the server would put this cell in
-    // every app that never asked for it.
-    if (fc.updates) await import("../state/updates-cell.ts");
-    if (fc.feedback) await import("../state/feedback-cell.ts");
+    // is read below, because a cell that registers afterwards is never composed
+    // and never bound.
+    //
+    // A CALL, not a dynamic import. These were `await import(…)`, chosen
+    // because `cell()` self-registers and a static import would have put the
+    // cell in every app that never asked for one. But a dynamic import from
+    // inside a function the app top-level-awaits can deadlock module
+    // evaluation — the app hangs at boot with no banner and Deno reporting
+    // "module evaluation is still pending … This is a bug in Deno", which
+    // names neither aio nor the app. The factories register on call, so the
+    // opt-in property survives and the hazard does not.
+    if (fc.updates) createUpdatesCell();
+    if (fc.feedback) createFeedbackCell();
 
     // Isolate filter
     const cliIsolate = parseCli().isolate;

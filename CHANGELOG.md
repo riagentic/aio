@@ -1,5 +1,153 @@
 # Changelog
 
+## 1.0.0-alpha56 — the empty desk (2026-08-09)
+
+A 42-finding static audit arrived, and this is the release where every one of
+them is closed: fixed with a test, or written into `feedback/refused.md` with
+the reason it will not be. Nothing was changed on the strength of a description
+— two findings were **refuted** on verification, and one was half right in a
+more interesting way than reported.
+
+Strictly additive: no removals, no renames, nothing to migrate.
+
+### An app that top-level-awaits `aio.run()` boots again
+
+alpha54 added two `await import(…)` calls **inside `aio.run()`** — for the
+built-in `updates` and `feedback` cells — because `cell()` self-registers and a
+static import would have put those cells in every app that never asked for one.
+The reasoning was sound; the shape was not. A dynamic import issued from inside
+a call the app top-level-awaits can leave module evaluation unable to complete,
+and the app dies at boot with:
+
+```
+error: Module evaluation is still pending after multiple event loop iterations,
+but no stalled top-level await was found. This is a bug in Deno.
+```
+
+That message names neither aio nor the app, and there is nothing in the app to
+fix — which is why `am fix` could not have helped: nothing in the project was
+wrong. **This is a defect, not one of the breaks we agreed to.**
+
+The two cells are factories now (`createUpdatesCell` / `createFeedbackCell`):
+registration happens on the CALL, so the opt-in property survives — an app that
+never configures updates still never gets the cell — and every caller uses an
+ordinary static import. The same shape one call deeper, in `startUpdates` and
+`startFeedback`, went with it: half a fix is not one. `aio/updates` and
+`aio/feedback` are unchanged for apps.
+
+A test now boots a real app whose ENTRY top-level-awaits `aio.run()`, with and
+without `feedback`, and a guard refuses any dynamic import of a cell or runtime
+module from the boot path. No harness covered this before, because every one of
+them calls `aio.run()` from inside a test function rather than at a module's top
+level — which is exactly not how apps are written.
+
+### Silent wrong outcomes — the class this project treats as disqualifying
+
+- **A held ack could lose a write.** Its known `serverTs` was clamped down to
+  the snapshot watermark — but a `serverTs` ABOVE the watermark is precisely the
+  op the snapshot does not contain, so the engine marked it already-folded,
+  skipped the apply, and the user's own change vanished from confirmed state.
+  Reachable whenever the server serialises a `sync-req` before an op whose ack
+  arrives while the catch-up gate is shut.
+- **A throwing live-query subscriber made a COMMITTED write reject.** The throw
+  propagated out of `invalidate()` into `execute()`, so the caller was told a
+  landed write had failed — and might retry it. Subscribers are app code; a bug
+  in one cannot un-commit a write.
+- **A route wildcard that was not last silently over-matched.** `matchRoute`
+  returns the moment it reaches a `*`, so `/files/*/x` answered `/files/foo` and
+  the `/x` it demands was never checked. Refused at boot now, naming the pattern
+  to write instead.
+- **A corrupt offline queue was discarded in silence** and overwritten by the
+  next save — in the subsystem whose entire purpose is not losing offline
+  mutations. Now reported, with the raw document kept alongside.
+- **Every recovery alert was dropped.** `VitalStatus` carries both `"healthy"`
+  and `"recovered"`; the reporter matched only the first while the sole firing
+  site uses the second, so its own recovery branch existed for an event it could
+  never receive.
+- **A worker patch with a disabled owner** vanished without the rejection record
+  every sibling path in that file writes.
+- **Two public methods swallowed real errors** — `feedback.refresh()` and
+  `updates.check()`, both of whose siblings already recorded failures.
+
+### Hangs
+
+- **"Abandoned" now means abandoned.** A hard-timed-out effect stayed in
+  `effectPromises` until its promise settled, so an effect that never settles
+  left `drain()` waiting forever on work the timeout had already given up on.
+- **A synchronous `sendFn` throw** waited out the 15-second ack clock and then
+  reported a generic timeout. The frame never left; the caller is told now.
+- **`connectCli().ready`** — see alpha55; `readyTimeoutMs` is the opt-in.
+
+### Correctness
+
+- **`useEffect(fn, [])` cleanup ran before every re-render**, tearing the mount
+  effect down permanently: `useEffect(() => subscribe(), [])` unsubscribed on
+  the first unrelated re-render and nothing put it back. The deps-form branch
+  was fixed for exactly this once, and carries a comment about it; its twin was
+  missed.
+- **A declared JWKS `kid` must now match.** `|| keys.length === 1` meant any
+  token verified against a sole published key whatever kid it declared — never a
+  bypass, since the signature still had to check out, but it made key rotation
+  meaningless.
+- **`electronBinReady` returned true when the binary was missing**, which is
+  exactly the broken install it exists to catch.
+- **A remove that races an EDIT is now reported as a conflict.** Remove still
+  wins — that part was a deliberate rule, and the audit's reading of it was half
+  wrong — but two sides deciding differently about the same item is a
+  disagreement `onConflict` should hear.
+
+### Shared-key mode can serve a browser
+
+The shell loaded with `?token=`, then every asset request arrived with no query
+and no header and 401'd — and since `key:` and `auth:` refuse to boot together,
+an app that wanted a browser had no shared-key option at all. The request that
+PROVES it holds the key is now handed the credential back as an `HttpOnly`,
+`SameSite=Strict` cookie, named per app (cookies ignore the port), `Secure` when
+the page is https, session-scoped and issued once. Strictly safer than the
+`?token=` URL it replaces, which leaks into history, referrers and proxy logs.
+
+### The boot report says WHO decided
+
+"Default target — where is it defined?" A client target can come from a
+`--client=` flag, `aio.run({ client })`, deno.json or the framework's default,
+and the running app was the one thing that could not say which:
+
+```
+client    electron (deno.json)
+port      8000 (flag)
+entry     /opt/wallet/src/app.ts (default)
+```
+
+`(default)` is spelled out rather than implied by silence. New lines, each
+because its absence sent someone to read source: **pid**, **bind**
+(`127.0.0.1 —
+loopback only` vs `0.0.0.0 — every interface`, the posture
+`expose` only implied), **tls**, **heap** (the ceiling and the machine it came
+from), **logs**, **journal**, **workers** and **sync** (the cells that are not
+ordinary — own thread, second writer), **routes**, **serverfns**.
+
+### `build.server` reaches the artifact
+
+It was recorded in the manifest, printed at the end of a build, and used to
+REFUSE a client-only build — and then the APK or AppImage still asked the user
+to type the address the build already knew. Now baked: the Electron client
+connects straight in (`--server-url` and an imported profile still win;
+`--connect` reaches the picker), and the Android client prefills and
+auto-connects on a FRESH install only, so a user's own choice always outranks
+it.
+
+### Tooling
+
+- **aiol stopped crying wolf** in three ways: a callback whose parameter shares
+  the draft's name is no longer blamed on the method, the `until`/`race`
+  exemption belongs to the CALL rather than the whole line, and the `$`
+  exemption is the four real meta fields instead of any `$`-prefixed name.
+- **One entry decider.** `am-utils` held a fourth copy of "where does this app
+  start"; it agreed by luck.
+- **Discoverability** — the README points at `pitfalls.md` where the two readers
+  who missed it actually were, and `am --help` gives `--json` its own line
+  instead of burying the scripting interface in a fourteen-flag row.
+
 ## 1.0.0-alpha55 — the memory a machine actually has (2026-08-09)
 
 An app that needs 12 GB on a 32 GB machine should get it. One that leaks should

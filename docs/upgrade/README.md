@@ -7,6 +7,12 @@ One guide per version migration. Find your current version and follow the steps.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha55 → alpha56](from-alpha55-to-alpha56.md) — the empty desk: a 42-finding
+  audit closed to zero (fixed or refused with reasons). Nothing to migrate; two
+  things you might NOTICE — a route pattern with a non-trailing `*` is refused
+  at boot (it was silently over-matching), and an OIDC token must name a `kid`
+  that exists (a single published key no longer verifies anything). Shared-key
+  apps now work in a browser
 - [alpha54 → alpha55](from-alpha54-to-alpha55.md) — the memory a machine
   actually has: the heap ceiling scales with physical RAM (25%, floor 4 GB)
   instead of V8's flat ~4 GB, so an app stops dying with memory to spare;

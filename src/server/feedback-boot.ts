@@ -15,6 +15,7 @@ import type {
   FeedbackRuntime,
   SubmittedReport,
 } from "../state/feedback-cell.ts";
+import { installFeedbackRuntime } from "../state/feedback-cell.ts";
 import {
   buildReport,
   listReports,
@@ -162,7 +163,8 @@ export async function startFeedback(
     count: async () => (await listReports(sources.dataDir)).length,
   };
 
-  const { installFeedbackRuntime } = await import("../state/feedback-cell.ts");
+  // Static — see the note in updates-boot.ts: a dynamic import from inside the
+  // call an app top-level-awaits can leave module evaluation unable to finish.
   installFeedbackRuntime(runtime);
 
   // Automatic capture. Deduped by message so one repeating fault produces one
