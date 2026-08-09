@@ -153,3 +153,31 @@ export function resolveEntryPath(
     ((mainConfig?.entry as string | undefined) ?? "") ||
     "src/app.ts";
 }
+
+/** The address a SHIPPED client should default to, from deno.json
+ *  `build.server`, normalised to a URL — or null when the app declares none.
+ *
+ *  `build.server` was manifest metadata and nothing else: the fleet recorded it,
+ *  printed it, and refused a client-only build without it — and then the APK or
+ *  AppImage that came out still opened a box asking the user to type an address
+ *  the build already knew. A field deployment worked around it by rewriting a
+ *  build-time constant.
+ *
+ *  Scheme is inferred, not required: `192.168.1.50:8000` is what people write in
+ *  a config file, and demanding `http://` there is the kind of ceremony that
+ *  gets an option abandoned. An explicit scheme is always honoured. */
+export function bakedServerUrl(
+  declared: string | null | undefined,
+): string | null {
+  const raw = (declared ?? "").trim();
+  if (!raw) return null;
+  const withScheme = /^https?:\/\//.test(raw) ? raw : `http://${raw}`;
+  try {
+    const u = new URL(withScheme);
+    if (!u.hostname) return null;
+    // No trailing slash: it is concatenated with paths downstream.
+    return u.origin;
+  } catch {
+    return null;
+  }
+}
