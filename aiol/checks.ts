@@ -1511,14 +1511,96 @@ function isPrefixWrite(code: string, start: number): boolean {
  *  safe form under concurrency. It is also the framework's own documented shape
  *  (`async tick(s) { await …; s.n += 1 }`), and a hint that fires on the docs is
  *  a hint people stop reading. Pure. */
+/** Character spans of `until(...)` / `race(...)` arguments on ONE line.
+ *  The exemption is the CALL, not the line it sits on. */
+export function pollSpans(line: string): Array<[number, number]> {
+  const out: Array<[number, number]> = [];
+  for (const m of line.matchAll(/\b(until|race)\s*\(/g)) {
+    let depth = 0;
+    for (let i = m.index! + m[0].length - 1; i < line.length; i++) {
+      if (line[i] === "(") depth++;
+      else if (line[i] === ")") {
+        depth--;
+        if (depth === 0) {
+          out.push([m.index!, i]);
+          break;
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/** True when EVERY read of `param` on this line falls inside a poll span — i.e.
+ *  the line's only reads are the sanctioned re-reads. A read outside one is a
+ *  genuine post-await read and must still be reported. */
+function readOnlyInside(
+  line: string,
+  param: string,
+  spans: Array<[number, number]>,
+  minOffset: number,
+): boolean {
+  // Only reads that actually run post-suspension count: on the await line
+  // itself, anything to the LEFT of the await already happened.
+  const offsets = draftReadOffsets(line, param).filter((o) => o > minOffset);
+  if (offsets.length === 0) return true; // nothing here to report
+  return offsets.every((o) => spans.some(([a, b]) => o >= a && o <= b));
+}
+
+/** True when `param` has been RE-BOUND by a nested function between the method
+ *  header and this line — a callback whose own parameter happens to share the
+ *  draft's name. Its `s.x` is that callback's `s`, not the draft, and blaming
+ *  the method for it is a false positive that teaches people to ignore the
+ *  rule. Conservative: only an exact same-name parameter counts. */
+function nestedShadowLine(
+  codeLines: string[],
+  startIdx: number,
+  lineIdx: number,
+  param: string,
+): boolean {
+  const re = new RegExp(
+    `(?:function\\s*\\w*\\s*\\(|\\(|,)\\s*${param}\\s*(?:[,)])\\s*=>|` +
+      `function\\s*\\w*\\s*\\(\\s*${param}\\s*[,)]`,
+  );
+  let depthAtShadow: number | null = null;
+  let depth = 0;
+  for (let i = startIdx; i <= lineIdx; i++) {
+    const line = codeLines[i]!;
+    if (i > startIdx && depthAtShadow === null && re.test(line)) {
+      depthAtShadow = depth;
+    }
+    for (const ch of line) {
+      if (ch === "{") depth++;
+      else if (ch === "}") {
+        depth--;
+        // Left the shadowing function: the draft's name means the draft again.
+        if (depthAtShadow !== null && depth <= depthAtShadow) {
+          depthAtShadow = null;
+        }
+      }
+    }
+  }
+  return depthAtShadow !== null;
+}
+
+/** The draft's framework surface — everything else on a draft is app state.
+ *  Named, not pattern-matched: see `draftReadOffsets`. */
+export const DRAFT_META = ["$signal", "$live", "$commit", "$do"] as const;
+
 export function draftReadOffsets(code: string, param: string): number[] {
   const out: number[] = [];
   // `(?<![\w$.])` — `other.s.count` is not a read of `s`.
-  // `(?!\$)` — draft META (`s.$signal`, `s.$live`, `s.$commit`) is framework
-  // surface, not app state another action can move under you.
-  const startRe = new RegExp(`(?<![\\w$.])${param}\\.(?!\\$)[\\w$]`, "g");
+  // Draft META is framework surface, not app state another action can move
+  // under you — but the exemption is the KNOWN four, not "anything starting
+  // with $". A blanket `(?!\$)` also excused `s.$myField`, and while a
+  // $-prefixed state key is refused at `cell()` today, an exemption whose
+  // breadth is accidental outlives the rule that made it safe.
+  const startRe = new RegExp(`(?<![\\w$.])${param}\\.[\\w$]`, "g");
   for (const m of code.matchAll(startRe)) {
     const start = m.index!;
+    if (DRAFT_META.some((meta) => code.startsWith(`${param}.${meta}`, start))) {
+      continue; // `s.$signal` / `s.$live` / `s.$commit` / `s.$do`
+    }
     const chain = memberChain(code, start + param.length);
     if (chain.mutator) continue;
     const after = skipTrivia(code, chain.end);
@@ -1676,14 +1758,27 @@ export const checkPatterns: Checker = (ctx) => {
             } else if (ch === "}") depth--;
           }
           if (entered && depth <= 0) break; // method body ended
+          // Reads BEFORE the first await happen pre-suspension. That used to
+          // excuse the whole line, which is right for `const x = await f(s.a)`
+          // and wrong for `await until(...); s.out = s.value;` — everything
+          // after the semicolon runs post-suspension like any other line.
+          let minOffset = 0;
           if (!sawAwait) {
-            if (/\bawait\b/.test(code)) sawAwait = true;
-            continue; // reads on the first await line happen pre-suspension
+            const at = code.search(/\bawait\b/);
+            if (at < 0) continue;
+            sawAwait = true;
+            minOffset = at;
           }
           // A live-poll primitive re-reads state ON PURPOSE — that is what it
-          // is for. Skip the line and keep looking for a genuine read.
-          if (/\b(until|race)\s*\(/.test(code)) continue;
-          if (readLines.has(i) && !isSuppressed(file.lines, i)) {
+          // is for. But the exemption belongs to the CALL, not the line: on
+          // `await until(() => s.ready); const v = s.value;` skipping the whole
+          // line also excused the genuine read that follows it.
+          const spans = pollSpans(code);
+          const nested = nestedShadowLine(codeLines, startIdx, i, param);
+          if (
+            readLines.has(i) && !isSuppressed(file.lines, i) &&
+            !readOnlyInside(code, param, spans, minOffset) && !nested
+          ) {
             report(
               "hint",
               "patterns",

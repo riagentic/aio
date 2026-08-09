@@ -4,6 +4,7 @@
  * Path resolution, payload parsing, entry/appId/port resolution.
  */
 
+import { resolveEntryPath } from "../server/paths.ts";
 import {
   type LockData,
   readLock,
@@ -97,22 +98,17 @@ export function resolveEntry(flagEntry?: string): string | null {
       return null;
     }
   }
+  // THE chain (server/paths.ts), not a fourth copy of it: an explicit `entry`,
+  // else src/app.ts. It read the same way already — which is exactly how a
+  // duplicate survives until the day one copy is updated and the others are not.
+  let cfg: Record<string, unknown> | null = null;
   try {
-    const cfg = JSON.parse(Deno.readTextFileSync("deno.json")) as {
-      entry?: string;
-    };
-    if (cfg.entry) {
-      try {
-        Deno.statSync(cfg.entry);
-        return cfg.entry;
-      } catch {
-        return null;
-      }
-    }
-  } catch { /* no deno.json */ }
+    cfg = JSON.parse(Deno.readTextFileSync("deno.json"));
+  } catch { /* no deno.json — the default still applies */ }
+  const entry = resolveEntryPath(cfg);
   try {
-    Deno.statSync("src/app.ts");
-    return "src/app.ts";
+    Deno.statSync(entry);
+    return entry;
   } catch {
     return null;
   }

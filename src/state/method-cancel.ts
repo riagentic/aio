@@ -129,7 +129,20 @@ export function _pendingCallPromises(): Promise<unknown>[] {
 }
 
 /** The pending calls belonging to `cells` (every call when `cells` is
- *  undefined — the process-wide view). */
+ *  undefined — the process-wide view).
+ *
+ *  Scoped by cell NAME, which is one step short of right. Two apps in one
+ *  process cannot share a cell DEF (bindCell refuses it), but they can each
+ *  hold a different def with the same id — a factory returning `cell("ledger",
+ *  …)`, which is exactly what a client binding a remote cell does. App A's
+ *  shutdown then counts, and aborts, app B's `ledger:` calls.
+ *
+ *  Narrow in practice (it needs two apps in one process AND a shared name) and
+ *  not fixed here on purpose: the honest fix keys the registry by app identity
+ *  rather than by name, which means threading an app id through `registerCall`
+ *  and every dispatch that reaches it — a hot-path change to cancellation
+ *  semantics, deserving its own release and its own gate run. Tracked in
+ *  todo.md. */
 function _pendingFor(cells?: Set<string>): Promise<unknown>[] {
   if (!cells) return [..._pending.keys()];
   const out: Promise<unknown>[] = [];
