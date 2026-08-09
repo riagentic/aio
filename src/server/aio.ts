@@ -34,7 +34,13 @@ import { setupDispatch } from "./aio-dispatch.ts";
 import { hostedCellName, startCellWorkerHost } from "./cell-worker-host.ts";
 import { createCellWorkerPool } from "./cell-worker-pool.ts";
 import { isScheduleEffect } from "../state/schedule.ts";
-import { reportHeapCeiling } from "./heap-policy.ts";
+import {
+  currentHeapLimitBytes,
+  describeHeapPolicy,
+  physicalMemoryBytes,
+  reportHeapCeiling,
+} from "./heap-policy.ts";
+import type { Provenance } from "./boot-facts.ts";
 import {
   appDirs,
   checkUnpackLocation,
@@ -710,6 +716,8 @@ async function _run<S, A, E>(
   // libraryMode means a TEST or a host app owns the process — it must not write
   // into the user's home, so its data dir defaults under baseDir (which tests
   // already point at a temp dir). Everything else resolves to `~/.<appId>`.
+  // Boot-report values assembled as the boot proceeds (printed by bootLines).
+  let _heapLine: string | undefined;
   const _dirs = resolveAppDirs({
     appId,
     appDir: config.appDir,
@@ -741,6 +749,14 @@ async function _run<S, A, E>(
     // discovered then. `am start`, run.sh and the build all size it correctly;
     // a bare `deno run src/app.ts` is the case that lands here.
     await reportHeapCeiling(log);
+    // The same numbers the warning uses, stated unconditionally: an app that
+    // died of "out of memory" with the machine half empty is a support thread
+    // that starts with "what was the ceiling?".
+    _heapLine = describeHeapPolicy(
+      Math.floor(((await currentHeapLimitBytes()) ?? 0) / (1024 * 1024)) ||
+        null,
+      physicalMemoryBytes(),
+    );
     sweepAppPayloadDir(_dirs);
     const unsafeUnpack = checkUnpackLocation(_dirs);
     if (unsafeUnpack) log.warn("security", unsafeUnpack);
@@ -763,6 +779,12 @@ async function _run<S, A, E>(
     });
   }
   const port = cli.port ?? config.port ?? await findFreePort();
+  const portFrom: Provenance = cli.port
+    ? "flag"
+    : config.port
+    ? "config"
+    : "default"; // …i.e. picked by findFreePort — worth saying, since a port
+  // that changes between runs is otherwise a mystery.
 
   // Singleton lock — libraryMode implies no lock (embeddable / testable).
   const singletonMode = config.libraryMode ? false : (config.singleton ?? true);
@@ -862,6 +884,16 @@ async function _run<S, A, E>(
   // `deno task dev` (no --client flag) actually run target X.
   const client = cli.client ?? config.client ?? _denoJsonTargetClient() ??
     "electron";
+  // …and WHO decided, kept beside the decision so the two cannot drift. The
+  // boot report says `client electron (deno.json)` instead of leaving someone
+  // to grep three files for the one that won.
+  const clientFrom: Provenance = cli.client
+    ? "flag"
+    : config.client
+    ? "config"
+    : _denoJsonTargetClient()
+    ? "deno.json"
+    : "default";
   const useElectron = client === "electron";
   const isHeadless = client === "server-only" || client === "cli";
   const { reduce, execute, onAction, onEffect, onStart, onStop, onError } =
@@ -1716,8 +1748,35 @@ async function _run<S, A, E>(
     // Facts the report cannot read off the process: where this app keeps what
     // it owns, and what it is actually running.
     bootExtras: {
+      pid: Deno.pid,
+      client: { value: client, from: clientFrom },
+      port: { value: port, from: portFrom },
+      entry: {
+        // What is RUNNING, read from the process — not what a config said
+        // should run. Those differ exactly when someone is confused.
+        value: Deno.mainModule.replace(/^file:\/\//, ""),
+        from: "default",
+      },
+      heap: _heapLine,
       dataDir: _dirs.home,
+      logs: { dir: _dirs.logs, level: cli.verbose ? "debug" : "info" },
+      journal: config.journal
+        ? (typeof config.journal === "string" ? config.journal : _dirs.journal)
+        : undefined,
       cells: Object.keys(config._cellMethods ?? {}),
+      // What is NOT ordinary about a cell: its own thread, or a second writer.
+      // Both change how a symptom is read, and neither was visible without
+      // opening the source.
+      workers: [...getRegisteredCells().values()]
+        .filter((c) => (c as { __aio?: { worker?: boolean } }).__aio?.worker)
+        .map((c) => (c as { __aio: { id: string } }).__aio.id),
+      syncCells: [...getRegisteredCells().values()]
+        .filter((c) => {
+          const sync = (c as { __aio?: { sync?: unknown } }).__aio?.sync;
+          return sync !== undefined && sync !== false;
+        })
+        .map((c) => (c as { __aio: { id: string } }).__aio.id),
+      routes: config.routes ? Object.keys(config.routes).length : 0,
       feedback: _feedback
         ? {
           auto: _feedback.auto,
