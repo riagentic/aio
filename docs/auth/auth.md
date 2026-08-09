@@ -52,6 +52,21 @@ restart. `users` / `resolveUser` (below) still take precedence for multi-user
 auth — a per-user app never authenticates anyone with the shared key, and the
 exposed-key default never applies to it.
 
+**Opening it in a browser** — follow the share link the server prints
+(`https://host:port?token=…`). That request hands the browser an `HttpOnly`,
+`SameSite=Strict` cookie holding the key, so the page's own follow-up requests
+(`/App.tsx`, the bundle, every asset) authenticate without the token in the URL.
+Before this, only the shell load carried the credential and every asset 401'd —
+shared-key mode could not serve a browser at all.
+
+The cookie is named per app (`aio_key_<appId>`), because cookies ignore the
+port: two aio apps on one host would otherwise overwrite each other's. It is
+session-scoped — it lasts as long as the window — `Secure` whenever the page is
+https, and unreadable from script, which makes it strictly safer than the
+`?token=` URL it replaces (URLs leak into history, referrers and proxy logs). It
+grants exactly what the token grants: reads. The control plane additionally
+requires an `X-AIO` header that a cross-origin page cannot set.
+
 **Pairing the aio client** — when a key is set, `--expose` prints a **pair
 code** on startup. In the aio client, click the app under "Apps on your network"
 and type the 6-digit code; the client pulls the profile (cert + key) once and
