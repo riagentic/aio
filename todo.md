@@ -1109,11 +1109,14 @@ fixed, each with the reason:
       an asymmetry, not just a gap: composition REFUSES TO BOOT on a guess (a
       field whose NAME matches a credential regex) while the author's own
       explicit `access` declaration was read by nothing.
-- [ ] **Shared-key mode cannot serve a browser at all** — the shell loads with
-      `?token=`, but `/App.tsx` and `/bundle.js` get no query and 401. Key mode
-      is native-client-only today. A cookie-borne key (set on the `?token=`
-      shell load) would fix it AND make `key:` + `auth:` reconcilable — which is
-      currently refused at boot. Deserves its own review.
+- [x] **Shared-key mode serves a browser — DONE 2026-08-09.** The request that
+      PROVES it holds the key is handed the credential back as an HttpOnly,
+      SameSite=Strict cookie named per app (`aio_key_<appId>` — cookies ignore
+      the port), Secure when the page is https, session-scoped, issued once. The
+      page's own asset requests then authenticate; before this only the shell
+      load carried a credential and every asset 401'd. Eight tests, four against
+      a real keyed server over https with its own pinned cert; mutation-checked.
+      `key:` + `auth:` still refuse to boot together — unchanged, out of scope.
 - [x] **Stale `app.key` after a mode switch** — FIXED (2026-08-05). Cleared on
       the per-user path (`users` / `resolveUser` / `auth: true`), which is the
       only signal that makes the shared key definitively dead. NOT on
