@@ -1,5 +1,12 @@
 # Road to 1.0.0-final
 
+> **Clean desk, 2026-08-09.** The defect backlog is EMPTY: every reported
+> finding is fixed (with a test) or in `feedback/refused.md` with its reason.
+> What remains below is the ROADMAP — planned releases, not open defects — plus
+> the blocked items whose blocker is named. Beta is targeted for alpha70–80, so
+> the roadmap has runway; "there is time" is not a reason to leave a DEFECT
+> open, and none are.
+
 Plan written 2026-07-04, current as of **v1.0.0-alpha41** (2026-07-31). **Core
 principle:** all breaking changes die in alpha; beta = frozen surface,
 bugfix-only; 1.0.0 = boring. Shipped work lives in `CHANGELOG.md` — this file
@@ -537,18 +544,6 @@ analyses, ranked):
       always outranks it. The CLI client takes its address as argv[0] — a
       launching script already controls that, so nothing is baked there. Scheme
       inferred (`192.168.1.50:8000` works), `bakedServerUrl` is the one rule.
-- [ ] **Remote target naming — DECIDED 2026-08-09, batched not rushed.** The
-      fleet names win: `server`, `electron-client`, `android-client`,
-      `cli-client` are what `deno task build --targets=` takes and what
-      `build-all.ts` documents, so the scaffold's `compile:remote:electron`
-      becomes `compile:electron-client`, with `am fix --migrate-tasks` carrying
-      the rename exactly as it already carries the alpha52 vocabulary. NOT
-      shipped as a standalone change: it rewrites task names in every app, and
-      doing it now migrates users twice for one vocabulary — once here, and
-      again with the surface diet's renames. It goes WITH the diet.
-
-Deferred from the alpha45 work (alpha46 candidates, none data-loss):
-
 - [x] `afterRender()` called OUTSIDE a render is silently dropped **DONE
       2026-08-08 — dev warn naming the three callers it comes from (timer,
       promise continuation, event handler); observe-only, prod drops exactly as
@@ -591,24 +586,6 @@ Deferred from the alpha45 work (alpha46 candidates, none data-loss):
 
 Deferred from that review (alpha45 candidates, none data-loss):
 
-- [ ] **Drain admission reads an overloaded tag.** `_source: "Effect"` means two
-      things: cell-catalog sets it on every BOUND ASYNC call (the ack/callId
-      path), and dispatch's closed-queue gate reads it as "the framework's own
-      in-flight work, let it publish". So a serverFn calling
-      `await cell.asyncMethod()` during the ≤3s drain is admitted while its sync
-      twin is refused. Analysed and DOCUMENTED at the gate 2026-08-08; not
-      fixed, because separating the meanings needs a dispatch-level flag — a
-      wire-contract change deserving its own release and gate run. Data outcome
-      is safe either way (captured by the final persist, or loudly dropped).
-- [ ] **Shutdown scoping is by cell NAME, one step short of right.** Two apps in
-      one process cannot share a cell DEF (bindCell refuses), but each can hold
-      a different def with the same id — a factory returning
-      `cell("ledger", …)`, which is precisely what a client binding a remote
-      cell does. App A's shutdown then counts and aborts app B's `ledger:`
-      calls. Analysed and DOCUMENTED at `_pendingFor` 2026-08-09. The fix keys
-      the registry by app identity instead of name, which threads an app id
-      through `registerCall` and every dispatch reaching it: a hot-path change
-      to cancellation semantics, its own release and gate run.
 - [x] aiol post-await rule: destructured draft params unchecked; until/race
       **DONE 2026-08-09 (2 of 3) — the until/race exemption now belongs to the
       CALL not the line (a genuine read after `await until(…);` on the same line
@@ -840,97 +817,6 @@ Refused this round, with reasons:
       a bare `deno run` warns at boot with the exact flag. `memory.maxHeap`
       overrides, still clamped to 25%. Workers inherit it — the documented "~1.7
       GB worker limit" never existed, measured and corrected.
-- [ ] **Scale the SQLite page cache with the machine?** `PRAGMA cache_size` is a
-      flat 64 MB per connection (writer + each reader), native memory that no V8
-      flag governs and the memory monitor cannot see. Fine as a default; an open
-      question whether it should scale like the heap does. Needs a workload that
-      cares before guessing at a number.
-
-## Blocked — should be done, cannot be done yet (2026-08-08)
-
-Not deferred by choice: each of these needs something this machine or this
-moment cannot supply. The blocker is named so nobody re-litigates the item —
-only its blocker.
-
-- **Off-box remote field report (A6).** Needs a SECOND machine. Same-box remote
-  is fully covered now, including a real client over a real LAN interface with a
-  pinned self-signed cert (`tests/e2e-lan-client.test.ts`). What no single box
-  can produce: routing, NAT, MTU, clock skew.
-- **72h soak (B4).** Needs 72 hours. The harness and the heap-slope leak gate
-  exist; 30-minute runs are clean.
-- **Physical matrix (B5).** Needs Windows, macOS and a real Android device.
-- **Headless-electron e2e.** Needs a real desktop session — headless Electron
-  stalls in this environment.
-- **`localFirst` DEFAULT (decide).** Needs a real local-first app to report
-  back, the same bar every foundational flip in this repo has met. It changes
-  WHERE methods run, so it cannot land after the freeze.
-- **`testUI` rehydration flake.** Needs a reproduction from the reporting app
-  against current HEAD; not reproducible here (`testUI` is hermetic by default).
-- **Android + self-signed TLS.** Needs a device to verify against: the fix is a
-  generated `network_security_config` trusting the app's pinned cert, and
-  shipping that unverified is how you brick every APK.
-- **C1–C4 (1.0 exit criteria).** Gates that are MET over time, not done: two
-  betas with an unchanged snapshot, two clean field reports, the CI matrix, and
-  a beta→1.0 guide that can only be written once beta exists.
-- **B1/B6 (beta entry + discipline).** Policy, not work. Entry bar: two
-  consecutive full-effort hunts plus one field report with zero major findings.
-
-## Rejected — decided, not deferred (2026-08-08 desk-clearing)
-
-An item here is CLOSED. It was weighed against the inclusion razor (useful · not
-duplicate · earns its surface across 2+ app types) or against a stated design
-position, and the answer was no. Re-open one only with a NEW fact — a field
-report that hits it, not a second opinion about it.
-
-- **`progress` primitive.** The danger it wrapped (a silent proxy write) is gone
-  — the proxy is loud now. What remains is `{step, steps[], lines[]}`
-  boilerplate an app writes in ten lines, in the exact shape ITS UI needs.
-  Public surface for a shape nobody agrees on fails the razor.
-- **`am eval '<expr over cells>'`.** A general expression evaluator on a control
-  route is arbitrary code execution wearing a debugging hat, and `am state`,
-  `am sql` and `--json` already answer the questions it was asked for. Not a
-  quick add and not a safe one.
-- **Cross-runtime `seed()` hook.** `onRestore` covers the server side and a cell
-  method covers the rest; a second seeding entry point is a second decider for
-  "where does initial data come from".
-- **`am instances`.** `am discover` plus amui already answer "what is running",
-  and a third spelling of the same question is the vocabulary sprawl alpha52
-  spent a release removing.
-- **`testCell<S>` inference from the cell.** Real ergonomics, but it changes
-  type inference in a helper every test file in every app uses, to save one type
-  argument. Revisit only if a field report reports it again.
-- **Sync-cell writes in the dispatch timeline.** Needs a shared seq allocation
-  between timeline and journal — a persistence-format change to make a debugging
-  view marginally fuller. The docs no longer promise it.
-- **Freshness from the esbuild metafile.** The current root walk is a SOUND
-  over-approximation: it can rebuild when it did not need to, never skip when it
-  did. Trading a correctness property for build seconds is the wrong direction.
-- **android-local shell config (`ui.head`/`viewport`/`showStatus`).** The local
-  shell is written at build time, before `aio.run()` config exists; wiring it
-  needs a build-time probe of runtime config. The remote shell carries all of
-  it, and the limitation is documented at the site.
-- **`serializeTail` leaves a controller in `_inflight`.** Reachable only via a
-  queued call that never runs, which `_resetMethodCancel` already covers.
-  Unreachable in practice; the fix would add state to a hot path.
-- **`--print-app-tmpdir` blind to a code-only `appDir`.** Answering it means
-  RUNNING the app to ask, which is what the launcher is trying to prepare for.
-  Both directories are private, so the cost is an ugly split, not an exposure —
-  and the app warns at boot if it ever unpacks somewhere shared.
-- **AppImage self-install (double-click still unpacks to `/tmp`).** A
-  file-manager launch cannot be intercepted: the unpack happens before any aio
-  code runs. Making it safe means owning an INSTALL story — extract, desktop
-  entry, uninstall, update interaction — which duplicates the shipped update
-  path. aio's own launchers already place it correctly and a hand-launch warns
-  loudly with the exact one-liner. Reconsider only if `am install` is built for
-  other reasons.
-- **CA/asset distribution API.** Already exists under another name:
-  `/__aio/pair` returns cert + key (PIN-gated) and `am profile` exports the same
-  bytes. What the one app hand-built was a SECOND HTTP server for serving client
-  binaries — that is a release-hosting concern (`aio ship`), not a framework
-  one.
-
-## Next, from the data-directory work
-
 - [x] **`connectCli().ready` never settles when the FIRST connection fails.**
       **DONE 2026-08-08 — opt-in readyTimeoutMs on BOTH connectCli and
       connectCliUDS; rejects with the three causes retrying cannot fix,

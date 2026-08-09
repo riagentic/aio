@@ -71,6 +71,12 @@ async function electronBinReady(launcher: string): Promise<boolean> {
   }
   // Find the electron package dir the launcher points into and confirm the
   // downloaded binary exists (path.txt names it, inside dist/).
+  // "no path.txt anywhere" and "path.txt present, the binary it names is
+  // missing" used to be the same answer: both fell through to `return true`.
+  // The second is precisely the broken install this check exists to catch —
+  // reading an existing path.txt succeeds, so the outer catch never fires — and
+  // returning true there handed back a launcher that cannot start Electron.
+  let sawPathTxt = false;
   try {
     for (
       const base of [
@@ -78,14 +84,23 @@ async function electronBinReady(launcher: string): Promise<boolean> {
         ...(await denoElectronDirs()),
       ]
     ) {
+      let rel: string;
       try {
-        const rel = (await Deno.readTextFile(`${base}/path.txt`)).trim();
+        rel = (await Deno.readTextFile(`${base}/path.txt`)).trim();
+      } catch {
+        continue; // no manifest here — try the next candidate
+      }
+      sawPathTxt = true;
+      try {
         await Deno.stat(`${base}/dist/${rel}`);
         return true; // real binary present
-      } catch { /* try next candidate */ }
+      } catch { /* named binary missing — keep looking, but remember */ }
     }
   } catch { /* fall through */ }
-  // No path.txt found (older layout) — trust the launcher's existence.
+  // A path.txt existed and named a binary that is not there: the install is
+  // broken, and saying so is the whole point of this function.
+  if (sawPathTxt) return false;
+  // No path.txt found at all (older layout) — trust the launcher's existence.
   return true;
 }
 
