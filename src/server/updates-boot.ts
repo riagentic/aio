@@ -14,6 +14,11 @@
 import type { Log } from "../diagnostics/logger.ts";
 import type { CheckResult } from "../state/updates-cell.ts";
 import {
+  createUpdatesCell,
+  installUpdatesRuntime,
+} from "../state/updates-cell.ts";
+import { createUpdatesRuntime } from "./updates-runtime.ts";
+import {
   type LocalData,
   resolveUpdates,
   type UpdatesInput,
@@ -153,8 +158,11 @@ export async function startUpdates(
     stamp: deps.stamp,
   });
 
-  const { createUpdatesRuntime } = await import("./updates-runtime.ts");
-  const { installUpdatesRuntime } = await import("../state/updates-cell.ts");
+  // Static, like everything else on this path: `startUpdates` is awaited from
+  // inside `aio.run()`, which an app top-level-awaits, and a dynamic import
+  // from there is what deadlocked module evaluation. The cost of importing
+  // these eagerly is graph size for apps that never configure updates; the cost
+  // of the dynamic form was an app that would not boot at all.
   const runtime = createUpdatesRuntime({
     config,
     dataDir: deps.dataDir,
@@ -177,10 +185,10 @@ export async function startUpdates(
   /** One check, plus whatever the policy says to do about the answer. */
   const runCheck = async (): Promise<void> => {
     if (stopped) return;
-    // Import lazily: this is the module that registers the cell, and it must
-    // not be pulled into an app that never configured updates.
-    const { updates } = await import("../state/updates-cell.ts");
-    const result = await updates.check() as CheckResult | undefined;
+    // The same instance the boot path created — the factory memoises, so this
+    // is a lookup, not a second cell. (It used to be a dynamic import for the
+    // side effect; see `createUpdatesCell` for why that shape is gone.)
+    const result = await createUpdatesCell().check() as CheckResult | undefined;
     if (result?.kind !== "offer") return;
     const available = result.update;
 
@@ -189,7 +197,7 @@ export async function startUpdates(
         "updates",
         `${available.version} is available — installing it (auto)`,
       );
-      await updates.apply();
+      await createUpdatesCell().apply();
       return;
     }
     // Not auto. A UI, if there is one, is already showing this through the
@@ -207,8 +215,8 @@ export async function startUpdates(
       const yes = await deps.prompt(
         `Update to ${available.version}? The app will restart. [y/N] `,
       );
-      if (yes) await updates.apply();
-      else await updates.dismiss();
+      if (yes) await createUpdatesCell().apply();
+      else await createUpdatesCell().dismiss();
     }
   };
 

@@ -9,14 +9,21 @@
 //   import { updates } from "aio/updates";
 //   …
 //   {updates.available && <UpdateBanner />}
+import { createUpdatesCell } from "./state/updates-cell.ts";
+
 export {
   type AvailableUpdate,
   type BlockedUpdate,
-  updates,
   type UpdatesCell,
   type UpdatesState,
   type UpdateStatus,
 } from "./state/updates-cell.ts";
+
+/** The built-in `updates` cell. Created HERE, at the import of this entry —
+ *  which is the opt-in act described above, unchanged. The cell module itself
+ *  no longer registers on import, so the boot path can reach it with an
+ *  ordinary static import instead of a dynamic one (see `createUpdatesCell`). */
+export const updates = createUpdatesCell();
 
 export type {
   CompatVerdict,

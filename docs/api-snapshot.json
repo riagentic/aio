@@ -421,7 +421,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "7a6a8c0ccc8c16ec"
+          "sig": "ce475e83d805d60d"
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -1262,7 +1262,7 @@
       "symbols": {
         "feedback": {
           "kind": "variable",
-          "sig": "fcf82a6cf5b53684"
+          "sig": "1588a0f075829371"
         },
         "FeedbackCell": {
           "kind": "typeAlias",
@@ -1862,7 +1862,7 @@
         },
         "updates": {
           "kind": "variable",
-          "sig": "1fa1a2b30259eb50"
+          "sig": "1588a0f075829371"
         },
         "UpdatesCell": {
           "kind": "typeAlias",
