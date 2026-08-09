@@ -105,3 +105,74 @@ Deno.test("an ack without a serverTs keeps the pre-alpha43 behaviour", async () 
   await engine.handleAck("todos", opId, [2000, 0, "s"]);
   assertEquals(confirmed.todos!.items, [{ text: "c" }]);
 });
+
+// ── The HELD-ack path: same question, one gate later ─────────────────────────
+// `requestSync()` closes a catch-up gate; anything that would mutate confirmed
+// state while it is shut is held and replayed when the response lands. The
+// replay carried the snapshot's watermark to tell `foldAck` "already folded" —
+// but it did so with `Math.min(h.serverTs ?? snapTs, snapTs)`, which CLAMPS a
+// known serverTs down to the watermark. An op the server persisted AFTER the
+// snapshot has a serverTs above it, which is exactly the op the snapshot does
+// not contain: clamped, it was skipped, and the user's own write vanished.
+
+Deno.test("held ack for an op NEWER than the snapshot still applies", async () => {
+  const { engine, sent, confirmed } = setup();
+
+  // 1. A local op goes out and the server persists it at cursor 101.
+  await engine.handleLocalAction("todos", "add", { text: "kept" });
+  const opId = (sent[0]!.d as { id: string }).id;
+
+  // 2. The client asks to catch up — the gate closes here. `requestSync` awaits
+  //    the buffer before arming, so let it reach that point before the ack.
+  const req = engine.requestSync();
+  await new Promise((r) => setTimeout(r, 0));
+
+  // 3. The ack lands while the gate is shut, so it is HELD rather than applied.
+  await engine.handleAck("todos", opId, [2000, 0, "s"], 101);
+  assertEquals(
+    (confirmed.todos!.items as unknown[]).length,
+    0,
+    "held, not applied — the response has not landed yet",
+  );
+
+  // 4. The response carries a snapshot taken BEFORE that op (cursor 100), so
+  //    the snapshot cannot contain it.
+  await engine.handleSyncResponse({
+    mode: "snapshot",
+    snapshot: { todos: { items: [] } },
+    ops: [],
+    lowWater: { todos: [1000, 0, "s"] },
+    lastServerTs: { todos: 100 },
+  });
+  await req;
+
+  assertEquals(
+    confirmed.todos!.items,
+    [{ text: "kept" }],
+    "an op the snapshot predates must survive the held-ack replay",
+  );
+});
+
+Deno.test("held ack for an op the snapshot DOES contain is still deduped", async () => {
+  // The clamp existed for a reason — keep it working. Here serverTs (99) is at
+  // or below the watermark (100), so the snapshot already brought the op in.
+  const { engine, sent, confirmed } = setup();
+  await engine.handleLocalAction("todos", "add", { text: "once" });
+  const opId = (sent[0]!.d as { id: string }).id;
+  const req = engine.requestSync();
+  await new Promise((r) => setTimeout(r, 0));
+  await engine.handleAck("todos", opId, [2000, 0, "s"], 99);
+  await engine.handleSyncResponse({
+    mode: "snapshot",
+    snapshot: { todos: { items: [{ text: "once" }] } },
+    ops: [],
+    lowWater: { todos: [1000, 0, "s"] },
+    lastServerTs: { todos: 100 },
+  });
+  await req;
+  assertEquals(
+    (confirmed.todos!.items as unknown[]).length,
+    1,
+    "exactly once — the snapshot's copy, not a second application",
+  );
+});

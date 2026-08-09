@@ -136,7 +136,18 @@ export const feedback: FeedbackCell = cell("feedback", {
       if (!runtime) return;
       try {
         s.pending = await runtime.count();
-      } catch { /* observe-only */ }
+        // A previous failure must not outlive its cause.
+        if (s.status === "error") {
+          s.status = "idle";
+          s.error = null;
+        }
+      } catch (e) {
+        // `refresh()` is a public method, not an observe-only hook: swallowing
+        // this left `pending` silently stale with nothing in state to see. Its
+        // sibling `report()` already records failures the same way.
+        s.status = "error";
+        s.error = e instanceof Error ? e.message : String(e);
+      }
     },
 
     dismiss(s) {
