@@ -46,42 +46,9 @@ export function _resetListensToHints(): void {
   _listensToHinted.clear();
 }
 
-/** One-time-per-cell hint for the SILENT alpha52 transaction-default flip:
- *  an async cell that never declared `transaction` changed semantics on a
- *  pin-bump with zero signal — every other alpha52 break hints at the old
- *  spelling, so this one must too. Observe-only. */
-const _transactionHinted = new Set<string>();
-/** @internal test seam. */
-export function _resetTransactionHints(): void {
-  _transactionHinted.clear();
-}
-function hintTransactionDefault(
-  name: string,
-  methods: Record<string, unknown>,
-): void {
-  if (_transactionHinted.has(name)) return;
-  // A cell already reaching for the $-meta draft members has made its choice
-  // for the new world — hinting it would be noise.
-  for (const fn of Object.values(methods)) {
-    if (
-      typeof fn === "function" &&
-      /\$commit\b|\$live\b|\$do\b/.test(String(fn))
-    ) {
-      return;
-    }
-  }
-  _transactionHinted.add(name);
-  log.warn(
-    "cell",
-    `[cell:${name}] has async methods and no \`transaction\` key — since ` +
-      `alpha52 the default is \`transaction: true\` (snapshot reads + atomic ` +
-      `commit; a throw or cancel discards the write-set). Add ` +
-      `\`transaction: false\` to keep the pre-alpha52 incremental commits, ` +
-      `or adopt the default: publish mid-method with s.$commit(), read live ` +
-      `with s.$live. aiol --safe-fix pins the old behavior. ` +
-      `(hinted once per cell)`,
-  );
-}
+/** @internal test seam. Retained as a no-op: the alpha52 transaction-default
+ *  hint it reset is gone with the flip it announced (alpha57). */
+export function _resetTransactionHints(): void {}
 function hintListensToArray(name: string): void {
   if (_listensToHinted.has(name)) return;
   _listensToHinted.add(name);
@@ -225,14 +192,9 @@ export function createCellFromMethods<
     methods as CellMethods<Record<string, unknown>>,
   );
 
-  // alpha52: transaction became the async default — say so ONCE per cell that
-  // never decided, at the definition site where the one-line fix goes.
-  if (
-    asyncMethods.size > 0 &&
-    (config as { transaction?: unknown }).transaction === undefined
-  ) {
-    hintTransactionDefault(name, methods);
-  }
+  // (alpha57 removed the transaction-default hint that used to live here: with
+  // `transaction` opt-in again, a cell that never declared it gets exactly the
+  // behavior it was written against, so there is nothing to warn about.)
   for (const [t, mk] of foreignHandlers) {
     if (asyncMethods.has(mk)) {
       throw new Error(

@@ -1,5 +1,180 @@
 # Changelog
 
+## 1.0.0-alpha57 — the default a cell never asked for (2026-08-12)
+
+`transaction` is opt-in again, and the rule that decides such questions is
+written down instead of re-argued. Then a field report from a desktop app sent
+the test surface the same way: stop answering a question other than the one
+asked, and own the state nobody owned.
+
+### `transaction` goes back to opt-in
+
+alpha52 made `transaction: true` the async default. On the merits it is the
+better model — snapshot reads, one atomic commit, conflict detection — and none
+of that changes. What changed is who it applies to: **a cell gets it when it
+asks for it.**
+
+The flip did not break a spelling; it silently re-specified every async method
+already written. Two shapes, both from the field:
+
+- a **stand-down guard** —
+  `s.query = q; await fetch(); if (s.query !== q) return` — reads its own pinned
+  write, so the comparison can never fire and a stale response overwrites a
+  fresh one
+- a **spinner** — `s.loading = true` announcing the fetch it precedes — buffers
+  to the end of the method that is doing the fetching, so it never reaches the
+  client
+
+Neither produces a type error, a runtime error, or a failing test. The app runs,
+differently. A boot WARN was not enough: it named the change, but an app that
+still runs is not looking for warnings, and `major.md` — compatibility with the
+previous alpha — was broken outright.
+
+Retired with the flip: the once-per-cell boot hint, aiol's migration warning,
+and `aiol --safe-fix`'s `transaction: false` insert. An app already carrying
+that insert needs no action — it now states the default. `transaction: true` and
+`{ serialize: true }` are unchanged for the cells that want them.
+
+### The rule, written down — `.katana/_aio.md`
+
+The axis is not restrictive ↔ permissive, it is **loud ↔ silent**:
+
+- detectable at **boot, build or lint** → be strict, refuse, and print the exact
+  replacement. It costs a newcomer nothing — they learn at the moment of the
+  mistake instead of building on sand
+- only observable by **watching runtime behavior** → the default never changes.
+  Opt-in forever, or gate the flip on a version the app declares
+
+And the corollary that keeps onboarding out of the argument: strict-and-loud
+defaults _teach_. What strictness trades against is EXISTING apps, which is the
+compatibility kata's business, not this one.
+
+### aiol stopped reading comments as code
+
+The read-after-await rule's opt-in probe tested RAW file content, so a cell that
+merely **mentioned** `transaction: true` in a comment — the comment explaining
+why it declined the option is the common shape — silently disabled the rule for
+the whole file. Masked now, like every other body probe in that file. Found in
+an app whose comment did exactly that.
+
+### The t2v report — the harness stops answering a different question
+
+A field report from a Deno/Electron app (two prompt stages, an embedded
+inference engine, ~250 tests) written from a session that included a full UI
+redesign. It rated aio 7/10 and kept the `cell` shape, `t`-handle testing and
+the no-build loop. The two points came off the test surface, and every finding
+below was probed before it was believed — two of them turned out to be a
+misdiagnosis of a real trap sitting next to them.
+
+- **A module-level `signal()` survived between tests.** Cells were already reset
+  per test; the state that lives BESIDE a cell was not, and from inside a test
+  the two are indistinguishable — so the report read it as "cells leak state
+  between tests" and wrote defensive setup lines in tests that had no business
+  caring. `testUI`, `testCell` and `bootCells` now restore every module-scope
+  signal to the value it was created with. Signals born during a render
+  (`useLocal`, `useRef(signal(…))`) are per-mount already and are not touched.
+  Hermetic means all of the state, not most of it.
+- **`present()`/`absent()` could answer about a component when you asked about
+  an element.** `t` on a component is a rename-proof component handle (an
+  earlier report's fix), so a component that also forwards `t` down to an
+  element makes one string name two things: `absent("image-negative")` was false
+  because the SWITCH was showing, while the field really was gone.
+
+  Chasing it found the general case, and it is not an app-authoring mistake:
+  **aio's own kit forwards `t`** — `<Button t="Home">`, `<Input t="who">`,
+  `<Select t="sel">` all pass it to the element they render — so every app built
+  on `aio/ui` has names that address a component and an element at once. The
+  harness has to answer well in spite of that, not scold about it. It now
+  resolves the ELEMENT first (deterministic and frame-local — never "what a
+  previous render happened to show", which would make tests order-dependent),
+  takes a kind when you want to be explicit (`ui.absent("x", "element")`), and
+  explains the one frame where the two answers genuinely differ (the element is
+  gone while the component still renders something else) instead of returning a
+  bare confident boolean. A component handle that names nothing else stays
+  silent — a warning that fires on the correct, common pattern is noise, and
+  noise gets ignored.
+- **A handle died when its subtree remounted.** Resolution pinned the path
+  captured at access time, so switching views re-parented the element and every
+  handle taken before the switch threw `is not on the current surface` — while
+  `ui.html()` and `present()` both insisted it was there. Three of the harness's
+  own APIs disagreeing about one element is the framework lying to somebody. The
+  NAME is the address now (the path only tie-breaks same-named siblings), and
+  "on screen" has one definition every API answers from: a live DOM node.
+  `present()` no longer counts a surface entry that has none.
+- **`ui.Name1` now spells "the first instance".** The report's "ambiguity should
+  be an error, not a silent first-match" was probed by making it exactly that —
+  and the kit's reachability fuzzer refused the change: same-named siblings are
+  POSITIONAL by design (bare name = first, `Name2` = second, which is why the
+  ordinal is 2-based and what every miss listing teaches). Erroring made
+  elements reachable only through an ordinal the author has no reason to know,
+  so it was reverted and the contract is pinned instead. The one real gap it
+  exposed: "the first" had no explicit spelling, so a reader could not tell a
+  deliberate first from an unconsidered one, and a loop over instances needed
+  two spellings. `Name1` says it. (A deep HOIST with two hits still throws —
+  that one is a search, not a position.)
+- **A missing handle dumped every name in the app** — ~50 entries, several
+  hundred characters each, on one line, with the failed assertion scrolled off
+  the top. Ranked by closeness to what was asked for, capped at 8, with
+  `AIO_TEST_NAMES=all` for the exhaustive list — the diet `am surface` already
+  went on.
+- **`signal` had no `.get()`.** `.value` to read, `.set()` to write, `.peek()`
+  to read untracked — the report tried `now.get()` and `now()` and landed on
+  `.value` by reading another component's source. `.get()` is now the tracked
+  read, the mirror of `.set()`; `.value` and `.peek()` are unchanged.
+- **The tracking boundary is written down** — `docs/ui/reactivity-tracking.md`:
+  a read is tracked during the synchronous execution of a component body, a
+  `computed()` or an `effect()`, and at no other time. Everything else (nesting,
+  fragments, conditional branches entered on a later render, selectors that
+  return functions) follows from that sentence.
+
+### The package is publishable again
+
+Two release gates had been red, and the pre-release audit is where that surfaced
+rather than at a publish attempt:
+
+- **`deno publish` refused the package.** `feedback` and `updates` were exported
+  with inferred types, so their type was knowable only by type-checking the
+  factory — a "slow type" that blocks `.d.ts` generation and makes every
+  consumer pay for the inference. Both factories already declare their return
+  type; the exports now say it (`export const feedback: FeedbackCell = …`).
+- **`deno lint` is clean.** `startFeedback`/`startUpdates` were `async` with
+  nothing to await: the dynamic import that made them asynchronous became static
+  in alpha56 (an app top-level-awaiting `aio.run()` could not otherwise finish
+  module evaluation) and only the keyword was left behind. They are synchronous
+  and now say so; both call sites already `await`, which is unchanged either
+  way.
+
+### The class behind the leak — who resets what
+
+Chasing the signal leak found the shape of it: `runtime-reset.ts` opens with
+"tests get hermeticity from a single call instead of remembering five scattered
+`_reset*` functions (forgetting one = cross-test bleed)" — and `src/` had grown
+**55 module-scope `_reset*` functions, of which the one call owned 7**. Every
+other one is a memory a test author has to hold, and the ones nobody holds are
+silent bleed. Fixing the signal was a patch; the class is module-scope mutable
+state whose lifetime nobody owns.
+
+- The **warn/hint dedup sets** joined the one call. An unreset "have I already
+  said this?" memory makes a test's own diagnostics order-dependent: the second
+  test to trigger the same hint sees silence, so "it warns about X" passes alone
+  and fails in a suite (or the reverse).
+- **`tests/reset-ownership.test.ts` is the gate.** Every `_reset*` exported from
+  `src/` must be classified — `RUNTIME` (the one call), `LIFECYCLE` (src/ code
+  owns when it runs), `HARNESS`, or `MANUAL` with a stated reason — and a new
+  one fails the gate until someone decides which. The ledger also rots forwards:
+  an entry naming a reset that no longer exists fails too.
+
+The ledger is deliberately uncomfortable to read: ~30 entries are still
+`MANUAL`, each a debt with a name rather than an anonymous trap. Moving one up
+to `RUNTIME` is now a visible improvement instead of a thing nobody knew to do.
+
+Two findings did not survive probing, and are pinned as what actually happens so
+nobody re-derives them: the stale nested-ternary-inside-a-fragment **re-renders
+correctly** (reads of one cell share one signal, and dependencies are
+re-collected every render, so a branch entered later still subscribes), and
+handles **never matched by substring** — every name match in the surface is
+`===`. The `t`-on-a-component trap is what made it look like both.
+
 ## 1.0.0-alpha56 — the empty desk (2026-08-09)
 
 A 42-finding static audit arrived, and this is the release where every one of

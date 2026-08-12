@@ -421,7 +421,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "ce475e83d805d60d"
+          "sig": "6757de38b3d40564"
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -493,7 +493,7 @@
         },
         "Computed": {
           "kind": "interface",
-          "sig": "4c847e396b9a978d"
+          "sig": "74e01d2bc412098f"
         },
         "connectAioDevTools": {
           "kind": "function",
@@ -725,7 +725,7 @@
         },
         "Signal": {
           "kind": "interface",
-          "sig": "a962066576a452b0"
+          "sig": "ef29ba28186c0407"
         },
         "SignIn": {
           "kind": "function",
@@ -1262,7 +1262,7 @@
       "symbols": {
         "feedback": {
           "kind": "variable",
-          "sig": "1588a0f075829371"
+          "sig": "e714bb584a50e48c"
         },
         "FeedbackCell": {
           "kind": "typeAlias",
@@ -1662,7 +1662,7 @@
         },
         "TestUI": {
           "kind": "typeAlias",
-          "sig": "09438c4c065a0f80"
+          "sig": "ca4e9dfa1e13aef5"
         },
         "TestUIOptions": {
           "kind": "interface",
@@ -1862,7 +1862,7 @@
         },
         "updates": {
           "kind": "variable",
-          "sig": "1588a0f075829371"
+          "sig": "70053f50f0e6fb7f"
         },
         "UpdatesCell": {
           "kind": "typeAlias",

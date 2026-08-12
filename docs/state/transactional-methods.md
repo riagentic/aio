@@ -1,27 +1,36 @@
 # Spec: Transactional cell methods
 
-Status: **SHIPPED, and THE DEFAULT since alpha52** — every async method runs
-transactionally unless the cell says `transaction: false`; this page is the
-contract, not a proposal. Conflict detection (§4) is the part that makes it safe
-rather than merely stable. Tests: `tests/transactional-methods.test.ts`,
+Status: **SHIPPED, OPT-IN** (`transaction: true`) — this page is the contract,
+not a proposal. Conflict detection (§4) is the part that makes it safe rather
+than merely stable. Tests: `tests/transactional-methods.test.ts`,
 `tests/transaction-default.test.ts`.
+
+> **It was the default from alpha52 to alpha56, and alpha57 took that back.**
+> Nothing here was wrong on the merits; the DEFAULT was. Flipping it silently
+> re-specified every async method already written — pinned reads make a
+> stand-down guard permanently inert, buffered writes stop a spinner reaching
+> the client — with no type error, no runtime error and no failing test to find
+> it by. See `.katana/_aio.md`: strict when a wrong choice is detectable at
+> boot/build/lint, never when it is only observable at runtime. Apps carrying
+> the `transaction: false` that `aiol --safe-fix` inserted need no action — it
+> now states the default.
 
 **The one rule, if you read nothing else:** a cell where a wrong merge costs
 something real — money, inventory, a ledger, anything a user would dispute —
-gets `transaction: { serialize: true }`. Everything else keeps the default
-(`transaction: true` — snapshot isolation: cheaper than serialize, but it
-permits write skew). `transaction: false` is the opt-OUT into live reads +
-incremental commits — reach for it only when a method's whole point is observing
-foreign commits mid-flight without `s.$live`, or writing state after its own
-cancellation. Under the default:
+gets `transaction: { serialize: true }`. A cell that wants the isolation but not
+the mutex asks for `transaction: true` (snapshot isolation: cheaper than
+serialize, but it permits write skew). Everything else declares nothing and
+keeps live reads + incremental commits — the right answer for a hot cell with a
+large store, for a method whose whole point is observing foreign commits
+mid-flight, and for one that writes state after its own cancellation. Once you
+opt in:
 
 - **spinner idiom** — publish mid-method deliberately:
   `s.busy = true; s.$commit();`
 - **live waits** — `await until(() => s.$live.ready)` (a pinned `s` read never
   changes across awaits, by design).
-- **migration** — `aiol` reports every async cell that never declared
-  `transaction`, and `--safe-fix` inserts `transaction: false,` to preserve
-  pre-alpha52 behavior byte-for-byte.
+- **no migration** — turning it on is a per-cell decision by the cell's author.
+  `aiol` has nothing to say about a cell that never declared `transaction`.
 
 The isolation-model detail below exists to justify the rule, not to be
 memorized.
@@ -60,9 +69,10 @@ Consequences one app hit repeatedly (all real, all silent):
 
 ## 3. Non-goals / constraints
 
-- **The default, with an explicit opt-out** (alpha52; it shipped opt-in). A cell
-  that needs live reads + incremental commits declares `transaction: false` —
-  the old semantics are a spelling away, never gone.
+- **Opt-in, permanently** (alpha52–56 made it the default; alpha57 reverted
+  that). A cell that wants snapshot isolation declares `transaction: true`; one
+  that says nothing keeps live reads + incremental commits. A cell's semantics
+  never change because the framework changed its mind.
 - **Sync methods are unchanged** — already atomic.
 - Must compose with: schedule/own effects returned from methods, cancellation
   (`s.$signal` / `cancelOn`), sync cells (CRDT op-log), persistence + the #3
