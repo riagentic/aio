@@ -7,6 +7,9 @@ One guide per version migration. Find your current version and follow the steps.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha56 → alpha57](from-alpha56-to-alpha57.md) — `transaction` is opt-in
+  again (add the line if you want it); module-level `signal()`s reset between
+  tests, and `present`/`absent` answer about the element first
 - [alpha55 → alpha56](from-alpha55-to-alpha56.md) — the empty desk: a 42-finding
   audit closed to zero (fixed or refused with reasons). Nothing to migrate; two
   things you might NOTICE — a route pattern with a non-trailing `*` is refused

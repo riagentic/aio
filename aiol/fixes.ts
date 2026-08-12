@@ -879,62 +879,9 @@ export function fixPollBackoffKey(filePath: string): () => Promise<boolean> {
   };
 }
 
-/** MIGRATION (alpha52): `transaction: true` became the async default. Insert
- *  an explicit `transaction: false,` into every `cell()` config that has async
- *  methods but declares no `transaction` — preserving the app's pre-alpha52
- *  incremental-commit behavior byte-for-byte. Deliberately behaviour-
- *  PRESERVING: adopting transactions ($commit/$live) is the author's move. */
-export function fixInsertTransactionFalse(
-  filePath: string,
-): () => Promise<boolean> {
-  return async () => {
-    let src: string;
-    try {
-      src = await Deno.readTextFile(filePath);
-    } catch {
-      return false;
-    }
-    let changed = false;
-    let out = "";
-    let cursor = 0;
-    const masked = codeText(src);
-    const re = /\bcell\s*\(\s*["'`][\w\-]+["'`]\s*,\s*\{/g;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(src)) !== null) {
-      if (!/[$\w]/.test(masked[m.index] ?? "")) continue; // comment mention
-      const open = masked.indexOf("{", m.index + m[0].length - 1);
-      const end = balancedEnd(src, open, masked);
-      if (end === -1) continue;
-      // Probe the MASKED body — comment mentions of async/transaction/$-meta
-      // must not steer the migration.
-      const body = masked.slice(open, end + 1);
-      if (!/\basync\s+[\w$]+\s*\(/.test(body)) continue; // no async methods
-      if (/\btransaction\s*:/.test(body)) continue; // already decided
-      // The checker's guard, RE-TESTED PER CELL: a `$commit`/`$live`/`$do`
-      // cell has adopted the transactional world — pinning `transaction:
-      // false` onto it would silently strip its snapshot/rollback semantics.
-      // (The Issue→safeFix link is per FILE, so one flagged cell must never
-      // migrate its adopted neighbours backwards.)
-      if (/\$commit\b|\$live\b|\$do\b/.test(body)) continue;
-      // Indentation of the first config line.
-      const nl = src.indexOf("\n", open);
-      const lineStart = src.lastIndexOf("\n", m.index) + 1;
-      const baseIndent = /^[ \t]*/.exec(src.slice(lineStart))?.[0] ?? "";
-      const indent = nl !== -1 && nl < end
-        ? (/^[ \t]*/.exec(src.slice(nl + 1))?.[0] ?? baseIndent + "  ")
-        : baseIndent + "  ";
-      out += src.slice(cursor, open + 1) +
-        `\n${indent}// aiol: pre-alpha52 behavior pinned — remove to adopt transactions (s.$commit/s.$live)` +
-        `\n${indent}transaction: false,`;
-      cursor = open + 1;
-      changed = true;
-    }
-    if (!changed) return false;
-    out += src.slice(cursor);
-    await Deno.writeTextFile(filePath, out);
-    return true;
-  };
-}
+// (alpha57 removed `fixInsertTransactionFalse`. It existed to pin apps against
+//  the alpha52 default flip; with `transaction` opt-in again there is nothing
+//  to pin — an undeclared cell already has the behavior it was written for.)
 
 /** Selector deps spread → tuple (alpha52): `{ deps: [a, b], fn: (s, x, y) =>`
  *  becomes `fn: (s, [x, y]) =>` — only when the param count exactly covers

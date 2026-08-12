@@ -1717,8 +1717,12 @@ export const checkPatterns: Checker = (ctx) => {
     //      primitive. `mod.ts`'s own flagship example tripped this.
     //   4. (llama-master #4) A plain WRITE was reported as a read — see
     //      `draftReadOffsets`.
+    //   5. The opt-in probe read RAW content, so a cell that merely MENTIONS
+    //      `transaction: true` in a comment — the comment explaining why it
+    //      declined the option is the common shape — disabled the rule for the
+    //      whole file. Masked, like every other body probe in this file.
     const isTransactional = /\btransaction\s*:\s*(?:true|\{)/.test(
-      file.content,
+      codeText(file.content),
     );
     if (!isTransactional && /\bcell\s*\(\s*['"]/.test(file.content)) {
       // Code-masked source: comment and string bodies are blanked (offsets and
@@ -2508,13 +2512,11 @@ export const checkUseCell: Checker = (ctx) => {
 };
 
 // ══════════════════════════════════════════════════════════════════════
-// ALPHA52 — the effect channel (deprecations + the transaction MIGRATION)
+// ALPHA52 — the effect channel (deprecations)
 // ══════════════════════════════════════════════════════════════════════
 
 /** alpha52 breaks, each with its migration:
  *  • effects off the return channel → `s.$do(...)` (safe-fix, conservative)
- *  • `transaction: true` async default → MIGRATION inserts `transaction:
- *    false,` into undeclared async cells (behaviour-preserving; safe-fix)
  *  • listensTo array form deprecated (report — the object form needs the
  *    author to pick a handler method)
  *  • selector deps spread signature → tuple (safe-fix when untyped)
@@ -2629,59 +2631,11 @@ export const checkAlpha52: Checker = (ctx) => {
       );
     }
 
-    // transaction MIGRATION: async methods with no transaction key
-    for (
-      const m of codeMatches(
-        file.content,
-        /\bcell\s*\(\s*["'`][\w\-]+["'`]\s*,\s*\{/g,
-      )
-    ) {
-      // Balanced-scan the config to scope the async/transaction probes —
-      // over the STRIPPED code: the raw walk counted braces inside comments
-      // and strings, so a commented cell could scope the probes to the wrong
-      // span (same defect class as _balancedClose, fixed together).
-      const open = code.indexOf("{", m.index! + m[0].length - 1);
-      let depth = 0;
-      let end = -1;
-      for (let i = open; i < code.length; i++) {
-        const ch = code[i];
-        if (ch === "{") depth++;
-        else if (ch === "}") {
-          depth--;
-          if (depth === 0) {
-            end = i;
-            break;
-          }
-        }
-      }
-      if (end === -1) continue;
-      const body = code.slice(open, end + 1);
-      if (!/\basync\s+[\w$]+\s*\(/.test(body)) continue;
-      if (/\btransaction\s*:/.test(body)) continue;
-      // Already written to the transactional world: a cell that reaches for
-      // the $-meta draft members ($commit/$live/$do) has made its choice —
-      // hinting it toward `transaction: false` would MIGRATE it backwards.
-      if (/\$commit\b|\$live\b|\$do\b/.test(body)) continue;
-      const line = lineOf(m.index!);
-      if (isSuppressed(file.lines, line - 1)) continue;
-      found++;
-      report(
-        "warn",
-        "alpha52",
-        `${file.relative}:${line} — this cell has async methods and no ` +
-          `\`transaction\` key: alpha52 made \`transaction: true\` the async ` +
-          `default (snapshot reads + atomic commit). Add \`transaction: ` +
-          `false,\` to keep the old incremental-commit behavior, or adopt ` +
-          `the default (publish mid-method with s.$commit(), read live with ` +
-          `s.$live)`,
-        {
-          file: file.relative,
-          line,
-          fix: "transaction: false,  // or adopt: s.$commit() / s.$live",
-          safeFix: fix.fixInsertTransactionFalse(file.path),
-        },
-      );
-    }
+    // (The alpha52 transaction MIGRATION check stood here. alpha57 returned
+    // `transaction` to opt-in, so a cell with async methods and no transaction
+    // key is correct as written and has nothing to migrate. An app already
+    // carrying the inserted `transaction: false,` needs no action either — it
+    // now states the default.)
 
     // listensTo array form
     for (const m of codeMatches(file.content, /\blistensTo\s*:\s*\[/g)) {

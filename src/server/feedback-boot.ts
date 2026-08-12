@@ -103,9 +103,12 @@ export type StartedFeedback = ResolvedFeedback & { stop: () => void };
  *  with it — so the cap is low, and hitting it is said out loud once. */
 const MAX_AUTO_PER_SESSION = 10;
 
-export async function startFeedback(
-  deps: StartFeedbackDeps,
-): Promise<StartedFeedback> {
+// Synchronous, and says so. It was `async` while it reached for a dynamic
+// import; that import became static (an app top-level-awaiting `aio.run()`
+// could not finish module evaluation otherwise) and the `async` stayed behind,
+// leaving a function that promised to be awaited for no reason. Callers already
+// `await` it, which is unchanged either way.
+export function startFeedback(deps: StartFeedbackDeps): StartedFeedback {
   const cfg = resolveFeedback(deps.feedback);
   const userCfg: FeedbackConfig = deps.feedback === true
     ? {}

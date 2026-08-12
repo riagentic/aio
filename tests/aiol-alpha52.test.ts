@@ -114,11 +114,14 @@ export const t = cell('t', {
   });
 });
 
-Deno.test("aiol alpha52 MIGRATION: async cell without `transaction` gets `transaction: false,`", async () => {
+// alpha57: `transaction` went back to opt-in, so the alpha52 migration that
+// used to insert `transaction: false,` is GONE. An async cell that never
+// declared it is correct as written — the linter must say nothing about it,
+// and must certainly not edit it. (.katana/_aio.md — the default a cell never
+// asked for cannot change under it.)
+Deno.test("aiol alpha57: an async cell without `transaction` is NOT flagged and NOT rewritten", async () => {
   await withTmpDir(async (dir) => {
-    await project(
-      dir,
-      `import { cell } from 'aio'
+    const source = `import { cell } from 'aio'
 export const jobs = cell('jobs', {
   state: { status: 'idle' },
   methods: {
@@ -138,17 +141,15 @@ export const decided = cell('decided', {
   transaction: true,
   methods: { async go(s) { await Promise.resolve(); s.n++ } },
 })
-`,
-    );
+`;
+    await project(dir, source);
     const { issues, fixed } = await runAndFix(dir);
-    assertEquals(issues.length, 1, "only the undeclared async cell");
-    assertStringIncludes(issues[0]!.message, "transaction: true");
-    assertStringIncludes(fixed, "transaction: false,");
-    // Inserted into `jobs` only.
-    const jobsIdx = fixed.indexOf("cell('jobs'");
-    const plainIdx = fixed.indexOf("cell('plain'");
-    const insertIdx = fixed.indexOf("transaction: false,");
-    assert(insertIdx > jobsIdx && insertIdx < plainIdx, "inserted into jobs");
+    assertEquals(
+      issues.filter((i) => i.message.includes("transaction")).length,
+      0,
+      "no transaction finding — the migration retired with the default flip",
+    );
+    assertEquals(fixed, source, "the file is left exactly as written");
   });
 });
 
@@ -317,18 +318,14 @@ export const poller = cell("poller", {
 `,
     );
     const { issues, fixed } = await runAndFix(dir);
-    // Two findings pre-fix: the return-ed effect AND the transaction
-    // MIGRATION (an async cell with no `transaction` key). The effect rewrite
-    // runs first and puts `$do` in the body — so the migration fixer's
-    // PER-CELL guard re-test correctly declines: the cell is an adopter now,
-    // and pinning `transaction: false` onto it would strip the semantics it
-    // just gained.
-    assertEquals(issues.length, 2);
+    // ONE finding: the return-ed effect. (Until alpha57 there was a second —
+    // the transaction MIGRATION — which retired with the default flip.)
+    assertEquals(issues.length, 1);
     assert(!fixed.includes("CellEffect"), "annotation AND import gone");
     assertStringIncludes(fixed, "& MethodDraftServed");
     assert(
-      !fixed.includes("transaction: false"),
-      "the re-tested guard declines: the rewritten $do cell is an adopter",
+      !fixed.includes("transaction"),
+      "an async cell is never given a transaction key it did not ask for",
     );
     await runGates(dir);
   });
@@ -385,60 +382,6 @@ export const alias = cell("alias", {
     assertEquals(fixed, source, "not confidently rewritable — untouched");
     // The UNFIXED file still passes its gates (deprecated channel works).
     await runGates(dir);
-  });
-});
-
-Deno.test("aiol alpha52 MIGRATION fix re-tests the guard PER CELL — an adopted $commit cell in the same file is untouched", async () => {
-  await withTmpDir(async (dir) => {
-    await project(
-      dir,
-      `import { cell } from 'aio'
-export const undecided = cell('undecided', {
-  state: { n: 0 },
-  methods: {
-    async go(s) {
-      await Promise.resolve();
-      s.n++;
-    },
-  },
-})
-export const adopted = cell('adopted', {
-  state: { busy: false, out: '' },
-  methods: {
-    async work(s) {
-      s.busy = true;
-      s.$commit();
-      await Promise.resolve();
-      s.out = 'done';
-      s.busy = false;
-    },
-  },
-})
-`,
-    );
-    const { issues, fixed } = await runAndFix(dir);
-    const migration = issues.filter((i) =>
-      i.message.includes("transaction: true")
-    );
-    assertEquals(migration.length, 1, "only the undecided cell is flagged");
-    assertEquals(
-      (fixed.match(/transaction: false,/g) ?? []).length,
-      1,
-      "exactly ONE insert",
-    );
-    const undecidedIdx = fixed.indexOf("cell('undecided'");
-    const adoptedIdx = fixed.indexOf("cell('adopted'");
-    const insertIdx = fixed.indexOf("transaction: false,");
-    assert(
-      insertIdx > undecidedIdx && insertIdx < adoptedIdx,
-      "the insert landed in the undecided cell",
-    );
-    assert(
-      !/adopted[\s\S]*transaction: false/.test(
-        fixed.slice(adoptedIdx),
-      ),
-      "the adopted $commit cell was NOT pinned backwards",
-    );
   });
 });
 

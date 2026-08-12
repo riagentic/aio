@@ -20,10 +20,28 @@ import { signal } from "aio/air";
 const count = signal(0);
 
 count.value; // 0 — reads with tracking (use in JSX)
+count.get(); // 0 — the same tracked read, spelled as the mirror of set()
 count.peek(); // 0 — reads without tracking (use in event handlers)
 count.set(1); // updates and notifies subscribers
 count.set(1); // no-op — same value (see equality rules below)
 ```
+
+### The three reads
+
+Two of them are the same operation:
+
+| Call      | Tracks? | Reach for it when                                      |
+| --------- | ------- | ------------------------------------------------------ |
+| `.value`  | yes     | inside JSX — `{count.value}` reads as a value          |
+| `.get()`  | yes     | beside a write — `count.set(count.get() + 1)`          |
+| `.peek()` | **no**  | you must NOT subscribe — event handlers, effect bodies |
+
+`.value` and `.get()` are interchangeable; pick whichever reads better at the
+call site. The only real choice is tracked (`.value` / `.get()`) versus
+untracked (`.peek()`) — and getting THAT wrong is what makes a UI go stale, so
+see [Reactivity — what is tracked, and where](reactivity-tracking.md).
+
+`computed()` answers all three the same way.
 
 ### Equality: when does `set()` notify?
 
@@ -83,6 +101,7 @@ function Sidebar() {
 | Member                        | Description                                                     |
 | ----------------------------- | --------------------------------------------------------------- |
 | `.value`                      | Read with automatic dependency tracking                         |
+| `.get()`                      | The same tracked read, as a method — mirrors `.set()`           |
 | `.peek()`                     | Read without tracking (use in event handlers)                   |
 | `.set(next)`                  | Write and notify. No-op for equal values — see "Equality" above |
 | `.set(next, { force: true })` | Bypass equality checks and always notify                        |

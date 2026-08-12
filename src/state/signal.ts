@@ -6,6 +6,17 @@
 /** Reactive value container — reads auto-track in effects and computed. */
 export interface Signal<T> {
   readonly value: T;
+  /** Tracked read — the exact same thing as {@linkcode value}, spelled as the
+   *  mirror of {@linkcode set}.
+   *
+   *  Two spellings, one operation, on purpose: `.value` reads best inside JSX
+   *  (`{count.value}`), `.get()` reads best in code that also writes
+   *  (`count.set(count.get() + 1)`). A field report landed on `.value` only
+   *  after `now.get()` and `now()` both failed to compile — "three shapes for
+   *  two operations", with the type error naming neither alternative. The read
+   *  a developer reaches for first now exists; {@linkcode peek} stays the
+   *  UNtracked read. */
+  get(): T;
   set(next: T, opts?: { force?: boolean }): void;
   update(fn: (prev: T) => T): void;
   peek(): T;
@@ -19,6 +30,10 @@ export interface Signal<T> {
 /** Derived reactive value — recomputes lazily when dependencies change. */
 export interface Computed<T> {
   readonly value: T;
+  /** Tracked read — identical to {@linkcode value}, so a computed answers the
+   *  same two spellings a signal does (nothing is more surprising than a read
+   *  API that works on one and not the other). */
+  get(): T;
   peek(): T;
   /** @internal */ readonly _subscribers: Set<Subscriber>;
 }
@@ -274,6 +289,11 @@ class SignalImpl<T> implements Signal<T> {
     return this._value;
   }
 
+  /** Tracked read — the method spelling of `.value` (see the interface). */
+  get(): T {
+    return this.value;
+  }
+
   set(next: T, opts?: { force?: boolean }): void {
     const resolved = next;
     if (!opts?.force && Object.is(this._value, resolved)) {
@@ -323,13 +343,70 @@ class SignalImpl<T> implements Signal<T> {
   }
 }
 
+// ── Module-scope signals: the other half of test hermeticity ────────
+//
+// A cell is reset between tests; a module-level `signal()` was NOT, and the two
+// look identical from a test. So the field saw "cells leak state between
+// tests": a test that set `zoom`/`orientation` changed the meaning of a later
+// test, showing up as an order-dependent failure that passes under --filter —
+// the worst way to find anything. The harness is the strictest environment, so
+// it has to reset every kind of state a test can write, not most of them.
+//
+// Only signals born OUTSIDE a render are recorded: a tracking scope is active
+// exactly while a component body runs, so `useLocal`/`useRef(signal(…))` — the
+// unbounded, per-instance ones — are skipped, and they are re-created by the
+// next mount anyway. What remains is the module-level population: bounded by
+// how many modules an app has. WeakRefs, so recording retains nothing, plus a
+// cap so a pathological creator can never grow it without bound. Recording is
+// unconditional (identical in dev and prod); only a test harness ever calls
+// the reset.
+type RootSignalEntry = { ref: WeakRef<SignalImpl<unknown>>; initial: unknown };
+const _rootSignals: RootSignalEntry[] = [];
+const ROOT_SIGNAL_CAP = 4096;
+
+/** A fresh copy of a captured initial, so resetting twice cannot hand back an
+ *  object a previous test mutated in place. Non-cloneable initials (functions,
+ *  DOM nodes, class instances) fall back to the value itself. */
+function _freshInitial(v: unknown): unknown {
+  if (v === null || typeof v !== "object") return v;
+  try {
+    return structuredClone(v);
+  } catch {
+    return v;
+  }
+}
+
+/** @internal Restore every module-scope signal to the value it was created
+ *  with — test isolation for the state that does not live in a cell. Called by
+ *  the harnesses (`testCell`, `testUI`, `bootCells`) at test START, so a test
+ *  that crashed before teardown still cannot poison the next one. */
+export function _resetRootSignals(): void {
+  let live = 0;
+  for (const entry of _rootSignals) {
+    const sig = entry.ref.deref();
+    if (!sig) continue;
+    _rootSignals[live++] = entry;
+    const fresh = _freshInitial(entry.initial);
+    if (Object.is(sig._value, fresh)) continue;
+    sig.set(fresh as never, { force: true });
+  }
+  _rootSignals.length = live; // compact away collected entries
+}
+
 /** Create a reactive signal with an initial value. Reads auto-track in effects and computed. */
 export function signal<T>(
   initial: T,
   nameOrOpts?: string | { name?: string },
 ): Signal<T> {
   const name = typeof nameOrOpts === "string" ? nameOrOpts : nameOrOpts?.name;
-  return new SignalImpl(initial, name);
+  const sig = new SignalImpl(initial, name);
+  if (_trackStack.length === 0 && _rootSignals.length < ROOT_SIGNAL_CAP) {
+    _rootSignals.push({
+      ref: new WeakRef(sig as SignalImpl<unknown>),
+      initial: _freshInitial(initial),
+    });
+  }
+  return sig;
 }
 
 // ── Computed ────────────────────────────────────────────────────────
@@ -366,6 +443,11 @@ class ComputedImpl<T> implements Computed<T> {
     if (tracker) tracker.add(this as unknown as SignalImpl<unknown>);
     if (this._dirty) this._recompute();
     return this._cached as T;
+  }
+
+  /** Tracked read — the method spelling of `.value` (see the interface). */
+  get(): T {
+    return this.value;
   }
 
   peek(): T {

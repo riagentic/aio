@@ -12,6 +12,7 @@
 // faithful to a user, never calling handlers directly.
 
 import { _armTestStrict } from "./test-strict.ts";
+import { _resetRootSignals } from "../state/signal.ts";
 import { _pendingCallPromises } from "../state/method-cancel.ts";
 import type { AioUser, AuthFeatures } from "../protocol/protocol-types.ts";
 import { _setDocument, _unmount, mount } from "../air/aio-renderer.ts";
@@ -20,6 +21,7 @@ import type { ComponentFn } from "../air/vdom-types.ts";
 import type { MountHandle, RootState } from "../air/renderer-types.ts";
 import { _rootStateMap } from "../air/renderer-state.ts";
 import {
+  _isForwardedHandle,
   buildUISurface,
   findComponents,
   findElementsDeep,
@@ -84,6 +86,12 @@ export interface TestUIOptions {
    *  `user` is set. */
   authFeatures?: Partial<AuthFeatures>;
 }
+
+/** Which kind of thing a presence question is about — see
+ *  {@linkcode TestUI.present}. One name can address an ELEMENT (`t` on a
+ *  `<button>`) and a COMPONENT (`t` on `<Stage/>`, a rename-proof handle) at
+ *  the same time; this says which one is meant. */
+export type UIKind = "element" | "component";
 
 /** A triggerable element of the semantic UI surface. Actions run on an
  *  ordered queue — **awaits are optional**: `ui.A.click(); ui.B.click();`
@@ -215,17 +223,25 @@ export type TestUI = {
   expectCell(cell: any, pred: (c: any) => boolean, msg?: string): Promise<void>;
   /** Find a component anywhere by name (and optionally AIR key). */
   find(component: string, key?: string | number): UIComponentHandle;
-  /** True when nothing named `name` is SHOWING — no element with that handle,
-   *  and no component of that name that put anything on screen. A component
-   *  which rendered `null` counts as absent: it has a surface node (it ran), but
-   *  it produced nothing, and "did it render anything" is the question being
-   *  asked. The negative assertion the surface was missing: a test for "the
-   *  advice panel is gone" was otherwise written as
+  /** True when nothing named `name` is SHOWING — no live element with that
+   *  handle, and no component of that name that put anything on screen. A
+   *  component which rendered `null` counts as absent: it has a surface node
+   *  (it ran), but it produced nothing, and "did it render anything" is the
+   *  question being asked. The negative assertion the surface was missing: a
+   *  test for "the advice panel is gone" was otherwise written as
    *  `assert(!ui.html().includes("placement-advice"))`, which is stringly-typed
-   *  and keeps passing for the wrong reason after a class rename. Composes with waitFor: `await ui.waitFor(() => ui.absent("Toast"))`. */
-  absent(name: string): boolean;
+   *  and keeps passing for the wrong reason after a class rename. Composes with
+   *  waitFor: `await ui.waitFor(() => ui.absent("Toast"))`.
+   *
+   *  `kind` pins WHICH thing is being asked about when one name addresses both
+   *  — `t` on a component is a component handle, and a component that forwards
+   *  its `t` prop to an inner element makes the same string name two things.
+   *  `"element"` asks only about elements on screen, `"component"` only about
+   *  components. Omit it and an element wins, with a one-time warning on the
+   *  ambiguous frame (see the `showing` note). */
+  absent(name: string, kind?: UIKind): boolean;
   /** Inverse of {@linkcode absent} — reads better in a positive assertion. */
-  present(name: string): boolean;
+  present(name: string, kind?: UIKind): boolean;
   /** Unmount and reset the local runtime (the auto-created window is closed
    *  in the background). Prefer `await using ui = await testUI(App)` or the
    *  `testUI(App, name, fn)` wrapper — both dispose for you. */
@@ -289,11 +305,71 @@ function surfaceDigest(node: UISurfaceNode, maxChars = 2000): string {
     `print it with JSON.stringify(ui.surface()) if you need the detail)`;
 }
 
-function fail(msg: string, available: string[]): never {
+/** Last addressable segment of a path — `App/Stage/Row[3]:title` → `title`. */
+function lastSegment(s: string): string {
+  const cut = Math.max(s.lastIndexOf(":"), s.lastIndexOf("/"));
+  return cut >= 0 ? s.slice(cut + 1) : s;
+}
+
+/** Edit distance, capped — only used to rank a listing, so an early exit past
+ *  the cap is free accuracy nobody can observe. */
+function editDistance(a: string, b: string, cap = 12): number {
+  if (a === b) return 0;
+  if (Math.abs(a.length - b.length) > cap) return cap + 1;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const row = [i];
+    for (let j = 1; j <= b.length; j++) {
+      row[j] = Math.min(
+        prev[j]! + 1,
+        row[j - 1]! + 1,
+        prev[j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+    }
+    prev = row;
+  }
+  return prev[b.length]!;
+}
+
+/** How many candidate names a failure lists before it stops helping.
+ *
+ *  A missing handle used to dump EVERY registered name in the app: one field
+ *  report's screen has ~50, several hundred characters each, on one line — the
+ *  assertion that failed scrolls off the top and the reader has to grep their
+ *  own error message. The fix is the one `am surface` already made: rank by
+ *  closeness to what was actually asked for, show the few that could plausibly
+ *  be meant, and put the exhaustive list behind a flag. */
+const NAME_LIMIT = 8;
+
+/** Rank candidates by how close they are to `target`'s last segment, so the
+ *  name the caller probably meant is the first thing they read. */
+function rankNames(target: string | undefined, names: string[]): string[] {
+  const uniq = [...new Set(names)];
+  if (!target) return uniq;
+  const want = lastSegment(target).toLowerCase();
+  return uniq
+    .map((n) => {
+      const seg = lastSegment(n).toLowerCase();
+      // A containment relation beats raw distance: `image-negative` should rank
+      // `toggle-image-negative` above an unrelated same-length name.
+      const contains = seg.includes(want) || want.includes(seg) ? -1 : 0;
+      return { n, score: contains + editDistance(want, seg) / 100 };
+    })
+    .sort((a, b) => a.score - b.score)
+    .map((x) => x.n);
+}
+
+function fail(msg: string, available: string[], target?: string): never {
+  const all = Deno.env.get("AIO_TEST_NAMES") === "all";
+  const ranked = rankNames(target, available);
+  const shown = all ? ranked : ranked.slice(0, NAME_LIMIT);
+  const hidden = ranked.length - shown.length;
   throw new Error(
-    `${msg}\n  available: ${
-      available.length ? available.join(", ") : "(none)"
-    }` +
+    `${msg}\n  available: ${shown.length ? shown.join(", ") : "(none)"}` +
+      (hidden > 0
+        ? `\n  (closest ${shown.length} of ${ranked.length} shown — ` +
+          `AIO_TEST_NAMES=all lists every one)`
+        : "") +
       `\n  tip: name elements explicitly with the t prop, e.g. <button t="save">`,
   );
 }
@@ -320,9 +396,14 @@ function listNames(node: UISurfaceNode): string[] {
 }
 
 /** Resolve the ordinal component form: `Button2` → the 2nd `Button` instance
- *  in tree (depth-first) order, 2-based to mirror element name de-duping
- *  (`Input`, `Input2`, …). Only kicks in when no exact name matched, so a
- *  component genuinely named `Button2` always wins. */
+ *  in tree (depth-first) order, mirroring element name de-duping (`Input`,
+ *  `Input2`, …). Only kicks in when no exact name matched, so a component
+ *  genuinely named `Button2` always wins.
+ *
+ *  `Button1` is accepted too — the explicit spelling of "the first one". It had
+ *  no spelling at all while the bare name silently meant it; now that an
+ *  ambiguous bare name is an error, "I really do mean the first" must be
+ *  sayable. */
 function ordinalComponent(
   scope: UISurfaceNode,
   prop: string,
@@ -330,9 +411,37 @@ function ordinalComponent(
   const m = /^(.*[^\d])(\d+)$/.exec(prop);
   if (!m) return undefined;
   const n = Number(m[2]);
-  if (n < 2) return undefined;
+  if (n < 1) return undefined;
   const hits = findComponents(scope, m[1]!);
   return hits.length >= n ? hits[n - 1] : undefined;
+}
+
+/** The component instance named `name` in `scope`, or fail loud.
+ *
+ *  Same-named siblings are POSITIONAL by design, not ambiguous: the bare name
+ *  is the first instance and `Name2`, `Name3`, … are the later ones — the
+ *  convention the miss listings themselves teach (`Button ×2 — use Button2 for
+ *  the 2nd`) and that `tests/ui-kit-semantic.test.tsx` fuzzes as a property.
+ *  (Making ambiguity an error here was tried and reverted: it contradicts that
+ *  contract, and it makes an element reachable only by an ordinal the author
+ *  has no reason to know. Element HOISTING is the different case — a deep
+ *  search with two hits genuinely has no answer, so that one throws.) */
+function oneComponent(
+  scope: UISurfaceNode,
+  name: string,
+  key?: string | number,
+): UISurfaceNode {
+  const hits = findComponents(scope, name, key);
+  if (hits.length === 0) {
+    fail(
+      `testUI: component "${name}"${
+        key !== undefined ? ` [key=${key}]` : ""
+      } not found under ${scope.path}`,
+      listNames(scope),
+      name,
+    );
+  }
+  return hits[0]!;
 }
 
 /** Any function component. Wider than ComponentFn on purpose: components
@@ -613,6 +722,14 @@ async function _mountTestUI(
     | ((p: Record<string, Record<string, unknown>>) => void)
     | undefined;
   const cells = opts.cells ?? [...getRegisteredCells().values()];
+  // The state that does NOT live in a cell. A module-level `signal()` survives
+  // a mount exactly as a cell singleton does, and used to be the half nothing
+  // restored — so `zoom.set(2)` in one test silently became the starting point
+  // of the next (an order-dependent failure that passes under --filter, which
+  // is the worst way to find anything). Hermetic means all of the state, not
+  // most of it. Before the cells boot, and independent of whether this app has
+  // any: a signals-only UI leaked just as hard.
+  if (!opts.persist) _resetRootSignals();
   if (cells.length > 0) {
     const standalone = await import("../standalone-air.ts");
     // Opt into virtual time BEFORE anything registers a schedule — the same
@@ -701,25 +818,64 @@ async function _mountTestUI(
     return s;
   }
 
-  /** Re-resolve an element by path at action time — never acts on stale refs. */
-  function resolveElement(path: string): UIElementInfo {
-    const found: UIElementInfo[] = [];
+  /** Elements named `name` that are actually ON SCREEN — a surface entry whose
+   *  vnode never got (or no longer has) a DOM node is not showing anything.
+   *
+   *  This is what made three of the harness's own APIs disagree about one
+   *  element: `present()` counted every surface entry, while resolving one
+   *  required a live node, so a report could see `present("x") === true`,
+   *  `ui.html()` containing it, and `ui.x` throwing "not on the current
+   *  surface" — all at the same instant. One definition of "on screen", used by
+   *  every API, or the harness is lying to somebody. */
+  function liveElements(scope: UISurfaceNode, name: string): UIElementInfo[] {
+    return findElementsDeep(scope, name).filter((e) => e._el);
+  }
+
+  /** Re-resolve an element at ACTION time — never acts on a stale reference.
+   *
+   *  The NAME is the address; the path is only a tie-breaker. Resolving by path
+   *  alone made a handle die the moment its subtree remounted: switching views
+   *  so one stage unmounts and another mounts re-parents the element, its path
+   *  changes, and every handle taken before the switch threw for good — with
+   *  `ui.html()` and `present()` both insisting the element was right there.
+   *  `settle()` could not help, because nothing was pending; the address had
+   *  simply gone stale. So: prefer the exact path (it disambiguates same-named
+   *  siblings), and fall back to the unique live element of that name. */
+  function resolveElement(path: string, name?: string): UIElementInfo {
+    const surface = currentSurface();
+    const byPath: UIElementInfo[] = [];
     const visit = (n: UISurfaceNode) => {
-      for (const e of n.elements) if (e.path === path) found.push(e);
+      for (const e of n.elements) if (e.path === path) byPath.push(e);
       n.children.forEach(visit);
     };
-    visit(currentSurface());
-    const el = found[0];
-    if (!el || !el._el) {
-      const names: string[] = [];
-      const collect = (n: UISurfaceNode) => {
-        n.elements.forEach((e) => names.push(e.path));
-        n.children.forEach(collect);
-      };
-      collect(currentSurface());
-      fail(`testUI: element "${path}" is not on the current surface`, names);
+    visit(surface);
+    const exact = byPath.find((e) => e._el);
+    if (exact) return exact;
+    // The path moved (remount / re-parent / a sibling appearing ahead of it).
+    // The name still addresses exactly one live element → that is the element.
+    const label = name ?? lastSegment(path);
+    const live = liveElements(surface, label);
+    if (live.length === 1) return live[0]!;
+    if (live.length > 1) {
+      fail(
+        `testUI: "${label}" was at ${path}, which no longer exists, and the ` +
+          `name now matches ${live.length} live elements — address the ` +
+          `instance: ui.….<Component>2.${label} (ordinal, tree order)`,
+        live.map((e) => e.path),
+        path,
+      );
     }
-    return el;
+    const names: string[] = [];
+    const collect = (n: UISurfaceNode) => {
+      n.elements.forEach((e) => names.push(e.path));
+      n.children.forEach(collect);
+    };
+    collect(surface);
+    fail(
+      `testUI: element "${path}" is not on the current surface`,
+      names,
+      path,
+    );
   }
 
   // ── Action queue — awaits are optional ───────────────────────────────
@@ -952,7 +1108,7 @@ async function _mountTestUI(
       // Point at every live location instead of a dead end.
       let elsewhere: UIElementInfo[] = [];
       try {
-        elsewhere = findElementsDeep(currentSurface(), name);
+        elsewhere = liveElements(currentSurface(), name);
       } catch { /* unmounted — plain listing below */ }
       fail(
         `testUI: "${name}" is not an element of ${node.path}` +
@@ -960,11 +1116,12 @@ async function _mountTestUI(
             ? `\n  hint: "${node.component}" names both this component and something inside it — use ui.${node.component}.${node.component}`
             : "") +
           (elsewhere.length > 0
-            ? `\n  found elsewhere: ${elsewhere.map((e) => e.path).join(", ")}${
-              elsewhere.length === 1 ? ` — reachable as ui.${name}` : ""
-            }`
+            ? `\n  found elsewhere: ${
+              elsewhere.slice(0, NAME_LIMIT).map((e) => e.path).join(", ")
+            }${elsewhere.length === 1 ? ` — reachable as ui.${name}` : ""}`
             : ""),
         listNames(node),
+        name,
       );
     };
     const eh = elementHandle(resolveInfo);
@@ -992,15 +1149,10 @@ async function _mountTestUI(
         // ui.Modal.ConfirmButton — resolve "Modal" lazily, then chain.
         return lazyHandle(() => {
           const parent = selectParent();
-          const hit = findComponents(parent, name)[0] ??
-            ordinalComponent(parent, name);
-          if (!hit) {
-            fail(
-              `testUI: component "${name}" not found under ${parent.path}`,
-              listNames(parent),
-            );
-          }
-          return hit;
+          const ord = findComponents(parent, name).length === 0
+            ? ordinalComponent(parent, name)
+            : undefined;
+          return ord ?? oneComponent(parent, name);
         }, prop as string);
       },
       apply() {
@@ -1027,15 +1179,16 @@ async function _mountTestUI(
   ): UIComponentHandle {
     let unique = false;
     try {
-      unique = findElementsDeep(selectScope(), name).length === 1;
+      unique = liveElements(selectScope(), name).length === 1;
     } catch { /* not mounted yet — component semantics only */ }
     if (!unique) return comp;
     const eh = elementHandle(() => {
-      const els = findElementsDeep(selectScope(), name);
-      if (els.length === 1 && els[0]!._el) return els[0]!;
+      const els = liveElements(selectScope(), name);
+      if (els.length === 1) return els[0]!;
       fail(
         `testUI: element "${name}" is not on the current surface`,
         els.map((e) => e.path),
+        name,
       );
     });
     return new Proxy(eh as AnyDoc, {
@@ -1062,18 +1215,7 @@ async function _mountTestUI(
         return String(dom?.textContent ?? root.textContent ?? "");
       },
       find(component: string, key?: string | number): UIComponentHandle {
-        return componentHandle(() => {
-          const hits = findComponents(select(), component, key);
-          if (hits.length === 0) {
-            fail(
-              `testUI: component "${component}"${
-                key !== undefined ? ` [key=${key}]` : ""
-              } not found under ${select().path}`,
-              listNames(select()),
-            );
-          }
-          return hits[0]!;
-        });
+        return componentHandle(() => oneComponent(select(), component, key));
       },
     };
     return new Proxy(base as AnyDoc, {
@@ -1090,26 +1232,25 @@ async function _mountTestUI(
           return lazyHandle(select, prop as string);
         }
         const elInfo = node.elements.find((e) => e.name === prop);
-        if (elInfo) return elementHandle(() => resolveElement(elInfo.path));
-        // Component by exact name — direct child first, then deep search.
-        const child = node.children.find((c) => c.component === prop) ??
-          findComponents(node, prop as string)[0];
-        if (child) {
-          const comp = componentHandle(() => {
-            const again = findComponents(select(), prop as string)[0];
-            if (!again) {
-              fail(`testUI: component "${String(prop)}" disappeared`, []);
-            }
-            return again;
-          });
+        if (elInfo) {
+          return elementHandle(() => resolveElement(elInfo.path, elInfo.name));
+        }
+        // Component by exact name — resolved fresh at use time, and ambiguity
+        // is an error rather than "whichever came first in tree order".
+        if (findComponents(node, prop as string).length > 0) {
+          const comp = componentHandle(() =>
+            oneComponent(select(), prop as string)
+          );
           return shadowHybrid(select, prop as string, comp);
         }
         // Element anywhere below this node — same hoist the top level does
         //, so `ui.ToolBar.Settings` reaches a `t`-handle inside a
         // child component without positional navigation.
-        const els = findElementsDeep(node, prop as string);
+        const els = liveElements(node, prop as string);
         if (els.length === 1) {
-          return elementHandle(() => resolveElement(els[0]!.path));
+          return elementHandle(() =>
+            resolveElement(els[0]!.path, prop as string)
+          );
         }
         // Ordinal instance access for same-type siblings: `Button2` → 2nd
         // `Button` in tree order (only when nothing exact matched).
@@ -1132,6 +1273,7 @@ async function _mountTestUI(
                 String(prop)
               } (ordinal, tree order)`,
             els.map((e) => e.path),
+            prop as string,
           );
         }
         // Not on the surface YET — hand back a lazy handle so un-awaited
@@ -1142,6 +1284,59 @@ async function _mountTestUI(
   }
 
   await settle();
+
+  // Explained once per mount, not per poll — `waitFor(() => ui.absent(x))`
+  // asks dozens of times.
+  const _ambiguityWarned = new Set<string>();
+
+  /** Is anything named `name` SHOWING? — the one definition `present`/`absent`
+   *  both answer from.
+   *
+   *  A name can address two things: `t` on an ELEMENT names that element, `t`
+   *  on a COMPONENT is a rename-proof handle for the component. They collide
+   *  only when a component takes `t` as a data prop and forwards it down, and
+   *  then the two answers differ exactly when the element is conditional:
+   *
+   *      <NegativePrompt t="image-negative" … />   // switch always; field when on
+   *      ui.absent("image-negative")               // false — but the FIELD is gone
+   *
+   *  An element that is really on screen therefore wins — it is the more
+   *  specific answer and the one a reader of the assertion expects — and
+   *  `kind` pins the question outright.
+   *
+   *  That leaves exactly one frame where the two answers differ: the element is
+   *  gone while the component still renders something else. The answer there is
+   *  "the component is showing", which is TRUE and almost never what was meant,
+   *  so it is explained rather than returned bare. Only for names known to be
+   *  forwarded to an element (see `_isForwardedHandle`) — a component handle
+   *  that names nothing else is unambiguous and must stay silent. */
+  function showing(name: string, kind?: UIKind): boolean {
+    const scope = currentSurface();
+    if (kind !== "component" && liveElements(scope, name).length > 0) {
+      return true;
+    }
+    if (kind === "element") return false;
+    const comps = findComponents(scope, name);
+    const shows = comps.some(showsSomething);
+    if (
+      shows && kind === undefined && _isForwardedHandle(name) &&
+      !_ambiguityWarned.has(name)
+    ) {
+      _ambiguityWarned.add(name);
+      const owner = comps.find((c) => c.handle === name);
+      console.warn(
+        `[aio:testUI] "${name}" is showing as a COMPONENT${
+          owner ? ` (<${owner.component}> at ${owner.path})` : ""
+        }, but NO element of that name is on screen — and elsewhere this app ` +
+          `uses "${name}" as an element handle, so this answer is probably ` +
+          `not the one you wanted.\n` +
+          `  the element is absent: ui.absent("${name}", "element") === true\n` +
+          `  ask about the component on purpose: ui.present("${name}", ` +
+          `"component") — which also silences this.`,
+      );
+    }
+    return shows;
+  }
 
   /** A cell this mount never booted cannot be asserted against.
    *
@@ -1206,16 +1401,8 @@ async function _mountTestUI(
       await settle();
     },
     html: () => String(root.innerHTML),
-    present: (name: string): boolean => {
-      const scope = currentSurface();
-      return findComponents(scope, name).some(showsSomething) ||
-        findElementsDeep(scope, name).length > 0;
-    },
-    absent: (name: string): boolean => {
-      const scope = currentSurface();
-      return !findComponents(scope, name).some(showsSomething) &&
-        findElementsDeep(scope, name).length === 0;
-    },
+    present: (name: string, kind?: UIKind): boolean => showing(name, kind),
+    absent: (name: string, kind?: UIKind): boolean => !showing(name, kind),
     async expectCell(
       cell: AnyDoc,
       pred: (c: AnyDoc) => boolean,
@@ -1287,18 +1474,9 @@ async function _mountTestUI(
       );
     },
     find(component: string, key?: string | number): UIComponentHandle {
-      return componentHandle(() => {
-        const hits = findComponents(currentSurface(), component, key);
-        if (hits.length === 0) {
-          fail(
-            `testUI: component "${component}"${
-              key !== undefined ? ` [key=${key}]` : ""
-            } not found`,
-            [currentSurface().component],
-          );
-        }
-        return hits[0]!;
-      });
+      return componentHandle(() =>
+        oneComponent(currentSurface(), component, key)
+      );
     },
     unmount() {
       _unmount(handle);
@@ -1358,9 +1536,9 @@ async function _mountTestUI(
       // regardless of nesting — `ui.watchPubkey` instead of the positional
       // `ui.find("Input", 1).watchPubkey`. Requires a UNIQUE match.
       if (surf) {
-        const els = findElementsDeep(surf, name);
+        const els = liveElements(surf, name);
         if (els.length === 1) {
-          return elementHandle(() => resolveElement(els[0]!.path));
+          return elementHandle(() => resolveElement(els[0]!.path, name));
         }
         // Ordinal instance access: ui.Button2 → 2nd Button in tree order.
         const ord = ordinalComponent(surf, name);
@@ -1377,6 +1555,7 @@ async function _mountTestUI(
               `disambiguate with ui.<Component>2.${name} (ordinal, tree order) ` +
               `or ui.find("Component", key).${name}`,
             els.map((e) => e.path),
+            name,
           );
         }
       }

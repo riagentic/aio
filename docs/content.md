@@ -32,7 +32,7 @@
 - [Real-time and high-frequency state](state/real-time.md) — The one question that decides everything: at what cadence does this state
 - [Scheduling](state/scheduling.md) — aio has a built-in scheduler for timers, intervals, daily triggers, and cron
 - [The bridge — what crosses, what doesn't, what freezes](state/the-bridge.md) — A shared cell's methods run on the server; the browser holds a live,
-- [Spec: Transactional cell methods](state/transactional-methods.md) — Status: SHIPPED, and THE DEFAULT since alpha52 — every async method runs
+- [Spec: Transactional cell methods](state/transactional-methods.md) — Status: SHIPPED, OPT-IN (transaction: true) — this page is the contract,
 
 ## UI — AIR renderer — components, signals, routing, forms
 
@@ -50,6 +50,7 @@
 - [Migrating from React to AIR](ui/comparison.md) — Step-by-step migration guide for teams moving from React to AIR.
 - [`aio/ui` — the component kit](ui/kit.md) — A small, deliberately basic set of components for aio's core use case —
 - [React components in aio — islands](ui/react-islands.md) — aio's renderer is AIR, not React.
+- [Reactivity — what is tracked, and where](ui/reactivity-tracking.md) — A field report gave up an hour to this and asked for exactly one thing: "nowhere
 
 ## Persistence & sync — SQLite, CRDT, offline
 
@@ -160,6 +161,7 @@
 - [alpha53 → alpha54](upgrade/from-alpha53-to-alpha54.md) — app that adds nothing to its config behaves exactly as it did on alpha53.
 - [alpha54 → alpha55](upgrade/from-alpha54-to-alpha55.md) — additive or a behaviour improvement your app gets for free.
 - [alpha55 → alpha56](upgrade/from-alpha55-to-alpha56.md) — Two changes can be noticed, and one is a refusal you might meet at boot.
+- [alpha56 → alpha57](upgrade/from-alpha56-to-alpha57.md) — again.
 - [Upgrade from v1.0.0-alpha6 to v1.0.0-alpha7](upgrade/from-alpha6-to-alpha7.md) — mod.ts no longer re-exports renderer primitives.
 - [Upgrade from v1.0.0-alpha7 to v1.0.0-alpha8](upgrade/from-alpha7-to-alpha8.md) — None.
 - [Upgrade from v1.0.0-alpha8 to v1.0.0-alpha9](upgrade/from-alpha8-to-alpha9.md) — The internal machine state field is renamed.

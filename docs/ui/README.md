@@ -8,6 +8,8 @@ AIO uses **AIR** — a built-in signal-based renderer (~8KB, zero dependencies).
   React-free)
 - [Setup](air-setup.md) — connecting to AIO server state
 - [Signals](air-signals.md) — signal, computed, effect, batch, watch
+- [Reactivity — what is tracked, and where](reactivity-tracking.md) — the
+  tracking boundary, and why a UI goes stale
 - [Components](air-components.md) — props, lists, refs, events
 - [Lifecycle](air-lifecycle.md) — hooks, context, errors, devtools
 - [Forms](air-forms.md) — form handling and validation

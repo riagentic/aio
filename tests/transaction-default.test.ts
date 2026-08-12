@@ -1,8 +1,9 @@
-// alpha52 — `transaction: true` is the DEFAULT for async methods. An
-// undeclared cell gets snapshot reads + atomic commit + conflict detection;
-// `transaction: false` opts back into live reads / incremental commits. The
-// spinner idiom under the default is `s.busy = true; s.$commit()`; deliberate
-// live reads are `s.$live` (`until(() => s.$live.flag)`).
+// alpha57 — `transaction` is OPT-IN for async methods (it was the default from
+// alpha52 to alpha56; see .katana/_aio.md for why that came back). An
+// UNDECLARED cell gets live reads + incremental commits, exactly as it was
+// written; `transaction: true` buys snapshot reads + atomic commit + conflict
+// detection. The spinner idiom under the opt-in is `s.busy = true; s.$commit()`;
+// deliberate live reads are `s.$live` (`until(() => s.$live.flag)`).
 import { assertEquals } from "@std/assert";
 import { cell } from "../src/state/cell-create.ts";
 import { bootCells } from "../src/testing/cell-test.ts";
@@ -12,11 +13,144 @@ import type { MethodDraftMeta } from "../src/state/cell-impl.ts";
 // deno-lint-ignore no-explicit-any
 type Any = any;
 
-Deno.test("default: an async method's writes are INVISIBLE until it returns (atomic)", async () => {
+// ── The default: undeclared === pre-alpha52 semantics ──────────────────
+
+Deno.test("DEFAULT (no transaction key): writes commit incrementally and reads are LIVE", async () => {
+  let release: (() => void) | null = null;
+  const gate = new Promise<void>((r) => (release = r));
+  const c = cell("txd_default", {
+    // No `transaction` key — the default is the thing under test. This is the
+    // shape every app written before alpha52 has, and it must behave as it did.
+    state: { a: 0, b: -1 },
+    methods: {
+      async readback(s: { a: number; b: number }) {
+        s.a = 5; // commits incrementally (next microtask)
+        await gate;
+        s.b = s.a; // live read — sees the foreign bump below
+      },
+      bump(s: { a: number }) {
+        s.a += 1;
+      },
+    },
+  });
+  const h = await bootCells([c]);
+  try {
+    const p = (c as Any).readback();
+    await h.settle();
+    assertEquals((c as Any).a, 5, "pre-await write committed incrementally");
+    await (c as Any).bump(); // a → 6 while readback is suspended
+    release!();
+    await p;
+    await h.settle();
+    assertEquals((c as Any).b, 6, "live read saw the foreign bump");
+  } finally {
+    h.dispose();
+  }
+});
+
+Deno.test("DEFAULT: a mid-method write reaches clients before the method returns (the spinner)", async () => {
+  // The regression the alpha52 flip caused in the field: `s.loading = true`
+  // announcing a fetch never published, because the write-set buffered to the
+  // end of the method that was doing the fetching.
+  let release: (() => void) | null = null;
+  const gate = new Promise<void>((r) => (release = r));
+  const c = cell("txd_default_spinner", {
+    state: { busy: false, result: "" },
+    methods: {
+      async work(s: { busy: boolean; result: string }) {
+        s.busy = true; // no $commit() needed off `transaction`
+        await gate;
+        s.result = "done";
+        s.busy = false;
+      },
+    },
+  });
+  const h = await bootCells([c]);
+  try {
+    const p = (c as Any).work();
+    await h.settle();
+    assertEquals((c as Any).busy, true, "the spinner is visible mid-flight");
+    release!();
+    await p;
+    await h.settle();
+    assertEquals([(c as Any).busy, (c as Any).result], [false, "done"]);
+  } finally {
+    h.dispose();
+  }
+});
+
+Deno.test("DEFAULT: a stand-down guard re-read after an await is NOT inert", async () => {
+  // searchWorkspace's shape: write the query, await, then compare against the
+  // CURRENT query to drop a stale response. Under pinned reads the comparison
+  // reads the method's own write and can never fire — silently keeping stale
+  // results. This asserts the guard actually fires.
+  let release: (() => void) | null = null;
+  const gate = new Promise<void>((r) => (release = r));
+  const c = cell("txd_default_guard", {
+    state: { query: "", results: "" },
+    methods: {
+      async search(s: { query: string; results: string }, q: string) {
+        s.query = q;
+        await gate;
+        if (s.query !== q) return; // a newer keystroke landed — stand down
+        s.results = `hits:${q}`;
+      },
+      setQuery(s: { query: string }, q: string) {
+        s.query = q;
+      },
+    },
+  });
+  const h = await bootCells([c]);
+  try {
+    const p = (c as Any).search("old");
+    await h.settle();
+    await (c as Any).setQuery("new"); // a newer keystroke while suspended
+    release!();
+    await p;
+    await h.settle();
+    assertEquals((c as Any).results, "", "the stale response stood down");
+  } finally {
+    h.dispose();
+  }
+});
+
+Deno.test("DEFAULT: an undeclared async cell boots SILENT (no hint, nothing to migrate)", async () => {
+  const { log } = await import("../src/diagnostics/logger.ts");
+  const warns: string[] = [];
+  // deno-lint-ignore no-explicit-any
+  const orig = (log as any).warn;
+  // deno-lint-ignore no-explicit-any
+  (log as any).warn = (...args: unknown[]) => {
+    warns.push(args.map(String).join(" "));
+  };
+  try {
+    cell("txd_silent", {
+      state: { n: 0 },
+      methods: {
+        async go(s: { n: number }) {
+          await Promise.resolve();
+          s.n++;
+        },
+      },
+    });
+  } finally {
+    // deno-lint-ignore no-explicit-any
+    (log as any).warn = orig;
+  }
+  assertEquals(
+    warns.filter((w) => w.includes("transaction")).length,
+    0,
+    "no transaction hint — an undeclared cell is correct as written",
+  );
+});
+
+// ── The opt-in: transaction: true still buys everything it did ─────────
+
+Deno.test("transaction: true — writes are INVISIBLE until the method returns (atomic)", async () => {
   let release: (() => void) | null = null;
   const gate = new Promise<void>((r) => (release = r));
   const c = cell("txd_atomic", {
-    // No `transaction` key — the default is the thing under test.
+    transaction: true,
     state: { a: 0, b: 0 },
     methods: {
       async both(s: { a: number; b: number }) {
@@ -48,17 +182,18 @@ Deno.test("default: an async method's writes are INVISIBLE until it returns (ato
   }
 });
 
-Deno.test("default: the spinner idiom — s.busy = true; s.$commit() publishes mid-method", async () => {
+Deno.test("transaction: true — the spinner idiom: s.busy = true; s.$commit() publishes mid-method", async () => {
   let release: (() => void) | null = null;
   const gate = new Promise<void>((r) => (release = r));
   const c = cell("txd_spinner", {
+    transaction: true,
     state: { busy: false, result: "" },
     methods: {
       async work(
         s: { busy: boolean; result: string } & Partial<MethodDraftMeta>,
       ) {
         s.busy = true;
-        s.$commit!(); // the alpha52 spinner idiom
+        s.$commit!(); // the transactional spinner idiom
         await gate;
         s.result = "done";
         s.busy = false;
@@ -79,8 +214,9 @@ Deno.test("default: the spinner idiom — s.busy = true; s.$commit() publishes m
   }
 });
 
-Deno.test("default: until(() => s.$live.flag) sees foreign commits (pinned s does not)", async () => {
+Deno.test("transaction: true — until(() => s.$live.flag) sees foreign commits (pinned s does not)", async () => {
   const c = cell("txd_live", {
+    transaction: true,
     state: { flag: false, out: "" },
     methods: {
       raise(s: { flag: boolean }) {
@@ -108,7 +244,9 @@ Deno.test("default: until(() => s.$live.flag) sees foreign commits (pinned s doe
   }
 });
 
-Deno.test("transaction: false — the opt-out restores live reads + incremental commits", async () => {
+Deno.test("transaction: false — the explicit spelling matches the default exactly", async () => {
+  // Apps that took `aiol --safe-fix` carry an explicit `transaction: false`.
+  // It must stay a synonym for the default, not a third behavior.
   let release: (() => void) | null = null;
   const gate = new Promise<void>((r) => (release = r));
   const c = cell("txd_optout", {
@@ -116,9 +254,9 @@ Deno.test("transaction: false — the opt-out restores live reads + incremental 
     state: { a: 0, b: -1 },
     methods: {
       async readback(s: { a: number; b: number }) {
-        s.a = 5; // commits incrementally (next microtask)
+        s.a = 5;
         await gate;
-        s.b = s.a; // live read
+        s.b = s.a;
       },
       bump(s: { a: number }) {
         s.a += 1;
@@ -130,7 +268,7 @@ Deno.test("transaction: false — the opt-out restores live reads + incremental 
     const p = (c as Any).readback();
     await h.settle();
     assertEquals((c as Any).a, 5, "pre-await write committed incrementally");
-    await (c as Any).bump(); // a → 6 while readback is suspended
+    await (c as Any).bump();
     release!();
     await p;
     await h.settle();
@@ -138,91 +276,4 @@ Deno.test("transaction: false — the opt-out restores live reads + incremental 
   } finally {
     h.dispose();
   }
-});
-
-Deno.test("alpha52 hint: an async cell with NO transaction key hints ONCE at cell(); deciders and adopters stay silent", async () => {
-  const { _resetTransactionHints } = await import(
-    "../src/state/cell-methods-factory.ts"
-  );
-  const { log } = await import("../src/diagnostics/logger.ts");
-  _resetTransactionHints();
-  const warns: string[] = [];
-  // deno-lint-ignore no-explicit-any
-  const orig = (log as any).warn;
-  // deno-lint-ignore no-explicit-any
-  (log as any).warn = (...args: unknown[]) => {
-    warns.push(args.map(String).join(" "));
-  };
-  try {
-    // Undeclared async cell → one hint, exactly once (second def same name).
-    cell("txd_hint", {
-      state: { n: 0 },
-      methods: {
-        async go(s: { n: number }) {
-          await Promise.resolve();
-          s.n++;
-        },
-      },
-    });
-    cell("txd_hint", {
-      state: { n: 0 },
-      methods: {
-        async go(s: { n: number }) {
-          await Promise.resolve();
-          s.n++;
-        },
-      },
-    });
-    // Explicit opt-out → silent.
-    cell("txd_hint_optout", {
-      transaction: false,
-      state: { n: 0 },
-      methods: {
-        async go(s: { n: number }) {
-          await Promise.resolve();
-          s.n++;
-        },
-      },
-    });
-    // Explicit opt-in → silent.
-    cell("txd_hint_optin", {
-      transaction: true,
-      state: { n: 0 },
-      methods: {
-        async go(s: { n: number }) {
-          await Promise.resolve();
-          s.n++;
-        },
-      },
-    });
-    // Adopted the new world ($commit in a body) → silent.
-    cell("txd_hint_adopted", {
-      state: { n: 0 },
-      methods: {
-        async go(s: { n: number } & Partial<MethodDraftMeta>) {
-          s.n++;
-          s.$commit!();
-          await Promise.resolve();
-        },
-      },
-    });
-    // Sync-only cell → silent (nothing flips for it).
-    cell("txd_hint_sync", {
-      state: { n: 0 },
-      methods: {
-        bump(s: { n: number }) {
-          s.n++;
-        },
-      },
-    });
-  } finally {
-    // deno-lint-ignore no-explicit-any
-    (log as any).warn = orig;
-  }
-  const hints = warns.filter((w) => w.includes("no `transaction` key"));
-  assertEquals(hints.length, 1, "exactly one hint, for the undecided cell");
-  const h = hints[0]!;
-  assertEquals(h.includes("txd_hint"), true, "names the cell");
-  assertEquals(h.includes("transaction: false"), true, "names the opt-out");
-  assertEquals(h.includes("$commit"), true, "names the spinner idiom");
 });

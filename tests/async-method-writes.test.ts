@@ -160,8 +160,9 @@ Deno.test("async: read-your-writes survives a no-op write + flush (stale overlay
 // breaking the other, so the contract is DOCUMENTED (docs/state/methods.md
 // "Error handling") — and pinned here, because a doc claim with no gate is how
 // it silently drifts.
-Deno.test("throw: SYNC and ASYNC methods BOTH roll back (alpha52 default); transaction:false keeps async writes", async () => {
+Deno.test("throw: a SYNC method rolls back, an ASYNC method keeps its writes; transaction:true rolls both back", async () => {
   const c = cell("thr-sem", {
+    // No `transaction` key — the default, and the shape the field report had.
     state: { syncNote: "", syncN: 0, asyncNote: "", asyncPost: "" },
     methods: {
       // deno-lint-ignore no-explicit-any
@@ -179,9 +180,11 @@ Deno.test("throw: SYNC and ASYNC methods BOTH roll back (alpha52 default); trans
       },
     },
   });
-  // The opted-out twin — pins the incremental-commit escape hatch.
-  const legacy = cell("thr-sem-legacy", {
-    transaction: false,
+  // The opted-IN twin — a transactional cell discards the whole write-set on a
+  // throw, which is the one way to get sync-like rollback out of an async
+  // method. Opt-in since alpha57 (.katana/_aio.md).
+  const tx = cell("thr-sem-tx", {
+    transaction: true,
     state: { note: "", post: "" },
     methods: {
       // deno-lint-ignore no-explicit-any
@@ -193,7 +196,7 @@ Deno.test("throw: SYNC and ASYNC methods BOTH roll back (alpha52 default); trans
       },
     },
   });
-  const App = () => h("div", null, `${c.syncNote}${c.asyncNote}${legacy.note}`);
+  const App = () => h("div", null, `${c.syncNote}${c.asyncNote}${tx.note}`);
   const ui = await testUI(App, { document: doc() });
 
   // deno-lint-ignore no-explicit-any
@@ -211,19 +214,19 @@ Deno.test("throw: SYNC and ASYNC methods BOTH roll back (alpha52 default); trans
   await sleep(20);
   assertEquals(
     [c.asyncNote, c.asyncPost],
-    ["", ""],
-    "alpha52: async methods are transactional by default — a throw discards " +
-      "the whole write-set, same as sync",
+    ["refused: too large", "written after the await"],
+    "the default: an async method commits incrementally, so what it wrote " +
+      "before the throw is already state (the dm #4 contract)",
   );
 
   // deno-lint-ignore no-explicit-any
-  await (legacy as any).refuse().catch(() => {});
+  await (tx as any).refuse().catch(() => {});
   await ui.settle();
   await sleep(20);
   assertEquals(
-    [legacy.note, legacy.post],
-    ["refused: too large", "written after the await"],
-    "transaction: false — incremental commits survive the throw (the opt-out)",
+    [tx.note, tx.post],
+    ["", ""],
+    "transaction: true — the whole write-set is discarded, same as sync",
   );
   await ui.dispose();
 });

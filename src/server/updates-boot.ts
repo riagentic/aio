@@ -147,9 +147,10 @@ export function beginUpdates(): void {
   begin?.();
 }
 
-export async function startUpdates(
-  deps: StartUpdatesDeps,
-): Promise<StartedUpdates> {
+// Synchronous, and says so — same story as `startFeedback`: the dynamic import
+// that made it async became static, and only the keyword was left. Callers
+// already `await` it, which is unchanged either way.
+export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
   const trust = readTrust(deps.dataDir);
   const config = resolveUpdates(deps.updates, {
     flag: deps.flag,

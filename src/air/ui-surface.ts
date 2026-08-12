@@ -77,6 +77,38 @@ export type UISurfaceNode = {
   _dom?: any;
 };
 
+// FORWARDED handles — a `t` the author gave to an ELEMENT, through a component.
+//
+// `t` on an element names that element; `t` on a component is an additional,
+// rename-proof handle for the component. Those two meanings collide whenever a
+// component takes `t` as a data prop and passes it down — and that is not an
+// exotic app mistake, it is what aio's OWN component kit does: `<Button
+// t="Home">`, `<Input t="who">`, `<Select t="sel">` all forward `t` to the
+// element they render. Every app built on `aio/ui` therefore has names that
+// address a component AND an element at once.
+//
+// So this is not something to scold an author about — it is a fact of the
+// model, and the harness has to answer well in spite of it. Presence resolves
+// the ELEMENT first (deterministic, frame-local), and a handle recorded here as
+// forwarded lets the harness explain the one frame where the two answers
+// genuinely differ: the element is gone while the component still renders
+// something else. Recording is observation only — it never changes an answer,
+// because a behaviour that depended on what a previous render happened to show
+// would make tests order-dependent.
+const _forwardedHandles = new Set<string>();
+
+/** @internal Has this name ever been a `t` that a component forwarded to an
+ *  element it renders? Advisory only — used to EXPLAIN an ambiguous answer,
+ *  never to decide one. */
+export function _isForwardedHandle(name: string): boolean {
+  return _forwardedHandles.has(name);
+}
+
+/** @internal test isolation — clear the forwarded-handle observations. */
+export function _resetForwardedHandles(): void {
+  _forwardedHandles.clear();
+}
+
 /** Collect every interactive element named `name` anywhere in the subtree —
  *  lets a `t`/data-testid handle be addressed from the top level regardless of
  *  how deeply it's nested, instead of a positional component index. */
@@ -405,6 +437,12 @@ function walkComponent(
     if (t) node.text = capText(t);
   }
   walkOutput(v._rendered ?? null, node, new Set(), labelCtx);
+  // The subtree is built: if this component's `t` handle is ALSO the name of
+  // something it rendered, the author gave that name to the element and the
+  // component merely carried it. Remember it (see _forwardedHandles).
+  if (node.handle && findElementsDeep(node, node.handle).length > 0) {
+    _forwardedHandles.add(node.handle);
+  }
   return node;
 }
 
