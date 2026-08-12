@@ -13,6 +13,7 @@ import type { ScheduleEffect } from "../state/schedule.ts";
 import type { OwnEffect } from "../state/own.ts";
 import { registerCall } from "../state/cell-impl.ts";
 import { _resetAioRuntime } from "../state/runtime-reset.ts";
+import { _resetRootSignals } from "../state/signal.ts";
 import { _armTestStrict } from "./test-strict.ts";
 import { attachMeta } from "../state/cell-catalog.ts";
 import { runWithUser } from "../server/auth-context.ts";
@@ -536,8 +537,11 @@ export async function bootCells(cells: CellDef[]): Promise<BootHandle> {
   // clock nothing advances means no schedule ever fires. Tests want the
   // virtual clock (that is what `advance(ms)` drives); an app must not get it.
   standalone._useVirtualSchedules();
-  // Hermetic: reset any prior runtime state so these cells start pristine.
+  // Hermetic: reset any prior runtime state so these cells start pristine —
+  // including module-level `signal()`s, which are state a test writes just as
+  // easily as a cell and which nothing used to restore.
   standalone._resetState();
+  _resetRootSignals();
   await standalone.aio.run({
     appId: "bootcells",
     // deno-lint-ignore no-explicit-any

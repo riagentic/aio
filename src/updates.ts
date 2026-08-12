@@ -9,7 +9,7 @@
 //   import { updates } from "aio/updates";
 //   …
 //   {updates.available && <UpdateBanner />}
-import { createUpdatesCell } from "./state/updates-cell.ts";
+import { createUpdatesCell, type UpdatesCell } from "./state/updates-cell.ts";
 
 export {
   type AvailableUpdate,
@@ -23,7 +23,7 @@ export {
  *  which is the opt-in act described above, unchanged. The cell module itself
  *  no longer registers on import, so the boot path can reach it with an
  *  ordinary static import instead of a dynamic one (see `createUpdatesCell`). */
-export const updates = createUpdatesCell();
+export const updates: UpdatesCell = createUpdatesCell();
 
 export type {
   CompatVerdict,

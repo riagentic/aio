@@ -105,9 +105,23 @@ sandbox so no test can write into your real `~/.<appId>`. A green test means
 what production means. If you find a case where a harness is more permissive
 than `deno task dev`, that is a bug — report it.
 
+**The state is right and the DOM is stale.** A read subscribes only while a
+component body, a `computed()` or an `effect()` is running — so a read you
+deferred (inside `onMount`, a timer, a `.then()`, after an `await`) tracks
+nothing and nothing warns. Nesting is never the cause: a read inside a ternary,
+a fragment, a `.map()` or a helper you call is still inside the body. The full
+rule, and the checklist for a stale UI, is
+[Reactivity — what is tracked, and where](../ui/reactivity-tracking.md).
+
 **Content-derived names change with copy.** `SubmitButton` came from the text
 "Submit" — reword the button and long-lived `am` scripts break. Pin stable
 handles with `t="save"` or `data-testid`.
+
+**One `t` can name two things.** `t` on an element names that element; `t` on a
+component is a rename-proof handle for the component — and aio's own kit
+forwards `t` down (`<Button t="Home">`), so the same string often addresses
+both. `present`/`absent` resolve the element first and take a kind when you need
+to be explicit: `ui.absent("image-negative", "element")`.
 
 **Actions queue; observations await.** In `testUI`, actions need no `await`
 (ordered queue), but reads (`.text`, `.value`) are instant snapshots — after

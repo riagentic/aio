@@ -514,13 +514,19 @@ export function buildMethodsExecutor(
 
       // Transactional methods: reads see a STABLE snapshot captured
       // at entry (an `await` never changes them), and writes buffer + commit
-      // atomically at return. alpha52: this is the DEFAULT for async methods —
-      // `transaction: false` opts out into the old live-read/incremental-commit
-      // behavior. Mid-method publishing is spelled `s.$commit()`; deliberately
-      // fresh reads are `s.$live`.
-      const transactional =
-        (config as { transaction?: unknown } | undefined)?.transaction !==
-          false;
+      // atomically at return. Mid-method publishing is spelled `s.$commit()`;
+      // deliberately fresh reads are `s.$live`.
+      //
+      // OPT-IN, by the boot-detectable rule (.katana/_aio.md): alpha52 made it
+      // the default and alpha57 took that back. The flip changed the semantics
+      // of every existing async method — pinned reads made stand-down guards
+      // inert, and buffered writes stopped a spinner ever reaching the client —
+      // with no type error, no runtime error and no failed test to find it by.
+      // Only a cell that ASKS for the isolation gets it.
+      const txValue = (config as { transaction?: unknown } | undefined)
+        ?.transaction;
+      const transactional = txValue === true ||
+        (typeof txValue === "object" && txValue !== null);
       // Cancellation (perfect-aio D1): every async call gets an
       // AbortController; cancelOn triggers abort it, the method observes it via
       // `s.$signal`. Untracked on settle either way.

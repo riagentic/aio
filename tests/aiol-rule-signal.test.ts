@@ -882,7 +882,7 @@ const VIOLATIONS: Case[] = [
     }),
     expect: "does not match dep/aio",
   },
-  // alpha52 — the effect channel deprecations + the transaction MIGRATION
+  // alpha52 — the effect channel deprecations
   {
     name: "alpha52: return-ed single effect",
     files: app({
@@ -923,24 +923,9 @@ const VIOLATIONS: Case[] = [
     }),
     expect: "returning an effects ARRAY is deprecated",
   },
-  {
-    name: "alpha52: async cell with no transaction key (MIGRATION)",
-    files: app({
-      "src/cell.ts": cellFile(
-        "counter",
-        `{
-  state: { count: 0 },
-  methods: {
-    async load(s: { count: number }) {
-      await Promise.resolve();
-      s.count += 1;
-    },
-  },
-}`,
-      ),
-    }),
-    expect: "alpha52 made `transaction: true` the async default",
-  },
+  // (The alpha52 transaction-MIGRATION fixture lived here. alpha57 returned
+  //  `transaction` to opt-in and retired the rule; the cell shape it used is
+  //  now legal code, covered by "aiol: legal code is not reported".)
   {
     name: "alpha52: listensTo array form",
     files: app({

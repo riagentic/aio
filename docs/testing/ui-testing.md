@@ -65,9 +65,16 @@ testUI(App, "add a todo end-to-end", async (ui) => {
 - Cells run on the real local dispatch loop (the android runtime). Hermetic by
   default (`persist: false`, unique key — no state leaks between tests).
 - **Registered cells reset to their `state:` defaults on each mount** — you do
-  **not** need to hand-roll a `resetCells()`. Only _non-cell_ module state (e.g.
-  a module-level vault holder, a `let` singleton) needs manual reset in your
-  test.
+  **not** need to hand-roll a `resetCells()`.
+- **Module-level `signal()`s reset too**, to the value they were created with —
+  they are state a test writes exactly as easily as a cell, and from inside a
+  test the two are indistinguishable. (They used to survive, so a test that set
+  `zoom` changed the meaning of a later test: an order-dependent failure that
+  passes under `--filter`, which is the worst way to find one.) Signals created
+  _during_ a render — `useLocal`, `useRef(signal(…))` — are per-mount anyway.
+  The same reset runs for `testCell` and `bootCells`.
+- What still needs manual reset is module state that is neither: a `let`
+  singleton, a module-level `Map`, a lazily-built client handle.
 - **Fire schedules deterministically with `await ui.advance(ms)`** — advances a
   virtual clock and dispatches every **cell** `schedule.after`/`every` now due,
   which makes debounce, `backoff` and `poll` unit-testable without real timers.
@@ -147,6 +154,84 @@ comes from an explicit `role` first, then the tag/type (a clickable `div.button`
 is a Button). The `t` prop also puts **non-interactive** elements on the surface
 (assertion targets) and is the stable handle to use where visible copy may
 change — it's typed and stripped from the DOM.
+
+Names match **exactly**. There is no prefix or substring matching anywhere in
+the surface — `toggle-negative` and `negative` are two unrelated handles.
+
+### `t` on a COMPONENT names the component
+
+`t` on an element names that element; `t` on a component is an additional,
+rename-proof handle for the component itself:
+
+```tsx
+<PlacementAdvice t="advice" />; // ui.find("advice") — survives a rename
+```
+
+One string can therefore name two things — and this is the trap a field report
+called the most confusing thing it hit:
+
+```tsx
+// NegativePrompt CONSUMES t and forwards it to its inner field
+<NegativePrompt t="image-negative" />; // a switch; the field only when on
+ui.absent("image-negative"); // false — the COMPONENT is showing (the switch)
+```
+
+The field really was gone; the question answered was "is the component rendering
+anything". Two ways out, either is fine:
+
+- **Say which one you mean** — `present`/`absent` take a kind:
+
+  ```ts
+  ui.absent("image-negative", "element"); // true — no such element on screen
+  ui.present("image-negative", "component"); // true — the switch is showing
+  ```
+
+- **Don't make one name mean two things** — rename the data prop a component
+  forwards (`fieldT`), so `t` on the component stays the component's handle.
+
+Omit the kind and a live element wins over a component; on the ambiguous frame
+(a component matched only by a forwarded `t`, with no element behind it) the
+harness warns and names both escape hatches rather than returning a confident
+wrong boolean.
+
+### Presence means SHOWING, and every API agrees on it
+
+`present`/`absent`, handle resolution and `ui.html()` answer from one
+definition: an element is on screen when it has a live DOM node, and a component
+is present when it put something on screen (a component that rendered `null` is
+absent).
+
+Handles are addressed by **name**; a path is only a tie-breaker between
+same-named siblings. So a handle taken before a subtree remounts still resolves
+after it:
+
+```ts
+const prompt = ui.prompt; // resolved inside <StageA/>
+await ui.toVideo.click(); // …the stage unmounts, <StageB/> mounts
+await prompt.setValue("a cat"); // still the right element
+```
+
+When a name misses, the failure lists the **closest** candidates, not every
+handle in the app — set `AIO_TEST_NAMES=all` to see the exhaustive list.
+
+### Same-named siblings are positional; a deep search is not
+
+Two rules, because they answer two different questions:
+
+```ts
+ui.TodoRow; //              the FIRST instance — bare name, by position
+ui.TodoRow1; //             the first, said explicitly (same instance)
+ui.TodoRow3; //             the third
+ui.find("TodoRow", "b"); // by AIR list key — stable across reorders
+```
+
+A **name lookup within a scope** is positional: the bare name is the first
+instance and the ordinals address the rest. Every miss listing teaches it
+(`TodoRow ×3 — use TodoRow2…TodoRow3 for the later instances`).
+
+A **deep hoist** — `ui.Save` reaching an element wherever it is nested — is a
+search, and a search with two hits has no right answer, so it throws and lists
+both paths. Disambiguate with the owning instance: `ui.TodoRow2.Save`.
 
 ## Typed clients: `testGen`
 

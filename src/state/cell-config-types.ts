@@ -161,11 +161,16 @@ export type MethodsCellConfig<
    *  discards). Kills the read-after-await class; sync methods are already
    *  atomic.
    *
-   *  THE DEFAULT since alpha52. `transaction: false` opts a cell back into
-   *  live reads + incremental commits (every write publishes on the next
-   *  microtask). Under the default, publish mid-method with `s.$commit()`
-   *  (the spinner idiom: `s.busy = true; s.$commit();`) and read current
-   *  state on purpose with `s.$live` (e.g. `until(() => s.$live.ready)`).
+   *  OPT-IN (`transaction: true`). It was briefly the default — alpha52 to
+   *  alpha56 — and alpha57 took that back: the flip silently re-specified every
+   *  async method already written, and nothing in a type, a runtime error or a
+   *  test could catch it. Cells that leave it unset keep live reads +
+   *  incremental commits (every write publishes on the next microtask).
+   *
+   *  Turn it on for a cell where a wrong merge costs something real — money,
+   *  inventory, a ledger. Then publish mid-method with `s.$commit()` (the
+   *  spinner idiom: `s.busy = true; s.$commit();`) and read current state on
+   *  purpose with `s.$live` (e.g. `until(() => s.$live.ready)`).
    *
    *  `{ serialize: true }` additionally runs this cell's transactional ASYNC
    *  methods one at a time (a per-cell mutex) when read-modify-write
