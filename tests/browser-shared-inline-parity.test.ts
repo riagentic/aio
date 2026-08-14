@@ -122,12 +122,26 @@ Deno.test("browser-shared: schedule effect creators are output-identical (random
     const id = `id-${Math.floor(r() * 50)}`;
     const ms = Math.floor(r() * 100_000) + 1;
     const action = { type: `a${Math.floor(r() * 10)}`, payload: { i } };
-    const pick = Math.floor(r() * 7);
+    const pick = Math.floor(r() * 8);
+    // Outcome, not just return value: for the ambiguous 3rd-argument forms the
+    // two copies could DISAGREE by one throwing and the other returning, which
+    // is exactly what happened for an action CREATOR (a callable object
+    // carrying a string `.type`). The browser accepted it as the action while
+    // the server read the same call as the deprecated opts-third order and
+    // threw `ms must be finite` — one source file, two behaviours, with the
+    // permissive side being the client.
+    const outcome = (fn: (...a: unknown[]) => unknown, args: unknown[]) => {
+      try {
+        return { ok: fn(...args) };
+      } catch (e) {
+        return { threw: (e as Error).message };
+      }
+    };
     const call = (name: string, args: unknown[]) => {
       checked++;
       assertEquals(
-        bs[name]!(...args),
-        ss[name]!(...args),
+        outcome(bs[name]!, args),
+        outcome(ss[name]!, args),
         `schedule.${name}(${JSON.stringify(args)}) diverges`,
       );
     };
@@ -166,6 +180,26 @@ Deno.test("browser-shared: schedule effect creators are output-identical (random
           ...(r() < 0.5 ? { max: 60_000 } : {}),
         }, action]);
         break;
+      case 6: {
+        // An action CREATOR in the action slot: `cell.method` is a FUNCTION
+        // with a string `.type`, and it is what people reach for first.
+        const creator = Object.assign(
+          (...args: unknown[]) => ({ type: action.type, payload: { args } }),
+          { type: action.type },
+        );
+        // THIRD argument — the ambiguous slot both copies have to read the
+        // same way.
+        const name = r() < 0.5 ? "backoff" : "poll";
+        call(name, [
+          id,
+          Math.floor(r() * 45),
+          creator,
+          name === "backoff"
+            ? { base: Math.floor(r() * 2000) + 1 }
+            : { every: Math.floor(r() * 10_000) + 1 },
+        ]);
+        break;
+      }
       default:
         call(r() < 0.5 ? "next" : "cancel", r() < 0.5 ? [id, action] : [id]);
         break;

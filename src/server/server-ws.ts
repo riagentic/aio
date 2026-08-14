@@ -5,6 +5,7 @@ import { invokeServerFn } from "./server-fns.ts";
 import {
   _clearClientDegraded,
   _recordClientDegraded,
+  degraded,
   type DegradedChange,
 } from "../diagnostics/degraded.ts";
 import {
@@ -36,6 +37,21 @@ import {
   PROTOCOL_MISMATCH_CLOSE_CODE,
   protoHello,
 } from "../protocol/protocol-version.ts";
+
+/** Is this socket "error" just the peer going away?
+ *
+ *  Closing a window, killing a tab, pulling a laptop off wifi — none of them
+ *  send a close frame, and every one of them arrives here as an error whose
+ *  message is `Unexpected EOF` (or a reset/broken pipe). Reporting those at
+ *  WARN made the last line of every clean shutdown look like a fault, which is
+ *  the fastest way to teach someone that warnings are background noise.
+ *
+ *  Pure and exported so the classification is testable without a socket — and
+ *  so widening it later is a visible, reviewed edit rather than a `catch {}`. */
+export function isPeerGone(message: string): boolean {
+  return /unexpected eof|connection reset|broken pipe|reset by peer|connection closed before message completed|os error 104|os error 32/i
+    .test(message);
+}
 
 /** Safety limits — prevent resource exhaustion */
 const WS_MAX_MESSAGE = 1_000_000; // 1MB — reject oversized WS messages
@@ -139,6 +155,12 @@ export type ClientMeta = {
   isElectron: boolean;
   user?: AioUser;
   lastFullJson?: string;
+  /** True when `lastFullJson` is only a SIZE memo and no longer describes what
+   *  the client holds — a patch moved the client on without re-serializing.
+   *  The dedup ("client already has this state, skip") may only trust
+   *  `lastFullJson` while this is false; see the flush loop in
+   *  server-broadcast.ts. */
+  lastFullJsonStale?: boolean;
   msgCount: number;
   bytesThisSec: number;
   msgResetTimer?: ReturnType<typeof setTimeout>;
@@ -499,12 +521,24 @@ export function createWsManager(deps: WsDeps): WsManager {
     };
 
     socket.onerror = (e) => {
-      log.warn(
-        "ws",
-        `error ${clientId.slice(0, 8)} — ${
-          e instanceof ErrorEvent ? e.message : e
-        }`,
-      );
+      const detail = e instanceof ErrorEvent ? e.message : String(e);
+      // A peer that vanishes without a close frame is a DISCONNECT, not a
+      // fault. Closing the window is the ordinary way to end an Electron or
+      // browser session, and Deno surfaces it as `Unexpected EOF` on the error
+      // channel — so the last line of every single run was
+      // `WARN ws error … — Unexpected EOF`, which reads as something going
+      // wrong at exactly the moment nothing did (a field report's "the ugly").
+      // The teardown below is identical either way; only the label changes,
+      // and the text is still there at debug level.
+      if (isPeerGone(detail)) {
+        log.debug(
+          "ws",
+          `client ${clientId.slice(0, 8)} went away without a close frame ` +
+            `(${detail})`,
+        );
+      } else {
+        log.warn("ws", `error ${clientId.slice(0, 8)} — ${detail}`);
+      }
       connections.delete(socket);
       _clearTimers(meta);
       _cleanupVitals(meta);
@@ -551,7 +585,11 @@ export function createWsManager(deps: WsDeps): WsManager {
         socket.send(encRaw("state", msg));
         meta.lastFullJson = msg;
       } catch (e) {
-        deps.debug(`ws: getUIState error on connect — ${e}`);
+        // The client is now connected and holds NO state — a blank UI, for
+        // this client, forever (nothing re-sends a missed initial frame). At
+        // `debug` that reached no sink under the default log level, so the
+        // server believed it had served a client it had not.
+        degraded("ws:initial-state").fail(e);
       }
       if (deps.getTTBroadcast) {
         try {
@@ -574,7 +612,12 @@ export function createWsManager(deps: WsDeps): WsManager {
       try {
         _handleMessage(socket, meta, e);
       } catch (err) {
-        deps.debug(`ws: malformed message — ${err}`);
+        // "malformed message" is a GUESS about whose fault this is, and it was
+        // made at `debug`: a genuine bug in server message handling looked
+        // exactly like a bad client frame, and both were invisible. The tracker
+        // separates them by frequency — one is a blip, a repeating one
+        // escalates to /__aio/health and names the last error.
+        degraded("ws:message").fail(err);
       }
     };
 
@@ -1050,7 +1093,13 @@ export function createWsManager(deps: WsDeps): WsManager {
         deps.vitalsSystem.serverTransport.onClientPing(vmeta.id);
         const staleness = typeof ping.ms === "number" ? ping.ms : 0;
         const prevMul = vmeta.bpMultiplier;
-        if (staleness > BP_STALENESS_HIGH) {
+        // `vitals.backpressure: false` turns the per-client throttle off. The
+        // option had NO reader at all — it type-checked, was accepted, and did
+        // nothing, while the hint engine told people to toggle it.
+        if (!deps.vitalsSystem.backpressureEnabled) {
+          vmeta.bpMultiplier = 1;
+          vmeta.bpConsecutiveLow = 0;
+        } else if (staleness > BP_STALENESS_HIGH) {
           vmeta.bpMultiplier = 4;
           vmeta.bpConsecutiveLow = 0;
         } else if (staleness > BP_STALENESS_MODERATE) {
@@ -1111,6 +1160,7 @@ export function createWsManager(deps: WsDeps): WsManager {
       );
       socket.send(encRaw("state", msg));
       meta.lastFullJson = msg;
+      meta.lastFullJsonStale = false; // exact again: the client holds this text
       meta.bpLastSentAt = Date.now();
     } catch (err) {
       log.warn("ws", `filtered state send error — ${err}`);
@@ -1125,6 +1175,7 @@ export function createWsManager(deps: WsDeps): WsManager {
       );
       socket.send(encRaw("state", msg));
       meta.lastFullJson = msg;
+      meta.lastFullJsonStale = false; // exact again: the client holds this text
       meta.bpLastSentAt = Date.now();
     } catch (err) {
       log.warn("ws", `resync send error — ${err}`);

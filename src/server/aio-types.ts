@@ -24,6 +24,8 @@ import type { ReduceBreakdown } from "../diagnostics/time-travel.ts";
  *  `resolveUser`/`users` entry attaches are readable without casting — the
  *  one opened definition lives in state/cell-types.ts (`AccessUser`). */
 import type { AccessUser } from "../state/cell-types.ts";
+/** The signed-in caller an aio app sees — `id` plus whatever your
+ *  `resolveUser`/`users` config attaches (roles, profile fields). */
 export type AioUser = AccessUser;
 
 /** AUTH-2/3 options for `auth: {...}` (auth: true = all defaults). */
@@ -388,6 +390,15 @@ export type CellsConfig = {
     persist?: import("../state/cell-types.ts").CellFieldFilter;
   };
   port?: number;
+  /** Bind address. Defaults to `127.0.0.1`, or `0.0.0.0` under `expose`.
+   *
+   *  It was allowlisted, forwarded by the config bridge and read by the
+   *  server, appears in `aio doctor`'s printout, and is the example
+   *  `docs/auth/auth.md` gives — but it was missing from THIS type, the one
+   *  surface an app must compile against, so following the docs failed
+   *  `deno task check`. Present in 2 of 3 surfaces is the trap this project
+   *  keeps a gate for. */
+  host?: string;
   /** Serve on 0.0.0.0 with TLS instead of loopback-only — the config twin of
    *  `--expose`. A compiled binary run by a service manager has no flags to
    *  pass, so "this app is a LAN server" has to be expressible in code.

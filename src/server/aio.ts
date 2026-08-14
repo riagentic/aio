@@ -151,6 +151,7 @@ export {
   validateConfig,
 } from "./config.ts";
 import {
+  misplacedDenoJsonKeys,
   VALID_AIO_CONFIG_KEYS,
   VALID_FEATURES_CONFIG_KEYS,
   VALID_UI_KEYS,
@@ -206,6 +207,28 @@ export function _exposeOf(
  *  binary launched from an unrelated project's directory used to read THAT
  *  project's deno.json and report its version as its own: the exact
  *  identity-adoption bug `resolveAppId` guards against, one field down. */
+/** One-time boot warning for aio-shaped keys at the top level of deno.json.
+ *
+ *  Once per process, like every other boot hint here: `parseCli`-adjacent code
+ *  runs several times in one boot and a repeated diagnostic reads as a loop. */
+let _hintedMisplacedDenoJson = false;
+function _warnMisplacedDenoJson(): void {
+  if (_hintedMisplacedDenoJson) return;
+  const stray = misplacedDenoJsonKeys(appDenoJson());
+  if (stray.length === 0) return;
+  _hintedMisplacedDenoJson = true;
+  log.warn(
+    `deno.json has aio config at the TOP LEVEL — aio never reads it there, ` +
+      `so ${stray.map((k) => `"${k}"`).join(", ")} ${
+        stray.length === 1 ? "is" : "are"
+      } silently doing nothing. Move ${
+        stray.length === 1 ? "it" : "them"
+      } into aio.run({ ${stray.join(", ")} }) in your app entry. ` +
+      `(deno.json carries only identity and build: appId, title, client, ` +
+      `entry, build, version.)`,
+  );
+}
+
 function _denoJsonVersion(): string | undefined {
   const v = appDenoJson()?.version;
   return typeof v === "string" ? v : undefined;
@@ -337,6 +360,14 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
   if (fc.ui) {
     validateConfig(fc.ui as Record<string, unknown>, VALID_UI_KEYS, "ui");
   }
+  // …and the OTHER file people put aio config in. `aio.run()` refuses an
+  // unknown key loudly; deno.json accepted `ui: { width, height }` at the top
+  // level, did nothing with it, and said nothing about it — the shape a field
+  // report called "the worst available behaviour", and it became a bullet in
+  // their project docs instead of a message from us. Warn (not throw): the
+  // file belongs to Deno and other tools keep their own sections in it, so the
+  // right answer is to name the key and where it belongs.
+  _warnMisplacedDenoJson();
   // Multi-instance (perfect-aio D2): several aio.run() calls may coexist in
   // one process — each app's cells bind exclusively (bindCell throws on a
   // def already bound to another app), each appId takes its own singleton
@@ -1035,15 +1066,27 @@ async function _run<S, A, E>(
           .map(([type, n]) => (n > 1 ? `${type} x${n}` : type))
           .join(", ");
         const seqs = replay.skipped.map((s) => s.seq);
+        const threw = replay.skipped.filter((s) => s.reason === "threw");
+        const why = threw.length === 0
+          ? `their payload was dropped by redactActions, so the arguments ` +
+            `needed to re-run them are gone`
+          : threw.length === replay.skipped.length
+          ? `the reducer REJECTED them: ${
+            [...new Set(threw.map((s) => s.error ?? "threw"))].join("; ")
+          }`
+          : `some had their payload dropped by redactActions and ${threw.length} ` +
+            `were rejected by the reducer: ${
+              [...new Set(threw.map((s) => s.error ?? "threw"))].join("; ")
+            }`;
         log.warn(
           `journal: ${replay.skipped.length} action(s) COULD NOT be replayed — ` +
-            `their payload was dropped by redactActions, so the arguments ` +
-            `needed to re-run them are gone: ${what} (seq ${
-              Math.min(...seqs)
-            }–${Math.max(...seqs)}). ` +
+            `${why}: ${what} (seq ${Math.min(...seqs)}–${
+              Math.max(...seqs)
+            }). ` +
             `Whatever those actions wrote after the last snapshot is NOT in ` +
-            `the recovered state. This is the documented cost of redacting an ` +
-            `action: its values are kept nowhere, including here.`,
+            `the recovered state. Skipping is deliberate: an entry that cannot ` +
+            `be replayed is still in the file at the next boot, so failing on ` +
+            `it would make recovery the reason this app can never start.`,
         );
       }
     }
@@ -1228,7 +1271,15 @@ async function _run<S, A, E>(
     const origin = isWriteSet ? actionOrigin(t, payload) : undefined;
     const ts = Date.now();
     const seq = journal
-      ? journal.append({ type: t, payload, origin }, ts)
+      ? journal.append(
+        {
+          type: t,
+          payload,
+          origin,
+          user: (action as { _user?: AioUser })._user,
+        },
+        ts,
+      )
       : timeline.lastSeq() + 1;
     timeline.record(seq, t, payload, prev, next, ts, origin);
   };

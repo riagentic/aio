@@ -180,6 +180,20 @@ export function createCellFromMethods<
                 `method to the foreign action(s) that trigger it.`,
             );
           }
+          // One trigger, one handler — the reducer looks up exactly one key,
+          // so a second mapping for the same foreign action silently REPLACED
+          // the first and that method simply never ran. Every other mistake in
+          // this block throws (unknown method, async handler, bad cancelOn);
+          // this one used to be the quiet exception.
+          const prior = foreignHandlers.get(t);
+          if (prior !== undefined && prior !== methodKey) {
+            throw new Error(
+              `[cell:${name}] listensTo: '${t}' is mapped to both ` +
+                `'${prior}' and '${methodKey}'. One foreign action triggers ` +
+                `ONE method here — only the last would ever run. Merge them ` +
+                `into a single method, or have that method call the other.`,
+            );
+          }
           foreignHandlers.set(t, methodKey);
           listensToTriggers.push(t);
         }
@@ -219,6 +233,26 @@ export function createCellFromMethods<
           `${[...asyncMethods].join(", ") || "(none)"}.`,
     );
   }
+  // `long` is the same check for the same reason: the fact that a method takes
+  // hours is a property OF THE METHOD, and it used to be declared in another
+  // file as `perfBudget.methods["cell:method"].timeout`, keyed by a string no
+  // refactor follows. A field report added six entries to that map one runtime
+  // failure at a time ("nothing warned me; I would have found out from a
+  // user"). Declared here, a typo throws at cell() time and a rename is a
+  // rename.
+  const longMethods = [...new Set(config.long ?? [])] as string[];
+  for (const mk of longMethods) {
+    if (asyncMethods.has(mk)) continue;
+    throw new Error(
+      methodNames.includes(mk)
+        ? `[cell:${name}] long: '${mk}' is a SYNC method — it holds the ` +
+          `reduce and cannot outlive a call ceiling that only bounds AWAITED ` +
+          `work. Only async methods can be long.`
+        : `[cell:${name}] long: no method '${mk}'. Known async methods: ` +
+          `${[...asyncMethods].join(", ") || "(none)"}.`,
+    );
+  }
+
   // alpha52: cancelOn triggers may be self("method") descriptors — the one
   // place a self-reference is STATICALLY present, so an unknown method throws
   // right here, at cell() definition.
@@ -371,6 +405,10 @@ export function createCellFromMethods<
     // compose (the testCell pattern) re-registers naturally. self()
     // descriptors are already resolved (above).
     cancelTriggers: cancelTriggers,
+    // Async methods with no time ceiling, by name. Consumed at compose time
+    // (the caller-side wait) and at boot (the effect tracker) from this ONE
+    // declaration — see `longMethodKeys` / `mergeLongIntoPerfBudget`.
+    longMethods: longMethods.length > 0 ? longMethods : undefined,
     // Dropping these silently disables persist/ui filters, validation and
     // migrations for methods-style cells.
     validate: config.validate,

@@ -77,7 +77,7 @@
         },
         "CellAio": {
           "kind": "typeAlias",
-          "sig": "9ac8f4e265b71033"
+          "sig": "6012903d0a9208a2"
         },
         "CellDef": {
           "kind": "typeAlias",
@@ -97,7 +97,7 @@
         },
         "CellsConfig": {
           "kind": "typeAlias",
-          "sig": "2c9f4c198a643ac7"
+          "sig": "9cfd2ff7612bf972"
         },
         "CellStatus": {
           "kind": "typeAlias",
@@ -197,7 +197,7 @@
         },
         "LogConfig": {
           "kind": "typeAlias",
-          "sig": "a6f0613bbdbc7b8f"
+          "sig": "1478e5ddaf426ed9"
         },
         "LogLevel": {
           "kind": "typeAlias",
@@ -221,7 +221,7 @@
         },
         "MethodsCellConfig": {
           "kind": "typeAlias",
-          "sig": "3a315d182cb205a1"
+          "sig": "a2e5f8156763b0fe"
         },
         "Msg": {
           "kind": "typeAlias",
@@ -381,7 +381,7 @@
         },
         "TestContext": {
           "kind": "typeAlias",
-          "sig": "f9e4f47330041090"
+          "sig": "a8126850ed01f1a0"
         },
         "text": {
           "kind": "function",
@@ -421,7 +421,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "6757de38b3d40564"
+          "sig": "b88541b0a0a99ce3"
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -1150,7 +1150,7 @@
         },
         "CliFlags": {
           "kind": "typeAlias",
-          "sig": "7da2d1fdd335b30f"
+          "sig": "dee05196f8cb22c8"
         },
         "createSliceSelector": {
           "kind": "function",
@@ -1380,6 +1380,22 @@
           "kind": "function",
           "sig": "3b01332a3d226191"
         },
+        "pickDirectory": {
+          "kind": "function",
+          "sig": "a49e60feab63a064"
+        },
+        "pickFile": {
+          "kind": "function",
+          "sig": "ae56d1c02918675e"
+        },
+        "PickFilter": {
+          "kind": "typeAlias",
+          "sig": "1715b892dcecbb4e"
+        },
+        "PickOptions": {
+          "kind": "typeAlias",
+          "sig": "c2f89602c949ad94"
+        },
         "QueryResult": {
           "kind": "typeAlias",
           "sig": "4d451b3b1c2af191"
@@ -1395,6 +1411,22 @@
         "ReactiveQuery": {
           "kind": "typeAlias",
           "sig": "f6c36923a5dd3ea4"
+        },
+        "spawn": {
+          "kind": "function",
+          "sig": "c0dc2025d13ae515"
+        },
+        "SpawnHandle": {
+          "kind": "typeAlias",
+          "sig": "9b77e51058f14b7e"
+        },
+        "SpawnOptions": {
+          "kind": "typeAlias",
+          "sig": "02a8319c2de34e67"
+        },
+        "SpawnStatus": {
+          "kind": "typeAlias",
+          "sig": "809c6bc0ca3e0ca9"
         },
         "syncTables": {
           "kind": "function",
@@ -1630,7 +1662,7 @@
         },
         "TestContext": {
           "kind": "typeAlias",
-          "sig": "f9e4f47330041090"
+          "sig": "a8126850ed01f1a0"
         },
         "testgen": {
           "kind": "variable",

@@ -19,23 +19,44 @@ async function patchDenoJson(
   projectDir: string,
   patch: (config: DenoJsonConfig) => void,
 ): Promise<boolean> {
-  const path = join(projectDir, "deno.json");
+  // Read and WRITE the same file. This used to fall back to reading
+  // `deno.jsonc` while writing `deno.json`: on a jsonc project the fix either
+  // did nothing (comments → JSON.parse throws → silent `false`, and the same
+  // issue reappears as `[fixable]` on every run with no reason given) or wrote
+  // a SECOND config file that Deno silently prefers — from then on every edit
+  // the user made to their own `deno.jsonc` was ignored.
+  let path = join(projectDir, "deno.json");
   let text: string;
   try {
     text = await Deno.readTextFile(path);
   } catch {
+    path = join(projectDir, "deno.jsonc");
     try {
-      text = await Deno.readTextFile(join(projectDir, "deno.jsonc"));
+      text = await Deno.readTextFile(path);
     } catch {
       return false;
     }
   }
+  let config: DenoJsonConfig;
   try {
-    const config = JSON.parse(text) as DenoJsonConfig;
+    config = JSON.parse(text) as DenoJsonConfig;
+  } catch {
+    // A jsonc file with real comments (the whole reason to use jsonc). Editing
+    // it mechanically would strip them, so refuse — and SAY so, rather than
+    // reporting a fix that never happened.
+    console.error(
+      `[aiol] cannot safe-fix ${path} automatically — it is not plain JSON ` +
+        `(comments or trailing commas). Apply this change by hand; the ` +
+        `comments in your config are worth more than the automation.`,
+    );
+    return false;
+  }
+  try {
     patch(config);
     await Deno.writeTextFile(path, JSON.stringify(config, null, 2) + "\n");
     return true;
-  } catch {
+  } catch (e) {
+    console.error(`[aiol] failed writing ${path}: ${e}`);
     return false;
   }
 }

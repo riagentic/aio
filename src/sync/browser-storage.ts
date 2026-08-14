@@ -33,6 +33,24 @@ export function createLocalStorageOpStorage(
   // is the entire point of persisting here); the cursor is session-scoped, so
   // a reload re-syncs from scratch.
   const session = randomUuid();
+  // One-time sweep of `<key>.corrupt.corrupt…` chains left by the old
+  // confirmOp key-scan (see the note on `confirmOp`): only that scan ever
+  // wrote a SECOND `.corrupt` suffix, growing one key per ack until quota, so
+  // any key carrying one is its garbage. Single-`.corrupt` forensic copies of
+  // real cell documents are deliberate and stay.
+  try {
+    const junk: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k?.startsWith(`${prefix}:`)) continue;
+      if (
+        /\.corrupt(\.corrupt)+$/.test(k) || k === `${prefix}:clientId.corrupt`
+      ) {
+        junk.push(k);
+      }
+    }
+    for (const k of junk) localStorage.removeItem(k);
+  } catch { /* storage unavailable (private mode) — nothing to sweep */ }
   const read = (cell: string): CellDoc => {
     let raw: string | null = null;
     try {
@@ -75,24 +93,21 @@ export function createLocalStorageOpStorage(
       write(op.cell, doc);
       return Promise.resolve();
     },
-    confirmOp: (opId) => {
-      // opId is globally unique (clientId-counter) — scan cells we know of
-      // is impossible here without the cell; the engine always confirms via
-      // buffer which passes through per-cell — find by scanning stored keys.
-      try {
-        for (let i = 0; i < localStorage.length; i++) {
-          const k = localStorage.key(i);
-          if (!k?.startsWith(`${prefix}:`)) continue;
-          const cell = k.slice(prefix.length + 1);
-          const doc = read(cell);
-          const op = doc.ops.find((o) => o.id === opId);
-          if (op) {
-            op.confirmed = true;
-            write(cell, doc);
-            break;
-          }
-        }
-      } catch { /* storage unavailable */ }
+    confirmOp: (cell, opId) => {
+      // ONLY this cell's document. This used to scan every `prefix:*` key as
+      // a cell doc, which swept up NON-doc keys sharing the prefix — the
+      // clientId key and the forensic `.corrupt` copies. Each scan re-flagged
+      // those as "corrupt queues" (a false data-loss alarm plus a new
+      // `.corrupt.corrupt…` key per ack), and a clientId whose 8 hex chars
+      // were all digits PARSED as a JSON number, so `doc.ops.find` threw and
+      // the catch ate the confirm — the op then rebased on top of every
+      // snapshot forever (the double-apply flake, ~2% of clients).
+      const doc = read(cell);
+      const op = doc.ops.find((o) => o.id === opId);
+      if (op) {
+        op.confirmed = true;
+        write(cell, doc);
+      }
       return Promise.resolve();
     },
     pruneConfirmed: (cell) => {

@@ -213,14 +213,14 @@ interface SyncConfig {
 }
 ```
 
-| Setting             | Default            | Description                         |
-| ------------------- | ------------------ | ----------------------------------- |
-| `merge`             | `{}` (all LWW)     | Per-field merge strategy            |
-| `identity`          | `{}` (auto `"id"`) | Identity field for set merges       |
-| `offline.retention` | `"4h"`             | How long to keep offline ops        |
-| `pendingCap`        | `500`              | Max unconfirmed ops before blocking |
-| `maxDrift`          | `60000`            | Max clock skew (ms)                 |
-| `compactOps`        | `1000`             | Server compacts after N ops         |
+| Setting             | Default            | Description                                                                                                                                                 |
+| ------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `merge`             | `{}` (all LWW)     | Per-field merge strategy                                                                                                                                    |
+| `identity`          | `{}` (auto `"id"`) | Identity field for set merges                                                                                                                               |
+| `offline.retention` | `"4h"`             | How long to keep offline ops — digits + `ms`/`s`/`m`/`h`/`d` (e.g. `"7d"`). A value this cannot read throws at boot rather than falling back to the default |
+| `pendingCap`        | `500`              | Max unconfirmed ops before blocking                                                                                                                         |
+| `maxDrift`          | `60000`            | Max clock skew (ms)                                                                                                                                         |
+| `compactOps`        | `1000`             | Server compacts after N ops                                                                                                                                 |
 
 ## Sync Status
 

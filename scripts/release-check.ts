@@ -1,0 +1,184 @@
+// The release gate, as ONE command: `deno task release:check`.
+//
+// `.katana/release.md` has always listed what must pass before a release. It
+// listed it in prose, so running it was a human loop — and alpha56 shipped with
+// `deno lint` red and `deno publish --dry-run` refusing the package outright,
+// because nobody ran the list. (CI ran both and had been red on main since that
+// release; a remote result that arrives after the push, and that nobody reads,
+// is not a gate.) A kata that cannot be executed decays into a wish.
+//
+// So: this script IS the kata. Two tiers, because the heavy ones cost ~12
+// minutes and there is no reason to spend that on a tree that fails `deno fmt`:
+//
+//   fast    every static gate + every release SURFACE (version triple,
+//           dated CHANGELOG entry, upgrade guide written AND listed)
+//   heavy   the three real-execution suites (test, onboard, build)
+//
+// Every fast gate runs even after one fails — a release report that stops at
+// the first problem makes you re-run the whole thing per fix. The heavy tier is
+// skipped when the fast tier failed, and only then.
+//
+//   deno task release:check          # everything (fast, then heavy)
+//   deno task release:check --fast   # static gates + surfaces only
+import { VERSION } from "../src/server/aio-cli.ts";
+
+const root = new URL("../", import.meta.url).pathname;
+const FAST_ONLY = Deno.args.includes("--fast");
+
+type Result = { name: string; ok: boolean; detail: string };
+
+async function run(name: string, cmd: string[]): Promise<Result> {
+  const t0 = Date.now();
+  const p = await new Deno.Command(cmd[0]!, {
+    args: cmd.slice(1),
+    cwd: root,
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  const secs = ((Date.now() - t0) / 1000).toFixed(0);
+  if (p.success) return { name, ok: true, detail: `${secs}s` };
+  // The last few lines of a failing gate are the part that says why.
+  const text = new TextDecoder().decode(
+    p.stderr.length > 0 ? p.stderr : p.stdout,
+  );
+  const tail = text.trimEnd().split("\n").slice(-4).join("\n      ");
+  return { name, ok: false, detail: `${secs}s\n      ${tail}` };
+}
+
+/** A release SURFACE — the checks no command covers, which is exactly why they
+ *  are the ones that rot (a version left behind in one of three files, an
+ *  upgrade guide written but never linked). */
+function surface(name: string, ok: boolean, detail: string): Result {
+  return { name, ok, detail };
+}
+
+async function surfaceChecks(): Promise<Result[]> {
+  const read = (rel: string) => Deno.readTextFile(root + rel);
+  const denoJson = JSON.parse(await read("deno.json")) as { version: string };
+  const readme = await read("README.md");
+  const changelog = await read("CHANGELOG.md");
+
+  const out: Result[] = [];
+
+  // One version, three places. Any one left behind ships a binary that lies
+  // about itself.
+  const badge = readme.includes(`<code>v${VERSION}</code>`);
+  const sameVersion = denoJson.version === VERSION && badge;
+  out.push(surface(
+    "version triple (deno.json = VERSION = README badge)",
+    sameVersion,
+    sameVersion
+      ? VERSION
+      : `deno.json=${denoJson.version} VERSION=${VERSION} ` +
+        `README badge ${badge ? "ok" : `missing v${VERSION}`}`,
+  ));
+
+  // A dated entry for THIS version — the version the tree currently IS.
+  //
+  // Deliberately not "the top entry is dated": between releases the top entry
+  // is the NEXT version, marked (unreleased), and that is the healthy state for
+  // most of a release cycle. A check that went red for all of it would be noise
+  // within a day, and a gate people learn to ignore is worse than no gate. So
+  // the rule is: wherever this version's entry sits, it carries a date.
+  const heading =
+    changelog.split("\n").find((l) =>
+      l.startsWith("## ") && l.includes(VERSION)
+    ) ?? "";
+  const dated = /\(\d{4}-\d{2}-\d{2}\)/.test(heading);
+  const top = changelog.split("\n").find((l) => l.startsWith("## ")) ?? "";
+  const pending = top !== heading ? ` · in progress above: ${top.trim()}` : "";
+  out.push(surface(
+    "CHANGELOG has a dated entry for this version",
+    dated,
+    dated
+      ? `${heading.trim()}${pending}`
+      : heading
+      ? `found but undated: ${heading.trim()}`
+      : `no "## …${VERSION}…" entry at all (top is: ${top.trim() || "(none)"})`,
+  ));
+
+  // The upgrade guide has to exist AND be reachable. Written-but-unlinked is
+  // the failure mode: it looks done in the diff and is invisible to a reader.
+  const cur = VERSION.replace(/^1\.0\.0-/, "");
+  const guides = [...Deno.readDirSync(root + "docs/upgrade")]
+    .map((e) => e.name)
+    .filter((n) => n.endsWith(`-to-${cur}.md`));
+  const index = await read("docs/upgrade/README.md");
+  const linked = guides.some((g) => index.includes(g));
+  out.push(surface(
+    "upgrade guide exists and is listed",
+    guides.length > 0 && linked,
+    guides.length === 0
+      ? `no docs/upgrade/*-to-${cur}.md`
+      : linked
+      ? guides.join(", ")
+      : `${guides[0]} exists but is not listed in docs/upgrade/README.md`,
+  ));
+
+  return out;
+}
+
+const FAST: [string, string[]][] = [
+  ["fmt", ["deno", "fmt", "--check"]],
+  ["check", ["deno", "task", "check"]],
+  ["lint", ["deno", "task", "lint"]],
+  ["lint:aio", ["deno", "task", "lint:aio"]],
+  ["boundaries", ["deno", "task", "boundaries"]],
+  ["api:check", ["deno", "task", "api:check"]],
+  ["docs:check", ["deno", "task", "docs:check"]],
+  ["docs:index (no diff)", ["deno", "task", "docs:index", "--", "--check"]],
+  ["docs:coverage", ["deno", "task", "docs:coverage"]],
+  ["publish --dry-run", ["deno", "publish", "--dry-run", "--allow-dirty"]],
+];
+
+const HEAVY: [string, string[]][] = [
+  ["test", ["deno", "task", "test"]],
+  ["test:onboard", ["deno", "task", "test:onboard"]],
+  ["test:build", ["deno", "task", "test:build"]],
+];
+
+function report(results: Result[]): void {
+  for (const r of results) {
+    console.log(`  ${r.ok ? "✓" : "✗"} ${r.name.padEnd(38)} ${r.detail}`);
+  }
+}
+
+console.log(`\nrelease check — v${VERSION}\n`);
+console.log("surfaces");
+const surfaces = await surfaceChecks();
+report(surfaces);
+
+console.log("\ngates (fast)");
+const fast: Result[] = [];
+for (const [name, cmd] of FAST) fast.push(await run(name, cmd));
+report(fast);
+
+const failedEarly = [...surfaces, ...fast].filter((r) => !r.ok);
+let heavy: Result[] = [];
+if (FAST_ONLY) {
+  console.log("\ngates (heavy)  — skipped (--fast)");
+} else if (failedEarly.length > 0) {
+  console.log(
+    `\ngates (heavy)  — skipped: fix the ${failedEarly.length} failure(s) ` +
+      `above first (they cost seconds, these cost ~12 minutes)`,
+  );
+} else {
+  console.log("\ngates (heavy)");
+  for (const [name, cmd] of HEAVY) heavy.push(await run(name, cmd));
+  report(heavy);
+}
+
+const failed = [...surfaces, ...fast, ...heavy].filter((r) => !r.ok);
+if (failed.length > 0) {
+  console.log(
+    `\n✗ NOT releasable — ${failed.length} failing: ${
+      failed.map((f) => f.name).join(", ")
+    }\n`,
+  );
+  Deno.exit(1);
+}
+console.log(
+  FAST_ONLY
+    ? "\n✓ fast gates + surfaces pass — run without --fast before pushing\n"
+    : "\n✓ releasable — every gate and surface in .katana/release.md passes\n",
+);

@@ -64,6 +64,48 @@ interface RInfo {
   port: number;
 }
 
+/** True for a private-range or loopback source address.
+ *
+ *  Discovery is a LAN convenience, so a reply only ever goes to a source that
+ *  could plausibly be on the segment. Two things follow. The reply is an
+ *  inventory of the host — app id, window title, real port, whether auth is
+ *  required — and an exposed app should not hand that to the internet for the
+ *  cost of one 13-byte datagram. And UDP source addresses are trivially
+ *  spoofed: without this check the responder is a reflector that aims ~100-byte
+ *  replies at any victim named as the source, with the app's own IP as origin. */
+export function isPrivateSource(host: string): boolean {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.\d{1,3}$/.exec(host);
+  if (m) {
+    const a = Number(m[1]), b = Number(m[2]);
+    return a === 10 || a === 127 ||
+      (a === 192 && b === 168) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 169 && b === 254); // link-local
+  }
+  const h = host.toLowerCase();
+  // IPv4-mapped IPv6 (::ffff:10.0.0.1) — recurse on the tail.
+  if (h.startsWith("::ffff:")) return isPrivateSource(h.slice(7));
+  return h === "::1" || h.startsWith("fc") || h.startsWith("fd") ||
+    h.startsWith("fe8") || h.startsWith("fe9") || h.startsWith("fea") ||
+    h.startsWith("feb");
+}
+
+/** A per-source reply budget: even on a LAN, one host must not be able to make
+ *  every exposed app on this machine answer thousands of times a second. */
+export function makeReplyBudget(
+  perSecond = 5,
+): (host: string, now: number) => boolean {
+  const seen = new Map<string, number[]>();
+  return (host, now) => {
+    const hits = (seen.get(host) ?? []).filter((t) => now - t < 1000);
+    if (hits.length >= perSecond) return false;
+    hits.push(now);
+    seen.set(host, hits);
+    if (seen.size > 4096) seen.clear(); // never grows without bound
+    return true;
+  };
+}
+
 /** True when this runtime can do UDP discovery. `node:dgram` is stable, so
  *  this is always true in Deno — kept for API stability / call-site clarity. */
 export function discoverySupported(): boolean {
@@ -103,8 +145,14 @@ export function startDiscoveryResponder(
       socket.close();
     } catch { /* already closed */ }
   });
+  const allow = makeReplyBudget();
   socket.on("message", (msg: Buffer, rinfo: RInfo) => {
     if (!msg.toString("utf8").startsWith("AIO_DISCOVER?")) return;
+    // LAN only, and rate-limited per source. See `isPrivateSource`: the reply
+    // is an inventory of this host, and an unguarded responder is both a free
+    // scan target and a spoofable reflector.
+    if (!isPrivateSource(rinfo.address)) return;
+    if (!allow(rinfo.address, Date.now())) return;
     // One datagram per app — the client collects and dedups by host:port.
     for (const ad of listApps()) {
       try {

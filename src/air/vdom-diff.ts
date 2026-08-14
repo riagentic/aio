@@ -345,14 +345,41 @@ function _diffComponent(
 function _diffPortal(nv: VNode, ov: VNode, ctx: RenderCtx): void {
   const target = nv.props.target as Node;
   const oldTarget = ov.props.target as Node | undefined;
-  if (!target) return;
+  if (!target) {
+    // `<Portal target={cond ? el : null}>`: the portal's content used to be
+    // left mounted in the OLD target forever — the returned-early diff removed
+    // nothing, transferred no `_dom`, and said nothing. Worse, when the target
+    // came back the vnode↔DOM link was broken and the reconciler's own
+    // corruption tripwire fired ("has no DOM node to diff against… this is an
+    // aio bug"). No target means no content: tear the old children down and
+    // carry the link over so the node stays diffable.
+    if (oldTarget) {
+      let cursor: Node | null = oldTarget.firstChild;
+      for (const child of ov.children) {
+        const at = getDom(child) ?? cursor;
+        cursor = _advance(at, _domNodeCount(child));
+        removeDom(oldTarget, child, ctx, at);
+      }
+    }
+    nv._dom = ov._dom;
+    return;
+  }
   // AIO-184: try-finally ensures delegation root is restored on error
   const prevDelegation = _getActiveDelegationRoot();
   if ((target as Node).nodeType === 1) {
     _setDelegationRoot(target as Element);
   }
   try {
-    if (oldTarget && oldTarget !== target) {
+    if (!oldTarget) {
+      // The previous render had NO target, so nothing of this portal is
+      // mounted anywhere — the branch above tore it down. Create; diffing here
+      // would patch vnodes whose `_dom` is already detached and append
+      // nothing, leaving the region permanently empty once a target came back.
+      for (const child of nv.children) {
+        const dom = createDom(child, ctx, false, target);
+        if (dom) target.appendChild(dom);
+      }
+    } else if (oldTarget !== target) {
       let cursor: Node | null = oldTarget.firstChild;
       for (const child of ov.children) {
         const at = getDom(child) ?? cursor;

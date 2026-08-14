@@ -7,6 +7,7 @@ import { h } from "./vdom.ts";
 import {
   _applyTransition,
   _isHTMLElement,
+  _raf,
   _removeTransition,
   type TransitionFn,
   type TransitionOptions,
@@ -104,6 +105,20 @@ export function TransitionGroup(props: TransitionGroupProps): VNode {
     const flipDur = flipDuration;
 
     _afterRender(() => {
+      // Measure BEFORE animating. `getBoundingClientRect()` includes
+      // transforms, so once this pass starts writing FLIP translations every
+      // later read is of a visually-offset element, not of the new layout.
+      // One pass of measurements serves both the dx/dy below and the reference
+      // rects saved for the next render.
+      const layoutRects = new Map<string | number, DOMRect>();
+      if (doFlip) {
+        for (const child of vnodeChildren) {
+          const d = child._dom;
+          if (child.key !== undefined && d && _isHTMLElement(d)) {
+            layoutRects.set(child.key, d.getBoundingClientRect());
+          }
+        }
+      }
       for (const child of vnodeChildren) {
         const dom = child._dom;
         if (!dom || !_isHTMLElement(dom)) continue;
@@ -166,7 +181,10 @@ export function TransitionGroup(props: TransitionGroupProps): VNode {
           doFlip && child.key !== undefined && savedPrevRects.has(child.key)
         ) {
           const oldRect = savedPrevRects.get(child.key)!;
-          const newRect = dom.getBoundingClientRect();
+          // The layout position measured BEFORE this pass applied any FLIP
+          // transform — see the measure loop above.
+          const newRect = layoutRects.get(child.key) ??
+            dom.getBoundingClientRect();
           const dx = oldRect.left - newRect.left;
           const dy = oldRect.top - newRect.top;
 
@@ -185,17 +203,36 @@ export function TransitionGroup(props: TransitionGroupProps): VNode {
             dom.style.transition = "none";
 
             // Play: remove flip transform, restore original transform
-            requestAnimationFrame(() => {
+            _raf(dom, () => {
               dom.style.transition = `transform ${flipDur}ms ease`;
               dom.style.transform = existingTransform || "";
 
               // Clean up after transition
               const cleanup = () => {
                 dom.style.transition = "";
-                dom.removeEventListener("transitionend", cleanup);
+                dom.removeEventListener("transitionend", onEnd);
+                // Clear the safety timer, don't just forget it. Deleting the
+                // map entry alone left an armed timeout holding THIS closure:
+                // a second reorder within the flip window found nothing to
+                // cancel (AIO-192's guard reads the same map), and the orphan
+                // then fired mid-animation, wiping the new transition and
+                // dropping the new entry — every reorder after that was
+                // uncancellable too.
+                const t = _flipTimers.get(dom);
+                if (t !== undefined) clearTimeout(t);
                 _flipTimers.delete(dom);
               };
-              dom.addEventListener("transitionend", cleanup);
+              // `transitionend` BUBBLES. Unfiltered, any transition on a
+              // descendant — a button's hover colour inside a moving row —
+              // ended the row's FLIP early and snapped it to its final
+              // position. Only this element's own transform counts.
+              const onEnd = (e: Event) => {
+                const te = e as TransitionEvent;
+                if (te.target !== dom) return;
+                if (te.propertyName && te.propertyName !== "transform") return;
+                cleanup();
+              };
+              dom.addEventListener("transitionend", onEnd);
               // Safety timeout — tracked per element (AIO-192)
               _flipTimers.set(
                 dom,
@@ -206,16 +243,22 @@ export function TransitionGroup(props: TransitionGroupProps): VNode {
         }
       }
 
-      // AIO-250: Capture current keys and rects for the NEXT render cycle.
-      // Now _dom is available on all children after diff.
+      // AIO-250: keys + rects for the NEXT render cycle.
+      //
+      // The rects are the ones measured BEFORE this pass applied its FLIP
+      // transforms (`layoutRects`). They used to be re-measured here, after —
+      // and `getBoundingClientRect()` includes transforms, so a moved element
+      // recorded its pre-move visual position instead of its new layout
+      // position. Every reorder after the first then animated from a stale
+      // origin: the item visibly jumped back to where it had been two renders
+      // ago before sliding to the new slot.
       const nextKeys = new Set<string | number>();
       const nextRects = new Map<string | number, DOMRect>();
       for (const child of vnodeChildren) {
         if (child.key !== undefined && child._dom) {
           nextKeys.add(child.key);
-          if (doFlip && child._dom instanceof HTMLElement) {
-            nextRects.set(child.key, child._dom.getBoundingClientRect());
-          }
+          const r = layoutRects.get(child.key);
+          if (doFlip && r) nextRects.set(child.key, r);
         }
       }
       prevRef.current = { keys: nextKeys, rects: nextRects };

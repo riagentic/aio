@@ -14,7 +14,7 @@ cloud, no accounts — just your notes on your machine.
     "compile": "deno run -A jsr:@riagentic/aio/build-all --build-spec=jsr:@riagentic/aio/build --targets=electron"
   },
   "imports": {
-    "aio": "jsr:@riagentic/aio@^1.0.0-alpha17"
+    "aio": "jsr:@riagentic/aio@^1.0.0-alpha"
   }
 }
 ```

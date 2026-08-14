@@ -24,11 +24,12 @@ deno task dev                    # opens in your browser
 ```
 
 The new project is git-initialized, ships a passing starter test
-(`deno task test`), and builds to every target with one line each —
-`deno task compile` (binary), `deno task electron`, `deno task android`.
+(`deno task test`), and builds with two tasks — `deno task compile` (a binary
+for the app's default target) and `deno task build --targets=electron|android`
+(any other target; `--list` prints them).
 
 It is also **pinned to an exact aio version**, recorded in its own `deno.json`
-(`"aioVersion": "v1.0.0-alpha38"`) and committed with your code. So the app you
+(`"aioVersion": "v1.0.0-alpha57"`) and committed with your code. So the app you
 push is the app your colleague builds:
 
 ```sh
@@ -73,9 +74,9 @@ If you're wiring a project by hand instead of `am create`, this is the shape:
     "jsxImportSource": "aio"
   },
   "imports": {
-    "aio": "jsr:@riagentic/aio@^1.0.0-alpha17",
-    "aio/air": "jsr:@riagentic/aio@^1.0.0-alpha17/air",
-    "aio/jsx-runtime": "jsr:@riagentic/aio@^1.0.0-alpha17/jsx-runtime",
+    "aio": "jsr:@riagentic/aio@^1.0.0-alpha",
+    "aio/air": "jsr:@riagentic/aio@^1.0.0-alpha/air",
+    "aio/jsx-runtime": "jsr:@riagentic/aio@^1.0.0-alpha/jsx-runtime",
     "esbuild": "npm:esbuild@^0.24",
     "electron": "npm:electron"
   },
@@ -145,12 +146,6 @@ Clone aio into `dep/aio/` and you're set:
 
 ```sh
 mkdir -p dep && git clone https://github.com/riagentic/aio dep/aio
-```
-
-Or let the scaffolder do both (clone + correct deno.json) in one step:
-
-```sh
-sh -c "$(curl -fsSL ...)" -- my-app --vendored
 ```
 
 The rest of the project (`import { cell } from "aio"`) is unchanged — the import
@@ -232,8 +227,9 @@ only to override.
 deno task dev
 ```
 
-Electron window opens, state persists across restarts, multiple browser tabs
-stay in sync. No Electron? Use `deno task dev --client=browser`.
+The app opens in your browser (the default target), state persists across
+restarts, and multiple tabs stay in sync. Want the desktop shell instead?
+`deno task dev --client=electron`.
 
 ## Window size
 
@@ -322,8 +318,8 @@ something and re-read state), see
 
 - **First step, always:** `deno task doctor` — emitted by every scaffold (or
   `deno run -A dep/aio/src/server/doctor.ts` vendored,
-  `jsr:@riagentic/aio@1.0.0-alpha20/doctor`). Validates the magic deno.json
-  lines (jsx, jsxImportSource, import map entries, electron nodeModulesDir, Deno
+  `jsr:@riagentic/aio@^1.0.0-alpha/doctor`). Validates the magic deno.json lines
+  (jsx, jsxImportSource, import map entries, electron nodeModulesDir, Deno
   version) with a one-line fix per failure.
 
 - **"Electron not found"** -- Run `deno task install:electron`, or use

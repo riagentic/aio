@@ -20,6 +20,7 @@ import {
   filterStateBySubs,
   type PatchEntry,
 } from "../protocol/broadcast-utils.ts";
+import { degraded } from "../diagnostics/degraded.ts";
 import type { ClientMeta } from "./server-ws.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
 import type { AioUser } from "./aio.ts";
@@ -138,6 +139,12 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
     } catch { /* observe-only */ }
   }
 
+  /** getUIState/serialize failures per broadcast round. Escalates to
+   *  `/__aio/health` (status: "degraded") once it stops being a blip. */
+  const _stateSerialization = degraded("broadcast:state");
+  /** Whole-round failures — a throw anywhere in the flush loop. */
+  const _broadcastRound = degraded("broadcast:round");
+
   /** Get filtered full-state JSON for a client (respects subscriptions) */
   function _getFilteredFullJson(meta: ClientMeta): string | undefined {
     try {
@@ -147,7 +154,12 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
       );
       return JSON.stringify(uiState);
     } catch (e) {
-      debug(`broadcast: getUIState error — ${e}`);
+      // NOT `debug`: the caller's response to `undefined` is `continue`, i.e.
+      // this client silently stops receiving state — permanently, and with
+      // `/__aio/health` still answering "healthy". A frozen UI whose server
+      // believes it is fine is the exact unnoticeable failure `degraded()`
+      // exists for, and this path was the one place that never used it.
+      _stateSerialization.fail(e);
       return undefined;
     }
   }
@@ -180,6 +192,13 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
       // differ), so it is observed in the loop and attributed once after it.
       let anyFullSend = false;
       let anyPatchSend = false;
+      // One ROUND regardless of client count — the per-client sends below feed
+      // payload/bandwidth, but the broadcasts/sec rate diagnoses dispatch
+      // frequency and must not scale with how many sockets are connected.
+      // (Zero connections → zero wire → no round to rate.)
+      if (connections.size > 0) {
+        vitalsSystem?.pressureMonitor?.onBroadcastRound();
+      }
       for (const [ws, meta] of connections) {
         if (ws.readyState !== WebSocket.OPEN) continue;
         if (vitalsSystem?.serverTransport.isFrozen(meta.id)) continue;
@@ -245,7 +264,18 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
                   fullStateThreshold * 100
                 }% of full state (${fullJsonForTracking.length}B) — sending full state`,
               );
-              if (fullJsonForTracking !== meta.lastFullJson) {
+              // `lastFullJson` proves what the client holds ONLY while it is
+              // fresh. It is refreshed just when a full state is serialized,
+              // so every patch round leaves it describing an older state than
+              // the client actually has — and then a state that serializes
+              // back to that older text was read as "already delivered" and
+              // silently dropped, along with the rest of the round. The
+              // client sat on the intermediate value forever (a spinner that
+              // never resolves), server idle, health green, nothing logged.
+              if (
+                meta.lastFullJsonStale ||
+                fullJsonForTracking !== meta.lastFullJson
+              ) {
                 _warnBigFullState(fullJsonForTracking, meta);
                 msgToSend = encRaw("state", fullJsonForTracking);
                 sentKind = "full";
@@ -263,7 +293,11 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
           // per broadcast otherwise).
           fullJsonForTracking ??= _getFilteredFullJson(meta);
           if (!fullJsonForTracking) continue;
-          if (fullJsonForTracking === meta.lastFullJson) continue;
+          // Same freshness rule as the threshold path above: a stale memo is
+          // not proof the client has this state.
+          if (
+            !meta.lastFullJsonStale && fullJsonForTracking === meta.lastFullJson
+          ) continue;
           // Anything that decides to send a whole state says WHY. The
           // threshold path above already did; this fallback did not, so the
           // expensive case was the invisible one — 438 KB frames, 28 of them
@@ -293,6 +327,10 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
           if (sentKind === "full") anyFullSend = true;
           else anyPatchSend = true;
           if (fullJsonForTracking) meta.lastFullJson = fullJsonForTracking;
+          // A patch moved the client past whatever `lastFullJson` describes;
+          // a full send makes it exact again. The string is kept either way —
+          // as a size estimate for the patch-vs-full decision it stays useful.
+          meta.lastFullJsonStale = sentKind === "patch";
           meta.bpLastSentAt = Date.now();
           vitalsSystem?.serverTransport.onClientStateSent(meta.id);
           const _bytes = _encoder.encode(msgToSend).byteLength;
@@ -358,7 +396,12 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
         }
       }
     } catch (e) {
-      debug(`broadcast error: ${e}`);
+      // This catch wraps the ENTIRE flush loop — patch compaction, per-client
+      // subscription filtering, cost metering, vitals. A throw anywhere in
+      // there kills the round for every client, and at `debug` it reached no
+      // sink at all under the default log level: the app just stopped updating,
+      // silently, with health still green.
+      _broadcastRound.fail(e);
     }
   };
 

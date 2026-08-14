@@ -380,9 +380,15 @@ ${tmplBoundsTracking()}
 ${tmplKeyboardShortcuts()}
 
   if (!USE_PROTOCOL) {
-    app.on('certificate-error', (event, _wc, _url, _err, _cert, cb) => {
-      const u = new URL(${JSON.stringify(url)});
-      if (u.hostname === 'localhost' || u.hostname === '127.0.0.1') { event.preventDefault(); cb(true); }
+    // Reads the URL that FAILED (arg 3), compared to this app's own origin —
+    // see the twin in electron-scripts.ts. Checking the app's own URL instead
+    // made this a constant true, trusting every bad cert from every host.
+    app.on('certificate-error', (event, _wc, failedUrl, _err, _cert, cb) => {
+      let sameOrigin = false;
+      try { sameOrigin = new URL(failedUrl).origin === new URL(${
+    JSON.stringify(url)
+  }).origin; } catch { sameOrigin = false; }
+      if (sameOrigin) { event.preventDefault(); cb(true); }
       else cb(false);
     });
   }

@@ -563,3 +563,36 @@ Deno.test("aiol safe-fix: the target→client rename keeps the key's position", 
     await Deno.remove(dir, { recursive: true }).catch(() => {});
   }
 });
+
+// A rename must never overwrite a task that already exists under the
+// destination name. An app that customized BOTH `dev:service` and `dev:server`
+// (the natural state of a project migrating by hand, one task at a time) had
+// its `dev:server` command silently replaced by the `dev:service` one — in a
+// file this tool then writes back to disk — and the destroyed task was
+// reported under `kept`, which claims the opposite. "Never delete a customized
+// task" is this function's stated contract.
+Deno.test("migrateTasks: a rename never clobbers a task already at the destination name", () => {
+  const old = legacyStandardTasks(true, "browser");
+  old["dev:service"] = "deno run -A src/app.ts --client=server-only --port=9";
+  old["dev:server"] = "deno run -A src/app.ts --client=server-only --port=7";
+  const expected = standardTasks(true, "browser");
+  delete expected["install:electron"];
+  delete expected["dev:server"]; // both names are the user's here, not ours
+  const m = migrateTasks(old, expected, legacyTaskTables());
+
+  assertEquals(
+    m.tasks["dev:server"],
+    "deno run -A src/app.ts --client=server-only --port=7",
+    "the destination task keeps ITS OWN command",
+  );
+  assertEquals(
+    m.tasks["dev:service"],
+    "deno run -A src/app.ts --client=server-only --port=9",
+    "and the source task is not thrown away either",
+  );
+  assert(
+    !m.renamed.some(([o]) => o === "dev:service"),
+    "a rename that cannot happen must not be reported as done",
+  );
+  assert(m.kept.includes("dev:service"), "it is kept, for the user to resolve");
+});

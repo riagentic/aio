@@ -209,8 +209,12 @@ export function isProcessAlive(pid: number): boolean {
   try {
     Deno.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (e) {
+    // EPERM means the pid EXISTS but belongs to another user — that process
+    // is alive. Conflating it with ESRCH ("no such process") made every
+    // liveness guard (backup/restore live-writer refusal, lock takeover)
+    // treat an app running under a different account as stopped.
+    return e instanceof Deno.errors.PermissionDenied;
   }
 }
 

@@ -471,8 +471,14 @@ export const checkCells: Checker = (ctx) => {
     ["UnionOf", ""], // removed — pre-methods relic
   ]);
   for (const file of ctx.sourceFiles) {
+    // Masked, like every other body probe: a strict (error-severity) rule that
+    // reads RAW text fires on an upgrade note in a comment or an import written
+    // inside a codegen template literal — failing the gate on code that never
+    // runs. `.katana/_aio.md` allows a rule to be strict only when its probe
+    // runs over masked code.
     for (
-      const m of file.content.matchAll(
+      const m of codeMatches(
+        file.content,
         /import\s+(?:type\s+)?\{([^}]*)\}\s*from\s*['"]aio['"]/g,
       )
     ) {
@@ -1189,8 +1195,16 @@ export const checkUI: Checker = (ctx) => {
   if (appTsx) {
     const SERVER_ONLY_IMPORT_RE =
       /(?:import|export)\s+(?!type\s).*?\s+from\s+['"]((?:@std\/|node:)[^'"]+)['"]/g;
+    // `(?!type\s)` — a TYPE-only hop is not an edge in the runtime graph.
+    // `import type { Format } from "./x.server.ts"` is erased before esbuild
+    // ever sees it, so it cannot drag anything into the browser bundle; without
+    // this the chain rule reported an ERROR (gate-failing) on a file that was
+    // correct, and the suggested cure did not apply either. A field report lost
+    // time to exactly that and worked around it by moving its shared types.
+    // The server-only probe below has always had this guard; the hop regex
+    // simply never got it.
     const LOCAL_IMPORT_RE =
-      /(?:import|export)\s+.*?\s+from\s+['"](\.[^'"]+)['"]/g;
+      /(?:import|export)\s+(?!type\s).*?\s+from\s+['"](\.[^'"]+)['"]/g;
 
     // Helper: resolve a relative import path to a source file
     const resolveFile = (fromFile: { relative: string }, relPath: string) => {
@@ -1227,8 +1241,15 @@ export const checkUI: Checker = (ctx) => {
             {
               file: resolved2.relative,
               line: lineIdx,
-              fix:
-                "Move server-only code to a file that is dynamically imported",
+              // Naming the DYNAMIC part matters: renaming the target to
+              // *.server.ts alone does nothing here — the build marks those
+              // external only for `import(...)`, not for a static import — and
+              // a reader who has seen that advice elsewhere will try it first.
+              fix: `Import it dynamically from the method that needs it ` +
+                `(\`const x = await import("./thing.server.ts")\`). Renaming ` +
+                `to *.server.ts only excludes DYNAMIC imports; a static one ` +
+                `still enters the bundle. If you only need its types, ` +
+                `\`import type\` is already erased and is not reported.`,
             },
           );
         }
@@ -2420,6 +2441,155 @@ export const checkPostAwaitRead: Checker = (ctx) => {
 };
 
 // ══════════════════════════════════════════════════════════════════════
+// 17b. A CELL CALLING ITS OWN METHOD FROM INSIDE A METHOD
+// ══════════════════════════════════════════════════════════════════════
+//
+// `job.foo()` from inside `job.bar()` runs as its OWN transaction against
+// COMMITTED state, so it cannot see the write `bar` is halfway through making.
+// The behaviour is correct and documented — and invisible at the call site,
+// which is the definition of a trap. A field report lost real debugging time to
+// it (choosing a file left the estimate empty), and their CLAUDE.md now carries
+// a standing warning plus a convention of plain helper functions. A standing
+// warning in a project doc is a lint rule that was never written.
+//
+// Conservative by construction, because a false positive here would push people
+// to distrust the linter:
+//   • only inside the `cell(...)` literal that DECLARES the method,
+//   • only a call to one of THAT cell's own methods,
+//   • never inside `$do(...)` — an effect runs after the commit, where calling
+//     your own method is the documented, correct thing to do.
+
+/** The span of the `cell(` call declared at `declLine` (1-based), as
+ *  [start, end] offsets into `code`, or null when it cannot be located.
+ *
+ *  Located by LINE, not by matching the cell's name: `codeText` blanks string
+ *  contents (that is the point of it), so `cell("job"` reads as `cell("   "`
+ *  and a name-matching regex finds nothing. `CellInfo.line` already knows
+ *  where the declaration is. */
+function cellLiteralSpan(
+  code: string,
+  declLine: number,
+): [number, number] | null {
+  const lines = code.split("\n");
+  if (declLine < 1 || declLine > lines.length) return null;
+  const lineStart = lines.slice(0, declLine - 1).reduce(
+    (n, l) => n + l.length + 1,
+    0,
+  );
+  const call = /\bcell\s*\(/.exec(code.slice(lineStart));
+  if (!call) return null;
+  const open = code.indexOf("(", lineStart + call.index);
+  if (open < 0) return null;
+  let depth = 0;
+  for (let i = open; i < code.length; i++) {
+    const ch = code[i];
+    if (ch === "(") depth++;
+    else if (ch === ")") {
+      depth--;
+      if (depth === 0) return [open, i];
+    }
+  }
+  return null;
+}
+
+/** Offsets covered by `$do(` … `)` — effect bodies, where a self-call is fine. */
+function doSpans(code: string): Array<[number, number]> {
+  const out: Array<[number, number]> = [];
+  for (const m of code.matchAll(/\$do\s*\(/g)) {
+    const open = code.indexOf("(", m.index);
+    let depth = 0;
+    for (let i = open; i < code.length; i++) {
+      if (code[i] === "(") depth++;
+      else if (code[i] === ")") {
+        depth--;
+        if (depth === 0) {
+          out.push([open, i]);
+          break;
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/** Does the enclosing method write to its draft BEFORE offset `at`?
+ *
+ *  The window starts at the nearest method header — every cell method takes the
+ *  draft as its first parameter (`name(s, …)` / `async name(_s, …)`), which is
+ *  a reliable anchor without parsing. A write is an assignment, a compound
+ *  assignment, an increment, or a mutating call on a draft field
+ *  (`s.list.push(...)`). */
+function writesDraftBefore(code: string, at: number): boolean {
+  const before = code.slice(0, at);
+  const header =
+    /[ \t]*(?:async\s+)?[A-Za-z_$][\w$]*\s*\(\s*_?s\b[^)]*\)\s*\{/g;
+  let start = -1;
+  for (const m of before.matchAll(header)) start = m.index + m[0].length;
+  if (start < 0) return false;
+  const body = before.slice(start);
+  return /\bs\s*\.\s*[\w$]+\s*(?:=[^=]|\+=|-=|\*=|\/=|\?\?=|\|\|=|&&=|\+\+|--|\.\s*(?:push|pop|shift|unshift|splice|sort|reverse|set|delete|add|clear)\s*\()/
+    .test(body) || /Object\s*\.\s*assign\s*\(\s*s\b/.test(body);
+}
+
+export const checkSelfMethodCall: Checker = (ctx) => {
+  const { cells, report } = ctx;
+  for (const c of cells) {
+    if (c.file.name.endsWith(".test.ts") || c.methodNames.length === 0) {
+      continue;
+    }
+    const code = codeText(c.file.content);
+    // The binding the cell was assigned to — that is what a self-call is
+    // written through, and a cell nobody named cannot be self-called at all.
+    const bind = /\b(?:const|let|var)\s+(\w+)\s*=\s*cell\s*\(/.exec(
+      code.split("\n")[c.line - 1] ?? "",
+    );
+    if (!bind) continue;
+    const varName = bind[1]!;
+    const span = cellLiteralSpan(code, c.line);
+    if (!span) continue;
+    const skip = doSpans(code);
+
+    // `(?<![.\w$])` is load-bearing: without it `s.contacts.push(...)` — a
+    // STATE FIELD that happens to share the cell's name — reads as a call on
+    // the cell binding. It flagged three lines of `examples/contacts`, which is
+    // exactly the kind of false positive that teaches people to ignore a rule.
+    const call = new RegExp(
+      `(?<![.\\w$])${varName}\\s*\\.\\s*(${c.methodNames.join("|")})\\s*\\(`,
+      "g",
+    );
+    for (const m of code.matchAll(call)) {
+      const at = m.index;
+      if (at < span[0] || at > span[1]) continue; // outside the cell literal
+      if (skip.some(([s, e]) => at > s && at < e)) continue; // inside $do()
+      // …and only when the caller has ALREADY WRITTEN to its draft. That is
+      // the whole trap: the nested call runs against committed state and
+      // cannot see that write. With no prior write there is nothing to miss —
+      // `examples/disk`'s `up()` awaiting `disk.open(parent)` is a deliberate
+      // supersession, and flagging it would be flagging the documented answer.
+      if (!writesDraftBefore(code, at)) continue;
+      const line = code.slice(0, at).split("\n").length;
+      if (isSuppressed(c.file.lines, line - 1)) continue;
+      report(
+        "warn",
+        "patterns",
+        `${c.file.relative}:${line} — \`${varName}.${
+          m[1]
+        }()\` is called from inside ` +
+          `${c.name}'s own method. A nested same-cell call runs as its OWN ` +
+          `transaction against COMMITTED state, so it cannot see the write ` +
+          `this method is halfway through making — the value it reads is the ` +
+          `one from before. Extract the shared work into a plain function ` +
+          `both methods call (\`apply${
+            m[1]!.charAt(0).toUpperCase() + m[1]!.slice(1)
+          }(s, …)\`), or dispatch it from an effect (\`s.$do(...)\`), which ` +
+          `runs after the commit.`,
+        { file: c.file.relative, line, manual: "extract a plain helper" },
+      );
+    }
+  }
+};
+
+// ══════════════════════════════════════════════════════════════════════
 // 18. WORKER CELLS READING PEER CELLS
 // ══════════════════════════════════════════════════════════════════════
 //
@@ -2925,12 +3095,26 @@ export const checkAlpha52Surface: Checker = (ctx) => {
 
   // Deleted entries: aio/schedule + aio/selectors (alpha52 entry diet).
   for (const file of sourceFiles) {
-    const m =
-      /(?:^|\n)\s*import\s[^\n]*from\s*["']aio\/(schedule|selectors)["']/
-        .exec(file.content);
+    // Masked (see the note on the moved-symbol probe above): a strict rule must
+    // not fire on a mention inside a comment or a template literal.
+    //
+    // `codeMatches` (start-offset filtering), NOT `codeText`: codeText blanks
+    // every non-code span INCLUDING string contents, and an import's specifier
+    // is a string — masking it that way made this rule unable to match its own
+    // violation. Filtering by where the match STARTS (the `import` keyword,
+    // which is code) keeps the specifier readable while still rejecting a match
+    // that begins inside a comment or a template literal.
+    const m = codeMatches(
+      file.content,
+      /(?:^|\n)\s*import\s[^\n]*from\s*["']aio\/(schedule|selectors)["']/g,
+    )[0];
     if (!m) continue;
     found++;
-    const line = file.content.slice(0, m.index).split("\n").length + 1;
+    // `+1` is only right when the match started at the `\n` the pattern
+    // allows; a FIRST-LINE import matches at index 0 and was reported as
+    // line 2 — an error-severity finding pointing at the wrong line.
+    const line = file.content.slice(0, m.index).split("\n").length +
+      (m.index === 0 ? 0 : 1);
     report(
       "error",
       "upgrade",
@@ -2970,7 +3154,11 @@ export const checkAlpha52Surface: Checker = (ctx) => {
     });
     if (!hasValue) continue;
     found++;
-    const line = file.content.slice(0, m.index).split("\n").length + 1;
+    // `+1` is only right when the match started at the `\n` the pattern
+    // allows; a FIRST-LINE import matches at index 0 and was reported as
+    // line 2 — an error-severity finding pointing at the wrong line.
+    const line = file.content.slice(0, m.index).split("\n").length +
+      (m.index === 0 ? 0 : 1);
     report(
       "warn",
       "upgrade",
@@ -3057,6 +3245,7 @@ export const ALL_CHECKS: Checker[] = [
   checkImports,
   checkUpgrade,
   checkPostAwaitRead,
+  checkSelfMethodCall,
   checkWorkerPeerReads,
   checkUseCell,
   checkAlpha52,

@@ -47,6 +47,8 @@ export interface TestClient {
   readonly cli: CliApp<Record<string, unknown>>;
 }
 
+/** Handle for a multi-client test: several independent clients on one app, so
+ *  broadcast, per-user filtering and convergence can be asserted for real. */
 export interface TestMultiClient {
   clients: TestClient[];
   /** Server-authoritative state — the truth every client should converge on. */

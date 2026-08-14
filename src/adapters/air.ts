@@ -78,6 +78,9 @@ export type UseLocalResult<T> =
   }
   & readonly [T, (next: T | ((prev: T) => T)) => void];
 
+/** Component-local reactive state — the signal you would otherwise create by
+ *  hand, scoped to this instance and disposed with it. Returns the tuple form
+ *  `[value, set]` and the object form (`.value`/`.set`/`.patch`) from one call. */
 export function useLocal<T>(
   initial: T,
 ): UseLocalResult<T> {

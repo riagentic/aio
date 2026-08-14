@@ -153,8 +153,20 @@ export function overAdvisedShare(
   totalBytes: number | null,
 ): number | null {
   if (mb === null || totalBytes === null) return null;
+  // The FLOOR is not a decision anyone made. `resolveMaxHeapMB` never returns
+  // less than HEAP_FLOOR_MB, and on any machine under ~16 GB that floor is
+  // itself above the 25% share — so this branch told an 8 GB laptop it had
+  // asked for more than the automatic share when nobody had asked for
+  // anything, and no app setting could silence it (a field report: "nothing
+  // can launch this app without a heap warning").
+  if (mb <= HEAP_FLOOR_MB) return null;
   const share = (mb * 1024 * 1024) / totalBytes;
-  return share > HEAP_FRACTION ? share : null;
+  // The same 10% band the under-policy branch has, for the same reason: V8
+  // reports slightly more than it was asked for (46.6 GB granted → 46.7 GB
+  // reported), and a warning about rounding is noise. It was asymmetric —
+  // `am start` sized the ceiling to exactly the advised share and then warned
+  // that the result exceeded it.
+  return share > HEAP_FRACTION * 1.1 ? share : null;
 }
 
 /** The `--v8-flags=…` argument for a resolved ceiling, or `[]` when there is

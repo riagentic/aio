@@ -12,7 +12,7 @@ import type {
   Portal,
   Suspense,
 } from "./vdom-types.ts";
-import { _getLazyListeners } from "./vdom-lazy.ts";
+import { _getLazyListeners, _takePendingLazyListeners } from "./vdom-lazy.ts";
 import { _reportHookError } from "./hook-error.ts";
 
 // ── h() — JSX factory ────────────────────────────────────────────────
@@ -203,6 +203,12 @@ export function _registerLazyListeners(
 ): void {
   if (!ctx.onLazyResolve) return;
   const cb = ctx.onLazyResolve;
+  // The lazy that actually threw — at any depth, including inside a wrapper
+  // component whose vnode says nothing about what it renders.
+  _takePendingLazyListeners()?.add(cb);
+  // …plus any lazy sitting directly in the boundary's children. A sibling
+  // lazy that has not rendered yet never threw, so it is not in the pending
+  // slot; registering it here keeps one resolution waking the boundary once.
   for (const child of children) {
     if (typeof child === "object" && typeof child.tag === "function") {
       const listeners = _getLazyListeners(child.tag);

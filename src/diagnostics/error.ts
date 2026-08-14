@@ -472,7 +472,16 @@ export function formatErrorBox(err: AioError): string {
 
   // Truncated state snapshot
   if (err.stateSnapshot) {
-    const snap = JSON.stringify(err.stateSnapshot);
+    // Guarded: the snapshot is the LIVE state, and a reducer that crashed on
+    // unusual state (a BigInt, a cycle) is exactly when stringify dies too —
+    // taking the whole report (onError hook, TT mark, error count, diag bus)
+    // down with it. Same guard the action log and dispatch's tag() carry.
+    let snap: string;
+    try {
+      snap = JSON.stringify(err.stateSnapshot) ?? "undefined";
+    } catch {
+      snap = "[unserializable: BigInt or circular structure]";
+    }
     const truncated = snap.length > 200 ? snap.slice(0, 200) + "…" : snap;
     lines.push(`${bar}`);
     lines.push(`${bar} ${DIM}State: ${truncated}${RESET}`);

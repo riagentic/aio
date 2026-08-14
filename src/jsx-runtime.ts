@@ -138,6 +138,39 @@ type AioHTMLAttributes<T extends EventTarget = HTMLElement> =
     draggable?: boolean;
     spellcheck?: boolean;
     contentEditable?: boolean | "true" | "false" | "plaintext-only";
+    /** Which on-screen keyboard to raise — `<input type="number"
+     *  inputMode="decimal">` is the standard way to get a numeric keypad.
+     *  Global (valid on any element, including `contentEditable` ones), which
+     *  is why it lives here rather than on the input attributes. The renderer
+     *  already wrote these through to the DOM; only the TYPE was missing, so
+     *  the documented spelling failed to compile on the target it matters most
+     *  for — Android is first-class here (a field report). */
+    inputMode?:
+      | "none"
+      | "text"
+      | "decimal"
+      | "numeric"
+      | "tel"
+      | "search"
+      | "email"
+      | "url";
+    /** The action label on the virtual keyboard's Enter key. */
+    enterKeyHint?:
+      | "enter"
+      | "done"
+      | "go"
+      | "next"
+      | "previous"
+      | "search"
+      | "send";
+    /** Auto-capitalization for virtual keyboards. */
+    autoCapitalize?:
+      | "off"
+      | "none"
+      | "on"
+      | "sentences"
+      | "words"
+      | "characters";
     [key: `data-${string}`]: string | number | boolean | undefined;
     [key: `aria-${string}`]: string | number | boolean | undefined;
     ref?: ((el: HTMLElement | null) => void) | { current: HTMLElement | null };
@@ -323,6 +356,7 @@ type AioDetailsAttributes = AioHTMLAttributes<HTMLDetailsElement> & {
   open?: boolean;
   name?: string;
 };
+/** `<dialog>` attributes, including the `open` boolean AIR treats as state. */
 type AioDialogAttributes = AioHTMLAttributes<HTMLDialogElement> & {
   open?: boolean;
 };
@@ -332,6 +366,7 @@ type AioProgressAttributes = AioHTMLAttributes<HTMLProgressElement> & {
   value?: number | string;
   max?: number | string;
 };
+/** `<meter>` attributes — value plus the min/max/low/high/optimum bounds. */
 type AioMeterAttributes = AioHTMLAttributes<HTMLMeterElement> & {
   value?: number | string;
   min?: number | string;

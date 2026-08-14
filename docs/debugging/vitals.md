@@ -48,6 +48,7 @@ aio.run({
       vitals: {
         heartbeatInterval: 1000,  // ms between checks (default: 1000)
         hints: true,              // enable hint engine (default: true in dev)
+        backpressure: true,       // per-client send throttling (default: true)
         thresholds: {             // override per-layer thresholds (ms)
           render:    { degraded: 50,  warning: 200, frozen: 2000 },
           transport: { degraded: 100, warning: 500, frozen: 2000 },
@@ -65,6 +66,12 @@ aio.run({
 ```
 
 Kill switch: `vitals: false`.
+
+`backpressure: false` turns off the per-client send throttle: a client that
+reports itself behind (staleness above the transport threshold) is no longer
+sent state at a reduced rate. Leave it on unless you have measured that the
+throttle is what is holding a client back — the hint engine says so by name when
+it is.
 
 ---
 

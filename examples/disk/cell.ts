@@ -20,6 +20,17 @@ export const disk = cell("disk", {
   // worth restoring. One word, and this app never persists a byte.
   persist: "none",
 
+  // Opt in to the transactional model (alpha57 made it opt-in again). It earns
+  // its line HERE and rarely elsewhere: a scan runs for minutes and can be
+  // superseded mid-flight, and under a transaction a cancelled call's buffered
+  // writes are discarded wholesale — no stale write can land, by construction,
+  // instead of the "check the signal, then carefully un-write" dance.
+  //
+  // It is also what makes `s.$commit!()` below real: without this line
+  // `$commit` resolves to a no-op, and the spinner it publishes would never
+  // reach the client.
+  transaction: true,
+
   state: {
     path: "",
     entries: [] as Entry[],
@@ -35,10 +46,10 @@ export const disk = cell("disk", {
   methods: {
     /** Scan a folder. Minutes-long on a big tree — hence everything below.
      *
-     *  Async methods are TRANSACTIONAL by default (alpha52): a cancelled or
-     *  superseded call's buffered writes are discarded wholesale, so the old
-     *  "check the signal, then carefully un-write" dance is gone — no stale
-     *  write can land, by construction. */
+     *  This cell asked for `transaction: true` (see the config above), so a
+     *  cancelled or superseded call's buffered writes are discarded wholesale:
+     *  no stale write can land, by construction, and the old "check the signal,
+     *  then carefully un-write" dance is gone. */
     async open(s: DiskState & Partial<MethodDraftMeta>, path?: string) {
       const io = await import("./disk.server.ts");
       const target = path ?? io.homeDir();

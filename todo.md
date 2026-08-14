@@ -79,6 +79,70 @@ that is the gate working, not a setback.
 - (Bugs caught while building an alpha — the alpha38 libraryMode log
   misplacement, the app-key split-brain — don't reset it: they never shipped.
   That distinction is the whole point of the gate.)
+- **2026-08-14 — the count stays 0, and restarts from alpha58's release.** The
+  alpha58 hunts found more defects reachable in RELEASED alphas, several of the
+  silent-wrong-outcome class: `serverUser()` was `undefined` in every async
+  method (so any identity check inside one read as anonymous), a reconnect
+  unsubscribed the client from its own cells permanently, a client could be
+  stranded one state behind forever, and Electron trusted every bad certificate
+  from every host. All fixed with red-when-reverted tests; none had shipped as
+  of an unreleased alpha58, but they were all reachable before it.
+
+## Open field-report items (triaged 2026-08-13, NOT yet decided)
+
+`feedback/` is gitignored, so the reports themselves live only in a working
+tree. These are the items from `got.md` and `fezor.md` that are neither fixed
+(`resolved.md`) nor refused (`refused.md`) — recorded HERE so the repo carries
+the fact that they exist. Each still needs verification before it is believed.
+
+- **`am start` / `am restart` return before the app is serving** (got #2) —
+  there is no `--wait`, so a script's next command races the boot. A real
+  usability gap; the shape of the fix (poll the health endpoint until it
+  answers, with a timeout) is obvious, the question is whether `--wait` should
+  be the default.
+- **A path-pinned app is documented, but the default pin makes it red** (got
+  #4), **a linked (not provisioned) aio needs four imports the app cannot
+  guess** (got #5), **`deno task compile --electron` auto-installs Electron,
+  rewrites `deno.json`, then fails** (got #6) — three onboarding-path items, not
+  yet reproduced.
+- **The `localStorage` dead-code class has no aiol rule** (fezor F-1) —
+  `grep
+  localStorage aiol/` is empty.
+- **`NO_COLOR` is honored nowhere** (fezor, via the goals audit) —
+  `src/diagnostics/logger-format.ts` emits ANSI unconditionally, against a
+  convention every CLI follows.
+
+The process defect behind this list: with `feedback/` untracked, "every reported
+item is in resolved.md or refused.md" cannot be verified from the repository,
+and an audit has no way to tell an unreported item from an unrecorded one.
+Deciding whether reports belong in version control is the actual fix.
+
+## Dead-wired client vitals + vacuous devtools tree (2026-08-14 hunt — verified, deliberately not drive-by-fixed)
+
+Found by the randomized hunt, each verified by grep + git archaeology; the fix
+is transport wiring, which deserves its own pass with a browser-path test, not a
+drive-by:
+
+- **Client render vitals never run.** alpha48's transport swap (570d3b3) deleted
+  `browser-transport-vitals.ts` — the ONLY caller of
+  `createRenderMeter()`/`_setVitalsRenderMeter()` — and the replacing
+  `browser-air-transport.ts` says "no vitals". `renderBudget` is typed,
+  validated, bridged into `window.__aioConfig`… and read by nothing;
+  `docs/debugging/vitals.md` still documents it as honored. The doctrine
+  violation class: config accepted, silently dropped.
+- **`vitals-ping` has no sender** (same deletion). The server transport probe
+  only registers clients in `onClientPing`, so its map stays empty forever:
+  `/__aio/vitals` reports `clients: []`, per-client freeze detection and the
+  `isFrozen` broadcast skip are unreachable.
+- **`DevToolsHandle.tree` is `[]` forever** — `_updateTree` has zero callers in
+  the repo; `RenderEvent.trigger` only ever emits `"signal"`. An advertised
+  inspection API that silently returns nothing: wire a renderer tree walker, or
+  remove the field honestly.
+
+One fix shape for the first two: an `initVitals` equivalent wired into the
+CURRENT transport (render meter + ping interval, through the frame router), plus
+a gate test in the class "every config key must reach a reader" — the
+`ui-kit-browser-import.test.ts` move, applied to config.
 
 ## Remaining before beta
 

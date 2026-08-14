@@ -2,11 +2,20 @@
 import type { HLC, SyncOp } from "./types.ts";
 import { SYNC_DEFAULTS } from "./types.ts";
 
-/** Parse a retention string like "4h" into milliseconds. */
-function parseRetention(retention: string): number {
-  const match = retention.match(/^(\d+)(ms|s|m|h)$/);
+/** Parse a retention string like "4h" or "7d" into milliseconds.
+ *
+ *  Throws on anything it cannot read. It used to fall back to 4h, so
+ *  `retention: "7d"` — the value `docs/persistence/crdt.md` puts in its own
+ *  example — silently became 4h: the queue evicted the user's unsent changes
+ *  42× earlier than the app asked for, with nothing to see. A retention it
+ *  cannot honour is a misconfig, and a misconfig speaks. */
+export function parseRetention(retention: string): number {
+  const match = retention.trim().match(/^(\d+)(ms|s|m|h|d)$/);
   if (!match) {
-    return SYNC_DEFAULTS.defaultRetention === "4h" ? 4 * 3600_000 : 1000;
+    throw new Error(
+      `[aio:sync] offline.retention "${retention}" is not a duration — ` +
+        `use digits plus one of ms, s, m, h, d (e.g. "4h", "7d").`,
+    );
   }
   const [, value, unit] = match;
   const n = Number(value);
@@ -20,7 +29,7 @@ function parseRetention(retention: string): number {
     case "h":
       return n * 3600_000;
     default:
-      return 1000;
+      return n * 86_400_000; // "d" — the regex admits nothing else
   }
 }
 
@@ -32,7 +41,7 @@ function parseRetention(retention: string): number {
 export interface OpBufferStorage {
   loadOps(cell: string): Promise<SyncOp[]>;
   saveOp(op: SyncOp): Promise<void>;
-  confirmOp(opId: string): Promise<void>;
+  confirmOp(cell: string, opId: string): Promise<void>;
   pruneConfirmed(cell: string): Promise<void>;
   pruneStale(cell: string, opId: string): Promise<void>;
   countUnconfirmed(cell: string): Promise<number>;
@@ -81,14 +90,9 @@ export function createMemoryStorage(): OpBufferStorage {
       return Promise.resolve();
     },
 
-    confirmOp(opId: string): Promise<void> {
-      for (const cellOps of ops.values()) {
-        const op = cellOps.find((o) => o.id === opId);
-        if (op) {
-          op.confirmed = true;
-          break;
-        }
-      }
+    confirmOp(cell: string, opId: string): Promise<void> {
+      const op = (ops.get(cell) ?? []).find((o) => o.id === opId);
+      if (op) op.confirmed = true;
       return Promise.resolve();
     },
 
@@ -210,6 +214,10 @@ export interface OpBufferOptions {
   onDrop?: OpBufferDropCallback;
   /** TTL in ms for stale unconfirmed op eviction (default: SYNC_DEFAULTS.defaultRetention) */
   staleAfter?: number;
+  /** Per-cell TTL override in ms — this is how a cell's
+   *  `sync: { offline: { retention } }` reaches the eviction rule. Falls back
+   *  to `staleAfter` when it returns undefined. */
+  staleAfterFor?: (cell: string) => number | undefined;
 }
 
 /**
@@ -223,8 +231,10 @@ export function createOpBuffer(
 ): OpBuffer {
   const cap = opts?.pendingCap ?? SYNC_DEFAULTS.pendingCap;
   const onDrop = opts?.onDrop;
-  const staleAfterMs = opts?.staleAfter ??
+  const defaultStaleAfterMs = opts?.staleAfter ??
     parseRetention(SYNC_DEFAULTS.defaultRetention);
+  const staleAfterOf = (cell: string): number =>
+    opts?.staleAfterFor?.(cell) ?? defaultStaleAfterMs;
 
   return {
     async add(op: SyncOp): Promise<boolean> {
@@ -242,7 +252,7 @@ export function createOpBuffer(
         // This prevents backpressure deadlock where a throttled client's pending
         // queue grows indefinitely while acks can't flow through fast enough.
         const staleOps = await storage.loadOps(op.cell);
-        const cutoff = Date.now() - staleAfterMs;
+        const cutoff = Date.now() - staleAfterOf(op.cell);
         let evictedCount = 0;
 
         for (const staleOp of staleOps) {
@@ -283,7 +293,7 @@ export function createOpBuffer(
       // advances only on actually delivered data: handleRemoteOp (broadcast
       // stamps) and handleSyncResponse (response ops / reserved-cursor echo,
       // which establishes lastServerTs on the very first sync round).
-      await storage.confirmOp(opId);
+      await storage.confirmOp(cell, opId);
       // …and let it go. An acked op is dead weight: `getUnconfirmed` filters
       // it out, `requestSync` never re-sends it, `rebase` never replays it.
       // The only thing that dropped one was the backpressure path in `add`,

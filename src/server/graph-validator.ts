@@ -187,14 +187,50 @@ import { SERVER_ONLY_AIO_SYMBOLS } from "../entries.ts";
  *  `server-only-import` (BLOCKING, shows the diagnostic page). `@std/*` (often
  *  browser-safe) and `Deno.*` *usage* (only breaks if that path runs client-
  *  side) are CONDITIONAL → `server-only-api` (warning). */
+/** `// aio-ok: server-only` — the acknowledgement path the warning had none of.
+ *
+ *  A field report ran for weeks with `⚠ src/cell/job.ts:292 — Deno.remove is
+ *  server-only` on every launch, pointing at a `finally` block inside a method
+ *  that only ever runs on the server, cleaning up a file it had itself created.
+ *  The rule is right in general and wrong there, and with no way to say so the
+ *  line became permanent noise printed next to the ✖ errors that genuinely
+ *  break the client — which trains people to skim the one output they most need
+ *  to read carefully. `aiol` already had this idiom (`// aiol-ok`).
+ *
+ *  Accepted on the flagged line, or on a comment line immediately above it
+ *  (where the reason belongs, and where `deno fmt` cannot move it).
+ *
+ *  Deliberately NOT accepted for blocking categories: "this path never runs in
+ *  the browser" is a claim a developer can make, "this import exists in the
+ *  browser build" is not — that one is a guaranteed blank screen, and a
+ *  silenceable one would be worse than the noise. */
+export function isServerOnlySuppressed(
+  lines: readonly string[],
+  lineNum: number,
+): boolean {
+  const marker = /\/\/.*\baio-ok\b\s*[:\-—]?\s*server-only/;
+  const own = lines[lineNum - 1] ?? "";
+  if (marker.test(own)) return true;
+  const above = (lines[lineNum - 2] ?? "").trim();
+  return above.startsWith("//") && marker.test(above);
+}
+
 export function checkPlatformSafety(code: string, file: string): GraphError[] {
   const errors: GraphError[] = [];
   let m;
   // (1) Server-only MODULE imports. `node:` builtins cannot resolve in the
   //     browser (guaranteed break → blocking); `@std/*` is frequently
   //     browser-safe (path/encoding/assert/…) so it stays a warning.
+  // `[^;\n]` — never `[\s\S]`, which crossed statement boundaries: the
+  // `(?!type[\s{])` lookahead was then evaluated against the FIRST import in
+  // the file, so `import { x } from "./x.ts"` followed anywhere below by a
+  // correct `import type { Buffer } from "node:buffer"` was reported as a
+  // BLOCKING server-only import — and a blocking error makes the dev server
+  // serve the diagnostic page instead of the app and suppress hot reload. The
+  // fix text even told the author to do what they had already done. The
+  // `aio`-symbol twin below was already bounded this way.
   const MODULE_IMPORT_RE =
-    /(?:import|export)\s+(?!type[\s{])[\s\S]*?\s+from\s+['"]((?:@std\/|node:)[^'"]+)['"]/gm;
+    /(?:import|export)\s+(?!type[\s{])[^;\n]*?\s+from\s+['"]((?:@std\/|node:)[^'"]+)['"]/g;
   while ((m = MODULE_IMPORT_RE.exec(code)) !== null) {
     const spec = m[1]!;
     const lineNum = code.slice(0, m.index).split("\n").length;
@@ -272,10 +308,16 @@ export function checkPlatformSafety(code: string, file: string): GraphError[] {
       message: `Deno.${m[1]} is server-only`,
       fix: `Deno.${
         m[1]
-      }() is not available in the browser. Move it into a *.server.ts module and dynamic-import it from the cell method, or use a cell effect (docs/build/imports.md).`,
+      }() is not available in the browser. Move it into a *.server.ts module and dynamic-import it from the cell method, or use a cell effect (docs/build/imports.md). If this path only ever runs on the server, say so: \`// aio-ok: server-only — <reason>\` on the line or the line above.`,
     });
   }
-  return errors;
+  // The acknowledgement pass. Warnings only — a blocking category is a
+  // guaranteed blank screen and stays unsilenceable.
+  const lines = code.split("\n");
+  return errors.filter((e) =>
+    BLOCKING_CATEGORIES.has(e.category) ||
+    !isServerOnlySuppressed(lines, e.line ?? 0)
+  );
 }
 
 export type TranspileFn = (source: string, filepath: string) => Promise<string>;

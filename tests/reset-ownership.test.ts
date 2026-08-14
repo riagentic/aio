@@ -67,6 +67,13 @@ const OWNERS: Record<string, [Owner, string]> = {
   // not a blessing — it is a debt with a name. Prefer moving one up to RUNTIME
   // over adding another here.
   _resetForwardedHandles: ["MANUAL", "advisory-only observation; test-local"],
+  _resetParsedCli: [
+    "MANUAL",
+    "memoized boot-path parse; lives in src/server, which src/state's one " +
+    "call may not import (boundaries). Only a test parsing the DEFAULT " +
+    "Deno.args twice needs it — every other test passes an explicit array " +
+    "and never touches the cache",
+  ],
   _resetPendingFactories: ["MANUAL", "own-effect factories; lifecycle-shaped"],
   _resetReadOnlyHint: ["MANUAL", "lives in src/air — state must not import it"],
   _resetInitialShapeKeys: ["MANUAL", "protocol shape-drift keys"],

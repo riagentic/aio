@@ -704,3 +704,54 @@ await aio.run({ appId: "open-app", expose: true });
     },
   );
 });
+
+// A finding's line number is the only part a reader acts on. The `+1` here
+// compensates for the `\n` the pattern is allowed to start on — but a FIRST
+// LINE import matches at index 0, where there is no newline to skip, and was
+// reported one line down. An error-severity finding that points at the wrong
+// line sends the reader to correct code.
+Deno.test("aiol alpha52: a dead-entry import on line 1 is reported as line 1", async () => {
+  const FIRST = `import { schedule } from "aio/schedule";
+export const x = 1;
+`;
+  const LATER = `// a comment first
+import { schedule } from "aio/schedule";
+export const x = 1;
+`;
+  await withProject(
+    { "src/a.ts": FIRST, "src/b.ts": LATER, "src/app.ts": "" },
+    {},
+    async (dir) => {
+      const issues = await surfaceIssues(dir);
+      const a = issues.find((i) => i.file === "src/a.ts");
+      const b = issues.find((i) => i.file === "src/b.ts");
+      assert(a, "the first-line import is found at all");
+      assert(b, "the second-line import is found at all");
+      assertEquals(a.line, 1, "line 1 is line 1");
+      assertEquals(b.line, 2, "and the general case is unchanged");
+      // The message carries the same number the issue does — they are read
+      // together, so they cannot disagree.
+      assert(a.message.includes("src/a.ts:1"), a.message);
+      assert(b.message.includes("src/b.ts:2"), b.message);
+    },
+  );
+});
+
+Deno.test("aiol alpha52: an aio/db VALUE import on line 1 is reported as line 1", async () => {
+  const FIRST = `import { createDB } from "aio/db";
+export const db = createDB;
+`;
+  await withProject(
+    { "src/a.ts": FIRST, "src/app.ts": "" },
+    {},
+    async (dir) => {
+      const issues = await surfaceIssues(dir);
+      const a = issues.find((i) =>
+        i.file === "src/a.ts" && i.message.includes("aio/db")
+      );
+      assert(a, "the aio/db value import is found");
+      assertEquals(a.line, 1);
+      assert(a.message.includes("src/a.ts:1"), a.message);
+    },
+  );
+});

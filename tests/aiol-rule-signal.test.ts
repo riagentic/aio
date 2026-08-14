@@ -449,6 +449,16 @@ const VIOLATIONS: Case[] = [
     }),
     expect: "has worker: true and",
   },
+  {
+    // The nested same-cell call: write, then call, and the callee runs its own
+    // transaction against committed state — so it reads the value from BEFORE.
+    name: "cell method calling its own cell's method after a write",
+    files: app({
+      "src/cell.ts":
+        `import { cell } from "aio";\nexport const counter = cell("counter", {\n  state: { count: 0, label: "" },\n  methods: {\n    set(s: { count: number; label: string }, n: number) {\n      s.count = n;\n      counter.relabel();\n    },\n    relabel(s: { count: number; label: string }) { s.label = String(s.count); },\n  },\n});\n`,
+    }),
+    expect: "own method",
+  },
   // performance
   {
     name: "useAio in a non-root component",
@@ -1213,6 +1223,23 @@ const LEGAL: Clean[] = [
       ),
       "src/io.server.ts":
         `export const read = async () => (await Deno.readTextFile("/tmp/x")).length;\n`,
+    }),
+  },
+  {
+    // A field report: `App.tsx → cell.ts → ayd.server.ts` where the last hop is
+    // `import type`. Types are erased before esbuild sees them, so nothing from
+    // that module can reach the bundle — but the chain walker matched the hop
+    // anyway and reported a gate-failing ERROR, and the cure it suggested did
+    // not apply. The reporter worked around it by relocating their types.
+    name: "a TYPE-only hop is not a runtime edge in the import chain",
+    forbid: "transitive server-only import",
+    files: app({
+      "src/App.tsx":
+        `import { label } from "./mid.ts";\nexport default function App() { return <div>{label()}</div>; }\n`,
+      "src/mid.ts":
+        `import type { Fmt } from "./io.server.ts";\nexport const label = (): string => "x" as Fmt;\n`,
+      "src/io.server.ts":
+        `import { join } from "@std/path";\nexport type Fmt = string;\nexport const p = () => join("a", "b");\n`,
     }),
   },
 ];

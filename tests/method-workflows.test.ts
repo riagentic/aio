@@ -1,6 +1,12 @@
 // perfect-aio D1 — the method-native workflow capabilities that replace
 // generators: until/race/sleep helpers + cancelOn/$signal cancellation.
-import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
 import {
   race,
   sleep,
@@ -454,4 +460,43 @@ Deno.test("listensTo: direct call and foreign reaction agree on the return", () 
     JSON.stringify(direct.effects),
     JSON.stringify(foreign.effects),
   );
+});
+
+// Two handlers, one foreign action. The reducer looks up exactly ONE handler
+// per trigger, so the second registration silently replaced the first and that
+// method simply never ran — no warning, no type error, in a block where every
+// other mistake throws. A cell whose reaction never fires is the quietest
+// possible bug, so this is a refusal now.
+Deno.test("listensTo: two methods on the SAME foreign action is refused, not silently last-wins", () => {
+  const src = cell("wf-dup-src", {
+    state: { n: 0 },
+    methods: {
+      bump(s) {
+        s.n += 1;
+      },
+    },
+  });
+  let thrown: unknown;
+  try {
+    cell("wf-dup-listener", {
+      state: { a: 0, b: 0 },
+      listensTo: { onFirst: src.bump, onSecond: src.bump },
+      methods: {
+        onFirst(s) {
+          s.a += 1;
+        },
+        onSecond(s) {
+          s.b += 1;
+        },
+      },
+    });
+  } catch (e) {
+    thrown = e;
+  }
+  assert(
+    thrown instanceof Error,
+    "a mapping only one half of which can run must throw",
+  );
+  assertStringIncludes(String(thrown), "onFirst");
+  assertStringIncludes(String(thrown), "onSecond");
 });

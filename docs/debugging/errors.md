@@ -193,11 +193,29 @@ await aio.run({
     console: true, // pretty-print to dev console (ANSI colors)
     heartbeat: 3600, // uptime summary every N seconds
     suppressTypes: ["timer:tick"], // hide noisy actions from debug.log
-    backupLogs: true, // keep previous logs on restart
-    backupKeep: 7, // backup archives to keep (default: 7)
+    backupLogs: true, // keep previous logs on restart (DEFAULT — false wipes on start)
+    backupKeep: 7, // backup archives to keep (default: 7, 0 = unlimited)
+    logBudget: 200 * 1024 * 1024, // byte ceiling for logs/ (default: 200MB, 0 = unlimited)
   },
 });
 ```
+
+### Retention
+
+Logs are kept, not wiped: on every start the live files rotate to `.1`, older
+archives shift up, and anything past `backupKeep` is removed. `.1` is always the
+run that just ended — including the crash you restarted because of, and the dev
+run a cell-file save just respawned.
+
+Nothing rotates a log mid-run, so `logBudget` is what actually bounds the disk:
+after rotating, archives are evicted **oldest run first** until `logs/` fits,
+and every eviction is logged. Live files are counted but never evicted — if they
+alone exceed the budget you get a warning, not a deleted log.
+
+- `--no-backup-logs` — wipe on start (the old default), archives included.
+- `--log-budget=500MB` (or bytes, or `0` for unlimited).
+- `am start` applies the same policy to `stdout.log` before it spawns the app —
+  it is the one log the app cannot rotate itself (the shell holds its fd).
 
 ### Client log (`client.log`)
 

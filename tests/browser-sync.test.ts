@@ -273,3 +273,60 @@ Deno.test("browser-sync: an ack for an op the snapshot already holds does not do
     _resetCellRegistry();
   }
 });
+
+Deno.test("browser-sync: a sync cell named 'clientId' is refused — its document would overwrite the identity key", () => {
+  shimLocalStorage();
+  _resetBrowserSync();
+  _resetCellRegistry();
+  registerCell(makeSyncCell("clientId"));
+  try {
+    let threw = false;
+    try {
+      initBrowserSync(() => {});
+    } catch (e) {
+      threw = true;
+      assert(String(e).includes("clientId"), "names the collision");
+    }
+    assert(threw, "misconfig must throw at the site, dev and prod alike");
+  } finally {
+    _resetBrowserSync();
+    _resetCellRegistry();
+  }
+});
+
+// A cell's `sync: { offline: { retention } }` has to REACH the eviction rule.
+// It was normalized, typed and documented — and read by nobody, so every cell
+// evicted at the shared 4h default no matter what it asked for. An app that
+// asked for 7d had its unsent changes thrown away 42× earlier than it said,
+// with nothing to see anywhere.
+Deno.test("browser-sync: each cell's own retention reaches the eviction rule", async () => {
+  const { _retentionMsOf } = await import("../src/browser/browser-sync.ts");
+  const withRetention = (id: string, retention?: string): CellDef => {
+    const def = makeSyncCell(id);
+    (def as unknown as { __aio: { syncConfig: unknown } }).__aio.syncConfig =
+      normalizeSyncConfig(
+        retention === undefined ? true : { offline: { retention } },
+      );
+    return def;
+  };
+  const cells = new Map<string, CellDef>([
+    ["patient", withRetention("patient", "7d")],
+    ["quick", withRetention("quick", "30s")],
+    ["silent", withRetention("silent")],
+  ]);
+
+  assertEquals(_retentionMsOf(cells, "patient"), 7 * 86_400_000);
+  assertEquals(_retentionMsOf(cells, "quick"), 30_000);
+  assertEquals(
+    _retentionMsOf(cells, "silent"),
+    4 * 3_600_000,
+    "a cell that says nothing is normalized to the documented 4h default — " +
+      "the same value the buffer would have used, now stated rather than " +
+      "assumed",
+  );
+  assertEquals(
+    _retentionMsOf(cells, "not-a-cell"),
+    undefined,
+    "and an unknown cell is not an error here",
+  );
+});

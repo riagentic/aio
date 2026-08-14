@@ -216,13 +216,19 @@ Deno.test("return-value: fuzz — random compositions never report a false EXACT
       p.verdict === "dropped" && /bigint/i.test(p.name)
     );
     // A bare function/symbol nested in an object is stripped, not fatal.
+    //
+    // `undefined` is the one class whose verdict DEPENDS on position, and this
+    // oracle used to get it wrong: the table's "exact" is the verdict for the
+    // BARE value (`return undefined` really does arrive as undefined), but as a
+    // MEMBER the key vanishes entirely, which `findLossy` reports as
+    // `absent` — deliberately, pinned by the hand-written test above
+    // (`value.deep.gone`). The composite rule read the bare verdict, so every
+    // seed that happened to draw `undefined` failed this fuzzer against
+    // correct code (FUZZ_SEED=3 and 11 both did). A gate that goes red on the
+    // behaviour another test demands is noise, and noise is how a real
+    // failure gets waved through.
     const expectExact = !expectDropped &&
-      parts.every((p) =>
-        p.verdict === "exact" ||
-        // undefined as a MEMBER vanishes → lossy, but our undefined class is
-        // the bare value, which as a member is a dropped key.
-        false
-      );
+      parts.every((p) => p.verdict === "exact" && p.name !== "undefined");
     const repro = `FUZZ_SEED=${SEED} round ${round}: ${
       parts.map((p) => p.name).join("+")
     }`;

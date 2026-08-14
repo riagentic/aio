@@ -47,11 +47,24 @@ async function main(): Promise<void> {
     await checkFile(entry.path, entry.path.replace(DOCS_DIR, ""));
   }
 
-  // Also check README.md at repo root
+  // Also check README.md at repo root.
+  //
+  // The path used to be `../../README.md` — this script lives in scripts/, so
+  // that resolved OUTSIDE the repo, to a file that does not exist — and the
+  // miss was swallowed by an empty catch. So the README half of this gate
+  // spent its whole life passing on a file it never opened, which is how the
+  // README came to advertise `deno task dev:electron` and friends five alphas
+  // after that task matrix was retired. A gate that cannot fail is not a gate:
+  // the path is right now, and a missing README is a LOUD failure.
+  const readmePath = new URL("../README.md", import.meta.url).pathname;
   try {
-    const readmePath = new URL("../../README.md", import.meta.url).pathname;
-    await checkFile(readmePath, "README.md");
-  } catch { /* not found */ }
+    await Deno.stat(readmePath);
+  } catch {
+    console.error(`✗ README.md not found at ${readmePath} — the root README `);
+    console.error(`  is a release surface; this check must not silently skip.`);
+    Deno.exit(1);
+  }
+  await checkFile(readmePath, "README.md");
 
   console.log(`Version check: v${expected}`);
   console.log(`Found ${seen.size} version(s) across docs:\n`);

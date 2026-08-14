@@ -273,7 +273,10 @@ export const ${symbol} = cell("${name}", {
 });
 `;
     await Deno.writeTextFile(file, content);
-    out(flags.json ? { created: file } : `created ${file}`, mode);
+    // `mode`, not `flags.json`: stdout that is not a tty IS json mode (every
+    // other am command branches this way), so a piped `am add cell x | jq
+    // -r .created` used to receive the pretty STRING, JSON-stringified.
+    out(mode === "pretty" ? `created ${file}` : { created: file }, mode);
   } else if (kind === "page") {
     // `am new page` generated a useAio() component wired to nothing — code
     // the framework deprecated. A page is a plain component; there is nothing

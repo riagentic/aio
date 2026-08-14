@@ -39,6 +39,11 @@ export type VitalsSystem = {
     state: Record<string, unknown>,
   ) => Record<string, number>;
   pressureMonitor: PressureMonitorAPI | null;
+  /** Whether per-client send throttling is active (`vitals.backpressure`,
+   *  default on). This flag is the ONLY reader of that option — it used to
+   *  have none at all: the switch type-checked, was accepted, and changed
+   *  nothing, while `hints.ts` advised "if backpressure is off, enable it". */
+  backpressureEnabled: boolean;
   destroy: () => void;
 };
 
@@ -186,18 +191,22 @@ export function createVitalsSystem(config: VitalsConfig): VitalsSystem {
   }
 
   function checkAndAlert() {
-    const loopStatus = loopProbe.getStatus();
+    const { status: loopStatus, driver } = loopProbe.getStatusDetail();
     if (loopStatus !== "healthy") {
       const loopVitals = loopProbe.getVitals();
-      const measured = Math.max(
-        loopVitals.lastReduceTime,
-        loopVitals.queueDepth,
-      );
+      // measured and threshold must come from the SAME layer: the queue is an
+      // action count, the loop is milliseconds. `max(ms, count)` against a
+      // loop threshold reported incoherent numbers (e.g. "degraded —
+      // measured: 60, threshold: 100" for a queue flood of fast reduces).
+      const tiers = driver === "queue" ? thresholds.queue : thresholds.loop;
+      const measured = driver === "queue"
+        ? loopVitals.queueDepth
+        : loopVitals.lastReduceTime;
       const threshold = loopStatus === "frozen"
-        ? thresholds.loop.frozen
+        ? tiers.frozen
         : loopStatus === "warning"
-        ? thresholds.loop.warning
-        : thresholds.loop.degraded;
+        ? tiers.warning
+        : tiers.degraded;
       fireAlert("loop", loopStatus, measured, threshold);
     }
     serverTransport.checkAllClients();
@@ -207,6 +216,7 @@ export function createVitalsSystem(config: VitalsConfig): VitalsSystem {
     loopProbe,
     serverTransport,
     pressureMonitor,
+    backpressureEnabled: config.backpressure !== false,
     checkAndAlert,
     getEndpointData: () => ({
       server: { loop: loopProbe.getVitals() },

@@ -84,6 +84,13 @@ export function buildBrowserImportMap(
     // `updates.available`, and nowhere else.
     "aio/updates": "/__aio/updates.ts",
     "aio/feedback": "/__aio/feedback.ts",
+    // The component kit. `docs/ui/kit.md` tells every app to
+    // `import { Button, Input } from "aio/ui"` — and the specifier resolved
+    // nowhere in the browser, so the page died on an unmapped bare import
+    // (a blank screen) while fmt, check, lint, aiol, doctor and the whole test
+    // suite stayed green: a field report hit exactly this. Anything the docs
+    // tell an app to import from a PAGE has to be in this map.
+    "aio/ui": "/__aio/ui/mod.ts",
   };
   for (const [name, specifier] of Object.entries(denoImports)) {
     if (!specifier.startsWith("npm:")) continue;

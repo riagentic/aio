@@ -12,6 +12,7 @@ import { isActionNoise } from "./action-kind.ts";
 export function createActionLog(path: string, max: number) {
   let lineCount = 0;
   let writeErrors = 0;
+  let modeFixed = false;
   // Serialize all file operations to prevent interleaved writes/truncation
   let _queue: Promise<void> = Promise.resolve();
 
@@ -45,8 +46,20 @@ export function createActionLog(path: string, max: number) {
         line = JSON.stringify({ type, payload: {}, ts: Date.now() }) + "\n";
       }
       try {
-        await Deno.writeTextFile(path, line, { append: true });
+        // 0600 like every other payload-retaining sink (journal, checkpoint):
+        // action payloads are user data, and redaction only covers the methods
+        // an app listed. Mode applies on creation; pre-existing files are
+        // tightened once below.
+        await Deno.writeTextFile(path, line, { append: true, mode: 0o600 });
         lineCount++;
+        if (!modeFixed) {
+          modeFixed = true;
+          try {
+            await Deno.chmod(path, 0o600);
+          } catch {
+            /* Windows, or FS without modes — creation mode did its best */
+          }
+        }
       } catch (e) {
         if (writeErrors++ < 3) log.error("action-log", `write failed: ${e}`);
       }
@@ -81,10 +94,23 @@ export function createActionLog(path: string, max: number) {
           return;
         }
         const keep = lines.slice(-Math.max(1, Math.floor(max / 2)));
-        await Deno.writeTextFile(path, keep.join("\n") + "\n");
+        await Deno.writeTextFile(path, keep.join("\n") + "\n", {
+          mode: 0o600,
+        });
         lineCount = keep.length;
-      } catch {
-        lineCount = 0;
+      } catch (e) {
+        if (e instanceof Deno.errors.NotFound) {
+          lineCount = 0; // file vanished externally — nothing left to bound
+          return;
+        }
+        // The bound IS the contract of a rolling log. Zeroing the counter
+        // here masked the overflow (the next attempt waited `max` appends
+        // away while the file sat over its bound) and said nothing — the
+        // append path logs its failures, so this one does too, on the same
+        // three-strikes budget. Keeping the count makes the next append retry.
+        if (writeErrors++ < 3) {
+          log.error("action-log", `truncate failed: ${e}`);
+        }
       }
     });
   }

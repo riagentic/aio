@@ -2,7 +2,7 @@
 import { log } from "../diagnostics/logger.ts";
 
 /** Framework version — printed by --version, checked in tests */
-export const VERSION = "1.0.0-alpha57";
+export const VERSION = "1.0.0-alpha58";
 
 /** What `--version` prints: what this artifact IS, and what it was built with.
  *
@@ -58,6 +58,8 @@ export type CliFlags = {
   host?: string;
   dbPath?: string;
   backupLogs?: boolean;
+  /** Byte ceiling for the log directory (`--log-budget=200MB`). */
+  logBudget?: number;
   /** Skip the legacy→`~/.<appId>` data move (app-dirs-migrate.ts). */
   noDataMigrate?: boolean;
 };
@@ -66,8 +68,38 @@ export type CliFlags = {
 // times in one boot, and the same line five times reads as an error loop.
 let _hintedBareServerUrl = false;
 
+// …and so does every other warning this function emits, for the same reason.
+// Guarding them one at a time was the old approach and it missed
+// `unknown flag ignored:`, which duly printed 5-7 times in a single boot — a
+// repeated diagnostic reads as a loop, and a reader who has learned to scroll
+// past repetition is a reader who will scroll past the next one too.
+//
+// The root cause is not the warning, it is that the same immutable input is
+// parsed ten times per boot. So the DEFAULT invocation (the boot path, the
+// only one that repeats) is memoized: one parse per process, every side effect
+// exactly once. Identity on `Deno.args` is the key — it is stable within a
+// process, and an explicit array (every test) never hits the cache, so tests
+// keep parsing fresh and cannot leak a cached answer into each other.
+let _parsedDefault: CliFlags | null = null;
+
+/** Test seam: forget the memoized default parse. @internal */
+export function _resetParsedCli(): void {
+  _parsedDefault = null;
+  _hintedBareServerUrl = false;
+}
+
 /** Parses CLI flags from Deno.args (or custom array for testing) */
 export function parseCli(args: readonly string[] = Deno.args): CliFlags {
+  const isDefault = args === Deno.args;
+  // A COPY: the cache must not become a shared mutable object that one caller's
+  // edit silently republishes to the next.
+  if (isDefault && _parsedDefault) return { ..._parsedDefault };
+  const parsed = _parseCliUncached(args);
+  if (isDefault) _parsedDefault = { ...parsed };
+  return parsed;
+}
+
+function _parseCliUncached(args: readonly string[]): CliFlags {
   const r: CliFlags = { verbose: false };
   const known = [
     "--no-data-migrate",
@@ -97,6 +129,8 @@ export function parseCli(args: readonly string[] = Deno.args): CliFlags {
     "--kill-existing",
     "--takeover",
     "--backup-logs",
+    "--no-backup-logs",
+    "--log-budget=",
     "--db-path=",
     "--host=",
   ];
@@ -147,8 +181,26 @@ export function parseCli(args: readonly string[] = Deno.args): CliFlags {
     else if (arg === "--kill-existing" || arg === "--takeover") {
       r.killExisting = true;
     } else if (arg.startsWith("--db-path=")) r.dbPath = arg.slice(10);
+    // `--backup-logs` is now the DEFAULT, kept so existing scripts still parse;
+    // `--no-backup-logs` is the one that changes anything (wipe on start).
     else if (arg === "--backup-logs") r.backupLogs = true;
-    // Opt out of the one-time move to ~/.<appId> (app-dirs-migrate.ts).
+    else if (arg === "--no-backup-logs") r.backupLogs = false;
+    else if (arg.startsWith("--log-budget=")) {
+      // Bytes, or a `<n>MB`/`<n>GB` suffix — a bare number in a flag about disk
+      // is ambiguous enough that both spellings have to work.
+      const raw = arg.slice(13).trim();
+      const m = raw.match(/^(\d+(?:\.\d+)?)\s*(b|kb|mb|gb)?$/i);
+      if (m) {
+        const mult = { b: 1, kb: 1024, mb: 1024 ** 2, gb: 1024 ** 3 }[
+          (m[2] ?? "b").toLowerCase() as "b" | "kb" | "mb" | "gb"
+        ];
+        r.logBudget = Math.floor(Number(m[1]) * mult);
+      } else {
+        console.warn(
+          `[aio] ignoring --log-budget=${raw} — expected bytes or e.g. 200MB`,
+        );
+      }
+    } // Opt out of the one-time move to ~/.<appId> (app-dirs-migrate.ts).
     else if (arg === "--no-data-migrate") r.noDataMigrate = true;
     // TLS cert/key. `--tls-cert`/`--tls-key` are canonical (the bare
     // `--cert`/`--key` collided with the auth `key` config concept); the old
@@ -219,7 +271,9 @@ Flags:
   --takeover       Kill running instance and take over
                    (--kill-existing is the deprecated alias)
   --db-path=PATH   Override the SQLite file (":memory:" for throwaway runs)
-  --backup-logs    Keep previous logs on restart (rotate to .1, .2, etc.)
+  --backup-logs    Keep previous logs on restart (the default — rotate to .1, .2, …)
+  --no-backup-logs Wipe the log directory on start instead of rotating
+  --log-budget=N   Byte ceiling for the log directory (e.g. 200MB, 0 = unlimited)
   --no-data-migrate Skip moving a legacy data layout into ~/.<appId>
   --width=N        Initial window width (default: 800)
   --height=N       Initial window height (default: 600)

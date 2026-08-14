@@ -87,9 +87,18 @@ export function Defer(props: DeferProps): VNode | null {
           finish();
         }
       },
-      () => {
+      (err: unknown) => {
         if (stateRef.current.state !== "loading") return;
         stateRef.current.state = "error";
+        // The reason was discarded entirely: a 404, a syntax error or a dead
+        // network rendered `null` (no `error`/`placeholder` prop) with an
+        // empty console — a blank region and nothing anywhere in the app to
+        // say why. `island.ts` reports its failures; so does this.
+        console.error(
+          `[aio:Defer] load() failed — this region will render its \`error\` ` +
+            `prop, or nothing at all if it has none:`,
+          err,
+        );
         renderSig.set(renderSig.peek() + 1);
       },
     );

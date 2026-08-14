@@ -7,6 +7,7 @@ import { h } from "./vdom.ts";
 import {
   _applyTransition,
   _isHTMLElement,
+  _raf,
   _removeTransition,
   type TransitionFn,
   type TransitionOptions,
@@ -202,12 +203,14 @@ export function _runTickTransition(
         return;
       }
       if (progress < 1) {
-        requestAnimationFrame(frame);
+        _raf(_el, frame);
       } else {
         resolve();
       }
     }
-    requestAnimationFrame(frame);
+    // This element's own window — a bare global rAF is absent outside a
+    // browser tab and threw the whole tick transition away (see _raf).
+    _raf(_el, frame);
   });
   // Attach cancel for external cleanup (element removed mid-transition)
   (promise as unknown as { _cancel: () => void })._cancel = () => {

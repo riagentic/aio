@@ -230,9 +230,19 @@ export function migrateTasks(
       res.deleted.push(k); // the new matrix covers it via dev flags / build
     } else if (k in SERVICE_RENAMES) {
       const nk = SERVICE_RENAMES[k]!;
-      res.tasks[nk] = v;
-      res.renamed.push([k, nk]);
-      res.kept.push(nk);
+      if (nk in res.tasks || nk in current) {
+        // The destination name already exists and carries the user's own
+        // command. Renaming onto it OVERWROTE that command — silently, in a
+        // file this tool then writes back — and reported the destroyed task
+        // under `kept`. "Never delete a customized task" is this function's
+        // stated contract, so the old name stays put for the user to resolve.
+        res.tasks[k] = v;
+        res.kept.push(k);
+      } else {
+        res.tasks[nk] = v;
+        res.renamed.push([k, nk]);
+        res.kept.push(nk);
+      }
     } else {
       res.tasks[k] = v;
       // A customized OLD-matrix task (a name we used to scaffold) deserves a
@@ -307,9 +317,22 @@ async function resolveEntry(dir: string): Promise<string | null> {
   // and nowhere else, so `am fix` could pronounce a project fine on the
   // strength of a file the build would never compile.
   let cfg: Record<string, unknown> | null = null;
-  try {
-    cfg = JSON.parse(await Deno.readTextFile(join(dir, "deno.json")));
-  } catch { /* no deno.json — the default below still applies */ }
+  // `parseJsonc`, and both filenames — the same reader `cmdFix` itself uses.
+  // A single `//` comment (Deno accepts them in deno.json) made JSON.parse
+  // throw, `cfg` fall back to null, and the entry resolve to the default
+  // `src/app.ts`; for an app whose entry is anywhere else that meant the
+  // `dependencies cached` repair — the main reason to run `am fix` on a fresh
+  // clone — was skipped with no line of output at all, and the banner still
+  // said "Now run: deno task dev".
+  for (const name of ["deno.json", "deno.jsonc"]) {
+    try {
+      cfg = parseJsonc(await Deno.readTextFile(join(dir, name))) as Record<
+        string,
+        unknown
+      >;
+      break;
+    } catch { /* try the next name; the default below still applies */ }
+  }
   const entry = resolveEntryPath(cfg);
   return (await exists(join(dir, entry))) ? entry : null;
 }

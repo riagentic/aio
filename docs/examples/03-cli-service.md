@@ -22,16 +22,16 @@ Create a new directory and `deno.json`:
   "title": "Task Queue",
   "nodeModulesDir": "auto",
   "imports": {
-    "aio": "jsr:@riagentic/aio@^1.0.0-alpha17"
+    "aio": "jsr:@riagentic/aio@^1.0.0-alpha"
   },
   "client": "server",
   "build": { "targets": ["server"], "out": "dist" },
   "tasks": {
     "dev": "deno run -A src/app.ts --client=server-only",
-    "am": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha17/am",
+    "am": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha/am",
     "test": "deno test -A tests/",
-    "build": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha17/build-all --build-spec=jsr:@riagentic/aio@^1.0.0-alpha17/build",
-    "compile": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha17/build-all --build-spec=jsr:@riagentic/aio@^1.0.0-alpha17/build --targets=server"
+    "build": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha/build-all --build-spec=jsr:@riagentic/aio@^1.0.0-alpha/build",
+    "compile": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha/build-all --build-spec=jsr:@riagentic/aio@^1.0.0-alpha/build --targets=server"
   }
 }
 ```
