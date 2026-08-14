@@ -4,6 +4,19 @@
 import type { ComponentFn } from "./vdom-types.ts";
 import { _LAZY_PENDING } from "./vdom-types.ts";
 
+/** The listener set of the lazy component that threw `_LAZY_PENDING` most
+ *  recently — read (and cleared) by the catching Suspense boundary. Render is
+ *  synchronous and single-threaded, so the throw and the catch are adjacent:
+ *  whatever is here when a boundary catches IS the lazy that stopped it. */
+let _pendingListeners: Set<() => void> | null = null;
+
+/** Take the pending lazy's listener set, clearing it. @internal */
+export function _takePendingLazyListeners(): Set<() => void> | null {
+  const p = _pendingListeners;
+  _pendingListeners = null;
+  return p;
+}
+
 /**
  * Lazy-load a component. Use with Suspense for fallback UI.
  * ```ts
@@ -47,7 +60,14 @@ export function lazy<P extends Record<string, unknown>>(
         _listeners.clear();
       });
     }
-    // Signal to Suspense that we're still loading
+    // Signal to Suspense that we're still loading. Record WHICH lazy is
+    // pending first: the boundary used to identify it by scanning its own
+    // immediate children, so a lazy one component deeper
+    // (`<Suspense><Wrapper/></Suspense>` where Wrapper renders the lazy) got no
+    // listener at all — the loader resolved and nothing ever re-rendered, so
+    // the fallback stayed on screen forever. The thrower knows its own
+    // identity; the boundary should not have to guess.
+    _pendingListeners = _listeners;
     throw _LAZY_PENDING;
   };
 

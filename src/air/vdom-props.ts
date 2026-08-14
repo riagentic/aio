@@ -10,6 +10,7 @@ import {
   _RESERVED_PROPS,
   _writeProp,
 } from "./prop-write.ts";
+import { svgAttrName as _attrName } from "./ssr-utils.ts";
 import { _DOM_PROPS } from "./vdom-types.ts";
 import {
   _CHANGE_TARGETS,
@@ -121,7 +122,14 @@ export function applyProps(
       } else {
         const ns = _attrNS(k);
         if (ns) el.removeAttributeNS(ns, k.slice(k.indexOf(":") + 1));
-        else el.removeAttribute(k);
+        // The SAME name mapping the write used. `_writeProp` sets
+        // `strokeWidth` as `stroke-width`, so removing the raw JSX key took
+        // an attribute that was never there and left the real one on the
+        // element forever — an incremental diff that does not converge on
+        // what a fresh render produces, silently, for all 41 mapped SVG
+        // names. (The `v == null` path already went through the mapper;
+        // only key-absent-from-next was wrong.)
+        else el.removeAttribute(_attrName(k));
       }
     }
   }

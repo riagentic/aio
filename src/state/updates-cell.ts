@@ -37,6 +37,8 @@ export type AvailableUpdate = {
  *  exactly what is in the way. */
 export type BlockedUpdate = { version: string; blockers: string[] };
 
+/** Where the built-in updater currently is: idle, checking, downloading,
+ *  ready to apply, or failed. */
 export type UpdateStatus =
   | "idle"
   | "checking"

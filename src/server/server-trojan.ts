@@ -499,6 +499,32 @@ async function handlePost(
       // separator, then AWAIT so a rejecting method surfaces as an error.
       const methods = trojan.cellMethods?.() ?? {};
       const sepIdx = action.type.search(/[:.]/);
+      // An ALL-DIGITS type is never a valid action — no cell method and no
+      // actions-form creator is named `0` — so it can only ever no-op, and it
+      // used to do that under a green "ok". The shape that produces it is
+      // predictable rather than exotic: `am trigger` and `am surface` take a
+      // CLIENT INDEX as their first positional, so `am dispatch 0
+      // counter:increment` is the natural generalization; it dispatched
+      // `{type:"0"}` into the void and answered {"ok":true}. A predictable user
+      // error that reports success is the silent-wrong-outcome class this
+      // project treats as disqualifying.
+      //
+      // Only the numeric form is refused: a bare `Increment` IS legitimate for
+      // an actions-form cell (pinned by the "bare config action" case in
+      // tests/trojan-dispatch-validate.test.ts), and the trojan cannot
+      // enumerate those creators to tell a typo from a real one.
+      if (/^\d+$/.test(action.type)) {
+        const valid = Object.entries(methods)
+          .flatMap(([c, ms]) => ms.map((m) => `${c}:${m}`))
+          .join(", ");
+        return err(
+          `"${action.type}" is not an action — dispatch takes <cell>:<method>, ` +
+            `so this would have done nothing. That looks like a client index: ` +
+            `\`am trigger\`/\`am surface\` take one, \`am dispatch\` does not.` +
+            (valid ? ` Known: ${valid}.` : ""),
+          404,
+        );
+      }
       if (sepIdx > 0 && Object.keys(methods).length > 0) {
         const cell = action.type.slice(0, sepIdx);
         const method = action.type.slice(sepIdx + 1);

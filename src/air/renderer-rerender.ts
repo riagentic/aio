@@ -489,9 +489,15 @@ export function _createHooks(rootState: RootState): VDomHooks {
             _setCurrentCollector(null);
           }
         }
-      } else if (inst) {
-        inst.mounted = true;
       }
+      // NOTE: an instance that collected NO callbacks is deliberately left
+      // `mounted: false`. `mounted` means "this instance's onMount has run",
+      // and marking it on a render that collected nothing burned the one
+      // chance a component gets: any component that returns early before its
+      // `onMount(...)` line — `Modal`/`Confirm` while closed, the normal case —
+      // registered nothing on render 1, and when it finally opened and DID
+      // collect a callback, the gate above discarded it as a re-render. The
+      // modal's Escape-to-close listener was never attached.
 
       _instanceStack.pop();
     },

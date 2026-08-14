@@ -78,9 +78,11 @@ testUI(App, "add a todo end-to-end", async (ui) => {
 - **Fire schedules deterministically with `await ui.advance(ms)`** — advances a
   virtual clock and dispatches every **cell** `schedule.after`/`every` now due,
   which makes debounce, `backoff` and `poll` unit-testable without real timers.
-  (`schedule.at`/`cron` aren't fired by the virtual clock. Neither is anything
-  on a raw `setTimeout` — including `aio/ui`'s `toast()` auto-dismiss: give it a
-  short `duration` and `await ui.waitFor(() => ui.absent("…"))`.)
+  `schedule.at` and `schedule.cron` fire on it too (they used to be dropped with
+  a warning — see `tests/harness-schedule-parity.test.ts`). What it does NOT
+  move is anything on a raw `setTimeout`, including `aio/ui`'s `toast()`
+  auto-dismiss: give that a short `duration` and
+  `await ui.waitFor(() => ui.absent("…"))`.
 
 For **multi-cell logic tests without a component**, `bootCells([a, b])` from
 `aio/testing` boots several cells on the same runtime and returns a handle with
@@ -121,7 +123,7 @@ no `/__aio/auth/me` stub, no reaching into auth-UI internals:
 ```ts
 await using ui = await testUI(App, { user: { id: "sita", role: "customer" } });
 // the FIRST render is signed in — role tests read as claims:
-if (ui.surface().includes("AdminPanel")) throw new Error("customer saw admin");
+if (ui.present("AdminPanel")) throw new Error("customer saw admin");
 ```
 
 `user: null` mounts anonymous (the `<SignIn/>` branch — pass `authFeatures` to

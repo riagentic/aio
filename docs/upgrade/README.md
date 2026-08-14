@@ -7,6 +7,9 @@ One guide per version migration. Find your current version and follow the steps.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha57 → alpha58](from-alpha57-to-alpha58.md) — logs are kept on restart
+  instead of wiped (`.1`, `.2`, … bounded by `backupKeep` and the new
+  `logBudget`); `stdout.log` rotates with them
 - [alpha56 → alpha57](from-alpha56-to-alpha57.md) — `transaction` is opt-in
   again (add the line if you want it); module-level `signal()`s reset between
   tests, and `present`/`absent` answer about the element first

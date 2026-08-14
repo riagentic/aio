@@ -300,7 +300,17 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     // Stamp this app's discovery metadata into its lock file so ANY responder
     // on the host can report it (the multi-app-per-host solution).
     deps.appLock?.update?.({
-      discovery: { title, tls: useHttps, needsAuth: !!users || !!token },
+      // `perUserAuth`, for the same reason the exposure warning 87 lines up
+      // uses it: `users`/`token` MISS `auth: true` and `resolveUser`, and with
+      // per-user auth no shared key is generated at all (app-key.ts declines),
+      // so both were falsy and a full-login app advertised itself on the LAN
+      // as needing none — no ⚷ marker in `am discover`, no auth badge in the
+      // client, which then tried a direct connect.
+      discovery: {
+        title,
+        tls: useHttps,
+        needsAuth: perUserAuth || !!users || !!token,
+      },
     });
     // The responder reports EVERY exposed app on the host, read fresh from the
     // lock registry each probe — see discovery.ts.

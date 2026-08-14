@@ -20,9 +20,9 @@ generates a correct `deno.json`. See [quickstart.md](quickstart.md).
 **Option B: Vendored** -- `git clone https://github.com/riagentic/aio dep/aio`,
 then map `"aio": "./dep/aio/mod.ts"` (plus `immer`, `@std/path`).
 
-**Option C: JSR** -- `deno add jsr:@riagentic/aio@1.0.0-alpha20` (pin the
-version explicitly: alphas are semver pre-releases, so an unpinned install
-resolves to an old stable).
+**Option C: JSR** -- `deno add jsr:@riagentic/aio@^1.0.0-alpha` (pin the version
+explicitly: alphas are semver pre-releases, so an unpinned install resolves to
+an old stable).
 
 ## Step 2: Update deno.json
 
@@ -34,16 +34,16 @@ resolves to an old stable).
     "jsxImportSource": "aio"
   },
   "imports": {
-    "aio": "jsr:@riagentic/aio@^1.0.0-alpha17",
-    "aio/air": "jsr:@riagentic/aio@^1.0.0-alpha17/air",
-    "aio/jsx-runtime": "jsr:@riagentic/aio@^1.0.0-alpha17/jsx-runtime",
+    "aio": "jsr:@riagentic/aio@^1.0.0-alpha",
+    "aio/air": "jsr:@riagentic/aio@^1.0.0-alpha/air",
+    "aio/jsx-runtime": "jsr:@riagentic/aio@^1.0.0-alpha/jsx-runtime",
     "esbuild": "npm:esbuild@^0.24"
   },
   "tasks": {
     "dev": "deno run -A src/app.ts",
-    "am": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha17/am",
+    "am": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha/am",
     "test": "deno test -A tests/",
-    "build": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha17/build-all --build-spec=jsr:@riagentic/aio@^1.0.0-alpha17/build"
+    "build": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha/build-all --build-spec=jsr:@riagentic/aio@^1.0.0-alpha/build"
   }
 }
 ```

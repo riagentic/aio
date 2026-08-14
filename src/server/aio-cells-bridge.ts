@@ -4,6 +4,7 @@
 import { physicalMemoryBytes } from "./heap-policy.ts";
 import type { CellDef, ComposedCells } from "../state/cell.ts";
 import { _releaseCellBindings } from "../state/cell-reactive.ts";
+import { mergeLongIntoPerfBudget } from "../state/cell-impl.ts";
 import { bindCell } from "../state/cell.ts";
 import { createMemoryMonitor } from "../diagnostics/memory-monitor.ts";
 import {
@@ -146,6 +147,13 @@ export function buildLegacyConfig(
       AioConfig<Record<string, unknown>, unknown, unknown>
     >),
     appId: fc.appId,
+    // The EFFECT side of `long`. The caller side is lifted at compose time (so
+    // testCell gets it too); this is the same declaration reaching the effect
+    // tracker's abandon-the-effect deadline, from the same list. Two ceilings
+    // resolved from one source — the trap the `effectTimeoutMs` unification
+    // already fixed once, and a per-method flag that lifted only ONE of them
+    // would have re-opened.
+    perfBudget: mergeLongIntoPerfBudget(fc.perfBudget, composed.cells),
     reduce: composed.reduce as AioConfig<
       Record<string, unknown>,
       unknown,
@@ -327,7 +335,10 @@ export async function initLogger(
   fc: CellsConfig,
 ): Promise<AioLogger | null> {
   const appId = resolveAppId(fc.appId);
-  const cliBackup = parseCli().backupLogs;
+  // Tri-state on purpose: the flag used to be spread only when TRUTHY, which
+  // was harmless while `false` was the default and silently unusable the moment
+  // it stopped being — `--no-backup-logs` would have parsed and done nothing.
+  const { backupLogs: cliBackup, logBudget: cliBudget } = parseCli();
   const logCfg = fc.logging === false
     ? null
     : (fc.logging === true || fc.logging === undefined ? {} : fc.logging);
@@ -341,7 +352,8 @@ export async function initLogger(
     ? new AioLogger({
       dir: dirs.logs,
       ...logCfg,
-      ...(cliBackup ? { backupLogs: true } : {}),
+      ...(cliBackup !== undefined ? { backupLogs: cliBackup } : {}),
+      ...(cliBudget !== undefined ? { logBudget: cliBudget } : {}),
       appName: appId,
       // `debug.log` retains action payloads on disk, so it obeys the SAME
       // `redactActions` list as the journal, the timeline, the action log and

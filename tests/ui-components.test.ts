@@ -3,6 +3,12 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { Window } from "happy-dom";
 import { h } from "../src/air/vdom.ts";
+import {
+  _setDocument,
+  _unmount,
+  mount as airMount,
+} from "../src/air/aio-renderer.ts";
+import { signal } from "../src/state/signal.ts";
 import type { ComponentFn } from "../src/air/vdom.ts";
 import { testUI } from "../src/testing/ui-test.ts";
 import {
@@ -195,6 +201,45 @@ Deno.test("ui: Modal Escape-to-close listens on the render document", async () =
     // KeyboardEvent unsupported in this DOM shim — render/backdrop paths cover it.
   }
   await ui.dispose();
+});
+
+// The test above mounts the modal ALREADY OPEN — the one case that worked. A
+// modal is normally closed on its first render, returns null before reaching
+// its `onMount(...)` line, and only later opens. The mount gate used to mark
+// such an instance "mounted" on that empty first render and then discard the
+// callbacks it finally collected, so Escape-to-close was dead for every modal
+// that started closed — i.e. all of them, plus Confirm/ConfirmButton.
+//
+// Driven through `mount()` rather than `testUI`: the harness re-renders via a
+// path that masks this, and a test that passes with the bug restored is worse
+// than no test at all (verified by putting the defect back).
+Deno.test("ui: Modal opened AFTER its first render still closes on Escape", () => {
+  const win = new Window({ url: "https://localhost" });
+  _setDocument(win.document as unknown as Document);
+  const doc = win.document as unknown as Document;
+  try {
+    let closes = 0;
+    const open = signal(false);
+    const App = () =>
+      h(Modal, { open: open.value, onClose: () => closes++ }, "x");
+    const host = doc.createElement("main");
+    doc.body.appendChild(host);
+    const handle = airMount(host, App);
+    handle._flush?.();
+
+    open.set(true);
+    handle._flush?.();
+    doc.dispatchEvent(
+      // deno-lint-ignore no-explicit-any
+      new (win as any).KeyboardEvent("keydown", { key: "Escape" }),
+    );
+    assertEquals(closes, 1, "the listener must attach when the modal opens");
+
+    _unmount(handle);
+    host.remove();
+  } finally {
+    win.happyDOM.close();
+  }
 });
 
 Deno.test("ui: Card renders title, body, and footer", async () => {

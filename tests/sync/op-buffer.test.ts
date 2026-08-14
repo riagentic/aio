@@ -1,6 +1,6 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertStringIncludes } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
-import { createOpBuffer } from "../../src/sync/op-buffer.ts";
+import { createOpBuffer, parseRetention } from "../../src/sync/op-buffer.ts";
 import type { SyncOp } from "../../src/sync/types.ts";
 import { createMemoryStorage } from "./_memory-storage.ts";
 
@@ -219,5 +219,83 @@ Deno.test("op-buffer: an evicted stale op is REPORTED, not silently dropped", as
     [...new Set(dropped.map((d) => d.reason))],
     ["stale-evicted"],
     "with a reason that says what happened",
+  );
+});
+
+// ── retention: the value the app asked for is the value that runs ────
+//
+// `parseRetention` used to swallow anything it could not read and return the
+// 4h default. `retention: "7d"` — the value docs/persistence/crdt.md puts in
+// its own example — has no `d` unit in the old regex, so it silently became
+// 4h: the offline queue evicted the user's unsent changes 42× earlier than the
+// app asked for, with nothing to see anywhere. A retention that cannot be
+// honoured is a misconfig, and a misconfig speaks.
+Deno.test("op-buffer: parseRetention reads every documented unit, including days", () => {
+  assertEquals(parseRetention("500ms"), 500);
+  assertEquals(parseRetention("30s"), 30_000);
+  assertEquals(parseRetention("15m"), 900_000);
+  assertEquals(parseRetention("4h"), 4 * 3_600_000);
+  assertEquals(parseRetention("7d"), 7 * 86_400_000);
+  assertEquals(parseRetention(" 7d "), 7 * 86_400_000, "trimmed, not refused");
+});
+
+Deno.test("op-buffer: a retention it cannot honour throws — it never becomes 4h", () => {
+  for (const bad of ["7 days", "1w", "abc", "", "-1h", "1.5h", "h"]) {
+    let msg = "";
+    try {
+      parseRetention(bad);
+    } catch (e) {
+      msg = String(e);
+    }
+    assertStringIncludes(
+      msg,
+      "is not a duration",
+      `"${bad}" must be refused loudly, not silently defaulted`,
+    );
+  }
+});
+
+// The per-cell wiring: `sync: { offline: { retention } }` was normalized,
+// typed and documented — and read by nobody, so every cell evicted at the
+// shared default no matter what it asked for.
+Deno.test("op-buffer: each cell evicts on ITS OWN retention", async () => {
+  const dropped: string[] = [];
+  const buffer = createOpBuffer(createMemoryStorage(), {
+    pendingCap: 2,
+    staleAfter: 1000, // the default, for cells that say nothing
+    staleAfterFor: (cell) => cell === "patient" ? 86_400_000 : undefined,
+    onDrop: (op, reason) => dropped.push(`${op.cell}:${op.id}:${reason}`),
+  });
+  const op = (cell: string, id: string, clientTs: number): SyncOp => ({
+    id,
+    hlc: [clientTs, 0, "me"],
+    cell,
+    action: "add",
+    payload: {},
+    confirmed: false,
+    _clientTs: clientTs,
+  });
+  const hourOld = Date.now() - 3_600_000;
+
+  // A cell asking for a day of retention keeps hour-old ops — so the cap
+  // refuses the new op rather than throwing the user's work away.
+  assertEquals(await buffer.add(op("patient", "p1", hourOld)), true);
+  assertEquals(await buffer.add(op("patient", "p2", hourOld)), true);
+  assertEquals(await buffer.add(op("patient", "p3", Date.now())), false);
+  assertEquals(
+    dropped,
+    ["patient:p3:prune-failed"],
+    "an hour is well inside a day of retention: the queued mutations stay " +
+      "and the INCOMING op is refused loudly instead",
+  );
+
+  // A cell that asks for nothing keeps the 1s default and evicts.
+  assertEquals(await buffer.add(op("chatty", "c1", hourOld)), true);
+  assertEquals(await buffer.add(op("chatty", "c2", hourOld)), true);
+  assertEquals(await buffer.add(op("chatty", "c3", Date.now())), true);
+  assertEquals(
+    dropped.filter((d) => d.startsWith("chatty")).sort(),
+    ["chatty:c1:stale-evicted", "chatty:c2:stale-evicted"],
+    "a cell that asked for nothing keeps the shared default",
   );
 });

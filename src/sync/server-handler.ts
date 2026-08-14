@@ -322,7 +322,17 @@ export function createServerSyncHandler(
               `[sync:server] dispatch of op ${op.id} failed: ${e}`,
             );
             await deps.db.execute("DELETE FROM sync_ops WHERE id = ?", [op.id])
-              .catch(() => {});
+              // A failed cleanup is NOT cosmetic: the op stays in `sync_ops`,
+              // so the next drain picks up the same already-failed op and
+              // retries it — forever, silently. That is the server twin of the
+              // browser bug `browser-sync.ts` was written to kill, and it hid
+              // behind an empty catch.
+              .catch((delErr: unknown) =>
+                deps.log.error(
+                  `[sync:server] could not delete failed op ${op.id} — it ` +
+                    `will be retried on every drain until removed: ${delErr}`,
+                )
+              );
           }
         }
 
@@ -500,7 +510,15 @@ export function createServerSyncHandler(
                 );
                 await deps.db.execute("DELETE FROM sync_ops WHERE id = ?", [
                   pending.id,
-                ]).catch(() => {});
+                  // Same as the drain path above: a swallowed delete leaves the
+                  // op to be reprocessed on every pass, with nothing said.
+                ]).catch((delErr: unknown) =>
+                  deps.log.error(
+                    `[sync:server] could not delete failed pending op ` +
+                      `${pending.id} — it will be retried on every drain ` +
+                      `until removed: ${delErr}`,
+                  )
+                );
               }
               if (rejectedReason === null) {
                 deps.broadcastRaw.fn(

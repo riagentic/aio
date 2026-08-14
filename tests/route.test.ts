@@ -312,3 +312,59 @@ Deno.test("route e2e: a broken handler fails ONE request, loudly — never the p
   assert(all.includes('route "/rej/:id" (GET /rej/7) threw'), all);
   assert(all.includes('route "/bad" (GET /bad) returned object'), all);
 });
+
+// `{...init.headers}` is wrong for two of the three legal HeadersInit forms: a
+// `Headers` instance has no own enumerable properties (every header the caller
+// set vanished), and the tuple form spreads into `{"0": [...]}` — a header
+// literally named `0`. Both type-check, because the parameter is ResponseInit.
+Deno.test("route: ctx.json/text keep caller headers in every HeadersInit form", async () => {
+  const req = () => new Request("http://x/y");
+
+  const withInstance = route((ctx) =>
+    ctx.json({ ok: 1 }, { headers: new Headers({ "x-total-count": "42" }) })
+  );
+  const a = await (withInstance as unknown as (
+    r: Request,
+    c: unknown,
+  ) => Promise<Response>)(req(), {});
+  assertEquals(a.headers.get("x-total-count"), "42");
+  assertEquals(
+    a.headers.get("content-type"),
+    "application/json; charset=utf-8",
+  );
+
+  const withTuples = route((ctx) =>
+    ctx.text("hi", { headers: [["x-a", "1"]] })
+  );
+  const b = await (withTuples as unknown as (
+    r: Request,
+    c: unknown,
+  ) => Promise<Response>)(req(), {});
+  assertEquals(b.headers.get("x-a"), "1");
+  assertEquals(
+    b.headers.get("0"),
+    null,
+    "no header may be named after an index",
+  );
+});
+
+// The textbook login handler: queue a session cookie, return a redirect built
+// by `Response.redirect()`. That response's headers are IMMUTABLE per the
+// fetch spec, so appending threw out of the handler — 500, no cookie, no
+// redirect — while this helper's docstring promises setCookie always lands.
+Deno.test("route: setCookie survives a handler-built Response.redirect()", async () => {
+  const h = route((ctx) => {
+    ctx.setCookie("sid", "abc", { path: "/" });
+    return Response.redirect("http://x/dashboard", 302);
+  });
+  const res = await (h as unknown as (
+    r: Request,
+    c: unknown,
+  ) => Promise<Response>)(new Request("http://x/login"), {});
+  assertEquals(res.status, 302);
+  assertEquals(res.headers.get("location"), "http://x/dashboard");
+  assert(
+    (res.headers.get("set-cookie") ?? "").includes("sid=abc"),
+    "the session cookie must reach the browser",
+  );
+});

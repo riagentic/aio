@@ -85,6 +85,7 @@
 - [amui — Aio Manager UI](clients/amui.md) — A visual manager for every aio app on your machine — the GUI counterpart to the
 - [App Manager](clients/app-manager.md) — Manage your aio app without ps, kill, or curl.
 - [Browser](clients/browser.md) — WebSocket client API, connection lifecycle, and UI state management for browser
+- [Desktop apps that drive a CLI](clients/desktop-jobs.md) — The shape: a window, a Browse… button, a long-running external process, a
 - [Electron](clients/electron.md) — Desktop app packaging, thin client, and window management.
 
 ## Build & deploy — targets, dev mode, imports, scaling
@@ -162,6 +163,7 @@
 - [alpha54 → alpha55](upgrade/from-alpha54-to-alpha55.md) — additive or a behaviour improvement your app gets for free.
 - [alpha55 → alpha56](upgrade/from-alpha55-to-alpha56.md) — Two changes can be noticed, and one is a refusal you might meet at boot.
 - [alpha56 → alpha57](upgrade/from-alpha56-to-alpha57.md) — again.
+- [alpha57 → alpha58](upgrade/from-alpha57-to-alpha58.md) — wiped.
 - [Upgrade from v1.0.0-alpha6 to v1.0.0-alpha7](upgrade/from-alpha6-to-alpha7.md) — mod.ts no longer re-exports renderer primitives.
 - [Upgrade from v1.0.0-alpha7 to v1.0.0-alpha8](upgrade/from-alpha7-to-alpha8.md) — None.
 - [Upgrade from v1.0.0-alpha8 to v1.0.0-alpha9](upgrade/from-alpha8-to-alpha9.md) — The internal machine state field is renamed.

@@ -126,3 +126,26 @@ export function _isHTMLElement(node: Node): node is HTMLElement {
     globalThis.HTMLElement;
   return HtmlEl ? node instanceof HtmlEl : false;
 }
+
+/** Schedule a paint-adjacent callback for THIS node's window.
+ *
+ *  A bare `requestAnimationFrame` is a global that a render document does not
+ *  have to provide: outside a browser tab (a test document, an embedder, an
+ *  Electron preload context) the call THREW from inside an afterRender
+ *  callback, and the renderer's contained-failure guard then swallowed it —
+ *  killing the rest of that pass, so the items after the first one silently
+ *  got no animation at all. Same function in a real browser (it is that
+ *  window's own rAF); a timer everywhere else, so the callback still runs.
+ *  @internal */
+export function _raf(node: Node, cb: () => void): void {
+  const view = node.ownerDocument?.defaultView as
+    | { requestAnimationFrame?: (cb: FrameRequestCallback) => number }
+    | null
+    | undefined;
+  const raf = view?.requestAnimationFrame ??
+    (typeof requestAnimationFrame !== "undefined"
+      ? requestAnimationFrame
+      : undefined);
+  if (raf) raf.call(view ?? globalThis, () => cb());
+  else setTimeout(cb, 16);
+}

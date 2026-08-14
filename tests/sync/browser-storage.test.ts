@@ -44,7 +44,7 @@ Deno.test("browser-storage: save/load/confirm/prune round-trip", async () => {
   assertEquals((await s.loadOps("board")).length, 2);
   assertEquals(await s.countUnconfirmed("board"), 2);
 
-  await s.confirmOp("a");
+  await s.confirmOp("board", "a");
   assertEquals(await s.countUnconfirmed("board"), 1);
 
   await s.pruneConfirmed("board");
@@ -101,4 +101,44 @@ Deno.test("browser-storage: per-cell isolation + snapshot + clear", async () => 
   await s.clear("cellA");
   assertEquals((await s.loadOps("cellA")).length, 0);
   assertEquals((await s.loadOps("cellB")).length, 1); // untouched
+});
+
+// The double-apply flake (~2% of runs), root-caused 2026-08-14: confirmOp used
+// to SCAN every `__aio_sync:*` key as a cell document. The clientId key shares
+// that prefix; when its 8-hex-char value happened to be all digits it PARSED
+// as a JSON number, `doc.ops.find` threw, and the catch silently ate the
+// confirm — the op then rebased on top of every snapshot forever. These pin
+// the class: confirm touches ONLY its own cell's document, and non-document
+// keys are never read as queues (no false "corrupt" alarms, no
+// `.corrupt.corrupt…` key chains).
+Deno.test("browser-storage: confirm reads only its cell — sibling non-doc keys are never parsed as queues", async () => {
+  const store = shimLocalStorage();
+  store.set("__aio_sync:clientId", "12345678"); // valid JSON — the killer case
+  store.set("__aio_sync:board.corrupt", "{broken"); // forensic copy, not a doc
+  const s = createLocalStorageOpStorage();
+  await s.saveOp(op("a"));
+  await s.confirmOp("board", "a");
+  assertEquals(await s.countUnconfirmed("board"), 0, "the confirm must land");
+  assertEquals(store.get("__aio_sync:clientId"), "12345678", "identity intact");
+  assertEquals(
+    [...store.keys()].filter((k) => k.endsWith(".corrupt.corrupt")),
+    [],
+    "no corrupt-chain keys sprout from non-doc keys",
+  );
+});
+
+Deno.test("browser-storage: boot sweeps the corrupt-chain garbage the old scan left, keeps real forensic copies", async () => {
+  const store = shimLocalStorage();
+  store.set("__aio_sync:board.corrupt", "{broken"); // deliberate forensic copy
+  store.set("__aio_sync:board.corrupt.corrupt", "{broken"); // scan garbage
+  store.set("__aio_sync:board.corrupt.corrupt.corrupt", "{broken"); // ditto
+  store.set("__aio_sync:clientId.corrupt", "a1b2c3d4"); // false alarm on the id
+  createLocalStorageOpStorage();
+  assertEquals(store.get("__aio_sync:board.corrupt"), "{broken", "kept");
+  assertEquals(store.get("__aio_sync:board.corrupt.corrupt"), undefined);
+  assertEquals(
+    store.get("__aio_sync:board.corrupt.corrupt.corrupt"),
+    undefined,
+  );
+  assertEquals(store.get("__aio_sync:clientId.corrupt"), undefined);
 });

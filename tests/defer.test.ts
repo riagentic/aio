@@ -166,3 +166,42 @@ Deno.test({
     await cleanup();
   },
 });
+
+// A failed `load()` discarded the reason entirely: a 404, a syntax error in
+// the chunk, a dead network — all rendered `null` (with no `error` prop) and
+// left an EMPTY console. A blank region with nothing anywhere in the app to
+// say why is the worst possible failure mode; `island.ts` reports its load
+// failures, and so does this.
+Deno.test({
+  name: "Defer: a failed load() is reported, with the reason",
+  async fn() {
+    const { document: doc, root, cleanup } = createDOM();
+    _setDocument(doc);
+    const errs: string[] = [];
+    const realError = console.error;
+    console.error = (...a: unknown[]) => errs.push(a.map(String).join(" "));
+    try {
+      function App() {
+        return h(Defer, {
+          trigger: "immediate",
+          load: () => Promise.reject(new Error("404 chunk-9f2.js")),
+          loading: h("span", null, "loading..."),
+        });
+      }
+      const handle = mount(root, App);
+      await delay(20);
+      handle._flush();
+      assertEquals(
+        errs.some((e) => e.includes("[aio:Defer]") && e.includes("404")),
+        true,
+        `the reason must reach the console — got: ${JSON.stringify(errs)}`,
+      );
+      // …and the region still degrades gracefully rather than throwing.
+      assertEquals(root.innerHTML, "");
+      _unmount(handle);
+    } finally {
+      console.error = realError;
+      await cleanup();
+    }
+  },
+});

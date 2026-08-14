@@ -13,6 +13,62 @@ export const VALID_UI_KEYS = new Set<string>([
   "head", // AIO-423: verbatim extra <head> content (meta/OG/favicon/fonts)
 ]);
 
+/** Top-level `deno.json` keys aio actually READS (its own + Deno's).
+ *
+ *  Everything else at that level is inert as far as aio is concerned — which
+ *  is fine for another tool's config and a silent trap for a key that looks
+ *  exactly like aio's own. A field report put `ui: { width, height }` there,
+ *  got no error and no effect, and lost time to it: "silently ignoring input
+ *  is the worst available behaviour". See {@link misplacedDenoJsonKeys}. */
+export const DENO_JSON_READ_KEYS = new Set<string>([
+  // aio's
+  "appId",
+  "title",
+  "client",
+  "target", // deprecated alias — still read, still warned about
+  "entry",
+  "build",
+  "version",
+  // Deno's own
+  "name",
+  "exports",
+  "imports",
+  "scopes",
+  "tasks",
+  "compilerOptions",
+  "lint",
+  "fmt",
+  "test",
+  "bench",
+  "publish",
+  "license",
+  "nodeModulesDir",
+  "unstable",
+  "workspace",
+  "exclude",
+  "include",
+  "patch",
+  "vendor",
+  "lock",
+  "$schema",
+]);
+
+/** aio-shaped keys sitting at the TOP LEVEL of deno.json, where they do
+ *  nothing. Pure — the caller warns.
+ *
+ *  Deliberately narrow: only a key aio would recognise inside `aio.run()`
+ *  counts, so another tool's section in the same file is never scolded. */
+export function misplacedDenoJsonKeys(
+  denoJson: Record<string, unknown> | undefined,
+): string[] {
+  if (!denoJson) return [];
+  return Object.keys(denoJson).filter((k) =>
+    !DENO_JSON_READ_KEYS.has(k) &&
+    (VALID_AIO_CONFIG_KEYS.has(k) || VALID_FEATURES_CONFIG_KEYS.has(k) ||
+      k === "ui")
+  );
+}
+
 export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "appId",
   "reduce",

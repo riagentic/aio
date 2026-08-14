@@ -23,8 +23,21 @@ export type TrustStore = {
   key?: JsonWebKey;
   /** The channel this install follows, once someone chose one explicitly. */
   channel?: string;
-  /** Last manifest ETag, so an unchanged check costs a 304 and no body. */
+  /** Legacy: the last manifest ETag, cached after ANY successful fetch.
+   *  No longer read — see `etagCurrent`. Kept in the type so an old trust
+   *  file round-trips instead of losing the field on the next write. */
   etag?: string;
+  /** The ETag of a manifest whose decision was "you are current".
+   *
+   *  ONLY that decision may be cached. The old field was written after every
+   *  fetch, including one that produced an OFFER: the next check then got a
+   *  304, reported `current`, and the cell cleared `available` — the update
+   *  went invisible and, because the ETag is on disk, stayed invisible across
+   *  every future boot. An unresolved offer must keep re-fetching until it is
+   *  installed. (Reading a new field also heals installs whose old `etag` was
+   *  poisoned by exactly that bug: it is ignored, so the next check refetches
+   *  in full.) */
+  etagCurrent?: string;
   /** The commit this build was made from — a git source's "current version". */
   commit?: string;
 };

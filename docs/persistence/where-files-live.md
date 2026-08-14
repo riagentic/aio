@@ -81,6 +81,13 @@ start; extracted trees are kept deliberately, as a warm start.
 where a bare `console.log` in a cell and the stack trace of a crash _before the
 logger is up_ end up. The framework's own structured logs are the other files.
 
+Every one of them keeps history: on start the live file rotates to `.1` and the
+older archives shift up, bounded by `backupKeep` (7) and by a byte ceiling over
+the whole directory (`logBudget`, 200 MB), which evicts the oldest run first and
+says so in `app.log`. `--no-backup-logs` restores the old wipe-on-start.
+`stdout.log` rotates too — done by `am` just before it spawns the app, because
+the shell redirect that writes it holds the fd for the life of the run.
+
 ## Secrets in recorded actions
 
 An action's payload is its arguments. `vault.unlockWith(passphrase)` therefore

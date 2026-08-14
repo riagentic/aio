@@ -128,5 +128,5 @@ if (s.count >= 10) {
 }
 ```
 
-See [reactivity.md](../ui/air-signals.md) and
-[generators.md](../state/generators.md) for full guides.
+See [reactivity.md](../ui/air-signals.md) and `docs/state/generators.md`
+(removed with generators themselves) for full guides.

@@ -16,7 +16,14 @@ import {
   now,
 } from "./logger-types.ts";
 import { formatText, printConsole } from "./logger-format.ts";
-import { type LogKind, rotateOnStart, wipeOnStart } from "./logger-rotate.ts";
+import {
+  DEFAULT_BACKUP_KEEP,
+  DEFAULT_LOG_BUDGET,
+  enforceBudget,
+  type LogKind,
+  rotateOnStart,
+  wipeOnStart,
+} from "./logger-rotate.ts";
 import { observeAction } from "./logger-observe.ts";
 import { noRedaction } from "./redact.ts";
 import type { Redactor } from "./redact.ts";
@@ -51,8 +58,9 @@ export class AioLogger {
       console: config.console ?? isDevMode(),
       heartbeat: config.heartbeat ?? 3600,
       suppressTypes: config.suppressTypes ?? [],
-      backupLogs: config.backupLogs ?? false,
-      backupKeep: config.backupKeep ?? 7,
+      backupLogs: config.backupLogs ?? true,
+      backupKeep: config.backupKeep ?? DEFAULT_BACKUP_KEEP,
+      logBudget: config.logBudget ?? DEFAULT_LOG_BUDGET,
     };
     this.dir = this.cfg.dir;
     this.appName = config.appName ?? "app";
@@ -63,9 +71,51 @@ export class AioLogger {
     try {
       await Deno.mkdir(this.dir, { recursive: true });
       const pathFn = this.path.bind(this);
-      if (this.cfg.backupLogs) await rotateOnStart(pathFn, this.cfg.backupKeep);
-      else await wipeOnStart(pathFn);
+      const rotated = this.cfg.backupLogs
+        ? await rotateOnStart(pathFn, this.cfg.backupKeep)
+        : (await wipeOnStart(pathFn), []);
+      // AFTER rotation, so the run that just ended is inside the bound like
+      // every other, and BEFORE `ready` — the first line of this run must not
+      // be written into a directory that is still over budget.
+      const budget = await enforceBudget(this.dir, this.cfg.logBudget);
       this.ready = true;
+      // The retention default changed (wipe → keep), and a default whose effect
+      // is only observable by watching the filesystem must not change silently
+      // (`.katana/_aio.md`). So the first thing this run says is what happened
+      // to the last run's logs, and how to get the old behaviour. Only when
+      // something was really archived — on a first boot there is nothing to say.
+      if (rotated.length > 0) {
+        this.emit("info", "logger", "kept the previous run's logs", {
+          archived: rotated.map((k) => `${k}.log.1`).join(", "),
+          keep: this.cfg.backupKeep === 0 ? "unlimited" : this.cfg.backupKeep,
+          wipeInstead: "--no-backup-logs",
+        });
+      }
+      // Reported, never silent (`.katana` rule: no silent caps). A deleted log
+      // the developer expected to find is exactly the surprise this project
+      // treats as a defect.
+      if (budget && budget.removed.length > 0) {
+        this.emit("info", "logger", "log budget: dropped oldest archives", {
+          removed: budget.removed.join(", "),
+          freedKB: Math.round(budget.freed / 1024),
+          budgetMB: Math.round(this.cfg.logBudget / 1024 / 1024),
+        });
+      }
+      if (budget?.over) {
+        this.emit(
+          "warn",
+          "logger",
+          "log budget exceeded by the live logs alone — nothing left to evict",
+          {
+            liveMB: Math.round(budget.live / 1024 / 1024),
+            budgetMB: Math.round(this.cfg.logBudget / 1024 / 1024),
+            dir: this.dir,
+            fix:
+              "raise logging.logBudget, lower logging.level, or delete the " +
+              "directory between runs",
+          },
+        );
+      }
       if (this.cfg.heartbeat > 0) {
         this.heartbeatTimer = setInterval(
           () => this.heartbeat(),
@@ -246,9 +296,18 @@ export class AioLogger {
   private write(path: string, entry: LogEntry): void {
     if (!this.ready) return;
     const line = formatText(entry);
-    const key = `${entry.lvl}|${entry.cat}|${entry.msg}|${
-      entry.data ? JSON.stringify(entry.data) : ""
-    }`;
+    // Guarded like formatText's safeStringify: entry.data can carry live
+    // state (REDUCE_ERROR's snapshot), and a BigInt/cycle in it would throw
+    // HERE and lose the very line reporting the error.
+    let dataKey = "";
+    if (entry.data) {
+      try {
+        dataKey = JSON.stringify(entry.data) ?? "";
+      } catch {
+        dataKey = line; // dedupe on the rendered line instead
+      }
+    }
+    const key = `${entry.lvl}|${entry.cat}|${entry.msg}|${dataKey}`;
     const last = this._lastLine.get(path);
     if (last && last.key === key) {
       last.count++;

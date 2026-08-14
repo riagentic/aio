@@ -69,9 +69,15 @@ export type TestContext<
   };
   /** Assertions */
   expect: {
-    /** Assert on cell state slice (typed — `s` is the cell's state) */
+    /** Assert on cell state slice (typed — `s` is the cell's state).
+     *
+     *  `msg` is folded into the failure, like every other assertion in the
+     *  ecosystem takes one. Without it a failure printed only the state dump
+     *  and the reader had to reverse-engineer the predicate's intent — and a
+     *  field report hit the missing argument at ~12 call sites at once, because
+     *  `assertEquals`-shaped calls are what everyone writes first. */
     // deno-lint-ignore no-explicit-any
-    state: (fn: (s: S, ...args: any[]) => boolean) => void;
+    state: (fn: (s: S, ...args: any[]) => boolean, msg?: string) => void;
     /** Assert current machine status */
     status: (expected: string) => void;
     /** Assert effect types returned by last action (full type strings, e.g. 'counter:persist') */
@@ -403,10 +409,12 @@ export function testCell(
       },
       send,
       expect: {
-        state: (check) => {
+        state: (check, msg) => {
           const fs = state[f.__aio.id] as Record<string, unknown>;
           if (!check(fs)) {
-            throw new Error(`state assertion failed: ${JSON.stringify(fs)}`);
+            throw new Error(
+              `${msg ?? "state assertion failed"}: ${JSON.stringify(fs)}`,
+            );
           }
         },
         status: (expected) => {

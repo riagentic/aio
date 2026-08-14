@@ -486,7 +486,16 @@ export async function cmdProfile(
   const outArg = args.find((a) => a.startsWith("--out="));
   if (outArg) {
     const file = outArg.slice(6);
-    await Deno.writeTextFile(file, JSON.stringify(profile, null, 2));
+    // 0600 — this file CONTAINS the app key, the forever credential that
+    // grants raw state, arbitrary dispatch and SQL under --expose. The server
+    // keeps that key 0600 inside a 0700 dir (app-key.ts); exporting it at the
+    // default 0644 into $HOME or /tmp handed it to every local user.
+    await Deno.writeTextFile(file, JSON.stringify(profile, null, 2), {
+      mode: 0o600,
+    });
+    try {
+      await Deno.chmod(file, 0o600); // pre-existing file: mode is not applied
+    } catch { /* Windows / FS without modes */ }
     out(
       mode === "pretty" ? `wrote ${file}` : { ok: true, file },
       mode,

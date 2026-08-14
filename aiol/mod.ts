@@ -206,6 +206,8 @@ export function printReport(
 async function applySafeFixes(
   report: Report,
   projectDir: string,
+  /** Where narration goes — stderr under --json, so stdout stays parseable. */
+  say: (msg: string) => void = console.log,
 ): Promise<number> {
   const fixable = report.issues.filter((i) => i.safeFix);
   let applied = 0;
@@ -214,14 +216,14 @@ async function applySafeFixes(
       const ok = await issue.safeFix!(projectDir);
       if (ok) {
         applied++;
-        console.log(
+        say(
           `  ${c(C.green, "✓ fixed")}  ${
             c(C.dim, `[${issue.area}]`)
           } ${issue.message}`,
         );
       }
     } catch (e) {
-      console.log(
+      say(
         `  ${c(C.red, "✗ failed")} ${
           c(C.dim, `[${issue.area}]`)
         } ${issue.message}: ${e}`,
@@ -300,14 +302,19 @@ Only harmless changes: missing config, unused imports. Never changes behavior.
   let finalReport = report;
 
   if (safeFix) {
+    // Under --json, stdout must carry ONE parseable document and nothing else.
+    // The human progress lines used to be printed around it on stdout, so
+    // `aiol . --json --safe-fix | jq` could not parse its own output. Progress
+    // is narration, not the result: it belongs on stderr.
+    const say = json ? console.error : console.log;
     const fixable = report.issues.filter((i) => i.safeFix).length;
     if (fixable === 0) {
+      say(`  ${c(C.dim, "No auto-fixable issues found.")}`);
       printReport(report, json, true, hideHints);
-      console.log(`  ${c(C.dim, "No auto-fixable issues found.")}\n`);
     } else {
-      console.log(`\n${c(C.bold, `aiol v${VERSION}`)} — applying safe fixes\n`);
-      const applied = await applySafeFixes(report, projectDir);
-      console.log(
+      say(`\n${c(C.bold, `aiol v${VERSION}`)} — applying safe fixes\n`);
+      const applied = await applySafeFixes(report, projectDir, say);
+      say(
         `\n  ${
           c(
             C.green + C.bold,

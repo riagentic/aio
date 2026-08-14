@@ -21,10 +21,25 @@ export type LogConfig = {
   heartbeat?: number;
   /** Action types to suppress entirely — even from debug.log */
   suppressTypes?: string[];
-  /** Keep previous logs on restart — rotates to .1, .2, etc. (default: false — wipe on start) */
+  /** Keep previous logs on restart — rotates to .1, .2, … (default: TRUE).
+   *
+   *  It defaulted to wipe-on-start, which destroyed the logs of the run you
+   *  restarted BECAUSE of — and in dev, where every cell-file save respawns the
+   *  process (`src/server/dev-restart.ts`), that meant the crash you just
+   *  reproduced was erased by the reload that followed it. Set `false` for the
+   *  old clean-slate behaviour (`--no-backup-logs`). */
   backupLogs?: boolean;
   /** How many backup archives to keep when backupLogs is enabled (default: 7, 0 = unlimited) */
   backupKeep?: number;
+  /** Byte ceiling for the WHOLE log directory (default: 200 MB, 0 = unlimited).
+   *
+   *  Enforced at boot, right after rotation: archives are evicted oldest-run
+   *  first until the directory fits, and what went is logged. Nothing rotates a
+   *  log mid-run, so retention alone would multiply an unbounded `client.log`
+   *  by `backupKeep + 1`; this is the bound that makes the default safe. Live
+   *  files are counted but never evicted — if they alone exceed the budget the
+   *  logger warns rather than deleting this run's evidence. */
+  logBudget?: number;
 };
 
 export type LogEntry = {

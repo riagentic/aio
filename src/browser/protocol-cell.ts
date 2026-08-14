@@ -154,6 +154,14 @@ export function cell(
         actions: cat,
         effects: eCat,
         asyncMethods,
+        // `long: ["method"]` — mirrored because the browser resolves the SAME
+        // call ceiling the server does (`longMethodKeys` in state/cell-impl).
+        // A booted app also gets these on the `cfg` frame as `timeout: 0`, but
+        // a client-scope cell never asks a server anything: without this key
+        // its long method would give up at 30s in the browser and nowhere
+        // else — the client/server divergence this file's parity gate exists
+        // to catch.
+        longMethods: (config as { long?: string[] }).long,
         bound: false,
       },
     };

@@ -18,7 +18,7 @@
  * TLS material, none of which are cell state.
  */
 
-import { basename, join, resolve } from "@std/path";
+import { basename, isAbsolute, join, relative, resolve } from "@std/path";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
 import { resolveAmAppId } from "./am-utils.ts";
@@ -78,10 +78,26 @@ function human(bytes: number): string {
   return `${i === 0 ? n : n.toFixed(1)}${units[i]}`;
 }
 
+/** `child` is `parent` itself or lies under it (both already resolved). */
+function within(parent: string, child: string): boolean {
+  const rel = relative(parent, child);
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
 /** Recursive copy that refuses to overwrite, so a mistyped destination can
  *  never eat an existing backup. Files carry their mode across (the app key and
  *  the TLS key are 0600 and must stay that way in the copy). */
 function copyTree(from: string, to: string): number {
+  // Overlapping trees are never a sane copy — and a destination INSIDE the
+  // source is a runaway: mkdir creates it, readDir then finds it, and the copy
+  // recurses into its own output until the path length or the stack gives out,
+  // spraying nested duplicates into the source on the way down. The commands
+  // refuse these up front with a friendlier message; this is the invariant.
+  if (within(from, to) || within(to, from)) {
+    throw new Error(
+      `copyTree: "${from}" and "${to}" overlap — refusing to copy a tree into itself`,
+    );
+  }
   let files = 0;
   Deno.mkdirSync(to, { recursive: true });
   for (const e of Deno.readDirSync(from)) {
@@ -221,6 +237,15 @@ export function cmdBackup(args: string[], flags: GlobalFlags): void {
     );
     Deno.exit(1);
   }
+  if (within(d.data, dest)) {
+    outError(
+      `${dest} is inside ${d.data} — a backup cannot be written into the very ` +
+        `data it copies (the copy would recurse into its own output). Pick a ` +
+        `destination outside the app's data directory.`,
+      mode,
+    );
+    Deno.exit(1);
+  }
   try {
     Deno.statSync(dest);
     outError(`${dest} already exists — pick another destination`, mode);
@@ -241,12 +266,21 @@ export function cmdBackup(args: string[], flags: GlobalFlags): void {
 
 // ── am restore ─────────────────────────────────────────────
 
-/** Read an archive's `meta.json`, or null when it has none (a hand-made copy). */
-function readArchiveMeta(src: string): AppMeta | null {
+/** Read an archive's `meta.json`: the meta, `null` when the file is absent (a
+ *  hand-made copy has none), or `"corrupt"` when it exists but cannot be
+ *  parsed. The caller must NOT treat corrupt as absent — that silently blinds
+ *  the wrong-app check, which is half this command's reason to exist. */
+function readArchiveMeta(src: string): AppMeta | null | "corrupt" {
+  let raw: string;
   try {
-    return JSON.parse(Deno.readTextFileSync(join(src, "meta.json"))) as AppMeta;
+    raw = Deno.readTextFileSync(join(src, "meta.json"));
   } catch {
-    return null;
+    return null; // genuinely absent
+  }
+  try {
+    return JSON.parse(raw) as AppMeta;
+  } catch {
+    return "corrupt";
   }
 }
 
@@ -269,6 +303,15 @@ export function cmdRestore(args: string[], flags: GlobalFlags): void {
     outError(`no backup directory at ${src}`, mode);
     Deno.exit(1);
   }
+  if (within(src, d.data) || within(d.data, src)) {
+    outError(
+      `${src} overlaps the live data directory ${d.data} — a restore must ` +
+        `come from a copy outside it (the current data is moved aside during ` +
+        `the restore, which would take the source with it).`,
+      mode,
+    );
+    Deno.exit(1);
+  }
   const pid = livePid(appId);
   if (pid !== null) {
     // Not overridable: the running app has the databases open and would write
@@ -280,7 +323,17 @@ export function cmdRestore(args: string[], flags: GlobalFlags): void {
     Deno.exit(1);
   }
   const meta = readArchiveMeta(src);
-  if (meta && meta.appId !== appId && !force) {
+  if (meta === "corrupt" && !force) {
+    outError(
+      `${join(src, "meta.json")} exists but cannot be parsed — whether this ` +
+        `archive belongs to "${appId}" is unverifiable (a backup taken with ` +
+        `--force on a live app can tear meta.json). Use --force to restore ` +
+        `it anyway.`,
+      mode,
+    );
+    Deno.exit(1);
+  }
+  if (meta !== null && meta !== "corrupt" && meta.appId !== appId && !force) {
     outError(
       `${
         basename(src)
@@ -305,7 +358,9 @@ export function cmdRestore(args: string[], flags: GlobalFlags): void {
   out(
     mode === "pretty"
       ? `restored ${appId}: ${files} files → ${d.data}` +
-        (meta ? `\n  archive: aio ${meta.aio}, saved ${meta.updatedAt}` : "") +
+        (meta && meta !== "corrupt"
+          ? `\n  archive: aio ${meta.aio}, saved ${meta.updatedAt}`
+          : "") +
         (aside ? `\n  previous data kept at ${aside}` : "")
       : { appId, src, files, replaced: aside ?? undefined },
     mode,

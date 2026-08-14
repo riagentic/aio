@@ -1,5 +1,5 @@
 // Entry — zero-config: cells self-register on import; appId, version and
-// baseDir are inferred. `onReady` kicks off the first scan so the app has
+// baseDir are inferred. `onStart` kicks off the first scan so the app has
 // something on screen the moment it opens.
 import { disk } from "./cell.ts";
 import { aio } from "aio";

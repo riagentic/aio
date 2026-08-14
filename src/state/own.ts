@@ -100,6 +100,9 @@ function _evictStaleFactories(): void {
   }
 }
 
+/** Resource ownership for cells: `own.set(id, factory)` acquires a resource
+ *  the runtime disposes for you (on replace, on cell stop, on shutdown), so a
+ *  method never leaks a handle it opened. */
 export const own: Own = {
   set(id: string, factory: () => OwnResource): OwnEffect {
     const token = nextToken++;

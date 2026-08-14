@@ -14,6 +14,8 @@ import {
   REDACTED,
 } from "../diagnostics/redact.ts";
 import type { Redactor } from "../diagnostics/redact.ts";
+import { runWithUser } from "./auth-context.ts";
+import type { AioUser } from "./aio-types.ts";
 
 export type JournalEntry = {
   seq: number;
@@ -35,12 +37,24 @@ export type JournalEntry = {
    *  reducer got the quiet version of the same thing: a wrong recovered state,
    *  silently. `replayJournal` therefore skips these and REPORTS them. */
   redacted?: true;
+  /** WHO dispatched it. A method that reads `serverUser()` — an authorization
+   *  check, an "own rows only" filter, a per-caller quota — is a different
+   *  function under a different caller, and replay ran them all as nobody.
+   *  Recorded so replay can restore the ambient identity the action really
+   *  had; absent for server-origin actions (schedules, effects), which is
+   *  exactly the `undefined` they ran under. */
+  user?: AioUser;
 };
 
 export type Journal = {
   /** Append a committed action; returns its monotonic seq. */
   append(
-    action: { type: string; payload?: unknown; origin?: string },
+    action: {
+      type: string;
+      payload?: unknown;
+      origin?: string;
+      user?: AioUser;
+    },
     ts: number,
   ): number;
   /** All entries with seq > `after` (the persisted watermark), in order. */
@@ -55,8 +69,22 @@ export type Journal = {
   close(): void;
 };
 
-/** An entry replay REFUSED, and why — so the caller can say so out loud. */
-export type SkippedEntry = { seq: number; type: string; reason: "redacted" };
+/** An entry replay REFUSED, and why — so the caller can say so out loud.
+ *
+ *  `threw` is the one that is not a policy decision: the reducer rejected the
+ *  entry (a guard that no longer holds, a caller the entry could not restore,
+ *  a shape from an older build). Skipping it costs whatever that one action
+ *  wrote; NOT skipping it cost the whole app — an entry that throws is still
+ *  in the file on the next boot, so the same crash repeats forever and the
+ *  watermark never advances. Recovery must never be the reason a process
+ *  cannot start. */
+export type SkippedEntry = {
+  seq: number;
+  type: string;
+  reason: "redacted" | "threw";
+  /** The reducer's message, for `threw`. */
+  error?: string;
+};
 
 /** What a replay reconstructed, and what it could not. */
 export type ReplayResult<S> = {
@@ -100,8 +128,24 @@ export function replayJournal<S, A>(
       skipped.push({ seq: e.seq, type: e.type, reason: "redacted" });
       continue;
     }
-    s = reduce(s, { type: e.type, payload: e.payload } as A).state;
-    replayed++;
+    try {
+      // Under the caller it really had. A user-scoped method (`serverUser()`
+      // for authorization, for "my rows only", for a per-caller quota) throws
+      // or reduces WRONGLY when replayed as nobody — and a throw here used to
+      // reject `aio.run()`, leaving an app that could never boot again.
+      s = runWithUser(
+        e.user,
+        () => reduce(s, { type: e.type, payload: e.payload } as A),
+      ).state;
+      replayed++;
+    } catch (err) {
+      skipped.push({
+        seq: e.seq,
+        type: e.type,
+        reason: "threw",
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
   return { state: s, replayed, skipped };
 }
@@ -192,6 +236,14 @@ export function createJournal(
           payload: hide ? REDACTED : action.payload,
           ts,
           ...(action.origin !== undefined ? { origin: action.origin } : {}),
+          // The caller, so replay re-reduces under the identity the action
+          // actually had. Never a credential: `AioUser` is the resolved id and
+          // role, which the app's own state already holds. An app that hangs
+          // extra fields off it (a public key, a tenant) pays for them here in
+          // bytes — bounded, because the journal is compacted at every
+          // watermark and therefore only ever holds the persist debounce
+          // window.
+          ...(action.user !== undefined ? { user: action.user } : {}),
           // The marker travels WITH the entry: replay must be able to refuse it
           // without pattern-matching a sentinel string, and the file outlives
           // the config that redacted it (a journal written under

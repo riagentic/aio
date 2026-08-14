@@ -24,6 +24,9 @@ export type PressureMonitorConfig = {
 
 /** Pressure monitor API — tracks broadcast payload sizes and per-client bandwidth. */
 export type PressureMonitorAPI = {
+  /** Once per broadcast ROUND — feeds the broadcasts/sec rate. */
+  onBroadcastRound(): void;
+  /** Once per client send within a round — feeds per-client payload/bandwidth. */
   onBroadcast(clientId: string, bytes: number): void;
   onClientDisconnect(clientId: string): void;
   getBytesPerSec(clientId: string): number;
@@ -41,7 +44,7 @@ export function createPressureMonitor(
   const lastConsoleEmit = new Map<string, number>();
   const _clientBandwidth = new Map<
     string,
-    { startedAt: number; totalBytes: number }
+    { startedAt: number; totalBytes: number; lastRate: number }
   >();
 
   let _broadcastCount = 0;
@@ -82,9 +85,15 @@ export function createPressureMonitor(
     }
   }
 
-  function onBroadcast(clientId: string, bytes: number): void {
+  // Counted per broadcast ROUND, not per client send: the rate is diagnosed
+  // as dispatch frequency ("debounce or batch the actions"), and counting
+  // every socket made 15 clients × 2 updates/sec read as 30 "broadcasts/sec"
+  // — a sustained false pressure alarm that scaled with popularity, not load.
+  function onBroadcastRound(): void {
     _broadcastCount++;
+  }
 
+  function onBroadcast(clientId: string, bytes: number): void {
     // Track per-client bandwidth
     const now = Date.now();
     const bw = _clientBandwidth.get(clientId);
@@ -93,6 +102,7 @@ export function createPressureMonitor(
       const elapsedSec = (now - bw.startedAt) / 1000;
       if (elapsedSec >= 1) { // need ≥1s of data before checking
         const bps = bw.totalBytes / elapsedSec;
+        bw.lastRate = Math.round(bps); // what getBytesPerSec reports mid-window
         if (bps >= bandwidthThreshold) {
           const mbps = (bps / 1_048_576).toFixed(2);
           emit({
@@ -115,7 +125,11 @@ export function createPressureMonitor(
         bw.totalBytes = 0;
       }
     } else {
-      _clientBandwidth.set(clientId, { startedAt: now, totalBytes: bytes });
+      _clientBandwidth.set(clientId, {
+        startedAt: now,
+        totalBytes: bytes,
+        lastRate: 0,
+      });
     }
 
     if (bytes >= payloadThreshold) {
@@ -144,7 +158,12 @@ export function createPressureMonitor(
     const bw = _clientBandwidth.get(clientId);
     if (!bw) return 0;
     const elapsedSec = (Date.now() - bw.startedAt) / 1000;
-    if (elapsedSec < 0.001) return 0;
+    // A window younger than 1s hasn't earned the division: a 50KB full-state
+    // send polled 10ms into the window read as 5 MB/s, and a poll right after
+    // a window close read as 0. Report the last COMPLETED window while the
+    // current one fills, or (before any window completes) the bytes gathered
+    // so far as a full second's worth — an under-, never over-estimate.
+    if (elapsedSec < 1) return bw.lastRate || Math.round(bw.totalBytes);
     return Math.round(bw.totalBytes / elapsedSec);
   }
 
@@ -171,6 +190,7 @@ export function createPressureMonitor(
   }, 1000);
 
   return {
+    onBroadcastRound,
     onBroadcast,
     onClientDisconnect,
     getBytesPerSec,

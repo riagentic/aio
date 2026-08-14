@@ -146,8 +146,14 @@ export const schedule: {
     a3: _SchedAction | { base: number; max?: number; factor?: number },
     a4?: _SchedAction | { base: number; max?: number; factor?: number },
   ): _SchedResult => {
-    const isAction = !!a3 && typeof (a3 as { type?: unknown }).type ===
-        "string";
+    // `typeof === "object"` is NOT optional here: the server twin
+    // (state/schedule.ts `_isAction`) has it, and an action CREATOR is a
+    // callable object carrying a string `.type`. Without the check the browser
+    // accepted a creator as the action while the server read the same call as
+    // the deprecated opts-third order and threw `ms must be finite` — one
+    // source, two outcomes, with the permissive side being the client.
+    const isAction = !!a3 && typeof a3 === "object" &&
+      typeof (a3 as { type?: unknown }).type === "string";
     if (!isAction) {
       _hintOnce(
         `backoff-order:${id}`,
@@ -183,8 +189,14 @@ export const schedule: {
       | _SchedAction
       | { every: number; factor?: number; backoff?: number; max?: number },
   ): _SchedResult => {
-    const isAction = !!a3 && typeof (a3 as { type?: unknown }).type ===
-        "string";
+    // `typeof === "object"` is NOT optional here: the server twin
+    // (state/schedule.ts `_isAction`) has it, and an action CREATOR is a
+    // callable object carrying a string `.type`. Without the check the browser
+    // accepted a creator as the action while the server read the same call as
+    // the deprecated opts-third order and threw `ms must be finite` — one
+    // source, two outcomes, with the permissive side being the client.
+    const isAction = !!a3 && typeof a3 === "object" &&
+      typeof (a3 as { type?: unknown }).type === "string";
     if (!isAction) {
       _hintOnce(
         `poll-order:${id}`,
