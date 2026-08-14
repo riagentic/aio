@@ -264,6 +264,8 @@ export type CellAio<
     string,
     "self" | (string | { type: string })[]
   >;
+  /** Async methods declared `long` — no call ceiling, no effect deadline. */
+  longMethods?: string[];
   /** Optional state validator — called after reduce, throw or return string to reject.
    *  `any` required: user provides (state: S) => ... but CellAio stores it unparameterized (contravariance). */
   // deno-lint-ignore no-explicit-any
@@ -354,7 +356,8 @@ export type Access =
     ...args: unknown[]
   ) => boolean);
 
-/** @deprecated alpha52 — unified as {@linkcode Access} (one rule vocabulary
+/** Who may call a cell method — the legacy spelling of {@linkcode Access}.
+ *  @deprecated alpha52 — unified as {@linkcode Access} (one rule vocabulary
  *  for cells and serverFns). Alias through beta. */
 export type CellAccess = Access;
 
@@ -443,7 +446,8 @@ export type MethodMeta<
 export type StateOf<F> = F extends CellDef<any, any, any, infer S> ? S
   : Record<string, unknown>;
 
-/** @deprecated alpha52 — renamed {@linkcode StateOf}. Alias through beta. */
+/** A cell definition's state type — the legacy spelling of {@linkcode StateOf}.
+ *  @deprecated alpha52 — renamed {@linkcode StateOf}. Alias through beta. */
 export type ExtractState<F> = StateOf<F>;
 
 /**

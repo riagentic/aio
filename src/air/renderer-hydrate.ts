@@ -239,10 +239,19 @@ export function _hydrateNode(
       ctx.hooks?.afterSubtree?.(vnode);
       return 0;
     }
-    const count = _hydrateNode(parent, rendered, ctx, isSvg, childIndex);
-    if (count >= 0) vnode._dom = getDom(rendered) ?? undefined;
-    ctx.hooks?.afterSubtree?.(vnode);
-    return count;
+    // `finally`, like the other two commit paths (vdom-render.ts:134,
+    // vdom-diff.ts:340). Without it a throw from the subtree — a lazy's
+    // `_LAZY_PENDING`, or a component error the boundary below catches — skipped
+    // the pop and left the module-global `_instanceStack` holding a dead
+    // instance forever. That stale ancestor then won `useContext` lookups for
+    // every later component without a real provider above it.
+    try {
+      const count = _hydrateNode(parent, rendered, ctx, isSvg, childIndex);
+      if (count >= 0) vnode._dom = getDom(rendered) ?? undefined;
+      return count;
+    } finally {
+      ctx.hooks?.afterSubtree?.(vnode);
+    }
   }
 
   // Portal — consumes 0 DOM nodes (renders elsewhere)

@@ -120,7 +120,7 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
   async function checkManifest(): Promise<CheckResult> {
     const trust = readTrust(deps.dataDir);
     const url = manifestUrl(config.source, channel, platform);
-    const got = await fetchManifest(url, trust.etag);
+    const got = await fetchManifest(url, trust.etagCurrent);
     if (got.kind === "error") return { kind: "error", error: got.error };
     if (got.kind === "not-modified") {
       return { kind: "current", reason: `${deps.appVersion} is the latest` };
@@ -154,8 +154,6 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
           `(allowUnsigned is on)`,
       );
     }
-    if (got.etag) writeTrust(deps.dataDir, { etag: got.etag });
-
     const d = decide({
       current: deps.appVersion,
       manifest: m,
@@ -178,6 +176,12 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       };
     }
     offered = null;
+    // Cache the ETag only for "nothing to do" — an offer, a block or a refusal
+    // is unresolved and must re-evaluate on every check, not be short-circuited
+    // by a 304 into "you are the latest".
+    if (got.etag && d.kind === "current") {
+      writeTrust(deps.dataDir, { etagCurrent: got.etag });
+    }
     if (d.kind === "incompatible") {
       return {
         kind: "blocked",

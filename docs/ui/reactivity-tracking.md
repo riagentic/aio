@@ -82,11 +82,26 @@ A selector that returns a function (`choicesFor: (s) => (role) => …`) is track
 at the moment you CALL the accessor, not when you call the function it returned:
 
 ```tsx
+// declared: choicesFor: (s) => (role) => …
 const pick = studio.choicesFor; //  no read yet
+const opts = studio.choicesFor()("image"); //  tracked at the FIRST call
+```
+
+Note the empty `()`. The accessor reads the cell and hands back your inner
+function; the argument goes to that function, not to the accessor. Passing it to
+the accessor (`studio.choicesFor("image")`) returns the inner function itself —
+the argument lands on the selector's second parameter, which a curried selector
+does not declare.
+
+If you would rather write it flat, declare the parameter instead and call it in
+one step — this shape takes its arguments on the accessor:
+
+```tsx
+// declared: choicesFor: (s, role) => …
 const opts = studio.choicesFor("image"); //  tracked here
 ```
 
-Calling the accessor during render is the normal case, and it is tracked.
+Either way, calling during render is the normal case, and it is tracked.
 
 ## What is NOT tracked
 

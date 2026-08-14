@@ -13,6 +13,13 @@ export type LoopProbeAPI = {
   updateCircuitBreakers: (names: string[]) => void;
   getVitals: () => LoopVitals;
   getStatus: () => VitalStatus;
+  /** Status plus WHICH layer produced it — the queue (an action count) and
+   *  the loop (milliseconds) have different units, and an alert built from
+   *  the wrong pair reports incoherent numbers. */
+  getStatusDetail: () => {
+    status: VitalStatus;
+    driver: "queue" | "loop" | null;
+  };
   getFirstDegradedAt: () => number | null;
   reset: () => void;
 };
@@ -70,21 +77,46 @@ export function createLoopProbe(thresholds: VitalThresholds): LoopProbeAPI {
     return actionTimestamps.length / span;
   }
 
-  function evaluateStatus(): VitalStatus {
+  const STATUS_RANK: Record<VitalStatus, number> = {
+    healthy: 0,
+    recovered: 0, // transitional, never produced by thresholds
+    degraded: 1,
+    warning: 2,
+    frozen: 3,
+  };
+
+  function evaluateStatus(): {
+    status: VitalStatus;
+    driver: "queue" | "loop" | null;
+  } {
     const qt = thresholds.queue;
     const lt = thresholds.loop;
 
-    // Check queue thresholds (higher priority)
-    if (queueDepth >= qt.frozen) return "frozen";
-    if (queueDepth >= qt.warning) return "warning";
-    if (queueDepth >= qt.degraded) return "degraded";
+    // Both layers are evaluated and the WORSE one wins. Early-returning on
+    // the queue tier alone downgraded a frozen loop to "degraded" exactly in
+    // the common cascade — a 2.5s reduce that also backed the queue up.
+    const queue: VitalStatus = queueDepth >= qt.frozen
+      ? "frozen"
+      : queueDepth >= qt.warning
+      ? "warning"
+      : queueDepth >= qt.degraded
+      ? "degraded"
+      : "healthy";
+    const loop: VitalStatus = lastReduceTime >= lt.frozen
+      ? "frozen"
+      : lastReduceTime >= lt.warning
+      ? "warning"
+      : lastReduceTime >= lt.degraded
+      ? "degraded"
+      : "healthy";
 
-    // Check loop (reduce time) thresholds
-    if (lastReduceTime >= lt.frozen) return "frozen";
-    if (lastReduceTime >= lt.warning) return "warning";
-    if (lastReduceTime >= lt.degraded) return "degraded";
-
-    return "healthy";
+    if (queue === "healthy" && loop === "healthy") {
+      return { status: "healthy", driver: null };
+    }
+    // On a tie the queue drives (its number is the more actionable of the two).
+    return STATUS_RANK[queue] >= STATUS_RANK[loop]
+      ? { status: queue, driver: "queue" }
+      : { status: loop, driver: "loop" };
   }
 
   function onPerf(timing: PerfTiming): void {
@@ -107,7 +139,7 @@ export function createLoopProbe(thresholds: VitalThresholds): LoopProbeAPI {
     pruneTimestamps(Date.now());
 
     // Track first degraded
-    const status = evaluateStatus();
+    const { status } = evaluateStatus();
     if (status !== "healthy" && firstDegradedAt === null) {
       firstDegradedAt = Date.now();
     }
@@ -115,7 +147,7 @@ export function createLoopProbe(thresholds: VitalThresholds): LoopProbeAPI {
 
   function updateQueueDepth(depth: number): void {
     queueDepth = depth;
-    const status = evaluateStatus();
+    const { status } = evaluateStatus();
     if (status !== "healthy" && firstDegradedAt === null) {
       firstDegradedAt = Date.now();
     }
@@ -152,6 +184,13 @@ export function createLoopProbe(thresholds: VitalThresholds): LoopProbeAPI {
   }
 
   function getStatus(): VitalStatus {
+    return evaluateStatus().status;
+  }
+
+  function getStatusDetail(): {
+    status: VitalStatus;
+    driver: "queue" | "loop" | null;
+  } {
     return evaluateStatus();
   }
 
@@ -180,6 +219,7 @@ export function createLoopProbe(thresholds: VitalThresholds): LoopProbeAPI {
     updateCircuitBreakers,
     getVitals,
     getStatus,
+    getStatusDetail,
     getFirstDegradedAt,
     reset,
   };

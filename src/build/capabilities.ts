@@ -40,13 +40,18 @@ const SIGNALS: [keyof Capabilities, RegExp][] = [
     "net",
     /\bfetch\s*\(|\bDeno\.(?:connect|listen|serve|connectTls|listenTls)\b|new\s+WebSocket\b|\bupdates\s*:\s*[{"'`]/,
   ],
+  // `Sync` is matched explicitly, never left to `\b`: "readFile" cannot match
+  // inside "readFileSync" (e→S is not a word boundary), so an app whose I/O is
+  // the *Sync spellings scanned to read:false/write:false and the signed
+  // manifest advertised `runFlags: []` — following that advice launched a
+  // binary that died on PermissionDenied at its first file read.
   [
     "read",
-    /\bDeno\.(?:readFile|readTextFile|readDir|open|stat|realPath|readLink)\b|\bDeno\.openKv\b|\bcreateDB\b|\bopenCassette\b/,
+    /\bDeno\.(?:readFile|readTextFile|readDir|open|stat|lstat|realPath|readLink)(?:Sync)?\b|\bDeno\.openKv\b|\bcreateDB\b|\bopenCassette\b/,
   ],
   [
     "write",
-    /\bDeno\.(?:writeFile|writeTextFile|mkdir|remove|rename|create|truncate|symlink|link|chmod|chown)\b/,
+    /\bDeno\.(?:writeFile|writeTextFile|mkdir|remove|rename|create|truncate|symlink|link|chmod|chown|copyFile|makeTempDir|makeTempFile)(?:Sync)?\b/,
   ],
   ["ffi", /\bDeno\.dlopen\b|\bDeno\.UnsafePointer\b|\bDeno\.UnsafeCallback\b/],
   ["env", /\bDeno\.env\b/],
@@ -55,6 +60,33 @@ const SIGNALS: [keyof Capabilities, RegExp][] = [
     "sys",
     /\bDeno\.(?:hostname|osRelease|systemMemoryInfo|networkInterfaces|loadavg|osUptime|uid|gid)\b/,
   ],
+];
+
+/** Every `Deno.*` API name the read/write signals above recognize — the guard
+ *  test walks this so a newly used API cannot quietly go unscanned. */
+export const _SCANNED_FS_APIS: readonly string[] = [
+  "readFile",
+  "readTextFile",
+  "readDir",
+  "open",
+  "stat",
+  "lstat",
+  "realPath",
+  "readLink",
+  "writeFile",
+  "writeTextFile",
+  "mkdir",
+  "remove",
+  "rename",
+  "create",
+  "truncate",
+  "symlink",
+  "link",
+  "chmod",
+  "chown",
+  "copyFile",
+  "makeTempDir",
+  "makeTempFile",
 ];
 
 /** Scan source contents → the capabilities they require. */

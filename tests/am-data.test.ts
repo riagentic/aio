@@ -257,3 +257,70 @@ Deno.test("am backup/restore: refuse while the app is running", async () => {
     await Deno.remove(home, { recursive: true });
   }
 });
+
+Deno.test("am backup: refuses a destination inside data/ (the copy would recurse into its own output)", async () => {
+  const home = await Deno.makeTempDir({ prefix: "am-backup-inside-" });
+  pin(home);
+  try {
+    const d = seedApp("intest", home);
+    const inside = run(cmdBackup, [join(d.data, "backups", "b1")], {
+      app: "intest",
+    });
+    assertEquals(inside.exited, 1);
+    assertStringIncludes(inside.out, "inside");
+    // …and nothing was written into data/.
+    let leaked = false;
+    for (const e of Deno.readDirSync(d.data)) {
+      if (e.name === "backups") leaked = true;
+    }
+    assertEquals(leaked, false, "no partial copy may land in data/");
+  } finally {
+    unpin();
+    await Deno.remove(home, { recursive: true });
+  }
+});
+
+Deno.test("am restore: refuses a source overlapping data/ (the move-aside would take the source with it)", async () => {
+  const home = await Deno.makeTempDir({ prefix: "am-restore-overlap-" });
+  pin(home);
+  try {
+    const d = seedApp("ovtest", home);
+    // src INSIDE data/…
+    const insideSrc = join(d.data, "old-copy");
+    Deno.mkdirSync(insideSrc, { recursive: true });
+    const a = run(cmdRestore, [insideSrc], { app: "ovtest" });
+    assertEquals(a.exited, 1);
+    assertStringIncludes(a.out, "overlaps");
+    // …and data/'s PARENT as src (data/ inside src).
+    const b = run(cmdRestore, [join(home, "ovtest")], { app: "ovtest" });
+    assertEquals(b.exited, 1);
+    assertStringIncludes(b.out, "overlaps");
+    assertEquals(Deno.readTextFileSync(d.stateDb), "STATE", "untouched");
+  } finally {
+    unpin();
+    await Deno.remove(home, { recursive: true });
+  }
+});
+
+Deno.test("am restore: a corrupt meta.json refuses (the wrong-app check is blind), --force proceeds", async () => {
+  const home = await Deno.makeTempDir({ prefix: "am-restore-corrupt-" });
+  pin(home);
+  try {
+    seedApp("ctest", home);
+    const archive = join(home, "ctest-archive");
+    const backup = run(cmdBackup, [archive], { app: "ctest" });
+    assertEquals(backup.exited, null, backup.out);
+    // A live --force backup can tear meta.json mid-write — simulate the tear.
+    Deno.writeTextFileSync(join(archive, "meta.json"), '{"appId": "ct');
+
+    const blind = run(cmdRestore, [archive], { app: "ctest" });
+    assertEquals(blind.exited, 1);
+    assertStringIncludes(blind.out, "cannot be parsed");
+
+    const forced = run(cmdRestore, [archive, "--force"], { app: "ctest" });
+    assertEquals(forced.exited, null, forced.out);
+  } finally {
+    unpin();
+    await Deno.remove(home, { recursive: true });
+  }
+});

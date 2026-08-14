@@ -215,6 +215,50 @@ export function _setCallTimeouts(
 export function _resetCallTimeouts(): void {
   _callTimeoutMs = DEFAULT_CALL_TIMEOUT_MS;
   _callTimeoutByMethod = undefined;
+  _longMethods.clear();
+}
+
+/** `cell:method` keys the CELL declared `long`. Registered at compose time, so
+ *  the ceiling is lifted wherever the cell runs — including `testCell`, which
+ *  never boots an app and therefore never sees `perfBudget`. A field report
+ *  worked around exactly that gap by starting the method and polling `kind`
+ *  instead of awaiting the call the test was about. */
+const _longMethods = new Set<string>();
+
+/** @internal — called by `composeCells` for every cell that declares `long`. */
+export function _registerLongMethods(keys: readonly string[]): void {
+  for (const k of keys) _longMethods.add(k);
+}
+
+/** Every `"cell:method"` the given cells declared `long`. Pure — the ONE
+ *  decider both consumers read, so the caller-side wait and the effect
+ *  tracker can never disagree about which methods are long. */
+export function longMethodKeys(
+  cells: readonly { __aio: { id: string; longMethods?: string[] } }[],
+): string[] {
+  return cells.flatMap((c) =>
+    (c.__aio.longMethods ?? []).map((m) => `${c.__aio.id}:${m}`)
+  );
+}
+
+/** Fold `long` into the effective `perfBudget.methods` as `timeout: 0`
+ *  (unbounded), leaving any entry the app wrote ALONE — an explicit number is
+ *  a decision, and silently replacing it with "no ceiling" would be the
+ *  framework overruling the developer. Pure: returns a new budget. */
+export function mergeLongIntoPerfBudget<
+  B extends { methods?: Record<string, { effect?: number; timeout?: number }> },
+>(
+  budget: B | undefined,
+  cells: readonly { __aio: { id: string; longMethods?: string[] } }[],
+): B | undefined {
+  const keys = longMethodKeys(cells);
+  if (keys.length === 0) return budget;
+  const methods = { ...(budget?.methods ?? {}) };
+  for (const k of keys) {
+    if (methods[k]?.timeout !== undefined) continue; // the app said a number
+    methods[k] = { ...methods[k], timeout: 0 };
+  }
+  return { ...(budget ?? {} as B), methods } as B;
 }
 
 /** The resolved ceilings, for bridging into the page shell — the BROWSER side
@@ -225,13 +269,33 @@ export function _getCallTimeouts(): {
   default: number;
   methods?: Record<string, number>;
 } {
-  return { default: _callTimeoutMs, methods: _callTimeoutByMethod };
+  // `long` folded in HERE, not only where the server assembles its config: the
+  // browser must resolve the same ceiling this process enforces, and the
+  // server bridge is not the only runtime that boots cells (the standalone
+  // WebView/Android path and `bootCells` never touch it). Reading both sources
+  // in the one function that answers "what does the client wait?" is what keeps
+  // them from drifting. An explicit per-method number still wins.
+  if (_longMethods.size === 0) {
+    return { default: _callTimeoutMs, methods: _callTimeoutByMethod };
+  }
+  const methods: Record<string, number> = {};
+  for (const k of _longMethods) methods[k] = 0;
+  return {
+    default: _callTimeoutMs,
+    methods: { ...methods, ...(_callTimeoutByMethod ?? {}) },
+  };
 }
 
-/** The ceiling for one call, in ms. `<= 0` ⇒ no ceiling. */
+/** The ceiling for one call, in ms. `<= 0` ⇒ no ceiling.
+ *
+ *  Precedence: an explicit `perfBudget.methods[key].timeout` beats the cell's
+ *  `long` (a number the app WROTE outranks a blanket "no ceiling"), which beats
+ *  the global default. */
 export function callTimeoutFor(method?: string): number {
   const perMethod = method ? _callTimeoutByMethod?.[method] : undefined;
-  return perMethod ?? _callTimeoutMs;
+  if (perMethod !== undefined) return perMethod;
+  if (method && _longMethods.has(method)) return 0;
+  return _callTimeoutMs;
 }
 
 /** Register a pending call — returns a Promise that resolves when resolveCall()

@@ -605,3 +605,43 @@ Deno.test("resolveSpecifier: an unknown bare specifier is still an error", () =>
   );
   assertEquals(r.kind, "error");
 });
+
+// The `type` lookahead has to be judged against the import it belongs to.
+// `[\s\S]*?` let one match span statement boundaries: the regex started at the
+// FIRST import in the file and ran to a later `from "node:…"`, so the
+// `(?!type[\s{])` check read the wrong statement and a correctly written
+// `import type { Buffer } from "node:buffer"` was reported as a BLOCKING
+// server-only import. A blocking graph error makes the dev server serve the
+// diagnostic page instead of the app and suppresses hot reload — and the fix
+// text told the author to do the thing they had already done.
+Deno.test("checkPlatformSafety: a type-only node: import stays clean below other imports", () => {
+  const code = `import { render } from "./render.ts";
+import { helper } from "./helper.ts";
+import type { Buffer } from "node:buffer";
+
+export const x = 1;`;
+  assertEquals(
+    checkPlatformSafety(code, "./ui.tsx"),
+    [],
+    "position in the file cannot decide whether an import is type-only",
+  );
+});
+
+Deno.test("checkPlatformSafety: a REAL node: import below others is still caught", () => {
+  const code = `import { render } from "./render.ts";
+import type { Buffer } from "node:buffer";
+import { readFile } from "node:fs/promises";`;
+  const errors = checkPlatformSafety(code, "./ui.tsx");
+  assertEquals(errors.length, 1, "one finding — the value import");
+  assertEquals(errors[0]!.category, "server-only-import");
+  assertStringIncludes(errors[0]!.message, "node:fs/promises");
+});
+
+Deno.test("checkPlatformSafety: the reported line is the offending import's own", () => {
+  const code = `import { a } from "./a.ts";
+import { b } from "./b.ts";
+import { join } from "@std/path";`;
+  const errors = checkPlatformSafety(code, "./p.ts");
+  assertEquals(errors.length, 1);
+  assertEquals(errors[0]!.line, 3, "a finding that points elsewhere is noise");
+});

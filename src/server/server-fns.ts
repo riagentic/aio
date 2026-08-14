@@ -24,7 +24,9 @@ import { log } from "../diagnostics/logger.ts";
 // deno-lint-ignore no-explicit-any
 type FnMap = Record<string, (...args: any[]) => any>;
 
-/** @deprecated alpha52 — unified as {@linkcode Access} (one network-access
+/** Who may call a serverFn over the network — the legacy spelling of
+ *  {@linkcode Access}.
+ *  @deprecated alpha52 — unified as {@linkcode Access} (one network-access
  *  vocabulary for cells and serverFns: true / role-string / predicate).
  *  Alias through beta. Direct server-side calls (via serverFn()/the returned
  *  map) never pass through this gate — the server trusts its own code. */

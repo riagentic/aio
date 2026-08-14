@@ -209,3 +209,79 @@ Deno.test("hydrate: Suspense adopts its server fallback and resolves onto it", a
     cleanup();
   }
 });
+
+// A lazy component is rarely the DIRECT child of its boundary in real code —
+// it sits inside a layout, a route wrapper, a memo. The boundary used to
+// identify "which lazy stopped me" by scanning its own immediate children, so
+// one level of nesting meant NO listener was registered: the loader resolved,
+// nothing re-rendered, and the fallback stayed on screen forever. The thrower
+// now records itself, so depth cannot matter.
+Deno.test("lazy: resolves when it is nested inside a wrapper, not a direct Suspense child", async () => {
+  const { doc, cleanup } = env();
+  try {
+    let resolveIt = () => {};
+    const Lazy = lazy(() =>
+      new Promise<{ default: ComponentFn }>((res) => {
+        resolveIt = () => res({ default: () => h("b", null, "loaded") });
+      })
+    );
+    const Wrapper = () => h(Lazy, null);
+    const App = () =>
+      h(
+        "div",
+        null,
+        h(Suspense, { fallback: h("p", null, "loading") }, h(Wrapper, null)),
+      );
+
+    const host = doc.createElement("main");
+    doc.body.appendChild(host);
+    const handle = mount(host, App);
+    assertEquals(host.innerHTML, "<div><p>loading</p></div>", "fallback first");
+
+    resolveIt();
+    await new Promise((r) => setTimeout(r, 10));
+    assertEquals(
+      host.innerHTML,
+      "<div><b>loaded</b></div>",
+      "the nested lazy must wake its boundary — depth is not a contract",
+    );
+    _unmount(handle);
+    host.remove();
+  } finally {
+    cleanup();
+  }
+});
+
+// `afterSubtree` pops the module-global instance stack. In hydrate it sat
+// after the recursive call with no `finally`, so any throw from the subtree
+// leaked an entry — and the stale ancestor then won `useContext` lookups for
+// unrelated components later on the page.
+Deno.test("hydrate: a throwing subtree does not leak the component instance stack", async () => {
+  const { doc, cleanup } = env();
+  try {
+    const Lazy = lazy(() => new Promise<{ default: ComponentFn }>(() => {}) // never resolves
+    );
+    const Wrapper = () => h(Lazy, null);
+    const App = () =>
+      h(
+        "div",
+        null,
+        h(Suspense, { fallback: h("p", null, "loading") }, h(Wrapper, null)),
+      );
+    const html = renderToString(h(App, null));
+    const host = doc.createElement("main");
+    host.innerHTML = html;
+    doc.body.appendChild(host);
+    const handle = hydrate(host, App);
+    const { _instanceStack } = await import("../src/air/renderer-state.ts");
+    _unmount(handle);
+    assertEquals(
+      _instanceStack.length,
+      0,
+      "every pushed instance must be popped, throw or not",
+    );
+    host.remove();
+  } finally {
+    cleanup();
+  }
+});

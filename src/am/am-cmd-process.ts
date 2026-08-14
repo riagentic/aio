@@ -6,6 +6,11 @@
 import { dirname, join } from "@std/path";
 import { appDirs } from "../server/app-dirs.ts";
 import {
+  DEFAULT_BACKUP_KEEP,
+  rotateFile,
+  wipeFile,
+} from "../diagnostics/logger-rotate.ts";
+import {
   maxHeapFlagArgs,
   physicalMemoryBytes,
   resolveMaxHeapMB,
@@ -86,6 +91,31 @@ function stdoutLogPath(appId: string): string {
     Deno.mkdirSync(dirname(path), { recursive: true });
   } catch { /* exists, or unwritable — the redirect will report it */ }
   return path;
+}
+
+/** Apply the log-retention policy to `stdout.log` BEFORE the spawn.
+ *
+ *  It is the one log the app's own logger must not touch: the shell redirect
+ *  holds its fd, so a rename from inside the app would carry the writer into
+ *  the archive and an unlink would send the whole run's output to a file with
+ *  no name. `am` is the only process that can rotate it — here, while nothing
+ *  is writing to it — and it does so under the SAME policy the logger uses
+ *  (`backupLogs` on by default, `--no-backup-logs` to wipe), because a log
+ *  directory where five files keep history and one silently doesn't is the
+ *  version of this that already shipped. Byte-budget eviction still belongs to
+ *  the app: `stdout.log.<n>` archives have no open fd, so `enforceBudget`
+ *  reaches them like any other. */
+export async function prepareStdoutLog(
+  logFile: string,
+  flags: string[],
+): Promise<void> {
+  const backup = !flags.includes("--no-backup-logs");
+  // `.err` is the Windows stderr split (detachedSpawnSpec); absent elsewhere,
+  // where rotateFile/wipeFile are no-ops.
+  for (const base of [logFile, `${logFile}.err`]) {
+    if (backup) await rotateFile(base, DEFAULT_BACKUP_KEEP);
+    else await wipeFile(base);
+  }
 }
 const KILL_GRACE_MS = 2000;
 const KILL_POLL_MS = 100;
@@ -191,6 +221,14 @@ export async function ensureSingleton(
     await r.body?.cancel();
     responds = r.ok;
   } catch { /* not responding */ }
+  // The same fallback `am status` carries (see its comment): a prod+UDS app
+  // listens on its Unix socket and NOWHERE else, so the TCP probe above can
+  // never succeed for it. Without this, single-instance protection was
+  // INVERTED for that transport — `am start` never refused, it killed the
+  // healthy running instance every time, while `am status` reported it up.
+  if (!responds && pf.socketPath) {
+    responds = await isSocketAlive(pf.socketPath);
+  }
 
   if (responds) {
     outError(`already running (pid ${pf.pid}, port ${pf.port})`, mode);
@@ -451,6 +489,7 @@ export async function cmdStart(
   // HOW is per-OS (sh/nohup does not exist on Windows — am start used to fail
   // there outright); detachedSpawnSpec builds the right command for each.
   const logFile = stdoutLogPath(appId);
+  await prepareStdoutLog(logFile, passthrough);
   const spec = detachedSpawnSpec(Deno.build.os, denoArgs, logFile);
   const proc = new Deno.Command(spec.cmd, {
     args: spec.args,

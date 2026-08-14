@@ -211,8 +211,20 @@ export function setupDispatch<S, A, E, App = any>(
     return runWithUser(user, () => reduce(s, a));
   };
 
-  const hookedExecute = onEffect
-    ? (app: App, e: E) => {
+  // Effects triggered by a user's action execute AS that user — always, not
+  // only when the app happens to configure an unrelated `onEffect` hook.
+  //
+  // The identity wrap used to live inside the `onEffect ? … : …` ternary, so
+  // with no hook (the default) effects ran outside the ALS scope. An async
+  // cell method's body IS an effect (`cell:__exec`), which made
+  // `serverUser()` `undefined` inside every async method in production —
+  // while adding a no-op `onEffect: () => {}` made the same method see
+  // "alice". `auth-context.ts` and the API reference both advertise
+  // serverUser() as usable in effects, and the test harness wraps whole
+  // `t.as()` bodies itself, so the harness was more permissive than prod:
+  // a green test over a broken path.
+  const hookedExecute = (app: App, e: E) => {
+    if (onEffect) {
       try {
         // (effect, state, user) — positional parity with onAction.
         onEffect(e, getState(), _currentActionUser);
@@ -226,10 +238,9 @@ export function setupDispatch<S, A, E, App = any>(
         });
         reportAioError(aioErr, reportOpts);
       }
-      // Effects triggered by a user's action execute as that user.
-      runWithUser(_currentActionUser, () => deps.execute(app, e));
     }
-    : deps.execute;
+    return runWithUser(_currentActionUser, () => deps.execute(app, e));
+  };
 
   // Immer patch accumulator — collects patches across all reduce calls in a batch
   let _pendingPatches: PatchEntry[] = [];

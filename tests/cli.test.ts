@@ -246,13 +246,34 @@ Deno.test("electronMainScript: Menu.setApplicationMenu(null) present", () => {
   assertEquals(script.includes("Menu.setApplicationMenu(null)"), true);
 });
 
-Deno.test("electronMainScript: certificate-error handler accepts localhost self-signed certs", () => {
+Deno.test("electronMainScript: a cert error is judged by the URL that FAILED, not the app's own", () => {
   const script = electronMainScript("https://localhost:8000");
   assertEquals(script.includes("certificate-error"), true);
-  assertEquals(script.includes("localhost"), true);
-  assertEquals(script.includes("127.0.0.1"), true);
-  // Remote hosts must NOT be auto-trusted
+  // The handler must READ the failing URL (Electron's 3rd argument) and
+  // compare it to this app's origin. It used to re-parse the app's own URL and
+  // ask whether THAT was localhost — a constant `true` for every local launch,
+  // so any bad certificate from any host (an intercepting proxy answering the
+  // page's fetch to a third-party API) was silently trusted.
+  assertEquals(
+    script.includes("(event, _wc, failedUrl, _err, _cert, cb)"),
+    true,
+    "the failing URL must be bound, not ignored",
+  );
+  assertEquals(script.includes("new URL(failedUrl).origin"), true);
+  assertEquals(
+    /new URL\(failedUrl\)\.origin === new URL\("https:\/\/localhost:8000"\)\.origin/
+      .test(script),
+    true,
+    "trust is same-origin with the app, nothing wider",
+  );
+  // Anything else is refused.
   assertEquals(script.includes("cb(false)"), true);
+  // And the old constant-true shape must not come back.
+  assertEquals(
+    script.includes("u.hostname === 'localhost'"),
+    false,
+    "judging the app's own hostname says nothing about the failing request",
+  );
 });
 
 // ── electronClientScript: edge cases ──────────────────────────────

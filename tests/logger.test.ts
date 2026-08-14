@@ -21,6 +21,7 @@ function mkLogger(
     console?: boolean;
     suppressTypes?: string[];
     backupLogs?: boolean;
+    logBudget?: number;
     level?: "trace" | "debug" | "info" | "warn" | "error";
   },
 ): AioLogger {
@@ -175,11 +176,13 @@ Deno.test("logger: perf violations go to perf.log and debug.log — no dedup", a
   assertEquals(debugLines.length, 3);
 });
 
-Deno.test("logger: default wipes logs on start", async () => {
+// The default is now to KEEP history (tests/log-retention.test.ts pins that);
+// this one pins the opt-out — `backupLogs: false` leaves no archive behind.
+Deno.test("logger: backupLogs:false wipes logs on start", async () => {
   const dir = tmpDir();
   await Deno.mkdir(dir, { recursive: true });
   await Deno.writeTextFile(`${dir}/app.log`, "old content\n");
-  const l = mkLogger({ dir });
+  const l = mkLogger({ dir, backupLogs: false });
   await l.init();
   // Old log should be gone, not rotated
   try {
@@ -353,7 +356,7 @@ Deno.test("logger: client.log is wiped on start like every other log", async () 
   await Deno.writeTextFile(`${dir}/client.log`, "stale line from a past run\n");
   await Deno.writeTextFile(`${dir}/app.log`, "stale\n");
 
-  const l = mkLogger({ dir }); // backupLogs defaults to false ⇒ wipe
+  const l = mkLogger({ dir, backupLogs: false }); // opt out ⇒ wipe
   await l.init();
 
   for (const name of ["client.log", "app.log"]) {

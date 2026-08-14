@@ -91,6 +91,9 @@ export const REPORT_LIMITS = {
   stateBytes: 256 * 1024,
 } as const;
 
+/** Everything a report is built FROM: the app's data dir, its identity and
+ *  version, the diagnostics to attach, and the redactor applied before any of
+ *  it is written or sent. */
 export type ReportSources = {
   appId: string;
   appVersion: string;

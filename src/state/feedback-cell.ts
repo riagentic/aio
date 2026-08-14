@@ -26,6 +26,7 @@ export type SubmittedReport = {
   delivered: boolean;
 };
 
+/** Where a report is in its life: idle, being captured, written, or failed. */
 export type FeedbackStatus = "idle" | "capturing" | "saved" | "error";
 
 /** The platform half, installed by the server when `feedback` is configured. */
@@ -47,6 +48,8 @@ export function installFeedbackRuntime(r: FeedbackRuntime | null): void {
   runtime = r;
 }
 
+/** The `feedback` cell's state — whether reporting is enabled, the last
+ *  report's status, and the reports captured this session. */
 export type FeedbackState = {
   /** False when the app did not configure `feedback`. */
   enabled: boolean;

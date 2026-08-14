@@ -66,6 +66,8 @@ function suggestBudget(duration: number): number {
   return Math.max(10, Math.ceil((duration * 2) / 10) * 10);
 }
 
+/** Per-dispatch time budgets (ms). Exceeding one is reported, never enforced:
+ *  a slow reducer is a diagnosis, not a reason to drop the user's action. */
 export type PerfBudget = {
   reduce?: number; // default: 100 — "feels instant" threshold
   effect?: number; // default: 5 — sync portion only, async by definition doesn't block

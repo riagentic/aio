@@ -122,6 +122,9 @@ function _readyDeadline<S>(
   };
 }
 
+/** Connect a CLI process to a running aio app as a real client: live state,
+ *  method calls, and reconnect with the offline queue — the terminal twin of a
+ *  browser client. */
 export function connectCli<S>(
   url: string,
   opts?: {

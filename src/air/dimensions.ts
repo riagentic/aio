@@ -12,10 +12,15 @@ export interface DimensionsState {
   height: Signal<number>;
 }
 
+let warnedNoRO = false;
+
 /**
  * Track an element's dimensions reactively via ResizeObserver.
  * Must be called inside a component function body during render.
  */
+// The `let` above used to sit BETWEEN this block and the function, so the
+// doc documented the flag: `useDimensions` was public and undocumented, and
+// the coverage gate said so the moment it was asked.
 export function useDimensions(): DimensionsState {
   const elRef = useRef<HTMLElement | null>(null);
   const width = useRef<Signal<number> | null>(null);
@@ -37,21 +42,46 @@ export function useDimensions(): DimensionsState {
   const observed = useRef<HTMLElement | null>(null);
   const obs = useRef<ResizeObserver | null>(null);
 
+  // A computed length that is missing or unparseable is ZERO, never NaN. An
+  // environment that reports padding as "" (happy-dom, jsdom, a detached
+  // element) turned `clientWidth - parseFloat("")` into NaN, and NaN then
+  // propagates through every layout comparison as `false` — a width that is
+  // neither < 600 nor >= 600.
+  const px = (v: string | undefined): number => {
+    const n = parseFloat(v ?? "");
+    return Number.isFinite(n) ? n : 0;
+  };
+
   const measure = (el: HTMLElement) => {
     // contentRect-equivalent, for consistency with ResizeObserver
     const cs = el.ownerDocument?.defaultView?.getComputedStyle(el);
-    const pl = parseFloat(cs?.paddingLeft ?? "0");
-    const pr = parseFloat(cs?.paddingRight ?? "0");
-    const pt = parseFloat(cs?.paddingTop ?? "0");
-    const pb = parseFloat(cs?.paddingBottom ?? "0");
-    w.set(el.clientWidth - pl - pr);
-    h.set(el.clientHeight - pt - pb);
+    const box = el.clientWidth - px(cs?.paddingLeft) - px(cs?.paddingRight);
+    const high = el.clientHeight - px(cs?.paddingTop) - px(cs?.paddingBottom);
+    w.set(Number.isFinite(box) ? box : 0);
+    h.set(Number.isFinite(high) ? high : 0);
   };
 
   const sync = () => {
     const el = elRef.current;
     if (el === observed.current) return; // same element — nothing to do
-    if (typeof ResizeObserver === "undefined") return;
+    if (typeof ResizeObserver === "undefined") {
+      // No observer: take the one-shot measurement anyway and SAY that live
+      // updates are off. Returning here left width/height at their initial 0
+      // for the component's whole life, so a layout branching on
+      // `width.value < 600` silently took the narrow path forever, with
+      // nothing logged — including in the test harness, which is the shape
+      // that manufactures a green test over a broken page.
+      observed.current = el;
+      if (el) measure(el);
+      if (!warnedNoRO) {
+        warnedNoRO = true;
+        console.warn(
+          "[aio:useDimensions] ResizeObserver is unavailable — measured once " +
+            "at mount; width/height will NOT track later resizes.",
+        );
+      }
+      return;
+    }
     if (obs.current && observed.current) {
       obs.current.unobserve(observed.current);
     }

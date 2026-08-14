@@ -2,6 +2,7 @@
 
 import { enablePatches } from "immer";
 import { registerCancelOn } from "./method-cancel.ts";
+import { _registerLongMethods, longMethodKeys } from "./cell-impl.ts";
 import { log } from "../diagnostics/logger.ts";
 import type { AioError } from "../diagnostics/error.ts";
 import type { CellEntry, Msg } from "./cell-types.ts";
@@ -117,6 +118,15 @@ export function composeCells(
       }
     }
   }
+
+  // ── `long` methods: lift the caller-side ceiling, from the DEF ──
+  // Here rather than at boot, because compose is the one path every runtime
+  // shares — the app, `bootCells`, `testUI` and `testCell`. A `long` that only
+  // worked in a booted app would leave every test of the app's main feature
+  // polling instead of awaiting, which is the workaround it exists to delete.
+  // The EFFECT-side deadline is lifted at boot (`mergeLongIntoPerfBudget`);
+  // testCell has no effect tracker, so this is the whole story there.
+  _registerLongMethods(longMethodKeys(cells));
 
   // ── Root reducer ──
   const _innerReduce = buildRootReducer(cells, reduceCtx, perfTracker);

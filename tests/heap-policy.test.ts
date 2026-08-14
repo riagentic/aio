@@ -64,6 +64,34 @@ Deno.test("heap: asking for more than the share is REPORTED, not refused", () =>
   );
 });
 
+// A field report: "Nothing can launch this app without a heap warning" — both
+// launch paths warned, in opposite directions, and no app setting could silence
+// either. Two causes, both here.
+Deno.test("heap: the FLOOR is never reported as a share someone asked for", () => {
+  // Under ~16 GB of RAM the 4 GB floor IS more than 25% — but nobody chose it,
+  // so calling it "above the share an app gets automatically" is a warning
+  // about the framework's own minimum, unactionable from the app.
+  assertEquals(overAdvisedShare(HEAP_FLOOR_MB, 8 * GB), null, "8 GB laptop");
+  assertEquals(overAdvisedShare(HEAP_FLOOR_MB, 4 * GB), null, "4 GB machine");
+  // Above the floor, on a machine where that really is a large share, still speaks.
+  const over = overAdvisedShare(6144, 8 * GB);
+  assertEquals(over !== null && over > 0.7, true, "a real over-ask is said");
+});
+
+Deno.test("heap: rounding at the advised share is not a warning", () => {
+  // `am start` sizes the ceiling TO the advised share; V8 then reports slightly
+  // more than it was handed (46.6 GB → 46.7 GB), which used to trip this branch
+  // — the app warned about the very ceiling the framework had just chosen. The
+  // under-policy branch has had a 10% band for this exact reason since it was
+  // written; this one had none.
+  const total = 186 * GB;
+  const want = Math.floor((total * 0.25) / (1024 * 1024));
+  assertEquals(overAdvisedShare(want, total), null, "exactly the share");
+  assertEquals(overAdvisedShare(want + 120, total), null, "V8's rounding");
+  const real = overAdvisedShare(Math.floor(want * 1.5), total);
+  assertEquals(real !== null, true, "a deliberate 37% ask still speaks");
+});
+
 Deno.test("heap: an unmeasurable machine is left alone", () => {
   // Guessing a ceiling from no information is how a working app starts
   // swapping. No number → no flag → V8 keeps its default.

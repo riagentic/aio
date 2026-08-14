@@ -103,6 +103,40 @@ export type StartedFeedback = ResolvedFeedback & { stop: () => void };
  *  with it — so the cap is low, and hitting it is said out loud once. */
 const MAX_AUTO_PER_SESSION = 10;
 
+/** How many distinct error keys the auto-capture dedup remembers. */
+export const _SEEN_LIMIT = 4096;
+
+/** A bounded insertion-ordered key memory: remembers the last `limit` keys and
+ *  forgets the oldest beyond that.
+ *
+ *  A plain `Set` here grew for the life of the process. Error messages
+ *  routinely embed a varying id ("request 4f3a failed", a path, a timestamp),
+ *  so nearly every one was a fresh key — and the per-session capture cap
+ *  bounds REPORTS, never this. Long-running servers are exactly the ones that
+ *  produce a long tail of unique errors.
+ *  @internal */
+export function _createSeenKeys(limit: number = _SEEN_LIMIT): {
+  has: (k: string) => boolean;
+  add: (k: string) => void;
+  size: () => number;
+} {
+  const keys = new Set<string>();
+  return {
+    has: (k) => keys.has(k),
+    add: (k) => {
+      if (keys.has(k)) return;
+      // Set iteration is insertion-ordered, so the first value IS the oldest.
+      while (keys.size >= limit) {
+        const oldest = keys.values().next().value;
+        if (oldest === undefined) break;
+        keys.delete(oldest);
+      }
+      keys.add(k);
+    },
+    size: () => keys.size,
+  };
+}
+
 // Synchronous, and says so. It was `async` while it reached for a dynamic
 // import; that import became static (an app top-level-awaiting `aio.run()`
 // could not finish module evaluation otherwise) and the `async` stayed behind,
@@ -174,7 +208,7 @@ export function startFeedback(deps: StartFeedbackDeps): StartedFeedback {
   // report, not one per occurrence.
   let autoCount = 0;
   let warnedCap = false;
-  const seen = new Set<string>();
+  const seen = _createSeenKeys();
   let unsubscribe: (() => void) | null = null;
 
   if (cfg.auto) {
@@ -182,7 +216,7 @@ export function startFeedback(deps: StartFeedbackDeps): StartedFeedback {
       if (String(event.severity) !== "error") return;
       const key = `${event.type}:${String(event.message).slice(0, 200)}`;
       if (seen.has(key)) return;
-      seen.add(key);
+      seen.add(key); // bounded — see _createSeenKeys
       if (autoCount >= MAX_AUTO_PER_SESSION) {
         if (!warnedCap) {
           warnedCap = true;

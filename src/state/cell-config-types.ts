@@ -85,6 +85,32 @@ export type MethodsCellConfig<
     string,
     "self" | (string | { type: string })[]
   >;
+  /** Async methods that may run as long as they need — no call ceiling, no
+   *  effect deadline.
+   *
+   *  The default ceiling (`effectTimeoutMs`, 30s) exists so a method that
+   *  silently never settles cannot hang a caller forever. But "this one takes
+   *  hours" is a property OF THE METHOD, and it used to be declared in another
+   *  file, keyed by a string (`perfBudget.methods["job:colorize"].timeout`)
+   *  that no rename follows and no type checks — a field report added six such
+   *  entries one runtime failure at a time.
+   *
+   *  ```ts
+   *  cell("job", {
+   *    state: { pct: 0 },
+   *    long: ["colorize", "refreshScratch"],   // ← checked against methods
+   *    methods: {
+   *      async colorize(s) { ... },            // hours; still cancellable
+   *    },
+   *  })
+   *  ```
+   *
+   *  It applies everywhere the cell runs — app, `bootCells`, `testUI` and
+   *  `testCell` — so a test can simply `await job.colorize()` instead of
+   *  starting it and polling. Cancellation is untouched: `long` removes a
+   *  deadline, `cancelOn` + `s.$signal` are still how a method is stopped.
+   *  An explicit `perfBudget.methods[...]` entry still wins. */
+  long?: (keyof M & string)[];
   /** Selectors — derived values, auto-scoped to cell state.
    *  Plain form: `(s) => R` receives the cell's own slice.
    *  Deps form: `{ deps: readonly string[]; fn: (s, ...depSlices) => R }` — deps are

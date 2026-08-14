@@ -97,3 +97,19 @@ Deno.test("trojan dispatch: a bare config action (no separator) still passes thr
   assertEquals(r.body.ok, true);
   assertEquals(dispatched[0]!.type, "Increment");
 });
+
+// A client INDEX where the action goes — the mistake `am`'s own vocabulary
+// invites, because `am trigger 0 …` and `am surface 0` DO take one. It used to
+// dispatch `{type:"0"}` into the void and answer {"ok":true}: a predictable
+// user error reported as success, which is the one outcome this project treats
+// as disqualifying.
+Deno.test("trojan dispatch: a client index as the type is refused, not acked", async () => {
+  const { deps, dispatched } = makeDeps();
+  const r = await dispatch(deps, { type: "0", payload: {} });
+  assertEquals(r.status, 404);
+  assertEquals(r.body.ok, undefined, "must never report success");
+  const msg = String(r.body.error);
+  assert(msg.includes("client index"), msg); // names the actual confusion
+  assert(msg.includes("nav:setStatusBarMessage"), msg); // and what to type
+  assertEquals(dispatched.length, 0, "nothing may be dispatched");
+});

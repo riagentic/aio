@@ -8,7 +8,7 @@
   One codebase → browser, Electron, and Android.
 </p>
 
-<p align="center"><code>v1.0.0-alpha57</code> · <a href="LICENSE">MIT</a></p>
+<p align="center"><code>v1.0.0-alpha58</code> · <a href="LICENSE">MIT</a></p>
 
 ## Get started — four lines
 
@@ -22,7 +22,7 @@ am create my-app
 # 3 — run it in the browser
 cd my-app && deno task dev
 
-# 4 — build a release binary (· deno task electron · deno task android)
+# 4 — build a release binary
 deno task compile
 ```
 
@@ -36,17 +36,20 @@ curl -fsSL https://raw.githubusercontent.com/riagentic/aio/main/run.sh | sh -s o
 
 See [run from source](docs/build/run-from-source.md).
 
-Every target has an explicit dev and compile task:
+Two tasks, and the target is a flag — not a task per target:
 
 ```sh
-deno task dev:browser        # dev build running in the browser
-deno task dev:electron       # dev build in an Electron desktop window
-deno task dev:android        # dev build in an Android emulator
+deno task dev                      # dev, in the app's default shell
+deno task dev --client=electron    # …in an Electron desktop window
+deno task dev --expose             # …reachable on the LAN
 
-deno task compile:browser    # release binary serving the browser app
-deno task compile:electron   # release desktop (Electron) build
-deno task compile:android    # release Android APK
+deno task compile                  # release binary for the default target
+deno task build --targets=electron # release desktop (Electron) build
+deno task build --targets=android  # release Android APK
+deno task build                    # every target in deno.json `build.targets`
 ```
+
+(`deno task build --list` prints the target names.)
 
 That's it. A working counter (or todo) app, runnable and buildable to a native
 binary, desktop (Electron), or Android APK. (Windows:

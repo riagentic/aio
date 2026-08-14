@@ -616,6 +616,52 @@ Deno.test("conformance: keyed fragments — 25 random shuffles keep multi-node g
   win.happyDOM.close();
 });
 
+// `<Portal target={cond ? el : null}>` — the target itself going away, which
+// is what a portal into a ref'd element does on the render before that element
+// exists (and again when it is torn down). The diff returned early on a null
+// target: nothing was removed, no `_dom` was carried over, and nothing was
+// said, so the portal's content stayed mounted in the OLD target forever.
+// Worse, when the target came back the vnode↔DOM link was broken and the
+// reconciler's own corruption tripwire fired ("has no DOM node to diff
+// against… this is an aio bug") at the user.
+Deno.test("conformance: Portal — a target that becomes null tears its content down", async () => {
+  const { win, doc } = harness();
+  const target = (doc as any).createElement("div");
+  (doc as any).body.appendChild(target);
+  const on = signal(true);
+  const App = () =>
+    h(
+      "div",
+      { id: "r" },
+      h("span", null, "main"),
+      h(
+        Portal,
+        { target: on.value ? target : null },
+        h("p", { key: "a" }, "inside"),
+      ),
+    );
+  const t = testComponent(App, { document: doc });
+  assertEquals(target.textContent, "inside");
+
+  on.set(false);
+  await tick();
+  assertEquals(
+    target.textContent,
+    "",
+    "no target means no content — it cannot stay behind in the old one",
+  );
+
+  // …and the node is still diffable: coming back must not trip the
+  // reconciler's corruption guard.
+  on.set(true);
+  await tick();
+  assertEquals(target.textContent, "inside", "the portal recovers its target");
+
+  t.unmount();
+  assertEquals(target.querySelectorAll("p").length, 0);
+  win.happyDOM.close();
+});
+
 Deno.test("conformance: Portal — keyed children reconcile in the target, cleanup empties it", async () => {
   const { win, doc } = harness();
   const target = (doc as any).createElement("div");

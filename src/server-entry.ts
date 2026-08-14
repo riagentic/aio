@@ -34,6 +34,29 @@ export { type AppDirs, appDirs, type AppMeta } from "./server/app-dirs.ts";
 // the launcher is missing or refuses the target.
 export { openExternal } from "./server/open-external.ts";
 
+// The other direction: "let the user CHOOSE a path". The most-requested
+// missing API in the field reports (three apps wrote the same zenity wrapper,
+// two of them shipped the same bug — a missing dialog binary reported as a
+// user cancelling). Cancel is `null`; a dialog that is missing, headless or
+// broken THROWS, naming the fix.
+export {
+  pickDirectory,
+  pickFile,
+  type PickFilter,
+  type PickOptions,
+} from "./server/pick-path.ts";
+
+// A child process an app can stream, pause, resume and CANCEL — with the whole
+// tree. Two field reports wrote this by hand; one of them shipped a
+// kill-the-tree that had never worked (procps `kill -STOP -<pid>` exits 0 and
+// signals nothing) and orphaned GPU workers until reboot.
+export {
+  spawn,
+  type SpawnHandle,
+  type SpawnOptions,
+  type SpawnStatus,
+} from "./server/spawn.ts";
+
 // The binary-tier primitive (tier ③, docs/persistence/big-data.md):
 // content-addressed blobs under `appDirs(appId).files/blobs/`. `aio.run()`
 // exposes the same store as `app.blobs`; this is the headless door (a CLI,

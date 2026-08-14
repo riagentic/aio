@@ -213,11 +213,26 @@ async function pushNote(): Promise<void> {
       (await sh("git", ["rev-parse", "--abbrev-ref", "HEAD"], REPO)).out.trim();
     const dirty =
       (await sh("git", ["status", "--porcelain"], REPO)).out.trim().length > 0;
-    const ahead =
-      (await sh("git", ["rev-list", "--count", `origin/${branch}..HEAD`], REPO))
-        .out.trim();
+    // The EXIT CODE matters as much as the output. `git rev-list
+    // origin/<branch>..HEAD` exits 128 with empty stdout when the branch does
+    // not exist on origin — and an empty string then read as "0 commits
+    // ahead", so preflight printed its green "`curl | sh` clones exactly this"
+    // for a branch `curl | sh` cannot clone at all. That false green is the
+    // exact trap this check exists to prevent. Same for a detached HEAD.
+    const revList = await sh(
+      "git",
+      ["rev-list", "--count", `origin/${branch}..HEAD`],
+      REPO,
+    );
+    const ahead = revList.out.trim();
     const pending: string[] = [];
-    if (ahead && ahead !== "0") pending.push(`${ahead} unpushed commit(s)`);
+    if (revList.code !== 0 || !/^\d+$/.test(ahead)) {
+      pending.push(
+        branch === "HEAD"
+          ? "detached HEAD (no branch to clone)"
+          : `no origin/${branch} — this branch has never been pushed`,
+      );
+    } else if (ahead !== "0") pending.push(`${ahead} unpushed commit(s)`);
     if (dirty) pending.push("uncommitted changes");
     if (pending.length) {
       console.log(c.red(c.b(`  ⚠ ${pending.join(" + ")}`)));

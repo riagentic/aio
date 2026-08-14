@@ -43,9 +43,21 @@ export interface DevToolsHandle {
 let _connected = false;
 // deno-lint-ignore no-explicit-any
 let _reduxDevTools: any = null;
-const _treeSig: Signal<ComponentTreeNode[]> = signal<ComponentTreeNode[]>([]);
-const _rendersSig: Signal<RenderEvent[]> = signal<RenderEvent[]>([]);
-const _totalRendersSig: Signal<number> = signal<number>(0);
+/** Reserved name prefix — lets `_recordRender` recognize a render that was
+ *  triggered by devtools' own signals (see the self-observation note there). */
+const DEVTOOLS_SIG_PREFIX = "__aioDevtools:";
+const _treeSig: Signal<ComponentTreeNode[]> = signal<ComponentTreeNode[]>(
+  [],
+  `${DEVTOOLS_SIG_PREFIX}tree`,
+);
+const _rendersSig: Signal<RenderEvent[]> = signal<RenderEvent[]>(
+  [],
+  `${DEVTOOLS_SIG_PREFIX}renders`,
+);
+const _totalRendersSig: Signal<number> = signal<number>(
+  0,
+  `${DEVTOOLS_SIG_PREFIX}totalRenders`,
+);
 const MAX_RENDER_EVENTS = 200;
 
 // ── Redux DevTools bridge ───────────────────────────────────────────
@@ -55,11 +67,18 @@ function _tryConnectReduxDevTools(): boolean {
   // deno-lint-ignore no-explicit-any
   const g = globalThis as any;
   if (g.__REDUX_DEVTOOLS_EXTENSION__) {
-    _reduxDevTools = g.__REDUX_DEVTOOLS_EXTENSION__.connect({
-      name: "AIO Renderer",
-      features: { jump: false, skip: false },
-    });
-    return true;
+    try {
+      _reduxDevTools = g.__REDUX_DEVTOOLS_EXTENSION__.connect({
+        name: "AIO Renderer",
+        features: { jump: false, skip: false },
+      });
+      return true;
+    } catch {
+      // Extension port dead (reload/update mid-connect) — the local handle
+      // still works; a diagnostic must never take the app down with it.
+      _reduxDevTools = null;
+      return false;
+    }
   }
   return false;
 }
@@ -114,6 +133,19 @@ export function connectAioDevTools(): DevToolsHandle {
 export function _recordRender(event: RenderEvent): void {
   if (!_connected) return;
 
+  // A component that DISPLAYS devtools state (reads `renders`/`totalRenders`
+  // in its render) is re-rendered BY these signals — recording that render
+  // would set them again in the same flush, a self-feeding loop the renderer's
+  // 25× cycle breaker then kills while blaming the app component. A render
+  // whose triggers are ALL devtools' own signals is the observer observing
+  // itself: drop it.
+  if (
+    event.signalNames !== undefined &&
+    event.signalNames.every((n) => n.startsWith(DEVTOOLS_SIG_PREFIX))
+  ) {
+    return;
+  }
+
   _totalRendersSig.set(_totalRendersSig.peek() + 1);
 
   const renders = _rendersSig.peek();
@@ -123,10 +155,18 @@ export function _recordRender(event: RenderEvent): void {
 
   // Send to Redux DevTools
   if (_reduxDevTools) {
-    _reduxDevTools.send(
-      { type: `RENDER/${event.component}`, ...event },
-      { renders: next.length, totalRenders: _totalRendersSig.peek() },
-    );
+    try {
+      _reduxDevTools.send(
+        { type: `RENDER/${event.component}`, ...event },
+        { renders: next.length, totalRenders: _totalRendersSig.peek() },
+      );
+    } catch {
+      // The extension port died (reloaded/updated) — postMessage on it throws
+      // on EVERY render from here on, out of the render path, misattributed
+      // to the component being rendered. Drop the bridge; the local handle
+      // (renders/tree/totalRenders) keeps working.
+      _reduxDevTools = null;
+    }
   }
 }
 

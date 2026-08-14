@@ -1,10 +1,12 @@
 ## Core aio (hardness)
 
-- aio is using as simple approaches as possible to complete the mission
+- every public API has ONE way to do the common thing; a second spelling for the
+  same job exists only as a documented deprecated alias with a removal entry
 - protocols are optimal and reliable, no hidden errors, no "why this doesn't
   work" questions
-- straightforward approach everywhere so that child can reason about it (ho
-  magic with millions of reasons why something doesn't work)
+- nothing in the framework acts on a value the app did not write or the docs did
+  not name: no implicit magic key, no inferred behavior a reader of the app's
+  own source cannot predict
 - connection between client is server is always working or visibly obvisous when
   not with true reason why it's not working
 - no state leaks

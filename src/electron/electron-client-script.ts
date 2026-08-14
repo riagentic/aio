@@ -157,14 +157,19 @@ function saveRecent(entry) {
     let list = loadRecents().filter((r) => r.url !== entry.url);
     list.unshift(entry);
     list = list.slice(0, 8);
-    fs.writeFileSync(recentsPath(), JSON.stringify(list));
+    // 0600: each entry carries the paired app key (and a ?token= URL) — the
+    // same forever credential the server keeps owner-only. userData is 0755,
+    // so the directory does not protect it.
+    fs.writeFileSync(recentsPath(), JSON.stringify(list), { mode: 0o600 });
+    try { fs.chmodSync(recentsPath(), 0o600); } catch {}
     return list;
   } catch { return loadRecents(); }
 }
 function forgetRecent(url) {
   try {
     const list = loadRecents().filter((r) => r.url !== url);
-    fs.writeFileSync(recentsPath(), JSON.stringify(list));
+    fs.writeFileSync(recentsPath(), JSON.stringify(list), { mode: 0o600 });
+    try { fs.chmodSync(recentsPath(), 0o600); } catch {}
     return list;
   } catch { return loadRecents(); }
 }

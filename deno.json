@@ -1,6 +1,6 @@
 {
   "name": "@riagentic/aio",
-  "version": "1.0.0-alpha57",
+  "version": "1.0.0-alpha58",
   "appId": "aio",
   "exports": {
     ".": "./mod.ts",
@@ -113,6 +113,7 @@
     "docs:coverage": "deno run --allow-read --allow-run scripts/check-doc-coverage.ts",
     "api:check": "deno run --allow-read --allow-write --allow-run scripts/api-snapshot.ts --check",
     "boundaries": "deno run --allow-read scripts/check-boundaries.ts",
+    "release:check": "deno run -A scripts/release-check.ts",
     "check:graph": "deno run -A scripts/check-graph.ts",
     "preflight": "deno run -A scripts/preflight.ts",
     "bench": "deno run -A --v8-flags=--expose-gc scripts/bench.ts",

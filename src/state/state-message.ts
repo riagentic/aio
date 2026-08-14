@@ -45,10 +45,25 @@ export function handleMessage(data: any): HandleResult {
   if (!_initialStateReceived) {
     // Delta before first state — drop (reconnect race)
     if (data.$patches) return "dropped";
+    const firstEver = _accessedPaths.size === 0;
     _initialStateReceived = true;
     _applyFullState(data);
-    _accessedPaths.clear();
-    cancelSubsTimer();
+    // Clear ONLY on the true first state of the session.
+    //
+    // A reconnect re-enters this branch (`_resetInitialStateFlag()` runs on
+    // every transport swap) while the server still holds the subscription list
+    // from before the drop. Clearing here wiped the client's record of what it
+    // had subscribed to, so the next path a component tracked — a route
+    // change, a newly mounted component — collapsed to a subs frame containing
+    // ONLY that path. The server REPLACES its list, and from then on the cells
+    // dropped out of it were never pushed to this client again: silent,
+    // permanent, and self-sustaining, since a cell that gets no updates cannot
+    // re-render to re-track itself. This is AIO-170, which the second branch
+    // below already carries a warning about; the first branch never got it.
+    if (firstEver) {
+      _accessedPaths.clear();
+      cancelSubsTimer();
+    }
     if (_readyResolve) {
       if (_readyTimeout !== null) {
         clearTimeout(_readyTimeout);

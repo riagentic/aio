@@ -35,7 +35,7 @@ generous timeout), this is a behavior change. Effects that exceed
 - **Diagnostic bus & health overlay** — unified event channel for 18
   previously-silent failure points, visible via green/yellow/red dot overlay
 - **Flow cross-feature access** — `ctx.getFullState()` and `ctx.when(predicate)`
-  in generators. See [generators.md](../state/generators.md)
+  in generators (`docs/state/generators.md`, removed with generators themselves)
 - **Reduce phase breakdown** — `PerfMetric.breakdown` field with phase timing
 - **Graph validator** — validates feature dependency graph at startup
 - **`structuredClone` dispatch fix** — reports `EFFECT_ERROR` instead of

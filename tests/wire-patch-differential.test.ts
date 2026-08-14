@@ -250,13 +250,22 @@ function serverRound(
  *  full state identical to the one the client already holds is NOT re-sent, so
  *  "no frame at all" is a production outcome and the client has to be right
  *  after it too. Leaving that out of the model would have made every silent-skip
- *  round look like a delivered frame. */
+ *  round look like a delivered frame.
+ *
+ *  It also carries `stale`, and that flag is the whole point of modelling this
+ *  at all: the real memo is refreshed ONLY when a full state is serialized, so
+ *  after any patch round it describes an older state than the client actually
+ *  holds. This model used to stamp it on every patch frame — an always-fresh
+ *  memo — which is precisely the property that made a real dropped-round bug
+ *  (state returning to a value equal to the last full send, mid-patch-stream,
+ *  is silently not sent and the client freezes) invisible to 150 rounds of
+ *  fuzzing. Model what the code does, not what it should have done. */
 function encodeFrame(
   state: State,
   entries: { cell: string; ops: Patch[] }[],
   subs: Set<string> | null,
   threshold: number,
-  meta: { lastFullJson?: string },
+  meta: { lastFullJson?: string; stale?: boolean },
 ): { kind: "patches" | "state" | "none"; json: string; rawOps: Patch[] } {
   const fullJson = JSON.stringify(filterStateBySubs(state, subs));
   const clientEntries = filterPatchesBySubs(entries, subs);
@@ -265,8 +274,12 @@ function encodeFrame(
   ) as Patch[];
   const allOps = compactPatches(rawOps);
   const sendFull = (): { kind: "state" | "none"; json: string } => {
-    if (fullJson === meta.lastFullJson) return { kind: "none", json: fullJson };
+    // A STALE memo is not proof the client already holds this state.
+    if (!meta.stale && fullJson === meta.lastFullJson) {
+      return { kind: "none", json: fullJson };
+    }
     meta.lastFullJson = fullJson;
+    meta.stale = false;
     return { kind: "state", json: fullJson };
   };
   if (allOps.length === 0) return { ...sendFull(), rawOps };
@@ -274,7 +287,9 @@ function encodeFrame(
   if (patchJson.length > fullJson.length * threshold) {
     return { ...sendFull(), rawOps };
   }
-  meta.lastFullJson = fullJson;
+  // A patch moves the client on WITHOUT re-serializing the full state, which
+  // is exactly how the memo goes stale in production.
+  meta.stale = true;
   return { kind: "patches", json: patchJson, rawOps };
 }
 
@@ -366,7 +381,7 @@ function runProgram(
   let subs: Set<string> | null = null;
   // The server's per-client dedup memo (ClientMeta.lastFullJson). Every place
   // server-ws.ts sends a full state stamps it, so the model does too.
-  const meta: { lastFullJson?: string } = {};
+  const meta: { lastFullJson?: string; stale?: boolean } = {};
 
   // Connect: the client's first frame is always a full state.
   meta.lastFullJson = JSON.stringify(filterStateBySubs(state, subs));

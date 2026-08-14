@@ -55,4 +55,5 @@ const myFeature = feature("myFeature", {
 });
 ```
 
-See [generators.md](../state/generators.md) for the full guide.
+The full guide lived in `docs/state/generators.md`, removed when generators were
+retired from aio — this guide is kept for historical migrations only.

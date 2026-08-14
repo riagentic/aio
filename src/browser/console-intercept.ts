@@ -2,6 +2,7 @@
 // Original console methods still work. Fire-and-forget; drops silently on failure.
 
 import { enc } from "../protocol/envelope.ts";
+import { degraded } from "../diagnostics/degraded.ts";
 import type { ClientLogEntry } from "../air/dom-inspector-types.ts";
 
 export type SendFn = (msg: string) => void;
@@ -68,8 +69,13 @@ export function _forward(
       ts: Date.now(),
     };
     _send(enc("log", entry));
-  } catch {
-    // Drop silently — transport may be down.
+  } catch (e) {
+    // A single drop is expected — the transport reconnects and the next line
+    // gets through. What must not be silent is the PERMANENT case: this is the
+    // channel the browser reports its own errors on, so if it dies for good
+    // the page goes quiet in exactly the way that looks like "no errors".
+    // `degraded` distinguishes the two by repetition and escalates to health.
+    degraded("client:log-forward").fail(e);
   } finally {
     _forwarding = false;
   }

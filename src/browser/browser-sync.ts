@@ -15,7 +15,7 @@
  */
 import { randomUuid } from "../rand.ts";
 import { createSyncEngine, type SyncEngine } from "../sync/sync-engine.ts";
-import { createOpBuffer } from "../sync/op-buffer.ts";
+import { createOpBuffer, parseRetention } from "../sync/op-buffer.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { createLocalStorageOpStorage } from "../sync/browser-storage.ts";
 import type { SyncConfig } from "../sync/types.ts";
@@ -154,6 +154,22 @@ export function handleSyncMessage(t: string, d: unknown): void {
   }
 }
 
+/** The eviction TTL for one cell, from ITS OWN `sync: { offline: { retention } }`.
+ *
+ *  This wiring is the whole fix: the option was normalized, typed and
+ *  documented, and then read by NOBODY — every cell evicted at the shared 4h
+ *  default no matter what it asked for. `undefined` means "no opinion, use the
+ *  buffer's default"; an unreadable value throws (see parseRetention) rather
+ *  than silently becoming 4h.
+ *  @internal */
+export function _retentionMsOf(
+  cells: Map<string, CellDef>,
+  cell: string,
+): number | undefined {
+  const r = cells.get(cell)?.__aio.syncConfig?.offline?.retention;
+  return r === undefined ? undefined : parseRetention(r);
+}
+
 /** Boot the engine for every registered sync cell. Idempotent. */
 export function initBrowserSync(
   send: (raw: string) => void,
@@ -170,6 +186,18 @@ export function initBrowserSync(
       ),
   );
   if (cells.size === 0) return null;
+  // The per-browser identity lives at `__aio_sync:clientId` — inside the
+  // storage's per-cell document namespace. A sync cell with that name would
+  // silently corrupt the identity (its queue document overwrites the id, and
+  // the id read hands the engine a JSON blob as its HLC node id). Misconfig →
+  // throw at the site, dev and prod alike.
+  if (cells.has("clientId")) {
+    throw new Error(
+      `[aio:sync] a sync cell cannot be named "clientId" — its offline-queue ` +
+        `document would collide with the sync identity key in localStorage. ` +
+        `Rename the cell.`,
+    );
+  }
   _syncCells = cells;
 
   const cfgs: Record<string, SyncConfig> = {};
@@ -213,6 +241,12 @@ export function initBrowserSync(
     // evicted under backpressure) was invisible to the app AND to the console
     //. Report it: loudly, once per op, with the cell and action.
     buffer: createOpBuffer(createLocalStorageOpStorage(), {
+      // A cell's `sync: { offline: { retention } }` reaches the eviction rule
+      // HERE — it was normalized, typed and documented, and then read by
+      // nobody, so every cell evicted at the 4h default no matter what it
+      // asked for. Parsed per cell (the config is per cell), and a value the
+      // parser cannot read throws rather than silently becoming 4h.
+      staleAfterFor: (cell) => _retentionMsOf(cells, cell),
       onDrop: (op, reason) => {
         const what = `${op.cell}:${op.action}`;
         console.error(

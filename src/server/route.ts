@@ -207,9 +207,42 @@ export function route(
     const url = new URL(req.url);
     const pending: string[] = []; // queued Set-Cookie values
     const withCookies = (res: Response): Response => {
-      for (const c of pending) res.headers.append("Set-Cookie", c);
+      if (pending.length === 0) return res;
+      try {
+        for (const c of pending) res.headers.append("Set-Cookie", c);
+      } catch {
+        // `Response.redirect()` and `Response.error()` return a response whose
+        // headers are IMMUTABLE per the fetch spec, so appending threw — out
+        // of the handler, into a 500, with the session cookie lost. That is
+        // the textbook login shape (`setCookie(...); return
+        // Response.redirect("/dashboard")`), and this helper's own docstring
+        // promises setCookie always takes effect. Rebuild the response with
+        // mutable headers and carry everything across.
+        const headers = new Headers(res.headers);
+        for (const c of pending) headers.append("Set-Cookie", c);
+        pending.length = 0;
+        return new Response(res.body, {
+          status: res.status === 0 ? 302 : res.status,
+          statusText: res.statusText,
+          headers,
+        });
+      }
       pending.length = 0; // applied — don't let the outer wrap re-apply
       return res;
+    };
+    /** Merge caller headers over a default content type.
+     *
+     *  `{...init.headers}` was wrong for two of the three legal `HeadersInit`
+     *  forms: a `Headers` instance has no own enumerable properties, so every
+     *  header the caller set vanished silently, and the `[["k","v"]]` tuple
+     *  form spread into `{"0": [...]}` — a bogus header named `0`. */
+    const mergeHeaders = (
+      contentType: string,
+      init?: ResponseInit,
+    ): Headers => {
+      const h = new Headers(init?.headers);
+      if (!h.has("Content-Type")) h.set("Content-Type", contentType);
+      return h;
     };
     const ctx: RouteContext = {
       req,
@@ -225,20 +258,14 @@ export function route(
         withCookies(
           new Response(JSON.stringify(data), {
             ...init,
-            headers: {
-              "Content-Type": "application/json; charset=utf-8",
-              ...(init?.headers ?? {}),
-            },
+            headers: mergeHeaders("application/json; charset=utf-8", init),
           }),
         ),
       text: (body, init) =>
         withCookies(
           new Response(body, {
             ...init,
-            headers: {
-              "Content-Type": "text/plain; charset=utf-8",
-              ...(init?.headers ?? {}),
-            },
+            headers: mergeHeaders("text/plain; charset=utf-8", init),
           }),
         ),
       redirect: (location, status = 302) =>

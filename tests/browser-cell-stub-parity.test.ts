@@ -95,6 +95,10 @@ function makeConfig() {
     },
     ui: { exclude: ["secret"] },
     sync: true,
+    // `long` has to be exercised here or the stub's key is never produced —
+    // and the browser resolves the same call ceiling the server does, so a
+    // long method missing from the stub gives up at 30s in the browser only.
+    long: ["load"],
   };
 }
 

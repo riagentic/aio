@@ -1,6 +1,10 @@
 // Dev-mode startup validation — server-only import scanning + graph validation
 import { join } from "@std/path";
-import { type GraphResult, validateGraph } from "./graph-validator.ts";
+import {
+  BLOCKING_CATEGORIES,
+  type GraphResult,
+  validateGraph,
+} from "./graph-validator.ts";
 import { transpile } from "./server-transpile.ts";
 
 /** Regex matching non-type imports from @std/ or node: — these fail in the browser */
@@ -98,10 +102,18 @@ export function startGraphValidation(
       // server-only-import is a GUARANTEED client break (sandboxed renderer
       // can't load node:/omitted-aio-symbols) → blocking. server-only-api
       // (conditional Deno.* / maybe-safe @std) + circular imports are warnings.
-      const isWarning = (c: string) =>
-        c === "server-only-api" || c === "circular-dependency";
-      const warnings = result.errors.filter((e) => isWarning(e.category));
-      const blocking = result.errors.filter((e) => !isWarning(e.category));
+      // ONE decider for "does this break the client", shared with the
+      // diagnostic page (`BLOCKING_CATEGORIES`). This used to be a second,
+      // hand-written list of the WARNING categories — it happened to agree, and
+      // the first new category would have split them silently: the terminal
+      // calling something a warning while the browser served the you-are-broken
+      // page, or the reverse.
+      const warnings = result.errors.filter((e) =>
+        !BLOCKING_CATEGORIES.has(e.category)
+      );
+      const blocking = result.errors.filter((e) =>
+        BLOCKING_CATEGORIES.has(e.category)
+      );
       if (result.valid) {
         debug(
           `graph: ✓ ${result.modules.size} modules validated (${
@@ -121,6 +133,16 @@ export function startGraphValidation(
           );
           console.error(`    FIX: ${err.fix}`);
         }
+        // What ✖ MEANS, in the terminal, every time. A field report read the
+        // two blocks as "an error and a warning printed together while dev
+        // started anyway" — a hard error that does not stop the process reads
+        // as a warning with a scarier icon unless the consequence is stated.
+        // The server deliberately keeps running (the fix hot-reloads); it is
+        // just not serving the app while it does.
+        console.error(
+          `  ⛔ the browser is being served the DIAGNOSTIC PAGE, not your app` +
+            ` — the fix hot-reloads, no restart needed.`,
+        );
       }
       // server-only-api = CONDITIONAL break (Deno.* in a client-reachable
       // module blank-screens only when that path runs in the browser). It was

@@ -37,12 +37,36 @@ Deno.test("pressure: rate over threshold emits pressure event", async () => {
     rateThreshold: 5,
     onDiagnostic: (e) => events.push(e),
   });
-  for (let i = 0; i < 10; i++) pm.onBroadcast("c1", 100);
+  // The rate counts broadcast ROUNDS (dispatch frequency), not per-client
+  // sends — 10 rounds to one client, same as 10 rounds to fifty clients.
+  for (let i = 0; i < 10; i++) {
+    pm.onBroadcastRound();
+    pm.onBroadcast("c1", 100);
+  }
   await new Promise((r) => setTimeout(r, 1100));
   const rateEvents = events.filter((e) => e.summary.includes("broadcasts/sec"));
   assertEquals(rateEvents.length, 1);
   assertEquals(rateEvents[0]!.kind, "pressure");
   assertEquals(rateEvents[0]!.severity, "possible");
+  pm.destroy();
+});
+
+Deno.test("pressure: many clients in ONE round is not a rate", async () => {
+  const events: DiagEvent[] = [];
+  const pm = createPressureMonitor({
+    payloadThreshold: 512_000,
+    rateThreshold: 5,
+    onDiagnostic: (e) => events.push(e),
+  });
+  // One dispatch, fifteen sockets — the old per-send counting read this as
+  // 15 "broadcasts/sec" and blamed dispatch frequency.
+  pm.onBroadcastRound();
+  for (let i = 0; i < 15; i++) pm.onBroadcast(`client-${i}`, 100);
+  await new Promise((r) => setTimeout(r, 1100));
+  assertEquals(
+    events.filter((e) => e.summary.includes("broadcasts/sec")).length,
+    0,
+  );
   pm.destroy();
 });
 
