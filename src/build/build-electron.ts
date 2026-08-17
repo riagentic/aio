@@ -48,14 +48,18 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
 
   // Copy Electron runtime — auto-install on first build so
   // `compile:electron` works OUT OF THE BOX; loud manual fallback if it fails.
-  const electronSrc = join(root, "node_modules", "electron", "dist");
+  //
+  // The LOCATION comes from `electronDistDir` (electron-spawn.ts), which is the
+  // same function the runtime uses to launch. This used to be a local
+  // `node_modules/electron/dist` — one of the two layouts — so a successful
+  // auto-install was followed by "not found — run: deno task install:electron",
+  // advice that installs it exactly where this code was still not looking.
+  const { autoInstallElectron, electronDistDir } = await import(
+    "../electron/electron-spawn.ts"
+  );
+  let electronSrc = await electronDistDir(root);
   const electronDst = join(appDir, "electron");
-  try {
-    await Deno.stat(electronSrc);
-  } catch {
-    const { autoInstallElectron } = await import(
-      "../electron/electron-spawn.ts"
-    );
+  if (electronSrc === null) {
     // `deno install npm:electron` REWRITES the app's deno.json (it adds the
     // dependency, and re-resolving can move other pins with it). That file is
     // the user's, and a build silently editing the config it is building from
@@ -75,16 +79,14 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
           `build reads its pins from this file.`,
       );
     }
-    let ok = false;
-    if (installed) {
-      try {
-        await Deno.stat(electronSrc);
-        ok = true;
-      } catch { /* still absent */ }
-    }
-    if (ok === false) {
+    if (installed) electronSrc = await electronDistDir(root);
+    if (electronSrc === null) {
       console.error(
-        "[electron] \u2717 node_modules/electron/dist/ not found — run: deno task install:electron",
+        "[electron] \u2717 the Electron runtime is not installed and could " +
+          "not be installed automatically. Install it by hand:\n" +
+          "      deno install --allow-scripts=npm:electron npm:electron\n" +
+          "  (looked in node_modules/electron/dist and " +
+          "node_modules/.deno/electron@*/node_modules/electron/dist)",
       );
       Deno.exit(1);
     }
@@ -155,6 +157,27 @@ Categories=Utility;
   await Deno.writeTextFile(join(appDir, `${binaryName}.desktop`), desktop);
 
   const toolPath = await ensureAppimagetool(arch, toolCacheDir());
+
+  // appimagetool shells out to `file(1)` and dies with "file command is
+  // missing but required, please install it" — its message, mid-build, about a
+  // tool the developer never chose. Present on every desktop, absent from
+  // minimal containers and slim CI images, which is exactly where a build
+  // runs. Checked here so the failure names the package instead of arriving
+  // from a program the user did not invoke.
+  const hasFile = await new Deno.Command("sh", {
+    args: ["-c", "command -v file"],
+    stdout: "null",
+    stderr: "null",
+  }).output().then((r) => r.success).catch(() => false);
+  if (!hasFile) {
+    console.error(
+      "[appimage] \u2717 `file` is not installed, and appimagetool requires it.\n" +
+        "      Debian/Ubuntu:  sudo apt install -y file\n" +
+        "      Fedora/RHEL:    sudo dnf install -y file\n" +
+        "      Alpine:         sudo apk add file",
+    );
+    Deno.exit(1);
+  }
 
   const appImageOut = join(root, `${binaryName}-${arch}.AppImage`);
   console.log("[appimage] packaging...");

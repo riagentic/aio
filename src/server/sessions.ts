@@ -18,6 +18,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 import type { AioUser } from "./aio-types.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 const DEFAULT_TTL_MS = 30 * 24 * 3_600_000; // 30 days
 
@@ -122,7 +123,7 @@ export function openSessionStore(
       try {
         l();
       } catch (e) {
-        console.warn(`[aio] auth: session revocation listener failed — ${e}`);
+        log.warn(`[aio] auth: session revocation listener failed — ${e}`);
       }
     }
   };
@@ -168,7 +169,7 @@ export function openSessionStore(
     revoke(token) {
       const r = del.run(hash(token));
       if (r.changes > 0) {
-        console.warn(`[aio] auth: session revoked`);
+        log.warn(`[aio] auth: session revoked`);
         emitRevoked();
         return true;
       }
@@ -177,7 +178,7 @@ export function openSessionStore(
     revokeUser(userId) {
       const r = delUser.run(userId);
       if (r.changes > 0) {
-        console.warn(
+        log.warn(
           `[aio] auth: all sessions revoked for user=${userId} (${r.changes})`,
         );
         emitRevoked();

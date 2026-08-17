@@ -1,4 +1,4 @@
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { createPressureMonitor } from "../../src/vitals/pressure-monitor.ts";
 import type { DiagEvent } from "../../src/vitals/types.ts";
 
@@ -44,10 +44,16 @@ Deno.test("pressure: rate over threshold emits pressure event", async () => {
     pm.onBroadcast("c1", 100);
   }
   await new Promise((r) => setTimeout(r, 1100));
-  const rateEvents = events.filter((e) => e.summary.includes("broadcasts/sec"));
+  // The summary says what the number MEANS, not just what it is: a reader who
+  // sees only this line has to be able to decide whether to act.
+  const rateEvents = events.filter((e) => e.summary.includes("broadcast rate"));
   assertEquals(rateEvents.length, 1);
   assertEquals(rateEvents[0]!.kind, "pressure");
   assertEquals(rateEvents[0]!.severity, "possible");
+  assert(
+    rateEvents[0]!.summary.includes("advisory threshold"),
+    "the line must name itself advisory",
+  );
   pm.destroy();
 });
 
@@ -64,7 +70,7 @@ Deno.test("pressure: many clients in ONE round is not a rate", async () => {
   for (let i = 0; i < 15; i++) pm.onBroadcast(`client-${i}`, 100);
   await new Promise((r) => setTimeout(r, 1100));
   assertEquals(
-    events.filter((e) => e.summary.includes("broadcasts/sec")).length,
+    events.filter((e) => e.summary.includes("broadcast rate")).length,
     0,
   );
   pm.destroy();
@@ -191,5 +197,35 @@ Deno.test("pressure: onClientDisconnect cleans up bandwidth tracking", () => {
   assertEquals(pm.getBytesPerSec("c1") >= 0, true);
   pm.onClientDisconnect("c1");
   assertEquals(pm.getBytesPerSec("c1"), 0);
+  pm.destroy();
+});
+
+Deno.test("pressure: the rate is reported on the edges, and the recovery is reported too", async () => {
+  // Eighteen identical lines in a row is one condition, not eighteen findings.
+  // Entering pressure says so once; leaving it says so once; the middle is
+  // silent, so the line that matters is not something a reader learns to skim.
+  const events: DiagEvent[] = [];
+  const pm = createPressureMonitor({
+    payloadThreshold: 512_000,
+    rateThreshold: 5,
+    onDiagnostic: (e) => events.push(e),
+  });
+  for (let round = 0; round < 2; round++) {
+    for (let i = 0; i < 10; i++) {
+      pm.onBroadcastRound();
+      pm.onBroadcast("c1", 100);
+    }
+    await new Promise((r) => setTimeout(r, 1100));
+  }
+  assertEquals(
+    events.filter((e) => e.summary.includes("broadcast rate")).length,
+    1,
+    "two seconds over the threshold is ONE report, not two",
+  );
+  // Quiet second: the condition ends, and that is worth exactly one line.
+  await new Promise((r) => setTimeout(r, 1100));
+  const clear = events.filter((e) => e.summary.includes("back under"));
+  assertEquals(clear.length, 1, "leaving pressure is reported once");
+  assertEquals(clear[0]!.severity, "speculative");
   pm.destroy();
 });

@@ -14,7 +14,7 @@
  */
 import { join } from "@std/path";
 import { type BuildConfig, loadBuildConfig } from "./build/build-config.ts";
-import { appDirs } from "./server/app-dirs.ts";
+import { appDirs, installRoot } from "./server/app-dirs.ts";
 import { slugify } from "./server/single-instance-lock.ts";
 import { ensureEmbeddedBundle, runBundle } from "./build/build-bundle.ts";
 import { buildClient } from "./build/build-client.ts";
@@ -177,6 +177,14 @@ if (import.meta.main) {
   // binary's appId is that name. A shell-side copy of the rule would silently
   // split an app's address (payload under one directory, data under another)
   // the moment either rule moved.
+  // Same idea, the other directory: WHERE a built artifact gets installed.
+  // `run.sh` asks instead of hardcoding `~/app`, so the installer, `am remove`
+  // and the updater cannot drift into three different opinions about where an
+  // app lives.
+  if (Deno.args.includes("--print-install-root")) {
+    console.log(installRoot());
+    Deno.exit(0);
+  }
   if (Deno.args.includes("--print-app-tmpdir")) {
     const cfg = await loadBuildConfig();
     console.log(appDirs(slugify(cfg.binaryName)).app);

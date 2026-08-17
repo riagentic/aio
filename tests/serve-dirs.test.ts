@@ -20,6 +20,7 @@
 // build time), so a production server cannot be pointed outside its own root
 // by a config key at all.
 import { assert, assertEquals } from "@std/assert";
+import { interceptConsole } from "./console-capture.ts";
 import { createStaticHandler } from "../src/server/server-static.ts";
 import { join, resolve } from "@std/path";
 
@@ -126,15 +127,14 @@ Deno.test("serveDirs: a root that is not a directory says so, resolved", async (
   // than the author assumed is the likely mistake.
   const f = await fixture();
   const lines: string[] = [];
-  const origLog = console.log;
-  console.log = (...a: unknown[]) => void lines.push(a.map(String).join(" "));
+  const origLog = interceptConsole(lines);
   try {
     const h = handlerFor(f.base, { "/shared": "no-such-dir-xyz" });
     const res = await h.serveStatic("/shared/sse.ts");
     await res.text();
     assertEquals(res.status, 404);
   } finally {
-    console.log = origLog;
+    origLog();
     f.cleanup();
   }
   const warn = lines.find((l) => l.includes('serveDirs["/shared"]'));

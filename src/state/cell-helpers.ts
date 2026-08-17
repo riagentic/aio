@@ -183,7 +183,7 @@ export function resolveVisibility(
   }
   if (config.ui !== undefined && !_visibleHinted.has(name)) {
     _visibleHinted.add(name);
-    console.warn(
+    log.warn(
       `[cell:${name}] config key \`ui:\` was renamed \`visible:\` (alpha52 — ` +
         `access gates calls, visible gates reads). The alias works through ` +
         `beta; rename it (aiol --safe-fix does it). App-level ` +
@@ -197,6 +197,7 @@ export function resolveVisibility(
 // ── Selector helpers ──────────────────────────────────────────────────
 
 import type { SelectorDef } from "./cell-config-types.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 /** One-time-per-selector hints for the deprecated spread deps signature.
  *  console.warn, not the diagnostics logger: this module is in the BROWSER
@@ -285,7 +286,7 @@ export function scopeSelectors<S>(
       const hk = `${cellName}:${key}`;
       if (!_selectorHinted.has(hk)) {
         _selectorHinted.add(hk);
-        console.warn(
+        log.warn(
           `[aio:cell:${cellName}] selector '${key}': the (s, ...depSlices) ` +
             `signature is deprecated — deps now arrive as a tuple: ` +
             `fn: (s, [${deps.join(", ")}], ...args) => …. ` +

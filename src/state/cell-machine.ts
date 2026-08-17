@@ -1,7 +1,7 @@
 // cell-machine.ts — machine validation
 
 import type { MachineConfig } from "./cell-types.ts";
-import { log } from "../diagnostics/logger.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 /** Validate a state machine config — checks initial state, transitions, reachability, and dead-ends. */
 export function validateMachine(

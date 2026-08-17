@@ -1,3 +1,5 @@
+import { log } from "../diagnostics/logger-api.ts";
+
 // blocking.ts — schedule.blocking(): a named, cancellable, backpressured worker
 // pool for FFI/CPU/sync work. A wedged USB ioctl or a
 // heavy compute runs OFF the main isolate, so it can never freeze rendering or
@@ -140,8 +142,9 @@ export function createBlockingPool(opts?: { size?: number }): BlockingPool {
           [...active.values()].some((t) => t.id === id))
       ) {
         _warnedDupId.add(id);
-        console.warn(
-          `[aio:blocking] a second task started under id '${id}' while the ` +
+        log.warn(
+          "blocking",
+          `a second task started under id '${id}' while the ` +
             `first is still in flight. Unlike schedule.after(id, …), blocking ` +
             `ids do NOT replace: both run, and cancel('${id}') stops BOTH. ` +
             `Use a distinct id per task if you need to cancel them separately. ` +

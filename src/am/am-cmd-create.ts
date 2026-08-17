@@ -21,6 +21,7 @@ import {
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, fail, out } from "./am-output.ts";
 import { resolve } from "@std/path";
+import { colorEnabled } from "../diagnostics/color.ts";
 import {
   ensureVersion,
   latestTag,
@@ -101,7 +102,7 @@ export function parseCreateArgs(args: string[]): CreateOpts {
       // `service` is the deprecated alias — accepted, loudly renamed.
       if ((v as string) === "service") {
         console.error(
-          "am create: --target=service is now --target=server (one " +
+          "am create: warning: --target=service is now --target=server (one " +
             "vocabulary — the headless role is `server`); scaffolding a " +
             "server app.",
         );
@@ -512,7 +513,7 @@ export async function cmdCreate(
     return;
   }
 
-  const C = mode === "pretty";
+  const C = mode === "pretty" && colorEnabled; // NO_COLOR, and pipes
   const b = (s: string) => C ? `\x1b[1m${s}\x1b[0m` : s;
   const dim = (s: string) => C ? `\x1b[2m${s}\x1b[0m` : s;
   const cyan = (s: string) => C ? `\x1b[36m${s}\x1b[0m` : s;

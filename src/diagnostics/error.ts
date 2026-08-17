@@ -2,6 +2,8 @@
 
 import type { DiagnosticEvent } from "./diagnostic-bus.ts";
 import { randomUuid } from "../rand.ts";
+import { log } from "./logger-api.ts";
+import { ansi } from "./color.ts";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -419,12 +421,14 @@ export function generateTip(err: AioError): string | undefined {
 
 // ─── ANSI helpers ────────────────────────────────────────────────────────────
 
-const RED = "\x1b[31m";
-const YELLOW = "\x1b[33m";
-const DIM = "\x1b[2m";
-const BOLD = "\x1b[1m";
-const RESET = "\x1b[0m";
-const CYAN = "\x1b[36m";
+// Through `ansi()`: one decider for NO_COLOR / not-a-terminal, so an error box
+// redirected to a file is readable text instead of escape soup (color.ts).
+const RED = ansi("\x1b[31m");
+const YELLOW = ansi("\x1b[33m");
+const DIM = ansi("\x1b[2m");
+const BOLD = ansi("\x1b[1m");
+const RESET = ansi("\x1b[0m");
+const CYAN = ansi("\x1b[36m");
 
 // ─── Console formatter ──────────────────────────────────────────────────────
 
@@ -531,12 +535,12 @@ export function reportError(err: AioError, opts: ReportErrorOpts = {}): void {
         : "";
       if (prod) {
         const compact = formatErrorCompact(err) + suffix;
-        if (isWarn) console.warn(compact);
-        else console.error(compact);
+        if (isWarn) log.warn(compact);
+        else log.error(compact);
       } else {
         const box = formatErrorBox(err) + (suffix ? `\n${suffix.trim()}` : "");
-        if (isWarn) console.warn(box);
-        else console.error(box);
+        if (isWarn) log.warn(box);
+        else log.error(box);
       }
     }
 
@@ -553,7 +557,7 @@ export function reportError(err: AioError, opts: ReportErrorOpts = {}): void {
       try {
         onError(err);
       } catch (hookErr) {
-        console.error("[aio] onError hook threw:", hookErr);
+        log.error("[aio] onError hook threw:", { detail: String(hookErr) });
       }
     }
 
@@ -586,6 +590,6 @@ export function reportError(err: AioError, opts: ReportErrorOpts = {}): void {
     }
   } catch {
     // Fallback — never throw from reportError
-    console.error("[AIO] reportError failed, raw error:", err);
+    log.error("[AIO] reportError failed, raw error:", { detail: String(err) });
   }
 }

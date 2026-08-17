@@ -37,6 +37,12 @@ export type GlobalFlags = {
   all?: boolean;
   /** `am state --ui` — the filtered UI-state projection (was `am ui`). */
   ui?: boolean;
+  /** `am remove --data` — also delete the app's DATA (`~/.<appId>/`). Opt-in
+   *  and never implied: state, logs, keys and user files do not come back. */
+  data?: boolean;
+  /** `--force` — proceed past a refusal the command made for a reason
+   *  (currently: removing an app that is still running). */
+  force?: boolean;
   /** `--help`/`-h` anywhere → print usage and exit 0. Without this the flag
    *  fell through to the subcommand's positionals and was silently ignored —
    *  `am dispatch --help` answered `{"ok":true}`, which reads as "your

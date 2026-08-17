@@ -211,7 +211,7 @@ export function cmdBackup(args: string[], flags: GlobalFlags): void {
   const mode = detectMode(flags);
   const appId = resolveAmAppId(flags.app);
   const d = appDirs(appId);
-  const force = args.includes("--force");
+  const force = args.includes("--force") || flags.force === true;
   const destArg = args.find((a) => !a.startsWith("--"));
   const dest = resolve(destArg ?? `${appId}-backup-${stamp()}`);
 
@@ -290,7 +290,7 @@ export function cmdRestore(args: string[], flags: GlobalFlags): void {
   const mode = detectMode(flags);
   const appId = resolveAmAppId(flags.app);
   const d = appDirs(appId);
-  const force = args.includes("--force");
+  const force = args.includes("--force") || flags.force === true;
   const srcArg = args.find((a) => !a.startsWith("--"));
   if (!srcArg) {
     outError(`usage: am restore <backup-dir> [--app=<appId>] [--force]`, mode);

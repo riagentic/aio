@@ -1,6 +1,7 @@
 // ─── Vital Signs — Public API ────────────────────────────────────────────────
 // Wires all probes together into a single VitalsSystem.
 
+import { log } from "../diagnostics/logger-api.ts";
 import type {
   VitalAlert,
   VitalLayer,
@@ -154,12 +155,12 @@ export function createVitalsSystem(config: VitalsConfig): VitalsSystem {
     try {
       onAlert?.(alert);
     } catch (e) {
-      console.error(`[aio:vitals] onVitalAlert hook threw — ${e}`);
+      log.error("vitals", `onVitalAlert hook threw — ${e}`);
     }
     try {
       reporter?.onAlert(alert);
     } catch (e) {
-      console.error(`[aio:vitals] reporter.onAlert threw — ${e}`);
+      log.error("vitals", `reporter.onAlert threw — ${e}`);
     }
     diagEmit({
       type: "vitals-alert",

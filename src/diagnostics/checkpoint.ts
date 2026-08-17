@@ -1,7 +1,7 @@
 // src/diagnostics/checkpoint.ts — Atomic state checkpoint + recovery
 
 import type { CheckpointData } from "./types.ts";
-import { log } from "./logger.ts";
+import { log } from "./logger-api.ts";
 import { noRedaction, REDACTED } from "./redact.ts";
 import type { Redactor } from "./redact.ts";
 
@@ -164,16 +164,14 @@ export function createCheckpoint(
   function schedule(data: CheckpointData): void {
     pending = data;
     if (debounceMs <= 0) {
-      write(data).catch((e) =>
-        console.error(`[checkpoint] write failed: ${e}`)
-      ); // AIO-279: log instead of swallow
+      write(data).catch((e) => log.error(`[checkpoint] write failed: ${e}`)); // AIO-279: log instead of swallow
       return;
     }
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => {
       if (pending) {
         write(pending).catch((e) =>
-          console.error(`[checkpoint] write failed: ${e}`)
+          log.error(`[checkpoint] write failed: ${e}`)
         ); // AIO-279
       }
       timer = null;

@@ -1,22 +1,20 @@
 // logger-api.ts — Public log singleton and API
 
-import type { LogLevel } from "./logger-types.ts";
-import { now } from "./logger-types.ts";
+import type { LogLevel, LogSink } from "./logger-types.ts";
+import { DEFAULT_LOG_DIR, now } from "./logger-types.ts";
 import { printConsole } from "./logger-format.ts";
-import { DEFAULT_LOG_DIR } from "./logger-core.ts";
-import type { AioLogger } from "./logger-core.ts";
 
 // ── Public singleton ──────────────────────────────────────────────────
 
-let _active: AioLogger | null = null;
+let _active: LogSink | null = null;
 
 /** Wire the framework logger instance into the public singleton */
-export function setLogger(l: AioLogger | null): void {
+export function setLogger(l: LogSink | null): void {
   _active = l;
 }
 
 /** Get the active logger instance (null if not configured) */
-export function getLogger(): AioLogger | null {
+export function getLogger(): LogSink | null {
   return _active;
 }
 

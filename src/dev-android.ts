@@ -291,7 +291,8 @@ async function main(): Promise<void> {
   const status = await server.status;
   if (status.code !== 0) {
     console.error(
-      "[dev:android] dev server exited — is the app already running elsewhere? " +
+      "[dev:android] \u2717 dev server exited — is the app already running " +
+        "elsewhere? " +
         "(each app is single-instance)",
     );
   }

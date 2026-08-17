@@ -21,7 +21,7 @@
 // Server-only, like `openExternal`: it spawns a desktop binary and reads the
 // environment. Available from a cell method or a serverFn via `aio/server`.
 
-import { log } from "../diagnostics/logger.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 /** A named extension group for the dialog's filter dropdown.
  *  `{ name: "Video", extensions: ["mp4", "mkv"] }` — extensions carry no dot. */

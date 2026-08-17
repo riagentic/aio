@@ -268,6 +268,8 @@ export function parseGlobalFlags(
   };
   for (const a of expanded) {
     if (a === "--json") flags.json = true;
+    else if (a === "--data") flags.data = true;
+    else if (a === "--force") flags.force = true;
     else if (a === "--quiet") flags.quiet = true;
     else if (a.startsWith("--port=")) flags.port = num(a.slice(7), "--port");
     else if (a.startsWith("--body=")) flags.jsonBody = a.slice(7);
@@ -296,7 +298,7 @@ export function parseGlobalFlags(
       // that launch an app (`am ui --client=browser`) can pass it through.
       if (/^\d+$/.test(a.slice(9).trim())) {
         console.error(
-          "am: --client=N is now --client-index=N (or -i N) — the old " +
+          "am: warning: --client=N is now --client-index=N (or -i N) — the old " +
             "spelling still works, but collides with the app runtime's " +
             "--client=<kind>",
         );
@@ -306,7 +308,7 @@ export function parseGlobalFlags(
       // `-c2` was the short form of `--client=2`. `-c2x` used to fail the
       // isNaN test and fall through to the POSITIONAL args, where it became a
       // command argument — the same NaN class, silent one step further along.
-      console.error("am: -cN is now -i N (client index)");
+      console.error("am: warning: -cN is now -i N (client index)");
       flags.client = num(a.slice(2), "-c (client index)");
     } else if (a === "--client") flags.client = 0;
     else if (a === "--ui") flags.ui = true;

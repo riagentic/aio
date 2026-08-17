@@ -76,6 +76,7 @@
 - [Testing](testing/README.md) — Verifying cells and UIs work correctly.
 - [Cell Testing](testing/cell-testing.md) — Test harness that wraps Deno.test with typed helpers.
 - [aiol — AIO Project Linter](testing/linter.md) — Static analysis tool for aio projects.
+- [The onboarding lab — testing on a machine that is not yours](testing/onboarding-lab.md) — Needs docker or podman.
 - [UI testing — semantic, selector-free, first-class](testing/ui-testing.md) — aio exposes every TSX component as an intuitive, deterministic API — tests and
 - ↗ [App Manager](clients/app-manager.md) — `am surface` / `am trigger` — observe and drive a RUNNING app, no selectors, no driver: the same loop as `testUI`, against the real thing
 
@@ -164,6 +165,7 @@
 - [alpha55 → alpha56](upgrade/from-alpha55-to-alpha56.md) — Two changes can be noticed, and one is a refusal you might meet at boot.
 - [alpha56 → alpha57](upgrade/from-alpha56-to-alpha57.md) — again.
 - [alpha57 → alpha58](upgrade/from-alpha57-to-alpha58.md) — wiped.
+- [alpha58 → alpha59](upgrade/from-alpha58-to-alpha59.md) — a change to what aio prints and where the one-liner puts things.
 - [Upgrade from v1.0.0-alpha6 to v1.0.0-alpha7](upgrade/from-alpha6-to-alpha7.md) — mod.ts no longer re-exports renderer primitives.
 - [Upgrade from v1.0.0-alpha7 to v1.0.0-alpha8](upgrade/from-alpha7-to-alpha8.md) — None.
 - [Upgrade from v1.0.0-alpha8 to v1.0.0-alpha9](upgrade/from-alpha8-to-alpha9.md) — The internal machine state field is renamed.

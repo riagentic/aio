@@ -139,7 +139,9 @@ export async function cmdUpdate(
       outError(`reinstall from ${canonical} failed (deno exit ${code})`, mode);
       Deno.exit(code);
     }
-    console.error(`am: returned from dev checkout (${root}) to ${canonical}`);
+    console.error(
+      `am: note: returned from dev checkout (${root}) to ${canonical}`,
+    );
     root = canonical;
   }
   if (root) {
@@ -301,7 +303,9 @@ export function cmdNew(
   args: string[],
   flags: GlobalFlags,
 ): Promise<void> {
-  console.error("am: `am new` is now `am add` — the old name still works");
+  console.error(
+    "am: warning: `am new` is now `am add` — the old name still works",
+  );
   return cmdAdd(args, flags);
 }
 
@@ -400,6 +404,12 @@ Inspect:
 
 Scaffold:
   add cell <name>         Generate src/cell/<name>.ts
+
+Install (apps that run.sh installed into ~/app/):
+  installed               List them, with version + where each came from
+  upgrade <app>           Rebuild and reinstall from its recorded source
+  remove <app> [--data]   Uninstall one — the PROGRAM; --data also deletes
+                          ~/.<app>/ (state, logs, keys — it does not come back)
 
 Other:
   version                 Print version

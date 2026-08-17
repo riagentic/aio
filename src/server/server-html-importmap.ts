@@ -2,6 +2,7 @@
 
 import { join, resolve } from "@std/path";
 import { CDN } from "./server-html-constants.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 /** Read the app's `deno.json` imports — THE input to the browser import map.
  *
@@ -49,7 +50,7 @@ export function readAppDenoImports(baseDir: string): Record<string, string> {
       continue;
     }
     _warnedJsonc.add(jsonc);
-    console.warn(
+    log.warn(
       `[aio] ${jsonc} found but no readable deno.json — the browser import ` +
         `map is built from deno.json ONLY, so this app's npm imports will NOT ` +
         `resolve in the browser ("Failed to resolve module specifier"). ` +

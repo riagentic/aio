@@ -5,6 +5,7 @@
 import { randomUuid } from "../rand.ts";
 import type { HLC, SyncOp } from "./types.ts";
 import type { OpBufferStorage } from "./op-buffer.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 type CellDoc = {
   ops: SyncOp[];
@@ -71,8 +72,9 @@ export function createLocalStorageOpStorage(
       try {
         localStorage.setItem(`${key(cell)}.corrupt`, raw);
       } catch { /* no room for the copy — the warning still goes out */ }
-      console.error(
-        `[aio:sync] offline queue for "${cell}" is corrupt and was discarded ` +
+      log.error(
+        "sync",
+        `offline queue for "${cell}" is corrupt and was discarded ` +
           `— any unsent changes in it are lost (${e}). The raw document was ` +
           `kept at "${key(cell)}.corrupt".`,
       );

@@ -10,6 +10,7 @@ import { enc } from "../protocol/envelope.ts";
 import { _BLOCKED_KEYS } from "./state-array-utils.ts";
 import { _setSubsSendFn, trackPath } from "./state-subs.ts";
 import { offlineQueue } from "./offline-queue.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -70,8 +71,9 @@ let _transport: Transport | null = null;
 // cell-method queue — it reaches the diagnostic bus (dev overlay, `am`), not
 // just the browser console.
 const _offlineQueue = offlineQueue(MAX_OFFLINE_QUEUE, (dropped) => {
-  console.warn(
-    `[aio:state] Action "${dropped.type}" dropped — offline queue full (${MAX_OFFLINE_QUEUE}), newest wins`,
+  log.warn(
+    "state",
+    `Action "${dropped.type}" dropped — offline queue full (${MAX_OFFLINE_QUEUE}), newest wins`,
   );
   diagEmit({
     type: "state-transport:offline-queue-full",

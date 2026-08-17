@@ -3,6 +3,7 @@
 // Called from server.ts for incoming "log" frames (WS/IPC).
 
 import type { ClientLogEntry } from "../air/dom-inspector-types.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 const MAX_RATE = 100; // messages per second per client
 const MAX_CLIENT_MSG = 8192; // max msg length from client
@@ -107,7 +108,7 @@ function _append(line: string): void {
   }).catch((e) => {
     if (_writeErrors < 3) {
       _writeErrors++;
-      console.error(`[client-log] write failed for ${path}: ${e}`);
+      log.error(`[client-log] write failed for ${path}: ${e}`);
     }
   });
 }

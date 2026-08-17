@@ -13,6 +13,7 @@ import { _ackSink } from "./ack-sink.ts";
 import { trackPath } from "./state-subs.ts";
 import { nameIsTaken } from "./cell-helpers.ts";
 import { applyCellFieldFilter, uiKeyVisibility } from "./state-filter.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 // ── Cell registry ────────────────────────────────────────────────────
 // Every cell() call registers here. Browser binding iterates this set.
@@ -36,7 +37,7 @@ export function registerCell(def: CellDef): void {
     // differs from the registered one (genuine conflict, not hot reload).
     const existing = _cellRegistry.get(id);
     if (existing !== def) {
-      console.warn(
+      log.warn(
         `[aio] duplicate cell name '${id}' — cell() called twice with this ` +
           `name. The previous definition is being replaced. If this is HMR, ` +
           `ignore; if two modules define the same cell name, rename one.`,
@@ -128,7 +129,7 @@ function reportHiddenRead(cellName: string, key: string, reason: string): void {
   }
   if (_uiReadWarned.has(id)) return;
   _uiReadWarned.add(id);
-  console.warn(msg);
+  log.warn(msg);
 }
 
 /** Deep-exclude for CLIENT reads — same shape as state-filter's pure

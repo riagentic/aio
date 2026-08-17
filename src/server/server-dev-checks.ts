@@ -6,6 +6,7 @@ import {
   validateGraph,
 } from "./graph-validator.ts";
 import { transpile } from "./server-transpile.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 /** Regex matching non-type imports from @std/ or node: — these fail in the browser */
 const SERVER_ONLY_RE =
@@ -124,14 +125,14 @@ export function startGraphValidation(
         // Blocking = guaranteed client break. The diagnostic page covers the
         // browser; print loudly here too so the terminal names the file even
         // if no browser is open.
-        console.error(
+        log.error(
           `[aio] graph: ${blocking.length} error(s) will break the browser client:`,
         );
         for (const err of blocking) {
-          console.error(
+          log.error(
             `  ✖ ${err.file}${err.line ? `:${err.line}` : ""} — ${err.message}`,
           );
-          console.error(`    FIX: ${err.fix}`);
+          log.error(`    FIX: ${err.fix}`);
         }
         // What ✖ MEANS, in the terminal, every time. A field report read the
         // two blocks as "an error and a warning printed together while dev
@@ -139,9 +140,10 @@ export function startGraphValidation(
         // as a warning with a scarier icon unless the consequence is stated.
         // The server deliberately keeps running (the fix hot-reloads); it is
         // just not serving the app while it does.
-        console.error(
+        log.error(
           `  ⛔ the browser is being served the DIAGNOSTIC PAGE, not your app` +
             ` — the fix hot-reloads, no restart needed.`,
+          { detail: String() },
         );
       }
       // server-only-api = CONDITIONAL break (Deno.* in a client-reachable
@@ -159,21 +161,23 @@ export function startGraphValidation(
       const deferredCount = allApi.length - apiWarnings.length;
       if (apiWarnings.length > 0) {
         const MAX_SHOWN = 10;
-        console.warn(
+        log.warn(
           `[aio] graph: server-only API reachable from the browser bundle ` +
             `(blank-screens if it runs client-side):`,
+          { detail: String() },
         );
         for (const err of apiWarnings.slice(0, MAX_SHOWN)) {
-          console.warn(
+          log.warn(
             `  ⚠ ${err.file}${err.line ? `:${err.line}` : ""} — ${err.message}`,
           );
         }
         if (apiWarnings.length > MAX_SHOWN) {
-          console.warn(`  … and ${apiWarnings.length - MAX_SHOWN} more`);
+          log.warn(`  … and ${apiWarnings.length - MAX_SHOWN} more`);
         }
-        console.warn(
+        log.warn(
           `  Fix: move server-only I/O into a *.server.ts module and ` +
             `dynamic-import it from the cell method (docs/build/imports.md).`,
+          { detail: String() },
         );
       }
       if (deferredCount > 0) {

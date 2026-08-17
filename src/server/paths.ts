@@ -3,7 +3,7 @@
 
 import { fromFileUrl, join, resolve } from "@std/path";
 import { lockDir } from "./single-instance-lock.ts";
-import { log } from "../diagnostics/logger.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 /** True when running inside a compiled binary (AppImage, deno compile) */
 export function isCompiled(): boolean {

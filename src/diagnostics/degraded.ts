@@ -14,6 +14,7 @@
 // and one more when it recovers. Everything in between is counted, not logged.
 
 import { diagEmit } from "./diagnostic-bus.ts";
+import { log } from "./logger-api.ts";
 
 // Console, not `log` — this module is reachable from the BROWSER bundle (the
 // sync engine escalates through it), and the structured logger pulls in
@@ -197,7 +198,7 @@ export function degraded(
     // Two sites watching one name with different thresholds would silently
     // race for whichever registered first — in the module whose whole point
     // is that nothing diverges silently.
-    console.warn(
+    log.warn(
       `[aio] degraded("${name}"): after=${after} requested, but this name ` +
         `was created with after=${first.after} — keeping ${first.after}. ` +
         `Use one threshold per name.`,
@@ -214,7 +215,7 @@ export function degraded(
     const msg = `${name}: degraded — ${e.failures} consecutive failures, ` +
       `last: ${e.lastError}. This operation is best-effort, so each failure ` +
       `alone is survivable; repeating means the feature behind it is off.`;
-    console.error(`[aio] ${msg}`);
+    log.error(`[aio] ${msg}`);
     diagEmit({
       // Per-subsystem type: the bus dedups by TYPE, so a shared "degraded" key
       // would let one wedged subsystem hide another's escalation.
@@ -232,7 +233,7 @@ export function degraded(
     const e = resolve();
     if (e.escalated) {
       const held = Date.now() - e.since;
-      console.info(
+      log.info(
         `[aio] ${name}: recovered after ${e.failures} failures (${held}ms)`,
       );
       diagEmit({

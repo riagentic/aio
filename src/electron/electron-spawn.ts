@@ -4,6 +4,7 @@ import type { AioMeta, Log, ShellConfig } from "./electron-shared.ts";
 import { electronMainScript } from "./electron-scripts.ts";
 import { electronClientScript } from "./electron-client-script.ts";
 import { electronMainScriptUDS } from "./electron-uds.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 // OS-aware packaged Electron binary path
 function distBinPath(): string {
@@ -106,16 +107,46 @@ async function electronBinReady(launcher: string): Promise<boolean> {
 
 /** Electron package dirs under Deno's `.deno` npm cache (node_modules/.deno/
  *  electron@<ver>/node_modules/electron). */
-async function denoElectronDirs(): Promise<string[]> {
+async function denoElectronDirs(root = "."): Promise<string[]> {
   const dirs: string[] = [];
   try {
-    for await (const e of Deno.readDir("node_modules/.deno")) {
+    for await (const e of Deno.readDir(`${root}/node_modules/.deno`)) {
       if (e.isDirectory && e.name.startsWith("electron@")) {
-        dirs.push(`node_modules/.deno/${e.name}/node_modules/electron`);
+        dirs.push(`${root}/node_modules/.deno/${e.name}/node_modules/electron`);
       }
     }
   } catch { /* no .deno dir */ }
   return dirs;
+}
+
+/** WHERE the installed Electron runtime actually is — `<pkg>/dist`, or null.
+ *
+ *  THE resolver, for the runtime and the build alike. It exists because there
+ *  were two: this file has always known that Deno's node_modules layout puts
+ *  the package under `node_modules/.deno/electron@<ver>/node_modules/electron`
+ *  (with `node_modules/electron` sometimes a symlink and sometimes absent),
+ *  while `build-electron.ts` checked `node_modules/electron/dist` and nothing
+ *  else. So `deno task compile --electron` auto-installed Electron
+ *  successfully, failed to find what it had just installed, and told the user
+ *  to run `deno task install:electron` — which installs it to the same place
+ *  the build would still not look. That is the bug a user reported as "the
+ *  one-line command doesn't start the app; I had to run install:electron
+ *  first", and it could only be fixed by making both sides read one rule. */
+export async function electronDistDir(root = "."): Promise<string | null> {
+  for (const base of await electronPkgDirs(root)) {
+    try {
+      const info = await Deno.stat(`${base}/dist`);
+      if (info.isDirectory) return `${base}/dist`;
+    } catch { /* not here — try the next layout */ }
+  }
+  return null;
+}
+
+/** Every place the electron PACKAGE itself may live (both node_modules
+ *  layouts). `electronDistDir` and the installer recovery below read the same
+ *  list, so "where is electron" has one answer. */
+export async function electronPkgDirs(root = "."): Promise<string[]> {
+  return [`${root}/node_modules/electron`, ...(await denoElectronDirs(root))];
 }
 
 /** Force-install electron in the app cwd so `dev:electron` / `compile:electron`
@@ -131,13 +162,55 @@ export async function autoInstallElectron(
       stdout: "inherit",
       stderr: "inherit",
     }).output(),
+  // "Is the runtime actually there?" — the ONLY question whose answer this
+  // function may return. It used to return `run().success`, i.e. whether the
+  // installer EXITED ZERO, and that is the defect: `deno install` exits zero
+  // having skipped the lifecycle script, so a caller was told "installed" and
+  // then could not find a binary. Injected so the contract can be tested
+  // without a 100MB download.
+  isInstalled: () => Promise<boolean> = () =>
+    electronDistDir().then((d) => d !== null),
 ): Promise<boolean> {
   (log.info ?? console.log)(
     "electron: not installed — auto-installing (deno install --allow-scripts=npm:electron npm:electron)… " +
       "first run downloads the Electron binary (~100MB), this can take a minute.",
   );
   try {
-    return (await run()).success;
+    await run();
+    if (await isInstalled()) return true;
+    // The install "succeeded" and the runtime is NOT there.
+    //
+    // `--allow-scripts` only PERMITS the lifecycle script; whether it actually
+    // RUNS depends on what deno already had cached and on whether the package
+    // counts as newly added — conditions an app cannot see or control. When it
+    // is skipped, `deno install` exits 0 with a package that has no `dist/`,
+    // and every later step reports the confusing half of the truth: "electron
+    // is not installed — run deno task install:electron", advice that runs the
+    // same command and skips the same script. A user hit exactly that loop and
+    // could only get out of it by accident.
+    //
+    // So run the package's OWN installer, which downloads and unpacks the
+    // platform binary. It is CommonJS; `--unstable-detect-cjs` is what lets
+    // deno load it. This is the step that makes `--target=electron` work on a
+    // machine that has never seen Electron.
+    for (const pkg of await electronPkgDirs()) {
+      try {
+        await Deno.stat(`${pkg}/install.js`);
+      } catch {
+        continue;
+      }
+      (log.info ?? console.log)(
+        `electron: the lifecycle script did not run — invoking ${pkg}/install.js directly`,
+      );
+      const r = await new Deno.Command(Deno.execPath(), {
+        args: ["run", "-A", "--unstable-detect-cjs", "install.js"],
+        cwd: pkg,
+        stdout: "inherit",
+        stderr: "inherit",
+      }).output();
+      if (r.success && await isInstalled()) return true;
+    }
+    return await isInstalled();
   } catch {
     return false;
   }
@@ -205,6 +278,49 @@ function forwardStderr(proc: Deno.ChildProcess): void {
   })();
 }
 
+/** Can Chromium's SUID sandbox helper actually be used here?
+ *
+ *  Electron's `chrome-sandbox` must be owned by root with mode 4755. An
+ *  npm/deno install cannot do that — it has no root — so the file lands
+ *  unprivileged, and Chromium REFUSES TO START rather than run unsandboxed:
+ *
+ *    FATAL:setuid_sandbox_host.cc(166)] The SUID sandbox helper binary was
+ *    found, but is not configured correctly …
+ *    electron exited with signal SIGTRAP
+ *
+ *  Historically this did not bite, because Chromium falls back to the
+ *  namespace sandbox when unprivileged user namespaces are allowed. Ubuntu
+ *  24.04 (and every distro that followed it, Mint 22 included) restricts those
+ *  by default — and every container does — so the fallback is gone and the
+ *  default client of this framework simply does not start. A user hit exactly
+ *  this and had to go find `deno task install:electron` themselves, which does
+ *  not even address it.
+ *
+ *  So: when the helper is present but not setuid-root, we say so and start
+ *  Electron with `--no-sandbox`. That is a real (small) reduction in isolation
+ *  for a process that loads THIS APP'S OWN local UI, weighed against a
+ *  framework whose default target cannot launch. It is announced every time,
+ *  never silent, and `AIO_ELECTRON_SANDBOX=1` forces the strict behaviour for
+ *  anyone who has configured the helper properly. */
+export async function sandboxUsable(
+  bin: string,
+  stat: (p: string) => Promise<Deno.FileInfo> = Deno.stat,
+): Promise<boolean> {
+  if (Deno.build.os !== "linux") return true; // only Linux has this helper
+  if (Deno.env.get("AIO_ELECTRON_SANDBOX") === "1") return true;
+  const helper = bin.replace(/\/[^/]+$/, "/chrome-sandbox");
+  try {
+    const info = await stat(helper);
+    // uid 0 AND the setuid bit — anything else and Chromium aborts.
+    const setuid = ((info.mode ?? 0) & 0o4000) !== 0;
+    return info.uid === 0 && setuid;
+  } catch {
+    // No helper at all: nothing to misconfigure, Chromium picks another
+    // sandbox. Leave it alone.
+    return true;
+  }
+}
+
 /** Writes script to temp file, spawns Electron, cleans up after exit or process unload */
 async function spawnElectron(
   bin: string,
@@ -213,8 +329,22 @@ async function spawnElectron(
 ): Promise<Deno.ChildProcess> {
   const tmpFile = await Deno.makeTempFile({ suffix: ".cjs" });
   await Deno.writeTextFile(tmpFile, script);
+  const sandboxArgs: string[] = [];
+  if (!(await sandboxUsable(bin))) {
+    log.warn(
+      "[aio] electron: chrome-sandbox is not setuid-root (an npm install " +
+        "cannot make it so), and this kernel restricts unprivileged user " +
+        "namespaces — Chromium would abort instead of starting. Launching " +
+        "with --no-sandbox. To use the sandbox instead:\n" +
+        `      sudo chown root:root ${
+          bin.replace(/\/[^/]+$/, "/chrome-sandbox")
+        } && sudo chmod 4755 ${bin.replace(/\/[^/]+$/, "/chrome-sandbox")}\n` +
+        "      then set AIO_ELECTRON_SANDBOX=1",
+    );
+    sandboxArgs.push("--no-sandbox");
+  }
   const proc = new Deno.Command(bin, {
-    args: [tmpFile, ...extraArgs],
+    args: [tmpFile, ...sandboxArgs, ...extraArgs],
     // stderr is PIPED so the graphics-stack probe noise can be kept out of the
     // app's own log (see forwardStderr). stdout stays inherited — that is the
     // app's own console output and must pass through untouched.

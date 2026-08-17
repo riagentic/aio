@@ -12,7 +12,7 @@ import type { Patch } from "immer";
 import type { CellDef, Msg } from "../state/cell-types.ts";
 import { WORKER_PATCH_ACTION } from "../state/cell-compose-reduce.ts";
 import { type CellWorker, createCellWorker } from "./cell-worker.ts";
-import { log } from "../diagnostics/logger.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 /** Refuse at boot what the thread boundary can't honour. Every one of these is
  *  a silent-wrong-behavior trap if allowed through, so they fail loudly with the

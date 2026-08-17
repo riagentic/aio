@@ -38,6 +38,7 @@ import {
   oidcStart,
 } from "./auth-oidc.ts";
 import type { AioUser } from "./aio-types.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 const VERIFY_TTL_MS = 24 * 3_600_000;
 const RESET_TTL_MS = 15 * 60_000;
@@ -479,9 +480,7 @@ export async function handleAuthFlow(
               text:
                 `Your password reset token (valid 15 minutes): ${token}\n\nPOST { token, password } to /__aio/auth/reset.`,
             }),
-          ).catch((e) =>
-            console.warn(`[aio] auth: reset mail send failed — ${e}`)
-          );
+          ).catch((e) => log.warn(`[aio] auth: reset mail send failed — ${e}`));
         }
       }
       return json(200, { ok: true });
@@ -509,7 +508,7 @@ export async function handleAuthFlow(
       // Proof of mailbox control: the email is verified. Sessions, tokens and
       // the lockout are `setPassword`'s job (above) — one decider.
       cfg.users.markVerified(stored.subject);
-      console.warn(
+      log.warn(
         `[aio] auth: password reset completed for id=${stored.subject}`,
       );
       return json(200, { ok: true });
@@ -576,7 +575,7 @@ export async function handleAuthFlow(
         return json(401, { error: "invalid_code" });
       }
       cfg.users.enableTotp(user.id);
-      console.warn(`[aio] auth: TOTP enabled for id=${user.id}`);
+      log.warn(`[aio] auth: TOTP enabled for id=${user.id}`);
       return json(200, { ok: true });
     }
 

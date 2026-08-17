@@ -25,7 +25,7 @@ import { resolveSelfAction } from "./self.ts";
 import { materializeValue, withDraftDo } from "./cell-impl.ts";
 import { current, type Draft, isDraft } from "immer";
 import { type AioError, createAioError } from "../diagnostics/error.ts";
-import { log } from "../diagnostics/logger.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 // ── The effect channel: s.$do (alpha52) ────────────────────────────────
 

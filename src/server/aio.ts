@@ -20,7 +20,7 @@ import {
 } from "../diagnostics/time-travel.ts";
 import { createScheduleManager } from "../state/schedule.ts";
 import { createOwnManager, isOwnEffect } from "../state/own.ts";
-import { getLogger, log } from "../diagnostics/logger.ts";
+import { getLogger, log } from "../diagnostics/logger-api.ts";
 import { timeTravelEnabled } from "../diagnostics/types.ts";
 import { teachableError } from "../diagnostics/error.ts";
 
@@ -714,11 +714,12 @@ async function _run<S, A, E>(
     // Same sources the app itself uses for its identity (resolveAppId handles
     // the compiled-binary case), so --version cannot describe a different app
     // than the one that would boot.
-    console.log(
+    log.info(
       versionLine(
         resolveAppId(config.appId),
         config.appVersion ?? _denoJsonVersion(),
       ),
+      { detail: String() },
     );
     Deno.exit(0);
   }
@@ -727,7 +728,7 @@ async function _run<S, A, E>(
     // What this build promises about data already on disk. Derived from the
     // very same cell versions and onMigrate hooks the boot path uses, so a
     // published contract cannot drift from what the binary actually does.
-    console.log(JSON.stringify(
+    log.info(JSON.stringify(
       deriveDataContract(
         config._cellMigrations ?? new Map(),
         PERSIST_SCHEMA_VERSION,

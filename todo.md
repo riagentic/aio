@@ -88,6 +88,16 @@ that is the gate working, not a setback.
   from every host. All fixed with red-when-reverted tests; none had shipped as
   of an unreleased alpha58, but they were all reachable before it.
 
+- **2026-08-17 — the count stays 0, and the onboarding path is now tested on a
+  machine that is not ours.** `deno task lab` runs install → create → run.sh →
+  electron → windows-scripts inside a fresh `ubuntu:24.04` (no deno, node or
+  unzip, non-root), takes a GitHub repo or a local path, and verifies the UI is
+  the app rather than a blank mount point, a stuck loader, a dead socket or the
+  module-error page. It found the published one-liner broken in four places. One
+  data-loss defect was introduced and fixed inside the same release: naming the
+  installed artifact `<app>-<version>` renamed the APP, because a compiled
+  binary took its identity from its file name.
+
 ## Open field-report items (triaged 2026-08-13, NOT yet decided)
 
 `feedback/` is gitignored, so the reports themselves live only in a working
@@ -100,17 +110,27 @@ the fact that they exist. Each still needs verification before it is believed.
   usability gap; the shape of the fix (poll the health endpoint until it
   answers, with a timeout) is obvious, the question is whether `--wait` should
   be the default.
-- **A path-pinned app is documented, but the default pin makes it red** (got
-  #4), **a linked (not provisioned) aio needs four imports the app cannot
-  guess** (got #5), **`deno task compile --electron` auto-installs Electron,
-  rewrites `deno.json`, then fails** (got #6) — three onboarding-path items, not
-  yet reproduced.
+- **A path-pinned app is documented, but the default pin makes it red** (got #4)
+  and **a linked (not provisioned) aio needs four imports the app cannot guess**
+  (got #5) — two onboarding-path items, not yet reproduced.
+- ~~**`deno task compile --electron` auto-installs Electron, rewrites
+  `deno.json`, then fails** (got #6)~~ — **reproduced and fixed in alpha59**, on
+  a fresh Ubuntu with no node. It was four defects, not one: two deciders for
+  where Electron lives (the build looked in one layout, the runtime knew both),
+  `deno install --allow-scripts` exiting 0 having skipped the postinstall,
+  `chrome-sandbox` not being setuid-root on Ubuntu 24.04+, and `appimagetool`
+  needing `file(1)`. The deno.json rewrite is still real and now says so out
+  loud instead of silently. `deno task lab --scenario=electron` ends in a mapped
+  Electron window from the one-line command.
 - **The `localStorage` dead-code class has no aiol rule** (fezor F-1) —
   `grep
   localStorage aiol/` is empty.
-- **`NO_COLOR` is honored nowhere** (fezor, via the goals audit) —
-  `src/diagnostics/logger-format.ts` emits ANSI unconditionally, against a
-  convention every CLI follows.
+- ~~**`NO_COLOR` is honored nowhere**~~ — **fixed in alpha59.**
+  `src/diagnostics/color.ts` is the one decider (`NO_COLOR`, `FORCE_COLOR`,
+  is-a-terminal, and browser/no-`--allow-env` safety); the logger, the error
+  box, `build-all` and `am create` all ask it. `tests/no-color.test.ts` pins
+  that turning colour off changes no character of the message, and that a file
+  emitting a colour escape without importing the decider is a failure.
 
 The process defect behind this list: with `feedback/` untracked, "every reported
 item is in resolved.md or refused.md" cannot be verified from the repository,

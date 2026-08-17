@@ -137,6 +137,30 @@ const HEAVY: [string, string[]][] = [
   ["test:build", ["deno", "task", "test:build"]],
 ];
 
+/** Is there a container runtime for the onboarding lab?
+ *
+ *  The lab is the ONLY gate that runs on a machine which is not this one, and
+ *  that is exactly what the other onboarding tests cannot do: they run here,
+ *  where deno is current and the framework is already checked out, so they
+ *  stayed green for months while the published one-liner failed on a fresh
+ *  Ubuntu (it needed `unzip`, which that image does not have).
+ *
+ *  When no runtime is installed the gate is REPORTED as skipped rather than
+ *  silently dropped — a release that never ran it should say so out loud. */
+function labRuntime(): string | null {
+  for (const bin of ["docker", "podman"]) {
+    try {
+      const out = new Deno.Command(bin, {
+        args: ["version", "--format", "{{.Server.Version}}"],
+        stdout: "null",
+        stderr: "null",
+      }).outputSync();
+      if (out.success) return bin;
+    } catch { /* not installed */ }
+  }
+  return null;
+}
+
 function report(results: Result[]): void {
   for (const r of results) {
     console.log(`  ${r.ok ? "✓" : "✗"} ${r.name.padEnd(38)} ${r.detail}`);
@@ -165,6 +189,26 @@ if (FAST_ONLY) {
 } else {
   console.log("\ngates (heavy)");
   for (const [name, cmd] of HEAVY) heavy.push(await run(name, cmd));
+  // The lab last: it is the slowest, and everything above has to hold before
+  // "does a stranger's machine survive this?" is even a meaningful question.
+  const runtime = labRuntime();
+  if (runtime) {
+    heavy.push(
+      await run("lab (fresh ubuntu)", [
+        "deno",
+        "task",
+        "lab",
+        "--scenario=install,create-dev,run-sh",
+      ]),
+    );
+  } else {
+    heavy.push({
+      name: "lab (fresh ubuntu)",
+      ok: true,
+      detail: "SKIPPED — no docker/podman on this machine. The one gate that " +
+        "tests onboarding on a machine that is not this one did not run.",
+    });
+  }
   report(heavy);
 }
 

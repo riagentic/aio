@@ -1,6 +1,6 @@
 {
   "name": "@riagentic/aio",
-  "version": "1.0.0-alpha58",
+  "version": "1.0.0-alpha59",
   "appId": "aio",
   "exports": {
     ".": "./mod.ts",
@@ -102,6 +102,10 @@
     "test": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno run --allow-read --allow-write --allow-env scripts/reset-test-home.ts && AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno test -A tests/ amui/src/",
     "test:onboard": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home AIO_ONBOARD_E2E=1 deno test -A --no-check=remote tests/onboarding-e2e.test.ts tests/run-sh-e2e.test.ts",
     "test:build": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home AIO_BUILD_E2E=1 deno test -A --no-check=remote tests/build-e2e.test.ts",
+    "lab": "deno run -A scripts/lab.ts",
+    "lab:browser": "deno run -A scripts/lab.ts --browser",
+    "lab:old-deno": "deno run -A scripts/lab.ts --old-deno --scenario=install",
+    "lab:github": "deno run -A scripts/lab.ts --source=github --browser",
     "ship": "deno run -A src/build/ship.ts",
     "test:e2e": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno run --allow-read --allow-write --allow-env scripts/reset-test-home.ts && AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno test -A --no-check=remote tests/e2e-direct-subscription.test.ts tests/e2e-subscription.test.ts tests/e2e-dispatch-ack.test.ts tests/e2e-ui-chromium.test.ts tests/e2e-blank-screen.test.ts tests/e2e-sync-browser.test.ts",
     "coverage:check": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno run --allow-read --allow-write --allow-env scripts/reset-test-home.ts && AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno test -A --coverage=coverage tests/ && deno cache mod.ts src/air.ts src/browser-air.ts src/standalone-air.ts src/cell-test.ts src/am.ts src/build.ts aiol/mod.ts && deno coverage coverage --lcov --output=coverage/lcov.info && deno run --allow-read scripts/check-coverage.ts",

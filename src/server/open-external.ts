@@ -4,7 +4,7 @@
 // dev-server fallback) each re-derived the darwin/windows/linux ternary; the
 // framework itself carried two more copies. One exported helper, fail-loud.
 
-import { log } from "../diagnostics/logger.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 /** Open a file, folder or URL with the OS default handler (`open` /
  *  `start` / `xdg-open`) — the desktop app pattern "reveal in file manager" /

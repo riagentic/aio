@@ -18,6 +18,7 @@ import { createHash } from "node:crypto";
 import { _timingSafeEqual } from "./server-auth.ts";
 import type { SessionStore } from "./sessions.ts";
 import type { AioUser } from "./aio-types.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 /** OWASP 2023 recommendation for PBKDF2-HMAC-SHA-256. */
 const PBKDF2_ITERS = 600_000;
@@ -412,7 +413,7 @@ export function openUserStore(
         if (Number(r.changes) === 1) {
           const after = selLock.get(id) as { locked_until: number } | undefined;
           if ((after?.locked_until ?? 0) > now) {
-            console.warn(
+            log.warn(
               `[aio] auth: account "${id}" locked for ${
                 LOCK_MS / 60_000
               }m after ${LOCK_AFTER} failed logins`,
@@ -452,7 +453,7 @@ export function openUserStore(
         // a user store without it silently rotates a password while the old
         // sessions keep working — the exact bug this consolidation fixed — so
         // say so at the moment it happens rather than leaving it to a report.
-        console.warn(
+        log.warn(
           `[aio] auth: password changed for id=${id} but this user store has ` +
             `no session store bound — ${_liveSessionsFor(id)} session(s) ` +
             `SURVIVE the change. Open it as ` +
@@ -506,7 +507,7 @@ export function openUserStore(
       const sess = opts?.sessions?.();
       if (sess) sess.revokeUser(id);
       else if (_liveSessionsFor(id) > 0) {
-        console.warn(
+        log.warn(
           `[aio] auth: user id=${id} removed but this user store has no ` +
             `session store bound — ${
               _liveSessionsFor(id)
