@@ -19,7 +19,7 @@
 import type { AioUser } from "./aio-types.ts";
 import type { Access } from "../state/cell-types.ts";
 import { serializeReturn } from "../protocol/return-value.ts";
-import { log } from "../diagnostics/logger.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 // deno-lint-ignore no-explicit-any
 type FnMap = Record<string, (...args: any[]) => any>;
@@ -118,7 +118,7 @@ export async function invokeServerFn(
   user?: AioUser,
 ): Promise<{ ok: true; value: unknown } | { ok: false; error: string }> {
   if (!serverFnAllowed(ns, user, name, args)) {
-    console.warn(
+    log.warn(
       `[aio] auth: serverFn "${ns}.${name}" denied for ${
         user ? `user=${user.id} role=${user.role}` : "anonymous client"
       }`,

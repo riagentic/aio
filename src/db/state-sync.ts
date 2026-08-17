@@ -11,13 +11,15 @@ import {
   type TableDef,
 } from "../server/sql.ts";
 
+import { log } from "../diagnostics/logger-api.ts";
+
 /** One report per offending fact, for the whole process — a persist runs every
  *  debounce window and the same row shape would otherwise be named on each. */
 const _reported = new Set<string>();
 function reportOnce(key: string, msg: string): void {
   if (_reported.has(key)) return;
   _reported.add(key);
-  console.warn(`[aio:db] ${msg}`);
+  log.warn("db", `${msg}`);
 }
 
 /** Test-only reset of the once-per-process report set. */

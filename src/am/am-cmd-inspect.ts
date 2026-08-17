@@ -696,7 +696,9 @@ export async function cmdSurface(
     );
     if (headless.ok) {
       if (mode !== "json") {
-        console.error("(no client connected — server-side render)");
+        console.error(
+          "note: no client connected — this is a server-side render",
+        );
       }
       result = headless;
       headlessRender = true;

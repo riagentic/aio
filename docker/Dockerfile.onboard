@@ -1,0 +1,106 @@
+# The onboarding lab — a stranger's machine, on purpose.
+#
+# Every "onboarding" test we had ran on a box that already had deno, git, a warm
+# module cache and the framework checked out; `AIO_HOME` pointed at the local
+# clone, so `install.sh`'s first-contact branch was NEVER taken. They passed for
+# months while the real one-liner failed on a fresh machine — which is the only
+# machine that matters, because it is the one a new developer has.
+#
+# So this image is deliberately POOR:
+#   • ubuntu:24.04, nothing but ca-certificates, curl and git;
+#   • NO unzip, NO tar extras, NO build-essential — if our installer needs a
+#     tool, it has to say so instead of failing inside someone else's script;
+#   • NO deno (or a deliberately OLD one — see PREINSTALL_DENO);
+#   • a NON-ROOT user, because root hides every PATH and permission bug: as
+#     root, `$HOME/.deno/bin` problems and world-writable temp dirs go unnoticed.
+#
+# Build:
+#   docker build -f docker/Dockerfile.onboard -t aio-lab:fresh docker
+#   docker build -f docker/Dockerfile.onboard -t aio-lab:old-deno \
+#     --build-arg PREINSTALL_DENO=2.1.4 docker
+#   docker build -f docker/Dockerfile.onboard -t aio-lab:browser \
+#     --build-arg WITH_BROWSER=1 docker
+#
+# `scripts/lab.ts` drives all of this — you should not need these by hand.
+
+FROM ubuntu:24.04
+
+# The bare minimum a human would have. `curl` and `git` are the two things our
+# one-liner instructions already assume ("curl … | sh"); everything else is the
+# installer's problem to solve or to report.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+     ca-certificates curl git \
+  && rm -rf /var/lib/apt/lists/*
+
+# A real browser, only for the UI tier (~400MB). Google's .deb rather than
+# Ubuntu's `chromium` package: the latter is a snap shim on 24.04 and snapd does
+# not run in a container — the kind of detail that makes a "works on Ubuntu"
+# claim false in exactly the environment people deploy to.
+ARG WITH_BROWSER=0
+RUN if [ "$WITH_BROWSER" = "1" ]; then \
+      apt-get update \
+      && curl -fsSL -o /tmp/chrome.deb \
+         https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
+      && apt-get install -y --no-install-recommends /tmp/chrome.deb \
+      && rm -f /tmp/chrome.deb \
+      && rm -rf /var/lib/apt/lists/*; \
+    fi
+
+# A DESKTOP, virtually. Electron is aio's default client, so "the one-line
+# command works" is a claim about a machine with a display — and every lab run
+# so far was headless, which is why an Electron failure could hide from it.
+# Xvfb is a real X server writing to memory: the app opens a real window, real
+# Chromium renders it, and nothing needs a monitor.
+#
+# NOTE what is deliberately NOT installed here: node. Deno users routinely do
+# not have it, and `node_modules/.bin/electron` is a node shim — so this image
+# is what proves aio launches Electron without one.
+ARG WITH_ELECTRON=0
+RUN if [ "$WITH_ELECTRON" = "1" ]; then \
+      apt-get update && apt-get install -y --no-install-recommends \
+        xvfb x11-utils file dbus dbus-x11 libgtk-3-0 libnss3 libasound2t64 libgbm1 libxss1 libxtst6 \
+        libatk-bridge2.0-0 libdrm2 libxkbcommon0 libxdamage1 libxfixes3 \
+        libxrandr2 libpango-1.0-0 libcairo2 fonts-liberation \
+      && rm -rf /var/lib/apt/lists/*; \
+    fi
+
+# Non-root, with a real home — the shape of an actual developer account.
+RUN useradd --create-home --shell /bin/bash aio
+
+# An OLD deno, to exercise the upgrade path rather than the install path.
+# `PREINSTALL_DENO=2.1.4` is the scenario a user reported: deno present, deno
+# too old, the installer says "✓ deno 2.1.4" and everything downstream fails
+# with a message about something else entirely.
+#
+# Seeding it needs `unzip` — deno's own installer requires it, which is the
+# very blocker this image exists to expose — so unzip is installed for this
+# step and PURGED afterwards. The image under test still has none, and the
+# only deno on it is the old one.
+ARG PREINSTALL_DENO=none
+RUN if [ "$PREINSTALL_DENO" != "none" ]; then \
+      apt-get update && apt-get install -y --no-install-recommends unzip \
+      && su aio -c "curl -fsSL https://deno.land/install.sh | sh -s -- -y --no-modify-path 'v$PREINSTALL_DENO' >/dev/null" \
+      && su aio -c "/home/aio/.deno/bin/deno --version | head -1" \
+      && apt-get purge -y unzip && apt-get autoremove -y \
+      && rm -rf /var/lib/apt/lists/*; \
+    fi
+
+USER aio
+WORKDIR /home/aio
+ENV HOME=/home/aio
+
+# The framework is bind-mounted from the host, so it belongs to a different uid
+# than this user, and git refuses to touch a repository it thinks is someone
+# else's. `safe.directory` is deliberately ignored when it comes from `-c` or
+# the environment (that is a security property of git, not an oversight), so it
+# has to live in a config FILE. Lab-only: a real install clones over https from
+# GitHub and never meets this.
+RUN git config --global --add safe.directory '*'
+
+# NOT on PATH by default: the installer must handle its own PATH story, which is
+# half of what "one line" promises.
+ENV PATH=/usr/local/bin:/usr/bin:/bin
+
+# Scenarios are mounted at /lab by the runner, the framework at /aio-src.
+CMD ["/bin/bash"]

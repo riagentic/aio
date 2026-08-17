@@ -42,7 +42,7 @@ import {
   type ServerRequest,
 } from "./auth-context.ts";
 import { _setCallTimeouts, registerCall } from "../state/cell-impl.ts";
-import { log } from "../diagnostics/logger.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 /** The cell name this worker hosts, or null when this isn't a cell worker. */
 export function hostedCellName(): string | null {

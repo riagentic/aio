@@ -88,6 +88,51 @@ says so in `app.log`. `--no-backup-logs` restores the old wipe-on-start.
 `stdout.log` rotates too — done by `am` just before it spawns the app, because
 the shell redirect that writes it holds the fd for the life of the run.
 
+## The program vs its data
+
+`run.sh` installs a built app into a directory you can open, and keeps its data
+where the app itself writes:
+
+```
+~/app/<name>/versions/<version>/<name>.AppImage   the artifact
+~/app/<name>/<name>.AppImage → that               the stable name
+~/app/<name>/<name>.svg                           its icon
+~/.local/share/applications/<name>.desktop
+~/.<appId>/                                       ← everything the app OWNS
+```
+
+The VERSION is the directory and the file keeps the app's name, deliberately: a
+deno-compiled binary derives its identity from its own file name at runtime, so
+installing it as `<name>-<version>` renamed the app — it wrote to
+`~/.<name>-<version>/`, and the next version started from empty state while the
+real data sat in the previous directory. `mv app app.bak` is the same trap. A
+compiled aio app now takes its id from the deno.json embedded in the binary, so
+its data survives being renamed at all.
+
+The split is the contract. `am remove <name>` deletes the first group and keeps
+`~/.<appId>/`, saying so; `am remove <name> --data` deletes both, and nothing
+implies it. An update writes a NEW versioned file beside the old one and
+re-points the stable symlink — so the previous version is the rollback, and a
+launcher pointing at the stable name never breaks.
+
+```
+~/app/<name>/installed.json     where it came from: repo, commit, version,
+                                target, the aio version it built against
+```
+
+That record is what makes the directory more than files. `am installed` reports
+version and source; `am upgrade <name>` rebuilds from that source (cloning a
+repo, or building a local checkout in place); and installing a DIFFERENT repo
+under a name that is already taken is refused rather than silently overwriting a
+program that shares `~/.<appId>/` with it.
+
+Old versions are the rollback, bounded: the newest three are kept
+(`AIO_KEEP_VERSIONS`), oldest pruned first, and the one the stable symlink
+points at is never removed. Without that bound, one ~156 MB artifact per update
+accumulates forever — the same shape as a log directory with no ceiling.
+
+`AIO_INSTALL_ROOT` moves the install root; `am installed` lists what is there.
+
 ## Secrets in recorded actions
 
 An action's payload is its arguments. `vault.unlockWith(passphrase)` therefore

@@ -2,6 +2,7 @@
 // Client-side rAF-based measurement. Replaces RenderProbe (setTimeout drift).
 // Single rAF loop: coalesced notification + 4 metrics + gauge output.
 
+import { log } from "../diagnostics/logger-api.ts";
 import type { Gauge, VitalStatus } from "./types.ts";
 
 // ─── Config & API Types ─────────────────────────────────────────────────────
@@ -264,7 +265,7 @@ export function createRenderMeter(config: RenderMeterConfig): RenderMeterAPI {
       try {
         tick(performance.now());
       } catch (e) {
-        console.error("[aio:render-meter] tick error:", e); // AIO-151
+        log.error("vitals", `tick error: ${e}`); // AIO-151
       }
       scheduleLoop();
     });

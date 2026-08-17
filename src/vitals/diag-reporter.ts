@@ -1,3 +1,8 @@
+import { log } from "../diagnostics/logger-api.ts";
+
+/** The logger prints its own category, so the inline `[aio:vitals]` tag would
+ *  be said twice. */
+const stripTag = (s: string) => s.replace(/^\[aio:vitals\]\s*/, "");
 import type { DiagEvent, VitalAlert } from "./types.ts";
 import { formatDiagEvent } from "./diag-formatter.ts";
 
@@ -26,7 +31,7 @@ export type TransportSnapshot = {
 /** Configuration for the server-side diagnostic reporter — snapshot providers and output hooks. */
 export type ServerDiagReporterConfig = {
   onDiagnostic?: (event: DiagEvent) => void;
-  onConsole?: (lines: string[]) => void; // override for testing; defaults to console.warn
+  onConsole?: (lines: string[]) => void; // override for testing; defaults to the framework logger at warn
   getLoopSnapshot: () => LoopSnapshot;
   getTransportSnapshot: () => TransportSnapshot;
 };
@@ -36,13 +41,16 @@ export function createServerDiagReporter(config: ServerDiagReporterConfig) {
   const lastStatus = new Map<string, DiagEvent["kind"]>();
   const lastConsoleEmit = new Map<string, number>();
 
-  const log = config.onConsole ?? ((lines: string[]) => {
+  // Named `emitLines`, not `log`: the local emitter used to be called `log`
+  // and now the framework logger is in scope under that name — one of them
+  // would silently win.
+  const emitLines = config.onConsole ?? ((lines: string[]) => {
     if (lines.length === 1) {
-      console.warn(lines[0]);
+      log.warn("vitals", stripTag(lines[0] ?? ""));
     } else {
-      console.group(lines[0]);
-      for (let i = 1; i < lines.length; i++) console.warn(lines[i]);
-      console.groupEnd();
+      log.warn("vitals", stripTag(lines[0] ?? ""), {
+        detail: lines.slice(1).map((l) => l.trim()).join(" · "),
+      });
     }
   });
 
@@ -171,7 +179,7 @@ export function createServerDiagReporter(config: ServerDiagReporterConfig) {
       try {
         config.onDiagnostic?.(event);
       } catch (e) {
-        console.error(`[aio:vitals] onDiagnostic hook threw — ${e}`);
+        log.error("vitals", `onDiagnostic hook threw — ${e}`);
       }
 
       // Console throttling
@@ -180,7 +188,7 @@ export function createServerDiagReporter(config: ServerDiagReporterConfig) {
       const lastEmit = lastConsoleEmit.get(throttleKey) ?? 0;
       if (now - lastEmit >= THROTTLE_MS) {
         lastConsoleEmit.set(throttleKey, now);
-        log(formatDiagEvent(event));
+        emitLines(formatDiagEvent(event));
       }
     },
     /** Expose for testing */

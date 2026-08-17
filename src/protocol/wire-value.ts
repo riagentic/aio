@@ -1,3 +1,5 @@
+import { log } from "../diagnostics/logger-api.ts";
+
 // wire-value.ts — what JSON does to a value on the way across the wire.
 //
 // THE decider for one fact: "did this value survive the trip, and if not, what
@@ -175,7 +177,7 @@ export function serializeArgs(
   const lossy: LossyConversion[] = [];
   findLossy(args, round, "args", lossy, { n: 0 });
   if (lossy.length > 0) {
-    console.warn(
+    log.warn(
       `[aio] ${what ?? "a call"} was called with arguments JSON cannot carry ` +
         `intact — the server receives DIFFERENT values than the caller ` +
         `passed:\n${formatLossy(lossy)}\nPass JSON-safe data across the wire ` +

@@ -2,6 +2,7 @@
 // non-top-level filter keys are silent no-ops; secret-looking exposed fields
 // are likely leaks. Both must warn loudly at compose time.
 import { assert, assertEquals, assertThrows } from "@std/assert";
+import { captureConsole } from "./console-capture.ts";
 import { cell } from "../src/state/cell-create.ts";
 import { composeCellsWiring } from "../src/server/aio-composition.ts";
 import { setLogger } from "../src/diagnostics/logger-api.ts";
@@ -11,14 +12,9 @@ type AnyEntry = Parameters<typeof composeCellsWiring>[0]["cellEntries"];
 
 function warningsFor(entries: AnyEntry): string[] {
   setLogger(null); // force console fallback so we can capture
-  const out: string[] = [];
-  const orig = console.log;
-  console.log = (...a: unknown[]) => out.push(a.map(String).join(" "));
-  try {
+  const out = captureConsole(() => {
     composeCellsWiring({ cellEntries: entries });
-  } finally {
-    console.log = orig;
-  }
+  });
   return out.filter((l) => l.includes("WARN") && l.includes("visibility"));
 }
 

@@ -13,7 +13,7 @@
 // before verifying is not. Backing up after migrating is useless. Handing over
 // before writing the pending marker loses the ability to roll back.
 import { join } from "@std/path";
-import type { Log } from "../diagnostics/logger.ts";
+import type { Log } from "../diagnostics/logger-api.ts";
 import {
   type ShipExpectations,
   type ShipManifest,
@@ -352,6 +352,10 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       current,
       staged,
       fromVersion: deps.appVersion,
+      // Names the new file when this app was installed by `run.sh`
+      // (~/app/<name>/<name>-<version>) — without it the swap would flatten
+      // that layout into a single file and lose every earlier version.
+      toVersion: m.version,
     });
     await pruneOld(current, KEEP_OLD);
 
@@ -421,6 +425,7 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
         current,
         staged,
         fromVersion: deps.appVersion,
+        toVersion: built.sha.slice(0, 8),
       });
       await pruneOld(current, KEEP_OLD);
 

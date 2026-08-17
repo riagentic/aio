@@ -16,35 +16,50 @@ AIO_BRANCH="${AIO_BRANCH:-main}"
 bold="\033[1m"; dim="\033[2m"; cyan="\033[36m"; green="\033[32m"; red="\033[31m"; reset="\033[0m"
 info() { printf "${cyan}▸${reset} %s\n" "$1"; }
 ok()   { printf "${green}✓${reset} %s\n" "$1"; }
+warn() { printf "${red}!${reset} %s\n" "$1" >&2; }
 fail() { printf "${red}✗${reset} %s\n" "$1" >&2; exit 1; }
 
-# ── Deno (am runs on Deno) ──
-if command -v deno >/dev/null 2>&1; then
-  ok "deno $(deno --version | head -1 | awk '{print $2}')"
-else
-  info "deno not found — installing..."
-  curl -fsSL https://deno.land/install.sh | sh -s -- -y >/dev/null 2>&1 || \
-    curl -fsSL https://deno.land/install.sh | sh
-  export DENO_INSTALL="${DENO_INSTALL:-$HOME/.deno}"
-  export PATH="$DENO_INSTALL/bin:$PATH"
-  command -v deno >/dev/null 2>&1 \
-    && ok "deno installed: $(deno --version | head -1 | awk '{print $2}')" \
-    || fail "deno install failed — see https://docs.deno.com/runtime/getting_started/installation/"
-fi
+# ── Tools this script itself needs ───────────────────────────────────────
+# Checked TOGETHER and UP FRONT: finding out about a missing `git` after the
+# deno download is a worse experience than being told both at once, and
+# discovering it inside someone else's script is worse still.
+missing=""
+for t in git curl; do
+  command -v "$t" >/dev/null 2>&1 || missing="$missing $t"
+done
+[ -z "$missing" ] || fail "missing required tool(s):$missing — install them and re-run (Debian/Ubuntu: sudo apt install -y$missing)"
 
-command -v git >/dev/null 2>&1 || fail "git is required — install git and re-run"
-
-# ── Clone / update aio, then check out the LAST TAGGED release ──
-# (full clone so tags + history are present; users get the last release, not
-# whatever WIP happens to be on the branch tip)
+# ── Clone / update aio FIRST ─────────────────────────────────────────────
+# Before deno, on purpose: the clone needs only git, and it carries the ONE
+# authoritative statement of which deno version this framework requires
+# (src/server/deno-version.ts). Checking deno first meant hardcoding that
+# number here — a second decider that would go stale the first time it moved.
 if [ -d "$AIO_HOME/.git" ]; then
   info "updating aio in $AIO_HOME"
-  git -C "$AIO_HOME" fetch --tags --force -q origin "$AIO_BRANCH" >/dev/null 2>&1
+  git -C "$AIO_HOME" fetch --tags --force -q origin "$AIO_BRANCH" >/dev/null 2>&1 || \
+    warn "could not fetch updates — continuing with the checkout that is there"
 else
   info "cloning aio → $AIO_HOME"
-  git clone -q "$AIO_REPO" "$AIO_HOME" >/dev/null 2>&1 \
-    || fail "git clone failed — check network / $AIO_REPO"
+  # git's OWN reason, not our guess at it. This used to swallow stderr and say
+  # "check network", which is one of a dozen causes — a proxy, a missing CA
+  # bundle, no disk, an ownership guard, a private repo. Reporting the wrong
+  # cause confidently is worse than reporting none.
+  _clone_err=$(git clone -q "$AIO_REPO" "$AIO_HOME" 2>&1) \
+    || fail "git clone failed for $AIO_REPO:
+${_clone_err:-(git said nothing)}"
 fi
+# An explicit ref wins over everything: `AIO_REF=v1.0.0-alpha57` pins a release,
+# `AIO_REF=main` follows the tip, `AIO_REF=<sha>` reproduces a report exactly.
+# The onboarding lab needs it too — without it the lab could only ever test the
+# last TAG, so a fix could not be verified until after it shipped.
+if [ -n "${AIO_REF:-}" ]; then
+  git -C "$AIO_HOME" fetch -q --tags --force origin "$AIO_REF" 2>/dev/null || :
+  git -C "$AIO_HOME" checkout -q --force "$AIO_REF" 2>/dev/null \
+    || git -C "$AIO_HOME" checkout -q --force "origin/$AIO_REF" 2>/dev/null \
+    || fail "AIO_REF=$AIO_REF is not a ref in $AIO_REPO"
+  ok "aio $AIO_REF (pinned via AIO_REF)"
+  AIO_TAG=""
+else
 # Latest tag reachable from the branch (ancestry-based — robust to version naming).
 AIO_TAG=$(git -C "$AIO_HOME" describe --tags --abbrev=0 "origin/$AIO_BRANCH" 2>/dev/null \
   || git -C "$AIO_HOME" tag -l 'v*' --sort=-creatordate | head -1)
@@ -55,18 +70,240 @@ else
   git -C "$AIO_HOME" checkout -q --force "$AIO_BRANCH" 2>/dev/null
   ok "aio $AIO_BRANCH (no tags yet)"
 fi
+fi
 
-# ── Install am from the clone (its deno.json supplies the import map) ──
-info "installing am..."
-deno install -gAf --config "$AIO_HOME/deno.json" -n am "$AIO_HOME/src/am.ts"
+# ── Deno, at a version this framework can actually run on ────────────────
+# The old version of this block asked ONE question — "is there a deno?" — and a
+# machine with deno 2.1 sailed through with a green "✓ deno 2.1.4". Everything
+# afterwards then failed somewhere else, describing something else, and the
+# person had no way to connect it to the version. That was the single worst bug
+# in the onboarding path, and it is why this compares.
+MIN_DENO=$(sed -n 's/.*MIN_DENO = "\([^"]*\)".*/\1/p' \
+  "$AIO_HOME/src/server/deno-version.ts" 2>/dev/null | head -1)
+[ -n "$MIN_DENO" ] || MIN_DENO="2.9.0"   # clone unreadable: still refuse to guess low
 
 export DENO_INSTALL="${DENO_INSTALL:-$HOME/.deno}"
-export PATH="$DENO_INSTALL/bin:$PATH"
-if command -v am >/dev/null 2>&1; then
-  ok "am installed: $(am version 2>/dev/null || echo am)"
+export PATH="$DENO_INSTALL/bin:$HOME/.deno/bin:$PATH"
+
+deno_version() { deno --version 2>/dev/null | head -1 | awk '{print $2}'; }
+
+# Numeric, field by field. A string compare says "2.10.0" < "2.9.0", which is
+# the classic way a version gate lets exactly the wrong build through; `sort -V`
+# is GNU-only and not on every minimal image.
+version_ge() { # version_ge HAVE WANT
+  h="${1%%[-+]*}"; w="${2%%[-+]*}"
+  h_maj="${h%%.*}"; h_r="${h#*.}"; h_min="${h_r%%.*}"; h_pat="${h_r#*.}"
+  w_maj="${w%%.*}"; w_r="${w#*.}"; w_min="${w_r%%.*}"; w_pat="${w_r#*.}"
+  case "$h_maj$h_min$h_pat$w_maj$w_min$w_pat" in *[!0-9]*) return 1 ;; esac
+  [ "$h_maj" -ne "$w_maj" ] && { [ "$h_maj" -gt "$w_maj" ]; return; }
+  [ "$h_min" -ne "$w_min" ] && { [ "$h_min" -gt "$w_min" ]; return; }
+  [ "$h_pat" -ge "$w_pat" ]
+}
+
+# Which deno build this machine needs. `uname` is on every POSIX box; getting
+# this wrong downloads a working binary for the wrong CPU, so an unknown pair
+# is refused rather than guessed.
+deno_target() {
+  case "$(uname -s)" in
+    Linux)  _os=unknown-linux-gnu ;;
+    Darwin) _os=apple-darwin ;;
+    *)      return 1 ;;
+  esac
+  case "$(uname -m)" in
+    x86_64|amd64)  _arch=x86_64 ;;
+    aarch64|arm64) _arch=aarch64 ;;
+    *)             return 1 ;;
+  esac
+  echo "${_arch}-${_os}"
+}
+
+# Install deno WITHOUT unzip.
+#
+# Deno is published only as a .zip, its installer needs `unzip` or `7z`, and a
+# fresh Ubuntu has NEITHER — so the one-line installer died inside someone
+# else's script on the most common Linux there is. Telling the user to
+# `apt install unzip` is honest but it is still a broken first minute, and
+# "install this other thing first" is exactly the friction a one-liner exists
+# to remove.
+#
+# A bare ubuntu:24.04 does have perl, and perl can inflate a zip member. So
+# when there is no unzip we do the whole thing ourselves: download the release
+# asset, VERIFY ITS SHA256 (which the official installer does not do), extract
+# the single `deno` member, and install it. `sha256sum` is coreutils, always
+# there; if perl is missing too, we say precisely what to install.
+install_deno_no_unzip() {
+  _target=$(deno_target) || return 1
+  command -v perl >/dev/null 2>&1 || return 1
+  perl -MIO::Uncompress::Unzip -e 1 >/dev/null 2>&1 || return 1
+
+  _base="https://github.com/denoland/deno/releases/latest/download"
+  _tmp="${TMPDIR:-/tmp}/aio-deno.$$"
+  mkdir -p "$_tmp" || return 1
+  info "downloading deno ($_target) — no unzip on this machine, using perl"
+  curl -fsSL -o "$_tmp/deno.zip" "$_base/deno-$_target.zip" || { rm -rf "$_tmp"; return 1; }
+
+  # The checksum is published beside the asset. Verifying it costs one request
+  # and turns "we downloaded something" into "we downloaded the right thing".
+  if curl -fsSL -o "$_tmp/deno.sha256" "$_base/deno-$_target.zip.sha256sum" 2>/dev/null \
+     && command -v sha256sum >/dev/null 2>&1; then
+    _want=$(awk '{print $1}' "$_tmp/deno.sha256" | head -1)
+    _have=$(sha256sum "$_tmp/deno.zip" | awk '{print $1}')
+    if [ -n "$_want" ] && [ "$_want" != "$_have" ]; then
+      rm -rf "$_tmp"
+      fail "the deno download did not match its published checksum — refusing to install it (expected $_want, got $_have)"
+    fi
+  fi
+
+  mkdir -p "$DENO_INSTALL/bin" || { rm -rf "$_tmp"; return 1; }
+  perl -MIO::Uncompress::Unzip=unzip -e '
+    unzip $ARGV[0] => $ARGV[1], Name => "deno"
+      or die "could not extract deno from the archive: $IO::Uncompress::Unzip::UnzipError\n";
+  ' "$_tmp/deno.zip" "$DENO_INSTALL/bin/deno" || { rm -rf "$_tmp"; return 1; }
+  chmod +x "$DENO_INSTALL/bin/deno" || { rm -rf "$_tmp"; return 1; }
+  rm -rf "$_tmp"
+  export PATH="$DENO_INSTALL/bin:$PATH"
+  hash -r 2>/dev/null || :
+  [ -x "$DENO_INSTALL/bin/deno" ] && deno --version >/dev/null 2>&1
+}
+
+install_deno() {
+  # The official installer first — it is the canonical path and handles its own
+  # future changes. It needs unzip/7z, which is exactly what we may not have.
+  if command -v unzip >/dev/null 2>&1 || command -v 7z >/dev/null 2>&1 \
+     || command -v 7zz >/dev/null 2>&1; then
+    curl -fsSL https://deno.land/install.sh | sh -s -- -y >/dev/null 2>&1 || \
+      curl -fsSL https://deno.land/install.sh | sh -s -- -y || return 1
+    export PATH="$DENO_INSTALL/bin:$PATH"
+    hash -r 2>/dev/null || :
+    return 0
+  fi
+  install_deno_no_unzip && return 0
+  fail "cannot install deno on this machine: it has no unzip/7z (deno ships as a .zip) and no perl to stand in for one.
+  Debian/Ubuntu:  sudo apt install -y unzip
+  Fedora/RHEL:    sudo dnf install -y unzip
+  Alpine:         sudo apk add unzip
+Then re-run this installer."
+}
+
+if ! command -v deno >/dev/null 2>&1; then
+  info "deno not found — installing (aio needs $MIN_DENO+)"
+  install_deno || fail "deno install failed — see https://docs.deno.com/runtime/getting_started/installation/"
+  ok "deno $(deno_version) installed"
+elif version_ge "$(deno_version)" "$MIN_DENO"; then
+  ok "deno $(deno_version)"
 else
-  ok "am installed to $DENO_INSTALL/bin"
-  printf "${dim}  add it to PATH:${reset} export PATH=\"\$HOME/.deno/bin:\$PATH\"\n"
+  HAVE=$(deno_version)
+  DENO_BIN=$(command -v deno)
+  info "deno $HAVE is older than the $MIN_DENO aio requires — upgrading"
+  # `deno upgrade` only works on a deno that OWNS its binary. A version from
+  # apt/snap/brew cannot rewrite itself, and its failure message talks about
+  # permissions rather than about what to do — so on any failure we install a
+  # private deno under $DENO_INSTALL and put it first on PATH. Two attempts,
+  # then a refusal that names the exact command; never a silent "close enough".
+  if deno upgrade >/dev/null 2>&1 && version_ge "$(deno_version)" "$MIN_DENO"; then
+    ok "deno upgraded to $(deno_version)"
+  else
+    info "that deno cannot upgrade itself ($DENO_BIN) — installing a private one in $DENO_INSTALL"
+    install_deno || :
+    hash -r 2>/dev/null || :
+    if version_ge "$(deno_version)" "$MIN_DENO"; then
+      ok "deno $(deno_version) (from $DENO_INSTALL/bin, ahead of $DENO_BIN on PATH)"
+      warn "the system deno at $DENO_BIN is still $HAVE — remove it, or keep $DENO_INSTALL/bin first on PATH"
+    else
+      fail "aio needs deno $MIN_DENO+ and this box has $HAVE, which could not be upgraded.
+  Fix it with ONE of:
+    deno upgrade                                   (if you installed deno yourself)
+    curl -fsSL https://deno.land/install.sh | sh   (installs into ~/.deno)
+    sudo snap refresh deno / brew upgrade deno     (if a package manager owns it)
+  Then re-run this installer."
+    fi
+  fi
+fi
+
+# ── Install am from the clone (its deno.json supplies the import map) ────
+info "installing am..."
+deno install -gAf --config "$AIO_HOME/deno.json" -n am "$AIO_HOME/src/am.ts" \
+  || fail "installing am failed — the output above says why"
+
+export PATH="$DENO_INSTALL/bin:$PATH"
+hash -r 2>/dev/null || :
+
+AM_BIN="$DENO_INSTALL/bin/am"
+[ -x "$AM_BIN" ] || AM_BIN=$(command -v am 2>/dev/null || echo "$DENO_INSTALL/bin/am")
+
+# `deno install` writes a shim whose body is `exec deno run …` — deno BY NAME.
+# So `am` works only where `deno` is already on PATH, and when it isn't the
+# failure is `am: 3: exec: deno: not found`: a message about deno, printed by a
+# script the user did not write, when they typed `am`. Pinning the interpreter
+# to the absolute path we just verified makes `am` independent of PATH — which
+# matters most in exactly the situation this installer creates, where deno was
+# installed seconds ago into a directory the current shell has never heard of.
+DENO_BIN_ABS=$(command -v deno 2>/dev/null || true)
+if [ -n "$DENO_BIN_ABS" ] && [ -f "$AM_BIN" ] && grep -q '^exec deno ' "$AM_BIN" 2>/dev/null; then
+  _tmp="$AM_BIN.aio-tmp.$$"
+  if sed "s|^exec deno |exec \"$DENO_BIN_ABS\" |" "$AM_BIN" > "$_tmp" 2>/dev/null; then
+    chmod +x "$_tmp" 2>/dev/null || :
+    mv -f "$_tmp" "$AM_BIN" 2>/dev/null || rm -f "$_tmp"
+  else
+    rm -f "$_tmp"
+  fi
+fi
+
+# ── PATH, made true rather than suggested ────────────────────────────────
+# The old script printed "add it to PATH: …" and exited 0. That is a one-line
+# instruction attached to a one-line installer, and it is the difference
+# between "aio is installed" and "aio is installed IF you also do this". The
+# next terminal has to work, so this writes the line itself — idempotently,
+# in a marked block, in every profile the shell might read.
+persist_path() {
+  _line='export PATH="$HOME/.deno/bin:$PATH"  # aio'
+  for rc in "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc"; do
+    # .profile is created if absent (login shells read it); the others are
+    # only touched when they already exist — writing a .zshrc onto a machine
+    # with no zsh is the kind of helpfulness nobody asked for.
+    [ "$rc" = "$HOME/.profile" ] || [ -f "$rc" ] || continue
+    if [ -f "$rc" ] && grep -qF '.deno/bin' "$rc" 2>/dev/null; then continue; fi
+    printf '\n%s\n' "$_line" >> "$rc" 2>/dev/null || :
+    _persisted="${_persisted:-}$rc "
+  done
+}
+persist_path
+
+# An installed file is not an installed TOOL. This used to accept `am version`
+# failing (`|| echo am`), so a broken install printed a cheerful line and the
+# next command was the one that told the truth.
+# `am version`, not `am --version`: this installer is fetched from the BRANCH
+# while the framework it installs is the last TAG, so the two are never
+# guaranteed to be the same age. Verifying with a spelling that only exists on
+# the newer side makes the published one-liner fail against the release it just
+# installed — which is the exact drift this check is supposed to catch, aimed
+# at the wrong target. `am version` has existed the whole time.
+am_says_version() { # am_says_version <cmd…>
+  "$@" version 2>/dev/null | head -1 || return 1
+}
+AM_VERSION=""
+if command -v am >/dev/null 2>&1; then
+  AM_VERSION=$(am_says_version am) || AM_VERSION=""
+fi
+if [ -z "$AM_VERSION" ] && [ -x "$AM_BIN" ]; then
+  AM_VERSION=$(am_says_version "$AM_BIN") || AM_VERSION=""
+fi
+if [ -n "$AM_VERSION" ]; then
+  ok "am installed: $AM_VERSION"
+else
+  [ -x "$AM_BIN" ] || fail "am did not install — expected $AM_BIN"
+  fail "am is installed at $AM_BIN but does not run:
+$("$AM_BIN" version 2>&1 | head -3)"
+fi
+
+# …and it has to work in the shell the user opens NEXT, not just in this one.
+# `sh -lc` is the login shell that reads ~/.profile — the check that would have
+# caught "works in the installer, missing in the terminal".
+if sh -lc 'command -v am >/dev/null 2>&1 && am version >/dev/null 2>&1' 2>/dev/null; then
+  ok "am works in a new shell too"
+else
+  warn "am works now, but a NEW terminal may not find it${_persisted:+ (added PATH to: ${_persisted})}"
+  printf "${bold}  This shell:${reset} export PATH=\"\$HOME/.deno/bin:\$PATH\"\n"
 fi
 
 printf "\n${bold}Next:${reset}\n"

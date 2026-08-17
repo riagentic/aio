@@ -7,6 +7,7 @@
 // 3. dispatch-after-close warns once per action type (shutdown used to spam
 //    hundreds of identical lines).
 import { assert, assertEquals, assertThrows } from "@std/assert";
+import { captureConsole } from "./console-capture.ts";
 import { Window } from "happy-dom";
 import { cell } from "../src/state/cell-create.ts";
 import { composeCells } from "../src/state/cell-compose.ts";
@@ -26,17 +27,9 @@ const counter = cell("flc-counter", {
 });
 
 function captureLogs(fn: () => void): string[] {
-  // log.warn without an active file logger falls back to printConsole →
-  // console.log; capture that.
-  const lines: string[] = [];
-  const orig = console.log;
-  console.log = (...a: unknown[]) => lines.push(a.join(" "));
-  try {
-    fn();
-  } finally {
-    console.log = orig;
-  }
-  return lines;
+  // log.warn without an active file logger falls back to printConsole, which
+  // prints a warning on console.warn — capture every channel, not one.
+  return captureConsole(fn);
 }
 
 // ── 1. unregistered-cell dispatch warns ──────────────────────

@@ -104,13 +104,19 @@ export const c = cell("probe", { state: { n: 0 }, methods: { inc(s) { s.n++; } }
     cwd: dir,
     stdin: "null",
     stdout: "piped",
-    stderr: "null",
+    // BOTH streams. The blank-screen guard warns, and a warning goes to
+    // STDERR now (the level picks the stream) — a probe that reads stdout
+    // alone sees an app that said nothing and calls that a pass.
+    stderr: "piped",
   }).spawn();
 
   const logRef = { buf: "" };
+  const dec = new TextDecoder();
   (async () => {
-    const dec = new TextDecoder();
     for await (const chunk of proc.stdout) logRef.buf += dec.decode(chunk);
+  })();
+  (async () => {
+    for await (const chunk of proc.stderr) logRef.buf += dec.decode(chunk);
   })();
   await waitFor("server up", async () => {
     const res = await fetch(`http://localhost:${port}/__aio/health`);

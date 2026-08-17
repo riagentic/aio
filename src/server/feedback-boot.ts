@@ -5,7 +5,7 @@
 // listens to the diagnostic bus and writes a report when the app breaks — with
 // the same contents, the same redaction and the same caps as one somebody
 // typed, because a maintainer should not have two formats to read.
-import type { Log } from "../diagnostics/logger.ts";
+import type { Log } from "../diagnostics/logger-api.ts";
 import { diagSubscribe } from "../diagnostics/diagnostic-bus.ts";
 import type { Redactor } from "../diagnostics/redact.ts";
 // Type-only: the cell module self-registers on import, so the VALUE import

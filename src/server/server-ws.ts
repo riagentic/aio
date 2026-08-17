@@ -25,7 +25,7 @@ import {
 import { filterStateBySubs, parseSubs } from "../protocol/broadcast-utils.ts";
 import { serializeReturn } from "../protocol/return-value.ts";
 import { writeClientLog } from "./client-log.ts";
-import { log } from "../diagnostics/logger.ts";
+import { log } from "../diagnostics/logger-api.ts";
 import { parseTTCommand } from "../diagnostics/time-travel.ts";
 import { rawStateControlAllowed } from "./server-auth.ts";
 import type { ClientLogEntry } from "../air/dom-inspector-types.ts";
@@ -1030,7 +1030,7 @@ export function createWsManager(deps: WsDeps): WsManager {
     // path already did) — "a method" is not a diagnosis.
     const { value: safe, dropped } = serializeReturn(value, actionType);
     if (dropped && !deps.prod) {
-      console.warn(
+      log.warn(
         `[aio] method "${actionType}" returned a non-serializable value — ` +
           `the caller resolves with undefined. Return JSON-safe data ` +
           `(plain objects/arrays/primitives) to transport a value.`,

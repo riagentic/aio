@@ -1,8 +1,8 @@
 // CLI parsing — pure functions, no aio.ts internal dependencies
-import { log } from "../diagnostics/logger.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 /** Framework version — printed by --version, checked in tests */
-export const VERSION = "1.0.0-alpha58";
+export const VERSION = "1.0.0-alpha59";
 
 /** What `--version` prints: what this artifact IS, and what it was built with.
  *
@@ -196,7 +196,7 @@ function _parseCliUncached(args: readonly string[]): CliFlags {
         ];
         r.logBudget = Math.floor(Number(m[1]) * mult);
       } else {
-        console.warn(
+        log.warn(
           `[aio] ignoring --log-budget=${raw} — expected bytes or e.g. 200MB`,
         );
       }
@@ -241,7 +241,7 @@ function _parseCliUncached(args: readonly string[]): CliFlags {
 
 /** Prints CLI usage and exits */
 export function printHelp(): void {
-  console.log(`aio ${VERSION} — all-in-one framework
+  log.info(`aio ${VERSION} — all-in-one framework
 
 Usage: deno run -A src/app.ts [flags]
 

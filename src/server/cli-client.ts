@@ -28,6 +28,8 @@ import {
   protoHello,
 } from "../protocol/protocol-version.ts";
 
+import { log } from "../diagnostics/logger-api.ts";
+
 enablePatches();
 
 const WS_MAX_QUEUE = 100;
@@ -193,8 +195,9 @@ export function connectCli<S>(
       _noteQueued();
       return { written: false, queued: true };
     }
-    console.warn(
-      `[aio:cli] offline queue full (${WS_MAX_QUEUE}) — action "${action.type}" was NOT sent`,
+    log.warn(
+      "cli",
+      `offline queue full (${WS_MAX_QUEUE}) — action "${action.type}" was NOT sent`,
     );
     return { written: false, queued: false };
   }
@@ -207,8 +210,9 @@ export function connectCli<S>(
   function _noteQueued(): void {
     if (_queueNoted) return;
     _queueNoted = true;
-    console.warn(
-      `[aio:cli] offline — actions are queued in memory (max ${WS_MAX_QUEUE}) ` +
+    log.warn(
+      "cli",
+      `offline — actions are queued in memory (max ${WS_MAX_QUEUE}) ` +
         `and sent on reconnect; awaited calls stay pending until then, and ` +
         `close() rejects whatever is still queued`,
     );
@@ -240,7 +244,7 @@ export function connectCli<S>(
       (e) => {
         connecting = false;
         if (closed) return;
-        console.error(`[aio:cli] token() failed: ${e} — retrying`);
+        log.error("cli", `token() failed: ${e} — retrying`);
         reconnectTimer = setTimeout(connect, backoffDelay(retry));
         retry++;
       },
@@ -290,7 +294,7 @@ export function connectCli<S>(
         // The one v1 shim: a v1 server's hello/refusal is still readable.
         const v1 = v1PeerReason(raw);
         if (v1) {
-          console.error(`[aio:cli] protocol version mismatch: ${v1}`);
+          log.error("cli", `protocol version mismatch: ${v1}`);
           closed = true;
           socket.close(PROTOCOL_MISMATCH_CLOSE_CODE, "protocol mismatch");
         }
@@ -332,17 +336,16 @@ export function connectCli<S>(
           if (!theirs) return;
           const result = negotiateProtocol(protoHello(VERSION), theirs);
           if (!result.ok) {
-            console.error(
-              `[aio:cli] protocol version mismatch: ${result.reason}`,
-            );
+            log.error("cli", `protocol version mismatch: ${result.reason}`);
             closed = true; // stop the reconnect loop — retrying can't fix it
             socket.close(PROTOCOL_MISMATCH_CLOSE_CODE, "protocol mismatch");
           }
           return;
         }
         case "proto-err":
-          console.error(
-            `[aio:cli] server rejected protocol version: ${
+          log.error(
+            "cli",
+            `server rejected protocol version: ${
               (frame.d as { reason?: string } | undefined)?.reason ?? "?"
             }`,
           );
@@ -391,15 +394,17 @@ export function connectCli<S>(
         ),
       );
       if (lost > 0) {
-        console.warn(
-          `[aio:cli] connection lost with ${lost} unacked action(s) — rejected; verify via state`,
+        log.warn(
+          "cli",
+          `connection lost with ${lost} unacked action(s) — rejected; verify via state`,
         );
       }
       ws = null;
       if (closed) return;
       if (!wasConnected && retry === 2) {
-        console.error(
-          `[aio:cli] cannot reach ${wsUrl}${
+        log.error(
+          "cli",
+          `cannot reach ${wsUrl}${
             ev.code === 1008 ? ` (${ev.reason || "unauthorized"})` : ""
           } — check the server is running and the URL/token match its share link (still retrying)`,
         );
@@ -499,8 +504,9 @@ export function connectCli<S>(
       // queued calls really are dead and rejectAll (not rejectInFlight) is the
       // truthful settlement. Say how many frames went with it.
       if (queue.length > 0) {
-        console.warn(
-          `[aio:cli] closed with ${queue.length} action(s) still queued — ` +
+        log.warn(
+          "cli",
+          `closed with ${queue.length} action(s) still queued — ` +
             `they were never sent; their callers reject`,
         );
         queue.length = 0;
@@ -581,16 +587,18 @@ export function connectCliUDS<S>(
       queue.push(action);
       if (!_udsQueueNoted) {
         _udsQueueNoted = true;
-        console.warn(
-          `[aio:cli] UDS offline — actions are queued in memory (max ` +
+        log.warn(
+          "cli",
+          `UDS offline — actions are queued in memory (max ` +
             `${WS_MAX_QUEUE}) and sent on reconnect; awaited calls stay ` +
             `pending until then, and close() rejects whatever is still queued`,
         );
       }
       return { written: false, queued: true };
     }
-    console.warn(
-      `[aio:cli] UDS offline queue full (${WS_MAX_QUEUE}) — action "${action.type}" was NOT sent`,
+    log.warn(
+      "cli",
+      `UDS offline queue full (${WS_MAX_QUEUE}) — action "${action.type}" was NOT sent`,
     );
     return { written: false, queued: false };
   }
@@ -639,7 +647,7 @@ export function connectCliUDS<S>(
                   // v1 shim: a v1 server's hello/refusal is still readable.
                   const v1 = v1PeerReason(line);
                   if (v1) {
-                    console.error(`[aio:cli] protocol version mismatch: ${v1}`);
+                    log.error("cli", `protocol version mismatch: ${v1}`);
                     closed = true;
                     try {
                       c.close();
@@ -675,8 +683,9 @@ export function connectCliUDS<S>(
                       theirs,
                     );
                     if (!result.ok) {
-                      console.error(
-                        `[aio:cli] protocol version mismatch: ${result.reason}`,
+                      log.error(
+                        "cli",
+                        `protocol version mismatch: ${result.reason}`,
                       );
                       closed = true; // stop the reconnect loop
                       try {
@@ -686,8 +695,9 @@ export function connectCliUDS<S>(
                     continue;
                   }
                   case "proto-err":
-                    console.error(
-                      `[aio:cli] server rejected protocol version: ${
+                    log.error(
+                      "cli",
+                      `server rejected protocol version: ${
                         (frame.d as { reason?: string } | undefined)?.reason ??
                           "?"
                       }`,
@@ -702,9 +712,11 @@ export function connectCliUDS<S>(
                     // that kept moving. The UDS server answers `resync` with a
                     // full snapshot exactly like the WS one.
                     state = applyServerFrame(state, frame, () => {
-                      console.warn(
-                        "[aio:cli] UDS patch did not apply (desync) — " +
+                      log.warn(
+                        "cli",
+                        "UDS patch did not apply (desync) — " +
                           "requesting a full snapshot",
+                        { detail: String() },
                       );
                       writer?.write(encoder.encode(enc("resync") + "\n"))
                         .catch(() => {});
@@ -737,8 +749,9 @@ export function connectCliUDS<S>(
               ),
             );
             if (lost > 0) {
-              console.warn(
-                `[aio:cli] UDS connection lost with ${lost} unacked action(s) — rejected; verify via state`,
+              log.warn(
+                "cli",
+                `UDS connection lost with ${lost} unacked action(s) — rejected; verify via state`,
               );
             }
           }
@@ -832,8 +845,9 @@ export function connectCliUDS<S>(
       // close() discards the queue — those frames are dead, so rejectAll is
       // the truthful settlement here (see connectCli.close).
       if (queue.length > 0) {
-        console.warn(
-          `[aio:cli] UDS closed with ${queue.length} action(s) still queued — ` +
+        log.warn(
+          "cli",
+          `UDS closed with ${queue.length} action(s) still queued — ` +
             `they were never sent; their callers reject`,
         );
         queue.length = 0;

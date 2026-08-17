@@ -7,7 +7,7 @@ import {
   buildBrowserImportMap,
   readAppDenoImports,
 } from "./server-html-importmap.ts";
-import { log } from "../diagnostics/logger.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 /** Startup lint result — ok/warn/hint/fail arrays */
 export type Lint = {

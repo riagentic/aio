@@ -84,10 +84,11 @@ let _tokenInUrlWarned = false;
 function _warnTokenInUrl(): void {
   if (_tokenInUrlWarned) return;
   _tokenInUrlWarned = true;
-  console.warn(
+  log.warn(
     "[aio] security: authenticated via ?token= in the URL — tokens leak via " +
       "browser history, proxy logs, and Referer. Prefer the Authorization: " +
       "Bearer header. Query-param auth is a fallback for header-less contexts.",
+    { detail: String() },
   );
 }
 
@@ -113,7 +114,7 @@ function _warnProxyBucketCollapse(req: Request): void {
   const seen = _FORWARD_HEADERS.find((h) => req.headers.get(h) !== null);
   if (!seen) return;
   _proxyCollapseWarned = true;
-  console.warn(
+  log.warn(
     `[aio] security: request carried "${seen}" but trustProxyHeader is not ` +
       `set — this app is behind a proxy, so every client collapses into ONE ` +
       `abuse bucket (per-IP auth budget, pairing PIN, WS denylist). One ` +
@@ -241,12 +242,13 @@ export function createServer(config: ServerConfig): ServerHandle {
   // "exposed + per-user auth + no trustProxyHeader" is worth saying out loud
   // even before the first client arrives.
   if (_perUserAuth && config.expose && !config.trustProxyHeader) {
-    console.warn(
+    log.warn(
       "[aio] security: --expose with per-user auth and no trustProxyHeader. " +
         "Direct-to-internet is fine (the TCP peer IS the client), but behind " +
         "a reverse proxy every client shares ONE abuse bucket and one " +
         "attacker throttles everybody. Behind a proxy set trustProxyHeader: " +
         '"x-forwarded-for" (and have the proxy OVERWRITE that header).',
+      { detail: String() },
     );
   }
 
@@ -258,7 +260,7 @@ export function createServer(config: ServerConfig): ServerHandle {
   if (config.authFlows?.totp === false) {
     const enrolled = config.authFlows.users.list().filter((u) => u.totpEnabled);
     if (enrolled.length > 0) {
-      console.warn(
+      log.warn(
         `[aio] auth: totp: false disables ENROLLMENT only — ${enrolled.length} ` +
           `account(s) already enrolled (${
             enrolled.slice(0, 5).map((u) => u.id).join(", ")
@@ -1104,8 +1106,9 @@ export function createServer(config: ServerConfig): ServerHandle {
   let _shuttingDown = false;
   httpServer.finished.then(() => {
     if (_shuttingDown) return;
-    console.error(
+    log.error(
       "[aio] FATAL: HTTP listener died unexpectedly — exiting so a supervisor can restart (zombie-server guard)",
+      { detail: String() },
     );
     Deno.exit(1);
   });

@@ -362,8 +362,10 @@ export function initStandalone<S, A, E>(
 
   const standaloneLog = {
     debug: (_: string) => {},
-    warn: (msg: string) => console.warn(`[aio] ${msg}`),
-    error: (msg: string) => console.error(`[aio] ${msg}`),
+    // The level is in the line, not only in the console method — this output
+    // is read in a terminal transcript as often as in devtools.
+    warn: (msg: string) => console.warn(`[aio] \u26a0 ${msg}`),
+    error: (msg: string) => console.error(`[aio] \u2717 ${msg}`),
   };
 
   const dispatch = createDispatch<S, A, E>({
@@ -482,7 +484,7 @@ export function useAio<S = unknown>(): {
   const send = (action: { type: string; payload?: unknown }) => {
     if (_app) _app.dispatch(action);
     else {console.warn(
-        "[aio] not initialized — call initStandalone() before rendering",
+        "[aio] \u26a0 not initialized — call initStandalone() before rendering",
       );}
   };
 

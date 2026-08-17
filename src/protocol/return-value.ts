@@ -30,7 +30,7 @@
 // a promise outcome that contradicts what the server actually did. The
 // developer gets the exact path and conversion; the value still travels.
 
-import { log } from "../diagnostics/logger.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 // The JSON round-trip comparison itself lives in wire-value.ts — ONE walk,
 // shared with the argument guard (the other direction of the same wire).

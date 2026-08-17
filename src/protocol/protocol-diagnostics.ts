@@ -2,7 +2,7 @@
 // Diagnostics: _diagEmit, state integrity checks.
 
 import type { AioWindow } from "./protocol-types.ts";
-
+import { log } from "../diagnostics/logger-api.ts";
 export const _w = typeof window !== "undefined"
   ? window as unknown as AioWindow & typeof globalThis
   : undefined;
@@ -45,9 +45,9 @@ export function _deliverDiag(ev: Record<string, unknown>): void {
     const sev = ev.severity;
     const line = `[aio:diag] ${type} — ${ev.message ?? ""}` +
       (ev.hint ? `\n  → ${ev.hint}` : "");
-    if (sev === "error") console.error(line);
-    else if (sev === "warning") console.warn(line);
-    else console.info(line);
+    if (sev === "error") log.error(line);
+    else if (sev === "warning") log.warn(line);
+    else log.info(line);
   } catch { /* a malformed event must never break the transport */ }
 }
 

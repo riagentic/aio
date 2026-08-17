@@ -67,6 +67,12 @@ const ALLOWED: Record<string, string[]> = {
   ],
   db: [
     "server", // worker-thread SQLite host plumbing
+    // The framework LOGGER. Every folder that talks to a human needs a levelled
+    // channel; the only alternative is `console`, which is the defect this edge
+    // exists to remove — output with no level, no category and no file. Widened
+    // deliberately, and narrowly: diagnostics/logger is a leaf here, never the
+    // rest of diagnostics' machinery.
+    "diagnostics",
   ],
   // ── server may use everything except browser-only client code ──
   server: [
@@ -83,6 +89,7 @@ const ALLOWED: Record<string, string[]> = {
   electron: [
     "server", // shares the server runtime in the main process
     "protocol", // UDS transport framing (transport-shared)
+    "diagnostics", // the framework logger — see the note on `db`
   ],
   build: [
     "server", // build drives the server's compile/manifest helpers

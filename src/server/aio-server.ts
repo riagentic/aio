@@ -22,7 +22,7 @@ import type { ComposedCells } from "../state/cell.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
 import type { AppLock } from "./single-instance-lock.ts";
 import { resolveSocketPath, resolveTransport } from "./paths.ts";
-import type { Log } from "../diagnostics/logger.ts";
+import type { Log } from "../diagnostics/logger-api.ts";
 import {
   clientDegradedReport,
   degradedReport,

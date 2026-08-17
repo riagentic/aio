@@ -10,7 +10,7 @@ import {
   type Patch,
   produceWithPatches,
 } from "immer";
-import { log } from "../diagnostics/logger.ts";
+import { log } from "../diagnostics/logger-api.ts";
 import { narrowArrayPatches } from "./patch-compact.ts";
 import type { ScheduleEffect } from "./schedule.ts";
 import type { OwnEffect } from "./own.ts";

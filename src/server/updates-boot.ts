@@ -11,7 +11,7 @@
 // Splitting them is the whole reason an unattended auto-update is safe: the
 // build that just replaced another one is the thing that decides whether it
 // worked.
-import type { Log } from "../diagnostics/logger.ts";
+import type { Log } from "../diagnostics/logger-api.ts";
 import type { CheckResult } from "../state/updates-cell.ts";
 import {
   createUpdatesCell,

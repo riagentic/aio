@@ -4,6 +4,7 @@
 
 import type { DiagEvent } from "./types.ts";
 import { formatDiagEvent } from "./diag-formatter.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 const THROTTLE_MS = 2000;
 /** Above this many live throttle keys, sweep the expired ones (they are
@@ -49,14 +50,21 @@ export function createPressureMonitor(
 
   let _broadcastCount = 0;
 
-  const log = config.onConsole ?? ((lines: string[]) => {
-    if (lines.length === 1) {
-      console.warn(lines[0]);
-    } else {
-      console.group(lines[0]);
-      for (let i = 1; i < lines.length; i++) console.warn(lines[i]);
-      console.groupEnd();
-    }
+  // Through the FRAMEWORK LOGGER, not console.warn.
+  //
+  // These lines used to arrive as bare text in the middle of a timestamped,
+  // levelled log — no level, no category, no timestamp, and absent from
+  // app.log/warning.log entirely, because console output only reaches a file
+  // when something happens to be capturing stdout. A reader could not tell
+  // whether `[aio:vitals] PRESSURE — 40 broadcasts/sec` was an error to act on
+  // or a note to ignore, which is precisely what a level is for.
+  const emitLines = config.onConsole ?? ((lines: string[]) => {
+    const [head, ...rest] = lines;
+    log.warn(
+      "vitals",
+      (head ?? "").replace(/^\[aio:vitals\]\s*/, ""),
+      rest.length > 0 ? { detail: rest.join(" · ") } : undefined,
+    );
   });
 
   function emit(event: DiagEvent, throttleKey: string): void {
@@ -64,7 +72,7 @@ export function createPressureMonitor(
     try {
       config.onDiagnostic?.(event);
     } catch (e) {
-      console.error(`[aio:vitals] onDiagnostic hook threw — ${e}`);
+      log.error("vitals", `onDiagnostic hook threw — ${e}`);
     }
 
     const now = Date.now();
@@ -81,7 +89,7 @@ export function createPressureMonitor(
           if (now - at >= THROTTLE_MS) lastConsoleEmit.delete(k);
         }
       }
-      log(formatDiagEvent(event));
+      emitLines(formatDiagEvent(event));
     }
   }
 
@@ -167,26 +175,60 @@ export function createPressureMonitor(
     return Math.round(bw.totalBytes / elapsedSec);
   }
 
-  // Tumbling 1s window for rate detection
+  // Tumbling 1s window for rate detection.
+  //
+  // Reported on the EDGES — when the rate crosses the threshold, and again
+  // when it comes back down — never once per second while it stays there. A
+  // real app printed eighteen identical PRESSURE lines in a row; that is not
+  // eighteen findings, it is one condition, and a line repeated every second
+  // is how a reader learns to skim past the one that matters. The peak and the
+  // duration are carried into the recovery line, so nothing is lost by staying
+  // quiet in between.
+  let _overSince = 0;
+  let _peakRate = 0;
   const _rateTimer = setInterval(() => {
-    if (_broadcastCount >= rateThreshold) {
+    const rate = _broadcastCount;
+    _broadcastCount = 0;
+    if (rate >= rateThreshold) {
+      _peakRate = Math.max(_peakRate, rate);
+      if (_overSince === 0) {
+        _overSince = Date.now();
+        emit({
+          kind: "pressure",
+          severity: "possible",
+          summary:
+            `broadcast rate ${rate}/sec is above the ${rateThreshold}/sec ` +
+            `advisory threshold — the app is working, this is about cost`,
+          detail: {
+            drainRate: rate,
+            hint: "high dispatch frequency. If these are UI/simulation ticks " +
+              "(a game loop, an animation), the structural fix is scope: " +
+              "'client' — that state never needs the wire. localFirst does " +
+              "NOT help here (methods still travel as CRDT ops). For bursty " +
+              "server work, debounce or batch the actions. Nothing is broken " +
+              "and no data is at risk; ignore it deliberately if the rate is " +
+              "what your app is for.",
+          },
+          timestamp: Date.now(),
+        }, "rate");
+      }
+      return;
+    }
+    if (_overSince !== 0) {
+      const forSec = Math.round((Date.now() - _overSince) / 1000);
+      const peak = _peakRate;
+      _overSince = 0;
+      _peakRate = 0;
       emit({
         kind: "pressure",
-        severity: "possible",
+        severity: "speculative",
         summary:
-          `PRESSURE — ${_broadcastCount} broadcasts/sec (threshold: ${rateThreshold}/sec)`,
-        detail: {
-          drainRate: _broadcastCount,
-          hint: "high dispatch frequency. If these are UI/simulation ticks " +
-            "(a game loop, an animation), the structural fix is scope: " +
-            "'client' — that state never needs the wire. localFirst does " +
-            "NOT help here (methods still travel as CRDT ops). For bursty " +
-            "server work, debounce or batch the actions.",
-        },
+          `broadcast rate back under ${rateThreshold}/sec after ${forSec}s ` +
+          `(peak ${peak}/sec)`,
+        detail: { drainRate: rate },
         timestamp: Date.now(),
-      }, "rate");
+      }, "rate-clear");
     }
-    _broadcastCount = 0;
   }, 1000);
 
   return {

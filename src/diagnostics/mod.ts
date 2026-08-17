@@ -9,7 +9,7 @@ import { computeDiffs, formatDiff } from "./state-diff.ts";
 import { createActionLog } from "./action-log.ts";
 import { createCheckpoint, readCheckpoint } from "./checkpoint.ts";
 import { installCrashHandler } from "./crash-handler.ts";
-import { log } from "./logger.ts";
+import { log } from "./logger-api.ts";
 import { diagSubscribe } from "./diagnostic-bus.ts";
 import { isRedactedAction, noRedaction, REDACTED } from "./redact.ts";
 import { actionOrigin } from "./action-kind.ts";

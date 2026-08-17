@@ -37,7 +37,7 @@ import {
   buildMethodsReducer,
 } from "./cell-methods-internals.ts";
 import { resolveSelfAction } from "./self.ts";
-import { log } from "../diagnostics/logger.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 /** One-time-per-cell hint for the deprecated listensTo ARRAY form. */
 const _listensToHinted = new Set<string>();

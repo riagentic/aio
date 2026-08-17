@@ -11,7 +11,7 @@ import {
   transpile,
 } from "./server-transpile.ts";
 import { lockDir } from "./single-instance-lock.ts";
-import { log } from "../diagnostics/logger.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 /** File extensions that trigger live reload */
 const RELOAD_EXT = new Set([".ts", ".tsx", ".css", ".html", ".svg"]);
@@ -243,12 +243,12 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
           }
         } catch (e) {
           watcherActive = false;
-          console.warn(`[aio] live reload stopped: ${e}`);
+          log.warn(`[aio] live reload stopped: ${e}`);
         }
       })();
       return true;
     } catch (e) {
-      console.warn(`[aio] live reload failed — hot reload disabled: ${e}`);
+      log.warn(`[aio] live reload failed — hot reload disabled: ${e}`);
       return false;
     }
   }
@@ -260,7 +260,7 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
     try {
       const info = Deno.lstatSync(SENTINEL);
       if (!info.isFile) {
-        console.warn(
+        log.warn(
           `[aio] live reload — sentinel path ${SENTINEL} is not a regular file (symlink/dir), refusing to use`,
         );
         return false;
@@ -281,7 +281,7 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
   function start(): boolean {
     _sentinelOk = ensureSentinel();
     if (!startWatcher()) return false;
-    console.log(`[aio] live reload watching ${absBaseDir}`);
+    log.info(`[aio] live reload watching ${absBaseDir}`);
     // Health check — touch sentinel every 30s, restart watcher if no events for 60s.
     // lstatSync+open(write+truncate) instead of writeTextFileSync so we never
     // follow a symlink if one gets swapped in mid-run (F-2 defense).
@@ -301,7 +301,7 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
       if (watcherActive && Date.now() - lastWatcherEvent > 60_000) {
         watcherRestarts++;
         if (watcherRestarts > MAX_WATCHER_RESTARTS) {
-          console.warn(
+          log.warn(
             `[aio] live reload — watcher unresponsive after ${MAX_WATCHER_RESTARTS} restarts, giving up`,
           );
           if (healthTimer) {
@@ -310,7 +310,7 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
           }
           return;
         }
-        console.warn(
+        log.warn(
           `[aio] live reload — watcher unresponsive, restarting (${watcherRestarts}/${MAX_WATCHER_RESTARTS})`,
         );
         try {

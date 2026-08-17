@@ -183,6 +183,32 @@ is enabled by default.
 Columns: timestamp, level (padded to 5), category (padded to 10), message, data
 (key=value), duration, source. All separated by 2 spaces.
 
+**Every line aio prints carries a level, and the level is the instruction:**
+
+| Level   | What it means for you                             |
+| ------- | ------------------------------------------------- |
+| `INFO`  | Nothing to do — this is the app narrating itself  |
+| `WARN`  | Something should be fixed; the app keeps working  |
+| `ERROR` | Something must be fixed; something did not happen |
+
+The framework never prints an unlevelled line. The level also picks the console
+stream and method, so `2>` separates warnings and errors from ordinary output,
+and a host process watching `console.warn` sees warnings:
+
+| Level           | Stream | Method          |
+| --------------- | ------ | --------------- |
+| `ERROR`         | stderr | `console.error` |
+| `WARN`          | stderr | `console.warn`  |
+| `INFO`          | stdout | `console.info`  |
+| `DEBUG`/`TRACE` | stdout | `console.debug` |
+
+### Colour
+
+ANSI colour is decoration and never changes a character of the message. It is
+emitted only when stdout is a terminal; `NO_COLOR=1` turns it off,
+`FORCE_COLOR=1` forces it on for a pipe that renders escapes anyway. Log FILES
+are never coloured.
+
 ### Configuration
 
 ```ts

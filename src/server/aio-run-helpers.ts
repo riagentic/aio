@@ -14,7 +14,7 @@ import type { ComposedCells } from "../state/cell.ts";
 import type { ServerHandle } from "./server-types.ts";
 import { AppLock, lockDir } from "./single-instance-lock.ts";
 import { launchElectronClient } from "../electron/electron.ts";
-import { getLogger, log } from "../diagnostics/logger.ts";
+import { getLogger, log } from "../diagnostics/logger-api.ts";
 
 /** Cache key for a user — a STABLE serialization of everything `ui.forUser`
  *  can observe, not just the id.
@@ -361,7 +361,7 @@ export async function acquireSingletonLock(
     const ex = result.existing;
     const where = ex.port > 0 ? ` at http://localhost:${ex.port}` : "";
     const who = ex.pid > 0 ? ` (pid ${ex.pid})` : "";
-    console.error(
+    log.error(
       `[AIO] ${
         killExisting ? "Failed to take over" : "Already running"
       }: ${ex.appId}${where}${who}`,

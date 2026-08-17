@@ -8,6 +8,7 @@ import { compareHLC, createHLC, type HLClock } from "./hlc.ts";
 import { rebase, type SyncReducer } from "./rebase.ts";
 import type { SyncConflict } from "./types.ts";
 import { mergeField } from "./merge.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 /**
  * Dependencies injected into the client-side sync engine.
@@ -208,8 +209,9 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     const key = `${cell}:${action}`;
     if (_warnedUndef.has(key)) return;
     _warnedUndef.add(key);
-    console.warn(
-      `[aio:sync] reducer returned undefined for action "${action}" in cell "${cell}". Expected state object or null. (logged once)`,
+    log.warn(
+      "sync",
+      `reducer returned undefined for action "${action}" in cell "${cell}". Expected state object or null. (logged once)`,
     );
   }
 
@@ -501,8 +503,9 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         await deps.buffer.pruneStale(cell, opId);
         await rebaseCell(cell);
         // D11: silent rejection is a blank-screen-class bug — always loud.
-        console.error(
-          `[aio:sync] ${cell}: change rejected by the server — ${reason} ` +
+        log.error(
+          "sync",
+          `${cell}: change rejected by the server — ${reason} ` +
             `(op ${opId}; optimistic view rolled back)`,
         );
         deps.cells[cell]?.onRejected?.({ opId, reason });

@@ -6,6 +6,9 @@ Verifying cells and UIs work correctly.
   AI-agent loop
 - [Cell Testing](cell-testing.md) — testCell, assertions, async, fuzz
 - [Linter](linter.md) — aiol static analysis, CI integration
+- [Onboarding lab](onboarding-lab.md) — `deno task lab`: the real one-liners on
+  a fresh Ubuntu container, plus "does MY repo build and run on a clean
+  machine?" for any path or GitHub link
 
 ## Driving the app you are running
 

@@ -1,5 +1,150 @@
 # Changelog
 
+## 1.0.0-alpha59 — a machine that is not ours, and a line you can act on (2026-08-17)
+
+Two halves, both from the same complaint: _"the one-line install was a horrible
+experience"_ — the installer did not upgrade deno, and the app it fetched never
+started. Every onboarding test aio had ever run had run on a machine that
+already had everything. So the first half is a lab that fails the way a new user
+fails, and the fixes it found. The second half is the output itself: a user
+pasted their app's log and asked what one of the lines even was.
+
+### Onboarding is now tested on a machine that has nothing
+
+`deno task lab` runs the whole first-contact path inside a fresh `ubuntu:24.04`
+container — no deno, no node, no unzip, non-root — and it takes a GitHub app or
+a local path:
+
+```sh
+deno task lab                              # all five scenarios
+deno task lab riagentic/llama-master       # any public aio app, end to end
+deno task lab --scenario=electron
+```
+
+Scenarios: `install` · `create-dev` · `run-sh` · `electron` · `windows-scripts`.
+The UI check is not a click — it is _"is the expected screen there"_. Over CDP
+it distinguishes **blank** (mount point empty), **stuck** (still a loader at the
+deadline), **dead** (painted, but the client says "Reconnecting…") and **broken
+build** (the module-error page served in place of the app), polls rather than
+snapshots, fails on any console error the page logs, and `--expect="text"`
+asserts a marker the caller knows should be on screen. An absent log directory
+is a finding, not a pass: "no errors" from a tier that scanned no files is the
+exact shape of a green test over a broken app.
+
+What it found, in the order it found it:
+
+- **deno could not install without `unzip`**, which a fresh Ubuntu does not
+  have. `install.sh` now unpacks with perl and verifies the checksum itself.
+- **Nothing compared the deno version.** An old deno failed later, inside a
+  build, with a message about something else. Both installers now read
+  `MIN_DENO` from the framework they just cloned, compare field-by-field, and
+  upgrade or refuse by name.
+- **The Electron client never started from the one-liner** (the original
+  report). Four defects between "built" and "a window": two deciders for where
+  Electron is installed; `deno install --allow-scripts` exiting 0 having skipped
+  the postinstall (we now run the package's own `install.js`); `chrome-sandbox`
+  not being setuid-root on Ubuntu 24.04+ and in every container (detected
+  exactly, `--no-sandbox` with the chown/chmod to restore the strict path
+  printed every time); and `appimagetool` needing `file(1)`.
+- **`autoInstallElectron` answered the wrong question** — `run().success`
+  instead of "is the runtime there".
+- **The lab's own Electron check was a false positive**: `pgrep -f electron`
+  matches any command line containing the word. It now requires a real electron
+  executable (`/proc/<pid>/exe`) and a mapped window from the X server.
+
+### The one-liner installs the app; `am remove` takes it back
+
+It used to build and run out of the checkout, so deleting the clone deleted the
+app and there was never a launcher.
+
+```
+~/app/<name>/versions/<version>/<name>.AppImage   the artifact
+~/app/<name>/<name>.AppImage                      a stable name, symlinked
+~/.local/share/applications/<name>.desktop        a menu entry (headless: ~/.local/bin)
+~/app/<name>/installed.json                       repo/commit/version/target/aio
+```
+
+- `am installed` · `am remove <app>` (data KEPT unless `--data`, refused while
+  running, naming `am stop`) · `am upgrade <app>` re-runs the recorded source.
+- Installing a **different** repo under a name already taken is refused, naming
+  both sources — two projects called `demo` share `~/app/demo` and `~/.demo`.
+- Old versions are pruned to the newest three (`AIO_KEEP_VERSIONS`); the version
+  the symlink points at is never removed.
+- The updater no longer flattens the layout: `swapArtifact` used to rename the
+  new artifact over the stable **symlink**, which replaced the link with a file
+  and destroyed the rollback.
+
+**A data-loss class, found and fixed in the same week it was introduced.** A
+deno-compiled binary takes its identity from the `deno-compile-<file>` VFS
+segment — the executable's file name, at runtime. Naming the installed artifact
+`<app>-<version>` therefore renamed the app: it wrote to `~/.app-1-0-0/` and
+every upgrade moved it again, silently orphaning the real data. `resolveAppId`
+now prefers the deno.json embedded in the binary, and the version moved into the
+directory so the running file is always called `<name>`. Even an app pinned to
+an older aio keeps one identity.
+
+### Windows is caught up, and honest about what is unverified
+
+`install.ps1`/`run.ps1` had drifted into an implied promise. They now clone
+first, compare the deno version, write the PATH entry in the User scope, install
+to `%LOCALAPPDATA%\Programs\<name>\`, write the same install record, prune to
+the same bound, and create a Start Menu shortcut.
+
+`run.ps1` used `??` — PowerShell **7 only**, a parse error on every stock
+Windows box before a single line ran. The class is now checked statically (`??`,
+`?.`, `-Parallel` rejected in both files) and the decisions are unit-tested in
+Microsoft's PowerShell image. What that cannot prove is printed on every run and
+stated at the top of both files: nothing here touches a Windows filesystem,
+registry, shortcut, `.exe` artifact or a winget deno. **Windows is best-effort
+by construction until there is a Windows runner** — stated, not implied.
+
+### Every line aio prints now says what it is
+
+A user pasted their app's output and asked the question the output could not
+answer:
+
+```
+[aio:vitals] PRESSURE — 40 broadcasts/sec (threshold: 30/sec)
+```
+
+> "aio:vitals, what is it, should it be fixed or is it just info? It's unclear."
+
+It was a bare `console.warn`: no timestamp, no level, no category — and absent
+from `app.log` and `warning.log` entirely, because console output only reaches a
+file when something happens to be capturing stdout. Sitting in the middle of the
+framework's own levelled log, it read as neither information nor error.
+
+- **Framework runtime code writes through the logger.** Every message carries
+  info (nothing to do) / warn (should be fixed) / error (must be fixed), a
+  timestamp and a category, and lands in the matching sink. Fifty-odd files
+  converted; `tests/every-message-has-a-level.test.ts` fails the build on a new
+  `console.*` in `server`, `state`, `vitals`, `diagnostics`, `electron`,
+  `protocol`, `db` or `sync`. Four files are allowlisted, each for a reason the
+  test re-checks: two generate browser code as strings, two _are_ the sink.
+- **The level picks the stream and the console method** — `console.error` /
+  `console.warn` / `console.info` / `console.debug`. Everything used to go
+  through `console.log`, so a host app filtering devtools by level, a shell
+  redirecting stderr, and `2>` all saw one undifferentiated stream.
+- **Two defects the conversion itself created, both now gated.** `log` reached
+  the browser bundle through `logger-core` (Deno-only, `@std/path`) — an
+  unmapped bare import is a blank screen for an app with no deno.json — so the
+  public API depends on a `LogSink` shape and the class stays server-side. And a
+  bulk rewrite put `log.warn` inside the template literals that GENERATE the
+  Electron main-process script, where `log` does not exist: the reconnect path
+  became a ReferenceError, so a backend restart never reconnected. Generated
+  code keeps its console, and a test now walks template literals to prove no
+  logger call is buried in one.
+- **Tests capture every channel.** `tests/console-capture.ts` — a test that
+  stubbed `console.log` alone saw nothing once warnings moved to `console.warn`,
+  and asserted "no warning" over an app that warned loudly.
+- **The pressure line says what it means and reports on the edges.** It now
+  reads _"broadcast rate 40/sec is above the 30/sec advisory threshold — the app
+  is working, this is about cost"_, ends with "Nothing is broken and no data is
+  at risk", fires once when the condition starts and once when it clears, and is
+  silent in between. Eighteen identical lines a second apart is one condition,
+  not eighteen findings — and it is how a reader learns to skim past the one
+  that matters.
+
 ## 1.0.0-alpha58 — everything outside the state model (2026-08-14)
 
 Two halves. A kata audit and two seeded hunts found the pattern behind most of

@@ -25,7 +25,7 @@
 //
 // Server-only (`aio/server`): it spawns processes and sends signals.
 
-import { log } from "../diagnostics/logger.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 /** How a child process ended: its exit code, the signal that killed it (if
  *  any), and the success shorthand. */

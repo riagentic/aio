@@ -180,15 +180,16 @@ export function armLocalControl(
 ): void {
   if (cfg.prod) return;
   if (!cfg.appId) {
-    console.warn(
+    log.warn(
       "[aio] control plane: no appId — `am`/amui cannot authenticate to " +
         "/__aio/trojan/* on an auth-enabled app. Set appId in aio.run().",
+      { detail: String() },
     );
     return;
   }
   const r = mintControlKey(cfg.appId);
   if (r.error !== undefined) {
-    console.warn(
+    log.warn(
       `[aio] control plane: no local control credential — ${r.error}. ` +
         `\`am\`/amui will need an authenticated admin on this app.`,
     );
@@ -351,6 +352,7 @@ function _staleCredentialHint(): string {
 // ── Cell access evaluation (AUTH-1) ──────────────────────────────────────────
 
 import type { Access } from "../state/cell-types.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 /** Evaluate a cell's declarative access rule for a network caller.
  *  Same vocabulary as serverFns' access (one `Access` type, alpha52): true = any authenticated user,
@@ -431,7 +433,7 @@ export function recordAuthFail(
     _sinceSweep = 0;
     _sweepExpired(now);
   }
-  console.warn(
+  log.warn(
     `[aio] auth: failed auth from ${key} (${detail}) — ${fails.length}/${AUTH_FAIL_MAX} in window`,
   );
 }

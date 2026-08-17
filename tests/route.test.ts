@@ -1,6 +1,7 @@
 // route() — ergonomic HTTP routes: :param matching, method guard,
 // cookies, and a JSON helper on top of the existing `routes: {}` config.
 import { assert, assertEquals } from "@std/assert";
+import { interceptConsole } from "./console-capture.ts";
 import {
   isReservedRoutePath,
   matchRoute,
@@ -269,7 +270,7 @@ Deno.test("route e2e: a broken handler fails ONE request, loudly — never the p
   const port = freePort();
   const c = cell("route-broken", { state: { n: 0 }, methods: {} });
   const logged: string[] = [];
-  const origLog = console.log;
+  const restoreConsole = interceptConsole(logged);
   const app = await aio.run({
     cells: [c],
     appId: "route-broken",
@@ -291,7 +292,6 @@ Deno.test("route e2e: a broken handler fails ONE request, loudly — never the p
       "/ok": routeFn((ctx) => ctx.text("fine")),
     } as never,
   });
-  console.log = (...a: unknown[]) => void logged.push(a.map(String).join(" "));
   try {
     for (const p of ["/boom", "/rej/7", "/bad"]) {
       const res = await fetch(`http://127.0.0.1:${port}${p}`);
@@ -302,7 +302,7 @@ Deno.test("route e2e: a broken handler fails ONE request, loudly — never the p
     const ok = await fetch(`http://127.0.0.1:${port}/ok`);
     assertEquals(await ok.text(), "fine");
   } finally {
-    console.log = origLog;
+    restoreConsole();
     await app.close();
   }
   const all = logged.join("\n");

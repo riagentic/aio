@@ -1,3 +1,5 @@
+import { log } from "../diagnostics/logger-api.ts";
+
 // Runtime config validation & documentation — extracted from aio.ts (AIO-52)
 // Types are erased at runtime. These sets are the runtime source of truth.
 // If you add a key to AioConfig, CellsConfig, or UiConfig — add it here too.
@@ -574,11 +576,11 @@ export function validateConfig(
 ): void {
   const unknown = Object.keys(obj).filter((k) => !validKeys.has(k));
   if (unknown.length > 0) {
-    console.error(
+    log.error(
       `\n[aio] CONFIG ERROR: unknown ${label} key(s): ${unknown.join(", ")}`,
     );
-    console.error(`\n[aio] Valid configuration:\n`);
-    console.error(formatValidConfig());
+    log.error(`\n[aio] Valid configuration:\n`);
+    log.error(formatValidConfig());
     exit(1);
   }
 }

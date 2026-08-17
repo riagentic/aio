@@ -1,3 +1,5 @@
+import { log } from "../diagnostics/logger-api.ts";
+
 // own.ts — keyed disposer slots for cell-owned native resources (AIO-382)
 //
 // Cells own OS resources (file watchers, sockets, subprocesses) that outlive
@@ -89,8 +91,9 @@ function _evictStaleFactories(): void {
   }
   if (!_leakWarned) {
     _leakWarned = true;
-    console.warn(
-      `[aio:own] more than ${MAX_PENDING} own.set() factories were parked and ` +
+    log.warn(
+      "own",
+      `more than ${MAX_PENDING} own.set() factories were parked and ` +
         `never handled — dropping the oldest ${dropped}. An own.set effect was ` +
         `created but never reached the runtime: a method that threw after ` +
         `calling own.set, a cell disabled before its effects ran, or an effect ` +
