@@ -1,7 +1,7 @@
 // Docs-completeness gate (roadmap B2): every public export of every deno.json
 // entry point must carry a JSDoc comment. _-prefixed / @internal symbols are
 // exempt (the api-snapshot gate enforces their tagging).
-// Run: deno task docs:coverage
+// Run: deno task check:doc-coverage
 
 const ROOT = new URL("..", import.meta.url);
 

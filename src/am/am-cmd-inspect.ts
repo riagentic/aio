@@ -90,6 +90,10 @@ export async function cmdClient(
 
 // ── Database commands ───────────────────────────────────────
 
+/** `am sql --tables` — the table list, which is one fixed query. `am tables`
+ *  is the same thing under its own name; the flag is the canonical spelling
+ *  because it composes with the rest of `sql` (`--json`, `--app`) instead of
+ *  being a second command to remember. */
 export async function cmdSql(
   args: string[],
   flags: GlobalFlags,
@@ -97,9 +101,11 @@ export async function cmdSql(
   const mode = detectMode(flags);
   const appId = resolveAmAppId(flags.app);
   const port = resolvePort(flags.port, appId);
-  const query = args.join(" ");
+  const query = args.includes("--tables") || flags.tables
+    ? "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+    : args.filter((a) => !a.startsWith("--")).join(" ");
   if (!query) {
-    outError("usage: am sql <query>", mode);
+    outError("usage: am sql <query>   ·   am sql --tables", mode);
     Deno.exit(1);
   }
   const result = await trojanPost(port, "sql", { query }, appId);
@@ -265,10 +271,48 @@ export async function cmdErrors(
   } catch {
     if (text) errors = [text]; // plain text fallback
   }
-  if (errors.length === 0) {
-    out(mode === "pretty" ? "no errors" : { errors: [] }, mode);
-  } else {
-    out(mode === "pretty" ? errors.join("\n") : { errors }, mode);
+  // …and the RUNTIME errors, which is what the word means to the person
+  // typing it. `/__aio/error` is the BUILD error — the thing that stops the
+  // app from loading at all — so it comes first when present, but a command
+  // called `errors` that stayed silent about error.log was answering a
+  // narrower question than it was asked.
+  const runtime = await tailErrorLog(appId, flags.lines ?? 20);
+
+  if (mode !== "pretty") {
+    // `errors` keeps meaning what it always meant — the BUILD errors — because
+    // `--json` is the scripting interface and a key that changes meaning under
+    // a script is worse than a missing one. `build` is its clearer name, and
+    // `runtime` is the new half.
+    out({ errors, build: errors, runtime }, mode);
+    return;
+  }
+  if (errors.length === 0 && runtime.length === 0) {
+    out("no errors — nothing in error.log, and the build is clean", mode);
+    return;
+  }
+  const parts: string[] = [];
+  if (errors.length > 0) {
+    parts.push(`build (nothing else runs until this is fixed):`);
+    parts.push(errors.join("\n"));
+  }
+  if (runtime.length > 0) {
+    if (parts.length) parts.push("");
+    parts.push(`runtime — last ${runtime.length} from error.log:`);
+    parts.push(runtime.join("\n"));
+  }
+  out(parts.join("\n"), mode);
+}
+
+/** The tail of the app's own `error.log`. Absent file = no errors yet, which
+ *  is different from "the app has no log directory" only in ways this command
+ *  cannot act on — either way there is nothing to show. */
+async function tailErrorLog(appId: string, lines: number): Promise<string[]> {
+  try {
+    const path = join(appDirs(appId).logs, "error.log");
+    const text = await Deno.readTextFile(path);
+    return text.split("\n").filter((l) => l.trim() !== "").slice(-lines);
+  } catch {
+    return [];
   }
 }
 
@@ -856,4 +900,61 @@ export async function cmdTrigger(
     ? { ...replied as Record<string, unknown>, action }
     : replied;
   out(data, mode);
+}
+
+/** `am open` — open THIS app in a browser.
+ *
+ *  `am ui` opens amui, the visual MANAGER; nothing opened the app itself, so
+ *  the answer to "where is it running?" was: read `am status`, find the port,
+ *  type the URL. Three steps for the most common question there is.
+ *
+ *  `--print` writes the URL instead of opening it, because the other half of
+ *  that question is scripts (`open "$(am open --print)"`, curl, a test). */
+export async function cmdOpen(
+  _args: string[],
+  flags: GlobalFlags,
+): Promise<void> {
+  const mode = detectMode(flags);
+  const appId = resolveAmAppId(flags.app);
+  const port = resolvePort(flags.port, appId);
+  const url = `http://localhost:${port}`;
+
+  // Refuse to open a URL that answers nothing: a browser tab showing
+  // ERR_CONNECTION_REFUSED is a worse answer than a sentence saying the app is
+  // not running, and it costs the same to find out.
+  const live = await fetch(`${url}/__aio/health`, {
+    signal: AbortSignal.timeout(FETCH_TIMEOUT),
+  }).then((r) => {
+    r.body?.cancel();
+    return r.ok;
+  }).catch(() => false);
+  if (!live) {
+    outError(
+      `nothing is serving on ${url} — start it with \`am start\``,
+      mode,
+    );
+    Deno.exit(1);
+  }
+
+  if (flags.print || mode === "json") {
+    out(mode === "json" ? { url, appId, port } : url, mode);
+    return;
+  }
+  const opener = Deno.build.os === "darwin"
+    ? "open"
+    : Deno.build.os === "windows"
+    ? "explorer"
+    : "xdg-open";
+  const p = await new Deno.Command(opener, {
+    args: [url],
+    stdout: "null",
+    stderr: "null",
+  }).output().catch(() => null);
+  if (!p || (!p.success && Deno.build.os !== "windows")) {
+    // `explorer` returns non-zero even when it worked, which is why it is
+    // excluded above rather than reported as a failure.
+    out(`open it: ${url}`, mode);
+    return;
+  }
+  out(`✓ opened ${url}`, mode);
 }

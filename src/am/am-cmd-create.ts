@@ -130,6 +130,7 @@ export function frameworkSpecs(source: boolean): {
   build: string;
   buildAll: string;
   devAndroid: string;
+  androidInstall: string;
   am: string;
   doctor: string;
   aiol: string;
@@ -164,6 +165,7 @@ export function frameworkSpecs(source: boolean): {
     build: spec("aio/build"),
     buildAll: spec("aio/build-all"),
     devAndroid: spec("aio/dev-android"),
+    androidInstall: spec("aio/android-install"),
     am: spec("aio/am"),
     doctor: spec("aio/doctor"),
     aiol: spec("aio/aiol"),
@@ -229,6 +231,15 @@ export function standardTasks(
     // required — dev/compile auto-install on demand. Scaffolded only for
     // electron apps (see denoJson()).
     "install:electron": "deno install --allow-scripts=npm:electron",
+    // …and the android twin: the built APK onto the connected phone.
+    //
+    // `install:<target>`, never `<target>:install`. Every qualified task in
+    // this scaffold reads verb-first with a TARGET as the qualifier —
+    // dev:electron, compile:android, install:electron — so the suffix is one
+    // closed vocabulary (the target names) rather than two. A reversed name is
+    // a second grammar, and a second grammar is something to remember.
+    // Scaffolded only for android apps (see denoJson()).
+    "install:android": `deno run -A ${fw.androidInstall}`,
   };
 }
 
@@ -305,6 +316,7 @@ export function denoJson(
   // scaffolding it into a browser/cli/server app is the noise the diet removed.
   const tasks = standardTasks(source, target);
   if (target !== "electron") delete tasks["install:electron"];
+  if (target !== "android") delete tasks["install:android"];
   const obj = {
     title: name,
     version: "0.1.0",

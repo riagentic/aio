@@ -8,7 +8,7 @@
   One codebase → browser, Electron, and Android.
 </p>
 
-<p align="center"><code>v1.0.0-alpha59</code> · <a href="LICENSE">MIT</a></p>
+<p align="center"><code>v1.0.0-alpha60</code> · <a href="LICENSE">MIT</a></p>
 
 ## Get started — four lines
 

@@ -284,3 +284,71 @@ Deno.test({
     );
   },
 });
+
+Deno.test({
+  name: "install.sh: a fresh macOS/zsh account gets a file zsh actually READS",
+  ignore: Deno.build.os === "windows",
+  fn: async () => {
+    // macOS has defaulted to zsh since Catalina and ships NO ~/.zshrc, so the
+    // old "only touch it if it exists" rule skipped every zsh file and wrote
+    // only ~/.profile — which a login zsh never reads (/etc/zprofile →
+    // ~/.zprofile → ~/.zshrc). The installer then verified with `sh -lc`,
+    // which DOES read ~/.profile, so it reported "am works in a new shell
+    // too" while the user's next Terminal had no `am`: a check passing in a
+    // shell the user does not use.
+    //
+    // persist_path is extracted and run in a sandbox HOME — the decision is
+    // what is under test, not the download.
+    const sh = await Deno.readTextFile(join(REPO, "install.sh"));
+    const fn = sh.match(/^persist_path\(\) \{[\s\S]*?^\}/m)?.[0];
+    assert(fn, "persist_path() not found — did it move?");
+
+    const run = async (env: Record<string, string>, home: string) => {
+      const p = await new Deno.Command("sh", {
+        args: ["-c", `${fn}\npersist_path`],
+        env: { ...env, HOME: home, PATH: "/usr/bin:/bin" },
+        clearEnv: true,
+        stdout: "null",
+        stderr: "piped",
+      }).output();
+      assertEquals(
+        p.code,
+        0,
+        new TextDecoder().decode(p.stderr) || "persist_path failed",
+      );
+    };
+    const read = (f: string) => Deno.readTextFile(f).catch(() => "");
+
+    // 1. A fresh mac: zsh login shell, no rc files at all.
+    const mac = await Deno.makeTempDir({ prefix: "persist-mac-" });
+    // 2. A linux box with bash: must NOT grow zsh files it has no shell for.
+    const linux = await Deno.makeTempDir({ prefix: "persist-linux-" });
+    try {
+      await run({ SHELL: "/bin/zsh" }, mac);
+      assertStringIncludes(
+        await read(join(mac, ".zprofile")),
+        ".deno/bin",
+        "a zsh login shell reads ~/.zprofile — it must be written even when " +
+          "absent, which is the normal state of a fresh macOS account",
+      );
+      assertStringIncludes(
+        await read(join(mac, ".profile")),
+        ".deno/bin",
+        "…and ~/.profile stays, for sh/bash",
+      );
+
+      await run({ SHELL: "/bin/bash" }, linux);
+      assertStringIncludes(await read(join(linux, ".profile")), ".deno/bin");
+      if (Deno.build.os !== "darwin") {
+        assertEquals(
+          await read(join(linux, ".zprofile")),
+          "",
+          "a bash machine must not sprout zsh files it will never read",
+        );
+      }
+    } finally {
+      await Deno.remove(mac, { recursive: true }).catch(() => {});
+      await Deno.remove(linux, { recursive: true }).catch(() => {});
+    }
+  },
+});

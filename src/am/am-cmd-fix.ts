@@ -79,11 +79,11 @@ const UNIVERSAL_TASKS = [
 const TARGET_TASKS: Record<string, readonly string[]> = {
   browser: [],
   electron: ["install:electron"],
-  android: [],
+  android: ["install:android"],
   cli: [],
   server: [],
   "electron-client": ["install:electron"],
-  "android-client": [],
+  "android-client": ["install:android"],
   "cli-client": [],
 };
 

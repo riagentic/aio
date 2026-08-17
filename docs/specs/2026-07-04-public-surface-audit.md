@@ -182,7 +182,7 @@ must stay exported for cross-module wiring move behind non-public paths or get
       each entry independently.
 - [x] **After cuts land**: regenerate `deno doc --json` snapshot → this becomes
       the A2 gate baseline. (Done: `docs/api-snapshot.json`, CI-enforced via
-      `deno task api:check`.)
+      `deno task check:api`.)
 
 ## Applied 2026-07-06 — deviations from the recommendations
 

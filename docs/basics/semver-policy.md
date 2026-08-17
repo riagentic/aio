@@ -7,7 +7,7 @@ each release phase may change.
 ## What counts as the public API
 
 The public surface is exactly what the CI-enforced snapshot locks
-(`docs/api-snapshot.json`, `deno task api:check`):
+(`docs/api-snapshot.json`, `deno task check:api`):
 
 - every export of every `deno.json` entry point (`aio`, `aio/air`,
   `aio/air/compat`, `aio/jsx-runtime`, `aio/state-core`, `aio/db`, `aio/sync`,

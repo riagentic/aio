@@ -569,6 +569,34 @@ localStorage.
 **Prerequisites:** Android SDK (`$ANDROID_HOME`), Java 17+ (`$JAVA_HOME`),
 Gradle on `PATH`.
 
+### Onto a real phone
+
+`dev:android` is the _development_ loop — it boots an emulator when nothing is
+attached, builds a dev APK pointed at a dev server, and holds that server open
+over `adb reverse`. To put a finished build on the phone on your desk:
+
+```sh
+deno task install:android                  # newest .apk → the attached phone
+deno task install:android --build          # build it first (debug APK)
+deno task install:android --build --release   # …a release build instead
+deno task install:android --emulator       # a RUNNING emulator, not a phone
+deno task install:android --apk=my.apk     # a specific artifact
+deno task install:android --device=SERIAL  # when several are attached
+deno task install:android --no-launch      # install without starting it
+```
+
+`--build` builds the **debug** APK, the same flags as `compile:android`: it is
+signed with the debug key, so it installs. A `--release` build with no signing
+config produces `<app>-unsigned.apk`, which Android refuses — use it once you
+have signing set up.
+
+Enable **Developer options → USB debugging** on the phone and accept the
+authorization dialog; `adb devices` should list it as `device`. An attached
+**emulator is refused** unless you pass `--emulator` — "install to my phone"
+quietly landing on an AVD is an hour nobody gets back — and an `-unsigned.apk`
+is refused by name rather than by `adb`'s
+`INSTALL_PARSE_FAILED_NO_CERTIFICATES`.
+
 Same `src/` code works on both platforms. Use `app.mode === 'standalone'` to
 branch for Deno-only APIs:
 

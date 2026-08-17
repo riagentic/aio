@@ -1,0 +1,61 @@
+# The Windows ARTIFACT, executed — on a machine that is not Windows.
+#
+# We cross-compile `x86_64-pc-windows-msvc` on every release and had never once
+# RUN the result. "It compiles" is not "it starts", and the gap had already
+# produced one data-loss class (a compiled binary taking its identity from its
+# file name), so the artifact staying unexecuted is not a small hole.
+#
+# Wine is a real Win32 implementation, and a Deno-compiled binary is a plain PE:
+# it boots here, opens its SQLite database, serves HTTP and writes to a
+# Windows-shaped profile path (`C:\users\<user>\…`). That is coverage nothing
+# else on a Linux host gives.
+#
+# What this image deliberately does NOT do: run install.ps1/run.ps1. PowerShell
+# 7 (7.2 and 7.4, on Wine 9 AND Wine 11 staging) loads .NET and exits without
+# executing — measured, not assumed. The scripts keep their own gate
+# (`--scenario=windows-scripts`: parse + pure logic + a static ban on
+# PowerShell-7-only syntax), and everything the scripts do to a real Windows
+# filesystem, registry or Start Menu stays untested until there is a Windows
+# runner. Two different gates, two different claims.
+#
+# Build (scripts/lab.ts does this for you):
+#   docker build -f docker/Dockerfile.windows-app -t aio-lab:windows-app docker
+
+FROM ubuntu:24.04
+
+# WineHQ rather than Ubuntu's wine: the distro package is 9.0, and while both
+# run our artifact, staying on the vendor's current build is the difference
+# between "our binary broke" and "wine 9 was old" when something eventually
+# does fail here.
+RUN dpkg --add-architecture i386 \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates curl wget gnupg unzip \
+ && mkdir -pm755 /etc/apt/keyrings \
+ && wget -qO /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key \
+ && wget -qNP /etc/apt/sources.list.d/ https://dl.winehq.org/wine-builds/ubuntu/dists/noble/winehq-noble.sources \
+ && apt-get update \
+ && apt-get install -y --install-recommends winehq-staging \
+ && rm -rf /var/lib/apt/lists/*
+
+# A real browser for the UI tier: the question this lab answers is "is the
+# expected screen there", and that needs a renderer, not a 200 OK.
+RUN apt-get update \
+ && curl -fsSL -o /tmp/chrome.deb \
+      https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
+ && apt-get install -y --no-install-recommends /tmp/chrome.deb \
+ && rm -f /tmp/chrome.deb && rm -rf /var/lib/apt/lists/*
+
+# Deno runs the VERIFIER (docker/verify-app.ts), not the app — the app under
+# test is the Windows .exe. This image is a test rig; unlike Dockerfile.onboard
+# it is not pretending to be a stranger's machine.
+RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh -s -- -y --no-modify-path >/dev/null
+
+RUN useradd --create-home --shell /bin/bash aio
+USER aio
+ENV HOME=/home/aio \
+    WINEPREFIX=/home/aio/.wine \
+    WINEARCH=win64 \
+    WINEDEBUG=-all
+WORKDIR /home/aio
+CMD ["/bin/bash"]

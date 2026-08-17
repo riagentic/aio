@@ -51,6 +51,9 @@ export const AIO_ENTRY_PATHS: Readonly<Record<string, string>> = {
   "aio/ship": "src/build/ship.ts",
   "aio/build-all": "src/build-all.ts",
   "aio/dev-android": "src/dev-android.ts",
+  // The other half of dev-android: a finished APK onto a connected phone
+  // (`deno task install:android`). Run-only, like every CLI here.
+  "aio/android-install": "src/android-install.ts",
   "aio/am": "src/am.ts",
   "aio/amui": "amui/src/app.ts",
   "aio/doctor": "src/server/doctor.ts",
@@ -67,6 +70,7 @@ export const AIO_RUN_ONLY_ENTRIES: ReadonlySet<string> = new Set([
   "aio/ship",
   "aio/build-all",
   "aio/dev-android",
+  "aio/android-install",
   "aio/am",
   "aio/amui",
   "aio/doctor",

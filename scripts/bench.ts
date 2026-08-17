@@ -3,7 +3,7 @@
 // "Correct but slower" fails the gate (scripts/check-bench.ts) like a broken
 // test. Each timing metric: warmup + N iterations → median + p95.
 // Run: deno task bench   (writes bench-results.json, gitignored)
-// Gate: deno task bench:check  (compares against scripts/bench-baselines.json)
+// Gate: deno task check:bench  (compares against scripts/bench-baselines.json)
 import { aio, cell, composeCells } from "../mod.ts";
 import { compactPatches } from "../src/state/patch-compact.ts";
 import { SKV_SCHEMA, sqliteKv } from "../src/server/skv-sqlite.ts";

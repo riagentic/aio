@@ -57,8 +57,8 @@ methods run in the executor and commit batched writes at each `await` boundary.
 
 `src/` root holds only the public entry files (`air.ts`, `browser-air.ts`,
 `build.ts`, `am.ts`, `schedule.ts`, …); all implementation lives in domain
-folders. The folder dependency matrix is CI-enforced by `deno task boundaries`
-(`scripts/check-boundaries.ts`).
+folders. The folder dependency matrix is CI-enforced by
+`deno task check:boundaries` (`scripts/check-boundaries.ts`).
 
 | Folder         | Purpose                                                     | Key files                                       |
 | -------------- | ----------------------------------------------------------- | ----------------------------------------------- |
@@ -121,7 +121,7 @@ not a leftover.
 ## Module Boundaries (CI-enforced)
 
 Folders may only import what the dependency matrix in
-`scripts/check-boundaries.ts` allows (`deno task boundaries`, runs in CI):
+`scripts/check-boundaries.ts` allows (`deno task check:boundaries`, runs in CI):
 
 - `state/`, `protocol/`, `diagnostics/` — isomorphic core, dependency-light
 - `browser/` and `air/` — may never import `server/` (a browser-loaded module

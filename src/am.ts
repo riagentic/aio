@@ -41,6 +41,7 @@ import {
   cmdHealth,
   cmdLog,
   cmdMetrics,
+  cmdOpen,
   cmdPair,
   cmdProfile,
   cmdSchedules,
@@ -104,9 +105,11 @@ const COMMANDS: Record<string, CmdHandler> = {
   timeline: cmdTimeline,
   replay: cmdReplay,
   ui: cmdUi, // opens amui (the visual manager); the projection is `state --ui`
+  open: cmdOpen, // opens THIS app — the thing `ui` does not do
   dispatch: cmdDispatch,
   actions: cmdActions,
-  tt: cmdTT,
+  timetravel: cmdTT,
+  tt: cmdTT, // the short spelling, kept — the long one is what help shows
   persist: cmdPersist,
   snapshot: cmdSnapshot,
   // Data — the files, not the state (see am-cmd-data.ts)
@@ -143,7 +146,7 @@ const COMMANDS: Record<string, CmdHandler> = {
   pin: cmdPin, // which aio version this app builds against
   link: cmdLink, // just the dep/aio symlink
   fix: cmdFix, // full clone repair (symlink + env + electron + config + …)
-  update: cmdUpdate,
+  update: cmdUpdate, // alias of a bare `am upgrade` (am itself)
   uninstall: cmdUninstall,
   remove: cmdRemove, // an installed APP; `uninstall` is am itself
   installed: cmdInstalled,

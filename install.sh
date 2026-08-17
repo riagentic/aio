@@ -257,11 +257,36 @@ fi
 # in a marked block, in every profile the shell might read.
 persist_path() {
   _line='export PATH="$HOME/.deno/bin:$PATH"  # aio'
-  for rc in "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc"; do
-    # .profile is created if absent (login shells read it); the others are
-    # only touched when they already exist — writing a .zshrc onto a machine
-    # with no zsh is the kind of helpfulness nobody asked for.
-    [ "$rc" = "$HOME/.profile" ] || [ -f "$rc" ] || continue
+
+  # Which files get CREATED depends on the shell that will actually be opened
+  # next, not on what happens to exist. This is where macOS was broken:
+  #
+  #   • macOS has defaulted to ZSH since Catalina, and ships NO ~/.zshrc — so
+  #     the "only touch it if it exists" rule skipped every zsh file;
+  #   • ~/.profile was created, and zsh NEVER reads it (a login zsh reads
+  #     /etc/zprofile → ~/.zprofile → ~/.zshrc; .profile is sh/bash only);
+  #   • the verification below runs `sh -lc`, which DOES read ~/.profile — so
+  #     the installer said "am works in a new shell too" and the user's next
+  #     Terminal had no `am` at all. A check that passes in a shell the user
+  #     does not use is worse than no check.
+  #
+  # So: `.profile` always (sh/bash login), and when the login shell is zsh —
+  # or we are on Darwin, where it is the default even if $SHELL is unset in
+  # this process — `~/.zprofile` is created too. Files that already exist are
+  # always updated, whatever the shell.
+  _targets="$HOME/.profile"
+  case "${SHELL:-}" in *zsh) _zsh=1 ;; *) _zsh=0 ;; esac
+  # if/else, not `[ … ] && x=1`: under `set -e` an AND-list whose test fails IS
+  # a failing command, and this one sits one edit away from being last.
+  if [ "$(uname -s 2>/dev/null || echo other)" = "Darwin" ]; then _zsh=1; fi
+  if [ "$_zsh" = 1 ]; then _targets="$_targets $HOME/.zprofile"; fi
+  for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.zprofile"; do
+    [ -f "$rc" ] || continue
+    case " $_targets " in *" $rc "*) continue ;; esac
+    _targets="$_targets $rc"
+  done
+
+  for rc in $_targets; do
     if [ -f "$rc" ] && grep -qF '.deno/bin' "$rc" 2>/dev/null; then continue; fi
     printf '\n%s\n' "$_line" >> "$rc" 2>/dev/null || :
     _persisted="${_persisted:-}$rc "
@@ -299,7 +324,20 @@ fi
 # …and it has to work in the shell the user opens NEXT, not just in this one.
 # `sh -lc` is the login shell that reads ~/.profile — the check that would have
 # caught "works in the installer, missing in the terminal".
-if sh -lc 'command -v am >/dev/null 2>&1 && am version >/dev/null 2>&1' 2>/dev/null; then
+# …and in the user's OWN login shell, which on macOS is zsh and does not read
+# the file `sh -lc` just proved. Both are checked when both exist.
+_newshell_ok=1
+sh -lc 'command -v am >/dev/null 2>&1 && am version >/dev/null 2>&1' 2>/dev/null \
+  || _newshell_ok=0
+case "${SHELL:-}" in
+  *zsh)
+    if command -v zsh >/dev/null 2>&1; then
+      zsh -lc 'command -v am >/dev/null 2>&1 && am version >/dev/null 2>&1' \
+        2>/dev/null || _newshell_ok=0
+    fi
+    ;;
+esac
+if [ "$_newshell_ok" = 1 ]; then
   ok "am works in a new shell too"
 else
   warn "am works now, but a NEW terminal may not find it${_persisted:+ (added PATH to: ${_persisted})}"

@@ -1,4 +1,4 @@
-// The release gate, as ONE command: `deno task release:check`.
+// The release gate, as ONE command: `deno task check:release`.
 //
 // `.katana/release.md` has always listed what must pass before a release. It
 // listed it in prose, so running it was a human loop — and alpha56 shipped with
@@ -18,8 +18,8 @@
 // the first problem makes you re-run the whole thing per fix. The heavy tier is
 // skipped when the fast tier failed, and only then.
 //
-//   deno task release:check          # everything (fast, then heavy)
-//   deno task release:check --fast   # static gates + surfaces only
+//   deno task check:release          # everything (fast, then heavy)
+//   deno task check:release --fast   # static gates + surfaces only
 import { VERSION } from "../src/server/aio-cli.ts";
 
 const root = new URL("../", import.meta.url).pathname;
@@ -123,11 +123,11 @@ const FAST: [string, string[]][] = [
   ["check", ["deno", "task", "check"]],
   ["lint", ["deno", "task", "lint"]],
   ["lint:aio", ["deno", "task", "lint:aio"]],
-  ["boundaries", ["deno", "task", "boundaries"]],
-  ["api:check", ["deno", "task", "api:check"]],
-  ["docs:check", ["deno", "task", "docs:check"]],
-  ["docs:index (no diff)", ["deno", "task", "docs:index", "--", "--check"]],
-  ["docs:coverage", ["deno", "task", "docs:coverage"]],
+  ["check:boundaries", ["deno", "task", "check:boundaries"]],
+  ["check:api", ["deno", "task", "check:api"]],
+  ["check:docs", ["deno", "task", "check:docs"]],
+  ["update:docs (no diff)", ["deno", "task", "update:docs", "--", "--check"]],
+  ["check:doc-coverage", ["deno", "task", "check:doc-coverage"]],
   ["publish --dry-run", ["deno", "publish", "--dry-run", "--allow-dirty"]],
 ];
 
