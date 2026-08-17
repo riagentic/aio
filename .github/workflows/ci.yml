@@ -33,19 +33,19 @@ jobs:
       - name: Type check (full tree)
         run: deno task check
       - name: Docs check (every error code documented)
-        run: deno task docs:check
+        run: deno task check:docs
       - name: Docs index (content.md matches the docs tree)
-        run: deno task docs:index -- --check
+        run: deno task update:docs -- --check
       - name: Docs coverage (every public export documented — roadmap B2)
-        run: deno task docs:coverage
+        run: deno task check:doc-coverage
       - name: API snapshot (public surface locked — roadmap A2)
-        run: deno task api:check
+        run: deno task check:api
       - name: Module boundaries (src/ folder dependency matrix)
-        run: deno task boundaries
+        run: deno task check:boundaries
       - name: Benchmarks (regression floors — roadmap B4)
         run: deno task bench
       - name: Coverage ratchet (src/ line coverage floor)
-        run: deno task coverage:check
+        run: deno task check:coverage
 
   # Full test suite across the supported Deno range and a second OS, so
   # platform- or version-specific regressions can't merge silently.

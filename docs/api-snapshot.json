@@ -1,5 +1,5 @@
 {
-  "$comment": "Public API surface lock (roadmap A2). Regenerate DELIBERATELY with `deno task api:update` — any diff here is a surface change and must be intentional. sig = digest of the normalized declaration; a changed sig means the symbol's signature changed.",
+  "$comment": "Public API surface lock (roadmap A2). Regenerate DELIBERATELY with `deno task update:api` — any diff here is a surface change and must be intentional. sig = digest of the normalized declaration; a changed sig means the symbol's signature changed.",
   "entries": {
     ".": {
       "symbols": {
@@ -421,7 +421,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "9a583418e5e14d0d"
+          "sig": "95a358744edb6c6a"
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -946,6 +946,26 @@
     },
     "./amui": {
       "symbols": {}
+    },
+    "./android-install": {
+      "symbols": {
+        "Device": {
+          "kind": "typeAlias",
+          "sig": "6c5503f4276afd96"
+        },
+        "parseDevices": {
+          "kind": "function",
+          "sig": "e0f903980ccd5876"
+        },
+        "pickApk": {
+          "kind": "function",
+          "sig": "d041413fb60a5a55"
+        },
+        "pickDevice": {
+          "kind": "function",
+          "sig": "a2b6ac1620e916b7"
+        }
+      }
     },
     "./build": {
       "symbols": {

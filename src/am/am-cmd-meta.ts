@@ -323,7 +323,9 @@ export function cmdHelp(
 
 Onboard:
   create <name> [--template=counter|todo]  Scaffold a new aio app (runnable + buildable)
-  update                  Update am to the latest release
+  upgrade                 Update am itself to the latest release
+                          ("am upgrade <app>" upgrades an installed APP —
+                          one verb, the object says which)
   uninstall               Remove am (your aio apps are untouched)
 
 Visual manager:
@@ -353,9 +355,9 @@ State:
 Time-travel:
   timeline [--from=J]     Recent dispatches + payload + state diff (--lines=N)
   replay [N..M] [--dry]   Re-dispatch a journal range for repro (--from=J)
-  tt undo|redo            Step back/forward
-  tt goto <N>             Jump to index
-  tt pause|resume         Freeze/unfreeze state
+  timetravel undo|redo    Step back/forward (short spelling: am tt)
+  timetravel goto <N>     Jump to index
+  timetravel pause|resume Freeze/unfreeze state
 
 Persistence:
   persist                 Force immediate persist
@@ -386,10 +388,11 @@ Inspect:
   trigger <idx> <path> <action> [text]  Drive the live UI (click/type/setValue/press/keyDown/keyUp/hover/focus/blur/scroll) — same engine as testUI
                           type APPENDS to the field, setValue REPLACES it (as in testUI)
   sql <query>             Execute read-only SQL
-  tables                  List SQLite tables
+  sql --tables            List SQLite tables
   schedules               Active scheduled effects
   log [filter]            Tail app log (--client for client.log) (--filter --lines --follow)
-  errors                  Last build error
+  errors                  What went wrong: the build error (if any) first,
+                          then the tail of error.log (--lines=N)
   metrics                 Uptime, connections, schedules
   cost                    Bytes pushed/s, per cell and per key, + reduce p95
   cost --keys             …every key, not just the top three
@@ -397,6 +400,7 @@ Inspect:
   cost --window=5m        …over a different window (default 60s)
   top [secs]              Live runtime view (per-cell state sizes); --json = one shot
   health                  HTTP health check
+  open [--print]          Open THIS app in a browser (--print writes the URL)
   discover [--timeout=ms] Find exposed aio apps on the LAN (UDP broadcast)
   profile [--out=file]    Export this app's .aioapp profile (cert + key) for the client
   pair                    Fresh single-use pairing PIN (3 min) — no restart needed
@@ -405,9 +409,27 @@ Inspect:
 Scaffold:
   add cell <name>         Generate src/cell/<name>.ts
 
+Repair (a clone that does not run yet):
+  fix                     Full repair: dep/aio symlink, env, electron, config,
+                          tasks — the one to run after a git clone
+  link                    Just the dep/aio symlink (fix does this and more)
+
+Auth (apps running with auth: true) — run "am auth" for all of them:
+  auth users              List accounts
+  auth create <id>        Add one (prints a generated password if none given)
+  auth passwd <id>        Set a password (also clears the lockout + sessions)
+  auth unlock <id>        Clear a lockout
+  auth totp <id> off      Clear the second factor (lost device)
+  auth revoke <id>        Revoke every session of a user
+
+Feedback:
+  report                  Collect a problem report (logs + versions + state
+                          shape) for an app configured with feedback: true
+
 Install (apps that run.sh installed into ~/app/):
   installed               List them, with version + where each came from
   upgrade <app>           Rebuild and reinstall from its recorded source
+                          (a bare "am upgrade" updates am itself)
   remove <app> [--data]   Uninstall one — the PROGRAM; --data also deletes
                           ~/.<app>/ (state, logs, keys — it does not come back)
 

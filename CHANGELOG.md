@@ -1,5 +1,103 @@
 # Changelog
 
+## 1.0.0-alpha60 — one grammar, and the words say what they do (2026-08-17)
+
+A surface review, and what it found. Nothing here changes how an app behaves;
+everything here changes what you type and what you can find.
+
+### The verb leads, always
+
+Half the framework's own tasks read backwards. `deno task android:install` next
+to `deno task dev:electron` is two grammars, and the person typing has to
+remember which half of the name comes first for _this_ command.
+
+| was                                                | now                                                 |
+| -------------------------------------------------- | --------------------------------------------------- |
+| `api:check` · `api:update`                         | `check:api` · `update:api`                          |
+| `docs:check` · `docs:coverage` · `docs:index`      | `check:docs` · `check:doc-coverage` · `update:docs` |
+| `coverage:check` · `bench:check` · `release:check` | `check:coverage` · `check:bench` · `check:release`  |
+| `boundaries`                                       | `check:boundaries`                                  |
+
+Nine scattered names became two families you can guess from one example —
+`check:*` for every gate, `update:*` for every regenerator — beside the ones
+that were already right (`check:graph`, `test:core`, `lint:aio`). The rule: **a
+bare verb is the default instance, `verb:qualifier` is a specific one, and the
+qualifier never leads.** In a scaffolded app the qualifier is narrower still —
+always a target — so you hold one closed vocabulary: `dev:electron`,
+`compile:android`, `install:electron`, `install:android`.
+
+`tests/task-naming.test.ts` fails a reversed name with the fix in the message.
+
+### `deno task install:android` — the build onto a real phone
+
+`dev:android` is the development loop: it boots an emulator when nothing is
+attached, builds a dev APK aimed at a dev server, and holds that server open.
+Nobody with a phone on the desk and a finished build wants any of that.
+
+```sh
+deno task install:android --build          # build it, install it, launch it
+deno task install:android --device=SERIAL  # when several are attached
+deno task install:android --emulator       # a running emulator, not a phone
+```
+
+Every refusal names what is actually attached: an `unauthorized` phone is the
+USB-debugging dialog waiting to be tapped (not "no device found" while the phone
+sits there lit up), two devices print the exact `--device=` flags, and an
+attached emulator is refused unless asked for. An `-unsigned.apk` is refused by
+name instead of arriving as adb's `INSTALL_PARSE_FAILED_NO_CERTIFICATES`.
+
+### `am`: one verb per act, and the words say what they do
+
+- **`am upgrade`** — one verb, the object decides: bare updates am itself,
+  `am upgrade <app>` upgrades an installed app. It used to be `update` for one
+  and `upgrade` for the other, told apart by a rule nobody can guess.
+  `am update` still works.
+- **`am errors`** hit the BUILD-error endpoint and said nothing about
+  `error.log`, while the runtime failures sat in a directory called `logs/`. It
+  now shows the build error first when there is one, then the tail of
+  `error.log` (`--lines=N`). `--json` keeps `errors` meaning exactly what it
+  meant and adds `build` + `runtime` — the scripting interface does not change
+  meaning underneath a script.
+- **`am open [--print]`** — opens _this app_. `am ui` opens the visual manager;
+  nothing opened the app itself. It refuses when nothing is serving, because a
+  browser tab reading `ERR_CONNECTION_REFUSED` is a worse answer than a
+  sentence.
+- **`am timetravel`** (`tt` still works) — the only abbreviation in a surface
+  that spells everything else out.
+- **`am sql --tables`** — `tables` was one fixed query wearing a command's name.
+- **Four commands existed that `am help` never mentioned**: `fix` — the one you
+  run after a `git clone` — plus `link`, `auth` and `report`. A command that
+  cannot be found is indistinguishable from a missing feature, and worse: the
+  cost is already paid and the user writes the workaround anyway.
+- **`am auth | less`** printed the entire help as one JSON string, escaped
+  newlines and all. Help is for a human by definition; a pipe does not change
+  who is reading.
+
+### The Windows artifact, executed
+
+Every release cross-compiles `x86_64-pc-windows-msvc` and nobody had ever run
+the result — "it compiles" is not "it starts", and that gap had already produced
+one data-loss class. Wine is a real Win32 implementation and a Deno binary is a
+plain PE, so `deno task lab --scenario=windows-app` now boots the same `.exe`
+that would ship: health, the UI verified on screen, `state.db` written by the
+SQLite worker, and the data directory named after the APP.
+
+What Wine does **not** do, measured rather than assumed: run PowerShell. 7.4 and
+7.2, on Wine 9 and on WineHQ 11.15 staging, load .NET and exit without executing
+— so `install.ps1`/`run.ps1` keep their own scenario, and the two scenarios make
+two different claims.
+
+### A fresh Mac would not have found `am`
+
+macOS has defaulted to zsh since Catalina and ships no `~/.zshrc`, so the
+installer's "only touch it if it exists" rule skipped every zsh file. It wrote
+`~/.profile` — which a login zsh never reads — and `~/.zprofile` was not even in
+the list. Then it verified with `sh -lc`, which _does_ read `~/.profile`, so it
+printed "am works in a new shell too" while the next Terminal had no `am` at
+all. A check that passes in a shell the user does not use is worse than no
+check. The targets are chosen by the login shell now, and the verification runs
+`zsh -lc` when that is the shell.
+
 ## 1.0.0-alpha59 — a machine that is not ours, and a line you can act on (2026-08-17)
 
 Two halves, both from the same complaint: _"the one-line install was a horrible

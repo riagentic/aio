@@ -24,10 +24,10 @@ deno task test:build        # artifact E2E: every target's binary boots from a F
 deno task check             # type-check src/ mod.ts aiol/ examples/ + amui
 deno task lint              # deno lint src/
 deno task lint:aio          # aiol — the custom project linter
-deno task boundaries        # src/ folder dependency matrix gate
-deno task api:check         # public-surface snapshot gate (api:update regenerates)
-deno task docs:check        # doc accuracy gate (docs:index regenerates docs/content.md)
-deno task coverage:check    # suite + src/ line-coverage floor
+deno task check:boundaries        # src/ folder dependency matrix gate
+deno task check:api         # public-surface snapshot gate (api:update regenerates)
+deno task check:docs        # doc accuracy gate (docs:index regenerates docs/content.md)
+deno task check:coverage    # suite + src/ line-coverage floor
 deno task preflight         # publish/install/scaffold sanity, end to end
 deno task bench             # + bench:check against scripts/bench-baselines.json
 deno task am <cmd>          # app manager: discover/start/stop/state/dispatch/surface/timeline/logs
@@ -45,7 +45,7 @@ nondeterministic. Don't ratchet it on noise.
 
 Source lives at the repo root (`src/`, `mod.ts`); tests all live in `tests/`,
 never beside their source. `mod.ts` plus the `exports` map in `deno.json` are
-the public surface — `api:check` snapshots it, so any export change is a
+the public surface — `check:api` snapshots it, so any export change is a
 deliberate, regenerated diff.
 
 Peer top-level apps: `amui/` (visual app manager), `aiol/` (custom linter),
@@ -192,7 +192,7 @@ identical in `deno.json`, `src/server/aio-cli.ts` (`VERSION`), and the README
 badge; `CHANGELOG.md` needs a dated entry; an upgrade guide must exist and be
 listed; `docs/content.md` and `docs/api-snapshot.json` must be regenerated.
 Gates: `fmt`, `check`, `lint`, `test`, `test:onboard`, `test:build`,
-`api:check`, `docs:check`, `boundaries`, `deno publish --dry-run`.
+`check:api`, `check:docs`, `boundaries`, `deno publish --dry-run`.
 
 `todo.md` is the live roadmap. `perfect-aio.md` holds the foundational design
 decisions.

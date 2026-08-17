@@ -269,6 +269,8 @@ export function parseGlobalFlags(
   for (const a of expanded) {
     if (a === "--json") flags.json = true;
     else if (a === "--data") flags.data = true;
+    else if (a === "--print") flags.print = true;
+    else if (a === "--tables") flags.tables = true;
     else if (a === "--force") flags.force = true;
     else if (a === "--quiet") flags.quiet = true;
     else if (a.startsWith("--port=")) flags.port = num(a.slice(7), "--port");

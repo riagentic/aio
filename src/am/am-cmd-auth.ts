@@ -18,7 +18,7 @@ import { resolveAmAppId } from "./am-utils.ts";
 import { openUserStore, type UserStore } from "../server/auth-users.ts";
 import { openSessionStore, type SessionStore } from "../server/sessions.ts";
 import type { GlobalFlags } from "./am-types.ts";
-import { detectMode, out, outError } from "./am-output.ts";
+import { detectMode, out, outError, usage } from "./am-output.ts";
 import { appDirs } from "../server/app-dirs.ts";
 
 const USAGE = `am auth — manage the built-in auth (auth: true) of this app
@@ -56,7 +56,7 @@ export async function cmdAuth(
   const mode = detectMode(flags);
   const [sub, ...rest] = args;
   if (!sub) {
-    out(USAGE, mode);
+    usage(USAGE, flags);
     return;
   }
 

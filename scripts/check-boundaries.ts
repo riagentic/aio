@@ -13,7 +13,7 @@
 //
 // Root entry files themselves are unrestricted (they ARE the public surface
 // and carry load-bearing side effects, e.g. state-core's enablePatches).
-// Run: deno task boundaries
+// Run: deno task check:boundaries
 
 const ALLOWED: Record<string, string[]> = {
   // periphery entry (aio/extras) — re-exports deep types across the surface

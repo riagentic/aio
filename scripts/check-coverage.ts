@@ -1,5 +1,5 @@
 // Coverage ratchet gate — src/ line coverage must not drop below the floor.
-// Run via `deno task coverage:check` (tests with --coverage → lcov → this).
+// Run via `deno task check:coverage` (tests with --coverage → lcov → this).
 // RATCHET RULE: when real coverage rises, raise FLOOR to just below it.
 // Never lower it — a drop below the floor means new code shipped untested.
 
@@ -12,7 +12,7 @@ try {
   text = await Deno.readTextFile(LCOV);
 } catch {
   console.error(
-    `[coverage] ✗ ${LCOV} not found — run \`deno task coverage:check\` ` +
+    `[coverage] ✗ ${LCOV} not found — run \`deno task check:coverage\` ` +
       `(it generates the profile + lcov before this gate).`,
   );
   Deno.exit(1);

@@ -23,11 +23,12 @@
 //   deno task lab --no-browser             # skip the UI proof (faster, weaker)
 //   deno task lab ../my-app                # test MY project (a path)
 //   deno task lab https://github.com/o/r   # test a project from a link
+//   deno task lab --scenario=windows-app   # run the .exe we ship, under Wine
 //   deno task lab --keep                   # leave the container for poking
 //
 // Exit code is the gate: 0 = every scenario passed.
 
-import { basename, resolve } from "@std/path";
+import { basename, join, resolve } from "@std/path";
 
 const HERE = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
@@ -276,6 +277,9 @@ const SCENARIO_FILE: Record<string, string> = {
   // Not a container scenario: it runs in Microsoft's PowerShell image, because
   // that is as close to Windows as a Linux host gets.
   "windows-scripts": "",
+  // Its own image (wine + a browser + deno) and its own runner, because it
+  // needs the ARTIFACT built first — see runWindowsApp().
+  "windows-app": "06-windows-app.sh",
 };
 
 /** What the target is, decided ONCE — the scenarios read this, so "a path" and
@@ -336,8 +340,165 @@ async function runWindowsScripts(): Promise<boolean> {
   return r.code === 0;
 }
 
+/** The Windows ARTIFACT, executed under Wine.
+ *
+ *  We cross-compile `x86_64-pc-windows-msvc` on every release and never ran the
+ *  result — and "it compiles" is not "it starts": the identity resolution, the
+ *  SQLite worker and the data-directory rules are all platform code a Linux
+ *  build never executes. Wine runs a Deno PE for real (measured: health,
+ *  served UI, state.db written under `C:\users\…`), so this closes the
+ *  artifact-never-executed gap for Windows.
+ *
+ *  It does NOT run install.ps1/run.ps1 — PowerShell 7 does not execute under
+ *  Wine 9 or Wine 11 staging (it loads .NET and exits), which is why the
+ *  scripts keep their own scenario. Two gates, two claims, neither borrowing
+ *  the other's credibility.
+ *
+ *  Opt-in: the image is ~4 GB, so it is not in the default set. */
+async function runWindowsApp(): Promise<boolean> {
+  console.log(
+    `\n${
+      "─".repeat(72)
+    }\n▸ scenario: windows-app (the .exe under Wine, not Windows)\n${
+      "─".repeat(72)
+    }`,
+  );
+  const image = "aio-lab:windows-app";
+  console.log(`▸ building ${image} (~4 GB the first time)`);
+  const built = await run([
+    RUNTIME,
+    "build",
+    "-f",
+    `${HERE}/docker/Dockerfile.windows-app`,
+    "-t",
+    image,
+    `${HERE}/docker`,
+  ]);
+  if (built.code !== 0) {
+    console.error("✗ wine image build failed");
+    return false;
+  }
+
+  // The artifact is built on the HOST: it is the same cross-compile a release
+  // runs, and building it here (rather than in the container) is both faster
+  // and closer to what actually ships.
+  const work = await Deno.makeTempDir({ prefix: "aio-lab-win-" });
+  try {
+    let appDir: string;
+    let appId: string;
+    if (TARGET.kind === "path") {
+      // A COPY: the build writes into the project, and dirtying someone's
+      // working tree is how a harness stops being run.
+      appDir = join(work, "project");
+      const cp = await run(["cp", "-a", TARGET.mount!, appDir]);
+      if (cp.code !== 0) {
+        console.error("✗ could not copy the target project");
+        return false;
+      }
+      appId = basename(TARGET.mount!);
+    } else if (TARGET.kind === "git") {
+      appDir = join(work, "project");
+      const cl = await run(["git", "clone", "--depth=1", TARGET.git, appDir]);
+      if (cl.code !== 0) {
+        console.error("✗ could not clone the target");
+        return false;
+      }
+      appId = basename(TARGET.git).replace(/\.git$/, "");
+    } else {
+      appId = "winlab";
+      const created = await run([
+        "deno",
+        "run",
+        "-A",
+        `${HERE}/src/am.ts`,
+        "create",
+        appId,
+        "--target=browser",
+      ], { cwd: work });
+      if (created.code !== 0) {
+        console.error("✗ am create failed");
+        return false;
+      }
+      appDir = join(work, appId);
+      // Pin the scaffold to THIS checkout: `am create` pins to the last
+      // release, and a scenario that tests the last release is testing the
+      // wrong end of the loop.
+      await run([
+        "deno",
+        "run",
+        "-A",
+        `${HERE}/src/am.ts`,
+        "pin",
+        "--path",
+        HERE,
+        "--force",
+      ], { cwd: appDir });
+    }
+
+    console.log("▸ cross-compiling the app for windows…");
+    const compiled = await run([
+      "deno",
+      "run",
+      "-A",
+      `${HERE}/src/build.ts`,
+      "--compile",
+      "--platform=windows",
+    ], { cwd: appDir });
+    if (compiled.code !== 0) {
+      console.error("✗ the windows cross-compile failed");
+      return false;
+    }
+    const exe = [...Deno.readDirSync(appDir)]
+      .filter((e) => e.isFile && e.name.endsWith(".exe"))
+      .map((e) => e.name)
+      .sort()[0];
+    if (!exe) {
+      console.error("✗ the build produced no .exe");
+      return false;
+    }
+    // Its own directory, world-readable: the container runs as a different
+    // user than the host, and a 0700 temp dir mounts as an empty-looking one —
+    // which the scenario correctly reported as "the runner did not build one".
+    // Mounting only this directory also keeps the project's node_modules out
+    // of the container.
+    const stage = join(work, "stage");
+    await Deno.mkdir(stage);
+    await Deno.copyFile(join(appDir, exe), join(stage, "app.exe"));
+    await Deno.chmod(work, 0o755);
+    await Deno.chmod(stage, 0o755);
+    await Deno.chmod(join(stage, "app.exe"), 0o755);
+    console.log(`▸ artifact: ${exe}`);
+
+    const r = await run([
+      RUNTIME,
+      "run",
+      "--rm",
+      "--name",
+      `aio-lab-windows-app-${Date.now()}`,
+      "-v",
+      `${HERE}/docker:/lab:ro`,
+      "-v",
+      `${join(work, "stage")}:/work:ro`,
+      "-e",
+      `LAB_WIN_APPID=${appId}`,
+      "-e",
+      "LAB_PORT=8123",
+      "-e",
+      "BROWSER_BIN=/usr/bin/google-chrome",
+      image,
+      "bash",
+      "-lc",
+      "sh /lab/scenarios/06-windows-app.sh",
+    ]);
+    return r.code === 0;
+  } finally {
+    await Deno.remove(work, { recursive: true }).catch(() => {});
+  }
+}
+
 async function runScenario(name: string): Promise<boolean> {
   if (name === "windows-scripts") return await runWindowsScripts();
+  if (name === "windows-app") return await runWindowsApp();
   const file = SCENARIO_FILE[name];
   if (!file) {
     console.error(

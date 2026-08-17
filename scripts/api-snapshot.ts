@@ -13,8 +13,8 @@
 //   (audit rule: `_` names are never public surface).
 //
 // Usage:
-//   deno task api:update   — regenerate docs/api-snapshot.json (deliberate)
-//   deno task api:check    — diff current surface vs snapshot; exit 1 on drift
+//   deno task update:api   — regenerate docs/api-snapshot.json (deliberate)
+//   deno task check:api    — diff current surface vs snapshot; exit 1 on drift
 
 const SNAPSHOT_PATH = new URL("../docs/api-snapshot.json", import.meta.url);
 const ROOT = new URL("../", import.meta.url);
@@ -174,7 +174,7 @@ async function buildSnapshot(): Promise<{
   return {
     snapshot: {
       $comment:
-        "Public API surface lock (roadmap A2). Regenerate DELIBERATELY with `deno task api:update` — any diff here is a surface change and must be intentional. sig = digest of the normalized declaration; a changed sig means the symbol's signature changed.",
+        "Public API surface lock (roadmap A2). Regenerate DELIBERATELY with `deno task update:api` — any diff here is a surface change and must be intentional. sig = digest of the normalized declaration; a changed sig means the symbol's signature changed.",
       entries,
     },
     violations,
@@ -261,7 +261,7 @@ async function main(): Promise<void> {
     committed = JSON.parse(await Deno.readTextFile(SNAPSHOT_PATH)) as Snapshot;
   } catch {
     console.error(
-      `✗ no committed snapshot at ${SNAPSHOT_PATH.pathname} — run \`deno task api:update\` and commit it`,
+      `✗ no committed snapshot at ${SNAPSHOT_PATH.pathname} — run \`deno task update:api\` and commit it`,
     );
     Deno.exit(1);
   }
@@ -275,7 +275,7 @@ async function main(): Promise<void> {
     );
     for (const line of diff) console.error(`  ${line}`);
     console.error(
-      "\nIf this change is intentional, regenerate with `deno task api:update`, review the diff, and commit it.",
+      "\nIf this change is intentional, regenerate with `deno task update:api`, review the diff, and commit it.",
     );
     Deno.exit(1);
   }

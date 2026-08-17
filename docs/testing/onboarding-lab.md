@@ -115,14 +115,40 @@ project instead of a scaffold — the answer to "will this thing build and run o
 a clean machine?", which is the question a README's install instructions are
 really making a claim about.
 
-### What the Windows scenario does NOT prove
+### Windows: two scenarios, two different claims
 
-Docker cannot boot Windows. `windows-scripts` runs in Microsoft's PowerShell
-image, so it catches syntax errors and wrong logic — the two things that made
-the POSIX one-liner fail — but nothing there touches a Windows filesystem, the
-registry, Start Menu shortcuts, `.exe` artifacts or a winget-installed deno. It
-is listed as its own scenario, with its limits printed on every run, precisely
-so a green line is never read as "Windows works". That needs a Windows runner.
+Docker cannot boot Windows — Windows containers need a Windows kernel, and no
+emulation path exists. What a Linux host _can_ do splits in two, and the split
+is deliberate: neither half is allowed to borrow the other's credibility.
+
+**`--scenario=windows-scripts`** — `install.ps1` / `run.ps1` under Microsoft's
+PowerShell image. It proves they **parse** and that their decisions are right
+(version comparison, `MIN_DENO` read from the framework, app-name derivation),
+plus a static ban on PowerShell-7-only syntax — needed because the gate's own
+pwsh 7 accepts what Windows 5.1 rejects, which is how a `??` shipped as a parse
+error on every stock Windows box. Seconds to run; in the default set.
+
+**`--scenario=windows-app`** — the **artifact**, executed. Every release
+cross-compiles `x86_64-pc-windows-msvc`, and until this existed nobody had ever
+run the result: "it compiles" is not "it starts". Wine is a real Win32
+implementation and a Deno-compiled binary is a plain PE, so the same `.exe` that
+would ship boots here, opens its SQLite database in a worker, serves, and writes
+to a Windows-shaped profile path. The UI tier then answers _is the expected
+screen there_, and the identity check re-proves the data-loss shape fixed in
+alpha59 (a binary must not take its name from its FILE). Opt-in: the image is ~4
+GB.
+
+What **neither** proves, printed on every run rather than left implied:
+
+- Windows PowerShell **5.1** actually executing the scripts (only a syntax
+  subset is checked statically). PowerShell 7 does **not** run under Wine at all
+  — measured on Wine 9 and Wine 11 staging: it loads .NET and exits without
+  executing, which is why the scripts are not tested there.
+- The real registry, Start Menu `.lnk`, a winget-installed deno, SmartScreen on
+  an unsigned binary, and true file locking when replacing a **running** `.exe`.
+
+Both remain best-effort until there is a Windows runner. The point of two
+scenarios is that a green line names exactly what went green.
 
 ## When it fails
 
