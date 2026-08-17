@@ -1,7 +1,7 @@
 // Deep merge — restores persisted state while preserving new schema fields
 // Shared by aio.ts (Deno KV) and standalone.ts (localStorage)
 
-import { log } from "../diagnostics/logger.ts";
+import { log } from "../diagnostics/logger-api.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 
 /** Returns true if v is a plain object (not null, not array, not Map/Set/Date) */

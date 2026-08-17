@@ -7,6 +7,7 @@
  */
 
 import { batch, type Signal, signal } from "./signal.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 // ── Dev-only deep freeze for cell signal values ─────────────────────
 // AIO-4.4: in dev, deep-freeze the value before installing it in a cell
@@ -28,7 +29,7 @@ function _maybeFreezeInDev<T>(value: T): T {
     if (!(globalThis as Record<string, unknown>).__aioFreezeSkipped) {
       (globalThis as Record<string, unknown>).__aioFreezeSkipped = true;
       // One-time warn to keep dev boot snappy.
-      console.info(
+      log.info(
         `[aio] dev freeze skipped: cell slice > ${FREEZE_SIZE_LIMIT}B`,
       );
     }

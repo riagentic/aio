@@ -32,6 +32,7 @@ import {
   unknownFleetFlags,
 } from "./build/build-flags.ts";
 import { resolveAppDir, resolveEntry } from "./build/build-config.ts";
+import { ansi } from "./diagnostics/color.ts";
 import {
   crossCompileBlocker,
   hostPlatform,
@@ -197,14 +198,16 @@ interface TargetResult {
   artifacts: ArtifactRec[];
 }
 
+// `ansi()` is the one place that decides NO_COLOR / not-a-terminal — a build
+// log piped into a file or a CI transcript should not carry escapes.
 const C = {
-  b: "\x1b[1m",
-  dim: "\x1b[2m",
-  red: "\x1b[31m",
-  green: "\x1b[32m",
-  blue: "\x1b[36m",
-  yellow: "\x1b[33m",
-  r: "\x1b[0m",
+  b: ansi("\x1b[1m"),
+  dim: ansi("\x1b[2m"),
+  red: ansi("\x1b[31m"),
+  green: ansi("\x1b[32m"),
+  blue: ansi("\x1b[36m"),
+  yellow: ansi("\x1b[33m"),
+  r: ansi("\x1b[0m"),
 };
 
 const flag = (name: string): string | undefined =>

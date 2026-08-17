@@ -8,6 +8,7 @@ import type {
   WorkerResponse,
 } from "./types.ts";
 import { isCompiled } from "../server/paths.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 /** Marker phrase every "the db worker isn't in this binary" error carries, so
  *  the condition is recognised by ONE predicate wherever it surfaces. */
@@ -259,9 +260,11 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
     // `createDB(":memory:")` is the intended ephemeral/test mode; keep it single-
     // Worker rather than let a stray `readers` option produce empty reads.
     if (numReaders > 0 && (path === ":memory:" || path === "")) {
-      console.warn(
-        `[aio:db] readers>0 ignored for an in-memory DB — each Worker gets its ` +
+      log.warn(
+        "db",
+        `readers>0 ignored for an in-memory DB — each Worker gets its ` +
           `own :memory: DB; using writer-only.`,
+        { detail: String() },
       );
       numReaders = 0;
     }

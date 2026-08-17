@@ -1,6 +1,13 @@
 // logger-types.ts — Types, constants, and pure helpers for structured logging
 
-/** Log severity levels */
+/** Default log directory — dot-dir so project watchers/scanners skip it. */
+// Only reached by a logger created WITHOUT an app (a standalone script, or a
+// log call before boot wires `dir: <appDirs>.logs`). An app's logs live in
+// `~/.<appId>/logs` — see src/server/app-dirs.ts.
+export const DEFAULT_LOG_DIR = ".aio/log";
+
+/** Log severity levels — the word in every line, and what it asks of you:
+ *  info = nothing to do · warn = should be fixed · error = must be fixed. */
 export type LogLevel = "trace" | "debug" | "info" | "warn" | "error";
 
 /** Logger configuration — passed to aio.run({ logging: {...} }) */
@@ -41,6 +48,40 @@ export type LogConfig = {
    *  logger warns rather than deleting this run's evidence. */
   logBudget?: number;
 };
+
+/** What the public `log` API needs from a logger.
+ *
+ *  `AioLogger` satisfies this structurally, and typing the singleton against
+ *  the INTERFACE is what keeps `logger-api.ts` free of any reference to
+ *  `logger-core.ts` — the core is Deno-only (`@std/path`, file writes), and a
+ *  single `import type` of it followed `log` into the browser bundle, where an
+ *  unmapped bare import is a blank screen. The API depends on the shape; only
+ *  the server ever depends on the class. */
+export interface LogSink {
+  readonly logDir: string;
+  pub(
+    lvl: LogLevel,
+    cat: string,
+    msg: string,
+    data?: Record<string, unknown>,
+  ): void;
+  /** A budget violation — its own sink (perf.log), not a level. */
+  perf(
+    source: "reduce" | "effect",
+    type: string,
+    duration: number,
+    budget: number,
+    breakdown?: {
+      produce: number;
+      clone: number;
+      spread: number;
+      routing: number;
+      listeners: number;
+    },
+  ): void;
+  /** Wait for buffered lines to reach disk (shutdown, and tests). */
+  flush(timeoutMs?: number): Promise<void>;
+}
 
 export type LogEntry = {
   ts: string;

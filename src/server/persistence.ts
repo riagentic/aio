@@ -10,7 +10,7 @@ import {
   reportError as reportAioError,
 } from "../diagnostics/error.ts";
 import type { ReportErrorOpts } from "../diagnostics/error.ts";
-import type { Log } from "../diagnostics/logger.ts";
+import type { Log } from "../diagnostics/logger-api.ts";
 import { PERSIST_SCHEMA_VERSION } from "./persist-schema.ts";
 import {
   describeIssues,

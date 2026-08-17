@@ -1,7 +1,7 @@
 // Shutdown orchestrator — multi-phase graceful shutdown (AIO-52 Phase 2)
 // Extracted from aio.ts. Order is critical: persist → diag → vitals → hooks → services → DB.
 
-import type { Log } from "../diagnostics/logger.ts";
+import type { Log } from "../diagnostics/logger-api.ts";
 import { blocking } from "../state/blocking.ts";
 import {
   abortAllInflight,

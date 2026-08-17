@@ -3,6 +3,7 @@
 
 import { blocking } from "./blocking.ts";
 import { selfMethodOf } from "./self.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -119,7 +120,7 @@ const _schedHinted = new Set<string>();
 function _hintOnce(key: string, msg: string): void {
   if (_schedHinted.has(key)) return;
   _schedHinted.add(key);
-  console.warn(`[aio:schedule] ${msg} (hinted once)`);
+  log.warn("schedule", `${msg} (hinted once)`);
 }
 
 /** Is this positional arg the ACTION (has a string `.type`) rather than an

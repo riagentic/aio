@@ -7,7 +7,7 @@
 
 import { compactPatches } from "../state/patch-compact.ts";
 import { writeClientLog } from "./client-log.ts";
-import { log } from "../diagnostics/logger.ts";
+import { log } from "../diagnostics/logger-api.ts";
 import {
   _recordClientDegraded,
   type DegradedChange,

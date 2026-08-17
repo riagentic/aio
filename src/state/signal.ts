@@ -1,3 +1,5 @@
+import { log } from "../diagnostics/logger-api.ts";
+
 // Reactive signal system for AIO renderer.
 // Provides: signal, computed, effect, batch — auto-tracked dependencies.
 
@@ -143,8 +145,9 @@ function _flush(): void {
   try {
     while (_pendingSubscribers.size > 0) {
       if (++_flushIterations > _FLUSH_MAX_ITERATIONS) {
-        console.warn(
-          `[aio:signal] _flush exceeded ${_FLUSH_MAX_ITERATIONS} iterations — possible infinite loop. ` +
+        log.warn(
+          "signal",
+          `_flush exceeded ${_FLUSH_MAX_ITERATIONS} iterations — possible infinite loop. ` +
             `${_pendingSubscribers.size} subscriber(s) still pending. ` +
             `Use signal(value, "name") for easier debugging. Remaining subscribers cleared.`,
         );
@@ -160,7 +163,9 @@ function _flush(): void {
           try {
             sub.prepare();
           } catch (e) {
-            console.error("[aio:signal] effect cleanup error:", e);
+            log.error("signal", "effect cleanup error:", {
+              detail: String(e),
+            });
             phase1Failed.add(sub);
           }
         }
@@ -171,7 +176,9 @@ function _flush(): void {
         try {
           sub.execute();
         } catch (e) {
-          console.error("[aio:signal] effect execute error:", e);
+          log.error("signal", "effect execute error:", {
+            detail: String(e),
+          });
         }
       }
     }
@@ -298,7 +305,7 @@ class SignalImpl<T> implements Signal<T> {
     const resolved = next;
     if (!opts?.force && Object.is(this._value, resolved)) {
       if (this._name && _devMode) {
-        console.warn(
+        log.warn(
           `[aio] signal "${this._name}" update skipped (identical reference)`,
         );
       }
@@ -313,7 +320,7 @@ class SignalImpl<T> implements Signal<T> {
       _shallowEq(this._value, resolved)
     ) {
       if (this._name && _devMode) {
-        console.warn(
+        log.warn(
           `[aio] signal "${this._name}" update skipped (shallow-equal)`,
         );
       }
@@ -531,7 +538,9 @@ export function _computedDisposeAll(list: Disposable[]): void {
       try {
         c.dispose();
       } catch (e) {
-        console.error("[aio:signal] computed dispose error:", e);
+        log.error("signal", "computed dispose error:", {
+          detail: String(e),
+        });
       }
     }
   } finally {
@@ -562,7 +571,7 @@ export function _effectDisposeAll(list: (() => void)[]): void {
       try {
         dispose();
       } catch (e) {
-        console.error("[aio:signal] effect dispose error:", e);
+        log.error("signal", "effect dispose error:", { detail: String(e) });
       }
     }
   } finally {

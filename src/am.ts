@@ -80,6 +80,7 @@ import {
 
 import type { CmdHandler } from "./am/am-types.ts";
 import { detectMode, outError } from "./am/am-output.ts";
+import { cmdInstalled, cmdRemove, cmdUpgrade } from "./am/am-cmd-remove.ts";
 import { cmdBackup, cmdData, cmdRestore } from "./am/am-cmd-data.ts";
 import { cmdPin } from "./am/am-cmd-pin.ts";
 import { cmdCost } from "./am/am-cmd-cost.ts";
@@ -144,6 +145,9 @@ const COMMANDS: Record<string, CmdHandler> = {
   fix: cmdFix, // full clone repair (symlink + env + electron + config + …)
   update: cmdUpdate,
   uninstall: cmdUninstall,
+  remove: cmdRemove, // an installed APP; `uninstall` is am itself
+  installed: cmdInstalled,
+  upgrade: cmdUpgrade, // rebuild+reinstall an installed app from its source
   version: cmdVersion,
   help: (args, flags) => cmdHelp(args, flags, Object.keys(COMMANDS)),
 };
@@ -174,7 +178,7 @@ async function delegateToPathPin(): Promise<boolean> {
   const self = new URL(import.meta.url).pathname;
   if (self === entry) return false;
   console.error(
-    `am: path pin — using the pinned checkout's am (${target}). ` +
+    `am: note: path pin — using the pinned checkout's am (${target}). ` +
       `AIO_AM_NO_DELEGATE=1 uses the installed am instead.`,
   );
   const p = new Deno.Command(Deno.execPath(), {
@@ -199,7 +203,13 @@ async function main(): Promise<void> {
     await COMMANDS.help!(command === "help" ? args : [command, ...args], flags);
     Deno.exit(0);
   }
-  const handler = COMMANDS[command];
+  // `--version` / `-v` / `-V` are what every other CLI answers to, and they are
+  // the FIRST thing anyone types to check an install worked. `am` answered
+  // `{"error":"unknown command: --version"}` — a JSON error, in the first
+  // sixty seconds, to a question that has an obvious answer. The onboarding lab
+  // caught it because the installer verifies `am` by asking it its version.
+  const cmd = /^--?(version|V)$/i.test(command) ? "version" : command;
+  const handler = COMMANDS[cmd];
   if (!handler) {
     outError(
       `unknown command: ${command} — run "am help" for usage`,

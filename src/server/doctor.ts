@@ -19,6 +19,7 @@ import {
   checkWorkerPeerReads,
 } from "../../aiol/checks.ts";
 import { manifestReport, scanCapabilities } from "../build/capabilities.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 /** One doctor check — a named config assertion with a one-line fix on failure. */
 interface Check {
@@ -240,14 +241,14 @@ if (import.meta.main) {
   let failed = 0;
   for (const c of checks) {
     if (c.ok) {
-      console.log(`  PASS  ${c.name}`);
+      log.info(`  PASS  ${c.name}`);
     } else {
       failed++;
-      console.log(`  FAIL  ${c.name}\n        fix: ${c.fix}`);
+      log.info(`  FAIL  ${c.name}\n        fix: ${c.fix}`);
     }
   }
-  console.log(`\n${checks.length - failed} checks passed, ${failed} failed`);
+  log.info(`\n${checks.length - failed} checks passed, ${failed} failed`);
   const manifest = await capabilityManifest(dir);
-  if (manifest) console.log(`\n${manifest}`);
+  if (manifest) log.info(`\n${manifest}`);
   if (!ok) Deno.exit(1);
 }

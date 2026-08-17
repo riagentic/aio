@@ -20,7 +20,7 @@
 // - opt out with AIO_NO_DEV_RESTART=1
 
 import { fromFileUrl } from "@std/path";
-import { log } from "../diagnostics/logger.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 /** Exit code a supervised child uses to ask for a fresh process. 75 =
  *  EX_TEMPFAIL — "try again", and outside the range apps use for errors. */

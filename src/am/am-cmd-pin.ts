@@ -303,7 +303,11 @@ export async function cmdPin(
   // source for spellings the target version no longer accepts, and say so with
   // file:line. Silence here would mean the app builds, ships, and dies at boot
   // on a framework the tool just told it was fine.
-  if (!args.includes("--force")) {
+  // `--force` is a GLOBAL flag now (am-utils parses it), so it never reaches
+  // the positional list. Reading both spellings keeps a script that passed it
+  // positionally working, and keeps this from silently ignoring it — which is
+  // what happened the moment the flag moved.
+  if (!args.includes("--force") && !flags.force) {
     const blocking = await preflight(appDir, ref);
     if (blocking.length) {
       const lines = blocking.map((b) =>

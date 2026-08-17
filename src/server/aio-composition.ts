@@ -24,7 +24,7 @@ import {
 } from "../state/cell-helpers.ts";
 import type { AioError, ReportErrorOpts } from "../diagnostics/error.ts";
 import { reportError as reportAioError } from "../diagnostics/error.ts";
-import { log } from "../diagnostics/logger.ts";
+import { log } from "../diagnostics/logger-api.ts";
 import { parseCli } from "./aio-cli.ts";
 import { isCompiled } from "./paths.ts";
 import { normalizeSyncConfig } from "../sync/types.ts";

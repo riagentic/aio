@@ -12,7 +12,7 @@
 // working tree.
 import { join } from "@std/path";
 import type { DataContract } from "../build/ship.ts";
-import type { Log } from "../diagnostics/logger.ts";
+import type { Log } from "../diagnostics/logger-api.ts";
 
 export type RebuildResult =
   | { ok: true; artifact: string; contract?: DataContract; sha: string }

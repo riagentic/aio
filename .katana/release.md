@@ -16,6 +16,13 @@ Gates (must pass):
 - `deno task docs:check` passes
 - `deno task boundaries` passes — src/ module dependency matrix respected
 - `deno publish --dry-run` succeeds
+- `deno task lab` passes — the onboarding lab: the REAL one-liners
+  (`install.sh`, `run.sh`) on a fresh ubuntu container with no deno, no unzip
+  and a non-root user, ending in an app whose UI actually renders. Every other
+  onboarding test runs on THIS machine, where deno is current and the framework
+  is already checked out, so none of them can fail the way a stranger fails.
+  Needs docker/podman; `release:check` reports it as SKIPPED when absent rather
+  than passing quietly
 - all tests and UI tests pass without isssues
 - all errors and warnings in logs are resolved (not hidden but trully resolved)
 

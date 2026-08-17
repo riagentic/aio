@@ -11,7 +11,9 @@
 //   • A failed boot after an update rolls itself back, because the case that
 //     most needs a rollback (an unattended service) has nobody to run one.
 import { dirname, join } from "@std/path";
+import { pruneVersions } from "./install-record.ts";
 import type { UpdateTarget } from "../build/ship.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 /** Where the artifact that is actually running lives on disk.
  *
@@ -184,6 +186,55 @@ export function judgePending(
  *  directory entry. The running process keeps its inode — and, for an AppImage,
  *  its mount — while the path now resolves to the new version, which is exactly
  *  what the next launch needs. */
+/** Is `path` the STABLE NAME of an installed app — a symlink pointing at a
+ *  versioned artifact beside it?
+ *
+ *  `run.sh` installs an app as:
+ *
+ *      ~/app/<name>/<name>-<version>.AppImage   the artifact
+ *      ~/app/<name>/<name>.AppImage → that      the stable name
+ *
+ *  and the stable name is what the menu entry, the shell alias and the user's
+ *  muscle memory point at. A plain `rename(staged, current)` over that symlink
+ *  REPLACES IT WITH A FILE: after the first update the versioning is gone, the
+ *  old version is unrecoverable, and every launcher now points at a regular
+ *  file that the next update overwrites in place. Detecting the layout is what
+ *  lets an update add a version instead of flattening the scheme. */
+export async function versionedInstall(
+  path: string,
+): Promise<
+  | { dir: string; link: string; target: string; base: string; ext: string }
+  | null
+> {
+  let info: Deno.FileInfo;
+  try {
+    info = await Deno.lstat(path);
+  } catch {
+    return null;
+  }
+  if (!info.isSymlink) return null;
+  let target: string;
+  try {
+    target = await Deno.realPath(path);
+  } catch {
+    return null; // dangling — not a layout we can reason about
+  }
+  const dir = dirname(path);
+  // `~/app/<name>/<name>.ext -> ~/app/<name>/versions/<version>/<name>.ext`.
+  // The VERSION is the directory, and the file keeps the app's name — a
+  // deno-compiled binary derives its identity (and therefore its data
+  // directory) from its own file name, so versioning the file would rename the
+  // app on every update.
+  const versions = join(dir, "versions");
+  if (!target.startsWith(versions + "/")) return null;
+  const linkName = path.slice(dir.length + 1);
+  const dot = linkName.indexOf(".");
+  const base = dot === -1 ? linkName : linkName.slice(0, dot);
+  const ext = dot === -1 ? "" : linkName.slice(dot);
+  if (target.slice(target.lastIndexOf("/") + 1) !== linkName) return null;
+  return { dir, link: path, target, base, ext };
+}
+
 export async function swapArtifact(opts: {
   /** The artifact currently running — the file to replace. */
   current: string;
@@ -192,7 +243,42 @@ export async function swapArtifact(opts: {
   staged: string;
   /** Version being replaced, for the kept-aside copy's name. */
   fromVersion: string;
+  /** How many versioned artifacts to keep in an installed layout (default 3,
+   *  never fewer than 2 — the new one and the one it replaced). */
+  keepVersions?: number;
+  /** Version being installed. Only used for the versioned-install layout,
+   *  where it NAMES the new file; without it that layout cannot be preserved,
+   *  so the old flat behaviour is used and said so at the call site. */
+  toVersion?: string;
 }): Promise<{ previous: string }> {
+  const layout = await versionedInstall(opts.current);
+  if (layout && opts.toVersion) {
+    // Add a version, then re-point the stable name at it. The old artifact is
+    // left exactly where it was — it IS the rollback copy, no duplicate
+    // needed — and the symlink swap is atomic (rename over a temporary link),
+    // so a crash mid-update leaves the app pointing at a real binary either
+    // way.
+    const nextDir = `${layout.dir}/versions/${opts.toVersion}`;
+    await Deno.mkdir(nextDir, { recursive: true });
+    const next = `${nextDir}/${layout.base}${layout.ext}`;
+    if (Deno.build.os !== "windows") await Deno.chmod(opts.staged, 0o755);
+    await Deno.rename(opts.staged, next);
+    const tmpLink = `${layout.link}.new-${opts.toVersion}`;
+    await Deno.remove(tmpLink).catch(() => {});
+    await Deno.symlink(next, tmpLink);
+    await Deno.rename(tmpLink, layout.link);
+    // Old versions ARE the rollback, but only the last few. Without this each
+    // update leaves another artifact — ~156MB for an AppImage — in the install
+    // directory forever: nothing fails, the disk just fills, and the person
+    // who finds out is the one who runs out of space doing something else.
+    // The two just written (new + previous) are always kept.
+    await pruneVersions({
+      dir: layout.dir,
+      keep: Math.max(2, opts.keepVersions ?? 3),
+      current: nextDir,
+    }).catch(() => []);
+    return { previous: layout.target };
+  }
   const previous = `${opts.current}.old-${opts.fromVersion}`;
   await Deno.copyFile(opts.current, previous);
   if (Deno.build.os !== "windows") await Deno.chmod(opts.staged, 0o755);
@@ -205,6 +291,18 @@ export async function restoreArtifact(
   current: string,
   previous: string,
 ): Promise<void> {
+  // In an installed layout, `current` is the stable symlink and `previous` is
+  // the version that was running before — so the rollback is re-pointing the
+  // link, not moving files. Renaming over the link here would do exactly the
+  // damage the swap was careful to avoid.
+  const layout = await versionedInstall(current);
+  if (layout) {
+    const tmpLink = `${current}.rollback`;
+    await Deno.remove(tmpLink).catch(() => {});
+    await Deno.symlink(previous, tmpLink);
+    await Deno.rename(tmpLink, current);
+    return;
+  }
   await Deno.rename(previous, current);
 }
 
@@ -304,7 +402,7 @@ export async function awaitPredecessor(
     if (!alive(pid)) return;
     await new Promise((r) => setTimeout(r, 100));
   }
-  console.warn(
+  log.warn(
     `[aio] update: previous instance (pid ${pid}) has not exited after ` +
       `${timeout / 1000}s — starting anyway`,
   );

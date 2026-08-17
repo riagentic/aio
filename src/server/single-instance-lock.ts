@@ -5,6 +5,7 @@
 
 import { dirname, join } from "@std/path";
 import { appDirs } from "./app-dirs.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -58,6 +59,24 @@ export function appIdFromConfig(
   return raw ? slugify(raw) : null;
 }
 
+/** The deno.json that travels INSIDE a compiled binary, next to its entry.
+ *  Read relative to `Deno.mainModule` (the VFS), never the launch directory —
+ *  the same lookup `appDenoJson()` uses for the version in the boot banner.
+ *  Kept local so this module stays free of a server-side import cycle. */
+function _embeddedDenoJson(): unknown {
+  try {
+    const main = new URL(Deno.mainModule);
+    for (const up of ["./", "../", "../../"]) {
+      try {
+        const text = Deno.readTextFileSync(new URL(`${up}deno.json`, main));
+        const parsed = JSON.parse(text);
+        if (parsed && typeof parsed === "object") return parsed;
+      } catch { /* not at this level — walk up */ }
+    }
+  } catch { /* no usable main module */ }
+  return null;
+}
+
 /** Resolve app ID — explicit `appId` wins; otherwise inferred. */
 export function resolveAppId(appId?: string): string {
   if (appId) return slugify(appId);
@@ -71,6 +90,26 @@ export function resolveAppId(appId?: string): string {
       p.startsWith("deno-compile-")
     );
     if (compiledSeg) {
+      // The VFS segment is named after the EXECUTABLE FILE, at runtime — so
+      // renaming the binary renames the app. That is not a theoretical
+      // objection: installing it as `<name>-<version>` (which is how versioned
+      // installs and rollbacks work) gave the app the id `name-1-0-0`, and its
+      // data directory moved with it. Every upgrade would then start from an
+      // empty `~/.<name>-<newversion>/` while the real state sat in the old
+      // one — silent, and exactly the kind of loss `~/.<appId>` exists to
+      // prevent. `mv app app.bak` would do the same.
+      //
+      // The binary EMBEDS its deno.json (that is where the version in the boot
+      // banner comes from), so the app's declared identity travels inside it
+      // and does not depend on what the file is called. This still never reads
+      // the CWD's deno.json — the rule that matters here is "not the launch
+      // directory's identity", and an embedded file is the binary's own.
+      const embedded = appIdFromConfig(
+        _embeddedDenoJson() as
+          | { appId?: string; title?: string; name?: string }
+          | null,
+      );
+      if (embedded) return embedded;
       return slugify(compiledSeg.slice("deno-compile-".length));
     }
   } catch { /* no main module — fall through */ }
@@ -448,7 +487,7 @@ export class AppLock {
         const where = existing.socketPath
           ? `socket ${existing.socketPath}`
           : `port ${existing.port}`;
-        console.warn(
+        log.warn(
           `[AIO] stale instance: pid ${existing.pid} is alive but ${where} refuses connections — reclaiming lock (zombie server)`,
         );
         removeLock(this.appId);

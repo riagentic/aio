@@ -95,7 +95,7 @@ export async function withDevExcluded(
           await Deno.symlink(target, path);
         }
       } catch (e) {
-        console.warn(`[${tag}] failed to restore symlink ${path}: ${e}`);
+        console.warn(`[${tag}] \u26a0 failed to restore symlink ${path}: ${e}`);
       }
     }
     if (saved.length) console.log(`[${tag}] restored ${saved.length} symlinks`);

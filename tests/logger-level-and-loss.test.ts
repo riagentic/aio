@@ -11,23 +11,14 @@
 //    forever, while every subsequent batch was dropped. A full disk or a
 //    revoked permission turned the app's log off with no signal at all.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { interceptConsole } from "./console-capture.ts";
 import { AioLogger } from "../src/diagnostics/logger.ts";
 
 const tmpDir = () => Deno.makeTempDirSync();
 
 function capture(): { lines: string[]; restore: () => void } {
   const lines: string[] = [];
-  const err = console.error;
-  const logf = console.log;
-  console.error = (...a: unknown[]) => lines.push(a.join(" "));
-  console.log = (...a: unknown[]) => lines.push(a.join(" "));
-  return {
-    lines,
-    restore: () => {
-      console.error = err;
-      console.log = logf;
-    },
-  };
+  return { lines, restore: interceptConsole(lines) };
 }
 
 Deno.test("logger: level gates EVERY sink, not just debug.log", async () => {

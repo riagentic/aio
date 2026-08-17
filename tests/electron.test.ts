@@ -300,23 +300,52 @@ Deno.test("electron: UDS script — reports a backend outage once, with the true
 // ── electron auto-install ────────────────────────────────
 import { autoInstallElectron } from "../src/electron/electron-spawn.ts";
 
-Deno.test("autoInstallElectron: reports success, failure, and throw — always loud, never throws", async () => {
+// The contract is "is Electron INSTALLED now", not "did the installer exit
+// zero" — because `deno install --allow-scripts` exits zero having skipped the
+// lifecycle script, leaving a package with no `dist/`. Returning success there
+// is what told a build the runtime was ready when it was not, and sent a user
+// chasing `deno task install:electron` in a loop.
+Deno.test("autoInstallElectron: answers 'is it installed', not 'did the command exit 0'", async () => {
   const infos: string[] = [];
   const log = { info: (m: string) => infos.push(m), error: () => {} };
+
   assertEquals(
-    await autoInstallElectron(log, () => Promise.resolve({ success: true })),
+    await autoInstallElectron(
+      log,
+      () => Promise.resolve({ success: true }),
+      () => Promise.resolve(true),
+    ),
     true,
   );
   assertEquals(
-    await autoInstallElectron(log, () => Promise.resolve({ success: false })),
+    await autoInstallElectron(
+      log,
+      // The exact shape of the bug: the command succeeds, nothing is installed.
+      () => Promise.resolve({ success: true }),
+      () => Promise.resolve(false),
+    ),
     false,
+    "an installer that exits 0 while installing nothing must NOT report success",
   );
   assertEquals(
-    await autoInstallElectron(log, () => Promise.reject(new Error("spawn"))),
+    await autoInstallElectron(
+      log,
+      () => Promise.resolve({ success: false }),
+      () => Promise.resolve(true),
+    ),
+    true,
+    "…and a non-zero exit with the runtime present is still installed",
+  );
+  assertEquals(
+    await autoInstallElectron(
+      log,
+      () => Promise.reject(new Error("spawn")),
+      () => Promise.resolve(false),
+    ),
     false,
   );
   // Loud: every attempt announces what it's doing (no silent installs).
-  assertEquals(infos.length, 3);
+  assertEquals(infos.length >= 4, true);
   assertEquals(infos[0]!.includes("--allow-scripts=npm:electron"), true);
 });
 

@@ -25,7 +25,7 @@ import {
 } from "../diagnostics/error.ts";
 import { makeRedactor } from "../diagnostics/redact.ts";
 import { migrateSchema, PERSIST_SCHEMA_VERSION } from "./persist-schema.ts";
-import type { Log } from "../diagnostics/logger.ts";
+import type { Log } from "../diagnostics/logger-api.ts";
 import type { CheckpointData, DiagnosticsHooks } from "../diagnostics/mod.ts";
 import type { ServerSyncHandler } from "../sync/server-handler.ts";
 import {

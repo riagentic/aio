@@ -15,7 +15,7 @@
 import type { UserStore } from "./auth-users.ts";
 import type { SessionStore } from "./sessions.ts";
 import type { AioUser } from "./aio-types.ts";
-
+import { log } from "../diagnostics/logger-api.ts";
 export interface OidcConfig {
   /** Provider issuer URL, e.g. "https://accounts.google.com". */
   issuer: string;
@@ -327,7 +327,7 @@ export async function oidcCallback(
     body,
   });
   if (!tokenResp.ok) {
-    console.warn(
+    log.warn(
       `[aio] auth: oidc token exchange failed (${tokenResp.status})`,
     );
     return new Response("token exchange failed", { status: 502 });
@@ -339,13 +339,13 @@ export async function oidcCallback(
   try {
     claims = await verifyIdToken(id_token, deps.cfg, d.jwks_uri);
   } catch (e) {
-    console.warn(`[aio] auth: oidc id_token rejected — ${e}`);
+    log.warn(`[aio] auth: oidc id_token rejected — ${e}`);
     return new Response("invalid id_token", { status: 401 });
   }
   // Nonce binds the token to THIS /start (anti-replay). Providers echo it;
   // require a match when we sent one.
   if (nonce && claims.nonce !== nonce) {
-    console.warn(`[aio] auth: oidc nonce mismatch`);
+    log.warn(`[aio] auth: oidc nonce mismatch`);
     return new Response("invalid id_token", { status: 401 });
   }
 
@@ -355,7 +355,7 @@ export async function oidcCallback(
   const sub = claims.sub as string;
   const id = externalId(deps.cfg.issuer, sub);
   if (id.length > 256) {
-    console.warn(`[aio] auth: oidc subject too long for an account id`);
+    log.warn(`[aio] auth: oidc subject too long for an account id`);
     return new Response("invalid id_token", { status: 401 });
   }
   const email = typeof claims.email === "string" ? claims.email : undefined;
@@ -366,7 +366,7 @@ export async function oidcCallback(
   // it, so an operator upgrading needs to know why an SSO user who used to
   // land on "alice" now lands on a fresh account.
   if (!existing && deps.users.get(sub)) {
-    console.warn(
+    log.warn(
       `[aio] auth: oidc login for sub="${sub}" maps to id="${id}" — a ` +
         `separate local account named "${sub}" exists and is NOT adopted ` +
         `(external identities are their own namespace; linking is not ` +
@@ -378,7 +378,7 @@ export async function oidcCallback(
     // Only ever for an account this namespace owns (never a local one — it is
     // unreachable from here now), and never silently.
     if (email && existing.email !== email) {
-      console.warn(
+      log.warn(
         `[aio] auth: oidc updated the email on id="${id}" (provider claim)`,
       );
       deps.users.setEmail(id, email);
@@ -395,7 +395,7 @@ export async function oidcCallback(
       // The id rules (length, no invisible characters) are the store's, and a
       // provider can mint a sub that breaks them. Refuse the login loudly
       // rather than 500 on a half-created account.
-      console.warn(
+      log.warn(
         `[aio] auth: oidc account creation refused for "${id}" — ${e}`,
       );
       return new Response("invalid id_token", { status: 401 });

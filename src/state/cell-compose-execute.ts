@@ -2,7 +2,7 @@
 // cell's executor (async-method triggers, schedule/own bridges). Generator
 // flow dispatch died with Style B (perfect-aio D1).
 
-import { log } from "../diagnostics/logger.ts";
+import { log } from "../diagnostics/logger-api.ts";
 import type { AioError } from "../diagnostics/error.ts";
 import { createAioError } from "../diagnostics/error.ts";
 import type { CellDef, Msg, ScopedApp } from "./cell-types.ts";

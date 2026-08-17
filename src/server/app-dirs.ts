@@ -147,6 +147,59 @@ export function _resetAppDirs(): void {
   _registered.clear();
 }
 
+/** Where a BUILT app is installed — the program, not its data.
+ *
+ *  `~/app/<name>/` by default (`AIO_INSTALL_ROOT` overrides): a plain
+ *  directory a person can open, unlike `~/.<appId>/`, which is the app's own
+ *  storage and stays hidden. The split is the point:
+ *
+ *    ~/app/<name>/       the artifact, its versions, its icon   ← replaceable
+ *    ~/.<appId>/         state, logs, keys, user files          ← precious
+ *
+ *  so `am remove` can delete the first and leave the second, and an update can
+ *  rewrite the first without ever touching the second.
+ *
+ *  THE decider: `run.sh` asks for this through
+ *  `build.ts --print-install-root` rather than hardcoding `~/app`, and `am
+ *  remove` and the updater read it directly. A shell copy of this rule is how
+ *  an installer and an uninstaller come to disagree about where things are. */
+export function installRoot(): string {
+  const override = Deno.env.get("AIO_INSTALL_ROOT");
+  if (override && override.trim()) return override;
+  // Windows has its own convention and ignoring it makes an app look like it
+  // was installed by a script that did not know where it was: user-scope
+  // programs live under %LOCALAPPDATA%\Programs (what VS Code and friends
+  // use), and that is where the Start Menu shortcut points.
+  if (Deno.build.os === "windows") {
+    const local = Deno.env.get("LOCALAPPDATA");
+    if (local) return join(local, "Programs");
+  }
+  return join(homedir(), "app");
+}
+
+/** Every path `run.sh` creates when it installs `name`. Pure — the caller
+ *  removes or inspects them; nothing here touches the filesystem. */
+export function installedAppPaths(name: string): {
+  dir: string;
+  stable: string;
+  desktop: string;
+  binLink: string;
+} {
+  const dir = join(installRoot(), name);
+  return {
+    dir,
+    stable: join(dir, name),
+    desktop: join(
+      homedir(),
+      ".local",
+      "share",
+      "applications",
+      `${name}.desktop`,
+    ),
+    binLink: join(homedir(), ".local", "bin", name),
+  };
+}
+
 /** Compute (do not create) every path for `appId`.
  *
  *  With no explicit `configured`, a booted app's REGISTERED dirs win — so every

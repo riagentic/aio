@@ -24,6 +24,7 @@
 // boot reports exactly which actions could not be reconstructed.
 
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { interceptConsole } from "./console-capture.ts";
 import { aio } from "../src/server/aio.ts";
 import { cell } from "../src/state/cell-create.ts";
 import { _resetAioRuntime } from "../src/state/runtime-reset.ts";
@@ -130,13 +131,10 @@ Deno.test("boot: journal + redactActions is bootable, and says what it could not
       }) + "\n",
     );
 
-    // The logger writes through console.log (logger-format.ts), so capture
-    // that — the assertion is about what the OPERATOR sees.
+    // Capture every console channel (the level picks the method), because the
+    // assertion is about what the OPERATOR sees.
     const warnings: string[] = [];
-    const origLog = console.log;
-    console.log = (...a: unknown[]) => {
-      warnings.push(a.map(String).join(" "));
-    };
+    const restoreConsole = interceptConsole(warnings);
 
     _resetAioRuntime();
     let app: Any;
@@ -152,7 +150,7 @@ Deno.test("boot: journal + redactActions is bootable, and says what it could not
         baseDir: dir,
       } as Any);
     } finally {
-      console.log = origLog;
+      restoreConsole();
     }
 
     // 1. It BOOTED. This is the bug: aio.run() used to reject, and the tail

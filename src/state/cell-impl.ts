@@ -13,6 +13,7 @@ import { removalMessage, removalOf } from "./removals.ts";
 import type { ScheduleEffect } from "./schedule.ts";
 import type { OwnEffect } from "./own.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 // Internal method types — `any` at spread args/return is unavoidable when
 // mapping over heterogeneous method signatures at the type-system boundary.
@@ -465,7 +466,7 @@ function _warnDroppedMutation(reason: string, m: Mutation): void {
     hint: "An async-method mutation walked through a null/undefined parent. " +
       "Initialize the parent object/array, or guard the access in the method.",
   });
-  console.warn(msg);
+  log.warn(msg);
 }
 
 // ── Transactional conflict detection ───────────────────────────────────

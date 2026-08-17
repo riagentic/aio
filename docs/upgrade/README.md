@@ -7,6 +7,12 @@ One guide per version migration. Find your current version and follow the steps.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha58 → alpha59](from-alpha58-to-alpha59.md) — every framework log line
+  carries info/warn/error on the matching console channel (capture more than
+  `console.log` if you assert on output); the one-liner INSTALLS into
+  `~/app/<name>/` with `am installed` / `remove` / `upgrade`; a compiled binary
+  no longer takes its identity from its file name — rebuild if you ever renamed
+  one
 - [alpha57 → alpha58](from-alpha57-to-alpha58.md) — logs are kept on restart
   instead of wiped (`.1`, `.2`, … bounded by `backupKeep` and the new
   `logBudget`); `stdout.log` rotates with them

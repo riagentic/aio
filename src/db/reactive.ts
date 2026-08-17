@@ -9,6 +9,7 @@
 // wrapper's execute/transaction for the feed to see them (direct writes to the
 // underlying DB are invisible — that's the seam).
 import type { DB, QueryResult, Tx } from "./types.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 const READ_TABLES = /\b(?:from|join)\s+["'`]?([A-Za-z_]\w*)/gi;
 const WRITE_TABLES =
@@ -130,8 +131,9 @@ export function reactiveDB(db: DB): ReactiveDB {
           try {
             cb(rows);
           } catch (e) {
-            console.error(
-              `[aio:db] a live-query subscriber threw — the write is COMMITTED ` +
+            log.error(
+              "db",
+              `a live-query subscriber threw — the write is COMMITTED ` +
                 `and the other subscribers still ran: ${e}`,
             );
           }

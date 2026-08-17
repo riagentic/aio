@@ -3,7 +3,7 @@
 import { enablePatches } from "immer";
 import { registerCancelOn } from "./method-cancel.ts";
 import { _registerLongMethods, longMethodKeys } from "./cell-impl.ts";
-import { log } from "../diagnostics/logger.ts";
+import { log } from "../diagnostics/logger-api.ts";
 import type { AioError } from "../diagnostics/error.ts";
 import type { CellEntry, Msg } from "./cell-types.ts";
 import type { ReduceBreakdown } from "../diagnostics/time-travel.ts";

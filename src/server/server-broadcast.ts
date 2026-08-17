@@ -24,6 +24,7 @@ import { degraded } from "../diagnostics/degraded.ts";
 import type { ClientMeta } from "./server-ws.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
 import type { AioUser } from "./aio.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 /** Payload stats per client — tracked for vitals/trojan introspection */
 export type PayloadStats = Map<
@@ -127,7 +128,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
       if (fresh.length === 0) return;
       for (const [cellName] of fresh) _warnedBigCells.add(cellName);
       const mb = (n: number) => `${(n / (1024 * 1024)).toFixed(1)}MB`;
-      console.warn(
+      log.warn(
         `[aio] broadcast: a full-state frame is ${mb(json.length)} — over ` +
           `the ${mb(BROADCAST_FULL_WARN_BYTES)} WS frame budget. Largest ` +
           `cell(s): ${

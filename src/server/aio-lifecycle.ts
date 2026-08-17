@@ -15,7 +15,7 @@ import { discoverySupported, startDiscoveryResponder } from "./discovery.ts";
 import { instances } from "./single-instance-lock.ts";
 import { shutdownAllRuntimes } from "./shutdown.ts";
 import { generatePin } from "./pairing.ts";
-import type { Log } from "../diagnostics/logger.ts";
+import type { Log } from "../diagnostics/logger-api.ts";
 import type { DB } from "../db/mod.ts";
 import type { ScheduleDef } from "../state/schedule.ts";
 

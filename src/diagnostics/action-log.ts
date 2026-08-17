@@ -1,6 +1,7 @@
 // src/diagnostics/action-log.ts — Rolling JSONL action recorder
 
-import { log } from "./logger.ts";
+import { log } from "./logger-api.ts";
+
 // What counts as framework noise is decided ONCE, in action-kind.ts. This file
 // used to carry its own copy that dropped every `:__set` type — so an async
 // method's writes, which exist in no other action, were missing from the log

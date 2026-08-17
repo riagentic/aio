@@ -23,7 +23,7 @@ import {
 } from "./cell-worker-protocol.ts";
 import { serverRequest, serverUser } from "./auth-context.ts";
 import { resolveCall } from "../state/cell-impl.ts";
-import { log } from "../diagnostics/logger.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 /** How long to wait for a spawned host to report `ready` before failing boot. */
 const READY_TIMEOUT_MS = 30_000;
