@@ -1223,7 +1223,7 @@ fixed, each with the reason:
       `aio/air`, which exported it from nowhere — following the documentation
       produced a module-resolution error. The function was real and correct the
       whole time; only the door was missing. Exported (strictly additive, one
-      symbol, `api:update` regenerated). The existing doc-imports gate could not
+      symbol, `update:api` regenerated). The existing doc-imports gate could not
       see it — it scans `import` statements inside fences, and this promise is
       made in PROSE — so `tests/docs-promised-exports.test.ts` checks
       framework-owned `name()` mentions in the prose of those pages against what

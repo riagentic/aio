@@ -7,6 +7,12 @@ One guide per version migration. Find your current version and follow the steps.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha59 → alpha60](from-alpha59-to-alpha60.md) — one grammar: the framework's
+  gate tasks read verb-first (`check:api`, `update:docs`, `check:release`), a
+  new `deno task install:android` puts a built APK on a connected phone, and
+  `am` says what it does (`am upgrade` for both am and an app, `am open`,
+  `am errors` finally showing runtime errors, four commands added to help).
+  Every old spelling still works
 - [alpha58 → alpha59](from-alpha58-to-alpha59.md) — every framework log line
   carries info/warn/error on the matching console channel (capture more than
   `console.log` if you assert on output); the one-liner INSTALLS into

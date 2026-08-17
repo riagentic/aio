@@ -43,6 +43,12 @@ export type GlobalFlags = {
   /** `--force` — proceed past a refusal the command made for a reason
    *  (currently: removing an app that is still running). */
   force?: boolean;
+  /** `am sql --tables` — the table list, one fixed query. `am tables` is the
+   *  same act under its own name; the flag composes with the rest of `sql`. */
+  tables?: boolean;
+  /** `am open --print` — write the URL instead of opening a browser, so the
+   *  answer composes (`open "$(am open --print)"`, curl, a test). */
+  print?: boolean;
   /** `--help`/`-h` anywhere → print usage and exit 0. Without this the flag
    *  fell through to the subcommand's positionals and was silently ignored —
    *  `am dispatch --help` answered `{"ok":true}`, which reads as "your

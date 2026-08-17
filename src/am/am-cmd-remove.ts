@@ -21,6 +21,7 @@ import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
 import { instances } from "../server/single-instance-lock.ts";
 import { readRecord } from "../server/install-record.ts";
+import { cmdUpdate } from "./am-cmd-meta.ts";
 
 async function exists(path: string): Promise<boolean> {
   try {
@@ -222,10 +223,15 @@ export async function cmdUpgrade(
 ): Promise<void> {
   const mode = detectMode(flags);
   const name = args[0] ?? flags.app;
-  if (!name) {
-    outError("which app? usage: am upgrade <name>", mode);
-    Deno.exit(1);
-  }
+  // ONE verb for "make it newer", and the OBJECT says what:
+  //
+  //   am upgrade          am itself
+  //   am upgrade <app>    that installed app
+  //
+  // It used to be two words — `update` for am, `upgrade` for an app — which is
+  // a distinction no one can guess from the words, only from having been told.
+  // `am update` still works and says this.
+  if (!name) return await cmdUpdate([], flags);
   const rec = await readRecord(name);
   if (!rec) {
     outError(

@@ -23,6 +23,17 @@ export function out(data: unknown, mode: OutputMode): void {
   }
 }
 
+/** Multi-line USAGE text — always plain, unless `--json` was asked for.
+ *
+ *  `out()` picks its mode from the terminal, so `am auth | less` printed the
+ *  whole help as ONE JSON string: escaped newlines, wrapping quotes, unusable.
+ *  Help is for a human by definition; a pipe does not change who is reading.
+ *  Only an explicit `--json` (a script asking) turns it into data. */
+export function usage(text: string, flags: { json?: boolean }): void {
+  if (flags.json) console.log(JSON.stringify({ usage: text }));
+  else console.log(text);
+}
+
 /** Error output — JSON or plain depending on mode.
  *
  *  In `--json` the error object goes to STDOUT: that is the stream a script

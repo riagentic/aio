@@ -2,7 +2,7 @@
 // (or reads bench-results.json with --cached) and compares each metric's
 // MEDIAN against the committed floors in scripts/bench-baselines.json.
 // "Correct but slower" fails here like a broken test.
-// Run: deno task bench:check   (add --cached to reuse bench-results.json)
+// Run: deno task check:bench   (add --cached to reuse bench-results.json)
 
 const root = new URL("../", import.meta.url);
 const resultsPath = new URL("bench-results.json", root);

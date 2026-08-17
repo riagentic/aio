@@ -8,8 +8,8 @@ throughput, persistence writes, patch compute, and memory are tracked, and
 
 ```sh
 deno task bench          # measure → table + bench-results.json (gitignored)
-deno task bench:check    # run bench, then gate against scripts/bench-baselines.json
-deno task bench:check --cached   # gate the last bench-results.json, no re-run
+deno task check:bench    # run bench, then gate against scripts/bench-baselines.json
+deno task check:bench --cached   # gate the last bench-results.json, no re-run
 ```
 
 Total runtime is a few seconds; everything is pure Deno, no external deps.
