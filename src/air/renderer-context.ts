@@ -4,6 +4,7 @@ import { computed, type Signal, signal } from "../state/signal.ts";
 import type { ComponentFn, VNode } from "./vdom.ts";
 import { Fragment, h } from "./vdom.ts";
 import { _currentCollector, _instanceStack } from "./renderer-state.ts";
+import { isSignal } from "./signal-binding.ts";
 
 // ── Context interface ─────────────────────────────────────────────────
 
@@ -28,7 +29,7 @@ export function createContext<T>(defaultValue: T): Context<T> {
       const existing = _currentCollector.contexts.get(id) as
         | Signal<T>
         | undefined;
-      if (existing && typeof existing === "object" && "set" in existing) {
+      if (isSignal(existing)) {
         existing.set(props.value);
       } else {
         _currentCollector.contexts.set(id, signal(props.value));
@@ -48,9 +49,12 @@ export function useContext<T>(ctx: Context<T>): T {
     const inst = _instanceStack[i]!;
     if (inst.contexts?.has(ctx._id)) {
       const entry = inst.contexts.get(ctx._id);
-      if (entry && typeof entry === "object" && "value" in entry) {
-        return (entry as Signal<T>).value;
-      }
+      // isSignal is THE decider — a context entry is either a signal (the
+      // Provider path) or a raw value. A local `typeof === "object"` copy
+      // stopped recognising signals the day they became callable, and
+      // `useContext` started handing components the signal OBJECT where they
+      // expected its value.
+      if (isSignal(entry)) return (entry as Signal<T>).value;
       return entry as T;
     }
   }
@@ -75,9 +79,7 @@ export function useContextSelector<T, R>(
     const inst = _instanceStack[i]!;
     if (inst.contexts?.has(ctx._id)) {
       const entry = inst.contexts.get(ctx._id);
-      if (entry && typeof entry === "object" && "value" in entry) {
-        contextSignal = entry as Signal<T>;
-      }
+      if (isSignal(entry)) contextSignal = entry as Signal<T>;
       break;
     }
   }

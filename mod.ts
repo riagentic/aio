@@ -279,3 +279,26 @@ export type { DB, DBOpts, QueryResult, Tx } from "./src/db/mod.ts";
 export { createSelector } from "./src/selector.ts";
 /** Selector type — a function from state to derived value with memoization. */
 export type { Selector } from "./src/selector.ts";
+
+/** JSX types, re-exported from the entry every app already imports.
+ *
+ *  `function App(): JSX.Element` is the first thing anyone annotates, and it
+ *  needs `JSX` in scope — aio does not declare it globally (JSR's fast-check
+ *  refuses `declare global` in a published module, which would break
+ *  `deno publish`). So the import is the contract, and it is here rather than
+ *  only on `aio/jsx-runtime` so it autocompletes off the specifier a new app
+ *  already has open:
+ *
+ *  ```tsx
+ *  import type { JSX } from "aio";
+ *  export default function App(): JSX.Element { … }
+ *  ```
+ *  `JsxElement`/`JsxNode` are the same shapes as standalone aliases, for code
+ *  that would rather not carry a namespace. */
+export type {
+  JSX,
+  JsxElement,
+  JsxIntrinsicAttributes,
+  JsxIntrinsicElements,
+  JsxNode,
+} from "./src/jsx-runtime.ts";

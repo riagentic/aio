@@ -862,9 +862,18 @@ Deno.test({
     const dir = await makeApp("counter", "build-e2e-xplat-skip-");
     try {
       const { hostPlatform } = await import("../src/build/platforms.ts");
-      const foreign = hostPlatform() === "windows" ? "linux" : "windows";
-      // Electron bundles a per-OS runtime — asking for it on another OS must
-      // produce a REASON, never a host AppImage wearing a foreign name.
+      // Electron cross-builds to Windows/macOS from any host now (the runtime
+      // is a download — see platforms.ts), so "another OS" is no longer the
+      // refused case. The refusal that REMAINS is a tool constraint: a Linux
+      // Electron package is an AppImage, and appimagetool is a native binary
+      // for the arch it assembles — so a Linux host is refused the OTHER
+      // Linux arch, and a non-Linux host is refused Linux entirely.
+      const host = hostPlatform();
+      const foreign = host === "linux"
+        ? "linux-arm64"
+        : host === "linux-arm64"
+        ? "linux"
+        : "linux";
       const r = await task(
         dir,
         "build",

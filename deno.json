@@ -1,6 +1,6 @@
 {
   "name": "@riagentic/aio",
-  "version": "1.0.0-alpha60",
+  "version": "1.0.0-alpha61",
   "appId": "aio",
   "exports": {
     ".": "./mod.ts",
@@ -23,6 +23,7 @@
     "./android-install": "./src/android-install.ts",
     "./am": "./src/am.ts",
     "./amui": "./amui/src/app.ts",
+    "./electron-install": "./src/electron-install.ts",
     "./doctor": "./src/server/doctor.ts",
     "./aiol": "./aiol/mod.ts"
   },
@@ -88,7 +89,10 @@
       "coverage/",
       "dist/",
       "android-template/",
-      "docs/content.md"
+      "docs/content.md",
+      ".katana/",
+      "feedback/",
+      "review/"
     ]
   },
   "lint": {

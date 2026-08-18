@@ -156,7 +156,9 @@ Deno.test("a missing property on a missing element fails loud, and an unresolved
   // throw the aio listing, never hand back a callable that reads as a value.
   const err = assertThrows(() => ui.App["no-such-toggle"].checked) as Error;
   assert(
-    /is not an element of App/.test(err.message),
+    /no element or component named "no-such-toggle" under App/.test(
+      err.message,
+    ),
     `names the miss: ${err.message}`,
   );
   assert(/available:/.test(err.message), "lists what IS there");

@@ -61,12 +61,14 @@ if (!_global.__aioSignals) {
   _global.__aioSignals = {
     state: signal<Record<string, any>>({}),
     connected: signal<boolean>(false),
+    ready: signal<boolean>(false),
     cells: new Map<string, Signal<any>>(),
   };
 }
 const _cache = _global.__aioSignals as {
   state: Signal<Record<string, any>>;
   connected: Signal<boolean>;
+  ready: Signal<boolean>;
   cells: Map<string, Signal<any>>;
 };
 
@@ -76,6 +78,8 @@ const _cache = _global.__aioSignals as {
 // never reassigns, so reactive getters that close over them see every reset.
 export const _stateSignal: Signal<Record<string, any>> = _cache.state;
 export const _connected: Signal<boolean> = _cache.connected;
+/** True once a FULL state frame has landed — see {@linkcode getReadySignal}. */
+export const _ready: Signal<boolean> = _cache.ready;
 export const _cellSignals = _cache.cells;
 
 // ── Internal helpers ─────────────────────────────────────────────────
@@ -94,6 +98,10 @@ export function _getOrCreateCellSignal(
 
 export function _applyFullState(state: Record<string, any>): void {
   batch(() => {
+    // Readiness is set BEFORE the state itself, inside the same batch: a
+    // component that renders off `ready` must not see it flip while its slices
+    // are still the previous frame's.
+    _ready.set(true);
     _stateSignal.set(state);
     for (const [key, value] of Object.entries(state)) {
       // AIO-4.4: freeze the value before installing in the cell signal so
@@ -126,6 +134,19 @@ export function getCellSignal(name: string, fallback?: any): Signal<any> {
   return _getOrCreateCellSignal(name, fallback);
 }
 
+/** Has the client received a full state frame yet?
+ *
+ *  Distinct from CONNECTED: a socket can be up while the first frame is still
+ *  in flight, and in that window every cell slice reads `undefined`. Every app
+ *  hand-rolls the same guard against it — a field report's is
+ *  `if (!state.core) return <Loading/>` at the top of its root component,
+ *  picking one arbitrary slice to stand in for "has anything arrived at all".
+ *  That is a fact the runtime knows and the app was made to guess.
+ *  @internal Engine wiring — apps read it through `useAio().ready`. */
+export function getReadySignal(): Signal<boolean> {
+  return _ready;
+}
+
 /** Returns the connection status signal — `true` when transport is connected.
  *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
  */
@@ -154,5 +175,6 @@ export function setConnected(v: boolean): void {
 export function _resetSignals(): void {
   _stateSignal.set({});
   _connected.set(false);
+  _ready.set(false);
   for (const sig of _cellSignals.values()) sig.set(undefined);
 }

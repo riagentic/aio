@@ -41,7 +41,7 @@ Deno.test("guardDispatches: a rejection is logged AND prevented from crashing", 
   }
 });
 
-Deno.test("guardDispatches OFF (default): a rejection is logged but NOT prevented", () => {
+Deno.test("guardRejections OFF (explicit fail-fast): logged but NOT prevented", () => {
   let logged = "";
   const uninstall = installCrashHandler({
     // guardRejections omitted → default crash behavior preserved

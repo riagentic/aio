@@ -10,8 +10,16 @@ All-in-one full-stack TypeScript framework on Deno ≥2.9 (`MIN_DENO` in
 state, persistence (worker-thread SQLite, one `state.db`), CRDT sync, and the UI
 (AIR — an ~8 KB signals+JSX renderer). One codebase builds to browser, Electron,
 Android, CLI, and service targets. Elm-like core:
-`(state, action) → { state, effects[] }`. v1.0.0-alpha40, ~3000 test blocks in
+`(state, action) → { state, effects[] }`. v1.0.0-alpha60, ~4300 test blocks in
 `tests/`.
+
+An app is TWO files' worth of decisions: `cell({ state, methods })` and a
+component. Everything a finished app also needs — a stylesheet, an icon, a
+window — has a default that is derived from the app's own identity rather than
+left blank: `ui.theme` (a full stylesheet in `@layer aio`, so the app's own CSS
+always wins), a generated monogram icon, and `ui.chrome` for the desktop frame.
+All three take the accent/hue from the same hash of the appId, so one app is one
+colour everywhere it appears.
 
 ## Commands
 

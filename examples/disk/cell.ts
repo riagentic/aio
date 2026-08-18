@@ -43,6 +43,16 @@ export const disk = cell("disk", {
   // cell's own bound methods don't exist yet inside its own literal.
   cancelOn: { open: ["self", "disk:stop"] },
 
+  // A filesystem walk is long-running BY NATURE, so say it here, on the
+  // method, where a rename follows it and `cell()` checks it against the
+  // method list. The old spelling —
+  // `perfBudget: { methods: { "disk:open": { timeout: 0 } } }` in app.ts —
+  // is a string in another file that nothing checks; this example taught it,
+  // and two field reports copied it into their apps (one of them accumulating
+  // three entries one runtime failure at a time, on a project started AFTER
+  // `long:` existed). Examples are what people copy.
+  long: ["open"],
+
   methods: {
     /** Scan a folder. Minutes-long on a big tree — hence everything below.
      *

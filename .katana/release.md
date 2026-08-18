@@ -1,4 +1,4 @@
-## Pre-release katana
+# Pre-release katana
 
 Gates (must pass):
 

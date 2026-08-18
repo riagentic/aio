@@ -12,6 +12,7 @@ export {
 import type { ScheduleEffect } from "../state/schedule.ts";
 import type { OwnEffect } from "../state/own.ts";
 import { registerCall } from "../state/cell-impl.ts";
+import { _pendingCallPromises } from "../state/method-cancel.ts";
 import { _resetAioRuntime } from "../state/runtime-reset.ts";
 import { _resetRootSignals } from "../state/signal.ts";
 import { _armTestStrict } from "./test-strict.ts";
@@ -32,8 +33,21 @@ export type TestContext<
   // deno-lint-ignore no-explicit-any
   A = Record<string, (...args: any[]) => any>,
 > = {
-  /** Initialize/reset cell to initial state */
-  init: () => void;
+  /** Reset the cell to its initial state — optionally SEEDED.
+   *
+   *  `t.init({ scanning: true })` shallow-merges over the declared initial
+   *  state, so a test can start at the state under test instead of driving the
+   *  cell there through real methods. That mattered: for a cell whose methods
+   *  shell out or hit the disk, "reach this state first" is the expensive
+   *  part, and one field report moved logic OUT of its cell into plain
+   *  functions purely so it could be tested from a known state. Good practice
+   *  anyway — but it should not be the only route.
+   *
+   *  An unknown key throws, listing the real ones: a silently-ignored seed
+   *  looks like a pinned fixture while pinning nothing, which is the failure
+   *  mode that makes seeding worse than not having it. (`testUI`'s `seed`
+   *  option is the same idea for a mounted app.) */
+  init: (seed?: Partial<S>) => void;
   /** Destroy cell (reset to initial + 'uninitialized' status) */
   destroy: () => void;
   /** Typed action senders — one per declared action, arguments inferred from action creators.
@@ -396,8 +410,25 @@ export function testCell(
     }
 
     const ctx: TestContext = {
-      init: () => {
+      init: (seed?: Record<string, unknown>) => {
         state = { ...composed.initialState };
+        if (seed) {
+          const own = (state as Record<string, unknown>)[prefix] as
+            | Record<string, unknown>
+            | undefined;
+          const known = own ?? {};
+          const unknown = Object.keys(seed).filter((k) => !(k in known));
+          if (unknown.length > 0) {
+            throw new Error(
+              `[${f.__aio.id}] t.init(): unknown state key(s) ${
+                unknown.map((k) => `"${k}"`).join(", ")
+              } — this cell's state is { ${Object.keys(known).join(", ")} }. ` +
+                `A seed that lands nowhere looks like a fixture and pins ` +
+                `nothing.`,
+            );
+          }
+          (state as Record<string, unknown>)[prefix] = { ...known, ...seed };
+        }
         lastEffects = [];
       },
       destroy: () => {
@@ -556,8 +587,30 @@ export async function bootCells(cells: CellDef[]): Promise<BootHandle> {
     cells: cells as any,
     persist: false,
   });
+  /** Drain until nothing is in flight.
+   *
+   *  Microtask ticks alone were not enough, and `advance()` is where that
+   *  showed: firing a timer STARTS the method, but its real work — a dynamic
+   *  import, a subprocess, a file read — lands on macrotasks the virtual clock
+   *  does not own, so `await h.advance(ms)` returned before anything had
+   *  happened. A field report ended up with a hand-rolled
+   *  `for (i<100) { sleep(10); await h.settle() }` poll, which is the tell that
+   *  a clock sold as deterministic is not.
+   *
+   *  So this awaits the tracked in-flight CALLS (the same registry `testUI`'s
+   *  settle drains), re-checking after each round because a settled method can
+   *  start another. Bounded, so a method that genuinely never finishes fails
+   *  the test's own timeout instead of hanging here forever. */
   const settle = async () => {
-    for (let i = 0; i < 10; i++) await Promise.resolve();
+    for (let round = 0; round < 50; round++) {
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      const pending = _pendingCallPromises();
+      if (pending.length === 0) return;
+      await Promise.race([
+        Promise.allSettled(pending),
+        new Promise((r) => setTimeout(r, 5)),
+      ]);
+    }
   };
   const dispose = () => standalone._resetState();
   return {

@@ -131,6 +131,64 @@ shape what it offers). The identity resets on dispose, so the next mount cannot
 inherit this test's user. Omit `user` entirely for today's behaviour (identity
 unresolved until a real `/me` answers).
 
+### Modified clicks, and the viewport
+
+`click`, `dblclick` and `hover` take the same modifier bag `press` does, so a
+ctrl+click gesture is one line instead of a raw `MouseEvent`:
+
+```ts
+await ui.node7.click({ ctrlKey: true }); //  add a sub-element
+await ui.row3.click({ shiftKey: true }); //  extend the selection
+await ui.canvas.hover({ ctrlKey: true }); //  reveal the delete crosses
+```
+
+The mount also has a **viewport**, and it defaults to 1024×768:
+
+```ts
+testUI(App, "zoom anchors on the top-left visible node", {
+  viewport: { width: 1440, height: 900 },
+}, async (ui) => {/* … */});
+```
+
+`window.innerWidth/innerHeight` and
+`document.documentElement.clientWidth/clientHeight` all report it. Anything that
+asks the viewport a question — a zoom that anchors on the first element fully
+inside it, a responsive breakpoint, a virtualised list — otherwise reads
+whatever the DOM stub happens to say, and **both branches of that question look
+green**.
+
+Element geometry is a different question with no honest answer: there is no
+layout engine here, so `getBoundingClientRect()` is all zeros. testUI says so
+out loud the first time you ask, because a silent zero is a measurement a
+component will branch on:
+
+```
+[aio:testUI] getBoundingClientRect() was read, and there is no layout engine
+here — every element measures 0×0 at position 0,0. A component that branches
+on its own size therefore takes its DEGENERATE branch, and the test passes
+without exercising the real one.
+```
+
+Assert the behaviour rather than the geometry, or stub the one measurement the
+test is about (`Object.defineProperty(el, "clientWidth", { value: 800 })`).
+
+### Global keys and `document` listeners
+
+`document` and `window` are real under `testUI` (the mount's own happy-dom
+window), so `document.addEventListener("keydown", …)` fires. `globalThis` is NOT
+the same object — a listener there never fires, and testUI says so.
+
+For the binding every app needs, there is a primitive:
+
+```tsx
+onGlobalKey("Escape", () => lightbox.close());
+onGlobalKey("k", () => palette.open(), { mod: true }); //  Ctrl/⌘+K
+```
+
+It resolves the right document, removes itself on unmount, ignores the chord
+while focus is in an input (`ignoreInInput: false` to opt out), and is driven by
+an ordinary `ui.<anything>.press("Escape")`.
+
 ## How names are derived (deterministic)
 
 `LABEL + ROLE`, both inferred from the TSX — a pure function of the render:

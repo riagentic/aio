@@ -6,6 +6,7 @@
 
 import { resolveEntryPath } from "../server/paths.ts";
 import {
+  instances,
   type LockData,
   readLock,
   removeLock,
@@ -136,11 +137,58 @@ export function removePid(appId?: string): void {
   removeLock(appId ?? resolveAmAppId());
 }
 
-/** --port flag > lock file > app.ts > default 8000. */
+/** Names already reported by {@linkcode resolvePort}, so one `am` invocation
+ *  says where it is pointing once, not once per lookup. */
+const _targetNoted = new Set<string>();
+
+/** THE target of an `am` command: `--port` > this app's lock > the ONE running
+ *  instance > app.ts > 8000.
+ *
+ *  The "one running instance" rung is the fix for a whole class of confusion.
+ *  `am` resolves an appId from the cwd (deno.json `appId`, else title, else the
+ *  directory name), and when that guess misses, every port-taking command
+ *  silently fell through to **8000** — so `am state` answered "app not running
+ *  on port 8000" while the app was serving on 8413, and `am dispatch` with no
+ *  `--port` targeted (and sometimes STARTED) a different instance entirely: an
+ *  Electron window appearing on a headless box, and minutes spent reading the
+ *  state of another process. In the other direction, `am status` reported
+ *  `stopped` for the resolved id while `am instances` listed the app as
+ *  running — two liveness sources disagreeing, which is the bug class that
+ *  makes you distrust your own measurements.
+ *
+ *  Both are the same defect: a GUESS with no way to see it. So the guess now
+ *  falls back to the registry, and the resolution is ECHOED on stderr — stderr
+ *  so `--json` output stays machine-clean — the first time it matters.
+ *  Ambiguity is never resolved silently: with several instances up and no
+ *  match, it says so and lists them rather than picking one. */
 export function resolvePort(flag?: number, appId?: string): number {
   if (flag !== undefined) return flag;
-  const pf = readPid(appId);
+  const id = appId ?? resolveAmAppId();
+  const pf = readPid(id);
   if (pf) return pf.port;
+
+  const live = instances();
+  if (live.length === 1) {
+    const only = live[0]!;
+    if (!_targetNoted.has(only.appId)) {
+      _targetNoted.add(only.appId);
+      console.error(
+        `[am] note: no app named "${id}" is running — using the one that ` +
+          `is: ` +
+          `${only.appId} @ :${only.port} (pid ${only.pid}). ` +
+          `Pin it with --app=${only.appId}, or run am from its directory.`,
+      );
+    }
+    return only.port;
+  }
+  if (live.length > 1) {
+    const list = live.map((i) => `${i.appId} @ :${i.port}`).join(", ");
+    console.error(
+      `[am] ✗ no app named "${id}" is running, and ${live.length} others ` +
+        `are: ` +
+        `${list}. Refusing to guess — pass --app=<id> or --port=N.`,
+    );
+  }
   return readEntryConfig().port ?? DEFAULT_PORT;
 }
 
@@ -272,6 +320,8 @@ export function parseGlobalFlags(
     else if (a === "--print") flags.print = true;
     else if (a === "--tables") flags.tables = true;
     else if (a === "--force") flags.force = true;
+    else if (a === "--stale") flags.stale = true;
+    else if (a === "--as-server") flags.asServer = true;
     else if (a === "--quiet") flags.quiet = true;
     else if (a.startsWith("--port=")) flags.port = num(a.slice(7), "--port");
     else if (a.startsWith("--body=")) flags.jsonBody = a.slice(7);

@@ -117,6 +117,8 @@ export interface ServerSetupDeps<S, A> {
     entry?: string; // AIO-8.1
     viewport?: string | false; // AIO-423
     head?: string; // AIO-423
+    chrome?: "standard" | "themed" | "none"; // desktop window frame
+    theme?: "auto" | "none"; // the default stylesheet
   };
   title: string;
   config: TransportConfig;
@@ -384,7 +386,19 @@ export async function setupTransport<S, A>(
           // an error frame; pre-caught so a fire-and-forget action without a
           // cid cannot become an unhandled rejection.
           const denial = Promise.reject(
-            new Error(`cell "${cellName}.${method}" — access denied`),
+            new Error(
+              `cell "${cellName}.${method}" — access denied` +
+                // Named HERE, at the moment it is needed. The operator hitting
+                // this from `am` is usually not being refused by mistake:
+                // "public read, server-only write" is a shape aio encourages,
+                // and its consequence is that the CLI cannot call the method
+                // either. Without the pointer the fallback was `am snapshot
+                // save/load` — validation bypassed entirely, the wrong tool.
+                (prod
+                  ? ""
+                  : `. From the CLI in dev: \`am dispatch ${cellName}:${method} ` +
+                    `--as-server\` (loopback-only, logged, refused in prod)`),
+            ),
           );
           denial.catch(() => {});
           return denial;
@@ -452,6 +466,11 @@ export async function setupTransport<S, A>(
       height: ui.height,
       getUIState: (user?: AioUser) => getUIState(getState(), user),
       dispatch: dispatchNetwork,
+      // The SERVER-origin path, for `am dispatch --as-server` — the operator
+      // escape hatch for a cell whose `access` rule (correctly) refuses every
+      // network caller. See the trojan route; it is dev-only, loopback-only
+      // and audit-logged, exactly like the rest of the trojan.
+      dispatchAsServer: (action: unknown) => dispatch(action as A),
       getSnapshot: () => app.snapshot(),
       loadSnapshot: (json: string) => app.loadSnapshot(json),
       blobs: deps.blobs,
@@ -477,6 +496,11 @@ export async function setupTransport<S, A>(
       uiEntry: ui.entry,
       viewport: ui.viewport,
       headExtra: ui.head,
+      chrome: ui.chrome,
+      theme: ui.theme,
+      // The accent follows the app's IDENTITY, not its window title: a title
+      // that changes with the route must not recolour the app mid-session.
+      themeName: appId || title,
       renderBudget: config.renderBudget,
       syncCells: config._syncCellIds,
       bootedCells: config._cellNames,
@@ -541,6 +565,12 @@ export async function setupTransport<S, A>(
               : "healthy",
             version: VERSION,
             appId,
+            // WHICH process answered. Without it, an orphan holding the port —
+            // a run whose lock is gone but whose process kept serving — is
+            // indistinguishable from the app you meant, and a field report
+            // read five-hour-old numbers out of one for a whole session. The
+            // pid is how `am kill --stale` can end it.
+            pid: Deno.pid,
             uptime,
             cells: cellsHealth,
             ...(dead.length > 0 ? { degraded: dead } : {}),
@@ -555,6 +585,7 @@ export async function setupTransport<S, A>(
             : "healthy",
           version: VERSION,
           appId,
+          pid: Deno.pid,
           uptime,
           ...(dead.length > 0 ? { degraded: dead } : {}),
           ...(clientDead.length > 0 ? { clientDegraded: clientDead } : {}),

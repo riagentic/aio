@@ -417,106 +417,141 @@ type AioCanvasAttributes = AioHTMLAttributes<HTMLCanvasElement> & {
   height?: number | string;
 };
 
-/** JSX namespace — resolved by `jsxImportSource: "aio"` */
+/** JSX namespace — resolved by `jsxImportSource: "aio"` for JSX ELEMENTS, and
+ *  imported by name when you want to ANNOTATE:
+ *
+ *  ```tsx
+ *  import type { JSX } from "aio";          // also: "aio/jsx-runtime"
+ *  export default function App(): JSX.Element { … }
+ *  ```
+ *
+ *  That import is the one thing about it worth knowing, because without it
+ *  `function App(): JSX.Element` is `TS2503: Cannot find namespace 'JSX'` — an
+ *  error naming no remedy, and one a field report hit 23 times on its first
+ *  `deno task check`. Two things changed as a result: `JSX` is re-exported
+ *  from `aio` itself (so it autocompletes off the import every app already
+ *  has), and every scaffold template annotates its component, so a new app
+ *  carries the line from the first minute.
+ *
+ *  It is NOT declared globally, and that is a packaging constraint rather than
+ *  a preference: JSR's fast-check refuses `declare global` in a published
+ *  module ("global augmentations are not supported"), so shipping the ambient
+ *  version would break `deno publish` — a release gate — for a convenience.
+ *
+ *  The shapes live at module scope so the namespace and the standalone type
+ *  aliases cannot drift. */
+export type JsxElement = VNode;
+/** Anything renderable in JSX — the type for a `children` prop. Gives
+ *  React-refugees a name (`children: JSX.Node`) instead of reaching for
+ *  React's `ReactNode`. `JSX.Children` is an alias. */
+export type JsxNode =
+  | VNode
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | JsxNode[];
+/** Attributes valid on every JSX element, including function components.
+ *  `key` is extracted by `jsx()` before props reach the component. */
+export interface JsxIntrinsicAttributes {
+  key?: string | number;
+  /** Semantic test handle for a COMPONENT — names it in the UI surface, so a
+   *  test addresses the handle you chose instead of the function's identifier.
+   *  Renaming the function is then a refactor, not a broken test. Elements
+   *  have carried `t` all along. */
+  t?: string;
+}
+/** Every intrinsic tag JSX accepts and its attribute type — HTML elements
+ *  with their aio-typed handlers, the SVG vocabulary, and an index signature
+ *  so unlisted tags still compile with generic attributes. */
+export interface JsxIntrinsicElements {
+  input: AioInputAttributes;
+  textarea: AioTextAreaAttributes;
+  select: AioSelectAttributes;
+  option: AioOptionAttributes;
+  button: AioButtonAttributes;
+  form: AioFormAttributes;
+  label: AioLabelAttributes;
+
+  a: AioAnchorAttributes;
+  img: AioImgAttributes;
+  iframe: AioIframeAttributes;
+  fieldset: AioFieldSetAttributes;
+  optgroup: AioOptGroupAttributes;
+  details: AioDetailsAttributes;
+  dialog: AioDialogAttributes;
+  progress: AioProgressAttributes;
+  meter: AioMeterAttributes;
+  td: AioTableCellAttributes;
+  th: AioTableCellAttributes;
+  video: AioMediaAttributes<HTMLVideoElement>;
+  audio: AioMediaAttributes<HTMLAudioElement>;
+  canvas: AioCanvasAttributes;
+
+  // SVG — must mirror SVG_TAG_LIST in air/vdom-types.ts. AioSVGAttributes
+  // carries a `[key: string]: unknown` index, so element-specific attrs
+  // (x1, offset, gradientTransform, stdDeviation, …) are admitted without
+  // per-element enumeration.
+  svg: AioSVGAttributes;
+  circle: AioSVGAttributes;
+  ellipse: AioSVGAttributes;
+  line: AioSVGAttributes;
+  path: AioSVGAttributes;
+  polygon: AioSVGAttributes;
+  polyline: AioSVGAttributes;
+  rect: AioSVGAttributes;
+  g: AioSVGAttributes;
+  defs: AioSVGAttributes;
+  symbol: AioSVGAttributes;
+  use: AioSVGAttributes;
+  text: AioSVGAttributes;
+  tspan: AioSVGAttributes;
+  textPath: AioSVGAttributes;
+  image: AioSVGAttributes;
+  clipPath: AioSVGAttributes;
+  mask: AioSVGAttributes;
+  pattern: AioSVGAttributes;
+  marker: AioSVGAttributes;
+  linearGradient: AioSVGAttributes;
+  radialGradient: AioSVGAttributes;
+  stop: AioSVGAttributes;
+  filter: AioSVGAttributes;
+  feBlend: AioSVGAttributes;
+  feColorMatrix: AioSVGAttributes;
+  feComponentTransfer: AioSVGAttributes;
+  feComposite: AioSVGAttributes;
+  feConvolveMatrix: AioSVGAttributes;
+  feDiffuseLighting: AioSVGAttributes;
+  feDisplacementMap: AioSVGAttributes;
+  feFlood: AioSVGAttributes;
+  feGaussianBlur: AioSVGAttributes;
+  feImage: AioSVGAttributes;
+  feMerge: AioSVGAttributes;
+  feMergeNode: AioSVGAttributes;
+  feMorphology: AioSVGAttributes;
+  feOffset: AioSVGAttributes;
+  feSpecularLighting: AioSVGAttributes;
+  feTile: AioSVGAttributes;
+  feTurbulence: AioSVGAttributes;
+  foreignObject: AioSVGAttributes;
+  animate: AioSVGAttributes;
+  animateTransform: AioSVGAttributes;
+  set: AioSVGAttributes;
+
+  // deno-lint-ignore no-explicit-any -- index must admit element-specific handler types (AIO-7.3)
+  [tag: string]: AioHTMLAttributes<any>;
+}
+
+/** The `JSX` namespace, importable by name (`import type { JSX } from "aio"`)
+ *  — `JSX.Element`, `JSX.Node`, `JSX.Children`, and the intrinsic maps. Not
+ *  declared globally: JSR's fast-check refuses `declare global` in a
+ *  published module, so the import is the contract (see the module note). */
 // deno-lint-ignore no-namespace
 export namespace JSX {
-  export type Element = VNode;
-  /** Anything renderable in JSX — the type for a `children` prop. Gives
-   *  React-refugees a name (`children: JSX.Node`) instead of reaching for
-   *  React's `ReactNode`. `Children` is an alias. */
-  export type Node =
-    | VNode
-    | string
-    | number
-    | boolean
-    | null
-    | undefined
-    | Node[];
-  export type Children = Node;
-  /** Attributes valid on every JSX element, including function components.
-   *  `key` is extracted by `jsx()` before props reach the component. */
-  export interface IntrinsicAttributes {
-    key?: string | number;
-    /** Semantic test handle for a COMPONENT — names it in the UI surface, so a
-     *  test addresses the handle you chose instead of the function's identifier.
-     *  Renaming the function is then a refactor, not a broken test. Elements have carried `t` all along. */
-    t?: string;
-  }
-  export interface IntrinsicElements {
-    input: AioInputAttributes;
-    textarea: AioTextAreaAttributes;
-    select: AioSelectAttributes;
-    option: AioOptionAttributes;
-    button: AioButtonAttributes;
-    form: AioFormAttributes;
-    label: AioLabelAttributes;
-
-    a: AioAnchorAttributes;
-    img: AioImgAttributes;
-    iframe: AioIframeAttributes;
-    fieldset: AioFieldSetAttributes;
-    optgroup: AioOptGroupAttributes;
-    details: AioDetailsAttributes;
-    dialog: AioDialogAttributes;
-    progress: AioProgressAttributes;
-    meter: AioMeterAttributes;
-    td: AioTableCellAttributes;
-    th: AioTableCellAttributes;
-    video: AioMediaAttributes<HTMLVideoElement>;
-    audio: AioMediaAttributes<HTMLAudioElement>;
-    canvas: AioCanvasAttributes;
-
-    // SVG — must mirror SVG_TAG_LIST in air/vdom-types.ts. AioSVGAttributes
-    // carries a `[key: string]: unknown` index, so element-specific attrs
-    // (x1, offset, gradientTransform, stdDeviation, …) are admitted without
-    // per-element enumeration.
-    svg: AioSVGAttributes;
-    circle: AioSVGAttributes;
-    ellipse: AioSVGAttributes;
-    line: AioSVGAttributes;
-    path: AioSVGAttributes;
-    polygon: AioSVGAttributes;
-    polyline: AioSVGAttributes;
-    rect: AioSVGAttributes;
-    g: AioSVGAttributes;
-    defs: AioSVGAttributes;
-    symbol: AioSVGAttributes;
-    use: AioSVGAttributes;
-    text: AioSVGAttributes;
-    tspan: AioSVGAttributes;
-    textPath: AioSVGAttributes;
-    image: AioSVGAttributes;
-    clipPath: AioSVGAttributes;
-    mask: AioSVGAttributes;
-    pattern: AioSVGAttributes;
-    marker: AioSVGAttributes;
-    linearGradient: AioSVGAttributes;
-    radialGradient: AioSVGAttributes;
-    stop: AioSVGAttributes;
-    filter: AioSVGAttributes;
-    feBlend: AioSVGAttributes;
-    feColorMatrix: AioSVGAttributes;
-    feComponentTransfer: AioSVGAttributes;
-    feComposite: AioSVGAttributes;
-    feConvolveMatrix: AioSVGAttributes;
-    feDiffuseLighting: AioSVGAttributes;
-    feDisplacementMap: AioSVGAttributes;
-    feFlood: AioSVGAttributes;
-    feGaussianBlur: AioSVGAttributes;
-    feImage: AioSVGAttributes;
-    feMerge: AioSVGAttributes;
-    feMergeNode: AioSVGAttributes;
-    feMorphology: AioSVGAttributes;
-    feOffset: AioSVGAttributes;
-    feSpecularLighting: AioSVGAttributes;
-    feTile: AioSVGAttributes;
-    feTurbulence: AioSVGAttributes;
-    foreignObject: AioSVGAttributes;
-    animate: AioSVGAttributes;
-    animateTransform: AioSVGAttributes;
-    set: AioSVGAttributes;
-
-    // deno-lint-ignore no-explicit-any -- index must admit element-specific handler types (AIO-7.3)
-    [tag: string]: AioHTMLAttributes<any>;
-  }
+  export type Element = JsxElement;
+  export type Node = JsxNode;
+  export type Children = JsxNode;
+  export interface IntrinsicAttributes extends JsxIntrinsicAttributes {}
+  export interface IntrinsicElements extends JsxIntrinsicElements {}
 }

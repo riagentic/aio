@@ -53,7 +53,9 @@ export async function findElectronBin(log: Log): Promise<string | null> {
   }
   log.error(
     "Electron could not be installed automatically. Check your network, then " +
-      "retry `deno task dev` — or install manually: deno install --allow-scripts=npm:electron npm:electron",
+      "retry `deno task dev` — or run `deno task install:electron`, which " +
+      "downloads the runtime directly (a bare `deno install` can skip the " +
+      "lifecycle script and exit 0 with nothing installed)",
   );
 
   return null;
@@ -372,6 +374,8 @@ export async function launchElectron(
     hasCSS?: boolean;
     /** Dev icon dir — the server's resolved baseDir (WYSIDIWYSIP). */
     iconDir?: string;
+    /** Base64 PNG used when the app ships no `icon.png`. */
+    defaultIcon?: string;
     shell?: ShellConfig;
   },
 ): Promise<Deno.ChildProcess | null> {
@@ -390,6 +394,7 @@ export async function launchElectron(
       title: uds.title,
       hasCSS: uds.hasCSS,
       iconDir: uds.iconDir,
+      defaultIcon: uds.defaultIcon,
       meta,
       shell: uds.shell,
     })

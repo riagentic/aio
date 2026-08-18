@@ -793,6 +793,43 @@ export async function cmdSurface(
   );
 }
 
+/** Parse a chord like `"ctrl+shift+Enter"` (or a bare `"ctrl+alt"`) into the
+ *  modifier flags plus the key, so one spelling drives keys and pointer
+ *  gestures alike. Unknown segments are the KEY — `"Enter"`, `"a"`, `"F2"` —
+ *  and a bare modifier list yields no key at all. */
+export function parseChord(
+  spec: string,
+): { mods?: Record<string, boolean>; key: string } {
+  const MODS: Record<string, string> = {
+    ctrl: "ctrlKey",
+    control: "ctrlKey",
+    cmd: "metaKey",
+    meta: "metaKey",
+    super: "metaKey",
+    alt: "altKey",
+    option: "altKey",
+    shift: "shiftKey",
+  };
+  const parts = spec.split("+").filter(Boolean);
+  const mods: Record<string, boolean> = {};
+  const keys: string[] = [];
+  for (const p of parts) {
+    const flag = MODS[p.toLowerCase()];
+    if (flag) mods[flag] = true;
+    else keys.push(p);
+  }
+  // The literal `+` key: splitting on "+" swallows it, so `press "+"` (zoom
+  // in — a real gesture) and `press "ctrl++"` would silently fall back to the
+  // caller's default key. A spec that ENDS in a separator with no key parsed
+  // means the key IS "+".
+  let key = keys.join("+");
+  if (key === "" && spec.endsWith("+") && spec.length > 0) key = "+";
+  return {
+    mods: Object.keys(mods).length ? mods : undefined,
+    key,
+  };
+}
+
 /** `am trigger <clientIdx> <path> <action> [text]` — faithfully simulate a
  *  user interaction on a live client via the semantic surface (same event
  *  sequences as testUI). Full testUI action set: click, dblclick, type,
@@ -842,6 +879,7 @@ export async function cmdTrigger(
         "type APPENDS to the field's current value; setValue REPLACES it\n" +
         "  (same words, same meanings as testUI's ui.X.type / ui.X.setValue)\n" +
         "keyDown/keyUp hold/release a key (games, drag) — pair them around frames\n" +
+        'modifiers: press "ctrl+Enter" · click "ctrl" · click "ctrl+shift"\n' +
         "discover paths with: am surface <clientIdx>",
       mode,
     );
@@ -890,7 +928,17 @@ export async function cmdTrigger(
     wire === "dragTo"
   ) body.text = text ?? "";
   if (wire === "press" || wire === "keyDown" || wire === "keyUp") {
-    body.key = text ?? "Enter";
+    const chord = parseChord(text ?? "Enter");
+    body.key = chord.key || "Enter";
+    if (chord.mods) body.mods = chord.mods;
+  }
+  // Modified pointer gestures — ctrl+click to add, shift+click to extend.
+  // testUI has had modifiers on `press` for a while and `am` had none at all,
+  // so the two drivers of ONE UI could not express the same interaction; an
+  // app whose primary gesture is ctrl+click was undrivable from the CLI.
+  if (wire === "click" || wire === "dblclick" || wire === "hover") {
+    const chord = parseChord(text ?? "");
+    if (chord.mods) body.mods = chord.mods;
   }
   const replied = await post(body);
   // Report the action the caller asked for, not the wire action it decomposed

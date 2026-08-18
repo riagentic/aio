@@ -100,11 +100,40 @@ Deno.test("platforms: only deno-compile targets may cross-compile", () => {
   for (const t of CROSS_COMPILABLE) {
     assertEquals(crossCompileBlocker(t), null, `${t} compiles with deno`);
   }
-  // Electron and Android package with per-OS tooling — refused WITH a reason,
-  // never quietly emitted as a host artifact under a foreign name.
-  for (
-    const t of ["electron", "electron-client", "android", "android-client"]
-  ) {
+  // Electron cross-builds to Windows and macOS from any host: its runtime is a
+  // published zip fetched for the TARGET, and the package there is a directory
+  // + launcher + zip. No OS-specific tooling is involved, so refusing it was a
+  // rule that cost users a CI matrix for nothing.
+  for (const t of ["electron", "electron-client"]) {
+    for (const p of ["windows", "macos", "macos-arm64"]) {
+      assertEquals(
+        crossCompileBlocker(t, p, "linux"),
+        null,
+        `${t} → ${p} cross-builds from a Linux host`,
+      );
+    }
+    // The ONE real constraint, and it is a TOOL constraint: a Linux Electron
+    // package is an AppImage, and `appimagetool` is a native binary for the
+    // arch it assembles. Refused WITH the reason, never quietly emitted as a
+    // host artifact under a foreign name.
+    for (
+      const [platform, host] of [
+        ["linux", "macos"],
+        ["linux", "windows"],
+        ["linux-arm64", "linux"],
+      ]
+    ) {
+      const why = crossCompileBlocker(t, platform, host);
+      assert(why, `${t} → ${platform} from ${host} must be refused`);
+      assert(
+        why!.length > 30,
+        `${t} → ${platform}: the refusal must explain itself: ${why}`,
+      );
+    }
+  }
+  // Android drives Gradle and emits ONE platform-independent APK — asking for
+  // a per-platform Android build is a category error, answered as one.
+  for (const t of ["android", "android-client"]) {
     const why = crossCompileBlocker(t);
     assert(why, `${t} must be refused for a foreign platform`);
     assert(why!.length > 30, `${t}: the refusal must explain itself: ${why}`);

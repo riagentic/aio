@@ -1,3 +1,4 @@
+# core
 ## Core aio (hardness)
 
 - every public API has ONE way to do the common thing; a second spelling for the

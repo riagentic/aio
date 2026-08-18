@@ -75,6 +75,12 @@ const OWNERS: Record<string, [Owner, string]> = {
     "and never touches the cache",
   ],
   _resetPendingFactories: ["MANUAL", "own-effect factories; lifecycle-shaped"],
+  _resetServerOnlyStatic: [
+    "MANUAL",
+    "build-scoped, not runtime: the bundler calls it at the START of each " +
+    "esbuild run so one build's server-only-import findings cannot be " +
+    "attributed to the next. Nothing in the app runtime touches it",
+  ],
   _resetReadOnlyHint: ["MANUAL", "lives in src/air — state must not import it"],
   _resetInitialShapeKeys: ["MANUAL", "protocol shape-drift keys"],
   _resetSchedules: ["MANUAL", "schedule registry; harness uses virtual time"],

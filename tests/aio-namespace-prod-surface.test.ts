@@ -99,10 +99,17 @@ Deno.test({
         !html.includes("importmap"),
         `prod shell must not emit an import map (it would need /__aio/*):\n${html}`,
       );
-      assert(
-        !html.includes("/__aio/"),
-        `prod shell must not reference the /__aio/ namespace:\n${html}`,
-      );
+      // The framework-SOURCE routes specifically — not the whole `/__aio/`
+      // namespace, which also carries runtime endpoints that are legitimately
+      // mounted in prod (`/__aio/health`, `/__aio/blobs/…`, `/__aio/icon`).
+      // What must never come back is a shell that needs code transpiled on
+      // demand, because that is what the route removal took away.
+      for (const route of SOURCE_ROUTES) {
+        assert(
+          !html.includes(route),
+          `prod shell must not reference ${route} (dev-only source route):\n${html}`,
+        );
+      }
     });
   },
 });

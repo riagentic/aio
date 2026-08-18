@@ -104,9 +104,15 @@ Deno.test("denoJson: install:electron is scaffolded ONLY for electron", () => {
     }).tasks;
   assertEquals(tasks().hasOwnProperty("install:electron"), false);
   assertEquals(tasks("cli").hasOwnProperty("install:electron"), false);
-  assertEquals(
-    tasks("electron")["install:electron"],
-    "deno install --allow-scripts=npm:electron",
+  // NOT `deno install --allow-scripts=npm:electron`: that command exits 0
+  // having skipped the lifecycle script whenever deno decides the package is
+  // not newly added, leaving no `dist/` — and the build then advises running
+  // the very task that just did nothing (a field report went round that loop).
+  // The task IS the launcher's own installer, which falls back to the
+  // package's `install.js`, so the two cannot disagree.
+  assertStringIncludes(
+    tasks("electron")["install:electron"]!,
+    "electron-install.ts",
   );
 });
 
@@ -166,7 +172,11 @@ Deno.test("scaffold: counter + todo emit the expected src/-based files", () => {
         "src/cell.ts",
         "src/App.tsx",
         "src/client.ts", // thin CLI client — the cli-client target's entry
-        "src/cell.test.ts",
+        // `tests/`, at the project root — ONE answer to "where do tests go".
+        // Three were in circulation (here, project-structure.md's `src/test/`,
+        // and the quickstart's `deno test -A tests/`); a field report picked
+        // one and noted that having three was the problem.
+        "tests/cell.test.ts",
         ".gitignore",
         "README.md",
       ]
@@ -318,7 +328,7 @@ for (const tpl of ["counter", "todo"] as const) {
           "src/app.ts",
           "src/App.tsx",
           "src/client.ts",
-          "src/cell.test.ts",
+          "tests/cell.test.ts",
         ],
         cwd: dir,
         stderr: "piped",
@@ -331,7 +341,7 @@ for (const tpl of ["counter", "todo"] as const) {
       );
       // The starter test is GREEN out of the box (`deno task test`).
       const test = await new Deno.Command("deno", {
-        args: ["test", "-A", "src/cell.test.ts"],
+        args: ["test", "-A", "tests/cell.test.ts"],
         cwd: dir,
         stderr: "piped",
         stdout: "null",

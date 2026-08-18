@@ -218,6 +218,11 @@ export async function reportHeapCeiling(
   deps: {
     limitBytes?: () => Promise<number | null>;
     totalBytes?: () => number | null;
+    /** Where to remember that this warning was already given. Omit for the old
+     *  every-boot behaviour (tests, and any caller with nowhere to write). */
+    stampPath?: string;
+    /** `--verbose` — say it every time, regardless of the stamp. */
+    always?: boolean;
   } = {},
 ): Promise<void> {
   const limit = await (deps.limitBytes ?? currentHeapLimitBytes)();
@@ -243,6 +248,32 @@ export async function reportHeapCeiling(
   // A 10% band: V8 reports slightly more than it was asked for (4096 → 4192),
   // and reporting that as a shortfall would be a warning about rounding.
   if (haveMB >= want * 0.9) return;
+  // ONCE per (machine, ceiling, policy) — not once per boot.
+  //
+  // The warning is correct and it is five lines the reader cannot act on from
+  // application code: V8 fixed the ceiling before any of this ran. Printed at
+  // every start of an app using a few MB, it becomes the paragraph you scroll
+  // past — and one field report watched it sit directly above the ONE warning
+  // they had deliberately emitted and needed to read. A framework whose rule
+  // is "fail loud, never silent" has the most to lose from noise, because
+  // noise is how loud stops working.
+  //
+  // The stamp records the numbers, not just "shown": change machine, change
+  // launcher, change the policy, and it speaks again — which is exactly when
+  // it is news. `--verbose` always says it.
+  const fingerprint = `${haveMB}/${want}`;
+  if (!deps.always && deps.stampPath) {
+    try {
+      if ((await Deno.readTextFile(deps.stampPath)).trim() === fingerprint) {
+        return;
+      }
+    } catch { /* never warned here before */ }
+    try {
+      await Deno.writeTextFile(deps.stampPath, fingerprint);
+    } catch {
+      /* unwritable data dir — warn every boot rather than not at all */
+    }
+  }
   log.warn(
     `heap ceiling is ${
       (haveMB / 1024).toFixed(1)
@@ -253,6 +284,9 @@ export async function reportHeapCeiling(
       `it cannot be raised from here — an app that needs more will fail with ` +
       `"out of memory" while the machine still has room. Launch with ` +
       `\`am start\`, or add --v8-flags=--max-old-space-size=${want} to the ` +
-      `deno run. Compiled builds bake it in.`,
+      `deno run. Compiled builds bake it in.` +
+      (deps.stampPath && !deps.always
+        ? ` (said once per machine — --verbose repeats it)`
+        : ``),
   );
 }

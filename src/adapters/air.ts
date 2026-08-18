@@ -22,6 +22,7 @@ import { signal } from "../state/signal.ts";
 import { useRef } from "../air/aio-renderer.ts";
 import {
   getConnectedSignal,
+  getReadySignal,
   getStateSignal,
   send,
   trackPath,
@@ -34,9 +35,24 @@ export function useAio<
 >(): {
   state: S;
   send: (action: { type: string; payload?: unknown }) => void;
+  /** Has a full state frame arrived yet?
+   *
+   *  Before it does, every slice of `state` reads `undefined` — a socket can
+   *  be open while the first frame is still in flight. Every app wrote the
+   *  same guard against that window, each picking one arbitrary slice to
+   *  stand in for "has anything arrived" (`if (!state.core) return
+   *  <Loading/>`), which breaks the day that slice legitimately empties.
+   *
+   *  ```tsx
+   *  const { state, ready } = useAio<AppState>()
+   *  if (!ready) return <Spinner/>
+   *  ```
+   *  Reading it subscribes, so the component re-renders when the frame lands. */
+  ready: boolean;
 } {
   trackPath("*");
   const sig = getStateSignal();
+  const readySig = getReadySignal();
 
   const state = new Proxy({} as S, {
     get(_target, prop: string | symbol): unknown {
@@ -61,14 +77,30 @@ export function useAio<
     },
   });
 
-  return { state, send };
+  return {
+    state,
+    send,
+    // A getter, not a snapshot: reading it inside the render subscribes, so a
+    // component that gates on it re-renders when the first frame lands.
+    get ready(): boolean {
+      return readySig.value;
+    },
+  };
 }
 
-/** Client-only reactive state — not synced to server. Returns `{ local, set, patch }`. */
 /** Result of {@linkcode useLocal} — object form (`{ local, set, patch }`)
- *  AND tuple form (`const [value, set] = useLocal(init)`); pick either.
- *  The tuple side is destructuring-only (backed by an iterator) — don't
- *  index it (`result[0]`); use `.local` for direct reads. */
+ *  AND tuple form (`const [value, set] = useLocal(init)`).
+ *
+ *  Neither is "preferred", and saying otherwise was itself the bug: the docs
+ *  called the tuple preferred while every worked example (and
+ *  `examples/contacts/App.tsx`) used the object form, so a reader following
+ *  the code reached for the shape the reference told them not to. The honest
+ *  rule is what each is FOR — the tuple for a scalar
+ *  (`const [text, setText] = useLocal("")`), the object when you want `patch`
+ *  (`draft.patch({ email })` on a form), which the tuple cannot express.
+ *
+ *  The tuple side is destructuring-only (backed by an iterator) — don't index
+ *  it (`result[0]`); use `.local` for direct reads. */
 export type UseLocalResult<T> =
   & {
     readonly local: T;
@@ -79,8 +111,9 @@ export type UseLocalResult<T> =
   & readonly [T, (next: T | ((prev: T) => T)) => void];
 
 /** Component-local reactive state — the signal you would otherwise create by
- *  hand, scoped to this instance and disposed with it. Returns the tuple form
- *  `[value, set]` and the object form (`.value`/`.set`/`.patch`) from one call. */
+ *  hand, scoped to this instance and disposed with it. One call returns both
+ *  the tuple form `[value, set]` and the object form (`.local`/`.set`/
+ *  `.patch`); see {@linkcode UseLocalResult} for which to reach for. */
 export function useLocal<T>(
   initial: T,
 ): UseLocalResult<T> {

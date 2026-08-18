@@ -119,6 +119,55 @@ const hw = cell("hw", {
 });
 ```
 
+### The case the top-level rules do NOT cover: a field inside a collection
+
+The table above defaults **top-level** keys. Restore is
+`deepMerge(initialState, persisted)`, so a key you add to `state` arrives with
+its default — but a field you add to the objects inside `Record<string, Elem>`
+or `Elem[]` does not exist on the thousands of rows already on disk. They come
+back `undefined`.
+
+This is the case that quietly wins, and it is worth naming because the wrong
+answer is so much easier to write:
+
+```ts
+// The tempting one. It works today, and every read site pays forever.
+const status = el.progress ?? "none";
+```
+
+One `??` becomes twenty, spread across the codebase, each one a guess about a
+value the schema is supposed to guarantee — and the day a field legitimately
+holds a falsy value, one of them is wrong. Migrate the collection once instead:
+
+```ts
+type Elem = { id: string; title: string; progress: Progress; grouped: boolean };
+
+const board = cell("board", {
+  version: 2, //  1 → 2: elements gained `progress` and `grouped`
+  state: { elements: {} as Record<string, Elem> },
+  onMigrate(state, from) {
+    if (from < 2) {
+      // Walk the collection ONCE, here, where the shape change is declared.
+      for (const el of Object.values(state.elements)) {
+        el.progress ??= "none";
+        el.grouped ??= false;
+      }
+    }
+    return state;
+  },
+  methods: {/* …every read is now unconditional: el.progress */},
+});
+```
+
+Two things make this the cheap option rather than the diligent one: it runs once
+at boot instead of on every read, and it puts the default in the single place
+the reader already looks for the shape. `am migrations` reports what the pass
+did, and a `version` bump with no `onMigrate` is refused by the data-contract
+gate — so this is hard to half-do.
+
+The same shape works for an array (`state.items.forEach(…)`) and for a nested
+collection (walk down, then across).
+
 `am migrations` shows each cell's declared vs stored version, what the last
 boot's migration pass did, and any **shape drift** — a field still in storage
 that the current `state` no longer declares. Boot warns about drift too, so a

@@ -544,8 +544,23 @@ async riskyOp(s) {
 
 `effectTimeoutMs` (default `30000`, `0` = forever) is the ceiling, and it bounds
 **both** sides of the same call: the framework stops tracking the effect, and
-`await cell.method()` rejects. Per method:
-`perfBudget: { methods: { "wallet:refresh": { timeout: 300_000 } } }`.
+`await cell.method()` rejects.
+
+For a method that is long-running **by nature**, say so on the cell:
+
+```ts
+cell("wallet", {
+  long: ["refresh"], // ← checked against the method list at cell() time
+  methods: { async refresh(s) {/* minutes; still cancellable */} },
+});
+```
+
+`long:` is the spelling to reach for. The other one —
+`perfBudget: { methods: { "wallet:refresh": { timeout: 300_000 } } }` — still
+works and is the right tool for a specific NUMBER, but it is keyed by a string
+in another file that no rename follows and nothing checks. `aiol` flags a
+`perfBudget.methods[…].timeout` naming a local cell's method and names the
+`long:` line that replaces it.
 
 Neither side **cancels** anything — the method keeps running, and if it
 finishes, its writes still commit. What you lose is the return value and the
@@ -715,7 +730,7 @@ not a special construct. Four things make it behave:
 
 | Need                   | Do this                                                                               |
 | ---------------------- | ------------------------------------------------------------------------------------- |
-| Raise the ceiling      | `perfBudget: { methods: { "disk:open": { timeout: 0 } } }` (`0` = no limit)           |
+| Raise the ceiling      | `long: ["open"]` on the cell (checked against its methods; see above)                 |
 | A cancel path          | `cancelOn` (`"self"` for supersession, a `stop` method for an explicit cancel button) |
 | A "still working" sign | Write a state field before the first `await` — clients see it on the next commit      |
 | Don't clobber          | After every `await`, check `s.$signal!.aborted` **before** writing terminal state     |

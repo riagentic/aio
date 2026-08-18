@@ -1,4 +1,4 @@
-## Error handling in aio
+# Error handling in aio
 
 - aio fails loudly
 - aio never hides errors

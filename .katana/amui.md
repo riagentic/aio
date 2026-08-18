@@ -1,8 +1,9 @@
+# amui
 ## am ui - The aio UI manager (amui)
 
 ## General
 
-- amui is aio electron application for managing and monitoring aio applicationsa
+- amui is aio electron application for managing and monitoring aio applications
 - app has modern layout, is aesthetically styled with good positioning
 - app is reactive
 - app is fully working, production state ready, tested with passing tests

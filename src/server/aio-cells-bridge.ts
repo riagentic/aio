@@ -316,6 +316,18 @@ export function buildLegacyConfig(
       }
       return m.size > 0 ? m : undefined;
     })(),
+    // Per-cell boot repair. Collected like `_cellMigrations`, and applied at
+    // the same point in boot — see aio-boot step 5.
+    _cellRestores: (() => {
+      const m = new Map<
+        string,
+        (state: Record<string, unknown>) => Record<string, unknown> | void
+      >();
+      for (const f of composed.cells) {
+        if (f.__aio.onRestore) m.set(f.__aio.id, f.__aio.onRestore);
+      }
+      return m.size > 0 ? m : undefined;
+    })(),
     _cellVersions: (() => {
       const v: Record<string, number> = {};
       let any = false;

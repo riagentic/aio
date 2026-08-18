@@ -22,6 +22,7 @@ import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, fail, out } from "./am-output.ts";
 import { resolve } from "@std/path";
 import { colorEnabled } from "../diagnostics/color.ts";
+import { PATH_PIN_PREFIX } from "../server/framework-pin.ts";
 import {
   ensureVersion,
   latestTag,
@@ -134,6 +135,7 @@ export function frameworkSpecs(source: boolean): {
   am: string;
   doctor: string;
   aiol: string;
+  electronInstall: string;
 } {
   // EVERY public entry point, not just the ones the template happens to use:
   // the docs tell people to `import { createDB } from "aio/db"` (or aio/ui,
@@ -169,6 +171,7 @@ export function frameworkSpecs(source: boolean): {
     am: spec("aio/am"),
     doctor: spec("aio/doctor"),
     aiol: spec("aio/aiol"),
+    electronInstall: spec("aio/electron-install"),
   };
 }
 
@@ -230,7 +233,14 @@ export function standardTasks(
     // Convenience: pre-fetch the Electron binary without launching. Not
     // required — dev/compile auto-install on demand. Scaffolded only for
     // electron apps (see denoJson()).
-    "install:electron": "deno install --allow-scripts=npm:electron",
+    // NOT `deno install --allow-scripts=npm:electron`. That command exits 0
+    // having SKIPPED the lifecycle script whenever deno decides the package is
+    // not newly added — leaving no `dist/`, so the build then advises running
+    // the very task that just did nothing. A field report went round that loop
+    // and escaped only by finding `node_modules/electron/install.js` by hand.
+    // The framework's launcher already falls back to that installer; this is
+    // the same code, so the task and the launcher cannot disagree.
+    "install:electron": `deno run -A ${fw.electronInstall}`,
     // …and the android twin: the built APK onto the connected phone.
     //
     // `install:<target>`, never `<target>:install`. Every qualified task in
@@ -298,7 +308,14 @@ export function legacyStandardTasks(
       `deno run -A ${fw.build} --compile --service --headless --remote && deno run -A ${fw.build} --compile --cli --remote`,
     "compile:remote:service":
       `deno run -A ${fw.build} --compile --service --headless --remote`,
-    "install:electron": "deno install --allow-scripts=npm:electron",
+    // NOT `deno install --allow-scripts=npm:electron`. That command exits 0
+    // having SKIPPED the lifecycle script whenever deno decides the package is
+    // not newly added — leaving no `dist/`, so the build then advises running
+    // the very task that just did nothing. A field report went round that loop
+    // and escaped only by finding `node_modules/electron/install.js` by hand.
+    // The framework's launcher already falls back to that installer; this is
+    // the same code, so the task and the launcher cannot disagree.
+    "install:electron": `deno run -A ${fw.electronInstall}`,
     test: "deno test -A",
     am: `deno run -A ${fw.am}`,
     doctor: `deno run -A ${fw.doctor}`,
@@ -344,6 +361,13 @@ export function denoJson(
     // (server · browser · cli · cli-client cross-compile; electron/android
     // package with per-OS tooling and build on their own OS.)
     build: { targets: [target], platforms: ["host"], out: "dist" },
+    // `.katana/` is a SPECIFICATION the author wrote, not prose to normalise.
+    // The scaffold owned `deno fmt` with no exclude, so a mid-session
+    // `deno task fmt` rewrapped the app's own quality spec — two field
+    // reports, one of which had an exact-match edit against a kata break
+    // underneath it. A tool that edits the file you are writing the rules in
+    // is a tool you stop running.
+    fmt: { exclude: [".katana/", "feedback/", "dist/", "node_modules/"] },
     nodeModulesDir: "auto",
     compilerOptions: {
       lib: ["deno.ns", "deno.unstable", "dom", "dom.iterable"],
@@ -385,7 +409,13 @@ export function scaffold(
     // fleet target compiles it (build-cli.ts's conventional --cli --remote
     // entry is src/client.ts).
     "src/client.ts": CLIENT_TS,
-    "src/cell.test.ts": template === "todo" ? TODO_TEST : COUNTER_TEST,
+    // `tests/`, at the project root — ONE answer to "where do tests go".
+    // Three were in circulation (this file scaffolded `src/cell.test.ts`,
+    // project-structure.md said `src/test/`, and the quickstart's task ran
+    // `deno test -A tests/`); a field report picked one and noted that having
+    // three was the problem. `tests/` is what the framework itself does and
+    // what the quickstart already ran.
+    "tests/cell.test.ts": template === "todo" ? TODO_TEST : COUNTER_TEST,
     "README.md": readme(name, template, target),
   };
   return files;
@@ -465,6 +495,21 @@ export async function cmdCreate(
       pinnedVersion = res.ref;
     } else {
       aioPath = root;
+      // `--mirror=<checkout>` is framework CO-DEVELOPMENT: the app follows a
+      // live tree on this machine. That still needs a pin — and specifically
+      // the `path:` one, or the app is born red.
+      //
+      // Without it, `doctor` FAILED ("no aioVersion — run `am pin --latest`")
+      // while `aiol` WARNED the moment a pin existed and dep/aio pointed at a
+      // checkout rather than the version store. Two first-party tools with
+      // opposite demands and no configuration satisfying both: one field
+      // report documented the contradiction in their README "as intended
+      // behaviour", which is what you do when a tool is wrong, and noted that
+      // it teaches people to ignore both.
+      //
+      // `path:<abs>` is the form that was always the answer — `linkSatisfiesPin`
+      // has understood it all along. Nothing told anyone it existed.
+      pinnedVersion = `${PATH_PIN_PREFIX}${resolve(root)}`;
     }
   } else if (repoRoot() && !flags.json) {
     // --jsr from a source checkout: the pinned version must actually be on JSR.
@@ -697,27 +742,33 @@ app.subscribe(() => console.log("state:", JSON.stringify(app.state)));
 `;
 
 const COUNTER_UI = `// UI — export default; the framework mounts it.
+//
+// No stylesheet: aio ships a default theme (typography, colour in light AND
+// dark, controls, cards) keyed to this app's name. Write \`src/style.css\` when
+// you want your own — every rule there wins over the default, because the
+// default lives in \`@layer aio\`. See docs/ui/theme.md.
+//
+// \`JSX.Element\` needs the type import below; \`aio\` re-exports it so this is
+// the only line to remember.
+import type { JSX } from "aio";
 import { counter } from "./cell.ts";
 
-const btn: Record<string, string> = {
-  padding: "0.75rem 1.5rem",
-  fontSize: "1.25rem",
-  cursor: "pointer",
-};
-
-export default function App() {
+export default function App(): JSX.Element {
   return (
-    <div style={{ padding: "3rem", fontFamily: "system-ui, sans-serif", textAlign: "center" }}>
+    <main>
       <h1>AIO Counter</h1>
-      <div style={{ fontSize: "4rem", margin: "1rem 0", color: "#00a6cc" }}>
-        {counter.count}
+      <div class="card stack" style={{ alignItems: "center" }}>
+        <div style={{ fontSize: "3.5rem", fontWeight: 700 }}>{counter.count}</div>
+        <div class="row">
+          <button type="button" onClick={() => counter.decrement()}>−</button>
+          <button type="button" class="ghost" onClick={() => counter.reset()}>Reset</button>
+          <button type="button" class="primary" onClick={() => counter.increment()}>+</button>
+        </div>
       </div>
-      <div style={{ display: "flex", gap: "0.5rem", justifyContent: "center" }}>
-        <button type="button" onClick={() => counter.decrement()} style={btn}>−</button>
-        <button type="button" onClick={() => counter.reset()} style={btn}>Reset</button>
-        <button type="button" onClick={() => counter.increment()} style={btn}>+</button>
-      </div>
-    </div>
+      <p class="muted">
+        State lives in <code>src/cell.ts</code>. Change it and this updates.
+      </p>
+    </main>
   );
 }
 `;
@@ -726,7 +777,7 @@ const COUNTER_TEST =
   `// A starter test — \`deno task test\`. Cells are pure, so they test in isolation
 // (no server, no DOM) with the testCell harness.
 import { testCell } from "aio/testing";
-import { counter } from "./cell.ts";
+import { counter } from "../src/cell.ts";
 
 testCell(counter, "increments, adds, and resets", (t) => {
   t.send.increment();
@@ -782,7 +833,7 @@ const TODO_TEST =
   `// A starter test — \`deno task test\`. Cells are pure, so they test in isolation
 // (no server, no DOM) with the testCell harness.
 import { testCell } from "aio/testing";
-import { todo, view } from "./cell.ts";
+import { todo, view } from "../src/cell.ts";
 
 testCell(todo, "adds, toggles, and clears items", (t) => {
   t.send.add("write a test");
@@ -811,12 +862,17 @@ await aio.run();
 `;
 
 const TODO_UI = `// UI — a filterable todo list.
+//
+// No stylesheet: aio's default theme styles semantic HTML and the handful of
+// classes used here (card / row / stack / badge / muted). Add src/style.css to
+// take over — your rules always win. See docs/ui/theme.md.
+import type { JSX } from "aio";
 import { useLocal } from "aio/air";
 import { type Filter, type Todo, todo, view } from "./cell.ts";
 
 const FILTERS: Filter[] = ["all", "active", "done"];
 
-export default function App() {
+export default function App(): JSX.Element {
   const { local: input, set: setInput } = useLocal("");
 
   const filtered: Todo[] = todo.items.filter((t: Todo) =>
@@ -825,99 +881,63 @@ export default function App() {
   const remaining = todo.items.filter((t: Todo) => !t.done).length;
 
   return (
-    <div style={{ maxWidth: 480, margin: "2rem auto", fontFamily: "system-ui, sans-serif" }}>
-      <h1 style={{ textAlign: "center", color: "#c77" }}>todos</h1>
+    <main style={{ maxWidth: "36rem" }}>
+      <h1>todos</h1>
 
       <form
+        class="row"
         onSubmit={() => {
           if (input.trim()) {
             todo.add(input.trim());
             setInput("");
           }
         }}
-        style={{ display: "flex", gap: "0.5rem", marginBottom: "1rem" }}
       >
         <input
           value={input}
           onChange={(e) => setInput(e.currentTarget.value)}
           placeholder="What needs to be done?"
-          style={{ flex: 1, padding: "0.5rem", fontSize: "1rem" }}
+          style={{ flex: 1 }}
         />
-        <button type="submit" style={{ padding: "0.5rem 1rem" }}>Add</button>
+        <button type="submit">Add</button>
       </form>
 
-      <ul style={{ listStyle: "none", padding: 0 }}>
+      <ul style={{ listStyle: "none", padding: 0, marginTop: "1rem" }}>
         {filtered.map((t) => (
-          <li
-            key={t.id}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "0.5rem",
-              padding: "0.5rem 0",
-              borderBottom: "1px solid #eee",
-            }}
-          >
+          <li key={t.id} class="row" style={{ padding: "0.4rem 0" }}>
             <input type="checkbox" checked={t.done} onChange={() => todo.toggle(t.id)} />
             <span
-              style={{
-                flex: 1,
-                textDecoration: t.done ? "line-through": "none",
-                color: t.done ? "#999": "inherit",
-              }}
+              style={{ flex: 1, textDecoration: t.done ? "line-through": "none" }}
+              class={t.done ? "muted": ""}
             >
               {t.text}
             </span>
-            <button
-              type="button"
-              onClick={() => todo.remove(t.id)}
-              style={{ color: "#c44", border: "none", background: "none", cursor: "pointer" }}
-            >
-              x
-            </button>
+            <button type="button" class="ghost" onClick={() => todo.remove(t.id)}>×</button>
           </li>
         ))}
       </ul>
 
       {todo.items.length > 0 && (
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            marginTop: "0.5rem",
-            fontSize: "0.85rem",
-            color: "#888",
-          }}
-        >
-          <span>{remaining} item{remaining !== 1 ? "s": ""} left</span>
-          <div style={{ display: "flex", gap: "0.25rem" }}>
+        <div class="row" style={{ justifyContent: "space-between" }}>
+          <span class="muted">{remaining} item{remaining !== 1 ? "s": ""} left</span>
+          <div class="row">
             {FILTERS.map((f) => (
               <button
                 key={f}
                 type="button"
+                class={view.filter === f ? "primary": "ghost"}
                 onClick={() => view.setFilter(f)}
-                style={{
-                  padding: "0.2rem 0.5rem",
-                  border: view.filter === f ? "1px solid #c77": "1px solid transparent",
-                  background: "none",
-                  cursor: "pointer",
-                  borderRadius: 3,
-                }}
               >
                 {f}
               </button>
             ))}
           </div>
-          <button
-            type="button"
-            onClick={() => todo.clearDone()}
-            style={{ border: "none", background: "none", cursor: "pointer", color: "#888" }}
-          >
+          <button type="button" class="ghost" onClick={() => todo.clearDone()}>
             Clear done
           </button>
         </div>
       )}
-    </div>
+    </main>
   );
 }
 `;

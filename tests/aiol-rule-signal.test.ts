@@ -715,15 +715,49 @@ const VIOLATIONS: Case[] = [
     }),
     expect: "uses of 'any'",
   },
+  // (The "throw in cell code" fixture is gone with its rule: it argued against
+  // the framework's own documented refusal mechanism — methods.md lists
+  // throwing first, examples/contacts does it three times — and a project
+  // whose tools contradict its docs teaches people to read neither.)
   {
-    name: "throw in cell code",
+    name: "the $live hazard: a pinned read written after an await",
     files: app({
       "src/cell.ts": cellFile(
-        "counter",
-        `{ state: { count: 0 }, methods: { go(s: { count: number }) { if (s.count) throw new Error("x"); s.count++; } } }`,
+        "issues",
+        `{ transaction: true, state: { items: [] as string[] }, methods: { async scan(s: { items: string[] }) { const n = s.items.length; await Promise.resolve(); s.items = [String(n)]; } } }`,
       ),
     }),
-    expect: "throw in cell code",
+    expect: "transactional",
+  },
+  {
+    name: "perfBudget timeout on a local method (the OLD way to say long:)",
+    files: app({
+      "src/cell.ts": cellFile(
+        "models",
+        `{ state: { n: 0 }, methods: { async scan(s: { n: number }) { await Promise.resolve(); s.n++; } } }`,
+      ),
+      "src/app.ts": `import { aio } from "aio";
+import "./cell.ts";
+await aio.run({ perfBudget: { methods: { "models:scan": { timeout: 0 } } } });
+`,
+    }),
+    expect: "is the OLD way",
+  },
+  {
+    name: "[t=] in a querySelector — t never reaches the DOM",
+    files: app({
+      "src/ui.ts":
+        `export const play = () => document.querySelector('video[t="player"]');
+`,
+    }),
+    expect: "never reaches the DOM",
+  },
+  {
+    name: "[t=] in a stylesheet — the rule matches nothing",
+    files: app({
+      "src/style.css": `[t="result-image"] { border: 1px solid red }\n`,
+    }),
+    expect: "matches nothing",
   },
   {
     name: "state read after an await",

@@ -26,7 +26,10 @@ mid-flight, and for one that writes state after its own cancellation. Once you
 opt in:
 
 - **spinner idiom** — publish mid-method deliberately:
-  `s.busy = true; s.$commit();`
+  `s.busy = true; s.$commit();` — and for progress out of a long loop,
+  `s.$commit(100)` publishes at most once per 100 ms (the first call always
+  publishes, so a progress bar never looks hung), which replaces the hand-rolled
+  `if (++ticks % 8 === 0)` counter every long method grew
 - **live waits** — `await until(() => s.$live.ready)` (a pinned `s` read never
   changes across awaits, by design).
 - **no migration** — turning it on is a per-cell decision by the cell's author.

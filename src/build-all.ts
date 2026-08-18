@@ -373,11 +373,16 @@ function printTargets(): void {
     `${C.dim}or pass --targets=a,b --platforms=linux,windows,macos-arm64.${C.r}`,
   );
   console.log(
+    `${C.dim}--all-platforms builds every one of them; what a target cannot${C.r}\n` +
+      `${C.dim}cross-build is printed with the reason, never dropped.${C.r}`,
+  );
+  console.log(
     `${C.dim}Two apps in one repo? Give each target its own module:${C.r}\n` +
       `${C.dim}  "targets": { "server": { "entry": "src/relay/app.ts", "name": "relay" }, "electron": {} }${C.r}`,
   );
   console.log(
-    `${C.dim}Electron/Android package with per-OS tooling — they build on their own OS only.${C.r}`,
+    `${C.dim}Electron cross-builds to Windows/macOS (its runtime is a download); a Linux
+AppImage needs a Linux host, and an APK is built once, on any host.${C.r}`,
   );
 }
 
@@ -482,8 +487,16 @@ export async function buildAll(): Promise<number> {
 
   // Platform list: --platforms= overrides deno.json build.platforms; the
   // default is this machine only, so an existing project's build is unchanged.
+  // `--all-platforms` — the one-liner for "ship everything this repo can
+  // produce from here". It expands to every platform aio knows, and the
+  // per-target refusal below still applies: an Electron AppImage needs a Linux
+  // host, an APK is built once. Nothing is silently dropped — every skip is
+  // printed with its reason, so "all" never quietly means "some".
   const argPlatforms = flag("platforms");
-  const rawPlatforms = argPlatforms
+  const allPlatforms = Deno.args.includes("--all-platforms");
+  const rawPlatforms = allPlatforms
+    ? Object.keys(PLATFORMS)
+    : argPlatforms
     ? argPlatforms.split(",")
     : block.platforms ?? ["host"];
   const platformsResolved = resolvePlatforms(rawPlatforms);
@@ -611,7 +624,7 @@ export async function buildAll(): Promise<number> {
         // silently dropped (a missing artifact people discover at release time).
         const blocker = isHostPlatform(platform)
           ? null
-          : crossCompileBlocker(target);
+          : crossCompileBlocker(target, platform);
         if (blocker) {
           console.log(
             `\n${C.b}▶ ${label}${C.r} ${C.yellow}skipped${C.r} ${C.dim}— ${blocker}${C.r}`,

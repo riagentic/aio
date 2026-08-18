@@ -85,6 +85,22 @@ export interface TestUIOptions {
    *  (`<SignIn/>` adapts to them). Defaults all-false; only read when
    *  `user` is set. */
   authFeatures?: Partial<AuthFeatures>;
+  /** Window size this mount reports: `window.innerWidth/innerHeight` and
+   *  `document.documentElement.clientWidth/clientHeight`. Default 1024×768.
+   *
+   *  Any component that asks "how big is the viewport?" — a zoom that anchors
+   *  on the top-left element fully inside it, a responsive breakpoint, a
+   *  virtualised list — otherwise reads whatever the DOM stub happens to say,
+   *  and BOTH branches of that question look green. A field report's zoom test
+   *  passed for a full development round for the wrong reason: nothing is ever
+   *  fully inside a 0×0 viewport, so the test only ever exercised the
+   *  fallback and would have passed against a broken implementation.
+   *
+   *  Element geometry is a different question and still has no honest answer —
+   *  there is no layout engine here, so `getBoundingClientRect()` is all
+   *  zeros. testUI says so out loud the first time you ask (see the layout
+   *  warning) rather than letting a zero read as a measurement. */
+  viewport?: { width: number; height: number };
 }
 
 /** Which kind of thing a presence question is about — see
@@ -100,10 +116,18 @@ export type UIKind = "element" | "component";
  *  action still returns a promise that settles the app (renders flushed,
  *  dispatch drained) when you do want to await it. */
 export interface UIElementHandle {
-  /** Full click sequence: pointerdown → mousedown → pointerup → mouseup → click. */
-  click(): Promise<void>;
-  /** Double click (after a full click sequence). */
-  dblclick(): Promise<void>;
+  /** Full click sequence: pointerdown → mousedown → pointerup → mouseup →
+   *  click, optionally with held modifiers (`{ ctrlKey, metaKey, altKey,
+   *  shiftKey }`) — parity with {@linkcode press}.
+   *
+   *  Ctrl+click to add, shift+click to extend, alt+click to remove are real
+   *  gestures, and without this an app whose PRIMARY interaction is one of
+   *  them has to test it with raw `new MouseEvent(…)` + `dispatchEvent` —
+   *  dropping straight through the semantic surface into the DOM work it
+   *  exists to remove. */
+  click(mods?: KeyModifiers): Promise<void>;
+  /** Double click (after a full click sequence), with optional modifiers. */
+  dblclick(mods?: KeyModifiers): Promise<void>;
   /** Type into an input/textarea like a user: focus, then per-character
    *  keydown + value update + input event. Note: `type` APPENDS to the current
    *  value (it does not clear first) — use {@link setValue} to replace. */
@@ -123,8 +147,9 @@ export interface UIElementHandle {
   keyDown(key: string, mods?: KeyModifiers): Promise<void>;
   /** Release a key held by {@linkcode keyDown}. */
   keyUp(key: string, mods?: KeyModifiers): Promise<void>;
-  /** Hover: mouseover + mouseenter. */
-  hover(): Promise<void>;
+  /** Hover: mouseover + mouseenter, with optional held modifiers (a UI that
+   *  reveals delete affordances while ctrl is held is testable this way). */
+  hover(mods?: KeyModifiers): Promise<void>;
   /** Focus the element. */
   focus(): Promise<void>;
   /** Blur the element. */
@@ -433,10 +458,30 @@ function oneComponent(
 ): UISurfaceNode {
   const hits = findComponents(scope, name, key);
   if (hits.length === 0) {
+    // ONE name can address two different things: a COMPONENT (`<Stage/>`, or
+    // `t` on a component) and an ELEMENT (`t` on a `<button>`). A miss that
+    // says "component X not found" and lists only what is directly in scope
+    // sends the reader looking in the wrong namespace — two field reports lost
+    // time to exactly that, one of them concluding it had misnamed a component
+    // while the thing it wanted was an element two levels down. So when the
+    // name IS on the surface as an element, say so and name the spelling that
+    // works.
+    const asElement = findElementsDeep(scope, name).filter((e) => e._el);
+    if (asElement.length > 0) {
+      fail(
+        `testUI: no COMPONENT named "${name}" under ${scope.path} — but there ` +
+          `IS an element by that name (${
+            asElement.map((e) => e.path).join(", ")
+          }).\n  fix: address elements directly — ui["${name}"] (or ` +
+          `ui.<Component>.${name}); find() resolves components only`,
+        listNames(scope),
+        name,
+      );
+    }
     fail(
-      `testUI: component "${name}"${
+      `testUI: no component or element named "${name}"${
         key !== undefined ? ` [key=${key}]` : ""
-      } not found under ${scope.path}`,
+      } under ${scope.path}`,
       listNames(scope),
       name,
     );
@@ -543,6 +588,85 @@ export function testUI(
   return _mountTestUI(App as ComponentFn, optsOrName ?? {});
 }
 
+/** Make the mount report a real viewport size.
+ *
+ *  happy-dom honours `width`/`height` for `window.innerWidth/innerHeight` but
+ *  leaves `documentElement.clientWidth/clientHeight` at 0 — and that pair is
+ *  the other half of every "how big is the window?" read in real code. Both
+ *  answers have to agree, or which one a component happens to use decides
+ *  whether its test is meaningful. */
+function _installViewport(win: AnyDoc, width: number, height: number): void {
+  const el = win.document?.documentElement;
+  if (!el) return;
+  for (
+    const [prop, value] of [
+      ["clientWidth", width],
+      ["clientHeight", height],
+    ] as const
+  ) {
+    try {
+      Object.defineProperty(el, prop, { get: () => value, configurable: true });
+    } catch { /* a DOM that already reports layout — leave it alone */ }
+  }
+}
+
+/** Say out loud that there is no layout engine here.
+ *
+ *  `getBoundingClientRect()` returns all zeros and `clientWidth` is 0 for
+ *  every element, because nothing lays anything out. Code that measures then
+ *  takes its degenerate branch — and passes. That is the single worst
+ *  outcome a test harness can produce: a green test that exercised the
+ *  fallback and would have passed against a broken implementation. So the
+ *  FIRST measurement per mount says what happened and what to do instead.
+ *
+ *  Once per mount, not per call: a virtualised list measures every row, and a
+ *  warning that scrolls the terminal is a warning nobody reads. */
+function _warnOnFakeLayout(win: AnyDoc): void {
+  const proto = win.Element?.prototype;
+  if (!proto) return;
+  let warned = false;
+  const warn = (what: string) => {
+    if (warned) return;
+    warned = true;
+    console.warn(
+      `[aio:testUI] ${what} was read, and there is no layout engine here — ` +
+        `every element measures 0×0 at position 0,0. A component that ` +
+        `branches on its own size therefore takes its DEGENERATE branch, and ` +
+        `the test passes without exercising the real one.\n` +
+        `  fix: assert the behaviour, not the geometry — or stub the ` +
+        `measurement for this test (\`Object.defineProperty(el, ` +
+        `"clientWidth", { value: 800 })\`).\n` +
+        `  note: the WINDOW does have a size — set it with ` +
+        `testUI(App, { viewport: { width, height } }).`,
+    );
+  };
+  const origRect = proto.getBoundingClientRect;
+  if (typeof origRect === "function") {
+    proto.getBoundingClientRect = function (this: AnyDoc) {
+      const r = origRect.call(this);
+      if (!r || (!r.width && !r.height)) warn("getBoundingClientRect()");
+      return r;
+    };
+  }
+  for (const prop of ["clientWidth", "clientHeight"] as const) {
+    const desc = Object.getOwnPropertyDescriptor(proto, prop);
+    if (!desc?.get) continue;
+    const get = desc.get;
+    try {
+      Object.defineProperty(proto, prop, {
+        configurable: true,
+        get(this: AnyDoc) {
+          const v = get.call(this);
+          // documentElement carries the viewport (see _installViewport) and
+          // has its own own-property getter, so it never reaches this one.
+          if (!v) warn(prop);
+          return v;
+        },
+      });
+    } catch { /* non-configurable — nothing to say */ }
+  }
+}
+
 async function _mountTestUI(
   App: ComponentFn,
   opts: TestUIOptions,
@@ -568,8 +692,37 @@ async function _mountTestUI(
       const hd = await import(spec);
       // Non-about:blank base URL so router code (navigate/Link) has a real
       // origin to resolve against.
-      ownedWindow = new hd.Window({ url: "http://localhost/" });
+      const vw = opts.viewport?.width ?? 1024;
+      const vh = opts.viewport?.height ?? 768;
+      ownedWindow = new hd.Window({
+        url: "http://localhost/",
+        width: vw,
+        height: vh,
+      });
       doc = ownedWindow.document;
+      _installViewport(ownedWindow, vw, vh);
+      _warnOnFakeLayout(ownedWindow);
+      // `document` and `window` as GLOBALS, from the same owned window.
+      //
+      // A component that writes `document.addEventListener("keydown", …)` —
+      // the most common form there is — reached `globalThis.document`, which
+      // is `undefined` in Deno. The read throws inside `onMount`, lifecycle
+      // hooks are error-guarded by design, and the result was a handler that
+      // simply never ran: no error, no clue. testUI's whole job is to BE a
+      // browser for the component under test, and a browser has these.
+      for (
+        const [key, value] of [
+          ["document", ownedWindow.document],
+          ["window", ownedWindow],
+        ] as const
+      ) {
+        if ((globalThis as AnyDoc)[key]) continue;
+        Object.defineProperty(globalThis, key, {
+          get: () => value,
+          configurable: true,
+        });
+        _ownedGlobals.push(key);
+      }
       // Router support: `navigate()` reads globalThis.location/history — put
       // the owned window's (same-origin, in-memory) pair there so routed apps
       // test with ZERO shim code. Restored on unmount.
@@ -974,11 +1127,17 @@ async function _mountTestUI(
       get info() {
         return resolveInfo();
       },
-      click() {
-        return act("click", (e) => triggerAction(e, "click"));
+      click(mods?: KeyModifiers) {
+        return act(
+          "click",
+          (e) => triggerAction(e, "click", undefined, mods),
+        );
       },
-      dblclick() {
-        return act("dblclick", (e) => triggerAction(e, "dblclick"));
+      dblclick(mods?: KeyModifiers) {
+        return act(
+          "dblclick",
+          (e) => triggerAction(e, "dblclick", undefined, mods),
+        );
       },
       type(text: string) {
         return enqueue(async () => {
@@ -1009,8 +1168,8 @@ async function _mountTestUI(
           (e) => triggerAction(e, "keyUp", key, mods),
         );
       },
-      hover() {
-        return act(null, (e) => triggerAction(e, "hover"));
+      hover(mods?: KeyModifiers) {
+        return act(null, (e) => triggerAction(e, "hover", undefined, mods));
       },
       focus() {
         return act(null, (e) => triggerAction(e, "focus"));
@@ -1097,6 +1256,20 @@ async function _mountTestUI(
       const node = selectParent();
       const found = node.elements.find((e) => e.name === name);
       if (found?._el) return found;
+      // HOIST at use time, exactly as the eager path hoists at access time.
+      //
+      // Without this the documented promise — "acting on UI a previous action
+      // creates just works: `ui.OpenButton.click(); ui.Modal.Confirm.click()`,
+      // the modal is resolved when its turn comes" — held only for elements
+      // that happen to sit DIRECTLY under the scope. A field report hit the
+      // gap on the most ordinary shape there is (`ui.signIn.click();
+      // ui.username.type(…)`, where the form the click reveals is a child
+      // component) and came away carrying a comment explaining why one action
+      // had to be awaited. A resolution rule that holds at access time and not
+      // at use time is worse than no lazy resolution at all, because the
+      // failure looks like a naming mistake.
+      const hoisted = liveElements(node, name);
+      if (hoisted.length === 1) return hoisted[0]!;
       // Component/element name SHADOWING: a component named like its own
       // inner element makes `ui.X` resolve to the component, so `ui.X.type()`
       // looks up an element "type" here and fails — say how to reach the
@@ -1110,8 +1283,17 @@ async function _mountTestUI(
       try {
         elsewhere = liveElements(currentSurface(), name);
       } catch { /* unmounted — plain listing below */ }
+      if (hoisted.length > 1) {
+        fail(
+          `testUI: "${name}" matches ${hoisted.length} elements under ` +
+            `${node.path} — address the instance: ` +
+            `ui.….<Component>2.${name} (ordinal, tree order)`,
+          hoisted.map((e) => e.path),
+          name,
+        );
+      }
       fail(
-        `testUI: "${name}" is not an element of ${node.path}` +
+        `testUI: no element or component named "${name}" under ${node.path}` +
           (shadowed
             ? `\n  hint: "${node.component}" names both this component and something inside it — use ui.${node.component}.${node.component}`
             : "") +
@@ -1188,6 +1370,51 @@ async function _mountTestUI(
       fail(
         `testUI: element "${name}" is not on the current surface`,
         els.map((e) => e.path),
+        name,
+      );
+    });
+    return new Proxy(eh as AnyDoc, {
+      get(target, prop: string | symbol) {
+        if (typeof prop !== "symbol" && prop in (target as object)) {
+          return (target as AnyDoc)[prop];
+        }
+        return (comp as AnyDoc)[prop];
+      },
+      has(target, prop) {
+        return prop in (target as object) || prop in (comp as object);
+      },
+    }) as UIComponentHandle;
+  }
+
+  /** A handle for a name that is on the surface as NEITHER kind — yet.
+   *
+   *  Element actions (`click`, `type`, …) resolve against the live surface
+   *  when they RUN, hoisting through child components exactly as the eager
+   *  path does; anything else is a component reference and defers to
+   *  `find()`. Whichever the name turns out to be, the first use decides. */
+  function lazyHybrid(name: string): UIComponentHandle {
+    const comp = api.find(name);
+    const eh = elementHandle(() => {
+      const surf = currentSurface();
+      const els = liveElements(surf, name);
+      if (els.length === 1) return els[0]!;
+      if (els.length > 1) {
+        fail(
+          `testUI: "${name}" matches ${els.length} elements on the surface — ` +
+            `disambiguate with ui.<Component>2.${name} (ordinal, tree order)`,
+          els.map((e) => e.path),
+          name,
+        );
+      }
+      // No element. If a COMPONENT by that name exists, the caller asked an
+      // element question of a component and deserves to be told which;
+      // otherwise oneComponent throws the canonical both-namespaces miss.
+      oneComponent(surf, name);
+      fail(
+        `testUI: "${name}" is a COMPONENT, not an element — element actions ` +
+          `(click/type/…) need an element. Reach one inside it with ` +
+          `ui.${name}.<Element>, or put a t handle on the node you mean`,
+        listNames(surf),
         name,
       );
     });
@@ -1559,8 +1786,15 @@ async function _mountTestUI(
           );
         }
       }
-      // ui.App / ui.AnyComponent → lazy component handle (may appear later)
-      return api.find(name);
+      // Nothing by that name is on the surface YET. It may be either kind —
+      // a component that has not mounted, or an ELEMENT a queued action is
+      // about to reveal — so commit to neither: element actions resolve as
+      // elements at use time, everything else falls through to the component
+      // handle. Committing to "component" here is what made the documented
+      // promise ("ui.OpenButton.click(); ui.Modal.Confirm.click() — resolved
+      // when its turn comes") false for `ui.reveal.click(); ui.field.type(…)`,
+      // and the failure named the wrong namespace on the way out.
+      return lazyHybrid(name);
     },
   }) as TestUI;
 }

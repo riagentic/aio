@@ -107,3 +107,25 @@ export interface DevToolsConnection {
   ) => () => void;
   disconnect: () => void;
 }
+
+/** A namespace of server functions as the CALLER sees it.
+ *
+ *  Every member returns a promise, whatever the body was declared as. That is
+ *  not a convenience: the hop IS asynchronous — over the wire in the browser,
+ *  and `Promise.resolve(...)`-wrapped on the server so the two agree — and a
+ *  type that says otherwise is simply wrong. It was wrong in a way that cost
+ *  every consumer: `logout(token: string): void` typed as `void` on both
+ *  sides, so the natural `await api.logout(t).catch(…)` failed to compile
+ *  (`Property 'catch' does not exist on type 'void'`) and the workaround was
+ *  to declare bodies `async` that have nothing to await — carrying a
+ *  `deno-lint-ignore require-await` each — which made the SERVER-side type
+ *  less accurate to buy back a client-side one.
+ *
+ *  `Awaited<R>` so an already-async body does not become `Promise<Promise<T>>`.
+ */
+// deno-lint-ignore no-explicit-any
+export type Remote<T extends Record<string, (...a: any[]) => any>> = {
+  [K in keyof T]: T[K] extends (...a: infer P) => infer R
+    ? (...a: P) => Promise<Awaited<R>>
+    : never;
+};

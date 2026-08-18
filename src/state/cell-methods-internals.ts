@@ -642,8 +642,30 @@ export function buildMethodsExecutor(
         };
         // Mid-method atomic publish: flush the buffer, then re-snapshot so reads
         // after $commit() see the just-committed state.
+        // `s.$commit(minMs?)` — publish now, or at most once per `minMs`.
+        //
+        // The throttle exists because every long method hand-rolled it. One
+        // report wrote the same shape twice in one app —
+        // `if (++ticks % 8 === 0) s.$commit!()` in a filesystem walk and
+        // `if (pct - published >= 0.01) s.$commit!()` in a hasher — which is
+        // the counter, the threshold and the bookkeeping variable that the
+        // framework can simply own. `long:` made "this runs for minutes" a
+        // first-class category; publishing progress from one is what those
+        // methods then all have to do.
+        //
+        // A bare `s.$commit()` is unchanged: publish, unconditionally.
+        let lastCommitAt = 0;
         const commit = transactional
-          ? () => {
+          ? (minMs?: number) => {
+            if (typeof minMs === "number" && minMs > 0) {
+              const now = Date.now();
+              // The first call always publishes: a progress bar that waits one
+              // interval before its first frame looks like a hang.
+              if (lastCommitAt !== 0 && now - lastCommitAt < minMs) return;
+              lastCommitAt = now;
+            } else {
+              lastCommitAt = Date.now();
+            }
             guardCommit();
             // Capture the write-set before flush clears it, then dispatch the
             // real atomic commit.
@@ -860,7 +882,16 @@ export function buildMethodsExecutor(
               // so the same `return schedule.after(...)` gave callers two
               // different answers depending on whether the method happened to
               // be async. Parity is the contract.
-              resolveCall(_callId, retEffects.length > 0 ? undefined : value);
+              // materializeValue: array read methods hand back LIVE element
+              // proxies (so writes through them land — cell-impl.ts), and
+              // `return s.items.filter(...)` therefore returns proxies. A
+              // Proxy is refused by structuredClone at the transport seam, so
+              // the return crosses to the caller as plain data. Values with no
+              // proxy inside are returned by reference and cost nothing.
+              resolveCall(
+                _callId,
+                retEffects.length > 0 ? undefined : materializeValue(value),
+              );
             }
           })
           .catch((e: Error) => {
