@@ -9,6 +9,10 @@ export type GetUIStateFn = (user?: AioUser) => unknown;
 /** Internal config — passed by aio.run(), not user-facing */
 export interface ServerConfig {
   port: number;
+  /** Server-origin dispatch for the trojan's `?as=server` — bypasses the cell
+   *  `access` gate, because server code always has. Dev-only + loopback-only,
+   *  like the whole trojan. */
+  dispatchAsServer?: (action: unknown) => Promise<unknown> | void;
   socketPath?: string; // Unix domain socket path — when set, serves over UDS instead of TCP
   title: string;
   width?: number; // window width hint (embedded in HTML meta)
@@ -40,6 +44,9 @@ export interface ServerConfig {
   uiEntry?: string; // AIO-8.1: UI entry file relative to baseDir (default: App.tsx)
   viewport?: string | false; // AIO-423: <meta viewport> override (false = omit)
   headExtra?: string; // AIO-423: verbatim extra <head> content
+  chrome?: "standard" | "themed" | "none"; // ui.chrome — desktop window frame
+  theme?: "auto" | "none"; // ui.theme — the default stylesheet
+  themeName?: string; // identity the theme accent is derived from (appId)
   renderBudget?: RenderBudget; // sent to browser for RenderMeter thresholds
   /** Extra read-only DEV-server roots by URL prefix — see CellsConfig.serveDirs. */
   serveDirs?: Record<string, string>;

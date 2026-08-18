@@ -99,7 +99,9 @@ for (const tpl of ["counter", "todo"] as const) {
       const dir = await makeApp(tpl);
       try {
         const chk = await new Deno.Command("deno", {
-          args: ["check", "src/app.ts", "src/App.tsx", "src/cell.test.ts"],
+          // `tests/`, at the project root — the alpha61 one-answer for where
+          // tests go (the scaffold moved with the docs and the quickstart).
+          args: ["check", "src/app.ts", "src/App.tsx", "tests/cell.test.ts"],
           cwd: dir,
           stdout: "null",
           stderr: "piped",
@@ -107,7 +109,7 @@ for (const tpl of ["counter", "todo"] as const) {
         assertEquals(chk.code, 0, `check failed:\n${dec.decode(chk.stderr)}`);
 
         const t = await new Deno.Command("deno", {
-          args: ["test", "-A", "src/cell.test.ts"],
+          args: ["test", "-A", "tests/cell.test.ts"],
           cwd: dir,
           stdout: "null",
           stderr: "piped",
@@ -336,9 +338,13 @@ Deno.test({
       const edj = JSON.parse(denoJson("demo", true, "electron")) as {
         tasks: Record<string, string>;
       };
-      assertEquals(
-        edj.tasks["install:electron"],
-        "deno install --allow-scripts=npm:electron",
+      // NOT `deno install --allow-scripts=npm:electron` — that command exits 0
+      // having skipped the lifecycle script, leaving no binary (a field report
+      // walked that loop). The task is the launcher's own installer now, so
+      // the two cannot disagree.
+      assertStringIncludes(
+        edj.tasks["install:electron"]!,
+        "electron-install.ts",
       );
 
       if (ELECTRON) {

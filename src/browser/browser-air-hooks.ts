@@ -8,13 +8,16 @@ import {
 import { useRef } from "../air/aio-renderer.ts";
 import { _projectWithSharing, ensureConnected } from "./browser-protocol.ts";
 
-/** AIR useAio -- full global state, signal-based. Calls ensureConnected(). */
+/** AIR useAio -- full global state, signal-based. Calls ensureConnected().
+ *
+ *  The return type is DERIVED from the adapter's rather than restated. It used
+ *  to be a hand-written copy, and the copy had already gone stale: the adapter
+ *  grew `ready` and this wrapper — the one every browser app actually calls —
+ *  kept advertising the older, smaller shape, so the feature existed and no
+ *  app could see it. Same twin class as the `useLocal` note below. */
 export function useAio<
   S extends Record<string, unknown> = Record<string, unknown>,
->(): {
-  state: S;
-  send: (action: { type: string; payload?: unknown }) => void;
-} {
+>(): ReturnType<typeof _airUseAio<S>> {
   ensureConnected();
   return _airUseAio<S>();
 }

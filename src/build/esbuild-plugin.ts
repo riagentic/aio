@@ -7,6 +7,20 @@
 // Dev-mode protection comes from: dynamic import map (Layer 1b),
 // aiol lint checks (Layer 2), and error overlay (Layer 3).
 
+/** Static server-only imports seen in the last client build:
+ *  `specifier → the modules that statically import it`.
+ *
+ *  Populated by the plugin, read by the build so it can FAIL with the chain
+ *  rather than ship a bundle whose every use of that module throws in the
+ *  browser. Module-level rather than returned, because esbuild's plugin API
+ *  gives the caller no channel back and the build already awaits the run. */
+export const serverOnlyStatic: Record<string, Set<string>> = {};
+
+/** Forget the previous build's findings — a build is a fresh question. */
+export function _resetServerOnlyStatic(): void {
+  for (const k of Object.keys(serverOnlyStatic)) delete serverOnlyStatic[k];
+}
+
 /** Creates an esbuild plugin that makes browser builds safe by intercepting server-only imports. */
 export function aioBrowserPlugin(): {
   name: string;
@@ -17,28 +31,53 @@ export function aioBrowserPlugin(): {
     name: "aio-browser",
     // deno-lint-ignore no-explicit-any
     setup(build: any) {
-      // Intercept @std/* — Deno standard library, never browser-safe
-      build.onResolve({ filter: /^@std\// }, (args: { path: string }) => ({
-        path: args.path,
-        namespace: "aio-server-only",
-      }));
-
-      // Intercept node:* — Node built-ins, never browser-safe
-      build.onResolve({ filter: /^node:/ }, (args: { path: string }) => ({
-        path: args.path,
-        namespace: "aio-server-only",
-      }));
+      // Intercept @std/* and node:* — Deno stdlib and Node built-ins, never
+      // browser-safe. Both are stubbed (see serverOnlyStub), and a STATIC one
+      // is RECORDED on the way past.
+      //
+      // The stub's premise is that these imports sit inside server-only method
+      // bodies reached through `await import(...)`, where they are dead code in
+      // the browser. That premise holds for a dynamic import and fails
+      // completely for a static one: a top-level `import { … } from
+      // "node:sqlite"` in a module the client graph reaches is LIVE code, and
+      // the stub turns it into a throw at first use. A production consumer shipped
+      // exactly that — a cell value-imported a module touching `node:sqlite`,
+      // the client bundle broke, the app served a blank page with "1 module
+      // error", and the entire test suite stayed green because tests render
+      // server-side where `node:sqlite` exists. They ended up policing aio's
+      // bundler with a test of their own. The bundler is where that belongs.
+      const record = (importer: string, spec: string) => {
+        if (!importer) return;
+        (serverOnlyStatic[spec] ??= new Set()).add(importer);
+      };
+      const intercept = (
+        args: { path: string; kind: string; importer: string },
+      ) => {
+        if (args.kind !== "dynamic-import") record(args.importer, args.path);
+        return { path: args.path, namespace: "aio-server-only" };
+      };
+      build.onResolve({ filter: /^@std\// }, intercept);
+      build.onResolve({ filter: /^node:/ }, intercept);
 
       // AIO-55: Mark *.server.ts dynamic imports as external — convention for
       // server-only helper modules. Cell methods run server-side; any
       // import('../foo.server.ts') inside them is dead code in the browser bundle.
       build.onResolve(
         { filter: /\.server\.ts$/ },
-        (args: { path: string; kind: string }) => {
+        (args: { path: string; kind: string; importer: string }) => {
           if (args.kind === "dynamic-import") {
             return { path: args.path, external: true };
           }
-          return undefined; // fall through to default resolution
+          // A STATIC import of a *.server.ts module from the client graph is
+          // the whole-app blank screen: the suffix convention is load-bearing
+          // and this was its one silent hole — typecheck, lint and the suite
+          // all stay green (tests render server-side) while the browser dies
+          // on the import chain. A wallet's field report (RIS-8.2) built its
+          // own graph test to catch exactly this; the bundler is where it
+          // belongs. Recorded like node:/@std — the build FAILS, naming the
+          // importing file.
+          record(args.importer, args.path);
+          return undefined; // still resolves, so the error can name ONE thing
         },
       );
 

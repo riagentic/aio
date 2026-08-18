@@ -7,6 +7,17 @@ import { log } from "../diagnostics/logger-api.ts";
 
 /** Reactive value container — reads auto-track in effects and computed. */
 export interface Signal<T> {
+  /** Tracked read, the call spelling — identical to {@linkcode value} and
+   *  {@linkcode get}.
+   *
+   *  It exists because it is the spelling people write FIRST and the compiler
+   *  answered with "Type 'Signal<Tab>' has no call signatures", which names
+   *  neither working alternative. That was reported once, answered by adding
+   *  `.get()` and documenting both — and then reported again, by a different
+   *  app, hitting the identical wall. The second report is the evidence: a
+   *  spelling that everybody reaches for is not a mistake to be corrected by
+   *  documentation, it is a missing feature. */
+  (): T;
   readonly value: T;
   /** Tracked read — the exact same thing as {@linkcode value}, spelled as the
    *  mirror of {@linkcode set}.
@@ -31,6 +42,11 @@ export interface Signal<T> {
 
 /** Derived reactive value — recomputes lazily when dependencies change. */
 export interface Computed<T> {
+  /** Tracked read, the call spelling — identical to {@linkcode value} and
+   *  {@linkcode get}. A computed answers every spelling a signal does;
+   *  nothing is more surprising than a read API that works on one and not the
+   *  other. */
+  (): T;
   readonly value: T;
   /** Tracked read — identical to {@linkcode value}, so a computed answers the
    *  same two spellings a signal does (nothing is more surprising than a read
@@ -279,7 +295,11 @@ function _shallowEq(a: unknown, b: unknown): boolean {
 
 // ── Signal ──────────────────────────────────────────────────────────
 
-class SignalImpl<T> implements Signal<T> {
+/** The instance side of a signal. Deliberately NOT `implements Signal<T>`:
+ *  the public type is CALLABLE and a class cannot be, so the call spelling is
+ *  grafted on by `_callable()` at construction. `signal()`'s return type is
+ *  the contract; this class is the half of it a prototype can express. */
+class SignalImpl<T> implements Omit<Signal<T>, never> {
   _value: T;
   readonly _subscribers = new Set<Subscriber>();
   _version = 0;
@@ -401,15 +421,42 @@ export function _resetRootSignals(): void {
 }
 
 /** Create a reactive signal with an initial value. Reads auto-track in effects and computed. */
+/** Make an already-constructed signal/computed CALLABLE without splitting its
+ *  state across two objects.
+ *
+ *  The instance's own fields are moved onto a function whose prototype is the
+ *  original's, so every method and getter still resolves through the class and
+ *  `instanceof` still holds — there is exactly one object, and calling it is
+ *  the same tracked read as `.value`. */
+function _callable<T, I extends object, O>(impl: I): O {
+  const fn = function (this: unknown) {
+    return (fn as unknown as { value: T }).value;
+  } as unknown as O;
+  Object.setPrototypeOf(fn, Object.getPrototypeOf(impl));
+  for (const key of Reflect.ownKeys(impl)) {
+    const d = Object.getOwnPropertyDescriptor(impl, key)!;
+    // `name`/`length` exist on every function and are non-writable; redefining
+    // is fine, skipping them would drop a real field of the same name.
+    Object.defineProperty(fn, key, { ...d, configurable: true });
+  }
+  return fn;
+}
+
+/** Create a reactive value. Reads auto-track (`count()` / `count.value` /
+ *  `count.get()` are one tracked read); write with `set`/`update`. A root
+ *  (module-scope) signal is registered for test-harness reset, and an
+ *  optional name feeds devtools + duplicate-update warnings. */
 export function signal<T>(
   initial: T,
   nameOrOpts?: string | { name?: string },
 ): Signal<T> {
   const name = typeof nameOrOpts === "string" ? nameOrOpts : nameOrOpts?.name;
-  const sig = new SignalImpl(initial, name);
+  const sig = _callable<T, SignalImpl<T>, Signal<T>>(
+    new SignalImpl(initial, name),
+  );
   if (_trackStack.length === 0 && _rootSignals.length < ROOT_SIGNAL_CAP) {
     _rootSignals.push({
-      ref: new WeakRef(sig as SignalImpl<unknown>),
+      ref: new WeakRef(sig as unknown as SignalImpl<unknown>),
       initial: _freshInitial(initial),
     });
   }
@@ -420,7 +467,7 @@ export function signal<T>(
 
 const _computing = new Set<ComputedImpl<unknown>>();
 
-class ComputedImpl<T> implements Computed<T> {
+class ComputedImpl<T> {
   private _fn: () => T;
   private _cached: T | undefined;
   private _dirty = true;
@@ -509,7 +556,7 @@ class ComputedImpl<T> implements Computed<T> {
 
 /** Create a derived signal that recomputes when its dependencies change. */
 export function computed<T>(fn: () => T): Computed<T> {
-  return new ComputedImpl(fn);
+  return _callable<T, ComputedImpl<T>, Computed<T>>(new ComputedImpl(fn));
 }
 
 // ── Computed collector (for renderer cleanup) ────────────────────────

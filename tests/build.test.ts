@@ -4,7 +4,7 @@ import {
   copyDir,
   formatMb,
   slugify,
-  writePlaceholderIcon,
+  writeDefaultIcon,
 } from "../src/build/build-helpers.ts";
 import { apkArtifact } from "../src/build/build-android.ts";
 import { ANDROID_TEMPLATE } from "../src/build/android-template.ts";
@@ -56,40 +56,43 @@ Deno.test("slugify: already slugified passes through", () => {
   assertEquals(slugify("my-app"), "my-app");
 });
 
-// ── writePlaceholderIcon ────────────────────────────────
+// ── writeDefaultIcon ────────────────────────────────────
+//
+// The old writePlaceholderIcon drew "<text>M</text>" in a font — the same flat
+// blue square for every app. The default is a generated MONOGRAM (glyph
+// geometry, colour hashed from the name), written as SVG + PNG side by side
+// because window managers and Android only read the PNG. Pinned here: both
+// files exist, the SVG is a real font-free document, the PNG carries its
+// magic, and the pair is deterministic in the name.
 
-Deno.test("writePlaceholderIcon: valid SVG with uppercase letter", async () => {
-  const tmp = await Deno.makeTempFile({ suffix: ".svg" });
+Deno.test("writeDefaultIcon: writes a real SVG and a real PNG", async () => {
+  const dir = await Deno.makeTempDir();
   try {
-    await writePlaceholderIcon(tmp, "myapp");
-    const svg = await Deno.readTextFile(tmp);
-    assertEquals(svg.includes("<svg"), true);
+    await writeDefaultIcon(`${dir}/myapp`, "myapp");
+    const svg = await Deno.readTextFile(`${dir}/myapp.svg`);
+    assertEquals(svg.startsWith("<svg"), true);
     assertEquals(svg.includes('xmlns="http://www.w3.org/2000/svg"'), true);
-    assertEquals(svg.includes(">M<"), true); // first letter uppercase
+    assertEquals(svg.includes("<text"), false, "geometry, never a font");
+    const png = await Deno.readFile(`${dir}/myapp.png`);
+    assertEquals([...png.subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47]);
   } finally {
-    await Deno.remove(tmp);
+    await Deno.remove(dir, { recursive: true });
   }
 });
 
-Deno.test("writePlaceholderIcon: empty label → A", async () => {
-  const tmp = await Deno.makeTempFile({ suffix: ".svg" });
+Deno.test("writeDefaultIcon: deterministic in the name", async () => {
+  const dir = await Deno.makeTempDir();
   try {
-    await writePlaceholderIcon(tmp, "");
-    const svg = await Deno.readTextFile(tmp);
-    assertEquals(svg.includes(">A<"), true);
+    await writeDefaultIcon(`${dir}/a`, "dashboard");
+    await writeDefaultIcon(`${dir}/b`, "dashboard");
+    await writeDefaultIcon(`${dir}/c`, "otherapp");
+    const a = await Deno.readTextFile(`${dir}/a.svg`);
+    const b = await Deno.readTextFile(`${dir}/b.svg`);
+    const c = await Deno.readTextFile(`${dir}/c.svg`);
+    assertEquals(a, b, "same name → same icon, every build");
+    assertEquals(a === c, false, "different apps must be tellable apart");
   } finally {
-    await Deno.remove(tmp);
-  }
-});
-
-Deno.test("writePlaceholderIcon: lowercase label gets uppercased", async () => {
-  const tmp = await Deno.makeTempFile({ suffix: ".svg" });
-  try {
-    await writePlaceholderIcon(tmp, "dashboard");
-    const svg = await Deno.readTextFile(tmp);
-    assertEquals(svg.includes(">D<"), true);
-  } finally {
-    await Deno.remove(tmp);
+    await Deno.remove(dir, { recursive: true });
   }
 });
 

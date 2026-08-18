@@ -10,9 +10,49 @@ import {
   ensureAppimagetool,
   formatMb,
   toolCacheDir,
-  writePlaceholderIcon,
+  writeDefaultIcon,
 } from "./build-helpers.ts";
 import type { BuildConfig } from "./build-config.ts";
+import { isHostPlatform } from "./platforms.ts";
+
+/** Zip a directory's CONTENTS, portably.
+ *
+ *  `zip -y` keeps symlinks as links, which matters for macOS: Electron.app's
+ *  Frameworks are a web of them, and a package that resolved them into copies
+ *  is both enormous and subtly broken. PowerShell's Compress-Archive is the
+ *  fallback (Windows hosts without `zip`), and it is no longer the only way —
+ *  that was what made a Windows package a Windows-only act. */
+async function zipDir(dir: string, out: string): Promise<boolean> {
+  const attempts: [string, string[]][] = [
+    ["zip", ["-r", "-y", "-q", out, "."]],
+    ["powershell", [
+      "-NoProfile",
+      "-Command",
+      `Compress-Archive -Path "${dir}/*" -DestinationPath "${out}" -Force`,
+    ]],
+  ];
+  for (const [cmd, args] of attempts) {
+    try {
+      const r = await new Deno.Command(cmd, {
+        args,
+        cwd: cmd === "zip" ? dir : undefined,
+        stdout: "null",
+        stderr: "piped",
+      }).output();
+      if (r.success) return true;
+      console.error(
+        `[electron] ⚠ ${cmd}: ${
+          new TextDecoder().decode(r.stderr).trim().split("\n")[0] ?? ""
+        }`,
+      );
+    } catch { /* not installed — try the next */ }
+  }
+  console.error(
+    "[electron] ✗ neither `zip` nor PowerShell could pack it — install zip " +
+      "(Debian/Ubuntu: sudo apt install zip)",
+  );
+  return false;
+}
 
 /** Package the Electron app for the current platform. Exits process on completion or error. */
 export async function buildElectron(cfg: BuildConfig): Promise<void> {
@@ -58,6 +98,34 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
     "../electron/electron-spawn.ts"
   );
   let electronSrc = await electronDistDir(root);
+
+  // Cross-building: the runtime in node_modules is THIS host's. Electron
+  // publishes every platform's build as a zip, so fetch the one this package
+  // is for — the version comes from the runtime already installed here, so a
+  // cross-built package and a local one are never two different Electrons.
+  if (!isHostPlatform(cfg.platform)) {
+    const { ensureElectronDist, installedElectronVersion } = await import(
+      "./electron-runtime.ts"
+    );
+    const version = await installedElectronVersion(root) ??
+      (await autoInstallElectron({ error: console.error })
+        ? await installedElectronVersion(root)
+        : null);
+    if (!version) {
+      console.error(
+        "[electron] ✗ cannot tell which Electron version to fetch for " +
+          `${cfg.platform} — install it once here so the version is pinned:\n` +
+          "      deno task install:electron",
+      );
+      Deno.exit(1);
+    }
+    try {
+      electronSrc = await ensureElectronDist(version, cfg.platform);
+    } catch (e) {
+      console.error(`[electron] ✗ ${e instanceof Error ? e.message : e}`);
+      Deno.exit(1);
+    }
+  }
   const electronDst = join(appDir, "electron");
   if (electronSrc === null) {
     // `deno install npm:electron` REWRITES the app's deno.json (it adds the
@@ -84,7 +152,7 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
       console.error(
         "[electron] \u2717 the Electron runtime is not installed and could " +
           "not be installed automatically. Install it by hand:\n" +
-          "      deno install --allow-scripts=npm:electron npm:electron\n" +
+          "      deno task install:electron\n" +
           "  (looked in node_modules/electron/dist and " +
           "node_modules/.deno/electron@*/node_modules/electron/dist)",
       );
@@ -108,8 +176,14 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
     await Deno.copyFile(userIcon, join(appDir, `${binaryName}.png`));
     console.log(`[electron] \u2713 icon from ${userIcon}`);
   } else {
-    await writePlaceholderIcon(join(appDir, `${binaryName}.svg`), binaryName);
-    console.log("[electron] \u2713 generated placeholder icon");
+    // The app ships no icon — generate its monogram rather than the same flat
+    // square every icon-less app used to get. Three running aio apps must be
+    // three distinguishable entries in a taskbar, which is the whole job an
+    // icon does before someone draws a real one.
+    await writeDefaultIcon(join(appDir, binaryName), appTitle ?? binaryName);
+    console.log(
+      `[electron] \u2713 default icon for "${appTitle ?? binaryName}"`,
+    );
   }
 
   const displayName = (appTitle ?? binaryName).replace(
@@ -226,18 +300,11 @@ SET ELECTRON_PATH=%HERE%electron\\electron.exe
 
   const zipOut = join(root, `${binaryName}-win-${archStr}.zip`);
   console.log("[electron] zipping Windows package...");
-  const zipResult = await new Deno.Command("powershell", {
-    args: [
-      "-NoProfile",
-      "-Command",
-      `Compress-Archive -Path "${appDir}\\*" -DestinationPath "${zipOut}" -Force`,
-    ],
-    stdout: "inherit",
-    stderr: "inherit",
-  }).output();
-
-  if (zipResult.code !== 0) {
-    console.error("[electron] \u2717 Compress-Archive failed");
+  // `zip` first, PowerShell second: Compress-Archive exists only on Windows,
+  // and that single call was the whole reason a Windows package could not be
+  // built anywhere else.
+  if (!await zipDir(appDir, zipOut)) {
+    console.error("[electron] \u2717 could not zip the Windows package");
     Deno.exit(1);
   }
 
@@ -269,15 +336,8 @@ exec "$HERE/${binaryName}" "$@"
 
   const zipOut = join(root, `${binaryName}-mac-${archStr}.zip`);
   console.log("[electron] zipping macOS package...");
-  const zipResult = await new Deno.Command("zip", {
-    args: ["-r", zipOut, "."],
-    cwd: appDir,
-    stdout: "inherit",
-    stderr: "inherit",
-  }).output();
-
-  if (zipResult.code !== 0) {
-    console.error("[electron] \u2717 zip failed");
+  if (!await zipDir(appDir, zipOut)) {
+    console.error("[electron] \u2717 could not zip the macOS package");
     Deno.exit(1);
   }
 

@@ -335,6 +335,12 @@ Visual manager:
 Process (singleton — one instance per app identity):
   start                   Start app (kills zombies, refuses if already running)
   stop                    Graceful shutdown (SIGTERM → SIGKILL)
+  kill                    End it now, no asking (SIGTERM + drop the lock)
+  kill --stale            Reap ORPHANS — processes still SERVING with no lock
+                          to account for them. That is the one that answers
+                          am state with old numbers while am status says
+                          stopped. Add --port=N for an orphan on a port
+                          nothing records.
   restart                 Stop + start
   watch [dir]             Hot-restart on .ts/.tsx change in dir (default: src/)
   status                  stopped|starting|started|stopping (exit 0=started, 1=stopped, 2=transitional)
@@ -347,6 +353,9 @@ State:
   expect <path> <op> [v]  Assert on state (eq/ne/gt/lt/contains/exists…); e2e; --wait=N
   record [out] --from=J  Generate a bootCells replay test from a journal
   dispatch <cell:method> [a b …]  Call a method with POSITIONAL args (setHost "1.2.3.4")
+  dispatch … --as-server  Dispatch past the cell access gate — the operator
+                          door for a "public read, server-only write" cell.
+                          Loopback-only, logged, dev-only (as the trojan is).
   dispatch <cell:method> --args='["1.2.3.4"]'  …the same, JSON-exact (values with '=', exact types)
   dispatch <Type> [k=v]   Dispatch a plain action with a named payload
   dispatch --body='{"type":...,"payload":...}'  Raw envelope (after a <Type>, --body is its payload)

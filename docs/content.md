@@ -15,7 +15,7 @@
 - [Migrating to AIO](basics/migration.md) — You have an existing Deno application and want to integrate AIO.
 - [Common Pitfalls](basics/pitfalls.md) — The traps people actually hit — each with the rule that avoids it.
 - [Positioning & non-goals](basics/positioning.md) — What aio is for, what it deliberately is not, and the trade-offs behind that —
-- [AIO -- Project Structure](basics/project-structure.md) — Six folders.
+- [AIO -- Project Structure](basics/project-structure.md) — …and tests/ beside src/, mirroring that structure:
 - [AIO Quickstart](basics/quickstart.md) — Start a new aio app from scratch.
 - [Versioning & Deprecation Policy](basics/semver-policy.md) — aio follows semver from 1.0.0 on.
 - [Tutorial -- Building with AIO Step by Step](basics/tutorial.md) — Each section builds on the previous, but you can stop at any point.
@@ -51,6 +51,7 @@
 - [`aio/ui` — the component kit](ui/kit.md) — A small, deliberately basic set of components for aio's core use case —
 - [React components in aio — islands](ui/react-islands.md) — aio's renderer is AIR, not React.
 - [Reactivity — what is tracked, and where](ui/reactivity-tracking.md) — A field report gave up an hour to this and asked for exactly one thing: "nowhere
+- [The default theme](ui/theme.md) — Every aio app has a stylesheet before anyone writes one.
 
 ## Persistence & sync — SQLite, CRDT, offline
 
@@ -168,6 +169,7 @@
 - [alpha58 → alpha59](upgrade/from-alpha58-to-alpha59.md) — a change to what aio prints and where the one-liner puts things.
 - [alpha59 → alpha60](upgrade/from-alpha59-to-alpha60.md) — not how anything runs — and every renamed thing kept its old spelling working.
 - [Upgrade from v1.0.0-alpha6 to v1.0.0-alpha7](upgrade/from-alpha6-to-alpha7.md) — mod.ts no longer re-exports renderer primitives.
+- [Upgrading from alpha60 to alpha61](upgrade/from-alpha60-to-alpha61.md) — Nothing breaks.
 - [Upgrade from v1.0.0-alpha7 to v1.0.0-alpha8](upgrade/from-alpha7-to-alpha8.md) — None.
 - [Upgrade from v1.0.0-alpha8 to v1.0.0-alpha9](upgrade/from-alpha8-to-alpha9.md) — The internal machine state field is renamed.
 - [Upgrade from v1.0.0-alpha9 to v1.0.0-alpha10](upgrade/from-alpha9-to-alpha10.md) — Alpha10 is fully additive.

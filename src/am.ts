@@ -24,6 +24,7 @@
 
 import {
   cmdInstances,
+  cmdKill,
   cmdRestart,
   cmdStart,
   cmdStatus,
@@ -93,6 +94,7 @@ const COMMANDS: Record<string, CmdHandler> = {
   // Process
   start: cmdStart,
   stop: cmdStop,
+  kill: cmdKill,
   restart: cmdRestart,
   status: cmdStatus,
   watch: cmdWatch,

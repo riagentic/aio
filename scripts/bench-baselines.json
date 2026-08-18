@@ -19,5 +19,9 @@
   },
   "measured-2026-07-31": {
     "proxy-array-10k": 30.2
+  },
+  "measured-2026-08-18": {
+    "proxy-array-10k": 50.4,
+    "note": "up from 30.2: array read methods now hand back LIVE element proxies (writes through map()/filter() results land \u2014 the alpha61 silent-drop fix), so each element access is a real tracked read instead of a detached clone. Correctness bought with ~20ms on this 10k micro-op; maxMedian 75 unchanged and holding with headroom."
   }
 }

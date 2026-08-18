@@ -7,6 +7,7 @@ import {
   type Signal,
   signal,
 } from "../state/signal.ts";
+import { isSignal } from "./signal-binding.ts";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -79,15 +80,12 @@ export function useVirtualList<T>(
   // AIO-289: robust type check using isSignal from signal-binding
   const getItems = (): T[] => {
     const items = config.items;
-    // Duck-type signal: has _subscribers Set, value getter, set method
-    if (
-      items !== null &&
-      typeof items === "object" &&
-      "_subscribers" in items &&
-      "value" in items
-    ) {
-      return (items as Signal<T[]>).value;
-    }
+    // THE decider, not a local copy of it. This used to re-implement the
+    // duck-type inline — and the copy tested `typeof === "object"`, which
+    // stopped recognising a signal the day signals became callable, sending
+    // every signal-backed list straight to the "items must be an array"
+    // warning with an empty list behind it.
+    if (isSignal(items)) return (items as Signal<T[]>).value;
     // Plain array
     if (Array.isArray(items)) {
       return items;

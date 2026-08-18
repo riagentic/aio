@@ -32,11 +32,10 @@ function ev(el: AnyEl, name: string, init: Record<string, unknown> = {}) {
   return new w.Event(name, { bubbles: true, cancelable: true, ...init });
 }
 
-function mouseEv(el: AnyEl, name: string) {
+function mouseEv(el: AnyEl, name: string, mods?: KeyModifiers) {
   const w = view(el);
-  return w.MouseEvent
-    ? new w.MouseEvent(name, { bubbles: true, cancelable: true, button: 0 })
-    : ev(el, name);
+  const init = { bubbles: true, cancelable: true, button: 0, ...mods };
+  return w.MouseEvent ? new w.MouseEvent(name, init) : ev(el, name, init);
 }
 
 /** What a real user physically cannot do — decided ONCE, here.
@@ -92,15 +91,36 @@ function keyEv(el: AnyEl, name: string, key: string, mods?: KeyModifiers) {
   return w.KeyboardEvent ? new w.KeyboardEvent(name, init) : ev(el, name, init);
 }
 
-/** Full user-faithful click sequence. */
-export function triggerClick(el: AnyEl): void {
+/** Full user-faithful click sequence, optionally with held modifiers
+ *  (`{ ctrlKey, metaKey, altKey, shiftKey }`).
+ *
+ *  Modified clicks are a real interaction vocabulary — ctrl+click to add,
+ *  shift+click to extend a range, alt+click to peel one off — and a harness
+ *  that cannot express them forces every test of the app's PRIMARY gesture
+ *  down to raw `new MouseEvent(…, { ctrlKey: true })` + `dispatchEvent`, which
+ *  is exactly the selector-level DOM work the semantic surface exists to
+ *  delete (a field report: "my single largest source of test friction").
+ *
+ *  With modifiers the final `click` is dispatched rather than delegated to
+ *  `el.click()`: the native method carries no modifier state, so it would fire
+ *  a plain click and silently test the wrong gesture. Checkbox/radio state is
+ *  flipped first, which is the order a real browser uses. */
+export function triggerClick(el: AnyEl, mods?: KeyModifiers): void {
   assertOperable(el, "click");
-  el.dispatchEvent(mouseEv(el, "pointerdown"));
-  el.dispatchEvent(mouseEv(el, "mousedown"));
-  el.dispatchEvent(mouseEv(el, "pointerup"));
-  el.dispatchEvent(mouseEv(el, "mouseup"));
-  if (typeof el.click === "function") el.click();
-  else el.dispatchEvent(mouseEv(el, "click"));
+  el.dispatchEvent(mouseEv(el, "pointerdown", mods));
+  el.dispatchEvent(mouseEv(el, "mousedown", mods));
+  el.dispatchEvent(mouseEv(el, "pointerup", mods));
+  el.dispatchEvent(mouseEv(el, "mouseup", mods));
+  const held = mods &&
+    (mods.ctrlKey || mods.metaKey || mods.altKey || mods.shiftKey);
+  if (!held && typeof el.click === "function") {
+    el.click();
+    return;
+  }
+  const type = String(el.type ?? "").toLowerCase();
+  if (type === "checkbox") el.checked = !el.checked;
+  else if (type === "radio") el.checked = true;
+  el.dispatchEvent(mouseEv(el, "click", mods));
 }
 
 /** Type one character like a user: keydown → value += ch → input → keyup.
@@ -271,11 +291,11 @@ export function triggerAction(
 ): void {
   switch (action) {
     case "click":
-      triggerClick(el);
+      triggerClick(el, mods);
       break;
     case "dblclick":
-      triggerClick(el);
-      el.dispatchEvent(mouseEv(el, "dblclick"));
+      triggerClick(el, mods);
+      el.dispatchEvent(mouseEv(el, "dblclick", mods));
       break;
     case "press":
       triggerPress(el, key ?? "Enter", mods);
@@ -287,8 +307,8 @@ export function triggerAction(
       triggerKeyUp(el, key ?? "Enter", mods);
       break;
     case "hover":
-      el.dispatchEvent(mouseEv(el, "mouseover"));
-      el.dispatchEvent(mouseEv(el, "mouseenter"));
+      el.dispatchEvent(mouseEv(el, "mouseover", mods));
+      el.dispatchEvent(mouseEv(el, "mouseenter", mods));
       break;
     case "focus":
       el.focus?.();

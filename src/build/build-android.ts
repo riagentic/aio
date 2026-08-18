@@ -13,6 +13,7 @@ import {
 import { ANDROID_TEMPLATE } from "./android-template.ts";
 import { androidLocalHTML } from "../server/server-html-gen.ts";
 import type { BuildConfig } from "./build-config.ts";
+import { appIconPng } from "./app-icon.ts";
 
 /** Build the Android APK. Exits process on completion or error. */
 export async function buildAndroid(cfg: BuildConfig): Promise<void> {
@@ -99,7 +100,7 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
   try {
     await Deno.stat(iconPath);
     hasIcon = true;
-  } catch { /* no icon — skip */ }
+  } catch { /* no icon — the default monogram is generated below */ }
 
   // Replace placeholders in template files
   const xmlFiles = new Set(["app/src/main/AndroidManifest.xml"]);
@@ -119,7 +120,7 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
     );
     content = content.replaceAll(
       "{{ICON_ATTR}}",
-      hasIcon ? 'android:icon="@mipmap/ic_launcher"' : "",
+      'android:icon="@mipmap/ic_launcher"',
     );
     await Deno.writeTextFile(path, content);
   }
@@ -146,12 +147,22 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
     }
   }
 
-  // Copy icon to mipmap resources
+  // Icon → mipmap resources. An app with no `icon.png` gets its MONOGRAM
+  // rather than Android's generic robot: on a phone the launcher icon is the
+  // only way to tell two aio apps apart, and "no icon" is not an option the
+  // platform offers — it just picks one for you.
+  const mipmapDir = join(androidDir, "app/src/main/res/mipmap-hdpi");
+  await Deno.mkdir(mipmapDir, { recursive: true });
   if (hasIcon) {
-    const mipmapDir = join(androidDir, "app/src/main/res/mipmap-hdpi");
-    await Deno.mkdir(mipmapDir, { recursive: true });
     await Deno.copyFile(iconPath, join(mipmapDir, "ic_launcher.png"));
     console.log(`[android] \u2713 icon from ${iconPath}`);
+  } else {
+    const label = appTitle ?? binaryName;
+    await Deno.writeFile(
+      join(mipmapDir, "ic_launcher.png"),
+      await appIconPng(label, 192),
+    );
+    console.log(`[android] \u2713 default icon for "${label}"`);
   }
 
   await _runGradle(
@@ -244,7 +255,12 @@ async function _writeLocalAssets(
   // ONE shell decider — see androidLocalHTML: a hand-rolled copy here shipped
   // a different default viewport than every other target (WYSIDIWYSIP).
   // Raw title: androidLocalHTML escapes it itself (escHtml in headContent).
-  const androidHtml = androidLocalHTML(appTitle ?? binaryName, hasCSS);
+  // The packaged APK's shell renders the SAME default theme dev does, keyed on
+  // the same identity — an app that is one colour on the desktop and another
+  // on the phone is not one app.
+  const androidHtml = androidLocalHTML(appTitle ?? binaryName, hasCSS, {
+    themeName: binaryName,
+  });
   await Deno.copyFile(join(dist, "app.js"), join(assetsDir, "app.js"));
   await Deno.writeTextFile(join(assetsDir, "index.html"), androidHtml);
   if (hasCSS) {

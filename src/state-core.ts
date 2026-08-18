@@ -65,7 +65,11 @@ export { getCellSignal, getStateSignal } from "./state/state-signals.ts";
 /** @internal Framework wiring (alpha52 sweep) — not public API, stripped from
  *  the snapshot. The public custom-transport set is: getStateSignal,
  *  getCellSignal, send, setTransport, Transport, ready, handleMessage. */
-export { getConnectedSignal, setConnected } from "./state/state-signals.ts";
+export {
+  getConnectedSignal,
+  getReadySignal,
+  setConnected,
+} from "./state/state-signals.ts";
 
 // Subscriptions
 /** @internal Framework wiring (alpha52 sweep) — not public API, stripped from the snapshot. */

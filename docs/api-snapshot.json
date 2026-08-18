@@ -25,7 +25,7 @@
         },
         "AioMeta": {
           "kind": "typeAlias",
-          "sig": "d6f10249ef499cb8"
+          "sig": "fdb15d5f42e5d271"
         },
         "AioUser": {
           "kind": "typeAlias",
@@ -77,7 +77,7 @@
         },
         "CellAio": {
           "kind": "typeAlias",
-          "sig": "6012903d0a9208a2"
+          "sig": "26fdc683abeed393"
         },
         "CellDef": {
           "kind": "typeAlias",
@@ -187,6 +187,26 @@
           "kind": "function",
           "sig": "209ed045c0221c65"
         },
+        "JSX": {
+          "kind": "namespace",
+          "sig": "db229a2ed409f674"
+        },
+        "JsxElement": {
+          "kind": "typeAlias",
+          "sig": "c4b91168d09f8262"
+        },
+        "JsxIntrinsicAttributes": {
+          "kind": "interface",
+          "sig": "4b312cc4e9d59b19"
+        },
+        "JsxIntrinsicElements": {
+          "kind": "interface",
+          "sig": "7933329161a68efd"
+        },
+        "JsxNode": {
+          "kind": "typeAlias",
+          "sig": "64b2f9154f3948de"
+        },
         "log": {
           "kind": "variable",
           "sig": "e3f864a5a3765e6b"
@@ -213,7 +233,7 @@
         },
         "MethodDraftMeta": {
           "kind": "typeAlias",
-          "sig": "c1d2568d0c3dd9a9"
+          "sig": "e66598c4dfe9667e"
         },
         "MethodDraftServed": {
           "kind": "typeAlias",
@@ -221,7 +241,7 @@
         },
         "MethodsCellConfig": {
           "kind": "typeAlias",
-          "sig": "a2e5f8156763b0fe"
+          "sig": "d02eb57efea611e6"
         },
         "Msg": {
           "kind": "typeAlias",
@@ -325,7 +345,7 @@
         },
         "serverFn": {
           "kind": "function",
-          "sig": "6f636ae25631fe54"
+          "sig": "192427111136b168"
         },
         "ServerFnAccess": {
           "kind": "typeAlias",
@@ -381,7 +401,7 @@
         },
         "TestContext": {
           "kind": "typeAlias",
-          "sig": "a8126850ed01f1a0"
+          "sig": "97103b78d6a41cd0"
         },
         "text": {
           "kind": "function",
@@ -397,7 +417,7 @@
         },
         "UiConfig": {
           "kind": "typeAlias",
-          "sig": "b9eb89ee5b56ec79"
+          "sig": "22ae90b49581b213"
         },
         "until": {
           "kind": "function",
@@ -421,7 +441,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "95a358744edb6c6a"
+          "sig": "feee9b17ba4e2a64"
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -493,7 +513,7 @@
         },
         "Computed": {
           "kind": "interface",
-          "sig": "74e01d2bc412098f"
+          "sig": "5cd48312b81fec18"
         },
         "connectAioDevTools": {
           "kind": "function",
@@ -631,6 +651,10 @@
           "kind": "function",
           "sig": "9cb67902b061b0ee"
         },
+        "onGlobalKey": {
+          "kind": "function",
+          "sig": "e033c293dffd8e25"
+        },
         "onMount": {
           "kind": "function",
           "sig": "9cb67902b061b0ee"
@@ -725,7 +749,7 @@
         },
         "Signal": {
           "kind": "interface",
-          "sig": "ef29ba28186c0407"
+          "sig": "d3e94febe45f26d5"
         },
         "SignIn": {
           "kind": "function",
@@ -801,7 +825,7 @@
         },
         "useAio": {
           "kind": "function",
-          "sig": "c82915ce358d200f"
+          "sig": "e2a6bbbe4cf253a5"
         },
         "useConnected": {
           "kind": "function",
@@ -1130,6 +1154,9 @@
         }
       }
     },
+    "./electron-install": {
+      "symbols": {}
+    },
     "./extras": {
       "symbols": {
         "ActionSource": {
@@ -1330,7 +1357,23 @@
         },
         "JSX": {
           "kind": "namespace",
-          "sig": "73a9546856b5cceb"
+          "sig": "db229a2ed409f674"
+        },
+        "JsxElement": {
+          "kind": "typeAlias",
+          "sig": "c4b91168d09f8262"
+        },
+        "JsxIntrinsicAttributes": {
+          "kind": "interface",
+          "sig": "4b312cc4e9d59b19"
+        },
+        "JsxIntrinsicElements": {
+          "kind": "interface",
+          "sig": "7933329161a68efd"
+        },
+        "JsxNode": {
+          "kind": "typeAlias",
+          "sig": "64b2f9154f3948de"
         },
         "jsxs": {
           "kind": "variable",
@@ -1682,7 +1725,7 @@
         },
         "TestContext": {
           "kind": "typeAlias",
-          "sig": "a8126850ed01f1a0"
+          "sig": "97103b78d6a41cd0"
         },
         "testgen": {
           "kind": "variable",
@@ -1718,7 +1761,7 @@
         },
         "TestUIOptions": {
           "kind": "interface",
-          "sig": "cb7b7ace4249f770"
+          "sig": "d3d86c5801ecaf39"
         },
         "totpCode": {
           "kind": "function",
@@ -1730,7 +1773,7 @@
         },
         "UIElementHandle": {
           "kind": "interface",
-          "sig": "ad4d3be860e47aae"
+          "sig": "3294c0d14c1d294e"
         }
       }
     },

@@ -30,6 +30,9 @@ export type DiagnosticsHooks = {
     fn: () => Record<string, { errors: number; enabled: boolean }>,
   ) => void;
   uninstallCrashHandler?: () => void;
+  /** Flip the crash guard from boot mode (rejections fatal) to runtime mode
+   *  (rejections supervised) — called by aio.run when boot succeeds. */
+  markBootComplete: () => void;
 };
 
 /** aio's own diagnostic artifacts, and the flag that owns each one. */
@@ -168,9 +171,11 @@ export function initDiagnostics(
 
   // ── Crash handler ──
   let uninstallCrash: (() => void) | undefined;
+  let bootComplete = false;
   if (opts.crashHandler) {
     uninstallCrash = installCrashHandler({
       guardRejections: guardDispatches,
+      isBootComplete: () => bootComplete,
       log: { error: (msg, data) => log.error("crash", msg, data) },
       getHealthData: () => ({ cells: getHealthSnapshot() }),
       writeEmergencyCheckpoint: () => {
@@ -308,6 +313,9 @@ export function initDiagnostics(
       healthGetter = fn;
     },
     uninstallCrashHandler: uninstallCrash,
+    markBootComplete: () => {
+      bootComplete = true;
+    },
   };
 }
 

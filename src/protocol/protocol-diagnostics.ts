@@ -7,7 +7,10 @@ export const _w = typeof window !== "undefined"
   ? window as unknown as AioWindow & typeof globalThis
   : undefined;
 
-export const _diagLastEmit = new Map<string, number>();
+export const _diagLastEmit = new Map<
+  string,
+  { last: number; window: number; suppressed: number }
+>();
 
 /** Deliver one diagnostic event to whatever sink the page has.
  *
@@ -32,9 +35,31 @@ export function _deliverDiag(ev: Record<string, unknown>): void {
   if (!_w) return;
   const type = typeof ev.type === "string" ? ev.type : "event";
   const now = Date.now();
-  const last = _diagLastEmit.get(type);
-  if (last && now - last < 5000) return;
-  _diagLastEmit.set(type, now);
+  // Exponential backoff per type, not a flat window. A flat 5s dedup against a
+  // PERSISTENT condition is a line every five seconds forever — one field
+  // report's client.log carried thousands of identical `state-shape-drift`
+  // lines over hours, burying the signal the log exists to carry. Now: 5s,
+  // 10s, 20s, … capped at an hour, with the suppressed count attached when
+  // the line does print, so "still happening, 719 times since the last line"
+  // stays one line. A type that stays quiet for a full window resets to 5s —
+  // a condition that STOPPED and came back is news again.
+  const st = _diagLastEmit.get(type);
+  if (st && now - st.last < st.window) {
+    st.suppressed++;
+    return;
+  }
+  const stale = !st || now - st.last >= st.window * 2;
+  const next = st && !stale ? Math.min(st.window * 2, 3_600_000) : 5000;
+  const suppressed = st && !stale ? st.suppressed : 0;
+  _diagLastEmit.set(type, { last: now, window: next, suppressed: 0 });
+  if (suppressed > 0 && typeof ev.message === "string") {
+    ev = {
+      ...ev,
+      message: `${ev.message} (repeated ${suppressed}× since the last ` +
+        `report; reporting again in ≤${Math.round(next / 1000)}s while it ` +
+        `persists)`,
+    };
+  }
   if (typeof _w._aioDiag === "function") {
     try {
       _w._aioDiag(ev);

@@ -211,6 +211,11 @@ deno task am start --wait=30      # start with 30s timeout
 deno task am start --port=9000    # start on specific port
 deno task am stop                 # graceful shutdown
 deno task am stop --wait          # stop and block until dead (default 5s timeout)
+deno task am kill                 # end it now, no asking (SIGTERM + drop the lock)
+deno task am kill --stale         # reap ORPHANS — processes still serving with no
+                                  # lock: the ones that answer `am state` with old
+                                  # numbers while `am status` says stopped.
+                                  # --port=N for an orphan on an unrecorded port
 deno task am restart              # stop + start
 deno task am status               # stopped|starting|started|stopping
 ```
@@ -293,6 +298,12 @@ what the browser sees (it was spelled `am ui` before alpha52 — `am ui` now ope
 ```sh
 # Cell methods — POSITIONAL args (no =): increment(5), setHost("10.0.0.1")
 deno task am dispatch counter:increment 5                    # increment(5)
+
+For a cell declared `access: false` (public read, server-only write), a network
+dispatch is refused — including `am`'s. The operator door is
+`am dispatch <cell:method> --as-server`: it dispatches with server provenance,
+past the `access` gate. Dev-only, loopback-only and logged, like the rest of
+the control plane; the denial message names it at the moment you need it.
 deno task am dispatch conn:setHost 10.0.0.1                  # setHost("10.0.0.1")
 deno task am dispatch counter:reset                          # reset()
 

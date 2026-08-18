@@ -208,7 +208,12 @@ Deno.test("cancelOn: naming a method that cannot be cancelled throws", () => {
     () =>
       cell("wf-badcancel", {
         state: { n: 0 },
-        cancelOn: { opne: "self" }, // typo
+        // A TYPO. It no longer type-checks either — `cancelOn`'s keys are
+        // `keyof M`, the way `long:`'s entries always were — so the cast is
+        // what a JS caller (or a `--no-check` run) still reaches this gate
+        // with. Both layers matter: the type stops it at the keystroke, the
+        // runtime stops it for everyone else.
+        cancelOn: { opne: "self" } as unknown as { open: "self" },
         methods: {
           async open(s) {
             await sleep(1);

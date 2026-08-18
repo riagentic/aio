@@ -401,6 +401,12 @@ export interface BootConfig<S> {
   cellMigrations?: Map<string, CellMigrationInfo>;
   /** User hook — transform state after restore */
   onRestore?: (state: S) => S;
+  /** Per-cell `onRestore` hooks — run BEFORE the app-level one, each scoped to
+   *  its own slice. See CellConfig.onRestore. */
+  cellRestores?: Map<
+    string,
+    (state: Record<string, unknown>) => Record<string, unknown> | void
+  >;
   /** Diagnostics checkpoint restore callback */
   onCheckpointRestore?: (
     checkpoint: CheckpointData,
@@ -464,6 +470,7 @@ export async function bootStorage<S>(
     dbSchema,
     syncCellIds,
     onRestore,
+    cellRestores,
     onCheckpointRestore,
     diagHooks,
     healthGetter,
@@ -826,7 +833,35 @@ export async function bootStorage<S>(
     migrations = { declared, stored: persistedVersions, report, drift };
   }
 
-  // ── 5. onRestore hook ─────────────────────────────────────────────
+  // ── 5. onRestore hooks ────────────────────────────────────────────
+  //
+  // Per-cell FIRST, each on its own slice: a repair belongs beside the state
+  // it repairs, and the app-level hook then sees the repaired world. Without
+  // the per-cell form, "this field does not survive a restart" (an undo
+  // closure, a live handle, a socket) had to be fixed from the app entry's
+  // `onStart` — in another file, away from the cell that owns it.
+  //
+  // Error-guarded like every lifecycle hook: a repair that throws is reported
+  // and that cell keeps its restored slice. Losing the app because a cosmetic
+  // repair failed would be the worse trade.
+  // ONLY when something was actually restored — the same rule migration
+  // follows, for the same reason: on a fresh install there is nothing to
+  // repair, and a hook run against pristine defaults can only damage them
+  // (a v0→v1 rename once turned an app's own defaults into garbage on first
+  // launch, which is why `onMigrate` gained this guard).
+  if (cellRestores?.size && hadPersistedState) {
+    const s = state as Record<string, unknown>;
+    for (const [id, hook] of cellRestores) {
+      const slice = s[id];
+      if (slice === undefined) continue;
+      try {
+        const next = hook(slice as Record<string, unknown>);
+        if (next !== undefined) s[id] = next;
+      } catch (e) {
+        log.error(`hook onRestore(${id}): ${e}`);
+      }
+    }
+  }
   if (onRestore) {
     try {
       state = onRestore(state);

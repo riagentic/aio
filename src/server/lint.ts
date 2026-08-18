@@ -243,7 +243,7 @@ export async function lint(
         await Deno.stat(join(Deno.cwd(), "node_modules", "electron"));
         r.hint.push(
           "electron installed but its binary is missing (postinstall skipped) — " +
-            "run `deno install --allow-scripts=npm:electron npm:electron`, " +
+            "run `deno task install:electron`, " +
             "or `deno task dev:electron`/`compile:electron` (they auto-install)",
         );
       } catch { /* electron not installed at all — handled by electron.ts */ }

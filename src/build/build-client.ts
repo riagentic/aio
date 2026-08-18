@@ -10,7 +10,7 @@ import {
   ensureAppimagetool,
   formatMb,
   toolCacheDir,
-  writePlaceholderIcon,
+  writeDefaultIcon,
 } from "./build-helpers.ts";
 import type { BuildConfig } from "./build-config.ts";
 
@@ -78,8 +78,8 @@ exec "$HERE/electron/electron" "$HERE/main.cjs" "$@"
     await Deno.copyFile(userIcon, join(appDir, "aio-client.png"));
     console.log(`[client] \u2713 icon from ${userIcon}`);
   } else {
-    await writePlaceholderIcon(join(appDir, "aio-client.svg"), "aio");
-    console.log("[client] \u2713 generated placeholder icon");
+    await writeDefaultIcon(join(appDir, "aio-client"), "aio client");
+    console.log("[client] \u2713 default icon");
   }
 
   // .desktop file

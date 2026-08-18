@@ -1,4 +1,4 @@
-## Major kata, top level control
+# Major kata, top level control
 
 - current (working) alpha is better (or at least not worse) than the previous
   alpha in all aspects

@@ -11,11 +11,18 @@ import { styleValue } from "./ssr-utils.ts";
 // because the value was a signal.
 import { _RESERVED_PROPS, _writeProp } from "./prop-write.ts";
 
-/** Check if a value is a Signal (duck-typing: _subscribers + set + peek). */
+/** Check if a value is a Signal (duck-typing: _subscribers + set + peek).
+ *
+ *  `"function"` is accepted alongside `"object"` because a signal IS callable
+ *  (`count()` is the same tracked read as `count.value`) — and `typeof` says
+ *  "function" for a callable object. This is THE decider for "is this a
+ *  signal": every prop binding, child binding and hydration check routes
+ *  through it, so an `"object"`-only test would silently reclassify every
+ *  signal in the renderer at once. */
 export function isSignal(v: unknown): v is Signal<unknown> {
   return (
     v !== null &&
-    typeof v === "object" &&
+    (typeof v === "object" || typeof v === "function") &&
     "_subscribers" in (v as Record<string, unknown>) &&
     "set" in (v as Record<string, unknown>) &&
     "peek" in (v as Record<string, unknown>)

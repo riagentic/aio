@@ -40,6 +40,82 @@ export function onCleanup(fn: () => void): void {
   }
 }
 
+// ── onGlobalKey ───────────────────────────────────────────────────────
+
+/** Modifier state a chord can require. Omitted = "don't care". */
+export type KeyChord = {
+  ctrl?: boolean;
+  meta?: boolean;
+  alt?: boolean;
+  shift?: boolean;
+  /** Match either Ctrl or Cmd — the portable "the modifier key" (Ctrl+K on
+   *  Linux/Windows, ⌘K on macOS), which is what an app almost always means. */
+  mod?: boolean;
+  /** Ignore the chord while focus is in an input/textarea/contenteditable.
+   *  Default `true`: a bare `"n"` shortcut that fires while someone is typing
+   *  a note is a bug in every app that has ever shipped one. */
+  ignoreInInput?: boolean;
+};
+
+/** A window/document-level key binding, scoped to this component's lifetime.
+ *
+ *  Every app needs one — Escape closes the lightbox, Ctrl+K opens the palette,
+ *  `?` shows help — and every app hits the same wall building it, twice:
+ *
+ *  1. It must be registered on the DOCUMENT the component is rendered into.
+ *     `globalThis.addEventListener("keydown", …)` is the natural spelling and
+ *     is INERT under `testUI` (aio warns about it); `document.addEventListener`
+ *     works but has to be torn down by hand.
+ *  2. The chord logic gets rewritten each time — and one field report's
+ *     workaround was to extract the predicate into a pure function and test
+ *     THAT, leaving the listener itself permanently uncovered.
+ *
+ *  This is that binding, as one line that is testable by construction: it
+ *  resolves the document the way the docs tell you to (`ownerDocument`, via
+ *  the mounted root), removes itself on unmount, and fires under `testUI`.
+ *
+ *  ```tsx
+ *  onGlobalKey("Escape", () => lightbox.close())
+ *  onGlobalKey("k", () => palette.open(), { mod: true })
+ *  ```
+ *  `key` is matched case-insensitively against `KeyboardEvent.key`. */
+export function onGlobalKey(
+  key: string,
+  fn: (e: KeyboardEvent) => void,
+  chord: KeyChord = {},
+): void {
+  const want = key.toLowerCase();
+  onMount(() => {
+    const doc = _activeRoot?.root?.ownerDocument ??
+      (globalThis as { document?: Document }).document;
+    if (!doc) return;
+    const handler = (ev: Event) => {
+      const e = ev as KeyboardEvent;
+      if ((e.key ?? "").toLowerCase() !== want) return;
+      if (chord.ctrl !== undefined && e.ctrlKey !== chord.ctrl) return;
+      if (chord.meta !== undefined && e.metaKey !== chord.meta) return;
+      if (chord.alt !== undefined && e.altKey !== chord.alt) return;
+      if (chord.shift !== undefined && e.shiftKey !== chord.shift) return;
+      if (chord.mod !== undefined && (e.ctrlKey || e.metaKey) !== chord.mod) {
+        return;
+      }
+      if (chord.ignoreInInput !== false) {
+        const t = e.target as
+          | { tagName?: string; isContentEditable?: boolean }
+          | null;
+        const tag = (t?.tagName ?? "").toUpperCase();
+        if (
+          tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" ||
+          t?.isContentEditable
+        ) return;
+      }
+      fn(e);
+    };
+    doc.addEventListener("keydown", handler);
+    onCleanup(() => doc.removeEventListener("keydown", handler));
+  });
+}
+
 // ── useRef ────────────────────────────────────────────────────────────
 
 /**

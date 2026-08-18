@@ -5,9 +5,9 @@ import { disk } from "./cell.ts";
 import { aio } from "aio";
 
 await aio.run({
-  // A filesystem walk is long-running by nature — don't let the framework's
-  // 30s call ceiling cut it off (docs/state/methods.md#long-running-server-work).
-  perfBudget: { methods: { "disk:open": { timeout: 0 } } },
+  // No `perfBudget` here: "this method may run as long as it needs" is a fact
+  // about the METHOD, so it lives on the cell as `long: ["open"]` (see
+  // cell.ts). Keyed by a string in this file, nothing would follow a rename.
   onStart: () => {
     disk.open();
   },

@@ -1,5 +1,6 @@
 // Build helpers — pure/extractable utilities used by build.ts
 import { dirname, join } from "@std/path";
+import { appIconPng, appIconSvg } from "./app-icon.ts";
 
 /** The appimagetool release this build pins to.
  *
@@ -299,17 +300,20 @@ function whichJavac(): string | null {
   }
 }
 
-/** Write a placeholder SVG icon */
-export async function writePlaceholderIcon(
-  path: string,
-  label: string,
+/** Write the app's DEFAULT icon (SVG + PNG) beside each other, named
+ *  `<base>.svg` / `<base>.png`.
+ *
+ *  Every packaging path calls this when the app ships no `icon.png`, so an
+ *  app the developer has not drawn an icon for still has one that identifies
+ *  it — its initial, on a colour derived from its name (see app-icon.ts). The
+ *  PNG is the one that matters in practice: window managers, taskbars and
+ *  Android all rasterize, and none of them read SVG. */
+export async function writeDefaultIcon(
+  base: string,
+  appName: string,
 ): Promise<void> {
-  const letter = (label[0] ?? "A").toUpperCase();
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48">
-  <rect width="48" height="48" rx="8" fill="#4a9eff"/>
-  <text x="24" y="34" font-size="28" font-family="sans-serif" fill="white" text-anchor="middle">${letter}</text>
-</svg>`;
-  await Deno.writeTextFile(path, svg);
+  await Deno.writeTextFile(`${base}.svg`, appIconSvg(appName));
+  await Deno.writeFile(`${base}.png`, await appIconPng(appName, 512));
 }
 
 /** Format bytes as MB string with one decimal place */

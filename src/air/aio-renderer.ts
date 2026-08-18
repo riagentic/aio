@@ -65,6 +65,7 @@ export type { MountHandle } from "./renderer-types.ts";
 export {
   _resetSsrIdCounter,
   onCleanup,
+  onGlobalKey,
   onMount,
   useId,
   useOptimistic,

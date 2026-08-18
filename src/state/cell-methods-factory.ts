@@ -430,6 +430,9 @@ export function createCellFromMethods<
         fromVersion: number,
       ) => Record<string, unknown>)
       | undefined,
+    onRestore: config.onRestore as
+      | ((state: Record<string, unknown>) => Record<string, unknown> | void)
+      | undefined,
   };
 
   const selectors = scopeSelectors(name, config.selectors);

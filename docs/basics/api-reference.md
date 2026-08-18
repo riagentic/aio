@@ -112,17 +112,17 @@ Method-native workflow tools — see
 
 ## AIR Hooks
 
-| Hook                        | Description                                                                                                             |
-| --------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `useAio<S>()`               | Proxy-tracked state access                                                                                              |
-| Direct cell access          | Scoped state + typed methods, selective re-renders                                                                      |
-| `useProjection(fn, deps)`   | Structural sharing for derived data                                                                                     |
-| `memo(Component, compare?)` | No-op (auto-memo via shallow prop compare)                                                                              |
-| `useLocal(initial)`         | Client-only state (not synced) — `const [v, setV] = useLocal(0)` (tuple, preferred; `{ local, set, patch }` also works) |
-| `useTimeTravel()`           | Dev-mode time-travel controls                                                                                           |
-| `connectDevTools()`         | Connect to Redux DevTools browser extension                                                                             |
-| `disconnectDevTools()`      | Disconnect from Redux DevTools                                                                                          |
-| `page(current, routes)`     | State-based routing                                                                                                     |
+| Hook                        | Description                                                                                                                                                                                                     |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `useAio<S>()`               | Proxy-tracked state access. Returns `{ state, send, ready }` — `ready` is true once a full state frame has landed, so `if (!ready) return <Spinner/>` replaces the hand-rolled one-arbitrary-slice loading gate |
+| Direct cell access          | Scoped state + typed methods, selective re-renders                                                                                                                                                              |
+| `useProjection(fn, deps)`   | Structural sharing for derived data                                                                                                                                                                             |
+| `memo(Component, compare?)` | No-op (auto-memo via shallow prop compare)                                                                                                                                                                      |
+| `useLocal(initial)`         | Client-only state (not synced). Two forms, neither "preferred": `const [v, setV] = useLocal(0)` for a scalar; `const f = useLocal({…})` when you want `f.patch({ name })` for a form draft                      |
+| `useTimeTravel()`           | Dev-mode time-travel controls                                                                                                                                                                                   |
+| `connectDevTools()`         | Connect to Redux DevTools browser extension                                                                                                                                                                     |
+| `disconnectDevTools()`      | Disconnect from Redux DevTools                                                                                                                                                                                  |
+| `page(current, routes)`     | State-based routing                                                                                                                                                                                             |
 
 ## Framework-agnostic Client
 

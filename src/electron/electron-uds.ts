@@ -29,6 +29,10 @@ export function electronMainScriptUDS(url: string, socketPath: string, opts: {
    *  Without it the dev window fell back to cwd/src/, showing a different
    *  window icon than the packaged app for any non-src layout (WYSIDIWYSIP). */
   iconDir?: string;
+  /** The app's DEFAULT icon as base64 PNG — used when the app ships no
+   *  `icon.png`. Passed in (rather than generated here) so `electron/` keeps
+   *  its narrow import surface; the server owns the app's identity anyway. */
+  defaultIcon?: string;
   meta?: AioMeta;
   /** `<head>` inputs for the templated aio:// shell — without them the
    *  packaged app renders a different `<head>` than dev does. */
@@ -110,6 +114,19 @@ app.on('ready', () => {
       if (pathname === '/' || pathname === '') {
         return new Response(PROD_HTML, { headers: { 'Content-Type': 'text/html' } });
       }
+      // The shell's favicon URL is one string on every target (server, dev,
+      // packaged). Here there is no server behind it, so map it onto the icon
+      // the build wrote next to the bundle — a 404 favicon in the packaged app
+      // would be the classic "works in dev" divergence.
+      if (pathname === '/__aio/icon') {
+        for (const [f, t] of [['icon.png', 'image/png'], ['icon.svg', 'image/svg+xml']]) {
+          try {
+            const data = await require('fs/promises').readFile(path.join(BASE_DIR, f));
+            return new Response(data, { headers: { 'Content-Type': t } });
+          } catch { /* next candidate */ }
+        }
+        return new Response('Not Found', { status: 404 });
+      }
       const filePath = path.resolve(path.join(BASE_DIR, pathname));
       const basePfx = BASE_DIR.endsWith(path.sep) ? BASE_DIR: BASE_DIR + path.sep;
       if (!filePath.startsWith(basePfx) && filePath !== BASE_DIR) {
@@ -132,6 +149,10 @@ app.on('ready', () => {
   b.webPreferences = { nodeIntegration: false, contextIsolation: true, preload: preloadFile, webviewTag: ${
     JSON.stringify(!!opts.meta?.childWindows)
   } };
+  // ui.chrome: "themed"/"none" drop the OS frame. "themed" gets aio's own
+  // title bar back from the page shell (server-html-gen); "none" is a bare
+  // canvas and the app draws whatever it wants, including its drag region.
+  b.frame = ${JSON.stringify((opts.meta?.chrome ?? "standard") === "standard")};
   const win = new BrowserWindow(b);
   if (b.x == null) win.center();
 
@@ -142,10 +163,14 @@ app.on('ready', () => {
       : path.join(${
     JSON.stringify(opts.iconDir ?? "")
   } || path.join(process.cwd(), 'src'), 'icon.png');
-    if (fs.existsSync(iconPath)) {
-      win.setIcon(nativeImage.createFromDataURL(
-        'data:image/png;base64,' + fs.readFileSync(iconPath).toString('base64')
-      ));
+    // The app's own icon.png wins; otherwise the generated monogram, so an
+    // app nobody has drawn an icon for is still tellable apart in a taskbar
+    // from the other three aio apps running beside it.
+    const b64 = fs.existsSync(iconPath)
+      ? fs.readFileSync(iconPath).toString('base64')
+      : ${JSON.stringify(opts.defaultIcon ?? "")};
+    if (b64) {
+      win.setIcon(nativeImage.createFromDataURL('data:image/png;base64,' + b64));
     }
   } catch {}
 
@@ -301,6 +326,15 @@ ${tmplBoundsTracking()}
     });
   }
   connectUDS();
+
+  // Window controls for a frameless window (ui.chrome). One channel, one
+  // switch: a renderer can ask for exactly these three verbs and nothing else.
+  ipcMain.on('__aio:win', (_event, verb) => {
+    if (win.isDestroyed()) return;
+    if (verb === 'minimize') win.minimize();
+    else if (verb === 'maximize') win.isMaximized() ? win.unmaximize() : win.maximize();
+    else if (verb === 'close') win.close();
+  });
 
   ipcMain.on('__aio:print', () => {
     if (!win.isDestroyed()) win.webContents.print({ silent: false, printBackground: true });

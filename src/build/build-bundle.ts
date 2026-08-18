@@ -2,13 +2,18 @@
  * @module
  * Build bundle — esbuild bundling step, freshness cache check, asset copying.
  */
-import { dirname, join, relative, resolve } from "@std/path";
+import { basename, dirname, join, relative, resolve } from "@std/path";
 import { bundleFrameworkEntries, ESBUILD_JSX } from "./esbuild-shared.ts";
-import { aioBrowserPlugin } from "./esbuild-plugin.ts";
+import {
+  _resetServerOnlyStatic,
+  aioBrowserPlugin,
+  serverOnlyStatic,
+} from "./esbuild-plugin.ts";
 import { makeHttpPlugin } from "./build-integrity.ts";
 import type { BuildConfig } from "./build-config.ts";
 import { VERSION } from "../server/aio-cli.ts";
 import { VERSION_STAMP } from "../protocol/protocol-version.ts";
+import { appIconPng, appIconSvg } from "./app-icon.ts";
 
 /** Where the bundle's REAL input list is recorded — esbuild's own metafile,
  *  reduced to the local files it actually read.
@@ -381,6 +386,8 @@ export async function runBundle(
     frameworkSrcDir,
     doAndroid,
     appDir,
+    appTitle,
+    binaryName,
   } = cfg;
 
   // The decider must have RUN. `join(undefined, "App.tsx")` returns "." —
@@ -482,6 +489,7 @@ export async function runBundle(
       // deno-lint-ignore no-import-prefix
       const esbuild = await import("npm:esbuild@0.24.2");
       const jsxConfig = ESBUILD_JSX; // shared dev==prod JSX config
+      _resetServerOnlyStatic();
 
       const result = await esbuild.build({
         entryPoints: [buildEntryPath],
@@ -517,6 +525,46 @@ export async function runBundle(
 
     if (!bundleOk) {
       console.error("[build] \u2717 bundle failed");
+      Deno.exit(1);
+    }
+
+    // A STATIC server-only import inside the client graph is a broken bundle
+    // that esbuild is happy with.
+    //
+    // The stub the plugin substitutes is correct for the DYNAMIC form (`await
+    // import("node:sqlite")` inside a method body is dead code in the
+    // browser). Statically imported at the top of a module the client reaches,
+    // the same stub makes every use of it throw at first access — and the
+    // symptom is a blank page with "1 module error", nowhere near the import.
+    // A production consumer shipped that and could not see it: their whole
+    // test suite renders SERVER-side, where `node:sqlite` exists, so every
+    // test stayed green. Nothing but the bundler is positioned to notice, so
+    // the bundler says it — with the importing module named, because "which
+    // file?" is the entire question at that point.
+    const leaks = Object.entries(serverOnlyStatic);
+    if (leaks.length > 0) {
+      console.error(
+        "[build] \u2717 server-only module(s) statically imported by the " +
+          "BROWSER bundle:",
+      );
+      for (const [spec, importers] of leaks) {
+        for (const imp of importers) {
+          console.error(`         ${relative(root, imp) || imp} → ${spec}`);
+        }
+      }
+      console.error(
+        "       These do not exist in a browser. The bundle would build and " +
+          "then throw at first use, showing a blank page.\n" +
+          (leaks.some(([spec]) => spec.endsWith(".server.ts"))
+            ? "       fix: a *.server.ts module is server-only BY CONVENTION " +
+              "— import it dynamically from the method that needs it " +
+              '(`const { x } = await import("./io.server.ts")`), never ' +
+              "statically from client-reachable code."
+            : "       fix: load it inside the method that needs it — `const " +
+              '{ x } = await import("node:…")` is server-side and stays out ' +
+              "of the client graph — or move the code into a `*.server.ts` " +
+              "module and import THAT dynamically."),
+      );
       Deno.exit(1);
     }
 
@@ -580,8 +628,20 @@ export async function runBundle(
   } catch { /* no icon.png at the app dir */ }
   if (hasIcon) {
     await Deno.copyFile(iconSrc, join(dist, "icon.png"));
+    await Deno.remove(join(dist, "icon.svg")).catch(() => {});
     console.log("[build] \u2713 dist/icon.png");
   } else {
-    await Deno.remove(join(dist, "icon.png")).catch(() => {});
+    // No app icon — GENERATE one rather than shipping none. `dist/icon.png` is
+    // what the packaged Electron window, the AppImage and the favicon all read,
+    // so this single write is why an app nobody has drawn an icon for is still
+    // identifiable in a taskbar. Deterministic in the app's name, so it does
+    // not churn between builds; overwritten the moment a real icon.png appears.
+    // appTitle → binaryName → the app dir's own name. `binaryName` is always
+    // set by loadBuildConfig, but the bundle step is also driven by harnesses
+    // with a hand-built config — the icon label must resolve to SOMETHING.
+    const label = appTitle ?? binaryName ?? basename(appDir);
+    await Deno.writeFile(join(dist, "icon.png"), await appIconPng(label, 512));
+    await Deno.writeTextFile(join(dist, "icon.svg"), appIconSvg(label));
+    console.log(`[build] \u2713 dist/icon.png (default, "${label}")`);
   }
 }
