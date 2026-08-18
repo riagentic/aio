@@ -22,6 +22,7 @@
 // environment. Available from a cell method or a serverFn via `aio/server`.
 
 import { log } from "../diagnostics/logger-api.ts";
+import { pauseCallDeadlines } from "../state/cell-impl.ts";
 
 /** A named extension group for the dialog's filter dropdown.
  *  `{ name: "Video", extensions: ["mp4", "mkv"] }` — extensions carry no dot. */
@@ -91,7 +92,23 @@ async function _pick(
 ): Promise<string | string[] | null> {
   const os = Deno.build.os;
   _assertDesktopSession(os);
+  // Deadlines pause for the dialog and RESUME when it closes (fresh, full
+  // window) — see the note above pauseCallDeadlines. The resume rides a
+  // finally so a throwing provider cannot leave every in-flight call
+  // unbounded forever.
+  const resume = pauseCallDeadlines();
+  try {
+    return await _pickDialog(os, kind, opts);
+  } finally {
+    resume();
+  }
+}
 
+async function _pickDialog(
+  os: typeof Deno.build.os,
+  kind: PickKind,
+  opts: PickOptions,
+): Promise<string | string[] | null> {
   const providers = os === "linux" ? LINUX_PROVIDERS : [{
     cmd: os === "darwin" ? "osascript" : "powershell",
     install: "",

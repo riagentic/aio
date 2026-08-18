@@ -71,8 +71,25 @@ export type AsyncMethod<S> = (
 export type MethodDraftMeta<S = Record<string, unknown>> = {
   readonly $signal: AbortSignal;
   /** Transactional cells: publish the buffered write-set atomically
-   *  mid-method, then continue against a fresh snapshot. No-op off `transaction`. */
-  readonly $commit: () => void;
+   *  mid-method, then continue against a fresh snapshot. No-op off
+   *  `transaction`.
+   *
+   *  `s.$commit(minMs)` publishes at most once per `minMs` — the progress
+   *  throttle every long-running method otherwise hand-rolls:
+   *
+   *  ```ts
+   *  for (const file of files) {
+   *    s.scanned++
+   *    s.$commit(100)          // ≤10 UI updates/second, whatever the loop does
+   *  }
+   *  ```
+   *
+   *  One report wrote that counter twice in one app (`if (++ticks % 8 === 0)`
+   *  in a walk, `if (pct - published >= 0.01)` in a hasher) — a counter, a
+   *  threshold and a bookkeeping variable per method, all of it the same
+   *  decision. The FIRST call always publishes: a progress bar that waits an
+   *  interval before its first frame looks like a hang. */
+  readonly $commit: (minMs?: number) => void;
   /** The state as it is NOW, not as it was when this method entered — the one
    *  sanctioned way out of snapshot isolation. Writes through it still join the
    *  transaction's atomic commit; reads through it are deliberately fresh, so
@@ -104,7 +121,17 @@ export type CellMethods<S extends Record<string, unknown>> = Record<
 
 const _pending = new Map<
   string,
-  { resolve: (value: unknown) => void; reject: (e: Error) => void }
+  {
+    resolve: (value: unknown) => void;
+    reject: (e: Error) => void;
+    /** The deadline timer, kept so a human wait can cancel it (see
+     *  `pauseCallDeadlines`). Undefined for an explicitly unbounded call. */
+    timer?: ReturnType<typeof setTimeout>;
+    /** The ceiling this call was registered with — what a resume re-arms. */
+    timeoutMs?: number;
+    /** Fires the deadline rejection — kept so a resume can re-arm it. */
+    expire?: () => void;
+  }
 >();
 
 /** Options for call() — `timeoutMs` (the `...Ms` suffix every other duration
@@ -313,7 +340,7 @@ export function registerCall(
     });
   }
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
+    const expire = () => {
       if (_pending.has(callId)) {
         _pending.delete(callId);
         reject(
@@ -331,8 +358,14 @@ export function registerCall(
           ),
         );
       }
-    }, timeoutMs);
+    };
+    const timer = setTimeout(expire, timeoutMs);
     _pending.set(callId, {
+      // The timer is kept so a HUMAN WAIT can cancel it — see
+      // `pauseCallDeadlines`.
+      timer,
+      timeoutMs,
+      expire,
       resolve: (v) => {
         clearTimeout(timer);
         resolve(v);
@@ -362,6 +395,55 @@ export function resolveCall(
 /** Clear all pending async call registrations — for test isolation between runs */
 export function resetPending(): void {
   _pending.clear();
+}
+
+/** Stop the clock on every in-flight call while a human is being waited on.
+ *  Returns a RESUME that re-arms each surviving call with a fresh, full
+ *  window.
+ *
+ *  A native file/directory picker blocks on a PERSON. Thirty seconds is a
+ *  perfectly ordinary amount of time to spend finding a folder, and the call
+ *  ceiling would cancel the pick out from under them — a field report hit
+ *  exactly that and had to add `long: ["openKataFolder"]`, having copied an
+ *  example that marks the hours-long render `long` and not the two methods
+ *  that wait on a human. "Waiting on a dialog" is never "the app being slow",
+ *  and it is a property of the PRIMITIVE, not of the method that calls it, so
+ *  the primitive is where it belongs.
+ *
+ *  It pauses every pending deadline rather than only the calling method's:
+ *  identifying the caller would need an ambient the picker does not have, and
+ *  a modal dialog stops the user from advancing the others anyway. The resume
+ *  is why this is a PAUSE and not an amnesty — without it, one dialog would
+ *  permanently disarm the timeout of an unrelated method that genuinely hung,
+ *  turning "rejected with a reason after 30s" into "hangs forever, silently".
+ *  A fresh full window (rather than the remaining time) errs on the side the
+ *  dialog already chose: the human was the delay, not the method. */
+export function pauseCallDeadlines(): () => void {
+  const paused: Array<{
+    id: string;
+    entry: {
+      timer?: ReturnType<typeof setTimeout>;
+      timeoutMs?: number;
+      expire?: () => void;
+    };
+  }> = [];
+  for (const [id, p] of _pending.entries()) {
+    if (p.timer !== undefined && p.timeoutMs !== undefined && p.expire) {
+      clearTimeout(p.timer);
+      p.timer = undefined;
+      paused.push({ id, entry: p });
+    }
+  }
+  return () => {
+    for (const { id, entry } of paused) {
+      // Settled while paused (no longer registered), or already re-armed by a
+      // nested pause's resume: nothing to do. Skipping settled entries is
+      // load-bearing — a timer armed for a finished call would be a garbage
+      // wakeup that a test's op sanitizer rightly reports as a leak.
+      if (_pending.get(id) !== entry || entry.timer !== undefined) continue;
+      entry.timer = setTimeout(entry.expire!, entry.timeoutMs!);
+    }
+  };
 }
 
 /** Batched mutation — multiple property writes grouped into one action */
@@ -893,9 +975,10 @@ const ARRAY_MUTATORS = new Set([
   "copyWithin",
 ]);
 
-/** Array read methods (non-mutating) that we intercept on the live proxy to
- *  return plain data from a structuredClone snapshot. Mutators remain in
- *  ARRAY_MUTATORS and are handled separately. */
+/** Array read methods (non-mutating) intercepted on the live proxy so they run
+ *  against LIVE elements — see {@linkcode ARRAY_SNAPSHOT_READ_METHODS} for the
+ *  three stringifying exceptions. Mutators remain in ARRAY_MUTATORS and are
+ *  handled separately. */
 const ARRAY_READ_METHODS = new Set([
   "map",
   "filter",
@@ -924,42 +1007,35 @@ const ARRAY_READ_METHODS = new Set([
   "toSpliced",
 ]);
 
-/** Read methods that hand the METHOD BODY its elements — and whose own return
- *  value is `undefined`, a boolean, an index or an iterator, never a rebuilt
- *  array. They run against LIVE elements, not the snapshot.
+/** Array read methods that must run against a detached SNAPSHOT instead of
+ *  live element proxies — the ONLY exceptions to the rule below.
  *
- *  This is the `find` fix generalized. `find` was special-cased because a
- *  detached snapshot element silently dropped a write that the identical sync
- *  (Immer draft) method applied; every other element-yielding read method has
- *  exactly that shape and was left on the snapshot. So:
+ *  Each stringifies every element, and `String(proxy)` throws the canonical
+ *  "not supported on live async state" error where an Immer draft yields
+ *  "[object Object]". A loud throw here would be a divergence the sync side
+ *  never has, so these three stay on plain data.
  *
- *      for (const it of s.items) it.q = 0;        // ✅ worked (iterator trap)
- *      s.items.forEach((it) => { it.q = 0; });    // ❌ silently did nothing
+ *  Everything ELSE in {@linkcode ARRAY_READ_METHODS} runs against live
+ *  elements. That was not always true, and the gap was the framework's worst
+ *  remaining silent divergence: `map`/`filter`/`slice`/… handed back DETACHED
+ *  clones, so
  *
- *  — the single most common bulk-update idiom in JavaScript, dropped without a
- *  word, while the same body in a sync method updated every row. The methods
- *  the interception list happens NOT to cover (`at`, `findLast`,
- *  `findLastIndex`) already behaved correctly, because the raw prototype
- *  function runs against the proxy and reaches elements through indexed access.
- *  Snapshot interception was the thing that broke it.
+ *      const rows = s.items.filter(r => r.on);   // async method
+ *      for (const r of rows) r.q = 0;            // ← silently did NOTHING
  *
- *  Deliberately NOT here — every member above returns `undefined`, a boolean,
- *  a number or an iterator, so nothing that escapes the call changes SHAPE:
- *  the methods that hand back a rebuilt array or a user-built value (`map`,
- *  `filter`, `slice`, `concat`, `flat`, `flatMap`, `reduce`, `toSorted`, …)
- *  would start returning proxies, which `structuredClone` refuses in an effect
- *  payload. Writing through an element THOSE return is still dropped; that is
- *  the same class and a wider decision than this one.
- *  `join`/`toString`/`toLocaleString` stay on the snapshot for a different
- *  reason: they stringify each element, and `String(proxy)` throws the
- *  canonical live-state error where the Immer draft yields "[object Object]". */
-const ARRAY_LIVE_ELEMENT_METHODS = new Set([
-  "forEach",
-  "some",
-  "every",
-  "findIndex",
-  "entries",
-  "values",
+ *  while the identical SYNC body (an Immer draft, whose `filter` yields
+ *  drafts) updated every row. A field report from a production consumer
+ *  distilled it into a memorized law — "mutate in ONE contiguous block, writes
+ *  interleaved between awaits drop" — which is not what was happening at all;
+ *  they had simply learned to avoid the shape that dropped. A rule invented to
+ *  route around a silent bug is the most expensive kind of documentation.
+ *
+ *  Running live also fixes identity: `s.items.indexOf(s.items[0])` is `0` on
+ *  the Immer draft and was `-1` through the snapshot. */
+const ARRAY_SNAPSHOT_READ_METHODS = new Set([
+  "join",
+  "toString",
+  "toLocaleString",
 ]);
 
 /** Snapshot a value for read-method interception — the shared cloneState
@@ -1033,7 +1109,7 @@ export function createLiveProxy<S extends Record<string, unknown>>(
   // Transactional mid-method publish: `s.$commit()` flushes the
   // buffered write-set atomically and re-snapshots. Root-level only; undefined
   // for non-transactional methods.
-  _commit?: () => void,
+  _commit?: (minMs?: number) => void,
   // Read/write recorder for snapshot-isolation conflict detection. Set only for
   // transactional methods (whose reads are pinned and therefore go stale);
   // undefined ⇒ zero overhead on the live path.
@@ -1148,65 +1224,59 @@ export function createLiveProxy<S extends Record<string, unknown>>(
         Array.isArray(fresh) && ARRAY_READ_METHODS.has(key) &&
         typeof value === "function"
       ) {
-        // Element-yielding methods with a non-array return: run them against
-        // the LIVE elements, so a write inside the callback batches exactly
-        // like `s.items[i].q = 0`. `[...receiver]` reuses the iterator trap,
-        // which already resolves each element through indexed access — so
-        // `forEach` and `for…of` finally mean the same thing.
-        if (ARRAY_LIVE_ELEMENT_METHODS.has(key)) {
+        // Read methods run against the LIVE elements — `[...receiver]` reuses
+        // the iterator trap, which resolves each element through indexed
+        // access, so every element the method hands back (to a callback, or in
+        // a rebuilt array) is the SAME live proxy `s.items[i]` gives. A write
+        // through one therefore batches exactly like `s.items[i].q = 0`, which
+        // is what the Immer draft does on the sync side.
+        if (!ARRAY_SNAPSHOT_READ_METHODS.has(key)) {
           return (...args: unknown[]) => {
+            // The whole array feeds the result — watch it as one read.
             noteRead?.(pathKey);
-            const live = [...(receiver as unknown as Iterable<unknown>)];
+            // Built directly from `fresh` rather than spreading `receiver`:
+            // the spread resolves EVERY index through the get trap, and each
+            // of those re-runs effectiveAt() (a root resolve + path walk).
+            // Over a 10k-element array that doubled the framework's own
+            // `proxy-array-10k` benchmark. Semantics are identical by
+            // construction — a primitive is handed out raw and an object as
+            // the SAME cached child proxy `receiver[i]` would return, so a
+            // write through an element still batches like `s.items[i].q = 0`.
+            const arr = fresh as unknown[];
+            const live = new Array(arr.length);
+            for (let i = 0; i < arr.length; i++) {
+              const el = arr[i];
+              if (el === null || typeof el !== "object") {
+                live[i] = el;
+                continue;
+              }
+              const cacheKey = [...path, String(i)].join("\0");
+              let cached = _proxyCache.get(cacheKey);
+              if (!cached) {
+                cached = createLiveProxy(
+                  cellName,
+                  prefix,
+                  methodName,
+                  getState,
+                  batcher,
+                  [...path, String(i)],
+                  _proxyCache,
+                  _overlay,
+                  undefined,
+                  undefined,
+                  _watch,
+                );
+                _proxyCache.set(cacheKey, cached);
+              }
+              live[i] = cached;
+            }
             // deno-lint-ignore no-explicit-any
             return (live as any)[key](...args);
           };
         }
-        // `find` returns an ELEMENT the caller may hold across an await and
-        // then MUTATE (`const u = s.users.find(…); u.salt = x`). A detached
-        // snapshot element silently dropped that write in prod while
-        // testCell's Immer draft applied it — the worst kind of divergence
-        //. Resolve the element's INDEX instead and hand back the
-        // LIVE proxy at that path, so writes batch exactly like s.users[i].
-        if (key === "find") {
-          return (...args: unknown[]) => {
-            // The predicate scanned the whole array — a `find`-based guard
-            // ("does this name exist?") is a read of the array, same as every
-            // other read method below.
-            noteRead?.(pathKey);
-            const snap = snapshotForRead(fresh) as unknown[];
-            const idx = snap.findIndex(
-              args[0] as (v: unknown, i: number, a: unknown[]) => boolean,
-              args[1],
-            );
-            if (idx === -1) return undefined;
-            const el = (fresh as unknown[])[idx];
-            if (el === null || typeof el !== "object") return el;
-            const cacheKey = [...path, String(idx)].join("\0");
-            let cached = _proxyCache.get(cacheKey);
-            if (!cached) {
-              cached = createLiveProxy(
-                cellName,
-                prefix,
-                methodName,
-                getState,
-                batcher,
-                [...path, String(idx)],
-                _proxyCache,
-                _overlay,
-                undefined,
-                undefined,
-                _watch,
-              );
-              _proxyCache.set(cacheKey, cached);
-            }
-            return cached;
-          };
-        }
         return (...args: unknown[]) => {
-          // The whole array feeds the result — watch it as one read.
           noteRead?.(pathKey);
-          // Snapshot the array before running the read method so the result
-          // is plain data, not a live-proxy-wrapped value.
+          // Stringifying methods only — see ARRAY_SNAPSHOT_READ_METHODS.
           const snap = snapshotForRead(fresh);
           // deno-lint-ignore no-explicit-any
           return (snap as any)[key](...args);

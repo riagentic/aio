@@ -12,10 +12,24 @@ src/
   type/               <- all exported types, always
   lib/                <- pure functions, no aio imports
   ui/                 <- components
-  test/               <- tests, mirrors source structure
 ```
 
-Six folders. Two root files. That is the entire app.
+…and `tests/` beside `src/`, mirroring that structure:
+
+```
+tests/
+  cell/counter.test.ts
+  lib/math.test.ts
+```
+
+Five folders under `src/`, one beside it, two root files. That is the entire
+app.
+
+> **One place, and only one.** Tests live in `tests/` at the project root — what
+> `am create` scaffolds, what the quickstart's `deno task test` runs, and what
+> the framework itself does. Three different answers used to be in circulation
+> (`src/test/`, a co-located `src/cell.test.ts`, and `tests/`); any one of them
+> works, and having three was the problem.
 
 ## The one load-bearing rule: your entry's directory IS the app root
 
@@ -55,20 +69,20 @@ fails the build with the fix in the message.
 | Extracted method helper            | `cell/` next to cell | Imports aio = stays with cell. |
 | Pure function, no aio import       | `lib/`               | Always.                        |
 | Component / JSX                    | `ui/`                | Always.                        |
-| Test                               | `test/`              | Mirrors source.                |
+| Test                               | `tests/`             | Mirrors `src/`.                |
 | `aio.run()`                        | `app.ts`             | One file.                      |
 
 ---
 
 ## Import Rules (Enforceable by Linter)
 
-| Folder  | Can import from                    |
-| ------- | ---------------------------------- |
-| `type/` | nothing (zero deps)                |
-| `lib/`  | `type/` only                       |
-| `cell/` | `type/` + `lib/` + `aio`           |
-| `ui/`   | `type/` + `lib/` + `cell/` + `aio` |
-| `test/` | anything                           |
+| Folder   | Can import from                    |
+| -------- | ---------------------------------- |
+| `type/`  | nothing (zero deps)                |
+| `lib/`   | `type/` only                       |
+| `cell/`  | `type/` + `lib/` + `aio`           |
+| `ui/`    | `type/` + `lib/` + `cell/` + `aio` |
+| `tests/` | anything                           |
 
 Types flow down. Logic flows down. Nothing flows up.
 
@@ -94,11 +108,12 @@ src/
     LoginPage.tsx
     shared/
       Button.tsx
-  test/
-    cell/
-      counter.test.ts
-    lib/
-      math.test.ts
+```
+
+```
+tests/
+  cell/counter.test.ts
+  lib/math.test.ts
 ```
 
 ---
@@ -137,11 +152,12 @@ src/
       LoginPage.tsx
     shared/
       Button.tsx
-  test/
-    cell/trading/
-      engine.test.ts
-    lib/trading/
-      risk.test.ts
+```
+
+```
+tests/
+  cell/trading/engine.test.ts
+  lib/trading/risk.test.ts
 ```
 
 **Never nest deeper than `cell/[domain]/[cell].ts`.**

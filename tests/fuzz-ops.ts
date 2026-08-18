@@ -314,6 +314,58 @@ export function applyOp(s: { data: Data }, op: Op, log: unknown[]): void {
     case "objarr_entries_write":
       for (const [i, it] of d.items.entries()) it.q = op.v + i;
       break;
+    // Writing through elements a REBUILT-ARRAY read method handed back.
+    // `map`/`filter`/`slice` used to return detached snapshot clones, so these
+    // writes vanished in an async method while the identical sync body applied
+    // them — the framework's worst silent divergence (see
+    // ARRAY_SNAPSHOT_READ_METHODS in cell-impl.ts).
+    case "objarr_map_write": {
+      const rows = d.items.map((x) => x);
+      log.push(rows.length);
+      if (rows.length) rows[op.i % rows.length]!.q = op.v;
+      break;
+    }
+    case "objarr_filter_write": {
+      const rows = d.items.filter((x) => x.id !== op.i % 5);
+      log.push(rows.length);
+      for (const r of rows) r.q = op.v;
+      break;
+    }
+    case "objarr_slice_write": {
+      const rows = d.items.slice(0, 2);
+      log.push(rows.length);
+      if (rows.length) rows[0]!.q = op.v;
+      break;
+    }
+    case "objarr_to_sorted_write": {
+      const rows = d.items.toSorted((x, y) => x.q - y.q);
+      log.push(rows.length);
+      if (rows.length) rows[0]!.q = op.v;
+      break;
+    }
+    case "objarr_concat_write": {
+      const rows = d.items.concat([]);
+      log.push(rows.length);
+      if (rows.length) rows[rows.length - 1]!.q = op.v;
+      break;
+    }
+    // The single most common list idiom: rebuild the array from a map over
+    // itself. Every element spread is a proxy spread on the async side.
+    case "objarr_map_reassign":
+      d.items = d.items.map((x) => ({ ...x, q: x.q + op.v }));
+      break;
+    // A rebuilt array serialized — proxies must stringify like plain data.
+    case "read_map_json":
+      log.push(JSON.stringify(d.items.map((x) => x)));
+      break;
+    // Identity through a read method: `indexOf(s.items[0])` is 0 on the draft
+    // and was -1 through the detached snapshot.
+    case "read_indexof_self":
+      log.push(d.items.length ? d.items.indexOf(d.items[0]!) : -2);
+      break;
+    case "read_includes_self":
+      log.push(d.items.length ? d.items.includes(d.items[0]!) : false);
+      break;
     case "read_some_write": {
       // a predicate that also writes — `some` short-circuits, so the write
       // lands on a PREFIX of the array and the stopping index must agree too
@@ -428,6 +480,15 @@ export const KINDS = [
   "objarr_values_write",
   "objarr_entries_write",
   "read_some_write",
+  "objarr_map_write",
+  "objarr_filter_write",
+  "objarr_slice_write",
+  "objarr_to_sorted_write",
+  "objarr_concat_write",
+  "objarr_map_reassign",
+  "read_map_json",
+  "read_indexof_self",
+  "read_includes_self",
 ];
 
 /** Ops that leave ONE object reachable at TWO paths.

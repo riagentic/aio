@@ -7,6 +7,11 @@ One guide per version migration. Find your current version and follow the steps.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha60 → alpha61](from-alpha60-to-alpha61.md) — nothing breaks: apps get a
+  default theme + icon (`ui.theme: "none"` opts out), writes through
+  `map()`/`filter()` results in async methods now land like their sync twins,
+  three new aiol rules, a browser-bundle leak gate, and `am kill --stale` /
+  `am dispatch --as-server`.
 - [alpha59 → alpha60](from-alpha59-to-alpha60.md) — one grammar: the framework's
   gate tasks read verb-first (`check:api`, `update:docs`, `check:release`), a
   new `deno task install:android` puts a built APK on a connected phone, and

@@ -129,26 +129,25 @@ testCell(door, "cannot open when already open", (t) => {
 
   t.send.open(); // guard line returns early
   t.expect.state((s) => s.status === "open"); // still 'open'
-  t.expect.noStateChange();
 });
 ```
 
 ## TestContext API
 
-| Method                       | Description                                                                                                  |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `t.init()`                   | Reset to initial state                                                                                       |
-| `t.destroy()`                | Reset + set status to 'uninitialized'                                                                        |
-| `t.send.<action>(...args)`   | Dispatch an action — starts immediately, like production. Returns a promise; await it to wait for completion |
-| `t.expect.state(fn)`         | Assert on cell state slice (incl. your `status` field)                                                       |
-| `t.expect.effects(['name'])` | Assert effect types from last action — use full `'cellName:effectKey'` format, e.g. `'counter:persist'`      |
-| `t.expect.effectCount(n)`    | Assert number of effects from last action                                                                    |
-| `t.expect.invariant(fn)`     | Assert a predicate holds                                                                                     |
-| `t.getState()`               | Get cell state slice                                                                                         |
-| `t.getEffects()`             | Get effects from last dispatched action                                                                      |
-| `t.randomActions(n)`         | Dispatch N random valid actions (property-based testing)                                                     |
-| `t.runEffects()`             | Execute pending effects manually (deprecated — `settle()` now auto-runs effects)                             |
-| `t.settle(ms?)`              | Run pending effects + wait for every call started so far. With ms: also wait out real timers.                |
+| Method                       | Description                                                                                                                                                                                                                                                     |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `t.init(seed?)`              | Reset to initial state, optionally SEEDED: `t.init({ scanning: true })` shallow-merges over the declared initial, so a test starts AT the state under test instead of driving the cell there through real methods. An unknown key throws, listing the real ones |
+| `t.destroy()`                | Reset + set status to 'uninitialized'                                                                                                                                                                                                                           |
+| `t.send.<action>(...args)`   | Dispatch an action — starts immediately, like production. Returns a promise; await it to wait for completion                                                                                                                                                    |
+| `t.expect.state(fn)`         | Assert on cell state slice (incl. your `status` field)                                                                                                                                                                                                          |
+| `t.expect.effects(['name'])` | Assert effect types from last action — use full `'cellName:effectKey'` format, e.g. `'counter:persist'`                                                                                                                                                         |
+| `t.expect.effectCount(n)`    | Assert number of effects from last action                                                                                                                                                                                                                       |
+| `t.expect.invariant(fn)`     | Assert a predicate holds                                                                                                                                                                                                                                        |
+| `t.getState()`               | Get cell state slice                                                                                                                                                                                                                                            |
+| `t.getEffects()`             | Get effects from last dispatched action                                                                                                                                                                                                                         |
+| `t.randomActions(n)`         | Dispatch N random valid actions (property-based testing)                                                                                                                                                                                                        |
+| `t.runEffects()`             | Execute pending effects manually (deprecated — `settle()` now auto-runs effects)                                                                                                                                                                                |
+| `t.settle(ms?)`              | Run pending effects + wait for every call started so far. With ms: also wait out real timers.                                                                                                                                                                   |
 
 ## Testing inter-cell coordination
 

@@ -76,6 +76,7 @@ export {
   mount,
   type MountHandle,
   onCleanup,
+  onGlobalKey,
   onMount,
   setDevMode,
   useContext,

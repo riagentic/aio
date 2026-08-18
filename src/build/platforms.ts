@@ -102,15 +102,47 @@ export const CROSS_COMPILABLE = new Set([
   "browser",
   "cli",
   "cli-client",
+  // Electron too — for Windows and macOS. Its runtime is a published zip we
+  // fetch for the target (electron-runtime.ts), and its package there is a
+  // directory + launcher + zip: no OS-specific tooling. Linux is the exception
+  // and it is a TOOL constraint, not a runtime one — see below.
+  "electron",
+  "electron-client",
 ]);
 
-/** Why `target` cannot be built for a non-host platform, or null when it can. */
-export function crossCompileBlocker(target: string): string | null {
-  if (CROSS_COMPILABLE.has(target)) return null;
+/** Why `target` cannot be built for `platform` from this host, or null when it
+ *  can.
+ *
+ *  Electron used to be refused outright, on the grounds that it "bundles a
+ *  per-OS runtime". It does — and that runtime is a download, not something
+ *  the host produces. What actually needs the target OS is SIGNING (Apple
+ *  notarization, a `.dmg`), and the zip we ship is unsigned either way. So the
+ *  refusal now names the one case that is real: an AppImage needs
+ *  `appimagetool`, which runs on Linux. */
+export function crossCompileBlocker(
+  target: string,
+  platform?: string,
+  host: string = hostPlatform(),
+): string | null {
   if (target.startsWith("electron")) {
-    return "Electron targets bundle a per-OS Electron runtime and package an " +
-      "AppImage/zip — build them on that OS (or in its CI runner)";
+    const spec = platform ? PLATFORMS[platform] : undefined;
+    if (!platform || !spec || platform === host) return null;
+    if (spec.os === "linux") {
+      const hostSpec = PLATFORMS[host];
+      // appimagetool is a NATIVE binary for the architecture it assembles, so
+      // "a Linux host" is not enough — an arm64 AppImage needs an arm64 Linux.
+      // Found by building it: the tool downloads for the target arch and then
+      // cannot execute, which arrived as "build exited 1" instead of a reason.
+      if (hostSpec?.os !== "linux" || hostSpec.arch !== spec.arch) {
+        return "an Electron package for Linux is an AppImage, and " +
+          "`appimagetool` is a native binary for the arch it assembles — " +
+          `build ${platform} on a ${spec.arch} Linux host (or its CI ` +
+          "runner). Windows and macOS packages cross-build fine from here";
+      }
+    }
+    return null;
   }
+  if (CROSS_COMPILABLE.has(target)) return null;
   if (target.startsWith("android")) {
     return "Android builds drive Gradle and produce a platform-independent " +
       "APK — build it once, on any host";

@@ -110,6 +110,70 @@ viewing (dashboards, monitoring screens).
 (broken pipe, destroyed socket), the socket is destroyed and the renderer is
 notified via `__aio:close`, triggering the reconnection UI.
 
+## Window chrome (`ui.chrome`)
+
+How much of the window the OS draws. Three values, one line of config:
+
+```ts
+await aio.run({ ui: { chrome: "themed" } });
+```
+
+| Value                    | Frame          | Title bar                         |
+| ------------------------ | -------------- | --------------------------------- |
+| `"standard"` _(default)_ | the platform's | the platform's                    |
+| `"themed"`               | none           | aio draws one, your CSS styles it |
+| `"none"`                 | none           | none — the page _is_ the window   |
+
+**`"themed"`** is the practical middle: dropping the OS frame otherwise takes
+three things with it — dragging, the minimise/maximise/close buttons, and
+double-click-to-maximise — and aio puts all three back as ordinary DOM you can
+restyle from your own `style.css`:
+
+```css
+:root {
+  --aio-titlebar-height: 40px;
+  --aio-titlebar-bg: #101828;
+  --aio-titlebar-fg: #e6edf3;
+  --aio-titlebar-hover: #ffffff1a;
+  --aio-titlebar-close: #e5484d;
+}
+.aio-titlebar {
+  border-bottom: 1px solid #1f2937;
+}
+.aio-titlebar-title {
+  font-weight: 600;
+  letter-spacing: .02em;
+}
+```
+
+The markup is `.aio-titlebar` > `.aio-titlebar-title` + `.aio-titlebar-controls`
+
+> three `.aio-titlebar-button[data-act]` (`minimize` / `maximize` / `close`).
+> The bar shows `document.title` and follows it when your app changes it.
+
+**`"none"`** hands you the whole surface. You get no drag region by default, so
+give yourself one — a window nobody can move is the usual first bug here:
+
+```css
+.my-header {
+  -webkit-app-region: drag;
+}
+.my-header button {
+  -webkit-app-region: no-drag;
+}
+```
+
+The three window verbs are on `window.__aioWindow` in every desktop mode, so a
+hand-built bar uses the same bridge aio's does:
+
+```tsx
+<button onClick={() => window.__aioWindow?.close()}>✕</button>;
+```
+
+**Browser target:** `ui.chrome` is ignored — there is no window to own. The
+themed bar checks for `window.__aioWindow` and does not mount without it, so the
+same page serves a browser tab with no dead buttons and no build-time branch.
+
 ## Window state persistence
 
 Electron remembers window size and position across runs. Bounds are saved to

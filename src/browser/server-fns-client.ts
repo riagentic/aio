@@ -5,6 +5,7 @@
 
 import { enc, type SfnrPayload } from "../protocol/envelope.ts";
 import { serializeArgs } from "../protocol/wire-value.ts";
+import type { Remote } from "../protocol/protocol-types.ts";
 
 const SFN_TIMEOUT_MS = 30_000;
 
@@ -40,8 +41,8 @@ type FnMap = Record<string, (...args: any[]) => any>;
 
 /** Typed access to a serverFns namespace — the explicit server hop.
  *  `const api = serverFn<typeof apiDef>("api"); await api.chargeCard(9)` */
-export function serverFn<T extends FnMap>(ns: string): T {
-  return new Proxy({} as T, {
+export function serverFn<T extends FnMap>(ns: string): Remote<T> {
+  return new Proxy({} as Remote<T>, {
     get(_t, prop) {
       if (typeof prop !== "string") return undefined;
       return (...args: unknown[]) =>

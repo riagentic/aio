@@ -31,6 +31,7 @@ import {
 import { detectMode, formatUptime, out, outError } from "./am-output.ts";
 import { repoRoot } from "./am-cmd-create.ts";
 import {
+  readEntryConfig,
   readPid,
   removePid,
   resolveAmAppId,
@@ -847,10 +848,24 @@ export async function cmdStatus(
   const appId = resolveAmAppId(flags.app);
   const pf = readPid(appId);
 
-  // No lock file → stopped
+  // No lock file → stopped. But "stopped" is only half an answer when OTHER
+  // aio apps are up: `am status` said `stopped` while `am instances` listed
+  // the app as running, and two liveness sources disagreeing is what makes you
+  // stop trusting your own measurements. They never actually disagreed — this
+  // command asks about ONE appId (guessed from the cwd) and that one lists
+  // every appId. Saying which id was asked about, and what else is running,
+  // makes it one answer.
   if (!pf) {
+    const others = instances();
     out(
-      mode === "pretty" ? `${appId}: stopped` : { appId, status: "stopped" },
+      mode === "pretty"
+        ? `${appId}: stopped` +
+          (others.length > 0
+            ? `\n  (running: ${
+              others.map((i) => `${i.appId} @ :${i.port}`).join(", ")
+            } — this directory resolves to "${appId}"; use --app=<id>)`
+            : "")
+        : { appId, status: "stopped", running: others.map((i) => i.appId) },
       mode,
     );
     Deno.exit(1);
@@ -991,4 +1006,122 @@ export function cmdInstances(_args: string[], flags: GlobalFlags): void {
       mode,
     );
   }
+}
+
+/** `am kill [--stale]` — end a process the polite path cannot reach.
+ *
+ *  `am stop` asks the app to shut down and falls back to SIGTERM when it has a
+ *  lock on the port. Neither helps against an ORPHAN: a run whose lock is gone
+ *  but whose process kept the port and kept answering. A field report hit that
+ *  three times in one session — `am status` said `stopped`, `am instances`
+ *  listed nothing, and `am state` cheerfully served five-hour-old numbers,
+ *  which they then reported to a user as current. A stale singleton silently
+ *  serving old state is worse than a crash, because nothing about it looks
+ *  wrong.
+ *
+ *  `--stale` finds them the only way that is reliable: ASK. Every port a lock
+ *  or the app config names is probed; a responder that reports an `appId`/`pid`
+ *  no live lock accounts for is an orphan, and its pid comes from its own
+ *  health answer (which is why `/__aio/health` reports one).
+ *
+ *  Nothing is killed silently — every kill is named, and with no orphans the
+ *  command says so. */
+export async function cmdKill(
+  _args: string[],
+  flags: GlobalFlags,
+): Promise<void> {
+  const mode = detectMode(flags);
+  const live = instances();
+
+  if (!flags.stale) {
+    // The blunt form: end THIS app now. `am stop` is the polite one.
+    const appId = resolveAmAppId(flags.app);
+    const pf = readPid(appId);
+    if (!pf || !isProcessAlive(pf.pid)) {
+      out(
+        mode === "pretty" ? `${appId}: not running` : { appId, killed: false },
+        mode,
+      );
+      Deno.exit(1);
+    }
+    try {
+      Deno.kill(pf.pid, "SIGTERM");
+    } catch { /* raced us to the exit */ }
+    removePid(appId);
+    out(
+      mode === "pretty"
+        ? `killed ${appId} (pid ${pf.pid})`
+        : { appId, pid: pf.pid, killed: true },
+      mode,
+    );
+    return;
+  }
+
+  // Candidate ports: everything a lock names, plus the port this project's
+  // config asks for — the one an orphan of THIS app is most likely holding.
+  const accounted = new Map<number, { appId: string; pid: number }>();
+  for (const i of live) accounted.set(i.port, { appId: i.appId, pid: i.pid });
+  const candidates = new Set<number>(accounted.keys());
+  const cfgPort = readEntryConfig().port;
+  if (cfgPort) candidates.add(cfgPort);
+  if (flags.port) candidates.add(flags.port);
+  // …plus the port THIS app was last launched with. An orphan usually holds
+  // the same port its predecessor did, and `am start` recorded it even though
+  // the lock is gone.
+  const launched = readLaunchInfo(resolveAmAppId(flags.app));
+  for (const f of launched?.flags ?? []) {
+    const m = /^--port=(\d+)$/.exec(f);
+    if (m) candidates.add(Number(m[1]));
+  }
+
+  const orphans: Array<{ appId: string; pid: number; port: number }> = [];
+  for (const port of candidates) {
+    let health: { appId?: string; pid?: number } | null = null;
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/__aio/health`, {
+        signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
+      });
+      health = r.ok ? await r.json() : null;
+    } catch { /* nothing there — not an orphan, just a closed port */ }
+    if (!health?.pid) continue;
+    const known = accounted.get(port);
+    // Accounted for by a live lock, and the SAME process — this is the app.
+    if (known && known.pid === health.pid) continue;
+    orphans.push({
+      appId: health.appId ?? "unknown",
+      pid: health.pid,
+      port,
+    });
+  }
+
+  if (orphans.length === 0) {
+    out(
+      mode === "pretty"
+        ? `no stale aio processes (checked ports: ${
+          [...candidates].sort((a, b) => a - b).join(", ") || "none"
+        })` +
+          `\n  an orphan on a port nothing records is invisible here — ` +
+          `name it with --port=N`
+        : { killed: [], checked: [...candidates] },
+      mode,
+    );
+    return;
+  }
+
+  for (const o of orphans) {
+    try {
+      Deno.kill(o.pid, "SIGTERM");
+    } catch { /* already gone */ }
+  }
+  out(
+    mode === "pretty"
+      ? orphans
+        .map((o) =>
+          `killed stale ${o.appId} (pid ${o.pid}, port ${o.port}) — it was ` +
+          `serving with no lock, so every am command was reading past it`
+        )
+        .join("\n")
+      : { killed: orphans },
+    mode,
+  );
 }

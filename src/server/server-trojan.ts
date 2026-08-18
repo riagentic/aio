@@ -46,6 +46,9 @@ export interface TrojanDeps {
   /** Cost meter for the `cost` route (`am cost`). */
   costMeter?: import("../vitals/cost-meter.ts").CostMeter;
   dispatch: (event: unknown, user?: AioUser) => Promise<unknown> | void;
+  /** Server-origin dispatch — bypasses the cell `access` gate, because server
+   *  code always has. Reached ONLY via `?as=server` on this route. */
+  dispatchAsServer?: (event: unknown) => Promise<unknown> | void;
   getUIState: (user?: AioUser) => unknown;
   debug: (msg: string) => void;
   prod: boolean;
@@ -554,8 +557,33 @@ async function handlePost(
       // wrong key once left the spoof open — drop both.
       delete action.user;
       sanitizeClientAction(action as Record<string, unknown>, "trojan");
+      // `?as=server` — dispatch with SERVER provenance, skipping the cell
+      // `access` gate.
+      //
+      // "Public read, server-only write" (`access: false` + `visible: "all"`)
+      // is a shape aio actively encourages, and it left the operator with no
+      // way to call one method from the CLI: `am dispatch news:add` answered
+      // "access denied", correctly, and the fallback was `am snapshot
+      // save/load`, which bypasses validation entirely and is the wrong tool
+      // for "call this one method".
+      //
+      // This widens nothing: the whole trojan is dev-only and loopback-only
+      // and already reads unfiltered state and runs SQL. What it adds is a
+      // NAMED, logged door instead of a bypass through the snapshot file.
+      const asServer = new URL(req.url).searchParams.get("as") === "server";
+      if (asServer && !deps.dispatchAsServer) {
+        return err("as=server is not available on this server", 400);
+      }
       try {
-        await deps.dispatch(action, undefined);
+        if (asServer) {
+          deps.debug?.(
+            `trojan: dispatching "${action.type}" AS SERVER (access gate ` +
+              `bypassed — dev-only, loopback-only)`,
+          );
+          await deps.dispatchAsServer!(action);
+        } else {
+          await deps.dispatch(action, undefined);
+        }
       } catch (e) {
         return err(
           `dispatch of "${action.type}" failed: ${

@@ -10,7 +10,7 @@ import {
   SERVER_ONLY_AIO_SYMBOLS,
 } from "../src/entries.ts";
 import { removalMessage, removalOf } from "../src/state/removals.ts";
-import { linkSatisfiesPin } from "../src/server/framework-pin.ts";
+import { linkSatisfiesPin, refOfLink } from "../src/server/framework-pin.ts";
 import { codeMatches, codeText } from "./scan.ts";
 
 // ══════════════════════════════════════════════════════════════════════
@@ -213,12 +213,28 @@ export const checkConfig: Checker = (ctx) => {
       );
     } catch { /* not linked yet — a fresh clone; `am fix` creates it */ }
     if (linked !== null && !linkSatisfiesPin(pin, linked)) {
+      // Naming `path:` is what makes this WINNABLE.
+      //
+      // `doctor` fails without a pin; this warns when a pin exists and dep/aio
+      // points at a working checkout rather than the version store. A field
+      // report concluded that no configuration satisfies both and wrote it up
+      // in their README as intended behaviour — which is what you do when a
+      // tool is wrong, and which teaches people to ignore both tools. There
+      // WAS an answer the whole time (`linkSatisfiesPin` has always understood
+      // `path:`); nothing said so at the moment it was needed.
+      const isCheckout = refOfLink(linked) === null;
       report(
         "warn",
         "config",
         `framework pin ${pin} does not match dep/aio (→ ${linked}) — ` +
-          "the app runs a version it does not declare. " +
-          "Run `am pin <version>` to move the pin, or `am fix` to relink",
+          "the app runs a version it does not declare.\n" +
+          (isCheckout
+            ? `      dep/aio points at a working CHECKOUT, not a provisioned ` +
+              `version. If that is deliberate (framework co-development), ` +
+              `declare it: \`am pin path:${linked}\` — then doctor and aiol ` +
+              `both agree. Otherwise \`am fix\` relinks to the pin.`
+            : "      Run `am pin <version>` to move the pin, or `am fix` to " +
+              "relink"),
       );
     } else {
       pass(
@@ -1691,22 +1707,20 @@ export const checkPatterns: Checker = (ctx) => {
       );
     }
 
-    // Thrown exceptions in cell code (prefer Result pattern). Fires only on an
-    // actual `cell('name', { ... })` call — not on framework files that
-    // *define* cell (their throws are config-validation errors, by design).
-    if (/\bcell\s*\(\s*['"]/.test(file.content)) {
-      const throwLines = file.lines.filter((l) =>
-        /\bthrow\s+new\s+/.test(l) && !l.trim().startsWith("//")
-      );
-      if (throwLines.length > 0) {
-        report(
-          "hint",
-          "patterns",
-          `${file.relative}: throw in cell code — consider returning error state instead (machines handle error states well)`,
-          { file: file.relative },
-        );
-      }
-    }
+    // REMOVED: "throw in cell code — consider returning error state instead".
+    //
+    // It argued against the framework's own documented mechanism. Throwing to
+    // REFUSE is the endorsed shape — `docs/state/methods.md` lists it first
+    // ("the caller's `await` rejects with your message… usually what you want
+    // for a guard"), `examples/contacts/cell.ts` demonstrates it three times,
+    // and `resolveCall` exists to deliver that rejection to the caller. A
+    // field report caught the contradiction: the linter told them not to do
+    // the thing the docs and the example told them to do, and when a project's
+    // own tools disagree, people stop reading both.
+    //
+    // The rule was also over-broad — it fired on any file containing
+    // `cell("…")` at all, including framework and scaffold sources whose
+    // throws are config validation.
 
     // State read after an await in an async method. Every await is a
     // commit + render point — another action may have committed while the
@@ -1914,7 +1928,7 @@ export const checkBuild: Checker = async (ctx) => {
           "warn",
           "build",
           "Electron package exists but its binary (node_modules/electron/dist) is missing — " +
-            "run: deno install --allow-scripts=npm:electron npm:electron " +
+            "run: deno task install:electron " +
             "(or just `deno task dev --client=electron` / `deno task build " +
             "--targets=electron` — they auto-install)",
         );
@@ -3228,6 +3242,301 @@ export const checkAlpha52Surface: Checker = (ctx) => {
   }
 };
 
+// ══════════════════════════════════════════════════════════════════════
+// 22. THE $live HAZARD — A TRANSACTIONAL METHOD THAT REREADS ITS OWN READS
+// ══════════════════════════════════════════════════════════════════════
+//
+// Under `transaction: true`, a method's reads are PINNED at entry: an `await`
+// never changes them, and at return the commit validates the read-set against
+// live state. So a method that
+//
+//     reads  s.issues        ← pinned here
+//     awaits something
+//     writes s.issues        ← computed from the pinned value
+//
+// conflicts the moment ANY other action commits `s.issues` while it was
+// suspended, and the commit is rejected (`conflict: "abort"`).
+//
+// The runtime error for this is excellent — it names the field, the mechanism
+// and three fixes. Its TIMING is the problem: it fires at runtime, on a real
+// machine, on a race that needs two async methods to overlap. A field report
+// hit it on the first live run of a desktop app, from `onStart` firing a
+// monitor tick and a scan concurrently, and called this "the single
+// highest-value change on this list" — because the hazard is STATICALLY
+// VISIBLE and aiol already walks the cell. A production crash that a lint line
+// could have been is the worst trade a framework makes.
+//
+// Deliberately narrow, because a false positive here trains people to ignore
+// the linter:
+//   • only cells declaring `transaction` (that is the mode with pinned reads),
+//   • only ASYNC methods that actually `await`,
+//   • only a field READ before the first await AND WRITTEN after it,
+//   • silent when the body mentions `$live` at all — the author knows.
+
+/** Field names read through the draft in `body` — `s.x`, `s.x.y`, `s.x[i]`.
+ *  `$`-prefixed meta (`$live`/`$commit`/`$do`/`$signal`) is not state.
+ *
+ *  A WRITE is not a read. The first cut of this counted every `s.field`
+ *  mention, including the LHS of `s.status = "capturing"` — and promptly
+ *  flagged three of the framework's own cells whose methods only ever WRITE
+ *  status/error around an await. The runtime's conflict detector pins reads
+ *  alone (the set trap records writes, never reads), so write→await→write
+ *  cannot conflict and must not warn: a rule that cries wolf on the shape the
+ *  framework itself uses is the false positive this rule promised not to be.
+ *  Compound assignment (`+=`), `++`/`--` and mutator calls that READ first
+ *  are conservative territory; only the plain `=` LHS and pure mutator calls
+ *  (`push`/`pop`/… — noteWrite-only in the runtime) are excluded. */
+function draftReads(body: string): Set<string> {
+  const MUTATORS = new Set([
+    "push",
+    "pop",
+    "shift",
+    "unshift",
+    "splice",
+    "sort",
+    "reverse",
+    "fill",
+    "copyWithin",
+    "set",
+    "delete",
+    "add",
+    "clear",
+  ]);
+  const out = new Set<string>();
+  for (const m of body.matchAll(/\bs\s*\.\s*([A-Za-z_$][\w$]*)/g)) {
+    const f = m[1]!;
+    if (f.startsWith("$")) continue;
+    // Walk the rest of the access chain to see how it ENDS.
+    let i = m.index + m[0].length;
+    let lastSeg = f;
+    while (i < body.length) {
+      const seg = /^\s*\.\s*([A-Za-z_$][\w$]*)/.exec(body.slice(i));
+      if (seg) {
+        lastSeg = seg[1]!;
+        i += seg[0].length;
+        continue;
+      }
+      const idx = /^\s*\[[^\]]*\]/.exec(body.slice(i));
+      if (idx) {
+        lastSeg = "";
+        i += idx[0].length;
+        continue;
+      }
+      break;
+    }
+    const after = body.slice(i);
+    // Chain ends in a PURE-MUTATOR call (`s.items.push(…)`): noteWrite-only
+    // in the runtime — not a read.
+    if (MUTATORS.has(lastSeg) && /^\s*\(/.test(after)) continue;
+    // Chain is the LHS of a plain assignment (`s.status = …`, `s.a.b = …`):
+    // the set trap records a write, never a read. `==`/`===`/`=>` stay reads.
+    if (/^\s*=(?![=>])/.test(after)) continue;
+    out.add(f);
+  }
+  return out;
+}
+
+/** Field names WRITTEN through the draft in `body` — assignment, compound
+ *  assignment, increment, or a mutating array/collection call. */
+function draftWrites(body: string): Set<string> {
+  const out = new Set<string>();
+  const re =
+    /\bs\s*\.\s*([A-Za-z_$][\w$]*)\s*(?:(?:\[[^\]]*\]|\.\s*[\w$]+)*\s*)?(=[^=]|\+=|-=|\*=|\/=|\?\?=|\|\|=|&&=|\+\+|--|\.\s*(?:push|pop|shift|unshift|splice|sort|reverse|fill|set|delete|add|clear)\s*\()/g;
+  for (const m of body.matchAll(re)) {
+    const f = m[1]!;
+    if (!f.startsWith("$")) out.add(f);
+  }
+  return out;
+}
+
+export const checkLiveHazard: Checker = (ctx) => {
+  const { cells, report } = ctx;
+  for (const cell of cells) {
+    const code = codeText(cell.file.content);
+    const span = cellLiteralSpan(code, cell.line);
+    if (!span) continue;
+    const literal = code.slice(span[0], span[1]);
+    // Only the pinned-read mode has this hazard at all.
+    if (!/\btransaction\s*:/.test(literal)) continue;
+    if (/\btransaction\s*:\s*false\b/.test(literal)) continue;
+
+    // Walk each async method body inside the literal.
+    const header = /\basync\s+([A-Za-z_$][\w$]*)\s*\(\s*_?s\b[^)]*\)\s*\{/g;
+    for (const m of literal.matchAll(header)) {
+      const name = m[1]!;
+      const open = span[0] + m.index + m[0].length - 1;
+      // Body span by brace matching from the method's `{`.
+      let depth = 0, close = -1;
+      for (let i = open; i < code.length; i++) {
+        if (code[i] === "{") depth++;
+        else if (code[i] === "}") {
+          depth--;
+          if (depth === 0) {
+            close = i;
+            break;
+          }
+        }
+      }
+      if (close < 0) continue;
+      const body = code.slice(open, close);
+      // `$live` anywhere in the body: the author has met this and chosen.
+      if (body.includes("$live")) continue;
+      const firstAwait = body.search(/\bawait\b/);
+      if (firstAwait < 0) continue;
+      const before = body.slice(0, firstAwait);
+      const after = body.slice(firstAwait);
+      const reads = draftReads(before);
+      const writes = draftWrites(after);
+      const hazard = [...writes].filter((w) => reads.has(w));
+      if (hazard.length === 0) continue;
+      const line = code.slice(0, open).split("\n").length;
+      const fields = hazard.map((f) => `s.${f}`).join(", ");
+      report(
+        "warn",
+        "patterns",
+        `${cell.file.relative}:${line} — \`${cell.name}.${name}()\` is ` +
+          `transactional: it READS ${fields} before an await and WRITES ` +
+          `${
+            hazard.length === 1 ? "it" : "them"
+          } after. Reads are pinned at entry, so if ` +
+          `another action commits ${
+            hazard.length === 1 ? "that field" : "those fields"
+          } while this ` +
+          `method is suspended, the commit is REJECTED as a conflict — at ` +
+          `runtime, only when the two overlap.\n` +
+          `      fix: read through \`s.$live\` after the await ` +
+          `(\`s.${hazard[0]} = f(s.$live.${hazard[0]})\`), or gather async ` +
+          `results FIRST and do the read+write in one contiguous block, or ` +
+          `set \`transaction: { conflict: "warn" }\` to commit anyway.`,
+        { file: cell.file.relative, line },
+      );
+    }
+  }
+};
+
+// ══════════════════════════════════════════════════════════════════════
+// 23. YOU ARE DOING IT THE OLD WAY — perfBudget.methods → long:
+// ══════════════════════════════════════════════════════════════════════
+//
+// `long: ["scan"]` is checked against the cell's own method list at `cell()`
+// time. `perfBudget: { methods: { "models:scan": { timeout: 0 } } }` is a
+// string in another file that no rename follows.
+//
+// The second one is still what the canonical example teaches, and it shows:
+// one field report accumulated nine such entries BEFORE `long:` existed, and a
+// LATER project accumulated three AFTER it existed, purely by copying
+// `examples/disk`. Docs and examples were fixed — this is the backstop, because
+// the next person copies from a blog post. Mechanically detectable and
+// mechanically fixable: aiol knows the cell names and their methods.
+
+export const checkOldWayPerfBudget: Checker = (ctx) => {
+  const { tsFiles, cells, report } = ctx;
+  if (cells.length === 0) return;
+  const owned = new Map<string, string>(); // "cell:method" → cell name
+  for (const c of cells) {
+    for (const m of c.methodNames) owned.set(`${c.name}:${m}`, c.name);
+  }
+  for (const file of tsFiles) {
+    if (file.name.endsWith(".test.ts")) continue;
+    const code = codeText(file.content);
+    if (!/perfBudget\s*:/.test(code)) continue;
+    // The KEY is inside a string, and codeText() blanks string CONTENTS — so
+    // match against the raw source and use codeText only to skip comments.
+    const raw = file.content;
+    for (
+      const m of raw.matchAll(
+        /["'`]([\w-]+:[\w$]+)["'`]\s*:\s*\{[^}]*\btimeout\s*:/g,
+      )
+    ) {
+      const key = m[1]!;
+      const cellName = owned.get(key);
+      if (!cellName) continue; // a foreign/unknown key — checkConfig owns that
+      const method = key.slice(cellName.length + 1);
+      const line = raw.slice(0, m.index).split("\n").length;
+      report(
+        "warn",
+        "patterns",
+        `${file.relative}:${line} — \`perfBudget.methods["${key}"].timeout\` ` +
+          `is the OLD way to say "this method may run as long as it needs". ` +
+          `Declare it on the cell instead: \`long: ["${method}"]\` in ` +
+          `cell("${cellName}", …). That is checked against the method list at ` +
+          `cell() time, so a rename cannot silently orphan it — this string ` +
+          `can, and does.`,
+        { file: file.relative, line },
+      );
+    }
+  }
+};
+
+// ══════════════════════════════════════════════════════════════════════
+// 24. `t` IS NOT AN ATTRIBUTE — [t="…"] IN A SELECTOR MATCHES NOTHING
+// ══════════════════════════════════════════════════════════════════════
+//
+// `t` is a framework-owned handle: it names the element on the semantic test
+// surface and is STRIPPED before the DOM. It looks like an attribute and is
+// written like one, so `document.querySelector('video[t="player"]')` and a CSS
+// rule `[t="result-image"] { … }` both match nothing — silently.
+//
+// This is documented twice, including in the spec, and it still shipped a dead
+// Play button in one repo (found by accident, while editing that element for
+// another reason) and a set of no-op CSS rules in the same codebase an hour
+// later. Documentation did not prevent two bugs in one project; that is the
+// definition of a footgun, and the reporter named this rule the highest value
+// per unit of effort on their list.
+
+export const checkTestHandleSelectors: Checker = (ctx) => {
+  const { tsFiles, tsxFiles, sourceFiles, styleCss, report } = ctx;
+  const sel = /\[\s*t\s*(?:=|\^=|\*=|\$=|~=|\|=)/;
+  for (const file of [...tsFiles, ...tsxFiles]) {
+    const code = codeText(file.content);
+    // Only inside a QUERY — `[t=` in ordinary code (a type index, an array
+    // literal) is not a selector.
+    for (
+      const m of code.matchAll(
+        /\b(?:querySelector|querySelectorAll|closest|matches)\s*\(\s*["'`]([^"'`]*)["'`]/g,
+      )
+    ) {
+      // codeText blanks string contents, so re-read the same span from source.
+      const raw = file.content.slice(m.index, m.index + m[0].length + 2);
+      if (!sel.test(raw)) continue;
+      const line = code.slice(0, m.index).split("\n").length;
+      report(
+        "error",
+        "ui",
+        `${file.relative}:${line} — this selector matches on \`[t=…]\`, and ` +
+          `\`t\` never reaches the DOM: it is a framework-owned test handle, ` +
+          `stripped before render. The query returns null, silently, forever.\n` +
+          `      fix: query something real (an id, a class, a data- attribute), ` +
+          `or drive the element through its handle instead — \`ui.<name>\` in a ` +
+          `test, \`am trigger\` against a live app.`,
+        { file: file.relative, line },
+      );
+    }
+  }
+  // …and the same mistake in a stylesheet. `styleCss` is THE app stylesheet
+  // (loaded separately by buildContext); any other .css that made it into the
+  // source list is checked too, so a multi-sheet app is not half-covered.
+  const sheets = [
+    ...(styleCss ? [styleCss] : []),
+    ...sourceFiles.filter((f) => f.ext === ".css" && f !== styleCss),
+  ];
+  for (const file of sheets) {
+    const lines = file.content.split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      if (!sel.test(lines[i]!)) continue;
+      report(
+        "error",
+        "ui",
+        `${file.relative}:${i + 1} — this rule selects on \`[t=…]\`, which ` +
+          `never reaches the DOM (\`t\` is a framework-owned test handle, ` +
+          `stripped before render). The rule matches nothing.\n` +
+          `      fix: style by class or a data- attribute.`,
+        { file: file.relative, line: i + 1 },
+      );
+    }
+  }
+};
+
 export const ALL_CHECKS: Checker[] = [
   checkConfig,
   checkStructure,
@@ -3250,4 +3559,7 @@ export const ALL_CHECKS: Checker[] = [
   checkUseCell,
   checkAlpha52,
   checkAlpha52Surface,
+  checkLiveHazard,
+  checkOldWayPerfBudget,
+  checkTestHandleSelectors,
 ];

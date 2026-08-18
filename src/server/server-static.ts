@@ -21,6 +21,7 @@ import {
 import { handleTrojan as _handleTrojanRoute } from "./server-trojan.ts";
 import { loadVendorImmer } from "./server-vendor.ts";
 import { BLOB_ID_RE, BLOB_URL_PREFIX, type BlobStore } from "./blobs.ts";
+import { appIconSvg } from "../build/app-icon.ts";
 
 // Framework module URLs — this file lives in src/server/, so entry files at the
 // src/ root and folderized modules are one level up. The /__aio/ namespace
@@ -147,6 +148,13 @@ export interface StaticDeps {
   uiEntry?: string; // AIO-8.1
   viewport?: string | false; // AIO-423: ui.viewport override (false = opt out)
   headExtra?: string; // AIO-423: ui.head — verbatim <head> content
+  /** ui.chrome — how much of the desktop window the OS draws. */
+  chrome?: "standard" | "themed" | "none";
+  /** ui.theme — whether the default stylesheet is emitted. */
+  theme?: "auto" | "none";
+  /** Identity the theme's accent hue is derived from — the appId, so the UI
+   *  and the icon are the same colour. */
+  themeName?: string;
   // Graph validation state — mutable ref from server.ts (dev only)
   getGraphResult: () => GraphResult | null;
   // Snapshot support
@@ -274,6 +282,9 @@ export function createStaticHandler(deps: StaticDeps): {
         deps.headExtra,
         deps.syncCells,
         deps.callTimeouts,
+        deps.chrome,
+        deps.theme,
+        deps.themeName,
       ),
       { headers: { "Content-Type": "text/html", ...deps.noCache } },
     );
@@ -427,6 +438,16 @@ export function createStaticHandler(deps: StaticDeps): {
       return handleBlob(pathname, req);
     }
 
+    // ── App icon ──
+    //
+    // ONE url for every consumer (the `<link rel="icon">` below, an OG card, a
+    // README), and one decider behind it: the app's own `icon.png`/`icon.svg`
+    // if it drew one, otherwise its generated monogram. Serving a default
+    // rather than a 404 is deliberate — a browser with no favicon shows the
+    // same grey globe for every tab, which is precisely the "which of my apps
+    // is this?" problem the icon exists to answer.
+    if (pathname === "/__aio/icon") return handleIcon();
+
     // ── Snapshot endpoint ──
     if (
       pathname === "/__aio/snapshot" && deps.getSnapshot && deps.loadSnapshot
@@ -469,6 +490,7 @@ export function createStaticHandler(deps: StaticDeps): {
     ) {
       const file = pathname.slice(1);
       try {
+        await _warnIfStaleArtifact(file);
         const body = await Deno.readTextFile(join(absDistDir, file));
         const ct = file.endsWith(".css")
           ? "text/css"
@@ -646,6 +668,86 @@ export function createStaticHandler(deps: StaticDeps): {
     } catch (e) {
       return new Response(`# metrics error: ${String(e)}\n`, { status: 503 });
     }
+  }
+
+  /** In PROD the browser is served `dist/`, while the developer edits `src/`.
+   *
+   *  That is correct — a prod server has a build — and it is invisible: edit
+   *  `src/style.css`, reload, see nothing change, and the natural conclusion
+   *  is that the edit was a no-op. One field report re-screenshotted after a
+   *  change, got a BYTE-IDENTICAL png, and went looking for a bug in their own
+   *  code before thinking to ask what the server was actually serving. "The
+   *  file you edited is not the file being served" is a silent failure with a
+   *  long debugging tail, and the server is the only thing that can see both.
+   *
+   *  Once per path per process: a stale artifact is a fact about the build,
+   *  not about this request, and a line per reload is a line nobody reads. */
+  const _staleWarned = new Set<string>();
+  async function _warnIfStaleArtifact(file: string): Promise<void> {
+    if (_staleWarned.has(file)) return;
+    _staleWarned.add(file);
+    const src = file === "app.js" ? null : join(deps.absBaseDir, file);
+    if (!src) return; // app.js has no single source file — the bundle has many
+    try {
+      const [a, b] = await Promise.all([
+        Deno.stat(join(deps.absDistDir!, file)),
+        Deno.stat(src),
+      ]);
+      if (!a.mtime || !b.mtime || b.mtime <= a.mtime) return;
+      deps.debug(
+        `serving dist/${file} (a build artifact) while ${file} in the source ` +
+          `dir is NEWER — your edit is not on screen. Rebuild (deno task ` +
+          `build), or run the dev server, which serves the source directly.`,
+      );
+    } catch { /* no source, or no artifact — nothing to compare */ }
+  }
+
+  /** Handle GET /__aio/icon — the app's icon, always.
+   *
+   *  Cached in PROD only: the artifact cannot change under a running server.
+   *  In dev it re-resolves per request — the Cache-Control below promises that
+   *  "dropping an icon.png into the app dir shows up on the next reload", and
+   *  a server-side forever-cache would quietly break that promise while the
+   *  header keeps making it. */
+  let _iconCache: { body: Uint8Array | string; type: string } | null = null;
+  async function handleIcon(): Promise<Response> {
+    if (!deps.prod) _iconCache = null;
+    if (!_iconCache) {
+      // The app's own art wins, in the same dir every other app asset comes
+      // from (THE app-dir decider). PNG first: that is the file the build,
+      // Electron and Android all read, so a project with both cannot end up
+      // with a browser tab that disagrees with its taskbar entry.
+      const dirs = [deps.absDistDir, deps.absBaseDir].filter(
+        Boolean,
+      ) as string[];
+      for (const dir of dirs) {
+        for (
+          const [file, type] of [
+            ["icon.png", "image/png"],
+            ["icon.svg", "image/svg+xml"],
+          ] as const
+        ) {
+          try {
+            _iconCache = { body: await Deno.readFile(join(dir, file)), type };
+            break;
+          } catch { /* next candidate */ }
+        }
+        if (_iconCache) break;
+      }
+      _iconCache ??= {
+        body: appIconSvg(deps.title),
+        type: "image/svg+xml",
+      };
+    }
+    return new Response(_iconCache.body as BodyInit, {
+      headers: {
+        "Content-Type": _iconCache.type,
+        // Short, not immutable: dropping an icon.png into the app dir has to
+        // show up on the next reload, or the feature teaches people that the
+        // icon they just drew does not work.
+        "Cache-Control": "public, max-age=60",
+      },
+    });
   }
 
   /** Handle GET /__aio/health */

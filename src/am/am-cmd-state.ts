@@ -417,12 +417,25 @@ export async function cmdDispatch(
     }
   }
 
-  const result = await trojanPost(port, "dispatch", action, appId);
+  // `--as-server` — dispatch with SERVER provenance, past the cell `access`
+  // gate. "Public read, server-only write" (`access: false` + `visible: "all"`)
+  // is a shape aio encourages, and it left the operator unable to call one
+  // method from the CLI; the fallback was `am snapshot save/load`, which
+  // bypasses validation entirely and is the wrong tool for "call this method".
+  // The trojan is already dev-only and loopback-only, so this widens nothing —
+  // it replaces a bypass through the snapshot file with a named, logged door.
+  const route = flags.asServer ? "dispatch?as=server" : "dispatch";
+  const result = await trojanPost(port, route, action, appId);
   if (!result.ok) {
     outError(result.error, mode);
     Deno.exit(1);
   }
-  out(mode === "pretty" ? "dispatched" : result.data, mode);
+  out(
+    mode === "pretty"
+      ? (flags.asServer ? "dispatched (as server)" : "dispatched")
+      : result.data,
+    mode,
+  );
 }
 
 export async function cmdActions(

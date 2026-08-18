@@ -304,6 +304,10 @@ export type CellAio<
     state: Record<string, unknown>,
     fromVersion: number,
   ) => Record<string, unknown>;
+  /** Boot-time repair of this cell's restored slice — see CellConfig. */
+  onRestore?: (
+    state: Record<string, unknown>,
+  ) => Record<string, unknown> | void;
   /** Bind guard — true after bindCell() */
   bound: boolean;
   /** Phantom — carries State type for TypeScript inference (never set at runtime) */

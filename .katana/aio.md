@@ -9,11 +9,11 @@ The axis is not restrictive ↔ permissive. It is **loud ↔ silent**.
 
 ## The rule
 
-- if a wrong choice is detectable at **boot, build or lint** → be strict:
+- If a wrong choice is detectable at **boot, build or lint** → be strict:
   REFUSE, name the offending value, and print the exact replacement. Costs a
   newcomer nothing — they learn at the moment of the mistake with the fix in
   hand, instead of building on sand
-- if a wrong choice is only observable by **watching runtime behavior** → the
+- If a wrong choice is only observable by **watching runtime behavior** → the
   default NEVER changes. Ship it opt-in, forever, or gate the flip on a version
   the app declares in `deno.json`. There is no third option, and a boot WARN is
   not one — an app that still runs, differently, is the silent-wrong-outcome

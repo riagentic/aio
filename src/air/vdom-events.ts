@@ -170,6 +170,26 @@ export function _deleteWrapped(el: Element, evt: string): void {
 // React migrants get expected behavior. Applied in applyProps + _hydrateProps.
 export const _CHANGE_TARGETS = new Set(["INPUT", "TEXTAREA", "SELECT"]);
 
+/** `<input type="…">` where `change` is the meaningful event and the
+ *  React-compat remap works AGAINST the platform.
+ *
+ *  For a FILE input, "the user picked a file" IS the `change` event — there is
+ *  no keystroke stream for `input` to be the better answer to. A real picker
+ *  happens to fire both, so remapping looked harmless in a browser; under
+ *  `testUI` a test dispatching `change` saw nothing at all, and the handler
+ *  "simply never fired" (a field report). The framework's own rule is fail
+ *  loud, never silent, and this was the one place it broke — so the remap
+ *  stops where it stops being an improvement.
+ *
+ *  Deliberately JUST `file`. Checkbox and radio have the same argument on
+ *  paper (`change` is the semantic event) and a real cost in practice: both
+ *  fire `input` too in every browser, so the remap is harmless there, while a
+ *  DOM stub with no layout and no native toggling may fire only one of them.
+ *  Widening this set made `examples/todo`'s checkbox stop responding under
+ *  `testUI` — the harness diverging from production, which is the failure this
+ *  change exists to remove, not to relocate. */
+const _CHANGE_IS_NATIVE_TYPES = new Set(["file"]);
+
 /** Map React-style event names to native DOM equivalents.
  *  @param hasOnInput — pass true when both onChange and onInput are on the same element
  *  to avoid collision (AIO-166). When true, onChange keeps native "change" semantics. */
@@ -178,7 +198,12 @@ export function _mapEventName(
   el: Element,
   hasOnInput?: boolean,
 ): string {
-  if (evt === "change" && _CHANGE_TARGETS.has(el.tagName) && !hasOnInput) {
+  if (
+    evt === "change" && _CHANGE_TARGETS.has(el.tagName) && !hasOnInput &&
+    !_CHANGE_IS_NATIVE_TYPES.has(
+      String((el as { type?: string }).type ?? "").toLowerCase(),
+    )
+  ) {
     return "input";
   }
   if (evt === "doubleclick") return "dblclick"; // AIO-165

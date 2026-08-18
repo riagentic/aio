@@ -46,6 +46,7 @@ export {
   type MountHandle,
   type NodeAction,
   onCleanup,
+  onGlobalKey,
   onMount,
   setDevMode,
   type VChild,

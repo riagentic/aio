@@ -479,6 +479,9 @@ export function createServer(config: ServerConfig): ServerHandle {
     uiEntry: config.uiEntry,
     viewport: config.viewport,
     headExtra: config.headExtra,
+    chrome: config.chrome,
+    theme: config.theme,
+    themeName: config.themeName,
     width: config.width,
     height: config.height,
     renderBudget: config.renderBudget,
@@ -528,6 +531,7 @@ export function createServer(config: ServerConfig): ServerHandle {
   function _buildTrojanDeps(): TrojanDeps {
     return {
       dispatch,
+      dispatchAsServer: config.dispatchAsServer,
       getUIState,
       debug,
       prod,

@@ -13,6 +13,8 @@ export const VALID_UI_KEYS = new Set<string>([
   "entry", // AIO-8.1: UI entry file override — typed on UiConfig, served by the dev server
   "viewport", // AIO-423: override the <meta viewport> (string) or opt out (false)
   "head", // AIO-423: verbatim extra <head> content (meta/OG/favicon/fonts)
+  "chrome", // desktop window frame: "standard" | "themed" | "none"
+  "theme", // default stylesheet: "auto" | "none"
 ]);
 
 /** Top-level `deno.json` keys aio actually READS (its own + Deno's).
@@ -155,6 +157,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "_cellMethods",
   "_cellFields",
   "_cellMigrations",
+  "_cellRestores",
   "_cellVersions",
 ]);
 
@@ -334,8 +337,8 @@ export const CONFIG_DOCS: Record<string, [string, string]> = {
     "fail boot if a defined cell was not passed to aio.run({ cells }) — its dispatches would be silent no-ops",
   ],
   guardDispatches: [
-    "false",
-    "supervised runtime — an unhandled dispatch rejection is logged loudly and the process survives",
+    "true",
+    "supervised runtime — an unhandled rejection is logged loudly and the process survives (false = fail-fast for supervisor-managed deployments)",
   ],
   journal: [
     "false",
@@ -425,6 +428,11 @@ export const UI_DOCS: Record<string, [string, string]> = {
     "<meta viewport> content override (false = omit it)",
   ],
   head: ["", "verbatim extra <head> content (meta/OG/favicon/fonts)"],
+  chrome: [
+    '"standard"',
+    'desktop window frame: "standard" | "themed" | "none"',
+  ],
+  theme: ['"auto"', 'default stylesheet — "auto" | "none" (yours always wins)'],
 };
 
 /** Keys printed in the IDENTITY table (see formatValidConfig). */
@@ -583,4 +591,26 @@ export function validateConfig(
     log.error(formatValidConfig());
     exit(1);
   }
+  // Enumerated VALUES, not just keys. A key allowlist catches `ui: { chrom: … }`
+  // and waves `ui: { chrome: "Themed" }` straight through to the default — a
+  // window that keeps its OS frame for no stated reason, which reads as the
+  // feature being broken rather than the value being wrong.
+  for (const [key, allowed] of Object.entries(ENUM_VALUES)) {
+    const v = obj[key];
+    if (v !== undefined && !allowed.includes(v as string)) {
+      log.error(
+        `\n[aio] CONFIG ERROR: ${label}.${key} is ${
+          JSON.stringify(v)
+        } — must be one of ${allowed.map((a) => JSON.stringify(a)).join(", ")}`,
+      );
+      exit(1);
+    }
+  }
 }
+
+/** Config keys whose value is one of a fixed set. Checked by
+ *  {@linkcode validateConfig} alongside the key allowlist. */
+const ENUM_VALUES: Record<string, readonly string[]> = {
+  chrome: ["standard", "themed", "none"],
+  theme: ["auto", "none"],
+};

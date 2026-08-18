@@ -32,11 +32,13 @@ async function captureErrors(fn: () => Promise<void>): Promise<string> {
 }
 
 const boom = () => {
-  // The field report's line, verbatim in spirit: no global document here.
-  (document as unknown as {
-    documentElement: { dataset: Record<string, string> };
-  })
-    .documentElement.dataset.theme = "dark";
+  // The field report's callback threw because testUI had no global
+  // `document`. That GAP IS CLOSED — testUI now installs the happy-dom
+  // window's document and window as globals, so the reporter's line works
+  // here. What this file pins is the other half, which is permanent: a
+  // callback that throws for ANY reason must not take the committed render
+  // with it. So the throw is explicit now instead of incidental.
+  throw new Error("effect blew up");
 };
 
 const theme = cell("hook-containment-theme", {

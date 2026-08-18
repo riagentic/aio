@@ -43,6 +43,13 @@ export type GlobalFlags = {
   /** `--force` — proceed past a refusal the command made for a reason
    *  (currently: removing an app that is still running). */
   force?: boolean;
+  /** `am dispatch --as-server` — dispatch with server provenance, past the
+   *  cell `access` gate. Dev-only + loopback-only (the trojan already is). */
+  asServer?: boolean;
+  /** `am kill --stale` — end processes still SERVING with no lock to account
+   *  for them. An orphan answers `am state` with old numbers while `am status`
+   *  says stopped, which is how you end up reporting stale values as current. */
+  stale?: boolean;
   /** `am sql --tables` — the table list, one fixed query. `am tables` is the
    *  same act under its own name; the flag composes with the rest of `sql`. */
   tables?: boolean;

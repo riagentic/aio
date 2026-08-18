@@ -49,6 +49,10 @@ export const FLEET_BOOL_FLAGS = [
   "--help",
   "--release",
   "--force",
+  // "ship everything this repo can produce from here" — expands to every
+  // platform in the table. What a target cannot cross-build is printed with
+  // its reason, so "all" never quietly means "some".
+  "--all-platforms",
 ] as const;
 
 /** Every `--flag=value` the fleet build understands. */

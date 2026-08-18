@@ -20,6 +20,7 @@ import type { AioUser } from "./aio-types.ts";
 import type { Access } from "../state/cell-types.ts";
 import { serializeReturn } from "../protocol/return-value.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import type { Remote } from "../protocol/protocol-types.ts";
 
 // deno-lint-ignore no-explicit-any
 type FnMap = Record<string, (...args: any[]) => any>;
@@ -77,8 +78,8 @@ export function serverFnAllowed(
 /** Resolve a namespace to its typed callable map. Server-side impl: returns
  *  the REAL functions (lazy proxy, so import order never matters); the
  *  browser build swaps in the WS proxy with the same signature. */
-export function serverFn<T extends FnMap>(ns: string): T {
-  return new Proxy({} as T, {
+export function serverFn<T extends FnMap>(ns: string): Remote<T> {
+  return new Proxy({} as Remote<T>, {
     get(_t, prop) {
       if (typeof prop !== "string") return undefined;
       return (...args: unknown[]) => {

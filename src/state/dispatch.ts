@@ -749,7 +749,15 @@ export function createDispatch<S, A, E>(
                     "EFFECT_TIMEOUT",
                     `async effect hard-timeout: ${
                       effectType ?? "?"
-                    } exceeded ${thisEffectTimeout}ms — effect abandoned`,
+                    } exceeded ${thisEffectTimeout}ms — the framework stopped ` +
+                      `TRACKING it. The method itself was NOT stopped and was ` +
+                      `not observed to crash: it may still be running, and if ` +
+                      `it finishes its writes still commit. Under ` +
+                      `transaction:{serialize:true} it also still holds the ` +
+                      `cell's turn, so later calls queue behind it until it ` +
+                      `settles. A method that is legitimately this slow ` +
+                      `should say so (long: ["name"] on the cell); one that ` +
+                      `should be stoppable needs cancelOn + s.$signal.`,
                     {
                       cellName: effectType?.split(":")[0],
                       effectType,

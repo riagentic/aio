@@ -789,7 +789,16 @@ async function _run<S, A, E>(
     // ends in "out of memory" with most of the machine free, and it must not be
     // discovered then. `am start`, run.sh and the build all size it correctly;
     // a bare `deno run src/app.ts` is the case that lands here.
-    await reportHeapCeiling(log);
+    await reportHeapCeiling(log, {
+      // Once per machine, keyed on the numbers — see reportHeapCeiling. The
+      // stamp lives beside the app's other disposables, so wiping the data dir
+      // legitimately makes it say the thing again.
+      // `<data>/` not `<data>/files/`: `files` is the APP's upload space
+      // (created lazily, and not ours), and a write that quietly fails puts
+      // the warning back on every boot.
+      stampPath: join(_dirs.data, ".heap-notice"),
+      always: cli.verbose,
+    });
     // The same numbers the warning uses, stated unconditionally: an app that
     // died of "out of memory" with the machine half empty is a support thread
     // that starts with "what was the ceiling?".
@@ -916,7 +925,16 @@ async function _run<S, A, E>(
     config._diagnostics,
     prod,
     config._cellNames,
-    config.guardDispatches,
+    // Supervised BY DEFAULT (alpha61, from a wallet's field report): an
+    // unhandled promise rejection — a floating `void poll()` on a schedule
+    // path — is logged loudly, checkpointed, and the process SURVIVES. Dying
+    // is not "failing louder": for a long-running server owning persisted
+    // state, process death from one stray rejection is the worst outcome on
+    // the table, and the report's app was a wallet mid-signing. Sync uncaught
+    // throws stay fatal (a hard fault is a hard fault). `guardDispatches:
+    // false` opts back into fail-fast for supervisor-managed deployments that
+    // WANT death-and-restart.
+    config.guardDispatches ?? true,
     redact,
   );
 
@@ -995,6 +1013,7 @@ async function _run<S, A, E>(
     syncCellIds,
     cellAccess: config._cellAccess,
     cellMigrations: config._cellMigrations,
+    cellRestores: config._cellRestores,
     onRestore: config.onRestore,
     onCheckpointRestore: config._onCheckpointRestore,
     diagHooks,
@@ -1872,6 +1891,7 @@ async function _run<S, A, E>(
     client,
     useElectron,
     isHeadless,
+    libraryMode: config.libraryMode,
     transport: transport.transport,
     skipHttp: transport.skipHttp,
     port,
@@ -1918,6 +1938,13 @@ async function _run<S, A, E>(
     appLock,
     log,
   });
+
+  // Boot is DONE: the crash guard may now supervise runtime rejections. Until
+  // this line a rejection means "the app refused to start" (a throwing
+  // onMigrate, a failed bind) and must stay fatal — flipping the guard's
+  // default without this gate turned the framework's own boot-refusal test
+  // into a zombie that idled for an hour.
+  diagHooks?.markBootComplete();
 
   return app;
 }

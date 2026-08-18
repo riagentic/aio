@@ -1,5 +1,199 @@
 # Changelog
 
+## 1.0.0-alpha61 — every write lands, and every app has a face (2026-08-18)
+
+Six field reports read together (`atomic`, `fixable`, `impactnews`, `modelinfo`,
+`quant`, `t2v` — 7.5–8.5/10, all locating the weakness at the boundary around
+the model, never in it), worked through to zero, and audited. Plus the thing
+none of them asked for and all of them needed: an app is two files of decisions
+now, and everything else has a default derived from the app's own identity.
+
+### The write that vanished (the one that mattered)
+
+In an async method, writes through the elements a rebuilt-array read method
+handed back **silently did nothing**:
+
+```ts
+const rows = s.items.filter((r) => r.on); //  async method
+for (const r of rows) r.q = 0; //            ← dropped, without a word
+```
+
+The byte-identical sync body updated every row. A production consumer had
+distilled the symptom into a memorized law — _"mutate in ONE contiguous block,
+writes interleaved between awaits drop"_ — which was never the rule; they had
+learned to avoid the shape that dropped. Now every array read method
+(`map`/`filter`/`slice`/`concat`/`toSorted`/…) runs against **live elements**,
+so a write through one batches exactly like `s.items[i].q = 0`, identity holds
+(`s.items.indexOf(s.items[0])` is `0` again), and method returns materialize at
+the transport seam. Pinned by the sync/async differential fuzzer's op set plus
+named regressions; the `proxy-array-10k` bench pays ~20 ms on 10k elements for
+it and the gate holds — correctness bought at a price that is written down.
+
+### Every app has a face
+
+- **A default icon.** No `icon.png` used to mean the same flat blue square for
+  every app — three running aio apps, three identical taskbar entries. Now: a
+  generated monogram (the app's initial, drawn from a geometric alphabet defined
+  in code — no font stack, so SVG and PNG cannot disagree) on a colour hashed
+  from the appId. Served at `/__aio/icon` (browser tab), set on the Electron
+  window (dev AND packaged), packed into the AppImage and the Android launcher.
+- **A default theme** (`ui.theme`). A complete stylesheet — typography, light
+  and dark, forms, tables, code, cards, five utility classes — in `@layer aio`,
+  so ANY rule in the app's own `style.css` wins with no `!important`. The accent
+  is the same hue as the icon, and every fill/text pairing clears WCAG AA across
+  the whole hue wheel, both schemes, by test.
+- **Window chrome** (`ui.chrome: "standard" | "themed" | "none"`). `"themed"`
+  drops the OS frame and puts back the three things frameless silently loses — a
+  drag region, min/max/close, double-click-to-maximise — as restylable DOM
+  driven by a `window.__aioWindow` bridge. Verified in real Electron over CDP,
+  including that close closes.
+
+One hash, one identity: icon, title bar and buttons are one colour the first
+time the app runs.
+
+### Advice became gates
+
+- **The bundler refuses a static server-only import in the client graph**,
+  naming the importing file. (A consumer shipped a blank prod page with a fully
+  green suite — tests render server-side, where `node:sqlite` exists.) The
+  dynamic `await import(…)` escape hatch is untouched.
+- **aiol: the `$live` hazard.** A transactional method that reads a field before
+  an await and writes it after conflicts only when two methods overlap at
+  runtime — now a lint line naming the method, the field, the mechanism and
+  three fixes. The audit's first cut counted assignment LHS as reads and flagged
+  three of the framework's own cells; a write is not a read, and the negative
+  cases are pinned as hard as the positive.
+- **aiol: `[t=` in a selector or stylesheet** is an error — `t` never reaches
+  the DOM, so the query matches nothing, silently (it shipped a dead Play
+  button).
+- **aiol: `perfBudget.methods["c:m"].timeout` on a local method** points at
+  `long: ["m"]` — the checked spelling. `examples/disk` and the docs now teach
+  it too.
+- **`check:docs` verifies every `t.expect.*` the docs teach** against the
+  harness type (the docs taught `noStateChange()`, which never existed).
+- Removed: aiol's "throw in cell code" hint — it argued against the framework's
+  own documented refusal mechanism.
+
+### testUI
+
+- `click`/`dblclick`/`hover` take modifiers (`{ ctrlKey: true }`), parity with
+  `press`; `am trigger` speaks the same chords (`click "ctrl+shift"`,
+  `press "ctrl+Enter"`, and the literal `+` key survives parsing).
+- A real **viewport** (default 1024×768, `{ viewport: { width, height } }`), and
+  the first `getBoundingClientRect()` says out loud that element geometry is not
+  real — a zero a component branches on is a green test for the wrong reason.
+- `document` and `window` are the mount's own happy-dom globals, so
+  `document.addEventListener` fires; `onGlobalKey("Escape", fn)` is the
+  primitive every app rebuilt (chords, input-focus guard, teardown, testable).
+- Misses name BOTH namespaces
+  (`no COMPONENT named "row-7" — there IS an
+  element by that name, use ui["row-7"]`);
+  lazy handles hoist at use time, so `ui.reveal.click(); ui.username.type(…)`
+  works un-awaited as documented.
+- `t.init(seed)` starts a test at the state under test; `bootCells`'
+  `advance()`/`settle()` drain the async work they dispatch (no more poll
+  loops).
+- `onChange` on `<input type="file">` listens to `change` — the React remap
+  stopped where it worked against the platform.
+
+### Types
+
+- `serverFn` returns promises **on both sides** (`Remote<T>`), so
+  `await api.logout(t).catch(…)` compiles without declaring sync bodies `async`.
+- `JSX` is re-exported from `aio` and every scaffold template annotates its
+  component. (Not ambient — JSR's fast-check refuses `declare global`, and
+  `deno publish` is a release gate. Tried, measured, reverted.)
+- **Signals are callable**: `count()` ≡ `count.value` ≡ `count.get()` — the
+  spelling reported twice is now real. `isSignal` accepts callables, and the
+  three inline duck-type copies that would have silently reclassified every
+  signal are gone.
+- `cancelOn` keys are typed against the cell's methods (`long:`'s pattern);
+  `useAio()` gained `ready` (a full state frame has landed), on all three
+  runtimes.
+
+### Runtime, cells, CLI
+
+- The **heap-ceiling warning speaks once per machine**, keyed on the numbers (a
+  changed ceiling is news; `--verbose` repeats it; an unwritable stamp warns
+  every boot rather than never).
+- **Headless survives SIGHUP** — `nohup deno run … &` stays up when the parent
+  shell exits (skipped in libraryMode, one listener per process).
+- **`am` discovers its target**: no more silent fall-through to port 8000; with
+  one instance running it says which app it picked (stderr, so `--json` stays
+  clean), with several it refuses to guess. `am status` names what IS running.
+  `/__aio/health` reports its `pid`, and **`am kill --stale`** reaps orphans —
+  the processes that answer `am state` with five-hour-old numbers while
+  `am status` says stopped.
+- **`am dispatch --as-server`** — the operator door for `access: false` cells
+  ("public read, server-only write"), loopback-only, logged, dev-only, and named
+  in the denial message at the moment it is needed.
+- **`onRestore` on a cell**: boot-time repair of the restored slice, beside the
+  state it repairs (dead undo closures, live handles); runs only when something
+  was actually restored, and a throw never costs the boot.
+- **`s.$commit(minMs)`**: publish at most once per interval — the progress
+  throttle every long method hand-rolled. First call always publishes.
+- **A picker is never on a clock**: `pickFile`/`pickDirectory` pause every call
+  deadline while the dialog is open and re-arm a fresh window when it closes —
+  one dialog is a pause, not a permanent amnesty for genuinely hung methods.
+- A prod server **says so** when `src/` is newer than the `dist/` it serves.
+
+### Tooling contradictions, ended
+
+- The doctor↔aiol **pin standoff is winnable**: `am create --mirror` writes the
+  `path:` pin it always should have, and both tools name that form when they
+  refuse. Verified green together on a co-development app.
+- `deno fmt` **leaves `.katana/` alone** (framework and scaffold): a formatter
+  must not rewrap the file you write the rules in.
+- **`install:electron` installs Electron**: the task is the launcher's own
+  installer (which invokes the package's `install.js` when `deno install` skips
+  the lifecycle script and exits 0 with nothing).
+- **One answer to "where do tests go"**: `tests/`, at the project root — the
+  scaffold, the docs and the quickstart finally agree.
+
+### Cross-platform builds (from the prior unpushed commit)
+
+`deno task build --all-platforms`: Electron for Windows and macOS packages from
+any host (the runtime is a download, not a host artifact — verified by unzipping
+`electron.exe`/`Electron.app` beside real PE/Mach-O binaries). The one true
+constraint names itself: a Linux AppImage needs `appimagetool`, a native binary
+for the arch it assembles.
+
+### Late addendum — a wallet's field report (RIS-1..11)
+
+Landed after the sweep, triaged before the tag:
+
+- **Supervised by default.** `guardDispatches` now defaults ON: an unhandled
+  promise rejection is logged loudly, checkpointed, and the process SURVIVES — a
+  floating `void poll()` must not kill a wallet mid-signing. Sync throws stay
+  fatal; `guardDispatches: false` restores fail-fast for supervised deployments.
+- **The bundler also refuses a static `*.server.ts` import** from the client
+  graph (the whole-app blank screen the suffix convention could not see), naming
+  the file.
+- **Repeating diagnostics back off exponentially** with a suppressed-count
+  ("repeated 719× since the last report") instead of a line every 5 s for hours.
+- **`EFFECT_TIMEOUT` never implies dead work**: tracking stopped, the method was
+  not; under `serialize` it still holds the cell's turn — with `long:` /
+  `cancelOn` named as the fixes.
+- **Per-target export drift is gated**: `aio/air`'s surface is compared against
+  the android alias directly; the 17 symbols that already drift are an
+  enumerated ledger the test refuses to let grow or rot.
+- Verified already-fixed on 61 and pinned: the style-object freeze (RIS-9),
+  `PRAGMA user_version` ownership (alpha52), `am restart` flag replay, the
+  credential-refusal escape hatch. The big asks — prod-parity test mode, `io:`
+  method kinds, db/persist granularity — are roadmapped in `todo.md`, not
+  hand-waved.
+
+### Refuted, in writing
+
+`review/refused.md` records what did not survive verification (`--port` silently
+ignored; the dev server serving stale bytes; `testUI` not exported) and what was
+declined on the merits (ambient `JSX`; per-field subscriptions — roadmap, not a
+sweep item; quant's "cut before 1.0" — the standing question for the beta cut,
+which this release consciously moves the wrong way).
+
+Suite: 4294 → 4300+ tests, 0 failed. Every gate green, including
+`deno publish --dry-run`.
+
 ## 1.0.0-alpha60 — one grammar, and the words say what they do (2026-08-17)
 
 A surface review, and what it found. Nothing here changes how an app behaves;

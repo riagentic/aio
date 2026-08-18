@@ -33,7 +33,11 @@ import {
   _resetCellRegistry,
   getRegisteredCells,
 } from "./state/cell-reactive.ts";
-import { _applyFullState, _resetSignals } from "./state/state-signals.ts";
+import {
+  _applyFullState,
+  _resetSignals,
+  getReadySignal,
+} from "./state/state-signals.ts";
 import {
   abortAllInflight,
   DRAIN_TIMEOUT_MS,
@@ -68,6 +72,10 @@ export {
   mount,
   type MountHandle,
   onCleanup,
+  // Every target ships the SAME global-key binding: a shortcut that works on
+  // desktop and silently does nothing on android is the twin hazard this file
+  // already carries two notes about (useLocal, useAio).
+  onGlobalKey,
   onMount,
   // aio-renderer's setDevMode is the one `aio/air` exports — it turns on the
   // renderer's dev checks AND forwards to vdom's flag.
@@ -478,6 +486,11 @@ export function initStandalone<S, A, E>(
 export function useAio<S = unknown>(): {
   state: S | null;
   send: (action: { type: string; payload?: unknown }) => void;
+  /** Has a full state frame landed? On this target the runtime IS local, so
+   *  it is true from the first commit — but the flag has to EXIST, or a
+   *  component written against `useAio().ready` renders a spinner forever on
+   *  android alone. Same twin hazard the `useLocal` note below records. */
+  ready: boolean;
 } {
   const state = _stateSignal.value as S | null;
 
@@ -488,7 +501,13 @@ export function useAio<S = unknown>(): {
       );}
   };
 
-  return { state, send };
+  return {
+    state,
+    send,
+    get ready(): boolean {
+      return getReadySignal().value;
+    },
+  };
 }
 
 // `useLocal` used to be re-implemented here — see the re-export above. The copy

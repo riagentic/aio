@@ -12,6 +12,13 @@ export type ShellConfig = {
   height?: number;
   viewport?: string | false;
   head?: string;
+  /** ui.chrome — the packaged shell must draw the same title bar dev does. */
+  chrome?: "standard" | "themed" | "none";
+  /** ui.theme + the identity its accent comes from — without these the
+   *  packaged app renders unstyled where dev renders themed, which is the
+   *  exact shell-divergence class this whole file exists to prevent. */
+  theme?: "auto" | "none";
+  themeName?: string;
 };
 
 /** Window metadata extracted from config or HTML meta tags */
@@ -21,6 +28,8 @@ export type AioMeta = {
   height?: number;
   /** Allow openWindow child windows (off by default — see AioRunOptions). */
   childWindows?: boolean;
+  /** `ui.chrome` — how much of the window the OS draws. See UiConfig. */
+  chrome?: "standard" | "themed" | "none";
 };
 
 /** Slugifies a title for use as Electron app name (stable userData path) */
@@ -354,6 +363,16 @@ contextBridge.exposeInMainWorld('__aioIPC', {
   // unless the app EXPLICITLY passes sandbox: false (logged).
   openWindow: (url, opts) => ipcRenderer.send('__aio:openWindow', { url, ...(opts || {}) }),
 });
+// Window controls for ui.chrome "themed"/"none": a frameless window loses
+// minimise, maximise and close along with its frame, and a page cannot get
+// them back on its own. Exposed ALWAYS (not only when themed) so an app using
+// chrome:"none" can build its own bar out of the same three verbs — the bridge
+// is the capability; the title bar is just one consumer of it.
+contextBridge.exposeInMainWorld('__aioWindow', {
+  minimize: () => ipcRenderer.send('__aio:win', 'minimize'),
+  maximize: () => ipcRenderer.send('__aio:win', 'maximize'),
+  close:    () => ipcRenderer.send('__aio:win', 'close'),
+});
 // AIO-54: Relay intercepted <a> navigations back to renderer as CustomEvent
 ipcRenderer.on('__aio:navigate', (_e, url) => {
   window.dispatchEvent(new CustomEvent('aio:navigate', { detail: { url } }));
@@ -394,5 +413,10 @@ export function udsProdHTML(
     undefined, // uiEntry — dev-only
     shell?.viewport,
     shell?.head,
+    undefined, // syncCells — cfg frame
+    undefined, // callTimeouts — cfg frame
+    shell?.chrome,
+    shell?.theme,
+    shell?.themeName,
   );
 }

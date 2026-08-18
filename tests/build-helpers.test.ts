@@ -5,7 +5,7 @@ import {
   formatMb,
   resolveSdk,
   slugify,
-  writePlaceholderIcon,
+  writeDefaultIcon,
 } from "../src/build/build-helpers.ts";
 import { join } from "@std/path";
 
@@ -182,39 +182,20 @@ Deno.test("formatMb: small bytes", () => {
   assertEquals(formatMb(512), "0.0");
 });
 
-// ── writePlaceholderIcon ──
+// ── writeDefaultIcon ──
 
-Deno.test("writePlaceholderIcon: writes valid SVG", async () => {
-  const tmp = await Deno.makeTempFile({ suffix: ".svg" });
+Deno.test("writeDefaultIcon: writes an SVG and a PNG side by side", async () => {
+  const dir = await Deno.makeTempDir();
   try {
-    await writePlaceholderIcon(tmp, "Test");
-    const content = await Deno.readTextFile(tmp);
-    assertEquals(content.includes("<svg"), true);
-    assertEquals(content.includes(">T<"), true); // first letter uppercase
+    await writeDefaultIcon(join(dir, "myapp"), "zebra");
+    const svg = await Deno.readTextFile(join(dir, "myapp.svg"));
+    assertEquals(svg.startsWith("<svg"), true);
+    const png = await Deno.readFile(join(dir, "myapp.png"));
+    // PNG magic — the packagers hand this straight to Electron/Android, so
+    // "it wrote a file" is not the assertion that matters.
+    assertEquals([...png.subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47]);
   } finally {
-    await Deno.remove(tmp);
-  }
-});
-
-Deno.test("writePlaceholderIcon: uses first letter", async () => {
-  const tmp = await Deno.makeTempFile({ suffix: ".svg" });
-  try {
-    await writePlaceholderIcon(tmp, "zebra");
-    const content = await Deno.readTextFile(tmp);
-    assertEquals(content.includes(">Z<"), true);
-  } finally {
-    await Deno.remove(tmp);
-  }
-});
-
-Deno.test("writePlaceholderIcon: empty label defaults to A", async () => {
-  const tmp = await Deno.makeTempFile({ suffix: ".svg" });
-  try {
-    await writePlaceholderIcon(tmp, "");
-    const content = await Deno.readTextFile(tmp);
-    assertEquals(content.includes(">A<"), true);
-  } finally {
-    await Deno.remove(tmp);
+    await Deno.remove(dir, { recursive: true });
   }
 });
 

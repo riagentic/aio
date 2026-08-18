@@ -17,7 +17,10 @@ declare function parsePercent(line: string): number | undefined;
 
 export const job = cell("job", {
   state: { input: "", outDir: "", pct: 0, status: "idle", paused: false },
-  long: ["colorize"], //  no time ceiling — this one runs for hours
+  // No ceiling for the hours-long render. `browse` and `chooseOutput` need no
+  // entry here: they block on a native DIALOG, and pickFile/pickDirectory lift
+  // the ceiling themselves for as long as a person is deciding.
+  long: ["colorize"],
   cancelOn: { colorize: ["self", "job:stop"] }, //  Stop, and restart-supersedes
   methods: {
     async browse(s) {
@@ -136,6 +139,10 @@ cell("job", {
 ```
 
 - A typo throws at `cell()` time, with the known async methods listed.
+- **A method that opens a picker needs no entry.** `pickFile`/`pickDirectory`
+  lift the ceiling for as long as the dialog is open: waiting on a person is not
+  the app being slow, and thirty seconds is an ordinary time to spend finding a
+  folder.
 - It lifts **both** ceilings — the caller-side `await job.colorize()` and the
   effect tracker's deadline — from one declaration.
 - It applies wherever the cell runs, `testCell` and `testUI` included, so a test

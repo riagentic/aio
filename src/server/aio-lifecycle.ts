@@ -18,6 +18,10 @@ import { generatePin } from "./pairing.ts";
 import type { Log } from "../diagnostics/logger-api.ts";
 import type { DB } from "../db/mod.ts";
 import type { ScheduleDef } from "../state/schedule.ts";
+import { appIconPngBase64 } from "../build/app-icon.ts";
+
+/** One SIGHUP guard per process — see the headless branch in startLifecycle. */
+let _sighupGuarded = false;
 
 /** Inputs for lifecycle startup */
 export interface LifecycleDeps<S, A> {
@@ -101,8 +105,14 @@ export interface LifecycleDeps<S, A> {
     showStatus?: boolean;
     viewport?: string | false;
     head?: string;
+    chrome?: "standard" | "themed" | "none";
+    theme?: "auto" | "none";
   };
   keepServer: boolean | undefined;
+  /** Library/test mode — no process-wide signal handlers (the same contract
+   *  aio-server honours for SIGINT/SIGTERM): an embedding host or test runner
+   *  owns the process, and handlers that outlive `app.close()` accumulate. */
+  libraryMode?: boolean;
   // Electron
   setElectronProc: (proc: Deno.ChildProcess | null) => void;
   /** Register the LAN-discovery responder stopper (called on shutdown). */
@@ -128,6 +138,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     client,
     useElectron,
     isHeadless,
+    libraryMode,
     transport,
     skipHttp,
     port,
@@ -348,13 +359,43 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
 
   // Launch client
   if (isHeadless) {
-    // Headless — server-only, no UI launch (CLI apps use connectCli() to connect)
+    // Headless — server-only, no UI launch (CLI apps use connectCli() to
+    // connect).
+    //
+    // …and it must SURVIVE its parent going away. SIGHUP's default action is
+    // terminate, so a headless app started from a shell that then exits —
+    // `nohup deno run … &`, a closed terminal, a CI step that backgrounds it —
+    // dies on the spot, with `uptime=0m` in the log and nothing saying why. A
+    // field report lost three attempts to it before discovering `setsid` made
+    // it stay up. The one role whose entire purpose is running unattended is
+    // the one that must not need a wrapper to do it.
+    //
+    // Registering ANY listener replaces the default terminate action; the app
+    // still stops on SIGINT/SIGTERM, which are the signals that MEAN stop.
+    // Scoped to headless deliberately: a dev server attached to a terminal
+    // SHOULD go when the terminal does.
+    // Skipped in libraryMode for the same reason aio-server skips
+    // SIGINT/SIGTERM there: a test runner / embedding host owns the process,
+    // and a handler per aio.run() would accumulate for its lifetime. Guarded
+    // once per process otherwise — several apps in one process (the supported
+    // disjoint-multi-app pattern) need one listener, not one each.
+    if (!libraryMode && !_sighupGuarded) {
+      _sighupGuarded = true;
+      try {
+        Deno.addSignalListener("SIGHUP", () => {
+          log.debug(
+            "SIGHUP ignored — headless apps outlive their parent shell",
+          );
+        });
+      } catch { /* not supported on this platform (Windows) */ }
+    }
   } else if (useElectron) {
     const meta: AioMeta = {
       title,
       width: cli.width ?? ui.width,
       height: cli.height ?? ui.height,
       childWindows,
+      chrome: ui.chrome,
     };
     const electronUrl = token ? `${localUrl}?token=${token}` : localUrl;
     // NOT distDir — that can be the binary's embedded VFS copy, which this
@@ -386,10 +427,26 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
           height: meta.height,
           viewport: ui.viewport,
           head: ui.head,
+          chrome: ui.chrome,
+          theme: ui.theme,
+          themeName: appId,
         },
       }
       : undefined;
-    launchElectron(electronUrl, log, meta, udsConfig)
+    // …and when the app ships none, the generated monogram travels with the
+    // launch, so the dev window is identified exactly like the packaged one
+    // (which reads dist/icon.png, written by the same generator). A failure to
+    // draw it must never stop the app from starting — it is an icon.
+    appIconPngBase64(title, 256)
+      .catch(() => "")
+      .then((defaultIcon) =>
+        launchElectron(
+          electronUrl,
+          log,
+          meta,
+          udsConfig && { ...udsConfig, defaultIcon },
+        )
+      )
       .then((proc) => {
         if (!proc) {
           // Electron unavailable (auto-install failed / offline) — fall back
@@ -399,7 +456,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
             "Electron not installed and auto-install failed — falling back to the system browser",
           );
           log.error(
-            `install manually with: deno install --allow-scripts=npm:electron npm:electron (then re-run) — serving at ${electronUrl}`,
+            `install it with: deno task install:electron (then re-run) — serving at ${electronUrl}`,
           );
           openExternalBestEffort(electronUrl);
           return;

@@ -74,6 +74,41 @@ export type UiConfig = {
    *  tags, `<link rel="icon">`, fonts, etc. Inserted trusted (not escaped),
    *  like the stylesheet link. */
   head?: string;
+  /** How much of the window the OS draws, on desktop (Electron) targets.
+   *
+   *  - `"standard"` (default) — the platform's own title bar and border.
+   *    Nothing changes; this is what every app has always had.
+   *  - `"themed"` — no OS frame; aio draws a title bar the app's own CSS
+   *    styles. It is a normal, restylable part of the page
+   *    (`.aio-titlebar`, `.aio-titlebar-title`, `.aio-titlebar-button`, and
+   *    the `--aio-titlebar-*` custom properties), and it keeps the three
+   *    things a frameless window otherwise loses: a drag region, the
+   *    minimise/maximise/close controls, and double-click-to-maximise.
+   *  - `"none"` — no frame and no title bar: the page IS the window. Draw
+   *    your own drag region with `-webkit-app-region: drag` wherever you want
+   *    one, or the window cannot be moved.
+   *
+   *  Ignored by the browser target, where there is no window to own — the
+   *  title bar hides itself when the window-control bridge is absent, so one
+   *  codebase serves both without a branch. */
+  chrome?: "standard" | "themed" | "none";
+  /** The default stylesheet.
+   *
+   *  - `"auto"` (default) — aio ships a complete, modern look: typography,
+   *    colour (light AND dark), forms, tables, code, cards. Every rule lives
+   *    in `@layer aio`, so ANY rule in your own `style.css` wins over it
+   *    without `!important` and without ordering games. The accent is derived
+   *    from the app's name — the same hue as its icon — so an app is a
+   *    coherent product the first time it runs, and two aio apps side by side
+   *    do not look like the same app.
+   *  - `"none"` — emit nothing but the box-model baseline. Pick this when the
+   *    app ships a full design system and the extra bytes are the only thing
+   *    the default could contribute.
+   *
+   *  Rebranding does not need this switch: set `--aio-accent` (or
+   *  `--aio-hue`, `--aio-font`, `--aio-r-2`, …) in your own CSS and every
+   *  derived tone follows. */
+  theme?: "auto" | "none";
 };
 
 /** Per-client WebSocket safety limits for `--expose` deployments. All optional —
@@ -299,6 +334,12 @@ export type AioConfig<S, A, E> = {
       ) => Record<string, unknown>;
     }
   >;
+  /** Internal: per-cell boot repair hooks (`onRestore` on a cell) — applied
+   *  after restore + migration, before the app-level `onRestore`. */
+  _cellRestores?: Map<
+    string,
+    (state: Record<string, unknown>) => Record<string, unknown> | void
+  >;
   /** Internal: per-cell versions — flat map for persistence */
   _cellVersions?: Record<string, number>;
   /** Internal: built from per-cell persist filters (replaces removed stateForDB) */
@@ -489,9 +530,19 @@ export type CellsConfig = {
    *  supported disjoint-multi-app pattern. a field report Bad #2. */
   strictCells?: boolean;
   /** Supervised runtime: an unhandled promise rejection (a fire-and-forget cell
-   *  dispatch that rejects) is logged loudly and the process SURVIVES instead of
-   *  dying — no hand-written `.catch(() => {})` per dispatch. Opt-in; scoped to
-   *  rejections (a synchronous uncaught throw is still fatal). a field report Bad #3. */
+   *  dispatch that rejects, a floating `void poll()` on a schedule path) is
+   *  logged loudly, checkpointed and the process SURVIVES — no hand-written
+   *  `.catch(() => {})` per dispatch.
+   *
+   *  **Default `true` since alpha61.** It shipped opt-in (a field report asked
+   *  for it), and the next field report — a wallet — was still wrapping every
+   *  schedule callsite in try/catch AND `.catch(()=>{})` because a stray
+   *  rejection took the process down mid-signing. For a long-running server
+   *  that owns persisted state, death from one floating promise is the worst
+   *  outcome available; a loud log + emergency checkpoint is the loud one.
+   *  Scoped to rejections — a synchronous uncaught throw is a hard fault and
+   *  stays fatal. Set `false` for fail-fast under a supervisor that restarts
+   *  you on purpose. */
   guardDispatches?: boolean;
   /** Durable action journal: every committed action is appended to
    *  a durable log; on the next boot the actions after the last snapshot are

@@ -101,6 +101,21 @@ async function main(): Promise<void> {
     }`,
   );
 
+  // A harness member the docs teach must EXIST.
+  //
+  // `docs/testing/cell-testing.md` documented `t.expect.noStateChange()`,
+  // which is in no version of `src/`. Copying it out of the docs is the
+  // obvious thing to do and produces a TypeError, and the reporter who found
+  // it pointed out the fix is mechanical: the harness surface is a TypeScript
+  // literal, the docs are text, and one can be checked against the other. This
+  // class of drift never has to be found by a human again.
+  const apiIssues = await checkHarnessMembers();
+  console.log(
+    `Test-harness members in docs: ${
+      apiIssues.length ? `${apiIssues.length} do not exist` : "all exist"
+    }`,
+  );
+
   // R2.2: every AioErrorCode must be documented in docs/debugging/errors.md, so
   // a new code can never ship without an operator-facing explanation.
   const codeIssues = await checkErrorCodes();
@@ -131,6 +146,13 @@ async function main(): Promise<void> {
   if (codeIssues.length) {
     console.log(
       `\nUndocumented error codes (must fix):\n${codeIssues.join("\n")}`,
+    );
+    Deno.exit(1);
+  }
+  if (apiIssues.length) {
+    console.log(
+      `\nTest-harness members the docs teach but src/ does not have (must ` +
+        `fix — the reader copies these):\n${apiIssues.join("\n")}`,
     );
     Deno.exit(1);
   }
@@ -249,3 +271,48 @@ async function detectVersion(): Promise<string | undefined> {
 }
 
 main();
+
+/** Every `t.expect.X` / `t.Y(` the docs teach must exist on the harness.
+ *
+ *  The source of truth is `TestContext` in src/testing/cell-test.ts — read as
+ *  text rather than imported, because this script must stay runnable with
+ *  `--allow-read` alone and the shape is a plain type literal. */
+async function checkHarnessMembers(): Promise<string[]> {
+  const src = await Deno.readTextFile(
+    new URL("../src/testing/cell-test.ts", import.meta.url),
+  );
+  // `expect: { … }` — the member names inside that block.
+  const expectBlock = /expect:\s*\{([\s\S]*?)\n  \};/.exec(src)?.[1] ?? "";
+  const known = new Set(
+    [...expectBlock.matchAll(/^\s{4}(\w+)\s*:/gm)].map((m) => m[1]!),
+  );
+  if (known.size === 0) {
+    return [
+      "  could not read TestContext.expect from src/testing/cell-test.ts — " +
+      "this check went blind; fix the parse rather than deleting it",
+    ];
+  }
+  const issues: string[] = [];
+  for await (
+    const entry of walk(DOCS_DIR, {
+      exts: [".md"],
+      includeDirs: false,
+      skip: [/\/upgrade\//, /\/specs\//, /\/release-notes\//],
+    })
+  ) {
+    const rel = entry.path.replace(DOCS_DIR, "");
+    if (rel === "content.md") continue; // generated index — mirrors sources
+    const lines = (await Deno.readTextFile(entry.path)).split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      for (const m of lines[i]!.matchAll(/\bt\.expect\.(\w+)/g)) {
+        if (!known.has(m[1]!)) {
+          issues.push(
+            `  ${rel}:${i + 1}  t.expect.${m[1]} does not exist ` +
+              `(has: ${[...known].sort().join(", ")})`,
+          );
+        }
+      }
+    }
+  }
+  return issues;
+}

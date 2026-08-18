@@ -15,12 +15,25 @@ export type CrashHandlerDeps = {
    *  uncaught error is a genuine hard fault and still terminates. Never silent —
    *  the error is always logged first. */
   guardRejections?: boolean;
+  /** Has the app finished booting? The guard only applies AFTER boot: a
+   *  rejection DURING boot is the app refusing to start (a throwing
+   *  onMigrate, a failed bind), and swallowing it leaves a zombie — alive,
+   *  serving nothing, holding the lock — where the contract is a non-zero
+   *  exit. Found the hard way: flipping the guard's default hung the
+   *  framework's own boot-refusal test for over an hour. Defaults to
+   *  "booted" so unit callers keep the plain behaviour. */
+  isBootComplete?: () => boolean;
 };
 
 /** Install global unhandledrejection + error handlers. Returns uninstall function. */
 export function installCrashHandler(deps: CrashHandlerDeps): () => void {
-  const { log, getHealthData, writeEmergencyCheckpoint, guardRejections } =
-    deps;
+  const {
+    log,
+    getHealthData,
+    writeEmergencyCheckpoint,
+    guardRejections,
+    isBootComplete,
+  } = deps;
 
   let _handling = false;
 
@@ -54,7 +67,9 @@ export function installCrashHandler(deps: CrashHandlerDeps): () => void {
     handle("unhandledrejection", e.reason);
     // Supervised: log-then-survive. Always AFTER handle() logs, so the failure
     // is never hidden — the process just doesn't die from a stray rejection.
-    if (guardRejections) e.preventDefault();
+    // Boot rejections stay fatal (see isBootComplete): supervision is for
+    // RUNTIME strays, never for "the app refused to start".
+    if (guardRejections && (isBootComplete?.() ?? true)) e.preventDefault();
   };
   const onError = (e: ErrorEvent) => {
     handle("uncaughtException", e.error ?? e.message);

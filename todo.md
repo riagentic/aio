@@ -1416,3 +1416,31 @@ these are the only pieces that outlived them:
 - `@experimental` tag = the only escape hatch for unstable surface.
 - Keep the field-report ritual; pin field-report keep-lists as tests where
   possible.
+
+## From the risoto field report (money software, alpha59 → triaged at alpha61)
+
+- **Prod-parity test mode** (RIS-3 — their #1, rightly): a harness mode where
+  the worker pool is ON, every method return/error crosses a real
+  structured-clone hop even in-process, sync methods replay in client context,
+  and the DOM is shared. Five of their six multi-day bugs were harness/prod
+  wiring divergence. Highest-leverage open testing item.
+- **First-class async-I/O shape** (RIS-4): design round for `io:`-kind methods
+  (no mutex hold, no ceiling false-alarm) or an `s.$job(fetch, commit)`
+  primitive — decide together with transaction/long/cancelOn, plus the aiol rule
+  that bans fetch/Deno.* in reducer bodies.
+- **Ceiling heartbeat** (RIS-1): the runner reports "still running (slow)" at
+  interval for a call past 50% of its deadline, so slow is never mistaken for
+  dead. (The lying message is already fixed; mutex release on timeout is refused
+  — serialization means one writer.)
+- **db:/persist granularity** (RIS-5a/6, and quant before them): object-shaped
+  `db:` mappings (subset/projection, not whole-slice arrays) and row/field dirty
+  tracking for persist + per-client deltas. Two production consumers now pay
+  this; largest open design debt.
+- **Shape-drift root cause** (RIS-7b): pair with the reporter — a key from the
+  initial full state vanishing from the client merge may be subscription
+  filtering looking like data loss, or the real thing. The repeating-diagnostic
+  noise around it is fixed (exponential backoff + counter).
+- **Standalone export parity — shrink the ledger** (RIS-11): the router, auth UI
+  and islands are enumerated KNOWN_DRIFT in
+  tests/standalone-export-parity.test.ts; porting the router to the android
+  runtime (without dragging the WS transport) is the first cut.

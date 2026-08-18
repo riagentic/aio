@@ -221,9 +221,12 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
     a.startsWith("--android-dev-url=")
   )?.slice("--android-dev-url=".length);
 
-  const os = Deno.build.os;
-  const arch = Deno.build.arch === "aarch64" ? "aarch64" : "x86_64";
-  const archStr = arch === "aarch64" ? "arm64" : "x64";
+  // os/arch describe the artifact being BUILT, not the machine building it.
+  // They were `Deno.build.*`, which was harmless while only the host's shell
+  // could be packaged — and became a silent wrong answer the moment Electron
+  // could cross-build: `--platform=windows` produced a LINUX AppImage and the
+  // summary called it the windows artifact. Resolved from the platform spec
+  // below (see `platform`), which is the same table the triple comes from.
 
   // --platform=<name>: which OS/arch this binary is FOR. Defaults to the host,
   // so every existing invocation behaves exactly as before.
@@ -236,11 +239,19 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
   }
   const platform = resolved.platforms[0] ?? hostPlatform();
   const spec = PLATFORMS[platform]!;
-  // A cross build must not pretend it can also be an Electron/Android bundle.
+  const os = spec.os;
+  const arch = spec.arch;
+  const archStr = arch === "aarch64" ? "arm64" : "x64";
+  // A cross build must not pretend it can package something this host cannot.
+  // `crossCompileBlocker` is the ONE decider — it answers per (target,
+  // platform, host), because Electron for Windows/macOS is a download plus a
+  // zip while Electron for Linux is an AppImage and needs `appimagetool`.
+  // Asking it without the platform is what produced "cannot be combined with
+  // --electron: null" — a refusal whose reason was the absence of one.
   if (!isHostPlatform(platform)) {
     const shell = doElectron ? "electron" : doAndroid ? "android" : null;
-    if (shell) {
-      const why = crossCompileBlocker(shell);
+    const why = shell ? crossCompileBlocker(shell, platform) : null;
+    if (shell && why) {
       console.error(
         `[build] \u2717 --platform=${platform} cannot be combined with ` +
           `--${shell}: ${why}`,

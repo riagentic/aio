@@ -1,6 +1,13 @@
 // HTML shell generation — dispatches to prod, AIO dev, or React dev templates.
 
 import type { RenderBudget } from "../vitals/types.ts";
+import type { UiConfig } from "./aio-types.ts";
+import { appThemeCss } from "../build/app-theme.ts";
+
+/** `ui.chrome` — how much of the desktop window the OS draws. */
+export type UiChrome = NonNullable<UiConfig["chrome"]>;
+/** `ui.theme` — whether the default stylesheet is emitted. */
+export type UiTheme = NonNullable<UiConfig["theme"]>;
 import { escHtml } from "./server-html-constants.ts";
 import { devWsScript } from "./server-html-scripts.ts";
 
@@ -27,6 +34,92 @@ function _safeUiEntry(uiEntry: string): string {
 const DEFAULT_VIEWPORT =
   "width=device-width, initial-scale=1, viewport-fit=cover";
 
+/** The title bar aio draws for `ui.chrome: "themed"` — CSS + a mount script,
+ *  emitted into the `<head>` so no target's `<body>` template has to know
+ *  about it.
+ *
+ *  Frameless windows are easy; frameless windows that are still USABLE are
+ *  not. Dropping the OS frame silently takes three things with it — you can no
+ *  longer drag the window, minimise/maximise/close it, or double-click the bar
+ *  to zoom — and an app that discovers that after shipping has to rebuild all
+ *  three by hand. This puts them back, as ordinary DOM the app's own
+ *  stylesheet restyles (`.aio-titlebar*`, `--aio-titlebar-*`).
+ *
+ *  It mounts only when `window.__aioWindow` exists, i.e. under Electron. The
+ *  SAME page served to a browser tab has no window to control, so the bar
+ *  removes itself rather than rendering three dead buttons — one shell, both
+ *  targets, no build-time branch. */
+function chromeShell(chrome: UiChrome | undefined): string {
+  if (chrome !== "themed") return "";
+  // The bar's own defaults are written as `var(--theme-token, <literal>)`, so
+  // it adopts the default theme's surface/text/border when one is present and
+  // still looks finished when `ui.theme: "none"` removed them. A title bar
+  // that ignores the app's palette is the tell of bolted-on chrome.
+  const css = ":root{--aio-titlebar-height:34px;" +
+    "--aio-titlebar-bg:var(--aio-surface-2,#f0f1f3);" +
+    "--aio-titlebar-fg:var(--aio-text,#1f2328);" +
+    "--aio-titlebar-hover:var(--aio-tint,#0000000f);" +
+    "--aio-titlebar-close:var(--aio-danger,#e81123);" +
+    "--aio-titlebar-font:var(--aio-font,13px/1 system-ui,-apple-system," +
+    "sans-serif)}" +
+    "@media(prefers-color-scheme:dark){:root{" +
+    "--aio-titlebar-bg:var(--aio-surface-2,#1b1f24);" +
+    "--aio-titlebar-fg:var(--aio-text,#c9d1d9);" +
+    "--aio-titlebar-hover:var(--aio-tint,#ffffff1f)}}" +
+    "html.aio-themed body{padding-top:var(--aio-titlebar-height)}" +
+    ".aio-titlebar{position:fixed;inset:0 0 auto 0;display:flex;" +
+    "align-items:center;height:var(--aio-titlebar-height);" +
+    "background:var(--aio-titlebar-bg);color:var(--aio-titlebar-fg);" +
+    "font-size:13px;font-family:var(--aio-font,system-ui,sans-serif);" +
+    "line-height:1;user-select:none;" +
+    "border-bottom:1px solid var(--aio-border,transparent);" +
+    "-webkit-app-region:drag;z-index:2147483000}" +
+    ".aio-titlebar-title{flex:1;padding:0 12px;overflow:hidden;" +
+    "white-space:nowrap;text-overflow:ellipsis;opacity:.8}" +
+    ".aio-titlebar-controls{display:flex;height:100%;" +
+    "-webkit-app-region:no-drag}" +
+    ".aio-titlebar-button{width:44px;height:100%;display:grid;" +
+    "place-items:center;padding:0;border:0;background:none;color:inherit;" +
+    "cursor:pointer}" +
+    ".aio-titlebar-button:hover{background:var(--aio-titlebar-hover)}" +
+    '.aio-titlebar-button[data-act="close"]:hover{' +
+    "background:var(--aio-titlebar-close);color:#fff}";
+  // Glyphs as inline SVG: a font-dependent "─ □ ✕" renders at three different
+  // sizes across platforms, and the em-dash trick is invisible in some fonts.
+  const svg = (d: string) =>
+    `<svg width="10" height="10" viewBox="0 0 10 10" fill="none" ` +
+    `stroke="currentColor" stroke-width="1.1">${d}</svg>`;
+  const buttons = [
+    ["minimize", "Minimize", '<path d="M0 5h10"/>'],
+    ["maximize", "Maximize", '<rect x="0.5" y="0.5" width="9" height="9"/>'],
+    ["close", "Close", '<path d="M0 0l10 10M10 0L0 10"/>'],
+  ]
+    .map(([act, label, d]) =>
+      `<button class="aio-titlebar-button" data-act="${act}" ` +
+      `aria-label="${label}" title="${label}">${svg(d!)}</button>`
+    )
+    .join("");
+  const js = `(function(){function m(){` +
+    `if(!window.__aioWindow||document.querySelector('.aio-titlebar'))return;` +
+    `var b=document.createElement('div');b.className='aio-titlebar';` +
+    `b.innerHTML='<div class="aio-titlebar-title"></div>' +` +
+    `'<div class="aio-titlebar-controls">${buttons}</div>';` +
+    `var t=b.firstChild;t.textContent=document.title;` +
+    // The app owns document.title; a bar that shows the boot-time value is a
+    // bar that goes stale the moment a route changes it.
+    `try{new MutationObserver(function(){t.textContent=document.title})` +
+    `.observe(document.querySelector('title'),{childList:true})}catch(e){}` +
+    `b.addEventListener('click',function(e){var a=e.target.closest` +
+    `&&e.target.closest('[data-act]');if(a)window.__aioWindow[a.dataset.act]()});` +
+    `b.addEventListener('dblclick',function(e){if(!(e.target.closest` +
+    `&&e.target.closest('[data-act]')))window.__aioWindow.maximize()});` +
+    `document.documentElement.classList.add('aio-themed');` +
+    `document.body.insertBefore(b,document.body.firstChild)}` +
+    `if(document.readyState==='loading')` +
+    `document.addEventListener('DOMContentLoaded',m);else m()})()`;
+  return `\n  <style>${css}</style>\n  <script>${js}</script>`;
+}
+
 function headContent(
   title: string,
   hasCSS: boolean,
@@ -41,6 +134,9 @@ function headContent(
   // "/" for server-served shells; "./" for the Android asset shell, whose
   // WebView loads from android_asset where absolute /-paths don't resolve.
   assetBase = "/",
+  chrome?: UiChrome,
+  theme?: UiTheme,
+  themeName?: string,
 ): string {
   // THE baseline, on every target, always — before the app's stylesheet so
   // any of it can be overridden by a single rule.
@@ -55,6 +151,12 @@ function headContent(
   // touch fonts, colours, spacing or anything else an app should decide.
   const baseStyle =
     `\n  <style>*,*::before,*::after{box-sizing:border-box}body{margin:0}</style>`;
+  // The default look (ui.theme). Inlined rather than linked: it is small, it
+  // must not cost a round trip before first paint, and the android shell has
+  // no server to fetch it from — one emission point, every target.
+  const themeStyle = theme === "none"
+    ? ""
+    : `\n  <style>${appThemeCss(themeName || title)}</style>`;
   const cssLink = hasCSS
     ? `\n  <link rel="stylesheet" href="${assetBase}style.css">`
     : "";
@@ -90,11 +192,20 @@ function headContent(
   // ui.head — verbatim <head> content (meta description, OG tags, favicon,
   // fonts). Not escaped: it's trusted author config, like the CSS link.
   const extra = headExtra ? `\n  ${headExtra}` : "";
+  // The favicon link only where a server (or the aio:// protocol handler)
+  // answers it. The android asset shell has no root to resolve `/__aio/icon`
+  // against — and a WebView has no tab to show a favicon in anyway, so
+  // emitting it there is a guaranteed dead request in every console.
+  const iconLink = assetBase === "/"
+    ? `\n  <link rel="icon" href="/__aio/icon">`
+    : "";
   return `  <meta charset="UTF-8">
   <meta name="referrer" content="no-referrer">${metaViewport}
   <title>${
     escHtml(title)
-  }</title>${metaW}${metaH}${baseStyle}${cssLink}${statusScript}${configScript}${extra}`;
+  }</title>${iconLink}${metaW}${metaH}${baseStyle}${themeStyle}${
+    chromeShell(chrome)
+  }${cssLink}${statusScript}${configScript}${extra}`;
 }
 
 /** Generates the HTML shell — dev: CDN import map + live-transpiled App.tsx, prod: self-contained app.js */
@@ -112,6 +223,9 @@ export function generateHTML(
   headExtra?: string, // ui.head — verbatim <head> content
   syncCells?: string[], // localFirst: cells the client runs locally + syncs
   callTimeouts?: { default?: number; methods?: Record<string, number> },
+  chrome?: UiChrome, // ui.chrome — desktop window frame
+  theme?: UiTheme, // ui.theme — the default stylesheet
+  themeName?: string, // identity the accent hue is derived from (appId)
 ): string {
   const head = headContent(
     title,
@@ -124,6 +238,10 @@ export function generateHTML(
     headExtra,
     syncCells,
     callTimeouts,
+    "/",
+    chrome,
+    theme,
+    themeName,
   );
 
   if (prod) return prodHTML(head);
@@ -146,7 +264,13 @@ export function generateHTML(
 export function androidLocalHTML(
   title: string,
   hasCSS: boolean,
-  shell?: { showStatus?: boolean; viewport?: string | false; head?: string },
+  shell?: {
+    showStatus?: boolean;
+    viewport?: string | false;
+    head?: string;
+    theme?: UiTheme;
+    themeName?: string;
+  },
 ): string {
   const head = headContent(
     title,
@@ -160,6 +284,9 @@ export function androidLocalHTML(
     undefined,
     undefined,
     "./", // relative assets — android_asset has no server root
+    undefined, // chrome — a phone has no window frame to own
+    shell?.theme,
+    shell?.themeName,
   );
   return `<!DOCTYPE html>
 <html>

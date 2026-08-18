@@ -149,9 +149,14 @@ machine you are building on; name others and one command emits them all:
 ```
 
 ```sh
+deno task build --all-platforms   # everything this machine can produce
 deno task build --platforms=linux,windows,macos,macos-arm64
-deno task build --list          # shows every platform, and marks this machine
+deno task build --list            # shows every platform, and marks this machine
 ```
+
+`--all-platforms` works on `compile` too (it is `build` narrowed to one target).
+It never quietly means "some": a pair this host cannot produce is printed as
+`–  skipped` with the reason, and the summary counts it separately.
 
 | Platform      | Triple                      | Runs on                             |
 | ------------- | --------------------------- | ----------------------------------- |
@@ -167,12 +172,27 @@ labelled (`myapp-windows.exe`, `myapp-macos-arm64`), so one `dist/` can hold
 them all. `manifest.json` records `builtOn`, the `platforms` list, and per
 artifact its `platform`, `triple`, and whether it is the `host` one.
 
-**What cross-compiles:** `server`, `browser`, `cli`, `cli-client` — the targets
-`deno compile` produces. **What does not:** `electron*` bundles a per-OS
-Electron runtime and packages an AppImage/zip, and `android*` drives Gradle (its
-APK is already platform-independent — build it once, anywhere). Asking for those
-on a foreign platform is **refused with the reason**, never quietly satisfied
-with a host binary under a foreign name.
+**What cross-compiles**
+
+|                                       | from any host                                                                                        |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `server` `browser` `cli` `cli-client` | ✅ — `deno compile` emits the target's binary                                                        |
+| `electron*` → **Windows, macOS**      | ✅ — the runtime is a published zip we fetch and cache; the package is a directory + launcher + zip  |
+| `electron*` → **Linux**               | ❌ needs a Linux host **of that arch** — an AppImage is assembled by `appimagetool`, a native binary |
+| `android*`                            | ❌ by design — the APK is platform-independent, so it is built **once**, on any host                 |
+
+So on a Linux x86_64 box, `--targets=electron --all-platforms` gives you the
+Linux `.AppImage`, the Windows `.zip` and both macOS `.zip`s, and skips
+`linux-arm64` with its reason.
+
+What still needs the target OS is **signing**, not packaging: Apple notarization
+(and a `.dmg`), and a Windows Authenticode certificate. The zips we emit are
+unsigned on every host, so nothing is lost by building them here — but a
+_downloaded_ unsigned app meets Gatekeeper/SmartScreen, which is a distribution
+decision, not a build one.
+
+Anything refused is **refused with the reason**, never quietly satisfied with a
+host binary under a foreign name.
 
 > **A cross-built binary is built and checked here, not run here.** Only the
 > host artifact can boot on the build machine; that is what

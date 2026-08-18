@@ -81,10 +81,13 @@ export type MethodsCellConfig<
    *  ```ts
    *  cancelOn: { open: "self", search: ["self", nav.leave] }
    *  ``` */
-  cancelOn?: Record<
-    string,
-    "self" | (string | { type: string })[]
-  >;
+  cancelOn?: {
+    // Typed against the cell's OWN method names, the way `long` is. The KEY is
+    // a method of this cell — a string nothing checked, so `cancelOn: { opne:
+    // "self" }` compiled, ran, and silently never cancelled anything. `long`
+    // proved the pattern (`keyof M & string`); this is the rest of it.
+    [K in keyof M & string]?: "self" | (string | { type: string })[];
+  };
   /** Async methods that may run as long as they need — no call ceiling, no
    *  effect deadline.
    *
@@ -227,6 +230,28 @@ export type MethodsCellConfig<
    *  ordering. A field report lost an afternoon to it and "fixed" it by
    *  widening the annotation, which silently widens `S` for the whole cell. */
   onMigrate?: (state: NoInfer<S>, fromVersion: number) => NoInfer<S>;
+  /** Repair this cell's restored state, once, at boot.
+   *
+   *  Distinct from `onMigrate`, which answers "the SHAPE changed" and only
+   *  runs on a version bump. `onRestore` answers "some of what was persisted
+   *  does not survive a restart" — and that is a property of the data, not of
+   *  the version, so it runs on every boot after restore.
+   *
+   *  The case that asked for it: a fix log persisted with undo handles that
+   *  are CLOSURES. They restore as dead references, so the UI offers Undo
+   *  buttons that cannot work. The repair is two lines and it belongs beside
+   *  the state it repairs — without this hook it had to be called from the
+   *  app entry's `onStart`, in another file, away from the cell that owns it.
+   *
+   *  ```ts
+   *  onRestore(s) {
+   *    for (const e of s.log) e.undo = undefined;   // closures don't persist
+   *  }
+   *  ```
+   *  Mutate the draft, or return a replacement. Error-guarded like every
+   *  lifecycle hook: a throw is reported and boot continues with the restored
+   *  state unchanged — a repair that fails must not cost you the app. */
+  onRestore?: (state: NoInfer<S>) => NoInfer<S> | void;
   onInit?: (app: ScopedApp<NoInfer<S>>) => void;
   onDestroy?: (app: ScopedApp<NoInfer<S>>) => void;
 };
