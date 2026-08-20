@@ -417,7 +417,7 @@
         },
         "UiConfig": {
           "kind": "typeAlias",
-          "sig": "d25281f5441e18bd"
+          "sig": "b9b4bd696ee6be1c"
         },
         "until": {
           "kind": "function",
@@ -441,7 +441,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "8248707a9c401684"
+          "sig": "8366d14df1c61bad"
         },
         "VitalsConfig": {
           "kind": "typeAlias",

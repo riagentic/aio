@@ -111,6 +111,18 @@ export {
   signal,
   untrack,
 } from "./state/signal.ts";
+// `log` — the same call an app makes on the server.
+//
+// A standalone/Android bundle is still the whole app: it holds the cells, the
+// network code and the session logic, and every one of those has something
+// worth saying when it goes wrong. `aio` and the browser build both export
+// this; without it here, `import { log } from "aio"` — code that compiled on
+// three platforms — fails to BUNDLE for the fourth, with an esbuild error that
+// names the framework's internal module rather than the app's own import.
+// The implementation is already used above; only the export was missing.
+export { log } from "./diagnostics/logger-api.ts";
+export type { Log } from "./diagnostics/logger-api.ts";
+
 export { Show } from "./air/show.ts";
 export { on, watch } from "./state/watch.ts";
 export type { WatchOptions } from "./state/watch.ts";

@@ -315,9 +315,13 @@ async function _writeLocalAssets(
   // ONE shell decider — see androidLocalHTML: a hand-rolled copy here shipped
   // a different default viewport than every other target (WYSIDIWYSIP).
   // Raw title: androidLocalHTML escapes it itself (escHtml in headContent).
-  // The packaged APK's shell renders the SAME default theme dev does, keyed on
-  // the same identity — an app that is one colour on the desktop and another
-  // on the phone is not one app.
+  // The packaged APK's shell renders the same default dev does, keyed on the
+  // same identity — an app that is one colour on the desktop and another on
+  // the phone is not one app. `ui.theme` itself is set in code (`aio.run()`),
+  // which a build cannot read, so the shell carries the framework DEFAULT:
+  // the inert `--aio-*` tokens, nothing that paints. An app that opts into the
+  // full look on the desktop must bring its own CSS to the APK — tracked in
+  // todo.md as the one ui.* key the APK shell cannot see.
   const androidHtml = androidLocalHTML(appTitle ?? binaryName, hasCSS, {
     themeName: binaryName,
   });

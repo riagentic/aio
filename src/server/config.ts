@@ -14,7 +14,7 @@ export const VALID_UI_KEYS = new Set<string>([
   "viewport", // AIO-423: override the <meta viewport> (string) or opt out (false)
   "head", // AIO-423: verbatim extra <head> content (meta/OG/favicon/fonts)
   "chrome", // desktop window frame: "standard" | "themed" | "none"
-  "theme", // default stylesheet: "auto" | "full" | "none"
+  "theme", // the default look: "tokens" (default) | "auto" | "full" | "none"
 ]);
 
 /** Top-level `deno.json` keys aio actually READS (its own + Deno's).
@@ -620,7 +620,11 @@ export function validateConfig(
 
 /** Config keys whose value is one of a fixed set. Checked by
  *  {@linkcode validateConfig} alongside the key allowlist. */
-const ENUM_VALUES: Record<string, readonly string[]> = {
+export const ENUM_VALUES: Record<string, readonly string[]> = {
   chrome: ["standard", "themed", "none"],
-  theme: ["auto", "none"],
+  // Every member of `UiTheme` (aio-types.ts) — a missing one is not a lenient
+  // check, it is a documented value that exits(1) at boot. `"full"` was
+  // missing here from the day it was documented; `tests/config-enum-values.
+  // test.ts` now compares this list against the type's own union.
+  theme: ["tokens", "auto", "full", "none"],
 };

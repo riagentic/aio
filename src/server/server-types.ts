@@ -1,5 +1,6 @@
 // Server type definitions — extracted from server.ts for clarity
 import type { AioUser } from "./aio.ts";
+import type { UiTheme } from "./aio-types.ts";
 import type { RenderBudget } from "../vitals/types.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
 
@@ -45,7 +46,7 @@ export interface ServerConfig {
   viewport?: string | false; // AIO-423: <meta viewport> override (false = omit)
   headExtra?: string; // AIO-423: verbatim extra <head> content
   chrome?: "standard" | "themed" | "none"; // ui.chrome — desktop window frame
-  theme?: "auto" | "full" | "none"; // ui.theme — the default stylesheet
+  theme?: UiTheme; // ui.theme — how much of the default look is emitted
   themeName?: string; // identity the theme accent is derived from (appId)
   renderBudget?: RenderBudget; // sent to browser for RenderMeter thresholds
   /** Extra read-only DEV-server roots by URL prefix — see CellsConfig.serveDirs. */

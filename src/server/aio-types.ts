@@ -57,6 +57,11 @@ export type ResolveUserFn<S = unknown> = (
   state: S,
 ) => AioUser | null | Promise<AioUser | null>;
 
+/** `ui.theme` — how much of aio's default look the shell emits. ONE spelling:
+ *  every shell (server, electron, android) and the config bridge import this
+ *  type rather than re-typing the union. See {@linkcode UiConfig.theme}. */
+export type UiTheme = "tokens" | "auto" | "full" | "none";
+
 /** Window + UI sync options — applies to both Electron and browser clients */
 export type UiConfig = {
   title?: string; // default: 'AIO App'
@@ -99,33 +104,36 @@ export type UiConfig = {
    *  title bar hides itself when the window-control bridge is absent, so one
    *  codebase serves both without a branch. */
   chrome?: "standard" | "themed" | "none";
-  /** The default stylesheet — and who owns the visual stage.
+  /** The default look — and who owns the visual stage.
    *
-   *  - `"auto"` (default) — **your stylesheet wins the stage.** With no
-   *    `style.css`, aio ships a complete, modern look: typography, colour
-   *    (light AND dark), forms, tables, code, cards, a page shell, accented
-   *    from the app's own name (the same hue as its icon), so an app is a
-   *    coherent product the first time it runs. The moment the app ships its
-   *    OWN `style.css`, every visual default steps aside and only the inert
-   *    `--aio-*` custom properties remain — variables paint nothing unless
-   *    something references them.
+   *  **Nothing paints unless you ask.** An app that never mentions `theme`
+   *  renders exactly as it would without aio: the browser's own defaults plus
+   *  aio's two-rule baseline (`box-sizing`, `body{margin:0}`), and the inert
+   *  `--aio-*` custom properties, which paint nothing until something
+   *  references them (`ui.chrome: "themed"`'s title bar does).
    *
-   *    Why it steps aside rather than layering underneath: `@layer aio` wins
-   *    only where the app's CSS *disagrees*. Where the app says nothing —
-   *    `max-width` on `<main>`, `display`/`gap` on a class it happens to call
-   *    `.row` — the default applies unopposed and quietly re-lays-out a page
-   *    nobody asked it to touch. And a rule you never wrote, that is not the
-   *    browser default either, is the worst kind to debug.
-   *  - `"full"` — the complete look ALONGSIDE your own CSS (what an app that
-   *    styles ON TOP of the default wants). Explicit by design: having typed
-   *    it, you know where the rules came from.
-   *  - `"none"` — emit nothing but the box-model baseline, with or without a
-   *    stylesheet of your own.
+   *  Opting in is one word, because a framework look that arrives on its own
+   *  is a rule you never wrote and that is not the browser default either —
+   *  the worst kind to debug. A cascade layer does not save you: `@layer aio`
+   *  wins only where your CSS *disagrees*, so where it says nothing —
+   *  `max-width` on `<main>`, `display`/`gap` on a class you happen to call
+   *  `.row` — the default applied unopposed and re-laid-out pages nobody
+   *  asked it to touch.
+   *
+   *  - `"tokens"` (default) — the `--aio-*` variables only. Nothing paints.
+   *  - `"auto"` — the complete look (typography, colour in light AND dark,
+   *    forms, tables, code, cards, a page shell, accented from the app's own
+   *    name — the same hue as its icon) UNTIL the app ships a `style.css`, at
+   *    which point every visual default steps aside and `"tokens"` remains.
+   *    What `am create` writes into a new app.
+   *  - `"full"` — the complete look ALONGSIDE your own CSS (for an app that
+   *    styles ON TOP of the default).
+   *  - `"none"` — nothing at all, not even the variables.
    *
    *  Rebranding does not need this switch: set `--aio-accent` (or
    *  `--aio-hue`, `--aio-font`, `--aio-r-2`, …) in your own CSS and every
    *  derived tone follows. */
-  theme?: "auto" | "full" | "none";
+  theme?: UiTheme;
 };
 
 /** Per-client WebSocket safety limits for `--expose` deployments. All optional —

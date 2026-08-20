@@ -718,12 +718,18 @@ export const counter = cell("counter", {
 `;
 
 const COUNTER_APP =
-  `// Entry — zero-config: cells self-register on import; appId/version/baseDir
-// are inferred from deno.json + this file's location.
+  `// Entry — near-zero-config: cells self-register on import; appId/version/
+// baseDir are inferred from deno.json + this file's location.
+//
+// \`theme: "auto"\` is the one opt-in: aio's default look (typography, colour
+// in light AND dark, controls, cards — accented from this app's own name)
+// until you write \`src/style.css\`, at which point it steps aside and leaves
+// only the \`--aio-*\` variables. Delete the line and the app renders with the
+// browser's own defaults; \`"full"\` keeps the look alongside your own CSS.
 import "./cell.ts";
 import { aio } from "aio";
 
-await aio.run();
+await aio.run({ ui: { theme: "auto" } });
 `;
 
 const CLIENT_TS =
@@ -743,10 +749,10 @@ app.subscribe(() => console.log("state:", JSON.stringify(app.state)));
 
 const COUNTER_UI = `// UI — export default; the framework mounts it.
 //
-// No stylesheet: aio ships a default theme (typography, colour in light AND
-// dark, controls, cards) keyed to this app's name. Write \`src/style.css\` when
-// you want your own — every rule there wins over the default, because the
-// default lives in \`@layer aio\`. See docs/ui/theme.md.
+// No stylesheet: app.ts opted into aio's default theme (\`ui.theme: "auto"\`),
+// which styles semantic HTML and a handful of classes, keyed to this app's
+// name. Write \`src/style.css\` and it steps aside entirely. See
+// docs/ui/theme.md.
 //
 // \`JSX.Element\` needs the type import below; \`aio\` re-exports it so this is
 // the only line to remember.
@@ -852,20 +858,24 @@ testCell(view, "switches the filter", (t) => {
 });
 `;
 
-const TODO_APP = `// Entry — zero-config: cells self-register on import.
+const TODO_APP = `// Entry — cells self-register on import.
+//
+// \`theme: "auto"\` opts into aio's default look (it styles the semantic HTML
+// and the card / row / stack / badge classes the UI uses) until you write
+// \`src/style.css\`, at which point every visual default steps aside.
 import "./cell.ts";
 import { aio } from "aio";
 
 export type { Filter, Todo } from "./cell.ts";
 
-await aio.run();
+await aio.run({ ui: { theme: "auto" } });
 `;
 
 const TODO_UI = `// UI — a filterable todo list.
 //
-// No stylesheet: aio's default theme styles semantic HTML and the handful of
-// classes used here (card / row / stack / badge / muted). Add src/style.css to
-// take over — your rules always win. See docs/ui/theme.md.
+// No stylesheet: app.ts opted into aio's default theme (\`ui.theme: "auto"\`),
+// which styles semantic HTML and the classes used here (card / row / stack /
+// badge / muted). Add src/style.css and it steps aside. See docs/ui/theme.md.
 import type { JSX } from "aio";
 import { useLocal } from "aio/air";
 import { type Filter, type Todo, todo, view } from "./cell.ts";

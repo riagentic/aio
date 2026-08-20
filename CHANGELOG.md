@@ -1,5 +1,62 @@
 # Changelog
 
+## 1.0.0-alpha63 — nothing you did not ask for (2026-08-20)
+
+A user report against alpha61/alpha62: _"the default aio CSS is messing up
+existing apps."_ It was, and the shape of the mistake is worth naming.
+
+### The default look is opt-in
+
+alpha61 shipped a stylesheet with every app. alpha62 made it step aside for apps
+that ship a `style.css`. Both releases assumed the framework could TELL whether
+an app styles itself. It cannot: CSS arrives through `ui.head`, through a
+`<style>` the component renders, through a CSS-in-JS runtime, through an
+imported design system — none of which a shell can see. And `@layer aio` only
+settles a disagreement; wherever an app's CSS was silent, aio's declaration
+applied unopposed and re-laid-out a page nobody asked it to touch.
+
+So the look is now something an app asks for, in one word:
+
+```ts
+await aio.run({ ui: { theme: "auto" } }); // what `am create` writes
+```
+
+| `ui.theme`           | no `style.css`           | with `style.css`               |
+| -------------------- | ------------------------ | ------------------------------ |
+| `"tokens"` (default) | `--aio-*` variables only | `--aio-*` variables only       |
+| `"auto"`             | the full default look    | variables only (steps aside)   |
+| `"full"`             | the full default look    | the full look, alongside yours |
+| `"none"`             | box-model baseline only  | box-model baseline only        |
+
+An app that never mentions `theme` gets the browser's own defaults plus the
+two-rule baseline (`box-sizing`, `body{margin:0}`) that predates the theme — no
+font, no `body` paint, no `main`/`.row`/`.card`. Boot says which way the look
+landed for an app that DID opt in. `tests/theme-steps-aside.test.ts` pins both
+halves.
+
+### `ui.theme: "full"` was refused at boot from the day it was documented
+
+`ENUM_VALUES.theme` listed `["auto", "none"]`, so the value the docs, the type
+and the shell all supported exited with `CONFIG ERROR`. The value allowlist is
+now compared against the `UiTheme` union itself
+(`tests/config-enum-values.test.ts`, mutation-tested), and `UiTheme` is defined
+once — the seven hand-copied spellings of `"auto" | "full" | "none"` across
+server, electron, static and lifecycle now import it.
+
+### Two android-bundle fixes (rimote)
+
+- `import { log } from "aio"` compiled for server, browser and electron and
+  failed to BUNDLE for android: the standalone entry never re-exported it. Fixed
+  — and `tests/android-air-surface.test.ts` now enumerates every `aio` export
+  the android entry lacks, split into server-only decisions and 13 listed gaps,
+  so the next one is a failing gate rather than an esbuild error naming a
+  framework internal.
+- A module-level `new URL("./blocking-worker.ts", import.meta.url)` threw while
+  the module was still evaluating in a bundle — one blank screen for any app
+  that merely LINKED `schedule.blocking()`. It resolves on first use now, with
+  an error naming the feature, and `tests/bundle-load-time-throw.test.ts`
+  refuses the pattern anywhere a client bundle can reach.
+
 ## 1.0.0-alpha62 — one fact, one spelling (2026-08-20)
 
 Worked from **rimote** (8/10) — a remote-desktop suite that is three aio apps in
