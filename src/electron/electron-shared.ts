@@ -1,6 +1,7 @@
 // Shared types, helpers, and CJS template fragments for Electron script generators
 
 import { generateHTML } from "../server/server-html-gen.ts";
+import type { UiTheme } from "../server/aio-types.ts";
 
 export type Log = { info: (msg: string) => void; error: (msg: string) => void };
 
@@ -17,7 +18,7 @@ export type ShellConfig = {
   /** ui.theme + the identity its accent comes from — without these the
    *  packaged app renders unstyled where dev renders themed, which is the
    *  exact shell-divergence class this whole file exists to prevent. */
-  theme?: "auto" | "full" | "none";
+  theme?: UiTheme;
   themeName?: string;
 };
 

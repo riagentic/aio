@@ -14,6 +14,7 @@ import {
   TEXT_EXTENSIONS,
 } from "./server-html.ts";
 import type { GraphResult } from "./graph-validator.ts";
+import type { UiTheme } from "./aio-types.ts";
 import {
   type EsbuildMessage,
   fmtEsbuildError,
@@ -151,8 +152,8 @@ export interface StaticDeps {
   headExtra?: string; // AIO-423: ui.head — verbatim <head> content
   /** ui.chrome — how much of the desktop window the OS draws. */
   chrome?: "standard" | "themed" | "none";
-  /** ui.theme — whether the default stylesheet is emitted. */
-  theme?: "auto" | "full" | "none";
+  /** ui.theme — how much of the default look the shell emits. */
+  theme?: UiTheme;
   /** Identity the theme's accent hue is derived from — the appId, so the UI
    *  and the icon are the same colour. */
   themeName?: string;

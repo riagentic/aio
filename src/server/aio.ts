@@ -1093,15 +1093,25 @@ async function _run<S, A, E>(
   // found by "why is my UI in half the screen". The framework knows both
   // answers at boot and said neither. Observe-only, once per boot.
   _warnPinDrift();
-  if (ui.theme === "full") {
+  // The look is opt-in (`ui.theme` defaults to "tokens", which paints
+  // nothing), so there is nothing to announce for an app that never asked.
+  // An app that DID ask hears which of the two ways it landed.
+  if (ui.theme === "full" || ui.theme === "auto") {
     const styled = await _appHasStylesheet(baseDir, ui.entry ?? UI_ENTRY);
-    if (styled) {
+    if (ui.theme === "full" && styled) {
       log.warn(
         `theme: ui.theme "full" — aio's complete stylesheet is emitted ALONGSIDE ` +
           `your style.css, so its rules apply wherever your CSS is silent ` +
           `(a cascade layer settles conflicts, not silence). That is what this ` +
-          `setting is for; the default ("auto") steps aside instead, and ` +
+          `setting is for; "auto" steps aside instead, and ` +
           `\`am theme adopt\` hands you the CSS to own.`,
+      );
+    } else if (!styled) {
+      log.info(
+        `theme: aio's default look is in effect (ui.theme "${ui.theme}", no ` +
+          `${APP_STYLE}) — it styles semantic HTML plus .card/.row/.stack/` +
+          `.grid/.badge, and \`<main>\` becomes a centred page container. ` +
+          `Write ${APP_STYLE} and every visual default steps aside.`,
       );
     }
   }

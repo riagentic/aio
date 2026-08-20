@@ -231,6 +231,11 @@ The app opens in your browser (the default target), state persists across
 restarts, and multiple tabs stay in sync. Want the desktop shell instead?
 `deno task dev --client=electron`.
 
+It renders with the browser's own defaults — aio styles nothing you did not ask
+it to. For a finished look without writing CSS, opt in with
+`aio.run({ ui: { theme: "auto" } })` ([the default theme](../ui/theme.md)); it
+steps aside the moment you write your own `style.css`.
+
 ## Window size
 
 ```ts

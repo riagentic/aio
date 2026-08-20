@@ -1,30 +1,29 @@
 # The default theme
 
-Every aio app has a stylesheet before anyone writes one. Cells + a component +
-`aio.run()` gives you a finished-looking app — typography, colour in light and
-dark, forms, tables, code, cards — and the colour is **your app's**, derived
+aio ships a complete stylesheet — typography, colour in light and dark, forms,
+tables, code, cards, a page shell — and the colour is **your app's**, derived
 from its identity, so two aio apps side by side do not look like the same app.
 
+**It is opt-in, in one word:**
+
 ```ts
-await aio.run({ appId: "notekeeper" });
+await aio.run({ appId: "notekeeper", ui: { theme: "auto" } });
 // → a themed app. No style.css anywhere in the project.
 ```
 
-## Your stylesheet owns the stage
+`am create` writes that line into every new app, so a scaffolded app is a
+finished-looking product the first time it runs.
 
-**The moment your app ships a `style.css`, every visual default steps aside.**
-Not "loses to yours where you disagree" — leaves. What remains is the inert
-half: the `--aio-*` custom properties, which paint nothing unless something
-references them.
+## Why opt-in, and not a default
 
-```ts
-// no style.css in the project  → the full default look
-// src/style.css exists         → your CSS, plus the --aio-* variables. Nothing else.
-```
+An app brings CSS in more ways than a shell can see: a `style.css`, a `<style>`
+in `ui.head`, a sheet the component itself renders, a CSS-in-JS runtime, a
+design system it imports. A framework look that arrives on its own therefore
+lands on top of styling aio has no way to detect.
 
-That is stricter than it needs to be for conflicts, and deliberately so. Every
-rule does live in `@layer aio`, and an **unlayered** rule — any rule in your own
-stylesheet — beats a layered one regardless of specificity:
+A cascade layer is not enough to make that safe. Every rule does live in
+`@layer aio`, and an **unlayered** rule — any rule in your own stylesheet —
+beats a layered one regardless of specificity:
 
 ```css
 /* style.css — wins. No !important, no ordering trick. */
@@ -43,11 +42,27 @@ rendered as a centred column with an empty band beside it. The `padding` it
 declared won; the two properties it never mentioned did not.
 
 Worse than the layout damage is the confusion. A rule you did not write, which
-is also not the browser default, is the hardest kind to track down. So once you
-start styling, you style everything — the way it would be without a framework.
+is also not the browser default, is the hardest kind to track down. So aio's
+look never arrives unasked: an app that never mentions `theme` renders with the
+browser's own defaults, aio's two-rule baseline (`box-sizing`, `body{margin:0}`)
+and nothing else that paints.
 
-Want both? `ui.theme: "full"` keeps the complete look alongside your CSS. It is
-explicit on purpose: having typed it, you know where the rules came from.
+## Your stylesheet still owns the stage
+
+Having opted in with `"auto"`, **the moment your app ships a `style.css` every
+visual default steps aside.** Not "loses to yours where you disagree" — leaves.
+What remains is the inert half: the `--aio-*` custom properties, which paint
+nothing unless something references them.
+
+```ts
+// ui.theme: "auto", no style.css  → the full default look
+// ui.theme: "auto", src/style.css → your CSS, plus the --aio-* variables. Nothing else.
+```
+
+So you start with a finished look, and the day you start styling, you style
+everything — the way it would be without a framework.
+
+Want both? `ui.theme: "full"` keeps the complete look alongside your CSS.
 
 ```ts
 await aio.run({ cells: [app], ui: { theme: "full" } });
@@ -148,20 +163,22 @@ moves when the framework moves. That is bounded (an app pins an exact aio
 version, so it can only move on a deliberate `am pin`), but if you want the look
 frozen, adopt it.
 
-| You want                            | Do this                            |
-| ----------------------------------- | ---------------------------------- |
-| A finished look, no CSS to write    | nothing — it is the default        |
-| Your own design, no interference    | write `style.css` — defaults leave |
-| To build ON aio's look, frozen      | `am theme adopt`                   |
-| To build ON aio's look, tracking it | `ui.theme: "full"`                 |
+| You want                            | Do this                       |
+| ----------------------------------- | ----------------------------- |
+| Nothing of aio's in your way        | nothing — that is the default |
+| A finished look, no CSS to write    | `ui.theme: "auto"`            |
+| Your own design, no interference    | nothing, or write `style.css` |
+| To build ON aio's look, frozen      | `am theme adopt`              |
+| To build ON aio's look, tracking it | `ui.theme: "full"`            |
 
-## The three settings
+## The four settings
 
-| `ui.theme`         | With no `style.css`     | With your own `style.css`              |
-| ------------------ | ----------------------- | -------------------------------------- |
-| `"auto"` (default) | the full default look   | **inert `--aio-*` variables only**     |
-| `"full"`           | the full default look   | the full default look, alongside yours |
-| `"none"`           | box-model baseline only | box-model baseline only                |
+| `ui.theme`           | With no `style.css`                | With your own `style.css`              |
+| -------------------- | ---------------------------------- | -------------------------------------- |
+| `"tokens"` (default) | **inert `--aio-*` variables only** | **inert `--aio-*` variables only**     |
+| `"auto"`             | the full default look              | **inert `--aio-*` variables only**     |
+| `"full"`             | the full default look              | the full default look, alongside yours |
+| `"none"`             | box-model baseline only            | box-model baseline only                |
 
 ```ts
 await aio.run({ ui: { theme: "none" } });
@@ -169,12 +186,11 @@ await aio.run({ ui: { theme: "none" } });
 
 `"none"` emits nothing but the box-model baseline (`box-sizing`,
 `body{margin:0}`), which is not part of the theme and never goes away. Reach for
-it when you want not even the variables — `"auto"` already gets the visual
-default out of your way the moment you write a stylesheet.
+it when you want not even the variables.
 
-Why the variables survive under `"auto"`: a custom property that nothing
-references renders nothing, so they cannot move a box or paint a pixel on their
-own. Keeping them means `ui.chrome: "themed"`'s title bar (which reads
+Why the variables survive by default: a custom property that nothing references
+renders nothing, so they cannot move a box or paint a pixel on their own.
+Keeping them means `ui.chrome: "themed"`'s title bar (which reads
 `var(--aio-…, fallback)`) stays coherent with the rest of your app, and you can
 reference a token deliberately if you want one.
 

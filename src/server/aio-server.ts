@@ -8,6 +8,7 @@ import { loadOrCreateCert, type TlsCert } from "./tls.ts";
 import { createServer } from "./server.ts";
 import { parseCli, VERSION } from "./aio-cli.ts";
 import type { ServerHandle } from "./server-types.ts";
+import type { UiTheme } from "./aio-types.ts";
 import { _getCallTimeouts, registerCall } from "../state/cell-impl.ts";
 import { createUDSListener, type UDSHandle } from "./uds.ts";
 import { flushAllUrgent } from "./broadcast-coalescer.ts";
@@ -125,7 +126,7 @@ export interface ServerSetupDeps<S, A> {
     viewport?: string | false; // AIO-423
     head?: string; // AIO-423
     chrome?: "standard" | "themed" | "none"; // desktop window frame
-    theme?: "auto" | "full" | "none"; // the default stylesheet
+    theme?: UiTheme; // how much of the default look the shell emits
   };
   title: string;
   config: TransportConfig;

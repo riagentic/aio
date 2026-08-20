@@ -8,6 +8,7 @@ import type { ServerHandle } from "./server-types.ts";
 import type { UDSHandle } from "./uds.ts";
 import type { TlsCert } from "./tls.ts";
 import type { AioUser } from "./aio.ts";
+import type { UiTheme } from "./aio-types.ts";
 import { VERSION } from "./aio-cli.ts";
 import { type BootExtras, bootLines, buildFacts } from "./boot-facts.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
@@ -106,7 +107,7 @@ export interface LifecycleDeps<S, A> {
     viewport?: string | false;
     head?: string;
     chrome?: "standard" | "themed" | "none";
-    theme?: "auto" | "full" | "none";
+    theme?: UiTheme;
   };
   keepServer: boolean | undefined;
   /** Library/test mode — no process-wide signal handlers (the same contract
