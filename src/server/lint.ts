@@ -1,5 +1,6 @@
 // Startup linter — validates config and src/ before running
 // Extracted from aio.ts. Checks state, config, App.tsx, imports, dependencies.
+import { UI_ENTRY } from "./app-files.ts";
 import { ESBUILD_SPEC } from "../build/esbuild-shared.ts";
 
 import { join } from "@std/path";
@@ -27,6 +28,11 @@ export async function lint(
   prod = false,
   headless = false,
   useElectron = true,
+  // THE ui-entry decider's value (`ui.entry`, default App.tsx). The boot check
+  // hardcoded "App.tsx", so an app that legitimately named another component
+  // failed its OWN boot lint — the framework's second decider for a fact the
+  // server already knows.
+  uiEntry = UI_ENTRY,
 ): Promise<Lint> {
   const r: Lint = { ok: [], warn: [], hint: [], fail: [] };
 
@@ -70,32 +76,32 @@ export async function lint(
 
   // Prod mode or headless: App.tsx not needed
   if (headless) {
-    r.ok.push("headless (no App.tsx)");
+    r.ok.push(`headless (no ${uiEntry})`);
   } else if (prod) {
     r.ok.push("prod");
   } else {
-    const appFile = join(baseDir, "App.tsx");
+    const appFile = join(baseDir, uiEntry);
     try {
       const src = await Deno.readTextFile(appFile);
       if (!src.includes("export default")) {
         r.warn.push(
-          "App.tsx has no `export default` — add it so the framework can mount your component",
+          `${uiEntry} has no \`export default\` — add it so the framework can mount your component`,
         );
       } else {
-        r.ok.push("App.tsx");
+        r.ok.push(uiEntry);
       }
       if (src.includes("createRoot")) {
         r.hint.push(
-          "App.tsx has createRoot — remove it, the framework handles mounting",
+          `${uiEntry} has createRoot — remove it, the framework handles mounting`,
         );
       }
       if (/import\s+React[\s,{]/.test(src)) {
         r.hint.push(
-          "App.tsx has `import React` — not needed, JSX transforms are automatic",
+          `${uiEntry} has \`import React\` — not needed, JSX transforms are automatic`,
         );
       }
     } catch {
-      r.fail.push(`App.tsx not found at ${appFile}`);
+      r.fail.push(`${uiEntry} not found at ${appFile}`);
       r.hint.push(
         "  create it: export default function App() { return <div>Hello</div> }",
       );

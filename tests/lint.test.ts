@@ -389,3 +389,40 @@ Deno.test("import map: a deno.jsonc-only app is told why its imports vanish", as
   assertEquals(all.includes("deno.jsonc"), true, all);
   assertEquals(all.includes("Rename it to deno.json"), true, all);
 });
+
+// The boot lint checked a HARDCODED App.tsx, so an app that legitimately named
+// its root component something else (`ui.entry`, honoured by the dev server and
+// — since rimote R-2 — by the build) failed its own boot check while the
+// server was about to serve the right file. One decider, checked here.
+Deno.test("lint: ui.entry decides which component must exist", async () => {
+  await withTmpDir(async (dir) => {
+    await Deno.writeTextFile(
+      join(dir, "Status.tsx"),
+      "export default function Status() { return <div/> }",
+    );
+    const ok = await lint(
+      { count: 0 },
+      { reduce: () => {}, execute: () => {} },
+      dir,
+      false,
+      false,
+      true,
+      "Status.tsx",
+    );
+    assertEquals(ok.fail.length, 0);
+    assertEquals(ok.ok.includes("Status.tsx"), true);
+
+    // …and the failure names the configured component, not App.tsx.
+    const bad = await lint(
+      { count: 0 },
+      { reduce: () => {}, execute: () => {} },
+      dir,
+      false,
+      false,
+      true,
+      "Missing.tsx",
+    );
+    assertEquals(bad.fail.length, 1);
+    assertEquals(bad.fail[0]!.startsWith("Missing.tsx not found at"), true);
+  });
+});

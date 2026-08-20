@@ -15,6 +15,7 @@ import { assert, assertEquals } from "@std/assert";
 import {
   _resetServerOnlyStatic,
   aioBrowserPlugin,
+  serverOnlyDynamic,
   serverOnlyStatic,
 } from "../src/build/esbuild-plugin.ts";
 
@@ -123,4 +124,42 @@ Deno.test("bundle gate: the DYNAMIC *.server.ts form stays the escape hatch", ()
   };
   assertEquals(r?.external, true, "externalized, exactly as before");
   assertEquals(Object.keys(serverOnlyStatic).length, 0);
+});
+
+// A STANDALONE APK has no Deno runtime (rimote R-13). The dynamic
+// `await import("./x.server.ts")` that is correct on every other target — a
+// cell method runs server-side, so the import deliberately stays out of the
+// browser graph — is, there, the half of the app that does the work silently
+// not shipping. rimote's agent (screenrecord, `wm size`, FFI) built to 3.2 MB,
+// printed BUILD SUCCESSFUL, installed, launched, rendered its panel, and every
+// switch did nothing; the Windows build of the same entry is 180 MB because it
+// carries a runtime. Discovering that after installing on a phone is the
+// expensive kind of failure.
+Deno.test("android: server-only reach is recorded separately from a static leak", () => {
+  _resetServerOnlyStatic();
+  const resolve = host();
+
+  // The sanctioned pattern: dynamic, from a method. NOT a static leak…
+  resolve("./link.server.ts", "dynamic-import", "/app/src/cell.ts");
+  assertEquals(
+    Object.keys(serverOnlyStatic).length,
+    0,
+    "dynamic is not a leak",
+  );
+  // …but it IS server-only REACH, which is what a standalone APK must refuse:
+  // there is no Deno runtime in a WebView to run the module behind it.
+  assertEquals(Object.keys(serverOnlyDynamic), ["./link.server.ts"]);
+  assert(serverOnlyDynamic["./link.server.ts"]!.has("/app/src/cell.ts"));
+
+  // A dynamic node: import counts the same way — same reason, same absence.
+  resolve("node:sqlite", "dynamic-import", "/app/src/db.ts");
+  assert(serverOnlyDynamic["node:sqlite"]!.has("/app/src/db.ts"));
+  assertEquals(Object.keys(serverOnlyStatic).length, 0);
+
+  // A STATIC one stays what it always was: a leak, on every target.
+  resolve("node:sqlite", "import-statement", "/app/src/cell.ts");
+  assert(serverOnlyStatic["node:sqlite"]!.has("/app/src/cell.ts"));
+
+  _resetServerOnlyStatic();
+  assertEquals(Object.keys(serverOnlyDynamic).length, 0, "reset clears both");
 });

@@ -864,6 +864,36 @@ Deno.test("realDistCandidates: never the compile VFS (Electron blank window)", (
   assertEquals(distCandidates(opts).slice(-real.length), real);
 });
 
+Deno.test("distCandidates: a NESTED entry still finds the embedded dist/", () => {
+  // rimote R-5: the two hardcoded guesses (`../dist`, `./dist`) assumed an
+  // entry exactly one level down. A relay at `src/server/app.ts` — one repo,
+  // three apps — probed `src/dist` and `src/server/dist`, missed the embedded
+  // copy, and the SHIPPED binary served the "Headless build — no browser UI"
+  // page. Dev was fine, the compile succeeded, and the failure arrived as a
+  // 503 the first time anyone opened the artifact.
+  const c = distCandidates({
+    mainModule: "file:///tmp/deno-compile-relay/app/src/server/app.ts",
+    cwd: "/elsewhere",
+    execDir: "/usr/local/bin",
+    moduleDir: null,
+  });
+  assert(
+    c.includes("/tmp/deno-compile-relay/app/dist"),
+    `the embedded dist/ must be a candidate; got: ${c.join(", ")}`,
+  );
+  // …and every level in between, so no depth is a special case.
+  assert(c.includes("/tmp/deno-compile-relay/app/src/dist"));
+  assert(c.includes("/tmp/deno-compile-relay/app/src/server/dist"));
+  // The walk stops at the filesystem root instead of looping.
+  assert(c.length < 20, `candidate list must stay bounded, got ${c.length}`);
+  // Real-filesystem probes still come last (Electron reads a real dist/).
+  assert(
+    c.indexOf("/elsewhere/dist") >
+      c.indexOf("/tmp/deno-compile-relay/app/dist"),
+    "entry-relative candidates must precede the filesystem ones",
+  );
+});
+
 Deno.test("distCandidates: survives a non-file mainModule, no dupes", () => {
   const c = distCandidates({
     mainModule: "https://example.com/app.ts",

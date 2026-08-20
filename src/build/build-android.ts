@@ -65,6 +65,18 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
     await Deno.writeTextFile(dest, content);
   }
 
+  // …then let the app overlay its own Android sources on top. See `_overlay`.
+  // Before placeholder substitution, so an overlaid manifest or build file
+  // still gets {{APPLICATION_ID}} and {{APP_NAME}} filled in like the
+  // template's own.
+  const overlaid = await _overlay(cfg.root, androidDir);
+  if (overlaid.length) {
+    console.log(
+      `[android] \u2713 overlay: ${overlaid.length} file(s) from android/`,
+    );
+    for (const f of overlaid) console.log(`[android]   \u00b7 ${f}`);
+  }
+
   // Derive application ID from THE APK label (see apkLabel /
   // androidApplicationId below) — dev:android derives the same id from the
   // APK's filename, so both must share the rule or drift.
@@ -174,6 +186,54 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
     doRelease,
   );
   Deno.exit(0);
+}
+
+/**
+ * Copy an app's own `android/` directory over the generated Gradle project.
+ *
+ * The APK aio generates is a WebView around a JS bundle, which is the whole app
+ * for anything that only needs a screen. It is not the whole app for anything
+ * that needs the DEVICE: screen capture is `MediaProjection`, input injection is
+ * an `AccessibilityService`, and neither has a JavaScript equivalent — there is
+ * no `getDisplayMedia` in an Android WebView and no way to dispatch a touch from
+ * one. Those apps are not asking for a different shell; they are asking to add a
+ * service and a permission to this one.
+ *
+ * So: files under `<app>/android/` land on the generated project at the same
+ * relative path, creating directories and replacing template files outright. A
+ * `AndroidManifest.xml` there replaces the generated manifest (keep the
+ * placeholders — they are substituted after this runs); Kotlin under
+ * `app/src/main/java/` is simply compiled with the rest.
+ *
+ * Every overlaid path is printed. A silent overlay is a build that quietly
+ * stopped being the app the template describes, and the first symptom would be
+ * a behaviour nobody could find the source of.
+ */
+async function _overlay(root: string, androidDir: string): Promise<string[]> {
+  const src = join(root, "android");
+  try {
+    if (!(await Deno.stat(src)).isDirectory) return [];
+  } catch {
+    return []; // no overlay — the overwhelmingly common case
+  }
+  const copied: string[] = [];
+  const walk = async (rel: string): Promise<void> => {
+    for await (const e of Deno.readDir(join(src, rel))) {
+      const childRel = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory) {
+        await walk(childRel);
+        continue;
+      }
+      if (!e.isFile) continue; // symlinks into a build tree are not portable
+      const dest = join(androidDir, childRel);
+      await Deno.mkdir(dirname(dest), { recursive: true });
+      await Deno.copyFile(join(src, childRel), dest);
+      copied.push(childRel);
+    }
+  };
+  await walk("");
+  copied.sort();
+  return copied;
 }
 
 export async function _writeConnectPage(
@@ -493,7 +553,8 @@ async function _runGradle(
     Deno.exit(1);
   }
   const label = apkLabel(cfg);
-  const apkDst = join(cfg.root, `${label}${built.suffix}.apk`);
+  await Deno.mkdir(cfg.outDir ?? cfg.root, { recursive: true });
+  const apkDst = join(cfg.outDir ?? cfg.root, `${label}${built.suffix}.apk`);
   await Deno.copyFile(join(outputsDir, built.file), apkDst);
   const apkStat = await Deno.stat(apkDst);
   const apkMb = (apkStat.size / 1024 / 1024).toFixed(1);

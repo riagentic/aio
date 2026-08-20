@@ -19,6 +19,7 @@ names themselves:
 │ android          │ APK, standalone (no server)                 │
 │ cli              │ headless binary + WS client API             │
 │ server           │ headless exposed server + systemd unit      │
+│ server-app       │ exposed server WITH its page + systemd unit │
 ├──────────────────┼─────────────────────────────────────────────┤
 │ electron-client  │ connect-page AppImage (no app code)         │
 │ android-client   │ client APK — connects to a server           │
@@ -46,9 +47,16 @@ set once and build it all with a single command:
 "build": {
   "targets": ["server", "electron-client", "android-client"],
   "out": "dist",
-  "server": "192.168.1.50:8000" // BAKED into every client artifact (see below)
+  "server": "192.168.1.50:8000", // BAKED into every client artifact (see below)
+  "ui": "App.tsx"                // the component every target bundles (default)
 }
 ```
+
+> **`build.ui` is the build's half of `ui.entry`.** The dev server reads
+> `ui.entry` from `aio.run()`; the bundler cannot (that is runtime code), so a
+> project that renames its root component declares it here too. Dev warns at
+> boot when the two disagree, and a prod server refuses a bundle whose stamp
+> does not match its `ui.entry` — the mismatch cannot reach a user silently.
 
 ```sh
 deno task build                 # builds every target in build.targets → dist/
@@ -105,17 +113,54 @@ dist/
   suffixed as if it were another build of the first.
 - **`platforms`** — an OS/arch list for this target alone, overriding
   `build.platforms`.
+- **`kind`** — what kind of target this is, when the key is a LABEL rather than
+  a target name. Without it the key must itself be a target name, which caps a
+  repo at one target of each kind.
+- **`ui`** — the component this target bundles, relative to its app dir
+  (default: `App.tsx`). The build-side twin of `ui.entry`; a compiled bundle
+  records what it was built from and the server refuses to serve one that
+  disagrees with the running config.
+
+### Two apps of the same kind
+
+Three apps in one repo — a relay and two desktop clients — is the shape
+[app architectures](../basics/app-architectures.md) recommends. Label each
+target freely and name its `kind`:
+
+```jsonc
+"build": {
+  "targets": {
+    "agent":   { "kind": "electron",   "entry": "src/agent/app.ts",   "name": "rimote-agent" },
+    "control": { "kind": "electron",   "entry": "src/control/app.ts", "name": "rimote-control" },
+    "relay":   { "kind": "server-app", "entry": "src/server/app.ts",  "name": "rimote-server" }
+  },
+  "out": "dist"
+}
+```
+
+The label is what you pass to `--targets=agent,relay`, what names the artifact
+group in the summary, and what the manifest records. A label that IS a target
+name (`"electron": {…}`) keeps meaning exactly what it always did.
 
 Both spellings behave identically otherwise — `["server", "electron"]` is the
 object form with no overrides, and `--targets=server` still selects a subset
 without discarding its declared entry.
 
-> Chaining single-target builds by hand
-> (`build.ts --compile && build.ts
-> --electron`) does **not** work: each build
-> cleans the shared `dist/`, so the first binary is gone by the time the second
-> finishes. That is what the orchestrator is for — it moves each target's
-> artifacts out to staging before the next build starts.
+> `dist/` is bundle STAGING, not a destination: it is embedded into the binary
+> wholesale (`deno compile --include dist/`) and every build wipes what it does
+> not own there. Chaining single-target builds that all write into it loses the
+> earlier artifacts.
+>
+> Give each build its own destination instead — `build.ts` takes **`--out=`**:
+>
+> ```sh
+> deno run -A build.ts --compile --service --remote --entry=src/server/app.ts --out=release/relay
+> deno run -A build.ts --compile --electron --entry=src/agent/app.ts  --name=agent --out=release/agent
+> ```
+>
+> `--out=` inside `dist/` is refused, for the reason above. `deno task build`
+> (the fleet build) does this staging for you — reach for the flag only when you
+> are orchestrating builds yourself.
 
 ## `build.server` — the address a shipped client starts with
 

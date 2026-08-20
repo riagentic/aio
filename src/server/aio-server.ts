@@ -108,6 +108,13 @@ export interface ServerSetupDeps<S, A> {
    *  cookie `secure` flag, the discovery record's `tls:`), so this is one
    *  gate — plus a loud warning, because the wire becomes readable. */
   cliNoTls?: boolean;
+  /** WHERE the opt-out came from, so the warning can name what was actually
+   *  written. `--no-tls` and `tls: false` resolve to ONE decider (`cliNoTls`),
+   *  which loses the provenance — and an author who wrote `tls: false` in
+   *  deno.json was then told to "Drop --no-tls", a flag not in their
+   *  invocation. A message naming a mechanism the reader did not use costs
+   *  them a search. */
+  noTlsSource?: "flag" | "config";
   cliTransport?: "uds" | "ws" | "auto";
   // UI
   ui: {
@@ -118,7 +125,7 @@ export interface ServerSetupDeps<S, A> {
     viewport?: string | false; // AIO-423
     head?: string; // AIO-423
     chrome?: "standard" | "themed" | "none"; // desktop window frame
-    theme?: "auto" | "none"; // the default stylesheet
+    theme?: "auto" | "full" | "none"; // the default stylesheet
   };
   title: string;
   config: TransportConfig;
@@ -190,6 +197,36 @@ export interface ServerSetupResult {
 }
 
 /** Resolve TLS, create HTTP server, wire sync broadcast, set up UDS & signal handlers */
+/**
+ * What to say when TLS is off, named for HOW it was turned off.
+ *
+ * Pure, so both wordings are a unit test rather than a claim about a branch
+ * that runs only on a real exposed boot. `--no-tls` and `tls: false` reach the
+ * server as one decider; only the MESSAGE needs to know which was written,
+ * because an instruction naming a mechanism the reader did not use sends them
+ * hunting for a flag that is not in their invocation (rimote R-7 follow-up).
+ */
+export function _noTlsWarning(
+  expose: boolean,
+  source: "flag" | "config",
+): string {
+  const said = source === "flag" ? "--no-tls" : "`tls: false`";
+  const undo = source === "flag" ? "Drop --no-tls" : 'Set `tls: "auto"`';
+  if (!expose) {
+    // Something that does nothing must say so. Loopback is plain HTTP either
+    // way, so there is no wrong OUTCOME here — but someone who set it believes
+    // they changed something, and the next step in that belief is assuming
+    // --expose would also be plaintext-by-default. Cheap to say, expensive to
+    // discover.
+    return `tls: ${said} has no effect without --expose — a loopback server ` +
+      `is plain HTTP already. It only matters when exposing to a network.`;
+  }
+  return `tls: ${said} — serving on 0.0.0.0 over PLAIN HTTP/WS. State, auth ` +
+    `tokens and every action are readable and forgeable by anything on this ` +
+    `network. Sound ONLY if the payload is already end-to-end encrypted or a ` +
+    `TLS-terminating proxy fronts this port. ${undo} for HTTPS.`;
+}
+
 export async function setupTransport<S, A>(
   deps: ServerSetupDeps<S, A>,
 ): Promise<ServerSetupResult> {
@@ -209,6 +246,7 @@ export async function setupTransport<S, A>(
     cliCert,
     cliKey,
     cliNoTls,
+    noTlsSource,
     cliTransport,
     ui,
     title,
@@ -261,24 +299,8 @@ export async function setupTransport<S, A>(
   // warning: every downstream consumer (ws:// vs wss://, the cookie `secure`
   // flag, the discovery record's `tls:`) already reads `tlsCert` as nullable.
   let tlsCert: TlsCert | null = null;
-  if (expose && cliNoTls) {
-    log.warn(
-      `tls: --no-tls — serving on 0.0.0.0 over PLAIN HTTP/WS. State, auth ` +
-        `tokens and every action are readable and forgeable by anything on ` +
-        `this network. Sound ONLY if the payload is already end-to-end ` +
-        `encrypted or a TLS-terminating proxy fronts this port. Drop ` +
-        `--no-tls for HTTPS.`,
-    );
-  } else if (!expose && cliNoTls) {
-    // A flag that does nothing must say so. Loopback is plain HTTP either way,
-    // so there is no wrong OUTCOME here — but someone passing --no-tls believes
-    // they changed something, and the next step in that belief is assuming
-    // --expose would also be plaintext-by-default. Cheap to say, expensive to
-    // discover.
-    log.warn(
-      `tls: --no-tls has no effect without --expose — a loopback server is ` +
-        `plain HTTP already. The flag only matters when exposing to a network.`,
-    );
+  if (cliNoTls) {
+    log.warn(_noTlsWarning(expose, noTlsSource ?? "flag"));
   } else if (expose) {
     // Tier ① — a private key belongs in the backup unit, and in ONE place
     // whether or not this is a compiled binary (it used to be ./.aio-tls in dev
@@ -297,8 +319,11 @@ export async function setupTransport<S, A>(
             `non-browser clients (curl, deno/node fetch, the aio CLI client) ` +
             `REFUSE the connection outright unless they trust this exact ` +
             `cert. Hand it out with \`am profile --app=${appId}\`, point a client ` +
-            `at it with DENO_CERT=${tlsCert.certPath} (curl: --cacert), or ` +
-            `pass --tls-cert=/path.pem --tls-key=/path.pem for a CA-signed one`,
+            `at it with DENO_CERT=${tlsCert.certPath} (curl: --cacert), ` +
+            `serve a real cert with \`tls: { cert, key }\`, or drop TLS with ` +
+            `\`tls: false\` / --no-tls if a proxy or your own encryption ` +
+            `covers the wire (--tls-cert=/path.pem --tls-key=/path.pem is the ` +
+            `flag spelling of the cert pair)`,
         );
       } else {
         log.info(`tls: using cert ${tlsCert.certPath}`);

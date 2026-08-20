@@ -1,4 +1,5 @@
 // Runtime helpers extracted from _run() — config resolution, memoization, vitals, app object
+import { DENO_JSON_NAMES, parseDenoJson } from "./deno-json.ts";
 import type { AioApp, AioConfig, AioUser } from "./aio-types.ts";
 import type { ReportErrorOpts } from "../diagnostics/error.ts";
 import {
@@ -471,14 +472,32 @@ export function appDenoJson(): Record<string, unknown> | undefined {
   try {
     const main = new URL(Deno.mainModule);
     for (const up of ["./", "../", "../../", "../../../", "../../../../"]) {
-      try {
-        const parsed = JSON.parse(
-          Deno.readTextFileSync(new URL(`${up}deno.json`, main)),
-        );
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          return parsed as Record<string, unknown>;
+      for (const name of DENO_JSON_NAMES) {
+        const url = new URL(`${up}${name}`, main);
+        let text: string;
+        try {
+          text = Deno.readTextFileSync(url);
+        } catch {
+          continue; // nothing at this level — keep walking up
         }
-      } catch { /* no deno.json at this level — keep walking up */ }
+        // The file EXISTS. A parse failure here used to be swallowed by the
+        // same catch as "no file", so a `//` comment — legal in deno.json, and
+        // the natural place to explain an import alias — made the runtime walk
+        // silently PAST its own app's config and adopt a parent's, or none:
+        // wrong title, wrong version, and the pin-drift warning never firing.
+        // Comments now parse; anything still broken is said out loud and the
+        // walk continues, because an unrelated malformed file in some ancestor
+        // directory is not this app's problem to die on.
+        try {
+          return parseDenoJson(text, url.pathname);
+        } catch (e) {
+          log.warn(
+            `config: ignoring ${url.pathname} — ${
+              e instanceof Error ? e.message.split("\n")[0] : String(e)
+            }`,
+          );
+        }
+      }
     }
   } catch { /* no usable main module (REPL, eval) */ }
   return undefined;

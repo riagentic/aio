@@ -1,5 +1,6 @@
 // HTTP + WebSocket server with live TSX transpilation (dev) or static serving (prod)
 // Thin orchestrator — delegates to server-*.ts modules
+import { UI_ENTRY } from "./app-files.ts";
 import { enc } from "../protocol/envelope.ts";
 import { join, resolve } from "@std/path";
 import { DEFAULT_SYNC_INTERVAL_MS } from "./aio.ts";
@@ -26,6 +27,7 @@ export {
   TEXT_EXTENSIONS,
 } from "./server-html.ts";
 import { hasVendorImmer } from "./server-vendor.ts";
+import { appDenoJson } from "./aio-run-helpers.ts";
 import { PIN_TTL_MS, verifyPin } from "./pairing.ts";
 export type { ServerConfig, ServerHandle } from "./server-types.ts";
 export { _timingSafeEqual } from "./server-auth.ts";
@@ -372,13 +374,29 @@ export function createServer(config: ServerConfig): ServerHandle {
   const syncIntervalMs = config.syncIntervalMs ?? DEFAULT_SYNC_INTERVAL_MS;
 
   // ── Dev startup checks ──
-  const uiEntry = config.uiEntry ?? "App.tsx";
+  const uiEntry = config.uiEntry ?? UI_ENTRY;
   if (!prod) {
     debug(
       `ui: serving ${uiEntry}${
         config.uiEntry ? "" : " (default convention — set ui.entry to override)"
       }`,
     );
+    // `ui.entry` (runtime) and `build.ui` (deno.json) name the same component
+    // to two different readers — the dev server and the bundler. Only the dev
+    // server can see both, so it says so HERE, at boot, instead of letting the
+    // compiled app render a different component than dev did. (The prod server
+    // refuses that bundle outright; this is the same fact, caught days
+    // earlier. Observe-only, so dev and prod still behave identically.)
+    const declaredUi = (appDenoJson()?.build as { ui?: string } | undefined)
+      ?.ui ?? UI_ENTRY;
+    if (declaredUi !== uiEntry) {
+      log.warn(
+        `ui.entry is ${uiEntry} but deno.json build.ui is ${declaredUi} — dev ` +
+          `serves ${uiEntry} and a build would bundle ${declaredUi}. Set ` +
+          `"build": { "ui": "${uiEntry}" } in deno.json so the compiled app ` +
+          `renders what you see here (the prod server refuses the mismatch).`,
+      );
+    }
   }
   const graphValidation = !prod
     ? startGraphValidation(absBaseDir, importMapObj, debug, uiEntry)

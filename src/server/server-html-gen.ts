@@ -1,8 +1,9 @@
 // HTML shell generation — dispatches to prod, AIO dev, or React dev templates.
 
+import { UI_ENTRY } from "./app-files.ts";
 import type { RenderBudget } from "../vitals/types.ts";
 import type { UiConfig } from "./aio-types.ts";
-import { appThemeCss } from "../build/app-theme.ts";
+import { appThemeCss, appThemeTokensCss } from "../build/app-theme.ts";
 
 /** `ui.chrome` — how much of the desktop window the OS draws. */
 export type UiChrome = NonNullable<UiConfig["chrome"]>;
@@ -154,9 +155,26 @@ function headContent(
   // The default look (ui.theme). Inlined rather than linked: it is small, it
   // must not cost a round trip before first paint, and the android shell has
   // no server to fetch it from — one emission point, every target.
-  const themeStyle = theme === "none"
-    ? ""
-    : `\n  <style>${appThemeCss(themeName || title)}</style>`;
+  // THE step-aside rule. An app that ships its own stylesheet owns the whole
+  // visual stage: aio's look would otherwise apply wherever the app's CSS
+  // happens to say nothing (a cascade LAYER only wins conflicts — it cannot
+  // stop a declaration nobody competes with), which is how `:where(main)
+  // {max-width;margin-inline;padding}` re-laid-out apps whose <main> was a
+  // full-bleed flex container, and how `.row`/`.grid`/`.card` collided with
+  // class names every app already uses. Worse than the layout damage is the
+  // confusion: "I never wrote this rule — why is it not the browser default?"
+  //
+  // So `"auto"` keeps only the INERT half once app CSS exists — the `--aio-*`
+  // custom properties, which paint nothing unless something references them
+  // (the `chrome: "themed"` title bar does, via `var(--aio-…, fallback)`).
+  // `"full"` is the explicit opt-in for an app that WANTS the default look
+  // alongside its own CSS; typing it removes the confusion by construction.
+  const themeCss = theme === "none"
+    ? null
+    : theme === "full" || !hasCSS
+    ? appThemeCss(themeName || title)
+    : appThemeTokensCss(themeName || title);
+  const themeStyle = themeCss === null ? "" : `\n  <style>${themeCss}</style>`;
   const cssLink = hasCSS
     ? `\n  <link rel="stylesheet" href="${assetBase}style.css">`
     : "";
@@ -218,7 +236,7 @@ export function generateHTML(
   width?: number,
   height?: number,
   renderBudget?: RenderBudget,
-  uiEntry = "App.tsx", // AIO-8.1: convention default, override via ui.entry
+  uiEntry = UI_ENTRY, // convention default, override via ui.entry
   viewport?: string | false, // ui.viewport override (false = opt out)
   headExtra?: string, // ui.head — verbatim <head> content
   syncCells?: string[], // localFirst: cells the client runs locally + syncs
@@ -321,7 +339,7 @@ ${head}
 function aioDevHTML(
   head: string,
   importMap: string,
-  uiEntry = "App.tsx",
+  uiEntry = UI_ENTRY,
 ): string {
   const entry = _safeUiEntry(uiEntry);
   // The client's dev flag. Every dev-only tripwire in the isomorphic core —

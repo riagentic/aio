@@ -2,6 +2,7 @@
  * @module
  * Build compile — withDevExcluded symlink manager + deno compile step + systemd service file.
  */
+import { readDenoJson, readDenoJsonSync } from "../server/deno-json.ts";
 import { dirname, fromFileUrl, isAbsolute, join, relative } from "@std/path";
 import { artifactName } from "./platforms.ts";
 import {
@@ -177,7 +178,7 @@ export async function assetIncludes(root: string): Promise<string[]> {
   //    `deno compile` fail hard — this closes the one silent case.)
   let decl: unknown;
   try {
-    const cfg = JSON.parse(await Deno.readTextFile(join(root, "deno.json")));
+    const cfg = (await readDenoJson(root))?.config ?? {};
     decl = (cfg as { compile?: { include?: unknown } })?.compile?.include;
   } catch { /* no deno.json / unparsable — nothing declared */ }
   if (Array.isArray(decl)) {
@@ -247,9 +248,7 @@ export async function v8FlagsArg(root: string): Promise<string[]> {
   let decl: unknown;
   let misplaced = false;
   try {
-    const cfg = JSON.parse(
-      await Deno.readTextFile(join(root, "deno.json")),
-    ) as {
+    const cfg = ((await readDenoJson(root))?.config ?? {}) as {
       build?: { v8Flags?: unknown };
       compile?: { v8Flags?: unknown };
     };
@@ -326,7 +325,7 @@ export async function v8FlagsArg(root: string): Promise<string[]> {
 /** `memory.maxHeap` from deno.json, when the app states one. */
 function declaredMaxHeap(root: string): string | number | undefined {
   try {
-    const cfg = JSON.parse(Deno.readTextFileSync(join(root, "deno.json")));
+    const cfg = readDenoJsonSync(root)?.config ?? {};
     return (cfg as { memory?: { maxHeap?: string | number } })?.memory?.maxHeap;
   } catch {
     return undefined; // no deno.json — the rule's default applies
@@ -379,7 +378,16 @@ export async function runDenoCompile(cfg: BuildConfig): Promise<boolean> {
   const outName = doElectron
     ? binaryName
     : artifactName(binaryName, cfg.platform);
-  const compileTarget = doElectron ? join(dist, "AppDir", binaryName) : outName;
+  // `--out=` (else the project root) is THE artifact destination — dist/ is
+  // staging that every build wipes and embeds wholesale, so it is never where
+  // a release lands. Orchestrating several single-target builds needs one
+  // directory per app; without this, callers staged into dist/ and the next
+  // build deleted it (rimote R-4).
+  const outDir = cfg.outDir ?? root;
+  const compileTarget = doElectron
+    ? join(dist, "AppDir", binaryName)
+    : join(outDir, outName);
+  if (!doElectron) await Deno.mkdir(outDir, { recursive: true });
   if (cfg.targetTriple) {
     console.log(
       `[compile] cross-compiling for ${cfg.platform} (${cfg.targetTriple})`,
@@ -452,7 +460,12 @@ export async function writeServiceFile(cfg: BuildConfig): Promise<void> {
   const { binaryName, appTitle, doRemote, doHeadless } = cfg;
   const user = Deno.env.get("USER") ?? "root";
   const home = Deno.env.get("HOME") ?? `/home/${user}`;
-  const serviceFile = `${binaryName}.service`;
+  // `?? "."` keeps a hand-built config (a test, a custom script) writing into
+  // the cwd exactly as it did before --out= existed.
+  const serviceFile = join(
+    cfg.outDir ?? cfg.root ?? ".",
+    `${binaryName}.service`,
+  );
   const execFlags = serviceExecFlags({ doRemote, doHeadless });
   // systemd units are line-oriented: a newline in the title starts a new
   // DIRECTIVE. `"title": "My App\nExecStart=/bin/sh -c '…'\nUser=root"` in

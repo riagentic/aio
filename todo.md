@@ -14,6 +14,56 @@ tracks only what remains.
 
 ---
 
+## From llama.master (alpha55/alpha61 field report, 8/10) — open
+
+Asks 1, 2 and 4 are done (see `review/resolved.md`). The rest, with the reason
+each is worth doing rather than a line in a changelog:
+
+- **`am doctor`: "running aio differs from `dep/aio` on disk"** (ask 3). A live
+  process holds the modules it loaded at boot, so a symlinked checkout can move
+  underneath it — which cost most of one diagnosis. Cheap shape: compare the
+  newest mtime under `dep/aio/src` against the process start time.
+- **Append-delta broadcasts for growing values** (ask 5). A streamed reply is a
+  string that grows; rewriting it every 60 ms is quadratic in the reply and
+  doubled per window — measured at a sustained 33 broadcasts/sec against aio's
+  own threshold of 30. The app hand-rolled byte-rate flush pacing. This is the
+  same granularity debt `quant` and `risoto` pay; three consumers now.
+- **`own(resourceId)` so effect displacement is unrepresentable** (ask 6).
+  `own.set(key, …)` stops whatever is running NOW, not the process the effect
+  was created for: after a crash the next Start came up and was SIGTERMed a
+  moment later. The remedy (key by resource identity) is documented advice, and
+  the API still makes the wrong thing the natural thing.
+- **Codemods for default flips** (ask 7). `transaction: true` by default
+  (alpha52) is carried in this app as an explicit `transaction: false` on every
+  cell. When a default must flip, ship `aio migrate`, not a changelog line.
+- **An options object for `generateHTML`-shaped APIs** (ask 8). Sixteen
+  positional arguments, and this session added two of them. The codebase already
+  knows the cost — `appShell()` exists because two hand-maintained calls
+  diverged once.
+- **A sanctioned workspace share for multi-app repos** (ask 9). Symlinks out of
+  the app root are refused by static serving (correctly), so the repo generates
+  `client/src/shared/` by copy and polices it with a test.
+- **Strict mode: refuse boot on unmigrated shape drift** (ask 10). A permanent
+  warning is a weaker instrument than a refusal.
+
+## From rimote (alpha61 field report, 8/10) — open
+
+Everything R-1..R-9 asked for is implemented (see `review/resolved.md`). What
+the report surfaced but did NOT ask for, kept honest here:
+
+- **A cross-target orchestration recipe worth documenting.** `--out=` + labelled
+  targets delete rimote's 260-line orchestrator, but nothing in `docs/` walks a
+  three-app repo end to end (dev tasks, per-app data dirs, one relay + two
+  desktop clients talking to it). The pieces exist; the worked example does not.
+- **`am` does not know about labelled targets.** `am create` still scaffolds one
+  app per directory, and `am` has no verb for "the three apps in this repo".
+  Nothing is broken — it just means a multi-app repo is managed by hand.
+- **Stale-capture detection is per-invocation, by design.** A reference that
+  escapes a method (stored in a module-level variable, closed over by a
+  callback) is not tracked: the ledger dies with the invocation. Escaping a live
+  proxy is already outside the contract, but it is the one hole in R-1's fix and
+  worth a rule in `aiol` rather than a runtime cost on every read.
+
 ## Shipped
 
 - **Phase A (alphas)** — A1 public-surface audit, A2 API-snapshot gate, A3 WS

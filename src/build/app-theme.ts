@@ -89,6 +89,44 @@ function accentInk(hue: number, bgLum: number, dark: boolean): string {
 }
 
 /** The default stylesheet for `name`, as one `@layer aio { … }` block. */
+/** The theme's INERT half: the `--aio-*` custom properties (light + dark), and
+ *  nothing that paints or sizes anything.
+ *
+ *  A custom property nothing references renders nothing, which is what makes
+ *  this safe to emit next to an app's own stylesheet: it cannot move a box or
+ *  repaint a pixel on its own. It is what `ui.theme: "auto"` keeps once the
+ *  app brings its own CSS — so `ui.chrome: "themed"`'s title bar (which reads
+ *  `var(--aio-…, fallback)`) stays coherent, and an app can reference a token
+ *  deliberately, while every VISUAL default steps aside. */
+export function appThemeTokensCss(name: string): string {
+  return sliceTokens(appThemeCss(name));
+}
+
+/** The `:root` blocks of a theme stylesheet — everything up to the first
+ *  visual rule, which is marked by the `canvas` banner. Derived from the ONE
+ *  stylesheet rather than duplicated, so the two can never drift into two
+ *  palettes. */
+function sliceTokens(css: string): string {
+  const cut = css.indexOf(TOKENS_END);
+  // No marker (someone edited the banner out) → keep the variables ONLY if we
+  // can prove where they end. Falling back to the whole sheet would silently
+  // restyle every app that asked for tokens; emitting nothing loses the
+  // palette the title bar reads. Refuse loudly instead: this is a build-time
+  // invariant of a file in this repo, not a runtime condition.
+  if (cut === -1) {
+    throw new Error(
+      "[aio] app-theme.ts: the token/visual boundary marker is gone — " +
+        `appThemeTokensCss cannot tell the inert half from the visual one. ` +
+        `Restore the "${TOKENS_END.trim()}" banner.`,
+    );
+  }
+  return css.slice(0, cut).trimEnd() + "\n}\n";
+}
+
+/** The banner that separates the inert `:root` tokens from the first rule that
+ *  paints. Load-bearing — {@linkcode sliceTokens} cuts here. */
+const TOKENS_END = "/* ── canvas ";
+
 export function appThemeCss(name: string): string {
   const hue = appHue(name);
   const { accent, onAccent } = accentFill(hue);

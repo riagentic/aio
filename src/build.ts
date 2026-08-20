@@ -12,6 +12,7 @@
  * await build(); // config from CLI flags + deno.json, like the script form
  * ```
  */
+import { readDenoJson } from "./server/deno-json.ts";
 import { join } from "@std/path";
 import { type BuildConfig, loadBuildConfig } from "./build/build-config.ts";
 import { appDirs, installRoot } from "./server/app-dirs.ts";
@@ -49,9 +50,7 @@ export async function build(cfg?: BuildConfig): Promise<void> {
   const skipsBundle = doCli || cfg.doHeadless || doClient ||
     (doAndroid && cfg.doRemote);
   if (!skipsBundle) {
-    const mainConfig = JSON.parse(
-      await Deno.readTextFile(join(root, "deno.json")),
-    );
+    const mainConfig = (await readDenoJson(root))?.config ?? {};
     await runBundle(cfg, mainConfig);
   } else if (doCompile && !doCli && !doClient && !doAndroid) {
     // This target BUILT no bundle but still packages one: `runDenoCompile`
@@ -59,9 +58,7 @@ export async function build(cfg?: BuildConfig): Promise<void> {
     // whatever is in there. Verify it is the shape and the version this build
     // is packaging (and not stale) — the stamp used to be read only by the
     // path that rebuilds, never by the path that ships.
-    const mainConfig = JSON.parse(
-      await Deno.readTextFile(join(root, "deno.json")),
-    );
+    const mainConfig = (await readDenoJson(root))?.config ?? {};
     await ensureEmbeddedBundle(cfg, mainConfig);
   }
 
@@ -86,6 +83,12 @@ export async function build(cfg?: BuildConfig): Promise<void> {
   }
 
   // ── Clean dist/ before compile ───────────────────────────────────────────
+  // dist/ is embedded WHOLESALE (`deno compile --include dist/`), so anything
+  // left here ships inside the binary — the clean cannot be narrowed to "files
+  // this build writes" without shipping the previous target's leftovers. That
+  // is why dist/ is staging and never a destination: `--out=` (default: the
+  // project root) is where artifacts land, and loadBuildConfig refuses an
+  // --out inside dist/ (rimote R-4).
   try {
     for await (const entry of Deno.readDir(dist)) {
       if (

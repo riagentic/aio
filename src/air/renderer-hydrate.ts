@@ -29,7 +29,7 @@ import {
   Suspense,
   SVG_TAGS,
 } from "./vdom.ts";
-import { _registerLazyListeners } from "./vdom-create.ts";
+import { _registerLazyListeners, nullSlot } from "./vdom-create.ts";
 import { _cleanupActions } from "./vdom-helpers.ts";
 import { applyChildDependentProps } from "./vdom-props.ts";
 import { _devWarn } from "./vdom-types.ts";
@@ -233,12 +233,13 @@ export function _hydrateNode(
       ctx.hooks?.abortComponent?.(vnode, hookState);
       throw e;
     }
+    // SSR already emits `<!---->` for a null slot (vdom-ssr.ts), so hydration
+    // must CONSUME that comment rather than skip it — otherwise the client
+    // rebuilt the tree one node out of step and a null-first component moved
+    // on its first re-render (rimote R-10).
+    if (rendered == null) rendered = nullSlot();
     vnode._rendered = rendered;
     ctx.hooks?.afterComponent(vnode, rendered, hookState);
-    if (rendered == null) {
-      ctx.hooks?.afterSubtree?.(vnode);
-      return 0;
-    }
     // `finally`, like the other two commit paths (vdom-render.ts:134,
     // vdom-diff.ts:340). Without it a throw from the subtree — a lazy's
     // `_LAZY_PENDING`, or a component error the boundary below catches — skipped

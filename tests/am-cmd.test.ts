@@ -923,6 +923,30 @@ Deno.test("declaredTargets reads both spellings, and neither invents targets", (
     declaredTargets({ build: { targets: { server: {}, "cli-client": {} } } }),
     ["server", "cli-client"],
   );
+  // A LABELLED target (one repo, two Electron apps) declares its kind — the
+  // label is a name for the build, not a target name, and reading it as one
+  // reported every labelled target as unknown.
+  assertEquals(
+    declaredTargets({
+      build: {
+        targets: {
+          agent: { kind: "electron", entry: "src/agent/app.ts" },
+          control: { kind: "electron", entry: "src/control/app.ts" },
+          relay: { kind: "server-app", entry: "src/server/app.ts" },
+        },
+      },
+    }),
+    ["electron", "server-app"],
+    "two labels of one kind collapse to that kind; the label is not a target",
+  );
+  assertEquals(
+    tasksForTargets(standardTasks(true, "electron"), [
+      "electron",
+      "server-app",
+    ]).unknown,
+    [],
+    "both kinds are real targets with standard tasks",
+  );
   assertEquals(declaredTargets({}), []);
   assertEquals(declaredTargets(null), []);
   assertEquals(declaredTargets({ build: { targets: [1, "", "  browser "] } }), [

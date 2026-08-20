@@ -17,7 +17,7 @@ export type ShellConfig = {
   /** ui.theme + the identity its accent comes from — without these the
    *  packaged app renders unstyled where dev renders themed, which is the
    *  exact shell-divergence class this whole file exists to prevent. */
-  theme?: "auto" | "none";
+  theme?: "auto" | "full" | "none";
   themeName?: string;
 };
 

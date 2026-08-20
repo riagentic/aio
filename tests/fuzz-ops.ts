@@ -3,6 +3,12 @@
 // and `transaction-differential` (no transaction vs snapshot vs serializable)
 // can never drift into testing different languages. Adding a proxy capability
 // means adding a kind HERE, and both fuzzers exercise it the same day.
+//
+// ONE forbidden shape: an op must never capture a nested reference, overwrite
+// its container, and then use the reference — the live proxy THROWS there by
+// design (stale-capture detection, rimote R-1) while the sync draft keeps the
+// old object. That deliberate divergence is pinned in
+// tests/proxy-stale-capture.test.ts, not here.
 
 export type Data = {
   a: number;

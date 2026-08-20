@@ -59,7 +59,11 @@ export async function buildCli(cfg: BuildConfig): Promise<void> {
   // produced another host binary under the host's name — two identical files
   // presented as two platforms.
   const cliBase = doRemote ? `${binaryName}-client` : binaryName;
-  const cliTarget = artifactName(cliBase, cfg.platform);
+  const cliTarget = join(
+    cfg.outDir ?? root,
+    artifactName(cliBase, cfg.platform),
+  );
+  await Deno.mkdir(cfg.outDir ?? root, { recursive: true });
   console.log(
     `[cli] compiling ${cliEntry} → ${cliTarget}${
       cfg.targetTriple ? ` (${cfg.platform}, ${cfg.targetTriple})` : ""

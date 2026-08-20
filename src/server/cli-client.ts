@@ -402,11 +402,23 @@ export function connectCli<S>(
       ws = null;
       if (closed) return;
       if (!wasConnected && retry === 2) {
+        // A `wss://` dial that NEVER opened is, more often than not, the
+        // self-signed cert an exposed aio server generates: Deno's WebSocket
+        // has no API to pass a CA, so the connection dies before any protocol
+        // frame and the generic "check the server is running" line sends
+        // people to look at the wrong thing (rimote R-7). DENO_CERT is read
+        // at process start, so this can only be said, not fixed from here.
+        const tlsHint = proto === "wss:"
+          ? `\n  If the server uses aio's self-signed cert, this client cannot ` +
+            `trust it after start: relaunch with DENO_CERT=<cert.pem> (get it ` +
+            `with \`am profile --app=<appId>\`), or serve a real cert ` +
+            `(tls: { cert, key }) / plain HTTP (tls: false) on the server.`
+          : "";
         log.error(
           "cli",
           `cannot reach ${wsUrl}${
             ev.code === 1008 ? ` (${ev.reason || "unauthorized"})` : ""
-          } — check the server is running and the URL/token match its share link (still retrying)`,
+          } — check the server is running and the URL/token match its share link (still retrying)${tlsHint}`,
         );
       }
       // Exponential backoff: 1s → 2s → 4s → 8s max, ±20% jitter (shared)

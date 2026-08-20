@@ -263,6 +263,16 @@ const VIOLATIONS: Case[] = [
     expect: 'convention is "src/app.ts"',
   },
   {
+    // Declared and NOT on disk is the other half: a different, worse fact than
+    // "no entry point", and the message must say which.
+    name: "a declared entry that is missing names itself",
+    files: app({
+      "src/app.ts": null,
+      "deno.json": denoJson({ entry: "src/server/app.ts" }),
+    }),
+    expect: "declared in deno.json but not found: src/server/app.ts",
+  },
+  {
     name: "App.tsx without export default",
     files: app({ "src/App.tsx": `export function App() { return <div/>; }\n` }),
     expect: "missing `export default`",
@@ -1120,6 +1130,54 @@ Deno.test("aiol: every report() site in checks.ts has a fixture", () => {
 type Clean = { name: string; files: Record<string, string>; forbid: string };
 
 const LEGAL: Clean[] = [
+  {
+    // The object form of `build.targets` used to CRASH the linter here
+    // ("uiTargets.some is not a function") — the check read only the array
+    // spelling. A linter that dies on a documented layout is worse than one
+    // that is merely wrong about it.
+    name: "object-form build.targets does not crash the UI-target check",
+    forbid: "no target builds a UI",
+    files: app({
+      "deno.json": denoJson({
+        build: {
+          targets: {
+            agent: { kind: "electron", entry: "src/app.ts" },
+          },
+        },
+        tasks: { dev: "deno run -A src/app.ts", test: "deno test -A tests/" },
+      }),
+    }),
+  },
+  {
+    // rimote R-8: one repo, three apps (a relay + two desktop clients). The
+    // entries are declared in deno.json; warning "no entry point found
+    // (src/app.ts)" on every lint of a layout the docs RECOMMEND is how a
+    // linter trains people to ignore it.
+    name: "a declared `entry` is an entry point",
+    forbid: "no entry point found",
+    files: app({
+      "src/app.ts": null,
+      "deno.json": denoJson({ entry: "src/server/app.ts" }),
+      "src/server/app.ts": APP,
+    }),
+  },
+  {
+    name: "a build.targets entry is an entry point",
+    forbid: "no entry point found",
+    files: app({
+      "src/app.ts": null,
+      "deno.json": denoJson({
+        build: {
+          targets: {
+            relay: { kind: "server-app", entry: "src/server/app.ts" },
+            agent: { kind: "electron", entry: "src/agent/app.ts" },
+          },
+        },
+      }),
+      "src/server/app.ts": APP,
+      "src/agent/app.ts": APP,
+    }),
+  },
   {
     name: "a worker cell CALLING a peer method is not a peer READ",
     forbid: "has worker: true and",

@@ -178,7 +178,12 @@ export function renderToString(
           ? vnode.children
           : (vnode.props.children ?? vnode.children),
       });
-      return renderToString(rendered);
+      // Nothing to render is still a POSITION, on the server exactly as on the
+      // client: `renderToString(null)` returns "", which would ship markup one
+      // node short of what the client builds — so hydration adopts the wrong
+      // node and a null-first component MOVES on its first re-render
+      // (rimote R-10). The placeholder makes the two agree.
+      return rendered == null ? "<!---->" : renderToString(rendered);
     }
 
     // Null placeholder — comment node in HTML (AIO-107)

@@ -10,10 +10,21 @@ await aio.run({ appId: "notekeeper" });
 // → a themed app. No style.css anywhere in the project.
 ```
 
-## It cannot fight you
+## Your stylesheet owns the stage
 
-Every rule lives in `@layer aio`. An **unlayered** rule — that is, any rule in
-your own `style.css` — beats every layered rule regardless of specificity:
+**The moment your app ships a `style.css`, every visual default steps aside.**
+Not "loses to yours where you disagree" — leaves. What remains is the inert
+half: the `--aio-*` custom properties, which paint nothing unless something
+references them.
+
+```ts
+// no style.css in the project  → the full default look
+// src/style.css exists         → your CSS, plus the --aio-* variables. Nothing else.
+```
+
+That is stricter than it needs to be for conflicts, and deliberately so. Every
+rule does live in `@layer aio`, and an **unlayered** rule — any rule in your own
+stylesheet — beats a layered one regardless of specificity:
 
 ```css
 /* style.css — wins. No !important, no ordering trick. */
@@ -23,8 +34,24 @@ button {
 }
 ```
 
-So the theme is never something to work around. Write CSS as if it were not
-there and it will get out of the way.
+But a layer only settles a _disagreement_. Where your CSS says **nothing** about
+a property, the default applies unopposed — there is no competing declaration
+for it to lose to. That is not theoretical: an app whose
+`<main class="content">` set `padding` but no `max-width` inherited
+`:where(main){max-width:72rem; margin-inline:auto}`, and its content pane
+rendered as a centred column with an empty band beside it. The `padding` it
+declared won; the two properties it never mentioned did not.
+
+Worse than the layout damage is the confusion. A rule you did not write, which
+is also not the browser default, is the hardest kind to track down. So once you
+start styling, you style everything — the way it would be without a framework.
+
+Want both? `ui.theme: "full"` keeps the complete look alongside your CSS. It is
+explicit on purpose: having typed it, you know where the rules came from.
+
+```ts
+await aio.run({ cells: [app], ui: { theme: "full" } });
+```
 
 ## Rebrand with one variable
 
@@ -89,16 +116,67 @@ are checked against WCAG AA for body text, accent text and accent fills across
 the whole hue wheel (`tests/app-theme.test.ts`), so no app's generated colour
 can be the unreadable one.
 
-## Turning it off
+## Building **on** the default, safely
+
+There is a third thing you might want: you like the default look and want to
+extend it rather than replace it. Done through the framework, that puts your
+app's appearance in a file you do not control and have never read — and a
+framework upgrade can then move your UI with no compile error and no failing
+test. That is not hypothetical; it is how `:where(main){max-width:72rem}` halved
+a real app's content pane.
+
+So aio does not ask you to trust it. It hands the stylesheet over:
+
+```sh
+am theme adopt      # → src/aio-theme.css, imported by your style.css
+```
+
+From that moment the rules are **yours**: a normal stylesheet in your repo and
+your git history, that you can read, edit and diff, and that no aio version can
+change. Adopting also needs no extra switch — your app now _has_ a stylesheet,
+which is exactly the condition `ui.theme: "auto"` steps aside for, so there is
+exactly one copy of the theme and it is the one you own.
+
+The adopted file keeps its `@layer aio` wrapper, so your own unlayered rules
+still beat it without `!important` — you override a piece without deleting it. A
+second `adopt` refuses rather than discarding your edits (`--force`, after a
+diff, is the way through).
+
+The alternative — `ui.theme: "full"` — is the _living_ version of the same idea:
+aio's current look applied alongside your CSS. It is honest about what it is: it
+moves when the framework moves. That is bounded (an app pins an exact aio
+version, so it can only move on a deliberate `am pin`), but if you want the look
+frozen, adopt it.
+
+| You want                            | Do this                            |
+| ----------------------------------- | ---------------------------------- |
+| A finished look, no CSS to write    | nothing — it is the default        |
+| Your own design, no interference    | write `style.css` — defaults leave |
+| To build ON aio's look, frozen      | `am theme adopt`                   |
+| To build ON aio's look, tracking it | `ui.theme: "full"`                 |
+
+## The three settings
+
+| `ui.theme`         | With no `style.css`     | With your own `style.css`              |
+| ------------------ | ----------------------- | -------------------------------------- |
+| `"auto"` (default) | the full default look   | **inert `--aio-*` variables only**     |
+| `"full"`           | the full default look   | the full default look, alongside yours |
+| `"none"`           | box-model baseline only | box-model baseline only                |
 
 ```ts
 await aio.run({ ui: { theme: "none" } });
 ```
 
-Emits nothing but the box-model baseline (`box-sizing`, `body{margin:0}`), which
-is not part of the theme and never goes away. Reach for this when the app ships
-a full design system and the only thing the default can contribute is bytes —
-not to override it, which needs no switch at all.
+`"none"` emits nothing but the box-model baseline (`box-sizing`,
+`body{margin:0}`), which is not part of the theme and never goes away. Reach for
+it when you want not even the variables — `"auto"` already gets the visual
+default out of your way the moment you write a stylesheet.
+
+Why the variables survive under `"auto"`: a custom property that nothing
+references renders nothing, so they cannot move a box or paint a pixel on their
+own. Keeping them means `ui.chrome: "themed"`'s title bar (which reads
+`var(--aio-…, fallback)`) stays coherent with the rest of your app, and you can
+reference a token deliberately if you want one.
 
 ## Where the colour comes from
 

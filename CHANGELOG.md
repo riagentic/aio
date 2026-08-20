@@ -1,5 +1,273 @@
 # Changelog
 
+## 1.0.0-alpha62 — one fact, one spelling (2026-08-20)
+
+Worked from **rimote** (8/10) — a remote-desktop suite that is three aio apps in
+one repo: a headless relay plus an Electron agent and controller, verified over
+a real LAN with the agent downloaded from the relay's own page. Two things came
+out of it: one design bug, and one gap wearing five hats.
+
+### A captured reference cannot go stale in silence
+
+```ts
+async respond(s, ok: boolean) {
+  const req = s.pending      // a VIEW, not a snapshot
+  s.pending = null
+  if (!req) return           // passes — req is still the object HERE
+  link.answerApproval(req.sid, ok)   // TypeError: reading 'sid' of null
+}
+```
+
+In a **sync** method `s` is an Immer draft, so `req` keeps the old object. In an
+**async** method `s` is a live path view, so `req` means "whatever `s.pending`
+holds now" — `null`, or worse, the object that _replaced_ it, read as though it
+were the original. Identical-looking code, opposite semantics, and the failure
+lands after an `await`, so the guard above it passes. The reporter shipped a
+broken consent flow that survived two audits: the prompt rendered, so it looked
+verified.
+
+The proxy now **refuses**. Any read, write, `in`, spread or return through a
+reference whose container this method overwrote throws by name:
+
+```
+[relay:respond] stale reference: this value was captured from s.pending before the
+method overwrote s.pending. In an async method `s` is a live view — the old
+reference would silently resolve to the NEW value (a sync method keeps the old
+object). Copy what you need before overwriting (const x = s.pending?.field) or
+snapshot first (const v = { ...s.pending }).
+```
+
+Captured array **elements** are invalidated only by mutators that re-address
+indexes (`sort`, `splice`, `shift`, `reverse`, `fill`, `copyWithin` — computed
+ranges, not assumptions); `push` never moves what already exists. A fresh
+re-fetch after the overwrite is a NEW capture and stays legal, so
+`s.obj = {…}; s.obj.nest.v = 1` still works. The differential fuzzer is green
+across seeds and `proxy-array-10k` is unchanged.
+
+### The multi-app repo the docs recommend, actually buildable
+
+`docs/basics/app-architectures.md` recommends "service + rich clients"; the
+build half-supported it, and rimote wrote a 260-line orchestrator to cover the
+difference. That orchestrator is now unnecessary:
+
+- **`build.targets` keys are labels, `kind` names the target.** Two Electron
+  apps in one repo:
+  ```jsonc
+  "targets": {
+    "agent":   { "kind": "electron",   "entry": "src/agent/app.ts",   "name": "rimote-agent" },
+    "control": { "kind": "electron",   "entry": "src/control/app.ts", "name": "rimote-control" },
+    "relay":   { "kind": "server-app", "entry": "src/server/app.ts",  "name": "rimote-server" }
+  }
+  ```
+  A key that is itself a target name keeps meaning exactly what it did.
+- **`server-app`** — the exposed server **with** its page (status UI, download
+  shelf). The canonical `server` target is headless by definition; reaching this
+  shape previously required a two-pass build only `build.ts` could tell you
+  about.
+- **`build.ts --out=`** — where artifacts land (binary, AppImage, zip, APK,
+  systemd unit). `dist/` is embedded into the binary wholesale and wiped by
+  every build, so it was never a place to collect releases; now there is
+  somewhere else to put them, and `--out=` pointing inside `dist/` is refused
+  with the reason.
+- **`ui.entry` reaches the build.** `build.ui` / `--ui=` bundle the component
+  the config names, the bundle records which one it was built from, and the prod
+  server refuses to serve a bundle whose stamp disagrees with the running
+  config. Setting `ui.entry` alone used to render one component in dev and a
+  different one once compiled.
+- **A compiled binary finds its own `dist/` at any entry depth.** The old fixed
+  guesses assumed `src/app.ts`; `src/server/app.ts` missed the embedded bundle
+  and the shipped binary served "Headless build — no browser UI" — a 503 the
+  first time a user opened it. And a binary that finds a `dist/` without an
+  `app.js` now says so at boot: that is never a headless build.
+
+### A component that renders `null` keeps its place
+
+Reported from the field after the first rimote pass, and the more expensive of
+the two findings. An approval prompt written as the **first** child of a panel
+rendered **last** — below a screenful of settings, off the bottom of a window it
+did not fit in:
+
+```tsx
+<main class="panel">
+  <Approval /> {/* returns null until a request arrives */}
+  <LinkStrip />
+  …four settings…
+</main>;
+```
+
+A component that rendered `null` created no node, therefore no `vnode._dom` —
+and `_dom` is the anchor the next diff inserts before. With no anchor the
+element that finally arrived was appended to the parent instead. Silent, visual,
+and it cannot fire until the component first becomes visible, so every test that
+starts in the visible state passes. Every `x ? <El/> : null` component has that
+shape — banners, toasts, modals, alerts, validation messages — which are
+precisely the ones whose position carries meaning.
+
+Absent components now hold their slot with the same `<!---->` placeholder a
+`null` CHILD has used since AIO-107, applied at **six** sites that each decide
+this independently: create, diff, hydrate, the signal re-render path, SSR, and
+the SSR streamer. The last three matter more than they look: without the
+re-render path a component came back correctly the first time and was appended
+every time after; SSR was NOT already emitting the placeholder for components
+(only for children), so fixing the client alone would have made the server
+disagree and hydration adopt the wrong node; and the streaming renderer is a
+separate implementation that must emit byte-identical markup — aio's own
+differential gate caught that one.
+
+The visible change, if your tests assert markup: a null component is `<!---->`
+rather than `""`. Assert on elements (`children`, `querySelector`) and nothing
+moves. Five framework tests said `innerHTML === "<div></div>"` where they meant
+"no element", and now say the latter.
+
+### `testComponent` is importable
+
+It was exported from `browser-air.ts` and reachable through no specifier in the
+export map at all, so an app could only get at it by a relative path into
+`dep/aio/src/…`. It now sits in `aio/testing` beside `testCell` and `testUI` —
+one testing entry point, cells and components together. The asymmetry had a
+cost: the app that reported this had DOM coverage of zero components until a
+positional bug shipped, because component tests looked unsupported.
+
+### Bugs that were the same bug: an audit, and three gates
+
+Four audits of "what makes bugs hard to find before production", run with
+scripts rather than opinion. The finding is not complexity — it is arithmetic.
+Every bug in the last three field reports was ONE fact decided independently in
+N places, where a change reached some of them and not the others:
+
+| the fact                           | deciders               | what it cost                            |
+| ---------------------------------- | ---------------------- | --------------------------------------- |
+| what `null` from a component means | 6 render paths         | a prompt written first rendered last    |
+| the UI entry filename              | 26 literals / 12 files | dev ≠ prod, _and_ the boot lint         |
+| how `deno.json` is read            | 13 readers             | one comment killed every build          |
+| `build.targets` shape              | 3 readers              | `aiol` crashed; `am fix` misread labels |
+
+On isolation the news was good, and it was checked rather than assumed: zero
+module-level collections that only grow, the vitals interval IS cleared (in the
+shutdown orchestrator), `untrack()` pops on the throw path, `abortComponent`
+closes all three scopes and disposes orphaned computeds. Every case probed was
+deliberate, with an incident number on it. What was missing is anything that
+CHECKS the N implementations agree. Three gates now do, each mutation-tested to
+prove it can fail:
+
+- **The differential fuzzer's op set audits itself.** aio's strongest tool could
+  not make a component start or stop rendering `null` — that shape was in its
+  node alphabet and absent from its MUTATION alphabet, which is exactly why R-10
+  shipped. Adding the op makes the fuzzer fail on every seed with the fix
+  reverted (it passed on all of them before). The coverage gate that came with
+  it immediately found three more unreachable kinds and one real gap: a form
+  control's prop set was never diffed across a transition.
+- **Scope isolation is asserted, not reviewed.** After every render path —
+  including one that throws — the dependency-tracking, computed-collection and
+  effect-collection scopes must be closed. A leaked scope is not a leak, it is a
+  leak of SCOPE: the next component's reads land in a dead component's
+  dependency set. Break one unwind and the tripwire fires six times.
+- **One fact, one spelling.** A shrink-only ledger of hardcoded literals, plus a
+  gate that nothing hand-parses the app config. It found the last two
+  `JSON.parse(deno.json)` sites that greps had missed.
+
+### Stillness at the boundary
+
+Two facts an app can be wrong about with no error anywhere, both reported after
+being diagnosed by symptom:
+
+- **The aio you pinned vs the aio you are running.** `dep/aio` is commonly a
+  symlink to a live checkout, so an app declared alpha55 while running alpha61
+  plus uncommitted work — six releases of drift, found by "why did the semantics
+  change". Boot now says so, naming both numbers and both ways out. A warning,
+  not a refusal: developing against a moving checkout is how aio itself is
+  built; doing it silently is the problem.
+- **`ui.theme: "full"` next to your own stylesheet** now says so once at boot.
+  Under the new default it cannot happen silently at all.
+
+### `deno.json` is JSONC, and `deno.jsonc` exists
+
+A `//` comment — legal in `deno.json`, and the natural place to explain an
+import alias — broke every `--compile` build with
+`SyntaxError: Expected
+double-quoted property name in JSON at position 1464`,
+naming neither the file nor the reason. Thirteen readers hand-parsed the config;
+one of them had been found, fixed and given a post-mortem, and the other twelve
+kept the bug. They are now one reader that accepts comments, finds `deno.jsonc`,
+and treats ABSENT and MALFORMED as the different facts they are — collapsing
+those is how `am fix` skipped its dependency repair and still printed "Now run:
+deno task dev".
+
+### A standalone APK that cannot work is refused, not shipped
+
+An Android build has no Deno runtime — the APK is a WebView and a bundle. So the
+dynamic `await import("./x.server.ts")` that is CORRECT on every other target
+is, there, the half of the app that does the work silently not shipping: a 3.2
+MB APK that installs, launches, renders its control panel, and does nothing (the
+Windows build of the same entry is 180 MB, because it carries a runtime). That
+build is now refused with each module and its importer named, and three ways
+forward — `--android --remote` (a client), a separate entry, or
+`--allow-server-only` when the paths are guarded. Discovering it after
+installing on a phone is the expensive kind of failure.
+
+### The default theme steps aside for your stylesheet
+
+alpha61's `ui.theme` claimed it "cannot fight you" because every rule lives in
+`@layer aio`. That is true of _conflicts_ and false of everything else: a layer
+settles a disagreement, and where an app's CSS says nothing about a property
+there is no disagreement to settle. A field app whose `<main class="content">`
+declared `padding` but no `max-width` inherited
+`:where(main){max-width:72rem; margin-inline:auto}` — its content pane rendered
+as a centred column with an empty band beside it. The `padding` it declared won;
+the two properties it never mentioned applied unopposed. Utility classes with
+names every app already uses (`.row`, `.grid`, `.stack`, `.card`) collided the
+same way.
+
+So `ui.theme: "auto"` (the default) now means **your stylesheet owns the
+stage**: with no `style.css` the full default look ships as before, and the
+moment the app has one, every visual default leaves. What remains is the inert
+half — the `--aio-*` custom properties, which paint nothing unless something
+references them, so `ui.chrome: "themed"`'s title bar stays coherent and a token
+is there if you want to reference it.
+
+`ui.theme: "full"` is the new opt-in for an app that wants the complete look
+alongside its own CSS (alpha61's behaviour). It is explicit by design: a rule
+you never wrote, which is not the browser default either, is the hardest kind to
+debug — typing `"full"` removes that question.
+
+### `am theme adopt` — build ON the default without depending on it
+
+Liking the default and extending it used to mean your app's appearance lived in
+a framework file you had never read, so an upgrade could move your UI silently.
+`am theme adopt` hands the stylesheet over instead: it writes the exact CSS the
+server would have emitted to `src/aio-theme.css`, imported from your
+`style.css`. From then on the rules are a normal file in your repo — readable,
+editable, diffable, and untouchable by any aio version.
+
+It needs no new switch to avoid doubling up: an app with a stylesheet is one
+`ui.theme: "auto"` already steps aside for, so exactly one theme exists and it
+is yours. The file keeps its `@layer aio` wrapper so your own rules still win
+without `!important`, and a second adopt refuses rather than discarding your
+edits.
+
+### Also
+
+- **`tls: "auto" | false | { cert, key }`** — a config key, because a compiled
+  binary in a service unit has no shell flags to pass (the same reason `expose`
+  is one). The CLI flags still win. An unusable shape is refused at boot naming
+  all three legal spellings, and both the server warning and the CLI client's
+  connect failure now name the three real answers to "an aio client cannot dial
+  an aio server over a self-signed cert": `DENO_CERT=`, a real cert, or no TLS
+  with your own encryption.
+- **`aiol` reads the project's declared entries** (`entry`, then every
+  `build.targets[].entry`) before falling back to the `src/app.ts` convention. A
+  warning that is wrong on a documented layout trains people to ignore the
+  linter. A declared entry missing on disk is reported as its own, worse fact.
+- **Three bugs found by fixing the above**, none of them reported: the boot lint
+  checked a hardcoded `App.tsx` (so an app with `ui.entry` failed its own boot
+  check), `aiol` crashed outright on the object form of `build.targets`
+  (`uiTargets.some is not a function`), and `am fix` would have read the new
+  target labels as target names and skipped their tasks.
+- **`docs/clients/binary-streams.md`** — the shape for a sustained binary side
+  channel (media, telemetry, remote input): per-kind sequence numbers (a shared
+  counter reads as phantom packet loss), drop-vs-queue on `bufferedAmount`, gap
+  detection, receive-side caps, broadcasting from a copy.
+
 ## 1.0.0-alpha61 — every write lands, and every app has a face (2026-08-18)
 
 Six field reports read together (`atomic`, `fixable`, `impactnews`, `modelinfo`,

@@ -3,6 +3,7 @@
 // (the framework symlink, .env, electron runtime, submodules) plus a few config
 // safety nets. `am doctor` diagnoses config; `am fix` repairs. `--dry-run`
 // (alias `--check`) reports what it WOULD do without changing anything.
+import { UI_ENTRY } from "../server/app-files.ts";
 import {
   legacyStandardTasks,
   standardTasks,
@@ -82,6 +83,10 @@ const TARGET_TASKS: Record<string, readonly string[]> = {
   android: ["install:android"],
   cli: [],
   server: [],
+  // The exposed server that also serves its page — same tasks as `server`
+  // (nothing to install), and omitting it here would report a real target as
+  // unknown.
+  "server-app": [],
   "electron-client": ["install:electron"],
   "android-client": ["install:android"],
   "cli-client": [],
@@ -90,8 +95,11 @@ const TARGET_TASKS: Record<string, readonly string[]> = {
 /** Read the fleet an app declares: `client` (the default shell; `target` is
  *  its pre-alpha52 spelling, still read) plus `build.targets` in EITHER
  *  spelling — the array form `["server","browser"]` or the object form
- *  `{"server":{"entry":…}}` (per-target overrides). All are live spellings, so
- *  reading only one would quietly under-repair the others. Pure. */
+ *  `{"server":{"entry":…}}` (per-target overrides) — where an object key may
+ *  be a free LABEL whose `kind` names the actual target
+ *  (`{"agent":{"kind":"electron",…}}`, two apps of one kind in one repo). All
+ *  are live spellings, so reading only one would quietly under-repair the
+ *  others. Pure. */
 export function declaredTargets(cfg: unknown): string[] {
   const seen = new Set<string>();
   const push = (v: unknown) => {
@@ -102,7 +110,16 @@ export function declaredTargets(cfg: unknown): string[] {
   push(c.target); // deprecated spelling of `client` — still declares the fleet
   const raw = (c.build as Record<string, unknown> | undefined)?.targets;
   if (Array.isArray(raw)) raw.forEach(push);
-  else if (raw && typeof raw === "object") Object.keys(raw).forEach(push);
+  else if (raw && typeof raw === "object") {
+    // The object form's key is a LABEL; `kind` names the target it builds
+    // (one repo, two Electron apps). Reading the label as a target name made
+    // every labelled target "unrecognized" here — a tool wrong about a layout
+    // the build supports, which is how a check trains people to ignore it.
+    for (const [label, o] of Object.entries(raw)) {
+      const kind = (o as { kind?: unknown } | null)?.kind;
+      push(typeof kind === "string" && kind.trim() ? kind : label);
+    }
+  }
   return [...seen];
 }
 
@@ -441,8 +458,8 @@ export async function cmdFix(
     Object.keys(tasks).some((t) =>
       t.includes("electron") && t !== "install:electron"
     );
-  const hasTsx = await exists(join(dir, "src", "App.tsx")) ||
-    await exists(join(dir, "App.tsx"));
+  const hasTsx = await exists(join(dir, "src", UI_ENTRY)) ||
+    await exists(join(dir, UI_ENTRY));
 
   // Recognize HOW the app consumes aio, so we only take actions that fit it.
   const aioSpec = imports["aio"] ?? "";

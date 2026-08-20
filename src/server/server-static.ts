@@ -1,5 +1,6 @@
 // Static file serving & virtual route handler — extracted from server.ts
 // Handles all HTTP requests (non-WS): HTML pages, transpilation, __aio/* endpoints, static files
+import { UI_ENTRY } from "./app-files.ts";
 import { extname, join, resolve, SEPARATOR } from "@std/path";
 import { formatPrometheus } from "./server-metrics.ts";
 import { log } from "../diagnostics/logger-api.ts";
@@ -151,7 +152,7 @@ export interface StaticDeps {
   /** ui.chrome — how much of the desktop window the OS draws. */
   chrome?: "standard" | "themed" | "none";
   /** ui.theme — whether the default stylesheet is emitted. */
-  theme?: "auto" | "none";
+  theme?: "auto" | "full" | "none";
   /** Identity the theme's accent hue is derived from — the appId, so the UI
    *  and the icon are the same colour. */
   themeName?: string;
@@ -492,6 +493,40 @@ export function createStaticHandler(deps: StaticDeps): {
       try {
         await _warnIfStaleArtifact(file);
         const body = await Deno.readTextFile(join(absDistDir, file));
+        // The bundle records which UI component it was built from
+        // (__aioBundleUi; absent = the App.tsx convention, which is what every
+        // pre-stamp build bundled). Serving a bundle built from a DIFFERENT
+        // component than the running `ui.entry` is the dev≠prod divergence in
+        // its purest form — the page renders, just the wrong app. Refuse, and
+        // name both sides and the fix.
+        if (file === "app.js") {
+          const stampUi =
+            body.match(/globalThis\.__aioBundleUi\s*=\s*"([^"]*)"/)?.[1] ??
+              UI_ENTRY;
+          const runtimeUi = deps.uiEntry ?? UI_ENTRY;
+          if (stampUi !== runtimeUi) {
+            const msg =
+              `dist/app.js was bundled from ${stampUi} but this server's ui.entry is ${runtimeUi} — ` +
+              `the compiled page would render a different component than dev. ` +
+              `Rebuild with --ui=${runtimeUi} (or set "build": { "ui": "${runtimeUi}" } in deno.json).`;
+            log.error(`[ui-entry] ${msg}`);
+            // The served body PUTS the reason on the page and then throws, so
+            // the browser console shows it too and whatever awaited this
+            // module fails loudly instead of mounting nothing.
+            const shown = JSON.stringify("[aio] " + msg);
+            return new Response(
+              `document.body.innerHTML = '<pre style="padding:2rem;white-space:pre-wrap">' + ${shown} + '</pre>';\n` +
+                `throw new Error(${shown});\n`,
+              {
+                status: 500,
+                headers: {
+                  "Content-Type": "application/javascript",
+                  ...noCache,
+                },
+              },
+            );
+          }
+        }
         const ct = file.endsWith(".css")
           ? "text/css"
           : "application/javascript";

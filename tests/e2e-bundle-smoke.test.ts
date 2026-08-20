@@ -84,6 +84,7 @@ async function bundle(
   dir: string,
   android: boolean,
   force = true,
+  uiEntry?: string,
 ): Promise<string> {
   // In a DOT-DIR: for a flat-layout app the project root IS the app dir, so a
   // stray `.ts` written beside App.tsx would itself count as an edited input
@@ -109,6 +110,7 @@ await runBundle({
   doForce: ${force},
   configEntry,
   appDir: resolveAppDir(root, configEntry),
+  uiEntry: ${JSON.stringify(uiEntry ?? "App.tsx")},
   // deno-lint-ignore no-explicit-any
 } as any, mainConfig);
 `,
@@ -294,6 +296,43 @@ Deno.test({
       );
     } finally {
       await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
+// `ui.entry` / `build.ui` must reach the BUNDLE, not just the dev server
+// (rimote R-2). Before this the bundler hardcoded App.tsx, so an app that set
+// it rendered one component in dev and another once compiled — and the bundle
+// carried nothing that could reveal the swap.
+Deno.test({
+  name:
+    "ui entry: the bundle is built from the configured component and says so",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  async fn() {
+    const dir = await makeApp();
+    try {
+      await Deno.writeTextFile(
+        `${dir}/src/Status.tsx`,
+        `export default function Status() { return <p>MARKER_STATUS_UI</p>; }`,
+      );
+      const js = await bundle(dir, false, true, "Status.tsx");
+      assertStringIncludes(js, "MARKER_STATUS_UI");
+      // The stamp is what lets the SERVER refuse a bundle built from a
+      // different component than the one it is configured to serve.
+      assertStringIncludes(js, 'globalThis.__aioBundleUi = "Status.tsx"');
+
+      // Switching the UI entry must invalidate the cache: same version, same
+      // target shape, same mtimes — only the component differs, and reusing
+      // the old bundle is the divergence in a new costume.
+      const back = await bundle(dir, false, /* force */ false, "App.tsx");
+      assert(
+        !back.includes("MARKER_STATUS_UI"),
+        "a bundle built from another UI entry must not be reused",
+      );
+      assertStringIncludes(back, 'globalThis.__aioBundleUi = "App.tsx"');
+    } finally {
+      await Deno.remove(dir, { recursive: true });
     }
   },
 });

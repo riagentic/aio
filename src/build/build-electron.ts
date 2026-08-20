@@ -253,7 +253,11 @@ Categories=Utility;
     Deno.exit(1);
   }
 
-  const appImageOut = join(root, `${binaryName}-${arch}.AppImage`);
+  await Deno.mkdir(cfg.outDir ?? root, { recursive: true });
+  const appImageOut = join(
+    cfg.outDir ?? root,
+    `${binaryName}-${arch}.AppImage`,
+  );
   console.log("[appimage] packaging...");
   const appimageResult = await new Deno.Command(toolPath, {
     args: [appDir, appImageOut],
@@ -298,7 +302,8 @@ SET ELECTRON_PATH=%HERE%electron\\electron.exe
   ]);
   console.log("[electron] \u2713 run.bat launcher");
 
-  const zipOut = join(root, `${binaryName}-win-${archStr}.zip`);
+  await Deno.mkdir(cfg.outDir ?? root, { recursive: true });
+  const zipOut = join(cfg.outDir ?? root, `${binaryName}-win-${archStr}.zip`);
   console.log("[electron] zipping Windows package...");
   // `zip` first, PowerShell second: Compress-Archive exists only on Windows,
   // and that single call was the whole reason a Windows package could not be
@@ -334,7 +339,8 @@ exec "$HERE/${binaryName}" "$@"
   await Deno.chmod(launcherPath, 0o755);
   console.log("[electron] \u2713 run.sh launcher");
 
-  const zipOut = join(root, `${binaryName}-mac-${archStr}.zip`);
+  await Deno.mkdir(cfg.outDir ?? root, { recursive: true });
+  const zipOut = join(cfg.outDir ?? root, `${binaryName}-mac-${archStr}.zip`);
   console.log("[electron] zipping macOS package...");
   if (!await zipDir(appDir, zipOut)) {
     console.error("[electron] \u2717 could not zip the macOS package");
