@@ -21,12 +21,15 @@ import { slugify } from "../src/build/build-helpers.ts";
 Deno.test("normalizeTargets: array form is unchanged (compat)", () => {
   assertEquals(
     normalizeTargets(["server", "electron-client"]),
-    [{ name: "server" }, { name: "electron-client" }],
+    [{ name: "server", kind: "server" }, {
+      name: "electron-client",
+      kind: "electron-client",
+    }],
   );
   // whitespace/empties tolerated exactly as before
   assertEquals(normalizeTargets([" server ", "", "cli"]), [
-    { name: "server" },
-    { name: "cli" },
+    { name: "server", kind: "server" },
+    { name: "cli", kind: "cli" },
   ]);
   assertEquals(normalizeTargets(undefined), []);
 });
@@ -38,9 +41,14 @@ Deno.test("normalizeTargets: object form carries entry/name/platforms", () => {
     cli: {},
   });
   assertEquals(got, [
-    { name: "server", entry: "src/relay/app.ts", appName: "relay" },
-    { name: "electron", entry: "src/app.ts" },
-    { name: "cli" },
+    {
+      name: "server",
+      kind: "server",
+      entry: "src/relay/app.ts",
+      appName: "relay",
+    },
+    { name: "electron", kind: "electron", entry: "src/app.ts" },
+    { name: "cli", kind: "cli" },
   ]);
 });
 
@@ -50,21 +58,80 @@ Deno.test("normalizeTargets: --targets selects without dropping overrides", () =
     electron: { entry: "src/app.ts" },
   };
   assertEquals(normalizeTargets(block, "server"), [
-    { name: "server", entry: "src/relay/app.ts", appName: "relay" },
+    {
+      name: "server",
+      kind: "server",
+      entry: "src/relay/app.ts",
+      appName: "relay",
+    },
   ]);
   // a name absent from the declaration is still selectable (array-form parity)
-  assertEquals(normalizeTargets(block, "cli"), [{ name: "cli" }]);
+  assertEquals(normalizeTargets(block, "cli"), [{ name: "cli", kind: "cli" }]);
   // --targets= on an array-form config behaves as before
   assertEquals(normalizeTargets(["server"], "cli,browser"), [
-    { name: "cli" },
-    { name: "browser" },
+    { name: "cli", kind: "cli" },
+    { name: "browser", kind: "browser" },
   ]);
 });
 
 Deno.test("normalizeTargets: per-target platforms survive", () => {
   assertEquals(normalizeTargets({ cli: { platforms: ["linux", "windows"] } }), [
-    { name: "cli", platforms: ["linux", "windows"] },
+    { name: "cli", kind: "cli", platforms: ["linux", "windows"] },
   ]);
+});
+
+Deno.test("normalizeTargets: labelled targets with kind (two apps, one kind)", () => {
+  // R-3 (rimote): two Electron apps in one repo — labels are free, `kind`
+  // names what gets built.
+  assertEquals(
+    normalizeTargets({
+      agent: {
+        kind: "electron",
+        entry: "src/agent/app.ts",
+        name: "rimote-agent",
+      },
+      control: {
+        kind: "electron",
+        entry: "src/control/app.ts",
+        name: "rimote-control",
+      },
+      relay: {
+        kind: "server-app",
+        entry: "src/server/app.ts",
+        name: "rimote-server",
+        ui: "Status.tsx",
+      },
+    }),
+    [
+      {
+        name: "agent",
+        kind: "electron",
+        entry: "src/agent/app.ts",
+        appName: "rimote-agent",
+      },
+      {
+        name: "control",
+        kind: "electron",
+        entry: "src/control/app.ts",
+        appName: "rimote-control",
+      },
+      {
+        name: "relay",
+        kind: "server-app",
+        entry: "src/server/app.ts",
+        appName: "rimote-server",
+        ui: "Status.tsx",
+      },
+    ],
+  );
+  // --targets= selects by LABEL and keeps the kind
+  assertEquals(
+    normalizeTargets(
+      { agent: { kind: "electron", entry: "src/agent/app.ts" } },
+      "agent",
+    ),
+    [{ name: "agent", kind: "electron", entry: "src/agent/app.ts" }],
+  );
 });
 
 // ── the out-dir guard protects EVERY target's app dir ───────────────────────

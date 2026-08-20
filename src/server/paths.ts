@@ -1,7 +1,7 @@
 // Path resolution utilities — extracted from aio.ts (AIO-52)
 // Pure functions for resolving KV, SQLite, UDS, and data directory paths.
 
-import { fromFileUrl, join, resolve } from "@std/path";
+import { dirname, fromFileUrl, join, resolve } from "@std/path";
 import { lockDir } from "./single-instance-lock.ts";
 import { log } from "../diagnostics/logger-api.ts";
 
@@ -32,8 +32,36 @@ export function distCandidates(opts: {
 }): string[] {
   const entryDist: string[] = [];
   try {
-    for (const rel of ["../dist", "./dist"]) {
-      entryDist.push(fromFileUrl(new URL(rel, opts.mainModule)));
+    // WALK UP to the compile root instead of guessing a fixed depth. The two
+    // hardcoded guesses (`../dist`, `./dist`) assumed an entry exactly one
+    // level down — `src/app.ts`. An entry at `src/server/app.ts` (one repo,
+    // three apps) resolved to `src/dist` and `src/server/dist`, missed the
+    // embedded copy, and the binary silently served the "Headless build — no
+    // browser UI" page: the compile succeeded, dev was fine, and the failure
+    // arrived as a 503 the first time anyone opened the shipped artifact
+    // (rimote R-5).
+    //
+    // The first two entries keep their historic order (parent, then the entry
+    // dir) so nothing that worked changes; higher ancestors follow. The walk
+    // stops at the filesystem root, and `deno compile` mirrors the project
+    // tree under one VFS root, so the real dist/ is always one of these.
+    const entryDir = resolve(fromFileUrl(new URL(".", opts.mainModule)));
+    const seen = new Set<string>();
+    const push = (dir: string) => {
+      const c = resolve(join(dir, "dist"));
+      if (!seen.has(c)) {
+        seen.add(c);
+        entryDist.push(c);
+      }
+    };
+    push(dirname(entryDir));
+    push(entryDir);
+    let up = dirname(dirname(entryDir));
+    for (let i = 0; i < 8; i++) {
+      const parent = dirname(up);
+      push(up);
+      if (parent === up) break; // filesystem root
+      up = parent;
     }
   } catch { /* mainModule not a file: URL — skip */ }
   return [...entryDist, ...realDistCandidates(opts)];

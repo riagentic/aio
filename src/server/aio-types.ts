@@ -63,8 +63,15 @@ export type UiConfig = {
   width?: number; // default: 800
   height?: number; // default: 600
   showStatus?: boolean; // default: true
-  /** AIO-8.1: UI entry file, relative to baseDir. Default: "App.tsx" (the
-   *  filename convention). Set to serve/watch a different component file. */
+  /** UI entry file, relative to baseDir. Default: "App.tsx" (the filename
+   *  convention). Set to serve/watch a different component file.
+   *
+   *  The BUILD half is `build.ui` in deno.json (or `--ui=`, which the fleet
+   *  build passes per target): a bundle records the component it was built
+   *  from, and the server refuses to serve one whose stamp disagrees with this
+   *  value. Setting only this used to render one component under `deno task
+   *  dev` and a different one once compiled — the dev≠prod divergence the
+   *  framework otherwise polices. */
   entry?: string;
   /** AIO-423: override the `<meta viewport>` content string. Default is
    *  responsive (`width=device-width, initial-scale=1, viewport-fit=cover`).
@@ -92,23 +99,33 @@ export type UiConfig = {
    *  title bar hides itself when the window-control bridge is absent, so one
    *  codebase serves both without a branch. */
   chrome?: "standard" | "themed" | "none";
-  /** The default stylesheet.
+  /** The default stylesheet — and who owns the visual stage.
    *
-   *  - `"auto"` (default) — aio ships a complete, modern look: typography,
-   *    colour (light AND dark), forms, tables, code, cards. Every rule lives
-   *    in `@layer aio`, so ANY rule in your own `style.css` wins over it
-   *    without `!important` and without ordering games. The accent is derived
-   *    from the app's name — the same hue as its icon — so an app is a
-   *    coherent product the first time it runs, and two aio apps side by side
-   *    do not look like the same app.
-   *  - `"none"` — emit nothing but the box-model baseline. Pick this when the
-   *    app ships a full design system and the extra bytes are the only thing
-   *    the default could contribute.
+   *  - `"auto"` (default) — **your stylesheet wins the stage.** With no
+   *    `style.css`, aio ships a complete, modern look: typography, colour
+   *    (light AND dark), forms, tables, code, cards, a page shell, accented
+   *    from the app's own name (the same hue as its icon), so an app is a
+   *    coherent product the first time it runs. The moment the app ships its
+   *    OWN `style.css`, every visual default steps aside and only the inert
+   *    `--aio-*` custom properties remain — variables paint nothing unless
+   *    something references them.
+   *
+   *    Why it steps aside rather than layering underneath: `@layer aio` wins
+   *    only where the app's CSS *disagrees*. Where the app says nothing —
+   *    `max-width` on `<main>`, `display`/`gap` on a class it happens to call
+   *    `.row` — the default applies unopposed and quietly re-lays-out a page
+   *    nobody asked it to touch. And a rule you never wrote, that is not the
+   *    browser default either, is the worst kind to debug.
+   *  - `"full"` — the complete look ALONGSIDE your own CSS (what an app that
+   *    styles ON TOP of the default wants). Explicit by design: having typed
+   *    it, you know where the rules came from.
+   *  - `"none"` — emit nothing but the box-model baseline, with or without a
+   *    stylesheet of your own.
    *
    *  Rebranding does not need this switch: set `--aio-accent` (or
    *  `--aio-hue`, `--aio-font`, `--aio-r-2`, …) in your own CSS and every
    *  derived tone follows. */
-  theme?: "auto" | "none";
+  theme?: "auto" | "full" | "none";
 };
 
 /** Per-client WebSocket safety limits for `--expose` deployments. All optional —
@@ -218,6 +235,19 @@ export type AioConfig<S, A, E> = {
    *  from code. `--expose` still wins when both are set. Resolved exactly once
    *  in aio.ts (`_exposeOf`); nothing else may re-decide it. */
   expose?: boolean;
+  /** Transport security when exposed — the config twin of `--no-tls` /
+   *  `--tls-cert`/`--tls-key`, so a COMPILED binary (a service unit has no
+   *  shell flags) can declare how it serves.
+   *
+   *  - `"auto"` (default) — self-signed cert generated and reused per app.
+   *  - `false` — plain HTTP/WS. Sound only behind a TLS-terminating proxy or
+   *    when the payload is already end-to-end encrypted; it warns loudly.
+   *  - `{ cert, key }` — your own PEM files (a real CA cert: the one shape
+   *    every non-browser client accepts without extra trust configuration).
+   *
+   *  The CLI flags still win when both are given. Loopback is plain HTTP
+   *  regardless — this only decides how an EXPOSED server serves. */
+  tls?: "auto" | false | { cert: string; key: string };
   /** Bind ONE address instead of the expose-derived default (0.0.0.0 when
    *  exposed, 127.0.0.1 when not) — a multi-homed machine (VPN + LAN) often
    *  wants the relay on the LAN interface only. Config twin of `--host=`;
@@ -447,6 +477,19 @@ export type CellsConfig = {
    *  exposure (auth key, the `ui:"all"` privacy warning, TLS, the share URL)
    *  reads the SAME resolved value — see `_exposeOf` in aio.ts. */
   expose?: boolean;
+  /** Transport security when exposed — the config twin of `--no-tls` /
+   *  `--tls-cert`/`--tls-key`, so a COMPILED binary (a service unit has no
+   *  shell flags) can declare how it serves.
+   *
+   *  - `"auto"` (default) — self-signed cert generated and reused per app.
+   *  - `false` — plain HTTP/WS. Sound only behind a TLS-terminating proxy or
+   *    when the payload is already end-to-end encrypted; it warns loudly.
+   *  - `{ cert, key }` — your own PEM files (a real CA cert: the one shape
+   *    every non-browser client accepts without extra trust configuration).
+   *
+   *  The CLI flags still win when both are given. Loopback is plain HTTP
+   *  regardless — this only decides how an EXPOSED server serves. */
+  tls?: "auto" | false | { cert: string; key: string };
   /** Where this app keeps everything it owns. Default `~/.<appId>` — `data/`
    *  inside it is the whole backup; `logs/` and `launch.json` are disposable.
    *  This is the AUTHOR's choice; whoever runs the app can move every app at

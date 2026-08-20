@@ -14,7 +14,7 @@ export const VALID_UI_KEYS = new Set<string>([
   "viewport", // AIO-423: override the <meta viewport> (string) or opt out (false)
   "head", // AIO-423: verbatim extra <head> content (meta/OG/favicon/fonts)
   "chrome", // desktop window frame: "standard" | "themed" | "none"
-  "theme", // default stylesheet: "auto" | "none"
+  "theme", // default stylesheet: "auto" | "full" | "none"
 ]);
 
 /** Top-level `deno.json` keys aio actually READS (its own + Deno's).
@@ -104,6 +104,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "ui",
   "port",
   "expose",
+  "tls",
   "host",
   "updates",
   "feedback",
@@ -168,6 +169,7 @@ export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
   "localFirst",
   "port",
   "expose",
+  "tls",
   "host",
   "updates",
   "feedback",
@@ -281,6 +283,10 @@ export const CONFIG_DOCS: Record<string, [string, string]> = {
     '"single" (one JSON blob) or "multi" (one SQLite row per top-level cell — rewrites only changed cells)',
   ],
   port: ["8000", "HTTP/WS server port"],
+  tls: [
+    '"auto"',
+    '"auto" | false | { cert, key } — how an EXPOSED server serves (same as --no-tls / --tls-cert/--tls-key; the flags win)',
+  ],
   expose: [
     "false",
     "serve on 0.0.0.0 + TLS for LAN access (same as --expose; the flag wins)",
@@ -432,7 +438,10 @@ export const UI_DOCS: Record<string, [string, string]> = {
     '"standard"',
     'desktop window frame: "standard" | "themed" | "none"',
   ],
-  theme: ['"auto"', 'default stylesheet — "auto" | "none" (yours always wins)'],
+  theme: [
+    '"auto"',
+    'default stylesheet — "auto" (steps aside for your style.css) | "full" (keep it alongside yours) | "none"',
+  ],
 };
 
 /** Keys printed in the IDENTITY table (see formatValidConfig). */
@@ -446,6 +455,7 @@ export const CONFIG_GROUPS: [string, string[]][] = [
   ["Server & transport", [
     "port",
     "expose",
+    "tls",
     "host",
     "updates",
     "feedback",

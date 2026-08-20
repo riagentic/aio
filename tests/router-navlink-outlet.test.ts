@@ -100,7 +100,11 @@ Deno.test(
   withRouterDOM("/", (root) => {
     const App = () => h("div", null, h(Outlet as ComponentFn, {}));
     const handle = mount(root, App);
-    assertEquals(root.innerHTML, "<div></div>");
+    // No ROUTE content — and a placeholder holding the outlet's position, so
+    // the matched route later renders where the outlet sits rather than after
+    // whatever else the layout put in that div (rimote R-10).
+    assertEquals(root.innerHTML, "<div><!----></div>");
+    assertEquals(root.querySelector("div")?.children.length, 0);
     _unmount(handle);
   }),
 );

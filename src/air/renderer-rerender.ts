@@ -1,6 +1,7 @@
 // renderer-rerender.ts — per-component reactive re-render, signal subscription, hooks factory.
 // Provides: _scheduleComponentRender, _rerenderComponent, _subscribeComponentDeps, _createHooks.
 
+import { nullSlot } from "./vdom-create.ts";
 import {
   _computedCollectEnd,
   _computedCollectStart,
@@ -172,6 +173,13 @@ export function _rerenderComponent(inst: ComponentInstance): void {
   _computedCollectEnd(collected);
   _effectCollectEnd(effectCollected);
 
+  // Nothing to render is still a POSITION — the same rule the create and diff
+  // paths follow. This is the path a SIGNAL re-render takes, which is how a
+  // component that had become visible once could lose its place the second
+  // time (rimote R-10): without the placeholder the element→null transition
+  // removed the anchor entirely, so the next null→element insert had nothing
+  // to insert before and appended.
+  if (rendered == null) rendered = nullSlot();
   vnode._rendered = rendered;
   _instanceStack.push(inst);
 

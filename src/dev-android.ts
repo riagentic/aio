@@ -10,6 +10,7 @@
  * Edits reflect live (reload in the WebView) — no re-bundle. Needs the Android
  * SDK (adb + emulator) and at least one AVD; fails loud with steps otherwise.
  */
+import { readDenoJsonSync } from "./server/deno-json.ts";
 import { join } from "@std/path";
 import { resolveSdk } from "./build/build-helpers.ts";
 import { resolveEntry } from "./build/build-config.ts";
@@ -35,16 +36,6 @@ function fail(msg: string, ...lines: string[]): never {
   console.error(`[dev:android] ✗ ${msg}`);
   for (const l of lines) console.error(`  ${l}`);
   Deno.exit(1);
-}
-
-/** The app's deno.json, or `{}` when there is none — the caller falls back to
- *  the scaffold default and then fails loud on a missing file. */
-function readDenoJson(): Record<string, unknown> {
-  try {
-    return JSON.parse(Deno.readTextFileSync("deno.json"));
-  } catch {
-    return {};
-  }
 }
 
 function freePort(): number {
@@ -198,7 +189,7 @@ async function main(): Promise<void> {
   //    `src/app.ts` that does not exist — the emulator then sat waiting on a
   //    server that never came up (WYSIDIWYSIP: one rule decides what the app
   //    IS, in dev and in the build alike).
-  const devEntry = resolveEntry(readDenoJson());
+  const devEntry = resolveEntry(readDenoJsonSync(Deno.cwd())?.config ?? {});
   try {
     Deno.statSync(devEntry);
   } catch {

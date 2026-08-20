@@ -7,6 +7,10 @@ One guide per version migration. Find your current version and follow the steps.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha61 → alpha62](from-alpha61-to-alpha62.md) — nothing breaks in your code:
+  the default theme steps aside for your own stylesheet, a standalone Android
+  build that cannot work is refused instead of shipped, and two new boot lines
+  tell you which aio you are actually running.
 - [alpha60 → alpha61](from-alpha60-to-alpha61.md) — nothing breaks: apps get a
   default theme + icon (`ui.theme: "none"` opts out), writes through
   `map()`/`filter()` results in async methods now land like their sync twins,

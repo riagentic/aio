@@ -85,6 +85,7 @@ import { detectMode, outError } from "./am/am-output.ts";
 import { cmdInstalled, cmdRemove, cmdUpgrade } from "./am/am-cmd-remove.ts";
 import { cmdBackup, cmdData, cmdRestore } from "./am/am-cmd-data.ts";
 import { cmdPin } from "./am/am-cmd-pin.ts";
+import { cmdTheme } from "./am/am-cmd-theme.ts";
 import { cmdCost } from "./am/am-cmd-cost.ts";
 import { parseGlobalFlags } from "./am/am-utils.ts";
 
@@ -146,6 +147,7 @@ const COMMANDS: Record<string, CmdHandler> = {
   add: cmdAdd,
   new: cmdNew, // deprecated alias of `add` — prints the rename, still works
   pin: cmdPin, // which aio version this app builds against
+  theme: cmdTheme, // adopt aio's stylesheet INTO the app, as a file it owns
   link: cmdLink, // just the dep/aio symlink
   fix: cmdFix, // full clone repair (symlink + env + electron + config + …)
   update: cmdUpdate, // alias of a bare `am upgrade` (am itself)

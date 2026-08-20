@@ -110,6 +110,27 @@ export function untrack<T>(fn: () => T): T {
   return result;
 }
 
+/** @internal How many tracking scopes are open. A render that finishes — or
+ *  that THROWS and unwinds — must leave this at the depth it started, or the
+ *  next component's signal reads are collected into a dead component's
+ *  dependency set: one scope silently subscribing on another's behalf.
+ *
+ *  Exposed only so the invariant can be ASSERTED (tests/scope-isolation).
+ *  The discipline itself is real — the throw path unwinds through
+ *  `abortComponent` — but it is spread across five render paths that each
+ *  have to remember it, and nothing checked that they all do. */
+export function _openScopeDepth(): {
+  track: number;
+  computed: boolean;
+  effect: boolean;
+} {
+  return {
+    track: _trackStack.length,
+    computed: _computedCollector !== null,
+    effect: _effectCollector !== null,
+  };
+}
+
 function _currentTracker(): Set<SignalImpl<unknown>> | undefined {
   return _trackStack[_trackStack.length - 1];
 }

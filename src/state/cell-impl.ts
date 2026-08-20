@@ -1049,6 +1049,101 @@ export function snapshotForRead(value: unknown): unknown {
   return cloneState(value, "shallow");
 }
 
+// ── Stale-capture detection (R-1, rimote) ──────────────────────────
+//
+// In a SYNC method a captured reference keeps the old object:
+//   const req = s.pending; s.pending = null; req.sid   // still "s1"
+// The async live proxy is a PATH view, so the identical code resolves through
+// `pending` to the NEW value — null (TypeError) or, worse, a replaced object
+// (silent wrong data). The two flavours cannot agree here by construction: the
+// proxy re-resolves its path on purpose (read-your-writes + surviving
+// `$commit`'s re-snapshot), so it cannot also pin object identity. What it CAN
+// do is refuse loudly: every proxy remembers the ledger length at its creation
+// ("birth"), every container overwrite this invocation makes is appended to a
+// shared ledger, and any use of a proxy whose container was overwritten AFTER
+// its birth throws a named error. A fresh re-fetch through the parent after
+// the overwrite creates a NEW proxy (the cache entry is lazily replaced), so
+// `s.obj = {…}; s.obj.nest.v = 1` keeps working — only HELD references trip.
+type StaleLedger = {
+  log: Array<{
+    /** Joined path of the overwritten container. */
+    p: string;
+    /** For index-moving array mutators: first affected index… */
+    from?: number;
+    /** …and last (inclusive); undefined = to the end. */
+    to?: number;
+  }>;
+};
+
+/** Array mutators that re-address existing indexes — a captured element proxy
+ *  would silently start reading a DIFFERENT element. `push` is exempt: it
+ *  never moves what already exists. */
+const INDEX_MOVING_MUTATORS = new Set([
+  "pop",
+  "shift",
+  "unshift",
+  "splice",
+  "sort",
+  "reverse",
+  "fill",
+  "copyWithin",
+]);
+
+/** Normalize a possibly-negative array index argument. */
+function normIdx(v: unknown, len: number): number {
+  let n = Math.trunc(Number(v));
+  if (!Number.isFinite(n)) n = 0;
+  if (n < 0) n = Math.max(len + n, 0);
+  return Math.min(n, len);
+}
+
+/** The ledger entry (birth-onward) that overwrote this proxy's container, or
+ *  null. An entry hits when it names this path or an ancestor of it; entries
+ *  with `from` (index-moving mutators) hit only strict descendants whose
+ *  element index falls in [from, to]. */
+function staleHit(
+  pathKey: string,
+  birth: number,
+  ledger: StaleLedger,
+): { p: string } | null {
+  const log = ledger.log;
+  for (let i = birth; i < log.length; i++) {
+    const e = log[i]!;
+    if (e.from === undefined) {
+      if (pathKey === e.p || pathKey.startsWith(e.p + PATH_SEP)) return e;
+      continue;
+    }
+    if (pathKey.length <= e.p.length || !pathKey.startsWith(e.p + PATH_SEP)) {
+      continue;
+    }
+    const rest = pathKey.slice(e.p.length + 1);
+    const cut = rest.indexOf(PATH_SEP);
+    const idx = Number(cut === -1 ? rest : rest.slice(0, cut));
+    if (Number.isInteger(idx) && idx >= e.from && idx <= (e.to ?? Infinity)) {
+      return e;
+    }
+  }
+  return null;
+}
+
+/** Throw the named stale-capture error (get/set/has/keys on a reference that
+ *  predates this method's overwrite of its container). */
+function throwStaleCapture(
+  cellName: string,
+  methodName: string,
+  pathKey: string,
+  overwrittenKey: string,
+): never {
+  const ref = "s." + pathKey.split(PATH_SEP).join(".");
+  const ow = "s." + overwrittenKey.split(PATH_SEP).join(".");
+  throw new Error(
+    `[${cellName}:${methodName}] stale reference: this value was captured from ${ref} before the method overwrote ${ow}. ` +
+      `In an async method \`s\` is a live view — the old reference would silently resolve to the NEW value ` +
+      `(a sync method keeps the old object). Copy what you need before overwriting ` +
+      `(const x = ${ref}?.field) or snapshot first (const v = { ...${ref} }).`,
+  );
+}
+
 /** Throw the canonical "live async state" error. */
 function throwLiveStateError(
   cellName: string,
@@ -1102,7 +1197,9 @@ export function createLiveProxy<S extends Record<string, unknown>>(
   // transactional path both satisfy it).
   batcher: Pick<ReturnType<typeof createBatcher>, "add" | "pending">,
   path: string[] = [],
-  _proxyCache: Map<string, S> = new Map(),
+  // Cache values carry the proxy AND its birth cursor so a re-fetch after an
+  // overwrite can detect the entry is stale and rebuild (see StaleLedger).
+  _proxyCache: Map<string, { px: unknown; birth: number }> = new Map(),
   _overlay: OverlayBox = { v: null },
   // Cancellation signal for this call (cancelOn / s.$signal — perfect-aio D1).
   _signal?: AbortSignal,
@@ -1122,10 +1219,65 @@ export function createLiveProxy<S extends Record<string, unknown>>(
   // executor wires it to an immediate `__effects` dispatch so an own.set
   // factory is consumed in the same tick.
   _do?: (...effects: unknown[]) => void,
+  // Stale-capture detection: shared per-invocation overwrite ledger + this
+  // proxy's birth cursor into it. Defaults create the ledger at the root; the
+  // recursion threads it through.
+  _stale: StaleLedger = { log: [] },
+  _birth = 0,
 ): S {
   const pathKey = path.join(PATH_SEP);
   const noteRead = _watch ? (k: string) => _watch.reads.add(k) : undefined;
   const noteWrite = _watch ? (k: string) => _watch.writes.add(k) : undefined;
+  /** Throw if this proxy's container was overwritten after its creation. The
+   *  root can never be stale, and the length check makes the common case free. */
+  const assertFresh = (): void => {
+    if (path.length === 0 || _stale.log.length <= _birth) return;
+    const hit = staleHit(pathKey, _birth, _stale);
+    if (hit) throwStaleCapture(cellName, methodName, pathKey, hit.p);
+  };
+  /** Record a container overwrite — only when a proxy could already exist at
+   *  or below the written path (every proxy's ancestors are cached by
+   *  construction, so an O(1) exact-key check covers descendants too). Leaf
+   *  scalar writes therefore never grow the ledger. */
+  const noteOverwrite = (writeKey: string): void => {
+    if (_proxyCache.has(writeKey)) _stale.log.push({ p: writeKey });
+  };
+  /** Fetch a nested proxy through the cache, rebuilding it when the cached one
+   *  predates an overwrite of its container — a fresh fetch through the parent
+   *  is a NEW capture and must stay legal. */
+  const nestedProxy = (childPath: string[], cacheKey: string): unknown => {
+    let cached = _proxyCache.get(cacheKey);
+    if (
+      cached && _stale.log.length > cached.birth &&
+      staleHit(cacheKey, cached.birth, _stale)
+    ) {
+      cached = undefined;
+    }
+    if (!cached) {
+      cached = {
+        px: createLiveProxy(
+          cellName,
+          prefix,
+          methodName,
+          getState,
+          batcher,
+          childPath,
+          _proxyCache,
+          _overlay,
+          undefined,
+          undefined,
+          _watch,
+          undefined,
+          undefined,
+          _stale,
+          _stale.log.length,
+        ),
+        birth: _stale.log.length,
+      };
+      _proxyCache.set(cacheKey, cached);
+    }
+    return cached.px;
+  };
   /** Committed root state with pending writes overlaid (read-your-writes). */
   function effectiveRoot(): S {
     const committed = getState();
@@ -1170,7 +1322,12 @@ export function createLiveProxy<S extends Record<string, unknown>>(
         // Materialization hook (LIVE_RAW): hands out the proxy's CURRENT
         // underlying value so a write of a proxy-derived structure can be
         // recorded as plain data — see materializeValue.
-        if (prop === LIVE_RAW) return effectiveAt();
+        if (prop === LIVE_RAW) {
+          // Materializing a stale reference into a write is the same silent
+          // wrong data — refuse at the write site.
+          assertFresh();
+          return effectiveAt();
+        }
         // Make arrays spreadable + iterable: `[...s.items]` and
         // `for (const x of s.items)`. The blanket symbol→undefined return used
         // to make `s.items[Symbol.iterator]` undefined → "not iterable" — which
@@ -1181,6 +1338,7 @@ export function createLiveProxy<S extends Record<string, unknown>>(
         // matches testCell's Immer draft (also iterable + mutable) — no
         // dev/prod fork.
         if (prop === Symbol.iterator) {
+          assertFresh();
           const fresh = effectiveAt();
           if (Array.isArray(fresh)) {
             noteRead?.(pathKey);
@@ -1195,6 +1353,9 @@ export function createLiveProxy<S extends Record<string, unknown>>(
         return undefined;
       }
       const key = prop as string;
+      // Held reference across this method's own overwrite of its container —
+      // named error instead of a silent read of the NEW value (R-1).
+      assertFresh();
       // `s.$signal` — the call's AbortSignal (aborts when a cancelOn trigger
       // fires). A never-aborting fallback keeps `s.$signal.aborted` safe in
       // sync methods / contexts without cancellation.
@@ -1250,25 +1411,11 @@ export function createLiveProxy<S extends Record<string, unknown>>(
                 live[i] = el;
                 continue;
               }
-              const cacheKey = [...path, String(i)].join("\0");
-              let cached = _proxyCache.get(cacheKey);
-              if (!cached) {
-                cached = createLiveProxy(
-                  cellName,
-                  prefix,
-                  methodName,
-                  getState,
-                  batcher,
-                  [...path, String(i)],
-                  _proxyCache,
-                  _overlay,
-                  undefined,
-                  undefined,
-                  _watch,
-                );
-                _proxyCache.set(cacheKey, cached);
-              }
-              live[i] = cached;
+              const idx = String(i);
+              live[i] = nestedProxy(
+                [...path, idx],
+                path.length === 0 ? idx : pathKey + PATH_SEP + idx,
+              );
             }
             // deno-lint-ignore no-explicit-any
             return (live as any)[key](...args);
@@ -1299,31 +1446,38 @@ export function createLiveProxy<S extends Record<string, unknown>>(
             op: key,
             args: args.map(materializeValue),
           });
+          // Index-moving mutators re-address existing elements — a captured
+          // element proxy would silently read a DIFFERENT element afterwards.
+          if (INDEX_MOVING_MUTATORS.has(key)) {
+            const len = (fresh as unknown[]).length;
+            let from = 0;
+            let to: number | undefined;
+            if (key === "pop") from = Math.max(len - 1, 0);
+            else if (key === "splice") from = normIdx(args[0] ?? 0, len);
+            else if (key === "fill") {
+              from = normIdx(args[1] ?? 0, len);
+              to = normIdx(args[2] ?? len, len) - 1;
+            } else if (key === "copyWithin") {
+              const t = normIdx(args[0] ?? 0, len);
+              const st = normIdx(args[1] ?? 0, len);
+              const en = normIdx(args[2] ?? len, len);
+              from = t;
+              to = t + Math.max(en - st, 0) - 1;
+            }
+            _stale.log.push({ p: pathKey, from, to });
+          }
           return result;
         };
       }
 
-      // Nested object/array — return cached nested proxy
+      // Nested object/array — return cached nested proxy (rebuilt when the
+      // cached one predates an overwrite of this path — a fresh fetch is a
+      // NEW capture).
       if (value !== null && typeof value === "object") {
-        const cacheKey = [...path, key].join("\0");
-        let cached = _proxyCache.get(cacheKey);
-        if (!cached) {
-          cached = createLiveProxy(
-            cellName,
-            prefix,
-            methodName,
-            getState,
-            batcher,
-            [...path, key],
-            _proxyCache,
-            _overlay,
-            undefined,
-            undefined,
-            _watch,
-          );
-          _proxyCache.set(cacheKey, cached);
-        }
-        return cached;
+        return nestedProxy(
+          [...path, key],
+          path.length === 0 ? key : pathKey + PATH_SEP + key,
+        );
       }
 
       // AIO-4.3: any other function value on a non-array is a usage we
@@ -1340,28 +1494,33 @@ export function createLiveProxy<S extends Record<string, unknown>>(
 
     set(_target, prop, value) {
       if (typeof prop === "symbol") return false;
+      assertFresh();
       noteWrite?.(path.length === 0 ? prop : pathKey + PATH_SEP + prop);
       batcher.add(methodName, {
         path: [...path, prop as string],
         value: materializeValue(value),
       });
+      noteOverwrite(path.length === 0 ? prop : pathKey + PATH_SEP + prop);
       return true;
     },
 
     // AIO-240: intercept `delete` so property removal is batched as a mutation
     deleteProperty(_target, prop) {
       if (typeof prop === "symbol") return false;
+      assertFresh();
       noteWrite?.(path.length === 0 ? prop : pathKey + PATH_SEP + prop);
       batcher.add(methodName, {
         path: [...path, prop as string],
         value: undefined,
         op: "delete",
       });
+      noteOverwrite(path.length === 0 ? prop : pathKey + PATH_SEP + prop);
       return true;
     },
 
     has(_target, prop) {
       if (typeof prop === "symbol") return false;
+      assertFresh();
       // `"x" in s` reads x's existence — record the probed path, not the whole
       // container, so only a change AT x conflicts.
       noteRead?.(
@@ -1373,6 +1532,7 @@ export function createLiveProxy<S extends Record<string, unknown>>(
     },
 
     ownKeys() {
+      assertFresh();
       noteRead?.(pathKey);
       const fresh = effectiveAt();
       if (fresh === null || fresh === undefined) return []; // AIO-232
@@ -1405,6 +1565,7 @@ export function createLiveProxy<S extends Record<string, unknown>>(
 
     getOwnPropertyDescriptor(_target, prop) {
       if (typeof prop === "symbol") return undefined;
+      assertFresh();
       const fresh = effectiveAt();
       if (fresh === null || fresh === undefined) return undefined; // AIO-232
       // Check fresh state directly — target may be stale if state was replaced.

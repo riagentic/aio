@@ -106,7 +106,7 @@ export interface LifecycleDeps<S, A> {
     viewport?: string | false;
     head?: string;
     chrome?: "standard" | "themed" | "none";
-    theme?: "auto" | "none";
+    theme?: "auto" | "full" | "none";
   };
   keepServer: boolean | undefined;
   /** Library/test mode — no process-wide signal handlers (the same contract

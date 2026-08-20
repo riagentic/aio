@@ -61,6 +61,42 @@ const App = () => (
 | `fallback` | `VChild`               | Shown when `when` is falsy        |
 | `children` | `(value: T) => VChild` | Render function with narrowed T   |
 
+### A component that renders nothing keeps its place
+
+`null` is a first-class thing to render, and it does **not** mean "no node":
+
+```tsx
+const Banner = () => alert.value ? <aside>{alert.value}</aside> : null;
+
+<main>
+  <Banner /> {/* absent → an empty comment node holds this slot */}
+  <Article />
+</main>;
+```
+
+While `Banner` is absent AIR leaves a comment node (`<!---->`) where it is
+written, so when it comes back it appears **first**, not after `<Article/>`.
+Without that placeholder the component has no DOM anchor, and a renderer with
+nothing to insert before can only append — which is how a prompt written as the
+first child of a panel ends up below a screenful of settings.
+
+This is the same slot a `null` child has always used, and the server emits it
+too, so mount, re-render, SSR and hydration all agree on where an absent
+component sits. What it costs is one comment node per absent component; what it
+buys is that position never depends on render order.
+
+The visible consequences, if you assert on markup:
+
+```ts
+// a component that renders null
+root.innerHTML; // "<!---->"  — not ""
+root.children.length; // 0    — comment nodes are not elements
+root.querySelector("aside"); // null
+```
+
+Assert on **elements** (`children`, `querySelector`) rather than exact
+`innerHTML` and absence reads the same either way.
+
 ---
 
 ## Lists & Keys

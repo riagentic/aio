@@ -58,6 +58,29 @@ export function h(
 
 // ── Child flattening ──────────────────────────────────────────────────
 
+/** The positional placeholder for "nothing here" — a comment node in the DOM,
+ *  `<!---->` in SSR.
+ *
+ *  ONE constructor, because two would drift: a null CHILD has used one since
+ *  AIO-107, and a component that renders `null` now uses the same one. It used
+ *  to create no node at all, which meant no `vnode._dom` — and `_dom` is the
+ *  anchor the next diff inserts before. So the component that came back was
+ *  APPENDED instead: an approval prompt written as the first child of a panel
+ *  rendered last, below a screenful of settings and off the bottom of the
+ *  window (rimote R-10). Every `x ? <El/> : null` component has that shape —
+ *  banners, toasts, modals, validation messages — and those are exactly the
+ *  ones whose position carries meaning. It also made SSR disagree with the
+ *  client: `vdom-ssr.ts` emits `<!---->` for a null slot, so a null-first
+ *  component hydrated in the right place and then MOVED on first re-render. */
+export function nullSlot(): VNode {
+  return {
+    tag: _Null,
+    props: {},
+    children: [],
+    _static: true,
+  } as unknown as VNode;
+}
+
 export function flattenChildren(
   raw: VChild[],
   out: (VNode | string | number)[],
@@ -65,15 +88,9 @@ export function flattenChildren(
 ): void {
   for (const c of raw) {
     if (c == null || typeof c === "boolean") {
-      // AIO-107: preserve null slots as comment-node placeholders for positional stability
-      out.push(
-        {
-          tag: _Null,
-          props: {},
-          children: [],
-          _static: true,
-        } as unknown as VNode,
-      );
+      // AIO-107: preserve null slots as comment-node placeholders for
+      // positional stability.
+      out.push(nullSlot());
       continue;
     }
     if (Array.isArray(c)) {

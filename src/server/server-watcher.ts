@@ -1,6 +1,7 @@
 // Dev-only file watcher — debounced live reload on src/ changes
 // Extracted from createServer() closure to keep server.ts focused on HTTP/WS
 
+import { UI_ENTRY } from "./app-files.ts";
 import { enc } from "../protocol/envelope.ts";
 import { join } from "@std/path";
 import type { GraphResult } from "./graph-validator.ts";
@@ -159,14 +160,14 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
 
       (async () => {
         // Re-validate import graph on file change (dev mode only)
-        if (fileExists(join(absBaseDir, deps.uiEntry ?? "App.tsx"))) {
+        if (fileExists(join(absBaseDir, deps.uiEntry ?? UI_ENTRY))) {
           const gen = ++graphGeneration;
           const timeout = new Promise<null>((r) =>
             setTimeout(() => r(null), 2000)
           );
           const revalTranspile = (s: string, f: string) => transpile(s, f);
           const validation = validateGraph(
-            join(absBaseDir, deps.uiEntry ?? "App.tsx"),
+            join(absBaseDir, deps.uiEntry ?? UI_ENTRY),
             deps.importMapObj,
             revalTranspile,
           );

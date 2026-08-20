@@ -32,6 +32,11 @@ export const BUILD_BOOL_FLAGS = [
   // packaged artifact (`AppDirs.app`) and exits. Part of the vocabulary because
   // an unknown flag here is silently ignored — a launcher asking with a typo
   // would get an empty answer and fall back to shared /tmp without a word.
+  // Standalone Android has no Deno runtime, so a build whose graph reaches
+  // server-only code is refused (it would ship a UI whose buttons do nothing).
+  // This says "those paths are guarded and never taken on Android" — the
+  // developer asserting what the build cannot see.
+  "--allow-server-only",
   "--print-app-tmpdir",
 ] as const;
 
@@ -41,6 +46,16 @@ export const BUILD_VALUE_FLAGS = [
   "--name",
   "--platform",
   "--android-dev-url",
+  // The UI component this build bundles (relative to the app dir), overriding
+  // the `App.tsx` convention — the build-side half of dev's `ui.entry`. The
+  // bundle records it (`__aioBundleUi`) and the server refuses to serve a
+  // bundle whose UI entry differs from the running config (dev==prod).
+  "--ui",
+  // Where final artifacts (binary, APK, AppImage, .service) land, instead of
+  // the project root. Orchestrating several single-target builds needs a
+  // per-app destination — without this, callers staged artifacts in dist/,
+  // which the next build wipes (dist/ is embedded into the binary wholesale).
+  "--out",
 ] as const;
 
 /** Every boolean flag the fleet build (`build-all.ts`) understands. */

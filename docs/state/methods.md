@@ -339,15 +339,13 @@ The live proxy supports the read patterns you'd expect:
   `.toSorted`, `.toReversed`, `.toSpliced`. They see the **current** state plus
   your pending writes, fresh per call — re-read after an `await` and you get the
   new state.
-- **Writing through an element** — `.find`, `.forEach`, `.some`, `.every`,
-  `.findIndex`, `.values()` and `.entries()` hand your callback the **live**
-  element, so `s.items.forEach((it) => { it.q = 0 })` batches exactly like
-  `s.items[i].q = 0` — the same as `for (const it of s.items)` and the same as
-  the sync (Immer draft) method. The methods that build a **new array** (`.map`,
-  `.filter`, `.slice`, `.concat`, `.flat`, `.flatMap`, `.toSorted`, …) and
-  `.reduce` still return plain data from a `structuredClone` snapshot, so a
-  write through one of THOSE elements changes nothing: filter for the indices
-  you want, or loop with `forEach`/`for…of`.
+- **Writing through an element** — every read method (`.find`, `.filter`,
+  `.map`, `.forEach`, `.some`, `.every`, `.slice`, iteration, …) hands back the
+  **live** element, so
+  `s.items.filter((x) => x.done).forEach((it) => { it.q = 0 })` batches exactly
+  like `s.items[i].q = 0` — the same as the sync (Immer draft) method. Only the
+  stringifying methods (`.join`, `.toString`, `.toLocaleString`) run on a
+  snapshot.
 
 For anything that isn't covered (function-valued properties on the state,
 unusual array methods), the live proxy throws:
@@ -359,6 +357,52 @@ unusual array methods), the live proxy throws:
 The fix is to take a plain snapshot of what you need before calling the
 unsupported op: `const items = [...s.items]`, `const config = { ...s.config }`,
 then call the op on the snapshot.
+
+### Pitfall: a captured reference does not survive overwriting its container
+
+In a **sync** method, a captured reference keeps the old object — Immer draft
+semantics:
+
+```ts
+respond(s, ok: boolean) {
+  const req = s.pending   // the draft object
+  s.pending = null
+  use(req.sid)            // still the old sid — req IS the old object
+}
+```
+
+In an **async** method `s` is a live **path view**: `req` above means "whatever
+`s.pending` holds _now_". After `s.pending = null` that is null; after
+`s.pending = other` it is the OTHER object. Both are silent wrong data, so the
+proxy refuses instead — any use of a reference captured **before this method
+overwrote its container** throws:
+
+```
+[cell:respond] stale reference: this value was captured from s.pending before the
+method overwrote s.pending. …
+```
+
+The same applies to a captured array **element** after an index-moving mutator
+(`sort`, `splice`, `shift`, `reverse`, …) — the path `s.items[0]` would suddenly
+address a different element. (`push` never moves existing elements, so captured
+elements stay valid.)
+
+The fix is always the same — copy what you need **before** overwriting:
+
+```ts
+async respond(s, ok: boolean) {
+  const sid = s.pending?.sid          // copy the primitive…
+  // …or snapshot the object: const req = { ...s.pending }
+  s.pending = null
+  if (!sid) return
+  const link = await import("./link.server.ts")
+  link.answerApproval(sid, ok)
+}
+```
+
+Fresh reads stay legal: `s.pending = {...}; s.pending.sid` re-fetches through
+`s` and sees the new object — only references **held across** the overwrite trip
+the check.
 
 ### Effects from async methods
 

@@ -1,5 +1,6 @@
 // Browser import map generation — npm packages → esm.sh CDN URLs.
 
+import { parseDenoJson } from "./deno-json.ts";
 import { join, resolve } from "@std/path";
 import { CDN } from "./server-html-constants.ts";
 import { log } from "../diagnostics/logger-api.ts";
@@ -26,7 +27,10 @@ export function readAppDenoImports(baseDir: string): Record<string, string> {
   ];
   for (const candidate of candidates) {
     try {
-      const imports = JSON.parse(Deno.readTextFileSync(candidate)).imports;
+      const imports = parseDenoJson(
+        Deno.readTextFileSync(candidate),
+        candidate,
+      ).imports as Record<string, string> | undefined;
       if (imports && typeof imports === "object") {
         return imports as Record<string, string>;
       }

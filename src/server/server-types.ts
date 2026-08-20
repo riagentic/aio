@@ -45,7 +45,7 @@ export interface ServerConfig {
   viewport?: string | false; // AIO-423: <meta viewport> override (false = omit)
   headExtra?: string; // AIO-423: verbatim extra <head> content
   chrome?: "standard" | "themed" | "none"; // ui.chrome — desktop window frame
-  theme?: "auto" | "none"; // ui.theme — the default stylesheet
+  theme?: "auto" | "full" | "none"; // ui.theme — the default stylesheet
   themeName?: string; // identity the theme accent is derived from (appId)
   renderBudget?: RenderBudget; // sent to browser for RenderMeter thresholds
   /** Extra read-only DEV-server roots by URL prefix — see CellsConfig.serveDirs. */

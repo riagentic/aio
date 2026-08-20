@@ -3,6 +3,7 @@
  * Process management commands for am — start, stop, restart, watch, status, instances.
  */
 
+import { readDenoJson } from "../server/deno-json.ts";
 import { dirname, join } from "@std/path";
 import { appDirs } from "../server/app-dirs.ts";
 import {
@@ -450,7 +451,7 @@ export async function cmdStart(
     let effective = clientArg;
     if (!effective) {
       try {
-        const dj = JSON.parse(await Deno.readTextFile("deno.json")) as {
+        const dj = ((await readDenoJson(Deno.cwd()))?.config ?? {}) as {
           target?: string;
         };
         effective = dj.target;
