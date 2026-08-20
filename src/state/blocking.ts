@@ -49,7 +49,35 @@ const DEFAULT_SIZE = (() => {
   return Math.max(1, (hw ?? 4) - 1); // leave a core for the main isolate
 })();
 
-const WORKER_URL = new URL("./blocking-worker.ts", import.meta.url);
+/**
+ * Where the worker module lives — resolved on FIRST USE, not at import.
+ *
+ * This used to be a module-level `new URL(..., import.meta.url)`. In a bundle
+ * there is no module URL to be relative to: esbuild rewrites `import.meta` to a
+ * shim whose `url` is not a valid absolute URL, so the constructor threw while
+ * the module was still evaluating — before any app code ran, and long before
+ * anything asked for a worker. One `throw` at that point takes the WHOLE bundle
+ * down, so an Android app that never calls `schedule.blocking()` came up as a
+ * blank screen with a single `Failed to construct 'URL'` in the console and no
+ * line of its own in the stack.
+ *
+ * Deferring it means a bundle that never spawns a worker never builds the URL,
+ * and one that does gets an error naming the thing it actually asked for.
+ */
+let _workerUrl: URL | string | null = null;
+function workerUrl(): URL | string {
+  if (_workerUrl) return _workerUrl;
+  try {
+    _workerUrl = new URL("./blocking-worker.ts", import.meta.url);
+  } catch {
+    throw new Error(
+      "schedule.blocking() needs a module URL to start its worker from, and " +
+        "this build has none (a bundled/standalone target). Run the blocking " +
+        "work on the server, or keep it on the main thread.",
+    );
+  }
+  return _workerUrl;
+}
 
 export function createBlockingPool(opts?: { size?: number }): BlockingPool {
   const size = Math.max(1, opts?.size ?? DEFAULT_SIZE);
@@ -62,7 +90,7 @@ export function createBlockingPool(opts?: { size?: number }): BlockingPool {
   let disposed = false;
 
   function spawn(): Worker {
-    const w = new Worker(WORKER_URL, { type: "module" });
+    const w = new Worker(workerUrl(), { type: "module" });
     all.add(w);
     w.onmessage = ({ data }: MessageEvent<WorkerRes>) => {
       const task = active.get(w);

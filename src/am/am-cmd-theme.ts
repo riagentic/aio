@@ -148,8 +148,9 @@ export async function cmdTheme(
       `\n` +
       `  It is a normal stylesheet now: yours to edit, in your git history, ` +
       `and no\n  aio upgrade can change it.\n` +
-      `  The framework's own copy stops being emitted automatically — an app ` +
-      `with a\n  stylesheet is one \`ui.theme: "auto"\` steps aside for, so ` +
-      `there is exactly one\n  theme and it is this file.`,
+      `  aio emits no look of its own beside it: the default (\`ui.theme:\n` +
+      `  "tokens"\`) paints nothing, and \`"auto"\` steps aside for an app ` +
+      `with a\n  stylesheet — so there is exactly one theme and it is this ` +
+      `file.`,
   );
 }

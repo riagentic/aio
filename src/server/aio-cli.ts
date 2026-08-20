@@ -2,7 +2,7 @@
 import { log } from "../diagnostics/logger-api.ts";
 
 /** Framework version — printed by --version, checked in tests */
-export const VERSION = "1.0.0-alpha62";
+export const VERSION = "1.0.0-alpha63";
 
 /** What `--version` prints: what this artifact IS, and what it was built with.
  *

@@ -7,6 +7,11 @@ One guide per version migration. Find your current version and follow the steps.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha62 → alpha63](from-alpha62-to-alpha63.md) — nothing breaks: aio's
+  default look is now opt-in (`ui.theme: "auto"`), so an app that never asked
+  for it renders exactly as it would without a framework; `ui.theme: "full"`
+  boots instead of exiting; two android-bundle fixes (`log` is exported, a
+  module-level `new URL` no longer kills the bundle).
 - [alpha61 → alpha62](from-alpha61-to-alpha62.md) — nothing breaks in your code:
   the default theme steps aside for your own stylesheet, a standalone Android
   build that cannot work is refused instead of shipped, and two new boot lines

@@ -1,12 +1,20 @@
-// `ui.theme: "auto"` — an app that ships its own stylesheet owns the visual
-// stage. The default look used to apply regardless, and a cascade LAYER does
-// not prevent that: `@layer aio` wins only where the app's CSS *disagrees*.
-// Where it says nothing — `max-width` on `<main>`, `display`/`gap` on a class
-// the app happens to call `.row` — aio's declaration applied unopposed and
-// silently re-laid-out the page. Reported from the field after alpha61.
-import { assert, assertStringIncludes } from "@std/assert";
+// `ui.theme` — aio's default look is OPT-IN, and the opt-in still steps aside.
+//
+// Two rules, one file:
+//   1. An app that never mentions `theme` gets NOTHING that paints. A shell
+//      cannot see every way an app brings CSS (a `style.css`, a `<style>` in
+//      `ui.head`, a sheet the component renders, a CSS-in-JS runtime), and a
+//      cascade layer does not make an unasked-for rule safe: `@layer aio` wins
+//      only where the app DISAGREES, so wherever it said nothing — `max-width`
+//      on `<main>`, `display`/`gap` on a class it happens to call `.row` — the
+//      default applied unopposed and re-laid-out the page. Reported from the
+//      field against alpha61/alpha62.
+//   2. `"auto"` — the opt-in a new app is scaffolded with — still leaves the
+//      moment the app ships its own `style.css`.
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { appThemeCss, appThemeTokensCss } from "../src/build/app-theme.ts";
 import { generateHTML } from "../src/server/server-html-gen.ts";
+import type { UiTheme } from "../src/server/aio-types.ts";
 
 /** Every declaration in the default look that can MOVE or PAINT a box — the
  *  half an app's own stylesheet must not have to fight. */
@@ -21,7 +29,7 @@ const VISUAL = [
   "font-family:var(--aio-font)", // body type
 ];
 
-function html(opts: { hasCSS: boolean; theme?: "auto" | "full" | "none" }) {
+function html(opts: { hasCSS: boolean; theme?: UiTheme }) {
   return generateHTML(
     "probe",
     /* prod */ true,
@@ -63,13 +71,38 @@ Deno.test("theme tokens are INERT — variables only, nothing that paints", () =
   for (const v of VISUAL) assertStringIncludes(full, v);
 });
 
-Deno.test("no app stylesheet → the full default look", () => {
-  const doc = html({ hasCSS: false });
+Deno.test("theme unset → nothing that paints, with or without app CSS", () => {
+  for (const hasCSS of [true, false]) {
+    const doc = html({ hasCSS });
+    for (const v of VISUAL) {
+      assert(
+        !doc.includes(v),
+        `unasked-for default emitted (hasCSS=${hasCSS}): ${v}`,
+      );
+    }
+    // The inert palette is still there — `chrome: "themed"` reads it, and an
+    // app may reference a token deliberately.
+    assertStringIncludes(doc, "--aio-accent:");
+    // And the two-rule baseline, which predates the theme and is not it.
+    assertStringIncludes(doc, "box-sizing:border-box");
+  }
+});
+
+Deno.test('"tokens" is the default, spelled out', () => {
+  assertEquals(
+    html({ hasCSS: false, theme: "tokens" }),
+    html({ hasCSS: false }),
+  );
+  assertEquals(html({ hasCSS: true, theme: "tokens" }), html({ hasCSS: true }));
+});
+
+Deno.test('ui.theme: "auto" + no stylesheet → the full default look', () => {
+  const doc = html({ hasCSS: false, theme: "auto" });
   for (const v of VISUAL) assertStringIncludes(doc, v);
 });
 
-Deno.test("app ships style.css → every visual default steps aside", () => {
-  const doc = html({ hasCSS: true });
+Deno.test('ui.theme: "auto" + style.css → every visual default steps aside', () => {
+  const doc = html({ hasCSS: true, theme: "auto" });
   for (const v of VISUAL) {
     assert(
       !doc.includes(v),

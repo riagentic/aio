@@ -51,7 +51,7 @@
 - [`aio/ui` — the component kit](ui/kit.md) — A small, deliberately basic set of components for aio's core use case —
 - [React components in aio — islands](ui/react-islands.md) — aio's renderer is AIR, not React.
 - [Reactivity — what is tracked, and where](ui/reactivity-tracking.md) — A field report gave up an hour to this and asked for exactly one thing: "nowhere
-- [The default theme](ui/theme.md) — Every aio app has a stylesheet before anyone writes one.
+- [The default theme](ui/theme.md) — aio ships a complete stylesheet — typography, colour in light and dark, forms,
 
 ## Persistence & sync — SQLite, CRDT, offline
 
@@ -172,6 +172,7 @@
 - [Upgrade from v1.0.0-alpha6 to v1.0.0-alpha7](upgrade/from-alpha6-to-alpha7.md) — mod.ts no longer re-exports renderer primitives.
 - [Upgrading from alpha60 to alpha61](upgrade/from-alpha60-to-alpha61.md) — Nothing breaks.
 - [Upgrading from alpha61 to alpha62](upgrade/from-alpha61-to-alpha62.md) — Nothing breaks in your app's code.
+- [Upgrading from alpha62 to alpha63](upgrade/from-alpha62-to-alpha63.md) — One default flips, and it flips towards your app: aio's stylesheet no longer
 - [Upgrade from v1.0.0-alpha7 to v1.0.0-alpha8](upgrade/from-alpha7-to-alpha8.md) — None.
 - [Upgrade from v1.0.0-alpha8 to v1.0.0-alpha9](upgrade/from-alpha8-to-alpha9.md) — The internal machine state field is renamed.
 - [Upgrade from v1.0.0-alpha9 to v1.0.0-alpha10](upgrade/from-alpha9-to-alpha10.md) — Alpha10 is fully additive.

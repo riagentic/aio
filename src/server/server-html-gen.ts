@@ -2,13 +2,14 @@
 
 import { UI_ENTRY } from "./app-files.ts";
 import type { RenderBudget } from "../vitals/types.ts";
-import type { UiConfig } from "./aio-types.ts";
+import type { UiConfig, UiTheme } from "./aio-types.ts";
 import { appThemeCss, appThemeTokensCss } from "../build/app-theme.ts";
 
 /** `ui.chrome` — how much of the desktop window the OS draws. */
 export type UiChrome = NonNullable<UiConfig["chrome"]>;
-/** `ui.theme` — whether the default stylesheet is emitted. */
-export type UiTheme = NonNullable<UiConfig["theme"]>;
+/** `ui.theme` — how much of the default look the shell emits. Defined in
+ *  aio-types (ONE spelling), re-exported here where the shells reach for it. */
+export type { UiTheme };
 import { escHtml } from "./server-html-constants.ts";
 import { devWsScript } from "./server-html-scripts.ts";
 
@@ -155,23 +156,27 @@ function headContent(
   // The default look (ui.theme). Inlined rather than linked: it is small, it
   // must not cost a round trip before first paint, and the android shell has
   // no server to fetch it from — one emission point, every target.
-  // THE step-aside rule. An app that ships its own stylesheet owns the whole
-  // visual stage: aio's look would otherwise apply wherever the app's CSS
-  // happens to say nothing (a cascade LAYER only wins conflicts — it cannot
-  // stop a declaration nobody competes with), which is how `:where(main)
-  // {max-width;margin-inline;padding}` re-laid-out apps whose <main> was a
-  // full-bleed flex container, and how `.row`/`.grid`/`.card` collided with
-  // class names every app already uses. Worse than the layout damage is the
-  // confusion: "I never wrote this rule — why is it not the browser default?"
   //
-  // So `"auto"` keeps only the INERT half once app CSS exists — the `--aio-*`
-  // custom properties, which paint nothing unless something references them
-  // (the `chrome: "themed"` title bar does, via `var(--aio-…, fallback)`).
-  // `"full"` is the explicit opt-in for an app that WANTS the default look
-  // alongside its own CSS; typing it removes the confusion by construction.
+  // THE opt-in rule. Nothing here paints unless the app asked for it by name.
+  // aio's look is not a default because an app can bring CSS in more ways than
+  // a shell can see — a `style.css`, a `<style>` in `ui.head`, a sheet the
+  // component itself renders, a CSS-in-JS runtime — and a cascade LAYER does
+  // not make an unasked-for rule safe: `@layer aio` wins only where the app
+  // DISAGREES, so wherever the app said nothing (`max-width` on `<main>`,
+  // `display`/`gap` on a class it happens to call `.row`) the default applied
+  // unopposed and quietly re-laid-out a page nobody asked it to touch. Worst
+  // of all to debug: a rule you never wrote that is not the browser default
+  // either. So the shell of an app that never mentions `theme` carries only
+  // the INERT half — the `--aio-*` custom properties, which paint nothing
+  // unless something references them (`chrome: "themed"`'s title bar does).
+  //
+  //   unset / "tokens" → variables only, nothing paints  (the default)
+  //   "auto"           → the full look until the app ships style.css
+  //   "full"           → the full look, always
+  //   "none"           → nothing at all, not even the variables
   const themeCss = theme === "none"
     ? null
-    : theme === "full" || !hasCSS
+    : theme === "full" || (theme === "auto" && !hasCSS)
     ? appThemeCss(themeName || title)
     : appThemeTokensCss(themeName || title);
   const themeStyle = themeCss === null ? "" : `\n  <style>${themeCss}</style>`;

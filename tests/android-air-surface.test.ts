@@ -27,6 +27,7 @@
 import { assert, assertEquals } from "@std/assert";
 import * as air from "../src/air.ts";
 import * as android from "../src/standalone-air.ts";
+import * as aio from "../mod.ts";
 
 // ── 1. the contract of a shared name is identical on both entries ────────
 
@@ -157,4 +158,92 @@ Deno.test("android aio/air: the primitives an app cannot render without are pres
         `the moment an app uses it`,
     );
   }
+});
+
+// ── 3. `aio` itself means the same thing there ──────────────────────────
+//
+// The android build remaps BOTH specifiers to this one entry:
+//   imports: { "aio": aioEntry, "aio/air": aioEntry }
+// so a symbol on `aio` that is missing here is an app that compiles for
+// server, browser and electron and fails to BUNDLE for android — with an
+// esbuild error naming a framework internal ("No matching export in
+// aio/src/standalone-air.ts for import \"log\""), which reads as a broken
+// install rather than a missing export. That is how `log` was found in the
+// field (rimote): every part of a standalone app — cells, networking, session
+// logic — has something to say when it goes wrong.
+
+/** On `aio`, deliberately NOT on the android entry: each needs a Deno process,
+ *  a server, or a database that a WebView bundle does not have. */
+const SERVER_ONLY: Record<string, string> = {
+  VERSION: "the running server's version string",
+  route: "HTTP route handlers",
+  serverFn: "server function boundary",
+  serverFns: "server function boundary",
+  serverRequest: "the server's request context",
+  serverUser: "the server's request context",
+  serverAuth: "the server's request context",
+  authClient: "talks to /__aio/auth/* on a server",
+  createAuthClient: "talks to /__aio/auth/* on a server",
+  generateTotpSecret: "server-side TOTP enrolment",
+  totpUri: "server-side TOTP enrolment",
+  verifyTotp: "server-side TOTP verification",
+  table: "SQLite schema builder",
+  pk: "SQLite schema builder",
+  ref: "SQLite schema builder",
+  text: "SQLite schema builder",
+  integer: "SQLite schema builder",
+  real: "SQLite schema builder",
+  isCellWorker: "Deno worker-thread cells",
+  blocking: "Deno worker pool (see tests/bundle-load-time-throw.test.ts)",
+  testCell: "test harness — runs in a Deno test process",
+};
+
+/** On `aio`, missing here, and NOT deliberate — the R-14 class, enumerated so
+ *  it is a visible fact instead of a discovery made by a user. Triage lives in
+ *  todo.md ("what `aio` means on android"); this list may only SHRINK. */
+const KNOWN_GAPS: Record<string, string> = {
+  own: "effect ownership — isomorphic, should ship",
+  schedule: "scheduling — isomorphic surface, pulls the Deno worker pool today",
+  self: "self-dispatch — isomorphic, should ship",
+  call: "call a cell method by name — isomorphic, should ship",
+  until: "documented in mod.ts's own example; async-method primitive",
+  race: "documented in mod.ts's own example; async-method primitive",
+  sleep: "async-method primitive",
+  UntilTimeoutError: "the error until() rejects with",
+  bindCell: "cell binding — isomorphic",
+  composeCells: "cell composition — isomorphic",
+  createSelector: "derived state — isomorphic",
+  degraded: "degradation reporting — isomorphic",
+  degradedReport: "degradation reporting — isomorphic",
+};
+
+Deno.test("android `aio`: every missing export is a listed decision or a listed gap", () => {
+  const surprises = Object.keys(aio).filter((n) =>
+    !(n in android) && !(n in SERVER_ONLY) && !(n in KNOWN_GAPS)
+  );
+  assertEquals(
+    surprises,
+    [],
+    "these vanish from `aio` on android with no recorded reason — an app that " +
+      "uses them builds everywhere and fails to BUNDLE only there:\n  " +
+      surprises.join("\n  "),
+  );
+});
+
+Deno.test("android `aio`: the ledgers have no dead entries", () => {
+  const stale = [...Object.keys(SERVER_ONLY), ...Object.keys(KNOWN_GAPS)]
+    .filter((n) => !(n in aio) || n in android);
+  assertEquals(
+    stale,
+    [],
+    "listed as missing but no longer so (or no longer on `aio`) — a ledger " +
+      "that does not shrink when the gap does is a lie:\n  " +
+      stale.join("\n  "),
+  );
+});
+
+Deno.test("android `aio`: log is present, and is THE logger", () => {
+  // The one closed in the field: `import { log } from \"aio\"` compiled for
+  // three targets and failed to bundle for the fourth.
+  assertEquals(android.log, aio.log, "standalone must re-export aio's log");
 });

@@ -64,6 +64,58 @@ the report surfaced but did NOT ask for, kept honest here:
   proxy is already outside the contract, but it is the one hole in R-1's fix and
   worth a rule in `aiol` rather than a runtime cost on every read.
 
+## A failed bundle leaves its old output for the next build to ship (rimote R-13)
+
+The server-only guard refuses a bad android bundle correctly and says exactly
+why — but `dist/app.js` from the previous build is left in place. Re-run the
+same command and the bundle is reused, the guard never runs, Gradle packages the
+STALE js and prints `BUILD SUCCESSFUL`. The reporter installed an old APK three
+times before noticing. The second build is the dangerous one: it produces the
+outcome the guard's own message warns about, reached by repeating the command
+that just refused. Fix shape: a failed bundle invalidates its output (remove or
+poison `dist/app.js`) rather than leaving it for the next run to ship.
+
+Also open from that report: **R-16** — apps overlaying native Android sources
+from `<app>/android/` into the generated Gradle project (the seam a
+capture/input agent needs; the report has a working seven-file proof), and a
+docs line that an Android WebView page is served from a secure origin, so an app
+talking to a plaintext LAN server needs `MIXED_CONTENT_ALWAYS_ALLOW` or it comes
+up perfectly and connects to nothing.
+
+## What `aio` means on android — 13 exports short (2026-08-20)
+
+The android build maps BOTH `aio` and `aio/air` to `src/standalone-air.ts`, so a
+symbol on `aio` that the standalone entry does not re-export is an app that
+compiles for server, browser and electron and fails to BUNDLE for android, with
+an esbuild error naming a framework internal. `log` was found that way (rimote
+R-14) and is fixed; a ledger in `tests/android-air-surface.test.ts` now names
+the rest, and the gate refuses any NEW divergence. Thirteen are listed as
+KNOWN_GAPS rather than decisions:
+
+`own` · `schedule` · `self` · `call` · `until` · `race` · `sleep` ·
+`UntilTimeoutError` · `bindCell` · `composeCells` · `createSelector` ·
+`degraded` · `degradedReport`
+
+`until`/`race` appear in mod.ts's OWN header example, so the documented spelling
+of an async method does not bundle for android. Most are isomorphic and should
+simply be re-exported; `schedule` is the one with a real dependency (the Deno
+worker pool — see `tests/bundle-load-time-throw.test.ts`), so it needs the
+standalone half separated from the pool rather than a re-export.
+
+## `ui.theme` is the one ui.* key the APK shell cannot see (2026-08-20)
+
+`ui.theme` is set in `aio.run({ ui })` — code, not `deno.json` (which
+deliberately refuses `ui` at its top level). The Android build generates the
+WebView's `index.html` without running the app, so it emits the framework
+DEFAULT (`"tokens"`: the inert `--aio-*` variables, nothing that paints). An app
+that opts into `"auto"`/`"full"` is therefore themed on desktop and unthemed in
+its APK — the same blind spot `ui.chrome` already has there, made visible by the
+alpha63 default flip. Shapes worth weighing: ship the full sheet in the APK
+shell `media="not all"` and let the standalone runtime enable it from the config
+it already receives (no flash, ~6 KB, one line); or let the bundler stamp the
+resolved look next to the app's own assets. Not: a second spelling of `ui.theme`
+in `deno.json`.
+
 ## Shipped
 
 - **Phase A (alphas)** — A1 public-surface audit, A2 API-snapshot gate, A3 WS

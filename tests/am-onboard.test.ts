@@ -183,7 +183,14 @@ Deno.test("scaffold: counter + todo emit the expected src/-based files", () => {
     ) {
       assert(f in files, `${tpl} missing ${f}`);
     }
-    assertStringIncludes(files["src/app.ts"]!, "aio.run()");
+    // The scaffold OPTS IN to the default look — `ui.theme` defaults to
+    // "tokens" (nothing that paints), so a new app that said nothing would
+    // render as raw user-agent HTML while its template markup assumes cards
+    // and a page shell.
+    assertStringIncludes(
+      files["src/app.ts"]!,
+      'aio.run({ ui: { theme: "auto" } })',
+    );
   }
   assertStringIncludes(
     scaffold("app", "counter", true)["src/cell.ts"]!,
