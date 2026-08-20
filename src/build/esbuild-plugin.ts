@@ -16,9 +16,26 @@
  *  gives the caller no channel back and the build already awaits the run. */
 export const serverOnlyStatic: Record<string, Set<string>> = {};
 
+/** Server-only modules the client graph reaches DYNAMICALLY —
+ *  `await import("./link.server.ts")` inside a cell method.
+ *
+ *  Legal, and the documented pattern: cell methods run server-side, so on
+ *  every target that HAS a Deno runtime this is exactly right and the import
+ *  is simply external to the browser bundle. Standalone Android has no Deno
+ *  runtime at all — the APK is a WebView and a bundle — so there the same
+ *  import is not dead code, it is the half of the app that does the work, and
+ *  it silently does not ship. rimote's agent (screenrecord, `wm size`, FFI)
+ *  built to a 3.2 MB APK that installed, launched, rendered its control panel,
+ *  and did nothing: the Windows build of the same entry is 180 MB because it
+ *  carries a runtime. Recorded separately from the static map because the two
+ *  mean opposite things — static is always wrong, dynamic is wrong only where
+ *  nothing can execute it. */
+export const serverOnlyDynamic: Record<string, Set<string>> = {};
+
 /** Forget the previous build's findings — a build is a fresh question. */
 export function _resetServerOnlyStatic(): void {
   for (const k of Object.keys(serverOnlyStatic)) delete serverOnlyStatic[k];
+  for (const k of Object.keys(serverOnlyDynamic)) delete serverOnlyDynamic[k];
 }
 
 /** Creates an esbuild plugin that makes browser builds safe by intercepting server-only imports. */
@@ -50,10 +67,16 @@ export function aioBrowserPlugin(): {
         if (!importer) return;
         (serverOnlyStatic[spec] ??= new Set()).add(importer);
       };
+      const recordDynamic = (importer: string, spec: string) => {
+        if (!importer) return;
+        (serverOnlyDynamic[spec] ??= new Set()).add(importer);
+      };
       const intercept = (
         args: { path: string; kind: string; importer: string },
       ) => {
-        if (args.kind !== "dynamic-import") record(args.importer, args.path);
+        if (args.kind === "dynamic-import") {
+          recordDynamic(args.importer, args.path);
+        } else record(args.importer, args.path);
         return { path: args.path, namespace: "aio-server-only" };
       };
       build.onResolve({ filter: /^@std\// }, intercept);
@@ -66,6 +89,7 @@ export function aioBrowserPlugin(): {
         { filter: /\.server\.ts$/ },
         (args: { path: string; kind: string; importer: string }) => {
           if (args.kind === "dynamic-import") {
+            recordDynamic(args.importer, args.path);
             return { path: args.path, external: true };
           }
           // A STATIC import of a *.server.ts module from the client graph is

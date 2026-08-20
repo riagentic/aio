@@ -327,6 +327,20 @@ function containers(s: Spec, out: Container[] = []): Container[] {
   }
   return out;
 }
+/** Every COMPONENT node in the tree — the targets for op 13.
+ *
+ *  `containers()` walks containers, `texts()` walks text leaves; a component
+ *  had no collector at all, which is why no mutation could ever change one IN
+ *  PLACE. That gap is what let rimote R-10 ship: `CNull` was in the component
+ *  alphabet from the start, so the fuzzer could BUILD a component that renders
+ *  nothing — it just could never make an existing one start or stop doing so,
+ *  and that transition is the entire bug. A fuzzer is only as strong as its op
+ *  set, and an op set nobody audits is a coverage claim nobody checked. */
+function comps(s: Spec, out: Extract<Spec, { k: "c" }>[] = []) {
+  if (s.k === "c") out.push(s);
+  if (isContainer(s)) { for (const k of s.kids) comps(k, out); }
+  return out;
+}
 function texts(s: Spec, out: Extract<Spec, { k: "t" }>[] = []) {
   if (s.k === "t") out.push(s);
   else if (isContainer(s)) { for (const k of s.kids) texts(k, out); }
@@ -340,7 +354,7 @@ function texts(s: Spec, out: Extract<Spec, { k: "t" }>[] = []) {
 function mutate(root: Spec, r: Rnd): Spec {
   const next = clone(root);
   const cs = containers(next);
-  const op = r.pick(13);
+  const op = r.pick(15);
   const c = r.of(cs);
   switch (op) {
     case 11: // swap an element's whole prop set (add/remove/replace attributes)
@@ -387,6 +401,39 @@ function mutate(root: Spec, r: Rnd): Spec {
     case 12: // flip a boundary into / out of its FALLBACK
       if (c.k === "b" || c.k === "u") c.boom = !c.boom;
       break;
+    case 14: { // a form control's PROP SET changes in place
+      // Found by the coverage gate above, the same shape as R-10: `i` nodes
+      // could be generated with a prop set and never given a different one,
+      // so `value`/`checked`/`disabled`/`readOnly` — the props that become DOM
+      // PROPERTIES rather than attributes, and that SSR writes as bare boolean
+      // tokens — were never diffed from one set to another on the same node.
+      const is: Extract<Spec, { k: "i" }>[] = [];
+      const walk = (n: Spec) => {
+        if (n.k === "i") is.push(n);
+        if (isContainer(n)) { for (const k of n.kids) walk(k); }
+      };
+      walk(next);
+      if (is.length) {
+        const t = r.of(is);
+        t.ii = (t.ii + 1 + r.pick(INPUTS.length - 1)) % INPUTS.length;
+      }
+      break;
+    }
+    case 13: { // the SAME component starts/stops rendering null (rimote R-10)
+      // In place — same spec id, same position, same siblings. That is the
+      // distinction from op 5 (replace wholesale), which swaps in a NEW node
+      // and therefore never exercises "this component's output appeared or
+      // vanished". A component with no DOM of its own has no position anchor,
+      // so the element it later returns can only be appended — which is how a
+      // prompt written first rendered last, under every framework test that
+      // starts in the visible state.
+      const cn = comps(next);
+      if (cn.length) {
+        const t = r.of(cn);
+        t.c = (t.c + 1 + r.pick(COMPS.length - 1)) % COMPS.length;
+      }
+      break;
+    }
     case 10: // wrap a child in a fragment (new region mid-list)
       if (c.kids.length) {
         const i = r.pick(c.kids.length);
@@ -484,6 +531,58 @@ function formState(root: Element): string[] {
 }
 
 const seen: string[] = [];
+
+// ── the fuzzer's own coverage gate ───────────────────────────────────────
+//
+// A differential fuzzer is only as strong as its OP SET, and an op set nobody
+// audits is a coverage claim nobody checked. rimote R-10 proved the cost: a
+// component that renders `null` was in the NODE alphabet from the start
+// (`CNull`), so the fuzzer could build one — but no mutation could make an
+// existing component start or stop rendering nothing, and that TRANSITION is
+// the entire bug. It shipped, and a user found it when an approval prompt
+// rendered off the bottom of their window.
+//
+// So the alphabet checks itself: every node kind the generator can produce
+// must be REACHABLE BY A MUTATION. Adding a kind without a way to change one
+// in place fails here, at the moment the kind is added, instead of in someone
+// else's app.
+Deno.test("differential: every node kind the generator makes, a mutation can change", () => {
+  const KINDS = ["t", "x", "e", "s", "i", "u", "f", "b", "c"] as const;
+  // A kind is "reached" when some mutation changed a node of that kind IN
+  // PLACE — same id, different content. Wholesale replacement (op 5) does not
+  // count: it swaps in a new node and so never exercises a transition.
+  const touched = new Set<string>();
+  const index = (s: Spec, out = new Map<number, Spec>()): Map<number, Spec> => {
+    out.set(s.id, s);
+    if (isContainer(s)) { for (const k of s.kids) index(k, out); }
+    return out;
+  };
+  const r = makeRnd(0x5eed);
+  for (let round = 0; round < 4000; round++) {
+    const before = genRoot(r);
+    const after = mutate(before, r);
+    const bi = index(before), ai = index(after);
+    for (const [id, b] of bi) {
+      const a = ai.get(id);
+      if (!a || a.k !== b.k) continue; // gone, or replaced wholesale
+      if (JSON.stringify(a) !== JSON.stringify(b)) touched.add(b.k);
+    }
+  }
+  // `x` (a null child) and `s` (an SVG subtree) carry no mutable fields at
+  // all — their only meaningful transition is being replaced, which op 5
+  // already does. Exempted explicitly rather than silently: if either ever
+  // gains a field, delete it from here and give it an op.
+  const CONTENT_FREE = new Set(["x", "s"]);
+  const missing = KINDS.filter((k) => !touched.has(k) && !CONTENT_FREE.has(k));
+  assertEquals(
+    missing,
+    [],
+    `these node kinds can be GENERATED but never MUTATED, so the fuzzer can ` +
+      `never test a transition into or out of them — the exact gap that let ` +
+      `a null-rendering component ship a positional bug. Add an op in ` +
+      `mutate() that changes one in place.`,
+  );
+});
 
 Deno.test("differential: incremental diff renders what a fresh render would", () => {
   const win = new Window({ url: "https://localhost" });

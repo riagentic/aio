@@ -32,6 +32,7 @@
  * exact string is the whole mechanism.
  */
 
+import { readDenoJson } from "../server/deno-json.ts";
 import { join } from "@std/path";
 
 /** The moving pin — `origin/main`, refreshed on every link. */
@@ -364,8 +365,9 @@ export async function removeVersion(
 /** Read `aioVersion` from an app's deno.json (null when unpinned). */
 export async function readPin(appDir: string): Promise<string | null> {
   try {
-    const raw = await Deno.readTextFile(join(appDir, "deno.json"));
-    const cfg = JSON.parse(raw) as { aioVersion?: unknown };
+    const cfg = ((await readDenoJson(appDir))?.config ?? {}) as {
+      aioVersion?: unknown;
+    };
     return typeof cfg.aioVersion === "string" && cfg.aioVersion
       ? cfg.aioVersion
       : null;
@@ -468,9 +470,9 @@ export async function syncFrameworkDeps(
 ): Promise<DepChange[]> {
   let want: Record<string, string>;
   try {
-    const fw = JSON.parse(
-      await Deno.readTextFile(join(versionPathOfPin, "deno.json")),
-    ) as { imports?: Record<string, string> };
+    const fw = ((await readDenoJson(versionPathOfPin))?.config ?? {}) as {
+      imports?: Record<string, string>;
+    };
     want = fw.imports ?? {};
   } catch {
     return []; // no readable framework config — nothing authoritative to copy

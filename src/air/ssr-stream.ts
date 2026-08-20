@@ -29,7 +29,10 @@ function _renderSync(vnode: VNode | string | number | null): string {
         ? vnode.children
         : (vnode.props.children ?? vnode.children),
     });
-    return _renderSync(rendered);
+    // Nothing to render is still a POSITION — identical to renderToString, or
+    // the stream and the string renderer ship different markup for the same
+    // tree (the differential gate catches exactly that). See nullSlot().
+    return rendered == null ? "<!---->" : _renderSync(rendered);
   }
   if (vnode.tag === Portal) return "";
   if (vnode.tag === Symbol.for("aio.Null")) return "<!---->";
@@ -116,6 +119,11 @@ export async function* renderToStream(
     } catch (thrown) {
       // Re-throw _LAZY_PENDING so Suspense boundaries can catch it
       throw thrown;
+    }
+    if (rendered == null) {
+      // Same rule as the sync path above and as renderToString.
+      yield "<!---->";
+      return;
     }
     yield* renderToStream(rendered);
     return;

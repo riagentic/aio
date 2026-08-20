@@ -7,6 +7,7 @@ import {
   _callRef,
   _registerLazyListeners,
   _tagComponentError,
+  nullSlot,
 } from "./vdom-create.ts";
 import { _componentName } from "./hook-error.ts";
 import { applyChildDependentProps, applyProps } from "./vdom-props.ts";
@@ -111,10 +112,12 @@ export function createDom(
       if (e !== _LAZY_PENDING) _tagComponentError(e, vnode.tag);
       throw e;
     }
+    // A component that renders nothing still OCCUPIES its written position —
+    // the placeholder is what the next diff inserts before. See nullSlot().
+    if (rendered == null) rendered = nullSlot();
     vnode._rendered = rendered;
     try {
       ctx.hooks?.afterComponent(vnode, rendered, hookState);
-      if (rendered == null) return null;
       let dom: Node | null;
       try {
         dom = createDom(rendered, ctx, isSvg, parentDom);

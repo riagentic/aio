@@ -4,6 +4,7 @@
 // -A), and an optional Ed25519 signature over the digest. The auto-update
 // CHANNEL (serving + fetching + swapping) is separate infra; this is the
 // signable, verifiable artifact it would distribute.
+import { readDenoJson } from "../server/deno-json.ts";
 import { join } from "@std/path";
 import { resolveAppDir, resolveEntry } from "./build-config.ts";
 import {
@@ -490,7 +491,7 @@ async function probeDataContract(
 /** The app's own deno.json (the `ship` CLI runs at the project root), or {}. */
 async function projectConfig(root: string): Promise<Record<string, unknown>> {
   try {
-    const parsed = JSON.parse(await Deno.readTextFile(join(root, "deno.json")));
+    const parsed = (await readDenoJson(root))?.config ?? {};
     return parsed && typeof parsed === "object"
       ? parsed as Record<string, unknown>
       : {};

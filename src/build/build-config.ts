@@ -2,7 +2,9 @@
  * @module
  * Build configuration — parses CLI flags, reads deno.json, derives all shared build state.
  */
-import { basename, dirname, join, resolve } from "@std/path";
+import { readDenoJson } from "../server/deno-json.ts";
+import { UI_ENTRY } from "../server/app-files.ts";
+import { basename, dirname, join, resolve, SEPARATOR } from "@std/path";
 import { slugify } from "./build-helpers.ts";
 import { appIdFromConfig } from "../server/single-instance-lock.ts";
 import { bakedServerUrl, resolveEntryPath } from "../server/paths.ts";
@@ -99,6 +101,20 @@ export interface BuildConfig {
    *  read this field — a second hardcoded path is the bug class that shipped
    *  a stylesheet in dev and silently dropped it from the prod bundle. */
   appDir: string;
+  /** `--allow-server-only` — the developer asserting that the server-only
+   *  code this app reaches is guarded and never taken on Android, where there
+   *  is no Deno runtime to run it. Without it, that build is refused. */
+  allowServerOnly: boolean;
+  /** The UI component this build bundles, relative to {@link appDir} —
+   *  `--ui=` else deno.json `build.ui`, else the `App.tsx` convention. The
+   *  build-side half of dev's `ui.entry`: the bundle records what it was built
+   *  from and the server refuses a mismatch, so the pair cannot silently
+   *  diverge (dev==prod). */
+  uiEntry: string;
+  /** Where final artifacts land (`--out=`, resolved against root; default:
+   *  the project root). dist/ stays the embedded-asset staging area — it is
+   *  wiped and embedded wholesale, never a place to collect releases. */
+  outDir: string;
   /** The raw `--entry=` value when THIS build was given one (a per-target entry
    *  from build-all), else undefined. `configEntry` already folds it in; this
    *  field only answers "did the caller NAME a module?", which is the one
@@ -186,9 +202,7 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
     Deno.exit(1);
   }
 
-  const mainConfig = JSON.parse(
-    await Deno.readTextFile(join(root, "deno.json")),
-  );
+  const mainConfig = (await readDenoJson(root))?.config ?? {};
   const rendererMode = "aio" as const;
   const appTitle = mainConfig.title as string | undefined;
   // --entry=<module> overrides deno.json's `entry` for THIS build only (a
@@ -197,8 +211,49 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
   const entryArg = Deno.args.find((a) => a.startsWith("--entry="))?.slice(
     "--entry=".length,
   );
+  const uiArg = Deno.args.find((a) => a.startsWith("--ui="))?.slice(
+    "--ui=".length,
+  );
+  const outArg = Deno.args.find((a) => a.startsWith("--out="))?.slice(
+    "--out=".length,
+  );
   const configEntry = resolveEntry(mainConfig, entryArg);
   const appDir = resolveAppDir(root, configEntry);
+  // UI entry: --ui= (per-target, from build-all) else deno.json build.ui,
+  // else the App.tsx convention — validated NOW, at the build, not as a
+  // missing-module error deep inside esbuild.
+  const uiExplicit = uiArg ??
+    (mainConfig.build as { ui?: string } | undefined)?.ui;
+  const uiEntry = uiExplicit ?? UI_ENTRY;
+  // Validate only an EXPLICIT ui entry — the App.tsx convention may
+  // legitimately be absent (headless/CLI builds bundle no UI), and the bundle
+  // step already decides that case.
+  if (uiExplicit !== undefined) {
+    try {
+      await Deno.stat(join(appDir, uiEntry));
+    } catch {
+      console.error(
+        `[build] ✗ UI entry not found: ${join(appDir, uiEntry)}\n` +
+          `  (from ${
+            uiArg !== undefined ? "--ui=" : "deno.json build.ui"
+          }; the path is relative to the app dir — the directory of the entry module)`,
+      );
+      Deno.exit(1);
+    }
+  }
+  const outDir = resolve(root, outArg ?? ".");
+  // dist/ is STAGING, not a destination: `deno compile --include dist/` embeds
+  // it wholesale, and every build wipes what it does not own there — an
+  // artifact collected inside it is embedded into the next binary AND deleted
+  // by the build after that. Both are silent. Refuse, and name the fix.
+  if (outDir === dist || outDir.startsWith(dist + SEPARATOR)) {
+    console.error(
+      `[build] ✗ --out=${outArg} points inside dist/ — dist/ is the bundle ` +
+        `staging dir: it is embedded into the binary wholesale and wiped by ` +
+        `every build. Pick another directory (--out=release, --out=out/agent).`,
+    );
+    Deno.exit(1);
+  }
   // ONE slugify decider for the binary name. Without a `title`, the fallback
   // used the raw directory name, so a project folder called `My App` produced
   // a binary literally named `My App` under `deno task compile` while
@@ -277,6 +332,7 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
     doHeadless,
     androidDevUrl,
     androidApplicationId,
+    allowServerOnly: Deno.args.includes("--allow-server-only"),
     entryFromFlag: entryArg !== undefined,
     bakedServer: bakedServerUrl(
       (mainConfig.build as { server?: string } | undefined)?.server,
@@ -285,6 +341,8 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
     appTitle,
     configEntry,
     appDir,
+    uiEntry,
+    outDir,
     entryOverride: entryArg,
     rendererMode,
     os,

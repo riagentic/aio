@@ -381,6 +381,12 @@ Framework version:
   pin main                Follow the branch tip (a moving target)
   pin --latest            Pin the newest release
 
+Look:
+  theme adopt             Take aio's stylesheet INTO this app (src/aio-theme.css)
+                          — yours from then on: editable, in your git history,
+                          and no aio upgrade can change it. Build ON the
+                          default look without depending on the framework for it.
+
 Files (~/.<app>/ — data/ is the whole backup):
   data                    Where this app keeps everything, and what to back up
   backup [dest]           Copy data/ to dest (stop the app first, or --force)

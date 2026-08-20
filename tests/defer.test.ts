@@ -196,8 +196,11 @@ Deno.test({
         true,
         `the reason must reach the console — got: ${JSON.stringify(errs)}`,
       );
-      // …and the region still degrades gracefully rather than throwing.
-      assertEquals(root.innerHTML, "");
+      // …and the region still degrades gracefully rather than throwing: no
+      // ELEMENT, and a placeholder keeping the deferred region's position for
+      // a later successful load (rimote R-10).
+      assertEquals(root.innerHTML, "<!---->");
+      assertEquals(root.children.length, 0);
       _unmount(handle);
     } finally {
       console.error = realError;

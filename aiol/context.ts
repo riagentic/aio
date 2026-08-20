@@ -29,6 +29,46 @@ const MAX_FILE_SIZE = 512 * 1024; // 512KB — skip huge generated files
  *  purely because the scan started and stopped at `src/`. */
 const OPTIONAL_ROOTS = ["cells", "scripts", "tools"] as const;
 
+/** Every entry module the project DECLARES, normalized to project-relative
+ *  paths: `entry`, then each `build.targets[].entry` of the object form.
+ *  Exported so the rule and its fixture agree on one answer. */
+export function declaredEntryPaths(cfg: DenoJsonConfig | null): string[] {
+  if (!cfg) return [];
+  const norm = (e: unknown): string | null =>
+    typeof e === "string" && e.trim() !== ""
+      ? e.trim().replace(/^\.\//, "").replaceAll("\\", "/")
+      : null;
+  const out: string[] = [];
+  const push = (e: unknown) => {
+    const n = norm(e);
+    if (n && !out.includes(n)) out.push(n);
+  };
+  push(cfg.entry);
+  const targets = cfg.build?.targets;
+  if (targets && !Array.isArray(targets) && typeof targets === "object") {
+    for (const t of Object.values(targets)) push(t?.entry);
+  }
+  return out;
+}
+
+/** The target KINDS a project declares in `build.targets`, for both
+ *  spellings: the array form `["server","browser"]` and the object form,
+ *  whose key may be a free LABEL with `kind` naming the actual target
+ *  (`{"agent":{"kind":"electron"}}` — two apps of one kind in one repo).
+ *  Always an array, so a caller can never `.some()` an object. */
+export function declaredTargetKinds(cfg: DenoJsonConfig | null): string[] {
+  const raw = cfg?.build?.targets;
+  if (Array.isArray(raw)) {
+    return raw.filter((t): t is string => typeof t === "string" && !!t.trim())
+      .map((t) => t.trim());
+  }
+  if (!raw || typeof raw !== "object") return [];
+  return Object.entries(raw).map(([label, o]) => {
+    const kind = (o as { kind?: unknown } | null)?.kind;
+    return typeof kind === "string" && kind.trim() ? kind.trim() : label.trim();
+  }).filter(Boolean);
+}
+
 /** Is this project an aio APP, or something else that happens to sit next to
  *  aio (the framework repo itself, a tool, a library)?
  *
@@ -453,11 +493,17 @@ export async function buildContext(
   // would then report it as untested. (`.test.tsx` was missed here too.)
   const cells = extractCells(sourceFiles.filter((f) => !isTest(f)));
 
-  // Find app entry and App.tsx
+  // Find app entry and App.tsx. The project's OWN declaration wins over the
+  // `src/app.ts` convention: `entry` in deno.json, then every
+  // `build.targets[].entry` (one repo, three apps — a relay and two desktop
+  // clients — is a shape the docs recommend, and the linter warned "no entry
+  // point found" on every lint of it; rimote R-8).
+  const declaredEntries = declaredEntryPaths(denoJson);
   const appEntry =
-    sourceFiles.find((f) =>
-      f.relative === "src/app.ts" || f.relative === "app.ts"
-    ) ?? null;
+    sourceFiles.find((f) => declaredEntries.includes(f.relative)) ??
+      sourceFiles.find((f) =>
+        f.relative === "src/app.ts" || f.relative === "app.ts"
+      ) ?? null;
   const appTsx = sourceFiles.find((f) => f.name === "App.tsx") ?? null;
 
   const ctx: LintContext = {

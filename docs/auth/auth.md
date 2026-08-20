@@ -98,6 +98,32 @@ via `?token=` query parameter or `Authorization: Bearer` header.
 deno task dev --expose --tls-cert=/etc/ssl/myapp.pem --tls-key=/etc/ssl/myapp.key
 ```
 
+**In config, for a binary with no flags to pass.** A compiled binary started by
+a service unit never sees a shell flag, so how it serves is a config key:
+
+```ts
+await aio.run({
+  cells: [app],
+  expose: true,
+  tls: { cert: "/etc/ssl/myapp.pem", key: "/etc/ssl/myapp.key" },
+  // "auto" (default) — self-signed, generated once per app
+  // false            — plain HTTP/WS; warns loudly. Sound ONLY behind a
+  //                    TLS-terminating proxy, or when the payload is already
+  //                    end-to-end encrypted.
+});
+```
+
+The CLI flags win over `tls` when both are given — the operator running the
+binary overrides the author, the same rule `expose` follows.
+
+> **Machine-to-machine.** The self-signed default is what a _browser_ can click
+> through; a program cannot. Deno's `WebSocket` has no API to pass a CA, so an
+> aio client dialing an aio server over `wss://` must be launched with
+> `DENO_CERT=<cert.pem>` (get the file with `am profile --app=<appId>`). If the
+> connecting side is not yours to launch, serve a real cert
+> (`tls: { cert, key }`) or drop TLS (`tls: false`) and encrypt the payload
+> yourself.
+
 **Security notes:**
 
 - Token auth is intended for trusted local networks (LAN demos, testing on

@@ -1,4 +1,5 @@
 // Dev-mode startup validation — server-only import scanning + graph validation
+import { UI_ENTRY } from "./app-files.ts";
 import { join } from "@std/path";
 import {
   BLOCKING_CATEGORIES,
@@ -80,7 +81,7 @@ export function startGraphValidation(
   absBaseDir: string,
   importMapObj: Record<string, string>,
   debug: (msg: string) => void,
-  uiEntry = "App.tsx", // AIO-8.1
+  uiEntry = UI_ENTRY,
 ): GraphValidationHandle {
   let graphResult: GraphResult | null = null;
   const entrypoint = join(absBaseDir, uiEntry);

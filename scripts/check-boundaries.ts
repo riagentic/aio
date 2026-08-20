@@ -103,6 +103,13 @@ const ALLOWED: Record<string, string[]> = {
     "server", // talks to running apps via the server's client/trojan APIs
     "state", // action/cell types for dispatch & timeline
     "diagnostics", // ONE redaction sentinel (redact.ts) for journal/replay
+    // `am theme adopt` writes the framework's generated stylesheet INTO an
+    // app, and must produce byte-identical CSS to what the server emits — so
+    // it calls the same generator (build/app-theme.ts) and the same app-dir
+    // decider (build/build-config.ts) rather than re-deriving either. A second
+    // copy of the theme, or a second rule for where app assets live, is the
+    // drift this matrix exists to prevent.
+    "build",
   ],
   // testing may boot a real server — `testServer()`/`testBrowser()`
   // (aio/testing) run in Deno test processes, never in a browser bundle, so

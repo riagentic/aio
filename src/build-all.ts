@@ -16,6 +16,7 @@
  * deno run -A jsr:@riagentic/aio/build-all --list        # show target names
  * ```
  */
+import { readDenoJson } from "./server/deno-json.ts";
 import {
   basename,
   extname,
@@ -57,6 +58,16 @@ export const TARGETS: Record<string, TargetSpec> = {
     role: "server",
     desc: "headless LAN/remote server binary + systemd unit (--expose)",
   },
+  "server-app": {
+    // R-6 (rimote): an exposed server that also SERVES its page — status UI,
+    // download shelf, dashboards. `server` is headless by definition; this is
+    // the same binary WITH the browser bundle embedded. Before it had a name,
+    // reaching it took a two-pass build that only reading build.ts revealed.
+    flags: ["--compile", "--service", "--remote"],
+    role: "server",
+    desc:
+      "exposed server binary WITH the browser UI (serves its page + systemd unit)",
+  },
   browser: {
     flags: ["--compile"],
     role: "app",
@@ -97,9 +108,25 @@ export const TARGETS: Record<string, TargetSpec> = {
 /** What a target may override when `build.targets` is written in object form.
  *  Everything is optional — an empty object is the array form's behaviour. */
 export interface TargetOverride {
+  /** What KIND of target this is — a key of {@link TARGETS}. Lets one repo
+   *  declare TWO targets of the same kind under different labels:
+   *
+   *  ```jsonc
+   *  "targets": {
+   *    "agent":   { "kind": "electron", "entry": "src/agent/app.ts",   "name": "rimote-agent" },
+   *    "control": { "kind": "electron", "entry": "src/control/app.ts", "name": "rimote-control" }
+   *  }
+   *  ```
+   *  Optional when the label itself is a known target name (backwards
+   *  compatible: `"electron": {…}` keeps meaning what it means today). */
+  kind?: string;
   /** The module THIS target compiles, overriding deno.json `entry`. One repo,
    *  two apps: a relay server and the client that talks to it. */
   entry?: string;
+  /** The UI component this target bundles, relative to ITS app dir (the
+   *  directory of its entry) — passed to the single-target build as `--ui=`.
+   *  Default: the App.tsx convention. */
+  ui?: string;
   /** This target's binary/APK name, overriding deno.json `title`. Two
    *  different apps must not both be called `myapp` and be papered over by the
    *  collision suffix — they are not two builds of one app. */
@@ -131,10 +158,17 @@ interface BuildBlock {
  *  single shape. THE place target config is read — every consumer downstream
  *  (argv, artifact detection, the out-dir guard, the manifest) sees only this. */
 export interface ResolvedTarget {
-  /** Key into {@link TARGETS}. */
+  /** This target's LABEL — the deno.json key / --targets= word. Names the
+   *  target in output, staging dirs and the manifest. */
   name: string;
+  /** Key into {@link TARGETS} — what actually gets built. Equal to `name`
+   *  unless the object form declared an explicit `kind`. */
+  kind: string;
   /** Per-target entry module, or undefined to use deno.json `entry`. */
   entry?: string;
+  /** Per-target UI component (relative to the target's app dir), or undefined
+   *  for the App.tsx convention. */
+  ui?: string;
   /** Per-target app name (pre-slugify), or undefined to use deno.json `title`. */
   appName?: string;
   /** Per-target platform list, or undefined to use `build.platforms`. */
@@ -170,7 +204,9 @@ export function normalizeTargets(
     const o = overrides.get(name);
     return {
       name,
+      kind: o?.kind?.trim() || name,
       ...(o?.entry ? { entry: o.entry.trim() } : {}),
+      ...(o?.ui ? { ui: o.ui.trim() } : {}),
       ...(o?.name ? { appName: o.name.trim() } : {}),
       ...(Array.isArray(o?.platforms) ? { platforms: o.platforms } : {}),
     };
@@ -378,7 +414,10 @@ function printTargets(): void {
   );
   console.log(
     `${C.dim}Two apps in one repo? Give each target its own module:${C.r}\n` +
-      `${C.dim}  "targets": { "server": { "entry": "src/relay/app.ts", "name": "relay" }, "electron": {} }${C.r}`,
+      `${C.dim}  "targets": { "server": { "entry": "src/relay/app.ts", "name": "relay" }, "electron": {} }${C.r}\n` +
+      `${C.dim}Two of the SAME kind? Label them and name the kind:${C.r}\n` +
+      `${C.dim}  "targets": { "agent": { "kind": "electron", "entry": "src/agent/app.ts", "name": "agent" }, ` +
+      `"control": { "kind": "electron", "entry": "src/control/app.ts", "name": "control" } }${C.r}`,
   );
   console.log(
     `${C.dim}Electron cross-builds to Windows/macOS (its runtime is a download); a Linux
@@ -410,7 +449,7 @@ export async function buildAll(): Promise<number> {
   const root = Deno.cwd();
   let denoJson: { title?: string; build?: BuildBlock; entry?: string };
   try {
-    denoJson = JSON.parse(await Deno.readTextFile(join(root, "deno.json")));
+    denoJson = (await readDenoJson(root))?.config ?? {};
   } catch {
     console.error(`${C.red}✗ no readable deno.json in ${root}${C.r}`);
     return 1;
@@ -430,14 +469,30 @@ export async function buildAll(): Promise<number> {
     printTargets();
     return 1;
   }
-  const unknown = targetList.filter((t) => !(t.name in TARGETS));
+  const unknown = targetList.filter((t) => !(t.kind in TARGETS));
   if (unknown.length > 0) {
     console.error(
       `${C.red}✗ unknown target(s): ${
-        unknown.map((t) => t.name).join(", ")
-      }${C.r}\n`,
+        unknown.map((t) =>
+          t.kind === t.name ? t.name : `${t.name} (kind: ${t.kind})`
+        ).join(", ")
+      }${C.r}\n  ${C.dim}a label that is not itself a target name needs ` +
+        `"kind": e.g. "agent": { "kind": "electron", "entry": "src/agent/app.ts" }${C.r}\n`,
     );
     printTargets();
+    return 1;
+  }
+  // Two labels are two targets; two IDENTICAL labels can only be a typo the
+  // object form cannot express — but --targets=a,a can. Refuse.
+  const dupLabels = targetList.map((t) => t.name).filter((n, i, a) =>
+    a.indexOf(n) !== i
+  );
+  if (dupLabels.length > 0) {
+    console.error(
+      `${C.red}✗ duplicate target label(s): ${
+        [...new Set(dupLabels)].join(", ")
+      }${C.r}\n`,
+    );
     return 1;
   }
   // A fleet of clients with nothing to connect to is a config that BUILDS
@@ -448,10 +503,10 @@ export async function buildAll(): Promise<number> {
   // LOCAL app binary, not the exposed server the clients need). Loud warning,
   // not an error: the server may legitimately be built elsewhere.
   const clientTargets = targetList.filter((t) =>
-    TARGETS[t.name]?.role === "client"
+    TARGETS[t.kind]?.role === "client"
   );
   const hasServerTarget = targetList.some((t) =>
-    TARGETS[t.name]?.role === "server"
+    TARGETS[t.kind]?.role === "server"
   );
   if (clientTargets.length > 0 && !hasServerTarget && !block.server) {
     console.error(
@@ -608,7 +663,7 @@ export async function buildAll(): Promise<number> {
   try {
     for (const t of targetList) {
       const target = t.name;
-      const spec = TARGETS[target]!;
+      const spec = TARGETS[t.kind]!;
       // A target's own app title/binary name, else the project's — the one
       // place a per-target name is turned into the name everything downstream
       // (argv, artifact detection, the manifest) uses.
@@ -624,7 +679,7 @@ export async function buildAll(): Promise<number> {
         // silently dropped (a missing artifact people discover at release time).
         const blocker = isHostPlatform(platform)
           ? null
-          : crossCompileBlocker(target, platform);
+          : crossCompileBlocker(t.kind, platform);
         if (blocker) {
           console.log(
             `\n${C.b}▶ ${label}${C.r} ${C.yellow}skipped${C.r} ${C.dim}— ${blocker}${C.r}`,
@@ -657,6 +712,7 @@ export async function buildAll(): Promise<number> {
           // Per-target entry: the single-target build resolves configEntry —
           // and therefore appDir and every app asset — from this.
           ...(t.entry ? [`--entry=${t.entry}`] : []),
+          ...(t.ui ? [`--ui=${t.ui}`] : []),
         ];
         if (release) args.push("--release");
         if (force) args.push("--force");

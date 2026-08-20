@@ -44,6 +44,23 @@ export {
   registerAppDirs,
 } from "./server/app-dirs.ts";
 
+// The COMPONENT harness, next to the cell one. It was exported from
+// `browser-air.ts` and reachable through no specifier in the export map at
+// all — `aio/testing` is cells, `aio/air` deliberately does not re-export it —
+// so an app could only get at it by a relative path into `dep/aio/src/…` or a
+// private alias. "Symmetric with testCell" is not symmetric if only one of the
+// two can be imported, and the asymmetry showed: a field app had DOM coverage
+// of zero components until a positional bug shipped, because the cell tests
+// were easy to write and the component tests looked unsupported (rimote R-11).
+//
+// One testing entry point: `testCell`, `testUI` and `testComponent` together.
+export {
+  setDocument,
+  testComponent,
+  type TestComponentHandle,
+  type TestComponentOptions,
+} from "./testing/test-component.ts";
+
 // TOTP code generator — HERE, not in `aio`: an integration test of a
 // `totp: true` login must SUBMIT a valid second factor, and this is the only
 // way to make one (a field report imported it through the framework's

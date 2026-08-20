@@ -2,11 +2,13 @@
  * @module
  * Build bundle — esbuild bundling step, freshness cache check, asset copying.
  */
+import { UI_ENTRY } from "../server/app-files.ts";
 import { basename, dirname, join, relative, resolve } from "@std/path";
 import { bundleFrameworkEntries, ESBUILD_JSX } from "./esbuild-shared.ts";
 import {
   _resetServerOnlyStatic,
   aioBrowserPlugin,
+  serverOnlyDynamic,
   serverOnlyStatic,
 } from "./esbuild-plugin.ts";
 import { makeHttpPlugin } from "./build-integrity.ts";
@@ -136,7 +138,9 @@ export async function isBundleFresh(cfg: BuildConfig): Promise<boolean> {
   // built by another aio version — or for the OTHER target, since all targets
   // share dist/app.js — is stale no matter how new it looks (remote/JSR builds
   // pin the version, so the stamp is checked there too).
-  if (!await bundleMatchesFramework(out, doAndroid)) return false;
+  if (!await bundleMatchesFramework(out, doAndroid, cfg.uiEntry ?? UI_ENTRY)) {
+    return false;
+  }
   try {
     const outStat = await Deno.stat(out);
     if (!outStat.mtime) return false; // AIO-227: can't verify freshness → rebuild
@@ -180,26 +184,34 @@ export function versionStamp(version: string): string {
  *  artifact for the freshness check to tell them apart; without it, building
  *  `--android` after a browser build would happily reuse a bundle that cannot
  *  boot in a WebView. */
-function targetStamp(doAndroid: boolean): string {
+function targetStamp(doAndroid: boolean, uiEntry: string): string {
   return `globalThis.__aioBundleTarget = ${
     JSON.stringify(doAndroid ? "android" : "browser")
-  };\n`;
+  };\nglobalThis.__aioBundleUi = ${JSON.stringify(uiEntry)};\n`;
 }
 
 /** The App.tsx import specifier for the generated entry (written at the
  *  project root), derived from THE app-dir decider (`cfg.appDir`) — never a
  *  hardcoded './src/App.tsx': the app dir is wherever the entry lives, exactly
  *  as the dev server resolves it (WYSIDIWYSIP). */
-export function appImportSpecifier(root: string, appDir: string): string {
+export function appImportSpecifier(
+  root: string,
+  appDir: string,
+  uiEntry = UI_ENTRY,
+): string {
   const rel = relative(root, appDir).replaceAll("\\", "/");
-  return rel === "" || rel === "." ? "./App.tsx" : `./${rel}/App.tsx`;
+  return rel === "" || rel === "." ? `./${uiEntry}` : `./${rel}/${uiEntry}`;
 }
 
 /** Generate the esbuild entry point code.
  *  Android (standalone WebView) auto-mounts — the generated index.html loads
  *  the bundle as a classic script, so there is no importer to call mount(). */
-function makeEntryCode(doAndroid: boolean, appImport: string): string {
-  const stamp = versionStamp(VERSION) + targetStamp(doAndroid);
+function makeEntryCode(
+  doAndroid: boolean,
+  appImport: string,
+  uiEntry: string,
+): string {
+  const stamp = versionStamp(VERSION) + targetStamp(doAndroid, uiEntry);
   if (doAndroid) {
     return stamp + `\
 import { mount as _mount } from 'aio/renderer'
@@ -230,7 +242,7 @@ export function mount(el) { ensureConnected(); _mount(el, App) }
  *  page, exit 0. */
 export async function readBundleStamps(
   out: string,
-): Promise<{ version?: string; target?: string } | null> {
+): Promise<{ version?: string; target?: string; ui?: string } | null> {
   let js: string;
   try {
     js = await Deno.readTextFile(out);
@@ -241,7 +253,11 @@ export async function readBundleStamps(
     js.match(
       new RegExp(`globalThis\\.${name}\\s*=\\s*"([^"]*)"`),
     )?.[1];
-  return { version: pick(VERSION_STAMP), target: pick("__aioBundleTarget") };
+  return {
+    version: pick(VERSION_STAMP),
+    target: pick("__aioBundleTarget"),
+    ui: pick("__aioBundleUi"),
+  };
 }
 
 /** True when dist/app.js was built by THIS aio version AND for this target's
@@ -251,10 +267,14 @@ export async function readBundleStamps(
 async function bundleMatchesFramework(
   out: string,
   doAndroid: boolean,
+  uiEntry: string,
 ): Promise<boolean> {
   const s = await readBundleStamps(out);
   return !!s && s.version === VERSION &&
-    s.target === (doAndroid ? "android" : "browser");
+    s.target === (doAndroid ? "android" : "browser") &&
+    // A bundle built from a DIFFERENT UI entry is not this app's bundle —
+    // reuse here is exactly the dev≠prod divergence `--ui`/`build.ui` closes.
+    (s.ui ?? UI_ENTRY) === uiEntry;
 }
 
 /** Human name for a bundle shape, for a message that has to name BOTH. */
@@ -350,7 +370,7 @@ export async function ensureEmbeddedBundle(
   cfg: BuildConfig,
   mainConfig: Record<string, unknown>,
 ): Promise<void> {
-  const appEntry = join(cfg.appDir, "App.tsx");
+  const appEntry = join(cfg.appDir, cfg.uiEntry ?? UI_ENTRY);
   let canRebuild = false;
   try {
     canRebuild = (await Deno.stat(appEntry)).isFile;
@@ -407,7 +427,7 @@ export async function runBundle(
   // Fail loud BEFORE esbuild: the UI entry must exist where the decider says
   // the app lives. esbuild's own "could not resolve" names a generated temp
   // file; this names the rule that produced the path.
-  const appEntry = join(appDir, "App.tsx");
+  const appEntry = join(appDir, cfg.uiEntry ?? UI_ENTRY);
   try {
     await Deno.stat(appEntry);
   } catch {
@@ -467,7 +487,8 @@ export async function runBundle(
     const buildEntryPath = join(root, "_build_entry.tsx");
     const entryCode = makeEntryCode(
       doAndroid,
-      appImportSpecifier(root, appDir),
+      appImportSpecifier(root, appDir, cfg.uiEntry ?? UI_ENTRY),
+      cfg.uiEntry ?? UI_ENTRY,
     );
     await Deno.writeTextFile(buildEntryPath, entryCode);
 
@@ -566,6 +587,46 @@ export async function runBundle(
               "module and import THAT dynamically."),
       );
       Deno.exit(1);
+    }
+
+    // A STANDALONE Android build has no Deno runtime — the APK is a Kotlin
+    // WebView plus this bundle, and nothing else. So the dynamic
+    // `await import("./x.server.ts")` that is CORRECT on every other target
+    // (a cell method runs server-side; the import stays out of the browser
+    // graph on purpose) is, here, the half of the app that does the work
+    // silently not shipping. rimote's agent — screenrecord, `wm size`, FFI —
+    // built to 3.2 MB, printed BUILD SUCCESSFUL, installed, launched, rendered
+    // its control panel, and every switch on it did nothing; the Windows build
+    // of the same entry is 180 MB because it carries a runtime. Discovering
+    // that after installing on a phone is the expensive kind of failure, so it
+    // is refused here with the modules named — the same treatment
+    // `crossCompileBlocker` gives combinations that cannot work.
+    //
+    // `--remote` is exempt: that APK is a CLIENT of a server running
+    // elsewhere, which is where its server code lives and runs.
+    if (doAndroid && !cfg.doRemote && !cfg.allowServerOnly) {
+      const reach = Object.entries(serverOnlyDynamic);
+      if (reach.length > 0) {
+        console.error(
+          "[build] \u2717 this app reaches server-only code, and a standalone " +
+            "APK has no Deno runtime to run it:",
+        );
+        for (const [spec, importers] of reach) {
+          for (const imp of importers) {
+            console.error(`         ${relative(root, imp) || imp} → ${spec}`);
+          }
+        }
+        console.error(
+          "       An APK is a WebView and this bundle: no subprocesses, no " +
+            "FFI, no node:/@std. The build would SUCCEED and ship an app " +
+            "whose UI renders and whose buttons do nothing.\n" +
+            "       fix: build `--android --remote` (a client of a server " +
+            "that runs elsewhere), split the client half into its own entry " +
+            "(--entry=), or pass --allow-server-only if those paths are " +
+            "guarded and never taken on Android.",
+        );
+        Deno.exit(1);
+      }
     }
 
     // Record the REAL inputs (after the temp entry/config are gone, so they

@@ -86,6 +86,7 @@
 - [Clients](clients/README.md) — How browsers, Electron, and CLI tools connect to AIO.
 - [amui — Aio Manager UI](clients/amui.md) — A visual manager for every aio app on your machine — the GUI counterpart to the
 - [App Manager](clients/app-manager.md) — Manage your aio app without ps, kill, or curl.
+- [Binary side channels](clients/binary-streams.md) — A sustained binary stream — screen frames, audio, telemetry, remote input — does
 - [Browser](clients/browser.md) — WebSocket client API, connection lifecycle, and UI state management for browser
 - [Desktop apps that drive a CLI](clients/desktop-jobs.md) — The shape: a window, a Browse… button, a long-running external process, a
 - [Electron](clients/electron.md) — Desktop app packaging, thin client, and window management.
@@ -170,6 +171,7 @@
 - [alpha59 → alpha60](upgrade/from-alpha59-to-alpha60.md) — not how anything runs — and every renamed thing kept its old spelling working.
 - [Upgrade from v1.0.0-alpha6 to v1.0.0-alpha7](upgrade/from-alpha6-to-alpha7.md) — mod.ts no longer re-exports renderer primitives.
 - [Upgrading from alpha60 to alpha61](upgrade/from-alpha60-to-alpha61.md) — Nothing breaks.
+- [Upgrading from alpha61 to alpha62](upgrade/from-alpha61-to-alpha62.md) — Nothing breaks in your app's code.
 - [Upgrade from v1.0.0-alpha7 to v1.0.0-alpha8](upgrade/from-alpha7-to-alpha8.md) — None.
 - [Upgrade from v1.0.0-alpha8 to v1.0.0-alpha9](upgrade/from-alpha8-to-alpha9.md) — The internal machine state field is renamed.
 - [Upgrade from v1.0.0-alpha9 to v1.0.0-alpha10](upgrade/from-alpha9-to-alpha10.md) — Alpha10 is fully additive.

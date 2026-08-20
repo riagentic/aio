@@ -4,6 +4,7 @@
  * Path resolution, payload parsing, entry/appId/port resolution.
  */
 
+import { readDenoJsonSync } from "../server/deno-json.ts";
 import { resolveEntryPath } from "../server/paths.ts";
 import {
   instances,
@@ -104,7 +105,7 @@ export function resolveEntry(flagEntry?: string): string | null {
   // duplicate survives until the day one copy is updated and the others are not.
   let cfg: Record<string, unknown> | null = null;
   try {
-    cfg = JSON.parse(Deno.readTextFileSync("deno.json"));
+    cfg = readDenoJsonSync(Deno.cwd())?.config ?? {};
   } catch { /* no deno.json — the default still applies */ }
   const entry = resolveEntryPath(cfg);
   try {

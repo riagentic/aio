@@ -96,7 +96,8 @@ Categories=Utility;
   const toolPath = await ensureAppimagetool(arch, toolCacheDir());
 
   // Build AppImage
-  const appImageOut = join(root, `aio-client-${arch}.AppImage`);
+  await Deno.mkdir(cfg.outDir ?? root, { recursive: true });
+  const appImageOut = join(cfg.outDir ?? root, `aio-client-${arch}.AppImage`);
   console.log("[appimage] packaging aio-client...");
   const appimageResult = await new Deno.Command(toolPath, {
     args: [appDir, appImageOut],

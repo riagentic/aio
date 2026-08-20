@@ -3,7 +3,11 @@
 import type { CellInfo, Checker } from "./types.ts";
 import { join, resolve } from "@std/path";
 import * as fix from "./fixes.ts";
-import { isToolingPath } from "./context.ts";
+import {
+  declaredEntryPaths,
+  declaredTargetKinds,
+  isToolingPath,
+} from "./context.ts";
 import { RESERVED_KEYS } from "../src/state/cell-types.ts";
 import {
   AIO_LIBRARY_ENTRIES,
@@ -261,7 +265,7 @@ export const checkStructure: Checker = async (ctx) => {
   const isHeadless = isClientServerOnly || clientFromTask;
 
   // app.ts entry point
-  if (appEntry) pass("entry: src/app.ts");
+  if (appEntry) pass(`entry: ${appEntry.relative}`);
   else {
     // A THIN CLIENT has no `aio.run()` and never will: `src/client.ts` opens a
     // `connectCli()` connection to a server that runs elsewhere. That is a
@@ -291,10 +295,20 @@ export const checkStructure: Checker = async (ctx) => {
       // Not for a project that never consumes aio: advising the framework repo
       // to "create an entry point with aio.run()" is the rule describing
       // itself, not the code.
+      // A DECLARED entry that is not on disk is a different (and worse) fact
+      // than "no entry point": the project said where its app is and the file
+      // is missing. Say which, so the linter is never wrong about a layout
+      // the project itself declares (rimote R-8).
+      const declared = declaredEntryPaths(denoJson);
       report(
         "warn",
         "structure",
-        "no entry point found (src/app.ts) — create one with aio.run()",
+        declared.length > 0
+          ? `entry point declared in deno.json but not found: ${
+            declared.join(", ")
+          } — create it (with aio.run()) or fix the path`
+          : "no entry point found (src/app.ts) — create one with aio.run(), " +
+            'or declare where it lives with "entry" in deno.json',
       );
     }
   }
@@ -326,15 +340,20 @@ export const checkStructure: Checker = async (ctx) => {
     // that runs the app entry keeps App.tsx one flag away from mounting.
     // Calling it unused told a brand-new server-target app to delete a file
     // its own README documents using.
-    const uiTargets = (denoJson?.build as { targets?: string[] } | undefined)
-      ?.targets ?? [];
+    // BOTH spellings — the array form and the object form, whose keys may be
+    // free labels with `kind` naming the target. Reading only the array form
+    // made this line throw ("uiTargets.some is not a function") on a repo that
+    // used the documented object form.
+    const uiTargets = declaredTargetKinds(denoJson);
     const uiTask = Object.values(tasks).some((t) =>
       /--client[= ](?:browser|electron)|--electron\b|--android\b/.test(t)
     );
     // Pass-through reachability: dev runs the app entry → --client=X works.
     const devRunsEntry = /\bsrc\/app\.ts\b|\bapp\.ts\b/.test(devTask);
     const buildsUI = uiTask || devRunsEntry ||
-      uiTargets.some((t) => ["browser", "electron", "android"].includes(t));
+      uiTargets.some((t) =>
+        ["browser", "electron", "android", "server-app"].includes(t)
+      );
     if (appTsx && !buildsUI) {
       report(
         "hint",

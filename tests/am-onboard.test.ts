@@ -302,6 +302,39 @@ Deno.test({
         names.includes("app-client"),
         `no remote client binary in ${names}`,
       );
+
+      // `--out=` — the answer to "I orchestrate my own builds" (rimote R-4).
+      // Two apps in one repo cannot both stage through dist/: it is embedded
+      // into the binary wholesale and wiped by every build, so the first
+      // artifact is gone by the time the second finishes.
+      await build(["--compile", "--cli", "--out=release/one"]);
+      const staged = [...Deno.readDirSync(resolve(dir, "release/one"))].map(
+        (e) => e.name,
+      );
+      assert(
+        staged.includes("app"),
+        `--out= did not place the binary: ${staged}`,
+      );
+
+      // …and an --out inside dist/ is REFUSED, because that is the trap.
+      const bad = await new Deno.Command("deno", {
+        args: [
+          "run",
+          "-A",
+          "dep/aio/src/build.ts",
+          "--compile",
+          "--cli",
+          "--out=dist/release",
+        ],
+        cwd: dir,
+        stderr: "piped",
+        stdout: "null",
+      }).output();
+      assertEquals(bad.code, 1, "--out inside dist/ must be refused");
+      assertStringIncludes(
+        new TextDecoder().decode(bad.stderr),
+        "points inside dist/",
+      );
     } finally {
       await Deno.remove(dir, { recursive: true });
     }

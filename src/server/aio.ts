@@ -2,6 +2,7 @@
 // Phase logic lives in aio-boot, aio-dispatch, aio-server, aio-lifecycle, aio-run-helpers.
 // Cell composition logic lives in aio-composition and aio-cells-bridge.
 
+import { APP_STYLE, UI_ENTRY } from "./app-files.ts";
 import { createShutdownOrchestrator, registerRuntime } from "./shutdown.ts";
 import { _registerAuthStore } from "./auth-context.ts";
 import type { ServerHandle } from "./server-types.ts";
@@ -200,6 +201,81 @@ export function _exposeOf(
   config: { expose?: boolean },
 ): boolean {
   return cli.expose ?? config.expose ?? false;
+}
+
+/** Resolve `config.tls` into the three transport knobs the server reads.
+ *  THE tls decider — the CLI flags override its result in ONE place (the
+ *  aio-server call site), and an unusable shape is refused here, at boot,
+ *  instead of surfacing as a handshake failure later.
+ *
+ *  Config exists for the same reason `expose` does: a compiled binary started
+ *  by a service unit has no shell flags, so "how this app serves" has to be
+ *  expressible in code (rimote R-7). */
+/** Warn when the aio actually running is not the aio the app pinned.
+ *
+ *  `dep/aio` is often a SYMLINK to a live checkout, so "the installed version"
+ *  is whatever that tree is this minute. An app declared alpha55 and was
+ *  running alpha61 plus uncommitted work — six releases of drift, discovered
+ *  by a semantics change nobody could explain. The framework knows both
+ *  numbers; the app should not have to run a linter to learn they differ.
+ *
+ *  A WARNING, not a refusal: developing against a moving checkout is a
+ *  legitimate workflow (it is how aio itself is developed). What is not
+ *  legitimate is doing it silently. Once per process. */
+let _pinWarned = false;
+export function _warnPinDrift(): void {
+  if (_pinWarned) return;
+  _pinWarned = true;
+  const declared = appDenoJson()?.aioVersion;
+  if (typeof declared !== "string" || declared === "") return;
+  // A path pin (`path:/abs/checkout`) IS "whatever that tree is" by
+  // construction — the developer said so. Nothing to compare.
+  if (declared.startsWith("path:")) return;
+  const want = declared.replace(/^v/, "");
+  if (want === VERSION) return;
+  log.warn(
+    `version: this app pins aio ${declared} (deno.json aioVersion) but is ` +
+      `RUNNING ${VERSION}. Everything below — defaults, semantics, the wire ` +
+      `protocol — is ${VERSION}'s. Run \`am pin ${declared}\` to get what the ` +
+      `app declares, or \`am pin --latest\` to record what it is running.`,
+  );
+}
+
+/** Does the app ship its own stylesheet? THE same question the theme decision
+ *  asks (server-html-gen's `hasCSS`), asked once more at boot so the answer can
+ *  be reported rather than only acted on. */
+async function _appHasStylesheet(
+  baseDir: string,
+  _uiEntry: string,
+): Promise<boolean> {
+  try {
+    await Deno.stat(join(baseDir, APP_STYLE));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function _tlsOf(
+  config: { tls?: "auto" | false | { cert: string; key: string } },
+): { cert?: string; key?: string; noTls: boolean } {
+  const t = config.tls;
+  if (t === undefined || t === "auto") return { noTls: false };
+  if (t === false) return { noTls: true };
+  if (
+    typeof t === "object" && t !== null &&
+    typeof (t as { cert?: unknown }).cert === "string" &&
+    typeof (t as { key?: unknown }).key === "string" &&
+    (t as { cert: string }).cert !== "" && (t as { key: string }).key !== ""
+  ) {
+    return { cert: t.cert, key: t.key, noTls: false };
+  }
+  throw new Error(
+    `[aio] invalid \`tls\` config: ${JSON.stringify(t)} — use "auto" ` +
+      `(self-signed, the default), false (plain HTTP; sound only behind a ` +
+      `TLS-terminating proxy or with an already-encrypted payload), or ` +
+      `{ cert: "./cert.pem", key: "./key.pem" }.`,
+  );
 }
 
 /** The app's own `version` — from THE app-deno.json decider
@@ -872,6 +948,7 @@ async function _run<S, A, E>(
       execDir: dirname(Deno.execPath()),
       moduleDir: import.meta.dirname ?? null,
     });
+    let sawDistDir: string | undefined;
     for (const dir of candidates) {
       try {
         await Deno.stat(join(dir, "app.js"));
@@ -879,7 +956,18 @@ async function _run<S, A, E>(
         prod = true;
         log.info("auto-detected dist/app.js → prod mode");
         break;
-      } catch { /* not found */ }
+      } catch {
+        // A dist/ that EXISTS but holds no app.js means this binary embedded a
+        // bundle directory and still has nothing to serve — never a headless
+        // build, always a packaging bug. Remember it so the fallback below can
+        // say so instead of quietly serving the "no browser UI" page
+        // (rimote R-5).
+        if (sawDistDir === undefined) {
+          try {
+            if ((await Deno.stat(dir)).isDirectory) sawDistDir = dir;
+          } catch { /* no such dir either */ }
+        }
+      }
     }
     // A HEADLESS build (`--service`/`--cli`) never bundles, so there is no
     // dist/app.js to find — but a compiled binary is prod by definition (dev
@@ -889,6 +977,15 @@ async function _run<S, A, E>(
     // server. `deno task compile:service` shipped exactly that.
     if (!prod) {
       prod = true;
+      if (sawDistDir) {
+        log.warn(
+          `compiled binary embeds ${sawDistDir} but it holds no app.js — ` +
+            `this build packaged a bundle directory with nothing to serve, so ` +
+            `the app will answer with the "no browser UI" page. Rebuild the ` +
+            `browser bundle before compiling (deno task build), or build a ` +
+            `headless target on purpose (--headless/--cli).`,
+        );
+      }
       log.info("compiled binary without a bundle → prod mode (headless)");
     }
   }
@@ -976,8 +1073,38 @@ async function _run<S, A, E>(
     validateConfig(config.ui as Record<string, unknown>, VALID_UI_KEYS, "ui");
   }
   printLint(
-    await lint(initialState, config, baseDir, prod, isHeadless, useElectron),
+    await lint(
+      initialState,
+      config,
+      baseDir,
+      prod,
+      isHeadless,
+      useElectron,
+      ui.entry ?? UI_ENTRY,
+    ),
   );
+
+  // ── stillness at the boundary (llama.master) ────────────────────────
+  //
+  // Two facts an app can be WRONG about without any error: which aio it is
+  // actually running, and whether a framework default has taken over its
+  // layout. Both were diagnosed in the field by symptom — six releases of pin
+  // drift found by "why did the semantics change", and a re-laid-out window
+  // found by "why is my UI in half the screen". The framework knows both
+  // answers at boot and said neither. Observe-only, once per boot.
+  _warnPinDrift();
+  if (ui.theme === "full") {
+    const styled = await _appHasStylesheet(baseDir, ui.entry ?? UI_ENTRY);
+    if (styled) {
+      log.warn(
+        `theme: ui.theme "full" — aio's complete stylesheet is emitted ALONGSIDE ` +
+          `your style.css, so its rules apply wherever your CSS is silent ` +
+          `(a cascade layer settles conflicts, not silence). That is what this ` +
+          `setting is for; the default ("auto") steps aside instead, and ` +
+          `\`am theme adopt\` hands you the CSS to own.`,
+      );
+    }
+  }
 
   const title = await resolveTitle(cli.title, ui.title);
   log.debug(
@@ -1667,6 +1794,9 @@ async function _run<S, A, E>(
   const clientCounter = { value: 0 };
   const udsRef = { current: null as UDSHandle | null };
 
+  // Resolved BEFORE the transport is set up so an invalid `tls` shape fails at
+  // boot, where it can name the config key, not at the first handshake.
+  const _tls = _tlsOf(config as { tls?: AioConfig<S, A, E>["tls"] });
   const transport = await setupTransport<S, A>({
     appId,
     port,
@@ -1694,9 +1824,14 @@ async function _run<S, A, E>(
         oidc: authOpts.oidc,
       }
       : undefined,
-    cliCert: cli.cert,
-    cliKey: cli.key,
-    cliNoTls: cli.noTls ?? false,
+    // TLS: ONE decider for the flag/config pair. The flags are per-launch and
+    // win; `tls` in config is how a compiled binary — a service unit passes no
+    // shell flags — declares the same thing (rimote R-7).
+    cliCert: cli.cert ?? _tls.cert,
+    cliKey: cli.key ?? _tls.key,
+    cliNoTls: cli.noTls ?? _tls.noTls,
+    // Which of the two said so — the warning names what was actually written.
+    noTlsSource: cli.noTls !== undefined ? "flag" : "config",
     cliTransport: cli.transport,
     ui,
     title,
