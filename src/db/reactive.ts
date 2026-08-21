@@ -53,12 +53,40 @@ type Entry = { tables: Set<string>; rerun: () => Promise<void> };
 export function reactiveDB(db: DB): ReactiveDB {
   const entries = new Set<Entry>();
 
+  /** Refresh one live query on the WRITE path, where a throw would be a lie.
+   *
+   *  The subscriber half of this is isolated where the callbacks are called
+   *  (see `rerun`), but the re-run itself — `db.query(sql)` — can throw too: a
+   *  busy database, a view whose SQL no longer resolves. That throw travelled
+   *  the same road (`invalidate` → `execute`/`transaction`) and rejected a
+   *  write that had ALREADY COMMITTED, so the caller retries a landed write or
+   *  reports a failure that did not happen. One rule for the whole path: after
+   *  the commit, nothing a REFRESH does can describe the write as undone.
+   *
+   *  Loud, never silent — a live query that stopped refreshing is a UI quietly
+   *  showing stale rows, which is exactly what this file exists to prevent.
+   *
+   *  The initial fill in `select()` is deliberately NOT routed through here: no
+   *  write has happened there, and a query that cannot run must fail at the
+   *  `select()` that asked for it. */
+  async function refreshAfterWrite(e: Entry): Promise<void> {
+    try {
+      await e.rerun();
+    } catch (err) {
+      log.error(
+        "db",
+        `a live query failed to refresh after a write — the write is ` +
+          `COMMITTED, and this query's rows are now STALE: ${err}`,
+      );
+    }
+  }
+
   async function invalidate(written: Set<string>): Promise<void> {
     if (written.size === 0) return;
     for (const e of entries) {
       for (const t of e.tables) {
         if (written.has(t)) {
-          await e.rerun();
+          await refreshAfterWrite(e);
           break;
         }
       }
@@ -66,7 +94,7 @@ export function reactiveDB(db: DB): ReactiveDB {
   }
 
   async function invalidateAll(): Promise<void> {
-    for (const e of entries) await e.rerun();
+    for (const e of entries) await refreshAfterWrite(e);
   }
 
   return {

@@ -31,11 +31,36 @@ const CLIENT_ENTRIES = [
 const IMPORT_RE =
   /(?:^|\n)\s*(?:import|export)\s+(?!type\s)[^"'\n]*?from\s*["']([^"']+)["']|(?:^|\n)\s*import\s*["']([^"']+)["']|import\s*\(\s*["']([^"']+)["']\s*\)/g;
 
-/** `new URL(…, import.meta.url)` in a TOP-LEVEL statement — column 0, so it
- *  runs the moment the module is evaluated. The same call inside a function
- *  body is indented and runs only when something asks for it. */
-const LOAD_TIME_URL_RE =
-  /^(?:export\s+)?(?:const|let|var)\s+\w+[^\n]*=\s*new URL\([^\n]*import\.meta\.url|^new URL\([^\n]*import\.meta\.url/gm;
+/** Every TOP-LEVEL statement in a module: a run of lines starting at column 0
+ *  and ending where the next one begins. Everything inside a function body is
+ *  indented, so what is left is exactly what runs at import time.
+ *
+ *  Line-anchored matching was not enough — the first version of this gate
+ *  matched only `const X = new URL(…, import.meta.url);` on ONE line, so
+ *  `deno fmt` wrapping the same statement over four lines (which it does above
+ *  80 columns) walked straight through it, as did an object literal, an IIFE
+ *  and `Deno.readFileSync(new URL(…))`. */
+function topLevelStatements(src: string): string[] {
+  const out: string[] = [];
+  let cur: string[] = [];
+  for (const line of src.split("\n")) {
+    const startsStatement = /^[^\s})\]]/.test(line);
+    if (startsStatement && cur.length) {
+      out.push(cur.join("\n"));
+      cur = [];
+    }
+    cur.push(line);
+  }
+  if (cur.length) out.push(cur.join("\n"));
+  return out;
+}
+
+/** What must not happen while a module evaluates: resolving a module-relative
+ *  URL, or reaching for `Deno` at all (a bundle may have neither). */
+const LOAD_TIME_HAZARD = /import\.meta\.(url|dirname|filename)|\bDeno\./;
+
+/** …except inside a function body, which only runs when something calls it. */
+const DEFERS = /=>|\bfunction\b|\bclass\b/;
 
 async function clientGraph(): Promise<string[]> {
   const visited = new Set<string>();
@@ -59,7 +84,7 @@ async function clientGraph(): Promise<string[]> {
   return [...visited];
 }
 
-Deno.test("no client-reachable module resolves a URL at load time", async () => {
+Deno.test("no client-reachable module touches Deno or import.meta at load time", async () => {
   const offenders: string[] = [];
   for (const url of await clientGraph()) {
     let text: string;
@@ -68,14 +93,22 @@ Deno.test("no client-reachable module resolves a URL at load time", async () => 
     } catch {
       continue;
     }
-    for (const m of text.matchAll(LOAD_TIME_URL_RE)) {
-      offenders.push(`${url.slice(SRC.href.length)}: ${m[0].split("\n")[0]}`);
+    for (const stmt of topLevelStatements(text)) {
+      const code = stmt.replace(/\/\*[\s\S]*?\*\//g, "")
+        .split("\n").filter((l) => !l.trim().startsWith("//")).join("\n");
+      if (!LOAD_TIME_HAZARD.test(code)) continue;
+      if (DEFERS.test(code)) continue; // a function body: runs on demand
+      offenders.push(
+        `${url.slice(SRC.href.length)}: ${
+          code.trim().split("\n")[0]!.slice(0, 90)
+        }`,
+      );
     }
   }
   assert(
     offenders.length === 0,
-    "these run `new URL(…, import.meta.url)` while the module evaluates, so a " +
-      "bundle that merely LINKS them throws before the app boots — move the " +
+    "these touch `import.meta.url` / `Deno` while the module EVALUATES, so a " +
+      "bundle that merely LINKS them fails before the app boots — move the " +
       "call into the function that needs it and throw an error naming the " +
       "feature:\n  " + offenders.join("\n  "),
   );

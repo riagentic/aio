@@ -78,6 +78,21 @@ export class AioLogger {
       // be written into a directory that is still over budget.
       const budget = await enforceBudget(this.dir, this.cfg.logBudget);
       this.ready = true;
+      // Everything said while the files did not yet exist, in the order it was
+      // said, before this run's first "real" line.
+      const held = this._preInit;
+      this._preInit = [];
+      for (const h of held) this.write(h.path, h.entry);
+      if (this._preInitDropped > 0) {
+        const dropped = this._preInitDropped;
+        this._preInitDropped = 0;
+        this.emit("warn", "logger", "early log lines were dropped", {
+          dropped,
+          kept: AioLogger.MAX_PREINIT,
+          why: "more than the pre-init buffer holds were emitted before the " +
+            "log files were ready",
+        });
+      }
       // The retention default changed (wipe → keep), and a default whose effect
       // is only observable by watching the filesystem must not change silently
       // (`.katana/_aio.md`). So the first thing this run says is what happened
@@ -292,8 +307,31 @@ export class AioLogger {
   private static readonly FLUSH_MS = 250;
   private static readonly MAX_BUFFERED = 512; // lines per file before forced flush
 
+  /** Lines emitted BEFORE `init()` finished, kept so they can be written when
+   *  it does. Bounded: a logger that never initializes must not grow a queue
+   *  forever, and the lines that matter on a failed boot are the FIRST ones. */
+  private _preInit: Array<{ path: string; entry: LogEntry }> = [];
+  private _preInitDropped = 0;
+  private static readonly MAX_PREINIT = 256;
+
   private write(path: string, entry: LogEntry): void {
-    if (!this.ready) return;
+    if (!this.ready) {
+      // Dropping these outright is a silent failure in the subsystem whose job
+      // is to leave a record: `init()` is async (rotation, budget enforcement),
+      // and every line a boot emits before it resolves — the config it read,
+      // the port it chose, the first error — vanished from app.log with nothing
+      // to show that anything was missing. They are held here and replayed in
+      // order once the files exist. (The console half was never affected, which
+      // is exactly why this was invisible: the developer watching a terminal
+      // saw everything, and only the FILE — the thing you read after a crash —
+      // was short.)
+      if (this._preInit.length < AioLogger.MAX_PREINIT) {
+        this._preInit.push({ path, entry });
+      } else {
+        this._preInitDropped++;
+      }
+      return;
+    }
     const line = formatText(entry);
     // Guarded like formatText's safeStringify: entry.data can carry live
     // state (REDUCE_ERROR's snapshot), and a BigInt/cycle in it would throw

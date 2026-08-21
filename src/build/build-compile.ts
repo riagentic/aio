@@ -3,6 +3,7 @@
  * Build compile — withDevExcluded symlink manager + deno compile step + systemd service file.
  */
 import { readDenoJson, readDenoJsonSync } from "../server/deno-json.ts";
+import { isProcessAlive } from "../server/single-instance-lock.ts";
 import { dirname, fromFileUrl, isAbsolute, join, relative } from "@std/path";
 import { artifactName } from "./platforms.ts";
 import {
@@ -24,6 +25,54 @@ type SavedLink = { path: string; target: string; isDir: boolean };
 
 /** Temporarily remove dev symlinks, run compile callback, restore symlinks. Returns callback result. */
 export async function withDevExcluded(
+  tag: string,
+  nmDir: string,
+  fn: (excludes: string[]) => Promise<boolean>,
+): Promise<boolean> {
+  // ONE build at a time may hold the project's dev symlinks aside.
+  //
+  // This removes `node_modules/electron`, `node_modules/esbuild` and their
+  // scope dirs, then restores them in `finally`. Two builds overlapping in the
+  // same project — `build-all` runs each target as a subprocess, and nothing
+  // stopped a second `deno task compile` in another terminal — meant one
+  // observing the other's half-removed state, and a restore racing a removal
+  // leaves a project whose `node_modules/electron` is simply gone (the restore
+  // failure is a `console.warn`, so the next `deno task dev` is the one that
+  // finds out). A lock file makes the window unreachable rather than unlikely.
+  const lock = join(nmDir, ".aio-build-lock");
+  let held = false;
+  for (let i = 0; i < 600 && !held; i++) { // ~60s, then take it over
+    try {
+      await Deno.mkdir(nmDir, { recursive: true });
+      await Deno.writeTextFile(lock, `${Deno.pid}`, { createNew: true });
+      held = true;
+    } catch {
+      // Someone else is excluding right now. Wait rather than interleave —
+      // and if the holder died without cleaning up, take the lock so a stale
+      // file cannot wedge every future build.
+      try {
+        const owner = Number(await Deno.readTextFile(lock));
+        // THE liveness decider, not a second copy of it: it knows that EPERM
+        // means the pid exists under another account (alive), which a bare
+        // try/catch around `Deno.kill` reads as dead.
+        if (
+          Number.isFinite(owner) && owner !== Deno.pid && !isProcessAlive(owner)
+        ) {
+          await Deno.remove(lock).catch(() => {}); // holder died mid-build
+          continue;
+        }
+      } catch { /* lock vanished — retry immediately */ }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+  try {
+    return await _withDevExcluded(tag, nmDir, fn);
+  } finally {
+    if (held) await Deno.remove(lock).catch(() => {});
+  }
+}
+
+async function _withDevExcluded(
   tag: string,
   nmDir: string,
   fn: (excludes: string[]) => Promise<boolean>,

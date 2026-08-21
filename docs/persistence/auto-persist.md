@@ -34,6 +34,16 @@ persist: { include: ["count", "name"] },
 persist: { exclude: ["cache", "htmlCache"] },
 ```
 
+Wanting exactly one field kept is the common case, and `{ include: [...] }` is
+it — reach for that before hand-rolling storage. The same four forms work for
+`visible` ([filter options](../state/cell-visibility.md#filter-options)).
+
+**The names are checked.** A field in `include`/`exclude` that is not in the
+cell's state throws at `cell()`, naming the nearest real field and what the
+mistake would have cost — a typo here is otherwise silent in both directions (an
+`include` typo drops a field you meant to keep; an `exclude` typo writes one you
+meant to leave out).
+
 To opt every cell out by default (e.g. for privacy-sensitive apps), use
 `cellDefaults` in `aio.run()`:
 

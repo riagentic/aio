@@ -482,6 +482,20 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
       writerWorker = null;
       readerWorkers = [];
       ready = null;
+      // Anything STILL pending here waited out the 5s drain and then had its
+      // worker terminated under it — its response is never coming. Clearing the
+      // map without settling those promises left every such caller's
+      // `await db.query()` unresolved FOREVER, on the shutdown path, which is
+      // the one place a hang looks exactly like "shutdown is taking a while".
+      // Reject them by name instead: a close that abandons work says so.
+      for (const [, p] of pending) {
+        p.reject(
+          new Error(
+            "db closed while this query was still in flight — the worker was " +
+              "terminated after the 5s drain, so no result is coming",
+          ),
+        );
+      }
       pending.clear(); // drop settled/stale entries so a respawn starts clean
     },
   };

@@ -53,6 +53,38 @@ export function extractForUser(
   return undefined;
 }
 
+/** The closest candidate, when a typo is one or two edits away from a real
+ *  name. ONE spelling of "did you mean" — for option keys, and for the state
+ *  fields a `persist` / `visible` filter names. */
+export function nearestOf(
+  bad: string,
+  candidates: Iterable<string>,
+): string | null {
+  const dist = (a: string, b: string): number => {
+    const d: number[][] = Array.from(
+      { length: a.length + 1 },
+      (_, i) => [i, ...Array(b.length).fill(0)],
+    );
+    for (let j = 0; j <= b.length; j++) d[0]![j] = j;
+    for (let i = 1; i <= a.length; i++) {
+      for (let j = 1; j <= b.length; j++) {
+        d[i]![j] = Math.min(
+          d[i - 1]![j]! + 1,
+          d[i]![j - 1]! + 1,
+          d[i - 1]![j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1),
+        );
+      }
+    }
+    return d[a.length]![b.length]!;
+  };
+  let best: string | null = null, bestD = 3;
+  for (const k of candidates) {
+    const dd = dist(bad.toLowerCase(), k.toLowerCase());
+    if (dd < bestD) [best, bestD] = [k, dd];
+  }
+  return best;
+}
+
 /**
  * Validate `visible`/`persist` field-filter keys against the declared state, at cell
  * creation. A filter key that matches NO state field silently does nothing — a
@@ -92,10 +124,28 @@ export function validateFieldFilters(
         // Framework-internal fields (__aio_*) are always allowed.
         if (head.startsWith("__aio")) continue;
         if (!stateKeys.has(head)) {
+          // The CONSEQUENCE, said correctly for the filter that was written.
+          // One sentence used to cover all four combinations — "silently
+          // exposing what you meant to hide" — which is true of
+          // `visible.exclude` and false of the other three. A `persist.include`
+          // typo exposes nothing: it drops the field from persistence, so the
+          // setting simply does not survive a restart, and being told to look
+          // for a leak sends the reader hunting the wrong thing. A field report
+          // hit exactly that case (`persist.include`, a field added to the
+          // state and not to the list).
+          const consequence = kind === "persist"
+            ? (mode === "include"
+              ? "so this field is NOT persisted — the value silently does not survive a restart"
+              : "so it excludes nothing — a field you meant to keep out of the database is written to it")
+            : (mode === "include"
+              ? "so this field is NOT sent to clients — the UI silently never sees it"
+              : "so it filters nothing, silently exposing what you meant to hide");
+          const near = nearestOf(head, stateKeys);
           throw new Error(
             `[cell:${name}] ${kind} ${mode} names "${key}", but "${head}" is not a ` +
-              `state field of this cell — so it filters nothing, silently exposing ` +
-              `what you meant to hide. Declared state: ${
+              `state field of this cell${
+                near ? ` — did you mean "${near}"?` : ""
+              } — ${consequence}. Declared state: ${
                 [...stateKeys].join(", ") || "(none)"
               }. Check the spelling.`,
           );

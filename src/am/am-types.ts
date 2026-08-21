@@ -34,6 +34,12 @@ export type GlobalFlags = {
   transport?: string;
   app?: string;
   client?: number;
+  /** The RUNTIME's `--client=<kind>` (browser/electron/cli), recorded even
+   *  though the flag is forwarded to the app as a positional. Without this,
+   *  `am log --client=browser` was accepted and tailed the SERVER log: the
+   *  client-vs-stdout decision reads `flags.client`, which only the numeric
+   *  and bare spellings ever set. */
+  clientKind?: string;
   all?: boolean;
   /** `am state --ui` — the filtered UI-state projection (was `am ui`). */
   ui?: boolean;

@@ -33,6 +33,7 @@
  */
 
 import { readDenoJson } from "../server/deno-json.ts";
+import { compareVersions as compareRawVersions } from "../server/updates-core.ts";
 import { join } from "@std/path";
 
 /** The moving pin — `origin/main`, refreshed on every link. */
@@ -152,8 +153,6 @@ export type Semver = {
   raw: string;
 };
 
-const PRE_RANK: Record<string, number> = { alpha: 1, beta: 2, rc: 3 };
-
 /** Parse `v1.2.3`, `v1.0.0-alpha38`, `v2.0.0-rc1`. Null when unparseable. */
 export function parseVersion(tag: string): Semver | null {
   const m = /^v?(\d+)\.(\d+)\.(\d+)(?:-([a-z]+)\.?(\d*))?$/.exec(tag.trim());
@@ -169,15 +168,17 @@ export function parseVersion(tag: string): Semver | null {
 }
 
 /** Negative when `a` is older. A final release outranks any prerelease of the
- *  same version (1.0.0 > 1.0.0-rc1), and prereleases rank alpha < beta < rc. */
+ *  same version (1.0.0 > 1.0.0-rc1), and prereleases rank alpha < beta < rc.
+ *
+ *  ONE ORDERING. This used to be a second implementation, and it disagreed with
+ *  the one the in-app updater uses on 22 of 24 tried pairs — every one of them
+ *  the shape this project ships (`alpha9` vs `alpha62`), because SemVer
+ *  compares such identifiers as ASCII. `am pin --latest` and `updates` could
+ *  therefore name different releases as "newest" from the same tag list. The
+ *  parsing stays here (it decides which tags are orderable AT ALL); the order
+ *  comes from `updates-core`. */
 export function compareVersions(a: Semver, b: Semver): number {
-  if (a.major !== b.major) return a.major - b.major;
-  if (a.minor !== b.minor) return a.minor - b.minor;
-  if (a.patch !== b.patch) return a.patch - b.patch;
-  const ra = a.pre === "" ? 99 : PRE_RANK[a.pre] ?? 50;
-  const rb = b.pre === "" ? 99 : PRE_RANK[b.pre] ?? 50;
-  if (ra !== rb) return ra - rb;
-  return a.preNum - b.preNum;
+  return compareRawVersions(a.raw, b.raw);
 }
 
 /** Release tags, newest FIRST, by semver. Unparseable tags are dropped rather

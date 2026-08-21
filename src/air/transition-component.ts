@@ -111,6 +111,12 @@ interface _TransitionChildProps {
 // signal change. Keyed by the DOM node, so a genuinely new element (a
 // keyed swap) still animates in.
 const _entered = new WeakSet<HTMLElement>();
+/** Pending enter-cleanup timers, so a element that leaves before its entrance
+ *  finishes takes its timer with it (see the enter branch below). */
+const _enterTimers = new WeakMap<
+  HTMLElement,
+  ReturnType<typeof setTimeout>
+>();
 
 function _TransitionChild(props: _TransitionChildProps): VNode {
   const { enter, exit, options, child } = props;
@@ -126,10 +132,19 @@ function _TransitionChild(props: _TransitionChildProps): VNode {
       const result = enter(dom, options);
       if (result.css) {
         const handle = _applyTransition(dom, result, "in", dom.ownerDocument);
-        setTimeout(
-          () => _removeTransition(handle),
+        // Cleared if this element goes away first. The timer is bounded by the
+        // animation, so an uncleared one was a small leak rather than a bug —
+        // but it kept the handle (and the detached <style> node it points at)
+        // alive for the duration, and this project guards exactly this class
+        // everywhere else (`defer.ts` clears its own timer).
+        const t = setTimeout(
+          () => {
+            _enterTimers.delete(dom);
+            _removeTransition(handle);
+          },
           result.duration + (result.delay ?? 0),
         );
+        _enterTimers.set(dom, t);
       } else if (result.tick) {
         _runTickTransition(dom, {
           duration: result.duration,
@@ -146,6 +161,13 @@ function _TransitionChild(props: _TransitionChildProps): VNode {
       if (!dom || !_isHTMLElement(dom)) return;
 
       _exitHandlers.set(dom, (el: HTMLElement) => {
+        // Leaving cancels arriving: the enter-cleanup timer has nothing left to
+        // clean up once this element is on its way out.
+        const pending = _enterTimers.get(el);
+        if (pending !== undefined) {
+          clearTimeout(pending);
+          _enterTimers.delete(el);
+        }
         const result = exit(el, options);
         if (result.css) {
           const handle = _applyTransition(el, result, "out", el.ownerDocument);

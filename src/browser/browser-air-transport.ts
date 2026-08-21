@@ -491,8 +491,18 @@ function _send(action: { type: string; payload?: unknown }) {
       _enqueue(tagged);
     }
   } else if (_ipc && _ipcConnected) {
-    _ipc.send(json);
-    if (cid) _armAckTimer(cid);
+    // The SAME rule as the WS branch above, which it did not have: a bridge
+    // that refuses the write is offline in every way that matters to this
+    // action. Without this the throw propagated synchronously out of the cell
+    // binding's dispatch — so one transport queued the action and recovered,
+    // and the other threw at the call site, for the same failure. Electron is
+    // the target that uses this branch.
+    try {
+      _ipc.send(json);
+      if (cid) _armAckTimer(cid);
+    } catch {
+      _enqueue(tagged);
+    }
   } else {
     _enqueue(tagged);
   }

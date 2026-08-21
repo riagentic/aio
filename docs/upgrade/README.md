@@ -7,6 +7,10 @@ One guide per version migration. Find your current version and follow the steps.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha63 → alpha64](from-alpha63-to-alpha64.md) — nothing breaks in your app
+  code: `am` learned that a repo can hold several apps (`am start` means the
+  project, `am start <label>` means one of it), `ui.theme: "none"` now really
+  emits nothing, and `renderBudget` says at boot that it is not honoured yet.
 - [alpha62 → alpha63](from-alpha62-to-alpha63.md) — nothing breaks: aio's
   default look is now opt-in (`ui.theme: "auto"`), so an app that never asked
   for it renders exactly as it would without a framework; `ui.theme: "full"`

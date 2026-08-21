@@ -538,9 +538,6 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
       if (response.ops) {
         for (const op of response.ops) clock.receive(op.hlc);
       }
-      if (response.rebase) {
-        for (const op of response.rebase) clock.receive(op.hlc);
-      }
 
       // Collect snapshot work per cell
       const snapshots = new Map<string, Record<string, unknown>>();

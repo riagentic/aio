@@ -31,8 +31,11 @@ import { assertEquals } from "@std/assert";
 const LEDGER: Record<string, { pattern: RegExp; files: number; use: string }> =
   {
     "App.tsx": { pattern: /"App\.tsx"/g, files: 5, use: "UI_ENTRY" },
-    "style.css": { pattern: /"style\.css"/g, files: 7, use: "APP_STYLE" },
-    "icon.png": { pattern: /"icon\.png"/g, files: 6, use: "APP_ICON" },
+    "style.css": { pattern: /"style\.css"/g, files: 6, use: "APP_STYLE" },
+    // 6 → 5: the four targets that each resolved `<appDir>/icon.png` for
+    // themselves now ask `resolveAppIcon` (fezor F-2), which is also what tells
+    // them an icon is sitting at the project root where the build cannot see it.
+    "icon.png": { pattern: /"icon\.png"/g, files: 5, use: "APP_ICON" },
     "app.js": { pattern: /"app\.js"/g, files: 6, use: "BUNDLE_JS" },
     "src/app.ts": {
       pattern: /"src\/app\.ts"/g,

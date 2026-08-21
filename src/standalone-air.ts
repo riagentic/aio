@@ -123,6 +123,28 @@ export {
 export { log } from "./diagnostics/logger-api.ts";
 export type { Log } from "./diagnostics/logger-api.ts";
 
+// The rest of the `aio` surface an app uses INSIDE a method, none of which
+// needs a server — and every one of which failed to BUNDLE for android, with
+// an esbuild error naming a framework internal, because this entry never
+// re-exported them. `until` and `race` appear in mod.ts's own header example,
+// so the documented spelling of an async method did not build for a shipped
+// target. Each module below is dependency-light and Deno-free (the gate in
+// tests/bundle-load-time-throw.test.ts holds them to that).
+export {
+  race,
+  sleep,
+  until,
+  UntilTimeoutError,
+} from "./state/async-helpers.ts";
+export type { UntilOptions } from "./state/async-helpers.ts";
+export { own } from "./state/own.ts";
+export type { OwnEffect } from "./state/own.ts";
+export { self } from "./state/self.ts";
+export { call } from "./state/cell-impl.ts";
+export { bindCell, composeCells } from "./state/cell.ts";
+export { createSelector } from "./selector.ts";
+export { degraded, degradedReport } from "./diagnostics/degraded.ts";
+
 export { Show } from "./air/show.ts";
 export { on, watch } from "./state/watch.ts";
 export type { WatchOptions } from "./state/watch.ts";
@@ -750,7 +772,11 @@ type StandaloneRunConfig = {
   persist?: boolean | string;
   onRestore?: (state: Record<string, unknown>) => Record<string, unknown>;
   circuitBreaker?: import("./state/cell-compose.ts").CircuitBreakerConfig;
-  // server-only options (ui, baseDir, port, schedules, …) are accepted and
+  /** `ui` is mostly server-only here, but two keys DO reach a standalone
+   *  shell — `theme` and `lang` — because the packaged HTML could not be told
+   *  them at build time. See {@linkcode applyShellUi}. */
+  ui?: Record<string, unknown>;
+  // other server-only options (baseDir, port, schedules, …) are accepted and
   // ignored so one app.ts can serve both server and standalone builds
   [key: string]: unknown;
 };
@@ -759,9 +785,40 @@ type StandaloneRunConfig = {
  *  Composes the given cells (or the whole registry) and binds their methods to
  *  a local dispatch loop. Server-only config (ui, port, schedules, db) is
  *  ignored. Idempotent with ensureConnected(). */
+/** The `<head>` half of `ui` a packaged shell could not be told at BUILD time.
+ *
+ *  The android/standalone shell is written before `aio.run()` exists, so it
+ *  cannot know `ui.theme` or `ui.lang`. Both travel with the bundle instead:
+ *  the shell ships the default look DISABLED (`media="not all"`, see
+ *  `server-html-gen.ts`) and this enables it when the app actually asked for
+ *  it. Without this, a scaffolded android app — whose template markup uses
+ *  `.card` / `.row` / `.stack` — was themed under `deno task dev` and unstyled
+ *  in its own APK, which is the WYSIDIWYSIP break the shells exist to prevent.
+ *
+ *  Observe-only and defensive: no document (a test, a worker) means nothing to
+ *  do, and a shell without the deferred sheet is simply left alone. */
+export function _applyShellUi(
+  ui: Record<string, unknown> | undefined,
+): void {
+  if (!ui || typeof document === "undefined") return;
+  const lang = typeof ui.lang === "string" ? ui.lang.trim() : "";
+  if (lang) document.documentElement.lang = lang;
+  const theme = ui.theme;
+  if (theme !== "auto" && theme !== "full") return;
+  const deferred = document.querySelector("style[data-aio-theme-deferred]");
+  if (!deferred) return;
+  // `"auto"` steps aside for an app that ships its own stylesheet — the same
+  // rule the server shell applies, asked at the one moment this runtime can
+  // see the answer.
+  const appCss = document.querySelector('link[rel="stylesheet"]');
+  if (theme === "auto" && appCss) return;
+  deferred.removeAttribute("media");
+}
+
 function runStandalone(
   cfg: StandaloneRunConfig,
 ): Promise<AioApp<Record<string, unknown>, Msg>> {
+  _applyShellUi(cfg.ui as Record<string, unknown> | undefined);
   const cells = cfg.cells && cfg.cells.length
     ? cfg.cells
     : [...getRegisteredCells().values()];

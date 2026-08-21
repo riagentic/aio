@@ -2,7 +2,7 @@
 // Phase logic lives in aio-boot, aio-dispatch, aio-server, aio-lifecycle, aio-run-helpers.
 // Cell composition logic lives in aio-composition and aio-cells-bridge.
 
-import { APP_STYLE, UI_ENTRY } from "./app-files.ts";
+import { APP_STYLE, appHasStylesheet, UI_ENTRY } from "./app-files.ts";
 import { createShutdownOrchestrator, registerRuntime } from "./shutdown.ts";
 import { _registerAuthStore } from "./auth-context.ts";
 import type { ServerHandle } from "./server-types.ts";
@@ -241,19 +241,62 @@ export function _warnPinDrift(): void {
   );
 }
 
-/** Does the app ship its own stylesheet? THE same question the theme decision
- *  asks (server-html-gen's `hasCSS`), asked once more at boot so the answer can
- *  be reported rather than only acted on. */
-async function _appHasStylesheet(
-  baseDir: string,
-  _uiEntry: string,
-): Promise<boolean> {
-  try {
-    await Deno.stat(join(baseDir, APP_STYLE));
-    return true;
-  } catch {
-    return false;
+/** What boot says about `ui.theme`, or null when there is nothing to say.
+ *
+ *  Pure so it can be tested: both lines are documented behaviour in shipped
+ *  upgrade guides ("Boot says so, once"), and the `"full"` one was silently
+ *  wrong in every compiled binary for two releases because the stylesheet
+ *  probe behind it looked in one directory. A line the framework promises is a
+ *  line a test owes. */
+/** The line an app gets for declaring a `renderBudget` today: it is accepted,
+ *  validated, bridged into the client config frame — and read by nothing.
+ *
+ *  alpha48's transport swap deleted `browser-transport-vitals.ts`, the only
+ *  caller of `createRenderMeter()`, and the transport that replaced it never
+ *  picked the meter back up. So client render vitals do not run, `vitals-ping`
+ *  has no sender, and a budget an app tuned deliberately changes nothing.
+ *
+ *  "Config accepted, silently dropped" is the class this project treats as
+ *  disqualifying, and the honest interim is to SAY SO rather than let the key
+ *  keep looking honoured. Wiring the meter into the current transport needs a
+ *  browser-path test and is tracked as its own pass; this line goes away with
+ *  it. Silence was the only unacceptable option. */
+export function _renderBudgetBootNote(
+  renderBudget: unknown,
+): string | null {
+  if (!renderBudget || typeof renderBudget !== "object") return null;
+  return `renderBudget: declared, and NOT honoured yet — client render vitals ` +
+    `are not wired into the current browser transport, so nothing measures ` +
+    `staleness or pending patches and no threshold can fire. The key is kept ` +
+    `(its shape is stable and the meter is coming back); remove it if you ` +
+    `would rather not carry dead config. Server-side vitals are unaffected.`;
+}
+
+export function _themeBootNote(
+  theme: UiConfig["theme"],
+  styled: boolean,
+): { level: "info" | "warn"; message: string } | null {
+  if (theme !== "full" && theme !== "auto") return null;
+  if (theme === "full" && styled) {
+    return {
+      level: "warn",
+      message:
+        `theme: ui.theme "full" — aio's complete stylesheet is emitted ALONGSIDE ` +
+        `your ${APP_STYLE}, so its rules apply wherever your CSS is silent ` +
+        `(a cascade layer settles conflicts, not silence). That is what this ` +
+        `setting is for; "auto" steps aside instead, and ` +
+        `\`am theme adopt\` hands you the CSS to own.`,
+    };
   }
+  if (styled) return null; // "auto" + a stylesheet: the app owns the stage
+  return {
+    level: "info",
+    message:
+      `theme: aio's default look is in effect (ui.theme "${theme}", no ` +
+      `${APP_STYLE}) — it styles semantic HTML plus .card/.row/.stack/` +
+      `.grid/.badge, and \`<main>\` becomes a centred page container. ` +
+      `Write ${APP_STYLE} and every visual default steps aside.`,
+  };
 }
 
 export function _tlsOf(
@@ -1095,26 +1138,17 @@ async function _run<S, A, E>(
   _warnPinDrift();
   // The look is opt-in (`ui.theme` defaults to "tokens", which paints
   // nothing), so there is nothing to announce for an app that never asked.
-  // An app that DID ask hears which of the two ways it landed.
-  if (ui.theme === "full" || ui.theme === "auto") {
-    const styled = await _appHasStylesheet(baseDir, ui.entry ?? UI_ENTRY);
-    if (ui.theme === "full" && styled) {
-      log.warn(
-        `theme: ui.theme "full" — aio's complete stylesheet is emitted ALONGSIDE ` +
-          `your style.css, so its rules apply wherever your CSS is silent ` +
-          `(a cascade layer settles conflicts, not silence). That is what this ` +
-          `setting is for; "auto" steps aside instead, and ` +
-          `\`am theme adopt\` hands you the CSS to own.`,
-      );
-    } else if (!styled) {
-      log.info(
-        `theme: aio's default look is in effect (ui.theme "${ui.theme}", no ` +
-          `${APP_STYLE}) — it styles semantic HTML plus .card/.row/.stack/` +
-          `.grid/.badge, and \`<main>\` becomes a centred page container. ` +
-          `Write ${APP_STYLE} and every visual default steps aside.`,
-      );
-    }
-  }
+  // An app that DID ask hears which of the two ways it landed. THE decider,
+  // not a second copy: a compiled binary's baseDir is `<cwd>/src` and its
+  // stylesheet lives in the embedded dist/, so asking only one of them made
+  // this line confidently wrong there.
+  const themeNote = _themeBootNote(
+    ui.theme,
+    appHasStylesheet(baseDir, distDir),
+  );
+  if (themeNote) log[themeNote.level](themeNote.message);
+  const rbNote = _renderBudgetBootNote(config.renderBudget);
+  if (rbNote) log.warn(rbNote);
 
   const title = await resolveTitle(cli.title, ui.title);
   log.debug(
@@ -1150,6 +1184,7 @@ async function _run<S, A, E>(
     syncCellIds,
     cellAccess: config._cellAccess,
     cellMigrations: config._cellMigrations,
+    _cellVersions: config._cellVersions,
     cellRestores: config._cellRestores,
     onRestore: config.onRestore,
     onCheckpointRestore: config._onCheckpointRestore,

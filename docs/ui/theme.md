@@ -76,12 +76,20 @@ own CSS (or on a subtree — they cascade):
 ```css
 :root {
   --aio-accent: #6d5efc; /* fills: primary buttons, focus ring, checkboxes */
-  --aio-accent-ink: #4a3fd0; /* accent as TEXT: links, badges */
+  --aio-on-accent: #ffffff; /* the ink ON that fill */
+  --aio-accent-ink: #4a3fd0; /* the accent as TEXT: links, badges */
   --aio-r-2: 4px; /* squarer controls */
   --aio-font: "Inter", system-ui, sans-serif;
   --aio-page: 60rem; /* narrower page container */
 }
 ```
+
+**Set all three.** `--aio-ring` and `--aio-tint` are `color-mix`es of the fill
+and follow it, but the two INK tokens are contrast-solved at generation time
+against the app's own hue — they are literals, not derivations. Change only the
+fill and your buttons keep the ink chosen for the old colour, which is how an
+accessible palette turns into white-on-yellow. The generated palette is checked
+against WCAG AA across the hue wheel; a hand-set one is yours to check.
 
 | Token                                            | What it colours                      |
 | ------------------------------------------------ | ------------------------------------ |
@@ -178,15 +186,22 @@ frozen, adopt it.
 | `"tokens"` (default) | **inert `--aio-*` variables only** | **inert `--aio-*` variables only**     |
 | `"auto"`             | the full default look              | **inert `--aio-*` variables only**     |
 | `"full"`             | the full default look              | the full default look, alongside yours |
-| `"none"`             | box-model baseline only            | box-model baseline only                |
+| `"none"`             | **no aio CSS at all**              | **no aio CSS at all**                  |
 
 ```ts
 await aio.run({ ui: { theme: "none" } });
 ```
 
-`"none"` emits nothing but the box-model baseline (`box-sizing`,
-`body{margin:0}`), which is not part of the theme and never goes away. Reach for
-it when you want not even the variables.
+`"none"` is the whole off switch: no look, no variables, and not even the
+two-rule box-model baseline (`*{box-sizing:border-box}`, `body{margin:0}`) that
+every other setting carries. Reach for it when you are bringing an existing
+stylesheet and want aio's hands off the page entirely — `border-box` on `*` is a
+real layout change to a sheet written against `content-box`.
+
+The trade is that you inherit the browser's own defaults, including
+`body{margin:8px}` — the white frame around the page that the baseline exists to
+remove. That is the correct trade for a port and the wrong one for a new app,
+which is why it is one word and not the default.
 
 Why the variables survive by default: a custom property that nothing references
 renders nothing, so they cannot move a box or paint a pixel on their own.

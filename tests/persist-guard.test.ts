@@ -12,7 +12,7 @@ import {
   stringifyWithIssues,
 } from "../src/server/persist-guard.ts";
 
-Deno.test("persist-guard: names every value JSON would corrupt, with its path", () => {
+Deno.test("persist-guard: names the built-ins JSON would corrupt, with its path", () => {
   const state = {
     cart: {
       items: [{ id: 1, addedAt: new Date(0) }],
@@ -64,4 +64,81 @@ Deno.test("persist-guard: a Date really does come back as a string (the bug)", (
     !(after.when instanceof Date),
     "this is what the guard exists to catch",
   );
+});
+
+// ── the guard is STRUCTURAL, not a list of four names ────────────────────
+//
+// `classify` used to be an allow-list — Date, Map, Set — so everything else
+// with a prototype sailed through: a RegExp and an Error persisted as `{}`
+// (exactly the loss the Map/Set entries describe), a Uint8Array as
+// `{"0":1,"1":2}`, an ArrayBuffer as `{}`. `s.lastError = err` and a byte
+// array are ordinary things to hold, and both came back as plain objects on
+// the next boot with nothing said at write time — the failure this file exists
+// to end, reintroduced by the shape of its own check.
+Deno.test("persist-guard: every non-plain object is named, not just the three", () => {
+  const cases: [string, unknown, string][] = [
+    ["RegExp", /ab+c/gi, "RegExp"],
+    ["Error", new Error("boom"), "Error"],
+    ["Uint8Array", new Uint8Array([1, 2, 3]), "Uint8Array"],
+    ["Float64Array", new Float64Array([1.5]), "Float64Array"],
+    ["ArrayBuffer", new ArrayBuffer(4), "ArrayBuffer"],
+    ["URL", new URL("https://x.test/"), "URL"],
+    [
+      "a class instance",
+      new (class Session {
+        token = "t";
+        valid() {
+          return true;
+        }
+      })(),
+      "Session",
+    ],
+  ];
+  for (const [label, value, kind] of cases) {
+    const { issues } = stringifyWithIssues({ field: value });
+    assertEquals(issues.length, 1, `${label}: expected exactly one issue`);
+    assertEquals(issues[0]!.path, "field", label);
+    assertEquals(issues[0]!.kind, kind, label);
+    assert(issues[0]!.becomes.length > 8, `${label}: says what it becomes`);
+  }
+});
+
+Deno.test("persist-guard: a toJSON() that creates the loss is caught too", () => {
+  // The blind spot in the old design: it classified the ORIGINAL value off the
+  // holder (so a Date is named "Date", not "string"), which meant a toJSON
+  // returning undefined dropped the key in total silence.
+  const dropped = stringifyWithIssues({ a: { toJSON: () => undefined } });
+  assertEquals(dropped.issues.map((i) => i.path), ["a"]);
+  assertEquals(dropped.json, "{}");
+
+  const nulled = stringifyWithIssues({ a: { toJSON: () => NaN } });
+  assertEquals(nulled.issues.map((i) => i.path), ["a"]);
+
+  // …and a toJSON that returns something JSON keeps is not an issue.
+  assertEquals(
+    stringifyWithIssues({ a: { toJSON: () => ({ ok: 1 }) } }).issues,
+    [],
+  );
+});
+
+Deno.test("persist-guard: plain data of every shape stays silent", () => {
+  const clean = {
+    s: "x",
+    n: 0,
+    neg: -1.5,
+    b: false,
+    nul: null,
+    arr: [1, "two", { three: 3 }, []],
+    nested: { deep: { deeper: [{ ok: true }] } },
+    empty: {},
+    nullProto: Object.assign(Object.create(null), { k: 1 }),
+  };
+  assertEquals(stringifyWithIssues(clean).issues, []);
+});
+
+Deno.test("persist-guard: an array hole is reported as null, not as a dropped key", () => {
+  const { issues } = stringifyWithIssues({ a: [1, , 3] });
+  assertEquals(issues.length, 1);
+  assertEquals(issues[0]!.path, "a.1");
+  assertStringIncludes(issues[0]!.becomes, "null");
 });

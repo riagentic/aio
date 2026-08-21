@@ -50,3 +50,27 @@ export const DIST_DIR = "dist";
 /** The scaffold's entry module. THE entry decider is `resolveEntryPath()`;
  *  this is only its fallback when a project declares nothing. */
 export const DEFAULT_ENTRY = "src/app.ts";
+
+/** Does this app ship its own stylesheet? THE decider — the theme decision and
+ *  the boot line that reports it must never answer differently.
+ *
+ *  Both dirs, because they are the same question asked from two places: the app
+ *  dir is where a developer puts `style.css`, and `dist/` is where the build
+ *  copied it — which is the ONLY one a compiled binary has, since `baseDir`
+ *  there falls back to `<cwd>/src` and usually does not exist. Asking only the
+ *  app dir is how a compiled app with a stylesheet had its shell correctly step
+ *  aside while boot announced "the default look is in effect (no style.css)".
+ */
+export function appHasStylesheet(
+  baseDir: string | null | undefined,
+  distDir?: string | null,
+): boolean {
+  for (const dir of [baseDir, distDir]) {
+    if (!dir) continue;
+    try {
+      Deno.statSync(`${dir}/${APP_STYLE}`);
+      return true;
+    } catch { /* next candidate */ }
+  }
+  return false;
+}

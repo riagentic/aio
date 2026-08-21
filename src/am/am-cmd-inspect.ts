@@ -41,7 +41,12 @@ import {
  *  still running from before the move. Returns the CURRENT path when neither
  *  exists, so the error names where a running app would have put it. */
 export function logPathFor(flags: GlobalFlags): string {
-  const client = flags.client !== undefined;
+  // BOTH spellings mean "the client's log": the index (`-i 2`, `--client`) and
+  // the runtime kind (`--client=browser`, which is forwarded to the app as a
+  // positional and used to leave `flags.client` undefined). Reading only the
+  // first tailed stdout.log for the second — the flag accepted, its documented
+  // purpose silently ignored.
+  const client = flags.client !== undefined || flags.clientKind !== undefined;
   const current = join(
     appDirs(resolveAmAppId(flags.app)).logs,
     client ? "client.log" : "stdout.log",

@@ -150,6 +150,8 @@ export interface StaticDeps {
   uiEntry?: string; // AIO-8.1
   viewport?: string | false; // AIO-423: ui.viewport override (false = opt out)
   headExtra?: string; // AIO-423: ui.head — verbatim <head> content
+  /** ui.lang — the document language every shell carries. */
+  lang?: string;
   /** ui.chrome — how much of the desktop window the OS draws. */
   chrome?: "standard" | "themed" | "none";
   /** ui.theme — how much of the default look the shell emits. */
@@ -270,24 +272,25 @@ export function createStaticHandler(deps: StaticDeps): {
    *  one closure makes the next added parameter a one-place change. */
   function appShell(): Response {
     return new Response(
-      generateHTML(
-        deps.title,
-        deps.prod,
-        deps.hasCSS,
-        deps.importMap,
-        deps.showStatus,
-        deps.width,
-        deps.height,
-        deps.renderBudget,
-        deps.uiEntry,
-        deps.viewport,
-        deps.headExtra,
-        deps.syncCells,
-        deps.callTimeouts,
-        deps.chrome,
-        deps.theme,
-        deps.themeName,
-      ),
+      generateHTML({
+        title: deps.title,
+        prod: deps.prod,
+        hasCSS: deps.hasCSS,
+        importMap: deps.importMap,
+        showStatus: deps.showStatus,
+        width: deps.width,
+        height: deps.height,
+        renderBudget: deps.renderBudget,
+        uiEntry: deps.uiEntry,
+        viewport: deps.viewport,
+        headExtra: deps.headExtra,
+        syncCells: deps.syncCells,
+        callTimeouts: deps.callTimeouts,
+        chrome: deps.chrome,
+        theme: deps.theme,
+        themeName: deps.themeName,
+        lang: deps.lang,
+      }),
       { headers: { "Content-Type": "text/html", ...deps.noCache } },
     );
   }

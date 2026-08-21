@@ -127,6 +127,7 @@ export interface ServerSetupDeps<S, A> {
     head?: string; // AIO-423
     chrome?: "standard" | "themed" | "none"; // desktop window frame
     theme?: UiTheme; // how much of the default look the shell emits
+    lang?: string; // <html lang> — WCAG 3.1.1, default "en"
   };
   title: string;
   config: TransportConfig;
@@ -524,6 +525,7 @@ export async function setupTransport<S, A>(
       headExtra: ui.head,
       chrome: ui.chrome,
       theme: ui.theme,
+      lang: ui.lang,
       // The accent follows the app's IDENTITY, not its window title: a title
       // that changes with the route must not recolour the app mid-session.
       themeName: appId || title,

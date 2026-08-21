@@ -399,6 +399,9 @@ export interface BootConfig<S> {
   cellAccess?: Map<string, import("../state/cell-types.ts").CellAccess>;
   /** Per-cell version + migration hooks — keyed by cell id */
   cellMigrations?: Map<string, CellMigrationInfo>;
+  /** Every cell's declared `version`, migration or not — the complete map the
+   *  persistence version stamp needs (see the note where it is used). */
+  _cellVersions?: Record<string, number>;
   /** User hook — transform state after restore */
   onRestore?: (state: S) => S;
   /** Per-cell `onRestore` hooks — run BEFORE the app-level one, each scoped to
@@ -954,15 +957,18 @@ export async function bootStorage<S>(
   );
 
   // ── 8. Persistence manager ────────────────────────────────────────
-  // Build cell versions map for persistence (only cells with version > 0)
-  const cellVersions: Record<string, number> | undefined =
-    cfg.cellMigrations?.size
-      ? (() => {
-        const v: Record<string, number> = {};
-        for (const [id, info] of cfg.cellMigrations!) v[id] = info.version;
-        return Object.keys(v).length > 0 ? v : undefined;
-      })()
-      : undefined;
+  // Cell versions for persistence — EVERY cell that declares one, not only the
+  // ones that also declare a migration. `_cellVersions` (built by the cells
+  // bridge from each cell's `version`) was computed on every boot and read
+  // nowhere, while this line derived a second, smaller map from
+  // `cellMigrations`: a cell with `version: 3` and no `onMigrate` was stamped
+  // by neither, so a later downgrade to a build that writes v2 had nothing on
+  // disk to notice it. One source now, the complete one.
+  const cellVersions: Record<string, number> | undefined = (() => {
+    const v: Record<string, number> = { ...(cfg._cellVersions ?? {}) };
+    for (const [id, info] of cfg.cellMigrations ?? []) v[id] = info.version;
+    return Object.keys(v).length > 0 ? v : undefined;
+  })();
 
   // Durable journal — opt-in, and only where there's a real file to
   // recover from (persisting, not :memory:). The persistence manager advances

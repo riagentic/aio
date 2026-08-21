@@ -13,6 +13,7 @@ export const VALID_UI_KEYS = new Set<string>([
   "entry", // AIO-8.1: UI entry file override — typed on UiConfig, served by the dev server
   "viewport", // AIO-423: override the <meta viewport> (string) or opt out (false)
   "head", // AIO-423: verbatim extra <head> content (meta/OG/favicon/fonts)
+  "lang", // <html lang> — WCAG 3.1.1; default "en"
   "chrome", // desktop window frame: "standard" | "themed" | "none"
   "theme", // the default look: "tokens" (default) | "auto" | "full" | "none"
 ]);
@@ -68,8 +69,12 @@ export function misplacedDenoJsonKeys(
   if (!denoJson) return [];
   return Object.keys(denoJson).filter((k) =>
     !DENO_JSON_READ_KEYS.has(k) &&
+    // …including a `ui` key written FLAT at the top level (`"theme": "auto"`,
+    // `"chrome": "themed"`, `"width": 900`). The reported case was the whole
+    // `ui: {…}` object; the flattened spelling is the same mistake one step
+    // further, and was just as inert and just as silent.
     (VALID_AIO_CONFIG_KEYS.has(k) || VALID_FEATURES_CONFIG_KEYS.has(k) ||
-      k === "ui")
+      VALID_UI_KEYS.has(k) || k === "ui")
   );
 }
 
@@ -423,6 +428,7 @@ export const CONFIG_DOCS: Record<string, [string, string]> = {
 /** [default, description] per `ui: {}` key — same completeness gate as
  *  CONFIG_DOCS (every VALID_UI_KEYS entry must have a row). */
 export const UI_DOCS: Record<string, [string, string]> = {
+  lang: ['"en"', "<html lang> — the document language (WCAG 3.1.1)"],
   title: ['"AIO App"', "window title"],
   width: ["800", "window width (px)"],
   height: ["600", "window height (px)"],

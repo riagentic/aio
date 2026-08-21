@@ -3,67 +3,38 @@
 </p>
 
 <p align="center">
-  <b>The all-in-one Deno app framework — persistence + state + UI, batteries included.</b><br>
-  Define state once as a <code>cell</code>; it persists, syncs to every client, and drives the UI.<br>
-  One codebase → browser, Electron, and Android.
+  <b>Write the state. Get the app.</b><br>
+  One <code>cell</code> is your server state, your database, your sync, and your UI —
+  building to browser, desktop and Android from the same two files.
 </p>
 
-<p align="center"><code>v1.0.0-alpha63</code> · <a href="LICENSE">MIT</a></p>
+<p align="center">
+  <code>v1.0.0-alpha64</code> · <a href="LICENSE">MIT</a> ·
+  <a href="docs/content.md">Docs</a> ·
+  <a href="docs/basics/quickstart.md">Quickstart</a> ·
+  <a href="CHANGELOG.md">Changelog</a>
+</p>
 
-## Get started — four lines
+---
+
+## Start
 
 ```sh
-# 1 — install: Deno (if missing) + am into ~/.local/lib/aio, added to your PATH
 curl -fsSL https://raw.githubusercontent.com/riagentic/aio/main/install.sh | sh
-
-# 2 — scaffold a new app (counter by default, or --template=todo)
-am create my-app
-
-# 3 — run it in the browser
-cd my-app && deno task dev
-
-# 4 — build a release binary
-deno task compile
+am create my-app && cd my-app && deno task dev
 ```
 
-Or skip all four — **one line runs any aio app straight from source** (installs
-whatever is missing, clones, repairs, production-builds, runs):
+That is a running app: persisted, synced, testable, and one flag away from a
+desktop window (`deno task dev --client=electron`) or an Android APK
+(`deno task build --targets=android`). Windows: `irm …/install.ps1 | iex`.
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/riagentic/aio/main/run.sh | sh -s owner/repo
-# inside an app repo, no argument needed · --dev for the dev server
-```
+## The idea
 
-See [run from source](docs/build/run-from-source.md).
-
-Two tasks, and the target is a flag — not a task per target:
-
-```sh
-deno task dev                      # dev, in the app's default shell
-deno task dev --client=electron    # …in an Electron desktop window
-deno task dev --expose             # …reachable on the LAN
-
-deno task compile                  # release binary for the default target
-deno task build --targets=electron # release desktop (Electron) build
-deno task build --targets=android  # release Android APK
-deno task build                    # every target in deno.json `build.targets`
-```
-
-(`deno task build --list` prints the target names.)
-
-That's it. A working counter (or todo) app, runnable and buildable to a native
-binary, desktop (Electron), or Android APK. (Windows:
-`irm …/install.ps1 | iex`.)
-
-**Read this second:** [Common pitfalls](docs/basics/pitfalls.md) — the traps
-people actually hit, each with the rule that avoids it. Two field reports in a
-row hit a trap that page already documented, which says more about where the
-link was than about the readers. Every `am` command also takes `--json`; that is
-the scripting interface.
-
-## The whole app is state
+State lives in a `cell`. You never write a store, an endpoint, a query, a
+migration, or a fetch — the cell **is** all of them.
 
 ```ts
+// counter.ts
 import { cell } from "aio";
 
 export const counter = cell("counter", {
@@ -72,68 +43,62 @@ export const counter = cell("counter", {
     increment(s, by = 1) {
       s.count += by;
     },
-    reset(s) {
-      s.count = 0;
-    },
   },
 });
-
-// In JSX: read `counter.count` directly, call `counter.increment()` directly.
-// It's persisted, synced to every client, and testable — for free.
 ```
 
-And the UI is just JSX over that cell (AIR, ~8 KB signals renderer):
-
 ```tsx
-// src/App.tsx — reads are reactive, calls dispatch. No hooks, no wiring.
+// App.tsx — reads are reactive, calls dispatch. No hooks, no wiring.
 import { counter } from "./counter.ts";
 
 export default function App() {
   return (
-    <main>
-      <h1>{counter.count}</h1>
-      <button type="button" onClick={() => counter.increment()}>+</button>
-      <button type="button" onClick={() => counter.reset()}>Reset</button>
-    </main>
+    <button type="button" onClick={() => counter.increment()}>
+      {counter.count}
+    </button>
   );
 }
 ```
 
-Two files — that's the whole app. State persists across restarts, every open
-client stays in sync, and the same two files build to browser, Electron desktop,
-and Android.
+Two files. `count` is persisted to SQLite, broadcast to every connected client
+as a delta, restored on restart, and drivable from a test — because it is state,
+and aio's whole job is state.
 
-## Features
+<p align="center">
+  <img src="docs/img/todo.png" alt="the todo example running in a browser" width="720">
+</p>
 
-Everything below ships in the box — no plugins, no assembly.
+<p align="center"><i>
+  <a href="examples/todo">examples/todo</a> — 3 files, no build step, no config.
+</i></p>
 
-| Feature                       | What                                                                                                                                                                                                      | Docs                                        |
-| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
-| **State — cells**             | One `cell({ state, methods })` drives server, UI, persistence, sync, and tests; `worker: true` gives a heavy cell its own thread                                                                          | [cells](docs/state/cells.md)                |
-| **Reactive UI — AIR (~8 KB)** | Signals + JSX; direct reads (`counter.count`) and calls (`counter.increment()`)                                                                                                                           | [air](docs/ui/air-setup.md)                 |
-| **Persistence**               | Auto worker-thread SQLite (one `state.db`) — zero config, opt out per cell/field; one app = one directory (`~/.<app>/data` is the whole backup)                                                           | [persist](docs/persistence/auto-persist.md) |
-| **Sync**                      | WebSocket delta patches, per-action acks, offline queue, CRDT merge                                                                                                                                       | [sync](docs/persistence/crdt.md)            |
-| **Async workflows**           | Plain async methods + `until`/`race`/`sleep`, cancellable via `cancelOn`                                                                                                                                  | [methods](docs/state/methods.md)            |
-| **Scheduling**                | `after` / `every` / `at` / cron / exponential `backoff`                                                                                                                                                   | [scheduling](docs/state/scheduling.md)      |
-| **Server**                    | HTTP routes with `:id` params, cookies + JSON (`route()`), ambient `serverRequest()`, per-user filtering, auto-TLS                                                                                        | [routes](docs/examples/05-integrations.md)  |
-| **Auth**                      | `auth: true` = full login: signup, sessions, `<SignIn/>`, TOTP 2FA, OIDC, roles                                                                                                                           | [auth](docs/auth/auth.md)                   |
-| **Testing**                   | `testCell` + semantic `testUI`, plus `testServer`/`testBrowser` for real e2e — zero setup, hermetic                                                                                                       | [testing](docs/testing/cell-testing.md)     |
-| **Build — 5 targets**         | Browser · Electron · Android · CLI · service, single-binary `deno compile`; `deno task build` builds a whole fleet (server + clients) into `dist/`                                                        | [targets](docs/build/targets.md)            |
-| **`am` CLI + amui GUI**       | Manage + inspect running apps: state, SQL, logs, trigger UI, metrics, `am cost` (what your app actually pushes) — CLI, or the visual [amui](docs/clients/amui.md) app manager                             | [am](docs/clients/app-manager.md)           |
-| **Debug & DX**                | Time-travel, blank-screen guard, dev graph validator, vitals, live reload (a cell edit restarts the app), one-frame reduce budget in dev, `am pin` (each app pins the aio version it was written against) | [debug](docs/debugging/troubleshooting.md)  |
-| **Security**                  | PBKDF2 passwords, lockout + rate limits, CSRF floor, secret-field boot guards, `redactActions` (a secret argument is recorded nowhere)                                                                    | [auth](docs/auth/auth.md)                   |
+## What you get
+
+Persistence (worker-thread SQLite) · CRDT sync + offline queue · an ~8 KB
+signals renderer · async methods with cancellation · scheduling · HTTP routes ·
+full auth with 2FA and OIDC · time-travel · `testCell`/`testUI` · single-binary
+builds for browser, Electron, Android, CLI and service — and `am`, a CLI that
+inspects and drives any running app.
+
+And one line runs _any_ aio app straight from its repo — installing whatever is
+missing, building, and starting it:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/riagentic/aio/main/run.sh | sh -s owner/repo
+```
 
 **[→ Every doc on one page](docs/content.md)** ·
-[Quickstart](docs/basics/quickstart.md) · [Concepts](docs/basics/concepts.md) ·
-[API](docs/basics/api-reference.md) · [FAQ](docs/basics/faq.md) ·
-[Changelog](CHANGELOG.md)
+[Concepts](docs/basics/concepts.md) · [Pitfalls](docs/basics/pitfalls.md) ·
+[API](docs/basics/api-reference.md) · [`am`](docs/clients/app-manager.md)
 
-## Is aio for you?
+## Honestly
 
-Built for apps where **state is the product** — dashboards, trading & ops tools,
-control panels, internal tools, local-first desktop/mobile apps. Not for
-content/SEO sites or planet-scale public APIs (one embedded process, by design).
-[Positioning & non-goals](docs/basics/positioning.md).
+aio is **alpha**: the surface still moves, each release names its breaks, and
+every app pins the version it was written against (`am pin`). It is built for
+apps where state is the product — dashboards, ops and trading tools, control
+panels, internal tools, local-first desktop and mobile. It is one embedded
+process by design, so it is **not** for content sites, SEO, or planet-scale
+public APIs. [Positioning & non-goals](docs/basics/positioning.md).
 
 ## License
 

@@ -417,7 +417,7 @@
         },
         "UiConfig": {
           "kind": "typeAlias",
-          "sig": "b9b4bd696ee6be1c"
+          "sig": "b361ec89141c6ad4"
         },
         "until": {
           "kind": "function",
@@ -441,7 +441,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "8366d14df1c61bad"
+          "sig": "beba0cb9d4a4629d"
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -1602,6 +1602,10 @@
         "MergeStrategy": {
           "kind": "typeAlias",
           "sig": "2ee8a419d0cf354e"
+        },
+        "normalizeSyncConfig": {
+          "kind": "function",
+          "sig": "49fa9a60be148f28"
         },
         "SYNC_DEFAULTS": {
           "kind": "variable",

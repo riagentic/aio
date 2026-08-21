@@ -141,13 +141,27 @@ function polylines(src: string): Pt[][] {
 }
 
 /** The character a name is drawn with: its first glyph-able character, so
- *  "  my-app" and "3d-viewer" both land somewhere sensible. */
+ *  "  my-app" and "3d-viewer" both land somewhere sensible.
+ *
+ *  Accents are FOLDED first (NFD, then drop the combining marks), because
+ *  skipping a letter the glyph set happens not to have drew the wrong initial
+ *  with total confidence: "Über" came out as a **B** icon and "Éclair" as a
+ *  **C** — the second letter, silently. Folding covers every Latin-script
+ *  language (Ü→U, É→E, ø→o via the compatibility form, ß→S through the
+ *  uppercase pass). A name in a script with no glyphs at all (Cyrillic, CJK,
+ *  Greek, Hebrew, …) still falls through to the placeholder — one shared mark
+ *  is honest where a wrong letter is not, and the hue still differs per app. */
 export function monogramChar(name: string): string {
-  for (const ch of (name || "").trim()) {
-    const up = ch.toUpperCase();
+  const folded = (name || "").trim()
+    .normalize("NFD")
+    .replace(/\p{M}/gu, ""); // every combining mark, not only "Diacritic"
+  for (const ch of folded) {
+    // `[0]`: ß uppercases to "SS", and a two-character string is in no glyph
+    // set — take the letter, not the expansion.
+    const up = ch.toUpperCase()[0] ?? "";
     if (up in GLYPHS) return up;
   }
-  return name.trim()[0]?.toUpperCase() ?? "?";
+  return folded[0]?.toUpperCase() ?? "?";
 }
 
 /** FNV-1a over the name — a stable hue per app, on every machine and target.

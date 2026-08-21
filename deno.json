@@ -1,6 +1,6 @@
 {
   "name": "@riagentic/aio",
-  "version": "1.0.0-alpha63",
+  "version": "1.0.0-alpha64",
   "appId": "aio",
   "exports": {
     ".": "./mod.ts",
@@ -136,8 +136,11 @@
     "compile:client": "deno run -A src/build.ts --client",
     "discover": "deno run -A src/am.ts discover",
     "doctor": "deno run -A src/server/doctor.ts",
-    "docs": "deno doc --html --name=aio --output=docs/api-ref mod.ts",
+    "fmt": "deno fmt",
+    "update:api-ref": "deno doc --html --name=aio --output=docs/api-ref mod.ts",
+    "docs": "deno task update:api-ref",
     "update:docs": "deno run --allow-read --allow-write scripts/gen-doc-index.ts",
-    "validate:matrix": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno test -A tests/examples.test.ts tests/examples-ui.test.ts && AIO_APPS_DIR=$INIT_CWD/.aio-test-home AIO_ONBOARD_E2E=1 deno test -A --no-check=remote tests/onboarding-e2e.test.ts && AIO_BUILD_SMOKE=1 deno test -A tests/am-onboard.test.ts"
+    "validate:matrix": "deno task check:matrix",
+    "check:matrix": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno test -A tests/examples.test.ts tests/examples-ui.test.ts && AIO_APPS_DIR=$INIT_CWD/.aio-test-home AIO_ONBOARD_E2E=1 deno test -A --no-check=remote tests/onboarding-e2e.test.ts && AIO_BUILD_SMOKE=1 deno test -A tests/am-onboard.test.ts"
   }
 }

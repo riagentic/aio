@@ -277,6 +277,8 @@ export function createWsManager(deps: WsDeps): WsManager {
   // Global rolling-window message counter — protects against distributed
   // clients each staying under the per-socket limit while flooding the server.
   let _totalMsgsThisSec = 0;
+  /** One "fuse tripped" line per window, not one per dropped frame. */
+  let _globalFuseReported = false;
   let _globalRateTimer: ReturnType<typeof setTimeout> | undefined;
 
   const connections = new Map<WebSocket, ClientMeta>();
@@ -686,24 +688,50 @@ export function createWsManager(deps: WsDeps): WsManager {
     if (!_globalRateTimer) {
       _globalRateTimer = setTimeout(() => {
         _totalMsgsThisSec = 0;
+        _globalFuseReported = false;
         _globalRateTimer = undefined;
       }, 1000);
     }
 
-    // Global rate-limit fuse: rolling window counter on WsManager itself
+    // Global rate-limit fuse: rolling window counter on WsManager itself.
+    //
+    // The ceiling SCALES with the number of connected sockets. It used to be a
+    // flat `wsRateLimit * 2` — 200 msg/sec for the whole server by default —
+    // while each individual client is allowed 100, so four honest clients doing
+    // vitals-pings, actions and acks could put the server over a limit none of
+    // them was near, and every frame after that was dropped: an availability
+    // cliff that arrives with the FOURTH user and looks like the network
+    // failing. Per-client limiting is what stops one abusive socket (and it
+    // denylists, above); this fuse is for the distributed case, so it trips
+    // when the AVERAGE client exceeds its own budget, never merely because
+    // there are several of them. The floor keeps the single-client case exactly
+    // as strict as before.
     _totalMsgsThisSec++;
-    if (_totalMsgsThisSec > wsRateLimit * 2) {
-      const msg =
-        `ws: global rate limit exceeded (${_totalMsgsThisSec} msg/sec) — dropping from client ${
-          meta.id.slice(0, 8)
-        }`;
-      log.error("ws", msg);
-      writeClientLog(meta.index, {
-        level: "error",
-        msg,
-        ts: Date.now(),
-        source: "server-ws",
-      });
+    // …and it is still a CEILING: linear growth with no upper bound would mean
+    // no global limit at all (100 clients at 99 msg/s each is 9,900 under a
+    // linear cap), which is the very case this fuse was written for. So it
+    // scales with the room and then stops — never more than 50 clients' worth
+    // of budget in aggregate, whatever the connection count.
+    const globalCap = wsRateLimit *
+      Math.min(50, Math.max(2, connections.size));
+    if (_totalMsgsThisSec > globalCap) {
+      // Once per window, not once per dropped FRAME: a tripped fuse drops
+      // thousands, and thousands of identical lines is how the one line that
+      // explains an outage gets lost.
+      if (!_globalFuseReported) {
+        _globalFuseReported = true;
+        const msg =
+          `ws: global rate limit exceeded (${_totalMsgsThisSec} msg/sec over ` +
+          `${connections.size} client(s), cap ${globalCap}) — dropping frames ` +
+          `until the next second`;
+        log.error("ws", msg);
+        writeClientLog(meta.index, {
+          level: "error",
+          msg,
+          ts: Date.now(),
+          source: "server-ws",
+        });
+      }
       return;
     }
 

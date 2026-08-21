@@ -63,19 +63,18 @@ const shellInputs = {
 } as const;
 
 function serverShell(prod: boolean): string {
-  return generateHTML(
-    shellInputs.title,
-    prod,
-    shellInputs.hasCSS,
-    "{}",
-    shellInputs.showStatus,
-    shellInputs.width,
-    shellInputs.height,
-    undefined,
-    "App.tsx",
-    shellInputs.viewport,
-    shellInputs.head,
-  );
+  return generateHTML({
+    title: shellInputs.title,
+    prod: prod,
+    hasCSS: shellInputs.hasCSS,
+    importMap: "{}",
+    showStatus: shellInputs.showStatus,
+    width: shellInputs.width,
+    height: shellInputs.height,
+    uiEntry: "App.tsx",
+    viewport: shellInputs.viewport,
+    headExtra: shellInputs.head,
+  });
 }
 
 Deno.test("WYSIDIWYSIP: dev and prod shells are visually identical", () => {
@@ -119,19 +118,17 @@ Deno.test("WYSIDIWYSIP: electron aio:// shell IS the server prod shell", () => {
     viewport: shellInputs.viewport,
     head: shellInputs.head,
   });
-  const viaServer = generateHTML(
-    shellInputs.title,
-    true,
-    shellInputs.hasCSS,
-    "",
-    shellInputs.showStatus,
-    shellInputs.width,
-    shellInputs.height,
-    undefined,
-    undefined,
-    shellInputs.viewport,
-    shellInputs.head,
-  );
+  const viaServer = generateHTML({
+    title: shellInputs.title,
+    prod: true,
+    hasCSS: shellInputs.hasCSS,
+    importMap: "",
+    showStatus: shellInputs.showStatus,
+    width: shellInputs.width,
+    height: shellInputs.height,
+    viewport: shellInputs.viewport,
+    headExtra: shellInputs.head,
+  });
   assertEquals(
     viaElectron,
     viaServer,
@@ -142,18 +139,32 @@ Deno.test("WYSIDIWYSIP: electron aio:// shell IS the server prod shell", () => {
 
 Deno.test("WYSIDIWYSIP: android local shell head matches the prod shell head", () => {
   const android = androidLocalHTML("A", true);
-  const server = generateHTML("A", true, true, "");
+  const server = generateHTML({
+    title: "A",
+    prod: true,
+    hasCSS: true,
+    importMap: "",
+  });
   // Only sanctioned differences: relative asset base (android_asset has no
-  // server root), the window-box metas (the OS sizes a phone window), and the
+  // server root), the window-box metas (the OS sizes a phone window), the
   // favicon link — `/__aio/icon` is served by a SERVER (or the aio://
   // protocol handler), which the asset shell does not have, and a WebView has
   // no tab to show a favicon in anyway; emitting it there was a guaranteed
-  // dead request in every console (alpha61).
+  // dead request in every console (alpha61) — and the DISABLED theme sheet,
+  // which is how `ui.theme` reaches a shell written before `aio.run()` exists:
+  // it carries `media="not all"`, so it applies nothing until the standalone
+  // runtime enables it from the config (see `_applyShellUi`). Carrying it is
+  // what makes dev and the APK agree for an app that opted in; it is inert
+  // for every app that did not.
   const norm = (h: string) =>
     h
       .replace('href="./style.css"', 'href="/style.css"')
       .replace(/\n\s*<meta name="aio:(width|height)"[^>]*>/g, "")
-      .replace(/\n\s*<link rel="icon"[^>]*>/g, "");
+      .replace(/\n\s*<link rel="icon"[^>]*>/g, "")
+      .replace(
+        /\n\s*<style media="not all" data-aio-theme-deferred>[\s\S]*?<\/style>/g,
+        "",
+      );
   assertEquals(
     norm(headOf(android)),
     norm(headOf(server)),

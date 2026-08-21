@@ -23,8 +23,12 @@
 //      same hash as the default icon (`appHue`), so an app is one colour in
 //      its taskbar icon, its title bar and its buttons the first time it runs.
 //      Two aio apps side by side look like two products.
-//   3. **It is one variable deep.** Rebranding is `--aio-accent: <colour>` in
-//      the app's own CSS; every derived tone is a `color-mix` off it.
+//   3. **It is three variables deep, and they are named.** `--aio-accent` is
+//      the fill; `--aio-on-accent` is the ink that sits ON it; `--aio-accent-ink`
+//      is the accent as TEXT on the page. Only `--aio-ring` and `--aio-tint`
+//      derive (`color-mix`) — the two inks are contrast-solved here, against
+//      the GENERATED hue, so overriding the fill alone leaves them behind. A
+//      rebrand sets the trio; `docs/ui/theme.md` says the same thing.
 //
 // Pure and I/O-free — the server inlines the string into the shell.
 
@@ -39,6 +43,19 @@ function luminance(h: number, s: number, l: number): number {
     return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
   };
   return 0.2126 * ch(0) + 0.7152 * ch(8) + 0.0722 * ch(4);
+}
+
+/** An HSL triple as `#rrggbb` — for values that need an alpha suffix, where a
+ *  `hsl(…)` function cannot carry one. Same maths as {@linkcode luminance}'s
+ *  channel walk, kept beside it so the two cannot drift. */
+function hslHex(h: number, s: number, l: number): string {
+  const a = s * Math.min(l, 1 - l);
+  const ch = (nn: number) => {
+    const k = (nn + h / 30) % 12;
+    const v = l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1));
+    return Math.round(255 * v).toString(16).padStart(2, "0");
+  };
+  return `#${ch(0)}${ch(8)}${ch(4)}`;
 }
 
 const contrast = (a: number, b: number) =>
@@ -136,10 +153,21 @@ export function appThemeCss(name: string): string {
   // saturated accent reads as two unrelated palettes; a hue-tinted neutral
   // reads as one designed thing, and the tint is far too low to notice as
   // colour.
-  const n = (l: number, s = 0.06) => `hsl(${hue} ${s * 100}% ${l}%)`;
+  // `s * 100` on a 0.14 literal is 14.000000000000002 in binary floating point,
+  // and that lands verbatim in a stylesheet `am theme adopt` hands to the user.
+  // Round to one decimal: far finer than any perceivable step in saturation.
+  const pct = (x: number) => `${Math.round(x * 1000) / 10}%`;
+  const n = (l: number, s = 0.06) => `hsl(${hue} ${pct(s)} ${l}%)`;
+  // The SHADOW colour, as #rrggbb, because a shadow needs an alpha suffix and
+  // `hsl(…)14` is not a colour — it is a token sequence a custom property will
+  // happily hold and `box-shadow` will refuse at computed-value time, which is
+  // exactly how the light theme shipped with no elevation at all from alpha61
+  // to alpha63 (dark mode used literal hex and was fine). Measured in Chromium:
+  // `getComputedStyle(card).boxShadow === "none"`. `tests/app-theme.test.ts`
+  // now resolves every token against its consumer, so this cannot recur.
+  const shadowHex = hslHex(hue, 0.14, 0.12);
   return `@layer aio {
 :root{
-  color-scheme: light dark;
   --aio-hue:${hue};
   --aio-accent:${accent};
   --aio-on-accent:${onAccent};
@@ -161,8 +189,8 @@ export function appThemeCss(name: string): string {
     "Helvetica Neue",Arial,sans-serif;
   --aio-mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,
     "Liberation Mono",monospace;
-  --aio-shadow-1:0 1px 2px ${n(12, 0.14)}14;
-  --aio-shadow-2:0 6px 24px -8px ${n(12, 0.14)}2e,0 1px 2px ${n(12, 0.14)}14;
+  --aio-shadow-1:0 1px 2px ${shadowHex}14;
+  --aio-shadow-2:0 6px 24px -8px ${shadowHex}2e,0 1px 2px ${shadowHex}14;
   --aio-ring:0 0 0 3px color-mix(in oklab, var(--aio-accent) 35%, transparent);
   --aio-tint:color-mix(in oklab, var(--aio-accent) 10%, var(--aio-surface));
 }
@@ -182,6 +210,13 @@ export function appThemeCss(name: string): string {
 }}
 
 /* ── canvas ─────────────────────────────────────────────────────── */
+/* color-scheme is the first thing that PAINTS, so it lives here and not
+   among the tokens: it repaints the UA canvas, the default text colour, form
+   controls and scrollbars on a dark-mode machine. Emitting it with the "inert"
+   half turned an app that never asked for a theme into a dark-mode app whose
+   own light panels kept white text — measured white-on-white. A custom
+   property renders nothing; this is not one. */
+:root{color-scheme: light dark}
 html{-webkit-text-size-adjust:100%}
 body{
   background:var(--aio-bg); color:var(--aio-text);
@@ -342,7 +377,7 @@ body{
 }
 :where(summary){cursor:pointer; font-weight:600}
 
-/* ── the five classes worth having ──────────────────────────────── */
+/* ── the six classes worth having ───────────────────────────────── */
 :where(.card){
   background:var(--aio-surface); border:1px solid var(--aio-border);
   border-radius:var(--aio-r-3); padding:var(--aio-s-4);

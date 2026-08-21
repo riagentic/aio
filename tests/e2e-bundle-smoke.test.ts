@@ -6,7 +6,12 @@
 // shapes on a scaffolded-style app and asserts the invariants that broke:
 //   browser → ESM with an exported mount()
 //   android → IIFE (classic <script> — `export` would throw) + registry boot
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+} from "@std/assert";
 
 // Coverage profiles from spawned deno processes go to a throwaway temp dir.
 const _childCovDir = Deno.env.get("DENO_COVERAGE_DIR") ??
@@ -78,14 +83,15 @@ export default function App() {
   return dir;
 }
 
-/** Run the real bundle step in a subprocess (it exits the process on
- *  failure) and return the produced dist/app.js. */
-async function bundle(
+/** Run the real bundle step in a subprocess (it exits the process on failure)
+ *  and hand back what it did — code and both streams, so a test can assert on
+ *  a REFUSAL as well as on a bundle. */
+async function runBundleProc(
   dir: string,
   android: boolean,
   force = true,
   uiEntry?: string,
-): Promise<string> {
+): Promise<{ code: number; stdout: string; stderr: string }> {
   // In a DOT-DIR: for a flat-layout app the project root IS the app dir, so a
   // stray `.ts` written beside App.tsx would itself count as an edited input
   // and bust the freshness cache the tests below measure.
@@ -122,11 +128,24 @@ await runBundle({
     stdout: "piped",
     stderr: "piped",
   }).output();
+  return {
+    code: out.code,
+    stdout: new TextDecoder().decode(out.stdout),
+    stderr: new TextDecoder().decode(out.stderr),
+  };
+}
+
+/** The happy path: bundle, or throw with the child's output. */
+async function bundle(
+  dir: string,
+  android: boolean,
+  force = true,
+  uiEntry?: string,
+): Promise<string> {
+  const out = await runBundleProc(dir, android, force, uiEntry);
   if (out.code !== 0) {
     throw new Error(
-      `bundle (android=${android}) failed:\n${
-        new TextDecoder().decode(out.stderr)
-      }${new TextDecoder().decode(out.stdout)}`,
+      `bundle (android=${android}) failed:\n${out.stderr}${out.stdout}`,
     );
   }
   return await Deno.readTextFile(`${dir}/dist/app.js`);
@@ -333,6 +352,124 @@ Deno.test({
       assertStringIncludes(back, 'globalThis.__aioBundleUi = "App.tsx"');
     } finally {
       await Deno.remove(dir, { recursive: true });
+    }
+  },
+});
+
+// A build that REFUSES must leave nothing behind for the next build to ship
+// (rimote R-13, fourth pass).
+//
+// The standalone-android guard is correct and its message is good: it names
+// each server-only module, its importer, and three ways forward. What it did
+// not do was clean up. esbuild had already written `dist/app.js`, the refusal
+// exited, and the artifact stayed — newer than every input, with the previous
+// build's input record still beside it. Re-running the SAME command therefore
+// printed `dist/app.js cached`, never re-ran the guard, and let Gradle package
+// the unvalidated js: `BUILD SUCCESSFUL`, a 3.2 MB APK, and precisely the
+// outcome the refusal warned about, reached by repeating the command that
+// warned. The reporter installed that APK three times before noticing.
+//
+// So the second build is the one under test here. The first is only the setup.
+Deno.test({
+  name: "bundle refusal: a refused bundle is not left for the next run to ship",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  async fn() {
+    const dir = await makeApp();
+    try {
+      // Build once, cleanly: the input record lives at `.aio/`, OUTSIDE the
+      // dist/ the next build wipes, so it is what survives to call a refused
+      // artifact fresh. Without this first build there is no record and the
+      // bug cannot appear — which is why the reporter met it only after their
+      // app had been building fine for a while.
+      await bundle(dir, /* android */ true);
+
+      // The SANCTIONED pattern everywhere with a Deno runtime — and the half
+      // of the app that silently does not ship inside a WebView.
+      await Deno.writeTextFile(
+        `${dir}/src/io.server.ts`,
+        `export const host = () => Deno.hostname();`,
+      );
+      await Deno.writeTextFile(
+        `${dir}/src/cell.ts`,
+        `import { cell } from "aio";
+export const c = cell("probe", {
+  state: { n: 0, host: "" },
+  methods: {
+    inc(s) { s.n++; },
+    async load(s) {
+      const { host } = await import("./io.server.ts");
+      s.host = host();
+    },
+  },
+});`,
+      );
+
+      const first = await runBundleProc(dir, true, /* force */ false);
+      assertEquals(first.code, 1, "a standalone APK cannot run server code");
+      assertStringIncludes(first.stderr, "reaches server-only code");
+      await assertRejects(
+        () => Deno.stat(`${dir}/dist/app.js`),
+        Deno.errors.NotFound,
+        undefined,
+        "a refused build leaves no artifact — this is the whole fix",
+      );
+
+      // THE test: the same command again, cache allowed.
+      const second = await runBundleProc(dir, true, /* force */ false);
+      assertEquals(
+        second.code,
+        1,
+        "re-running a refused build must refuse again, not reuse the bundle " +
+          `the refusal produced\n${second.stdout}${second.stderr}`,
+      );
+      assertStringIncludes(second.stderr, "reaches server-only code");
+      assert(
+        !second.stdout.includes("cached"),
+        "a bundle no gate has passed may never be reported as cached",
+      );
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
+// The same rule for the STATIC leak (a browser build, no android involved):
+// one refusal path, one guarantee, both proven rather than one assumed from
+// the other.
+Deno.test({
+  name: "bundle refusal: a static server-only leak also discards its artifact",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  async fn() {
+    const dir = await makeApp();
+    try {
+      await Deno.writeTextFile(
+        `${dir}/src/cell.ts`,
+        `import { cell } from "aio";
+import { DatabaseSync } from "node:sqlite";
+export const c = cell("probe", {
+  state: { n: 0 },
+  methods: { inc(s) { s.n++; void DatabaseSync; } },
+});`,
+      );
+      const first = await runBundleProc(dir, /* android */ false);
+      assertEquals(first.code, 1);
+      assertStringIncludes(first.stderr, "server-only module(s) statically");
+      await assertRejects(
+        () => Deno.stat(`${dir}/dist/app.js`),
+        Deno.errors.NotFound,
+      );
+
+      const second = await runBundleProc(dir, false, /* force */ false);
+      assertEquals(
+        second.code,
+        1,
+        `the leak must be re-reported, not cached past\n${second.stdout}`,
+      );
+      assertStringIncludes(second.stderr, "server-only module(s) statically");
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
     }
   },
 });

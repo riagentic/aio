@@ -198,8 +198,14 @@ export interface OpBufferDropCallback {
     op: SyncOp,
     /** `stale-evicted`: an UNCONFIRMED op past its TTL, discarded to make room
      *  under backpressure. It never reached the server — this is the app's one
-     *  chance to know a local mutation was abandoned. */
-    reason: "buffer-full" | "prune-failed" | "stale-evicted",
+     *  chance to know a local mutation was abandoned.
+     *  `prune-failed`: the buffer was over its cap and pruning could not free a
+     *  slot, so the NEW op was refused.
+     *
+     *  There is no third reason. `"buffer-full"` was listed here and never
+     *  emitted — a handler could switch on it forever and be dead code, and a
+     *  reader would reasonably conclude aio distinguishes a case it does not. */
+    reason: "prune-failed" | "stale-evicted",
   ): void;
 }
 

@@ -179,6 +179,7 @@ export function resolveSpecifier(
 // THE list lives in src/entries.ts (alpha52 one-decider; aiol imports the
 // same set, so the dev-server diagnostic and the linter can never disagree).
 import { SERVER_ONLY_AIO_SYMBOLS } from "../entries.ts";
+import { codeText } from "../diagnostics/code-mask.ts";
 
 /** Detect server-only APIs in browser-bound code.
  *  AIO-427: severity is split by CERTAINTY of breakage —
@@ -278,11 +279,19 @@ export function checkPlatformSafety(code: string, file: string): GraphError[] {
       });
     }
   }
-  // Deno.* usage — strip comments AND string literals to avoid false positives
-  const stripped = code
-    .replace(/\/\/.*$/gm, "")
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/(["'`])(?:(?!\1|\\).|\\.)*\1/g, '""');
+  // Deno.* usage — comments AND string literals blanked, so a `Deno.` written
+  // in a doc example or inside a string is not a call.
+  //
+  // `codeText` and NOT a hand-rolled strip, because the line number below is
+  // computed from this text: deleting a block comment takes its NEWLINES with
+  // it, so every finding after the first JSDoc block was reported too high in
+  // the file. A field report measured it — 39 newlines destroyed in one
+  // 681-line file, the warning reported 4 lines above its call — and the
+  // consequence was not a cosmetic one: `isServerOnlySuppressed` looks at the
+  // reported line and the line above it for `// aio-ok: server-only`, so the
+  // acknowledgement was unreachable for any file with JSDoc in it, which is
+  // most files. `codeText` blanks to spaces and keeps every offset.
+  const stripped = codeText(code);
   const DENO_RE = /\bDeno\.(\w+)/g;
   while ((m = DENO_RE.exec(stripped)) !== null) {
     // Line number from stripped (line count preserved — replacements are same-line)

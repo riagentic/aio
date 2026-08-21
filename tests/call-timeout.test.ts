@@ -189,21 +189,13 @@ Deno.test("browser ack: a deferred (queued) call starts its clock at SEND, not a
 
 Deno.test("browser ack: the page shell bridges the resolved ceilings", async () => {
   const { generateHTML } = await import("../src/server/server-html-gen.ts");
-  const html = generateHTML(
-    "t",
-    true,
-    false,
-    "{}",
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    { default: 45_000, methods: { "wallet:refresh": 120_000 } },
-  );
+  const html = generateHTML({
+    title: "t",
+    prod: true,
+    hasCSS: false,
+    importMap: "{}",
+    callTimeouts: { default: 45_000, methods: { "wallet:refresh": 120_000 } },
+  });
   assertStringIncludes(html, '"callTimeouts":{"default":45000');
   assertStringIncludes(html, '"wallet:refresh":120000');
 });

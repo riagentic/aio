@@ -17,8 +17,9 @@ import {
 import { join } from "@std/path";
 import { appDirs } from "../server/app-dirs.ts";
 import type { GlobalFlags } from "./am-types.ts";
-import { detectMode, out, outError } from "./am-output.ts";
+import { detectMode, fail, out, outError } from "./am-output.ts";
 import { trojanGet, trojanPost } from "./am-http.ts";
+import { type Component, projectComponents } from "./am-components.ts";
 
 // ── Entry config cache ──────────────────────────────────────
 
@@ -51,8 +52,69 @@ export const DEFAULT_PORT = 8000;
 
 /** Resolve the appId for am commands — --app flag > deno.json appId > app.ts aio.run().
  *  am runs in dev only (not compiled), so deno.json is always available. */
+/** The refusal for "which app?" in a project that has more than one.
+ *
+ *  Without it every command that needs ONE app silently resolved the PROJECT's
+ *  inferred id — `mc-probe` from deno.json `title` — which is not any of the
+ *  components and never runs. `am state` then reported "no app named
+ *  \"mc-probe\" is running" and helpfully listed five unrelated apps from other
+ *  projects: an answer about an app that does not exist, in a directory where
+ *  three real ones do. Naming the parts and the flag is the whole fix. */
+/** This project's components, or none when it has none / cannot be read. */
+function components(): Component[] {
+  try {
+    return projectComponents(Deno.cwd());
+  } catch {
+    return []; // unreadable project — the inference below is still honest
+  }
+}
+
+function refuseAmbiguousApp(labels: string[]): never {
+  const list = labels.join(", ");
+  const msg = `this project has several components (${list}) and this ` +
+    `command acts on one — pick one with --app=${labels[0]}, or manage the ` +
+    `project as a whole with am start | am stop | am status`;
+  // Through THE failure path, so a scripted caller gets `{"error": …}` on
+  // stdout like every other refusal instead of a human line it cannot parse.
+  // `resolveAmAppId` is called too deep to be handed the parsed flags, so the
+  // mode is read the way `detectMode` reads it.
+  const mode: "json" | "pretty" = Deno.args.includes("--json") ||
+      !Deno.stdout.isTerminal()
+    ? "json"
+    : "pretty";
+  if (mode === "pretty") {
+    console.error(
+      `[am] ✗ this project has several components (${list}) and this command ` +
+        `acts on one.\n` +
+        `    Pick one:  --app=${labels[0]}\n` +
+        `    Or manage the project as a whole: am start | am stop | am status`,
+    );
+    Deno.exit(1);
+  }
+  fail(msg, mode);
+}
+
 export function resolveAmAppId(flag?: string): string {
-  if (flag) return resolveAppId(flag);
+  if (flag) {
+    // `--app` names an app identity, and in a project that declares COMPONENTS
+    // a component LABEL is the name its developer knows it by. Process verbs
+    // take the label positionally (`am start agent`); everything else cannot,
+    // because its first positional is already a state path or an action — so
+    // the label resolves here instead, and one flag works for every command.
+    // A label that names no component falls through to today's behaviour, so
+    // an ordinary `--app=<id>` is untouched.
+    for (const c of components()) if (c.label === flag) return c.appId;
+    return resolveAppId(flag);
+  }
+  // A project that declares COMPONENTS has no single "this app" to infer, and
+  // inferring one anyway names something that never runs.
+  //
+  // The refusal is deliberately OUTSIDE the try that reads them: a `catch` wide
+  // enough to swallow an unreadable deno.json is wide enough to swallow the
+  // refusal's own control flow, and a guard that can be caught by the code
+  // guarding it is not a guard.
+  const cs = components();
+  if (cs.length > 0) refuseAmbiguousApp(cs.map((c) => c.label));
   try {
     const cfg = JSON.parse(
       Deno.readTextFileSync(join(Deno.cwd(), "deno.json")),
@@ -257,6 +319,14 @@ export function resolvePath(
   const segments = path.split(".");
   let cur = obj;
   for (const seg of segments) {
+    // `.length` on a string is the one property worth reaching through a
+    // non-object: `am state title.length` reported "not found" while
+    // `am state items.length` (an array — an object) worked, which reads as
+    // the path being wrong rather than as strings being excluded.
+    if (typeof cur === "string" && seg === "length") {
+      cur = cur.length;
+      continue;
+    }
     if (cur == null || typeof cur !== "object") return { found: false };
     const idx = /^\d+$/.test(seg) ? Number(seg) : undefined;
     if (idx !== undefined && Array.isArray(cur)) {
@@ -356,7 +426,13 @@ export function parseGlobalFlags(
             "--client=<kind>",
         );
         flags.client = num(a.slice(9), "--client");
-      } else rest.push(a);
+      } else {
+        // Forwarded to the app (that is what this spelling is for) AND
+        // remembered, so a command that asks "did the user mean the client?"
+        // gets the right answer instead of a silent no.
+        flags.clientKind = a.slice(9).trim();
+        rest.push(a);
+      }
     } else if (a.startsWith("-c") && a.length > 2) {
       // `-c2` was the short form of `--client=2`. `-c2x` used to fail the
       // isNaN test and fall through to the POSITIONAL args, where it became a

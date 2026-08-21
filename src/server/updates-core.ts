@@ -232,18 +232,43 @@ function comparePre(a: string[], b: string[]): number {
   if (!a.length && !b.length) return 0;
   if (!a.length) return 1;
   if (!b.length) return -1;
-  for (let i = 0; i < Math.max(a.length, b.length); i++) {
-    const x = a[i], y = b[i];
-    if (x === undefined) return -1;
-    if (y === undefined) return 1;
-    const nx = /^\d+$/.test(x), ny = /^\d+$/.test(y);
-    if (nx && ny) {
-      const d = Number(x) - Number(y);
+  return comparePieces(pieces(a), pieces(b));
+}
+
+/** A prerelease as the sequence of letter-runs and digit-runs it is made of,
+ *  dots or no dots: `alpha62` and `alpha.62` are both `["alpha", "62"]`.
+ *
+ *  SemVer compares alphanumeric identifiers as ASCII strings, which puts
+ *  `alpha9` AFTER `alpha62` — "9" > "6" — and this project's own tags are
+ *  exactly that shape (`v1.0.0-alpha62`, `v1.0.0-alpha63`). Read literally, the
+ *  updater told an app on `alpha9` that it was newer than the published
+ *  `alpha62` and never offered the release; `am`, which parses the number out,
+ *  ordered the same pair the other way. Two comparators, two answers, one repo.
+ *
+ *  So the order is PIECEWISE: letters as letters, digit runs as numbers, and a
+ *  dot is just a boundary (`rc1` ≡ `rc.1`). Every ordering SemVer's own spec
+ *  lists still holds (`alpha < alpha.1 < alpha.beta < beta < beta.2 < beta.11
+ *  < rc.1 < release`) — the two differ only where a digit run sits inside an
+ *  identifier, and there this is the order every human and the rest of the
+ *  toolchain already assume. */
+function pieces(ids: string[]): string[] {
+  return ids.flatMap((id) => id.match(/\d+|\D+/g) ?? []);
+}
+
+/** Exported for the one place that must agree with it byte-for-byte: `am`. */
+export function comparePieces(pa: string[], pb: string[]): number {
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const a = pa[i], b = pb[i];
+    if (a === undefined) return -1; // the shorter sequence is the earlier one
+    if (b === undefined) return 1;
+    const an = /^\d+$/.test(a), bn = /^\d+$/.test(b);
+    if (an && bn) {
+      const d = Number(a) - Number(b);
       if (d) return d < 0 ? -1 : 1;
-    } else if (nx !== ny) {
-      return nx ? -1 : 1; // numeric identifiers rank below alphanumeric
-    } else if (x !== y) {
-      return x < y ? -1 : 1;
+    } else if (an !== bn) {
+      return an ? -1 : 1; // numeric pieces rank below alphabetic ones
+    } else if (a !== b) {
+      return a < b ? -1 : 1;
     }
   }
   return 0;
@@ -287,6 +312,34 @@ export type CompatVerdict = {
   warnings: string[];
 };
 
+/** Is this actually a data contract, or just an object that reached us?
+ *
+ *  Checked rather than trusted because nothing else checks it: the manifest is
+ *  cast, not parsed, and this gate is the last thing between a release and an
+ *  app's data. */
+function isDataContract(c: unknown): c is DataContract {
+  if (typeof c !== "object" || c === null) return false;
+  const o = c as Record<string, unknown>;
+  if (typeof o.schema !== "number" || !Number.isFinite(o.schema)) return false;
+  if (typeof o.cells !== "object" || o.cells === null) return false;
+  return Object.values(o.cells as Record<string, unknown>).every((v) => {
+    if (typeof v !== "object" || v === null) return false;
+    const cell = v as Record<string, unknown>;
+    return typeof cell.version === "number" &&
+      typeof cell.migratesFrom === "number";
+  });
+}
+
+/** What is wrong with it, in the blocker line — "malformed" alone sends
+ *  someone to read a manifest by hand. */
+function describeContract(c: unknown): string {
+  if (typeof c !== "object" || c === null) return `it is ${typeof c}`;
+  const o = c as Record<string, unknown>;
+  if (typeof o.schema !== "number") return "no `schema` version";
+  if (typeof o.cells !== "object" || o.cells === null) return "no `cells` map";
+  return "a cell entry without `version`/`migratesFrom`";
+}
+
 /** Decide whether a published build can take over this app's data.
  *
  *  This is the gate behind the project's hardest rule: an update never breaks
@@ -302,6 +355,29 @@ export function dataCompatibility(
   let migrates = false;
 
   const persisted = Object.entries(local.cells);
+
+  // A contract that is PRESENT but not a contract is not a pass. The manifest
+  // arrives as `JSON.parse(text) as ShipManifest` — a cast, not a validation —
+  // so a mis-published or older-format release could hand this gate `{}` (a
+  // TypeError from inside the thing whose contract is "anything it cannot prove
+  // safe becomes a blocker") or `{cells:{…}}` with no `schema`, where
+  // `undefined < local.schema` is false and the backwards-schema blocker simply
+  // could not fire. Both are now what they always should have been: a refusal.
+  if (contract && !isDataContract(contract)) {
+    return {
+      ok: false,
+      migrates,
+      blockers: [
+        `the release's data contract is malformed (${
+          describeContract(contract)
+        }) ` +
+        `— it cannot be checked against your data, so it is not offered. ` +
+        `Re-publish with \`aio ship\`, which derives the contract from the ` +
+        `cells the build actually runs.`,
+      ],
+      warnings,
+    };
+  }
 
   if (!contract) {
     // Nothing on disk to protect — an app with no persisted cell versions

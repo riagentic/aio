@@ -83,22 +83,13 @@ Deno.test({
     // and the bridge, so the shell fragment is inlined by hand from the same
     // generator the server uses.
     const { generateHTML } = await import("../src/server/server-html-gen.ts");
-    const html = generateHTML(
-      "Themed Demo",
-      true,
-      false,
-      "",
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      "themed",
-    ).replace(
+    const html = generateHTML({
+      title: "Themed Demo",
+      prod: true,
+      hasCSS: false,
+      importMap: "",
+      chrome: "themed",
+    }).replace(
       // The prod shell imports /app.js, which does not exist here.
       /<script type="module">[\s\S]*?<\/script>/,
       "",
