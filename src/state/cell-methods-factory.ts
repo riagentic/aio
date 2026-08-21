@@ -68,6 +68,12 @@ export function createCellFromMethods<
 >(
   name: N,
   config: MethodsCellConfig<N, S, M>,
+  /** The cell's scope, decided by the CALLER. It used to be hard-set to
+   *  `"server"` here and patched back to `"client"` at one of the two call
+   *  sites — so the invariant was momentarily false, and a third caller
+   *  forgetting the patch would have produced a silently server-scoped client
+   *  cell that the type system cannot catch (both spellings are valid). */
+  scope: "server" | "client" = "server",
 ):
   & CellDef<N, Record<string, never>, Record<string, never>, S>
   & DirectCalling<N, M> {
@@ -398,7 +404,7 @@ export function createCellFromMethods<
     destroyType: `${prefix}:__destroy`,
     onInit: config.onInit as ((app: ScopedApp) => void) | undefined,
     onDestroy: config.onDestroy as ((app: ScopedApp) => void) | undefined,
-    scope: "server",
+    scope,
     asyncMethods,
     // Cancellation triggers (perfect-aio D1) — DEF data; the runtime registry
     // is (re)built from this at compose time, so a runtime reset + fresh

@@ -220,6 +220,9 @@ deno task am restart              # stop + start
 deno task am status               # stopped|starting|started|stopping
 ```
 
+In a repo that declares COMPONENTS (below), `start`, `stop`, `restart` and
+`status` mean the whole project, and take a component label to mean one of it.
+
 Exit codes: `started` -> 0, `stopped` -> 1, `starting`/`stopping` -> 2.
 
 `start` and `stop` return immediately by default — use `--wait[=N]` to block
@@ -227,6 +230,57 @@ until the action completes. `restart` always waits for stop internally, then
 spawns and returns immediately. `stop` tries graceful shutdown via trojan API,
 falls back to SIGTERM, escalates to SIGKILL after timeout. Kill sequence:
 SIGTERM -> wait 2s -> SIGKILL.
+
+### A project that is more than one app (components)
+
+Some repos hold several runnable things — a relay, an agent, a control UI — and
+declare them as labelled build targets with their own entries:
+
+```jsonc
+// deno.json
+"build": {
+  "targets": {
+    "relay":   { "kind": "server",   "entry": "src/relay/app.ts" },
+    "agent":   { "kind": "electron", "entry": "src/agent/app.ts" },
+    "control": { "kind": "electron", "entry": "src/control/app.ts" }
+  }
+}
+```
+
+`am` reads that same declaration, so the process verbs mean the project:
+
+```sh
+am start                 # starts relay, agent and control
+am start agent           # …just that one
+am stop                  # stops the project
+am restart control       # one component
+am status                # one line each; exit 0 only when every one is up
+```
+
+Every other command takes the label through `--app`, because their first
+argument is already a state path or an action:
+
+```sh
+am state --app=agent
+am dispatch session:close --app=relay
+am logs --app=control
+```
+
+Two rules make this predictable:
+
+- **Distinct ENTRIES are what make components.**
+  `"targets": ["server",
+  "electron"]` — and any object form whose targets
+  share one entry — is one app built for several shells, and behaves exactly as
+  it always has.
+- **Each component needs its own identity.** They get separate lock files, data
+  directories and ports, so `aio.run({ appId: "relay" })` in each entry is what
+  keeps them apart. If two resolve to the same id, `am` refuses and says which —
+  sharing one `~/.<appId>/` is how two apps quietly open one database.
+
+A component that declares no `port` is given one (`8000`, `8001`, … in
+declaration order) and `am` prints the assignment. Declare `port` in `aio.run()`
+when something else needs to find it.
 
 ### Singleton behavior
 

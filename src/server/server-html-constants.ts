@@ -53,3 +53,9 @@ export function escHtml(s: string): string {
 
 /** CDN base for npm→browser resolution in dev mode */
 export const CDN = "https://esm.sh";
+
+/** The document language every shell carries unless `ui.lang` says otherwise.
+ *  A default, not a guess about the app's content: a page with no `lang` fails
+ *  WCAG 3.1.1 outright, while a page whose `lang` is wrong is one config key
+ *  away from right. */
+export const DEFAULT_LANG = "en";

@@ -75,6 +75,9 @@ export function useVirtualList<T>(
   const { itemHeight, containerHeight, overscan = 3 } = config;
   const safeItemHeight = Math.max(1, itemHeight);
   const scrollTopSig = signal(0);
+  // Per LIST, not per module: two differently-broken lists each deserve their
+  // own warning, and one of them must not silence the other.
+  let warnedItems = false;
 
   // Resolve items — support both plain array and signal
   // AIO-289: robust type check using isSignal from signal-binding
@@ -90,8 +93,15 @@ export function useVirtualList<T>(
     if (Array.isArray(items)) {
       return items;
     }
-    // Invalid input — return empty array and warn in dev
-    console.warn("[aio:virtualList] items must be an array or Signal<array>");
+    // Invalid input — return empty array and warn ONCE. `getItems()` runs
+    // inside both the visible and total-height computeds, so this fired on
+    // every scroll frame: the same misconfiguration printed hundreds of times,
+    // which buries whatever the console was actually needed for. One warning
+    // per list, like `_warnA11yOnce` / `_hinted` elsewhere.
+    if (!warnedItems) {
+      warnedItems = true;
+      console.warn("[aio:virtualList] items must be an array or Signal<array>");
+    }
     return [] as T[];
   };
 

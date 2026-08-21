@@ -267,10 +267,13 @@ host binary under a foreign name.
 > Known limitation (android with bundled assets): the packaged shell HTML is
 > written at **build** time, before your `aio.run()` config exists — so
 > `ui.head`, a custom `ui.viewport`, and `ui.showStatus` cannot reach the
-> android-local shell. It carries the app title, stylesheet, icon, and the
-> standard viewport; the other targets (browser, electron) render the full `ui`
-> shell config. If your app depends on `ui.head` on android, use
-> `android-client` (the WebView then loads the live server's shell).
+> android-local shell. It carries the app title, stylesheet, icon, the standard
+> viewport, and — applied by the runtime at boot, because they travel with the
+> bundle rather than the HTML — `ui.theme` and `ui.lang`. The build prints this
+> list, so a dropped key is never a surprise. The other targets (browser,
+> electron) render the full `ui` shell config. If your app depends on `ui.head`
+> on android, use `android-client` (the WebView then loads the live server's
+> shell).
 
 Each target maps to a set of single-target `build.ts` flags (the table below),
 run as a subprocess. A failed target is reported in the summary and marked
@@ -674,6 +677,70 @@ methods: {
 },
 ```
 
+### Adding native Android code (`<app>/android/`)
+
+The generated APK is a WebView around the JS bundle, which is the whole app for
+anything that only needs a screen. It is not the whole app for anything that
+needs the **device** — screen capture (`MediaProjection`), input injection (an
+`AccessibilityService`), a foreground service, an extra permission. Those apps
+are not asking for a different shell; they are asking to add a service to this
+one.
+
+So anything under `<app>/android/` is copied over the generated Gradle project
+at the same relative path, before placeholder substitution — an overlaid
+manifest still gets `{{APPLICATION_ID}}`:
+
+```
+myapp/
+  android/
+    app/src/main/AndroidManifest.xml        # replaces the generated manifest
+    app/src/main/java/aio/app/MainActivity.kt
+    app/src/main/java/aio/app/CaptureService.kt
+    app/src/main/res/xml/accessibility.xml
+```
+
+Every overlaid path is printed by the build — a silent overlay is a build that
+quietly stopped being the app the template describes.
+
+Overlaid files still go through placeholder substitution, and `dev:android`
+rewrites two exact strings in `MainActivity.kt`. So a replacement must keep what
+the build reaches for, or that step quietly does nothing:
+
+| If you replace        | Keep                                                                                                                                                                                                    |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MainActivity.kt`     | `loadUrl("https://appassets.androidplatform.net/assets/index.html")` — rewritten to the dev server's URL                                                                                                |
+| `MainActivity.kt`     | `return !url.startsWith("https://appassets.androidplatform.net/")` — rewritten so dev navigation stays in the WebView                                                                                   |
+| `AndroidManifest.xml` | `{{APPLICATION_ID}}`, `{{APP_NAME}}`, `{{ICON_ATTR}}` and `{{CLEARTEXT_ATTR}}` — the last becomes `android:usesCleartextTraffic="true"` for a dev or `--remote` build, and nothing for a standalone one |
+
+### The page is a secure origin, so `ws://` is blocked
+
+The WebView serves packaged assets from `https://appassets.androidplatform.net`
+rather than `file://`, and that is deliberate: `crypto.subtle` and
+`navigator.mediaDevices` only exist in a secure context. The consequence is that
+the page is **https**, and a secure page may not open a plaintext socket. An app
+that talks to a LAN server over `ws://` or `http://` comes up perfectly, renders
+its whole UI, and connects to nothing.
+
+Two ways out, in preference order:
+
+1. **Serve the LAN server over TLS** (`tls` in `deno.json`) and use `wss://` —
+   the page and the socket then agree, with no WebView setting involved.
+2. **Overlay a `MainActivity.kt`** (above) that opts that WebView back into
+   mixed content:
+
+   ```kotlin
+   settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+   ```
+
+   This is the whole app's setting, not one socket's — take it knowingly. A
+   standalone APK also needs `android:usesCleartextTraffic="true"` on its
+   `<application>` (it dials nothing by default, so the build does not add it) —
+   put it in the same overlay, on an `AndroidManifest.xml` that keeps the other
+   placeholders listed above.
+
+`--android --remote` is unaffected: that APK navigates to the server's own
+origin, so there is no mixed content to allow.
+
 ## android-client (client APK)
 
 ```sh
@@ -683,6 +750,11 @@ deno run -A dep/aio/src/build.ts --android --remote
 Thin client APK — no local state, no reducer, no Deno runtime. Shows a connect
 page where the user enters the server URL. The remote server must run with
 `--expose`.
+
+That server serves plain `http://` unless you set `tls`, and Android blocks
+cleartext by default from targetSdk 28 — so this target's manifest permits it
+(`android:usesCleartextTraffic="true"`). A standalone APK does not get it: it
+dials nothing.
 
 ## Exposed server with browser UI (+ systemd)
 

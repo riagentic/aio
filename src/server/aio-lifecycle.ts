@@ -108,6 +108,7 @@ export interface LifecycleDeps<S, A> {
     head?: string;
     chrome?: "standard" | "themed" | "none";
     theme?: UiTheme;
+    lang?: string;
   };
   keepServer: boolean | undefined;
   /** Library/test mode — no process-wide signal handlers (the same contract
@@ -430,6 +431,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
           head: ui.head,
           chrome: ui.chrome,
           theme: ui.theme,
+          lang: ui.lang,
           themeName: appId,
         },
       }

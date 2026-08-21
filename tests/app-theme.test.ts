@@ -105,29 +105,24 @@ Deno.test("theme: every rule is layered, so the app's CSS always wins", () => {
 
 Deno.test("theme: the shell emits it by default and drops it on request", () => {
   const shell = (theme?: "auto" | "none") =>
-    generateHTML(
-      "Demo",
-      true,
-      false,
-      "",
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      theme,
-      "demo-app",
-    );
+    generateHTML({
+      title: "Demo",
+      prod: true,
+      hasCSS: false,
+      importMap: "",
+      theme: theme,
+      themeName: "demo-app",
+    });
   assertStringIncludes(shell(undefined), "@layer aio");
   assertStringIncludes(shell("auto"), "@layer aio");
   assertEquals(shell("none").includes("@layer aio"), false);
-  // The box-model baseline is NOT the theme and survives opting out.
-  assertStringIncludes(shell("none"), "box-sizing:border-box");
+  // …and "none" means none: not the look, not the tokens, and not the
+  // two-rule box-model baseline either. It used to keep the baseline while
+  // documenting "nothing at all", so the one word that reads as "aio, hands
+  // off my CSS" quietly was not — and `box-sizing: border-box` on `*` is a
+  // real layout change to a stylesheet written against content-box.
+  assertEquals(shell("none").includes("box-sizing:border-box"), false);
+  assertStringIncludes(shell(undefined), "box-sizing:border-box");
 });
 
 Deno.test("theme: the accent follows identity, not the window title", () => {
@@ -139,4 +134,51 @@ Deno.test("theme: the accent follows identity, not the window title", () => {
     appThemeCss("demo-app") !== appThemeCss("Demo"),
     "different identities are different themes",
   );
+});
+
+// ── the emitted CSS must be CSS ──────────────────────────────────────────
+//
+// Every gate here used to measure the maths (contrast, hue derivation, layer
+// structure) and none measured the artefact. `--aio-shadow-1` was
+// `0 1px 2px hsl(281 14% 12%)14` for three releases: a custom property holds
+// any token sequence, so nothing complained, and `box-shadow: var(--aio-shadow-1)`
+// simply computed to `none`. Light mode shipped with no elevation at all —
+// cards, buttons and dialogs flat — while dark mode (literal hex) was fine.
+// Measured in Chromium over CDP: `CSS.supports("box-shadow", <that value>)`
+// → false, `getComputedStyle(card).boxShadow` → "none".
+Deno.test("theme: no token appends an alpha suffix to a colour FUNCTION", () => {
+  for (const name of ["probe", "shop", "notekeeper", "a", "zzz-9"]) {
+    const css = appThemeCss(name);
+    // `)` immediately followed by hex digits — the exact shape that is a valid
+    // custom-property value and an invalid colour.
+    const offenders = css.split("\n").map((l) => l.trim())
+      .filter((l) => /\)[0-9a-f]{2,}/i.test(l));
+    assertEquals(offenders, [], `${name}: alpha suffix on a colour function`);
+  }
+});
+
+Deno.test("theme: every shadow token is a value box-shadow can take", () => {
+  const css = appThemeCss("probe");
+  const shadows = [...css.matchAll(/--aio-shadow-\d:([^;]+);/g)].map((m) =>
+    m[1]!.trim()
+  );
+  assertEquals(shadows.length, 4, "two shadows, light + dark");
+  for (const v of shadows) {
+    for (const layer of v.split(/,(?![^(]*\))/)) {
+      assert(
+        // <offset-x> <offset-y> <blur> [<spread>] <colour>, colour last and hex
+        /^(0|-?[\d.]+(px|rem|em))( (0|-?[\d.]+(px|rem|em))){2,3} #[0-9a-f]{3,8}$/i
+          .test(layer.trim()),
+        `not a usable box-shadow layer: "${layer.trim()}"`,
+      );
+    }
+  }
+});
+
+Deno.test("theme: generated numbers carry no float noise", () => {
+  for (const name of ["probe", "shop", "a"]) {
+    const noisy = appThemeCss(name).split("\n").map((l) => l.trim())
+      .filter((l) => /\d\.\d{4,}/.test(l));
+    assertEquals(noisy, [], `${name}: unrounded float in generated CSS`);
+  }
 });

@@ -128,6 +128,15 @@ aio.run({
 });
 ```
 
+> **Not wired today.** alpha48's transport swap removed the only caller of the
+> render meter, and the transport that replaced it has not picked it back up —
+> so the client-side numbers in this section are not being measured, no
+> threshold can fire, and `vitals-ping` has no sender (`/__aio/vitals` reports
+> `clients: []`). The key is still accepted and its shape is stable, and boot
+> now says so rather than letting it look honoured. **Server-side vitals — the
+> loop probe, dispatch and reduce timings, `am metrics`, `am top` — are
+> unaffected and real.**
+
 ### TransportProbe (client + server)
 
 Measures RTT via `vitals-ping`/`vitals-pong` frames over WebSocket. Client sends

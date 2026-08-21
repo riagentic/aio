@@ -13,6 +13,8 @@ export type ShellConfig = {
   height?: number;
   viewport?: string | false;
   head?: string;
+  /** ui.lang — `<html lang>`; the packaged shell must carry what dev serves. */
+  lang?: string;
   /** ui.chrome — the packaged shell must draw the same title bar dev does. */
   chrome?: "standard" | "themed" | "none";
   /** ui.theme + the identity its accent comes from — without these the
@@ -402,22 +404,21 @@ export function udsProdHTML(
   hasCSS: boolean,
   shell?: ShellConfig,
 ): string {
-  return generateHTML(
+  // renderBudget / uiEntry / syncCells / callTimeouts are deliberately absent —
+  // see the note above: the cfg frame fills them at connect.
+  return generateHTML({
     title,
-    true, // prod
+    prod: true,
     hasCSS,
-    "", // importMap — prod bundles its own imports
-    shell?.showStatus,
-    shell?.width,
-    shell?.height,
-    undefined, // renderBudget — cfg frame
-    undefined, // uiEntry — dev-only
-    shell?.viewport,
-    shell?.head,
-    undefined, // syncCells — cfg frame
-    undefined, // callTimeouts — cfg frame
-    shell?.chrome,
-    shell?.theme,
-    shell?.themeName,
-  );
+    importMap: "", // prod bundles its own imports
+    showStatus: shell?.showStatus,
+    width: shell?.width,
+    height: shell?.height,
+    viewport: shell?.viewport,
+    headExtra: shell?.head,
+    chrome: shell?.chrome,
+    theme: shell?.theme,
+    themeName: shell?.themeName,
+    lang: shell?.lang,
+  });
 }

@@ -1,5 +1,5 @@
 // Build helpers — pure/extractable utilities used by build.ts
-import { dirname, join } from "@std/path";
+import { dirname, join, resolve } from "@std/path";
 import { appIconPng, appIconSvg } from "./app-icon.ts";
 
 /** The appimagetool release this build pins to.
@@ -298,6 +298,47 @@ function whichJavac(): string | null {
   } catch {
     return null;
   }
+}
+
+/** Where the app's `icon.png` is — and, when it is nowhere useful, whether it
+ *  is sitting somewhere the build deliberately does NOT look.
+ *
+ *  Every target resolves the icon from THE app dir (the entry module's
+ *  directory), the same place dev serves it from. The project ROOT is the
+ *  obvious other candidate — it is where `deno.json` lives — and a field report
+ *  put `icon.png` there, got no icon and no warning, and shipped a 158 MB
+ *  AppImage wearing a generated placeholder. Nothing was wrong enough to fail:
+ *  a missing icon is legal, and the framework draws a monogram for it.
+ *
+ *  So this is a HINT, not a refusal, and deliberately unlike the `style.css`
+ *  rule beside it (which refuses): a root `icon.png` is frequently a repo logo
+ *  for a README, and a build that dies over one would be wrong more often than
+ *  right. `misplaced` is only ever set when the app dir has no icon at all —
+ *  there is nothing to say when the app already has the icon it wants. */
+export async function resolveAppIcon(
+  root: string,
+  appDir: string,
+): Promise<{ icon: string | null; misplaced: string | null }> {
+  const wanted = join(appDir, "icon.png");
+  try {
+    await Deno.stat(wanted);
+    return { icon: wanted, misplaced: null };
+  } catch { /* no icon where the build looks — is one nearby? */ }
+  if (resolve(root) === resolve(appDir)) return { icon: null, misplaced: null };
+  const atRoot = join(root, "icon.png");
+  try {
+    await Deno.stat(atRoot);
+    return { icon: null, misplaced: atRoot };
+  } catch { /* genuinely no icon — the monogram is the honest answer */ }
+  return { icon: null, misplaced: null };
+}
+
+/** The one sentence a target prints when the app HAS an icon and the build
+ *  cannot use it. One wording, four targets. */
+export function misplacedIconHint(misplaced: string, appDir: string): string {
+  return `found ${misplaced}, which the build does not read — the app dir is ` +
+    `${appDir} (the entry's directory, the same place dev serves it from). ` +
+    `Move it to ${join(appDir, "icon.png")} to use it.`;
 }
 
 /** Write the app's DEFAULT icon (SVG + PNG) beside each other, named

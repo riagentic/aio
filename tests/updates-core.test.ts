@@ -1,6 +1,11 @@
 // updates-core.test.ts — the rules that decide whether a user is ever offered
 // an update. Pure functions, so every branch is reachable without a network.
-import { assert, assertEquals, assertThrows } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
 import type { DataContract, ShipManifest } from "../src/build/ship.ts";
 import {
   classifySource,
@@ -360,4 +365,46 @@ Deno.test("decideGit: an install with no recorded commit is refused, not guessed
   const d = decideGit({ currentSha: null, head: { sha: "aa", ref: "main" } });
   assertEquals(d.kind, "refused");
   if (d.kind === "refused") assert(d.reason.includes("does not record"));
+});
+
+// ── the gate refuses what it cannot check ────────────────────────────────
+//
+// `dataCompatibility` is the last thing between a release and an app's data —
+// "anything it cannot prove safe becomes a blocker". The manifest reaches it as
+// `JSON.parse(text) as ShipManifest`, a cast with no validation, so a
+// mis-published or older-format release could hand it a contract with no
+// `schema` (where `undefined < local.schema` is false, so the backwards-schema
+// blocker could never fire — the release was judged SAFE) or `{}` (a TypeError
+// thrown from inside the gate). Both are refusals now.
+Deno.test("dataCompatibility: a malformed contract is a blocker, not a pass", () => {
+  const local = { schema: 3, cells: { todo: 2 } };
+  const malformed: unknown[] = [
+    {},
+    { cells: { todo: { version: 2, migratesFrom: 1 } } }, // no schema
+    { schema: 3 }, // no cells
+    { schema: "3", cells: {} }, // schema of the wrong type
+    { schema: 3, cells: { todo: { version: 2 } } }, // cell without migratesFrom
+    { schema: 3, cells: { todo: "2" } },
+    [],
+  ];
+  for (const contract of malformed) {
+    const v = dataCompatibility(local, contract as never);
+    assertEquals(v.ok, false, `must refuse: ${JSON.stringify(contract)}`);
+    assertEquals(v.blockers.length, 1);
+    assertStringIncludes(v.blockers[0]!, "malformed");
+    assertStringIncludes(v.blockers[0]!, "aio ship"); // …and how to fix it
+  }
+  // A well-formed one still passes, and a backwards schema is still the
+  // blocker it always was — the new check must not swallow the real ones.
+  assertEquals(
+    dataCompatibility(local, {
+      schema: 3,
+      cells: { todo: { version: 2, migratesFrom: 1 } },
+    }).ok,
+    true,
+  );
+  assertStringIncludes(
+    dataCompatibility(local, { schema: 2, cells: {} }).blockers[0]!,
+    "goes backwards",
+  );
 });

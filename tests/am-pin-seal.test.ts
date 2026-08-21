@@ -14,6 +14,11 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { latestTag, readPin } from "../src/am/am-versions.ts";
+import {
+  linkSatisfiesPin,
+  pinDisagreementHint,
+  versionPath,
+} from "../src/server/framework-pin.ts";
 
 interface Sandbox {
   install: string;
@@ -291,7 +296,6 @@ Deno.test("am fix seals a local-checkout link with a path: pin, and the pin deci
   // (linkSatisfiesPin: a version pin must resolve to the versions store)
   // warned "pin does not match dep/aio" immediately after the fix that wrote
   // it. The local-dev pin exists for exactly this shape.
-  const { linkSatisfiesPin } = await import("../src/server/framework-pin.ts");
   const s = await sandbox();
   try {
     await Deno.mkdir(join(s.app, "dep"), { recursive: true });
@@ -337,4 +341,44 @@ Deno.test("am fix seals a local-checkout link with a path: pin, and the pin deci
   } finally {
     await s.cleanup();
   }
+});
+
+// A version pin over a CHECKOUT link is a choice, not a defect — and the two
+// tools that report it have to say the same thing (got #4).
+//
+// `dep/aio -> ../../aio` is the documented co-development setup. Writing the
+// plain version — the obvious thing, and what the README implies — made doctor
+// FAIL with "run `am fix`", which would have relinked away from the checkout
+// the developer deliberately chose, while aiol WARNed with a different, better
+// sentence. One link, two tools, two answers, and the only visible exit was the
+// destructive one. `pinDisagreementHint` is now THE decider both read.
+Deno.test("pin hint: a version pin over a checkout offers BOTH ways out", () => {
+  const hint = pinDisagreementHint("1.0.0-alpha56", "/home/dev/code/gen/aio");
+  assert(hint, "a checkout link must produce a hint");
+  assertStringIncludes(hint, "am pin path:/home/dev/code/gen/aio");
+  assertStringIncludes(hint, "am fix");
+  assert(
+    hint.indexOf("am pin path:") < hint.indexOf("am fix"),
+    "keeping the checkout comes first — it is what the developer chose",
+  );
+});
+
+Deno.test("pin hint: a link inside the version store gets no special hint", () => {
+  // Here "run `am fix`" IS the whole answer, and a hint about path pins would
+  // be noise pointing at a setup this app is not using.
+  const inStore = versionPath("1.0.0-alpha56");
+  assertEquals(pinDisagreementHint("1.0.0-alpha56", inStore), null);
+});
+
+Deno.test("pin hint: a path pin never disagrees with the link it names", () => {
+  const checkout = "/home/dev/code/gen/aio";
+  assertEquals(
+    pinDisagreementHint(`path:${checkout}`, checkout),
+    null,
+    "the sealed form is the fix — it cannot also be the complaint",
+  );
+  assert(
+    linkSatisfiesPin(`path:${checkout}`, checkout),
+    "and THE decider agrees, which is the point of sharing it",
+  );
 });

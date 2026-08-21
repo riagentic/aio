@@ -61,7 +61,8 @@ Everything below is the full reference, organized by category.
 | `route(handler, opts?)`                 | A `routes: {}` handler with `:id` params, method guard, cookies, `ctx.json/text/redirect` |
 | `serverUser()`                          | Ambient caller identity — `undefined` = anonymous or server-origin                        |
 | `serverRequest()`                       | Ambient request facts — `{ ip, headers, cookies, url, method, via }`, read-only           |
-| `serverFn(def, ns)` / `serverFns(...)`  | Server-only functions callable from the client (typed WS proxy)                           |
+| `serverFns(ns, fns)`                    | DEFINE server-only functions (server side)                                                |
+| `serverFn<T>(ns)`                       | CALL them from the client — a typed proxy over the WS bridge                              |
 | `generateTotpSecret()` / `totpUri(...)` | TOTP enrollment primitives for a hand-rolled 2FA UI                                       |
 | `verifyTotp(secret, code)`              | Verify a TOTP code                                                                        |
 

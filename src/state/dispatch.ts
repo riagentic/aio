@@ -671,8 +671,17 @@ export function createDispatch<S, A, E>(
             typeof (effect as Record<string, unknown>).type !== "string"
           ) {
             const actionType = tag(current);
-            if (!warnedInvalidEffect.has(actionType)) {
-              warnedInvalidEffect.add(actionType);
+            // Keyed by the action TYPE, which is what "logged once per action"
+            // says. `tag()` renders type + full payload, so keying on it warned
+            // once per distinct PAYLOAD — the same broken reducer shouting on
+            // every keystroke — and grew the set by one entry per call for the
+            // life of the process.
+            const warnKey = typeof (current as { type?: unknown })?.type ===
+                "string"
+              ? (current as { type: string }).type
+              : actionType;
+            if (!warnedInvalidEffect.has(warnKey)) {
+              warnedInvalidEffect.add(warnKey);
               log.warn(
                 `reducer returned invalid effect (missing .type string) — ` +
                   `skipping. Action was: ${actionType} (logged once per action)`,

@@ -4,7 +4,7 @@
  */
 
 import { readDenoJson } from "../server/deno-json.ts";
-import { dirname, join } from "@std/path";
+import { dirname, join, resolve, SEPARATOR as sep } from "@std/path";
 import { appDirs } from "../server/app-dirs.ts";
 import {
   DEFAULT_BACKUP_KEEP,
@@ -19,6 +19,7 @@ import {
 import type { GlobalFlags } from "./am-types.ts";
 import {
   AppLock,
+  type InstanceInfo,
   instances,
   isProcessAlive,
   isSocketAlive,
@@ -39,6 +40,7 @@ import {
   resolveAmPort,
   resolveEntry,
 } from "./am-utils.ts";
+import { componentPort, processPlan } from "./am-components.ts";
 import {
   probePort,
   resolveControlPort,
@@ -377,6 +379,35 @@ export async function cmdStart(
   flags: GlobalFlags,
 ): Promise<void> {
   const mode = detectMode(flags);
+
+  // A project can be more than one app. When it says so — labelled build
+  // targets with their own entries — `am start` means the PROJECT and
+  // `am start <label>` means one component of it. Ordinary repos never take
+  // this branch (see `processPlan`), so nothing about them changes.
+  {
+    const plan = processPlan(args, { app: flags.app, port: flags.port });
+    if (plan.kind === "error") {
+      outError(plan.message, mode);
+      Deno.exit(1);
+    }
+    if (plan.kind === "one" || plan.kind === "all") {
+      const list = plan.kind === "one" ? [plan.component] : plan.components;
+      for (const c of list) {
+        const { port, assigned } = componentPort(plan.components, c);
+        if (assigned && mode === "pretty") {
+          out(
+            `${c.label}: port ${port} (assigned — this entry declares none)`,
+            mode,
+          );
+        }
+        await cmdStart(
+          args.filter((a) => a.startsWith("-")),
+          { ...flags, app: c.appId, port, entry: c.entry },
+        );
+      }
+      return;
+    }
+  }
   const appId = resolveAmAppId(flags.app);
   const port = resolveAmPort(flags.port);
 
@@ -409,7 +440,14 @@ export async function cmdStart(
       });
       trojan = r.ok
         ? { ok: true, data: await r.json() }
-        : { ok: false, error: "" };
+        // 401/403 is an aio app ANSWERING — it is asking for the key this
+        // probe deliberately does not send. Reading that as "not aio" told the
+        // user their own keyed app was "another process", which sends them
+        // hunting a port conflict that does not exist. `authed` says which.
+        : {
+          ok: false,
+          error: r.status === 401 || r.status === 403 ? "auth" : "",
+        };
     } catch {
       trojan = { ok: false, error: "" };
     }
@@ -419,6 +457,12 @@ export async function cmdStart(
         `port ${port} in use by aio app "${
           cfg.title ?? "?"
         }" — stop it first or use --port=N`,
+        mode,
+      );
+    } else if (!trojan.ok && trojan.error === "auth") {
+      outError(
+        `port ${port} in use by an aio app that requires a key (it answered ` +
+          `the probe with 401) — stop it first, or use --port=N`,
         mode,
       );
     } else {
@@ -689,17 +733,57 @@ export async function resolveStopTarget(
   }
 }
 
-export async function cmdStop(
-  _args: string[],
-  flags: GlobalFlags,
-): Promise<void> {
-  const mode = detectMode(flags);
-  const resolved = await resolveStopTarget(flags);
-  if (!resolved.ok) {
-    outError(resolved.error, mode);
-    Deno.exit(1);
+/** The project this `am` invocation is about: the nearest ancestor of the cwd
+ *  holding a `deno.json`, or the cwd when there is none.
+ *
+ *  This is what scopes `--all`, and the walk UP is the point. A compiled app is
+ *  routinely launched from somewhere inside its own project rather than the
+ *  root — `dist/<app>/./<app>` is the normal way to run a built server — and
+ *  its lock records THAT directory. Comparing against the bare cwd would leave
+ *  exactly those instances running while reporting that everything stopped. */
+export function projectRoot(from = Deno.cwd()): string {
+  let dir = resolve(from);
+  for (;;) {
+    try {
+      if (Deno.statSync(join(dir, "deno.json")).isFile) return dir;
+    } catch { /* keep walking */ }
+    const up = dirname(dir);
+    if (up === dir) return resolve(from);
+    dir = up;
   }
-  const { appId, port, pf } = resolved.target;
+}
+
+/** Is `path` inside `root` (or root itself)? Compared as path SEGMENTS, so
+ *  `/home/u/rimote-old` is not treated as living inside `/home/u/rimote`. */
+export function isUnder(root: string, path: string): boolean {
+  const a = resolve(root);
+  const b = resolve(path);
+  return b === a || b.startsWith(a.endsWith(sep) ? a : a + sep);
+}
+
+/** The running instances `--all` is allowed to stop: this project's, and only
+ *  this project's.
+ *
+ *  Scoped rather than global on purpose. `am instances` is machine-wide, so a
+ *  literal "stop all" would reach into every other aio app the developer has
+ *  running — a different project's server going down because someone tidied up
+ *  in this one is not a tidy-up, it is an outage with no obvious cause. */
+export function instancesInProject(root = projectRoot()): InstanceInfo[] {
+  return instances()
+    .filter((i) => i.cwd && isUnder(root, i.cwd))
+    .sort((a, b) => a.appId < b.appId ? -1 : a.appId > b.appId ? 1 : 0);
+}
+
+/** Stop one app. Returns what happened instead of exiting, so `--all` can carry
+ *  on through a failure and report every app rather than dying on the first. */
+async function stopOne(
+  target: StopTarget,
+  flags: GlobalFlags,
+): Promise<
+  | { ok: true; appId: string; pid?: number; port: number }
+  | { ok: false; appId: string; error: string }
+> {
+  const { appId, port, pf } = target;
 
   // Mark as stopping
   if (pf) writeLock({ ...pf, status: "stopping" });
@@ -717,19 +801,12 @@ export async function cmdStop(
     // The real reason, not the generic literal that discarded it: "app not
     // running on port N", an identity refusal, or the app's own error.
     if (pf) writeLock(pf); // we stopped nothing — undo the "stopping" mark
-    outError(result.error, mode);
-    Deno.exit(1);
+    return { ok: false, appId, error: result.error };
   }
 
   // Without --wait: return immediately, user checks with `am status`
   if (flags.wait === undefined) {
-    out(
-      mode === "pretty"
-        ? `stopping ${appId} (pid ${pf?.pid ?? "?"}, port ${port})`
-        : { appId, status: "stopping", pid: pf?.pid, port },
-      mode,
-    );
-    return;
+    return { ok: true, appId, pid: pf?.pid, port };
   }
 
   // With --wait: poll until dead, then force kill if needed
@@ -754,8 +831,103 @@ export async function cmdStop(
     await killProcess(pf.pid, 0); // already waited gracefully
   }
   removePid(appId);
+  return { ok: true, appId, pid: pf?.pid, port };
+}
+
+export async function cmdStop(
+  _args: string[],
+  flags: GlobalFlags,
+): Promise<void> {
+  const mode = detectMode(flags);
+  const waited = flags.wait !== undefined;
+
+  // `am stop` in a multi-component project stops the PROJECT — which is what
+  // `--all` already did, now the default where the project says it has parts.
+  // `am stop <label>` stops one. A single-app repo is untouched.
+  let stopAll = flags.all;
+  {
+    const plan = processPlan(_args, { app: flags.app, port: flags.port });
+    if (plan.kind === "error") {
+      outError(plan.message, mode);
+      Deno.exit(1);
+    }
+    if (plan.kind === "one") {
+      flags = { ...flags, app: plan.component.appId };
+    } else if (plan.kind === "all") {
+      stopAll = true;
+    }
+  }
+
+  if (stopAll) {
+    // `--port` names ONE app; `--all` names every app here. Asking for both is
+    // not a refinement of either, so it is refused rather than resolved by a
+    // precedence rule nobody would remember.
+    if (flags.port !== undefined || flags.app) {
+      outError(
+        "--all stops every app of this project; it cannot be combined with " +
+          "--port or --app, which name one",
+        mode,
+      );
+      Deno.exit(1);
+    }
+    const root = projectRoot();
+    const running = instancesInProject(root);
+    if (running.length === 0) {
+      out(
+        mode === "pretty"
+          ? `nothing running under ${root}`
+          : { root, stopped: [], status: "none-running" },
+        mode,
+      );
+      return;
+    }
+
+    const results = [];
+    for (const i of running) {
+      results.push(
+        await stopOne(
+          { appId: i.appId, port: i.port, pf: readPid(i.appId) },
+          flags,
+        ),
+      );
+    }
+    const failed = results.filter((r) => !r.ok);
+    if (mode === "pretty") {
+      for (const r of results) {
+        out(
+          r.ok
+            ? `${waited ? "stopped" : "stopping"} ${r.appId}`
+            : `✗ ${r.appId}: ${r.error}`,
+          mode,
+        );
+      }
+    } else {
+      out({ root, stopped: results }, mode);
+    }
+    // Non-zero when ANY app is still up: a script that stops a fleet and reads
+    // exit 0 is entitled to believe the fleet is down.
+    if (failed.length) Deno.exit(1);
+    return;
+  }
+
+  const resolved = await resolveStopTarget(flags);
+  if (!resolved.ok) {
+    outError(resolved.error, mode);
+    Deno.exit(1);
+  }
+  const r = await stopOne(resolved.target, flags);
+  if (!r.ok) {
+    outError(r.error, mode);
+    Deno.exit(1);
+  }
   out(
-    mode === "pretty" ? `stopped ${appId}` : { appId, status: "stopped" },
+    mode === "pretty"
+      ? waited
+        ? `stopped ${r.appId}`
+        : `stopping ${r.appId} (pid ${r.pid ?? "?"}, port ${r.port})`
+      : waited
+      ? { appId: r.appId, status: "stopped" }
+      : { appId: r.appId, status: "stopping", pid: r.pid, port: r.port },
     mode,
   );
 }
@@ -765,6 +937,46 @@ export async function cmdRestart(
   flags: GlobalFlags,
 ): Promise<void> {
   const mode = detectMode(flags);
+
+  // A DECLARED project can be restarted whole, because the declaration is
+  // exactly what `--all` lacked: each component's entry and identity. That is
+  // why the refusal below still stands for undeclared fleets and does not
+  // stand here.
+  {
+    const plan = processPlan(args, { app: flags.app, port: flags.port });
+    if (plan.kind === "error") {
+      outError(plan.message, mode);
+      Deno.exit(1);
+    }
+    if (plan.kind === "one" || plan.kind === "all") {
+      const list = plan.kind === "one" ? [plan.component] : plan.components;
+      for (const c of list) {
+        const { port } = componentPort(plan.components, c);
+        await cmdRestart(
+          args.filter((a) => a.startsWith("-")),
+          { ...flags, app: c.appId, port, entry: c.entry },
+        );
+      }
+      return;
+    }
+  }
+
+  // Refused rather than ignored. `stop --all` exists, so `restart --all` is a
+  // reasonable thing to type, and silently restarting ONE app while reporting
+  // success is the worst available answer: a fleet half up, and a developer
+  // who believes it is whole. Starting several apps is not the mirror of
+  // stopping them — each needs its own entry and its own flags, and an app am
+  // did not start has no launch to replay.
+  if (flags.all) {
+    outError(
+      "restart --all is not supported: am can stop a fleet, but it cannot " +
+        "know how to start every app back up (each has its own entry and " +
+        "flags, and an app am did not start has no launch to replay). Use " +
+        "am stop --all, then start each app the way you normally do",
+      mode,
+    );
+    Deno.exit(1);
+  }
   const appId = resolveAmAppId(flags.app);
   const pf = readPid(appId);
 
@@ -846,6 +1058,45 @@ export async function cmdStatus(
   flags: GlobalFlags,
 ): Promise<void> {
   const mode = detectMode(flags);
+
+  // "Is the project up?" is the question a multi-component repo asks, and one
+  // line about one of its three apps was not an answer to it.
+  {
+    const plan = processPlan(_args, { app: flags.app, port: flags.port });
+    if (plan.kind === "error") {
+      outError(plan.message, mode);
+      Deno.exit(1);
+    }
+    if (plan.kind === "one") {
+      flags = { ...flags, app: plan.component.appId };
+    } else if (plan.kind === "all") {
+      const rows = plan.components.map((c) => {
+        const pf = readPid(c.appId);
+        const up = pf !== null && isProcessAlive(pf.pid);
+        return {
+          component: c.label,
+          appId: c.appId,
+          status: up ? (pf.status ?? "started") : "stopped",
+          ...(up ? { pid: pf.pid, port: pf.port } : {}),
+        };
+      });
+      out(
+        mode === "pretty"
+          ? rows.map((r) =>
+            `${r.component} (${r.appId}): ${r.status}` +
+            (r.pid ? ` (pid ${r.pid}, port ${r.port})` : "")
+          ).join("\n")
+          : { components: rows },
+        mode,
+      );
+      // Same exit contract as the single-app form, read over the whole
+      // project: 0 only when EVERY component is up.
+      const up = rows.filter((r) => r.status === "started").length;
+      if (up === rows.length) return;
+      Deno.exit(rows.some((r) => r.status !== "stopped") ? 2 : 1);
+    }
+  }
+
   const appId = resolveAmAppId(flags.app);
   const pf = readPid(appId);
 

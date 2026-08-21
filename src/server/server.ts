@@ -1,6 +1,6 @@
 // HTTP + WebSocket server with live TSX transpilation (dev) or static serving (prod)
 // Thin orchestrator — delegates to server-*.ts modules
-import { UI_ENTRY } from "./app-files.ts";
+import { APP_STYLE, appHasStylesheet, UI_ENTRY } from "./app-files.ts";
 import { enc } from "../protocol/envelope.ts";
 import { join, resolve } from "@std/path";
 import { DEFAULT_SYNC_INTERVAL_MS } from "./aio.ts";
@@ -68,15 +68,6 @@ import {
 } from "./server-dev-checks.ts";
 import type { TrojanDeps } from "./server-trojan.ts";
 import { resetTrojanRateLimit } from "./server-trojan.ts";
-
-function fileExists(path: string): boolean {
-  try {
-    Deno.statSync(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 // B-11: tokens in the URL query string leak via browser history, proxy logs,
 // and Referer headers. The timing-safe `?token=` path stays as an opt-in
@@ -359,9 +350,29 @@ export function createServer(config: ServerConfig): ServerHandle {
   const IMPORT_MAP = JSON.stringify({ imports: importMapObj });
 
   const absDistDir = distDir ? resolve(distDir) : null;
-  const hasCSS = fileExists(join(absBaseDir, "style.css")) ||
-    (absDistDir ? fileExists(join(absDistDir, "style.css")) : false);
+  const hasCSS = appHasStylesheet(absBaseDir, absDistDir);
   if (hasCSS) debug("style.css detected — injecting <link>");
+  else {
+    // A stylesheet that exists and is never served is the quietest failure in
+    // this whole area: `style.css` is resolved from the APP DIR (the entry's
+    // directory), so one written next to a `ui.entry` in a subdirectory is
+    // simply not there as far as dev and the build are concerned — and with
+    // `ui.theme: "auto"` the framework then styles an app that visibly styles
+    // itself. The stray `src/style.css` case has been loud at build time for
+    // releases; this is the same mistake one directory further in.
+    const entry = config.uiEntry ?? UI_ENTRY;
+    const uiDir = entry.includes("/")
+      ? join(absBaseDir, entry.slice(0, entry.lastIndexOf("/")))
+      : null;
+    if (uiDir && appHasStylesheet(uiDir)) {
+      log.warn(
+        `style: ${join(uiDir, APP_STYLE)} exists but is NOT served — ` +
+          `${APP_STYLE} is read from the app dir (${absBaseDir}), the same ` +
+          `place the build copies it from. Move it there, or point ` +
+          `baseDir at ${uiDir}.`,
+      );
+    }
+  }
 
   // Explicit in BOTH modes so prod caching isn't left to proxy heuristics — an
   // empty header lets an intermediary serve a stale asset after redeploy, a bug
@@ -499,6 +510,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     headExtra: config.headExtra,
     chrome: config.chrome,
     theme: config.theme,
+    lang: config.lang,
     themeName: config.themeName,
     width: config.width,
     height: config.height,

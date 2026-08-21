@@ -146,7 +146,19 @@ export function useLocal<T>(
       const current = sig.peek();
       if (current && typeof current === "object" && !Array.isArray(current)) {
         sig.set({ ...current, ...partial });
+        return;
       }
+      // There is nothing to merge INTO, and pretending otherwise means a UI
+      // that simply never updates. The type already says `never` for non-object
+      // state, so reaching this is a cast or untyped call — the two cases where
+      // a silent no-op is least likely to be noticed and most likely to be
+      // blamed on the framework.
+      throw new Error(
+        `[aio] useLocal().patch() needs object state to merge into, but this ` +
+          `local holds ${
+            Array.isArray(current) ? "an array" : typeof current
+          }. Use .set(next) — or .set(prev => …) — for arrays and primitives.`,
+      );
     }) as T extends Record<string, unknown> ? (partial: Partial<T>) => void
       : never,
   };

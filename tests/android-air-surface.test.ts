@@ -27,6 +27,7 @@
 import { assert, assertEquals } from "@std/assert";
 import * as air from "../src/air.ts";
 import * as android from "../src/standalone-air.ts";
+import { _applyShellUi } from "../src/standalone-air.ts";
 import * as aio from "../mod.ts";
 
 // ── 1. the contract of a shared name is identical on both entries ────────
@@ -199,22 +200,15 @@ const SERVER_ONLY: Record<string, string> = {
 };
 
 /** On `aio`, missing here, and NOT deliberate — the R-14 class, enumerated so
- *  it is a visible fact instead of a discovery made by a user. Triage lives in
- *  todo.md ("what `aio` means on android"); this list may only SHRINK. */
+ *  it is a visible fact instead of a discovery made by a user. This list may
+ *  only SHRINK: twelve of its thirteen entries were one-line re-exports of
+ *  dependency-free modules (`until`/`race` appear in mod.ts's own header
+ *  example, so the documented spelling of an async method did not bundle for a
+ *  shipped target) and they now ship. What is left needs work, not a line. */
 const KNOWN_GAPS: Record<string, string> = {
-  own: "effect ownership — isomorphic, should ship",
-  schedule: "scheduling — isomorphic surface, pulls the Deno worker pool today",
-  self: "self-dispatch — isomorphic, should ship",
-  call: "call a cell method by name — isomorphic, should ship",
-  until: "documented in mod.ts's own example; async-method primitive",
-  race: "documented in mod.ts's own example; async-method primitive",
-  sleep: "async-method primitive",
-  UntilTimeoutError: "the error until() rejects with",
-  bindCell: "cell binding — isomorphic",
-  composeCells: "cell composition — isomorphic",
-  createSelector: "derived state — isomorphic",
-  degraded: "degradation reporting — isomorphic",
-  degradedReport: "degradation reporting — isomorphic",
+  schedule:
+    "pulls the Deno worker pool through blocking.ts — needs the standalone " +
+    "half separated from the pool, not a re-export",
 };
 
 Deno.test("android `aio`: every missing export is a listed decision or a listed gap", () => {
@@ -246,4 +240,80 @@ Deno.test("android `aio`: log is present, and is THE logger", () => {
   // The one closed in the field: `import { log } from \"aio\"` compiled for
   // three targets and failed to bundle for the fourth.
   assertEquals(android.log, aio.log, "standalone must re-export aio's log");
+});
+
+// ── 4. `ui.theme` reaches the packaged APK ───────────────────────────────
+//
+// The android shell is generated at BUILD time, before `aio.run()` exists, so
+// `ui.theme` could not travel with it: alpha63 made the look opt-in, `am
+// create` wrote `theme: "auto"` into every new app, and a scaffolded android
+// app was themed in dev and unstyled in its own APK — cards with no card, rows
+// that do not lay out. The shell now carries the full sheet DISABLED and the
+// standalone runtime (which does receive the config) enables it at boot.
+import { androidLocalHTML } from "../src/server/server-html-gen.ts";
+import { Window } from "happy-dom";
+
+function shellDoc(opts: { appCss?: boolean } = {}) {
+  const win = new Window();
+  win.document.write(
+    androidLocalHTML("probe", opts.appCss ?? false, { themeName: "probe" }),
+  );
+  return win.document;
+}
+
+Deno.test("android shell: the default look ships disabled, not applied", () => {
+  const doc = shellDoc();
+  const deferred = doc.querySelector("style[data-aio-theme-deferred]");
+  assert(deferred, "the packaged shell must carry the sheet");
+  assertEquals(
+    deferred!.getAttribute("media"),
+    "not all",
+    "…and it must be inert until the app asks for it",
+  );
+});
+
+Deno.test('android runtime: ui.theme "auto" enables it; nothing else does', () => {
+  // deno-lint-ignore no-explicit-any
+  const g = globalThis as any;
+  const prevDoc = g.document;
+  try {
+    for (
+      const [theme, want] of [
+        [undefined, "not all"],
+        ["tokens", "not all"],
+        ["none", "not all"],
+        ["auto", null],
+        ["full", null],
+      ] as [string | undefined, string | null][]
+    ) {
+      const doc = shellDoc();
+      g.document = doc;
+      _applyShellUi({ theme });
+      assertEquals(
+        doc.querySelector("style[data-aio-theme-deferred]")!.getAttribute(
+          "media",
+        ),
+        want,
+        `ui.theme: ${theme}`,
+      );
+    }
+    // "auto" still steps aside for an app that ships its own stylesheet.
+    const styled = shellDoc({ appCss: true });
+    g.document = styled;
+    _applyShellUi({ theme: "auto" });
+    assertEquals(
+      styled.querySelector("style[data-aio-theme-deferred]")!.getAttribute(
+        "media",
+      ),
+      "not all",
+      "auto + style.css → the app owns the stage, on android too",
+    );
+    // ui.lang travels the same way.
+    const langDoc = shellDoc();
+    g.document = langDoc;
+    _applyShellUi({ lang: "pt-BR" });
+    assertEquals(langDoc.documentElement.lang, "pt-BR");
+  } finally {
+    g.document = prevDoc;
+  }
 });

@@ -1,6 +1,7 @@
 // Static diagnostic HTML page for import graph errors.
 // Zero JS imports — only inline JS for live reload WS.
 
+import { htmlOpen } from "./server-html-gen.ts";
 import { BLOCKING_CATEGORIES, type GraphError } from "./graph-validator.ts";
 import { escHtml } from "./server-html-constants.ts";
 
@@ -51,7 +52,7 @@ export function generateDiagnosticHTML(
     : "";
 
   return `<!DOCTYPE html>
-<html>
+${htmlOpen()}
 <head>
   <meta charset="UTF-8">
   <title>${escHtml(title)} — Module Errors</title>

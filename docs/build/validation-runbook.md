@@ -8,7 +8,7 @@ physical parts need real machines — record results in the table at the bottom.
 ## 1. Automated (every release — one command)
 
 ```sh
-deno task validate:matrix
+deno task check:matrix
 ```
 
 Runs: per-target boot + WS-increment smoke for all 10 target examples, example

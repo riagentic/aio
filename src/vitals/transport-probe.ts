@@ -76,12 +76,6 @@ export function createTransportProbeClient(config: TransportProbeClientConfig) {
       setStatus(evaluateStatus(rtt, t));
     },
 
-    checkLiveness() {
-      // Called periodically — if no pong was received, RTT stays stale.
-      // The caller should use createPing + processPong cycle.
-      return status;
-    },
-
     getStatus(): VitalStatus {
       return status;
     },

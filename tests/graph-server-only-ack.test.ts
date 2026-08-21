@@ -112,3 +112,104 @@ Deno.test("server-only: the fix text tells you the marker exists", () => {
     "an escape hatch nobody can discover is not an escape hatch",
   );
 });
+
+// …and the acknowledgement has to be reachable in a REAL file, which is the
+// half that was broken for as long as the feature existed.
+//
+// The scan ran over a copy of the source with comments deleted, and a deleted
+// block comment takes its NEWLINES with it — under a comment claiming "line
+// count preserved — replacements are same-line", true of `//` comments and
+// false of every JSDoc block. A field report measured it: 681 lines, 39
+// newlines destroyed, the `Deno.remove` on line 330 reported as line 326.
+// `isServerOnlySuppressed` then read lines 325/326, found no marker, and the
+// warning survived — so the escape hatch could not be used by any file with
+// JSDoc in it, which is most files. The reporter moved the call into a
+// `.server.ts` module instead, which is what the warning wanted, but the
+// acknowledgement path was simply unreachable.
+Deno.test("server-only: a JSDoc block above the call does not move the line", () => {
+  const src = `/**
+ * A doc comment, of the kind every method in a real file carries.
+ * Three lines of it, so a collapsed block would shift by three.
+ */
+export function clean(p: string) {
+  Deno.remove(p);
+}
+`;
+  const errs = checkPlatformSafety(src, "src/job.ts");
+  assertEquals(errs.length, 1);
+  assertEquals(
+    errs[0]!.line,
+    6,
+    "the line the reader sees — a line number nobody can find is worse " +
+      "than no line number",
+  );
+  // The number is not decoration: this is what reads it.
+  assertEquals(
+    isServerOnlySuppressed(src.split("\n"), errs[0]!.line!),
+    false,
+    "no marker here yet",
+  );
+});
+
+Deno.test("server-only: the marker works in a file full of block comments", () => {
+  const src = `/** Header.
+ *  Two lines.
+ */
+const tmp = (p: string) => p + "/tmp";
+
+/**
+ * Another block, further down.
+ * With more lines in it.
+ * And more.
+ */
+export function clean(p: string) {
+  // aio-ok: server-only — this method only ever runs on the server
+  Deno.remove(tmp(p));
+}
+`;
+  assertEquals(
+    checkPlatformSafety(src, "src/job.ts"),
+    [],
+    "the acknowledgement must be findable after any number of block comments",
+  );
+});
+
+// The general property, so this cannot regress by one line rather than by all
+// of them: wherever the call sits, the reported line is the line it is on.
+Deno.test("server-only: reported line == real line, at every depth", () => {
+  for (let blocks = 0; blocks < 6; blocks++) {
+    for (let extra = 0; extra < 4; extra++) {
+      const header = Array.from(
+        { length: blocks },
+        (_, i) => `/**\n${" *  x\n".repeat(extra)} *  block ${i}\n */\n`,
+      ).join("");
+      const src =
+        `${header}export function clean(p: string) {\n  Deno.remove(p);\n}\n`;
+      const trueLine = src.split("\n").findIndex((l) =>
+        l.includes("Deno.remove")
+      ) + 1;
+      const errs = checkPlatformSafety(src, "src/job.ts");
+      assertEquals(errs.length, 1, `blocks=${blocks} extra=${extra}`);
+      assertEquals(
+        errs[0]!.line,
+        trueLine,
+        `blocks=${blocks} extra=${extra}: reported ${
+          errs[0]!.line
+        }, actually ${trueLine}`,
+      );
+    }
+  }
+});
+
+// A `Deno.` mentioned INSIDE a doc comment or a string is not a use of it —
+// the masking half of the same change, which the old strip also did (by
+// deletion) and must keep doing.
+Deno.test("server-only: a Deno.* inside a comment or a string is not a call", () => {
+  const src = `/** Do not call Deno.remove here. */
+export const hint = "run Deno.remove yourself";
+export function safe() {
+  return hint;
+}
+`;
+  assertEquals(checkPlatformSafety(src, "src/job.ts"), []);
+});

@@ -44,6 +44,46 @@ export function deepExclude(value: unknown, segs: string[]): unknown {
   return { ...obj, [head]: child };
 }
 
+const MISSING: unique symbol = Symbol("missing");
+
+/** The value at ONE dotted path, or MISSING. The mirror of
+ *  {@linkcode deepExclude}, including its array rule: a path through an array
+ *  applies to EVERY element (`rows.name` keeps `name` from each row), so
+ *  `include` and `exclude` read the same spelling the same way. An element
+ *  without the path becomes `{}` — the array keeps its shape and indices. */
+function pickPath(src: unknown, segs: string[]): unknown {
+  if (segs.length === 0) return src;
+  if (src === null || typeof src !== "object") return MISSING;
+  if (Array.isArray(src)) {
+    const out = src.map((el) => pickPath(el, segs));
+    return out.every((v) => v === MISSING)
+      ? MISSING
+      : out.map((v) => (v === MISSING ? {} : v));
+  }
+  const [head, ...rest] = segs;
+  const from = src as Record<string, unknown>;
+  if (head === undefined || !(head in from)) return MISSING;
+  const picked = pickPath(from[head], rest);
+  return picked === MISSING ? MISSING : { [head]: picked };
+}
+
+/** Merge one picked branch into the projection so `["profile.name",
+ *  "profile.email"]` yields one `profile` with both, and `["rows.a", "rows.b"]`
+ *  one array whose elements carry both. */
+function mergePicked(dst: unknown, add: unknown): unknown {
+  if (Array.isArray(dst) && Array.isArray(add) && dst.length === add.length) {
+    return dst.map((d, i) => mergePicked(d, add[i]));
+  }
+  const obj = (v: unknown): v is Record<string, unknown> =>
+    v !== null && typeof v === "object" && !Array.isArray(v);
+  if (obj(dst) && obj(add)) {
+    const out: Record<string, unknown> = { ...dst };
+    for (const k of Object.keys(add)) out[k] = mergePicked(out[k], add[k]);
+    return out;
+  }
+  return add;
+}
+
 /** Apply a CellFieldFilter to a cell's state slice — returns filtered object or undefined if "none" */
 export function applyCellFieldFilter(
   filter: CellFieldFilter | undefined,
@@ -54,7 +94,21 @@ export function applyCellFieldFilter(
   if ("include" in filter) {
     const result: Record<string, unknown> = {};
     for (const key of filter.include) {
-      if (key in cellState) result[key] = cellState[key];
+      // Dot paths work on BOTH sides. They used to work only on `exclude`, so
+      // `include: ["profile.name"]` silently produced nothing at all — the
+      // field was hidden, which fails closed (good) and says nothing (not
+      // good). Same spelling, same meaning, either way round.
+      if (key.includes(".")) {
+        const picked = pickPath(cellState, key.split("."));
+        if (picked === MISSING) continue; // not there — invent nothing
+        for (
+          const [k, v] of Object.entries(picked as Record<string, unknown>)
+        ) {
+          result[k] = mergePicked(result[k], v);
+        }
+      } else if (key in cellState) {
+        result[key] = cellState[key];
+      }
     }
     return result;
   }

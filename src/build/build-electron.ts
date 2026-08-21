@@ -9,6 +9,8 @@ import {
   copyDir,
   ensureAppimagetool,
   formatMb,
+  misplacedIconHint,
+  resolveAppIcon,
   toolCacheDir,
   writeDefaultIcon,
 } from "./build-helpers.ts";
@@ -164,13 +166,16 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
   console.log("[electron] \u2713 electron/ copied");
 
   // Icon \u2014 from THE app-dir decider (cfg.appDir), same place dev reads it
-  const userIcon = join(cfg.appDir, "icon.png");
-  let hasUserIcon = false;
-  try {
-    await Deno.stat(userIcon);
-    hasUserIcon = true;
-  } catch { /* no app icon \u2014 placeholder below */ }
-  if (hasUserIcon) {
+  const { icon: userIcon, misplaced } = await resolveAppIcon(
+    cfg.root,
+    cfg.appDir,
+  );
+  if (misplaced) {
+    console.warn(
+      `[electron] \u26a0 ${misplacedIconHint(misplaced, cfg.appDir)}`,
+    );
+  }
+  if (userIcon) {
     // Outside the stat's catch: an EXISTING icon that fails to copy (EACCES,
     // disk full) is a broken build, never a silent placeholder downgrade.
     await Deno.copyFile(userIcon, join(appDir, `${binaryName}.png`));
