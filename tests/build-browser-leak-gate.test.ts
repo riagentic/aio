@@ -163,3 +163,35 @@ Deno.test("android: server-only reach is recorded separately from a static leak"
   _resetServerOnlyStatic();
   assertEquals(Object.keys(serverOnlyDynamic).length, 0, "reset clears both");
 });
+
+// …and the artifact must be GONE when it does (rimote R-13, fourth pass).
+//
+// The three refusals above all happen after esbuild has written `dist/app.js`
+// and before the build records its inputs — the one window in which an
+// artifact exists that no gate has passed. A bare `Deno.exit()` anywhere in
+// that window leaves it on disk, newer than every input, for the next run of
+// the same command to report as `cached` and ship. That is not a thing to
+// remember at each new refusal site; every exit in the window goes through
+// `refuseBundle()`, which discards first, and this holds the next one to it.
+Deno.test("bundle refusal: no exit inside the rebuild window skips the discard", async () => {
+  const src = await Deno.readTextFile(
+    new URL("../src/build/build-bundle.ts", import.meta.url),
+  );
+  const from = src.indexOf("const bundleFresh = await isBundleFresh(cfg);");
+  const to = src.indexOf("await writeBundleInputs(");
+  assert(
+    from > 0 && to > from,
+    "the rebuild window moved — re-anchor this gate",
+  );
+  const window = src.slice(from, to);
+  assert(
+    window.includes("await refuseBundle("),
+    "the window must still refuse through the discarding path",
+  );
+  assertEquals(
+    window.match(/Deno\.exit\(/g),
+    null,
+    "a refusal between esbuild and writeBundleInputs leaves an unvalidated " +
+      "dist/app.js the next build calls fresh — use refuseBundle()",
+  );
+});

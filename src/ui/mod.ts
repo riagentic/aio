@@ -836,10 +836,21 @@ export function toast(
   const id = ++_toastSeq;
   const variant = opts?.variant ?? "info";
   _toasts.set([..._toasts.peek(), { id, message, variant }]);
-  const dismiss = () => _toasts.set(_toasts.peek().filter((t) => t.id !== id));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const dismiss = () => {
+    // Clearing on manual dismiss: the auto-dismiss timer used to survive the ×
+    // and fire later against an already-filtered list — a no-op, but one live
+    // timer per dismissed toast for the rest of its duration, in a helper an
+    // app calls on every save.
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
+    _toasts.set(_toasts.peek().filter((t) => t.id !== id));
+  };
   const duration = opts?.duration ?? 4000;
   if (duration > 0 && typeof setTimeout !== "undefined") {
-    setTimeout(dismiss, duration);
+    timer = setTimeout(dismiss, duration);
   }
   return dismiss;
 }

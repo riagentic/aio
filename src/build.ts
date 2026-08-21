@@ -45,6 +45,22 @@ export async function build(cfg?: BuildConfig): Promise<void> {
     doService,
   } = cfg;
 
+  // `--service` writes a systemd unit for the BINARY this build produces, so
+  // on its own it describes a file that will not exist. The pipeline used to
+  // accept it: it bundled `dist/app.js`, reached the "nothing left to do"
+  // return below (`doCompile` is false), and exited 0 — a successful-looking
+  // command that did a fraction of what its flag implies, which is the shape
+  // this project refuses everywhere else.
+  if (doService && !doCompile) {
+    console.error(
+      "[build] \u2717 --service writes a systemd unit for a compiled binary, " +
+        "and this build compiles nothing.\n" +
+        "       fix: `--compile --service` (the combination the unit file " +
+        "describes), or drop --service to build only the bundle.",
+    );
+    Deno.exit(1);
+  }
+
   // ── Step 1: Bundle dist/app.js ───────────────────────────────────────────
   // Skip for targets that don't need browser bundles
   const skipsBundle = doCli || cfg.doHeadless || doClient ||

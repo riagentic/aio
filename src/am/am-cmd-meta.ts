@@ -333,17 +333,28 @@ Visual manager:
                           \`am ui --client=browser\` opens a browser tab instead)
 
 Process (singleton — one instance per app identity):
-  start                   Start app (kills zombies, refuses if already running)
-  stop                    Graceful shutdown (SIGTERM → SIGKILL)
+  start [component]       Start the app (kills zombies, refuses if already
+                          running). In a project that declares COMPONENTS —
+                          several entries in one repo — plain "am start" starts
+                          all of them and "am start <label>" starts one.
+  stop [component]        Graceful shutdown (SIGTERM → SIGKILL). Stops the
+                          whole project when it declares components.
+  stop --all              Stop EVERY app of this project, declared or not —
+                          scoped to instances whose cwd is under this project
+                          root, so another project's app is never touched
+                          (am instances is machine-wide, this is not).
   kill                    End it now, no asking (SIGTERM + drop the lock)
   kill --stale            Reap ORPHANS — processes still SERVING with no lock
                           to account for them. That is the one that answers
                           am state with old numbers while am status says
                           stopped. Add --port=N for an orphan on a port
                           nothing records.
-  restart                 Stop + start
+  restart [component]     Stop + start (the whole project, or one component)
   watch [dir]             Hot-restart on .ts/.tsx change in dir (default: src/)
-  status                  stopped|starting|started|stopping (exit 0=started, 1=stopped, 2=transitional)
+  status [component]      stopped|starting|started|stopping (exit 0=started,
+                          1=stopped, 2=transitional). With components: one line
+                          each, and the same three codes read over the whole
+                          project — 0 every one up, 1 every one down, 2 partial.
   instances               List all running aio apps on this machine
 
 State:

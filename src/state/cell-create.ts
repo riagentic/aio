@@ -14,6 +14,7 @@ import { isAsyncFunction, type Method } from "./cell-impl.ts";
 import { createCellFromMethods } from "./cell-methods-factory.ts";
 import { registerCell } from "./cell-reactive.ts";
 import { removalMessage, removalsUsedBy } from "./removals.ts";
+import { nearestOf } from "./cell-helpers.ts";
 import type {
   MethodsCellConfig,
   SelectorAccessors,
@@ -21,6 +22,37 @@ import type {
 } from "./cell-config-types.ts";
 
 export type { MethodsCellConfig };
+
+/** Every key `cell()` reads. Kept beside the type it mirrors
+ *  ({@linkcode MethodsCellConfig}) — `tests/cell-config-keys.test.ts` fails the
+ *  moment the two disagree, so this cannot rot into a stale allow-list. */
+const VALID_CELL_KEYS: ReadonlySet<string> = new Set([
+  "state",
+  "methods",
+  "selectors",
+  "sync",
+  "persist",
+  "ui",
+  "visible",
+  "access",
+  "scope",
+  "long",
+  "cancelOn",
+  "listensTo",
+  "transaction",
+  "validate",
+  "version",
+  "onMigrate",
+  "onInit",
+  "onDestroy",
+  "onRestore",
+  "worker",
+]);
+
+/** The closest valid key, when a typo is one edit away from a real one. */
+function nearestKey(bad: string): string | null {
+  return nearestOf(bad, VALID_CELL_KEYS);
+}
 
 // ── cell() ──────────────────────────────────────────────────────
 
@@ -99,6 +131,28 @@ export function cell(name: string, config: any): any {
     throw new Error(removalMessage(r, name));
   }
 
+  // An unknown key is a typo, and a typo that is accepted is a feature that
+  // silently does not exist. `aio.run()` has refused a misspelled key across
+  // 156 of them for releases; the OTHER half of an app's configuration —
+  // where `sync`, `access`, `persist` and `version` live — validated nothing,
+  // so `method:` for `methods:` produced a cell with no methods, `presist:`
+  // persisted anyway, and `sync: { mrege: … }` silently resolved every
+  // conflict last-write-wins instead of the strategy the app declared.
+  const unknown = Object.keys(config as Record<string, unknown>)
+    .filter((k) => !VALID_CELL_KEYS.has(k));
+  if (unknown.length > 0) {
+    const hints = unknown.map((k) => {
+      const near = nearestKey(k);
+      return near ? `"${k}" (did you mean "${near}"?)` : `"${k}"`;
+    });
+    throw new Error(
+      `[${name}] cell(): unknown option ${hints.join(", ")}. Valid keys: ` +
+        `${[...VALID_CELL_KEYS].sort().join(", ")}. ` +
+        `A key aio does not read does nothing — silently, until you notice ` +
+        `the behaviour you configured never happened.`,
+    );
+  }
+
   // AIO-5.1: client-scoped cells — browser-local state, sync methods only.
   // Validation happens at cell() time so misuse fails at definition, not at runtime.
   if (config.scope === "client") {
@@ -126,8 +180,8 @@ export function cell(name: string, config: any): any {
     const def = createCellFromMethods(
       name,
       config as MethodsCellConfig<string, Record<string, unknown>>,
+      "client",
     );
-    def.__aio.scope = "client";
     // Raw sync methods — bindCellReactive runs these locally against the cell signal.
     def.__aio.clientMethods = config.methods as Record<
       string,

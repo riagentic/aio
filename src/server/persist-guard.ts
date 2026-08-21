@@ -38,9 +38,40 @@ const LOSSY: Record<string, string> = {
   Set: "{} — every member lost",
   function: "the key is dropped entirely",
   symbol: "the key is dropped entirely",
+  RegExp: "{} — the pattern is lost",
+  Error: "{} — message, stack and cause are all lost",
+  ArrayBuffer: "{} — the bytes are lost",
+  toJSON: "whatever its toJSON() returned, which JSON then dropped or nulled",
 };
 
-/** Classify a raw value, or null when JSON handles it faithfully. */
+/** What a value BECOMES, for a class the list above does not name. */
+function lossyNote(kind: string): string {
+  if (LOSSY[kind]) return LOSSY[kind];
+  if (/Array$/.test(kind)) {
+    return `{"0":…,"1":…} — a plain object, not a ${kind}`;
+  }
+  return `a plain object — the ${kind} prototype (and every method on it) is lost`;
+}
+
+/** True for the two shapes JSON reproduces exactly: a plain object and an
+ *  array. Everything else with a prototype — Map, Set, RegExp, Error, a typed
+ *  array, an app's own class — serializes to something that is NOT what comes
+ *  back, which is the whole point of this file. */
+function isPlainData(raw: object): boolean {
+  if (Array.isArray(raw)) return true;
+  const proto = Object.getPrototypeOf(raw);
+  return proto === Object.prototype || proto === null;
+}
+
+/** Classify a raw value, or null when JSON handles it faithfully.
+ *
+ *  A structural test, not a list of the four built-ins someone thought of:
+ *  `classify` used to name Date/Map/Set and miss RegExp, Error, every typed
+ *  array and ArrayBuffer — all of which land as `{}` or as an object with
+ *  numeric keys, exactly the failure the Map/Set entries describe. Storing an
+ *  Error (`s.lastError = e`) or a Uint8Array of file bytes is ordinary; both
+ *  came back as plain objects on the next boot with nothing said at write
+ *  time. */
 function classify(raw: unknown): string | null {
   if (raw === undefined) return "undefined";
   if (typeof raw === "number") {
@@ -50,9 +81,21 @@ function classify(raw: unknown): string | null {
   }
   if (typeof raw === "function") return "function";
   if (typeof raw === "symbol") return "symbol";
-  if (raw instanceof Date) return "Date";
-  if (raw instanceof Map) return "Map";
-  if (raw instanceof Set) return "Set";
+  if (raw === null || typeof raw !== "object") return null;
+  if (isPlainData(raw)) return null;
+  return raw.constructor?.name || "object";
+}
+
+/** The loss a `toJSON()` creates rather than reveals.
+ *
+ *  `classify` reads the ORIGINAL value off the holder (a Date must be named a
+ *  Date, not "string"), which means a `toJSON()` that itself returns something
+ *  JSON drops — `undefined`, `NaN` — was invisible: the key vanished and the
+ *  guard said nothing. `val` is the post-`toJSON` value, so this sees it. */
+function classifySerialized(raw: unknown, val: unknown): string | null {
+  if (raw === val) return null;
+  if (val === undefined) return "toJSON";
+  if (typeof val === "number" && !Number.isFinite(val)) return "toJSON";
   return null;
 }
 
@@ -80,13 +123,14 @@ export function stringifyWithIssues(
     // `val` has already been through `toJSON` (a Date arrives as a string), so
     // classify the ORIGINAL value off the holder.
     const raw = key === "" ? val : holder?.[key];
-    const kind = classify(raw);
+    const kind = classify(raw) ?? classifySerialized(raw, val);
     if (kind && here) {
-      issues.push({
-        path: here,
-        kind,
-        becomes: LOSSY[kind] ?? "a wrong value",
-      });
+      // An array HOLE is not a dropped key — it becomes `null`, and telling
+      // someone their key vanished sends them looking for the wrong thing.
+      const becomes = kind === "undefined" && Array.isArray(holder)
+        ? "null (an array hole, not a dropped key)"
+        : lossyNote(kind);
+      issues.push({ path: here, kind, becomes });
     }
     if (val !== null && typeof val === "object") {
       pathOf.set(val as object, here);

@@ -16,6 +16,7 @@ import type { BuildConfig } from "./build-config.ts";
 import { VERSION } from "../server/aio-cli.ts";
 import { VERSION_STAMP } from "../protocol/protocol-version.ts";
 import { appIconPng, appIconSvg } from "./app-icon.ts";
+import { misplacedIconHint, resolveAppIcon } from "./build-helpers.ts";
 
 /** Where the bundle's REAL input list is recorded — esbuild's own metafile,
  *  reduced to the local files it actually read.
@@ -99,6 +100,50 @@ async function writeBundleInputs(
     console.warn(
       `[build] \u26a0 could not record the bundle's inputs at ${path}: ${e} — ` +
         `every build will re-run esbuild until this is writable`,
+    );
+  }
+}
+
+/** Throw away the bundle this build produced (or inherited), then refuse.
+ *
+ *  THE rule: a build that refuses leaves nothing behind for the next build to
+ *  ship. It used to leave `dist/app.js` exactly where it was — so re-running
+ *  the SAME command that had just refused found a bundle newer than every
+ *  input, printed `dist/app.js cached`, never re-ran the guard that refused,
+ *  and handed Gradle the unvalidated js. `BUILD SUCCESSFUL`, a 3.2 MB APK, and
+ *  the precise outcome the refusal's own message warns about — reached by
+ *  repeating the command that warned. A field reporter installed that APK
+ *  three times before noticing it was older than their code.
+ *
+ *  Both halves go: the artifact AND its input record. Either one alone leaves
+ *  `isBundleFresh` able to answer "fresh" about a bundle no gate has passed.
+ *
+ *  Never returns. */
+async function refuseBundle(
+  root: string,
+  out: string,
+  ...lines: string[]
+): Promise<never> {
+  for (const line of lines) console.error(line);
+  await _discardBundle(root, out);
+  Deno.exit(1);
+}
+
+/** The removal half of {@linkcode refuseBundle}, separately testable.
+ *  Best-effort by construction: nothing to delete is the success case, and a
+ *  build already refusing must not die a second time over a missing file. */
+export async function _discardBundle(root: string, out: string): Promise<void> {
+  let discarded = false;
+  for (const path of [out, inputsManifestPath(root)]) {
+    try {
+      await Deno.remove(path);
+      discarded = true;
+    } catch { /* not there — the case this exists to guarantee */ }
+  }
+  if (discarded) {
+    console.error(
+      "[build] \u2717 discarded dist/app.js — a refused build ships nothing, " +
+        "so the next run re-checks instead of reusing this one",
     );
   }
 }
@@ -545,8 +590,7 @@ export async function runBundle(
     }
 
     if (!bundleOk) {
-      console.error("[build] \u2717 bundle failed");
-      Deno.exit(1);
+      await refuseBundle(root, out, "[build] \u2717 bundle failed");
     }
 
     // A STATIC server-only import inside the client graph is a broken bundle
@@ -586,7 +630,7 @@ export async function runBundle(
               "of the client graph — or move the code into a `*.server.ts` " +
               "module and import THAT dynamically."),
       );
-      Deno.exit(1);
+      await refuseBundle(root, out);
     }
 
     // A STANDALONE Android build has no Deno runtime — the APK is a Kotlin
@@ -625,7 +669,7 @@ export async function runBundle(
             "(--entry=), or pass --allow-server-only if those paths are " +
             "guarded and never taken on Android.",
         );
-        Deno.exit(1);
+        await refuseBundle(root, out);
       }
     }
 
@@ -681,13 +725,14 @@ export async function runBundle(
   }
 
   // Copy icon.png to dist/ if it exists (same decider as style.css)
-  const iconSrc = join(appDir, "icon.png");
-  let hasIcon = false;
-  try {
-    await Deno.stat(iconSrc);
-    hasIcon = true;
-  } catch { /* no icon.png at the app dir */ }
-  if (hasIcon) {
+  const { icon: iconSrc, misplaced: misplacedIcon } = await resolveAppIcon(
+    root,
+    appDir,
+  );
+  if (misplacedIcon) {
+    console.warn(`[build] \u26a0 ${misplacedIconHint(misplacedIcon, appDir)}`);
+  }
+  if (iconSrc) {
     await Deno.copyFile(iconSrc, join(dist, "icon.png"));
     await Deno.remove(join(dist, "icon.svg")).catch(() => {});
     console.log("[build] \u2713 dist/icon.png");

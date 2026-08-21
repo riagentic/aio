@@ -133,7 +133,12 @@ export type SyncResponse =
   | {
     mode: "incremental";
     ops: SyncOp[];
-    rebase?: SyncOp[];
+    // No `rebase?: SyncOp[]` here. It was declared, read by the client
+    // (`handleSyncResponse` fed its HLCs into the clock) and NEVER written by
+    // the server — dead on both sides, and the kind of dead that reads as
+    // protocol: someone maintaining either half would reasonably preserve it.
+    // A server-driven rebase, if it is ever wanted, is a wire change with its
+    // own version bump, not a field waiting quietly in a type.
     lowWater: HLC | Record<string, HLC>;
     /** Per-cell server_ts cursor — reserved under each cell's lock, so ops
      *  the client hasn't seen are strictly above it (no re-delivery). */
@@ -163,9 +168,43 @@ export const SYNC_DEFAULTS = {
 
  *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
  */
+/** Every key a cell's `sync:` object may carry. Same rule as `cell()`'s own
+ *  option check: a key nothing reads is a feature that silently does not
+ *  exist, and here the cost is the highest in the framework — `sync: { mrege:
+ *  { count: "counter" } }` resolves every conflict last-write-wins instead of
+ *  the strategy the app declared, and the symptom is lost data, later, on
+ *  someone else's machine. */
+const VALID_SYNC_KEYS: ReadonlySet<string> = new Set([
+  "merge",
+  "identity",
+  "offline",
+  "onConflict",
+  "onSync",
+  "onRejected",
+]);
+
+/** `sync: true` or a partial config → the complete one every consumer reads.
+ *
+ *  THE place a cell's sync options are resolved, and the place a misspelled one
+ *  is refused: `sync: { mrege: … }` used to resolve every conflict
+ *  last-write-wins while the app believed it had declared a strategy. A key aio
+ *  does not read does nothing, silently, until you notice the behaviour you
+ *  configured never happened — so an unknown key throws here, naming it and
+ *  listing what is valid.
+ *
+ *  Pure: same input, same output, no defaults read from anywhere else. */
 export function normalizeSyncConfig(
   raw: true | Partial<SyncConfig>,
 ): SyncConfig {
+  if (raw && raw !== true && typeof raw === "object") {
+    const unknown = Object.keys(raw).filter((k) => !VALID_SYNC_KEYS.has(k));
+    if (unknown.length > 0) {
+      throw new Error(
+        `sync: unknown option ${unknown.map((k) => `"${k}"`).join(", ")}. ` +
+          `Valid keys: ${[...VALID_SYNC_KEYS].sort().join(", ")}.`,
+      );
+    }
+  }
   if (raw === true) {
     return {
       merge: {},

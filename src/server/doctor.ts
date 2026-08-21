@@ -8,7 +8,11 @@
  */
 import { resolve } from "@std/path";
 import { meetsMinDeno, MIN_DENO } from "./deno-version.ts";
-import { linkSatisfiesPin, pinnedFrameworkPath } from "./framework-pin.ts";
+import {
+  linkSatisfiesPin,
+  pinDisagreementHint,
+  pinnedFrameworkPath,
+} from "./framework-pin.ts";
 import { VERSION } from "./aio-cli.ts";
 import { buildContext } from "../../aiol/context.ts";
 import {
@@ -90,6 +94,9 @@ interface DenoJson {
   imports?: Record<string, string>;
   unstable?: string[];
   nodeModulesDir?: string | boolean;
+  /** Read to ask what this app actually DOES — a dependency only some apps
+   *  need is checked only where its task exists. */
+  tasks?: Record<string, string>;
 }
 
 /** Pull the pinned aio version out of an import-map spec, or null. Handles
@@ -167,9 +174,14 @@ export async function runDoctor(
         // the rule here made a local-dev `path:` pin fail forever, with `am fix`
         // — which recreates that exact link — as the "fix".
         ok: linked === null || linkSatisfiesPin(pin, linked),
-        fix: `dep/aio points at ${linked}, not ${
-          pinnedFrameworkPath(pin)
-        } — run \`am fix\``,
+        // A CHECKOUT that is simply not under the version store is a choice,
+        // not a defect — and "run `am fix`" is the one exit that throws the
+        // choice away. `pinDisagreementHint` is THE decider for saying so, so
+        // doctor and aiol cannot word it differently.
+        fix: (linked !== null ? pinDisagreementHint(pin, linked) : null) ??
+          `dep/aio points at ${linked}, not ${
+            pinnedFrameworkPath(pin)
+          } — run \`am fix\``,
       });
     }
   }
@@ -199,14 +211,40 @@ export async function runDoctor(
     });
   }
 
-  // Vendored mode: aio maps to a relative path → immer + @std/path must be present
+  // Vendored mode: aio maps to a relative path, so AIO's OWN dependencies
+  // resolve through the APP's import map. Miss one and the app type-checks
+  // cleanly, then fails at boot, at build, or in `testUI` — which is where a
+  // field report found the other two: `immer` and `@std/path` were listed here,
+  // `esbuild` and `happy-dom` were not, and they were discovered one failure at
+  // a time. Four now, and the two that are not needed by every app are asked
+  // for only where they are used, so this cannot become a permanent red on an
+  // app that has no build step or no UI (a report filed that class too).
   const aioTarget = imports["aio"] ?? "";
   if (aioTarget.startsWith("./") || aioTarget.startsWith("../")) {
-    for (const dep of ["immer", "@std/path"]) {
+    const tasks = Object.values(cfg.tasks ?? {}).join("\n");
+    const builds = /build\.ts|build-all\.ts|--compile|compile:/.test(tasks);
+    const tests = /deno test|\btest\b/.test(tasks);
+    const vendored: Array<[string, boolean, string]> = [
+      [
+        "immer",
+        true,
+        "the state model itself — a cell cannot commit without it",
+      ],
+      ["@std/path", true, "used on every path aio resolves"],
+      ["esbuild", builds, "the bundler `deno task build`/`compile` runs"],
+      [
+        "happy-dom",
+        tests,
+        "the DOM `testUI` renders into — without it UI tests fail at import",
+      ],
+    ];
+    for (const [dep, needed, why] of vendored) {
+      if (!needed) continue;
       checks.push({
         name: `vendored aio: "${dep}" in import map`,
         ok: dep in imports,
-        fix: `add "${dep}" to imports — vendored aio resolves it from your map`,
+        fix: `add "${dep}" to imports — vendored aio resolves it from your ` +
+          `map, and it is ${why}. \`am fix\` writes the whole set.`,
       });
     }
   }

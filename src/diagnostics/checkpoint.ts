@@ -164,6 +164,11 @@ export function createCheckpoint(
   function schedule(data: CheckpointData): void {
     pending = data;
     if (debounceMs <= 0) {
+      // Consumed, not left behind: `pending` outliving its own write made
+      // `flush()` (the shutdown path) write the identical checkpoint a second
+      // time. Idempotent, and still one avoidable disk write at the moment the
+      // process is trying to leave.
+      pending = null;
       write(data).catch((e) => log.error(`[checkpoint] write failed: ${e}`)); // AIO-279: log instead of swallow
       return;
     }

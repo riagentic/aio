@@ -409,6 +409,26 @@ export function bindCellReactive(
     }
   }
 
+  /** Is this an effect a client-scoped cell can never run — and which kind?
+   *
+   *  A HAND-KEPT TWIN of `isOwnEffect` (own.ts) and `isScheduleEffect`
+   *  (schedule.ts), and deliberately not an import of them: this module is
+   *  browser-reachable, `schedule.ts` pulls `blocking.ts` and the Deno worker
+   *  pool behind it, and widening the browser graph to reach a two-line type-tag
+   *  check is the trade `import type` is used for everywhere else in this file's
+   *  neighbours (`dispatch.ts`, `cell-impl.ts`). The twin is not trusted on its
+   *  own — `tests/client-cell-return.test.ts` feeds REAL effects, built through
+   *  the real `own.set()` / `schedule.after()`, through this predicate, so a new
+   *  effect kind or a renamed tag fails there rather than going quiet here. */
+  function deadClientEffect(e: unknown): "own" | "schedule" | null {
+    const tag = typeof e === "object" && e !== null
+      ? (e as { type?: unknown }).type
+      : undefined;
+    if (tag === "__own") return "own";
+    if (tag === "__schedule") return "schedule";
+    return null;
+  }
+
   // AIO-5.1: client-scoped cells — methods run locally against the cell signal,
   // synchronously, with no server dispatch. Each binding (tab) owns its slice.
   if (def.__aio.scope === "client") {
@@ -432,10 +452,29 @@ export function bindCellReactive(
           enumerable: false,
           configurable: true,
         });
-        method(next, ...args);
+        const returned = method(next, ...args);
         delete (next as Record<string, unknown>)["$do"];
         sig.set(next);
-        return Promise.resolve();
+        // A client cell has no effect runtime, so an effect RETURNED from a
+        // method is as dead as one passed to `s.$do` — and was dropped without
+        // a word. Same treatment, same words: the silent no-op is the bug.
+        const dead = deadClientEffect(returned);
+        if (dead) {
+          throw new Error(
+            `[${cellName}] ${key}(): returning a ${dead} effect does nothing ` +
+              `in a scope: "client" cell — client cells have no effect ` +
+              `runtime. Do timer work in the component (useInterval), or ` +
+              `move the method to a server cell.`,
+          );
+        }
+        // The method's own return value, which used to be thrown away: a sync
+        // method that returns transports its value to the caller on the server
+        // path (`markReturn` → the ack frame), and the SAME method on a
+        // `scope: "client"` cell resolved `undefined` forever. Documented as a
+        // load-bearing parity contract in docs/state/methods.md — "in-process
+        // callers always get the raw value" — and a client cell is the most
+        // in-process caller there is: no wire, so no JSON requirement either.
+        return Promise.resolve(returned);
       };
       const label = `${cellName}:${key}`;
       const creator = Object.assign(

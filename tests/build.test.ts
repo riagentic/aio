@@ -6,7 +6,7 @@ import {
   slugify,
   writeDefaultIcon,
 } from "../src/build/build-helpers.ts";
-import { apkArtifact } from "../src/build/build-android.ts";
+import { _cleartextAttr, apkArtifact } from "../src/build/build-android.ts";
 import { ANDROID_TEMPLATE } from "../src/build/android-template.ts";
 
 const buildScript = join(import.meta.dirname ?? ".", "..", "src", "build.ts");
@@ -210,6 +210,21 @@ Deno.test("build: --service + --compile does not conflict", async () => {
   // --service is not a shell flag, so --compile + --service is valid
   const { stderr } = await runBuild(["--compile", "--service"]);
   assertEquals(stderr.includes("conflicting flags"), false);
+});
+
+// A bare `--service` used to build a bundle and exit 0 (ds4 L24). The unit file
+// it writes points at a compiled binary, so alone it describes a file that will
+// never exist — a successful-looking command that did a fraction of what its
+// flag says. The pipeline refuses it now, naming the combination that works.
+Deno.test("build: bare --service is refused, not half-done", async () => {
+  const { code, stderr, stdout } = await runBuild(["--service"]);
+  assertEquals(code, 1, `must refuse:\n${stdout}${stderr}`);
+  const out = stderr + stdout;
+  assert(out.includes("--service"), out);
+  assert(
+    out.includes("--compile --service"),
+    `it must name the combination that works: ${out}`,
+  );
 });
 
 // ── --name flag slugification ──────────────────────────────
@@ -1085,5 +1100,62 @@ Deno.test("writeServiceFile: a title cannot inject systemd directives", async ()
   } finally {
     Deno.chdir(cwd);
     await Deno.remove(dir, { recursive: true }).catch(() => {});
+  }
+});
+
+// Cleartext is ONE decision, and the client APK is on the wrong side of it.
+//
+// Android blocks cleartext from targetSdk 28; this template is 34. The
+// attribute that permits it used to be injected by the `dev:android` rewrite
+// and nowhere else, so the dev loop reached a plain-http server and the
+// `--android --remote` client APK that loop exists to produce could not reach
+// the same one — `net::ERR_CLEARTEXT_NOT_PERMITTED` on a target whose entire
+// UI is a box for the server's URL, and whose documented server is `--expose`,
+// which serves plain http unless `tls` is set. One decider now, and a
+// standalone APK still gets nothing: it has no server to reach.
+Deno.test("android manifest: cleartext is permitted exactly where a server is dialled", () => {
+  assertEquals(
+    _cleartextAttr({ remote: true }),
+    'android:usesCleartextTraffic="true"',
+    "the client APK's whole purpose is a plain-http LAN server",
+  );
+  assertEquals(
+    _cleartextAttr({ devUrl: "http://127.0.0.1:8000" }),
+    'android:usesCleartextTraffic="true"',
+    "dev:android reaches the dev server over adb reverse",
+  );
+  assertEquals(
+    _cleartextAttr({}),
+    "",
+    "a standalone APK loads packaged assets over https and dials nothing — " +
+      "cleartext would be permission for nothing",
+  );
+  assertEquals(_cleartextAttr({ devUrl: null, remote: false }), "");
+});
+
+// The other half: the manifest must actually HAVE the hole this fills, and
+// must not carry a second, hardcoded spelling of the answer.
+Deno.test("android manifest: the template asks for the cleartext decision", () => {
+  const manifest = ANDROID_TEMPLATE["app/src/main/AndroidManifest.xml"]!;
+  assert(
+    manifest.includes("{{CLEARTEXT_ATTR}}"),
+    "the placeholder is where the decider's answer lands",
+  );
+  assertEquals(
+    /usesCleartextTraffic/.test(manifest.replace("{{CLEARTEXT_ATTR}}", "")),
+    false,
+    "a hardcoded attribute would answer the question twice",
+  );
+  // Every placeholder in the manifest must be substituted by the build. An
+  // unreplaced `{{…}}` is not a warning — aapt2 fails, or worse, ships.
+  const src = Deno.readTextFileSync(
+    new URL("../src/build/build-android.ts", import.meta.url),
+  );
+  for (const ph of new Set(manifest.match(/\{\{[A-Z_]+\}\}/g) ?? [])) {
+    assert(
+      src.includes(`"${ph}"`),
+      `${ph} is in the manifest template with nothing in build-android.ts to ` +
+        `replace it`,
+    );
   }
 });

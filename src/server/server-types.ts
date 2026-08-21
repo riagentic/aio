@@ -45,6 +45,7 @@ export interface ServerConfig {
   uiEntry?: string; // AIO-8.1: UI entry file relative to baseDir (default: App.tsx)
   viewport?: string | false; // AIO-423: <meta viewport> override (false = omit)
   headExtra?: string; // AIO-423: verbatim extra <head> content
+  lang?: string; // ui.lang — <html lang>, default "en"
   chrome?: "standard" | "themed" | "none"; // ui.chrome — desktop window frame
   theme?: UiTheme; // ui.theme — how much of the default look is emitted
   themeName?: string; // identity the theme accent is derived from (appId)

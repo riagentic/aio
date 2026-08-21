@@ -173,6 +173,7 @@
 - [Upgrading from alpha60 to alpha61](upgrade/from-alpha60-to-alpha61.md) — Nothing breaks.
 - [Upgrading from alpha61 to alpha62](upgrade/from-alpha61-to-alpha62.md) — Nothing breaks in your app's code.
 - [Upgrading from alpha62 to alpha63](upgrade/from-alpha62-to-alpha63.md) — One default flips, and it flips towards your app: aio's stylesheet no longer
+- [Upgrading from alpha63 to alpha64](upgrade/from-alpha63-to-alpha64.md) — Nothing in your app code changes.
 - [Upgrade from v1.0.0-alpha7 to v1.0.0-alpha8](upgrade/from-alpha7-to-alpha8.md) — None.
 - [Upgrade from v1.0.0-alpha8 to v1.0.0-alpha9](upgrade/from-alpha8-to-alpha9.md) — The internal machine state field is renamed.
 - [Upgrade from v1.0.0-alpha9 to v1.0.0-alpha10](upgrade/from-alpha9-to-alpha10.md) — Alpha10 is fully additive.

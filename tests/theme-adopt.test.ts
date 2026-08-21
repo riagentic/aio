@@ -83,24 +83,13 @@ Deno.test("adopt composes with ui.theme:auto — exactly ONE theme exists", asyn
     // `ui.theme: "auto"` steps aside for — so the framework stops emitting
     // its copy and the adopted file is the only one. No new switch, and no
     // way to end up with two.
-    const shell = generateHTML(
-      "shop",
-      true,
-      /* hasCSS (adopt created style.css) */ true,
-      "{}",
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      "shop",
-    );
+    const shell = generateHTML({
+      title: "shop",
+      prod: true,
+      hasCSS: true,
+      importMap: "{}",
+      themeName: "shop",
+    });
     assert(
       !shell.includes(":where(main)"),
       "the framework still emitted its own theme next to the adopted one",

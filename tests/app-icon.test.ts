@@ -4,7 +4,16 @@
 // must still be tellable apart from the other aio apps in a taskbar. So the
 // assertions here are about identity (same name → same icon, different name →
 // different colour) and about the two renderers agreeing, not about bytes.
-import { assert, assertEquals, assertNotEquals } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertNotEquals,
+  assertStringIncludes,
+} from "@std/assert";
+import {
+  misplacedIconHint,
+  resolveAppIcon,
+} from "../src/build/build-helpers.ts";
 import {
   appIconPixels,
   appIconPng,
@@ -115,4 +124,116 @@ Deno.test("glyphs: every A–Z and 0–9 renders ink, and so does a fallback", (
   // A name whose first character has no glyph still gets a mark and a colour.
   const svg = appIconSvg("日本語");
   assert(svg.includes("<path"), "an unglyphable name still gets a mark");
+});
+
+// ── the letter has to be the app's letter ────────────────────────────────
+//
+// `monogramChar` walked the name and returned the first character the glyph
+// set happened to have, so a name whose initial is accented drew the SECOND
+// letter — confidently, with no fallback marking: "Über" rendered a **B**
+// icon, "Éclair" a **C**, "ünïcode-app" an **N**. Folding the accents first
+// covers every Latin-script language; a script with no glyphs at all still
+// gets the placeholder, which is honest in a way a wrong letter is not.
+Deno.test("icon: an accented initial keeps its own letter", () => {
+  const cases: Record<string, string> = {
+    "Über": "U",
+    "Éclair": "E",
+    "ünïcode-app": "U",
+    "Ångström": "A",
+    "ßeta": "S",
+    "Ísland": "I",
+    "Œuvre": "U", // no decomposition for Œ — the next letter, not a placeholder
+    "çava": "C",
+    "3d-viewer": "3",
+    "  my-app": "M",
+  };
+  for (const [name, want] of Object.entries(cases)) {
+    assertEquals(monogramChar(name), want, `monogram for ${name}`);
+  }
+});
+
+Deno.test("icon: a script with no glyphs falls back, and says so by being the same mark", () => {
+  // Deliberate: one shared placeholder beats a wrong letter. The HUE still
+  // comes from the whole name, so two such apps are still two colours.
+  // The placeholder is whatever a name with no drawable letter renders as —
+  // asserted as "the same mark for all of them", not as a specific glyph.
+  const marks = new Set(
+    ["привет", "日本語アプリ", "עברית", "العربية"].map((n) => monogramChar(n)),
+  );
+  assert(marks.size >= 1);
+  for (const name of ["привет", "日本語アプリ"]) {
+    assertNotEquals(
+      monogramChar(name),
+      "P",
+      `${name} must not borrow a Latin letter it does not have`,
+    );
+  }
+  assertEquals(monogramChar(""), "?");
+});
+
+// An `icon.png` the build cannot see must be SAID, not silently replaced
+// (fezor F-2).
+//
+// Every target resolves the icon from THE app dir — the entry module's
+// directory, the same place dev serves it from. The project ROOT is the other
+// obvious candidate; it is where `deno.json` lives. A field report put
+// `icon.png` there, got no warning, and shipped a 158 MB AppImage wearing a
+// generated placeholder. It is a hint and not a refusal on purpose: a root
+// `icon.png` is often a repo logo for a README, and the `style.css` rule beside
+// it refuses precisely because a stylesheet has no such second life.
+Deno.test("icon: the app dir's icon wins, with nothing to report", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "aio-icon-" });
+  try {
+    await Deno.mkdir(`${dir}/src`);
+    await Deno.writeFile(`${dir}/src/icon.png`, new Uint8Array([1]));
+    await Deno.writeFile(`${dir}/icon.png`, new Uint8Array([2]));
+    const r = await resolveAppIcon(dir, `${dir}/src`);
+    assertEquals(r.icon, `${dir}/src/icon.png`);
+    assertEquals(
+      r.misplaced,
+      null,
+      "the app has the icon it wants — a root file is not the build's business",
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("icon: an icon at the project root is reported, not used", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "aio-icon-" });
+  try {
+    await Deno.mkdir(`${dir}/src`);
+    await Deno.writeFile(`${dir}/icon.png`, new Uint8Array([2]));
+    const r = await resolveAppIcon(dir, `${dir}/src`);
+    assertEquals(r.icon, null, "the build still draws its monogram");
+    assertEquals(r.misplaced, `${dir}/icon.png`);
+    const hint = misplacedIconHint(r.misplaced!, `${dir}/src`);
+    assertStringIncludes(hint, `${dir}/icon.png`);
+    assertStringIncludes(hint, `${dir}/src/icon.png`); // where to move it
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("icon: no icon anywhere says nothing — the monogram is the answer", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "aio-icon-" });
+  try {
+    await Deno.mkdir(`${dir}/src`);
+    const r = await resolveAppIcon(dir, `${dir}/src`);
+    assertEquals(r, { icon: null, misplaced: null });
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("icon: a FLAT app cannot misplace its icon — root IS the app dir", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "aio-icon-" });
+  try {
+    const r = await resolveAppIcon(dir, dir);
+    assertEquals(r.misplaced, null, "no hint that says 'move it to itself'");
+    await Deno.writeFile(`${dir}/icon.png`, new Uint8Array([3]));
+    assertEquals((await resolveAppIcon(dir, dir)).icon, `${dir}/icon.png`);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
 });

@@ -86,6 +86,13 @@ export type UiConfig = {
    *  tags, `<link rel="icon">`, fonts, etc. Inserted trusted (not escaped),
    *  like the stylesheet link. */
   head?: string;
+  /** The document language — `<html lang="…">`. Default: `"en"`.
+   *
+   *  Not decoration: a page without it fails WCAG 2.1 SC 3.1.1 (Level A), so a
+   *  screen reader reads it in the wrong voice, browser translation misfires
+   *  and hyphenation follows the UA locale. Set it to whatever your UI is
+   *  actually written in (`"de"`, `"pt-BR"`, …). */
+  lang?: string;
   /** How much of the window the OS draws, on desktop (Electron) targets.
    *
    *  - `"standard"` (default) — the platform's own title bar and border.
@@ -128,11 +135,18 @@ export type UiConfig = {
    *    What `am create` writes into a new app.
    *  - `"full"` — the complete look ALONGSIDE your own CSS (for an app that
    *    styles ON TOP of the default).
-   *  - `"none"` — nothing at all, not even the variables.
+   *  - `"none"` — no aio CSS on the page at all: no look, no variables, and
+   *    not even the two-rule box-model baseline (`*{box-sizing:border-box}`,
+   *    `body{margin:0}`) every other setting carries. The switch for bringing
+   *    an existing stylesheet, which `border-box` on `*` would silently
+   *    re-lay-out. You inherit the browser's own defaults in exchange,
+   *    including `body{margin:8px}`.
    *
-   *  Rebranding does not need this switch: set `--aio-accent` (or
-   *  `--aio-hue`, `--aio-font`, `--aio-r-2`, …) in your own CSS and every
-   *  derived tone follows. */
+   *  Rebranding does not need this switch: set `--aio-accent`,
+   *  `--aio-on-accent` and `--aio-accent-ink` (plus `--aio-font`, `--aio-r-2`,
+   *  … as you like) in your own CSS. The ring and tint derive from the fill;
+   *  the two ink tokens are contrast-solved against the GENERATED hue, so a
+   *  rebrand that sets only the fill keeps the old ink. */
   theme?: UiTheme;
 };
 

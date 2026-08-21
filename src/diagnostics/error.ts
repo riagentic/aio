@@ -130,6 +130,9 @@ const THROTTLED_CODES: Set<AioErrorCode> = new Set([
   "LOOP_SATURATED",
 ]);
 const _perfThrottleMs = 10_000;
+/** When the throttle bookkeeping is swept for expired keys. Not a hard limit:
+ *  every entry within the throttle window is still live and stays. */
+const _PERF_KEYS_SOFT_CAP = 512;
 const _perfLastReported = new Map<string, number>();
 const _perfSuppressed = new Map<string, number>();
 
@@ -150,6 +153,21 @@ function _perfThrottle(
     return { suppress: true, coalesced: 0 };
   }
   _perfLastReported.set(key, now);
+  // Bounded, because the KEY is unbounded: it carries the action type, and an
+  // app with dynamic action types (`workspace:fsChanged`, one per file) grows a
+  // new entry per distinct action forever — a slow leak in the subsystem whose
+  // job is reporting leaks, on the process that runs longest. An entry older
+  // than the throttle window can never suppress anything again, so it is
+  // exactly the entry to drop; the sweep only runs when the map is large, so
+  // the common case pays nothing.
+  if (_perfLastReported.size > _PERF_KEYS_SOFT_CAP) {
+    for (const [k, t] of _perfLastReported) {
+      if (now - t >= _perfThrottleMs) {
+        _perfLastReported.delete(k);
+        _perfSuppressed.delete(k);
+      }
+    }
+  }
   const coalesced = _perfSuppressed.get(key) ?? 0;
   _perfSuppressed.delete(key);
   return { suppress: false, coalesced };

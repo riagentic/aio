@@ -81,24 +81,22 @@ Deno.test("localFirst: the decision reaches the browser through the page shell",
   // Without this the client would keep dispatching to the server and localFirst
   // would be a server-side no-op that LOOKS enabled — the silent-half-feature
   // failure. The shell is the same channel the render budget already uses.
-  const html = generateHTML(
-    "t",
-    true,
-    false,
-    "{}",
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    ["lf-notes2", "lf-tuned"],
-  );
+  const html = generateHTML({
+    title: "t",
+    prod: true,
+    hasCSS: false,
+    importMap: "{}",
+    syncCells: ["lf-notes2", "lf-tuned"],
+  });
   assert(html.includes("window.__aioConfig="), html.slice(0, 400));
   assert(html.includes('"syncCells":["lf-notes2","lf-tuned"]'), html);
 
-  const none = generateHTML("t", true, false, "{}");
+  const none = generateHTML({
+    title: "t",
+    prod: true,
+    hasCSS: false,
+    importMap: "{}",
+  });
   assert(!none.includes("syncCells"), "no cells ⇒ no config noise");
 });
 

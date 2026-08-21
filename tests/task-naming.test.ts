@@ -27,6 +27,11 @@ const VERBS = new Set([
   "bench",
   "build",
   "check",
+  // `fmt` is the verb Deno (and Go before it) uses for "format", and
+  // `deno task fmt` was the one gate in the release kata with no task behind
+  // it — a gap people tripped over, and a grammar hole: every other gate is a
+  // task. Widening the vocabulary by one word is the smaller cost.
+  "fmt",
   "compile",
   "dev",
   "discover",

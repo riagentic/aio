@@ -43,9 +43,75 @@ Deno.test("ui: UiStyles renders the base stylesheet with themeable tokens", asyn
   await using ui = await mount(() => h("div", null, h(UiStyles, null)));
   const html = ui.html();
   assertStringIncludes(html, "<style");
-  assertStringIncludes(html, "--aio-accent");
+  assertStringIncludes(html, "--aio-ui-accent");
   // dark theme ships too
   assertStringIncludes(UI_CSS, "prefers-color-scheme: dark");
+});
+
+// ── ONE `--aio-*` vocabulary ────────────────────────────────────────────
+//
+// The kit and the default theme (src/build/app-theme.ts) both write `:root`
+// custom properties into the same page. They used to share six names, and two
+// of them meant OPPOSITE things: the kit's `--aio-accent-ink` was the ink ON an
+// accent fill, the theme's is the accent AS TEXT on the page — so a kit button
+// rendered on a themed page without <UiStyles/> painted accent text on an
+// accent background. Worse, the kit's `:root` is UNLAYERED, so it beat the
+// theme's `@layer aio` block for every shared name and replaced the app's
+// identity hue with a flat blue wherever the kit rendered.
+//
+// The rule now: the kit owns `--aio-ui-*` and nothing else, and each of its
+// tokens DEFAULTS to the theme's token of the same meaning.
+Deno.test("ui: the kit defines only --aio-ui-* tokens", () => {
+  const defined = [...UI_CSS.matchAll(/^\s*(--aio-[\w-]+)\s*:/gm)]
+    .map((m) => m[1]!);
+  const strays = [...new Set(defined)].filter((n) =>
+    !n.startsWith("--aio-ui-")
+  );
+  assertEquals(
+    strays,
+    [],
+    "the kit must not define tokens in the theme's namespace — it wins " +
+      "(unlayered) and silently replaces the app's palette",
+  );
+  assert(defined.length >= 10, "…and it must still define its own");
+});
+
+Deno.test("ui: every kit token falls back to the theme's equivalent", () => {
+  // Not cosmetic: this is what makes an app that opted into ui.theme get kit
+  // components in ITS colour, and an app that did not keep the kit's own look.
+  const THEME: Record<string, string> = {
+    "--aio-ui-accent": "--aio-accent",
+    "--aio-ui-on-accent": "--aio-on-accent",
+    "--aio-ui-bg": "--aio-surface",
+    "--aio-ui-surface": "--aio-surface-2",
+    "--aio-ui-ink": "--aio-text",
+    "--aio-ui-ink-soft": "--aio-muted",
+    "--aio-ui-line": "--aio-border",
+    "--aio-ui-danger": "--aio-danger",
+    "--aio-ui-radius": "--aio-r-2",
+    "--aio-ui-font": "--aio-font",
+  };
+  const pairs = [...UI_CSS.matchAll(/^\s*(--aio-ui-[\w-]+):\s*([^;]+);/gm)];
+  assert(pairs.length >= 10);
+  for (const [, name, value] of pairs) {
+    const theme = THEME[name!];
+    assert(theme, `unexpected kit token ${name} — add it to the table`);
+    assert(
+      value!.includes(`var(${theme},`),
+      `${name} must read the theme's ${theme}: ${value}`,
+    );
+    // …and never a bare theme-namespace name OTHER than its legacy alias
+    // (which sits first, so an app's old reskin still wins).
+    const reads = [...value!.matchAll(/var\((--aio-[\w-]+)/g)].map((m) => m[1]);
+    for (const r of reads) {
+      assert(
+        r === theme || r!.startsWith("--aio-ui-") ||
+          ["--aio-ink", "--aio-ink-soft", "--aio-line", "--aio-radius"]
+            .includes(r!),
+        `${name} reads ${r}, which is neither its theme token nor its legacy alias`,
+      );
+    }
+  }
 });
 
 Deno.test("ui: Button renders variant + size classes and fires onClick", async () => {

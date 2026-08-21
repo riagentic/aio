@@ -8,10 +8,12 @@ import {
   findJdk,
   GRADLE_MAX_JDK,
   type JdkResult,
+  misplacedIconHint,
+  resolveAppIcon,
   resolveSdk,
 } from "./build-helpers.ts";
 import { ANDROID_TEMPLATE } from "./android-template.ts";
-import { androidLocalHTML } from "../server/server-html-gen.ts";
+import { androidLocalHTML, htmlOpen } from "../server/server-html-gen.ts";
 import type { BuildConfig } from "./build-config.ts";
 import { appIconPng } from "./app-icon.ts";
 
@@ -107,12 +109,16 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
     .replace(/"/g, "&quot;");
 
   // Check for user icon — from THE app-dir decider (cfg.appDir)
-  const iconPath = join(cfg.appDir, "icon.png");
-  let hasIcon = false;
-  try {
-    await Deno.stat(iconPath);
-    hasIcon = true;
-  } catch { /* no icon — the default monogram is generated below */ }
+  const { icon: iconPath, misplaced: misplacedIcon } = await resolveAppIcon(
+    cfg.root,
+    cfg.appDir,
+  );
+  const hasIcon = iconPath !== null;
+  if (misplacedIcon) {
+    console.warn(
+      `[android] \u26a0 ${misplacedIconHint(misplacedIcon, cfg.appDir)}`,
+    );
+  }
 
   // Replace placeholders in template files
   const xmlFiles = new Set(["app/src/main/AndroidManifest.xml"]);
@@ -133,6 +139,10 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
     content = content.replaceAll(
       "{{ICON_ATTR}}",
       'android:icon="@mipmap/ic_launcher"',
+    );
+    content = content.replaceAll(
+      "{{CLEARTEXT_ATTR}}",
+      _cleartextAttr({ devUrl: cfg.androidDevUrl, remote: doRemote }),
     );
     await Deno.writeTextFile(path, content);
   }
@@ -186,6 +196,32 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
     doRelease,
   );
   Deno.exit(0);
+}
+
+/** Does this APK need to talk to a plaintext `http://` / `ws://` server?
+ *
+ *  Android blocks cleartext by default from targetSdk 28 (this template is 34),
+ *  so an APK without this attribute reaches a plain-http server not at all —
+ *  `net::ERR_CLEARTEXT_NOT_PERMITTED`, on a target whose whole purpose is
+ *  "enter your server's URL". It used to be added by the dev rewrite ALONE, so
+ *  `dev:android` worked and the `--android --remote` client APK it is meant to
+ *  become could not reach the same server: the second decider, in the shape
+ *  where only one of the two knows the rule.
+ *
+ *  Both cases here are a client of a server the developer chose and can see — a
+ *  dev server over `adb reverse`, or a LAN server run with `--expose`, which
+ *  serves plain http unless `tls` is set. A STANDALONE APK gets nothing: it
+ *  loads packaged assets over the asset loader's https origin and has no server
+ *  to reach, so cleartext would be permission for nothing.
+ *
+ *  (Separate from the WebView's own mixed-content rule — a packaged https page
+ *  may still not open a `ws://` socket. See docs/build/targets.md.) */
+export function _cleartextAttr(
+  opts: { devUrl?: string | null; remote?: boolean },
+): string {
+  return opts.devUrl || opts.remote
+    ? 'android:usesCleartextTraffic="true"'
+    : "";
 }
 
 /**
@@ -246,7 +282,7 @@ export async function _writeConnectPage(
   bakedServer?: string | null,
 ): Promise<void> {
   const connectHtml = `<!DOCTYPE html>
-<html>
+${htmlOpen()}
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -317,14 +353,25 @@ async function _writeLocalAssets(
   // Raw title: androidLocalHTML escapes it itself (escHtml in headContent).
   // The packaged APK's shell renders the same default dev does, keyed on the
   // same identity — an app that is one colour on the desktop and another on
-  // the phone is not one app. `ui.theme` itself is set in code (`aio.run()`),
-  // which a build cannot read, so the shell carries the framework DEFAULT:
-  // the inert `--aio-*` tokens, nothing that paints. An app that opts into the
-  // full look on the desktop must bring its own CSS to the APK — tracked in
-  // todo.md as the one ui.* key the APK shell cannot see.
+  // the phone is not one app. `ui.theme` is set in code, which a build cannot
+  // read, so the shell carries BOTH: the inert tokens (active) and the full
+  // look (disabled), and `_applyShellUi` in the standalone runtime enables the
+  // second one when the app asked for it.
   const androidHtml = androidLocalHTML(appTitle ?? binaryName, hasCSS, {
     themeName: binaryName,
   });
+  // Never a silent drop (.katana/core.md): the packaged shell is written before
+  // `aio.run()` exists, so the `<head>` keys set in code cannot reach it. Two
+  // of them now travel with the bundle instead (`ui.theme` as a disabled sheet
+  // the standalone runtime enables, `ui.lang` set at boot); the rest cannot,
+  // and a build that quietly stops being the app the config describes is the
+  // bug this line exists to prevent.
+  console.log(
+    "[android] note: the packaged shell is built before aio.run() runs — " +
+      "ui.head, ui.viewport and ui.showStatus cannot reach it " +
+      "(ui.theme and ui.lang do, applied at boot). " +
+      "Use --android --remote if your app depends on them.",
+  );
   await Deno.copyFile(join(dist, "app.js"), join(assetsDir, "app.js"));
   await Deno.writeTextFile(join(assetsDir, "index.html"), androidHtml);
   if (hasCSS) {
@@ -435,14 +482,8 @@ async function _applyDevUrl(androidDir: string, devUrl: string): Promise<void> {
     "return false",
   );
   await Deno.writeTextFile(actPath, act);
-
-  const manifestPath = join(androidDir, "app/src/main/AndroidManifest.xml");
-  let manifest = await Deno.readTextFile(manifestPath);
-  manifest = manifest.replace(
-    'android:allowBackup="false"',
-    'android:allowBackup="false"\n        android:usesCleartextTraffic="true"',
-  );
-  await Deno.writeTextFile(manifestPath, manifest);
+  // Cleartext is NOT patched in here — see `_cleartextAttr`, which decides it
+  // for the dev build and the remote client alike, at placeholder time.
 }
 
 /** Force Gradle onto the resolved JDK(s) so its toolchain resolver can only pick

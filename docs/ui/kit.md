@@ -28,15 +28,45 @@ export default function App() {
 }
 ```
 
-Everything keys off `--aio-*` tokens with a light + dark default (follows
-`prefers-color-scheme`). Reskin by overriding tokens in your own CSS:
+Everything keys off `--aio-ui-*` tokens with a light + dark default (follows
+`prefers-color-scheme`), and **each one defaults to the matching token of the
+[default theme](theme.md)** — so an app that opted into `ui.theme` gets kit
+components in its own accent without doing anything.
+
+Reskin at whichever level you mean:
 
 ```css
 :root {
+  /* theme-wide: the kit follows, and so does everything else */
   --aio-accent: #7c3aed;
-  --aio-radius: 12px;
+  --aio-r-2: 12px;
+
+  /* kit-only: overrides the component kit and nothing else */
+  --aio-ui-radius: 12px;
+  --aio-ui-line: #d8dee9;
 }
 ```
+
+| kit token            | defaults to       | what it colours             |
+| -------------------- | ----------------- | --------------------------- |
+| `--aio-ui-accent`    | `--aio-accent`    | primary fill, focus ring    |
+| `--aio-ui-on-accent` | `--aio-on-accent` | the ink ON that fill        |
+| `--aio-ui-ink`       | `--aio-text`      | body text in components     |
+| `--aio-ui-ink-soft`  | `--aio-muted`     | secondary text              |
+| `--aio-ui-bg`        | `--aio-surface`   | input/field background      |
+| `--aio-ui-surface`   | `--aio-surface-2` | secondary button background |
+| `--aio-ui-line`      | `--aio-border`    | borders and hairlines       |
+| `--aio-ui-danger`    | `--aio-danger`    | destructive actions         |
+| `--aio-ui-radius`    | `--aio-r-2`       | corner radius               |
+| `--aio-ui-font`      | `--aio-font`      | component typeface          |
+
+> Before alpha64 the kit defined bare `--aio-*` names of its own, two of which
+> collided with the theme's under the same spelling — `--aio-accent-ink` meant
+> "ink on the accent" here and "the accent as text" there. Nothing you wrote
+> breaks: `--aio-accent` keeps working unchanged, and the four kit-only names
+> (`--aio-radius`, `--aio-ink`, `--aio-ink-soft`, `--aio-line`) are still read —
+> an explicit override of one of them wins over the theme's token, which wins
+> over the kit's literal. Prefer the `--aio-ui-*` spellings in new code.
 
 ## Components
 

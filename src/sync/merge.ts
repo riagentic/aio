@@ -30,7 +30,7 @@ export function mergeField(
     case "lww":
       return mergeLWW(local, localHlc, remote, remoteHlc);
     case "counter":
-      return mergeCounter(local as number, remote as number, base as number);
+      return mergeCounter(local, remote, base);
     case "lww-per-key":
       return mergeLWWPerKey(
         local as Record<string, unknown>,
@@ -58,6 +58,80 @@ export function mergeField(
   }
 }
 
+/** The one message shape for "this strategy cannot merge these values".
+ *
+ *  The set strategies already refuse a missing `id` with a sentence naming the
+ *  fix; the null/type cases leaked internal locals instead — an app author's
+ *  log read `safeRemote is not iterable`, which names nothing they wrote. Same
+ *  standard for both. */
+function refuse(
+  strategy: MergeStrategy,
+  wants: string,
+  side: string,
+  got: unknown,
+): never {
+  const shown = got === undefined
+    ? "undefined"
+    : got === null
+    ? "null"
+    : Array.isArray(got)
+    ? "an array"
+    : typeof got;
+  throw new Error(
+    `merge: the "${strategy}" strategy needs ${wants} on both sides, and the ` +
+      `${side} value is ${shown}. Give the field a starting value of the right ` +
+      `shape (a synced field that can be null needs merge: "lww"), or drop the ` +
+      `strategy for this field.`,
+  );
+}
+
+/** Both sides of a numeric strategy, or a refusal that names the side. */
+function numeric(
+  strategy: MergeStrategy,
+  local: unknown,
+  remote: unknown,
+  base: unknown,
+): [number, number, number] {
+  const ok = (v: unknown): v is number =>
+    typeof v === "number" && Number.isFinite(v);
+  if (!ok(local)) refuse(strategy, "a finite number", "local", local);
+  if (!ok(remote)) refuse(strategy, "a finite number", "remote", remote);
+  // No prior value (the field did not exist, or was null, before either side
+  // wrote) is a fact, not a type error: the counter's base is 0 then — which
+  // is what `base = 0` always meant. Only a base that IS a value of the wrong
+  // shape is refused.
+  if (base === undefined || base === null) return [local, remote, 0];
+  if (!ok(base)) refuse(strategy, "a finite number", "base", base);
+  return [local, remote, base];
+}
+
+/** A record on both sides, or a refusal that names the side. */
+function records(
+  strategy: MergeStrategy,
+  local: unknown,
+  remote: unknown,
+): [Record<string, unknown>, Record<string, unknown>] {
+  const ok = (v: unknown): v is Record<string, unknown> =>
+    typeof v === "object" && v !== null && !Array.isArray(v);
+  if (!ok(local)) refuse(strategy, "an object", "local", local);
+  if (!ok(remote)) refuse(strategy, "an object", "remote", remote);
+  return [local, remote];
+}
+
+/** An array on both sides, or a refusal that names the side. `null`/`undefined`
+ *  are treated as "empty" — a cleared list is an ordinary state, unlike a
+ *  string or a number, which means the field's shape changed under the app. */
+function arrays(
+  strategy: MergeStrategy,
+  ...vals: [string, unknown][]
+): unknown[][] {
+  return vals.map(([side, v]) => {
+    if (v === null || v === undefined) return [];
+    if (!Array.isArray(v)) refuse(strategy, "an array", side, v);
+    return v;
+  });
+}
+
 function mergeLWW(
   local: unknown,
   localHlc: HLC,
@@ -75,10 +149,21 @@ function mergeLWW(
 }
 
 function mergeCounter(
-  local: number,
-  remote: number,
-  base = 0,
+  localRaw: unknown,
+  remoteRaw: unknown,
+  baseRaw?: unknown,
 ): MergeResult {
+  // Validated, because `base + (local - base) + (remote - base)` on anything
+  // else is silent: a non-number gives NaN, and an object gives a STRING
+  // (`"[object Object]NaNNaN"`) — written straight into cell state through
+  // onStateUpdate, in a framework whose rule is that nothing is ever silently
+  // coerced. Every sibling strategy refuses; this one now does too.
+  const [local, remote, base] = numeric(
+    "counter",
+    localRaw,
+    remoteRaw,
+    baseRaw,
+  );
   const localDelta = local - base;
   const remoteDelta = remote - base;
   return { value: base + localDelta + remoteDelta, conflict: false };
@@ -92,6 +177,9 @@ function mergeLWWPerKey(
   remote: Record<string, unknown>,
   remoteHlc: HLC,
 ): MergeResult {
+  const [l, r] = records("lww-per-key", local, remote);
+  local = l;
+  remote = r;
   const allKeys = new Set([...Object.keys(local), ...Object.keys(remote)]);
   const merged: Record<string, unknown> = {};
   let conflict = false;
@@ -162,8 +250,11 @@ function mergeSetAdd(
   remoteHlc: HLC,
   idField: string,
 ): MergeResult {
-  const safeLocal = local ?? [];
-  const safeRemote = remote ?? [];
+  const [safeLocal = [], safeRemote = []] = arrays(
+    "set-add",
+    ["local", local],
+    ["remote", remote],
+  );
   const getId = _getId(idField);
   const merged = new Map<string, unknown>();
   let conflict = false;
@@ -200,9 +291,12 @@ function mergeSetRemove(
   base: unknown[],
   idField: string,
 ): MergeResult {
-  const safeLocal = local ?? [];
-  const safeRemote = remote ?? [];
-  const safeBase = base ?? [];
+  const [safeLocal = [], safeRemote = [], safeBase = []] = arrays(
+    "set-remove",
+    ["local", local],
+    ["remote", remote],
+    ["base", base],
+  );
   const getId = _getId(idField);
   const baseIds = new Set(safeBase.map(getId));
   const localIds = new Set(safeLocal.map(getId));

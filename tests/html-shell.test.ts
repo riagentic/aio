@@ -13,19 +13,15 @@ import { udsProdHTML } from "../src/electron/electron-shared.ts";
 const gen = (
   opts: { viewport?: string | false; head?: string; prod?: boolean } = {},
 ) =>
-  generateHTML(
-    "T",
-    opts.prod ?? false,
-    false,
-    "{}",
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    "App.tsx",
-    opts.viewport,
-    opts.head,
-  );
+  generateHTML({
+    title: "T",
+    prod: opts.prod ?? false,
+    hasCSS: false,
+    importMap: "{}",
+    uiEntry: "App.tsx",
+    viewport: opts.viewport,
+    headExtra: opts.head,
+  });
 
 Deno.test("html shell: responsive viewport is present by default (dev + prod)", () => {
   const want =
@@ -60,8 +56,18 @@ Deno.test("html shell: ui.head injects verbatim <head> content", () => {
 // test quietly corrupted state in the browser you develop in. Dev sets it; prod
 // must never, or a shipped app pays for dev-only checks.
 Deno.test("html shell: dev sets __aioDev before any module, prod never does", () => {
-  const dev = generateHTML("t", false, false, "{}");
-  const prod = generateHTML("t", true, false, "{}");
+  const dev = generateHTML({
+    title: "t",
+    prod: false,
+    hasCSS: false,
+    importMap: "{}",
+  });
+  const prod = generateHTML({
+    title: "t",
+    prod: true,
+    hasCSS: false,
+    importMap: "{}",
+  });
   assert(dev.includes("window.__aioDev=true"), "dev shell arms the tripwires");
   assert(
     dev.indexOf("window.__aioDev=true") < dev.indexOf('<script type="module">'),
@@ -109,19 +115,17 @@ Deno.test("electron aio:// shell: identical to the HTTP prod shell", () => {
       width: 800,
       height: 600,
     }),
-    generateHTML(
-      "T",
-      true,
-      false,
-      "",
-      true,
-      800,
-      600,
-      undefined,
-      undefined,
-      opts.viewport,
-      opts.head,
-    ),
+    generateHTML({
+      title: "T",
+      prod: true,
+      hasCSS: false,
+      importMap: "",
+      showStatus: true,
+      width: 800,
+      height: 600,
+      viewport: opts.viewport,
+      headExtra: opts.head,
+    }),
     "one prod shell, not two that drift",
   );
 });
@@ -140,9 +144,33 @@ Deno.test("electron aio:// shell: still escapes the title", () => {
 // by default" is not a default.
 Deno.test("shell: a baseline reset ships on every target, with or without style.css", () => {
   const shells: [string, string][] = [
-    ["prod", generateHTML("t", true, false, "{}")],
-    ["dev", generateHTML("t", false, false, "{}")],
-    ["prod+css", generateHTML("t", true, true, "{}")],
+    [
+      "prod",
+      generateHTML({
+        title: "t",
+        prod: true,
+        hasCSS: false,
+        importMap: "{}",
+      }),
+    ],
+    [
+      "dev",
+      generateHTML({
+        title: "t",
+        prod: false,
+        hasCSS: false,
+        importMap: "{}",
+      }),
+    ],
+    [
+      "prod+css",
+      generateHTML({
+        title: "t",
+        prod: true,
+        hasCSS: true,
+        importMap: "{}",
+      }),
+    ],
     ["android-local", androidLocalHTML("t", false)],
   ];
   for (const [label, html] of shells) {
@@ -157,12 +185,72 @@ Deno.test("shell: a baseline reset ships on every target, with or without style.
 
 Deno.test("shell: the app's own stylesheet comes AFTER the baseline (it must win)", () => {
   // A baseline the app cannot override is a straitjacket, not a default.
-  const html = generateHTML("t", true, true, "{}");
+  const html = generateHTML({
+    title: "t",
+    prod: true,
+    hasCSS: true,
+    importMap: "{}",
+  });
   const base = html.indexOf("body{margin:0}");
   const link = html.indexOf('rel="stylesheet"');
   assert(base !== -1 && link !== -1, "both must be present");
   assert(
     base < link,
     "the baseline must precede style.css so one app rule overrides it",
+  );
+});
+
+// ── every shell declares the page's language ─────────────────────────────
+//
+// Five hand-written `<html>` tags shipped with no `lang` at all, on every
+// target, with no `ui.lang` to set one — WCAG 2.1 SC 3.1.1 is Level A, and the
+// practical cost is a screen reader reading the page in the wrong voice and
+// browser translation misfiring. The framework ships an icon, a viewport, a
+// stylesheet and a title bar by default; this belongs in that set.
+Deno.test("shells: <html lang> is present on dev, prod, electron and android", () => {
+  const shells: Record<string, string> = {
+    dev: generateHTML({
+      title: "t",
+      prod: false,
+      hasCSS: false,
+      importMap: "{}",
+    }),
+    prod: generateHTML({
+      title: "t",
+      prod: true,
+      hasCSS: false,
+      importMap: "{}",
+    }),
+    electron: udsProdHTML("t", false, {}),
+    android: androidLocalHTML("t", false, {}),
+  };
+  for (const [name, html] of Object.entries(shells)) {
+    assertStringIncludes(html, '<html lang="en">', `${name} shell`);
+  }
+});
+
+Deno.test("shells: ui.lang overrides it, everywhere it can travel", () => {
+  assertStringIncludes(
+    generateHTML({
+      title: "t",
+      prod: true,
+      hasCSS: false,
+      importMap: "{}",
+      lang: "pt-BR",
+    }),
+    '<html lang="pt-BR">',
+  );
+  assertStringIncludes(
+    udsProdHTML("t", false, { lang: "de" }),
+    '<html lang="de">',
+  );
+  assertStringIncludes(
+    androidLocalHTML("t", false, { lang: "fr" }),
+    '<html lang="fr">',
+  );
+  // A hostile value cannot break out of the attribute.
+  assertStringIncludes(
+    udsProdHTML("t", false, { lang: '"><script>x' }),
+    "&quot;&gt;&lt;script&gt;x",
   );
 });

@@ -10,7 +10,7 @@ export type UiChrome = NonNullable<UiConfig["chrome"]>;
 /** `ui.theme` — how much of the default look the shell emits. Defined in
  *  aio-types (ONE spelling), re-exported here where the shells reach for it. */
 export type { UiTheme };
-import { escHtml } from "./server-html-constants.ts";
+import { DEFAULT_LANG, escHtml } from "./server-html-constants.ts";
 import { devWsScript } from "./server-html-scripts.ts";
 
 /** Validate a UI entry filename before interpolating into the dev HTML shell's
@@ -51,6 +51,19 @@ const DEFAULT_VIEWPORT =
  *  SAME page served to a browser tab has no window to control, so the bar
  *  removes itself rather than rendering three dead buttons — one shell, both
  *  targets, no build-time branch. */
+/** The `<html>` open tag — ONE spelling, on every shell.
+ *
+ *  Five hand-written `<html>` tags shipped without a `lang`, which is WCAG 2.1
+ *  SC 3.1.1 (Level A): a screen reader picks its default voice and
+ *  pronunciation rules instead of the page's language, browser translation
+ *  misfires, and hyphenation falls back to the UA locale. The framework already
+ *  ships an icon, a viewport, a stylesheet and a title bar by default; this is
+ *  the one `<html>`-level default it was missing. `ui.lang` overrides it. */
+export function htmlOpen(lang?: string): string {
+  const tag = (lang ?? DEFAULT_LANG).trim() || DEFAULT_LANG;
+  return `<html lang="${escHtml(tag)}">`;
+}
+
 function chromeShell(chrome: UiChrome | undefined): string {
   if (chrome !== "themed") return "";
   // The bar's own defaults are written as `var(--theme-token, <literal>)`, so
@@ -62,7 +75,10 @@ function chromeShell(chrome: UiChrome | undefined): string {
     "--aio-titlebar-fg:var(--aio-text,#1f2328);" +
     "--aio-titlebar-hover:var(--aio-tint,#0000000f);" +
     "--aio-titlebar-close:var(--aio-danger,#e81123);" +
-    "--aio-titlebar-font:var(--aio-font,13px/1 system-ui,-apple-system," +
+    // A FAMILY LIST, like --aio-font it defaults to: it used to be a `font`
+    // shorthand (`13px/1 system-ui,…`), which nothing could have consumed
+    // correctly — and nothing did. The bar reads it below.
+    "--aio-titlebar-font:var(--aio-font,system-ui,-apple-system," +
     "sans-serif)}" +
     "@media(prefers-color-scheme:dark){:root{" +
     "--aio-titlebar-bg:var(--aio-surface-2,#1b1f24);" +
@@ -72,7 +88,7 @@ function chromeShell(chrome: UiChrome | undefined): string {
     ".aio-titlebar{position:fixed;inset:0 0 auto 0;display:flex;" +
     "align-items:center;height:var(--aio-titlebar-height);" +
     "background:var(--aio-titlebar-bg);color:var(--aio-titlebar-fg);" +
-    "font-size:13px;font-family:var(--aio-font,system-ui,sans-serif);" +
+    "font-size:13px;font-family:var(--aio-titlebar-font);" +
     "line-height:1;user-select:none;" +
     "border-bottom:1px solid var(--aio-border,transparent);" +
     "-webkit-app-region:drag;z-index:2147483000}" +
@@ -139,6 +155,12 @@ function headContent(
   chrome?: UiChrome,
   theme?: UiTheme,
   themeName?: string,
+  /** `<html lang>` is written by {@linkcode htmlOpen}, not here — the shells
+   *  pass it positionally so this stays one argument list. */
+  _lang?: string,
+  /** Carry the full look, disabled, for a runtime that learns `ui.theme` only
+   *  after the shell exists (the packaged android WebView). */
+  deferTheme = false,
 ): string {
   // THE baseline, on every target, always — before the app's stylesheet so
   // any of it can be overridden by a single rule.
@@ -151,8 +173,17 @@ function headContent(
   //
   // Deliberately two rules. This is a baseline, not an opinion: it does not
   // touch fonts, colours, spacing or anything else an app should decide.
-  const baseStyle =
-    `\n  <style>*,*::before,*::after{box-sizing:border-box}body{margin:0}</style>`;
+  //
+  // …and `theme: "none"` turns even this off, because that word has to mean
+  // what it says. It documented "nothing at all, not even the variables" while
+  // still shipping these two rules — so an app that wanted aio to keep its
+  // hands off its CSS entirely had no way to ask, and the one word that looked
+  // like the way to ask quietly did not. `box-sizing: border-box` on `*` is a
+  // real layout change to a page that assumed content-box; an app porting an
+  // existing stylesheet needs a switch that is actually off.
+  const baseStyle = theme === "none"
+    ? ""
+    : `\n  <style>*,*::before,*::after{box-sizing:border-box}body{margin:0}</style>`;
   // The default look (ui.theme). Inlined rather than linked: it is small, it
   // must not cost a round trip before first paint, and the android shell has
   // no server to fetch it from — one emission point, every target.
@@ -180,6 +211,19 @@ function headContent(
     ? appThemeCss(themeName || title)
     : appThemeTokensCss(themeName || title);
   const themeStyle = themeCss === null ? "" : `\n  <style>${themeCss}</style>`;
+  // The android half of `ui.theme`. A packaged APK's shell is written at BUILD
+  // time, before `aio.run()` exists, so the build cannot know whether the app
+  // opted in — and shipping the default meant a scaffolded android app (whose
+  // template markup uses .card/.row/.stack) rendered themed in `deno task dev`
+  // and unstyled in the APK. So the full sheet travels with the shell,
+  // DISABLED (`media="not all"` parses and applies nothing), and the standalone
+  // runtime — which does receive the config — enables it at boot. No flash: the
+  // page starts in the state an app that never asked for a theme wants.
+  const deferredTheme = deferTheme && themeCss !== null
+    ? `\n  <style media="not all" data-aio-theme-deferred>${
+      appThemeCss(themeName || title)
+    }</style>`
+    : "";
   const cssLink = hasCSS
     ? `\n  <link rel="stylesheet" href="${assetBase}style.css">`
     : "";
@@ -226,49 +270,69 @@ function headContent(
   <meta name="referrer" content="no-referrer">${metaViewport}
   <title>${
     escHtml(title)
-  }</title>${iconLink}${metaW}${metaH}${baseStyle}${themeStyle}${
+  }</title>${iconLink}${metaW}${metaH}${baseStyle}${themeStyle}${deferredTheme}${
     chromeShell(chrome)
   }${cssLink}${statusScript}${configScript}${extra}`;
 }
 
 /** Generates the HTML shell — dev: CDN import map + live-transpiled App.tsx, prod: self-contained app.js */
-export function generateHTML(
-  title: string,
-  prod: boolean,
-  hasCSS: boolean,
-  importMap: string,
-  showStatus?: boolean,
-  width?: number,
-  height?: number,
-  renderBudget?: RenderBudget,
-  uiEntry = UI_ENTRY, // convention default, override via ui.entry
-  viewport?: string | false, // ui.viewport override (false = opt out)
-  headExtra?: string, // ui.head — verbatim <head> content
-  syncCells?: string[], // localFirst: cells the client runs locally + syncs
-  callTimeouts?: { default?: number; methods?: Record<string, number> },
-  chrome?: UiChrome, // ui.chrome — desktop window frame
-  theme?: UiTheme, // ui.theme — the default stylesheet
-  themeName?: string, // identity the accent hue is derived from (appId)
-): string {
+/** Everything the page shell can be told. NAMED, because it was seventeen
+ *  positional arguments and every one of them was optional after the fourth:
+ *  the call sites had grown `/* renderBudget *\/ undefined` comments to stay
+ *  readable, two of the seventeen were added in a single session, and the one
+ *  mistake this shape invites — passing a `string | undefined` in the wrong
+ *  slot — type-checks perfectly. A field report asked for exactly this. */
+export interface HtmlShellOptions {
+  title: string;
+  /** Serve the built bundle (`dist/app.js`) instead of the dev import map. */
+  prod: boolean;
+  /** The app ships a `style.css` — decides the link tag AND `theme: "auto"`. */
+  hasCSS: boolean;
+  /** Dev import map, inlined into the page. Empty in prod. */
+  importMap: string;
+  showStatus?: boolean;
+  width?: number;
+  height?: number;
+  renderBudget?: RenderBudget;
+  /** ui.entry — the component this page mounts (default: App.tsx). */
+  uiEntry?: string;
+  /** ui.viewport — override the meta tag, or `false` to omit it. */
+  viewport?: string | false;
+  /** ui.head — verbatim extra `<head>` content. */
+  headExtra?: string;
+  /** localFirst: cells the client runs locally and syncs. */
+  syncCells?: string[];
+  callTimeouts?: { default?: number; methods?: Record<string, number> };
+  /** ui.chrome — the desktop window frame. */
+  chrome?: UiChrome;
+  /** ui.theme — how much of the default look this shell emits. */
+  theme?: UiTheme;
+  /** The identity the accent hue is derived from (the appId). */
+  themeName?: string;
+  /** ui.lang — the document language (default: "en"). */
+  lang?: string;
+}
+
+export function generateHTML(o: HtmlShellOptions): string {
   const head = headContent(
-    title,
-    hasCSS,
-    showStatus,
-    width,
-    height,
-    renderBudget,
-    viewport,
-    headExtra,
-    syncCells,
-    callTimeouts,
+    o.title,
+    o.hasCSS,
+    o.showStatus,
+    o.width,
+    o.height,
+    o.renderBudget,
+    o.viewport,
+    o.headExtra,
+    o.syncCells,
+    o.callTimeouts,
     "/",
-    chrome,
-    theme,
-    themeName,
+    o.chrome,
+    o.theme,
+    o.themeName,
   );
 
-  if (prod) return prodHTML(head);
-  return aioDevHTML(head, importMap, uiEntry);
+  if (o.prod) return prodHTML(head, o.lang);
+  return aioDevHTML(head, o.importMap, o.uiEntry ?? UI_ENTRY, o.lang);
 }
 
 /** Android local (standalone WebView) shell. Delegates its `<head>` to the
@@ -293,6 +357,7 @@ export function androidLocalHTML(
     head?: string;
     theme?: UiTheme;
     themeName?: string;
+    lang?: string;
   },
 ): string {
   const head = headContent(
@@ -310,9 +375,13 @@ export function androidLocalHTML(
     undefined, // chrome — a phone has no window frame to own
     shell?.theme,
     shell?.themeName,
+    shell?.lang,
+    // Only when the build could not be told: an explicit ui.theme in the build
+    // (not possible today) would make the deferred copy dead weight.
+    shell?.theme === undefined,
   );
   return `<!DOCTYPE html>
-<html>
+${htmlOpen(shell?.lang)}
 <head>
 ${head}
 </head>
@@ -324,9 +393,9 @@ ${head}
 }
 
 /** Prod: app.js bundles React + useAio + user code, exports mount() */
-function prodHTML(head: string): string {
+function prodHTML(head: string, lang?: string): string {
   return `<!DOCTYPE html>
-<html>
+${htmlOpen(lang)}
 <head>
 ${head}
 </head>
@@ -345,6 +414,7 @@ function aioDevHTML(
   head: string,
   importMap: string,
   uiEntry = UI_ENTRY,
+  lang?: string,
 ): string {
   const entry = _safeUiEntry(uiEntry);
   // The client's dev flag. Every dev-only tripwire in the isomorphic core —
@@ -354,7 +424,7 @@ function aioDevHTML(
   // PERMISSIVE environment aio has, and its bugs surfaced later, in a test or
   // in production. It is set before any module loads, and never in prod.
   return `<!DOCTYPE html>
-<html>
+${htmlOpen(lang)}
 <head>
 ${head}
 </head>

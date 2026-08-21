@@ -114,3 +114,75 @@ Deno.test("L20: an issuer publishing no kid at all still works", async () => {
     undefined,
   );
 });
+
+// The same rule one level up: the SUBSCRIBERS were isolated, the re-run that
+// feeds them was not. `rerun()` calls `db.query(sql)`, and that can throw on
+// its own — a busy database, a view whose SQL stopped resolving — travelling
+// the identical road (invalidate → execute) to reject a write that had already
+// committed. One rule for the whole path: after the commit, nothing a REFRESH
+// does can describe the write as undone. Stale rows are loud instead.
+Deno.test("M8: a live query that fails to REFRESH does not fail the write", async () => {
+  const { createDB } = await import("../src/db/mod.ts");
+  const { reactiveDB } = await import("../src/db/reactive.ts");
+  const dir = await Deno.makeTempDir({ prefix: "aio-m8c-" });
+  const inner = await createDB(`${dir}/t.db`);
+  await inner.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)");
+
+  // A DB whose query() starts failing after the live view is established —
+  // the transient failure, without needing to wedge a real SQLite.
+  let failQueries = false;
+  const flaky = new Proxy(inner, {
+    get(target, prop, recv) {
+      if (prop === "query") {
+        return (sql: string, params?: unknown[]) =>
+          failQueries
+            ? Promise.reject(new Error("database is locked"))
+            : target.query(sql, params);
+      }
+      return Reflect.get(target, prop, recv);
+    },
+  });
+  // deno-lint-ignore no-explicit-any
+  const db = reactiveDB(flaky as any);
+  try {
+    const q = await db.select("SELECT * FROM t"); // initial fill still works
+    let notified = 0;
+    q.subscribe(() => notified++);
+    failQueries = true;
+
+    // The write must land and REPORT that it landed.
+    await db.execute("INSERT INTO t (v) VALUES ('a')");
+
+    failQueries = false;
+    const rows = await inner.query("SELECT * FROM t");
+    assertEquals(rows.rows.length, 1, "the write is committed and visible");
+    assertEquals(notified, 0, "a refresh that failed notifies nobody");
+    // …and the query recovers on the next successful refresh, rather than
+    // being permanently detached from the feed.
+    await q.refresh();
+    assertEquals(q.rows.length, 1, "the live view catches up");
+  } finally {
+    await inner.close();
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+// The initial fill is the one place a query failure MUST still throw: no write
+// has happened, and a select() that cannot run is the caller's own error.
+Deno.test("M8: select() itself still fails loudly when the query cannot run", async () => {
+  const { createDB } = await import("../src/db/mod.ts");
+  const { reactiveDB } = await import("../src/db/reactive.ts");
+  const dir = await Deno.makeTempDir({ prefix: "aio-m8d-" });
+  const db = reactiveDB(await createDB(`${dir}/t.db`));
+  try {
+    await assertRejects(
+      () => db.select("SELECT * FROM does_not_exist"),
+      Error,
+      undefined,
+      "a live query over a missing table is a broken select, not stale rows",
+    );
+  } finally {
+    await db.close();
+    await Deno.remove(dir, { recursive: true });
+  }
+});

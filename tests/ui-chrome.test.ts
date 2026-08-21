@@ -12,22 +12,13 @@ import { udsPreloadScript } from "../src/electron/electron-shared.ts";
 import { VALID_UI_KEYS, validateConfig } from "../src/server/config.ts";
 
 const shell = (chrome?: "standard" | "themed" | "none") =>
-  generateHTML(
-    "Demo",
-    true,
-    false,
-    "",
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    chrome,
-  );
+  generateHTML({
+    title: "Demo",
+    prod: true,
+    hasCSS: false,
+    importMap: "",
+    chrome: chrome,
+  });
 
 Deno.test("chrome: only themed adds a title bar to the shell", () => {
   assertEquals(shell(undefined).includes("aio-titlebar"), false);

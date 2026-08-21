@@ -14,7 +14,10 @@ import {
   SERVER_ONLY_AIO_SYMBOLS,
 } from "../src/entries.ts";
 import { removalMessage, removalOf } from "../src/state/removals.ts";
-import { linkSatisfiesPin, refOfLink } from "../src/server/framework-pin.ts";
+import {
+  linkSatisfiesPin,
+  pinDisagreementHint,
+} from "../src/server/framework-pin.ts";
 import { codeMatches, codeText } from "./scan.ts";
 
 // ══════════════════════════════════════════════════════════════════════
@@ -226,17 +229,18 @@ export const checkConfig: Checker = (ctx) => {
       // tool is wrong, and which teaches people to ignore both tools. There
       // WAS an answer the whole time (`linkSatisfiesPin` has always understood
       // `path:`); nothing said so at the moment it was needed.
-      const isCheckout = refOfLink(linked) === null;
+      // THE decider for what to say — shared with doctor, which used to offer
+      // only "run `am fix`" for this exact case and so contradicted this
+      // warning. Two tools disagreeing about one link is how a developer ends
+      // up documenting a false red in their own README.
+      const hint = pinDisagreementHint(pin, linked);
       report(
         "warn",
         "config",
         `framework pin ${pin} does not match dep/aio (→ ${linked}) — ` +
           "the app runs a version it does not declare.\n" +
-          (isCheckout
-            ? `      dep/aio points at a working CHECKOUT, not a provisioned ` +
-              `version. If that is deliberate (framework co-development), ` +
-              `declare it: \`am pin path:${linked}\` — then doctor and aiol ` +
-              `both agree. Otherwise \`am fix\` relinks to the pin.`
+          (hint
+            ? `      ${hint}`
             : "      Run `am pin <version>` to move the pin, or `am fix` to " +
               "relink"),
       );

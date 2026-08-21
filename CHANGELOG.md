@@ -1,5 +1,101 @@
 # Changelog
 
+## 1.0.0-alpha64 — which app is "this app" (2026-08-21)
+
+`am` was built around one assumption: a directory is an app. aio supports the
+other shape too — several runnable things in one repo, declared as labelled
+build targets with their own entries — and in that repo `am start` started
+whichever entry `deno.json` happened to name, said nothing about the rest, and
+offered no verb to reach them. Worse, every command that acts on ONE app
+resolved the PROJECT's inferred id, which is not any component's id and never
+runs: `am state` in a directory with three live apps answered "no app named
+'mc-probe' is running" and helpfully listed five unrelated apps from other
+projects.
+
+### A project can be more than one app
+
+The declaration the BUILD already reads now means the same thing to the process
+commands:
+
+```sh
+am start                 # starts every component
+am start agent           # …just that one
+am stop                  # stops the project
+am restart control
+am status                # one line each; exit 0 only when every one is up
+am state --app=agent     # every other command takes the label through --app
+```
+
+- **Distinct ENTRIES are what make components.**
+  `"targets": ["server",
+  "electron"]`, and any object form whose targets share
+  one entry, is one app built for several shells and behaves exactly as before.
+- **A one-app command refuses to guess**, naming the components and the flag
+  that picks one, instead of resolving an id that never runs.
+- **Two components under one identity is a refusal**, naming which: they would
+  share one lock file, one data directory and one port. A component that
+  declares no port is given a stable one (8000, 8001, … in declaration order)
+  and `am` prints the assignment.
+- `--app=<label>` resolves a component label anywhere, because every other
+  command's first positional is already a state path or an action.
+
+### `ui.theme: "none"` now means none
+
+It documented "nothing at all, not even the variables" and shipped aio's
+two-rule box-model baseline anyway — so the one word that reads as "hands off my
+CSS" quietly was not, and `box-sizing: border-box` on `*` is a real layout
+change to a stylesheet written against `content-box`. `"none"` now emits no aio
+CSS at all. Every other setting, including the default, is unchanged.
+
+### A dead config key stops looking live
+
+`renderBudget` is accepted, validated and bridged to the client — and read by
+nothing: alpha48's transport swap deleted the only caller of the render meter
+and the transport that replaced it never picked it up, so client render vitals
+do not run, `vitals-ping` has no sender, and `DevToolsHandle.tree` is `[]`
+forever. Config-accepted-then-silently-dropped is the class this project calls
+disqualifying, so boot says it and `docs/debugging/vitals.md` says it. Wiring
+the meter back needs a browser-path test and is roadmapped, not pretended.
+
+### The desk
+
+- **A refused build ships nothing.** esbuild had already written `dist/app.js`
+  when the server-only guard refused, and the input record lives outside the
+  `dist/` a rebuild wipes — so re-running the same command printed
+  `✓ dist/app.js cached`, exited 0, never re-ran the guard, and handed Gradle
+  the unvalidated js. Reproduced verbatim, then fixed: one `refuseBundle()`
+  discards artifact and record, and a structural gate forbids a bare `Deno.exit`
+  in that window.
+- **`// aio-ok: server-only` was unreachable in any file with a JSDoc block.**
+  Comment-stripping deleted newlines under a comment claiming it preserved them,
+  so the reported line drifted and the suppression lookup missed. aiol already
+  had the correct offset-preserving mask; it moved to
+  `src/diagnostics/code-mask.ts` as THE decider.
+- **A `scope: "client"` cell's sync method dropped its return value** — a
+  documented parity contract — and a returned effect vanished instead of
+  refusing.
+- **A live query failing to REFRESH rejected an already-committed write.**
+- Plus the ds4 low tier worked to zero (L1, L3, L4, L6–L11, L13, L15–L17, L21,
+  L23–L26), an `icon.png` at the project root now reported instead of silently
+  replaced, the path-pin false red offering the non-destructive exit first, and
+  doctor's vendored-dependency list completed.
+
+`feedback/` is down to `resolved.md` + `refused.md`; `review/` is gone (it was a
+second ledger for the same fact). `todo.md` is a 150-line roadmap again instead
+of 1,500 lines of finished-work narrative.
+
+### Smaller
+
+- `generateHTML` takes named options. It was seventeen positional arguments, all
+  optional after the fourth, and passing a `string | undefined` in the wrong
+  slot type-checked perfectly.
+- `deno task fmt` exists — it was the one gate without a task. `check:matrix`
+  replaces `validate:matrix` and `update:api-ref` replaces `docs`; both old
+  names still work.
+- `am log --client=browser` tails the client log, a bare `--service` build is
+  refused instead of half-done, and log lines emitted before the log files exist
+  are replayed rather than dropped.
+
 ## 1.0.0-alpha63 — nothing you did not ask for (2026-08-20)
 
 A user report against alpha61/alpha62: _"the default aio CSS is messing up
@@ -510,11 +606,11 @@ Landed after the sweep, triaged before the tag:
 
 ### Refuted, in writing
 
-`review/refused.md` records what did not survive verification (`--port` silently
-ignored; the dev server serving stale bytes; `testUI` not exported) and what was
-declined on the merits (ambient `JSX`; per-field subscriptions — roadmap, not a
-sweep item; quant's "cut before 1.0" — the standing question for the beta cut,
-which this release consciously moves the wrong way).
+`feedback/refused.md` records what did not survive verification (`--port`
+silently ignored; the dev server serving stale bytes; `testUI` not exported) and
+what was declined on the merits (ambient `JSX`; per-field subscriptions —
+roadmap, not a sweep item; quant's "cut before 1.0" — the standing question for
+the beta cut, which this release consciously moves the wrong way).
 
 Suite: 4294 → 4300+ tests, 0 failed. Every gate green, including
 `deno publish --dry-run`.

@@ -71,3 +71,28 @@ export function linkSatisfiesPin(pin: string, linkedPath: string): boolean {
     ? resolve(linkedPath) === resolve(pathPinTarget(pin))
     : refOfLink(linkedPath) === pin;
 }
+
+/** Why a VERSION pin and this link disagree, said as a choice rather than a
+ *  dead end.
+ *
+ *  `dep/aio -> ../../aio` (a sibling framework checkout) is the documented
+ *  co-development setup, and writing the plain version — the obvious thing —
+ *  makes it permanently red: doctor FAILs, aiol WARNs, and the offered fix,
+ *  `am fix`, would "resolve" it by relinking away from the checkout the
+ *  developer deliberately chose. Nothing said that `path:` pins exist, so the
+ *  only visible exit was the wrong one. A field report spent 15 minutes
+ *  chasing a FAIL that was not a defect.
+ *
+ *  Returns null when the link is under the version store, where "run `am fix`"
+ *  really is the whole answer. */
+export function pinDisagreementHint(
+  pin: string,
+  linkedPath: string,
+): string | null {
+  if (isPathPin(pin) || refOfLink(linkedPath) !== null) return null;
+  return `dep/aio points at a CHECKOUT (${linkedPath}), not a release in ` +
+    `${versionsDir()}. Two ways forward, and only you know which: keep the ` +
+    `checkout and pin it — \`am pin path:${resolve(linkedPath)}\` — or ` +
+    `follow the release and relink with \`am fix\` (which points dep/aio at ` +
+    `${versionPath(pin)}).`;
+}
