@@ -287,7 +287,10 @@ export const CONFIG_DOCS: Record<string, [string, string]> = {
     '"single"',
     '"single" (one JSON blob) or "multi" (one SQLite row per top-level cell — rewrites only changed cells)',
   ],
-  port: ["8000", "HTTP/WS server port"],
+  port: [
+    "a free one",
+    "HTTP/WS server port — unset means the runtime picks a free port (nothing binds 8000 by default); $AIO_PORT and --port win over this",
+  ],
   tls: [
     '"auto"',
     '"auto" | false | { cert, key } — how an EXPOSED server serves (same as --no-tls / --tls-cert/--tls-key; the flags win)',

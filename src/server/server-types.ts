@@ -142,4 +142,21 @@ export interface ServerHandle {
   trojanPort?: number; // set when TLS is active — HTTP-only trojan endpoint on 127.0.0.1
   socketPath?: string; // set when UDS is active
   watcherActive?: boolean; // true if file watcher is running (dev mode only)
+  /** Serve ONE control-plane request that arrived over a non-TCP wire (the
+   *  UDS `ctl` frame — `am`, amui).
+   *
+   *  It is the same `handleRequest` the TCP listener calls, given a peer
+   *  address of `{ transport: "unix" }`. That is the whole point: every gate
+   *  the trojan has — the same-machine 404, the local control credential, the
+   *  app's own key/user auth, the dev-only mount, the rate limit — is decided
+   *  once, in one place, and a request over the socket meets exactly the same
+   *  ones. A parallel socket-side control API would be a second decider for
+   *  rules whose whole value is that there is only one.
+   *
+   *  `_isLocalRequest` already answers `true` for a unix peer ("same-machine
+   *  by construction"), and the abuse-bucket key is already documented as
+   *  absent for UDS — both were written for this before it existed. */
+  control?: (
+    req: Request,
+  ) => Promise<Response>;
 }

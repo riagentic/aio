@@ -184,6 +184,9 @@ export interface ServerSetupResult {
   tlsCert: TlsCert | null;
   transport: "uds" | "ws";
   skipHttp: boolean;
+  /** The socket the HTTP handler listens on when this app binds no TCP port
+   *  (dev + electron + UDS). Undefined whenever a port is in play. */
+  httpSocketPath?: string;
   shareUrl: string;
   localUrl: string;
   /** The address the listener is ACTUALLY bound to — `host` when set, else the
@@ -315,13 +318,22 @@ export async function setupTransport<S, A>(
       // handshake failure with no hint of its cause.
       tlsCert = await loadOrCreateCert(certDir, cliCert, cliKey, appId);
       if (tlsCert.selfSigned) {
-        log.info(`tls: self-signed cert at ${tlsCert.certPath}`);
+        log.info(
+          `tls: self-signed cert at ${tlsCert.certPath}` +
+            (tlsCert.caPath
+              // The anchor is what a client pins, and it is deliberately NOT
+              // the leaf: the leaf is re-issued whenever this machine's
+              // addresses change, and a pin on it would break every time.
+              ? ` (trust anchor: ${tlsCert.caPath} — pin THIS)`
+              : ""),
+        );
         log.warn(
           `tls: self-signed — browsers show a security warning, and ` +
             `non-browser clients (curl, deno/node fetch, the aio CLI client) ` +
             `REFUSE the connection outright unless they trust this exact ` +
             `cert. Hand it out with \`am profile --app=${appId}\`, point a client ` +
-            `at it with DENO_CERT=${tlsCert.certPath} (curl: --cacert), ` +
+            `at it with DENO_CERT=${tlsCert.caPath ?? tlsCert.certPath} ` +
+            `(curl: --cacert), ` +
             `serve a real cert with \`tls: { cert, key }\`, or drop TLS with ` +
             `\`tls: false\` / --no-tls if a proxy or your own encryption ` +
             `covers the wire (--tls-cert=/path.pem --tls-key=/path.pem is the ` +
@@ -344,32 +356,71 @@ export async function setupTransport<S, A>(
     expose,
   );
 
-  // Prod + UDS + electron: skip HTTP server entirely (zero TCP ports — all via
-  // UDS+IPC). Conditional on `electronDistDir`: without a dist/ Electron can
-  // open itself it loads the page over HTTP, and skipping the server would
-  // hand it a refused connection — a blank window (the AppImage bug).
+  // ── Zero TCP ports, where zero is possible ──────────────────────────────
+  //
+  // A local Electron app talks to its own server over a Unix socket. Nothing
+  // about that needs a port, so it should not open one: a loopback port is
+  // reachable by every process on the machine and by any browser tab, while a
+  // socket sits in a 0700 directory. The port was never the feature — it was
+  // the only wire the page could arrive on.
+  //
+  // There are two ways to reach zero, and they differ only in where the PAGE
+  // comes from:
+  //   • prod, with a readable dist/ — Electron loads the bundle straight off
+  //     disk (aio://), so no request handler is needed at all.
+  //   • dev — the page and its modules must be transpiled on demand, so the
+  //     handler still runs; it just listens on a SOCKET instead of a port
+  //     (`Deno.serve({ path })`), and Electron fetches through it.
+  // Everything else — a browser client, --expose, custom routes — genuinely
+  // needs a port, and keeps one.
   const canServeFromDisk = !!electronDistDir;
-  const skipHttp = prod && transport === "uds" && useElectron && !expose &&
-    canServeFromDisk;
-  if (prod && transport === "uds" && useElectron && !expose && !skipHttp) {
+  const localElectronUds = transport === "uds" && useElectron && !expose;
+  // Custom routes are somebody ELSE's entry point (a webhook, an OAuth
+  // callback). Serving them only on a socket would leave them technically
+  // alive and practically unreachable, so an app that declares any keeps its
+  // port — and is told why, because a silently-kept port is the same class of
+  // surprise as a silently-dropped one.
+  const routeCount = config.routes ? Object.keys(config.routes).length : 0;
+  // Dev's route to zero is OPT-IN (`--zero-port`) and prod's is not, and that
+  // asymmetry is a KNOWN DEFECT being quarantined, not a design:
+  //
+  //   Serving the page over the socket works — the window loads, renders,
+  //   transpiles modules on demand, and `am` drives it. What does NOT work is
+  //   the reload after a source edit: the reloaded renderer stops using the
+  //   IPC bridge and tries `ws://app/ws` (its `location.host` on an `aio://`
+  //   page), which in a zero-port app is a socket that cannot exist. The
+  //   window comes back blank and does not recover. Over HTTP the same
+  //   fallback silently WORKED, which is why this never surfaced before.
+  //
+  // Hot reload is the dev loop. Until the renderer refuses to fall back to WS
+  // on a page with no HTTP origin, the default stays exactly where it was —
+  // and the capability stays reachable for anyone who wants to test it.
+  // Tracked in todo.md.
+  const zeroPortRequested = parseCli().zeroPort ?? false;
+  const _wantsZeroPort = localElectronUds &&
+    (prod ? canServeFromDisk : zeroPortRequested);
+  if (_wantsZeroPort && routeCount > 0) {
+    log.warn(
+      `${routeCount} custom HTTP route(s) are configured — keeping the TCP ` +
+        `port so they stay reachable. Without them this app would bind no ` +
+        `port at all (electron + UDS). Move the endpoint into a serverFn to ` +
+        `drop the port.`,
+    );
+  }
+  const zeroPort = _wantsZeroPort && routeCount === 0;
+  /** Prod's route to zero: no request handler at all. */
+  const skipHttp = zeroPort && prod;
+  /** Dev's route to zero: the handler, on a socket instead of a port. Its own
+   *  socket — the NDJSON transport owns `<appId>.sock` and one listener per
+   *  path is the rule. */
+  const httpSocketPath = zeroPort && !prod
+    ? resolveSocketPath(appId, "http")
+    : undefined;
+  if (prod && localElectronUds && !skipHttp && routeCount === 0) {
     log.warn(
       "prod+electron: no dist/ readable outside the binary (embedded VFS " +
         "only) — keeping the HTTP server so the window can load. Ship dist/ " +
         "next to the binary (the AppImage/AppDir layout) for zero TCP ports.",
-    );
-  }
-  // Doctrine: no silent dev/prod divergence. Custom `routes` are served by the
-  // HTTP server; skipping it in prod would let a webhook/callback endpoint work
-  // all through development and then silently connection-refuse in production.
-  // Refuse loudly at boot with the fix instead of dropping them unseen.
-  if (skipHttp && config.routes && Object.keys(config.routes).length > 0) {
-    throw new Error(
-      `[aio] ${Object.keys(config.routes).length} custom HTTP route(s) are ` +
-        `configured, but in prod + electron + UDS the app runs with NO TCP ` +
-        `HTTP server (zero ports) — they cannot be served and would silently ` +
-        `404 in production while working in dev. Serve them another way: set ` +
-        `client:"ws" (or "server-only"), pass --expose, or move the endpoint ` +
-        `into a serverFn.`,
     );
   }
   // Network-borne dispatch: auth-gate → dispatch → resolve with the method's
@@ -484,6 +535,10 @@ export async function setupTransport<S, A>(
     }
     : createServer({
       port,
+      // Dev's zero-port route: the handler listens on a SOCKET instead of a
+      // TCP port (`Deno.serve({ path })`). `port` above is then unused — the
+      // boot report says so rather than printing a number nothing bound.
+      ...(httpSocketPath ? { socketPath: httpSocketPath } : {}),
       appId,
       clientCounter,
       title,
@@ -722,6 +777,12 @@ export async function setupTransport<S, A>(
       // The UDS twin of wsLimits.maxMessageBytes — an app that raised its WS
       // frame ceiling for large payloads gets the same ceiling on this path.
       config.wsLimits?.maxMessageBytes,
+      // The control plane, over the socket. `server.control` IS the HTTP
+      // handler, so `am` reaches the same routes behind the same gates on
+      // either wire — the transport stops deciding what the operator can do.
+      // Absent on the skipHttp stub, which is correct: that path is prod, and
+      // the trojan does not exist in prod at all.
+      server.control,
     );
     udsRef.current = uds;
     const u = uds;
@@ -743,6 +804,10 @@ export async function setupTransport<S, A>(
       status: "started",
       ...(server.trojanPort ? { trojanPort: server.trojanPort } : {}),
       ...(uds ? { socketPath: uds.socketPath } : {}),
+      // An app with no TCP listener must not leave a port number in the lock
+      // that reads like one: 0 is the honest answer, and `am` follows the
+      // socket instead (a port-0 lock is valid — see readLock).
+      ...(zeroPort ? { port: 0 } : {}),
     });
   }
 
@@ -752,6 +817,7 @@ export async function setupTransport<S, A>(
     tlsCert,
     transport,
     skipHttp,
+    ...(httpSocketPath ? { httpSocketPath } : {}),
     shareUrl,
     localUrl,
     bindHost,

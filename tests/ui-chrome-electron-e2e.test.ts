@@ -9,6 +9,7 @@ import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { electronMainScriptUDS } from "../src/electron/electron.ts";
 import { freePort } from "../src/testing/server-test.ts";
+import { testDisplayEnv } from "../src/testing/test-display.ts";
 
 const ELECTRON_BIN = "node_modules/.bin/electron";
 const CDP_PORT = freePort();
@@ -127,7 +128,13 @@ Deno.test({
       ],
       stdout: "null",
       stderr: "null",
-      env: { ...Deno.env.toObject(), ELECTRON_DISABLE_SECURITY_WARNINGS: "1" },
+      env: {
+        ...Deno.env.toObject(),
+        ELECTRON_DISABLE_SECURITY_WARNINGS: "1",
+        // Nested display — this test maps a REAL window, and it must not be
+        // on the desktop the person is working on.
+        ...testDisplayEnv(),
+      },
     }).spawn();
     let session: Awaited<ReturnType<typeof cdp>> | null = null;
     try {

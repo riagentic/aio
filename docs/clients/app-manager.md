@@ -155,13 +155,13 @@ to `deno.json` as a dev convenience.
 
 ## Global flags
 
-| Flag         | Effect                                                                               |
-| ------------ | ------------------------------------------------------------------------------------ |
-| `--app=X`    | Target a specific app by ID (default: from `deno.json` `appId`)                      |
-| `--port=N`   | Target a specific port (default: from lock file or 8000)                             |
-| `--wait[=N]` | start/stop: block until complete (default 10s/5s). state: poll every Ns (default 2s) |
-| `--json`     | Force JSON output                                                                    |
-| `--quiet`    | Suppress output (exit code only)                                                     |
+| Flag         | Effect                                                                                                                                                     |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--app=X`    | Target a specific app by ID (default: from `deno.json` `appId`)                                                                                            |
+| `--port=N`   | Target a specific port (default: from lock file or 8000)                                                                                                   |
+| `--wait[=N]` | start/stop: block until complete (default 10s / 9s — stop waits out the runtime's whole graceful budget before SIGKILL). state: poll every Ns (default 2s) |
+| `--json`     | Force JSON output                                                                                                                                          |
+| `--quiet`    | Suppress output (exit code only)                                                                                                                           |
 
 ## Reaching an app that has auth (`control.key`)
 
@@ -210,7 +210,7 @@ deno task am start --wait         # start and block until healthy (default 10s t
 deno task am start --wait=30      # start with 30s timeout
 deno task am start --port=9000    # start on specific port
 deno task am stop                 # graceful shutdown
-deno task am stop --wait          # stop and block until dead (default 5s timeout)
+deno task am stop --wait          # stop and block until dead (default 9s — the graceful budget)
 deno task am kill                 # end it now, no asking (SIGTERM + drop the lock)
 deno task am kill --stale         # reap ORPHANS — processes still serving with no
                                   # lock: the ones that answer `am state` with old
@@ -278,9 +278,10 @@ Two rules make this predictable:
   keeps them apart. If two resolve to the same id, `am` refuses and says which —
   sharing one `~/.<appId>/` is how two apps quietly open one database.
 
-A component that declares no `port` is given one (`8000`, `8001`, … in
-declaration order) and `am` prints the assignment. Declare `port` in `aio.run()`
-when something else needs to find it.
+**`am` never invents a port.** A component that declares none gets a free one
+from the runtime — the same `findFreePort()` behind `deno task dev` — and
+`am status` lists what each one bound. Declare `port` in `aio.run()` when
+something else needs to find it at a fixed address.
 
 ### Singleton behavior
 
@@ -615,8 +616,27 @@ deno task am add cell payments    # scaffold src/cell/payments.ts (was: am new)
 
 ## Trojan — Control REST API
 
-REST API at `/__aio/trojan/*` for inspection and control. Available in dev and
-prod.
+REST API at `/__aio/trojan/*` for inspection and control. **Dev only** — a prod
+build does not mount it and refuses it if reached (`am status`, which reads the
+lock file, still works against a prod app).
+
+### Which wire it answers on
+
+The control plane follows the app's transport, and `am` follows the app:
+
+| The app's transport | `am` reaches it via                      |
+| ------------------- | ---------------------------------------- |
+| WS (a TCP port)     | `http://127.0.0.1:<port>/__aio/trojan/*` |
+| UDS (a Unix socket) | a `ctl` frame on the app's socket        |
+
+Both arrive at the **same** server-side handler, so the routes, the answers and
+every auth gate are identical either way — the transport does not decide what
+the operator can do. `am` reads which one applies from the lock file the app
+wrote, so an app that binds no TCP port at all is still fully inspectable. The
+socket is the stricter door of the two: it lives in a `0700` directory, while a
+loopback port admits any local process.
+
+`curl` examples below assume the TCP case; for a socket-only app use `am`.
 
 ### Inspect (GET)
 

@@ -4,6 +4,7 @@
 // converges), acks the sender, and relays to peers. Two real chromium tabs
 // + the server must all agree.
 import { assert, assertEquals } from "@std/assert";
+import { testDisplayEnv } from "../src/testing/test-display.ts";
 
 // Coverage profiles from spawned deno processes go to a throwaway temp dir.
 const _childCovDir = Deno.env.get("DENO_COVERAGE_DIR") ??
@@ -126,7 +127,11 @@ export default function App() {
       // machine and was red forever after — while CI, always a fresh checkout,
       // stayed green. That read as a flake for a long time; it is not one, and
       // no amount of polling could have fixed it.
-      env: { DENO_COVERAGE_DIR: _childCovDir, AIO_APPS_DIR: `${dir}/home` },
+      env: {
+        DENO_COVERAGE_DIR: _childCovDir,
+        AIO_APPS_DIR: `${dir}/home`,
+        ...testDisplayEnv(),
+      },
       args: [
         "run",
         "-A",

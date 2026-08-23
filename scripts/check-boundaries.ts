@@ -110,6 +110,12 @@ const ALLOWED: Record<string, string[]> = {
     // copy of the theme, or a second rule for where app assets live, is the
     // drift this matrix exists to prevent.
     "build",
+    // The control plane over UDS: `am` speaks the SAME v2 wire envelope as
+    // every other peer (`ctl` out, `ctlr` back) rather than inventing a
+    // socket-only control format. Widened deliberately — the alternative is a
+    // second wire vocabulary for one client, which is exactly the drift the
+    // envelope's single catalog exists to prevent (`SERVES.am` records it).
+    "protocol",
   ],
   // testing may boot a real server — `testServer()`/`testBrowser()`
   // (aio/testing) run in Deno test processes, never in a browser bundle, so

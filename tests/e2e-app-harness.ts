@@ -9,6 +9,7 @@
 import { assert } from "@std/assert";
 import { resolve } from "@std/path";
 import { scaffold } from "../src/am/am-cmd-create.ts";
+import { descendantPids } from "../src/server/single-instance-lock.ts";
 
 export const REPO_ROOT = resolve(import.meta.dirname!, "..");
 const dec = new TextDecoder();
@@ -76,6 +77,20 @@ export function freePort(): number {
   return port;
 }
 
+/** The environment EVERY app a test spawns must carry, spread into the child's
+ *  `env`. Two facts, both about not outliving or escaping the test:
+ *
+ *  • `AIO_PARENT_PID` — the runtime stops itself when this process is gone.
+ *    A test that hangs and is then killed by `timeout` never reaches its
+ *    `finally`; without this the app it started is reparented to init and
+ *    keeps serving (one ran 5 h, `--expose`d, advertising itself on the LAN).
+ *  • `AIO_NO_OPEN` — no browser tab out of a test (see `open-external.ts`).
+ *
+ *  Spread it LAST so nothing in the test's own env can switch either off. */
+export function childEnv(): Record<string, string> {
+  return { AIO_PARENT_PID: String(Deno.pid), AIO_NO_OPEN: "1" };
+}
+
 /** Spawn a long-running process; drain stderr in the background so it can't
  *  block, and expose the accumulated log for failure messages. */
 export function spawn(
@@ -86,6 +101,7 @@ export function spawn(
   const proc = new Deno.Command(cmd, {
     args,
     cwd,
+    env: childEnv(),
     stdout: "piped",
     stderr: "piped",
   }).spawn();
@@ -143,12 +159,35 @@ export async function killAnd(
   await Deno.remove(dir, { recursive: true }).catch(() => {});
 }
 
-/** Kill a spawned process and reap it (never throws). */
+/** Kill a spawned process AND everything it started, then reap it.
+ *
+ *  Killing only the direct child is what leaves zombies behind. Several tests
+ *  spawn a shell — `run.sh`, an installer, a task runner — which then starts
+ *  the actual app; SIGKILL to the shell ends the shell and leaves the app
+ *  running, still holding its port and its singleton lock. The next run then
+ *  refuses to start ("Already running"), and the developer has to hunt the
+ *  process down by hand before they can work. That is the whole complaint.
+ *
+ *  Never throws: cleanup runs in `finally` blocks, and a cleanup path that can
+ *  throw turns one failing test into a failing test plus a leaked process. */
 export async function kill(proc: Deno.ChildProcess): Promise<void> {
+  // THE descendant walk (server/single-instance-lock.ts), not a third copy of
+  // it: `am stop` and this harness are answering the same question — what did
+  // this process start — and two answers to that is how one of them goes stale.
+  let kids: number[] = [];
+  try {
+    kids = await descendantPids(proc.pid);
+  } catch { /* pgrep missing (windows) — the direct child is still killed */ }
   try {
     proc.kill("SIGKILL");
     await proc.status;
   } catch { /* already gone */ }
+  // Deepest first, so a parent cannot spawn a replacement on its way out.
+  for (const pid of kids.reverse()) {
+    try {
+      Deno.kill(pid, "SIGKILL");
+    } catch { /* already gone, or not ours */ }
+  }
 }
 
 /** Assert an HTTP body is real served markup from an aio app. */

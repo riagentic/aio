@@ -68,7 +68,9 @@ export type Kind =
   | "op-rejected" // S→C — server refused an optimistic op (D11)
   | "sync-err" // S→C — sync failure, client backs off + re-requests
   | "sfn" // C→S — server-function invocation
-  | "sfnr"; // S→C — server-function result
+  | "sfnr" // S→C — server-function result
+  | "ctl" // C→S — control-plane request {id,path,method,headers?,body?}
+  | "ctlr"; // S→C — control-plane reply {id,status,headers?,body}
 
 /** Runtime list of every kind — the test pins this against the union. */
 export const FRAME_KINDS: readonly Kind[] = [
@@ -109,6 +111,8 @@ export const FRAME_KINDS: readonly Kind[] = [
   "sync-err",
   "sfn",
   "sfnr",
+  "ctl",
+  "ctlr",
 ] as const;
 
 const KIND_SET: ReadonlySet<string> = new Set(FRAME_KINDS);
@@ -135,8 +139,7 @@ export function isIgnorableKind(t: string): boolean {
  *  • ws (server-ws.ts, C→S): everything a client sends EXCEPT "ping" — WS has
  *    protocol-level ping/pong frames; the app-level "ping" keepalive exists
  *    only for UDS/IPC, which has no transport heartbeat of its own.
- *  • uds (uds.ts, C→S): everything EXCEPT "type" (the only UDS client is the
- *    Electron shell — the transport itself identifies the client kind) and
+ *  • uds (uds.ts, C→S): everything EXCEPT
  *    "vitals-ping" (vitals are WS-only diagnostics — see unsupportedOnUds,
  *    which rejects them LOUDLY rather than dropping them).
  *  • browser (browser-air-transport + browser-shared handleControlFrame +
@@ -144,7 +147,10 @@ export function isIgnorableKind(t: string): boolean {
  *    omissions — a server frame the client cannot route is a bug.
  *  S→C-only kinds are absent from ws/uds and C→S-only kinds from browser by
  *  direction, not by choice. */
-export const SERVES: Record<"ws" | "uds" | "browser", ReadonlySet<Kind>> = {
+export const SERVES: Record<
+  "ws" | "uds" | "browser" | "am",
+  ReadonlySet<Kind>
+> = {
   ws: new Set<Kind>([
     "proto",
     "type",
@@ -177,6 +183,13 @@ export const SERVES: Record<"ws" | "uds" | "browser", ReadonlySet<Kind>> = {
     "op",
     "sync-req",
     "sfn",
+    "ctl",
+    // "type" earns its place on this transport now that the socket carries a
+    // peer that is NOT a UI: `am`'s control client. Without it every control
+    // call was counted as a connected window — it took a client index, showed
+    // up in `am clients`, and was mailed a full state snapshot on every
+    // `am state`.
+    "type",
   ]),
   browser: new Set<Kind>([
     "proto",
@@ -203,6 +216,12 @@ export const SERVES: Record<"ws" | "uds" | "browser", ReadonlySet<Kind>> = {
     "sync-err",
     "sfnr",
   ]),
+  // The CONTROL client (`am`, amui) — a fourth router, and the only peer that
+  // is not a UI. It connects to the same socket as the Electron shell and
+  // speaks exactly one exchange: `ctl` out, `ctlr` back. Recorded here for the
+  // same reason as the other three — a reply kind no router handles is a frame
+  // dead on the wire, and this is the transport that carries it.
+  am: new Set<Kind>(["ctlr"]),
 };
 
 /** One decoded wire frame. `d` is kind-specific (see payload types below). */
@@ -300,6 +319,31 @@ export type SfnrPayload = {
   ok: boolean;
   value?: unknown;
   error?: string;
+};
+/** A control-plane request, tunnelled over the socket.
+ *
+ *  Deliberately HTTP-shaped: the server answers it by building a `Request`
+ *  and handing it to the SAME handler the TCP listener uses, so the control
+ *  plane has one implementation and one set of auth gates whatever wire it
+ *  arrived on. A second, socket-specific control API would be a second place
+ *  for the trojan's rules to drift out of agreement with itself. */
+export type CtlPayload = {
+  /** Correlates the reply — several control calls may be in flight. */
+  id: string;
+  /** Absolute path, query string included (`/__aio/trojan/state?x=1`). */
+  path: string;
+  method: "GET" | "POST";
+  /** Carried verbatim onto the synthetic Request — this is how the local
+   *  control credential and the CSRF header reach the same gates they do
+   *  over HTTP. */
+  headers?: Record<string, string>;
+  body?: string;
+};
+export type CtlrPayload = {
+  id: string;
+  status: number;
+  headers?: Record<string, string>;
+  body: string;
 };
 
 /** Kinds a UDS/NDJSON endpoint does NOT serve (vitals are WS-only

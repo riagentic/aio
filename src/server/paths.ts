@@ -136,15 +136,40 @@ export function resolveTransport(
   return "ws";
 }
 
-/** Resolves UDS socket path — /tmp/aio/{appId}.sock (same dir as lock files) */
-export function resolveSocketPath(appId: string): string {
+/** Resolves a UDS socket path — `<lockDir>/{appId}.sock`, beside the lock
+ *  files and inside the same 0700 directory (which is what makes a socket a
+ *  stricter door than a loopback port: only the owning user can open it).
+ *
+ *  `kind` names a SECOND socket for the same app. An app running with no TCP
+ *  port has two listeners — the NDJSON state/IPC transport on the bare path,
+ *  and the HTTP handler that serves its page and modules on `.http.sock` —
+ *  because one listener owns one path and the two speak different protocols.
+ *  Naming them here keeps both spellings in one place; deriving the second one
+ *  at its use site is how the client and the server end up looking for
+ *  different files. */
+export function resolveSocketPath(appId: string, kind?: "http"): string {
   const dir = lockDir();
-  const sockPath = join(dir, `${appId}.sock`);
+  const suffix = kind ? `.${kind}.sock` : ".sock";
+  const sockPath = join(dir, `${appId}${suffix}`);
   if (sockPath.length > 100) {
     log.warn(
       `UDS path is ${sockPath.length} chars (limit ~108) — using /tmp/aio fallback`,
     );
-    return join("/tmp/aio", `${appId}.sock`);
+    // The fallback used to drop `kind`, which was survivable while there was
+    // one socket per app and is not now: both listeners would resolve to the
+    // same path and the second would take the first one's door.
+    const fallbackDir = "/tmp/aio";
+    // …and it used to hand back a path in a directory nothing created. With
+    // `$XDG_RUNTIME_DIR` set, `lockDir()` is somewhere else entirely, so
+    // `/tmp/aio` might not exist (bind fails with ENOENT) or might be owned by
+    // ANOTHER user with the default 0755 — the one place the "a socket is
+    // protected by its 0700 directory" guarantee did not hold. Same treatment
+    // as `lockDir()`: create it, and make it ours.
+    try {
+      Deno.mkdirSync(fallbackDir, { recursive: true });
+      if (Deno.build.os !== "windows") Deno.chmodSync(fallbackDir, 0o700);
+    } catch { /* best-effort — the bind below reports what actually failed */ }
+    return join(fallbackDir, `${appId}${suffix}`);
   }
   return sockPath;
 }
@@ -162,6 +187,40 @@ export function findFreePort(): number {
   throw new Error(
     "no free port found in 49152-65535 after 50 attempts — the ephemeral range looks exhausted. Set an explicit port via aio.run({ port }) or --port=N.",
   );
+}
+
+/** The port an OPERATOR set in the environment — `AIO_PORT`.
+ *
+ *  It sits between `--port` and the app's own config: a systemd unit, a
+ *  container, or `deno run --env-file` has no command line to hang `--port=`
+ *  on, and a COMPILED binary in a service unit has neither. That is the whole
+ *  gap this fills — which is also why aio does not read `.env` itself: one
+ *  integer is not worth owning parse, precedence and secret-leak questions
+ *  that `Deno.env` plus `--env-file` / `EnvironmentFile=` already answer.
+ *
+ *  A malformed value is REFUSED, never ignored: an app that silently drops
+ *  `AIO_PORT=havoc` and binds an ephemeral port instead is the exact quiet
+ *  misconfiguration this framework exists to make impossible. `0` is legal
+ *  and means "pick a free one", the same as saying nothing.
+ *
+ *  THE one reader — `am` calls this too, so the operator's environment cannot
+ *  mean one port to the app and another to the tool inspecting it. */
+export function envPort(): number | undefined {
+  let raw: string | undefined;
+  try {
+    raw = Deno.env.get("AIO_PORT");
+  } catch {
+    return undefined; // no --allow-env here: the environment is not readable
+  }
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const n = Number(raw.trim());
+  if (!Number.isInteger(n) || n < 0 || n > 65535) {
+    throw new Error(
+      `AIO_PORT=${raw} is not a port (want an integer 0-65535; 0 means ` +
+        `"pick a free one"). Fix or unset it — it will not be ignored.`,
+    );
+  }
+  return n;
 }
 
 /** THE entry rule: an explicit `entry` (deno.json, or a per-target override),

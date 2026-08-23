@@ -5,10 +5,11 @@ import type { Log } from "../diagnostics/logger-api.ts";
 import { blocking } from "../state/blocking.ts";
 import {
   abortAllInflight,
-  DRAIN_TIMEOUT_MS,
   endShutdownAbort,
   settlePending,
 } from "../state/method-cancel.ts";
+import { DRAIN_TIMEOUT_MS, TEARDOWN_TIMEOUT_MS } from "./shutdown-budget.ts";
+import { pruneLockDir } from "./single-instance-lock.ts";
 
 /** How long everything AFTER the drain gets, IN TOTAL — persist, diagnostics,
  *  the user's `onStop`, the lock, the server and the databases share this one
@@ -24,8 +25,11 @@ import {
  *  uses for each of its waits (`db/async-db.ts`): a healthy teardown finishes
  *  in milliseconds, and a sick one is never cut before the subsystem that IS
  *  bounded has had its own full wait. Total shutdown is therefore bounded by
- *  DRAIN + TEARDOWN, and every phase that runs out says so in the log. */
-const TEARDOWN_TIMEOUT_MS = 5000;
+ *  DRAIN + TEARDOWN, and every phase that runs out says so in the log.
+ *
+ *  The number itself lives in `shutdown-budget.ts`, next to the drain's, so
+ *  that `am` and the lock's takeover path can wait at least that long before
+ *  they SIGKILL — they used to retype shorter ones. */
 
 /** Distinguishes "the phase timed out" from any value it could return. */
 const TIMED_OUT = Symbol("shutdown-phase-timeout");
@@ -108,6 +112,14 @@ export function registerRuntime(shutdown: () => Promise<void>): () => void {
   return () => {
     _runtimes.delete(shutdown);
   };
+}
+
+/** How many apps are registered in this process right now. A refusal that
+ *  would end the PROCESS (a lock another instance holds) has to know whether
+ *  it is alone: with a sibling app running, `Deno.exit(1)` takes that app down
+ *  through `unload`, without its Phase 1–7 — so the refusal throws instead. */
+export function runtimeCount(): number {
+  return _runtimes.size;
 }
 
 /** Stop EVERY app in this process, then resolve. THE thing to await before
@@ -305,6 +317,12 @@ export function createShutdownOrchestrator(
     await phase(log, "users", tLeft, () => refs.userStore?.close());
 
     await phase(log, "mark stopped", tLeft, () => refs.setRunning(false));
+
+    // Last, after the server (whose watcher owns the reload sentinel in the
+    // same directory): a per-AIO_APPS_DIR lock dir that is now empty goes
+    // away with its last app. `lockDir()` created one for every temp home the
+    // suite ever used and nothing removed them — 675 on one machine, one day.
+    await phase(log, "lock dir", tLeft, () => pruneLockDir());
   }
 
   function shutdown(): Promise<void> {

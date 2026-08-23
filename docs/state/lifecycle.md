@@ -85,6 +85,8 @@ await aio.run({
 | `users` / `resolveUser`       | map / `fn`                               | Auth — static token map or dynamic provider hook; see [auth](../../docs/auth/auth.md)                                                                                      |
 | `logging`                     | `LogConfig \| false`                     | Structured file logs — level (default `info`), dir (default `~/.<appId>/logs`)                                                                                             |
 | `maxConnections` / `wsLimits` | `number` / obj                           | WS safety limits (hardened defaults)                                                                                                                                       |
+| `onStart`                     | `(app) => void \| Promise<void>`         | Runs once the cells are bound. A throw — sync or async — is logged (`fatalOnStart: true` exits instead)                                                                    |
+| `onStop`                      | `() => void \| Promise<void>`            | Runs during shutdown and is **awaited**, inside the 5 s teardown budget — the place to finish your own writes (a flush, a handle, a child)                                 |
 
 ### Cell isolation (dev)
 
@@ -141,6 +143,18 @@ const health = app.cells!.health();
 Also available over HTTP: `GET /__aio/health` returns the same data as JSON.
 Like every `/__aio/*` endpoint it sits behind auth when `token`, `users`, or
 `resolveUser` is configured — health probes need the token too.
+
+### Dying with the launcher — `AIO_PARENT_PID`
+
+A spawned app is a plain child: when whatever started it is killed, times out or
+crashes, the app is reparented to `init` and keeps running — holding its port
+and its singleton lock, and (exposed) answering LAN discovery. A launcher that
+wants the app to go when it goes sets `AIO_PARENT_PID=<its pid>`; the app then
+watches that pid and runs its normal graceful shutdown (every phase, final
+persist included) once it is gone. Opt-in, same in dev and prod. The test
+harness sets it for every app it spawns (`childEnv()` in
+`tests/e2e-app-harness.ts`), and `deno task check:orphans` is the gate that
+nothing outlived the suite.
 
 ---
 
