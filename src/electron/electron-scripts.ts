@@ -6,6 +6,7 @@ import {
   tmplBoundsTracking,
   tmplCrashGuard,
   tmplKeyboardShortcuts,
+  tmplParentWatch,
   tmplWillNavigate,
   toSlug,
 } from "./electron-shared.ts";
@@ -22,6 +23,7 @@ const fs = require('fs');
 Menu.setApplicationMenu(null);
 app.name = ${JSON.stringify(slug)};
 ${tmplCrashGuard()}
+${tmplParentWatch()}
 
 // ── Window state persistence ──
 ${tmplBounds()}

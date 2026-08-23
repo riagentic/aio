@@ -136,21 +136,19 @@ export function componentConflict(components: Component[]): string | null {
     `or a distinct "name" on its build target.`;
 }
 
-/** The port a component runs on: what it declares, else a deterministic slot.
+/** The port a component runs on, or undefined when it declares none.
  *
- *  Deterministic (base + index in declaration order) rather than "next free",
- *  so a component keeps its address across restarts — a client pointed at
- *  `:8001` should not have to be re-pointed because a sibling started first.
- *  `am` prints the assignment; an assignment nobody can see is the kind of
- *  magic this project refuses. */
-export function componentPort(
-  components: Component[],
-  c: Component,
-  basePort = 8000,
-): { port: number; assigned: boolean } {
-  if (c.port !== undefined) return { port: c.port, assigned: false };
-  const idx = components.findIndex((x) => x.label === c.label);
-  return { port: basePort + Math.max(0, idx), assigned: true };
+ *  `am` does not invent one. It used to hand each component a slot
+ *  (`8000`, `8001`, …) so siblings could find each other at a predictable
+ *  address — which reintroduced, one level up, the bug that made this whole
+ *  area wrong: on a machine where something already owns 8000, the assignment
+ *  is a port conflict `am` created. The runtime already has the answer for an
+ *  app that declares nothing (`findFreePort()`, the same one `deno task dev`
+ *  uses), so components follow it, `am status` lists what each one bound, and a
+ *  component that NEEDS a fixed address declares `port` in its own
+ *  `aio.run()` — the same rule as any other app. */
+export function componentPort(c: Component): number | undefined {
+  return c.port;
 }
 
 /** Resolve a component by label, or null. Case-sensitive: the label is a key

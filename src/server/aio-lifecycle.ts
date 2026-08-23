@@ -2,7 +2,7 @@
 // Extracted from aio.ts _run() to keep the orchestrator lean.
 
 import { join } from "@std/path";
-import { openExternalBestEffort } from "./open-external.ts";
+import { hasDesktopSession, openExternalBestEffort } from "./open-external.ts";
 import { type AioMeta, launchElectron } from "../electron/electron.ts";
 import type { ServerHandle } from "./server-types.ts";
 import type { UDSHandle } from "./uds.ts";
@@ -13,7 +13,7 @@ import { VERSION } from "./aio-cli.ts";
 import { type BootExtras, bootLines, buildFacts } from "./boot-facts.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { discoverySupported, startDiscoveryResponder } from "./discovery.ts";
-import { instances } from "./single-instance-lock.ts";
+import { instances, isProcessAlive } from "./single-instance-lock.ts";
 import { shutdownAllRuntimes } from "./shutdown.ts";
 import { generatePin } from "./pairing.ts";
 import type { Log } from "../diagnostics/logger-api.ts";
@@ -23,6 +23,8 @@ import { appIconPngBase64 } from "../build/app-icon.ts";
 
 /** One SIGHUP guard per process — see the headless branch in startLifecycle. */
 let _sighupGuarded = false;
+/** One parent watch per process — see `AIO_PARENT_PID` in startLifecycle. */
+let _parentWatched = false;
 
 /** Inputs for lifecycle startup */
 export interface LifecycleDeps<S, A> {
@@ -48,6 +50,10 @@ export interface LifecycleDeps<S, A> {
   isHeadless: boolean;
   transport: "uds" | "ws";
   skipHttp: boolean;
+  /** Set when this app binds NO TCP port and its HTTP handler listens on a
+   *  socket instead (dev + electron + UDS). The Electron window fetches its
+   *  page and modules through it. */
+  httpSocketPath?: string;
   // Network
   port: number;
   token: string | undefined;
@@ -97,7 +103,13 @@ export interface LifecycleDeps<S, A> {
   // Config
   maxConnections: number | undefined;
   // CLI overrides
-  cli: { width?: number; height?: number; keepServer?: boolean };
+  cli: {
+    width?: number;
+    height?: number;
+    keepServer?: boolean;
+    /** `--open` — hand the URL to the desktop browser. Off by default. */
+    open?: boolean;
+  };
   // Not just the window box: the head-shaped keys travel to the templated
   // aio:// Electron shell, which has no other way to learn them.
   ui: {
@@ -180,11 +192,13 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
   __aio.appVersion = appVersion;
   __aio.aioVersion = VERSION;
 
-  // onStart hook — error-guarded
+  // onStart hook — error-guarded, for a sync throw AND an async rejection.
+  // An `async onStart` used to bypass this whole block: its rejection went to
+  // the crash handler as an unhandled rejection and `fatalOnStart` never saw
+  // it. The hook is not awaited (boot must not block on app code), but its
+  // outcome is routed to the same place either way.
   if (onStart) {
-    try {
-      onStart(app);
-    } catch (e) {
+    const failed = (e: unknown) => {
       log.error(`hook onStart: ${e}`);
       diagEmit({
         type: "hook-start-failed",
@@ -199,6 +213,46 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
         log.error("fatalOnStart is true — exiting due to onStart failure");
         Deno.exit(1);
       }
+    };
+    try {
+      const r = onStart(app) as unknown;
+      if (r && typeof (r as Promise<unknown>).then === "function") {
+        (r as Promise<unknown>).catch(failed);
+      }
+    } catch (e) {
+      failed(e);
+    }
+  }
+
+  // AIO_PARENT_PID — die with the process that started you.
+  //
+  // A spawned app is a plain child: when its launcher is SIGKILLed, times out
+  // or crashes, the app is reparented to init and keeps running — holding its
+  // port, its lock and (exposed) a LAN-visible listener. That is how a test
+  // runner killed by `timeout` left an `--expose`d app serving for 5 h. There
+  // is no portable "kill me when my parent dies" for a child, so the child
+  // watches: a launcher that wants this sets the env var, and the app stops
+  // itself — gracefully, every phase — when that pid is gone. Opt-in, same in
+  // dev and prod, observe-only until the parent actually disappears.
+  if (!libraryMode && !_parentWatched) {
+    const parentPid = Number(Deno.env.get("AIO_PARENT_PID") ?? "");
+    if (Number.isInteger(parentPid) && parentPid > 0) {
+      _parentWatched = true;
+      const timer = setInterval(() => {
+        if (isProcessAlive(parentPid)) return;
+        clearInterval(timer);
+        log.warn(
+          `parent process ${parentPid} is gone (AIO_PARENT_PID) — shutting down`,
+        );
+        shutdownAllRuntimes().then(() => Deno.exit(0)).catch(() =>
+          Deno.exit(1)
+        );
+      }, 2000);
+      // A watch must never be the thing that keeps an otherwise-finished
+      // process alive.
+      try {
+        Deno.unrefTimer(timer);
+      } catch { /* not supported */ }
     }
   }
 
@@ -231,8 +285,15 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
       "⚠ no authentication configured with --expose — any website can connect via WebSocket",
     );
   }
-  if (skipHttp) {
+  // "No TCP port" has two shapes and the report must not print a number for
+  // either: prod serves its page off disk with no handler at all, dev keeps
+  // the handler on a socket. Printing `web http://localhost:49208` for an app
+  // that bound nothing is the exact class of confidently-wrong line this
+  // codebase keeps deleting.
+  const noPort = skipHttp || !!deps.httpSocketPath;
+  if (noPort) {
     log.info(`running (${mode}, ${shell}, uds — no TCP port)`);
+    if (deps.httpSocketPath) log.info(`${p("http")}${deps.httpSocketPath}`);
   } else {
     log.info(`running (${mode}, ${shell}${transportLabel})`);
     const wsProto = useHttps ? "wss" : "ws";
@@ -256,8 +317,15 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
   // posture, and `expose: true` only implied it), and whether TLS is real.
   const _bootExtras = {
     ...deps.bootExtras,
-    bind: expose ? "0.0.0.0 — every interface" : "127.0.0.1 — loopback only",
-    tls: skipHttp
+    // What this process is actually reachable ON. A socket-only app is not
+    // "loopback" — it is not on the network stack at all, and its door is the
+    // filesystem permission on a 0700 directory.
+    bind: noPort
+      ? "unix socket only — no network interface"
+      : expose
+      ? "0.0.0.0 — every interface"
+      : "127.0.0.1 — loopback only",
+    tls: noPort
       ? undefined
       : useHttps
       ? (deps.tlsCert?.selfSigned ? "self-signed" : "provided cert")
@@ -309,7 +377,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
   // client (and `am discover`) can find them without knowing the IP/port.
   // UDP via node:dgram (stable — no flags); best-effort, degrades silently
   // if the port can't bind or the network blocks broadcast.
-  if (expose && !skipHttp) {
+  if (expose && !noPort) {
     // Stamp this app's discovery metadata into its lock file so ANY responder
     // on the host can report it (the multi-app-per-host solution).
     deps.appLock?.update?.({
@@ -391,6 +459,22 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
         });
       } catch { /* not supported on this platform (Windows) */ }
     }
+  } else if (useElectron && !hasDesktopSession()) {
+    // A desktop app on a machine with no desktop. Launching Electron here
+    // fails, and because "the window went away" is what shuts a desktop app
+    // down, the failure took the whole app with it — so an electron app on a
+    // headless server (ssh, a container, CI) exited instead of serving.
+    //
+    // `isHeadless` could not catch this: it answers "does this CLIENT have a
+    // UI", which is a property of the app, while this is a property of the
+    // MACHINE. Two different questions that happened to share an answer on a
+    // developer's laptop.
+    log.warn(
+      "electron client, but this machine has no desktop session " +
+        "(no DISPLAY/WAYLAND_DISPLAY) — not launching a window. The server " +
+        `is up at ${localUrl}; use --client=browser to open it from another ` +
+        `machine, or --client=server-only to say so explicitly.`,
+    );
   } else if (useElectron) {
     const meta: AioMeta = {
       title,
@@ -415,6 +499,11 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
       ? {
         socketPath: udsHandle.socketPath,
         baseDir: udsBaseDir,
+        // Dev's zero-port route: no dist/ to read and no port to fetch from,
+        // so the window's `aio://` handler goes through the HTTP socket for
+        // the page, its modules and every asset. Undefined whenever a TCP
+        // port exists — the window then loads over http:// exactly as before.
+        httpSocketPath: deps.httpSocketPath,
         title,
         hasCSS: udsHasCSS,
         // Dev window icon comes from the SAME dir the prod build packages it
@@ -452,16 +541,30 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
       )
       .then((proc) => {
         if (!proc) {
-          // Electron unavailable (auto-install failed / offline) — fall back
-          // to the system browser LOUDLY instead of dying: the
-          // app is identical over WS; the developer keeps working.
+          // Electron unavailable (auto-install failed / offline). The app
+          // keeps serving — it is identical over WS — but it does NOT quietly
+          // become a browser app.
+          //
+          // Opening a tab here changed the client the developer asked for, in
+          // the one situation where they were least likely to be watching, and
+          // it did it into a browser aio cannot close afterwards. A suite where
+          // Electron is not installed therefore produced a stack of identical
+          // tabs, each having stolen focus on the way in, and the fix for a
+          // desktop app was to install Electron — not to be handed a browser.
+          //
+          // So: say what happened, say where the app is, and let the person
+          // decide. `openExternalBestEffort` would refuse in a test anyway; the
+          // point of not calling it is that a desktop app staying a desktop app
+          // is a rule, not a side effect of the environment.
           log.error(
-            "Electron not installed and auto-install failed — falling back to the system browser",
+            "Electron not installed and auto-install failed — this app is a " +
+              "desktop app and will NOT be opened in a browser instead",
           );
           log.error(
-            `install it with: deno task install:electron (then re-run) — serving at ${electronUrl}`,
+            `install it with: deno task install:electron (then re-run). The ` +
+              `server is up meanwhile at ${electronUrl} — open it yourself, ` +
+              `or run with --client=browser if that is what you want.`,
           );
-          openExternalBestEffort(electronUrl);
           return;
         }
         setElectronProc(proc);
@@ -489,13 +592,30 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
       })
       .catch((e) => log.error(`electron: ${e}`));
   } else {
-    // Wait briefly for existing browser tabs to reconnect via WS
-    setTimeout(() => {
-      if (server.clientCount() > 0) {
-        log.debug("browser: existing client connected — skipping open");
-        return;
-      }
-      openExternalBestEffort(localUrl);
-    }, 1500);
+    // A browser client is a URL, printed. It is NOT a tab opened for you.
+    //
+    // Auto-opening was a convenience that quietly cost more than it gave: a tab
+    // handed to an already-running browser belongs to that browser, so aio
+    // cannot close it when the app exits. Boot an app twenty times — a test
+    // suite, a watch loop, a restart-on-crash — and there are twenty tabs of
+    // the same app, each one having taken focus as it mapped, none of them
+    // yours to close. An Electron window is different in kind: it is a child
+    // process aio owns and shuts down with the app, which is why THAT still
+    // opens by default.
+    //
+    // `--open` remains for the people who liked it, and even then the
+    // environment can still refuse (headless, CI, a test display).
+    if (!cli.open) {
+      log.info(`open ${localUrl} in your browser (or pass --open)`);
+    } else {
+      // Wait briefly for existing browser tabs to reconnect via WS
+      setTimeout(() => {
+        if (server.clientCount() > 0) {
+          log.debug("browser: existing client connected — skipping open");
+          return;
+        }
+        openExternalBestEffort(localUrl);
+      }, 1500);
+    }
   }
 }

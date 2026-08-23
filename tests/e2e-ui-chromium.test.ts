@@ -8,6 +8,7 @@
 // Runs automatically when a chromium/chrome binary is on the box; skipped
 // (visibly) otherwise. Opt out with AIO_E2E=0.
 import { assert, assertEquals } from "@std/assert";
+import { testDisplayEnv } from "../src/testing/test-display.ts";
 
 // Coverage profiles from spawned deno processes go to a throwaway temp dir —
 // never into the repo (an empty DENO_COVERAGE_DIR means "cwd"), never into
@@ -96,7 +97,7 @@ Deno.test({
     const port = freePort();
     const base = `http://localhost:${port}`;
     const app = new Deno.Command(Deno.execPath(), {
-      env: { DENO_COVERAGE_DIR: _childCovDir },
+      env: { DENO_COVERAGE_DIR: _childCovDir, ...testDisplayEnv() },
       args: [
         "run",
         "-A",

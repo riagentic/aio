@@ -62,6 +62,7 @@ import {
   cmdVersion,
 } from "./am/am-cmd-meta.ts";
 import { cmdCreate } from "./am/am-cmd-create.ts";
+import { cmdTrust } from "./am/am-cmd-trust.ts";
 import { cmdLink } from "./am/am-cmd-link.ts";
 import { cmdFix } from "./am/am-cmd-fix.ts";
 import { cmdAuth } from "./am/am-cmd-auth.ts";
@@ -156,6 +157,7 @@ const COMMANDS: Record<string, CmdHandler> = {
   installed: cmdInstalled,
   upgrade: cmdUpgrade, // rebuild+reinstall an installed app from its source
   version: cmdVersion,
+  trust: cmdTrust,
   help: (args, flags) => cmdHelp(args, flags, Object.keys(COMMANDS)),
 };
 

@@ -144,6 +144,12 @@ on the same port; open tabs notice the new boot ID and reload themselves. The
 process that started the app becomes a thin supervisor and re-launches it, so
 the process depth stays at two no matter how many times you save.
 
+A save that does not load — a syntax error, a bad import — is a _failed
+restart_, not the end of the session: the relaunched child dies at module load,
+the supervisor prints the error, says it is waiting, and relaunches on your next
+save. (A child that ran for a while and then crashed is a crash, and its exit
+code passes through as before.)
+
 It steps aside — warning as before, telling you to restart by hand — when it
 can't relaunch faithfully:
 

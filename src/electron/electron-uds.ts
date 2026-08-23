@@ -14,6 +14,7 @@ import {
   tmplBoundsTracking,
   tmplCrashGuard,
   tmplKeyboardShortcuts,
+  tmplParentWatch,
   tmplWillNavigate,
   toSlug,
   udsPreloadScript,
@@ -37,6 +38,11 @@ export function electronMainScriptUDS(url: string, socketPath: string, opts: {
   /** `<head>` inputs for the templated aio:// shell — without them the
    *  packaged app renders a different `<head>` than dev does. */
   shell?: ShellConfig;
+  /** The app's HTTP handler, on a Unix socket, because this app binds no TCP
+   *  port (dev + electron + UDS). The window then serves `aio://` by proxying
+   *  to it — same handler, same HTML, same transpiled modules as `http://`
+   *  would have delivered, minus the port. */
+  httpSocketPath?: string;
 }): string {
   const w = opts.meta?.width ?? 800;
   const h = opts.meta?.height ?? 600;
@@ -66,14 +72,22 @@ app.commandLine.appendSwitch('disable-features', 'CloudPrintEnable');
 Menu.setApplicationMenu(null);
 app.name = ${JSON.stringify(slug)};
 ${tmplCrashGuard()}
+${tmplParentWatch()}
 
-// ── Auto-detect: serve from disk (prod) or HTTP (dev) ──
+// ── Where the page comes from: disk (prod), the app's socket (dev, zero
+//    port), or the HTTP server (everything else) ──
 const BASE_DIR = ${JSON.stringify(opts.baseDir ?? "")};
-const USE_PROTOCOL = BASE_DIR && fs.existsSync(path.join(BASE_DIR, 'app.js'));
+const HTTP_SOCK = ${JSON.stringify(opts.httpSocketPath ?? "")};
+const FROM_DISK = !!(BASE_DIR && fs.existsSync(path.join(BASE_DIR, 'app.js')));
+// Disk wins when a bundle is there: it needs no server at all. Otherwise the
+// socket, when this app has one — that is the dev app that binds no port, and
+// http:// would have nothing to answer it.
+const FROM_SOCKET = !FROM_DISK && !!HTTP_SOCK;
+const USE_PROTOCOL = FROM_DISK || FROM_SOCKET;
 // machine U11 — never silent: when a dist dir was given but its app.js is
 // missing, the window silently falls back from disk (aio://) to HTTP. Say so.
-if (BASE_DIR && !USE_PROTOCOL) {
-  console.warn('[aio:electron] baseDir set but ' + path.join(BASE_DIR, 'app.js') + ' not found — falling back to the HTTP server (no on-disk bundle)');
+if (BASE_DIR && !FROM_DISK) {
+  console.warn('[aio:electron] baseDir set but ' + path.join(BASE_DIR, 'app.js') + ' not found — falling back to ' + (FROM_SOCKET ? 'the app socket' : 'the HTTP server') + ' (no on-disk bundle)');
 }
 
 // AIO-56: Register aio:// scheme as privileged BEFORE app.on('ready').
@@ -82,6 +96,40 @@ if (USE_PROTOCOL) {
     scheme: 'aio',
     privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true }
   }]);
+}
+
+// One request to the app's HTTP handler over its Unix socket. Node's own
+// http.request speaks this natively (a socketPath option), so the page, its modules
+// and every asset arrive through the SAME handler an http:// fetch would have
+// reached — headers, status and bytes intact, nothing re-encoded. Streaming
+// the body straight into the Response keeps binary assets binary.
+function socketFetch(reqPath, method, headers, body) {
+  return new Promise((resolve) => {
+    const http = require('http');
+    const r = http.request(
+      { socketPath: HTTP_SOCK, path: reqPath, method: method || 'GET', headers: headers || {} },
+      (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => {
+          const h = {};
+          for (const [k, v] of Object.entries(res.headers)) {
+            if (typeof v === 'string') h[k] = v;
+            else if (Array.isArray(v)) h[k] = v.join(', ');
+          }
+          resolve(new Response(Buffer.concat(chunks), { status: res.statusCode || 200, headers: h }));
+        });
+      },
+    );
+    // A dead socket must not hang the window forever on a blank page. Say what
+    // failed, in the window, where the developer is already looking.
+    r.on('error', (e) => resolve(new Response(
+      'aio: cannot reach the app over its socket (' + HTTP_SOCK + '): ' + e.message,
+      { status: 502, headers: { 'Content-Type': 'text/plain' } },
+    )));
+    if (body) r.write(body);
+    r.end();
+  });
 }
 
 const MIME = {
@@ -109,6 +157,19 @@ app.on('ready', () => {
   if (USE_PROTOCOL) {
     protocol.handle('aio', async (req) => {
       const url = new URL(req.url);
+      // Proxy EVERYTHING to the app's handler, path and query intact. No
+      // special cases here on purpose: the dev page, its on-demand transpiled
+      // modules, /__aio/* and the app's own routes are one surface, and a
+      // second copy of the routing table in the window is how the two come to
+      // disagree about what the app serves.
+      if (FROM_SOCKET) {
+        const hdrs = {};
+        req.headers.forEach((v, k) => { hdrs[k] = v; });
+        const body = (req.method === 'POST' || req.method === 'PUT')
+          ? Buffer.from(await req.arrayBuffer())
+          : undefined;
+        return await socketFetch(url.pathname + url.search, req.method, hdrs, body);
+      }
       let pathname;
       try { pathname = decodeURIComponent(url.pathname); } catch { pathname = url.pathname; }
       if (pathname === '/' || pathname === '') {

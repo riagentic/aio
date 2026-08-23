@@ -19,8 +19,9 @@
 //   silently WIDEN permissions. Then we fall back to the warning.
 // - opt out with AIO_NO_DEV_RESTART=1
 
-import { fromFileUrl } from "@std/path";
+import { dirname, fromFileUrl } from "@std/path";
 import { log } from "../diagnostics/logger-api.ts";
+import { instances, resolveAppId } from "./single-instance-lock.ts";
 
 /** Exit code a supervised child uses to ask for a fresh process. 75 =
  *  EX_TEMPFAIL — "try again", and outside the range apps use for errors. */
@@ -28,6 +29,25 @@ export const RESTART_EXIT_CODE = 75;
 
 const CHILD_ENV = "AIO_DEV_SUPERVISED";
 const OPT_OUT_ENV = "AIO_NO_DEV_RESTART";
+
+/** A child that dies THIS soon after a relaunch did not crash — it never got
+ *  to run: the file just saved does not load (a syntax error, a bad import).
+ *  That is a failed restart, and the answer to it is "fix the file", not "your
+ *  dev server is gone". A child that ran longer and then died crashed for its
+ *  own reasons, and its exit code is passed through exactly as before. */
+export const FAILED_RESTART_WINDOW_MS = 15_000;
+
+/** Source extensions whose change ends the wait after a failed restart. */
+const SOURCE_EXT = new Set([
+  ".ts",
+  ".tsx",
+  ".js",
+  ".jsx",
+  ".mjs",
+  ".json",
+  ".jsonc",
+  ".css",
+]);
 
 const PERMISSIONS: Deno.PermissionName[] = [
   "read",
@@ -181,6 +201,7 @@ async function superviseForever(): Promise<never> {
     } catch { /* signal not supported here */ }
   }
   while (true) {
+    const spawnedAt = Date.now();
     const child = new Deno.Command(Deno.execPath(), {
       args,
       env: { [CHILD_ENV]: "1" },
@@ -189,8 +210,94 @@ async function superviseForever(): Promise<never> {
       stderr: "inherit",
     }).spawn();
     stop.child = child;
-    const { code } = await child.status;
+    const status = await child.status;
     stop.child = null;
-    if (code !== RESTART_EXIT_CODE) Deno.exit(code);
+    if (status.code === RESTART_EXIT_CODE) continue;
+    // A signal ended it: `am kill`, a `kill -9`, Ctrl-C reaching the child
+    // directly. Someone wanted it dead; the supervisor goes too. A clean 0 is
+    // `am stop` or the window closing — same answer. A crash after it had
+    // been running is the app's own business and its code passes through.
+    if (
+      status.signal || status.code === 0 ||
+      Date.now() - spawnedAt > FAILED_RESTART_WINDOW_MS
+    ) {
+      Deno.exit(status.code);
+    }
+    // It died right after the relaunch: the file that was just saved does not
+    // load. This used to be `Deno.exit(1)` — a typo mid-edit ended the dev
+    // session, and nothing on screen said the watcher was gone. Stay up, say
+    // so, relaunch on the next save.
+    log.error(
+      "watch",
+      `the app exited with code ${status.code} right after the restart — ` +
+        `the file you saved most likely does not load (syntax or import ` +
+        `error above). The dev session stays up: fix it and save, and the ` +
+        `app relaunches. Ctrl-C to quit.`,
+    );
+    await waitForSourceChange();
+    // While we waited, `am start` (or a second `deno task dev`) may have
+    // brought the app up on its own. Relaunching would only be refused with
+    // "Already running" — say which process owns it and step aside.
+    const other = otherInstancePid();
+    if (other !== null) {
+      log.warn(
+        "watch",
+        `another instance of this app is running (pid ${other}) — this dev ` +
+          `session ends; that one is the app now`,
+      );
+      Deno.exit(0);
+    }
+  }
+}
+
+/** Resolve on the first change to a source file under the entry's directory
+ *  (recursive), after a short settle so a save that lands in two events is one
+ *  relaunch. Best-effort by design: if the watch cannot be set up the wait
+ *  ends immediately and the relaunch happens (at worst it fails again and
+ *  this runs again). */
+async function waitForSourceChange(): Promise<void> {
+  let dir: string;
+  try {
+    dir = dirname(fromFileUrl(Deno.mainModule));
+  } catch {
+    return;
+  }
+  let watcher: Deno.FsWatcher;
+  try {
+    watcher = Deno.watchFs(dir, { recursive: true });
+  } catch {
+    return;
+  }
+  log.info("watch", `waiting for a change under ${dir}`);
+  try {
+    for await (const ev of watcher) {
+      const hit = ev.paths.some((path) => {
+        const dot = path.lastIndexOf(".");
+        return dot >= 0 && SOURCE_EXT.has(path.slice(dot));
+      });
+      if (hit) break;
+    }
+  } catch {
+    /* watcher died — relaunch anyway */
+  } finally {
+    try {
+      watcher.close();
+    } catch { /* already closed */ }
+  }
+  await new Promise((r) => setTimeout(r, 150));
+}
+
+/** The pid of a DIFFERENT live instance of this app, or null. Uses the same
+ *  zero-config identity the child resolves; an app that names its `appId`
+ *  only in `aio.run()` is not visible from here, and the relaunch then simply
+ *  gets the runtime's own "Already running". */
+function otherInstancePid(): number | null {
+  try {
+    const live = instances(resolveAppId()).find((i) =>
+      i.alive && i.pid !== Deno.pid
+    );
+    return live ? live.pid : null;
+  } catch {
+    return null;
   }
 }

@@ -347,6 +347,9 @@ async function spawnElectron(
   }
   const proc = new Deno.Command(bin, {
     args: [tmpFile, ...sandboxArgs, ...extraArgs],
+    // The window dies with this process — see tmplParentWatch. Merged into
+    // the inherited environment, so the shim passes it through to Electron.
+    env: { AIO_PARENT_PID: String(Deno.pid) },
     // stderr is PIPED so the graphics-stack probe noise can be kept out of the
     // app's own log (see forwardStderr). stdout stays inherited — that is the
     // app's own console output and must pass through untouched.
@@ -367,6 +370,18 @@ export async function launchElectron(
   url: string,
   log: Log,
   meta?: AioMeta,
+  /** THE declaration for what reaches the generated main script. Read it as
+   *  the one list: the call below is a mechanical passthrough (`...rest`), so
+   *  a key added here is wired by the fact of being declared.
+   *
+   *  It used to be a hand-copied literal, and this is the same shape the
+   *  config bridge documents dropping keys six times over
+   *  (`TransportConfig`, aio-server.ts). It did it again here: the socket that
+   *  lets a zero-port app serve its own page was declared, threaded through
+   *  four files, and then quietly not copied into this object — so the window
+   *  fell back to `http://localhost:<port>` and opened on
+   *  ERR_CONNECTION_REFUSED, with nothing in the chain wrong except a missing
+   *  line in a literal. */
   uds?: {
     socketPath: string;
     baseDir?: string;
@@ -377,6 +392,8 @@ export async function launchElectron(
     /** Base64 PNG used when the app ships no `icon.png`. */
     defaultIcon?: string;
     shell?: ShellConfig;
+    /** The app's HTTP handler on a socket — set when it binds no TCP port. */
+    httpSocketPath?: string;
   },
 ): Promise<Deno.ChildProcess | null> {
   const bin = await findElectronBin(log);
@@ -388,16 +405,11 @@ export async function launchElectron(
     : "$ELECTRON_PATH";
   const transport = uds ? "UDS" : "WS";
   log.info(`launching Electron (${mode}, ${transport})`);
+  // Mechanical passthrough — `socketPath` is positional, everything else the
+  // caller declared rides across untouched. Never re-list the keys here.
+  const { socketPath: _sock, ...udsOpts } = uds ?? { socketPath: "" };
   const script = uds
-    ? electronMainScriptUDS(url, uds.socketPath, {
-      baseDir: uds.baseDir,
-      title: uds.title,
-      hasCSS: uds.hasCSS,
-      iconDir: uds.iconDir,
-      defaultIcon: uds.defaultIcon,
-      meta,
-      shell: uds.shell,
-    })
+    ? electronMainScriptUDS(url, uds.socketPath, { ...udsOpts, meta })
     : electronMainScript(url, meta);
   return spawnElectron(bin, script);
 }

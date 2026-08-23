@@ -430,6 +430,11 @@ Inspect:
   discover [--timeout=ms] Find exposed aio apps on the LAN (UDP broadcast)
   profile [--out=file]    Export this app's .aioapp profile (cert + key) for the client
   pair                    Fresh single-use pairing PIN (3 min) — no restart needed
+  trust                   Show this machine's aio root + how to install it, so
+                          browsers stop warning about EVERY aio app (one
+                          install, all apps, forever). Name-constrained: it can
+                          only vouch for localhost/.local/LAN, never the public
+                          web. \`am trust path\` prints just the file.
   config                  Server configuration
 
 Scaffold:

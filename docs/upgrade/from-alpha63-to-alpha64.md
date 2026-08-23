@@ -42,8 +42,8 @@ Two things are new for multi-entry repos:
 - **Each component needs its own identity.** `aio.run({ appId: "relay" })` in
   each entry. If two resolve to the same id, `am` refuses and says which: they
   would share one lock file, one data directory and one port. A component that
-  declares no `port` is given one (8000, 8001, … in declaration order) and `am`
-  prints the assignment.
+  declares no `port` gets a free one from the runtime, exactly as
+  `deno task dev` does; `am status` lists what each one bound.
 
 ## `ui.theme: "none"` now means none
 

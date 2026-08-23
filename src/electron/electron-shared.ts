@@ -66,6 +66,34 @@ process.on('unhandledRejection', (reason) => {
 });`;
 }
 
+/** Die with the aio server that launched this window.
+ *
+ *  Electron is spawned as a plain child: when the server is SIGKILLed,
+ *  OOM-killed or crashes, the window stays up — "reconnecting" forever to a
+ *  socket that will never come back, and when the app is started again the
+ *  OLD window reconnects to the NEW server while the new server opens its own.
+ *  Two windows, one app, one of them running yesterday's renderer. So the
+ *  launcher passes its pid and the main process watches it: gone ⇒ quit, with
+ *  a line saying why. A `process.ppid` check would not do — the `.bin/electron`
+ *  shim sits between the two and outlives its parent as well.
+ *  Expects `app` and `__aioQuitting` (tmplCrashGuard) in scope. */
+export function tmplParentWatch(): string {
+  return `
+const __aioParent = Number(process.env.AIO_PARENT_PID || 0);
+if (__aioParent > 0) {
+  const __aioParentTimer = setInterval(() => {
+    let alive = true;
+    try { process.kill(__aioParent, 0); } catch (e) { alive = !!(e && e.code === 'EPERM'); }
+    if (alive) return;
+    clearInterval(__aioParentTimer);
+    console.warn('[aio:electron] the aio server (pid ' + __aioParent + ') is gone — closing the window');
+    __aioQuitting = true;
+    try { app.quit(); } catch { process.exit(0); }
+  }, 2000);
+  __aioParentTimer.unref && __aioParentTimer.unref();
+}`;
+}
+
 /** Window bounds persistence: stateFile, loadBounds, saveBounds.
  *  @param async Use async fs/promises variant (UDS) vs sync writeFileSync (standard) */
 export function tmplBounds(async = false): string {

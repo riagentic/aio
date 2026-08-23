@@ -23,21 +23,24 @@ import {
   instances,
   isProcessAlive,
   isSocketAlive,
+  killProcess,
   type LockData,
   lockDir,
   readLaunchInfo,
   resolveAppId,
+  STARTUP_GRACE_MS,
   writeLaunchInfo,
   writeLock,
 } from "../server/single-instance-lock.ts";
+import { SHUTDOWN_BUDGET_MS } from "../server/shutdown-budget.ts";
 import { detectMode, formatUptime, out, outError } from "./am-output.ts";
 import { repoRoot } from "./am-cmd-create.ts";
 import {
+  declaredPort,
   readEntryConfig,
   readPid,
   removePid,
   resolveAmAppId,
-  resolveAmPort,
   resolveEntry,
 } from "./am-utils.ts";
 import { componentPort, processPlan } from "./am-components.ts";
@@ -121,10 +124,13 @@ export async function prepareStdoutLog(
     else await wipeFile(base);
   }
 }
-const KILL_GRACE_MS = 2000;
 const KILL_POLL_MS = 100;
-const KILL_REAP_MS = 300;
-const SINGLETON_WAIT_MS = 3000;
+// How long `am` waits for a STOPPING instance before it SIGKILLs — the
+// runtime's own worst-case graceful stop plus a margin, imported rather than
+// retyped: a 3 s wait against an 8 s budget killed legitimate final flushes.
+const SINGLETON_WAIT_MS = SHUTDOWN_BUDGET_MS + 1000;
+/** Default for `--wait` on stop/restart, in seconds — the same budget. */
+const STOP_WAIT_DEFAULT_S = Math.ceil(SINGLETON_WAIT_MS / 1000);
 const POLL_INTERVAL_MS = 200;
 const HEALTH_TIMEOUT_MS = 2000;
 const QUICK_TIMEOUT_MS = 1000;
@@ -132,28 +138,15 @@ const STOP_CHECK_TIMEOUT_MS = 500;
 
 // ── Singleton enforcement ───────────────────────────────────
 
-/** Kill a process: SIGTERM first, SIGKILL after grace period */
-export async function killProcess(
-  pid: number,
-  grace = KILL_GRACE_MS,
-): Promise<void> {
-  if (!isProcessAlive(pid)) return;
-  try {
-    Deno.kill(pid, "SIGTERM");
-  } catch {
-    return;
-  }
-  const deadline = Date.now() + grace;
-  while (Date.now() < deadline && isProcessAlive(pid)) {
-    await new Promise((r) => setTimeout(r, KILL_POLL_MS));
-  }
-  if (isProcessAlive(pid)) {
-    try {
-      Deno.kill(pid, "SIGKILL");
-    } catch { /* ok */ }
-    await new Promise((r) => setTimeout(r, KILL_REAP_MS));
-  }
-}
+/** Kill a process and anything it left running — THE implementation, in
+ *  `single-instance-lock.ts`, re-exported so `am`'s callers keep their import.
+ *
+ *  There were two copies of this, and they had already drifted in the way
+ *  copies do: same shape, same constants retyped, and NEITHER of them knew
+ *  about child processes — so a hung app's Electron window survived the kill
+ *  that was meant to stop it. One killer, one grace period, one answer to
+ *  "is it actually gone". */
+export { killProcess };
 
 /** Ensure no other instance of this app is running. Kills zombies, waits for stopping. */
 export async function ensureSingleton(
@@ -190,7 +183,23 @@ export async function ensureSingleton(
   }
 
   if (pf.status === "starting") {
-    // Check if it's actually responding (auto-heal to 'started')
+    // A booting app is not a stuck one. Two facts decide that, and both used
+    // to be ignored: the runtime's own grace (`STARTUP_GRACE_MS` — the same
+    // number `AppLock.acquire` honours) and whether there is a port to probe
+    // at all. `am start` writes the placeholder lock with `port: 0` when the
+    // app declared none, so the probe below went to 127.0.0.1:0, failed by
+    // definition, and a second `am start` during boot SIGTERMed the first.
+    const probePort = pf.trojanPort ?? pf.port;
+    const withinGrace = Date.now() - pf.startedAt < STARTUP_GRACE_MS;
+    if (withinGrace || !(probePort > 0)) {
+      outError(
+        `already starting: ${appId} (pid ${pf.pid}) — wait for it, or ` +
+          `\`am stop\` it first`,
+        mode,
+      );
+      Deno.exit(1);
+    }
+    // Past the grace with a real port: is it actually responding?
     let responds = false;
     try {
       const r = await fetch(`http://127.0.0.1:${pf.trojanPort ?? pf.port}/`, {
@@ -393,23 +402,28 @@ export async function cmdStart(
     if (plan.kind === "one" || plan.kind === "all") {
       const list = plan.kind === "one" ? [plan.component] : plan.components;
       for (const c of list) {
-        const { port, assigned } = componentPort(plan.components, c);
-        if (assigned && mode === "pretty") {
-          out(
-            `${c.label}: port ${port} (assigned — this entry declares none)`,
-            mode,
-          );
-        }
+        const port = componentPort(c);
         await cmdStart(
           args.filter((a) => a.startsWith("-")),
-          { ...flags, app: c.appId, port, entry: c.entry },
+          {
+            ...flags,
+            app: c.appId,
+            ...(port !== undefined ? { port } : {}),
+            entry: c.entry,
+          },
         );
       }
       return;
     }
   }
   const appId = resolveAmAppId(flags.app);
-  const port = resolveAmPort(flags.port);
+  // The port this app DECLARED, or undefined — in which case the runtime picks
+  // a free one exactly as `deno task dev` does, and `am` reads it back from the
+  // lock the app writes. `am` inventing 8000 here made the two commands
+  // disagree about the same app, and made `am start` refuse over a port the app
+  // was never going to bind.
+  const declared = declaredPort(flags.port);
+  const port = declared ?? 0; // 0 = "not decided yet", for the placeholder lock
 
   // Clean up stuck/zombie instances before acquiring lock
   await ensureSingleton(appId, mode);
@@ -426,50 +440,54 @@ export async function cmdStart(
     Deno.exit(1);
   }
 
-  // Pre-check: is the target port already taken?
-  try {
-    const resp = await fetch(`http://127.0.0.1:${port}/`, {
-      signal: AbortSignal.timeout(QUICK_TIMEOUT_MS),
-    });
-    await resp.body?.cancel();
-    // Something is listening — check if it's an aio app
-    let trojan: import("./am-types.ts").Result;
+  // Pre-check: is the target port already taken? Only when there IS a target —
+  // an app that declares no port has no port to conflict over, and probing a
+  // guess produced a refusal naming an unrelated app on 8000.
+  if (declared !== undefined) {
     try {
-      const r = await fetch(`http://127.0.0.1:${port}/__aio/trojan/config`, {
+      const resp = await fetch(`http://127.0.0.1:${port}/`, {
         signal: AbortSignal.timeout(QUICK_TIMEOUT_MS),
       });
-      trojan = r.ok
-        ? { ok: true, data: await r.json() }
-        // 401/403 is an aio app ANSWERING — it is asking for the key this
-        // probe deliberately does not send. Reading that as "not aio" told the
-        // user their own keyed app was "another process", which sends them
-        // hunting a port conflict that does not exist. `authed` says which.
-        : {
-          ok: false,
-          error: r.status === 401 || r.status === 403 ? "auth" : "",
-        };
-    } catch {
-      trojan = { ok: false, error: "" };
-    }
-    if (trojan.ok) {
-      const cfg = trojan.data as { title?: string };
-      outError(
-        `port ${port} in use by aio app "${
-          cfg.title ?? "?"
-        }" — stop it first or use --port=N`,
-        mode,
-      );
-    } else if (!trojan.ok && trojan.error === "auth") {
-      outError(
-        `port ${port} in use by an aio app that requires a key (it answered ` +
-          `the probe with 401) — stop it first, or use --port=N`,
-        mode,
-      );
-    } else {
-      outError(`port ${port} in use by another process — use --port=N`, mode);
-    }
-    Deno.exit(1);
-  } catch { /* port free — good */ }
+      await resp.body?.cancel();
+      // Something is listening — check if it's an aio app
+      let trojan: import("./am-types.ts").Result;
+      try {
+        const r = await fetch(`http://127.0.0.1:${port}/__aio/trojan/config`, {
+          signal: AbortSignal.timeout(QUICK_TIMEOUT_MS),
+        });
+        trojan = r.ok
+          ? { ok: true, data: await r.json() }
+          // 401/403 is an aio app ANSWERING — it is asking for the key this
+          // probe deliberately does not send. Reading that as "not aio" told the
+          // user their own keyed app was "another process", which sends them
+          // hunting a port conflict that does not exist. `authed` says which.
+          : {
+            ok: false,
+            error: r.status === 401 || r.status === 403 ? "auth" : "",
+          };
+      } catch {
+        trojan = { ok: false, error: "" };
+      }
+      if (trojan.ok) {
+        const cfg = trojan.data as { title?: string };
+        outError(
+          `port ${port} in use by aio app "${
+            cfg.title ?? "?"
+          }" — stop it first or use --port=N`,
+          mode,
+        );
+      } else if (!trojan.ok && trojan.error === "auth") {
+        outError(
+          `port ${port} in use by an aio app that requires a key (it answered ` +
+            `the probe with 401) — stop it first, or use --port=N`,
+          mode,
+        );
+      } else {
+        outError(`port ${port} in use by another process — use --port=N`, mode);
+      }
+      Deno.exit(1);
+    } catch { /* port free — good */ }
+  }
 
   // Resolve entry point — --entry flag > deno.json "entry" > src/app.ts
   const entry = resolveEntry(flags.entry);
@@ -562,12 +580,24 @@ export async function cmdStart(
   };
   writeLock(lockData);
 
-  // Without --wait: return immediately, user checks with `am status`
+  // Without --wait: return immediately, user checks with `am status`.
+  // The port is only reported when the app DECLARED one — otherwise the child
+  // is still choosing it, and printing a number am made up is how "am start
+  // says 8000, the app is on 49208" happens. `am status` reads the real one
+  // from the lock the app writes.
   if (flags.wait === undefined) {
     out(
       mode === "pretty"
-        ? `starting ${appId} (pid ${pid}, port ${port})`
-        : { appId, pid, port, status: "starting" },
+        ? declared !== undefined
+          ? `starting ${appId} (pid ${pid}, port ${port})`
+          : `starting ${appId} (pid ${pid}) — the app picks a free port; ` +
+            `am status shows it`
+        : {
+          appId,
+          pid,
+          ...(declared !== undefined ? { port } : {}),
+          status: "starting",
+        },
       mode,
     );
     return;
@@ -577,11 +607,19 @@ export async function cmdStart(
   const timeout = (flags.wait || 10) * 1000;
   let healthy = false;
   const deadline = Date.now() + timeout;
+  // The port to probe is whatever the CHILD bound, which it records in its own
+  // lock — the only honest source when nothing was declared.
+  let livePort = declared;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
     if (!isProcessAlive(pid)) break; // died early
+    if (livePort === undefined) {
+      const written = readPid(appId);
+      if (written?.port) livePort = written.port;
+      else continue; // not far enough into boot to have chosen one
+    }
     try {
-      const ctrlPort = resolveControlPort(port, appId);
+      const ctrlPort = resolveControlPort(livePort, appId);
       const resp = await fetch(`http://127.0.0.1:${ctrlPort}/`, {
         signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
       });
@@ -599,10 +637,14 @@ export async function cmdStart(
     if (updated && updated.status !== "started") {
       writeLock({ ...updated, status: "started" });
     }
+    // The port the app ACTUALLY bound — from its own lock, falling back to what
+    // we probed. Reporting `port` here would print am's placeholder for an app
+    // that chose its own.
+    const realPort = updated?.port ?? livePort ?? port;
     out(
       mode === "pretty"
-        ? `started ${appId} (pid ${pid}, port ${port})`
-        : { appId, pid, port, status: "started" },
+        ? `started ${appId} (pid ${pid}, port ${realPort})`
+        : { appId, pid, port: realPort, status: "started" },
       mode,
     );
   } else if (!isProcessAlive(pid)) {
@@ -810,7 +852,7 @@ async function stopOne(
   }
 
   // With --wait: poll until dead, then force kill if needed
-  const timeout = (flags.wait || 5) * 1000;
+  const timeout = (flags.wait || STOP_WAIT_DEFAULT_S) * 1000;
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     if (pf && !isProcessAlive(pf.pid)) break;
@@ -951,10 +993,15 @@ export async function cmdRestart(
     if (plan.kind === "one" || plan.kind === "all") {
       const list = plan.kind === "one" ? [plan.component] : plan.components;
       for (const c of list) {
-        const { port } = componentPort(plan.components, c);
+        const port = componentPort(c);
         await cmdRestart(
           args.filter((a) => a.startsWith("-")),
-          { ...flags, app: c.appId, port, entry: c.entry },
+          {
+            ...flags,
+            app: c.appId,
+            ...(port !== undefined ? { port } : {}),
+            entry: c.entry,
+          },
         );
       }
       return;
@@ -1010,7 +1057,11 @@ export async function cmdRestart(
   if (pf && isProcessAlive(pf.pid)) {
     const port = pf.port;
     // Stop must complete before start — force --wait internally
-    const stopFlags = { ...flags, quiet: true, wait: flags.wait ?? 5 };
+    const stopFlags = {
+      ...flags,
+      quiet: true,
+      wait: flags.wait ?? STOP_WAIT_DEFAULT_S,
+    };
     await cmdStop([], stopFlags);
     // Wait until port is free
     const deadline = Date.now() + SINGLETON_WAIT_MS;

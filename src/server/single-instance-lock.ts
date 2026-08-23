@@ -6,6 +6,14 @@
 import { dirname, join } from "@std/path";
 import { appDirs } from "./app-dirs.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { SHUTDOWN_BUDGET_MS } from "./shutdown-budget.ts";
+
+/** How long a lock may sit at `status:"starting"` before anyone — the next
+ *  launch's zombie probe, `am start` — may treat "its listener does not answer"
+ *  as "it is stuck". THE one decider: `am` used to have none, probed the port
+ *  the placeholder lock carried (0, when the app had not declared one) and
+ *  killed every app that was still booting. */
+export const STARTUP_GRACE_MS = 10_000;
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -177,6 +185,24 @@ export function lockDir(): string {
   return _lockDir;
 }
 
+/** Remove the per-`AIO_APPS_DIR` lock dir when it is empty — called at the
+ *  very end of an app's shutdown. The default dir (`…/aio`) is never removed;
+ *  it is shared by every app on the machine and costs nothing. A scoped one
+ *  belongs to a temp home that is about to be deleted, and used to outlive it
+ *  forever. Non-recursive on purpose: another app's lock or a live watcher
+ *  sentinel makes the rmdir fail, which is the right answer. */
+export function pruneLockDir(): void {
+  if (!_lockDir || !Deno.env.get("AIO_APPS_DIR")) return;
+  try {
+    Deno.removeSync(_lockDir);
+    // The path is still right; only the directory is gone. Forget the cached
+    // answer so the next `lockDir()` call re-creates it (a later app in this
+    // same process — every sequential test — must not write into a void).
+    _lockDir = null;
+    _lockDirKey = null;
+  } catch { /* not empty, or already gone — either way not ours to force */ }
+}
+
 /** Full path to the lock file for a given appId */
 export function lockPath(appId: string): string {
   return join(lockDir(), `${appId}.lock`);
@@ -316,17 +342,35 @@ export function readLock(appId: string): LockData | null {
 
 /** Write lock file atomically — createNew for first write, overwrite for updates */
 export function writeLock(data: LockData): void {
-  Deno.writeTextFileSync(lockPath(data.appId), JSON.stringify(data));
+  const path = lockPath(data.appId);
+  try {
+    Deno.writeTextFileSync(path, JSON.stringify(data));
+  } catch (e) {
+    // Same case as tryCreateLock: a sibling's shutdown pruned the scoped lock
+    // dir between our `lockDir()` and this write. Re-create, write once more.
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+    Deno.mkdirSync(dirname(path), { recursive: true });
+    Deno.writeTextFileSync(path, JSON.stringify(data));
+  }
 }
 
 /** Atomic create-new lock file — returns false if file already exists (race-safe) */
 function tryCreateLock(data: LockData): boolean {
   const encoded = new TextEncoder().encode(JSON.stringify(data));
+  const open = () =>
+    Deno.openSync(lockPath(data.appId), { createNew: true, write: true });
   try {
-    const fd = Deno.openSync(lockPath(data.appId), {
-      createNew: true,
-      write: true,
-    });
+    let fd: Deno.FsFile;
+    try {
+      fd = open();
+    } catch (e) {
+      // The directory can vanish between `lockDir()` and this write: a sibling
+      // app's shutdown pruned its (momentarily empty) scoped dir. Re-create
+      // and try once more — an ENOENT here is never "someone holds the lock".
+      if (!(e instanceof Deno.errors.NotFound)) throw e;
+      Deno.mkdirSync(dirname(lockPath(data.appId)), { recursive: true });
+      fd = open();
+    }
     fd.writeSync(encoded);
     fd.close();
     return true;
@@ -352,10 +396,24 @@ export class AppLock {
     this.appId = appId;
   }
 
-  /** Register process-termination hooks so the lock file is removed on crash /
-   *  SIGINT / SIGTERM / page unload. Idempotent — safe to call from every
-   *  acquire() exit path. Audit F-7: previously only registered in the
-   *  last-ditch fallback, so normal startups leaked stale locks on hard exit. */
+  /** Register process-termination hooks. Idempotent — safe to call from every
+   *  acquire() exit path.
+   *
+   *  Two different things happen here, and they used to be one:
+   *
+   *  • `unload` RELEASES — the process is ending, nothing runs after this.
+   *  • SIGINT / SIGTERM only MARK the lock `stopping`. The signal starts the
+   *    graceful shutdown (`aio-server.ts` installs that handler); the lock is
+   *    released by its Phase 6, AFTER the final persist. Releasing it at signal
+   *    time — which is what this did — left the app alive, listening and
+   *    flushing, but unlocked: measured, the lock file was gone 1 ms after
+   *    SIGTERM and the process 14 ms later, and for an app with a real final
+   *    snapshot the gap is the whole shutdown (seconds). A launch in that gap
+   *    took the lock, opened the same `state.db`, restored PRE-final state and
+   *    overwrote the first app's last write on its next persist. The stale-
+   *    lock case this was added for (Audit F-7: a hard exit leaves the file
+   *    behind) is covered by pid liveness — a dead owner is reclaimed on the
+   *    next launch — and a hard exit runs no JS handler anyway. */
   private _registerCleanupHandlers(): void {
     // TWO facts, and merging them was the bug: "are the process-wide listeners
     // installed?" and "which locks must they release?".
@@ -373,19 +431,24 @@ export class AppLock {
     AppLock._cleanupRegistered = true;
     // Snapshot the set: `release()` mutates it, and a Set must not be mutated
     // while it is being iterated.
-    const cleanup = () => {
+    const release = () => {
       for (const lock of [...AppLock._live]) lock.release();
     };
+    const markStopping = () => {
+      for (const lock of [...AppLock._live]) {
+        lock.update({ status: "stopping" });
+      }
+    };
     try {
-      addEventListener("unload", cleanup);
+      addEventListener("unload", release);
     } catch { /* skip if listener limit */ }
     try {
-      AppLock._sigintHandler = cleanup;
-      Deno.addSignalListener("SIGINT", cleanup);
+      AppLock._sigintHandler = markStopping;
+      Deno.addSignalListener("SIGINT", markStopping);
     } catch { /* unsupported on windows */ }
     try {
-      AppLock._sigtermHandler = cleanup;
-      Deno.addSignalListener("SIGTERM", cleanup);
+      AppLock._sigtermHandler = markStopping;
+      Deno.addSignalListener("SIGTERM", markStopping);
     } catch { /* unsupported on windows */ }
   }
 
@@ -474,7 +537,7 @@ export class AppLock {
       // for HTTP servers, UDS for socket-only (prod/electron skipHttp) ones.
       // Grace: skip while the owner is still starting up.
       const pastStartup = existing.status !== "starting" ||
-        Date.now() - existing.startedAt > 10_000;
+        Date.now() - existing.startedAt > STARTUP_GRACE_MS;
       let listenerDead = false;
       if (pastStartup) {
         if (existing.socketPath) {
@@ -497,8 +560,10 @@ export class AppLock {
 
       // Owner is alive — behavior depends on killExisting
       if (killExisting) {
-        // Kill the old instance
-        await killProcess(existing.pid);
+        // Kill the old instance — SIGTERM, then wait out the WHOLE graceful
+        // budget before SIGKILL: a takeover is not a reason to truncate the
+        // previous instance's final snapshot.
+        await killProcess(existing.pid, SHUTDOWN_BUDGET_MS + 1000);
         removeLock(this.appId);
         await delay(100);
         continue;
@@ -600,10 +665,54 @@ function delay(ms: number): Promise<void> {
 
 const KILL_GRACE_MS = 2000;
 const KILL_POLL_MS = 100;
+const KILL_REAP_MS = 300;
 
 /** Kill a process: SIGTERM first, SIGKILL after grace period */
-async function killProcess(pid: number, grace = KILL_GRACE_MS): Promise<void> {
+/** Every descendant of `pid`, shallowest first.
+ *
+ *  Asked BEFORE anything is killed, because once a parent dies its children are
+ *  reparented to init and can no longer be found by walking down from it. */
+export async function descendantPids(pid: number): Promise<number[]> {
+  const out: number[] = [];
+  const walk = async (p: number) => {
+    const r = await new Deno.Command("pgrep", {
+      args: ["-P", String(p)],
+      stdout: "piped",
+      stderr: "null",
+    }).output().catch(() => null);
+    if (!r?.success) return; // no pgrep (windows) — the parent is still killed
+    for (const line of new TextDecoder().decode(r.stdout).trim().split("\n")) {
+      const child = Number(line.trim());
+      if (Number.isInteger(child) && child > 0) {
+        out.push(child);
+        await walk(child);
+      }
+    }
+  };
+  await walk(pid).catch(() => {});
+  return out;
+}
+
+/** THE process killer: SIGTERM, a grace period, then SIGKILL — and then any
+ *  descendant the app left behind.
+ *
+ *  This used to exist TWICE, near-identically, and neither copy knew about
+ *  child processes. That mattered most for the case it was written for: an aio
+ *  app owns an Electron window, and a graceful stop closes it (`shutdown.ts`
+ *  has an "electron" phase). But a HUNG app never reaches its shutdown, so the
+ *  SIGKILL below orphaned the window — leaving a desktop app on screen with no
+ *  server behind it, and a developer killing processes by hand before their
+ *  next run would start.
+ *
+ *  The graceful path is unchanged and still preferred: when the app shuts down
+ *  properly it reaps its own children, and the sweep below finds nothing. */
+export async function killProcess(
+  pid: number,
+  grace = KILL_GRACE_MS,
+): Promise<void> {
   if (!isProcessAlive(pid)) return;
+  // Ask first, kill second.
+  const kids = await descendantPids(pid);
   try {
     Deno.kill(pid, "SIGTERM");
   } catch {
@@ -617,6 +726,14 @@ async function killProcess(pid: number, grace = KILL_GRACE_MS): Promise<void> {
     try {
       Deno.kill(pid, "SIGKILL");
     } catch { /* ok */ }
-    await delay(300);
+    await delay(KILL_REAP_MS);
+  }
+  // Deepest first, so a parent cannot spawn a replacement on its way out.
+  // Anything already gone (the graceful case) is a no-op.
+  for (const kid of kids.reverse()) {
+    if (!isProcessAlive(kid)) continue;
+    try {
+      Deno.kill(kid, "SIGKILL");
+    } catch { /* already gone, or not ours to signal */ }
   }
 }

@@ -77,11 +77,24 @@ Deno.test("SERVES.browser matches the client router's case labels", async () => 
   );
 });
 
+// The control client is a router like any other: it decodes frames off the
+// same socket and acts on exactly one kind. Recording it here is what keeps
+// `ctlr` from being a reply the catalog claims exists and nobody reads.
+Deno.test("SERVES.am matches the control client's handled kinds", async () => {
+  assertEquals(
+    sorted(await fileKinds("src/am/am-uds.ts")),
+    sorted(SERVES.am),
+    "am-uds.ts names a different kind set than SERVES.am records — the " +
+      "control client sends `ctl` and reads `ctlr`, nothing else",
+  );
+});
+
 Deno.test("every frame kind is served by at least one transport", () => {
   const union = new Set<Kind>([
     ...SERVES.ws,
     ...SERVES.uds,
     ...SERVES.browser,
+    ...SERVES.am,
   ]);
   const unrouted = FRAME_KINDS.filter((k) => !union.has(k));
   assertEquals(

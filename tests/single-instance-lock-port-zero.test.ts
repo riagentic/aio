@@ -157,8 +157,19 @@ console.log("CLOSED");
   },
 });
 
+/** The recorded status of a lock file, or null when it is gone/unreadable. */
+function statusOf(path: string): string | null {
+  try {
+    return (JSON.parse(Deno.readTextFileSync(path)) as { status?: string })
+      .status ?? null;
+  } catch {
+    return null;
+  }
+}
+
 Deno.test({
-  name: "lock: SIGTERM releases EVERY lock in the process, not just the first",
+  name:
+    "lock: SIGTERM marks EVERY lock in the process stopping, not just the first",
   ignore: Deno.build.os === "windows", // no POSIX signals
   sanitizeResources: false,
   sanitizeOps: false,
@@ -167,9 +178,15 @@ Deno.test({
     // handler used to close over ONE instance. A second locked app in the same
     // process (a supported shape: `singleton` defaults to true outside
     // libraryMode) saw the registration flag already set, returned early, and
-    // got no cleanup at all. Its lock then outlived the process and blocked
-    // that app's next launch, while the first app's lock released fine — so
-    // the symptom appeared in only one of two apps, at the next start.
+    // got no handler at all — so whatever the signal does to a lock, it
+    // happened to only one of two apps.
+    //
+    // What the signal DOES is mark the lock `stopping` — not release it. The
+    // lock is released by shutdown's Phase 6, after the final persist; a
+    // release at signal time left the app alive, listening and unlocked for
+    // its whole shutdown (see tests/lock-lifetime.test.ts). So the assertion
+    // here is: BOTH locks carry the mark, i.e. both are covered by the one
+    // process-wide handler.
     const appsDir = await Deno.makeTempDir({ prefix: "aio-lock-multi-" });
     const src = join(appsDir, "probe.ts");
     await Deno.writeTextFile(
@@ -216,12 +233,11 @@ setInterval(() => {}, 1000);
     // Signal, give the handler time to run, then INSPECT — never wait on the
     // child to exit. A regression here must fail with a clear assertion, not
     // hang until a CI timeout, and whether the process chooses to exit after
-    // handling SIGTERM is a separate question from whether it released its
-    // locks.
+    // handling SIGTERM is a separate question from what it did to its locks.
     child.kill("SIGTERM");
     await new Promise((r) => setTimeout(r, 800));
-    const stillA = exists(lockA);
-    const stillB = exists(lockB);
+    const markA = statusOf(lockA);
+    const markB = statusOf(lockB);
     try {
       child.kill("SIGKILL");
     } catch { /* already gone */ }
@@ -229,12 +245,16 @@ setInterval(() => {}, 1000);
     reader.cancel().catch(() => {});
     child.stderr.cancel().catch(() => {});
 
-    assertEquals(stillA, false, "app A's lock must be released");
     assertEquals(
-      stillB,
-      false,
-      "app B's lock must be released too — the SECOND lock in a process got " +
-        "no cleanup handler at all",
+      markA,
+      "stopping",
+      "app A's lock must be marked stopping (and still held) on SIGTERM",
+    );
+    assertEquals(
+      markB,
+      "stopping",
+      "app B's lock must be marked too — the SECOND lock in a process got " +
+        "no signal handler at all",
     );
 
     await Deno.remove(appsDir, { recursive: true }).catch(() => {});
@@ -297,7 +317,7 @@ setInterval(() => {}, 1000);
 
     child.kill("SIGTERM");
     await new Promise((r) => setTimeout(r, 800));
-    const stillB = exists(lockB);
+    const markB = statusOf(lockB);
     try {
       child.kill("SIGKILL");
     } catch { /* already gone */ }
@@ -306,11 +326,11 @@ setInterval(() => {}, 1000);
     child.stderr.cancel().catch(() => {});
 
     assertEquals(
-      stillB,
-      false,
-      "app B's lock must still be released on SIGTERM — app A's earlier, " +
-        "unrelated shutdown must not remove the process's signal handlers " +
-        "while another lock is still held",
+      markB,
+      "stopping",
+      "app B's lock must still be marked stopping on SIGTERM — app A's " +
+        "earlier, unrelated shutdown must not remove the process's signal " +
+        "handlers while another lock is still held",
     );
 
     await Deno.remove(appsDir, { recursive: true }).catch(() => {});

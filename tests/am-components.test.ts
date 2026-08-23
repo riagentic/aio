@@ -11,8 +11,11 @@
 // commands: `am start` starts the project, `am start <label>` starts one part.
 // A single-app repo must be completely unaffected, which is most of what these
 // tests check.
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
+import { declaredPort } from "../src/am/am-utils.ts";
+import { envPort } from "../src/server/paths.ts";
 import {
+  type Component,
   componentByLabel,
   componentConflict,
   componentPort,
@@ -272,92 +275,95 @@ Deno.test("entryDeclarations: reads identity without running the app", async () 
 
 // ── Ports ───────────────────────────────────────────────────────────────────
 
-Deno.test("ports: declared wins, otherwise a stable slot", () => {
-  const cs = [
-    { label: "relay", entry: "/a", appId: "relay", declaresAppId: true },
-    {
-      label: "agent",
-      entry: "/b",
-      appId: "agent",
-      declaresAppId: true,
-      port: 9100,
-    },
-    { label: "control", entry: "/c", appId: "control", declaresAppId: true },
-  ];
-  assertEquals(componentPort(cs, cs[0]!), { port: 8000, assigned: true });
-  assertEquals(componentPort(cs, cs[1]!), { port: 9100, assigned: false });
-  assertEquals(componentPort(cs, cs[2]!), { port: 8002, assigned: true });
-  // Deterministic: a component keeps its address across restarts, so a client
-  // pointed at :8002 is not re-pointed because a sibling started first.
-  assertEquals(componentPort(cs, cs[2]!), componentPort(cs, cs[2]!));
-  assertEquals(componentByLabel(cs, "agent")?.appId, "agent");
-  assertEquals(componentByLabel(cs, "nope"), null);
+// `am` does not invent a port. It used to assign each component a slot (8000,
+// 8001, …) so siblings had predictable addresses — which recreated, one level
+// up, the bug that made this area wrong: on a machine where something already
+// owns 8000, that assignment IS a port conflict am created. The runtime's own
+// answer for an app that declares nothing is `findFreePort()`, which is also
+// what `deno task dev` does, so components follow it.
+Deno.test("ports: a declared port is honoured, an undeclared one is not invented", () => {
+  const declared: Component = {
+    label: "agent",
+    entry: "/b",
+    appId: "agent",
+    declaresAppId: true,
+    port: 9100,
+  };
+  const silent: Component = {
+    label: "relay",
+    entry: "/a",
+    appId: "relay",
+    declaresAppId: true,
+  };
+  assertEquals(componentPort(declared), 9100);
+  assertEquals(
+    componentPort(silent),
+    undefined,
+    "undefined means the runtime picks a free one and says so — the same " +
+      "answer `deno task dev` gives for the same app",
+  );
+  assertEquals(componentByLabel([declared, silent], "relay")?.appId, "relay");
+  assertEquals(componentByLabel([declared, silent], "nope"), null);
 });
 
-// ── The commands that act on ONE app ────────────────────────────────────────
-//
-// `am start`/`stop`/`status` mean the project. Every other command — `state`,
-// `logs`, `metrics`, `dispatch` — acts on one app, and in a component project
-// there is no honest way to guess which. It used to guess anyway: the PROJECT's
-// inferred id (deno.json `title` → "mc-probe") is not any component's id and
-// never runs, so `am state` answered "no app named \"mc-probe\" is running" and
-// listed five unrelated apps from other projects, in a directory where three
-// real ones were up. An answer about an app that does not exist.
-Deno.test("components: a one-app command refuses to guess, and names the parts", async () => {
-  const dir = await project({
-    title: "MC Probe",
-    build: {
-      targets: {
-        relay: { entry: "src/relay/app.ts" },
-        agent: { entry: "src/agent/app.ts" },
-      },
-    },
-  }, {
-    "src/relay/app.ts": entry("mcprobe-relay"),
-    "src/agent/app.ts": entry("mcprobe-agent"),
-  });
-  const cwd = Deno.cwd();
-  const errs: string[] = [];
-  const realError = console.error;
-  const realLog = console.log;
-  const realExit = Deno.exit;
-  // BOTH streams: the refusal goes through the same failure path as every
-  // other one, so a terminal gets the readable form on stderr and a script
-  // gets `{"error": …}` on stdout. A test is not a terminal, so it sees the
-  // second — and either way it must name the components.
-  console.error = (...a: unknown[]) => errs.push(a.map(String).join(" "));
-  console.log = (...a: unknown[]) => errs.push(a.map(String).join(" "));
-  // deno-lint-ignore no-explicit-any
-  (Deno as any).exit = (code?: number) => {
-    throw new Error(`EXIT:${code}`);
-  };
-  try {
-    Deno.chdir(dir);
-    const { resolveAmAppId } = await import("../src/am/am-utils.ts");
-    let thrown = "";
-    try {
-      resolveAmAppId();
-    } catch (e) {
-      thrown = (e as Error).message;
-    }
-    assertEquals(thrown, "EXIT:1", "it must refuse, not resolve a phantom");
-    const msg = errs.join("\n");
-    assert(msg.includes("relay") && msg.includes("agent"), msg);
-    assert(msg.includes("--app="), "it must name the flag that resolves it");
-    assert(msg.includes("am start"), "…and the verb that means all of them");
+// ── AIO_PORT ────────────────────────────────────────────────────────────────
 
-    // A label passed to --app resolves to that component's identity, so ONE
-    // flag works for every command (their first positional is already taken by
-    // a state path or an action).
-    assertEquals(resolveAmAppId("agent"), "mcprobe-agent");
-    // …and an id that is not a label still resolves as it always did.
-    assertEquals(resolveAmAppId("something-else"), "something-else");
+// The operator rung between `--port` and `aio.run({ port })`. It exists for the
+// contexts with no command line to hang a flag on — a systemd unit, a
+// container, a compiled binary — which is also why aio does not read `.env`
+// itself: `deno run --env-file` / `EnvironmentFile=` already deliver one, and
+// `am` already forwards `--env-file` to the child (am-restart-flags).
+//
+// ONE reader (`paths.ts: envPort`), shared by the runtime and `am`, so the
+// same environment cannot mean one port to the app and another to the tool
+// inspecting it.
+function withEnvPort<T>(value: string | null, fn: () => T): T {
+  const had = Deno.env.get("AIO_PORT");
+  try {
+    if (value === null) Deno.env.delete("AIO_PORT");
+    else Deno.env.set("AIO_PORT", value);
+    return fn();
   } finally {
-    Deno.chdir(cwd);
-    console.error = realError;
-    console.log = realLog;
-    // deno-lint-ignore no-explicit-any
-    (Deno as any).exit = realExit;
-    await Deno.remove(dir, { recursive: true });
+    if (had === undefined) Deno.env.delete("AIO_PORT");
+    else Deno.env.set("AIO_PORT", had);
   }
+}
+
+Deno.test("AIO_PORT: unset or blank is 'nobody said', not a value", () => {
+  withEnvPort(null, () => assertEquals(envPort(), undefined));
+  withEnvPort("", () => assertEquals(envPort(), undefined));
+  withEnvPort("   ", () => assertEquals(envPort(), undefined));
+});
+
+Deno.test("AIO_PORT: a port is read, and 0 keeps its meaning", () => {
+  withEnvPort("9100", () => assertEquals(envPort(), 9100));
+  withEnvPort(" 9100 ", () => assertEquals(envPort(), 9100));
+  // 0 is the documented "pick a free one" — the same answer as saying nothing,
+  // and NOT the falsy hole that once made a port-0 lock read back as invalid.
+  withEnvPort("0", () => assertEquals(envPort(), 0));
+});
+
+// The whole point of the rung: an app that quietly ignores a misconfigured
+// AIO_PORT and binds an ephemeral port instead is the silent failure this
+// framework refuses. It must be impossible to set it wrong and not know.
+Deno.test("AIO_PORT: a malformed value is refused, never ignored", () => {
+  for (const bad of ["havoc", "80.5", "-1", "65536", "8000abc"]) {
+    withEnvPort(bad, () => {
+      assertThrows(
+        () => envPort(),
+        Error,
+        "AIO_PORT",
+        `AIO_PORT=${bad} must not be silently dropped`,
+      );
+    });
+  }
+});
+
+Deno.test("AIO_PORT: --port outranks it, and it outranks nothing else here", () => {
+  withEnvPort("9100", () => {
+    assertEquals(declaredPort(7000), 7000, "the flag is this run's answer");
+    assertEquals(declaredPort(), 9100, "with no flag, the environment speaks");
+    // `--port=0` is a value, not an absence (AIO-212) — it must still win.
+    assertEquals(declaredPort(0), 0);
+  });
 });

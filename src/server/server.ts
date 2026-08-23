@@ -140,6 +140,11 @@ export function _isLocalRequest(addr: Deno.Addr | undefined): boolean {
   return false;
 }
 
+/** The peer a control request over the Unix socket presents. Named once so the
+ *  claim "a `ctl` frame is a same-machine request" is a value the gate reads,
+ *  not a boolean some caller passed in. */
+const UDS_PEER: Deno.Addr = { transport: "unix", path: "" };
+
 /** Starts HTTP + WS server, returns broadcast handle for state pushes and shutdown */
 /** The shared-key cookie's name, scoped to the app.
  *
@@ -1180,6 +1185,11 @@ export function createServer(config: ServerConfig): ServerHandle {
     trojanPort,
     socketPath: udsPath,
     watcherActive: watcher?.active,
+    // The control plane over a non-TCP wire. Not a second implementation —
+    // the SAME handler, told the truth about its peer: a unix socket, which
+    // `_isLocalRequest` already treats as same-machine by construction, and
+    // which carries no abuse-bucket key by design (see `clientKey`).
+    control: (req) => handleRequest(req, { remoteAddr: UDS_PEER } as never),
     shutdown: async () => {
       _shuttingDown = true;
       clearInterval(_stallTimer);

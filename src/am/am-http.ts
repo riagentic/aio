@@ -1,7 +1,14 @@
 /**
  * @module
- * HTTP client layer for am — aio manager CLI.
- * Trojan API, general HTTP, and control port resolution.
+ * The client layer for am — aio manager CLI. Trojan API, general HTTP, and
+ * control-target resolution.
+ *
+ * TWO transports, one surface: an app that binds a TCP port is reached with
+ * `fetch`, and an app on a Unix socket is reached with a `ctl` frame
+ * (`am-uds.ts`). Which one is not a choice made here — it is read from the
+ * lock the app itself wrote, so `am` follows the app onto whichever wire the
+ * app chose. Both arrive at the SAME server-side handler, so the answers, the
+ * refusals and the auth gates are identical on either.
  */
 
 import type { Result } from "./am-types.ts";
@@ -12,8 +19,92 @@ import {
   controlKeyPath,
   readControlKey,
 } from "../server/app-key.ts";
+import { udsRequest } from "./am-uds.ts";
 
 export const FETCH_TIMEOUT = 5000;
+
+/** The socket this app answers control requests on, or undefined when it has
+ *  none (a WS-transport app, or nothing running under that id).
+ *
+ *  THE transport decision for `am`, made once. It is read from the lock the
+ *  app itself wrote — never guessed — so `am` follows the app onto whichever
+ *  wire the app chose rather than assuming a port exists. A live pid is part
+ *  of the answer: a leftover socket file from a crashed app must not silently
+ *  become the target.
+ *
+ *  Order matters and is deliberate: the socket is tried FIRST when present,
+ *  because an app on UDS may have no TCP port at all, and the port path's
+ *  failure mode there is a connection-refused that reads like "your app is
+ *  broken". */
+function controlSocket(appId?: string): string | undefined {
+  const pf = readPid(appId);
+  if (!pf?.socketPath) return undefined;
+  return isProcessAlive(pf.pid) ? pf.socketPath : undefined;
+}
+
+/** Run one trojan call over the socket and shape it like a `fetch` outcome, so
+ *  the two transports converge before any caller sees them.
+ *
+ *  The shared key is offered only AFTER the app asks for it. Over TCP that
+ *  question is answered by probing /__aio/health for a 401 (`gated`); there is
+ *  no such probe here, and guessing wrong is worse on this wire than on that
+ *  one — a UDS request carries no per-peer abuse key, so a failed credential
+ *  lands in the SHARED `"*"` bucket (`server-auth.ts`) and an `am` loop with a
+ *  stale `app.key` would spend everyone's auth budget, not its own.
+ *
+ *  So: ask unauthenticated, and let a 401/403 be the app SAYING it wants a
+ *  credential. That costs one refused call on a keyed app and nothing on the
+ *  rest, and unlike a probe it cannot be wrong about the app's mode. */
+async function trojanOverUds(
+  socketPath: string,
+  route: string,
+  init: {
+    method: "GET" | "POST";
+    headers?: Record<string, string>;
+    body?: string;
+  },
+  timeout: number,
+  appId?: string,
+): Promise<Result | null> {
+  const path = `/__aio/trojan/${route}`;
+  const send = (c: LocalCreds) =>
+    udsRequest(
+      socketPath,
+      path,
+      { ...init, headers: { ...init.headers, ...c.headers } },
+      timeout,
+    );
+
+  let creds = localCreds(appId, { control: true, gated: false });
+  let r = await send(creds);
+  if (!("error" in r) && (r.status === 401 || r.status === 403)) {
+    const keyed = localCreds(appId, { control: true, gated: true });
+    // Only worth a second trip if it actually adds a credential.
+    if (keyed.headers["Authorization"] !== creds.headers["Authorization"]) {
+      creds = keyed;
+      r = await send(keyed);
+    }
+  }
+
+  // A transport failure is NOT an answer. The caller falls back to TCP on
+  // null, so an app that has both wires keeps working if the socket is
+  // unusable (a stale path, a permission change) — the socket is the
+  // preference, never a dead end.
+  if ("error" in r) return null;
+  if (r.status < 200 || r.status >= 300) {
+    const extra = credentialDiagnosis(r.status, creds, appId);
+    try {
+      return { ok: false, error: (JSON.parse(r.body).error ?? r.body) + extra };
+    } catch {
+      return { ok: false, error: r.body + extra };
+    }
+  }
+  try {
+    return { ok: true, data: JSON.parse(r.body) };
+  } catch (e) {
+    return { ok: false, error: `malformed control reply: ${e}` };
+  }
+}
 
 // Instance identity (a field report): `--port=N` used to trust
 // that WHATEVER answers on N is the app the user means — a green e2e once
@@ -261,14 +352,22 @@ export function fetchError(e: unknown, port: number, appId?: string): Result {
     // not happen: their compiled app was alive on its Unix socket, with no
     // TCP listener for this probe to reach. When the lock says exactly that,
     // say exactly that.
+    //
+    // Reaching HERE with a socket in the lock now means something narrower
+    // than it used to: the control plane IS served over the socket, so `am`
+    // would have gone that way (`controlSocket`). Landing on the TCP path
+    // anyway means the socket was rejected — the app is a PROD build, where
+    // the trojan does not exist on any wire by design.
     if (appId) {
       const pf = readPid(appId);
       if (pf?.socketPath && isProcessAlive(pf.pid)) {
         return {
           ok: false,
-          error: `app "${appId}" is running over UDS (production build, ` +
-            `pid ${pf.pid}) — the dev control plane is not served there; ` +
-            `\`am status\` still works`,
+          error: `app "${appId}" is running over UDS with no TCP port ` +
+            `(pid ${pf.pid}). Its socket is ${pf.socketPath}, but the ` +
+            `control plane answered nothing there — a production build has ` +
+            `no trojan on any transport. \`am status\` still works; run a dev ` +
+            `build to inspect state.`,
         };
       }
     }
@@ -296,6 +395,20 @@ export async function trojanGet(
   appId?: string,
   timeout = FETCH_TIMEOUT,
 ): Promise<Result> {
+  // The app's own wire first. An app on UDS may bind no TCP port at all, and
+  // the identity gate below is a PORT concern — a socket is named by the app's
+  // own lock, so there is no "who answers on this number" question to ask.
+  const sock = controlSocket(appId);
+  if (sock) {
+    const r = await trojanOverUds(
+      sock,
+      route,
+      { method: "GET" },
+      timeout,
+      appId,
+    );
+    if (r) return r;
+  }
   const ctrl = resolveControlPort(port, appId);
   const mismatch = await identityGate(ctrl, appId);
   if (mismatch) return mismatch;
@@ -330,6 +443,26 @@ export async function trojanPost(
   body?: unknown,
   appId?: string,
 ): Promise<Result> {
+  const sock = controlSocket(appId);
+  if (sock) {
+    const r = await trojanOverUds(
+      sock,
+      route,
+      {
+        method: "POST",
+        headers: {
+          ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+          // The CSRF header rides along unchanged: the server runs this
+          // through the same handler, so it meets the same check.
+          "X-AIO": "1",
+        },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      },
+      FETCH_TIMEOUT,
+      appId,
+    );
+    if (r) return r;
+  }
   const ctrl = resolveControlPort(port, appId);
   const mismatch = await identityGate(ctrl, appId);
   if (mismatch) return mismatch; // a MUTATION is gated at least as hard as a read
@@ -369,6 +502,34 @@ export async function httpGet(
   path: string,
   appId?: string,
 ): Promise<Result<string>> {
+  // The app's own routes answer on the socket too — same handler. Without this
+  // `am state` would work on a socket-only app while `am health` reported it
+  // unreachable: one app, two verdicts, which is worse than either.
+  const sock = controlSocket(appId);
+  if (sock) {
+    // NO control credential, exactly as below: it authorizes the control
+    // plane, not the app's front door.
+    const creds = localCreds(appId, { control: false, gated: false });
+    let r = await udsRequest(sock, path, {
+      method: "GET",
+      headers: creds.headers,
+    }, FETCH_TIMEOUT);
+    if (!("error" in r) && (r.status === 401 || r.status === 403)) {
+      const keyed = localCreds(appId, { control: false, gated: true });
+      if (keyed.headers["Authorization"]) {
+        r = await udsRequest(sock, path, {
+          method: "GET",
+          headers: keyed.headers,
+        }, FETCH_TIMEOUT);
+      }
+    }
+    if (!("error" in r)) {
+      return r.status >= 200 && r.status < 300
+        ? { ok: true, data: r.body }
+        : { ok: false, error: `${r.status} ${r.body}` };
+    }
+    // transport failure — fall through to TCP
+  }
   const ctrl = resolveControlPort(port, appId);
   const mismatch = await identityGate(ctrl, appId);
   if (mismatch) return mismatch; // `/__aio/snapshot` dumps a whole app's data

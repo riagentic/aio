@@ -14,6 +14,7 @@ import type { VitalsSystem } from "../vitals/mod.ts";
 import type { ComposedCells } from "../state/cell.ts";
 import type { ServerHandle } from "./server-types.ts";
 import { AppLock, lockDir } from "./single-instance-lock.ts";
+import { runtimeCount } from "./shutdown.ts";
 import { launchElectronClient } from "../electron/electron.ts";
 import { getLogger, log } from "../diagnostics/logger-api.ts";
 
@@ -362,11 +363,16 @@ export async function acquireSingletonLock(
     const ex = result.existing;
     const where = ex.port > 0 ? ` at http://localhost:${ex.port}` : "";
     const who = ex.pid > 0 ? ` (pid ${ex.pid})` : "";
-    log.error(
-      `[AIO] ${
-        killExisting ? "Failed to take over" : "Already running"
-      }: ${ex.appId}${where}${who}`,
-    );
+    const msg = `[AIO] ${
+      killExisting ? "Failed to take over" : "Already running"
+    }: ${ex.appId}${where}${who}`;
+    // Alone in the process: the refusal IS the exit, and a clean one-line
+    // error beats a stack trace. With a sibling app already running (D2 —
+    // an app plus its admin panel), `Deno.exit(1)` would take THAT app down
+    // through `unload` with no Phase 1–7 and no final persist — so the
+    // refusal is thrown to the caller instead, and the sibling keeps running.
+    if (runtimeCount() > 0) throw new Error(msg);
+    log.error(msg);
     Deno.exit(1);
   }
   log.debug(`lock: acquired ${lockDir()}/${appId}.lock (PID ${Deno.pid})`);
