@@ -152,3 +152,66 @@ a runtime cost on every read.
 - **Needs the user's machines** (not closable from here): the Windows and macOS
   target matrix, a real-Android device pass, the 72-hour soak, and the off-box
   remote field report.
+
+## Zero-port dev: the renderer must not fall back to WS on an `aio://` page
+
+`--zero-port` (dev + electron + UDS) serves the page, its on-demand transpiled
+modules and every asset over a Unix socket, so the app binds NO TCP port.
+Verified working end to end: the window loads, renders, `am state`/`dispatch`/
+`surface`/`trigger` all drive it, and `ss` shows zero TCP listeners.
+
+**Open defect — why it is opt-in rather than the default:** after a source edit
+the server sends `reload`, the renderer calls `location.reload()`, and the
+reloaded page stops using the IPC bridge and opens `ws://app/ws` instead —
+`buildWsUrl()` derives from `location.host`, which is `app` on an `aio://app/`
+page. In a zero-port app that socket cannot exist, so the window comes back
+blank and never recovers. Over HTTP the same fallback silently _worked_, which
+is why it never surfaced.
+
+`window.__aioIPC` IS present in the reloaded page (checked over CDP), so
+`detectIPC()` should have found it — the root cause is not yet established.
+
+Fix direction: a page with no HTTP origin must have no WS fallback at all.
+`_connect()` should refuse to build a WS when `location.protocol` is not
+http/https and wait for the bridge instead — a transport that cannot exist is
+not a fallback, and silently retrying it forever is the failure mode this
+codebase calls a quiet degradation. Once that holds, dev zero-port becomes the
+default for electron + UDS and the flag goes away.
+
+## `discovery: multi-app-per-host` is environment-sensitive, not hermetic
+
+`tests/discovery.test.ts` sends a UDP broadcast and asserts on whoever answers.
+It therefore sees every aio responder reachable on the LAN — including apps
+started by other tests, other checkouts, or another machine entirely. Observed
+failing once with `apps.length >= 3` PASSING while its own `dashboard` was
+absent: three strangers answered and its own responder did not make the window.
+
+Not a regression (it passes 3/3 in isolation and in a full suite run), but it
+can fail for reasons that have nothing to do with the change under test, which
+is the property that eventually gets a test deleted rather than fixed.
+
+Fix direction: give the responder a per-run nonce and have the sweep keep only
+answers carrying it. The test then measures ITS responder instead of the
+neighbourhood, and stays meaningful on a busy network.
+
+## `install.sh` fails against a repo created under a restrictive umask
+
+`git` writes loose objects with the process umask applied. Under `umask 077`
+they land as `400` (owner-read only) instead of git's usual `444`, and a local
+`git clone` of that repo then fails:
+
+```
+fatal: failed to copy file to '…/.git/objects/fc/afa…': Permission denied
+```
+
+Hit for real: `deno task lab` failed all four install scenarios because this
+repo had nine `400` objects, all written by commits made in a shell whose umask
+was `077`. `chmod 444` on them fixed it.
+
+`umask 077` is a reasonable hardening choice, not a mistake, so a developer can
+have a perfectly good repo that `install.sh` cannot clone — and the error names
+git internals rather than the cause.
+
+Fix direction: `install.sh` should not depend on the source repo's object modes.
+Either normalize after cloning, or fetch the way a stranger would (the remote
+path already works — only the local-source path reads objects directly).

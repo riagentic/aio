@@ -175,6 +175,13 @@ function strays(sb: Sandbox): string[] {
   return walk(sb.root).filter((p) => {
     if (p.startsWith(`home/.${APP_ID}`) || p === "home") return false;
     if (p.startsWith("run/aio") || p === "run") return false;
+    // `~/.aio/ca` is the third legitimate location, and deliberately NOT inside
+    // any one app's home: it is the machine-wide trust root every aio app's
+    // certificate is issued from, and the single thing a person installs so
+    // their browser stops warning about all of them. Per-app roots would mean a
+    // new trust dialog for every app forever. Its MODES are asserted below —
+    // permitted here, not unexamined.
+    if (p === "home/.aio" || p.startsWith("home/.aio/")) return false;
     if (p === "proj") return false;
     // projBefore is relative to proj/, this walk is relative to root/.
     if (p.startsWith("proj/") && sb.projBefore.has(p.slice("proj/".length))) {
@@ -352,6 +359,22 @@ Deno.test({
       );
       // The cert is public by definition; only its existence matters here.
       assert(await Deno.stat(join(tlsDir, "tls-cert.pem")));
+
+      // The machine-wide root. Its private key can mint a trusted certificate
+      // for EVERY aio app on this machine for the next ten years, and a person
+      // is being asked to put its public half in their browser — which makes it
+      // the most sensitive file the framework writes, more than any one app's
+      // leaf key. openssl writes with the process umask, so the mode has to be
+      // stated where the key is created, and proven here.
+      const caDir = join(sb.root, "home", ".aio", "ca");
+      assertEquals(await mode(caDir), 0o700, "the root CA dir is owner-only");
+      const rootKeyMode = await mode(join(caDir, "aio-root-key.pem"));
+      assertEquals(
+        rootKeyMode & 0o077,
+        0,
+        `the aio root key is reachable by group/other ` +
+          `(${rootKeyMode.toString(8)})`,
+      );
 
       // Exposing an app must not expose it on the FILESYSTEM either.
       const stray = strays(sb);

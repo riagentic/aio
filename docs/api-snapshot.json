@@ -97,7 +97,7 @@
         },
         "CellsConfig": {
           "kind": "typeAlias",
-          "sig": "a573aa7832b1af5f"
+          "sig": "c962b186362fb93b"
         },
         "CellStatus": {
           "kind": "typeAlias",
@@ -441,7 +441,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "beba0cb9d4a4629d"
+          "sig": "b677a9cc248b090a"
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -1197,7 +1197,7 @@
         },
         "CliFlags": {
           "kind": "typeAlias",
-          "sig": "dee05196f8cb22c8"
+          "sig": "a82226d9a1be7eea"
         },
         "createSliceSelector": {
           "kind": "function",

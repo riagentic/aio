@@ -2,7 +2,7 @@
 import { log } from "../diagnostics/logger-api.ts";
 
 /** Framework version — printed by --version, checked in tests */
-export const VERSION = "1.0.0-alpha64";
+export const VERSION = "1.0.0-alpha65";
 
 /** What `--version` prints: what this artifact IS, and what it was built with.
  *
@@ -52,6 +52,19 @@ export type CliFlags = {
   key?: string;
   isolate?: string[];
   transport?: "uds" | "ws";
+  /** `--zero-port`: in DEV + electron + UDS, serve the page and its modules
+   *  over a Unix socket so the app binds no TCP port at all. Experimental —
+   *  hot reload does not survive it yet (see `aio-server.ts`). Prod + electron
+   *  + UDS + dist already runs with zero ports and needs no flag. */
+  zeroPort?: boolean;
+  /** `--open`: after boot, hand the app's URL to the desktop's browser.
+   *
+   *  OFF by default, and that is the whole point. A tab handed to an
+   *  already-running browser is the one window aio cannot take back: the app
+   *  exits and the tab stays. Booting an app twenty times therefore left twenty
+   *  tabs, each having stolen focus as it appeared. Printing the URL costs a
+   *  click and loses nothing. */
+  open?: boolean;
   killExisting?: boolean;
   /** Explicit bind address for the HTTP/WS listener — overrides the
    *  expose-derived default (0.0.0.0 exposed, 127.0.0.1 not). */
@@ -126,6 +139,8 @@ function _parseCliUncached(args: readonly string[]): CliFlags {
     "--key=",
     "--isolate=",
     "--transport=",
+    "--zero-port",
+    "--open",
     "--kill-existing",
     "--takeover",
     "--backup-logs",
@@ -217,6 +232,10 @@ function _parseCliUncached(args: readonly string[]): CliFlags {
       if (Number.isInteger(n) && n > 0) r.height = n;
     } else if (arg.startsWith("--isolate=")) {
       r.isolate = arg.slice(10).split(",").map((s) => s.trim()).filter(Boolean);
+    } else if (arg === "--zero-port") {
+      r.zeroPort = true;
+    } else if (arg === "--open") {
+      r.open = true;
     } else if (arg.startsWith("--transport=")) {
       const v = arg.slice(12);
       if (v === "uds" || v === "ws") r.transport = v;
@@ -246,7 +265,7 @@ export function printHelp(): void {
 Usage: deno run -A src/app.ts [flags]
 
 Flags:
-  --port=N         Server port (default: 8000)
+  --port=N         Server port (default: a free one, or $AIO_PORT)
   --no-persist     Disable persistence (SQLite <data>/state.db)
   --client=X       Client mode: electron|browser|cli|server-only (default: electron)
   --keep-server    Server survives Electron close (electron only)
@@ -278,6 +297,10 @@ Flags:
   --width=N        Initial window width (default: 800)
   --height=N       Initial window height (default: 600)
   --transport=X    Transport: 'uds' or 'ws' (default: auto — UDS for electron on linux/mac)
+  --zero-port      Dev + electron + UDS: serve the page over the socket too, so
+                   the app binds NO TCP port (experimental — breaks hot reload)
+  --open           Open the app in your browser after boot (default: OFF — the
+                   URL is printed; a tab aio opens is one it cannot close)
   --isolate=a,b    Only activate the specified cells
   --version        Print version and exit
   --help           Show this help`);

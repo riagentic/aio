@@ -219,7 +219,13 @@ export function buildLegacyConfig(
           getState: () => appRef.current!.getState(),
         });
       }
-      if (fc.onStop) fc.onStop();
+      // AWAITED. The orchestrator budgets this phase (5 s teardown) precisely
+      // so arbitrary app code can finish; calling the hook without awaiting it
+      // resolved the phase the moment the hook STARTED, and an async `onStop`
+      // — a flush to a remote, a handle to close, a child to wait for — was
+      // abandoned ~ms before `Deno.exit`. Measured: a 4.5 s hook logged its
+      // first line and never its last, on every `am stop`.
+      if (fc.onStop) await fc.onStop();
     },
     onRestore: onRestore as AioConfig<
       Record<string, unknown>,

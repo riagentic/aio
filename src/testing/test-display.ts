@@ -139,7 +139,16 @@ export function testDisplay(): string {
  *  box), so spreading it is always safe. */
 export function testDisplayEnv(): Record<string, string> {
   const d = testDisplay();
-  return d ? { DISPLAY: d } : {};
+  // AIO_NO_OPEN travels with the display, ALWAYS — including on a headless box
+  // where `testDisplay()` returns nothing.
+  //
+  // A nested display keeps a spawned app's own window off your desktop, but it
+  // does nothing about the app handing a URL to `xdg-open`: that reaches the
+  // real browser, in the real session, and leaves a tab aio cannot close.
+  // Stacking one per spawned app is the failure people actually report. The
+  // display and "do not open anything" are the same decision — a test's UI
+  // belongs to the test — so they ship together and cannot be set apart.
+  return d ? { DISPLAY: d, AIO_NO_OPEN: "1" } : { AIO_NO_OPEN: "1" };
 }
 
 /** Test seam: forget the cached answer. @internal */

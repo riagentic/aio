@@ -16,6 +16,7 @@ import { createServer } from "../src/server/server.ts";
 import { electronMainScriptUDS } from "../src/electron/electron.ts";
 import { createUDSListener } from "../src/server/aio.ts";
 import { freePort } from "../src/testing/server-test.ts";
+import { testDisplayEnv } from "../src/testing/test-display.ts";
 
 const ELECTRON_BIN = "node_modules/.bin/electron";
 const DEV_PORT = freePort();
@@ -168,7 +169,14 @@ async function launchElectron(
     ],
     stdout: "null",
     stderr: "null",
-    env: { ...Deno.env.toObject(), ELECTRON_DISABLE_SECURITY_WARNINGS: "1" },
+    env: {
+      ...Deno.env.toObject(),
+      ELECTRON_DISABLE_SECURITY_WARNINGS: "1",
+      // The window opens on the NESTED display, not the desktop this test
+      // is running on. Without it every run (and every retry) maps a window
+      // over whatever the developer is typing into.
+      ...testDisplayEnv(),
+    },
   }).spawn();
 }
 

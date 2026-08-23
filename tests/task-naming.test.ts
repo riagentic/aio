@@ -27,6 +27,9 @@ const VERBS = new Set([
   "bench",
   "build",
   "check",
+  // `clean:tmp` — stop orphaned test apps, remove ownerless temp homes and
+  // stale lock dirs. "clean" is the verb every build tool uses for it.
+  "clean",
   // `fmt` is the verb Deno (and Go before it) uses for "format", and
   // `deno task fmt` was the one gate in the release kata with no task behind
   // it — a gap people tripped over, and a grammar hole: every other gate is a

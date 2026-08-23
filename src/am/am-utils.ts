@@ -5,7 +5,7 @@
  */
 
 import { readDenoJsonSync } from "../server/deno-json.ts";
-import { resolveEntryPath } from "../server/paths.ts";
+import { envPort, resolveEntryPath } from "../server/paths.ts";
 import {
   instances,
   type LockData,
@@ -47,8 +47,6 @@ export function readEntryConfig(): { appId?: string; port?: number } {
 }
 
 // ── Resolve helpers ─────────────────────────────────────────
-
-export const DEFAULT_PORT = 8000;
 
 /** Resolve the appId for am commands — --app flag > deno.json appId > app.ts aio.run().
  *  am runs in dev only (not compiled), so deno.json is always available. */
@@ -139,16 +137,55 @@ export function resolveAmAppId(flag?: string): string {
   );
 }
 
-/** Resolve port for am commands — --port flag > deno.json port > app.ts aio.run() port > DEFAULT_PORT */
-export function resolveAmPort(flag?: number): number {
+/** The port this app has DECLARED, or undefined when it has declared none.
+ *
+ *  THE SAME three rungs the runtime resolves, in the same order (`aio.ts`:
+ *  `cli.port ?? envPort() ?? config.port ?? await findFreePort()`):
+ *  `--port` > `AIO_PORT` > the entry's `aio.run({ port })`.
+ *
+ *  Undefined is an answer, not a gap. It used to fall back to 8000 — so
+ *  `am start` and `deno task dev` gave the SAME app two different ports, and
+ *  `am` never told the child about its 8000 anyway. What the user saw:
+ *  `deno task dev` on :49208, then `am start` refusing with `port 8000 in use
+ *  by aio app "Rimote Server"` — a refusal about a port the app was never
+ *  going to bind, naming an unrelated app. One fact, one spelling: when
+ *  nothing is declared, the RUNTIME decides and says so, and `am` reads the
+ *  port back from the lock the app writes.
+ *
+ *  deno.json's top-level `port` was a fourth rung here and is now gone. The
+ *  runtime never read it — `_warnMisplacedDenoJson` WARNS that aio config at
+ *  deno.json's top level "is silently doing nothing", port included — so `am`
+ *  was aiming at a number the app had already been told it was ignoring. */
+export function declaredPort(flag?: number): number | undefined {
   if (flag !== undefined) return flag; // AIO-212: don't ignore --port=0
+  const env = envPort(); // throws on a malformed AIO_PORT — see resolvePort
+  if (env !== undefined) return env;
+  _warnDenoJsonPort();
+  return readEntryConfig().port;
+}
+
+/** Dropping a rung silently is the failure this codebase keeps fixing, so the
+ *  key `am` no longer reads is NAMED once per invocation — with the same
+ *  verdict the runtime already gives it (`_warnMisplacedDenoJson`: aio config
+ *  at deno.json's top level "is silently doing nothing"). Nobody's app changes
+ *  behaviour here; what changes is that `am` stops disagreeing with the app it
+ *  is inspecting. stderr, so `--json` output stays machine-clean. */
+let _warnedDenoJsonPort = false;
+function _warnDenoJsonPort(): void {
+  if (_warnedDenoJsonPort) return;
   try {
     const cfg = JSON.parse(
       Deno.readTextFileSync(join(Deno.cwd(), "deno.json")),
     ) as { port?: number };
-    if (cfg.port) return cfg.port;
-  } catch { /* no deno.json */ }
-  return readEntryConfig().port ?? DEFAULT_PORT;
+    if (typeof cfg.port !== "number") return;
+    _warnedDenoJsonPort = true;
+    console.error(
+      `[am] note: deno.json has a top-level "port": ${cfg.port} — aio never ` +
+        `reads it there (deno.json carries identity and build only), so the ` +
+        `app does not bind it and am no longer aims at it. Move it into ` +
+        `aio.run({ port: ${cfg.port} }) in the app entry, or set AIO_PORT.`,
+    );
+  } catch { /* no deno.json, or unreadable — nothing to say */ }
 }
 
 /** Resolve entry point: --entry flag > deno.json "entry" > src/app.ts
@@ -205,7 +242,16 @@ export function removePid(appId?: string): void {
 const _targetNoted = new Set<string>();
 
 /** THE target of an `am` command: `--port` > this app's lock > the ONE running
- *  instance > app.ts > 8000.
+ *  instance > what the app DECLARED (`AIO_PORT`, `aio.run({ port })`) > refuse.
+ *
+ *  There is no final 8000 rung any more. 8000 was never a port aio binds — the
+ *  runtime's own answer when nothing is declared is `findFreePort()` — so the
+ *  last rung was a number invented by the tool, and every command that took it
+ *  aimed at a listener that had no reason to exist. It read as a diagnosis
+ *  ("app not running on port 8000") when the truth was "am does not know which
+ *  app you mean". A tool that cannot find its target says so; it does not pick
+ *  one. Refusing here is also the precondition for UDS-only apps, which bind
+ *  no TCP port at all and must be addressed by appId, never by number.
  *
  *  The "one running instance" rung is the fix for a whole class of confusion.
  *  `am` resolves an appId from the cwd (deno.json `appId`, else title, else the
@@ -244,15 +290,25 @@ export function resolvePort(flag?: number, appId?: string): number {
     }
     return only.port;
   }
-  if (live.length > 1) {
-    const list = live.map((i) => `${i.appId} @ :${i.port}`).join(", ");
-    console.error(
-      `[am] ✗ no app named "${id}" is running, and ${live.length} others ` +
-        `are: ` +
-        `${list}. Refusing to guess — pass --app=<id> or --port=N.`,
-    );
-  }
-  return readEntryConfig().port ?? DEFAULT_PORT;
+  // Nothing is running under this id. The app's OWN declaration is still a
+  // real answer — `am start` on a declared port, an app between restarts.
+  const declared = declaredPort();
+  if (declared !== undefined) return declared;
+
+  // Out of rungs. Say which question failed, and list what IS running so the
+  // next command can name it.
+  const list = live.length
+    ? ` ${live.length} app${live.length === 1 ? " is" : "s are"} running: ${
+      live.map((i) => `${i.appId} @ ${i.socketPath ? "uds" : `:${i.port}`}`)
+        .join(", ")
+    }.`
+    : " Nothing is running.";
+  throw new Error(
+    `am does not know which app to target: no app named "${id}" is running ` +
+      `and none declares a port (AIO_PORT, or aio.run({ port }) in the app ` +
+      `entry).${list} Name one with --app=<id>, or point at a listener with ` +
+      `--port=N.`,
+  );
 }
 
 // ── State path resolution ───────────────────────────────────

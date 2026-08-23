@@ -17,6 +17,7 @@
 // the honest boundary of the claim.
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
+import { childEnv } from "./e2e-app-harness.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const dec = new TextDecoder();
@@ -65,7 +66,10 @@ import { makeCounter } from "./counter.ts";
 
 const [url, token] = Deno.args;
 const counter = makeCounter();
-const app = connectCli(url, { token });
+// A script's first connection must be REPORTABLE: without a deadline a wrong
+// cert or token is a client that retries forever, a test that never returns,
+// and — once the runner is killed for it — a server nobody stops.
+const app = connectCli(url, { token, readyTimeoutMs: 20_000 });
 app.bind(counter);
 await app.ready;
 await counter.bump(7);
@@ -118,6 +122,7 @@ Deno.test({
       env: {
         DENO_COVERAGE_DIR: _childCovDir,
         AIO_APPS_DIR: home,
+        ...childEnv(),
       },
       stdin: "null",
       stdout: "piped",
@@ -181,10 +186,13 @@ Deno.test({
           token,
         ],
         cwd: proj,
-        env: { DENO_COVERAGE_DIR: _childCovDir },
+        env: { DENO_COVERAGE_DIR: _childCovDir, ...childEnv() },
         stdin: "null",
         stdout: "piped",
         stderr: "piped",
+        // The test's OWN bound, so a hung client fails THIS test instead of
+        // hanging the runner until an outer `timeout` kills it.
+        signal: AbortSignal.timeout(60_000),
       }).output();
 
       const out = dec.decode(client.stdout);

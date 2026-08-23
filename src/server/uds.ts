@@ -19,6 +19,7 @@ import {
 import { invokeServerFn } from "./server-fns.ts";
 import {
   type ActionPayload,
+  type CtlPayload,
   dec,
   enc,
   encRaw,
@@ -80,6 +81,14 @@ export function createUDSListener(
    *  Electron window talks over UDS instead, and the failure was a silent
    *  connection reset mid-send. Never lowers the default. */
   maxFrameBytes?: number,
+  /** Serve one control-plane request that arrived as a `ctl` frame.
+   *
+   *  Supplied by `aio-server.ts` from the ServerHandle, so it IS the HTTP
+   *  handler — same routes, same auth gates, same dev-only trojan mount. When
+   *  absent (no HTTP server was built), a `ctl` frame is answered with a plain
+   *  503 rather than dropped: a control client that gets silence cannot tell
+   *  "refused" from "this build has no control plane". */
+  control?: (req: Request) => Promise<Response>,
 ): UDSHandle {
   try {
     Deno.removeSync(socketPath);
@@ -147,6 +156,7 @@ export function createUDSListener(
           syncHandler ?? null,
           tt,
           maxFrameBytes,
+          control,
         );
       } catch (e) {
         log.error("uds", `client handshake failed — ${e}`);
@@ -375,6 +385,10 @@ function _handleUDSConn(
     getBroadcast: () => unknown;
   },
   maxFrameBytes?: number,
+  /** The control-plane server (see `createUDSListener`) — the HTTP handler
+   *  itself, so a `ctl` frame meets the same routes and gates as a request
+   *  over TCP. */
+  control?: (req: Request) => Promise<Response>,
 ): void {
   const decoder = new TextDecoder();
   const MAX_BUF = udsFrameCeiling(maxFrameBytes);
@@ -448,6 +462,17 @@ function _handleUDSConn(
           switch (frame.t) {
             case "ping":
               continue;
+            case "type": {
+              // A peer declaring it is not a UI. The control client (`am`,
+              // amui) asks a question and leaves; it is not a window, so it
+              // must not appear in the client roster, must not consume the
+              // index `am surface N` addresses, and must not be mailed state
+              // broadcasts it will never render. `clientMap` keys BOTH the
+              // roster and the broadcast loop, so leaving it is the whole fix.
+              const kind = (frame.d as { kind?: string } | undefined)?.kind;
+              if (kind === "control") clientMap.delete(conn);
+              continue;
+            }
             case "tt-cmd": {
               if (tt && typeof frame.d === "string") {
                 const cmd = parseTTCommand(frame.d);
@@ -639,6 +664,65 @@ function _handleUDSConn(
                       enc("sfnr", { cid, ok: false, error: String(e) }),
                     );
                   } catch { /* peer gone */ }
+                });
+              continue;
+            }
+            case "ctl": {
+              // The control plane (`am`, amui) over the socket. The frame is
+              // HTTP-shaped on purpose: it is turned back into a `Request` and
+              // handed to the server's own handler, so nothing about the
+              // trojan's routing or its gates is re-decided here. This file
+              // does transport, not policy.
+              const c = (frame.d ?? {}) as CtlPayload;
+              if (
+                typeof c?.id !== "string" || typeof c.path !== "string" ||
+                (c.method !== "GET" && c.method !== "POST")
+              ) {
+                log.warn("uds", "invalid ctl frame — dropping");
+                continue;
+              }
+              const reply = (
+                status: number,
+                body: string,
+                headers?: Record<string, string>,
+              ) => {
+                try {
+                  sendTo(
+                    conn,
+                    enc("ctlr", { id: c.id, status, body, headers }),
+                  );
+                } catch { /* peer gone mid-call */ }
+              };
+              if (!control) {
+                reply(
+                  503,
+                  JSON.stringify({
+                    error:
+                      "this app has no control plane (no HTTP handler built)",
+                  }),
+                );
+                continue;
+              }
+              // The origin is a placeholder: only the PATH is routed on, and
+              // every gate downstream reads the peer address, never the host.
+              const req = new Request(`http://uds.invalid${c.path}`, {
+                method: c.method,
+                headers: c.headers ?? {},
+                ...(c.method === "POST" ? { body: c.body ?? "" } : {}),
+              });
+              control(req)
+                .then(async (res: Response) => {
+                  const headers: Record<string, string> = {};
+                  res.headers.forEach((v: string, k: string) => {
+                    headers[k] = v;
+                  });
+                  reply(res.status, await res.text(), headers);
+                })
+                .catch((e: unknown) => {
+                  // A throw from the handler is an ANSWER, not a dropped
+                  // frame — the caller is waiting on this id.
+                  log.error("uds", `ctl ${c.method} ${c.path} failed — ${e}`);
+                  reply(500, JSON.stringify({ error: String(e) }));
                 });
               continue;
             }

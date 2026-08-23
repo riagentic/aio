@@ -7,6 +7,11 @@ One guide per version migration. Find your current version and follow the steps.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha64 → alpha65](from-alpha64-to-alpha65.md) — nothing breaks in your app
+  code: aio stops opening your browser (it prints the URL; `--open` opts in), an
+  Electron app never silently becomes a browser tab, `am` refuses instead of
+  guessing port 8000, and an exposed app's certificate re-issues itself when the
+  machine changes network. New: `AIO_PORT`, `am trust`, `--zero-port`.
 - [alpha63 → alpha64](from-alpha63-to-alpha64.md) — nothing breaks in your app
   code: `am` learned that a repo can hold several apps (`am start` means the
   project, `am start <label>` means one of it), `ui.theme: "none"` now really

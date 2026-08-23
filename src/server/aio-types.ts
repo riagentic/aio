@@ -251,7 +251,10 @@ export type AioConfig<S, A, E> = {
    *  HttpOnly session cookie. Implies `sessions`. */
   auth?: boolean | AuthOptions;
   ui?: UiConfig;
-  port?: number; // default: 8000
+  /** HTTP/WS port. Unset ⇒ the runtime picks a FREE one (never 8000), so
+   *  two apps never collide by default. Precedence: `--port` > `AIO_PORT` >
+   *  this. `am` reads the same three rungs. */
+  port?: number;
   /** Bind 0.0.0.0 + TLS for LAN access — the config twin of `--expose`, so a
    *  COMPILED binary (which has no shell flags in a service unit) can expose
    *  from code. `--expose` still wins when both are set. Resolved exactly once
@@ -321,10 +324,10 @@ export type AioConfig<S, A, E> = {
   onEffect?: (effect: E, state: S, user?: AioUser) => void;
   onConnect?: (user?: AioUser) => void;
   onDisconnect?: (user?: AioUser) => void;
-  onStart?: (app: AioApp<S, A>) => void;
+  onStart?: (app: AioApp<S, A>) => void | Promise<void>;
   /** If true, an onStart error terminates the process. Default: false (log and continue). */
   fatalOnStart?: boolean;
-  onStop?: () => void;
+  onStop?: () => void | Promise<void>;
   onError?: (error: AioError) => void;
   /** Internal: schedule cancel callback set by _run, used by cells disable */
   _onScheduleReady?: (cancelByPrefix: (prefix: string) => void) => void;
@@ -662,9 +665,9 @@ export type CellsConfig = {
   onEffect?: (effect: unknown, state: unknown, user?: AioUser) => void;
   onConnect?: (user?: AioUser) => void;
   onDisconnect?: (user?: AioUser) => void;
-  onStart?: (app: AioApp) => void;
+  onStart?: (app: AioApp) => void | Promise<void>;
   fatalOnStart?: boolean;
-  onStop?: () => void;
+  onStop?: () => void | Promise<void>;
   onError?: (error: AioError) => void;
   onRestore?: (state: unknown) => unknown;
   /** Structured logging — app.log (narrative), debug.log (all), error.log (errors), warning.log (warnings), perf.log (violations).

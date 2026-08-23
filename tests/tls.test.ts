@@ -1,3 +1,9 @@
+// The aio root is MACHINE-wide, so a test that does not relocate it writes
+// trust material into the developer's real home and then asserts against
+// whatever their machine already had. `AIO_APPS_DIR` moves the whole data
+// root, root CA included.
+const _TLS_SANDBOX = await Deno.makeTempDir({ prefix: "aio-tls-test-" });
+Deno.env.set("AIO_APPS_DIR", _TLS_SANDBOX);
 import {
   assert,
   assertEquals,
@@ -177,18 +183,38 @@ Deno.test("generated cert carries the appId in its subject, CA:FALSE, and SANs",
   });
 });
 
-Deno.test("two apps get DIFFERENT issuer DNs (the anchor collision is impossible)", async () => {
+// This used to assert the OPPOSITE — that two apps get different ISSUER DNs —
+// and it was right for the design it guarded. Back then every app's leaf was
+// its own trust anchor, so a client holding several of them picked one by
+// matching the issuer DN; when they all said `aio-local`, it picked the wrong
+// anchor and rustls failed with `BadSignature`, which names nothing about the
+// cause.
+//
+// That hazard is not moved, it is DISSOLVED: there is now exactly one anchor on
+// the machine, so there is nothing to disambiguate. Sharing an issuer is the
+// point — it is what lets a person trust one certificate and have every aio
+// app work, including apps that do not exist yet.
+//
+// What must still hold is that the two apps remain TELLABLE APART, and that
+// they really do hang off the same root rather than quietly minting their own.
+Deno.test("two apps share ONE issuer and stay distinguishable", async () => {
   await withTempDir(async (a) => {
     await withTempDir(async (b) => {
       const one = await loadOrCreateCert(a, undefined, undefined, "app-one");
       const two = await loadOrCreateCert(b, undefined, undefined, "app-two");
-      const issuer = (t: string) =>
-        t.split("\n").find((l) => l.trim().startsWith("Issuer:"))!.trim();
-      const i1 = issuer(await certText(one.certPath));
-      const i2 = issuer(await certText(two.certPath));
-      assertNotEquals(i1, i2, `both apps issued ${i1}`);
-      assert(i1.includes("app-one"), i1);
-      assert(i2.includes("app-two"), i2);
+      const line = (t: string, k: string) =>
+        t.split("\n").find((l) => l.trim().startsWith(k))!.trim();
+      const t1 = await certText(one.certPath);
+      const t2 = await certText(two.certPath);
+
+      // ① one anchor, shared — the whole reason `am trust` is a one-time act
+      assertEquals(line(t1, "Issuer:"), line(t2, "Issuer:"));
+      assertEquals(one.caPath, two.caPath);
+
+      // ② still two different apps, named as themselves
+      assertNotEquals(line(t1, "Subject:"), line(t2, "Subject:"));
+      assert(line(t1, "Subject:").includes("app-one"), line(t1, "Subject:"));
+      assert(line(t2, "Subject:").includes("app-two"), line(t2, "Subject:"));
     });
   });
 });

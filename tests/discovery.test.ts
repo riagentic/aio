@@ -16,23 +16,33 @@ Deno.test({
   async fn() {
     // The whole point: many apps on different ports, but a single responder
     // (reading the host registry) reports them all — with ip/port/name/url/auth.
+    //
+    // NAMES ARE UNIQUE PER RUN, and the sweep waits for OUR three rather than
+    // counting whatever answers. This test broadcasts on the LAN, so it hears
+    // every aio app within reach — the developer's own running apps, another
+    // checkout, another machine. Asserting on a total count therefore passed
+    // for the wrong reason (three strangers answered) while its own responder
+    // was absent, and a fixed name like "dashboard" could match a REAL app and
+    // assert against its port. Both failure modes are the same mistake:
+    // measuring the neighbourhood instead of the thing under test.
+    const tag = `t${crypto.randomUUID().slice(0, 8)}`;
     const hostApps = [
       {
-        name: "dashboard",
+        name: `${tag}-dashboard`,
         port: 8000,
         title: "Dashboard",
         needsAuth: false,
         tls: false,
       },
       {
-        name: "trading",
+        name: `${tag}-trading`,
         port: 8010,
         title: "Trading",
         needsAuth: true,
         tls: true,
       },
       {
-        name: "admin",
+        name: `${tag}-admin`,
         port: 8020,
         title: "Admin",
         needsAuth: true,
@@ -42,10 +52,26 @@ Deno.test({
     const r = startDiscoveryResponder(() => hostApps);
     try {
       await new Promise((res) => setTimeout(res, 100));
-      const apps = await discoverAioApps({ timeoutMs: 800 });
-      assertEquals(apps.length >= 3, true, "all three host apps discovered");
-      const dash = apps.find((a) => a.name === "dashboard")!;
-      const trade = apps.find((a) => a.name === "trading")!;
+      // Poll until OUR three are all present. A single sweep can miss a
+      // datagram — UDP promises nothing — and a miss is not the property under
+      // test; that the one responder reports every app is.
+      const mine = (list: { name: string }[]) =>
+        list.filter((a) => a.name.startsWith(tag));
+      let apps: Awaited<ReturnType<typeof discoverAioApps>> = [];
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline) {
+        apps = await discoverAioApps({ timeoutMs: 800 });
+        if (mine(apps).length >= 3) break;
+      }
+      assertEquals(
+        mine(apps).length,
+        3,
+        `this run's three apps were not all discovered (saw ${
+          mine(apps).map((a) => a.name).join(", ") || "none of ours"
+        }; ${apps.length} app(s) answered in total)`,
+      );
+      const dash = apps.find((a) => a.name === `${tag}-dashboard`)!;
+      const trade = apps.find((a) => a.name === `${tag}-trading`)!;
       assert(dash, "dashboard found");
       assert(dash.host.length > 0, "host (IP) resolved from the datagram");
       assertEquals(dash.port, 8000);

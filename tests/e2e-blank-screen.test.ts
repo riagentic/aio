@@ -4,6 +4,7 @@
 // timeout), renders an in-page diagnostic, and reports to the server so the
 // terminal says why. Proven against real chromium.
 import { assert, assertStringIncludes } from "@std/assert";
+import { testDisplayEnv } from "../src/testing/test-display.ts";
 
 // Coverage profiles from spawned deno processes go to a throwaway temp dir.
 const _childCovDir = Deno.env.get("DENO_COVERAGE_DIR") ??
@@ -92,7 +93,7 @@ export const c = cell("probe", { state: { n: 0 }, methods: { inc(s) { s.n++; } }
 
   const port = freePort();
   const proc = new Deno.Command(Deno.execPath(), {
-    env: { DENO_COVERAGE_DIR: _childCovDir },
+    env: { DENO_COVERAGE_DIR: _childCovDir, ...testDisplayEnv() },
     args: [
       "run",
       "-A",

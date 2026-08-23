@@ -38,7 +38,11 @@ Deno.test("testDisplay: an explicit AIO_TEST_DISPLAY always wins", () => {
   // session — none of them want us starting a second server.
   withEnv({ AIO_TEST_DISPLAY: ":99" }, () => {
     assertEquals(testDisplay(), ":99");
-    assertEquals(testDisplayEnv(), { DISPLAY: ":99" });
+    // AIO_NO_OPEN rides along with the display and is not optional: a nested
+    // display keeps a spawned app's OWN window off your desktop, but nothing
+    // stops that app handing a URL to xdg-open and leaving a tab in your real
+    // browser — one per spawned app, none of them closable by aio.
+    assertEquals(testDisplayEnv(), { DISPLAY: ":99", AIO_NO_OPEN: "1" });
   });
 });
 
@@ -68,10 +72,14 @@ Deno.test("testDisplayEnv: empty when there is nothing to contain", () => {
   // must stay safe rather than setting DISPLAY="".
   withEnv({ AIO_TEST_DISPLAY: null, DISPLAY: null }, () => {
     if (Deno.build.os !== "linux") {
-      assertEquals(testDisplayEnv(), {});
+      // No display to hand over — but the no-open rule still travels, because
+      // a machine with no desktop is exactly where an accidental xdg-open is
+      // least wanted and least visible.
+      assertEquals(testDisplayEnv(), { AIO_NO_OPEN: "1" });
       return;
     }
     const env = testDisplayEnv();
+    assertEquals(env.AIO_NO_OPEN, "1");
     // Either a nested display was found/started, or we degraded to nothing —
     // never an empty-string DISPLAY, which breaks X clients in a confusing way.
     if ("DISPLAY" in env) assert(env.DISPLAY.length > 0);

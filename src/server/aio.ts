@@ -100,6 +100,7 @@ import { PERSIST_SCHEMA_VERSION } from "./persist-schema.ts";
 import { deriveDataContract } from "./updates-core.ts";
 import {
   distCandidates,
+  envPort,
   findFreePort,
   isCompiled,
   realDistCandidates,
@@ -801,11 +802,17 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
     // method surface is bound — so seeding via a cell method (members.seed())
     // works instead of throwing "cell runtime not booted". Error-guarded: a
     // throwing onStart must not abort a successful boot.
+    // Guarded for a sync throw AND an async rejection: an `async onStart` used
+    // to bypass the catch entirely and surface as an unhandled rejection.
     if (fc.onStart) {
+      const failed = (e: unknown) => log.error(`onStart hook error: ${e}`);
       try {
-        fc.onStart(app);
+        const r = fc.onStart(app) as unknown;
+        if (r && typeof (r as Promise<unknown>).then === "function") {
+          (r as Promise<unknown>).catch(failed);
+        }
       } catch (e) {
-        log.error(`onStart hook error: ${e}`);
+        failed(e);
       }
     }
     return app;
@@ -947,9 +954,21 @@ async function _run<S, A, E>(
       app: (config as { appVersion?: string }).appVersion,
     });
   }
-  const port = cli.port ?? config.port ?? await findFreePort();
+  // THE port chain, in one place, with `am` reading the same three rungs
+  // (`declaredPort`): `--port` (operator, this run) > `AIO_PORT` (operator, no
+  // command line to hang a flag on — a service unit, a container, a compiled
+  // binary) > `aio.run({ port })` (the author) > the runtime picks a free one.
+  //
+  // deno.json is deliberately NOT a rung: it carries identity and build only
+  // (see `_warnMisplacedDenoJson`, which WARNS that a top-level `port` there is
+  // inert). `am` used to read it anyway, so a key the runtime told you it was
+  // ignoring silently decided where `am` aimed.
+  const _envPort = envPort();
+  const port = cli.port ?? _envPort ?? config.port ?? await findFreePort();
   const portFrom: Provenance = cli.port
     ? "flag"
+    : _envPort !== undefined
+    ? "env"
     : config.port
     ? "config"
     : "default"; // …i.e. picked by findFreePort — worth saying, since a port
@@ -2010,7 +2029,14 @@ async function _run<S, A, E>(
     bootExtras: {
       pid: Deno.pid,
       client: { value: client, from: clientFrom },
-      port: { value: port, from: portFrom },
+      // An app that binds no TCP port has no port fact to report. It used to
+      // print one anyway — `findFreePort()` runs before the transport is even
+      // decided — so a zero-port app announced a number it never bound, and
+      // anyone who tried it got a refused connection. `sourced()` drops an
+      // undefined value, and the socket is named on its own line instead.
+      port: transport.httpSocketPath || transport.skipHttp
+        ? { value: undefined as unknown as number, from: portFrom }
+        : { value: port, from: portFrom },
       entry: {
         // What is RUNNING, read from the process — not what a config said
         // should run. Those differ exactly when someone is confused.
@@ -2074,6 +2100,7 @@ async function _run<S, A, E>(
     libraryMode: config.libraryMode,
     transport: transport.transport,
     skipHttp: transport.skipHttp,
+    httpSocketPath: transport.httpSocketPath,
     port,
     token,
     users,
@@ -2094,7 +2121,12 @@ async function _run<S, A, E>(
     asyncDb,
     db: config.db,
     maxConnections: config.maxConnections,
-    cli: { width: cli.width, height: cli.height, keepServer: cli.keepServer },
+    cli: {
+      width: cli.width,
+      height: cli.height,
+      keepServer: cli.keepServer,
+      open: cli.open,
+    },
     // The FULL head-shaped config, not just the window box: the dev Electron
     // aio:// shell is templated at launch and has no other way to learn
     // ui.head/ui.viewport/ui.showStatus. Dropping them here made an app that

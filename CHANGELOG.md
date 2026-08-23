@@ -1,5 +1,155 @@
 # Changelog
 
+## v1.0.0-alpha65 — what it opens, it closes (2026-08-23)
+
+The release about an app's footprint: the ports it binds, the windows and tabs
+it opens, the processes it leaves behind, and the certificate it asks you to
+trust. Every one of them was leaking something.
+
+### One port chain, and a control plane that follows the app
+
+`--port` > `AIO_PORT` > `aio.run({ port })` > the runtime picks a free one — one
+chain, read by the runtime and `am` alike. `AIO_PORT` is the operator rung for
+the places with no command line to hang a flag on (a service unit, a container,
+a compiled binary); a malformed value is refused, never ignored. aio still does
+not read `.env` — `deno run --env-file` and `EnvironmentFile=` deliver one, and
+`am` already forwards `--env-file`.
+
+- **`am` no longer invents 8000.** 8000 is not a port aio binds, so the tool was
+  answering with a number it made up: "app not running on port 8000" read as a
+  diagnosis when the truth was "am does not know which app you mean". It now
+  refuses and names the failed question.
+- **deno.json's top-level `port` is no longer a rung.** The runtime never read
+  it — and warns that aio config there "is silently doing nothing" — while `am`
+  read it anyway, so it aimed at a number the app had been told it was ignoring.
+- **The boot report stops printing a port for an app that binds none.**
+
+**The trojan control plane now answers over UDS** (`ctl`/`ctlr` frames), so an
+app on a Unix socket is fully inspectable — `am state`, `dispatch`, `surface`,
+`trigger`. Deliberately not a socket-native API: the frame becomes a `Request`
+handed to the SAME handler the TCP listener uses, so the routes and every auth
+gate are decided once. `am` picks its wire from the lock the app wrote and falls
+back to TCP on transport failure.
+
+**`--zero-port`** (experimental): dev + electron + UDS serves the page and its
+modules over a second socket, so the app binds no TCP port at all. Verified on a
+real window. It is opt-in and NOT the default because hot reload does not
+survive it yet — the reloaded renderer abandons the IPC bridge and tries
+`ws://app/ws`. See `todo.md`.
+
+### One certificate to trust, once
+
+Automatic TLS was breaking its own rule — that it must never cause a problem the
+app would not have had without it. A cached certificate was reused verbatim with
+no check that it still matched the machine, so changing network, taking a new
+DHCP lease or bringing up a VPN left the app serving a cert that does not name
+the address clients now use: a handshake failure on an app nobody touched.
+
+Now the leaf (which proves an ADDRESS, and is therefore perishable) is re-issued
+automatically whenever the machine's addresses change, and it is issued from a
+root that names no address at all. The root is **machine-wide** — one per user,
+not one per app — so trusting it is a single act that covers every aio app you
+have and every one you write later.
+
+**`am trust`** prints the root and the install steps for your OS (system store
+and the separate NSS store Firefox/Chrome keep). It never installs anything
+itself. The root is **name-constrained** to localhost/.local/RFC1918 — it is
+cryptographically incapable of vouching for a public website even for whoever
+holds the key, which is what makes installing it a reasonable thing to be asked.
+
+### A test run does not touch your desktop
+
+Reported: apps still running after a suite, and "10 stacked tabs of the same app
+left". The singleton lock was not the problem — four other things were.
+
+- **aio no longer opens a browser.** The URL is printed; `--open` opts in. A tab
+  handed to a running browser belongs to that browser: the app exits, the tab
+  stays. An Electron window is different in kind — a child process aio owns and
+  closes — so that still opens by default.
+- **An Electron app whose Electron is missing stays a desktop app.** It used to
+  fall back to opening a browser tab, changing the client you chose in the
+  moment you were least likely to be watching.
+- **Every GUI test opens on the nested Xephyr display.** The helper already
+  existed and was exactly right; not one GUI test used it.
+- **The e2e harness kills the process TREE.** Several tests spawn a shell that
+  starts the real app, so killing the child left the app holding its port and
+  lock — and the next run refused to start.
+
+### One process killer, and a desktop app that survives a headless box
+
+`killProcess` existed twice, near-identically, and neither copy knew about child
+processes — so a hung app's Electron window outlived the kill meant to stop it.
+One implementation now, sweeping descendants collected before the parent dies.
+
+`isHeadless` answers "does this CLIENT have a UI"; whether a window can open is
+a property of the MACHINE. An electron app over ssh or in a container tried to
+launch Electron, failed, and exited — because "the window went away" is what
+stops a desktop app. It now degrades loudly to no-window and keeps serving.
+
+### Nothing outlives you — process hygiene, from a read-only audit
+
+An audit of one developer machine found a test-spawned `--expose`d app that had
+been serving for 5 h (its runner killed by `timeout`), 579 `/tmp/aio-*` dirs,
+675 stale lock dirs, and — by reading — five places where the framework let an
+app outlive, pre-empt or under-run its own shutdown contract. All fixed, each
+with a test that fails on the old code:
+
+- **`onStop` is awaited.** The bridge called the user's hook without `await`, so
+  an async `onStop` was abandoned the moment it started and the process exited
+  ~ms later — a 4.5 s hook logged its first line and never its last, on every
+  `am stop`. Awaited now, inside the 5 s teardown budget; `onStart`'s async
+  rejection is routed through the same guard instead of becoming an unhandled
+  rejection. Types: `() => void | Promise<void>`.
+- **The singleton lock lives as long as the process.** SIGINT/SIGTERM used to
+  release it on the spot — measured: gone 1 ms after SIGTERM, 14 ms before the
+  process — leaving the app alive, listening and unlocked for its whole
+  shutdown. The signal now only marks it `stopping`; Phase 6 releases it after
+  the final persist. `am`'s waits and the `--kill-existing` grace are derived
+  from the runtime's own budget (`SHUTDOWN_BUDGET_MS`, one decider) instead of
+  shorter retyped numbers that SIGKILLed a legitimate final flush.
+- **`am start` no longer kills a booting app.** It probed the port of the
+  placeholder lock — `0` when the app declared none — and read "connection
+  refused" as "stuck", so a second `am start` during boot SIGTERMed the first.
+  It now honours the runtime's `STARTUP_GRACE_MS` and never probes a port that
+  is not there.
+- **A typo does not end the dev session.** The auto-restart supervisor passed
+  the child's exit code through, so a syntax error in the cell you were editing
+  killed `deno task dev`. A child that dies right after a relaunch is a failed
+  restart: the supervisor stays up, says so, and relaunches on the next save.
+- **An Electron window dies with its server.** A SIGKILLed/crashed server left a
+  window reconnecting forever, which then re-attached to the NEXT instance — two
+  windows, one app. The launcher passes `AIO_PARENT_PID`; the window quits when
+  that pid is gone.
+- **`AIO_PARENT_PID`** is the same contract for any launcher: an app with it set
+  runs its graceful shutdown when the parent disappears. The test harness sets
+  it for every spawned app, and `deno task test` ends with `check:orphans`,
+  which fails if any app outlived the run. `deno task
+  clean:tmp` stops orphans
+  and removes ownerless `/tmp/aio-*` homes, stale lock dirs and stale watcher
+  sentinels.
+- **A lock refusal in a two-app process no longer exits the process** (which
+  took the sibling app down without its shutdown) — it throws to the caller.
+- Per-`AIO_APPS_DIR` lock dirs are removed with their last app; `connectCli` in
+  the LAN e2e sets `readyTimeoutMs` and the test has its own deadline, so a
+  wrong cert/token is a failed test rather than a hung runner; two dead TLS
+  functions that kept `deno task lint` red on `main` are gone.
+
+### `am` stopped inventing a port
+
+Reported right after alpha64: `am start` put an app on 8000 while
+`deno task dev` put the SAME app on a random port — and on a machine where
+something already owned 8000, `am start` refused, naming an unrelated app.
+
+Two deciders for one fact. The runtime resolves `--port` → `aio.run({ port })` →
+`findFreePort()`; `am` resolved `--port` → deno.json `port` → the entry's port →
+**8000**, and then never passed that 8000 to the child, so it was a guess it
+used for its own pre-check, lock and health probe. `am` now reads what the app
+DECLARED (or nothing), skips the pre-check when there is no declared port, and
+takes the real port from the lock the app writes. Same rule for components: the
+per-component slot assignment (8000, 8001, …) is gone, because on this machine
+it was a port conflict `am` created. Declare `port` in `aio.run()` when
+something needs a fixed address.
+
 ## 1.0.0-alpha64 — which app is "this app" (2026-08-21)
 
 `am` was built around one assumption: a directory is an app. aio supports the

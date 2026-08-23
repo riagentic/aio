@@ -1,4 +1,4 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertThrows } from "@std/assert";
 import {
   parseGlobalFlags,
   parsePayload,
@@ -11,6 +11,7 @@ import {
 import { formatUptime } from "../src/am/am-output.ts";
 import { resolveControlPort } from "../src/am/am-http.ts";
 import {
+  instances,
   isProcessAlive,
   lockPath,
 } from "../src/server/single-instance-lock.ts";
@@ -273,9 +274,19 @@ Deno.test("am: resolvePort — falls back to lock file", () => {
   }
 });
 
-Deno.test("am: resolvePort — default 8000", () => {
+// 8000 is not a port aio binds — the runtime picks a FREE one when nothing is
+// declared — so a tool that answers 8000 is answering with a number it made up.
+// The contract is a refusal that names the failed question.
+Deno.test("am: resolvePort — refuses rather than inventing 8000", () => {
   removePid(TEST_APP);
-  assertEquals(resolvePort(undefined, TEST_APP), 8000);
+  // The "one running instance" rung is a legitimate answer and owns this case
+  // when the machine has exactly one app up; only the invented rung is on trial.
+  if (instances().length > 0) return;
+  assertThrows(
+    () => resolvePort(undefined, TEST_APP),
+    Error,
+    "does not know which app to target",
+  );
 });
 
 // ── Unit: isProcessAlive ─────────────────────────────────────
