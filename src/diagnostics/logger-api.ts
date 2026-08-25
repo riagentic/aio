@@ -49,6 +49,62 @@ export interface Log {
   error(cat: string, msg: string, data?: Record<string, unknown>): void;
 }
 
+// ── Call-site tag inference ───────────────────────────────────────────
+//
+// `log.error("bridge: …")` from APP code printed the module `aio`, so a line
+// the app wrote read as a framework fault. When no tag is given, the tag is
+// now read off the first non-logger stack frame: inside the framework's own
+// `src/` → `aio`, anywhere else → `app`. Observe-only (a label), and cheap:
+// one regex per NEW call site, cached by the frame line.
+//
+// The framework root is this module's own location, so the same rule holds
+// for a checkout (`file:///…/aio/src/`), the `dep/aio` symlink an app imports
+// through, and the jsr package cache (`https://jsr.io/@…/aio/<v>/src/`) —
+// wherever aio is, its `src/` is one prefix away from this file. Inference is
+// disabled (tag stays `aio`) when the URL is not that shape, i.e. inside a
+// browser bundle where every frame is the bundle.
+// Resolved on FIRST use, never at module load: this module is client-reachable
+// and a bundle that merely links it must not touch `import.meta` while it
+// evaluates (tests/bundle-load-time-throw.test.ts).
+let _frameworkSrc: string | null | undefined;
+function frameworkSrc(): string | null {
+  if (_frameworkSrc !== undefined) return _frameworkSrc;
+  let url = "";
+  try {
+    url = import.meta.url;
+  } catch { /* no module URL (inline script) → nothing is "the framework" */ }
+  _frameworkSrc = /[/\\]src[/\\]diagnostics[/\\]logger-api\.ts$/.test(url)
+    ? url.slice(0, url.lastIndexOf("/diagnostics/") + 1)
+    : null;
+  return _frameworkSrc;
+}
+
+/** Pure: is a stack-frame line one of the framework's own? */
+export function frameIsFramework(line: string): boolean {
+  const src = frameworkSrc();
+  return src !== null && line.includes(src);
+}
+
+const _tagCache = new Map<string, "aio" | "app">();
+const TAG_CACHE_MAX = 4096;
+
+/** The tag for an untagged call: `app` when the first frame outside the
+ *  logger is not framework code, else `aio`. `stack` is injectable for tests. */
+export function inferTag(stack?: string): "aio" | "app" {
+  if (frameworkSrc() === null) return "aio";
+  const frames = (stack ?? new Error().stack ?? "").split("\n");
+  const site = frames.find((f) =>
+    f.includes("    at ") && !f.includes("/diagnostics/logger-")
+  );
+  if (!site) return "aio";
+  const hit = _tagCache.get(site);
+  if (hit) return hit;
+  const tag = frameIsFramework(site) ? "aio" : "app";
+  if (_tagCache.size >= TAG_CACHE_MAX) _tagCache.clear();
+  _tagCache.set(site, tag);
+  return tag;
+}
+
 /** Resolve overloaded args: (msg) or (cat, msg) or (cat, msg, data) */
 function resolveArgs(
   a: string,
@@ -56,7 +112,7 @@ function resolveArgs(
   c?: Record<string, unknown>,
 ): [string, string, Record<string, unknown> | undefined] {
   if (typeof b === "string") return [a, b, c];
-  return ["aio", a, b as Record<string, unknown> | undefined];
+  return [inferTag(), a, b as Record<string, unknown> | undefined];
 }
 
 function emit(

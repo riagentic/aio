@@ -29,6 +29,7 @@
  */
 import { parse as parseJsonc } from "@std/jsonc";
 import { join } from "@std/path";
+import { log } from "../diagnostics/logger-api.ts";
 
 /** Both filenames Deno accepts, in the order it prefers them. */
 export const DENO_JSON_NAMES = ["deno.json", "deno.jsonc"] as const;
@@ -75,6 +76,107 @@ export async function readDenoJson(
     return { config: parseDenoJson(text, path), path };
   }
   return null;
+}
+
+// ── The framework pin ───────────────────────────────────────
+//
+// `aioVersion` in deno.json is the COMMITTED pin: the version every clone
+// builds against. A path pin (`am pin /abs/checkout` — follow a framework
+// checkout on this machine) is per-MACHINE by nature, so writing it into the
+// committed file pinned every clone to a directory that exists on one laptop.
+// It lives in a git-ignored local override instead, and THIS reader — the one
+// place `aioVersion` is consulted — prefers it. A legacy `"path:…"` value in
+// deno.json is still honoured (warned once) so an app written before the
+// override moved keeps building.
+
+/** The git-ignored local override: one line, the absolute checkout path. */
+export const LOCAL_PIN_FILE = ".aio/pin.local";
+
+/** Prefix a local path pin carries when returned as a pin string
+ *  (`path:/abs/checkout`) — the ONE spelling `framework-pin.ts` decides on. */
+const PATH_PIN = "path:";
+
+/** The path in `.aio/pin.local`, or null when absent/empty. A file that
+ *  exists but names a directory without `mod.ts` is a dangling override and
+ *  THROWS — silently building against something else is the failure the
+ *  pin exists to end. */
+export function readLocalPinSync(dir: string): string | null {
+  const file = join(dir, LOCAL_PIN_FILE);
+  let text: string;
+  try {
+    text = Deno.readTextFileSync(file);
+  } catch {
+    return null;
+  }
+  const line = text.split("\n").map((l) => l.trim()).find((l) =>
+    l !== "" && !l.startsWith("#")
+  );
+  if (!line) return null;
+  const target = line.startsWith(PATH_PIN) ? line.slice(PATH_PIN.length) : line;
+  try {
+    Deno.statSync(join(target, "mod.ts"));
+  } catch {
+    throw new Error(
+      `[aio] ${file} pins this app to ${target}, which is not an aio ` +
+        `checkout on this machine (no mod.ts). The file is a per-machine ` +
+        `override: fix the path, or delete it to build against the ` +
+        `committed aioVersion.`,
+    );
+  }
+  return target;
+}
+
+const _said = new Set<string>();
+/** Say a thing once per process per subject — the local override and the
+ *  legacy in-file path pin are both worth exactly one line. */
+function _once(key: string, say: () => void): void {
+  if (_said.has(key)) return;
+  _said.add(key);
+  say();
+}
+
+/** How an app's framework pin was resolved. */
+export type FrameworkPin = {
+  /** `v1.0.0-alpha67`, `main-<sha>`, or `path:/abs/checkout`; null = unpinned. */
+  pin: string | null;
+  /** Where it came from: the local override, the committed file, or nowhere. */
+  source: "local" | "deno.json" | null;
+};
+
+/** THE reader of an app's framework pin: `.aio/pin.local` first (local
+ *  override wins, and says so once), then `aioVersion` in deno.json. */
+export function readFrameworkPinSync(dir: string): FrameworkPin {
+  const local = readLocalPinSync(dir);
+  if (local !== null) {
+    _once(`local:${dir}`, () => log.info(`aio: local path pin → ${local}`));
+    return { pin: PATH_PIN + local, source: "local" };
+  }
+  let cfg: Record<string, unknown> | undefined;
+  try {
+    cfg = readDenoJsonSync(dir)?.config;
+  } catch {
+    return { pin: null, source: null };
+  }
+  const v = cfg?.aioVersion;
+  if (typeof v !== "string" || v === "") return { pin: null, source: null };
+  if (v.startsWith(PATH_PIN)) {
+    _once(
+      `legacy:${dir}`,
+      () =>
+        log.warn(
+          `aio: deno.json carries aioVersion "${v}" — a path pin is ` +
+            `per-machine and does not belong in the committed file. Move it: ` +
+            `\`am pin ${v.slice(PATH_PIN.length)}\` writes ${LOCAL_PIN_FILE} ` +
+            `(git-ignored) and leaves deno.json for a release pin.`,
+        ),
+    );
+  }
+  return { pin: v, source: "deno.json" };
+}
+
+/** {@linkcode readFrameworkPinSync}, for async callers. */
+export function readFrameworkPin(dir: string): Promise<FrameworkPin> {
+  return Promise.resolve(readFrameworkPinSync(dir));
 }
 
 /** {@linkcode readDenoJson}, synchronously — for the boot paths that run

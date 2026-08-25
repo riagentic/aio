@@ -13,7 +13,12 @@ import { createCoalescer } from "./broadcast-coalescer.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
 import type { ComposedCells } from "../state/cell.ts";
 import type { ServerHandle } from "./server-types.ts";
-import { AppLock, instances, lockDir } from "./single-instance-lock.ts";
+import {
+  AppLock,
+  instances,
+  lockDir,
+  type LockMeta,
+} from "./single-instance-lock.ts";
 import { resolve } from "@std/path";
 import { runtimeCount } from "./shutdown.ts";
 import { launchElectronClient } from "../electron/electron.ts";
@@ -366,10 +371,11 @@ export async function acquireSingletonLock(
   port: number,
   singletonMode: boolean,
   killExisting: boolean,
+  meta: LockMeta = {},
 ): Promise<AppLock | null> {
   if (singletonMode === false) return null;
   const appLock = new AppLock(appId, home);
-  const result = await appLock.acquire(port, killExisting);
+  const result = await appLock.acquire(port, killExisting, meta);
   if (!result.ok) {
     const ex = result.existing;
     const where = ex.port > 0 ? ` at http://localhost:${ex.port}` : "";

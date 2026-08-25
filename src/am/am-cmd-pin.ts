@@ -38,6 +38,7 @@ import {
   syncFrameworkDeps,
   writePin,
 } from "./am-versions.ts";
+import { LOCAL_PIN_FILE } from "../server/deno-json.ts";
 import {
   isPathPin,
   linkSatisfiesPin,
@@ -45,6 +46,7 @@ import {
   pathPinTarget,
 } from "./am-versions.ts";
 import {
+  isFixturePath,
   type RemovalHit,
   removalMessage,
   removalsInSource,
@@ -134,9 +136,21 @@ function render(info: PinInfo, tags: string[]): string {
 }
 
 /** One reason a target version would break this app. */
-interface Blocker {
+export interface Blocker {
   where: string; // file:line, relative to the app
   hit: RemovalHit;
+  /** True when the file is a test/fixture path (`isFixturePath`): the old
+   *  spelling is a fixture, so the move WARNS and proceeds instead of
+   *  refusing — a real config key on a real path still refuses. */
+  fixture: boolean;
+}
+
+/** One blocker, as every surface prints it: file:line, the QUOTED line that
+ *  matched, then the removal message. */
+export function blockerLines(b: Blocker): string {
+  return `  ${b.where}\n    | ${b.hit.text}\n    ${
+    removalMessage(b.hit.removal)
+  }`;
 }
 
 /** Does `ref` still accept an API whose last supporting release was `lastGood`?
@@ -201,9 +215,11 @@ export async function preflight(
     if (!text.includes("cell(")) continue; // config keys live in cell() calls
     for (const hit of removalsInSource(text)) {
       if (stillAccepts(ref, hit.removal.lastGood)) continue;
+      const rel = relative(appDir, file);
       blocking.push({
-        where: `${relative(appDir, file)}:${hit.line}`,
+        where: `${rel}:${hit.line}`,
         hit,
+        fixture: isFixturePath(rel),
       });
     }
   }
@@ -264,8 +280,9 @@ export async function cmdPin(
     ref = PATH_PIN_PREFIX + target;
     // Always on stderr, every mode — the trade-off must be impossible to miss.
     console.error(
-      `⚠ local-dev pin — machine-specific: committing it pins every clone ` +
-        `to ${target}. Return to a release with "am pin --latest".`,
+      `⚠ local-dev pin — this machine only: recorded in ${LOCAL_PIN_FILE} ` +
+        `(git-ignored), deno.json untouched. Return to a release with ` +
+        `"am pin --latest".`,
     );
   }
   if (wantLatest) {
@@ -308,14 +325,24 @@ export async function cmdPin(
   // positionally working, and keeps this from silently ignoring it — which is
   // what happened the moment the flag moved.
   if (!args.includes("--force") && !flags.force) {
-    const blocking = await preflight(appDir, ref);
-    if (blocking.length) {
-      const lines = blocking.map((b) =>
-        `  ${b.where}\n    ${removalMessage(b.hit.removal)}`
+    const found = await preflight(appDir, ref);
+    const blocking = found.filter((b) => !b.fixture);
+    const fixtures = found.filter((b) => b.fixture);
+    // A removed spelling on a TEST/FIXTURE path is the app's own upgrade
+    // test or self-test feeding the old shape on purpose — said, with the
+    // line, never refused. Always stderr: the pin proceeds and this must not
+    // vanish into a JSON payload nobody reads.
+    if (fixtures.length) {
+      console.error(
+        `⚠ ${fixtures.length} removed API(s) on test/fixture paths — ` +
+          `${ref} no longer runs them; pinning anyway:\n` +
+          fixtures.map(blockerLines).join("\n"),
       );
+    }
+    if (blocking.length) {
       outError(
         `${ref} would break this app — ${blocking.length} removed API(s) ` +
-          `still in use:\n${lines.join("\n")}\n` +
+          `still in use:\n${blocking.map(blockerLines).join("\n")}\n` +
           `  Migrate them, pin a version that still runs them, or re-run with ` +
           `--force to pin anyway.`,
         mode,
@@ -339,7 +366,7 @@ export async function cmdPin(
   // `main-<sha>`, so the pin in the repo is always exact and a clone reproduces
   // the same tree. "Follow main" stays an action you re-run, never a stored
   // state that can change the framework under an app behind its back.
-  await writePin(appDir, res.ref);
+  const wrote = await writePin(appDir, res.ref);
   // The other half of the pin: align the framework-owned dep entries in the
   // app's map with what THIS version declares (see syncFrameworkDeps).
   const deps = await syncFrameworkDeps(appDir, res.path);
@@ -351,7 +378,14 @@ export async function cmdPin(
         res.ref === ref ? "" : `  (resolved from "${ref}")`
       }\n` +
         `  dep/aio → ${res.path}${res.created ? "  (provisioned)" : ""}\n` +
-        `  deno.json aioVersion: ${res.ref}\n` +
+        (wrote.file === "deno.json"
+          ? `  deno.json aioVersion: ${res.ref}\n` +
+            (wrote.removedLocal
+              ? `  removed ${LOCAL_PIN_FILE} (local path override) — this release now wins\n`
+              : "")
+          : `  ${wrote.file}: ${
+            pathPinTarget(res.ref)
+          }  (git-ignored, this machine only; deno.json untouched)\n`) +
         deps.map((d) =>
           `  dep synced: ${d.key} ${d.from ?? "(none)"} → ${d.to}\n`
         ).join("") +
@@ -359,10 +393,13 @@ export async function cmdPin(
         (ref === MAIN
           ? `  NOTE: pinned to that exact commit. Re-run \`am pin main\` to advance.\n`
           : "") +
-        `  commit deno.json so a clone builds against the same version`
+        (wrote.file === "deno.json"
+          ? `  commit deno.json so a clone builds against the same version`
+          : `  commit nothing — \`am pin --latest\` returns to a release`)
       : {
         pinned: res.ref,
         requested: ref,
+        recordedIn: wrote.file,
         path: res.path,
         provisioned: res.created,
         depsSynced: deps,

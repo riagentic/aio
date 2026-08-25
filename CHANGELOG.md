@@ -1,5 +1,60 @@
 # Changelog
 
+## v1.0.0-alpha68 — proven in anger (2026-08-25)
+
+The follow-up to a desktop wallet's second field report: every round-one item it
+could exercise on a real Electron boot held; this release is the half point it
+named — the migration path proven end to end, and what the proof found.
+
+- **Two bugs in released alpha66/67, found by the new end-to-end migration
+  test.** (1) `replaySyncOps` assigned the reducer's `{ state, effects }`
+  wrapper as the cell state, so any `sync: true` app restarting with one or more
+  uncompacted ops folded op 1 into a wrapped root and op 2 threw — dev refused,
+  prod quarantined, on every boot, with unit tests green (bare-state reducers).
+  (2) The KV migration pass ran `onMigrate` over a sync cell's DEFAULTS (KV
+  never held its slice), reported "migrated", and the replay ran the hook again
+  on the real data. Both fixed; sync cells are skipped by the KV pass and the
+  boundary migration is reported once.
+- **`tests/sync-migration-e2e.test.ts`** — real `aio.run` ×6, a real WebSocket
+  client writing ops, SQLite read back directly: v1 → v2 (add, remove, rename a
+  field) asserts `onMigrate` ran once per boundary, the migrated shape carries
+  the op-derived values, every other cell's KV bytes are identical, compaction
+  writes the MIGRATED slice, `am migrations` lists it; v3 without a hook refuses
+  in dev and quarantines in prod (snapshot kept, compaction skipped, new ops
+  still land); a downgrade skips newer ops and says so. Named, line by line, in
+  `docs/persistence/crdt.md`. The downgrade case now gets its own remedy line
+  instead of "bump the version".
+- **`am pin`'s removed-API scan tokenizes.** A removed key inside a string,
+  template literal or comment no longer refuses a pin; the refusal quotes the
+  matched line; a hit under a test/fixture path warns and proceeds. One code
+  mask (`src/diagnostics/code-mask.ts`) serves `am pin` and `aiol`.
+- **A path pin is per-machine.** `am pin /abs/path` records `.aio/pin.local`
+  (git-ignored) and leaves the committed `aioVersion` alone; the one reader
+  prefers the local override and says so once; a legacy `path:` value in
+  `deno.json` is still read and warned about.
+- **`am instances` names each instance's aio version** (`aio=…`, `≠ am …` on a
+  mismatch) — a stale instance beside a fresh one is no longer a `readlink`
+  away.
+- **`am shot`** — a headless PNG of the live window over the DevTools protocol.
+  Opt-in: `aio --cdp[=port]` / `AIO_CDP=1` starts Electron with a loopback-only
+  debugging port, printed on the boot line and recorded in the lock, so "no TCP
+  port" stays literally true unless asked.
+  `am shot [n]
+  [--home=<dir>] [--out=f.png] [--full]`; refuses with the exact
+  flag when the port is not there. `--pose` is deliberately not a thing: the app
+  owns its camera.
+- **Untagged log lines from app code say `app`**, not `aio` — the tag is
+  inferred from the first non-logger frame outside the framework's own tree.
+- **Boot noise is the app's, and the doc says how to silence it**: the `bigint`
+  bindings line, `DEP0040 punycode` and the peer-dependency paragraph come from
+  app dependencies (measured: aio's own graph prints nothing);
+  `NODE_NO_WARNINGS` does not silence `DEP0040` on Deno 2.9 —
+  `process.noDeprecation = true` before the import does
+  (`docs/build/dev-mode.md`).
+- `aiol sync-method-reads-hidden-field` now catches expression-bodied arrow
+  selectors, the case the report actually hit. `_warnPinDrift` respects a local
+  path pin.
+
 ## v1.0.0-alpha67 — the same socket on every desktop (2026-08-25)
 
 - **Windows: the local transport is a named pipe hosted by Deno — a local
@@ -119,7 +174,8 @@ items below flip a default or change prod semantics — they are marked
   built (no CDP hook in the shell).
 - **Docs**: `docs/clients/transports.md` (the one matrix),
   `docs/state/cell-contexts.md` (which code runs where, which combinations are
-  refused), a `## Retire` section in every upgrade guide (gated).
+  refused), a `## Retire` section in every upgrade guide from alpha65 on
+  (gated).
 
 ### The one-liner keeps `am` current, and `am fix` installs Electron for real
 

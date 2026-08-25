@@ -436,6 +436,16 @@ async function spawnElectron(
   return proc;
 }
 
+/** The Chromium switch that opens the DevTools Protocol — or nothing.
+ *
+ *  Pure, and the ONLY place the switch is spelled: `--cdp` is opt-in, so an
+ *  app that did not ask must launch with an argv identical to before (a bound
+ *  debugging port is a port, and "zero ports" is a promise). Chromium binds
+ *  `--remote-debugging-port` to 127.0.0.1 only. */
+export function cdpSwitches(port: number | undefined): string[] {
+  return port ? [`--remote-debugging-port=${port}`] : [];
+}
+
 /** Spawns Electron with the main app script */
 export async function launchElectron(
   url: string,
@@ -468,6 +478,8 @@ export async function launchElectron(
   },
   /** The dist/ carrying the baked Electron version (compiled binaries). */
   distDir?: string,
+  /** `--cdp`: open the DevTools Protocol on this loopback port (`am shot`). */
+  cdpPort?: number,
 ): Promise<Deno.ChildProcess | null> {
   const bin = await findElectronBin(log, { distDir });
   if (!bin) return null;
@@ -479,14 +491,18 @@ export async function launchElectron(
     ? "packaged"
     : "$ELECTRON_PATH";
   const transport = uds ? "UDS" : "WS";
-  log.info(`launching Electron (${mode}, ${transport})`);
+  log.info(
+    `launching Electron (${mode}, ${transport}${
+      cdpPort ? `, cdp 127.0.0.1:${cdpPort}` : ""
+    })`,
+  );
   // Mechanical passthrough — `socketPath` is positional, everything else the
   // caller declared rides across untouched. Never re-list the keys here.
   const { socketPath: _sock, ...udsOpts } = uds ?? { socketPath: "" };
   const script = uds
     ? electronMainScriptUDS(url, uds.socketPath, { ...udsOpts, meta })
     : electronMainScript(url, meta);
-  return spawnElectron(bin, script);
+  return spawnElectron(bin, script, cdpSwitches(cdpPort));
 }
 
 /** Launches Electron with the client connect-page script (no server needed) */

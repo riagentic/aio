@@ -18,6 +18,7 @@ import {
   linkSatisfiesPin,
   pinDisagreementHint,
 } from "../src/server/framework-pin.ts";
+import { readFrameworkPinSync } from "../src/server/deno-json.ts";
 import { codeMatches, codeText } from "./scan.ts";
 
 // ══════════════════════════════════════════════════════════════════════
@@ -207,9 +208,13 @@ export const checkConfig: Checker = (ctx) => {
   // field report). aiol walks deno.json for every other fact it reports; the
   // pin is one more. `linkSatisfiesPin` is THE decider (shared with doctor,
   // `am pin`, `am fix`), so the verdicts cannot contradict each other.
-  const pin = typeof (dj as { aioVersion?: unknown }).aioVersion === "string"
-    ? (dj as { aioVersion: string }).aioVersion
-    : null;
+  // `readFrameworkPinSync` is THE reader: the per-machine `.aio/pin.local`
+  // override first, then `aioVersion` — so a local path pin is judged
+  // against the link it actually names, not the release it overrides.
+  let pin: string | null = null;
+  try {
+    pin = readFrameworkPinSync(ctx.projectDir).pin;
+  } catch { /* a dangling override — reported by am/doctor, not a lint */ }
   if (pin) {
     let linked: string | null = null;
     try {
@@ -3692,6 +3697,47 @@ function _members(
       param,
       start: braceAt,
       body: stripped.slice(braceAt, close + 1),
+    });
+  }
+  // EXPRESSION-BODIED arrows: `name: (s) => s.seed.length`, `name: s => …`,
+  // `name: async (s) => …`. The body runs to the depth-0 `,` (or the block's
+  // end). These used to be invisible to every rule that reads `_members`, so
+  // a selector written the short way read a hidden field unflagged while the
+  // same selector with braces was an error (a field report).
+  const arrow =
+    /[,{]\s*([$\w]+)\s*:\s*(async\s*)?(?:\(([^)]*)\)|([$\w]+))\s*=>(?!\s*\{)/g;
+  for (const m of body.matchAll(arrow)) {
+    let depth = 0;
+    for (let i = 0; i <= m.index!; i++) {
+      const ch = body[i]!;
+      if ("({[".includes(ch)) depth++;
+      else if (")}]".includes(ch)) depth--;
+    }
+    if (depth !== 1) continue;
+    const from = m.index! + m[0].length;
+    let d = 0, to = body.length;
+    for (let i = from; i < body.length; i++) {
+      const ch = body[i]!;
+      if ("({[".includes(ch)) d++;
+      else if (")}]".includes(ch)) {
+        if (d === 0) {
+          to = i;
+          break;
+        }
+        d--;
+      } else if (ch === "," && d === 0) {
+        to = i;
+        break;
+      }
+    }
+    const param = (m[3] ?? m[4] ?? "").split(",")[0]!.trim()
+      .replace(/[:=].*$/s, "").trim();
+    out.push({
+      name: m[1]!,
+      async: Boolean(m[2]),
+      param,
+      start: open + from,
+      body: body.slice(from, to),
     });
   }
   // deps-form selectors: `name: { deps: [...], fn(s, ...) {…} }`

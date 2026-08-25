@@ -200,3 +200,18 @@ injects the updated stylesheet without losing React state.
 
 If a CSS file and a TS/TSX file change in the same debounce window, a full
 `"reload"` is sent instead (since the JS needs reloading anyway).
+
+## Lines before aio's first line
+
+`bigint: Failed to load bindings, pure JS will be used`,
+`(node) [DEP0040]
+DeprecationWarning: The punycode module is deprecated` and
+Deno's npm warnings (ignored build scripts, peer dependencies) are printed by
+the APP's own npm dependencies as they load — `bigint-buffer` (pulled in by
+several chain SDKs), `tr46`/`whatwg-url` (via `node-fetch`), and Deno's resolver
+— before any aio code runs. aio does not silence them: they are your
+dependencies' messages, and a framework that hides a dependency's warning hides
+its next error too. To silence a deprecation in your own app, set
+`process.noDeprecation = true` in your entry before the import that triggers it
+(measured on Deno 2.9: the Node env `NODE_NO_WARNINGS` is NOT honoured); the
+bigint line goes away by dropping or replacing the dependency that prints it.

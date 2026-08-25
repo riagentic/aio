@@ -72,11 +72,26 @@ export function registerSyncReplayContext(
   _syncContexts.set(db, ctx);
 }
 
+/** The replay context a boot registered for `db` — the SAME `report` array
+ *  the trojan `migrations` route (and so `am migrations`) serves. Read-only
+ *  by contract; the e2e in tests/sync-migration-e2e.test.ts reads it because
+ *  the trojan is dev-only and quarantine is a prod outcome. @internal */
+export function getSyncReplayContext(db: DB): SyncReplayContext | undefined {
+  return _syncContexts.get(db);
+}
+
 /** The ONE dev/prod decider for the boot replay: the same signal composition
  *  uses for its security refusals — a source run without `--prod` is dev, a
  *  compiled binary or `--prod` is prod. */
 export function isDevBoot(): boolean {
   return !parseCli().prod && !isCompiled();
+}
+
+/** `{ state, effects }` (the composed reducer) → state; a bare state passes. */
+function unwrapReduced<S>(r: S | { state: S; effects?: unknown[] }): S {
+  return _isObj(r) && "state" in r && Array.isArray(r.effects)
+    ? (r as { state: S }).state
+    : r as S;
 }
 
 /** Fill fields the durable projection dropped from a snapshot with their
@@ -115,7 +130,16 @@ function withDefaults(
 export async function replaySyncOps<S>(
   db: DB,
   syncCellIds: string[],
-  reduce: (state: S, action: { type: string; payload?: unknown }) => S,
+  /** The composed reducer. The Elm-shaped `{ state, effects }` return (what
+   *  `aio.run`'s `config.reduce` actually produces) is unwrapped like the
+   *  journal replay does; a bare state is taken as-is (the unit tests). The
+   *  cast at the call site used to hide the wrapper: op 1 turned the ROOT
+   *  state into `{ state, effects }`, op 2 found no cell slice and threw —
+   *  every sync app with an uncompacted log booted quarantined (or refused). */
+  reduce: (
+    state: S,
+    action: { type: string; payload?: unknown },
+  ) => S | { state: S; effects?: unknown[] },
   state: S,
   log: Pick<Log, "info" | "error" | "warn">,
   /** Explicit context (tests); otherwise the one `bootStorage` registered for
@@ -231,6 +255,7 @@ export async function replaySyncOps<S>(
       try {
         (next as Record<string, unknown>)[cell] = hook(slice, from);
         log.info(`sync: migrated cell "${cell}" v${from} → v${declared}`);
+        ctx.report?.push({ cell, from, to: declared, outcome: "migrated" });
       } catch (e) {
         failures.push(`onMigrate(v${from}) threw: ${e}`);
       }
@@ -289,10 +314,10 @@ export async function replaySyncOps<S>(
           if (failures.length > 0) break;
         }
         try {
-          next = reduce(next, {
+          next = unwrapReduced(reduce(next, {
             type: `${op.cell}:${op.action}`,
             payload: op.payload,
-          });
+          }));
           applied++;
         } catch (e) {
           failures.push(`op ${op.id} (${op.cell}:${op.action}) threw: ${e}`);
@@ -322,10 +347,18 @@ export async function replaySyncOps<S>(
 
     // ── Quarantine — ONE decider for both modes ───────────────────────
     const failed = total - applied;
-    const fix = hook
-      ? `Fix "${cell}"'s onMigrate/methods so the op-log folds, then restart.`
-      : `Bump "${cell}"'s \`version\` and add an onMigrate(state, from) that ` +
-        `converts the older shape, then restart.`;
+    // Three different remedies for three different causes — a wrong fix line
+    // is worse than none (the reader trusts it and bumps a version that only
+    // needed the newer build back).
+    const fix =
+      skipped.newer > 0 && skipped.older === 0 && failures.length === 0
+        ? `This build declares "${cell}" version ${declared} but the ` +
+          `log holds ops from a NEWER shape — run the build that wrote them ` +
+          `(a downgrade never folds forward), or bump this build's version.`
+        : hook
+        ? `Fix "${cell}"'s onMigrate/methods so the op-log folds, then restart.`
+        : `Bump "${cell}"'s \`version\` and add an onMigrate(state, from) that ` +
+          `converts the older shape, then restart.`;
     const what =
       `${failed}/${total} op(s) could not be folded into "${cell}" ` +
       `(${skipped.older} older-shape skipped, ${skipped.newer} newer-shape ` +
@@ -1027,11 +1060,19 @@ export async function bootStorage<S>(
     stampedVersions = persistedVersions;
     const stateObj = state as Record<string, unknown>;
     let report: MigrationReport = [];
-    if (cfg.cellMigrations?.size) {
+    // A sync cell's shape ladder is the op-log replay's (`replaySyncOps`):
+    // KV never stored its slice, so the slice here is the declared DEFAULTS —
+    // running its onMigrate over those (and reporting "migrated") was a hook
+    // call on data that never existed, before the replay ran the hook again
+    // on the real data. One migration pass per cell, on its durable home.
+    const kvMigrations = new Map(
+      [...(cfg.cellMigrations ?? [])].filter(([c]) => !syncCellIds.includes(c)),
+    );
+    if (kvMigrations.size) {
       try {
         report = applyCellMigrations(
           stateObj,
-          cfg.cellMigrations,
+          kvMigrations,
           persistedVersions,
           log,
           persistedSnapshot,

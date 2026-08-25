@@ -10,7 +10,7 @@ import type { UDSHandle } from "./uds.ts";
 import type { TlsCert } from "./tls.ts";
 import type { AioUser } from "./aio.ts";
 import type { UiTheme } from "./aio-types.ts";
-import { VERSION } from "./aio-cli.ts";
+import { cdpPort, VERSION } from "./aio-cli.ts";
 import { type BootExtras, bootLines, buildFacts } from "./boot-facts.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { discoverySupported, startDiscoveryResponder } from "./discovery.ts";
@@ -317,6 +317,10 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
   if (server.trojanPort) {
     log.info(`${p("trojan")}http://localhost:${server.trojanPort}`);
   }
+  // Printed ONLY when asked for: a debugging port is a port, and the
+  // "no TCP port" line above must stay literally true by default.
+  const cdp = cdpPort();
+  if (cdp) log.info(`${p("cdp")}127.0.0.1:${cdp} (opt-in, loopback)`);
   log.info(`${p("id")}${appId}`);
   log.info(`${p("version")}${appVersion}`);
   log.info(`${p("aio")}${VERSION}`);
@@ -551,6 +555,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
           meta,
           udsConfig && { ...udsConfig, defaultIcon },
           distDir,
+          cdpPort(),
         )
       )
       .then((proc) => {
