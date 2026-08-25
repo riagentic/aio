@@ -2,6 +2,7 @@
 // Extracted from aio.ts _run() to keep the orchestrator lean.
 
 import { join } from "@std/path";
+import { isPipePath } from "./local-listen.ts";
 import { hasDesktopSession, openExternalBestEffort } from "./open-external.ts";
 import { type AioMeta, launchElectron } from "../electron/electron.ts";
 import type { ServerHandle } from "./server-types.ts";
@@ -274,7 +275,12 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
   else log.debug("run with --help to see available flags");
   const mode = prod ? "prod" : "dev";
   const shell = client;
-  const transportLabel = transport === "uds" ? ", uds" : "";
+  // The local socket's spelling: a Unix socket, or a named pipe on windows.
+  const localKind =
+    isPipePath(udsHandle?.socketPath ?? deps.httpSocketPath ?? "")
+      ? "pipe"
+      : "uds";
+  const transportLabel = transport === "uds" ? `, ${localKind}` : "";
 
   const p = (key: string) => `  ${key.padEnd(10)}`;
   if (expose && token) {
@@ -296,17 +302,10 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
   // codebase keeps deleting.
   const noPort = skipHttp || !!deps.httpSocketPath;
   if (noPort) {
-    log.info(`running (${mode}, ${shell}, uds — no TCP port)`);
+    log.info(`running (${mode}, ${shell}, ${localKind} — no TCP port)`);
     if (deps.httpSocketPath) log.info(`${p("http")}${deps.httpSocketPath}`);
   } else {
-    // A local electron app on Windows keeps a port for one reason, and the
-    // line says it: Deno has no Unix-socket listener there.
-    const windowsClause =
-      Deno.build.os === "windows" && useElectron && !expose &&
-        transport === "ws"
-        ? ", tcp — Windows has no Unix-socket listener"
-        : "";
-    log.info(`running (${mode}, ${shell}${transportLabel}${windowsClause})`);
+    log.info(`running (${mode}, ${shell}${transportLabel})`);
     const wsProto = useHttps ? "wss" : "ws";
     // `bindHost` is the transport's OWN resolved answer — re-deriving it here
     // (from the flag only) made the report contradict the bind for an app
@@ -314,7 +313,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     log.info(`${p("web")}${url}`);
     log.info(`${p("ws")}${wsProto}://${advertiseHost}:${port}/ws`);
   }
-  if (udsHandle) log.info(`${p("uds")}${udsHandle.socketPath}`);
+  if (udsHandle) log.info(`${p(localKind)}${udsHandle.socketPath}`);
   if (server.trojanPort) {
     log.info(`${p("trojan")}http://localhost:${server.trojanPort}`);
   }
@@ -332,7 +331,9 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     // "loopback" — it is not on the network stack at all, and its door is the
     // filesystem permission on a 0700 directory.
     bind: noPort
-      ? "unix socket only — no network interface"
+      ? `${
+        localKind === "pipe" ? "named pipe" : "unix socket"
+      } only — no network interface`
       : expose
       ? "0.0.0.0 — every interface"
       : "127.0.0.1 — loopback only",

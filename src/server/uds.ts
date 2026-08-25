@@ -36,6 +36,7 @@ import {
   protoHello,
 } from "../protocol/protocol-version.ts";
 import type { ServerSyncHandler } from "../sync/server-handler.ts";
+import { isPipePath, listenLocal, type LocalConn } from "./local-listen.ts";
 
 /** How long the server waits for a live client to answer a control request
  *  (`am surface N`, `am trigger N …`, `am client N`) — THE one decider for both
@@ -56,7 +57,7 @@ export function clientReplyTimeoutError(index: number): string {
 }
 
 export type UDSClient = {
-  conn: Deno.Conn;
+  conn: LocalConn;
   index: number;
   id: string;
   subscriptions: Set<string> | null;
@@ -108,13 +109,17 @@ export function createUDSListener(
    *  "refused" from "this build has no control plane". */
   control?: (req: Request) => Promise<Response>,
 ): UDSHandle {
-  try {
-    Deno.removeSync(socketPath);
-  } catch { /* doesn't exist */ }
+  // A stale socket FILE from a crashed instance is unlinked; a pipe is a
+  // kernel name that vanished with that process — nothing to remove.
+  if (!isPipePath(socketPath)) {
+    try {
+      Deno.removeSync(socketPath);
+    } catch { /* doesn't exist */ }
+  }
 
-  const listener = Deno.listen({ transport: "unix", path: socketPath });
-  const connSet = new Set<Deno.Conn>();
-  const clientMap = new Map<Deno.Conn, UDSClient>();
+  const listener = listenLocal(socketPath);
+  const connSet = new Set<LocalConn>();
+  const clientMap = new Map<LocalConn, UDSClient>();
   const counter = clientCounter ?? { value: 0 };
   let closed = false;
 
@@ -190,9 +195,9 @@ export function createUDSListener(
   });
 
   // AIO-216: per-connection write queue to prevent byte interleaving
-  const _writeQueues = new WeakMap<Deno.Conn, Promise<void>>();
+  const _writeQueues = new WeakMap<LocalConn, Promise<void>>();
 
-  function sendTo(conn: Deno.Conn, msg: string, onSent?: () => void): void {
+  function sendTo(conn: LocalConn, msg: string, onSent?: () => void): void {
     const encoded = new TextEncoder().encode(msg + "\n");
     const prev = _writeQueues.get(conn) ?? Promise.resolve();
     const next = prev.then(async () => {
@@ -361,9 +366,11 @@ export function createUDSListener(
       pendingState.clear();
       connSet.clear();
       clientMap.clear();
-      try {
-        Deno.removeSync(socketPath);
-      } catch { /* already removed */ }
+      if (!isPipePath(socketPath)) {
+        try {
+          Deno.removeSync(socketPath);
+        } catch { /* already removed */ }
+      }
     },
   };
 }
@@ -381,9 +388,9 @@ export function udsFrameCeiling(maxFrameBytes?: number): number {
 }
 
 function _handleUDSConn(
-  conn: Deno.Conn,
-  connections: Set<Deno.Conn>,
-  clientMap: Map<Deno.Conn, UDSClient>,
+  conn: LocalConn,
+  connections: Set<LocalConn>,
+  clientMap: Map<LocalConn, UDSClient>,
   pendingState: Map<
     string,
     { resolve: (v: unknown) => void; timer: ReturnType<typeof setTimeout> }
@@ -396,7 +403,7 @@ function _handleUDSConn(
    *  here: this handler used to carry its own copy of the subscription filter,
    *  which is the same fact decided twice. */
   fullJsonFor: (client: Pick<UDSClient, "subscriptions">) => string | undefined,
-  sendTo: (conn: Deno.Conn, msg: string, onSent?: () => void) => void,
+  sendTo: (conn: LocalConn, msg: string, onSent?: () => void) => void,
   syncHandler: ServerSyncHandler | null,
   tt?: {
     onCommand: (cmd: string, arg?: number) => void;
@@ -415,8 +422,8 @@ function _handleUDSConn(
   // Minimal structural WebSocket stand-in for the sync handler — it only
   // ever calls .send(). One stable object per conn so broadcast exclusion
   // (identity-based) stays consistent across calls.
-  const _sinks = new WeakMap<Deno.Conn, WebSocket>();
-  function _wireSink(conn: Deno.Conn): WebSocket {
+  const _sinks = new WeakMap<LocalConn, WebSocket>();
+  function _wireSink(conn: LocalConn): WebSocket {
     let sink = _sinks.get(conn);
     if (!sink) {
       sink = {
@@ -428,7 +435,7 @@ function _handleUDSConn(
     return sink;
   }
 
-  function _sendFilteredState(conn: Deno.Conn, client: UDSClient): void {
+  function _sendFilteredState(conn: LocalConn, client: UDSClient): void {
     const msg = fullJsonFor(client);
     if (msg === undefined) return; // already reported by the snapshot builder
     sendTo(conn, encRaw("state", msg), () => {

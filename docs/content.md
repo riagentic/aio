@@ -178,6 +178,7 @@
 - [Upgrading from alpha63 to alpha64](upgrade/from-alpha63-to-alpha64.md) — Nothing in your app code changes.
 - [Upgrading from alpha64 to alpha65](upgrade/from-alpha64-to-alpha65.md) — Nothing in your app code changes.
 - [Upgrading from alpha65 to alpha66](upgrade/from-alpha65-to-alpha66.md) — Four behaviours change; three can break an app.
+- [Upgrading from alpha66 to alpha67](upgrade/from-alpha66-to-alpha67.md) — Nothing in your app code changes.
 - [Upgrade from v1.0.0-alpha7 to v1.0.0-alpha8](upgrade/from-alpha7-to-alpha8.md) — None.
 - [Upgrade from v1.0.0-alpha8 to v1.0.0-alpha9](upgrade/from-alpha8-to-alpha9.md) — The internal machine state field is renamed.
 - [Upgrade from v1.0.0-alpha9 to v1.0.0-alpha10](upgrade/from-alpha9-to-alpha10.md) — Alpha10 is fully additive.

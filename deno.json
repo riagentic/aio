@@ -1,6 +1,6 @@
 {
   "name": "@riagentic/aio",
-  "version": "1.0.0-alpha66",
+  "version": "1.0.0-alpha67",
   "appId": "aio",
   "exports": {
     ".": "./mod.ts",
@@ -109,6 +109,7 @@
     "clean:tmp": "deno run -A scripts/check-orphans.ts --clean",
     "test:onboard": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home AIO_ONBOARD_E2E=1 deno test -A --no-check=remote tests/onboarding-e2e.test.ts tests/run-sh-e2e.test.ts",
     "test:build": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home AIO_BUILD_E2E=1 deno test -A --no-check=remote tests/build-e2e.test.ts",
+    "test:wine": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home AIO_WINE_E2E=1 deno test -A --no-check=remote tests/wine-pipe-e2e.test.ts",
     "lab": "deno run -A scripts/lab.ts",
     "lab:browser": "deno run -A scripts/lab.ts --browser",
     "lab:old-deno": "deno run -A scripts/lab.ts --old-deno --scenario=install",

@@ -59,3 +59,21 @@ ENV HOME=/home/aio \
     WINEDEBUG=-all
 WORKDIR /home/aio
 CMD ["/bin/bash"]
+
+# ── the named-pipe rig (alpha67) ──────────────────────────────────────────
+# `deno task test:wine` builds this image with WITH_WIN_TOOLS=1 and proves the
+# Windows local transport (src/server/win-pipe.ts) under Wine: the HOST is the
+# Windows Deno binary (same version as the host's `deno`, so the FFI surface is
+# the one that ships), and the CLIENT is a Windows Node LTS — libuv's named-pipe
+# client is the exact code path Electron main uses (`net.connect`,
+# `http.request({ socketPath })`). Zips are cached on the host under
+# ~/.cache/aio/tools/win and staged into docker/tools/win by the runner, never
+# downloaded at build time. Without the arg the lab build is unchanged.
+ARG WITH_WIN_TOOLS=0
+COPY --chown=aio:aio tools/ /home/aio/tools/
+RUN if [ "$WITH_WIN_TOOLS" = "1" ]; then set -e; \
+      mkdir -p /home/aio/win && cd /home/aio/win \
+      && unzip -oq /home/aio/tools/win/deno-*-x86_64-pc-windows-msvc.zip deno.exe \
+      && unzip -oqj /home/aio/tools/win/node-*-win-x64.zip '*/node.exe' \
+      && ls -la /home/aio/win; \
+    fi; rm -rf /home/aio/tools

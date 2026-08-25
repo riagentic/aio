@@ -62,9 +62,9 @@ The HTTP server always runs regardless of Electron — you can access the app at
 
 ## UDS transport
 
-By default (`transport: 'auto'`), Electron apps on Linux/macOS use Unix domain
-sockets instead of WebSocket/HTTP. This eliminates open TCP ports — more secure,
-slightly faster.
+By default (`transport: 'auto'`), local Electron apps use a local socket — a
+Unix domain socket on Linux/macOS, a named pipe on Windows — instead of
+WebSocket/HTTP. This eliminates open TCP ports — more secure, slightly faster.
 
 ```ts
 await aio.run({
@@ -92,8 +92,8 @@ Deno ↔ UDS/NDJSON ↔ Electron main (net.connect) ↔ IPC ↔ renderer (window
 
 ### Zero TCP ports — and the app's own routes
 
-A local Electron app on Linux/macOS binds **no TCP port at all** — by default,
-in dev and in prod (prod needs `dist/` readable next to the binary, the
+A local Electron app binds **no TCP port at all** — by default, on every OS, in
+dev and in prod (prod needs `dist/` readable next to the binary, the
 AppImage/AppDir layout). The window loads its page from the `aio://` scheme, and
 the boot line says `running (…, uds — no TCP port)` — printed only when it is
 literally true. A port is a cost (reachable by every process and tab on the
@@ -128,13 +128,13 @@ app.
 
 Where a route is served, by mode:
 
-| Mode                          | Page                      | Custom `routes` / `/__aio/*` | TCP port |
-| ----------------------------- | ------------------------- | ---------------------------- | -------- |
-| prod, electron, dist/ on disk | `aio://` off disk         | `aio://app/<path>` → UDS     | none     |
-| prod, electron, no dist/      | `http://127.0.0.1:<port>` | same origin, TCP             | one      |
-| dev, electron (default)       | `aio://` → UDS            | `aio://app/<path>` → UDS     | none     |
-| dev or prod, `--port=N`       | `http://127.0.0.1:N`      | same origin, TCP             | one      |
-| any, Windows                  | `http://127.0.0.1:<port>` | same origin, TCP             | one      |
+| Mode                          | Page                                  | Custom `routes` / `/__aio/*` | TCP port |
+| ----------------------------- | ------------------------------------- | ---------------------------- | -------- |
+| prod, electron, dist/ on disk | `aio://` off disk                     | `aio://app/<path>` → UDS     | none     |
+| prod, electron, no dist/      | `http://127.0.0.1:<port>`             | same origin, TCP             | one      |
+| dev, electron (default)       | `aio://` → UDS                        | `aio://app/<path>` → UDS     | none     |
+| dev or prod, `--port=N`       | `http://127.0.0.1:N`                  | same origin, TCP             | one      |
+| any, Windows                  | as above — the socket is a named pipe | `aio://app/<path>` → pipe    | none     |
 
 A `serverFn` is not a substitute for a route here: it returns a value over the
 message bridge, while an `<img>` needs a URL the renderer's network stack can
@@ -142,11 +142,12 @@ resolve. Use `routes` for bytes, `serverFn` for values.
 
 The full transport matrix — dev/prod × electron/browser/server-only ×
 Linux-macOS/Windows, what listens where, what a named port changes — lives in
-one place: [transports.md](transports.md). Short form: **Windows is the
-exception** — Deno has no Unix-socket listener there, so the UDS transport (and
-the zero-port page) is not available: the app runs on WS + TCP, loopback-bound,
-and the boot line says so. A Unix-socket or named-pipe listener in Deno would
-close it ([transports.md → Windows](transports.md#windows-the-exception)).
+one place: [transports.md](transports.md). Short form: **Windows runs the same
+rows** — the local socket there is a named pipe (`\\.\pipe\aio-<lockKey>`)
+hosted by Deno, which Electron's `net.connect` / `http.request({ socketPath })`
+open natively, so a local Windows app binds no TCP port either
+([transports.md → Windows](transports.md#windows-a-named-pipe-the-same-protocol);
+proven under Wine in CI, one pass on real Windows pending).
 
 On an `aio://` page the IPC bridge is the **only** transport. The renderer never
 falls back to `ws://app/ws` (a socket that cannot exist): if the bridge is
@@ -158,7 +159,6 @@ such a page as well; the bridge already delivers `reload`/`css`/`boot`.
 
 **When UDS is not used:**
 
-- Windows (no UDS support) — always falls back to WS
 - `--expose` mode — needs real HTTP for remote access
 - Browser mode — no Electron IPC bridge available
 - `--server-url=X` thin client — connects to a remote server over HTTP/WS

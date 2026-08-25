@@ -1,6 +1,7 @@
 /**
  * @module
- * The control plane over the Unix socket — `am`'s fourth-transport client.
+ * The control plane over the local socket (a Unix socket; a named pipe on
+ * windows) — `am`'s fourth-transport client.
  *
  * An app whose transport is UDS answers the control plane on its socket, not
  * on a TCP port (`uds.ts`, `case "ctl"`). This is the client half: one request,
@@ -23,6 +24,7 @@ import { dec, enc } from "../protocol/envelope.ts";
 import type { CtlrPayload } from "../protocol/envelope.ts";
 import { protoHello } from "../protocol/protocol-version.ts";
 import { VERSION } from "../server/aio-cli.ts";
+import { connectLocal, type LocalConn } from "../server/local-listen.ts";
 
 /** One control exchange's outcome. A transport failure is `error`; anything
  *  the app actually answered — including a 404 or a 401 — is a `status` plus a
@@ -38,17 +40,17 @@ export type UdsReply =
  *  so a control client MUST be a line reader, not a read-once caller — reading
  *  a single chunk got the greeting and declared the app broken. */
 async function readUntil(
-  conn: Deno.Conn,
+  conn: LocalConn,
   onLine: (line: string) => boolean,
   deadline: number,
 ): Promise<void> {
   const decoder = new TextDecoder();
-  const buf = new Uint8Array(64 * 1024);
+  const reader = conn.readable.getReader();
   let pending = "";
   while (Date.now() < deadline) {
-    const n = await conn.read(buf);
-    if (n === null) return; // peer closed
-    pending += decoder.decode(buf.subarray(0, n), { stream: true });
+    const { value, done } = await reader.read();
+    if (done) return; // peer closed
+    pending += decoder.decode(value, { stream: true });
     let nl: number;
     while ((nl = pending.indexOf("\n")) !== -1) {
       const line = pending.slice(0, nl);
@@ -74,9 +76,9 @@ export async function udsRequest(
   },
   timeout: number,
 ): Promise<UdsReply> {
-  let conn: Deno.Conn;
+  let conn: LocalConn;
   try {
-    conn = await Deno.connect({ transport: "unix", path: socketPath });
+    conn = await connectLocal(socketPath);
   } catch (e) {
     return {
       error: e instanceof Deno.errors.NotFound
@@ -89,7 +91,8 @@ export async function udsRequest(
     const deadline = Date.now() + timeout;
     // Hello first, like every other peer: a version-skewed `am` is told
     // `__proto-err:<reason>` instead of being left to misread the silence.
-    await conn.write(
+    const writer = conn.writable.getWriter();
+    await writer.write(
       new TextEncoder().encode(
         // Announce first: this peer is a control client, not a window. The
         // server drops it from the roster on this frame, so a control call
@@ -105,6 +108,7 @@ export async function udsRequest(
           }) + "\n",
       ),
     );
+    writer.releaseLock();
 
     let reply: UdsReply | null = null;
     await readUntil(conn, (line) => {

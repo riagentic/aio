@@ -1,5 +1,28 @@
 # Changelog
 
+## v1.0.0-alpha67 — the same socket on every desktop (2026-08-25)
+
+- **Windows: the local transport is a named pipe hosted by Deno — a local
+  Electron app binds no TCP port on Windows either.** `resolveTransport()` picks
+  the local socket for electron-without-`--expose` on Windows too; the socket is
+  `\\.\pipe\aio-<lockKey>` (and `…-http` for the page/route handler), created
+  through `kernel32` with overlapped I/O (`src/server/win-pipe.ts`), an explicit
+  owner-only DACL, and `FILE_FLAG_FIRST_PIPE_INSTANCE` so a second instance
+  fails at the bind. The page/route handler runs over the pipe through a minimal
+  streaming HTTP/1.1 server (`src/server/http-over-conn.ts`, unit-tested on
+  Linux over a Unix socket). Electron and `am` connect natively (libuv); nothing
+  above the new `local-listen.ts` seam changed. Boot says
+  `running (dev, electron, pipe — no TCP port)`. Proven under Wine in CI; one
+  pass on real Windows still pending. `--transport=ws` still forces WS.
+- **The Wine gate.** `deno task test:wine` builds the Windows-tools image (Wine
+  staging + the Windows Deno + a Windows Node) and runs the Windows Deno binary
+  as the pipe host against a libuv client (Electron main's exact code path) and
+  a Deno client (`am`'s path): 1000 NDJSON lines incl. a 1 MB line in order, a
+  20 MB route body streamed with headers intact, a 5 MB POST echo, 8 concurrent
+  clients with no `PIPE_BUSY`, an unhosted pipe failing fast. It found the one
+  bug Linux could not: a bitmask OR'd into a negative int32 that Deno FFI
+  refuses as `u32` — every mask now goes through one `u32()` helper.
+
 ## v1.0.0-alpha66 — no port you did not ask for (2026-08-25)
 
 ### The field-report sweep — zero ports by default, a sync replay that refuses or quarantines, and phantoms that throw

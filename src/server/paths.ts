@@ -4,6 +4,9 @@
 import { dirname, fromFileUrl, join, resolve } from "@std/path";
 import { heldLockKey, lockDir } from "./single-instance-lock.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { isPipePath, PIPE_PREFIX } from "./local-listen.ts";
+
+export { isPipePath };
 
 /** True when running inside a compiled binary (AppImage, deno compile) */
 export function isCompiled(): boolean {
@@ -121,17 +124,23 @@ export function resolveKvPath(appId: string): string | undefined {
   return join(resolveDataDirLegacy(appId), "data.kv");
 }
 
-/** Resolves transport: UDS on linux/mac with electron, WS otherwise */
+/** Resolves transport: the LOCAL socket for a local electron app, WS
+ *  otherwise. The name `"uds"` means "local socket" — a Unix domain socket on
+ *  linux/mac, a named pipe on windows (`\\.\pipe\aio-<lockKey>`, hosted by
+ *  Deno, see `win-pipe.ts`); every layer above the socket is the same.
+ *  `--transport=ws` still forces WS on every OS. `os` is a parameter so the
+ *  decision is a table, not a belief about the machine the tests run on. */
 export function resolveTransport(
   transport: "uds" | "ws" | "auto" | undefined,
   useElectron: boolean,
   expose: boolean,
+  os: typeof Deno.build.os = Deno.build.os,
 ): "uds" | "ws" {
   if (transport === "ws") return "ws";
   if (transport === "uds") return "uds";
   if (
     useElectron && !expose &&
-    (Deno.build.os === "linux" || Deno.build.os === "darwin")
+    (os === "linux" || os === "darwin" || os === "windows")
   ) return "uds";
   return "ws";
 }
@@ -139,6 +148,9 @@ export function resolveTransport(
 /** Resolves a UDS socket path — `<lockDir>/{appId}.sock`, beside the lock
  *  files and inside the same 0700 directory (which is what makes a socket a
  *  stricter door than a loopback port: only the owning user can open it).
+ *  On windows: the named pipe `\\.\pipe\aio-<lockKey>` (and `…-http`) — a
+ *  kernel namespace, not the filesystem, so `isPipePath()` gates every
+ *  remove/stat/chmod a socket file would get.
  *
  *  `kind` names a SECOND socket for the same app. An app running with no TCP
  *  port has two listeners — the NDJSON state/IPC transport on the bare path,
@@ -147,7 +159,17 @@ export function resolveTransport(
  *  Naming them here keeps both spellings in one place; deriving the second one
  *  at its use site is how the client and the server end up looking for
  *  different files. */
-export function resolveSocketPath(appId: string, kind?: "http"): string {
+export function resolveSocketPath(
+  appId: string,
+  kind?: "http",
+  os: typeof Deno.build.os = Deno.build.os,
+): string {
+  if (os === "windows") {
+    // A pipe NAME, not a file: no directory, no length limit, no unlink. The
+    // lock key keeps the per-home identity exactly as the unix path does, so
+    // `am --home` reaches the instance whose lock it read.
+    return `${PIPE_PREFIX}aio-${heldLockKey(appId)}${kind ? `-${kind}` : ""}`;
+  }
   const dir = lockDir();
   const suffix = kind ? `.${kind}.sock` : ".sock";
   // Named by the LOCK this process holds for the app (`<appId>@<hash8(home)>`
