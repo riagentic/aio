@@ -118,7 +118,7 @@ Deno.test("cmdFix --migrate-tasks: converts an old scaffold, keeps the customize
     );
     // The kept dev:client task makes the app electron-adjacent; satisfy the
     // "electron runtime installed" check so the test never hits the network.
-    await Deno.mkdir(join(dir, "node_modules", "electron"), {
+    await Deno.mkdir(join(dir, "node_modules", "electron", "dist"), {
       recursive: true,
     });
     Deno.chdir(dir);
@@ -355,7 +355,7 @@ Deno.test("cmdFix --migrate-tasks: derives build.targets from the tasks it delet
     );
     // Electron ships with this app — satisfy the runtime check so the test
     // never reaches for the network.
-    await Deno.mkdir(join(dir, "node_modules", "electron"), {
+    await Deno.mkdir(join(dir, "node_modules", "electron", "dist"), {
       recursive: true,
     });
     Deno.chdir(dir);
@@ -407,7 +407,7 @@ Deno.test("cmdFix --migrate-tasks: an electron-only app migrates to an electron-
         tasks: { "compile:electron": legacy["compile:electron"] },
       }),
     );
-    await Deno.mkdir(join(dir, "node_modules", "electron"), {
+    await Deno.mkdir(join(dir, "node_modules", "electron", "dist"), {
       recursive: true,
     });
     Deno.chdir(dir);
@@ -447,7 +447,7 @@ Deno.test("cmdFix --migrate-tasks: an existing build.targets is authoritative �
         tasks: { "compile:electron": legacy["compile:electron"] },
       }),
     );
-    await Deno.mkdir(join(dir, "node_modules", "electron"), {
+    await Deno.mkdir(join(dir, "node_modules", "electron", "dist"), {
       recursive: true,
     });
     Deno.chdir(dir);
@@ -492,7 +492,7 @@ Deno.test("cmdFix --migrate-tasks: install:electron is dropped when the fleet ha
       }),
     );
     // Satisfy the runtime check (imports name electron) — never the network.
-    await Deno.mkdir(join(dir, "node_modules", "electron"), {
+    await Deno.mkdir(join(dir, "node_modules", "electron", "dist"), {
       recursive: true,
     });
     Deno.chdir(dir);

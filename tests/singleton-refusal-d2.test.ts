@@ -39,7 +39,7 @@ Deno.test({
     };
     try {
       await assertRejects(
-        () => acquireSingletonLock(appId, port, true, false),
+        () => acquireSingletonLock(appId, undefined, port, true, false),
         Error,
         "Already running",
       );

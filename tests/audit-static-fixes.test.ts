@@ -1,4 +1,4 @@
-// Findings from the ds4 static audit, each pinned where it was fixed.
+// Findings from the static audit, each pinned where it was fixed.
 //
 // The audit's own framing — "severity is my judgment of reachability × impact,
 // not a claim that each is a confirmed bug" — is the right one: this project

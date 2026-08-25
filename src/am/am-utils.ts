@@ -9,13 +9,14 @@ import { envPort, resolveEntryPath } from "../server/paths.ts";
 import {
   instances,
   type LockData,
+  lockKey,
   readLock,
   removeLock,
   resolveAppId,
   writeLock,
 } from "../server/single-instance-lock.ts";
 import { join } from "@std/path";
-import { appDirs } from "../server/app-dirs.ts";
+import { appDirs, registerAppDirs } from "../server/app-dirs.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, fail, out, outError } from "./am-output.ts";
 import { trojanGet, trojanPost } from "./am-http.ts";
@@ -147,7 +148,7 @@ export function resolveAmAppId(flag?: string): string {
  *  `am start` and `deno task dev` gave the SAME app two different ports, and
  *  `am` never told the child about its 8000 anyway. What the user saw:
  *  `deno task dev` on :49208, then `am start` refusing with `port 8000 in use
- *  by aio app "Rimote Server"` — a refusal about a port the app was never
+ *  by aio app "Remote Server"` — a refusal about a port the app was never
  *  going to bind, naming an unrelated app. One fact, one spelling: when
  *  nothing is declared, the RUNTIME decides and says so, and `am` reads the
  *  port back from the lock the app writes.
@@ -217,10 +218,28 @@ export function resolveEntry(flagEntry?: string): string | null {
 
 // ── Lock file helpers (pid compat layer) ────────────────────
 
-/** Read lock data for current app — replaces old readPid() */
+/** `am --home=<dir>`: ONE decider, the app-dirs registry. Registering the home
+ *  makes every `appDirs(id)` reader in this process — the lock key below, the
+ *  control key, launch info, logs — follow that instance, exactly as the app's
+ *  own process does after `aio.run()` resolved `appDir`. Nothing else in `am`
+ *  needs to know the flag exists. */
+export function targetHome(appId: string, home: string): void {
+  registerAppDirs(appId, appDirs(appId, home));
+}
+
+/** The lock key `am` targets for `appId`: the plain id for the default home,
+ *  `<id>@<hash8(home)>` after {@linkcode targetHome}. */
+export function amLockKey(appId: string): string {
+  return lockKey(appId, appDirs(appId).home);
+}
+
+/** Read lock data for current app — replaces old readPid().
+ *  Keyed by appId AND home (`lockKey`), so a `--home` call reads the lock of
+ *  THAT instance and — because the socket path is in the lock — reaches that
+ *  instance's control socket. */
 export function readPid(appId?: string): LockData | null {
   const id = appId ?? resolveAmAppId();
-  const lock = readLock(id);
+  const lock = readLock(amLockKey(id));
   if (!lock) return null;
   // Backward compat: old lock files without status
   if (!lock.status) lock.status = "started";
@@ -234,7 +253,7 @@ export function writePid(pf: LockData): void {
 
 /** Remove lock — replaces old removePid() */
 export function removePid(appId?: string): void {
-  removeLock(appId ?? resolveAmAppId());
+  removeLock(amLockKey(appId ?? resolveAmAppId()));
 }
 
 /** Names already reported by {@linkcode resolvePort}, so one `am` invocation
@@ -419,6 +438,8 @@ export function parseGlobalFlags(
     "--transport",
     "--app",
     "--client-index",
+    "--home",
+    "--timeout",
   ]);
   const expanded: string[] = [];
   for (let i = 0; i < raw.length; i++) {
@@ -461,7 +482,10 @@ export function parseGlobalFlags(
     else if (a.startsWith("--entry=")) flags.entry = a.slice(8);
     else if (a.startsWith("--transport=")) flags.transport = a.slice(12);
     else if (a.startsWith("--app=")) flags.app = a.slice(6);
-    else if (a.startsWith("--client-index=")) {
+    else if (a.startsWith("--home=")) flags.home = a.slice(7);
+    else if (a.startsWith("--timeout=")) {
+      flags.timeout = num(a.slice(10), "--timeout");
+    } else if (a.startsWith("--client-index=")) {
       flags.client = num(a.slice(15), "--client-index");
     } else if (a === "--client-index") flags.client = 0;
     else if (a.startsWith("-i") && a.length > 2) {

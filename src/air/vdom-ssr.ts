@@ -182,7 +182,7 @@ export function renderToString(
       // client: `renderToString(null)` returns "", which would ship markup one
       // node short of what the client builds — so hydration adopts the wrong
       // node and a null-first component MOVES on its first re-render
-      // (rimote R-10). The placeholder makes the two agree.
+      // (R-10). The placeholder makes the two agree.
       return rendered == null ? "<!---->" : renderToString(rendered);
     }
 

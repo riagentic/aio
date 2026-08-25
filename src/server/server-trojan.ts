@@ -17,6 +17,7 @@
 // was not: with the login flows on, the anonymous fall-through reached
 // serveStatic — and this file — with no credential at all.
 // CSRF-protected (X-AIO header on POST), rate-limited.
+import { serializeReturn } from "../protocol/return-value.ts";
 import { enc } from "../protocol/envelope.ts";
 import type { AioUser } from "./aio.ts";
 import {
@@ -574,15 +575,16 @@ async function handlePost(
       if (asServer && !deps.dispatchAsServer) {
         return err("as=server is not available on this server", 400);
       }
+      let returned: unknown;
       try {
         if (asServer) {
           deps.debug?.(
             `trojan: dispatching "${action.type}" AS SERVER (access gate ` +
               `bypassed — dev-only, loopback-only)`,
           );
-          await deps.dispatchAsServer!(action);
+          returned = await deps.dispatchAsServer!(action);
         } else {
-          await deps.dispatch(action, undefined);
+          returned = await deps.dispatch(action, undefined);
         }
       } catch (e) {
         return err(
@@ -591,7 +593,17 @@ async function handlePost(
           }`,
         );
       }
-      return json({ ok: true });
+      // The method's return value rides back exactly as it does over the WS
+      // ack (`serializeReturn`: JSON round-trip, lossy conversions warned).
+      // `{ok:true}` alone told a caller the method RAN and nothing about what
+      // it said — `am dispatch` printed "dispatched" for a method that
+      // returned an error object (a field report, §6).
+      const ret = serializeReturn(returned, action.type);
+      return json({
+        ok: true,
+        ...(ret.value !== undefined ? { result: ret.value } : {}),
+        ...(ret.dropped ? { resultDropped: true } : {}),
+      });
     } catch {
       return err("invalid JSON");
     }

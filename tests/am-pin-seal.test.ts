@@ -382,3 +382,66 @@ Deno.test("pin hint: a path pin never disagrees with the link it names", () => {
     "and THE decider agrees, which is the point of sharing it",
   );
 });
+
+// A link that WORKS is not a link that is RIGHT. The pin said `main` (an
+// author edited aioVersion, or ran `am pin`), dep/aio still pointed at the
+// previous tag — and `am fix` reported "dep/aio framework link: ok", then the
+// one-liner built a desktop app against a framework the app had just stopped
+// pinning. One fact (which framework) decided in two places, with the wrong
+// one winning silently. The pin is the fact; the link follows it.
+Deno.test("am fix relinks dep/aio when the pin and the link disagree", async () => {
+  const s = await sandbox();
+  try {
+    const want = await latestTag(s.install);
+    assert(want, "the clone has release tags");
+    await Deno.writeTextFile(
+      join(s.app, "deno.json"),
+      JSON.stringify(
+        {
+          name: "sealdemo",
+          aioVersion: want,
+          imports: { aio: "./dep/aio/mod.ts" },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    // A perfectly usable aio — just not the pinned one.
+    await Deno.mkdir(join(s.app, "dep"), { recursive: true });
+    await Deno.symlink(s.install, join(s.app, "dep", "aio"));
+    const linkOf = (r: FixResult) =>
+      r.results.find((x) => x.name === "dep/aio framework link");
+
+    const dry = await amFix(s, "--dry-run");
+    assertEquals(linkOf(dry)?.outcome, "would-fix", linkOf(dry)?.note);
+    assertStringIncludes(linkOf(dry)!.note, "was");
+    assertStringIncludes(
+      await Deno.readLink(join(s.app, "dep", "aio")),
+      s.install,
+      "--dry-run touched the link",
+    );
+
+    const r = await amFix(s);
+    assertEquals(linkOf(r)?.outcome, "fixed", linkOf(r)?.note);
+    assertStringIncludes(linkOf(r)!.note, s.install); // says what it was
+    const link = await Deno.readLink(join(s.app, "dep", "aio"));
+    assertStringIncludes(link, join(s.versions, want));
+    // The decider reads the versions dir from the env — this process must see
+    // the sandbox's, exactly as the child `am fix` did.
+    Deno.env.set("AIO_VERSIONS_DIR", s.versions);
+    try {
+      assert(
+        linkSatisfiesPin(want, link),
+        "the pin decider agrees with the link am fix wrote",
+      );
+    } finally {
+      Deno.env.delete("AIO_VERSIONS_DIR");
+    }
+
+    // Idempotent: the second run has nothing to say.
+    const again = await amFix(s);
+    assertEquals(linkOf(again)?.outcome, "ok", linkOf(again)?.note);
+  } finally {
+    await s.cleanup();
+  }
+});

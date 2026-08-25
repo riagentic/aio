@@ -497,7 +497,7 @@ export async function buildContext(
   // `src/app.ts` convention: `entry` in deno.json, then every
   // `build.targets[].entry` (one repo, three apps — a relay and two desktop
   // clients — is a shape the docs recommend, and the linter warned "no entry
-  // point found" on every lint of it; rimote R-8).
+  // point found" on every lint of it; R-8).
   const declaredEntries = declaredEntryPaths(denoJson);
   const appEntry =
     sourceFiles.find((f) => declaredEntries.includes(f.relative)) ??

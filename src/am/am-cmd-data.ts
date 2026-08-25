@@ -21,20 +21,16 @@
 import { basename, isAbsolute, join, relative, resolve } from "@std/path";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
-import { resolveAmAppId } from "./am-utils.ts";
+import { readPid, resolveAmAppId } from "./am-utils.ts";
 import { type AppDirs, appDirs, ensureAppDirs } from "../server/app-dirs.ts";
 import type { AppMeta } from "../server/app-dirs.ts";
-import {
-  isProcessAlive,
-  lockDir,
-  readLock,
-} from "../server/single-instance-lock.ts";
+import { isProcessAlive, lockDir } from "../server/single-instance-lock.ts";
 
 // ── Shared helpers ─────────────────────────────────────────
 
 /** The running pid, or null when the app isn't up. */
 function livePid(appId: string): number | null {
-  const lock = readLock(appId);
+  const lock = readPid(appId); // honours --home
   return lock && isProcessAlive(lock.pid) ? lock.pid : null;
 }
 

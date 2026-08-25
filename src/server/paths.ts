@@ -2,7 +2,7 @@
 // Pure functions for resolving KV, SQLite, UDS, and data directory paths.
 
 import { dirname, fromFileUrl, join, resolve } from "@std/path";
-import { lockDir } from "./single-instance-lock.ts";
+import { heldLockKey, lockDir } from "./single-instance-lock.ts";
 import { log } from "../diagnostics/logger-api.ts";
 
 /** True when running inside a compiled binary (AppImage, deno compile) */
@@ -39,7 +39,7 @@ export function distCandidates(opts: {
     // embedded copy, and the binary silently served the "Headless build — no
     // browser UI" page: the compile succeeded, dev was fine, and the failure
     // arrived as a 503 the first time anyone opened the shipped artifact
-    // (rimote R-5).
+    // (R-5).
     //
     // The first two entries keep their historic order (parent, then the entry
     // dir) so nothing that worked changes; higher ancestors follow. The walk
@@ -150,7 +150,11 @@ export function resolveTransport(
 export function resolveSocketPath(appId: string, kind?: "http"): string {
   const dir = lockDir();
   const suffix = kind ? `.${kind}.sock` : ".sock";
-  const sockPath = join(dir, `${appId}${suffix}`);
+  // Named by the LOCK this process holds for the app (`<appId>@<hash8(home)>`
+  // for a non-default home), so a second instance of one appId from another
+  // home does not unlink and take the first one's socket — and `am --home`
+  // reaches the instance whose lock it read.
+  const sockPath = join(dir, `${heldLockKey(appId)}${suffix}`);
   if (sockPath.length > 100) {
     log.warn(
       `UDS path is ${sockPath.length} chars (limit ~108) — using /tmp/aio fallback`,

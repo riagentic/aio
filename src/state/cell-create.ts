@@ -56,6 +56,31 @@ function nearestKey(bad: string): string | null {
 
 // ── cell() ──────────────────────────────────────────────────────
 
+/** The ONE wording for "a persist filter on a sync cell" — thrown by `cell()`
+ *  for the cell's own `persist`, and by composition for a `cellDefaults`
+ *  filter that would land on a sync cell. */
+export function persistFilterOnSyncCellMessage(
+  name: string,
+  persist: unknown,
+  via?: string,
+): string {
+  const p = persist as "none" | { include?: string[]; exclude?: string[] };
+  const fields = p === "none"
+    ? 'every field (`persist: "none"`)'
+    : p.exclude
+    ? `exclude: ${p.exclude.join(", ")}`
+    : `include: ${(p.include ?? []).join(", ")}`;
+  return `[cell:${name}] sync: true + a persist filter (${fields}${
+    via ? `, from ${via}` : ""
+  }) is refused. ` +
+    `The op-log is the durable home of a sync cell and every op is a method ` +
+    `call's payload written raw, so a persist filter cannot apply to it — ` +
+    `the field would be on disk anyway. Pick one:\n` +
+    `  • remove the persist filter from "${name}" (persist: "all"), or\n` +
+    `  • turn sync off for "${name}" (server-authoritative, filter honoured), or\n` +
+    `  • keep the transient data in a separate non-sync cell.`;
+}
+
 /** Define a cell — state + methods (+ selectors, sync, cancelOn, listensTo).
  *  ONE style: methods mutate a draft; async methods batch writes and carry a
  *  cancellation signal (`s.$signal`). See docs/state/cells.md. */
@@ -151,6 +176,19 @@ export function cell(name: string, config: any): any {
         `A key aio does not read does nothing — silently, until you notice ` +
         `the behaviour you configured never happened.`,
     );
+  }
+
+  // field report §3.1: `sync` + a `persist` filter is REFUSED at definition.
+  // A sync cell's durable home is the op-log, and an op is the method call's
+  // payload — raw. No filter can apply to it: an excluded field's every value
+  // that passed through a method payload is on disk regardless, and `"none"`
+  // would restore an empty cell. The filter used to be honoured on the
+  // compaction snapshot only and warned about — a promise kept in one of two
+  // write paths is a promise the framework cannot keep, so the combination is
+  // now impossible. `cellDefaults.persist` reaching a sync cell is refused
+  // at compose time by the same rule (aio-composition `refuseFilteredSyncCells`).
+  if (config.sync && config.persist !== undefined && config.persist !== "all") {
+    throw new Error(persistFilterOnSyncCellMessage(name, config.persist));
   }
 
   // AIO-5.1: client-scoped cells — browser-local state, sync methods only.

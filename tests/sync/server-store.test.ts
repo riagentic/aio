@@ -110,6 +110,9 @@ describe("persistOp + loadOpsSince", () => {
         payload,
         hlc: [1000, 2, "client-a"],
         confirmed: true,
+        // The cell shape version the op was written under (field report §3.1) —
+        // the default a cell declares when the caller passes none.
+        version: 0,
       });
       assert(
         typeof serverTs === "number" && serverTs > 0,

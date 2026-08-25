@@ -25,6 +25,7 @@ import {
 import { filterStateBySubs, parseSubs } from "../protocol/broadcast-utils.ts";
 import { serializeReturn } from "../protocol/return-value.ts";
 import { writeClientLog } from "./client-log.ts";
+import { CLIENT_REPLY_TIMEOUT_MS, clientReplyTimeoutError } from "./uds.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { parseTTCommand } from "../diagnostics/time-travel.ts";
 import { rawStateControlAllowed } from "./server-auth.ts";
@@ -1285,8 +1286,8 @@ export function createWsManager(deps: WsDeps): WsManager {
     const statePromise = new Promise<unknown>((resolve) => {
       const timer = setTimeout(() => {
         pendingClientState.delete(pendingKey);
-        resolve({ error: "client did not respond within 5s" });
-      }, 5000);
+        resolve({ error: clientReplyTimeoutError(idx) });
+      }, CLIENT_REPLY_TIMEOUT_MS);
       if (pendingClientState.size >= PENDING_STATE_MAX) {
         const oldest = pendingClientState.keys().next().value!;
         const entry = pendingClientState.get(oldest)!;

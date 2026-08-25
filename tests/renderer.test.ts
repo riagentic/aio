@@ -286,7 +286,7 @@ Deno.test({
     // comment placeholder — the same `_Null` slot a null CHILD has used since
     // AIO-107, and the same thing SSR emits. Without it the component had no
     // `_dom` anchor, so when it later returned an element the reconciler
-    // APPENDED it (rimote R-10). What this test means is "no ELEMENT", and
+    // APPENDED it (R-10). What this test means is "no ELEMENT", and
     // that is what it now says.
     assertEquals(root.innerHTML, "<section><!----></section>");
     assertEquals(root.querySelector("div"), null, "no element while null");
@@ -426,7 +426,7 @@ Deno.test({
     assertEquals(root.innerHTML, "<div><b>on</b></div>");
     // VNode → null: the element goes, the POSITION stays as a placeholder —
     // which is what lets the element come back where it was written and not
-    // at the end of its parent (rimote R-10).
+    // at the end of its parent (R-10).
     show.set(false);
     handle._flush();
     assertEquals(root.innerHTML, "<div><!----></div>");

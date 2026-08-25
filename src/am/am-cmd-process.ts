@@ -796,7 +796,7 @@ export function projectRoot(from = Deno.cwd()): string {
 }
 
 /** Is `path` inside `root` (or root itself)? Compared as path SEGMENTS, so
- *  `/home/u/rimote-old` is not treated as living inside `/home/u/rimote`. */
+ *  `/home/u/remote-old` is not treated as living inside `/home/u/remote`. */
 export function isUnder(root: string, path: string): boolean {
   const a = resolve(root);
   const b = resolve(path);
@@ -1291,7 +1291,7 @@ export function cmdInstances(_args: string[], flags: GlobalFlags): void {
       );
       const uds = inst.socketPath ? ` (${inst.socketPath})` : "";
       console.log(
-        `${inst.appId}  pid=${inst.pid}  port=${inst.port}  ${inst.status}  ${transport}${uds}  uptime=${uptime}  cwd=${inst.cwd}`,
+        `${inst.appId}  pid=${inst.pid}  port=${inst.port}  ${inst.status}  ${transport}${uds}  uptime=${uptime}  home=${inst.home}  cwd=${inst.cwd}`,
       );
     }
   } else {
@@ -1304,6 +1304,7 @@ export function cmdInstances(_args: string[], flags: GlobalFlags): void {
         transport: inst.socketPath ? "uds" : "ws",
         ...(inst.socketPath ? { socketPath: inst.socketPath } : {}),
         uptime: Math.round((Date.now() - inst.startedAt) / 1000),
+        home: inst.home,
         cwd: inst.cwd,
       })),
       mode,

@@ -1,7 +1,7 @@
 // Two field reports about the same promise, from opposite directions: "acting
 // on UI a previous action creates just works".
 //
-// fezor F-4: a row click dispatches a method that itself dispatches another,
+// F-4: a row click dispatches a method that itself dispatches another,
 // and the second one is not drained — so the test has to bypass the UI and call
 // the cell directly, with a comment explaining why.
 // GOT #9b: a control that only exists after a previous queued action — revealed

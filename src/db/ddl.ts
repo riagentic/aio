@@ -18,7 +18,8 @@
 // and aio once stamping it on open silently defeated exactly that in the
 // field (a fresh file read 1, so every `at >= version` app correction
 // skipped). One integer cannot serve two owners; the app owns the idiom —
-// aio reads and writes user_version NOWHERE.
+// aio reads and writes user_version NOWHERE (documented at `createDB` and in
+// docs/persistence/sqlite.md, with the ≤alpha51 "may read 1" caveat).
 //
 // A file with no `aio_schema` table reads version 0 — "pre-versioned/
 // legacy": the idempotent reconcilers above run (as they always have) and

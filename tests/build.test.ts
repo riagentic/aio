@@ -212,7 +212,7 @@ Deno.test("build: --service + --compile does not conflict", async () => {
   assertEquals(stderr.includes("conflicting flags"), false);
 });
 
-// A bare `--service` used to build a bundle and exit 0 (ds4 L24). The unit file
+// A bare `--service` used to build a bundle and exit 0 (audit L24). The unit file
 // it writes points at a compiled binary, so alone it describes a file that will
 // never exist — a successful-looking command that did a fraction of what its
 // flag says. The pipeline refuses it now, naming the combination that works.
@@ -880,7 +880,7 @@ Deno.test("realDistCandidates: never the compile VFS (Electron blank window)", (
 });
 
 Deno.test("distCandidates: a NESTED entry still finds the embedded dist/", () => {
-  // rimote R-5: the two hardcoded guesses (`../dist`, `./dist`) assumed an
+  // R-5: the two hardcoded guesses (`../dist`, `./dist`) assumed an
   // entry exactly one level down. A relay at `src/server/app.ts` — one repo,
   // three apps — probed `src/dist` and `src/server/dist`, missed the embedded
   // copy, and the SHIPPED binary served the "Headless build — no browser UI"

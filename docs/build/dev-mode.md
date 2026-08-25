@@ -83,6 +83,18 @@ Browser mode always uses WS. Windows always uses WS (no UDS support).
 
 CLI apps can connect via `connectCliUDS(socketPath)` for headless UDS transport.
 
+## `dep/aio` as a live symlink
+
+An app that tracks aio's working tree (`dep/aio` → a checkout, instead of a
+pinned version) type-checks against whatever that tree holds at the moment:
+`deno check src/` follows the symlink into the framework's sources, so another
+session editing aio can fail the app's check on files the app does not own, and
+the error is gone minutes later. There is no switch to skip it — a check that
+ignored the framework it compiles against would pass an app that does not run.
+The supported answer for a stable check is `am pin`: pin the app to a released
+aio version (`docs/clients/app-manager.md`), and move the pin when you choose
+to.
+
 ## Startup linter
 
 When `aio.run()` starts, it checks your app and reports issues:

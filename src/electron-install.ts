@@ -18,8 +18,20 @@
 // the package's installer. The task did not, so the two disagreed. Now the
 // task IS the launcher's installer — one implementation, and the answer it
 // reports is "is the runtime there?", never "did a command exit zero".
-import { autoInstallElectron } from "./electron/electron-spawn.ts";
+import {
+  autoInstallElectron,
+  electronDistDir,
+} from "./electron/electron-spawn.ts";
 import { log } from "./diagnostics/logger-api.ts";
+
+// `--check`: answer "is the runtime there?" and nothing else — exit 0 when
+// `<pkg>/dist` exists, 1 when it does not, no download, no output. This is how
+// `am fix` asks the question WITHOUT re-implementing the resolver: am may not
+// import src/electron (boundary matrix), and a second copy of "where electron
+// lives" is exactly the two-decider bug this file's history is about.
+if (Deno.args.includes("--check")) {
+  Deno.exit((await electronDistDir()) === null ? 1 : 0);
+}
 
 const ok = await autoInstallElectron({
   info: (m: string) => log.info("electron", m),

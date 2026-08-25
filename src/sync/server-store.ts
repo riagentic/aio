@@ -13,6 +13,7 @@ interface OpRow {
   hlc_cnt: number;
   hlc_node: string;
   server_ts?: number;
+  version?: number;
 }
 
 function rowToOp(r: OpRow): SyncOp {
@@ -31,6 +32,8 @@ function rowToOp(r: OpRow): SyncOp {
     // cannot do that (see the ordered fold in sync-engine's
     // `handleSyncResponse`); broadcasts have always carried it.
     ...(typeof r.server_ts === "number" ? { serverTs: r.server_ts } : {}),
+    // The shape version the op was written under (see SyncOp.version).
+    ...(typeof r.version === "number" ? { version: r.version } : {}),
   };
 }
 
@@ -175,6 +178,11 @@ export async function issueSnapshotTs(db: DB): Promise<number> {
 export async function persistOp(
   db: DB,
   op: { id: string; hlc: HLC; cell: string; action: string; payload: unknown },
+  /** The cell's declared shape `version` at write time — stamped on the row so
+   *  the boot replay can tell an op from an older shape apart (field report §3.1).
+   *  Callers pass the cell's declared version; the default is the default
+   *  `version` a cell declares (0). */
+  cellVersion = 0,
 ): Promise<number | null> {
   await seedServerTs(db);
   // Known-id check, both halves in one round trip (both are PK lookups):
@@ -201,8 +209,8 @@ export async function persistOp(
   // check above is an optimization, not the correctness boundary.
   const serverTs = nextServerTs();
   const { changes } = await db.execute(
-    `INSERT OR IGNORE INTO sync_ops (id, cell, action, payload, hlc_phys, hlc_cnt, hlc_node, server_ts)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR IGNORE INTO sync_ops (id, cell, action, payload, hlc_phys, hlc_cnt, hlc_node, server_ts, version)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       op.id,
       op.cell,
@@ -212,6 +220,7 @@ export async function persistOp(
       hlcCnt,
       hlcNode,
       serverTs,
+      cellVersion,
     ],
   );
   return changes > 0 ? serverTs : null;
@@ -277,7 +286,7 @@ export async function loadOpsSince(
   // Use server_ts cursor when available — strictly monotonic per-server, no concurrency ambiguity
   if (lastServerTs != null && lastServerTs > 0) {
     const { rows } = await db.query<OpRow>(
-      `SELECT id, cell, action, payload, hlc_phys, hlc_cnt, hlc_node, server_ts
+      `SELECT id, cell, action, payload, hlc_phys, hlc_cnt, hlc_node, server_ts, version
        FROM sync_ops WHERE cell = ? AND server_ts > ?
        ORDER BY server_ts`,
       [cell, lastServerTs],
@@ -288,7 +297,7 @@ export async function loadOpsSince(
   // No cursor → full op-log in dispatch (server_ts) order, so a replay or a
   // fresh client folds ops in exactly the order the live server applied them.
   const { rows } = await db.query<OpRow>(
-    `SELECT id, cell, action, payload, hlc_phys, hlc_cnt, hlc_node, server_ts
+    `SELECT id, cell, action, payload, hlc_phys, hlc_cnt, hlc_node, server_ts, version
      FROM sync_ops WHERE cell = ? ORDER BY server_ts`,
     [cell],
   );
@@ -305,14 +314,23 @@ export async function loadOpsSince(
 export async function loadSnapshot(
   db: DB,
   cell: string,
-): Promise<{ state: Record<string, unknown>; hlc: HLC } | null> {
+): Promise<
+  {
+    state: Record<string, unknown>;
+    hlc: HLC;
+    /** The cell shape `version` the snapshot was written under; -1 = the row
+     *  predates the stamp (unknown). */
+    cellVersion: number;
+  } | null
+> {
   const { rows } = await db.query<{
     state: string;
     hlc_phys: number;
     hlc_cnt: number;
     hlc_node: string;
+    cell_version: number;
   }>(
-    `SELECT state, hlc_phys, hlc_cnt, hlc_node FROM sync_snapshots WHERE cell = ?`,
+    `SELECT state, hlc_phys, hlc_cnt, hlc_node, cell_version FROM sync_snapshots WHERE cell = ?`,
     [cell],
   );
   const row = rows[0];
@@ -321,6 +339,7 @@ export async function loadSnapshot(
     return {
       state: JSON.parse(row.state) as Record<string, unknown>,
       hlc: [row.hlc_phys, row.hlc_cnt, row.hlc_node],
+      cellVersion: typeof row.cell_version === "number" ? row.cell_version : -1,
     };
   } catch (e) {
     log.error(
@@ -344,12 +363,14 @@ export async function seedSyncSnapshot(
   db: DB,
   cell: string,
   state: unknown,
+  /** The cell's declared shape `version` — see `CompactDeps.cellVersion`. */
+  cellVersion = 0,
 ): Promise<void> {
   await db.execute(
-    `INSERT INTO sync_snapshots (cell, version, state, hlc_phys, hlc_cnt, hlc_node)
-       VALUES (?, 1, ?, 0, 0, 'seed')
+    `INSERT INTO sync_snapshots (cell, version, state, hlc_phys, hlc_cnt, hlc_node, cell_version)
+       VALUES (?, 1, ?, 0, 0, 'seed', ?)
        ON CONFLICT(cell) DO NOTHING`,
-    [cell, JSON.stringify(state)],
+    [cell, JSON.stringify(state), cellVersion],
   );
 }
 

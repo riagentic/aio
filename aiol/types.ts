@@ -46,7 +46,7 @@ export type DenoJsonConfig = {
   compilerOptions?: Record<string, unknown>;
   /** THE entry decider's config half — the module `aio.run()` lives in.
    *  Read so the linter looks where the PROJECT says its app is, not only at
-   *  the `src/app.ts` convention (rimote R-8). */
+   *  the `src/app.ts` convention (R-8). */
   entry?: string;
   build?: {
     targets?: string[] | Record<string, { entry?: string; kind?: string }>;

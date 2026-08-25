@@ -1,6 +1,6 @@
 // `serveDirs` — extra read-only DEV roots, with baseDir's guards unchanged.
 //
-// Field report (llama-master #1): two apps in one repository cannot share a
+// Field report (a chat-app report #1): two apps in one repository cannot share a
 // pure module. The client reused the server app's SSE parser and formatters,
 // because "a second implementation of 'what did this token event contain' is a
 // second implementation that drifts". A relative import (`../../src/lib/sse.ts`)

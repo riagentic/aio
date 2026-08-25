@@ -126,11 +126,11 @@ Deno.test("bundle gate: the DYNAMIC *.server.ts form stays the escape hatch", ()
   assertEquals(Object.keys(serverOnlyStatic).length, 0);
 });
 
-// A STANDALONE APK has no Deno runtime (rimote R-13). The dynamic
+// A STANDALONE APK has no Deno runtime (R-13). The dynamic
 // `await import("./x.server.ts")` that is correct on every other target — a
 // cell method runs server-side, so the import deliberately stays out of the
 // browser graph — is, there, the half of the app that does the work silently
-// not shipping. rimote's agent (screenrecord, `wm size`, FFI) built to 3.2 MB,
+// not shipping. the remote-desktop agent (screenrecord, `wm size`, FFI) built to 3.2 MB,
 // printed BUILD SUCCESSFUL, installed, launched, rendered its panel, and every
 // switch did nothing; the Windows build of the same entry is 180 MB because it
 // carries a runtime. Discovering that after installing on a phone is the
@@ -164,7 +164,7 @@ Deno.test("android: server-only reach is recorded separately from a static leak"
   assertEquals(Object.keys(serverOnlyDynamic).length, 0, "reset clears both");
 });
 
-// …and the artifact must be GONE when it does (rimote R-13, fourth pass).
+// …and the artifact must be GONE when it does (R-13, fourth pass).
 //
 // The three refusals above all happen after esbuild has written `dist/app.js`
 // and before the build records its inputs — the one window in which an

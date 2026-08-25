@@ -606,6 +606,13 @@ in another file that no rename follows and nothing checks. `aiol` flags a
 `perfBudget.methods[…].timeout` naming a local cell's method and names the
 `long:` line that replaces it.
 
+For a method whose duration is **unknown** — a network round-trip that is
+usually fast and occasionally not — make the ceiling a report instead of a
+rejection: `perfBudget: { methods: { "wallet:refresh": { timeout: "warn" } } }`.
+The caller keeps awaiting; at the default ceiling one `warn` names the method
+and the elapsed time. The default stays reject, because a method that silently
+never settles must not hang a caller forever.
+
 Neither side **cancels** anything — the method keeps running, and if it
 finishes, its writes still commit. What you lose is the return value and the
 framework's attention:
@@ -613,16 +620,72 @@ framework's attention:
 ```
 wallet:refresh: stopped waiting after 30000ms. The call gave up; the METHOD
 did not — it may still be running, and if it finishes its writes will still
-commit, without a return value reaching this caller.
+commit, without a return value reaching this caller. Fix: long: ["refresh"]
+on cell("wallet") (no ceiling), or perfBudget.methods["wallet:refresh"]
+.timeout: "warn" (report at 30000ms, keep waiting) or a number. Under
+transaction: { serialize: true } the still-running method HOLDS the cell's
+mutex, so every later async call on it queues behind it and burns its own
+ceiling — one slow method cascades. Or fetch outside and commit with a sync
+reducer (docs/state/methods.md).
 ```
 
 That matters for what you do next: starting the work again on timeout can leave
 two runs writing the same state. Either raise the ceiling for genuinely long
 work, or make the method itself the guard (a `running` flag, `cancelOn` + a
-`s.$signal` check) rather than treating the timeout as a cancellation.
+`s.$signal` check) rather than treating the timeout as a cancellation. Under
+[`transaction: { serialize: true }`](transactional-methods.md#concurrency) the
+cost is higher still: the orphaned method holds the cell's mutex until it
+settles, so one slow RPC stalls every later async call on that cell.
 
 If a method is routinely near the ceiling, it usually wants to be a job with a
-progress field rather than a call somebody awaits.
+progress field rather than a call somebody awaits — or, for network I/O, the
+pattern below.
+
+### Network I/O: fetch outside, commit with a sync reducer
+
+**This is the canonical pattern for network I/O.** An `await fetch()` inside an
+async method puts a remote server's latency on the call ceiling, on the
+transaction mutex, and on every caller. Do the I/O where nothing is waiting on
+state, and commit the result through a sync method — a pure reducer that cannot
+time out, cannot hold a mutex, and replays deterministically:
+
+```ts
+const wallet = cell("wallet", {
+  state: { balance: 0, fetchedAt: 0, error: "" },
+  methods: {
+    // The reducer: synchronous, no I/O, commits in one dispatch.
+    setBalance(s, balance: number, at: number) {
+      s.balance = balance;
+      s.fetchedAt = at;
+      s.error = "";
+    },
+    setError(s, message: string) {
+      s.error = message;
+    },
+  },
+});
+
+// The I/O lives OUTSIDE the cell — a route, an effect, a schedule, a component.
+export async function refreshBalance(address: string): Promise<void> {
+  try {
+    const res = await fetch(`${RPC}/balance/${address}`);
+    const { lamports } = await res.json();
+    wallet.setBalance(lamports, Date.now());
+  } catch (e) {
+    wallet.setError(String(e));
+  }
+}
+
+schedule.every(30_000, () => refreshBalance(current));
+```
+
+What it buys: the ceiling never fires (nothing awaits the network through a
+method), `serialize` has nothing to hold, the write is one atomic commit, and
+the reducer is testable with `testCell` without a network. Reach for an async
+method when the work must read **and** write state around an `await`
+(read-modify-write with `transaction` semantics); reach for this pattern when
+the work is "get a value from somewhere, then store it" — which is most of
+network I/O.
 
 ---
 
@@ -772,12 +835,13 @@ is unwritable.
 Minutes-long work — a filesystem scan, a build, an import — is a normal method,
 not a special construct. Four things make it behave:
 
-| Need                   | Do this                                                                               |
-| ---------------------- | ------------------------------------------------------------------------------------- |
-| Raise the ceiling      | `long: ["open"]` on the cell (checked against its methods; see above)                 |
-| A cancel path          | `cancelOn` (`"self"` for supersession, a `stop` method for an explicit cancel button) |
-| A "still working" sign | Write a state field before the first `await` — clients see it on the next commit      |
-| Don't clobber          | After every `await`, check `s.$signal!.aborted` **before** writing terminal state     |
+| Need                   | Do this                                                                                                                        |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| Raise the ceiling      | `long: ["open"]` on the cell (checked against its methods; see above)                                                          |
+| Network I/O            | Don't await it in a method — [fetch outside, commit with a sync reducer](#network-io-fetch-outside-commit-with-a-sync-reducer) |
+| A cancel path          | `cancelOn` (`"self"` for supersession, a `stop` method for an explicit cancel button)                                          |
+| A "still working" sign | Write a state field before the first `await` — clients see it on the next commit                                               |
+| Don't clobber          | After every `await`, check `s.$signal!.aborted` **before** writing terminal state                                              |
 
 The last row is the one that bites. A method that resumes after an `await` is
 writing into state that other calls and other actions have moved on from, so a

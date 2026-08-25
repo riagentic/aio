@@ -264,6 +264,20 @@ export function detectIPC(): AioIPCBridge | null {
     | undefined ?? null;
 }
 
+/** Does this page have an HTTP origin a WebSocket could reach? On an `aio://`
+ *  page (the zero-port Electron shell) there is none — the IPC bridge is the
+ *  ONLY transport, and `ws://app/ws` is a socket that cannot exist. */
+export function hasHttpOrigin(): boolean {
+  return typeof location !== "undefined" &&
+    /^https?:$/.test(location.protocol);
+}
+
+/** The one message for a page that can reach nothing: no HTTP origin to open
+ *  a WebSocket to, and no IPC bridge either. */
+export const NO_TRANSPORT_MSG =
+  "page has no HTTP origin and no IPC bridge \u2014 the aio:// page must be " +
+  "loaded by the aio Electron shell";
+
 /** Build WebSocket URL from current page location */
 export function buildWsUrl(): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";

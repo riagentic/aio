@@ -77,7 +77,7 @@
         },
         "CellAio": {
           "kind": "typeAlias",
-          "sig": "26fdc683abeed393"
+          "sig": "a83f66a818d2bcfb"
         },
         "CellDef": {
           "kind": "typeAlias",
@@ -265,7 +265,7 @@
         },
         "PerfBudget": {
           "kind": "typeAlias",
-          "sig": "f20e82aff508b9f7"
+          "sig": "7876e43b314a7b17"
         },
         "pk": {
           "kind": "function",
@@ -441,7 +441,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "b677a9cc248b090a"
+          "sig": "7424f3e6ceae0fc2"
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -1245,7 +1245,7 @@
         },
         "LockData": {
           "kind": "typeAlias",
-          "sig": "bc5f3d758250261c"
+          "sig": "47352ea186c8664d"
         },
         "markAsync": {
           "kind": "function",
@@ -1265,7 +1265,7 @@
         },
         "readLock": {
           "kind": "function",
-          "sig": "267dd388234e499d"
+          "sig": "ddcc58121cc22df0"
         },
         "ReduceBreakdown": {
           "kind": "typeAlias",
@@ -1691,6 +1691,14 @@
           "kind": "function",
           "sig": "84317e7760a7e7de"
         },
+        "smoke": {
+          "kind": "function",
+          "sig": "3563e6abb4acd211"
+        },
+        "SmokeResult": {
+          "kind": "interface",
+          "sig": "76cf7f439068e7f6"
+        },
         "testApps": {
           "kind": "function",
           "sig": "1e28408e4fc4b642"
@@ -1713,7 +1721,7 @@
         },
         "TestClient": {
           "kind": "interface",
-          "sig": "d31a740943cf7833"
+          "sig": "168ff83b0c7996af"
         },
         "testComponent": {
           "kind": "function",
@@ -1761,7 +1769,7 @@
         },
         "TestUI": {
           "kind": "typeAlias",
-          "sig": "ca4e9dfa1e13aef5"
+          "sig": "9beaddf43123cdb6"
         },
         "TestUIOptions": {
           "kind": "interface",

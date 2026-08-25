@@ -47,6 +47,11 @@ async function sandbox(): Promise<
   const env = {
     ...Deno.env.toObject(),
     AIO_HOME: REPO_ROOT, // a git checkout of aio — run.sh's prereq is satisfied
+    // run.sh runs install.sh EVERY time now. Without this it would curl the
+    // PUBLISHED install.sh — a network call in an offline suite, and one that
+    // once force-checked-out the last tag onto THIS working tree (AIO_HOME is
+    // the repo). This checkout's installer leaves a working checkout alone.
+    AIO_INSTALL: join(REPO_ROOT, "install.sh"),
     AIO_APPS_DIR: join(root, "apps"),
     DENO_INSTALL_ROOT: join(root, "deno"),
     PATH: `${join(root, "deno", "bin")}:${Deno.env.get("PATH") ?? ""}`,
@@ -238,6 +243,8 @@ Deno.test({
     }).output();
     assertEquals(clone.code, 0, dec.decode(clone.stderr));
     const SENTINEL = "installed-aio-builder-must-not-be-used";
+    const noopInstall = join(base, "install.sh");
+    await Deno.writeTextFile(noopInstall, "#!/bin/sh\nexit 0\n");
     await Deno.writeTextFile(
       join(install, "src", "build.ts"),
       `throw new Error("${SENTINEL}");\n`,
@@ -321,6 +328,8 @@ Deno.test({
     const denoHome = join(base, "deno");
     const bin = join(denoHome, "bin");
     const SENTINEL = "installed-aio-builder-must-not-be-used";
+    const noopInstall = join(base, "install.sh");
+    await Deno.writeTextFile(noopInstall, "#!/bin/sh\nexit 0\n");
     await Deno.mkdir(join(install, "src"), { recursive: true });
     await Deno.writeTextFile(
       join(install, "src", "build.ts"),
@@ -355,6 +364,7 @@ Deno.test({
         env: {
           ...Deno.env.toObject(),
           AIO_HOME: install,
+          AIO_INSTALL: noopInstall, // a sabotaged AIO_HOME has no am to install
           DENO_INSTALL: denoHome,
           DENO_INSTALL_ROOT: denoHome,
           PATH: `${bin}:${Deno.env.get("PATH") ?? ""}`,

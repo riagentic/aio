@@ -5,7 +5,7 @@
 
 import type { ScheduleEffect } from "./schedule.ts";
 import type { OwnEffect } from "./own.ts";
-import type { CellEffect, CellMethods } from "./cell-impl.ts";
+import type { CellEffect } from "./cell-impl.ts";
 import type { SyncConfig } from "../sync/types.ts";
 import type { AioUser as WireAioUser } from "../protocol/protocol-types.ts";
 
@@ -254,9 +254,12 @@ export type CellAio<
   onInit?: (app: ScopedApp<unknown>, initState?: unknown) => void;
   /** Custom destroy handler */
   onDestroy?: (app: ScopedApp<unknown>) => void;
-  /** Sync/async method implementations */
-  methods?: CellMethods<Record<string, unknown>>;
-  syncMethods?: Set<string>;
+  // NO `methods` / `syncMethods` slot — they were declared here and populated
+  // NOWHERE, so a `methods` read on `__aio` typed as real and resolved to `undefined`;
+  // a test guarded with `if (typeof fn === "function")` then passed while
+  // asserting nothing (field report §4.2). The way to drive a method is `testCell`.
+  /** Names of the async methods (a `Set` — `has(key)`); `undefined` for cells
+   *  with no methods at all. */
   asyncMethods?: Set<string>;
   /** cancelOn config — method → trigger actions (registered at compose time).
    *  `"self"` (bare or in the list) resolves to the method's own action type. */

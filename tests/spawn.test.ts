@@ -1,6 +1,6 @@
 // spawn.test.ts — the child-process API, and the bug it was written from.
 //
-// bw2col's hand-rolled version killed the parent and orphaned four Python CUDA
+// one GPU-pipeline app's hand-rolled version killed the parent and orphaned four Python CUDA
 // workers holding GPU memory until reboot, because
 // `Deno.Command("kill", ["-STOP", "-1234"])` exits 0 and signals NOTHING —
 // procps kill does not read a negative pid as a group. It looked correct in

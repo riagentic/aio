@@ -64,3 +64,159 @@ Deno.test("run.sh: the artifact is launched with a private TMPDIR, not /tmp", as
     "$HOME is 0755 on most distros — moving out of /tmp without 0700 fixes nothing",
   );
 });
+
+// The one-liner used to call install.sh ONLY when deno/am/the checkout was
+// missing, so a box that had installed aio once kept that am forever — the
+// newest run.sh, running the oldest am. install.sh is idempotent, so the fix is
+// to always run it. This pins that the call is unconditional in BOTH scripts.
+Deno.test("run.sh + run.ps1: install.sh runs every time — am is updated, not merely present", async () => {
+  const sh = await Deno.readTextFile(join(REPO_ROOT, "run.sh"));
+  const ps = await Deno.readTextFile(join(REPO_ROOT, "run.ps1"));
+  // The old guard: the install ran only inside `if ! deno_ok || ! am …`.
+  assert(
+    !sh.includes("if ! deno_ok ||"),
+    "run.sh: install.sh is not gated on absence",
+  );
+  assert(sh.includes('sh "$AIO_INSTALL"') && sh.includes("updating aio + am"));
+  assert(
+    !ps.includes("if (-not $denoOk -or"),
+    "run.ps1: install.ps1 is not gated on absence",
+  );
+  assert(ps.includes("& $env:AIO_INSTALL") && ps.includes("updating aio + am"));
+});
+
+// `run.sh` with a FAKE install.sh: the fake is invoked even though deno, am
+// and the checkout are all present — the behavioural half of the gate above.
+Deno.test("run.sh: invokes install.sh even when deno + am + checkout already exist", async () => {
+  const tmp = await Deno.makeTempDir();
+  const home = join(tmp, "aio-home");
+  await Deno.mkdir(join(home, ".git"), { recursive: true });
+  await Deno.mkdir(join(home, "src", "server"), { recursive: true });
+  await Deno.writeTextFile(
+    join(home, "src", "server", "deno-version.ts"),
+    'export const MIN_DENO = "0.0.1";\n',
+  );
+  const bin = join(tmp, "bin");
+  await Deno.mkdir(bin);
+  await Deno.writeTextFile(join(bin, "am"), "#!/bin/sh\nexit 0\n");
+  await Deno.chmod(join(bin, "am"), 0o755);
+  const marker = join(tmp, "install-ran");
+  const fake = join(tmp, "install.sh");
+  await Deno.writeTextFile(fake, `#!/bin/sh\n: > "${marker}"\nexit 0\n`);
+  // No deno.json in cwd → run.sh stops right after the install step, which is
+  // all this test needs to observe.
+  const p = await new Deno.Command("sh", {
+    args: [join(REPO_ROOT, "run.sh"), "--no-run"],
+    cwd: tmp,
+    env: {
+      ...Deno.env.toObject(),
+      AIO_HOME: home,
+      AIO_INSTALL: fake,
+      PATH: `${bin}:${Deno.env.get("PATH") ?? ""}`,
+    },
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  const out = dec.decode(p.stdout);
+  assert(out.includes("updating aio + am"), out + dec.decode(p.stderr));
+  let ran = true;
+  try {
+    await Deno.stat(marker);
+  } catch {
+    ran = false;
+  }
+  assert(ran, "install.sh was not invoked although everything was present");
+  await Deno.remove(tmp, { recursive: true });
+});
+
+// Now that install.sh runs on EVERY one-liner, the checkout it may move must
+// never be a repo someone works in: run.sh inside a dev clone (AIO_HOME set to
+// it, as the e2e suite does) once `git checkout --force <tag>`-ed the
+// framework's own working tree and deleted uncommitted edits. A branch or
+// local changes = a working checkout = left untouched; am is still installed.
+Deno.test("install.sh: never git-mutates a working checkout (on a branch, or dirty)", async () => {
+  const tmp = await Deno.makeTempDir();
+  const home = join(tmp, "aio-home");
+  const git = (...args: string[]) =>
+    new Deno.Command("git", {
+      args: ["-C", home, ...args],
+      stdout: "null",
+      stderr: "null",
+    }).output();
+  await Deno.mkdir(join(home, "src", "server"), { recursive: true });
+  await Deno.writeTextFile(
+    join(home, "src", "server", "deno-version.ts"),
+    'export const MIN_DENO = "0.0.1";\n',
+  );
+  await Deno.writeTextFile(
+    join(home, "src", "am.ts"),
+    'console.log("am from a dev checkout")\n',
+  );
+  await Deno.writeTextFile(join(home, "deno.json"), "{}\n");
+  await git("init", "-q", "-b", "main");
+  await git("-c", "user.email=t@t", "-c", "user.name=t", "add", ".");
+  await git(
+    "-c",
+    "user.email=t@t",
+    "-c",
+    "user.name=t",
+    "commit",
+    "-q",
+    "-m",
+    "one",
+  );
+  await git("tag", "v0.0.1");
+  await git(
+    "-c",
+    "user.email=t@t",
+    "-c",
+    "user.name=t",
+    "commit",
+    "-q",
+    "--allow-empty",
+    "-m",
+    "wip",
+  );
+  await git("remote", "add", "origin", home);
+  // Uncommitted edit — the thing a forced checkout destroys.
+  const wip = join(home, "src", "wip.ts");
+  await Deno.writeTextFile(wip, "// not committed\n");
+  await git("add", wip);
+  const denoRoot = join(tmp, "deno-root");
+  const p = await new Deno.Command("sh", {
+    args: [join(REPO_ROOT, "install.sh")],
+    cwd: tmp,
+    env: {
+      ...Deno.env.toObject(),
+      HOME: tmp,
+      AIO_HOME: home,
+      DENO_INSTALL_ROOT: denoRoot,
+      SHELL: "/bin/sh",
+    },
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  const out = dec.decode(p.stdout) + dec.decode(p.stderr);
+  assert(out.includes("working checkout"), out);
+  // Still on the branch, still at the WIP commit, the edit still there.
+  const head = await new Deno.Command("git", {
+    args: ["-C", home, "symbolic-ref", "--short", "HEAD"],
+    stdout: "piped",
+  }).output();
+  assertEquals(
+    dec.decode(head.stdout).trim(),
+    "main",
+    "not detached onto the tag",
+  );
+  const log = await new Deno.Command("git", {
+    args: ["-C", home, "log", "--oneline", "-1"],
+    stdout: "piped",
+  }).output();
+  assert(dec.decode(log.stdout).includes("wip"), "HEAD was moved");
+  assertEquals(
+    await Deno.readTextFile(wip),
+    "// not committed\n",
+    "uncommitted work survived",
+  );
+  await Deno.remove(tmp, { recursive: true });
+});

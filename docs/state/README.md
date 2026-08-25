@@ -15,6 +15,8 @@ Start here. Covers what every app needs.
   selectors, Immer
 - [The bridge](the-bridge.md) — what crosses client↔server, what doesn't, what
   freezes
+- [Cell contexts](cell-contexts.md) — which code runs where (server, client
+  replay, worker, tests), what each option means there, refused combinations
 
 ## Going further
 

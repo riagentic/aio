@@ -1,6 +1,7 @@
 // HTML shell generation — dispatches to prod, AIO dev, or React dev templates.
 
 import { UI_ENTRY } from "./app-files.ts";
+import type { CallTimeouts } from "../protocol/protocol-types.ts";
 import type { RenderBudget } from "../vitals/types.ts";
 import type { UiConfig, UiTheme } from "./aio-types.ts";
 import { appThemeCss, appThemeTokensCss } from "../build/app-theme.ts";
@@ -148,7 +149,7 @@ function headContent(
   viewport?: string | false,
   headExtra?: string,
   syncCells?: string[],
-  callTimeouts?: { default?: number; methods?: Record<string, number> },
+  callTimeouts?: CallTimeouts,
   // "/" for server-served shells; "./" for the Android asset shell, whose
   // WebView loads from android_asset where absolute /-paths don't resolve.
   assetBase = "/",
@@ -302,7 +303,7 @@ export interface HtmlShellOptions {
   headExtra?: string;
   /** localFirst: cells the client runs locally and syncs. */
   syncCells?: string[];
-  callTimeouts?: { default?: number; methods?: Record<string, number> };
+  callTimeouts?: CallTimeouts;
   /** ui.chrome — the desktop window frame. */
   chrome?: UiChrome;
   /** ui.theme — how much of the default look this shell emits. */

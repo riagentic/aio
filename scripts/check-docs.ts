@@ -125,6 +125,19 @@ async function main(): Promise<void> {
     }`,
   );
 
+  // Every upgrade guide from alpha65 on carries a `## Retire` section — the
+  // list of workarounds an app may delete, each with the version that fixed
+  // the bug. A field report carried two bridge-return workarounds for thirty
+  // releases after alpha34 fixed them, because nothing ever said "you can
+  // delete this now". The section is the place that says it; the gate is
+  // what keeps a release from shipping without one.
+  const retireIssues = await checkRetireSections();
+  console.log(
+    `Upgrade guides with a Retire section: ${
+      retireIssues.length ? `${retireIssues.length} missing` : "all present"
+    }`,
+  );
+
   // Version-string drift is ADVISORY: docs legitimately reference historical
   // versions (migration notes) and example CLI output, so it warns but never
   // gates. Error-code coverage is EXACT, so it is the hard gate.
@@ -146,6 +159,16 @@ async function main(): Promise<void> {
   if (codeIssues.length) {
     console.log(
       `\nUndocumented error codes (must fix):\n${codeIssues.join("\n")}`,
+    );
+    Deno.exit(1);
+  }
+  if (retireIssues.length) {
+    console.log(
+      `\nUpgrade guides without a \`## Retire\` section (must fix — list the ` +
+        `workarounds this release lets an app delete, with the version each ` +
+        `fix shipped in; "nothing to retire" is a valid one-line section):\n${
+          retireIssues.join("\n")
+        }`,
     );
     Deno.exit(1);
   }
@@ -209,6 +232,26 @@ async function checkRetiredSpellings(): Promise<string[]> {
     }
   }
   return issues;
+}
+
+/** The first upgrade guide that must carry `## Retire`; every later one too. */
+const RETIRE_SECTION_SINCE = 65;
+
+/** `docs/upgrade/from-alphaNN-to-alphaMM.md` with MM >= 65 must contain a
+ *  `## Retire` heading. Older guides are history and stay as written. */
+async function checkRetireSections(): Promise<string[]> {
+  const issues: string[] = [];
+  const dir = `${DOCS_DIR}upgrade/`;
+  for await (const entry of Deno.readDir(dir)) {
+    if (!entry.isFile) continue;
+    const m = /^from-alpha(\d+)-to-alpha(\d+)\.md$/.exec(entry.name);
+    if (!m || Number(m[2]) < RETIRE_SECTION_SINCE) continue;
+    const text = await Deno.readTextFile(dir + entry.name);
+    if (!/^## Retire\s*$/m.test(text)) {
+      issues.push(`  upgrade/${entry.name}  no \`## Retire\` heading`);
+    }
+  }
+  return issues.sort();
 }
 
 /** Every `docs/….md` path mentioned in src/ code must exist on disk. */

@@ -16,6 +16,9 @@ export interface CompactDeps {
   getState: () => Record<string, unknown>;
   serverHlc: HLC;
   compactOps?: number;
+  /** The cell's declared shape `version` — stamped on the snapshot so the boot
+   *  replay knows which shape the snapshot was written under. Default 0. */
+  cellVersion?: number;
   log: {
     debug: (msg: string, data?: Record<string, unknown>) => void;
     warn: (msg: string, data?: Record<string, unknown>) => void;
@@ -91,12 +94,21 @@ export async function compactSyncOps(deps: CompactDeps): Promise<void> {
     },
     {
       sql:
-        `INSERT INTO sync_snapshots (cell, version, state, hlc_phys, hlc_cnt, hlc_node)
-            VALUES (?, COALESCE((SELECT version FROM sync_snapshots WHERE cell = ?), 0) + 1, ?, ?, ?, ?)
+        `INSERT INTO sync_snapshots (cell, version, state, hlc_phys, hlc_cnt, hlc_node, cell_version)
+            VALUES (?, COALESCE((SELECT version FROM sync_snapshots WHERE cell = ?), 0) + 1, ?, ?, ?, ?, ?)
             ON CONFLICT(cell) DO UPDATE SET
               version = excluded.version, state = excluded.state,
-              hlc_phys = excluded.hlc_phys, hlc_cnt = excluded.hlc_cnt, hlc_node = excluded.hlc_node`,
-      params: [deps.cell, deps.cell, stateJson, hlcPhys, hlcCnt, hlcNode],
+              hlc_phys = excluded.hlc_phys, hlc_cnt = excluded.hlc_cnt, hlc_node = excluded.hlc_node,
+              cell_version = excluded.cell_version`,
+      params: [
+        deps.cell,
+        deps.cell,
+        stateJson,
+        hlcPhys,
+        hlcCnt,
+        hlcNode,
+        deps.cellVersion ?? 0,
+      ],
     },
     {
       // Everything below the boundary is inside the snapshot above.
@@ -140,7 +152,8 @@ export const SYNC_SCHEMA: string[] = [
   `CREATE TABLE IF NOT EXISTS sync_ops (
     id TEXT PRIMARY KEY, cell TEXT NOT NULL, action TEXT NOT NULL,
     payload TEXT NOT NULL, hlc_phys INTEGER NOT NULL, hlc_cnt INTEGER NOT NULL,
-    hlc_node TEXT NOT NULL, server_ts INTEGER NOT NULL)`,
+    hlc_node TEXT NOT NULL, server_ts INTEGER NOT NULL,
+    version INTEGER NOT NULL DEFAULT 0)`,
   `CREATE INDEX IF NOT EXISTS idx_sync_ops_cell_hlc
     ON sync_ops(cell, hlc_phys, hlc_cnt, hlc_node)`,
   // Delivery reads by server_ts (`loadOpsSince`), and the cursor reservation
@@ -151,7 +164,8 @@ export const SYNC_SCHEMA: string[] = [
   `CREATE INDEX IF NOT EXISTS idx_sync_ops_ts ON sync_ops(server_ts)`,
   `CREATE TABLE IF NOT EXISTS sync_snapshots (
     cell TEXT PRIMARY KEY, version INTEGER NOT NULL, state TEXT NOT NULL,
-    hlc_phys INTEGER NOT NULL, hlc_cnt INTEGER NOT NULL, hlc_node TEXT NOT NULL)`,
+    hlc_phys INTEGER NOT NULL, hlc_cnt INTEGER NOT NULL, hlc_node TEXT NOT NULL,
+    cell_version INTEGER NOT NULL DEFAULT 0)`,
   `CREATE TABLE IF NOT EXISTS sync_meta (
     cell TEXT PRIMARY KEY, low_water TEXT NOT NULL,
     last_compact INTEGER NOT NULL, op_count INTEGER NOT NULL,
@@ -175,7 +189,18 @@ export const SYNC_MIGRATIONS: string[] = [
   // `getOpServerTs` reports as unknown rather than guessing (a wrong cursor on
   // an ack is worse than no cursor).
   `ALTER TABLE sync_compacted_ids ADD COLUMN server_ts INTEGER NOT NULL DEFAULT 0`,
+  // The cell shape `version` an op / a snapshot was written under (field report
+  // §3.1). -1 = "this row predates the stamp": UNKNOWN, which the boot replay
+  // resolves from the KV version stamp of the build that last persisted —
+  // never 0, or every existing app that declares `version: N` + `onMigrate`
+  // would re-run its hook over already-current data on the first boot after
+  // this upgrade. Fresh rows are always stamped explicitly.
+  `ALTER TABLE sync_ops ADD COLUMN version INTEGER NOT NULL DEFAULT -1`,
+  `ALTER TABLE sync_snapshots ADD COLUMN cell_version INTEGER NOT NULL DEFAULT -1`,
 ];
+
+/** `version` / `cell_version` value of a row written before the stamp existed. */
+export const SYNC_VERSION_UNKNOWN = -1;
 
 /** Apply {@linkcode SYNC_MIGRATIONS}, tolerating the already-applied case.
  *

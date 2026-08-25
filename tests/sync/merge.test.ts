@@ -96,7 +96,7 @@ describe("mergeField", () => {
 });
 
 // ── set-remove: what the rule IS, and what it now reports ────────────────────
-// The ds4 audit read `if (inBase && !inLocal) continue` as "a remote re-add is
+// The static audit read `if (inBase && !inLocal) continue` as "a remote re-add is
 // silently dropped". Read whole, the rule is SYMMETRIC remove-wins: an item in
 // base that either side dropped is gone. That is a deliberate set-merge choice,
 // and a 3-way ARRAY diff cannot do better — "remote re-added it" and "remote

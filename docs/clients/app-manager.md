@@ -155,13 +155,15 @@ to `deno.json` as a dev convenience.
 
 ## Global flags
 
-| Flag         | Effect                                                                                                                                                     |
-| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--app=X`    | Target a specific app by ID (default: from `deno.json` `appId`)                                                                                            |
-| `--port=N`   | Target a specific port (default: from lock file or 8000)                                                                                                   |
-| `--wait[=N]` | start/stop: block until complete (default 10s / 9s — stop waits out the runtime's whole graceful budget before SIGKILL). state: poll every Ns (default 2s) |
-| `--json`     | Force JSON output                                                                                                                                          |
-| `--quiet`    | Suppress output (exit code only)                                                                                                                           |
+| Flag           | Effect                                                                                                                                                     |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--app=X`      | Target a specific app by ID (default: from `deno.json` `appId`)                                                                                            |
+| `--port=N`     | Target a specific port (default: from lock file or 8000)                                                                                                   |
+| `--wait[=N]`   | start/stop: block until complete (default 10s / 9s — stop waits out the runtime's whole graceful budget before SIGKILL). state: poll every Ns (default 2s) |
+| `--json`       | Force JSON output                                                                                                                                          |
+| `--quiet`      | Suppress output (exit code only)                                                                                                                           |
+| `--home=DIR`   | Target the instance of the app running from data home `DIR` — an isolated second boot (`appDir`) beside the user's own. `AIO_APPS_DIR` is the env form     |
+| `--timeout=MS` | `surface`/`trigger`: how long to wait for the live client (default 8000; must exceed the server's own 5000 ms client wait)                                 |
 
 ## Reaching an app that has auth (`control.key`)
 
@@ -297,6 +299,17 @@ Lock files at `/tmp/aio/` (or `$XDG_RUNTIME_DIR/aio/`) as `{appId}.lock`. Stale
 locks (dead PID) are auto-cleaned. Zombies (alive but not responding) are killed
 automatically on `start`.
 
+**Identity is appId AND data home.** An app booted again from a different
+`appDir` (an isolated smoke-test or screenshot boot beside the user's own) is a
+different instance: its lock is `{appId}@{hash8(home)}.lock`, its control socket
+follows the same name, and it starts with one info line ("another instance of X
+runs from a different home; this one continues") that names no port and no pid.
+The default home keeps the plain `{appId}.lock`, so nothing migrates. A refusal
+("Already running … (home …)") therefore always means the SAME home — a true
+duplicate, whose port and pid are your own instance's. `am --home=<dir>` (or
+`AIO_APPS_DIR=<root>`) targets the instance you mean; `am instances` shows each
+instance's `home`.
+
 ## Instance discovery
 
 ```sh
@@ -306,7 +319,7 @@ deno task am instances --json     # JSON output
 ```
 
 Scans lock files, validates each PID is alive, returns active instances with
-appId, port, PID, uptime, and cwd.
+appId, port, PID, uptime, home, and cwd.
 
 **Two apps on one machine mean two `am` targets.** Every `am` command resolves
 ONE app — from `--app=<id>`, else the `deno.json`/entry in the current directory
@@ -361,6 +374,7 @@ past the `access` gate. Dev-only, loopback-only and logged, like the rest of
 the control plane; the denial message names it at the moment you need it.
 deno task am dispatch conn:setHost 10.0.0.1                  # setHost("10.0.0.1")
 deno task am dispatch counter:reset                          # reset()
+deno task am dispatch wallet:balance                         # → prints the method's RETURN value
 
 # …the same, JSON-exact. Use it when a value contains '=' (a URL, a base64
 # blob), or when the exact type matters.
@@ -578,6 +592,15 @@ deno task am trigger 0 App:Stage keyUp ArrowLeft      # … then release it — 
 already has one); `setValue` clears first, then types — use it to drive a form,
 where replacing is the usual intent. Same two words, same two meanings as
 `testUI`'s `ui.X.type()` / `ui.X.setValue()`, because both drive the same UI.
+
+**Which path each command takes** — they are not one thing seen three ways:
+`am state --ui` is the SERVER's projection (`getUIState()`, no client involved);
+`am surface N` / `am trigger N` talk to LIVE client `N` over the transport that
+client is on (WS for a browser tab, UDS for the Electron window) and wait up to
+`--timeout` for it to answer — a stalled or headless client is reported by index
+with the connected indices listed; `am logs` reads the server's log store;
+`am dispatch` runs the cell method on the server and prints what it returned.
+With several instances of one app up, `--home=<dir>` picks the one to drive.
 
 Run `am surface` first to see the addressable `Component:name` paths, then
 `am trigger` them. This is the one unified UI facility — the old CSS-selector

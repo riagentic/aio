@@ -33,7 +33,7 @@ const LEDGER: Record<string, { pattern: RegExp; files: number; use: string }> =
     "App.tsx": { pattern: /"App\.tsx"/g, files: 5, use: "UI_ENTRY" },
     "style.css": { pattern: /"style\.css"/g, files: 6, use: "APP_STYLE" },
     // 6 → 5: the four targets that each resolved `<appDir>/icon.png` for
-    // themselves now ask `resolveAppIcon` (fezor F-2), which is also what tells
+    // themselves now ask `resolveAppIcon` (F-2), which is also what tells
     // them an icon is sitting at the project root where the build cannot see it.
     "icon.png": { pattern: /"icon\.png"/g, files: 5, use: "APP_ICON" },
     "app.js": { pattern: /"app\.js"/g, files: 6, use: "BUNDLE_JS" },
@@ -58,7 +58,7 @@ async function* walk(dir: string): AsyncGenerator<string> {
 /** The same rule one level up: HOW the app's config is read. `deno.json` is
  *  JSONC and `deno.jsonc` is legal, so `JSON.parse` on either is a bug — and
  *  it was written eleven times, fixed in exactly one of them, and left in the
- *  other ten (rimote R-12). */
+ *  other ten (R-12). */
 const JSON_PARSE_HOME = "src/server/deno-json.ts";
 
 Deno.test("one fact, one spelling: nothing hand-parses the app config", async () => {

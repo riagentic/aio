@@ -90,7 +90,7 @@ Deno.test("components: two targets sharing one entry are still one app", async (
 
 Deno.test("components: distinct entries are the project's parts", async () => {
   const dir = await project({
-    title: "Rimote",
+    title: "Remote",
     build: {
       targets: {
         relay: { kind: "server", entry: "src/relay/app.ts" },
@@ -245,12 +245,12 @@ Deno.test("components: the entry's own appId wins over the target label", async 
       },
     },
   }, {
-    "src/relay/app.ts": entry("rimote-relay"),
-    "src/agent/app.ts": entry("rimote-agent"),
+    "src/relay/app.ts": entry("remote-relay"),
+    "src/agent/app.ts": entry("remote-agent"),
   });
   try {
     const cs = projectComponents(dir);
-    assertEquals(cs.map((c) => c.appId), ["rimote-relay", "rimote-agent"]);
+    assertEquals(cs.map((c) => c.appId), ["remote-relay", "remote-agent"]);
   } finally {
     await Deno.remove(dir, { recursive: true });
   }

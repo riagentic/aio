@@ -1,6 +1,6 @@
 // Cell config must not be ORDER-DEPENDENT.
 //
-// Field report (llama-master #7): adding a migration with the fields in the
+// Field report (a chat-app report #7): adding a migration with the fields in the
 // order the docs list them —
 //
 //     cell("cfg", {
@@ -64,14 +64,14 @@ testCell(
   hooksFirst,
   "hooks declared before state: methods stay typed",
   async (t) => {
-    await t.send.rememberFit("llama-7b", 4096);
-    assertEquals(t.getState().fitCtx["llama-7b"], 4096);
-    assertEquals(t.getState().label, "llama-7b");
+    await t.send.rememberFit("model-7b", 4096);
+    assertEquals(t.getState().fitCtx["model-7b"], 4096);
+    assertEquals(t.getState().label, "model-7b");
   },
 );
 
 testCell(stateFirst, "state declared first: identical behaviour", async (t) => {
-  await t.send.rememberFit("llama-7b", 4096);
-  assertEquals(t.getState().fitCtx["llama-7b"], 4096);
-  assertEquals(t.getState().label, "llama-7b");
+  await t.send.rememberFit("model-7b", 4096);
+  assertEquals(t.getState().fitCtx["model-7b"], 4096);
+  assertEquals(t.getState().label, "model-7b");
 });

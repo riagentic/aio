@@ -1,4 +1,4 @@
-// `tls` as a CONFIG key (rimote R-7). `--no-tls` / `--tls-cert` / `--tls-key`
+// `tls` as a CONFIG key (R-7). `--no-tls` / `--tls-cert` / `--tls-key`
 // were argv-only, so a COMPILED binary's transport could not be declared in
 // deno.json — it depended on remembering a flag at launch, including inside a
 // systemd unit the build itself generates. Same reasoning as `expose`: a

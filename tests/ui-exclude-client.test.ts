@@ -2,11 +2,13 @@
 // CLIENT read seam (bindCellReactive), not only at broadcast time. In
 // standalone/electron there is no broadcast, so before this every "secret"
 // field was fully readable on the cell object in the client process. Now:
-//   - hidden fields read as undefined from client context + ONE loud warning
+//   - a hidden-field read from client context THROWS — dev and prod alike —
+//     naming cell + field + the two fixes (it used to warn once and read
+//     `undefined`, which client code then branched on as data)
 //   - dot-path excludes strip the nested value (same as the broadcast filter)
 //   - selectors see the filtered slice (no leak through computed reads)
 //   - server-side reads (bindCell — routes/effects) still see everything
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 import { cell } from "../src/state/cell-create.ts";
 import { bindCell } from "../src/state/cell-catalog.ts";
 import {
@@ -29,12 +31,40 @@ function withWarnCapture<T>(fn: () => T): { result: T; warnings: string[] } {
   }
 }
 
+/** The one outcome for a hidden read: a throw naming `cell.field`, and the
+ *  same throw on the second read. Run under BOTH dev and prod so the table
+ *  cannot fork again. */
+function assertHiddenThrows(id: string, read: () => unknown): string {
+  const g = globalThis as Record<string, unknown>;
+  const prev = g.__aioDev;
+  let msg = "";
+  try {
+    for (const dev of [true, false]) {
+      g.__aioDev = dev;
+      const { warnings } = withWarnCapture(() => {
+        const e = assertThrows(
+          read,
+          Error,
+          id,
+          `${dev ? "dev" : "prod"}: ${id}`,
+        );
+        assertThrows(read, Error, id, "second read throws too");
+        msg = e.message;
+      });
+      assertEquals(warnings.length, 0, "a throw, never a warning");
+    }
+  } finally {
+    g.__aioDev = prev;
+  }
+  return msg;
+}
+
 function reset(): void {
   _resetAioRuntime();
   _resetSignals();
 }
 
-Deno.test("B7: ui.exclude field reads undefined in client context + warns once", () => {
+Deno.test("B7: ui.exclude field read from client context THROWS naming cell.field + the fixes", () => {
   reset();
   const members = cell("b7-members", {
     state: { roster: ["alice"], pins: { alice: "1234" } },
@@ -48,18 +78,13 @@ Deno.test("B7: ui.exclude field reads undefined in client context + warns once",
     pins: { alice: "1234", bob: "9999" },
   });
 
-  const { warnings } = withWarnCapture(() => {
-    const m = members as unknown as { roster: string[]; pins?: unknown };
-    assertEquals(m.roster, ["alice", "bob"], "visible field stays live");
-    assertEquals(m.pins, undefined, "excluded field must read undefined");
-    assertEquals(m.pins, undefined, "second read also undefined");
-  });
-  const b7Warns = warnings.filter((w) => w.includes("b7-members.pins"));
-  assertEquals(b7Warns.length, 1, "exactly ONE warning per cell.field");
-  assert(
-    b7Warns[0]!.includes("ui.exclude"),
-    `warning names the cause: ${b7Warns[0]}`,
-  );
+  const m = members as unknown as { roster: string[]; pins?: unknown };
+  assertEquals(m.roster, ["alice", "bob"], "visible field stays live");
+  const msg = assertHiddenThrows("b7-members.pins", () => m.pins);
+  assert(msg.includes("ui.exclude"), `names the cause: ${msg}`);
+  assert(msg.includes("hasPins: boolean"), `names the fact-field fix: ${msg}`);
+  assert(msg.includes("server-side/async"), `names the server fix: ${msg}`);
+  assert(msg.includes("dev and prod"), `says it holds everywhere: ${msg}`);
   reset();
 });
 
@@ -93,20 +118,16 @@ Deno.test("B7: ui.include hides non-included fields on client reads", () => {
     visible: { include: ["publicCount"] },
   });
   bindCellReactive(stats);
-  const { warnings } = withWarnCapture(() => {
-    const s = stats as unknown as {
-      publicCount: number;
-      internalBuffer?: string;
-    };
-    assertEquals(s.publicCount, 1);
-    assertEquals(s.internalBuffer, undefined);
-  });
-  assert(
-    warnings.some((w) =>
-      w.includes("b7-stats.internalBuffer") && w.includes("ui.include")
-    ),
-    `warning names include-mode cause: ${warnings.join("|")}`,
+  const s = stats as unknown as {
+    publicCount: number;
+    internalBuffer?: string;
+  };
+  assertEquals(s.publicCount, 1);
+  const msg = assertHiddenThrows(
+    "b7-stats.internalBuffer",
+    () => s.internalBuffer,
   );
+  assert(msg.includes("ui.include"), `names include-mode cause: ${msg}`);
   reset();
 });
 
@@ -118,11 +139,10 @@ Deno.test('B7: ui "none" hides every field on client reads', () => {
     visible: "none",
   });
   bindCellReactive(internal);
-  const { result, warnings } = withWarnCapture(() =>
-    (internal as unknown as { queue?: unknown }).queue
+  assertHiddenThrows(
+    "b7-internal.queue",
+    () => (internal as unknown as { queue?: unknown }).queue,
   );
-  assertEquals(result, undefined);
-  assert(warnings.some((w) => w.includes("b7-internal.queue")));
   reset();
 });
 
@@ -144,31 +164,21 @@ Deno.test("B7: selectors in client context see the FILTERED slice (no leak)", ()
   });
   const v = vault as unknown as { leak: () => unknown; count: () => number };
   // Not leaking is half the contract; SAYING SO is the other half. This test
-  // asserted only the undefined — the same silent `undefined`-as-data trap the
-  // direct-read seam throws/warns about — so a selector was the one client read
-  // that could quietly fabricate an answer.
-  const { warnings } = withWarnCapture(() => {
-    assertEquals(v.count(), 2, "selector over visible fields works");
-    assertEquals(v.leak(), undefined, "selector cannot read excluded field");
-    assertEquals(v.leak(), undefined, "second read also undefined");
-  });
-  const leakWarns = warnings.filter((w) => w.includes("b7-vault.masterKey"));
-  assertEquals(
-    leakWarns.length,
-    1,
-    `a selector that READS a hidden field must report exactly like ` +
-      `cell.masterKey does — once. Saw: ${JSON.stringify(warnings)}`,
-  );
-  assert(leakWarns[0]!.includes("ui.exclude"), "and say why");
+  // once asserted only the undefined — the same silent `undefined`-as-data
+  // trap the direct-read seam throws about — so a selector was the one client
+  // read that could quietly fabricate an answer.
+  assertEquals(v.count(), 2, "selector over visible fields works");
+  const msg = assertHiddenThrows("b7-vault.masterKey", () => v.leak());
+  assert(msg.includes("ui.exclude"), "and say why");
   reset();
 });
 
-Deno.test('B7: a selector on a ui:"none" cell reports instead of computing over {}', () => {
+Deno.test('B7: a selector on a ui:"none" cell throws instead of computing over {}', () => {
   reset();
   // `filterSlice` hands a fully hidden cell an EMPTY object, and the selector
   // computed over it: `total()` returned NaN and `count()` returned 0 —
   // plausible numbers, entirely fabricated — while `cell.balance` on the very
-  // same cell throws in dev. One seam, two loudness rules.
+  // same cell threw. One seam, two loudness rules.
   const secret = cell("b7-none", {
     state: { balance: 100, items: [1, 2, 3] },
     methods: {},
@@ -186,26 +196,11 @@ Deno.test('B7: a selector on a ui:"none" cell reports instead of computing over 
     count: () => number;
     constant: () => number;
   };
-
+  assertHiddenThrows("b7-none.balance", () => c.total());
+  assertHiddenThrows("b7-none.items", () => c.count());
   const { warnings } = withWarnCapture(() => {
-    assertEquals(
-      Number.isNaN(c.total()),
-      true,
-      "the value is garbage either way — what matters is that it is reported",
-    );
-    c.count();
     assertEquals(c.constant(), 42, "a selector reading nothing hidden works");
   });
-  assertEquals(
-    warnings.filter((w) => w.includes("b7-none.balance")).length,
-    1,
-    `total() read a hidden field and must say so: ${JSON.stringify(warnings)}`,
-  );
-  assertEquals(
-    warnings.filter((w) => w.includes("b7-none.items")).length,
-    1,
-    `count() read a hidden field and must say so: ${JSON.stringify(warnings)}`,
-  );
   assertEquals(
     warnings.filter((w) => w.includes("b7-none.constant")).length,
     0,
@@ -306,13 +301,9 @@ Deno.test("B7: standalone wiring (bindCell → bindCellReactive) filters reads",
   bindCellReactive(vault);
 
   await (vault as unknown as { add: (v: string) => Promise<void> }).add("x");
-  const { result, warnings } = withWarnCapture(() => {
-    const v = vault as unknown as { items: string[]; apiSecret?: string };
-    assertEquals(v.items, ["x"], "visible field live through the local loop");
-    return v.apiSecret;
-  });
-  assertEquals(result, undefined, "secret hidden in standalone");
-  assert(warnings.some((w) => w.includes("b7-standalone.apiSecret")));
+  const v = vault as unknown as { items: string[]; apiSecret?: string };
+  assertEquals(v.items, ["x"], "visible field live through the local loop");
+  assertHiddenThrows("b7-standalone.apiSecret", () => v.apiSecret);
   reset();
 });
 
@@ -343,8 +334,9 @@ Deno.test("B7: client-scoped cells are exempt (state never leaves the client)", 
 // a field report #3 — the warning was the ONLY signal, and a warning does not
 // stop the read from type-checking as the field's declared type: a lock screen
 // asked "does a vault exist?", got `undefined` from a ui.exclude'd verifier, and
-// branched on it as data. Dev/test now throws at the read; prod still degrades.
-Deno.test("B7: a hidden read THROWS in dev, degrades in prod", () => {
+// branched on it as data. Dev threw first; prod kept degrading to `undefined`
+// — and prod is exactly where the warning scrolls past. One rule now: throw.
+Deno.test("B7: a hidden read THROWS in dev AND in prod — the mirrored fact field still reads", () => {
   reset();
   const seeds = cell("b7-dev-seeds", {
     state: { hasVault: true, vaultCheck: "secret" },
@@ -353,34 +345,14 @@ Deno.test("B7: a hidden read THROWS in dev, degrades in prod", () => {
   });
   bindCellReactive(seeds);
   const s = seeds as unknown as { hasVault: boolean; vaultCheck?: unknown };
-  const dev = (globalThis as Record<string, unknown>).__aioDev;
   try {
-    (globalThis as Record<string, unknown>).__aioDev = true;
-    let threw = "";
-    try {
-      s.vaultCheck;
-    } catch (e) {
-      threw = String(e);
-    }
-    assert(
-      threw.includes("b7-dev-seeds.vaultCheck"),
-      `dev must throw at the read, got: ${threw || "no throw"}`,
+    const msg = assertHiddenThrows(
+      "b7-dev-seeds.vaultCheck",
+      () => s.vaultCheck,
     );
-    assert(threw.includes("read from client context"), threw);
+    assert(msg.includes("read from client context"), msg);
     assertEquals(s.hasVault, true, "the mirrored non-secret fact still reads");
-
-    // Prod: the app keeps rendering — undefined + one warning, as before.
-    (globalThis as Record<string, unknown>).__aioDev = false;
-    const { warnings } = withWarnCapture(() => {
-      assertEquals(s.vaultCheck, undefined);
-      assertEquals(s.vaultCheck, undefined);
-    });
-    assertEquals(
-      warnings.filter((w) => w.includes("b7-dev-seeds.vaultCheck")).length,
-      1,
-    );
   } finally {
-    (globalThis as Record<string, unknown>).__aioDev = dev;
     reset();
   }
 });
@@ -445,7 +417,7 @@ Deno.test("B7: the shape probe never invokes a getter (no reads, no tracking)", 
   reset();
 });
 
-Deno.test("B7: a DEEP excluded field read is loud — dev throws, prod warns once", () => {
+Deno.test("B7: a DEEP excluded field read is loud — throws in dev and prod, spreads stay quiet", () => {
   // The alpha40 dev-throw covered top-level excludes; a dot-path exclude
   // still read as a clean `undefined` in every environment — the same
   // "undefined as data" trap, one level down. The stripped parent now carries
@@ -460,43 +432,15 @@ Deno.test("B7: a DEEP excluded field read is loud — dev throws, prod warns onc
   const list =
     (wallet as unknown as { accounts: Record<string, unknown>[] }).accounts;
 
-  // Dev: the read THROWS, naming the path.
-  const devBefore = (globalThis as Record<string, unknown>).__aioDev;
-  (globalThis as Record<string, unknown>).__aioDev = true;
-  let threw = "";
-  try {
-    void list[0]!.encSecKey;
-  } catch (e) {
-    threw = String(e);
-  } finally {
-    (globalThis as Record<string, unknown>).__aioDev = devBefore;
-  }
-  assert(threw.includes("b7-deep-loud.accounts.encSecKey"), threw);
-  assert(threw.includes("ui.exclude"), threw);
+  const msg = assertHiddenThrows(
+    "b7-deep-loud.accounts.encSecKey",
+    () => list[0]!.encSecKey,
+  );
+  assert(msg.includes("ui.exclude"), msg);
+  assert(msg.includes("hasEncSecKey: boolean"), `fix names the LEAF: ${msg}`);
 
   // Spreads / keys / JSON of the parent never trip it — only the named read.
   assertEquals(Object.keys(list[0]!), ["name"]);
   assertEquals(JSON.stringify(list[0]), '{"name":"a"}');
-
-  // Prod: warn once, undefined — degrade, never break the page.
-  const dev = (globalThis as Record<string, unknown>).__aioDev;
-  (globalThis as Record<string, unknown>).__aioDev = false;
-  try {
-    const { result, warnings } = withWarnCapture(() => {
-      const l = (wallet as unknown as { accounts: Record<string, unknown>[] })
-        .accounts;
-      const first = l[0]!.encSecKey;
-      const second = l[0]!.encSecKey;
-      return [first, second];
-    });
-    assertEquals(result, [undefined, undefined]);
-    assertEquals(
-      warnings.filter((w) => w.includes("accounts.encSecKey")).length,
-      1,
-      "one warning, not per-read spam",
-    );
-  } finally {
-    (globalThis as Record<string, unknown>).__aioDev = dev;
-  }
   reset();
 });

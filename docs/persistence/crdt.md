@@ -264,8 +264,80 @@ onSync(stats) {
 ## Persistence
 
 Sync cells are automatically excluded from the `aio_kv` snapshot. Their state
-lives in the SQLite op-log and snapshot tables. Non-sync cells use `aio_kv` as
-before.
+lives in the SQLite op-log (`sync_ops`) and snapshot table (`sync_snapshots`).
+Non-sync cells use `aio_kv` as before.
+
+At boot each sync cell is rebuilt **per cell, per op**: the compaction snapshot
+is loaded first, then every surviving op is folded through the composed reducer.
+One cell's replay never touches another cell's restore, and the KV restore of
+non-sync cells is finished before the replay starts.
+
+### Shape changes: `version` + `onMigrate`
+
+Every op row and every snapshot is stamped with the cell's declared `version` at
+the moment it was written. At boot the stamp is compared with the version the
+running build declares:
+
+| stored vs declared      | `onMigrate` declared | what replay does                                                                  |
+| ----------------------- | -------------------- | --------------------------------------------------------------------------------- |
+| equal                   | —                    | applied as-is                                                                     |
+| older                   | yes                  | ops fold in version order; at each version boundary `onMigrate(slice, from)` runs |
+| older                   | no                   | ops **skipped**, never applied blind; snapshot kept with a `stale` warning        |
+| newer (downgrade)       | —                    | ops **skipped**                                                                   |
+| reducer throws on an op | —                    | the op counts as failed                                                           |
+
+A cell with a skipped or failed op is **quarantined** — one decider, two
+outcomes:
+
+- **dev** (source run without `--prod`): boot is **refused** with an `AioError`
+  naming the cell, `failed/total`, the first error and the fix. Nothing is
+  written; the op-log and snapshot are intact on disk for a fixed build.
+- **prod** (`--prod` or a compiled binary): the cell runs at its **last
+  snapshot** (never `initialState`), `log.error` says so once, and **compaction
+  and the boot seed skip the cell** — its snapshot is never rewritten and its
+  ops never deleted. Writes made while quarantined are not durable across a
+  restart; fix the version/hook and restart.
+
+The quarantine exists because of a real incident (a field report, §3.1): a field
+was added to a sync cell, every replayed op threw, the cell came up at its
+defaults, and the next compaction wrote that emptiness into the snapshot while
+deleting the ops.
+
+Two warnings you will see before anything goes wrong:
+
+- `sync: cell "x" has a persisted op-log and no \`version\``— declare`version:
+  1` now, so the next shape change has a boundary to migrate across. Dev and
+  prod both warn (a refusal would break every existing sync app).
+- `migrate: sync cell "x" snapshot v1 → v2 but no onMigrate hook` — the same
+  `stale` outcome the KV path reports.
+
+Both appear in `am migrations` as `sync-unversioned` / `stale`; a quarantine
+appears as `sync-quarantined`.
+
+Rows written by an aio older than the stamp carry `-1` (unknown). They resolve
+to the version stamp of the build that last persisted (`__versions` in
+`aio_kv`), never to `0` — so an app that already declares `version: 3` does not
+re-run its hook over current data on the first boot after upgrading.
+
+Writing `onMigrate` for a sync cell: the hook receives the slice as it stood
+**after** the ops written under `from` were folded, and must return it in the
+declared shape. If the log holds ops from several older versions, the hook runs
+once per boundary; the ops of the next version then fold onto the migrated
+slice.
+
+### `persist` filters on a sync cell — refused
+
+The op-log is the durable home of a sync cell and an op **is** the method call's
+payload — raw. No `persist` filter can apply to it: a value that passed through
+a method payload is on disk regardless of any `exclude`, and `persist: "none"`
+would restore an empty cell. So `sync: true` together with any `persist` filter
+(`exclude`, `include`, `"none"`) is **refused at `cell()`**, and a
+`cellDefaults.persist` filter that would land on a sync cell is refused at
+`aio.run()` (`localFirst` adoption declines such a cell and says so). The error
+names the cell, the fields and the three ways out: remove the filter
+(`persist: "all"`), turn sync off for that cell, or keep the transient data in a
+separate non-sync cell. It used to be honoured on the compaction snapshot only
+and warned about — a filter kept in one of two write paths.
 
 ## Module Structure
 

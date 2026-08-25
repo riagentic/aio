@@ -37,7 +37,7 @@ function token(css: string, name: string, block: "light" | "dark"): string {
 Deno.test("theme: the accent is the app's own, and stable", () => {
   assertEquals(appHue("notekeeper"), appHue("notekeeper"));
   const hues = new Set(
-    ["notekeeper", "atomic", "a trading app", "a video tool", "ledger"].map(appHue),
+    ["notekeeper", "atomic", "quill", "tally", "ledger"].map(appHue),
   );
   assertEquals(hues.size, 5, "distinct apps get distinct colours");
 });

@@ -1,5 +1,5 @@
 // `ui.entry` must mean the same thing to the DEV server and to the BUILD
-// (rimote R-2). Before this, `config.ts` documented it, the dev server honoured
+// (R-2). Before this, `config.ts` documented it, the dev server honoured
 // it, and the bundler hardcoded `App.tsx` — so an app that set it rendered one
 // component under `deno task dev` and a different one (or failed) once
 // compiled. That is precisely the dev≠prod divergence the framework polices.
