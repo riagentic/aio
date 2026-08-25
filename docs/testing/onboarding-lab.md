@@ -138,6 +138,31 @@ screen there_, and the identity check re-proves the data-loss shape fixed in
 alpha59 (a binary must not take its name from its FILE). Opt-in: the image is ~4
 GB.
 
+**`deno task test:wine`** — the **named-pipe transport**, under Wine. On Windows
+a local Electron app (and `am`) talks to the host over `\\.\pipe\aio-<x>`
+instead of a TCP port (`src/server/win-pipe.ts`, `local-listen.ts`,
+`http-over-conn.ts`). No Windows machine exists in this project's CI, so the
+same `Dockerfile.windows-app` image is extended (`WITH_WIN_TOOLS=1`) with two
+real Windows runtimes, cached under `~/.cache/aio/tools/win`: the Windows
+`deno.exe` at the host's own version hosts the pipes
+(`tests/fixtures/wine-pipe/host.ts`, importing the real modules from the
+read-only mounted checkout), a Windows Node 22 LTS drives libuv's pipe client —
+`net.connect` and `http.request({ socketPath })`, the exact code path Electron
+main uses — through 1000 NDJSON lines including a 1 MB one, a streamed 20 MB
+body with its sha256 and `nosniff` headers, a 5 MB POST echo, 8 concurrent
+clients (the pre-created-next-instance pattern; no `ERROR_PIPE_BUSY`), and the
+negative control (a pipe nobody hosts fails fast, `ENOENT`); then `deno.exe`
+again through `connectLocal` — the `am` path. One summary line,
+`WINE PIPE: N passed, M failed`, with each failure naming the Win32 call and
+`GetLastError` code; `tests/wine-pipe-e2e.test.ts` (gated by `AIO_WINE_E2E=1`)
+asserts it. Wine's pipe emulation is not the NT kernel, so the claim is exactly
+"proven under Wine in CI; one pass on real Windows still pending". Not yet
+covered here: the compiled `.exe` booting in pipe mode under Wine and `am state`
+reaching it (a `windows-pipe` lab scenario) — Wine offers no `netstat` view of a
+pipe namespace and the compiled binary picks the pipe only for the electron
+client, which Wine cannot launch, so that half waits for a flag that forces the
+transport without a window.
+
 What **neither** proves, printed on every run rather than left implied:
 
 - Windows PowerShell **5.1** actually executing the scripts (only a syntax

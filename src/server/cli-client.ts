@@ -3,6 +3,7 @@
 // Same delta protocol as browser.ts but no DOM, no React — pure Deno runtime.
 
 import { applyPatches, enablePatches, type Patch } from "immer";
+import { connectLocal, type LocalConn } from "./local-listen.ts";
 import { backoffDelay } from "../protocol/transport-shared.ts";
 import {
   type AckPayload,
@@ -558,7 +559,7 @@ export function connectCliUDS<S>(
   );
   const _bound: CellDef[] = [];
   let state: S | null = null;
-  let conn: Deno.Conn | null = null;
+  let conn: LocalConn | null = null;
   let writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
   let closed = false;
   let retry = 0;
@@ -619,7 +620,7 @@ export function connectCliUDS<S>(
 
   function connect(): void {
     if (conn || closed) return;
-    Deno.connect({ transport: "unix", path: socketPath })
+    connectLocal(socketPath)
       .then((c) => {
         conn = c;
         writer = c.writable.getWriter();

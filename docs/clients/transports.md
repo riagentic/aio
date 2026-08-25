@@ -9,33 +9,38 @@ Two wires exist:
 
 - **TCP** — an HTTP(S) server on a port (page, modules, `routes`, `/__aio/*`)
   and a WebSocket on the same port (state, method calls, sync, serverFns).
-- **UDS** — a Unix domain socket in a `0700` directory
-  (`<lockDir>/<appId>.sock`) speaking NDJSON: the same v2 envelope as WS —
-  state, method calls, sync, serverFns, time travel. Only vitals stay WS-only
-  (refused loudly on UDS).
+- **UDS** — the local socket: a Unix domain socket in a `0700` directory
+  (`<lockDir>/<appId>.sock`) on Linux/macOS, a **named pipe**
+  (`\\.\pipe\aio-<lockKey>`) on Windows — speaking NDJSON: the same v2 envelope
+  as WS — state, method calls, sync, serverFns, time travel. Only vitals stay
+  WS-only (refused loudly on UDS). The name `uds` means "local socket" on every
+  OS; see [Windows](#windows-a-named-pipe-the-same-protocol).
 
-`transport: "auto"` (the default) picks UDS for **electron on Linux/macOS
-without `--expose`**, WS everywhere else. `--transport=ws` / `transport: "ws"`
-forces TCP; `--transport=uds` forces the socket.
+`transport: "auto"` (the default) picks the local socket for **electron without
+`--expose`** on Linux, macOS and Windows, WS everywhere else. `--transport=ws` /
+`transport: "ws"` forces TCP; `--transport=uds` forces the socket.
 
 ## The matrix
 
-`client` is `aio.run({ client })` (default `"electron"`). Windows has no UDS —
-every Windows row is the WS row (see [Windows](#windows-the-exception)).
+`client` is `aio.run({ client })` (default `"electron"`). On Windows every
+**UDS** cell below is a **named pipe** (`\\.\pipe\aio-<lockKey>`, and `…-http`
+for the second listener) — no filesystem entry, no TCP port (see
+[Windows](#windows-a-named-pipe-the-same-protocol)); every TCP cell is the same
+on both.
 
-| mode | client                               | linux / mac                                                                                    | windows       |
-| ---- | ------------------------------------ | ---------------------------------------------------------------------------------------------- | ------------- |
-| dev  | electron                             | **UDS** (state) + **UDS** `<appId>.http.sock` (page, modules, routes, `/__aio/*`) — **no TCP** | TCP 127.0.0.1 |
-| dev  | electron, `--port=N`                 | **UDS** (state) + **TCP** 127.0.0.1:N (page, modules, routes, trojan)                          | TCP 127.0.0.1 |
-| dev  | browser                              | TCP 127.0.0.1                                                                                  | TCP 127.0.0.1 |
-| dev  | server-only / cli                    | TCP 127.0.0.1                                                                                  | TCP 127.0.0.1 |
-| prod | electron, `dist/` readable           | **UDS** only — page from disk (`aio://`), **no HTTP handler at all**                           | TCP 127.0.0.1 |
-| prod | electron, `dist/` readable, `routes` | **UDS** (state) + **UDS** `<appId>.http.sock` (routes only) — **no TCP**                       | TCP 127.0.0.1 |
-| prod | electron, `--port=N`                 | UDS (state) + TCP 127.0.0.1:N (page, routes)                                                   | TCP 127.0.0.1 |
-| prod | electron, no `dist/` on disk         | UDS (state) + TCP 127.0.0.1 (page) — warns why                                                 | TCP 127.0.0.1 |
-| prod | browser                              | TCP 127.0.0.1                                                                                  | TCP 127.0.0.1 |
-| prod | server-only / cli                    | TCP 127.0.0.1                                                                                  | TCP 127.0.0.1 |
-| any  | any, `--expose`                      | TCP 0.0.0.0 (or `--host`), HTTPS unless `--no-tls`; transport is WS                            | same          |
+| mode | client                               | linux / mac                                                                                    | windows                                                           |
+| ---- | ------------------------------------ | ---------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| dev  | electron                             | **UDS** (state) + **UDS** `<appId>.http.sock` (page, modules, routes, `/__aio/*`) — **no TCP** | **named pipe** (state) + **named pipe** `-http` — **no TCP port** |
+| dev  | electron, `--port=N`                 | **UDS** (state) + **TCP** 127.0.0.1:N (page, modules, routes, trojan)                          | named pipe (state) + TCP 127.0.0.1:N                              |
+| dev  | browser                              | TCP 127.0.0.1                                                                                  | TCP 127.0.0.1                                                     |
+| dev  | server-only / cli                    | TCP 127.0.0.1                                                                                  | TCP 127.0.0.1                                                     |
+| prod | electron, `dist/` readable           | **UDS** only — page from disk (`aio://`), **no HTTP handler at all**                           | **named pipe** only — **no TCP port**                             |
+| prod | electron, `dist/` readable, `routes` | **UDS** (state) + **UDS** `<appId>.http.sock` (routes only) — **no TCP**                       | named pipe (state) + named pipe `-http` — **no TCP**              |
+| prod | electron, `--port=N`                 | UDS (state) + TCP 127.0.0.1:N (page, routes)                                                   | named pipe (state) + TCP 127.0.0.1:N                              |
+| prod | electron, no `dist/` on disk         | UDS (state) + TCP 127.0.0.1 (page) — warns why                                                 | named pipe (state) + TCP 127.0.0.1 (page)                         |
+| prod | browser                              | TCP 127.0.0.1                                                                                  | TCP 127.0.0.1                                                     |
+| prod | server-only / cli                    | TCP 127.0.0.1                                                                                  | TCP 127.0.0.1                                                     |
+| any  | any, `--expose`                      | TCP 0.0.0.0 (or `--host`), HTTPS unless `--no-tls`; transport is WS                            | same                                                              |
 
 "No `dist/` on disk" is the compiled-binary case: the bundle is inside the
 binary's embedded VFS, which Electron cannot open, so the page still needs a
@@ -69,37 +74,51 @@ function, pinned as a table by `tests/zero-port-decision.test.ts`).
   (aio://app/<path>) — no TCP port`.
 
 **The opt-out is a named port.** Anything that needs a URL keeps one: a browser
-client, `--expose`, the thin client, prod without `dist/`, Windows — and an app
-whose port was named: `--port=N`, `AIO_PORT`, or `aio.run({ port })`. A route
-that **another process** must reach over TCP (a webhook receiver, a `curl`
-probe, a browser tab beside the window) is exactly the case for naming the port,
-and boot says so: `port N named explicitly — keeping a TCP listener`.
+client, `--expose`, the thin client, prod without `dist/` — and an app whose
+port was named: `--port=N`, `AIO_PORT`, or `aio.run({ port })`. A route that
+**another process** must reach over TCP (a webhook receiver, a `curl` probe, a
+browser tab beside the window) is exactly the case for naming the port, and boot
+says so: `port N named explicitly — keeping a TCP listener`.
 
 `--zero-port` (the dev opt-in before this was the default) is still accepted as
 a no-op — scripts pass it — and prints one info line.
 
-## Windows: the exception
+## Windows: a named pipe, the same protocol
 
-Deno has no Unix-socket listener on Windows: `resolveTransport()` picks WS
-there, so a Windows electron app is always the TCP row — a loopback-bound
-(`127.0.0.1`) port, page and state over HTTP/WS — and the boot line says why in
-one clause
-(`running (dev, electron, tcp — Windows has no Unix-socket
-listener)`).
-Precisely what Deno's own declarations (Deno 2.9) say: the fetch-proxy
-declaration states that a Unix domain socket is "_not supported on Windows_",
-and the listener is built on a Unix-only primitive; aio does not attempt it
-there. Electron's main process (Node) has no `AF_UNIX` on Windows either — what
-it has is **named pipes** (`\\.\pipe\<name>`), native and portless.
+Deno has no Unix-socket listener on Windows, so the local socket there is a
+**named pipe hosted by Deno**: `\\.\pipe\aio-<lockKey>` for the NDJSON state
+transport and `\\.\pipe\aio-<lockKey>-http` for the page/route handler
+(`src/server/win-pipe.ts`, driven through `kernel32` directly — overlapped
+`ReadFile`/`WriteFile`, the blocking waits on a pool thread, never the event
+loop). Everything above the socket is the code Linux runs: the NDJSON envelope,
+the control plane, the `aio://` page over the socket. The one piece Windows adds
+is a minimal HTTP/1.1 server over the pipe (`src/server/http-over-conn.ts`),
+because `Deno.serve({ path })` has no pipe form; it is unit-tested on Linux over
+a Unix socket, so both OSs run the same parser and the same streaming writer.
 
-What would close the gap without waiting for Deno: reverse the roles on Windows
-— the Electron shell hosts the named pipe (`net.createServer().listen`), and
-Deno dials it by opening the pipe path as a file (`Deno.open` returns a duplex
-byte stream; no FFI). The NDJSON envelope, the control plane and the
-page-over-socket path stay identical; only _who listens_ changes. It is on the
-hardware-week list because it needs a real Windows machine to prove — the
-shipped `.exe` is exercised under Wine, which does not emulate named pipes
-faithfully.
+- **Electron connects natively** — Node's `net.connect(path)` and
+  `http.request({ socketPath })` accept `\\.\pipe\…` (libuv). No special case in
+  the shell.
+- **`am` connects natively too** — `am status`, `am surface`, `am trigger` read
+  `socketPath` from the lock and open the pipe; a control request is a `ctl`
+  frame, exactly as on a Unix socket.
+- **No filesystem, no port.** A pipe is a kernel name that vanishes when its
+  last handle closes: there is nothing to unlink, nothing to `chmod`, and no
+  stale-socket cleanup (`isPipePath()` gates every such step).
+- **ACL = the creating user.** The pipe is created with an explicit DACL
+  (owner + LocalSystem, nothing else — the Win32 default would grant read access
+  to Everyone), the same door a `0700` socket directory is on Unix. Remote
+  clients are rejected at the pipe.
+- **A second instance fails at the bind** (`FILE_FLAG_FIRST_PIPE_INSTANCE`), as
+  a Unix bind does — one pipe name, one process.
+
+The boot line reads `running (dev, electron, pipe — no TCP port)` and
+`transport: named pipe at \\.\pipe\aio-<x>`. The WS + TCP path remains for
+exactly what needs a URL: `--transport=ws`, a browser client, `--expose`.
+
+**Status:** proven under Wine in CI (`tests/wine-pipe-e2e.test.ts` — the pipe
+server, overlapped I/O, the HTTP-over-pipe streaming path, concurrent clients,
+the named errors); one pass on real Windows is still pending.
 
 ## `routes` vs `serverFn` — what each costs you
 

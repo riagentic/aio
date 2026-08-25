@@ -4,6 +4,7 @@
 // Prevents multiple instances from corrupting shared resources
 
 import { dirname, join, resolve } from "@std/path";
+import { connectLocal } from "./local-listen.ts";
 import { appDirs, appHome } from "./app-dirs.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { SHUTDOWN_BUDGET_MS } from "./shutdown-budget.ts";
@@ -343,12 +344,13 @@ export async function isPortInUse(port: number): Promise<boolean> {
   }
 }
 
-/** Check if a Unix Domain Socket has something listening — used to detect
- *  zombie UDS-only instances (prod/electron skipHttp) whose process is alive
- *  but whose listener died. Mirrors isPortInUse for the socket transport. */
+/** Check if a local socket (Unix socket, or a named pipe on windows) has
+ *  something listening — used to detect zombie socket-only instances
+ *  (prod/electron skipHttp) whose process is alive but whose listener died.
+ *  Mirrors isPortInUse for the socket transport. */
 export async function isSocketAlive(socketPath: string): Promise<boolean> {
   try {
-    const conn = await Deno.connect({ transport: "unix", path: socketPath });
+    const conn = await connectLocal(socketPath);
     conn.close();
     return true;
   } catch {

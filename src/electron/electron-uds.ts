@@ -104,8 +104,9 @@ if (USE_PROTOCOL) {
   }]);
 }
 
-// One request to the app's HTTP handler over its Unix socket. Node's own
-// http.request speaks this natively (a socketPath option), so the page, its
+// One request to the app's HTTP handler over its local socket — a Unix socket,
+// or a named pipe (\\\\.\\pipe\\...) on Windows; Node's own http.request speaks
+// both natively (the socketPath option, libuv underneath), so the page, its
 // modules and every asset arrive through the SAME handler an http:// fetch
 // would have reached — headers, status and bytes intact, nothing re-encoded.
 //

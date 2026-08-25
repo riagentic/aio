@@ -2,7 +2,7 @@
 import { log } from "../diagnostics/logger-api.ts";
 
 /** Framework version — printed by --version, checked in tests */
-export const VERSION = "1.0.0-alpha66";
+export const VERSION = "1.0.0-alpha67";
 
 /** What `--version` prints: what this artifact IS, and what it was built with.
  *
@@ -299,11 +299,11 @@ Flags:
   --no-data-migrate Skip moving a legacy data layout into ~/.<appId>
   --width=N        Initial window width (default: 800)
   --height=N       Initial window height (default: 600)
-  --transport=X    Transport: 'uds' or 'ws' (default: auto — UDS for electron on linux/mac)
+  --transport=X    Transport: 'uds' (the local socket — a Unix socket, a named
+                   pipe on Windows) or 'ws' (default: auto — uds for a local electron app)
   --zero-port      No-op (accepted): zero TCP ports is already the default for
-                   a local electron app on Linux/macOS — page, modules and
-                   routes go over the socket. Windows has no Unix-socket
-                   listener and keeps a loopback TCP port
+                   a local electron app — page, modules and routes go over the
+                   socket (a named pipe on Windows)
   --open           Open the app in your browser after boot (default: OFF — the
                    URL is printed; a tab aio opens is one it cannot close)
   --isolate=a,b    Only activate the specified cells
