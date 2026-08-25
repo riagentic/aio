@@ -113,3 +113,20 @@ Deno.test("trojan dispatch: a client index as the type is refused, not acked", a
   assert(msg.includes("nav:setStatusBarMessage"), msg); // and what to type
   assertEquals(dispatched.length, 0, "nothing may be dispatched");
 });
+
+Deno.test("trojan dispatch: the method's return value is in the reply (`result`), absent when undefined", async () => {
+  const { deps, failNext } = makeDeps();
+  failNext(() => Promise.resolve({ balance: 42, tags: ["a"] }));
+  const r = await dispatch(deps, { type: "counter:inc" });
+  assertEquals(r.status, 200);
+  assertEquals(r.body, { ok: true, result: { balance: 42, tags: ["a"] } });
+
+  failNext(() => Promise.resolve(undefined));
+  const none = await dispatch(deps, { type: "counter:inc" });
+  assertEquals(none.body, { ok: true });
+
+  // A value JSON cannot carry is flagged, never silently turned into null.
+  failNext(() => Promise.resolve(() => 1));
+  const fn = await dispatch(deps, { type: "counter:inc" });
+  assertEquals(fn.body, { ok: true, resultDropped: true });
+});

@@ -124,7 +124,7 @@ APPIMG=$(find "$INST" -maxdepth 4 -path '*/versions/*' -name '*.AppImage' 2>/dev
 [ -n "$APPIMG" ] || die "no AppImage under $INST"
 ok "installed $APPIMG"
 # The installed name must BE the app's name. Splitting at the first hyphen
-# turned demo-electron into "demo" and would have made llama-master "llama".
+# turned demo-electron into "demo" and would have made chat-app "chat".
 # The installed FILE must be named after the app — not the app plus a version.
 # A deno-compiled binary takes its identity from its own file name at runtime,
 # so `<app>-<version>` made the app call itself `app-1-0-0` and write to

@@ -88,7 +88,7 @@ import { cmdBackup, cmdData, cmdRestore } from "./am/am-cmd-data.ts";
 import { cmdPin } from "./am/am-cmd-pin.ts";
 import { cmdTheme } from "./am/am-cmd-theme.ts";
 import { cmdCost } from "./am/am-cmd-cost.ts";
-import { parseGlobalFlags } from "./am/am-utils.ts";
+import { parseGlobalFlags, resolveAmAppId, targetHome } from "./am/am-utils.ts";
 
 // ── Command map ────────────────────────────────────────────
 
@@ -206,6 +206,15 @@ async function main(): Promise<void> {
   if (flags.error) {
     outError(flags.error, detectMode(flags));
     Deno.exit(1);
+  }
+  // `--home=<dir>` targets the instance running from that data home. Bound
+  // here, once, before any command resolves a lock — see `targetHome`.
+  if (flags.home !== undefined) {
+    if (!flags.home) {
+      outError("--home needs a directory: --home=<dir>", detectMode(flags));
+      Deno.exit(1);
+    }
+    targetHome(resolveAmAppId(flags.app), flags.home);
   }
   // `am <anything> --help` answers with usage, never with a command result.
   if (flags.help) {

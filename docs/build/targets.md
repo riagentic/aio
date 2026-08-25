@@ -130,9 +130,9 @@ target freely and name its `kind`:
 ```jsonc
 "build": {
   "targets": {
-    "agent":   { "kind": "electron",   "entry": "src/agent/app.ts",   "name": "rimote-agent" },
-    "control": { "kind": "electron",   "entry": "src/control/app.ts", "name": "rimote-control" },
-    "relay":   { "kind": "server-app", "entry": "src/server/app.ts",  "name": "rimote-server" }
+    "agent":   { "kind": "electron",   "entry": "src/agent/app.ts",   "name": "remote-agent" },
+    "control": { "kind": "electron",   "entry": "src/control/app.ts", "name": "remote-control" },
+    "relay":   { "kind": "server-app", "entry": "src/server/app.ts",  "name": "remote-server" }
   },
   "out": "dist"
 }

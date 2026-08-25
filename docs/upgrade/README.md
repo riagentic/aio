@@ -2,16 +2,29 @@
 
 One guide per version migration. Find your current version and follow the steps.
 
+From alpha65 on, every guide ends with a **`## Retire`** section: the
+workarounds an app may still carry for bugs that are now fixed, each with the
+version that fixed it — so "nothing told us we could delete it" stops being a
+reason to keep one (gated by `deno task check:docs`).
+
 ## restructure (alpha27+)
 
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha65 → alpha66](from-alpha65-to-alpha66.md) — **three breaks**: a local
+  Electron app binds no TCP port by default (`--port=N` opts out), hidden-field
+  reads throw in prod too, `sync` + a `persist` filter is refused. Routes are
+  served through `aio://`, sync cells carry a `version`, the lock follows the
+  home. Retire: the op-log guard test, the no-I/O scanner, the graph/boot-smoke
+  tests, the `__aio.methods` guard.
 - [alpha64 → alpha65](from-alpha64-to-alpha65.md) — nothing breaks in your app
   code: aio stops opening your browser (it prints the URL; `--open` opts in), an
   Electron app never silently becomes a browser tab, `am` refuses instead of
   guessing port 8000, and an exposed app's certificate re-issues itself when the
-  machine changes network. New: `AIO_PORT`, `am trust`, `--zero-port`.
+  machine changes network. New: `AIO_PORT`, `am trust`, `--zero-port`. First
+  guide with a `## Retire` list (bridge returns, worker returns, static
+  subtrees, UDS throttle).
 - [alpha63 → alpha64](from-alpha63-to-alpha64.md) — nothing breaks in your app
   code: `am` learned that a repo can hold several apps (`am start` means the
   project, `am start <label>` means one of it), `ui.theme: "none"` now really

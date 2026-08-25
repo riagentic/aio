@@ -55,7 +55,7 @@ function createTestDb(): DB {
 const hlc = (phys: number, cnt: number, node = "n1"): HLC =>
   [phys, cnt, node] as HLC;
 
-const silentLog = { info: () => {}, error: () => {} };
+const silentLog = { info: () => {}, error: () => {}, warn: () => {} };
 
 // A tiny composed reducer over a `members` sync cell (add/remove by id).
 type S = {

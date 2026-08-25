@@ -14,6 +14,7 @@
 import type { Result } from "./am-types.ts";
 import { readPid } from "./am-utils.ts";
 import { isProcessAlive } from "../server/single-instance-lock.ts";
+import { CLIENT_REPLY_TIMEOUT_MS } from "../server/uds.ts";
 import {
   appKeyPath,
   controlKeyPath,
@@ -21,7 +22,33 @@ import {
 } from "../server/app-key.ts";
 import { udsRequest } from "./am-uds.ts";
 
-export const FETCH_TIMEOUT = 5000;
+/** `am`'s transport timeout. Strictly LONGER than the server's own wait for a
+ *  client reply, so that when a client stalls the server's NAMED reason (which
+ *  index, why) arrives instead of a bare "timeout connecting". The two used to
+ *  be equal (5000/5000) and raced — the server always lost by a millisecond. */
+export const FETCH_TIMEOUT = 8000;
+if (FETCH_TIMEOUT <= CLIENT_REPLY_TIMEOUT_MS) {
+  throw new Error(
+    `am FETCH_TIMEOUT (${FETCH_TIMEOUT}ms) must exceed the server's ` +
+      `CLIENT_REPLY_TIMEOUT_MS (${CLIENT_REPLY_TIMEOUT_MS}ms) — equal timeouts ` +
+      `race and the server's reason never surfaces`,
+  );
+}
+
+/** Resolve `--timeout=<ms>` against the floor above; a caller-chosen wait
+ *  below the server's own wait would recreate the race, so it is refused. */
+export function clientTimeout(flag?: number): number {
+  if (flag === undefined) return FETCH_TIMEOUT;
+  if (flag <= CLIENT_REPLY_TIMEOUT_MS) {
+    throw new Error(
+      `--timeout=${flag} is not above the server's client-reply wait ` +
+        `(${CLIENT_REPLY_TIMEOUT_MS}ms); use at least ${
+          CLIENT_REPLY_TIMEOUT_MS + 1
+        }`,
+    );
+  }
+  return flag;
+}
 
 /** The socket this app answers control requests on, or undefined when it has
  *  none (a WS-transport app, or nothing running under that id).
@@ -442,6 +469,7 @@ export async function trojanPost(
   route: string,
   body?: unknown,
   appId?: string,
+  timeout = FETCH_TIMEOUT,
 ): Promise<Result> {
   const sock = controlSocket(appId);
   if (sock) {
@@ -458,7 +486,7 @@ export async function trojanPost(
         },
         ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
       },
-      FETCH_TIMEOUT,
+      timeout,
       appId,
     );
     if (r) return r;
@@ -479,7 +507,7 @@ export async function trojanPost(
         ...creds.headers,
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(FETCH_TIMEOUT),
+      signal: AbortSignal.timeout(timeout),
     });
     if (!resp.ok) {
       const text = await resp.text();

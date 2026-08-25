@@ -106,7 +106,7 @@ Deno.test({
     const handle = mount(root, App);
     // "Nothing" is a comment placeholder holding the position, not the absence
     // of any node: `<Show>` is exactly the shape that must come back WHERE IT
-    // WAS WRITTEN rather than at the end of its parent (rimote R-10). Null
+    // WAS WRITTEN rather than at the end of its parent (R-10). Null
     // children have paid this same one-comment cost since AIO-107, and SSR
     // emits it too, so this is the framework agreeing with itself.
     assertEquals(root.innerHTML, "<!---->");

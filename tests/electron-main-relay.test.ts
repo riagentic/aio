@@ -23,6 +23,7 @@ const ctrl = net.connect(process.env.AIO_CTRL);
 ctrl.setEncoding('utf8');
 let cbuf = '';
 const wcH = {}, ipcH = {}, appH = {};
+let protoHandler = null;
 function ev(o) { try { ctrl.write(JSON.stringify(o) + '\\n'); } catch {} }
 ctrl.on('data', (d) => {
   cbuf += d;
@@ -32,9 +33,37 @@ ctrl.on('data', (d) => {
     if (!l) continue;
     const m = JSON.parse(l);
     try {
-      if (m.cmd === 'wc') for (const f of (wcH[m.event] || [])) f(...(m.args || []));
+      if (m.cmd === 'wc' && m.event === 'will-navigate') {
+        // Chromium hands will-navigate a cancellable event; report the verdict.
+        let prevented = false;
+        const evt = { preventDefault: () => { prevented = true; } };
+        for (const f of (wcH['will-navigate'] || [])) f(evt, m.url);
+        ev({ ev: 'navigate', id: m.id, url: m.url, prevented });
+      }
+      else if (m.cmd === 'wc') for (const f of (wcH[m.event] || [])) f(...(m.args || []));
       else if (m.cmd === 'ipc') for (const f of (ipcH[m.channel] || [])) f({}, m.arg);
       else if (m.cmd === 'app') for (const f of (appH[m.event] || [])) f();
+      else if (m.cmd === 'proto') {
+        // Drive the captured protocol.handle('aio') callback like Chromium
+        // would, and report what came back: status, headers, whether the body
+        // was a STREAM (resolved on headers) and its bytes.
+        (async () => {
+          try {
+            const req = new Request(m.url, { method: m.method || 'GET', body: m.body || undefined });
+            const t0 = Date.now();
+            const res = await protoHandler(req);
+            const resolvedAt = Date.now();
+            const isStream = res.body instanceof ReadableStream;
+            const bytes = new Uint8Array(await res.arrayBuffer());
+            const endedAt = Date.now();
+            let b64 = '';
+            for (let i = 0; i < bytes.length; i += 0x8000) b64 += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+            ev({ ev: 'proto', id: m.id, status: res.status, headers: Object.fromEntries(res.headers), isStream, t0, resolvedAt, endedAt, body: btoa(b64) });
+            ev({ ev: 'done', id: m.id });
+          } catch (e) { ev({ ev: 'done', id: m.id, error: String(e && e.stack || e) }); }
+        })();
+        continue;
+      }
       ev({ ev: 'done', id: m.id });
     } catch (e) { ev({ ev: 'done', id: m.id, error: String(e) }); }
   }
@@ -64,13 +93,32 @@ module.exports = {
   BrowserWindow,
   Menu: { setApplicationMenu: () => {} },
   ipcMain: { on: (c, fn) => { (ipcH[c] = ipcH[c] || []).push(fn); } },
-  protocol: { registerSchemesAsPrivileged: () => {}, handle: () => {} },
+  protocol: {
+    registerSchemesAsPrivileged: (l) => ev({ ev: 'privileges', privileges: l[0].privileges }),
+    handle: (_scheme, fn) => { protoHandler = fn; },
+  },
   shell: { openExternal: (u) => ev({ ev: 'openExternal', url: u }) },
   nativeImage: { createFromDataURL: () => ({}) },
 };
 `;
 
-type Ev = { ev: string; channel?: string; arg?: string; id?: number };
+type Ev = {
+  ev: string;
+  channel?: string;
+  arg?: string;
+  id?: number;
+  error?: string;
+  status?: number;
+  headers?: Record<string, string>;
+  isStream?: boolean;
+  url?: string;
+  prevented?: boolean;
+  t0?: number;
+  resolvedAt?: number;
+  endedAt?: number;
+  body?: string;
+  privileges?: Record<string, boolean>;
+};
 
 const encoder = new TextEncoder();
 
@@ -133,7 +181,10 @@ function rawServer(path: string) {
 }
 
 /** Boots the REAL generated main.cjs under a stub Electron. */
-async function startMain(sockPath: string, opts: { title?: string } = {}) {
+async function startMain(
+  sockPath: string,
+  opts: { title?: string; httpSocketPath?: string; baseDir?: string } = {},
+) {
   const dir = await Deno.makeTempDir({ prefix: "aio-emain-" });
   await Deno.mkdir(join(dir, "node_modules", "electron"), { recursive: true });
   await Deno.writeTextFile(
@@ -154,6 +205,8 @@ async function startMain(sockPath: string, opts: { title?: string } = {}) {
     join(dir, "main.cjs"),
     electronMainScriptUDS("http://127.0.0.1:1/", sockPath, {
       title: opts.title ?? "harness",
+      httpSocketPath: opts.httpSocketPath,
+      baseDir: opts.baseDir,
     }),
   );
 
@@ -197,10 +250,13 @@ async function startMain(sockPath: string, opts: { title?: string } = {}) {
   })();
 
   let seq = 0;
-  async function cmd(o: Record<string, unknown>): Promise<void> {
+  async function cmd(o: Record<string, unknown>): Promise<number> {
     const id = ++seq;
     await writer.write(encoder.encode(JSON.stringify({ ...o, id }) + "\n"));
     await waitFor(() => events.some((e) => e.ev === "done" && e.id === id));
+    const done = events.find((e) => e.ev === "done" && e.id === id)!;
+    if (done.error) throw new Error(`main.cjs command failed: ${done.error}`);
+    return id;
   }
   async function waitFor(pred: () => boolean, ms = 5000): Promise<void> {
     const t0 = Date.now();
@@ -232,6 +288,19 @@ async function startMain(sockPath: string, opts: { title?: string } = {}) {
     /** The renderer's own "my listeners are registered" signal. */
     rendererReady: () => cmd({ cmd: "ipc", channel: "__aio:ready" }),
     finishLoad: () => cmd({ cmd: "wc", event: "did-finish-load" }),
+    /** What the shell decides about a navigation the page requested. */
+    async navigate(url: string) {
+      const id = await cmd({ cmd: "wc", event: "will-navigate", url });
+      const r = events.find((e) => e.ev === "navigate" && e.id === id)!;
+      return r.prevented as boolean;
+    },
+    /** Chromium reports the main-frame navigation as failed (code -3 = aborted). */
+    failLoad: (code = -3, url = "aio://app/") =>
+      cmd({
+        cmd: "wc",
+        event: "did-fail-load",
+        args: [{}, code, code === -3 ? "ERR_ABORTED" : "ERR_FAILED", url, true],
+      }),
     startNavigation: () =>
       cmd({
         cmd: "wc",
@@ -240,6 +309,20 @@ async function startMain(sockPath: string, opts: { title?: string } = {}) {
       }),
     send: (json: string) =>
       cmd({ cmd: "ipc", channel: "__aio:send", arg: json }),
+    /** One request through the captured protocol.handle('aio') callback. */
+    async proto(url: string, method = "GET", body?: string) {
+      const id = await cmd({ cmd: "proto", url, method, body });
+      const r = events.find((e) => e.ev === "proto" && e.id === id)!;
+      return {
+        status: r.status!,
+        headers: r.headers!,
+        isStream: r.isStream!,
+        t0: r.t0!,
+        resolvedAt: r.resolvedAt!,
+        endedAt: r.endedAt!,
+        bytes: Uint8Array.from(atob(r.body!), (c) => c.charCodeAt(0)),
+      };
+    },
     async close() {
       try {
         await writer.close();
@@ -272,15 +355,21 @@ async function withHarness(
   fn: (
     srv: ReturnType<typeof rawServer>,
     main: Awaited<ReturnType<typeof startMain>>,
+    dir: string,
   ) => Promise<void>,
+  opts: { httpSocket?: boolean; baseDir?: (dir: string) => Promise<string> } =
+    {},
 ): Promise<void> {
   const dir = await Deno.makeTempDir({ prefix: "aio-esock-" });
   const sockPath = join(dir, "s.sock");
   const srv = rawServer(sockPath);
-  const main = await startMain(sockPath);
+  const main = await startMain(sockPath, {
+    httpSocketPath: opts.httpSocket ? join(dir, "http.sock") : undefined,
+    baseDir: opts.baseDir ? await opts.baseDir(dir) : undefined,
+  });
   try {
     await main.waitFor(() => srv.conns() > 0);
-    await fn(srv, main);
+    await fn(srv, main, dir);
   } finally {
     await main.close();
     srv.close();
@@ -395,6 +484,82 @@ Deno.test("electron main: frames during a reload are not silently dropped", asyn
       }`,
     );
     assert(after.includes("state"), "the fresh document must get a snapshot");
+  });
+});
+
+// ── The dev reload on the zero-port page ────────────────────────────────────
+//
+// Measured with CDP on a real window: an edit sent `reload`, the renderer
+// called location.reload(), Chromium answered net::ERR_ABORTED before the
+// request ever reached protocol.handle, and the old page stayed on screen with
+// `am surface` timing out forever. Two causes, both pinned here: the
+// will-navigate guard compared URL.origin — "null" for a custom scheme — so
+// the app's own root looked foreign; and a navigation that never committed
+// left rendererReady false on a document that had already signalled it.
+Deno.test("electron aio://: a reload of the app's own root is NOT vetoed; foreign URLs are", async () => {
+  await withHarness(async (_srv, main) => {
+    assert(
+      main.events.some((e) => e.ev === "loadURL" && e.url === "aio://app/"),
+      "zero-port shell: the page is aio://app/",
+    );
+    await main.rendererReady();
+    assertEquals(
+      await main.navigate("aio://app/"),
+      false,
+      "root reload passes",
+    );
+    assertEquals(
+      await main.navigate("aio://app/settings"),
+      true,
+      "in-app route → relayed, not navigated",
+    );
+    assertEquals(
+      await main.navigate("aio://evil/"),
+      true,
+      "another host on the scheme is not this app",
+    );
+    assertEquals(
+      await main.navigate("https://example.com/"),
+      true,
+      "external → system browser",
+    );
+    assert(
+      main.events.some((e) =>
+        e.ev === "openExternal" && e.url === "https://example.com/"
+      ),
+      "external http(s) goes to the system browser",
+    );
+    assert(
+      main.channels().includes("__aio:navigate"),
+      "an in-app path is relayed to the page as a route",
+    );
+  }, { httpSocket: true });
+});
+
+Deno.test("electron main: an aborted navigation gives the old document its relay back", async () => {
+  await withHarness(async (srv, main) => {
+    await srv.writeLine('{"v":2,"t":"state","d":{"n":1}}');
+    await main.rendererReady();
+    await main.finishLoad();
+    await main.waitFor(() => main.msgs().length >= 1);
+
+    await main.startNavigation(); // location.reload() began …
+    await main.failLoad(-3); // … and Chromium aborted it: same document, no new __aio:ready
+    const before = main.msgs().length;
+    await srv.writeLine('{"v":2,"t":"ui-surface","d":{"id":"q1"}}');
+    await main.waitFor(() => main.msgs().length > before, 1500).catch(() => {});
+    const after = main.msgs().slice(before).map(kindOf);
+    assert(
+      after.includes("ui-surface"),
+      `a frame after an aborted navigation must still reach the living document — got ${
+        JSON.stringify(after)
+      }`,
+    );
+    assert(
+      main.stderr.join("").includes("failed (-3 ERR_ABORTED)") ||
+        main.stdout.join("").includes("failed (-3 ERR_ABORTED)"),
+      "the aborted navigation is said out loud",
+    );
   });
 });
 
@@ -714,4 +879,195 @@ Deno.test("electron main: relay fuzz — nothing lost, reordered or corrupted", 
       await Deno.remove(dir, { recursive: true }).catch(() => {});
     }
   }
+});
+
+// ── The aio:// scheme: the app's routes, through the shell, STREAMED ───────
+//
+// field report §1: a wallet shows artwork with `<img src="/nft-image/<sha>">` served
+// by a custom route — up to 100 MB each. On the zero-port page that URL is
+// `aio://app/nft-image/<sha>`, and the protocol handler proxies it to the
+// app's HTTP handler over the socket. Three things must hold: status and
+// headers pass through untouched (nosniff, content-type), the bytes are
+// binary-identical, and the body is a STREAM — the handler resolves on
+// headers, before the app has finished writing, so nothing is buffered.
+
+/** The app's HTTP handler on a unix socket: streams `chunks` with a pause
+ *  between them, records when the last one was written, echoes POST bodies. */
+function streamingHttpServer(
+  path: string,
+  chunks: Uint8Array[],
+  gapMs: number,
+) {
+  const marks = { lastWriteAt: 0, firstWriteAt: 0 };
+  const server = Deno.serve(
+    { path, onListen: () => {} },
+    async (req) => {
+      const u = new URL(req.url);
+      if (req.method === "POST") {
+        return new Response("echo:" + await req.text(), { status: 201 });
+      }
+      if (u.pathname === "/gone") return new Response(null, { status: 204 });
+      if (!u.pathname.startsWith("/nft-image/")) {
+        return new Response("Not Found", { status: 404 });
+      }
+      const body = new ReadableStream<Uint8Array>({
+        async start(ctrl) {
+          for (let i = 0; i < chunks.length; i++) {
+            if (i > 0) await new Promise((r) => setTimeout(r, gapMs));
+            const now = Date.now();
+            if (i === 0) marks.firstWriteAt = now;
+            marks.lastWriteAt = now;
+            ctrl.enqueue(chunks[i]!);
+          }
+          ctrl.close();
+        },
+      });
+      return new Response(body, {
+        status: 200,
+        headers: {
+          "content-type": "image/png",
+          "x-content-type-options": "nosniff",
+          "cache-control": "private, max-age=31536000, immutable",
+        },
+      });
+    },
+  );
+  return { marks, close: () => server.shutdown() };
+}
+
+function randomChunks(n: number, size: number): Uint8Array[] {
+  return Array.from({ length: n }, () => {
+    const c = new Uint8Array(size);
+    crypto.getRandomValues(c);
+    c[0] = 0; // NUL and 0xFF on purpose — a text path would mangle both
+    c[1] = 0xff;
+    return c;
+  });
+}
+
+function concat(chunks: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
+  let o = 0;
+  for (const c of chunks) {
+    out.set(c, o);
+    o += c.length;
+  }
+  return out;
+}
+
+Deno.test("electron aio://: a route response streams through the socket, headers and bytes intact", async () => {
+  await withHarness(async (_srv, main, dir) => {
+    const chunks = randomChunks(4, 64 * 1024);
+    const GAP = 200;
+    const http = streamingHttpServer(join(dir, "http.sock"), chunks, GAP);
+    try {
+      const priv = main.events.find((e) => e.ev === "privileges")?.privileges;
+      assert(priv, "the scheme was registered as privileged");
+      assertEquals(
+        priv!.stream,
+        true,
+        "stream: true — Chromium may read the body as it arrives",
+      );
+      assertEquals(
+        priv!.standard,
+        true,
+        "standard — relative URLs and caching work",
+      );
+
+      const r = await main.proto("aio://app/nft-image/abc");
+      assertEquals(r.status, 200);
+      assertEquals(r.headers["content-type"], "image/png");
+      assertEquals(
+        r.headers["x-content-type-options"],
+        "nosniff",
+        "nosniff passes through",
+      );
+      assertEquals(
+        r.headers["cache-control"],
+        "private, max-age=31536000, immutable",
+        "cache headers pass through — Chromium caches by scheme+URL",
+      );
+      assertEquals(r.bytes, concat(chunks), "binary body is byte-identical");
+      assert(r.isStream, "the Response body is a ReadableStream");
+      // Streamed, not buffered: the handler resolved on headers, before the
+      // app wrote its last chunk (which came 3×GAP after the first).
+      assert(
+        r.resolvedAt < http.marks.lastWriteAt,
+        `handler resolved at +${
+          r.resolvedAt - r.t0
+        }ms but the last chunk was ` +
+          `written at +${
+            http.marks.lastWriteAt - r.t0
+          }ms — the body was buffered`,
+      );
+      assert(
+        r.endedAt >= http.marks.lastWriteAt,
+        "the body was read to the end",
+      );
+
+      // A request body goes the other way through the same pipe.
+      const p = await main.proto("aio://app/nft-image/x", "POST", "hello");
+      assertEquals(p.status, 201);
+      assertEquals(new TextDecoder().decode(p.bytes), "echo:hello");
+
+      // A body-less status must not become a stream Response() rejects.
+      const g = await main.proto("aio://app/gone");
+      assertEquals(g.status, 204);
+      assertEquals(g.bytes.length, 0);
+    } finally {
+      await http.close();
+    }
+  }, { httpSocket: true });
+});
+
+// ── Prod: page from dist/, routes through the socket ─────────────────────
+//
+// A packaged app's window reads the bundle off disk and needs no server for
+// it. Its custom routes are not on disk: when the app runs its handler on a
+// socket, every path dist/ does not hold falls through to it. Without a
+// socket that path is a 404, exactly as before.
+Deno.test("electron aio://: FROM_DISK serves dist/ and falls through to the socket for routes", async () => {
+  const mkDist = async (dir: string) => {
+    const dist = join(dir, "dist");
+    await Deno.mkdir(dist);
+    await Deno.writeTextFile(join(dist, "app.js"), "// bundle");
+    return dist;
+  };
+  await withHarness(async (_srv, main, dir) => {
+    const chunks = randomChunks(2, 1024);
+    const http = streamingHttpServer(join(dir, "http.sock"), chunks, 10);
+    try {
+      const page = await main.proto("aio://app/");
+      assertEquals(page.status, 200);
+      assert(
+        new TextDecoder().decode(page.bytes).includes("<html"),
+        "the page comes from the templated shell",
+      );
+      const js = await main.proto("aio://app/app.js");
+      assertEquals(js.status, 200);
+      assertEquals(
+        new TextDecoder().decode(js.bytes),
+        "// bundle",
+        "app.js comes off disk",
+      );
+      assertEquals(js.headers["content-type"], "application/javascript");
+      const img = await main.proto("aio://app/nft-image/abc");
+      assertEquals(img.status, 200, "a route path falls through to the socket");
+      assertEquals(img.headers["x-content-type-options"], "nosniff");
+      assertEquals(img.bytes, concat(chunks));
+      assert(img.isStream, "…streamed");
+      const miss = await main.proto("aio://app/nope");
+      assertEquals(miss.status, 404, "the socket's own 404 passes through");
+    } finally {
+      await http.close();
+    }
+  }, { httpSocket: true, baseDir: mkDist });
+
+  // No socket: dist/ only, and a route path is a plain 404 (no proxy target).
+  await withHarness(async (_srv, main) => {
+    const js = await main.proto("aio://app/app.js");
+    assertEquals(js.status, 200);
+    const miss = await main.proto("aio://app/nft-image/abc");
+    assertEquals(miss.status, 404);
+  }, { baseDir: mkDist });
 });

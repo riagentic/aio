@@ -471,9 +471,12 @@ Other:
 --json: machine-readable output for EVERY command — the scripting interface
         (errors included; a non-zero exit still means failed)
 
-Flags: --app=X  --port=N  --entry=<path>  --wait[=N]  --json  --quiet  --body='{...}'  --args='[...]'  --filter=X  --lines=N  --follow/-f  --transport=ws|uds  --client-index=N/-i N  --all
+Flags: --app=X  --port=N  --entry=<path>  --wait[=N]  --json  --quiet  --body='{...}'  --args='[...]'  --filter=X  --lines=N  --follow/-f  --transport=ws|uds  --client-index=N/-i N  --all  --home=<dir>  --timeout=<ms>
 
 --app: target specific app by ID (default: resolved from deno.json name)
+--home: target the instance of that app running from <dir> (an isolated
+        second boot); AIO_APPS_DIR is the env-level equivalent
+--timeout: ms to wait for a live client (surface/trigger; default 8000)
 --entry: override entry point (default: deno.json "entry" > src/app.ts)
 --wait: start/stop block until complete (default 10s/5s). state polls every Ns.`);
 }

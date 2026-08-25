@@ -638,7 +638,7 @@ export async function runBundle(
     // `await import("./x.server.ts")` that is CORRECT on every other target
     // (a cell method runs server-side; the import stays out of the browser
     // graph on purpose) is, here, the half of the app that does the work
-    // silently not shipping. rimote's agent — screenrecord, `wm size`, FFI —
+    // silently not shipping. the remote-desktop agent — screenrecord, `wm size`, FFI —
     // built to 3.2 MB, printed BUILD SUCCESSFUL, installed, launched, rendered
     // its control panel, and every switch on it did nothing; the Windows build
     // of the same entry is 180 MB because it carries a runtime. Discovering

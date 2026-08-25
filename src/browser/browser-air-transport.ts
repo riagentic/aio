@@ -36,6 +36,8 @@ import {
   buildWsUrl,
   detectIPC,
   handleControlFrame,
+  hasHttpOrigin,
+  NO_TRANSPORT_MSG,
 } from "./browser-shared.ts";
 import {
   dec,
@@ -417,6 +419,27 @@ function _connect() {
     return;
   }
   if (_ws) return;
+  // NEVER fall back to WS on a page whose origin has no HTTP. On an aio://
+  // page `buildWsUrl()` is `ws://app/ws` — a socket that cannot exist in a
+  // zero-port app — and the retry loop would sit on it forever, the window
+  // blank. That is the hot-reload failure that kept zero-port opt-in for a while:
+  // the reloaded page had the bridge (the preload re-injects it) but this
+  // function only ever reached IPC through the branch above, so with the
+  // bridge missing it degraded QUIETLY. Now it stops, says why, and throws.
+  if (!hasHttpOrigin()) {
+    _connecting = false;
+    _closed = true; // no retry loop — retrying cannot conjure an origin
+    _status(NO_TRANSPORT_MSG);
+    diagEmit({
+      type: "browser-air-transport:no-transport",
+      severity: "error",
+      source: "browser-air-transport",
+      message: NO_TRANSPORT_MSG,
+      hint: "open the app through its Electron window (deno task dev), " +
+        "not as a file or a foreign scheme",
+    });
+    throw new Error(`[aio:air] ${NO_TRANSPORT_MSG}`);
+  }
   const ws = new WebSocket(buildWsUrl());
   ws.onopen = () => {
     _connecting = false;

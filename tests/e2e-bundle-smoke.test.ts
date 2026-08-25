@@ -320,7 +320,7 @@ Deno.test({
 });
 
 // `ui.entry` / `build.ui` must reach the BUNDLE, not just the dev server
-// (rimote R-2). Before this the bundler hardcoded App.tsx, so an app that set
+// (R-2). Before this the bundler hardcoded App.tsx, so an app that set
 // it rendered one component in dev and another once compiled — and the bundle
 // carried nothing that could reveal the swap.
 Deno.test({
@@ -357,7 +357,7 @@ Deno.test({
 });
 
 // A build that REFUSES must leave nothing behind for the next build to ship
-// (rimote R-13, fourth pass).
+// (R-13, fourth pass).
 //
 // The standalone-android guard is correct and its message is good: it names
 // each server-only module, its importer, and three ways forward. What it did

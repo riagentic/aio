@@ -320,7 +320,7 @@ function _diffComponent(
   // Same rule as the create path: nothing to render is still a POSITION.
   // Without the placeholder the component had no `_dom` anchor, so when it
   // later returned an element the reconciler appended it to the parent
-  // instead of putting it back where it was written (rimote R-10).
+  // instead of putting it back where it was written (R-10).
   if (rendered == null) rendered = nullSlot();
   nv._rendered = rendered;
   try {

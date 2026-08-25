@@ -37,6 +37,24 @@ import {
 } from "../protocol/protocol-version.ts";
 import type { ServerSyncHandler } from "../sync/server-handler.ts";
 
+/** How long the server waits for a live client to answer a control request
+ *  (`am surface N`, `am trigger N …`, `am client N`) — THE one decider for both
+ *  transports (WS in server-ws.ts, UDS here). `am`'s transport timeout must be
+ *  strictly LONGER (am-http.ts asserts it): with the two equal, the transport
+ *  gave up in the same instant this fired, and the reason named here never
+ *  reached the caller — every stall read as "timeout connecting". */
+export const CLIENT_REPLY_TIMEOUT_MS = 5000;
+
+/** The named reason a client did not answer, with the causes a caller can act
+ *  on. `ok:false` so the CLI's one "did this happen" rule (`data.ok === false`)
+ *  fails the command instead of printing the error as a success. */
+export function clientReplyTimeoutError(index: number): string {
+  return `client ${index} did not respond within ${CLIENT_REPLY_TIMEOUT_MS}ms — ` +
+    `it is connected but not answering ui requests: its main thread is busy ` +
+    `(a long render/effect), or it is a headless/thin client that does not ` +
+    `run the ui-trigger handler. Check \`am clients\` for the index you meant.`;
+}
+
 export type UDSClient = {
   conn: Deno.Conn;
   index: number;
@@ -325,8 +343,8 @@ export function createUDSListener(
         }
         const timer = setTimeout(() => {
           pendingState.delete(client.id);
-          resolve({ error: "client did not respond within 5s" });
-        }, 5000);
+          resolve({ error: clientReplyTimeoutError(index) });
+        }, CLIENT_REPLY_TIMEOUT_MS);
         pendingState.set(client.id, { resolve, timer });
         sendTo(client.conn, msg);
       });

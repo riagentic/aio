@@ -8,8 +8,8 @@ import { assert, assertEquals } from "@std/assert";
 import { testUI } from "../src/testing/ui-test.ts";
 
 const LONG =
-  "cmake -B build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=OFF " +
-  "-DGGML_CUDA_FORCE_MMQ=ON -DCMAKE_CUDA_ARCHITECTURES=86 --parallel 16";
+  "cmake -B build -DUSE_CUDA=ON -DCMAKE_BUILD_TYPE=Release -DUSE_CURL=OFF " +
+  "-DUSE_CUDA_FORCE_MMQ=ON -DCMAKE_CUDA_ARCHITECTURES=86 --parallel 16";
 
 function App() {
   return <div class="cmd">{LONG}</div>;

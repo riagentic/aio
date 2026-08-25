@@ -79,6 +79,8 @@ const MUST_ARM = [
   "testComponent",
   "testServer",
   "testMultiClient",
+  // Boots a real server (via testServer) and fetches every eager module.
+  "smoke",
   // Boots N real apps in this process — same exposure as testServer, N times.
   "testApps",
 ] as const;

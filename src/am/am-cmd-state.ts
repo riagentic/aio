@@ -430,12 +430,15 @@ export async function cmdDispatch(
     outError(result.error, mode);
     Deno.exit(1);
   }
-  out(
-    mode === "pretty"
-      ? (flags.asServer ? "dispatched (as server)" : "dispatched")
-      : result.data,
-    mode,
-  );
+  const data = result.data as { result?: unknown; resultDropped?: boolean };
+  if (mode === "pretty") {
+    const label = flags.asServer ? "dispatched (as server)" : "dispatched";
+    if (data?.resultDropped) {
+      out(`${label} — the method returned a value JSON cannot carry`, mode);
+    } else if (data && "result" in data) {
+      out(`${label} → ${JSON.stringify(data.result, null, 2)}`, mode);
+    } else out(label, mode);
+  } else out(result.data, mode);
 }
 
 export async function cmdActions(

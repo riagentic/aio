@@ -513,7 +513,11 @@ export function findComponents(
   const visit = (n: UISurfaceNode) => {
     if (
       (n.component === component || n.handle === component) &&
-      (key === undefined || n.key === key)
+      // `String()` on both sides: a component keyed `key={5}` renders exactly
+      // like `key="5"`, and a finder that compared strictly missed the numeric
+      // one SILENTLY — `find(C, 5)` returned nothing, and so did `find(C, "5")`
+      // for the other spelling (field report §4.5).
+      (key === undefined || String(n.key) === String(key))
     ) hits.push(n);
     n.children.forEach(visit);
   };

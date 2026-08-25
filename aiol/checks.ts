@@ -302,7 +302,7 @@ export const checkStructure: Checker = async (ctx) => {
       // A DECLARED entry that is not on disk is a different (and worse) fact
       // than "no entry point": the project said where its app is and the file
       // is missing. Say which, so the linter is never wrong about a layout
-      // the project itself declares (rimote R-8).
+      // the project itself declares (R-8).
       const declared = declaredEntryPaths(denoJson);
       report(
         "warn",
@@ -803,7 +803,7 @@ export const checkPerformance: Checker = (ctx) => {
   // scaffolded `src/client.ts` is exactly this, so the shipped template was
   // hinted at by the shipped linter on creation.
   //
-  // Not in TOOLING either (field report, llama-master #9): a developer command
+  // Not in TOOLING either (field report #9): a developer command
   // — a `sync-shared.ts` that mirrors files, a codegen script, a one-off
   // migration runner — prints to a terminal on purpose. It is not the app; it
   // has no logger sinks, no client, and nobody greps its output by level.
@@ -1546,7 +1546,7 @@ function isPrefixWrite(code: string, start: number): boolean {
  *  SUPPOSED to do after its I/O — record the result — and flagging it made the
  *  hint unsilenceable without lying: there is no read there to declare
  *  deliberate with `// aiol-ok`, "which is how useful lints get ignored"
- *  (field report, llama-master #4). The old test was line-level (`does this
+ *  (field report #4). The old test was line-level (`does this
  *  line contain any write?`), which failed BOTH ways: a `deno fmt`-wrapped
  *  `s.lastError =\n  String(err)` looked like a bare read (the report's line
  *  189), and `s.x = s.y + 1` hid a genuine read behind the write on its line.
@@ -1773,7 +1773,7 @@ export const checkPatterns: Checker = (ctx) => {
     //   3. `until(() => s.x)` / `race({...})` are the SANCTIONED way to wait on
     //      live state inside a method; re-reading is the entire point of the
     //      primitive. `mod.ts`'s own flagship example tripped this.
-    //   4. (llama-master #4) A plain WRITE was reported as a read — see
+    //   4. (a chat-app report #4) A plain WRITE was reported as a read — see
     //      `draftReadOffsets`.
     //   5. The opt-in probe read RAW content, so a cell that merely MENTIONS
     //      `transaction: true` in a comment — the comment explaining why it
@@ -3560,6 +3560,359 @@ export const checkTestHandleSelectors: Checker = (ctx) => {
   }
 };
 
+// ══════════════════════════════════════════════════════════════════════
+// 25. A SYNC METHOD / SELECTOR READING A ui-HIDDEN FIELD
+// ══════════════════════════════════════════════════════════════════════
+//
+// `visible: { exclude: [...] }` is enforced on every CLIENT read — and sync
+// methods of a `sync`/`localFirst`/client-scoped cell REPLAY on the client
+// (optimistic rebase), selectors of every cell compute over the filtered
+// slice. A sync reducer touching `s.encSecKey` therefore THROWS there
+// (dev and prod alike). A field report: a lock screen's
+// `vaultInitialized()` selector read a hidden field, got `undefined`, and
+// offered to CREATE a vault over the existing one. The runtime tripwire is
+// the guarantee; this names the read with file:line before anything runs.
+
+/** The static shape of a cell's `visible:`/`ui:` config, read from RAW
+ *  source (the field names are strings — stripped text blanks them). */
+type _StaticVisibility = {
+  mode: "all" | "none" | "include" | "exclude";
+  fields: string[]; // include or exclude list (dot-paths kept)
+  publicFields: string[];
+};
+
+function _strings(list: string): string[] {
+  return [...list.matchAll(/["'`]([^"'`]+)["'`]/g)].map((m) => m[1]!);
+}
+
+/** Parse `visible:` (or the deprecated `ui:` alias) from one cell's config
+ *  body. `raw` and `stripped` share offsets; `open..end` bound the body. */
+function _staticVisibility(
+  raw: string,
+  stripped: string,
+  open: number,
+  end: number,
+): _StaticVisibility {
+  const none: _StaticVisibility = { mode: "all", fields: [], publicFields: [] };
+  const body = stripped.slice(open, end + 1);
+  // Top-level `visible:` / `ui:` only — a nested `ui:` inside state is data.
+  let depth = 0;
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i]!;
+    if ("({[".includes(ch)) depth++;
+    else if (")}]".includes(ch)) depth--;
+    else if (depth === 1 && /[$\w]/.test(ch)) {
+      if (/[$\w.]/.test(body[i - 1] ?? "")) continue;
+      const m = /^(visible|ui)\s*:\s*/.exec(body.slice(i));
+      if (!m) {
+        while (i + 1 < body.length && /[$\w]/.test(body[i + 1]!)) i++;
+        continue;
+      }
+      const at = open + i + m[0].length;
+      if (stripped[at] === "{") {
+        const close = _balancedClose(stripped, at);
+        if (close === -1) return none;
+        const cfg = raw.slice(at, close + 1);
+        const pub = /\bpublicFields\s*:\s*\[([^\]]*)\]/.exec(cfg);
+        const publicFields = pub ? _strings(pub[1]!) : [];
+        const inc = /\binclude\s*:\s*\[([^\]]*)\]/.exec(cfg);
+        if (inc) {
+          return { mode: "include", fields: _strings(inc[1]!), publicFields };
+        }
+        const exc = /\bexclude\s*:\s*\[([^\]]*)\]/.exec(cfg);
+        if (exc) {
+          return { mode: "exclude", fields: _strings(exc[1]!), publicFields };
+        }
+        return { ...none, publicFields };
+      }
+      const lit = /^["'`](all|none)["'`]/.exec(raw.slice(at));
+      if (lit?.[1] === "none") return { ...none, mode: "none" };
+      return none;
+    }
+  }
+  return none;
+}
+
+/** Top-level keys hidden from the client + the LEAF names of deep excludes. */
+function _hiddenOf(
+  vis: _StaticVisibility,
+  stateKeys: string[],
+): { top: Set<string>; leaves: Map<string, string> } {
+  const top = new Set<string>();
+  const leaves = new Map<string, string>(); // leaf → full dot-path
+  if (vis.mode === "none") { for (const k of stateKeys) top.add(k); }
+  if (vis.mode === "include") {
+    for (const k of stateKeys) if (!vis.fields.includes(k)) top.add(k);
+  }
+  if (vis.mode === "exclude") {
+    for (const f of vis.fields) {
+      if (f.includes(".")) leaves.set(f.slice(f.lastIndexOf(".") + 1), f);
+      else top.add(f);
+    }
+  }
+  return { top, leaves };
+}
+
+/** Function-shaped members of an object-literal body (stripped text):
+ *  `name(s) {…}`, `async name(s) {…}`, `name: (s) => {…}`, `name: async (s) =>`,
+ *  `name: { deps, fn(s, …) {…} }` (the fn is reported under the outer name). */
+function _members(
+  stripped: string,
+  open: number,
+  end: number,
+): Array<
+  { name: string; async: boolean; param: string; start: number; body: string }
+> {
+  const out: Array<
+    { name: string; async: boolean; param: string; start: number; body: string }
+  > = [];
+  // Includes the opening `{` so the first member has its `[,{]` lead-in.
+  const body = stripped.slice(open, end);
+  const re =
+    /[,{]\s*(?:(async)\s+)?(?:\*\s*)?([$\w]+)\s*(?::\s*(async\s*)?)?\(([^)]*)\)\s*(?:=>\s*)?\{/g;
+  for (const m of body.matchAll(re)) {
+    // Depth-1 members only (depth counted AFTER the lead-in delimiter).
+    let depth = 0;
+    for (let i = 0; i <= m.index!; i++) {
+      const ch = body[i]!;
+      if ("({[".includes(ch)) depth++;
+      else if (")}]".includes(ch)) depth--;
+    }
+    if (depth !== 1) continue;
+    const name = m[2]!;
+    if (["if", "for", "while", "switch", "catch"].includes(name)) continue;
+    const braceAt = open + m.index! + m[0].length - 1;
+    const close = _balancedClose(stripped, braceAt);
+    if (close === -1) continue;
+    const param = (m[4] ?? "").split(",")[0]!.trim().replace(/[:=].*$/s, "")
+      .trim();
+    out.push({
+      name,
+      async: Boolean(m[1] || m[3]),
+      param,
+      start: braceAt,
+      body: stripped.slice(braceAt, close + 1),
+    });
+  }
+  // deps-form selectors: `name: { deps: [...], fn(s, ...) {…} }`
+  for (const m of body.matchAll(/([$\w]+)\s*:\s*\{\s*deps\s*:/g)) {
+    const at = open + m.index! + m[0].lastIndexOf("{");
+    const close = _balancedClose(stripped, at);
+    if (close === -1) continue;
+    const inner = _members(stripped, at, close).find((x) => x.name === "fn");
+    if (inner) out.push({ ...inner, name: m[1]! });
+  }
+  return out;
+}
+
+/** Offsets of a depth-1 `key:` block (`methods`, `selectors`) inside a cell
+ *  body; null when absent. */
+function _blockOf(
+  stripped: string,
+  open: number,
+  end: number,
+  key: string,
+): [number, number] | null {
+  const body = stripped.slice(open, end + 1);
+  let depth = 0;
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i]!;
+    if ("({[".includes(ch)) depth++;
+    else if (")}]".includes(ch)) depth--;
+    else if (
+      depth === 1 && body.startsWith(key, i) &&
+      !/[$\w.]/.test(body[i - 1] ?? "")
+    ) {
+      const m = new RegExp(`^${key}\\s*:\\s*\\{`).exec(body.slice(i));
+      if (!m) continue;
+      const at = open + i + m[0].length - 1;
+      const close = _balancedClose(stripped, at);
+      return close === -1 ? null : [at, close];
+    }
+  }
+  return null;
+}
+
+const _CELL_BLOCK_RE = /\bcell\s*\(\s*["'`]([\w\-]+)["'`]\s*,\s*\{/g;
+
+export const checkSyncMethodHiddenReads: Checker = (ctx) => {
+  const { tsFiles, tsxFiles, cells, report, pass } = ctx;
+  let found = 0, checked = 0;
+  for (const file of [...tsFiles, ...tsxFiles]) {
+    if (/\.test\.tsx?$/.test(file.name)) continue;
+    const raw = file.content;
+    const code = codeText(raw);
+    const lineOf = (idx: number) => code.slice(0, idx).split("\n").length;
+    for (const m of codeMatches(raw, _CELL_BLOCK_RE)) {
+      const name = m[1]!;
+      const open = code.indexOf("{", m.index! + m[0].length - 1);
+      const end = _balancedClose(code, open);
+      if (end === -1) continue;
+      const keys = _topLevelKeys(code.slice(open, end + 1));
+      const info = cells.find((c) =>
+        c.name === name && c.file.path === file.path
+      );
+      const vis = _staticVisibility(raw, code, open, end);
+      const { top, leaves } = _hiddenOf(vis, info?.stateKeys ?? []);
+      if (top.size === 0 && leaves.size === 0) continue;
+      checked++;
+      const replays = (keys.has("sync") &&
+        !/\bsync\s*:\s*false\b/.test(code.slice(open, end + 1))) ||
+        /\bscope\s*:\s*["'`]client["'`]/.test(raw.slice(open, end + 1));
+      const targets: Array<
+        { kind: "sync method" | "selector"; block: [number, number] }
+      > = [];
+      const sel = _blockOf(code, open, end, "selectors");
+      if (sel) targets.push({ kind: "selector", block: sel });
+      const meth = replays ? _blockOf(code, open, end, "methods") : null;
+      if (meth) targets.push({ kind: "sync method", block: meth });
+      for (const { kind, block } of targets) {
+        for (const fn of _members(code, block[0], block[1])) {
+          if (fn.async) continue;
+          const roots = [
+            ...new Set([fn.param, "s", "state", "draft"].filter(Boolean)),
+          ]
+            .map((r) => r.replace(/[$]/g, "\\$"));
+          let hit: { key: string; path: string; at: number } | undefined;
+          for (const key of top) {
+            const re = new RegExp(
+              `\\b(?:${roots.join("|")})\\s*\\.\\s*${key}\\b`,
+            );
+            const r = re.exec(fn.body);
+            if (r) {
+              hit = { key, path: key, at: fn.start + r.index };
+              break;
+            }
+          }
+          if (!hit) {
+            for (const [leaf, path] of leaves) {
+              const r = new RegExp(`\\.\\s*${leaf}\\b`).exec(fn.body);
+              if (r) {
+                hit = { key: leaf, path, at: fn.start + r.index };
+                break;
+              }
+            }
+          }
+          if (!hit) continue;
+          const line = lineOf(hit.at);
+          if (isSuppressed(file.lines, line - 1)) continue;
+          found++;
+          const fact = `has${hit.key.charAt(0).toUpperCase()}${
+            hit.key.slice(1)
+          }`;
+          report(
+            "error",
+            "cells",
+            `${file.relative}:${line} — cell "${name}" ${kind} "${fn.name}" ` +
+              `reads \`${
+                fn.param || "s"
+              }.${hit.key}\`, which \`visible\` hides ` +
+              `("${hit.path}"). ${
+                kind === "selector"
+                  ? "Selectors run in CLIENT context over the filtered slice"
+                  : "Sync methods of a sync/localFirst/client-scoped cell REPLAY on the client against the filtered slice"
+              }, so this read THROWS there (dev and prod alike). ` +
+              `Read hidden fields only in server-side/async ` +
+              `methods, or publish a non-secret fact field ` +
+              `(\`${fact}: boolean\`) beside the secret and read that.`,
+            {
+              file: file.relative,
+              line,
+              fix:
+                `state: { ${fact}: false, … } — set it where ${hit.key} is written; read ${fact} here`,
+            },
+          );
+        }
+      }
+    }
+  }
+  if (checked > 0 && found === 0) {
+    pass("no sync method/selector reads a ui-hidden field");
+  }
+};
+
+// ══════════════════════════════════════════════════════════════════════
+// 26. A STATE FIELD NAMED LIKE A CREDENTIAL, VISIBLE TO EVERY CLIENT
+// ══════════════════════════════════════════════════════════════════════
+//
+// The static port of aio.run()'s boot refusal (src/server/aio-composition.ts,
+// HARD_SECRET_RE + guards): a top-level state key that unambiguously names a
+// credential and is broadcast to every client stops the app from BOOTING in
+// dev — after the suite went green, because tests never compose the app. A
+// field report: a display label named `namePrivateKey` refused the boot, and
+// the override (`publicFields`) took a docs search. The regexes below MUST
+// stay byte-identical to the runtime's (tests/aiol-credential-field-name
+// .test.ts pins them against the source), so the lint and the boot agree.
+const HARD_SECRET_RE =
+  /passwo?rd|passphrase|mnemonic|private[_-]?key|api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token/i;
+const PUBLIC_HINT_RE = /pub(lic)?/i;
+const NONSECRET_SUFFIX_RE =
+  /(Id|Ids|Type|Name|Count|Index|Idx|At|Ref|Kind|Length|Len|Path|Mode|Status|Flag|Enabled|Visible|Label|Order|Version|Ms|Sec|Secs|Seconds|Bytes|Kb|Mb|Gb|Hz|Pct|Percent|Ratio|Rate|Total|Avg|Min|Max|Size|Width|Height|Duration|Elapsed)$/;
+
+export const checkCredentialFieldName: Checker = (ctx) => {
+  const { tsFiles, tsxFiles, cells, report, pass } = ctx;
+  let found = 0, checked = 0;
+  for (const file of [...tsFiles, ...tsxFiles]) {
+    if (/\.test\.tsx?$/.test(file.name)) continue;
+    const raw = file.content;
+    const code = codeText(raw);
+    for (const m of codeMatches(raw, _CELL_BLOCK_RE)) {
+      const name = m[1]!;
+      const open = code.indexOf("{", m.index! + m[0].length - 1);
+      const end = _balancedClose(code, open);
+      if (end === -1) continue;
+      const info = cells.find((c) =>
+        c.name === name && c.file.path === file.path
+      );
+      if (!info?.stateIsLiteral) continue;
+      // A client-scoped cell is never broadcast — nothing to leak.
+      if (/\bscope\s*:\s*["'`]client["'`]/.test(raw.slice(open, end + 1))) {
+        continue;
+      }
+      checked++;
+      const vis = _staticVisibility(raw, code, open, end);
+      const { top, leaves } = _hiddenOf(vis, info.stateKeys);
+      const deepHeads = new Set(
+        [...leaves.values()].map((p) => p.split(".")[0]!),
+      );
+      const bad = info.stateKeys.filter((k) =>
+        !top.has(k) && !deepHeads.has(k) && !vis.publicFields.includes(k) &&
+        HARD_SECRET_RE.test(k) && !PUBLIC_HINT_RE.test(k) &&
+        !NONSECRET_SUFFIX_RE.test(k)
+      );
+      if (bad.length === 0) continue;
+      const line = code.slice(0, m.index!).split("\n").length;
+      if (isSuppressed(file.lines, line - 1)) continue;
+      found++;
+      const list = `[${bad.map((k) => `"${k}"`).join(", ")}]`;
+      const one = bad.length === 1;
+      report(
+        "error",
+        "security",
+        `${file.relative}:${line} — cell "${name}" state ${
+          one ? "field" : "fields"
+        } ` +
+          `${list} ${one ? "is" : "are"} named like a credential and visible ` +
+          `to every client, so aio.run() REFUSES to boot in dev (tests do ` +
+          `not compose the app; this is the same check, pre-boot). Hide ` +
+          `${one ? "it" : "them"}: visible: { exclude: ${list} } — or, if ` +
+          `${one ? "it" : "they"} genuinely ${one ? "is" : "are"} public ` +
+          `(a label, not a secret), declare ${one ? "it" : "them"}: ` +
+          `visible: { publicFields: ${list} }.`,
+        {
+          file: file.relative,
+          line,
+          fix:
+            `visible: { exclude: ${list} }  // or publicFields: ${list} if truly public`,
+        },
+      );
+    }
+  }
+  if (checked > 0 && found === 0) {
+    pass("no credential-named state field is client-visible");
+  }
+};
+
 export const ALL_CHECKS: Checker[] = [
   checkConfig,
   checkStructure,
@@ -3585,4 +3938,6 @@ export const ALL_CHECKS: Checker[] = [
   checkLiveHazard,
   checkOldWayPerfBudget,
   checkTestHandleSelectors,
+  checkSyncMethodHiddenReads,
+  checkCredentialFieldName,
 ];

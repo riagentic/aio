@@ -1,6 +1,6 @@
 // In the test surface, an absent boolean must not be a callable.
 //
-// From a field report (feedback/llama-master.md #6): asserting that a checkbox
+// From a field report (a chat-app field report, #6): asserting that a checkbox
 // starts unchecked —
 //
 //   assertEquals(page["one-lan-toggle"].checked, false);

@@ -3,7 +3,7 @@
 // tests get hermeticity from a single call instead of remembering five
 // scattered _reset* functions (forgetting one = cross-test bleed).
 
-import { _resetCellBindings, _resetUiReadWarnings } from "./cell-reactive.ts";
+import { _resetCellBindings } from "./cell-reactive.ts";
 import { _resetCallTimeouts, resetPending } from "./cell-impl.ts";
 import { _resetDegraded } from "../diagnostics/degraded.ts";
 import { _resetMethodCancel } from "./method-cancel.ts";
@@ -35,7 +35,6 @@ import { _resetPerfThrottle } from "../diagnostics/error.ts";
  *  itself) calls `_resetCellRegistry()` directly. */
 export function _resetAioRuntime(): void {
   _resetCellBindings();
-  _resetUiReadWarnings();
   resetPending();
   _resetCallTimeouts();
   // The degraded registry is process-global; without this a test's escalation

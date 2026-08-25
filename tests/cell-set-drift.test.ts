@@ -1,6 +1,6 @@
 // A cell in the BUNDLE that the server never booted must say so.
 //
-// Field report (llama-master #8): a `ui` cell was added to a running dev app
+// Field report (a chat-app report #8): a `ui` cell was added to a running dev app
 // and the browser reloaded. The client bundle is fetched fresh, so the new
 // controls rendered — but the server process was still the old one and had no
 // `ui` cell, so every dispatch went nowhere. From the UI it looked like three

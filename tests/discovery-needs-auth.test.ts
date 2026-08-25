@@ -36,6 +36,7 @@ function advertised(auth: {
     prod: false,
     electronDistDir: undefined,
     baseDir: Deno.cwd(),
+    distDir: Deno.cwd(),
     expose: true, // discovery only runs for an exposed app
     singletonMode: false,
     childWindows: false,

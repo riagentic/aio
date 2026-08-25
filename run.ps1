@@ -57,7 +57,7 @@ function Test-DenoAtLeast([string]$have, [string]$want) {
 
 # The app name an artifact belongs to. Windows builds produce `<name>.exe`, but
 # a packaged one may carry the arch the way the AppImage does — splitting at the
-# first hyphen would turn `llama-master` into `llama`, which is a bug the POSIX
+# first hyphen would turn `chat-app` into `chat`, which is a bug the POSIX
 # side shipped for exactly one afternoon.
 function Get-AppBaseName([string]$fileName) {
   $base = [IO.Path]::GetFileNameWithoutExtension($fileName)
@@ -90,15 +90,21 @@ function Invoke-AioRun {
     if ($have -match 'deno\s+(\S+)') { $have = $Matches[1] } else { $have = '' }
     $denoOk = Test-DenoAtLeast $have (Get-MinDenoFrom $AioHome)
   }
-  if (-not $denoOk -or -not (Get-Command am -ErrorAction SilentlyContinue) -or
-      -not (Test-Path (Join-Path $AioHome ".git"))) {
+  # ALWAYS, not only when something is missing (same rule as run.sh): a box
+  # that installed aio once otherwise keeps that am forever. install.ps1 is
+  # idempotent — fetch, check out the latest tag, reinstall am — and the app
+  # still builds with its own pin, so updating am never moves an app.
+  if ($denoOk -and (Get-Command am -ErrorAction SilentlyContinue) -and
+      (Test-Path (Join-Path $AioHome ".git"))) {
+    Info "updating aio + am (already installed)..."
+  } else {
     Info "setting up aio (deno + framework + am)..."
-    if ($env:AIO_INSTALL) { & $env:AIO_INSTALL }
-    else { irm "$AioRaw/install.ps1" | iex }
-    $env:Path = "$denoBin;$env:Path"
-    if (-not (Get-Command deno -ErrorAction SilentlyContinue)) { Fail "deno still not found after install" }
-    if (-not (Get-Command am -ErrorAction SilentlyContinue)) { Fail "am still not found after install" }
   }
+  if ($env:AIO_INSTALL) { & $env:AIO_INSTALL }
+  else { irm "$AioRaw/install.ps1" | iex }
+  $env:Path = "$denoBin;$env:Path"
+  if (-not (Get-Command deno -ErrorAction SilentlyContinue)) { Fail "deno still not found after install" }
+  if (-not (Get-Command am -ErrorAction SilentlyContinue)) { Fail "am still not found after install" }
   Ok ("deno " + ((deno --version | Select-Object -First 1)) + " - am ready")
 
   # -- clone (when a repo was given) ------------------------------------

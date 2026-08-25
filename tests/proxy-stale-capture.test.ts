@@ -1,4 +1,4 @@
-// Stale-capture detection (rimote R-1). In a SYNC method a captured reference
+// Stale-capture detection (R-1). In a SYNC method a captured reference
 // keeps the old object (`const req = s.pending; s.pending = null; req.sid` is
 // still the old sid). The async live proxy is a PATH view, so the identical
 // code used to resolve through `pending` to the NEW value — a bare TypeError
@@ -30,7 +30,7 @@ const mk = () =>
         s.pending = null;
         if (!req) return;
         await Promise.resolve();
-        s.answered = req.sid; // rimote's exact shape
+        s.answered = req.sid; // the reported shape
       },
       async replacedRead(s) {
         const req = s.pending;

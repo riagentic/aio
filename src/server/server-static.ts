@@ -1,6 +1,7 @@
 // Static file serving & virtual route handler — extracted from server.ts
 // Handles all HTTP requests (non-WS): HTML pages, transpilation, __aio/* endpoints, static files
 import { UI_ENTRY } from "./app-files.ts";
+import type { CallTimeouts } from "../protocol/protocol-types.ts";
 import { extname, join, resolve, SEPARATOR } from "@std/path";
 import { formatPrometheus } from "./server-metrics.ts";
 import { log } from "../diagnostics/logger-api.ts";
@@ -146,7 +147,7 @@ export interface StaticDeps {
   height?: number;
   renderBudget?: RenderBudget;
   syncCells?: string[];
-  callTimeouts?: { default?: number; methods?: Record<string, number> };
+  callTimeouts?: CallTimeouts;
   uiEntry?: string; // AIO-8.1
   viewport?: string | false; // AIO-423: ui.viewport override (false = opt out)
   headExtra?: string; // AIO-423: ui.head — verbatim <head> content

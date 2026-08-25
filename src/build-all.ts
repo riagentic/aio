@@ -59,7 +59,7 @@ export const TARGETS: Record<string, TargetSpec> = {
     desc: "headless LAN/remote server binary + systemd unit (--expose)",
   },
   "server-app": {
-    // R-6 (rimote): an exposed server that also SERVES its page — status UI,
+    // R-6: an exposed server that also SERVES its page — status UI,
     // download shelf, dashboards. `server` is headless by definition; this is
     // the same binary WITH the browser bundle embedded. Before it had a name,
     // reaching it took a two-pass build that only reading build.ts revealed.
@@ -113,8 +113,8 @@ export interface TargetOverride {
    *
    *  ```jsonc
    *  "targets": {
-   *    "agent":   { "kind": "electron", "entry": "src/agent/app.ts",   "name": "rimote-agent" },
-   *    "control": { "kind": "electron", "entry": "src/control/app.ts", "name": "rimote-control" }
+   *    "agent":   { "kind": "electron", "entry": "src/agent/app.ts",   "name": "remote-agent" },
+   *    "control": { "kind": "electron", "entry": "src/control/app.ts", "name": "remote-control" }
    *  }
    *  ```
    *  Optional when the label itself is a known target name (backwards

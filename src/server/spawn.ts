@@ -1,7 +1,7 @@
 // spawn.ts — a child process an app can actually cancel, pause and read.
 //
-// Requested by two field reports (ayd, bw2col) and written from scratch by
-// both. bw2col's version cost them a real user-visible bug, and it is the
+// Requested by two field reports (a downloader and a GPU-pipeline app) and written from scratch by
+// both. the GPU-pipeline app's version cost them a real user-visible bug, and it is the
 // reason this module exists rather than a doc page:
 //
 //   `Deno.Command("kill", ["-STOP", "-1234"])` EXITS 0 AND DOES NOTHING.

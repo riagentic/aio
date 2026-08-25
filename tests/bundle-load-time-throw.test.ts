@@ -1,6 +1,6 @@
 // A module-level `new URL(…, import.meta.url)` is a bundle that DIES AT LOAD.
 //
-// From a field report (rimote, Android): `src/state/blocking.ts` resolved its
+// From a field report (an Android app): `src/state/blocking.ts` resolved its
 // worker module at module scope. In a bundle there is no module URL to be
 // relative to — esbuild rewrites `import.meta` to a shim whose `url` is not a
 // valid absolute URL — so the constructor threw while the module was still

@@ -1077,6 +1077,24 @@ await aio.run({ perfBudget: { methods: { "models:scan": { timeout: 0 } } } });
     }),
     expect: "types + pure helpers since",
   },
+  // field report §3.3 / §3.5 — the client-read tripwire and the credential-name
+  // boot refusal, static.
+  {
+    name: "sync method of a sync cell reads a visible-hidden field",
+    files: app({
+      "src/vault.ts":
+        `import { cell } from "aio";\nexport const vault = cell("vault", {\n  state: { encSecKey: "", n: 0 },\n  visible: { exclude: ["encSecKey"] },\n  sync: true,\n  methods: { unlock(s: { encSecKey: string }) { if (!s.encSecKey) throw new Error("x"); } },\n});\n`,
+    }),
+    expect: "REPLAY on the client",
+  },
+  {
+    name: "credential-named state field visible to every client",
+    files: app({
+      "src/c.ts":
+        `import { cell } from "aio";\nexport const c = cell("c", {\n  state: { namePrivateKey: "Private key" },\n  methods: {},\n});\n`,
+    }),
+    expect: "named like a credential",
+  },
   {
     name: "import from the deleted aio/schedule entry",
     files: app({
@@ -1149,7 +1167,7 @@ const LEGAL: Clean[] = [
     }),
   },
   {
-    // rimote R-8: one repo, three apps (a relay + two desktop clients). The
+    // R-8: one repo, three apps (a relay + two desktop clients). The
     // entries are declared in deno.json; warning "no entry point found
     // (src/app.ts)" on every lint of a layout the docs RECOMMEND is how a
     // linter trains people to ignore it.
@@ -1318,7 +1336,7 @@ const LEGAL: Clean[] = [
     }),
   },
   {
-    // A field report: `App.tsx → cell.ts → ayd.server.ts` where the last hop is
+    // A field report: `App.tsx → cell.ts → dl.server.ts` where the last hop is
     // `import type`. Types are erased before esbuild sees them, so nothing from
     // that module can reach the bundle — but the chain walker matched the hop
     // anyway and reported a gate-failing ERROR, and the cure it suggested did

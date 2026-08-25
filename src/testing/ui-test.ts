@@ -211,6 +211,16 @@ export type TestUI = {
   /** Serialized semantic surface of the whole app — the intuitive map of
    *  "what can be done on this screen" (for humans and AI agents alike). */
   surface(): UISurfaceNode;
+  /** The window the component is mounted in (happy-dom, owned by this mount;
+   *  `null` only when a caller-supplied `document` has no `defaultView`).
+   *  `globalThis.window` / `document` / `location` / `history` resolve to the
+   *  same objects while the harness is up. */
+  // deno-lint-ignore no-explicit-any
+  readonly window: any;
+  /** The document the component is mounted in — `ui.document.activeElement`,
+   *  `ui.document.title`, … */
+  // deno-lint-ignore no-explicit-any
+  readonly document: any;
   /** Wait until the app is quiescent (renders flushed, no pending updates). */
   settle(): Promise<void>;
   /** Advance the virtual schedule clock by `ms` and fire every **cell**
@@ -809,22 +819,40 @@ async function _mountTestUI(
   ]);
   const _origAddEventListener = globalThis.addEventListener;
   const _warnedGlobalEvents = new Set<string>();
+  // A DOM listener on the Deno global is INERT here and correct in a browser
+  // (where `window` IS the global). Tests are the strictest environment, so
+  // under the harness this is not a warning: the registration THROWS at the
+  // site (inside `onMount`, usually — a contained hook error), and the same
+  // error is stashed so the NEXT observation point (`settle`/`expectCell`/
+  // `waitFor`/`dispose`) fails the test with it — a hook error alone is only
+  // logged and kept, which is exactly the silence field report §4.1 reported.
+  // The fix is named: `ui.window.addEventListener`, or `onGlobalKey`.
+  const _globalListenerFailures: Error[] = [];
   globalThis.addEventListener = function (
     this: unknown,
     type: string,
     ...rest: unknown[]
   ) {
-    if (DOM_UI_EVENTS.has(type) && !_warnedGlobalEvents.has(type)) {
-      _warnedGlobalEvents.add(type);
-      console.warn(
+    if (DOM_UI_EVENTS.has(type)) {
+      const msg =
         `[aio:testUI] "${type}" listener registered on the Deno global — it ` +
-          `will NEVER fire here. testUI dispatches on the happy-dom window, ` +
-          `so this handler is inert (in a browser the two are the same ` +
-          `object, which is why the code looks right).\n` +
-          `  fix: register on the document's window — e.g. inside onMount, ` +
-          `\`el.ownerDocument.defaultView.addEventListener("${type}", …)\`, ` +
-          `or attach the handler to the element itself.`,
-      );
+        `will NEVER fire here. testUI dispatches on the happy-dom window, ` +
+        `so this handler is inert (in a browser the two are the same ` +
+        `object, which is why the code looks right).\n` +
+        `  fix: register on the document's window — \`ui.window\` in the ` +
+        `test, \`el.ownerDocument.defaultView\` inside onMount — e.g. ` +
+        `\`el.ownerDocument.defaultView.addEventListener("${type}", …)\`, ` +
+        `use \`onGlobalKey\` for a key binding, or attach the handler to ` +
+        `the element itself.`;
+      if ((globalThis as AnyDoc).__aioDev === true) {
+        const err = new Error(msg);
+        _globalListenerFailures.push(err);
+        throw err;
+      }
+      if (!_warnedGlobalEvents.has(type)) {
+        _warnedGlobalEvents.add(type);
+        console.warn(msg);
+      }
     }
     return (_origAddEventListener as AnyDoc).call(this, type, ...rest);
   } as typeof globalThis.addEventListener;
@@ -1080,6 +1108,11 @@ async function _mountTestUI(
     const first = _failures.find((f) => !f.seen());
     _failures.length = 0; // delivered or reported — either way, done with them
     if (first) throw first.err;
+    const inert = _globalListenerFailures.shift();
+    if (inert) {
+      _globalListenerFailures.length = 0;
+      throw inert;
+    }
   }
 
   function elementHandle(resolveInfo: () => UIElementInfo): UIElementHandle {
@@ -1593,6 +1626,13 @@ async function _mountTestUI(
 
   const api = {
     surface: () => serializeSurface(currentSurface()),
+    // The mount's OWN window and document — the same objects `window` and
+    // `document` resolve to inside the component. A test that needs the real
+    // thing (dispatch a `resize`, read `location`, register a listener where
+    // the component's one lives) reaches them here instead of re-creating a
+    // happy-dom of its own (field report §4.1).
+    window: (ownedWindow ?? (doc as AnyDoc).defaultView ?? null) as AnyDoc,
+    document: doc as AnyDoc,
     // Unfiltered server-authoritative state — what a server route sees
     // via app.getState(), including `ui.exclude`d fields the client proxy hides.
     // `serverState()` = whole store; `fullState(cell)` = one cell's slice.

@@ -103,7 +103,7 @@ Deno.test("mid-batch scheduling under budget overrun strands no component", asyn
   }
 });
 
-// ── The other question about the same counter (ds4 M3) ──────────────────────
+// ── The other question about the same counter (audit M3) ──────────────────────
 //
 // The cycle detector counts renders PER COMPONENT PER FLUSH, and that count
 // deliberately persists across yield boundaries (AIO-209) while the limit (25)

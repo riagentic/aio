@@ -13,7 +13,8 @@ import { createCoalescer } from "./broadcast-coalescer.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
 import type { ComposedCells } from "../state/cell.ts";
 import type { ServerHandle } from "./server-types.ts";
-import { AppLock, lockDir } from "./single-instance-lock.ts";
+import { AppLock, instances, lockDir } from "./single-instance-lock.ts";
+import { resolve } from "@std/path";
 import { runtimeCount } from "./shutdown.ts";
 import { launchElectronClient } from "../electron/electron.ts";
 import { getLogger, log } from "../diagnostics/logger-api.ts";
@@ -349,15 +350,25 @@ export function createUdsBroadcastController(refs: {
   };
 }
 
-/** Single-instance enforcement — lock in /tmp/aio/{appId}.lock */
+/** Single-instance enforcement — lock in /tmp/aio/{appId}[@home].lock.
+ *
+ *  Identity is appId AND resolved data home (`AppLock`): a second boot from a
+ *  DIFFERENT home is a different instance by construction and never collides,
+ *  so a refusal here can only be a true duplicate — the same data dir — and
+ *  its port/pid ARE the caller's own instance. A boot beside a foreign-home
+ *  sibling says so in one info line that names no port and no pid: the
+ *  caller asked for a different home, and the other instance's coordinates
+ *  are not its business (a field report, §2.1 — a harness killed the
+ *  user's wallet with the pid the old refusal had just printed). */
 export async function acquireSingletonLock(
   appId: string,
+  home: string | undefined,
   port: number,
   singletonMode: boolean,
   killExisting: boolean,
 ): Promise<AppLock | null> {
   if (singletonMode === false) return null;
-  const appLock = new AppLock(appId);
+  const appLock = new AppLock(appId, home);
   const result = await appLock.acquire(port, killExisting);
   if (!result.ok) {
     const ex = result.existing;
@@ -365,7 +376,7 @@ export async function acquireSingletonLock(
     const who = ex.pid > 0 ? ` (pid ${ex.pid})` : "";
     const msg = `[AIO] ${
       killExisting ? "Failed to take over" : "Already running"
-    }: ${ex.appId}${where}${who}`;
+    }: ${ex.appId}${where}${who} (home ${appLock.home})`;
     // Alone in the process: the refusal IS the exit, and a clean one-line
     // error beats a stack trace. With a sibling app already running (D2 —
     // an app plus its admin panel), `Deno.exit(1)` would take THAT app down
@@ -375,7 +386,18 @@ export async function acquireSingletonLock(
     log.error(msg);
     Deno.exit(1);
   }
-  log.debug(`lock: acquired ${lockDir()}/${appId}.lock (PID ${Deno.pid})`);
+  const foreign = instances(appId).filter((i) =>
+    i.pid !== Deno.pid && resolve(i.home ?? "") !== appLock.home
+  );
+  if (foreign.length > 0) {
+    log.info(
+      `[AIO] another instance of ${appId} runs from a different home; ` +
+        `this one continues (home ${appLock.home})`,
+    );
+  }
+  log.debug(
+    `lock: acquired ${lockDir()}/${appLock.key}.lock (PID ${Deno.pid})`,
+  );
   return appLock;
 }
 

@@ -234,9 +234,13 @@ the standard SQLite idiom for an _app's_ own "have I run this migration" marker,
 and it is entirely the app's to read and write; aio tracks its schema era in
 `aio_schema` instead.
 
-History caveat: aio ≤alpha51 wrote `user_version`, so a value found on an
-EXISTING database may not be yours — an app that used the idiom against an
-aio-created file should move its marker to its own table and accept one re-run.
+History caveat: aio ≤alpha51 wrote `user_version = 1` on open (aio never reads
+or writes it since alpha52), so a file created by an older aio may already read
+`1` without any app migration having run. An app whose files predate alpha52
+should treat `1` as its own baseline — or keep its marker in an app table and
+accept one re-run. A fresh file opens at `0`. `createDB` has no `migrations`
+option; run yours after it returns (an ordered, recorded `migrations: [...]`
+option is a possible later addition).
 
 ## Integrity & snapshots
 

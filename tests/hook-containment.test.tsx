@@ -1,6 +1,6 @@
 // An effect must never be able to un-render the tree that scheduled it.
 //
-// From a field report (feedback/llama-master.md #5): a theme toggle wrote the
+// From a field report (a chat-app field report, #5): a theme toggle wrote the
 // chosen theme onto `document` from `afterRender`; under `testUI` there is no
 // global `document`, the callback threw — and the reporter found THE BUTTON
 // THAT TOGGLES THE THEME missing from the surface, two debug cycles away from

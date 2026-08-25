@@ -1,5 +1,7 @@
 // Build helpers — pure/extractable utilities used by build.ts
 import { dirname, join, resolve } from "@std/path";
+import { toolCacheDir } from "../electron/electron-runtime-fetch.ts";
+export { toolCacheDir };
 import { appIconPng, appIconSvg } from "./app-icon.ts";
 
 /** The appimagetool release this build pins to.
@@ -407,15 +409,6 @@ export function appimageEnv(arch: string): Record<string, string> {
  *  in the shipped binary — every build after the first shipped the build tool
  *  inside the app (measured: 29MB → 43MB of embedded files). A user-level cache
  *  is also shared across projects, so the tool downloads once per machine. */
-export function toolCacheDir(): string {
-  const xdg = Deno.env.get("XDG_CACHE_HOME");
-  const home = Deno.env.get("HOME") ?? Deno.env.get("USERPROFILE") ?? ".";
-  return join(
-    xdg && xdg.length > 0 ? xdg : join(home, ".cache"),
-    "aio",
-    "tools",
-  );
-}
 
 /** Lowercase hex SHA-256 of `bytes`. */
 async function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {

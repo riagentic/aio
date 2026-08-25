@@ -1,5 +1,6 @@
 // Server type definitions — extracted from server.ts for clarity
 import type { AioUser } from "./aio.ts";
+import type { CallTimeouts } from "../protocol/protocol-types.ts";
 import type { UiTheme } from "./aio-types.ts";
 import type { RenderBudget } from "../vitals/types.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
@@ -61,7 +62,7 @@ export interface ServerConfig {
   bootedCells?: string[];
   /** Resolved `await cell.method()` ceilings (effectTimeoutMs + perfBudget),
    *  bridged to the browser so both sides wait from the same numbers. */
-  callTimeouts?: { default?: number; methods?: Record<string, number> };
+  callTimeouts?: CallTimeouts;
   /** Late-bound UDS raw broadcast — carries tt-state to electron clients. */
   udsBroadcastRef?: { fn: ((raw: string) => void) | null };
   fullStateThreshold?: number; // 0-1: ratio of changed keys for delta vs full broadcast (default: 0.5)

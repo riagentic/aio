@@ -3,7 +3,7 @@
 // Three field-report apps wrote the same zenity wrapper and at least two
 // shipped the same bug: a dialog binary that is NOT INSTALLED exits 1 with no
 // output, and so does a user pressing Cancel. Conflating them makes a broken
-// Browse button look like an indecisive user (bw2col shipped exactly that).
+// Browse button look like an indecisive user (one GPU-pipeline app shipped exactly that).
 //
 // So the tests that matter are not "does it return a path" — they are the four
 // endings, told apart: picked · cancelled · missing · broken. They run against

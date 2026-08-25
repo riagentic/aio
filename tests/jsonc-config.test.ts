@@ -1,4 +1,4 @@
-// `deno.json` is JSONC, and `deno.jsonc` exists (rimote R-12).
+// `deno.json` is JSONC, and `deno.jsonc` exists (R-12).
 //
 // Deno reads both, and accepts `//` comments in either — which is the natural
 // place to explain a non-obvious import alias. The framework read the file with

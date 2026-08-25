@@ -214,7 +214,7 @@ testCell(
 // nothing in the API to warn you.
 const order: string[] = [];
 
-const disk = cell("diskspacy", {
+const disk = cell("diskspace", {
   state: { path: null as string | null, scanning: false },
   methods: {
     async open(s, path: string) {

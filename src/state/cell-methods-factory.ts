@@ -459,14 +459,14 @@ export function createCellFromMethods<
   );
 
   const def: Record<string, unknown> = {
-    __aio: {
+    __aio: guardAioInternals({
       ...internals,
       selectors,
       selectorDeps,
       actions: publicCatalog,
       effects: eCatalog,
       bound: false,
-    },
+    }),
     fx: eCatalog,
   };
 
@@ -497,4 +497,105 @@ export function createCellFromMethods<
   return def as unknown as
     & CellDef<N, Record<string, never>, Record<string, never>, S>
     & DirectCalling<N, M>;
+}
+
+/** Every slot `CellAio` declares — the ONLY names a `__aio` read may resolve.
+ *  Kept next to the assembly so a new slot is added in one place (a slot that
+ *  is typed but not listed here throws under the harness on first read, which
+ *  is the point: the list cannot drift silently). */
+const CELL_AIO_KEYS: ReadonlySet<string> = new Set([
+  "state",
+  "machine",
+  "reduce",
+  "execute",
+  "selectors",
+  "selectorDeps",
+  "actions",
+  "effects",
+  "actionKeys",
+  "effectKeys",
+  "id",
+  "actionTypeToKey",
+  "foreignActions",
+  "initType",
+  "destroyType",
+  "scope",
+  "clientMethods",
+  "onInit",
+  "onDestroy",
+  "asyncMethods",
+  "cancelTriggers",
+  "longMethods",
+  "validate",
+  "persist",
+  "access",
+  "ui",
+  "uiForUser",
+  "uiPublicFields",
+  "syncConfig",
+  "syncOptOut",
+  "enableSync",
+  "worker",
+  "version",
+  "onMigrate",
+  "onRestore",
+  "bound",
+  "stateType",
+  "cellName",
+  "keys",
+  "kind",
+]);
+
+/** Names any object is asked for by the platform (await, JSON, inspect) —
+ *  never a phantom API. */
+const PLATFORM_PROBES: ReadonlySet<string> = new Set([
+  "then",
+  "toJSON",
+  "constructor",
+  "valueOf",
+  "toString",
+  "inspect",
+  "$$typeof",
+  "prototype",
+  "__proto__",
+]);
+
+/** Framework-side reads of names `CellAio` does not declare. EMPTY on
+ *  purpose: the two that existed (`sync`, `methodKeys` in src/server/aio.ts)
+ *  were bugs the gate found (field report §4.2) and are fixed at the site. Add a
+ *  name here only with the file:line that needs it — deleting the entry is
+ *  the whole fix once that site is corrected. */
+const FRAMEWORK_PHANTOM_READS: ReadonlySet<string> = new Set([]);
+
+/** Wrap `cell.__aio` so a PHANTOM read fails loud under the harness.
+ *
+ *  A `methods` slot on `__aio` never existed, but it was typed, so reaching for it
+ *  returned `undefined` — and the natural `if (typeof fn === "function")`
+ *  guard around it made a test pass while asserting nothing (two sat green
+ *  that way in one field report, field report §4.2). A read of a name `CellAio`
+ *  does not declare now THROWS in dev/test, naming the supported path.
+ *
+ *  Prod: the same Proxy answers exactly like the plain object (unknown →
+ *  `undefined`), so the only difference is that dev/test throws where prod
+ *  stays quiet — category (b), dev stricter, never the reverse. Writes pass
+ *  through untouched (`bound = true`, the browser stub's `enableSync`, …); the
+ *  decision is made at READ time because cells are defined at module load,
+ *  before any harness has armed `__aioDev`. */
+function guardAioInternals<T extends object>(aio: T): T {
+  return new Proxy(aio, {
+    get(target, key, receiver) {
+      if (
+        typeof key === "symbol" || key in target || CELL_AIO_KEYS.has(key) ||
+        PLATFORM_PROBES.has(key) || FRAMEWORK_PHANTOM_READS.has(key)
+      ) return Reflect.get(target, key, receiver);
+      if ((globalThis as Record<string, unknown>).__aioDev === true) {
+        const id = String((target as { id?: unknown }).id ?? "?");
+        throw new Error(
+          `[cell:${id}] __aio.${key} does not exist — drive methods with ` +
+            `testCell/testUI (docs/testing/ui-testing.md)`,
+        );
+      }
+      return undefined;
+    },
+  });
 }

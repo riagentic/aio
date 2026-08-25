@@ -64,7 +64,7 @@ Check 'MIN_DENO is read from the framework, not copied into the script' {
 }
 
 Check 'app name: an arch suffix is stripped, a hyphenated NAME is not' {
-  Assert ((Get-AppBaseName 'llama-master.exe') -eq 'llama-master') 'llama-master survives'
+  Assert ((Get-AppBaseName 'chat-app.exe') -eq 'chat-app') 'chat-app survives'
   Assert ((Get-AppBaseName 'demo-electron-x86_64.exe') -eq 'demo-electron') 'arch is stripped'
   Assert ((Get-AppBaseName 'demo.exe') -eq 'demo') 'plain name'
 }

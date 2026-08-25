@@ -23,6 +23,9 @@ type PendingEntry = {
   /** Ceiling for THIS call (ms; 0 = wait indefinitely). Kept on the entry so a
    *  deferred arm (offline queue → replay) uses the call's own budget. */
   ceilingMs: number;
+  /** `"warn"`: at the ceiling report ONCE and keep waiting — never reject.
+   *  The server-side twin is `perfBudget.methods[key].timeout: "warn"`. */
+  mode: "reject" | "warn";
   methodKey: string | undefined;
   /** True once the frame carrying this call has actually been WRITTEN to a
    *  transport. False while it sits in an offline queue.
@@ -72,20 +75,42 @@ export type AckRegistry = {
   size(): number;
 };
 
+/** A resolved per-call ceiling: a number of ms (0 = wait indefinitely), or
+ *  `{ warnAfterMs }` — warn once at that point and keep waiting. */
+export type AckCeiling = number | { warnAfterMs: number };
+
 /** Build a registry.
  *
- *  `ceilingFor` resolves the per-call deadline in ms from the method key
- *  ("cell:method"), returning 0 to wait indefinitely. It is injected because
+ *  `ceilingFor` resolves the per-call deadline from the method key
+ *  ("cell:method"): ms (0 = wait indefinitely) or `{ warnAfterMs }`. It is injected because
  *  the answer has a different source per environment: the browser reads the
  *  server-bridged `__aioConfig.callTimeouts`, a CLI client has no page shell
  *  and uses its own constant. The registry itself stays environment-free. */
 export function createAckRegistry(
-  ceilingFor: (methodKey: string | undefined) => number,
+  ceilingFor: (methodKey: string | undefined) => AckCeiling,
+  /** Where a `timeout: "warn"` report goes — the caller's levelled sink
+   *  (browser console, CLI log.warn); protocol code owns no console. */
+  warn: (msg: string) => void,
 ): AckRegistry {
   const pending = new Map<string, PendingEntry>();
 
   const arm = (cid: string, entry: PendingEntry): void => {
     if (entry.timer !== undefined || entry.ceilingMs <= 0) return;
+    if (entry.mode === "warn") {
+      // Same contract as the server's registerCall in warn mode: one report,
+      // the entry stays pending, the timer is spent (nothing re-arms it).
+      entry.timer = setTimeout(() => {
+        if (!pending.has(cid)) return;
+        warn(
+          `[aio] ${
+            entry.methodKey ?? "cell:method"
+          }: still running after ${entry.ceilingMs}ms (timeout: "warn") — ` +
+            `the caller keeps waiting; no response has reached this client ` +
+            `yet.`,
+        );
+      }, entry.ceilingMs);
+      return;
+    }
     entry.timer = setTimeout(() => {
       pending.delete(cid);
       const what = entry.methodKey ? `'${entry.methodKey}'` : "the method";
@@ -113,12 +138,14 @@ export function createAckRegistry(
         resolve = res;
         reject = rej;
       });
+      const ceiling = ceilingFor(opts?.methodKey);
       const entry: PendingEntry = {
         promise,
         resolve,
         reject,
         timer: undefined,
-        ceilingMs: ceilingFor(opts?.methodKey),
+        ceilingMs: typeof ceiling === "number" ? ceiling : ceiling.warnAfterMs,
+        mode: typeof ceiling === "number" ? "reject" : "warn",
         methodKey: opts?.methodKey,
         // A caller that does NOT defer is telling us it has no queue to track
         // — the frame is gone as far as it knows, so the call counts as

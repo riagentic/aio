@@ -310,7 +310,7 @@ Deno.test({
         `no remote client binary in ${names}`,
       );
 
-      // `--out=` — the answer to "I orchestrate my own builds" (rimote R-4).
+      // `--out=` — the answer to "I orchestrate my own builds" (R-4).
       // Two apps in one repo cannot both stage through dist/: it is embedded
       // into the binary wholesale and wiped by every build, so the first
       // artifact is gone by the time the second finishes.

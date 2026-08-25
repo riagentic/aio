@@ -81,24 +81,24 @@ Deno.test("normalizeTargets: per-target platforms survive", () => {
 });
 
 Deno.test("normalizeTargets: labelled targets with kind (two apps, one kind)", () => {
-  // R-3 (rimote): two Electron apps in one repo — labels are free, `kind`
+  // R-3: two Electron apps in one repo — labels are free, `kind`
   // names what gets built.
   assertEquals(
     normalizeTargets({
       agent: {
         kind: "electron",
         entry: "src/agent/app.ts",
-        name: "rimote-agent",
+        name: "remote-agent",
       },
       control: {
         kind: "electron",
         entry: "src/control/app.ts",
-        name: "rimote-control",
+        name: "remote-control",
       },
       relay: {
         kind: "server-app",
         entry: "src/server/app.ts",
-        name: "rimote-server",
+        name: "remote-server",
         ui: "Status.tsx",
       },
     }),
@@ -107,19 +107,19 @@ Deno.test("normalizeTargets: labelled targets with kind (two apps, one kind)", (
         name: "agent",
         kind: "electron",
         entry: "src/agent/app.ts",
-        appName: "rimote-agent",
+        appName: "remote-agent",
       },
       {
         name: "control",
         kind: "electron",
         entry: "src/control/app.ts",
-        appName: "rimote-control",
+        appName: "remote-control",
       },
       {
         name: "relay",
         kind: "server-app",
         entry: "src/server/app.ts",
-        appName: "rimote-server",
+        appName: "remote-server",
         ui: "Status.tsx",
       },
     ],

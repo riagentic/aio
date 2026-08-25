@@ -6,7 +6,7 @@
 //
 // ONE forbidden shape: an op must never capture a nested reference, overwrite
 // its container, and then use the reference — the live proxy THROWS there by
-// design (stale-capture detection, rimote R-1) while the sync draft keeps the
+// design (stale-capture detection, R-1) while the sync draft keeps the
 // old object. That deliberate divergence is pinned in
 // tests/proxy-stale-capture.test.ts, not here.
 

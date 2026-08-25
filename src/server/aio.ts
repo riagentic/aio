@@ -211,7 +211,7 @@ export function _exposeOf(
  *
  *  Config exists for the same reason `expose` does: a compiled binary started
  *  by a service unit has no shell flags, so "how this app serves" has to be
- *  expressible in code (rimote R-7). */
+ *  expressible in code (R-7). */
 /** Warn when the aio actually running is not the aio the app pinned.
  *
  *  `dep/aio` is often a SYMLINK to a live checkout, so "the installed version"
@@ -565,12 +565,10 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
       const known = new Set<string>();
       for (const e of cellEntries) {
         const def = ("__aio" in e ? e : e.cell) as {
-          __aio: { id: string; methodKeys?: string[]; actionKeys?: string[] };
+          __aio: { id: string; actionKeys?: string[] };
         };
         const id = def.__aio.id;
-        for (
-          const m of def.__aio.methodKeys ?? def.__aio.actionKeys ?? []
-        ) known.add(`${id}:${m}`);
+        for (const m of def.__aio.actionKeys ?? []) known.add(`${id}:${m}`);
       }
       const unknown = Object.keys(budgetMethods).filter((k) => !known.has(k));
       if (unknown.length > 0) {
@@ -980,6 +978,7 @@ async function _run<S, A, E>(
     (cli.killExisting ?? false);
   const appLock = await acquireSingletonLock(
     appId,
+    appDirs(appId, config.appDir).home,
     port,
     singletonMode,
     killExisting,
@@ -1023,7 +1022,7 @@ async function _run<S, A, E>(
         // bundle directory and still has nothing to serve — never a headless
         // build, always a packaging bug. Remember it so the fallback below can
         // say so instead of quietly serving the "no browser UI" page
-        // (rimote R-5).
+        // (R-5).
         if (sawDistDir === undefined) {
           try {
             if ((await Deno.stat(dir)).isDirectory) sawDistDir = dir;
@@ -1146,7 +1145,7 @@ async function _run<S, A, E>(
     ),
   );
 
-  // ── stillness at the boundary (llama.master) ────────────────────────
+  // ── stillness at the boundary (a local-LLM chat app) ────────────────────────
   //
   // Two facts an app can be WRONG about without any error: which aio it is
   // actually running, and whether a framework default has taken over its
@@ -1552,8 +1551,10 @@ async function _run<S, A, E>(
     config.perfBudget?.methods
       ? Object.fromEntries(
         Object.entries(config.perfBudget.methods)
-          .filter(([, v]) => typeof v?.timeout === "number")
-          .map(([k, v]) => [k, v!.timeout as number]),
+          .filter(([, v]) =>
+            typeof v?.timeout === "number" || v?.timeout === "warn"
+          )
+          .map(([k, v]) => [k, v!.timeout as number | "warn"]),
       )
       : undefined,
   );
@@ -1660,22 +1661,81 @@ async function _run<S, A, E>(
       void dispatch(effect as unknown as A); // cross-cell action
     },
   });
-  if (
-    config.libraryMode && (config._workerCells ?? []).length > 0 && !prod
-  ) {
+  /** Cells that WOULD run in a worker but are running in this isolate because a
+   *  test owns the entry module. Empty in production. */
+  const _inIsolateWorkerCells = new Set(
+    config.libraryMode && !prod
+      ? (config._workerCells ?? []).map((f) => f.__aio.id)
+      : [],
+  );
+  if (_inIsolateWorkerCells.size > 0) {
     log.info(
       "aio",
       `libraryMode: worker cells (${
-        (config._workerCells ?? []).map((f) => f.__aio.id).join(", ")
+        [..._inIsolateWorkerCells].join(", ")
       }) run in-isolate — a test owns the entry module, so there is nothing to ` +
-        `host them from. Behavior is identical; isolation is not.`,
+        `host them from. Isolation is not reproduced; the SERIALIZATION ` +
+        `boundary is (see below).`,
     );
   }
   _reseedWorkerCells = () => workerPool.reseed();
+
+  /** Make an in-isolate worker cell cross the SAME boundary it crosses in
+   *  production.
+   *
+   *  A real worker cell is reached by `postMessage`, so every argument and
+   *  every return value is structured-cloned. In-isolate they were passed by
+   *  reference — which is why "behaviour is identical, isolation is not" was
+   *  not true, and why this harness could stay green while production threw:
+   *  a function, a class instance, a live proxy or anything holding one is
+   *  perfectly fine passed by reference and impossible to clone.
+   *
+   *  That is the harness-versus-production gap this project treats as
+   *  disqualifying — a test environment more permissive than production
+   *  manufactures green-test-broken-prod. Cloning here costs a test nothing and
+   *  moves the failure to the run that can still act on it.
+   *
+   *  Scoped precisely to cells that WOULD have been hosted: an app with no
+   *  worker cells pays nothing, and production never reaches this at all. */
+  const _cloneAcrossWorkerBoundary = (
+    value: unknown,
+    what: string,
+    cellId: string,
+  ): unknown => {
+    try {
+      return structuredClone(value);
+    } catch (e) {
+      throw new Error(
+        `cell "${cellId}" is a worker cell, and its ${what} cannot cross a ` +
+          `worker boundary: ${e instanceof Error ? e.message : String(e)}.\n` +
+          `In this test it runs in-isolate, so a reference would have worked ` +
+          `— in production it is reached by postMessage and this throws. ` +
+          `Pass plain data (no functions, class instances, or live cell ` +
+          `proxies); \`{ ...obj }\` off a proxy is already materialised.`,
+      );
+    }
+  };
+  const _workerBoundaryDispatch: typeof dispatch = ((a: A) => {
+    const type = (a as unknown as { type?: unknown })?.type;
+    if (typeof type !== "string") return dispatch(a);
+    const i = type.indexOf(":");
+    const cellId = i === -1 ? type : type.slice(0, i);
+    if (!_inIsolateWorkerCells.has(cellId)) return dispatch(a);
+    const sent = _cloneAcrossWorkerBoundary(a, "action payload", cellId) as A;
+    const out = dispatch(sent);
+    return Promise.resolve(out).then((v) =>
+      v === undefined
+        ? v
+        : _cloneAcrossWorkerBoundary(v, "return value", cellId)
+    );
+  }) as typeof dispatch;
+
   const appDispatch = workerPool.size > 0
     ? (workerPool.route(
       (a) => dispatch(a as unknown as A),
     ) as unknown as typeof dispatch)
+    : _inIsolateWorkerCells.size > 0
+    ? _workerBoundaryDispatch
     : dispatch;
   if (workerPool.size > 0) {
     // Boot fails loudly if a host can't bind — a silently missing worker cell
@@ -1864,6 +1924,7 @@ async function _run<S, A, E>(
   const transport = await setupTransport<S, A>({
     appId,
     port,
+    portRequested: portFrom !== "default",
     prod,
     distDir,
     electronDistDir,
@@ -1890,7 +1951,7 @@ async function _run<S, A, E>(
       : undefined,
     // TLS: ONE decider for the flag/config pair. The flags are per-launch and
     // win; `tls` in config is how a compiled binary — a service unit passes no
-    // shell flags — declares the same thing (rimote R-7).
+    // shell flags — declares the same thing (R-7).
     cliCert: cli.cert ?? _tls.cert,
     cliKey: cli.key ?? _tls.key,
     cliNoTls: cli.noTls ?? _tls.noTls,
@@ -2057,10 +2118,10 @@ async function _run<S, A, E>(
         .filter((c) => (c as { __aio?: { worker?: boolean } }).__aio?.worker)
         .map((c) => (c as { __aio: { id: string } }).__aio.id),
       syncCells: [...getRegisteredCells().values()]
-        .filter((c) => {
-          const sync = (c as { __aio?: { sync?: unknown } }).__aio?.sync;
-          return sync !== undefined && sync !== false;
-        })
+        .filter((c) =>
+          (c as { __aio?: { syncConfig?: unknown } }).__aio?.syncConfig !==
+            undefined
+        )
         .map((c) => (c as { __aio: { id: string } }).__aio.id),
       routes: config.routes ? Object.keys(config.routes).length : 0,
       feedback: _feedback
@@ -2090,6 +2151,7 @@ async function _run<S, A, E>(
     title,
     prod,
     electronDistDir,
+    distDir,
     baseDir,
     expose,
     singletonMode,

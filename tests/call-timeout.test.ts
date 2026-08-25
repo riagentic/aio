@@ -11,9 +11,11 @@
 // — a knob that looks like it worked. Now there is one ceiling.
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import {
+  _getCallTimeouts,
   _resetCallTimeouts,
   _setCallTimeouts,
   callTimeoutFor,
+  callTimeoutModeFor,
   registerCall,
   resolveCall,
 } from "../src/state/cell-impl.ts";
@@ -198,4 +200,138 @@ Deno.test("browser ack: the page shell bridges the resolved ceilings", async () 
   });
   assertStringIncludes(html, '"callTimeouts":{"default":45000');
   assertStringIncludes(html, '"wallet:refresh":120000');
+});
+
+// ── field report §3.2: the rejection names the fix in ONE line, and `timeout: "warn"`
+// makes the ceiling a report that keeps awaiting instead of a rejection that
+// misreports live work.
+
+Deno.test('call timeout: the rejection names long:, timeout: "warn" and the serialize mutex', async () => {
+  _resetCallTimeouts();
+  _setCallTimeouts(20);
+  const err = await assertRejects(
+    () => registerCall("slow-2", "wallet:refresh"),
+    Error,
+  );
+  const msg = String(err);
+  assertStringIncludes(msg, 'long: ["refresh"] on cell("wallet")');
+  assertStringIncludes(
+    msg,
+    'perfBudget.methods["wallet:refresh"].timeout: "warn"',
+  );
+  assertStringIncludes(msg, "transaction: { serialize: true }");
+  assertStringIncludes(msg, "HOLDS the cell's mutex");
+  assertStringIncludes(msg, "commit with a sync reducer");
+  _resetCallTimeouts();
+});
+
+Deno.test('call timeout: timeout: "warn" warns once at the ceiling and KEEPS awaiting', async () => {
+  _resetCallTimeouts();
+  _setCallTimeouts(20, { "wallet:refresh": "warn", "wallet:other": 500 });
+  assertEquals(callTimeoutModeFor("wallet:refresh"), "warn");
+  assertEquals(callTimeoutModeFor("wallet:other"), "reject");
+  assertEquals(
+    callTimeoutFor("wallet:refresh"),
+    20,
+    "warn fires at the default ceiling",
+  );
+  assertEquals(callTimeoutFor("wallet:other"), 500, "a number still wins");
+  const warnings: string[] = [];
+  const orig = console.warn;
+  console.warn = (...a: unknown[]) => warnings.push(a.join(" "));
+  try {
+    const p = registerCall("warn-1", "wallet:refresh");
+    await new Promise((r) => setTimeout(r, 60)); // 3× past the ceiling
+    const mine = warnings.filter((w) => w.includes("wallet:refresh"));
+    assertEquals(mine.length, 1, `exactly one warning: ${warnings}`);
+    assertStringIncludes(mine[0]!, "still running after");
+    assertStringIncludes(mine[0]!, 'timeout: "warn"');
+    assertStringIncludes(mine[0]!, "keeps waiting");
+    resolveCall("warn-1", "late but here");
+    assertEquals(await p, "late but here", "the caller still gets the value");
+  } finally {
+    console.warn = orig;
+    _resetCallTimeouts();
+  }
+});
+
+Deno.test('call timeout: timeout: "warn" from aio.run() reaches the caller side', async () => {
+  const slow = cell("ct_warn", {
+    state: { done: false },
+    methods: {
+      async work(s: { done: boolean }) {
+        await new Promise((r) => setTimeout(r, 5));
+        s.done = true;
+        return "finished";
+      },
+    },
+  });
+  await using srv = await testServer({
+    cells: [slow],
+    perfBudget: { methods: { "ct_warn:work": { timeout: "warn" } } },
+  });
+  assertEquals(callTimeoutModeFor("ct_warn:work"), "warn");
+  assertEquals(
+    await (slow as unknown as { work: () => Promise<string> }).work(),
+    "finished",
+  );
+  void srv;
+});
+
+// ── The BROWSER half of `timeout: "warn"` (CLAUDE.md: a per-method flag the
+// browser branches on must reach the browser). "warn" rides the cfg frame /
+// page shell as-is, and browser-ack keeps awaiting — never rejects.
+
+Deno.test('call timeout: _getCallTimeouts() carries "warn" to the cfg frame', () => {
+  _resetCallTimeouts();
+  _setCallTimeouts(90_000, { "wallet:refresh": "warn", "wallet:slow": 5 });
+  assertEquals(_getCallTimeouts(), {
+    default: 90_000,
+    methods: { "wallet:slow": 5, "wallet:refresh": "warn" },
+  });
+  _resetCallTimeouts();
+});
+
+Deno.test('browser ack: a "warn" method warns once at the ceiling and KEEPS awaiting', async () => {
+  const { _registerAck, _resolveAck, _rejectAllPending, _setAckGraceMs } =
+    await import("../src/browser/browser-ack.ts");
+  const w = globalThis as { __aioConfig?: unknown };
+  const prev = w.__aioConfig;
+  _setAckGraceMs(1);
+  const warnings: string[] = [];
+  const orig = console.warn;
+  console.warn = (...a: unknown[]) => warnings.push(a.join(" "));
+  try {
+    w.__aioConfig = {
+      callTimeouts: { default: 5, methods: { "wallet:refresh": "warn" } },
+    };
+    const p = _registerAck("cid-warn", { methodKey: "wallet:refresh" });
+    let settled = false;
+    p.then(() => (settled = true), () => (settled = true));
+    await new Promise((r) => setTimeout(r, 40)); // 6× past default+grace
+    assertEquals(settled, false, "warn mode must never reject");
+    const mine = warnings.filter((x) => x.includes("wallet:refresh"));
+    assertEquals(mine.length, 1, `exactly one warning: ${warnings}`);
+    assertStringIncludes(mine[0]!, 'timeout: "warn"');
+    assertStringIncludes(mine[0]!, "keeps waiting");
+    _resolveAck("cid-warn", "late");
+    assertEquals(await p, "late", "the browser caller still gets the value");
+  } finally {
+    console.warn = orig;
+    _rejectAllPending(new Error("test teardown"));
+    _setAckGraceMs(5_000);
+    w.__aioConfig = prev;
+  }
+});
+
+Deno.test('browser ack: the page shell bridges "warn" unchanged', async () => {
+  const { generateHTML } = await import("../src/server/server-html-gen.ts");
+  const html = generateHTML({
+    title: "t",
+    prod: true,
+    hasCSS: false,
+    importMap: "{}",
+    callTimeouts: { default: 45_000, methods: { "wallet:refresh": "warn" } },
+  });
+  assertStringIncludes(html, '"wallet:refresh":"warn"');
 });

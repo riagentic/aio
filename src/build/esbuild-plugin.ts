@@ -24,7 +24,7 @@ export const serverOnlyStatic: Record<string, Set<string>> = {};
  *  is simply external to the browser bundle. Standalone Android has no Deno
  *  runtime at all — the APK is a WebView and a bundle — so there the same
  *  import is not dead code, it is the half of the app that does the work, and
- *  it silently does not ship. rimote's agent (screenrecord, `wm size`, FFI)
+ *  it silently does not ship. the remote-desktop agent (screenrecord, `wm size`, FFI)
  *  built to a 3.2 MB APK that installed, launched, rendered its control panel,
  *  and did nothing: the Windows build of the same entry is 180 MB because it
  *  carries a runtime. Recorded separately from the static map because the two

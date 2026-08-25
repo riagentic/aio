@@ -21,21 +21,24 @@
  * — see `crossCompileBlocker`.
  */
 import { join } from "@std/path";
-import { toolCacheDir } from "./build-helpers.ts";
+import { readDenoJson } from "../server/deno-json.ts";
+import {
+  DEFAULT_ELECTRON_VERSION,
+  electronRuntimeDir,
+  electronSlug,
+  electronZipUrlFor,
+  ensureElectronRuntime,
+} from "../electron/electron-runtime-fetch.ts";
 import { PLATFORMS } from "./platforms.ts";
+
+export { unzipInto } from "../electron/electron-runtime-fetch.ts";
 
 /** Electron's own name for a platform, as it appears in its release assets:
  *  `electron-v28.3.3-win32-x64.zip`. Ours is the aio platform name. */
 export function electronAssetSlug(platform: string): string | null {
   const spec = PLATFORMS[platform];
   if (!spec) return null;
-  const os = spec.os === "windows"
-    ? "win32"
-    : spec.os === "darwin"
-    ? "darwin"
-    : "linux";
-  const arch = spec.arch === "aarch64" ? "arm64" : "x64";
-  return `${os}-${arch}`;
+  return electronSlug(spec);
 }
 
 /** The URL Electron publishes that build at. Pure, so the whole mapping is a
@@ -45,16 +48,15 @@ export function electronZipUrl(
   platform: string,
 ): string | null {
   const slug = electronAssetSlug(platform);
-  if (!slug) return null;
-  const v = version.startsWith("v") ? version : `v${version}`;
-  return `https://github.com/electron/electron/releases/download/${v}/electron-${v}-${slug}.zip`;
+  return slug ? electronZipUrlFor(version, slug) : null;
 }
 
-/** Where a fetched runtime lives. One directory per version+platform, so two
- *  targets of the same build share one download and a second build costs
- *  nothing. */
+/** Where a fetched runtime lives — the SAME directory the launcher of a
+ *  compiled binary downloads into, so a machine that built an app and a
+ *  machine that runs one each hold one copy per version, not one per use. */
 export function electronCacheDir(version: string, platform: string): string {
-  return join(toolCacheDir(), "electron", `${version}-${platform}`);
+  const slug = electronAssetSlug(platform) ?? platform;
+  return electronRuntimeDir(version, slug);
 }
 
 /** The Electron version this app builds against — read from the runtime it
@@ -75,102 +77,35 @@ export async function installedElectronVersion(
   return null;
 }
 
-/** Unpack `zip` into `dir`.
- *
- *  Deno has no zip reader, so this shells out — and the tool it needs is the
- *  one a minimal image most often lacks (the fresh-Ubuntu lab exists because
- *  `deno`'s own installer assumed `unzip`). Three candidates are tried and the
- *  failure names the package to install, rather than arriving as "command not
- *  found" from a program the developer never invoked.
- *
- *  `unzip` and `bsdtar` both preserve the symlinks and exec bits inside
- *  Electron.app; python's zipfile does not preserve exec bits, so it is the
- *  last resort and says what it cost. */
-export async function unzipInto(zip: string, dir: string): Promise<void> {
-  await Deno.mkdir(dir, { recursive: true });
-  const tries: [string, string[]][] = [
-    ["unzip", ["-q", "-o", zip, "-d", dir]],
-    ["bsdtar", ["-xf", zip, "-C", dir]],
-    ["python3", ["-m", "zipfile", "-e", zip, dir]],
-  ];
-  const missing: string[] = [];
-  for (const [cmd, args] of tries) {
-    let out;
-    try {
-      out = await new Deno.Command(cmd, {
-        args,
-        stdout: "null",
-        stderr: "piped",
-      }).output();
-    } catch {
-      missing.push(cmd);
-      continue; // not installed — try the next
-    }
-    if (out.success) {
-      if (cmd === "python3") {
-        console.warn(
-          "[electron] ⚠ unpacked with python's zipfile, which drops " +
-            "executable bits — install `unzip` for a package that runs " +
-            "without a chmod",
-        );
-      }
-      return;
-    }
-    throw new Error(
-      `${cmd} failed to unpack ${zip}: ${
-        new TextDecoder().decode(out.stderr).trim().split("\n")[0] ?? ""
-      }`,
-    );
-  }
-  throw new Error(
-    `no unzip tool found (tried ${missing.join(", ")}) — install one:\n` +
-      "    Debian/Ubuntu: sudo apt install unzip\n" +
-      "    Fedora:        sudo dnf install unzip\n" +
-      "    macOS:         unzip ships with the system",
-  );
-}
-
 /** The Electron runtime directory for `platform`, downloading it once.
- *
- *  Returns the directory to copy into the package — the same shape
- *  `node_modules/electron/dist` has, because it IS that: the zip Electron
- *  publishes is the dist directory. */
+ *  Delegates to the launcher's fetch (`electron/electron-runtime-fetch.ts`) —
+ *  one implementation for "get me Electron <version> for <platform>". */
 export async function ensureElectronDist(
   version: string,
   platform: string,
   opts: { log?: (msg: string) => void } = {},
 ): Promise<string> {
-  const log = opts.log ?? ((m: string) => console.log(m));
-  const dir = electronCacheDir(version, platform);
-  // A marker rather than "the directory exists": an interrupted download left
-  // a half-unpacked runtime that looked complete and produced a package that
-  // could not start.
-  const stamp = join(dir, ".aio-complete");
+  const slug = electronAssetSlug(platform);
+  if (!slug) throw new Error(`unknown platform "${platform}"`);
+  return await ensureElectronRuntime(version, slug, opts);
+}
+
+/** The Electron version THIS app is built against — one decider for the
+ *  build and (via `dist/electron.json`) the compiled binary's launcher:
+ *   1. the runtime already installed in node_modules (what dev runs);
+ *   2. an exact-enough spec in the import map (`npm:electron@^43.4.1`);
+ *   3. the framework default.
+ *  Never null: a compiled desktop app has to know which Electron to fetch. */
+export async function resolveElectronVersion(root = "."): Promise<string> {
+  const installed = await installedElectronVersion(root);
+  if (installed) return installed;
   try {
-    await Deno.stat(stamp);
-    log(`[electron] ✓ runtime ${version} (${platform}) — cached`);
-    return dir;
-  } catch { /* not cached, or not finished */ }
-
-  const url = electronZipUrl(version, platform);
-  if (!url) throw new Error(`unknown platform "${platform}"`);
-  await Deno.remove(dir, { recursive: true }).catch(() => {});
-  await Deno.mkdir(dir, { recursive: true });
-
-  log(`[electron] downloading runtime ${version} for ${platform}…`);
-  const res = await fetch(url);
-  if (!res.ok) {
-    throw new Error(
-      `could not download the Electron runtime for ${platform}: ` +
-        `${res.status} ${res.statusText}\n  ${url}\n` +
-        `  (is ${version} a real Electron release?)`,
-    );
-  }
-  const zip = join(dir, "electron.zip");
-  await Deno.writeFile(zip, new Uint8Array(await res.arrayBuffer()));
-  await unzipInto(zip, dir);
-  await Deno.remove(zip).catch(() => {});
-  await Deno.writeTextFile(stamp, `${url}\n`);
-  log(`[electron] ✓ runtime ${version} (${platform}) ready`);
-  return dir;
+    const cfg = ((await readDenoJson(root))?.config ?? {}) as {
+      imports?: Record<string, string>;
+    };
+    const spec = cfg.imports?.["electron"];
+    const m = spec && /^npm:electron@[\^~]?(\d+\.\d+\.\d+)$/.exec(spec);
+    if (m) return m[1]!;
+  } catch { /* no deno.json here — the default below */ }
+  return DEFAULT_ELECTRON_VERSION;
 }

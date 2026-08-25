@@ -1,5 +1,5 @@
 // A PROD server must refuse to serve a bundle built from a DIFFERENT UI
-// component than its own `ui.entry` (rimote R-2). This is the dev≠prod
+// component than its own `ui.entry` (R-2). This is the dev≠prod
 // divergence in its purest form: the page renders, just the wrong app, and
 // nothing anywhere says so. The bundle carries `__aioBundleUi`; the server
 // compares it to the running config and answers with an error the browser
