@@ -14,6 +14,7 @@ import {
   pinnedFrameworkPath,
 } from "./framework-pin.ts";
 import { VERSION } from "./aio-cli.ts";
+import { LOCAL_PIN_FILE, readFrameworkPin } from "./deno-json.ts";
 import { buildContext } from "../../aiol/context.ts";
 import {
   checkCells,
@@ -149,11 +150,14 @@ export async function runDoctor(
     typeof v === "string" && v.includes("dep/aio")
   );
   if (usesDepAio) {
-    const pin = typeof (cfg as { aioVersion?: unknown }).aioVersion === "string"
-      ? (cfg as { aioVersion: string }).aioVersion
-      : null;
+    // `readFrameworkPin` is THE reader: `.aio/pin.local` (per-machine path
+    // pin) first, then `aioVersion` — restating it here made a local
+    // override invisible to doctor and red on a correct setup.
+    const { pin, source } = await readFrameworkPin(dir);
     checks.push({
-      name: "framework pin (deno.json aioVersion)",
+      name: `framework pin (${
+        source === "local" ? LOCAL_PIN_FILE : "deno.json aioVersion"
+      })`,
       ok: pin !== null,
       fix: "run `am pin --latest` and commit deno.json — otherwise a clone " +
         "builds against whatever aio is installed. Following a framework " +

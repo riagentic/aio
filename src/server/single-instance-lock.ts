@@ -37,7 +37,19 @@ export type LockData = {
   // discovery responder on the host can report EVERY exposed app (not just
   // itself) by reading the lock dir. See src/server/discovery.ts.
   discovery?: { title?: string; tls: boolean; needsAuth: boolean };
+  /** The aio VERSION the instance runs — so `am instances` can say which
+   *  framework each process is on, and mark one that differs from the `am`
+   *  reading it (two checkouts on one machine is the normal dev setup, and
+   *  a mismatch is the first thing to rule out). Absent on locks written
+   *  before alpha68. */
+  aioVersion?: string;
+  /** Chrome DevTools Protocol port of the instance's desktop window, when
+   *  one is open and debuggable. Reserved: written as undefined for now. */
+  cdpPort?: number;
 };
+
+/** What a boot records about itself beyond identity — see {@linkcode LockData}. */
+export type LockMeta = { aioVersion?: string; cdpPort?: number };
 
 /** Instance info returned by instances() — lock data + liveness */
 export type InstanceInfo = LockData & { alive: boolean };
@@ -553,24 +565,28 @@ export class AppLock {
   async acquire(
     port: number,
     killExisting = false,
+    meta: LockMeta = {},
   ): Promise<{ ok: true } | { ok: false; existing: LockData }> {
     const maxRetries = 30; // 3 seconds total
+    // The record a successful create writes — ONE shape for both attempts.
+    const fresh = (): LockData => ({
+      appId: this.appId,
+      pid: Deno.pid,
+      port,
+      startedAt: Date.now(),
+      status: "starting",
+      cwd: Deno.cwd(),
+      home: this.home,
+      ...(meta.aioVersion !== undefined ? { aioVersion: meta.aioVersion } : {}),
+      ...(meta.cdpPort !== undefined ? { cdpPort: meta.cdpPort } : {}),
+    });
 
     for (let i = 0; i < maxRetries; i++) {
       const existing = readLock(this.key);
 
       if (!existing) {
         // No lock — try atomic create
-        const data: LockData = {
-          appId: this.appId,
-          pid: Deno.pid,
-          port,
-          startedAt: Date.now(),
-          status: "starting",
-          cwd: Deno.cwd(),
-          home: this.home,
-        };
-        if (tryCreateLock(data)) {
+        if (tryCreateLock(fresh())) {
           this.acquired = true;
           this._registerCleanupHandlers();
           return { ok: true };
@@ -642,16 +658,7 @@ export class AppLock {
     const existing = readLock(this.key);
     if (existing) return { ok: false, existing };
     // Last-ditch attempt
-    const data: LockData = {
-      appId: this.appId,
-      pid: Deno.pid,
-      port,
-      startedAt: Date.now(),
-      status: "starting",
-      cwd: Deno.cwd(),
-      home: this.home,
-    };
-    if (tryCreateLock(data)) {
+    if (tryCreateLock(fresh())) {
       this.acquired = true;
       this._registerCleanupHandlers();
       return { ok: true };

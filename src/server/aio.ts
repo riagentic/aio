@@ -3,6 +3,7 @@
 // Cell composition logic lives in aio-composition and aio-cells-bridge.
 
 import { APP_STYLE, appHasStylesheet, UI_ENTRY } from "./app-files.ts";
+import { readLocalPinSync } from "./deno-json.ts";
 import { createShutdownOrchestrator, registerRuntime } from "./shutdown.ts";
 import { _registerAuthStore } from "./auth-context.ts";
 import type { ServerHandle } from "./server-types.ts";
@@ -86,7 +87,13 @@ import { createFeedbackCell } from "../state/feedback-cell.ts";
 import { createCostMeter } from "../vitals/cost-meter.ts";
 
 // CLI + path resolution
-import { parseCli, printHelp, VERSION, versionLine } from "./aio-cli.ts";
+import {
+  cdpPort,
+  parseCli,
+  printHelp,
+  VERSION,
+  versionLine,
+} from "./aio-cli.ts";
 import { awaitPredecessor } from "./updates-apply.ts";
 import { startFeedback } from "./feedback-boot.ts";
 import {
@@ -227,6 +234,9 @@ let _pinWarned = false;
 export function _warnPinDrift(): void {
   if (_pinWarned) return;
   _pinWarned = true;
+  // A local path override (`.aio/pin.local`) IS the pin on this machine; the
+  // committed `aioVersion` is what other clones get. Nothing to compare here.
+  if (readLocalPinSync(Deno.cwd())) return;
   const declared = appDenoJson()?.aioVersion;
   if (typeof declared !== "string" || declared === "") return;
   // A path pin (`path:/abs/checkout`) IS "whatever that tree is" by
@@ -982,6 +992,10 @@ async function _run<S, A, E>(
     port,
     singletonMode,
     killExisting,
+    {
+      aioVersion: VERSION,
+      cdpPort: cdpPort(),
+    },
   );
 
   // Thin client mode

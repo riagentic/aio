@@ -105,6 +105,7 @@ registry, and refuses a move that would break it:
 ```
 ✗ v1.0.0-alpha42 would break this app — 1 removed API(s) still in use:
   src/cell/a field report.ts:61
+    | machine: { initial: "idle", states: { idle: {} } },
     cell config key 'machine:' was removed in alpha27 — guards are a guard line
     — `if (s.status !== "idle") return;`. Migrate: docs/upgrade/restructure.md
     — or run it unchanged on the version it was written for:
@@ -114,9 +115,14 @@ registry, and refuses a move that would break it:
 ```
 
 The pin does not change; nothing is written. `--force` pins anyway — the check
-informs, it does not forbid. Moving **backward** to a version that still accepts
-the old spelling is silent, and `main` (or a path pin) counts as the tip, so it
-is checked like the newest release.
+informs, it does not forbid. The scan reads **code**, not text: a removed key
+spelled inside a string, a template literal, a comment or a regex is not a hit,
+and every hit quotes the line it matched (`| …`). A hit on a **test/fixture
+path** (`tests/`, `test/`, `*.test.*`, `fixtures/`, `util/selftest`) is an app's
+own upgrade fixture, not a config it boots with: it is printed as a warning with
+the same quoted line, and the pin proceeds. Moving **backward** to a version
+that still accepts the old spelling is silent, and `main` (or a path pin) counts
+as the tip, so it is checked like the newest release.
 
 Advised, never changed for you: `deno.json` config (`jsx`/`jsxImportSource`/
 `nodeModulesDir`), a missing `appId` in `aio.run()`, a Deno version below the
@@ -318,6 +324,12 @@ deno task am ls                   # alias
 deno task am instances --json     # JSON output
 ```
 
+Each row names the aio version the instance booted with (`aio=1.0.0-alpha68`;
+`aio=?` for a lock written before the field existed) and marks one that differs
+from the `am` reading it (`≠ am 1.0.0-alpha68`) — two checkouts on one machine
+is the normal dev setup, and a version mismatch is the first thing to rule out.
+JSON: `aio`, `aioMismatch`.
+
 Scans lock files, validates each PID is alive, returns active instances with
 appId, port, PID, uptime, home, and cwd.
 
@@ -484,11 +496,18 @@ am pin --latest           # newest release
 am pin /path/to/aio       # LOCAL-DEV pin: follow a framework checkout on this machine
 ```
 
-A **path pin** records `aioVersion: "path:/abs/checkout"` — every later `am fix`
-keeps linking that checkout, which is the workflow for developing an app against
-a work-in-progress framework. It is machine-specific by design: on a machine
-without that path, `am fix` fails loudly with the fix instead of silently
-linking something else. Return to a reproducible release with `am pin --latest`.
+A **path pin** is **per-machine**: `am pin /abs/checkout` writes the path to the
+git-ignored `.aio/pin.local` (one line; `.aio/` is added to `.gitignore` if
+missing) and leaves the committed `aioVersion` untouched — a clone still builds
+against the release in `deno.json`, while this machine follows the checkout.
+Every later `am fix` keeps linking that checkout, which is the workflow for
+developing an app against a work-in-progress framework. The one pin reader
+prefers the local override and says so once per process
+(`aio: local path pin → /abs/checkout`); a dangling override (no `mod.ts` at the
+path) fails loudly instead of falling back. Pinning a release
+(`am pin --latest`, `am pin v…`) **removes** `.aio/pin.local`, so the release
+really is what runs. A legacy `aioVersion: "path:…"` in `deno.json` is still
+read, with a one-time warning telling you to move it (`am pin <that path>`).
 
 Inside a path-pinned app, the installed `am` **delegates** to the pinned
 checkout's own am (announced on stderr; `AIO_AM_NO_DELEGATE=1` opts out) — so am
@@ -617,6 +636,31 @@ am surface --full                    # untruncated element text
 
 A filter that matches nothing exits non-zero and lists the components that ARE
 in the surface — an empty result is nearly always a typo.
+
+### Screenshots (`am shot`)
+
+A PNG of the live Electron window, headlessly, over the Chrome DevTools
+Protocol. The protocol is **opt-in**: start the app with `--cdp` (or
+`AIO_CDP=1`, or `--cdp=<port>`) and it binds a debugging port on 127.0.0.1 only,
+prints it on the boot line (`cdp  127.0.0.1:<port> (opt-in, loopback)`) and
+records it in the lock. Without the flag the app binds nothing extra — "no TCP
+port" stays literally true — and `am shot` refuses with the flag to add.
+
+```sh
+deno task am start --cdp                      # or: AIO_CDP=1 deno task dev
+deno task am shot                             # → <appId>-<stamp>.png in the cwd
+deno task am shot --out=before.png            # name the file
+deno task am shot --full                      # capture beyond the viewport
+deno task am shot 1                           # the second app window
+deno task am shot --json                      # {"file","bytes","url"}
+```
+
+The target is the window whose URL is the app's own (`aio://…` or its http
+origin); DevTools' own pages are never captured. `--home=<dir>` picks the
+instance, as everywhere in `am`.
+
+`--pose=<json>` is **not** supported: the app decides its own camera. Expose a
+cell method that sets the view, drive it with `am dispatch`, then `am shot`.
 
 ## Monitoring
 

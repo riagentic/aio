@@ -60,6 +60,15 @@ process and electron is optional.
 The HTTP server always runs regardless of Electron — you can access the app at
 `localhost:8000` in any browser, and multiple tabs stay in sync.
 
+### DevTools Protocol (`--cdp`)
+
+`--cdp` (or `--cdp=<port>`, or the env `AIO_CDP=1|<port>` — `am start` inherits
+it) launches the window with `--remote-debugging-port`, bound to 127.0.0.1 only.
+It is opt-in: without it no debugging port exists, and a zero-port app really
+binds zero ports. The port is printed on the boot line and recorded in the lock,
+which is how `am shot` (a headless screenshot) finds it. Anything that speaks
+CDP can attach to `http://127.0.0.1:<port>/json`.
+
 ## UDS transport
 
 By default (`transport: 'auto'`), local Electron apps use a local socket — a

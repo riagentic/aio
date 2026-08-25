@@ -120,8 +120,10 @@ Static analysis of `cell()` calls:
 - **Sync method / selector reading a `visible`-hidden field** (error) — sync
   methods of a `sync`/`localFirst`/`scope: "client"` cell replay on the client,
   and selectors of every cell run there, over the filtered slice; the read is
-  `undefined` (dev throws). Fix: read it in a server-side/async method, or
-  publish a non-secret fact field (`hasVault: boolean`) and read that
+  `undefined` (dev throws). Both member forms are scanned — block bodies and
+  expression-bodied arrows (`seedLen: (s) => s.seed.length`). Fix: read it in a
+  server-side/async method, or publish a non-secret fact field
+  (`hasVault: boolean`) and read that
 
 ### 4. Performance
 

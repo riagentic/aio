@@ -22,6 +22,7 @@
 // ADDING A ROW IS MANDATORY for any future 1.x removal:
 // `tests/removals-registry.test.ts` fails if a removal is announced anywhere in
 // `src/` or `aiol/` by a message that did not come from here.
+import { codeText } from "../diagnostics/code-mask.ts";
 
 /** What kind of thing was removed — decides how the message reads. */
 export type RemovalKind =
@@ -155,10 +156,25 @@ export function removalsUsedBy(
   );
 }
 
-/** A removed key found in source, with the line it sits on (1-based). */
+/** A removed key found in source, with the line it sits on (1-based) and
+ *  that line's text (trimmed) — a refusal that names `src/x.ts:61` without
+ *  showing what matched sends the reader to open the file to learn it was a
+ *  real config key and not a word in a comment. */
 export interface RemovalHit {
   readonly removal: Removal;
   readonly line: number;
+  readonly text: string;
+}
+
+/** Is this source path a test/fixture path — where a removed spelling is a
+ *  FIXTURE (an app's own upgrade test, a self-test that feeds the old shape
+ *  on purpose) rather than a config the app boots with? `am pin` WARNS on
+ *  these and REFUSES on the rest. `path` is relative to the app root. */
+export function isFixturePath(path: string): boolean {
+  const p = "/" + path.replaceAll("\\", "/");
+  return /\/tests?\//.test(p) || /\/testing\//.test(p) ||
+    /\.test\./.test(p) || p.includes("/fixtures/") ||
+    p.includes("/util/selftest");
 }
 
 /**
@@ -168,19 +184,29 @@ export interface RemovalHit {
  * the upgrade preflight each grow their own scanner and disagree about what
  * counts as a hit, which is the same drift this file exists to end.
  *
- * Deliberately textual and deliberately generous: callers narrow the input
- * (aiol passes one cell's config block; `am pin` passes whole files that call
+ * Textual, but on CODE only: the source is passed through `codeText` (THE
+ * "is this offset real code?" decider, shared with aiol) first, so a key
+ * spelled inside a string, a template literal (`${…}` included), a comment
+ * or a regex literal is not a hit. A field report: an app's own upgrade-test
+ * fixture carried `execute:` in a template string, and `am pin` refused to
+ * move an app whose real config was already migrated. Offsets and line breaks
+ * survive the mask, so the line number — and the quoted line — are the ones
+ * the reader sees in the file.
+ *
+ * Still deliberately generous within code: callers narrow the input (aiol
+ * passes one cell's config block; `am pin` passes whole files that call
  * `cell(`). A false positive costs a warning a human can overrule; a miss costs
  * an app that explodes at boot on a version it was told was safe.
  */
 export function removalsInSource(text: string): RemovalHit[] {
   const hits: RemovalHit[] = [];
-  const lines = text.split("\n");
+  const raw = text.split("\n");
+  const lines = codeText(text).split("\n");
   for (const r of REMOVALS) {
     if (r.kind !== "cell-config") continue; // an API shape is not textual
     const re = new RegExp(`(^|[{,\\s])${r.key}\\s*:`);
     const i = lines.findIndex((l) => re.test(l));
-    if (i >= 0) hits.push({ removal: r, line: i + 1 });
+    if (i >= 0) hits.push({ removal: r, line: i + 1, text: raw[i]!.trim() });
   }
   return hits.sort((a, b) => a.line - b.line);
 }
