@@ -1,6 +1,8 @@
 // HTTP + WebSocket server with live TSX transpilation (dev) or static serving (prod)
 // Thin orchestrator — delegates to server-*.ts modules
 import { APP_STYLE, appHasStylesheet, UI_ENTRY } from "./app-files.ts";
+import { isPipePath, listenLocal } from "./local-listen.ts";
+import { serveHttpOverLocal } from "./http-over-conn.ts";
 import { enc } from "../protocol/envelope.ts";
 import { join, resolve } from "@std/path";
 import { DEFAULT_SYNC_INTERVAL_MS } from "./aio.ts";
@@ -1035,9 +1037,16 @@ export function createServer(config: ServerConfig): ServerHandle {
   }
 
   // ── Start HTTP server ──
-  let httpServer: Deno.HttpServer;
+  let httpServer: Pick<Deno.HttpServer, "finished" | "shutdown">;
   const udsPath = config.socketPath;
-  if (udsPath) {
+  if (udsPath && isPipePath(udsPath)) {
+    // Windows: `Deno.serve({ path })` has no pipe equivalent, so the handler
+    // is served by the minimal HTTP/1.1 server over the pipe listener — the
+    // same handler, the same peer claim (`UDS_PEER`), one request per
+    // connection, bodies streamed both ways.
+    const over = serveHttpOverLocal(listenLocal(udsPath), handleRequest);
+    httpServer = { finished: over.finished, shutdown: () => over.close() };
+  } else if (udsPath) {
     try {
       Deno.removeSync(udsPath);
     } catch { /* doesn't exist */ }
@@ -1204,7 +1213,7 @@ export function createServer(config: ServerConfig): ServerHandle {
         trojanServer?.shutdown(),
       ]);
       await stopEsbuild();
-      if (udsPath) {
+      if (udsPath && !isPipePath(udsPath)) {
         try {
           Deno.removeSync(udsPath);
         } catch { /* already removed */ }

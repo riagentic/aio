@@ -22,7 +22,7 @@ import type { ServerSyncHandler } from "../sync/server-handler.ts";
 import type { ComposedCells } from "../state/cell.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
 import type { AppLock } from "./single-instance-lock.ts";
-import { resolveSocketPath, resolveTransport } from "./paths.ts";
+import { isPipePath, resolveSocketPath, resolveTransport } from "./paths.ts";
 import type { Log } from "../diagnostics/logger-api.ts";
 import {
   clientDegradedReport,
@@ -252,9 +252,9 @@ export function _noTlsWarning(
  *    • dev — the page and its modules are transpiled on demand, so the
  *      handler always runs, on the socket.
  *  Everything that needs a URL keeps a port: a browser client, `--expose`,
- *  the thin client, prod without a readable dist/, Windows (no Unix-socket
- *  listener in Deno — `resolveTransport` picks WS there, so
- *  `localElectronUds` is false), and — the explicit opt-out — an app whose
+ *  the thin client, prod without a readable dist/ (on windows the local
+ *  socket is a named pipe — the same rows apply), and — the explicit opt-out
+ *  — an app whose
  *  port was NAMED (`--port=N`, `AIO_PORT`, `aio.run({ port })`): a route that
  *  another process must reach over TCP (a webhook receiver, a `curl` probe, a
  *  browser tab beside the window) is exactly the case where naming the port
@@ -821,7 +821,11 @@ export async function setupTransport<S, A>(
     udsRef.current = uds;
     const u = uds;
     udsBroadcastRef.fn = (raw) => u.broadcast(raw);
-    log.info(`transport: UDS at ${socketPath}`);
+    log.info(
+      isPipePath(socketPath)
+        ? `transport: named pipe at ${socketPath}`
+        : `transport: UDS at ${socketPath}`,
+    );
   }
 
   const useHttps = expose && !!tlsCert;

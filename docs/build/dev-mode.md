@@ -64,9 +64,9 @@ Active flags are logged on startup:
 
 ## UDS transport
 
-`--transport=uds` uses Unix domain sockets instead of WebSocket/HTTP for
-Electron apps. The `auto` default selects UDS on Linux/macOS when using
-Electron, WS otherwise.
+`--transport=uds` uses the local socket (a Unix domain socket; a named pipe on
+Windows) instead of WebSocket/HTTP for Electron apps. The `auto` default selects
+it for a local Electron app, WS otherwise.
 
 **Why UDS?** No open TCP ports — more secure, slightly faster. The Electron app
 communicates over NDJSON on a Unix socket instead of HTTP/WS.
@@ -79,7 +79,8 @@ Socket path: `/tmp/aio/{slug}.sock` (or `$XDG_RUNTIME_DIR/aio/{slug}.sock` if
 set).
 
 **Exceptions:** `--expose` always uses WS (needs real HTTP for remote access).
-Browser mode always uses WS. Windows always uses WS (no UDS support).
+Browser mode always uses WS. On Windows the socket is a named pipe
+(`\\.\pipe\aio-<lockKey>`) — see [transports](../clients/transports.md).
 
 CLI apps can connect via `connectCliUDS(socketPath)` for headless UDS transport.
 
