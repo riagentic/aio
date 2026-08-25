@@ -27,6 +27,7 @@
  * ```
  */
 
+import { dec } from "../protocol/envelope.ts";
 import { connectCli } from "../server/cli-client.ts";
 import type { CliApp } from "../server/cli-client.ts";
 import type { CellsConfig } from "../server/aio-types.ts";
@@ -43,8 +44,87 @@ export interface TestClient {
   fullState(): Record<string, unknown>;
   /** Dispatch over this client's socket, resolving when the server acks. */
   dispatch(action: { type: string; payload?: unknown }): Promise<void>;
+  /** Every patch this client RECEIVED over its socket, in arrival order — the
+   *  immer-style `{ op, path, value }` objects the server broadcast, exactly as
+   *  a browser tab would apply them. State is the sum; this is the stream, so
+   *  "the field was filtered out of the delta" or "the whole state was resent"
+   *  (an entry with `op: "replace"` and an empty `path`) is assertable. */
+  readonly patches: readonly Patch[];
+  /** Observe patches as they arrive; returns an unsubscribe. */
+  onPatch(cb: (batch: readonly Patch[]) => void): () => void;
+  /** Resolve with the first patch (already received or still to come) that
+   *  satisfies `pred`; rejects after `timeoutMs` (default 2000) naming the
+   *  patches that DID arrive. */
+  waitForPatch(
+    pred: (p: Patch) => boolean,
+    opts?: { timeoutMs?: number },
+  ): Promise<Patch>;
   /** Underlying connection, for anything this surface doesn't cover. */
   readonly cli: CliApp<Record<string, unknown>>;
+}
+
+/** One received patch — immer's shape on the wire. A full-state resend is
+ *  recorded as a single `replace` at the empty path. */
+export type Patch = {
+  op: "add" | "replace" | "remove";
+  path: (string | number)[];
+  value?: unknown;
+};
+
+// ── Patch capture ─────────────────────────────────────────────────────────
+// `connectCli` owns its WebSocket and exposes state, not frames. The frames
+// are what a browser tab sees, so the harness listens on the SAME socket: the
+// global `WebSocket` is wrapped for the harness's lifetime, and every socket
+// created while a client is being connected is attributed to that client (a
+// reconnect goes to the client whose previous socket closed). Refcounted so
+// two harnesses in one process share one wrapper and restore the original
+// once the last one closes.
+type Sink = { push(batch: Patch[]): void; socket: WebSocket | null };
+const _sinks = new Set<Sink>();
+let _constructing: Sink | null = null;
+let _wrapDepth = 0;
+let _origWebSocket: typeof WebSocket | null = null;
+
+function _installSocketCapture(): void {
+  if (_wrapDepth++ > 0) return;
+  const Orig = globalThis.WebSocket;
+  _origWebSocket = Orig;
+  const Wrapped = function (
+    this: unknown,
+    url: string | URL,
+    protocols?: string | string[],
+  ) {
+    const ws = new Orig(url, protocols);
+    const owner = _constructing ??
+      [..._sinks].find((s) =>
+        s.socket === null || s.socket.readyState === WebSocket.CLOSED
+      ) ?? null;
+    if (owner) {
+      owner.socket = ws;
+      ws.addEventListener("message", (e: MessageEvent) => {
+        if (typeof e.data !== "string") return;
+        const frame = dec(e.data);
+        if (!frame) return;
+        if (frame.t === "patches" && Array.isArray(frame.d)) {
+          owner.push(frame.d as Patch[]);
+        } else if (frame.t === "state") {
+          owner.push([{ op: "replace", path: [], value: frame.d }]);
+        }
+      });
+    }
+    return ws;
+  } as unknown as typeof WebSocket;
+  Wrapped.prototype = Orig.prototype;
+  for (const k of ["CONNECTING", "OPEN", "CLOSING", "CLOSED"] as const) {
+    Object.defineProperty(Wrapped, k, { value: Orig[k] });
+  }
+  globalThis.WebSocket = Wrapped;
+}
+
+function _uninstallSocketCapture(): void {
+  if (--_wrapDepth > 0) return;
+  if (_origWebSocket) globalThis.WebSocket = _origWebSocket;
+  _origWebSocket = null;
 }
 
 /** Handle for a multi-client test: several independent clients on one app, so
@@ -115,9 +195,35 @@ export async function testMultiClient(
   // stays as the ceiling for a genuinely slow round trip.
   const NOOP_GRACE_MS = 250;
 
+  const sinks: Sink[] = [];
+  _installSocketCapture();
   try {
     for (let i = 0; i < count; i++) {
-      const cli = connectCli<Record<string, unknown>>(srv.url);
+      const patches: Patch[] = [];
+      const patchListeners = new Set<(b: readonly Patch[]) => void>();
+      const sink: Sink = {
+        socket: null,
+        push: (batch) => {
+          patches.push(...batch);
+          for (const fn of patchListeners) fn(batch);
+        },
+      };
+      _sinks.add(sink);
+      sinks.push(sink);
+      _constructing = sink;
+      let cli: CliApp<Record<string, unknown>>;
+      try {
+        cli = connectCli<Record<string, unknown>>(srv.url);
+      } finally {
+        _constructing = null;
+      }
+      if (sink.socket === null) {
+        throw new Error(
+          "testMultiClient: the client's WebSocket was not observed — patch " +
+            "capture wraps globalThis.WebSocket during connectCli(), which " +
+            "must construct its socket synchronously",
+        );
+      }
       await cli.ready; // first full state — the client is a real peer now
       // Observe EVERY send, including raw `client.cli.send(...)`. `converged()`
       // must not answer in the window between an action leaving a socket and the
@@ -129,9 +235,46 @@ export async function testMultiClient(
           rawSend(action);
         };
       conns.push(cli);
+      const waitForPatch = (
+        pred: (p: Patch) => boolean,
+        opts?: { timeoutMs?: number },
+      ): Promise<Patch> => {
+        const hit = patches.find(pred);
+        if (hit) return Promise.resolve(hit);
+        return new Promise<Patch>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            off();
+            reject(
+              new Error(
+                `testMultiClient: client ${i} received no matching patch within ${
+                  opts?.timeoutMs ?? 2000
+                }ms.\n  received: ${
+                  JSON.stringify(patches).slice(0, 600) || "(none)"
+                }`,
+              ),
+            );
+          }, opts?.timeoutMs ?? 2000);
+          const off = onPatch((batch) => {
+            const p = batch.find(pred);
+            if (!p) return;
+            clearTimeout(timer);
+            off();
+            resolve(p);
+          });
+        });
+      };
+      const onPatch = (cb: (b: readonly Patch[]) => void) => {
+        patchListeners.add(cb);
+        return () => {
+          patchListeners.delete(cb);
+        };
+      };
       clients.push({
         index: i,
         cli,
+        patches,
+        onPatch,
+        waitForPatch,
         state: <T>(cell: string) =>
           ((cli.state ?? {}) as Record<string, unknown>)[cell] as T,
         fullState: () => (cli.state ?? {}) as Record<string, unknown>,
@@ -159,6 +302,8 @@ export async function testMultiClient(
     }
   } catch (e) {
     for (const c of conns) c.close();
+    for (const s of sinks) _sinks.delete(s);
+    _uninstallSocketCapture();
     await srv.close();
     throw e;
   }
@@ -252,8 +397,13 @@ export async function testMultiClient(
     }
   };
 
+  let closed = false;
   const close = async () => {
+    if (closed) return;
+    closed = true;
     for (const c of conns) c.close();
+    for (const s of sinks) _sinks.delete(s);
+    _uninstallSocketCapture();
     await sleep(5); // let the sockets unwind before the server goes down
     await srv.close();
   };

@@ -331,7 +331,7 @@ function containers(s: Spec, out: Container[] = []): Container[] {
  *
  *  `containers()` walks containers, `texts()` walks text leaves; a component
  *  had no collector at all, which is why no mutation could ever change one IN
- *  PLACE. That gap is what let rimote R-10 ship: `CNull` was in the component
+ *  PLACE. That gap is what let R-10 ship: `CNull` was in the component
  *  alphabet from the start, so the fuzzer could BUILD a component that renders
  *  nothing — it just could never make an existing one start or stop doing so,
  *  and that transition is the entire bug. A fuzzer is only as strong as its op
@@ -419,7 +419,7 @@ function mutate(root: Spec, r: Rnd): Spec {
       }
       break;
     }
-    case 13: { // the SAME component starts/stops rendering null (rimote R-10)
+    case 13: { // the SAME component starts/stops rendering null (R-10)
       // In place — same spec id, same position, same siblings. That is the
       // distinction from op 5 (replace wholesale), which swaps in a NEW node
       // and therefore never exercises "this component's output appeared or
@@ -535,7 +535,7 @@ const seen: string[] = [];
 // ── the fuzzer's own coverage gate ───────────────────────────────────────
 //
 // A differential fuzzer is only as strong as its OP SET, and an op set nobody
-// audits is a coverage claim nobody checked. rimote R-10 proved the cost: a
+// audits is a coverage claim nobody checked. R-10 proved the cost: a
 // component that renders `null` was in the NODE alphabet from the start
 // (`CNull`), so the fuzzer could build one — but no mutation could make an
 // existing component start or stop rendering nothing, and that TRANSITION is

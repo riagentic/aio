@@ -57,6 +57,15 @@ export interface SyncHandlerDeps {
    *  `ui: "none"` cells and excluded fields to any client that fell behind
    *  compaction. A default here would just re-create that fail-open. */
   getClientCellState: (cell: string) => Record<string, unknown> | null;
+  /** The cell's declared shape `version` (field report §3.1) — stamped on every op
+   *  row and every compaction snapshot, so the boot replay can tell what shape
+   *  a row was written under. Undefined ⇒ 0 (the default a cell declares). */
+  cellVersion?: (cell: string) => number;
+  /** A cell the boot replay QUARANTINED (its op-log could not be folded into
+   *  the current shape): compaction must not write its live state over the
+   *  snapshot — the log and the snapshot are the only surviving copies of the
+   *  data. Undefined ⇒ nothing is quarantined. */
+  isQuarantined?: (cell: string) => boolean;
   /** AUTH-1 parity for the sync path: may `user` mutate `cell` via a sync op?
    *  Undefined = no access rules (open). The `action` dispatch path is gated in
    *  aio-server.ts; sync ops route through a different dispatch, so the SAME
@@ -169,12 +178,26 @@ export function createServerSyncHandler(
   }
 
   async function tryCompact(cell: string, force = false): Promise<void> {
+    // A quarantined cell's live state is NOT the data (the replay could not
+    // fold the log; the slice is the last snapshot, or the defaults). Writing
+    // it into sync_snapshots and DELETING the ops it "contains" would be the
+    // exact data loss the quarantine exists to prevent. Refused here — the ONE
+    // path every snapshot write takes (op-count, server-write, shutdown flush).
+    if (deps.isQuarantined?.(cell)) {
+      deps.log.warn(
+        `[sync:server] compaction of "${cell}" skipped — the cell is ` +
+          `quarantined since boot (its op-log could not be replayed into the ` +
+          `current shape); fix the cell's version/onMigrate and restart`,
+      );
+      return;
+    }
     try {
       await compactSyncOps({
         db: deps.db,
         cell,
         getState: () => deps.getCellState(cell),
         serverHlc: clock.now(),
+        cellVersion: deps.cellVersion?.(cell) ?? 0,
         log: deps.log,
         // force: fold current state into the snapshot regardless of op count —
         // the durability path for server-origin writes (see noteServerWrite).
@@ -256,7 +279,11 @@ export function createServerSyncHandler(
         // Persist → ack → broadcast (await persist before ack — AIO-audit3)
         let serverTs: number | null = null;
         try {
-          serverTs = await persistOp(deps.db, op);
+          serverTs = await persistOp(
+            deps.db,
+            op,
+            deps.cellVersion?.(op.cell) ?? 0,
+          );
         } catch (e) {
           deps.log.error(`[sync:server] failed to persist op ${op.id}: ${e}`);
           return; // Don't ack — client will retry
@@ -457,7 +484,11 @@ export function createServerSyncHandler(
             const serverHlc = clock.tick();
             let serverTs: number | null = null;
             try {
-              serverTs = await persistOp(deps.db, pending);
+              serverTs = await persistOp(
+                deps.db,
+                pending,
+                deps.cellVersion?.(pending.cell) ?? 0,
+              );
             } catch (e) {
               deps.log.error(
                 `[sync:server] failed to persist pending op ${pending.id}: ${e}`,

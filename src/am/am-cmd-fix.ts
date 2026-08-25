@@ -10,7 +10,7 @@ import {
   type Target,
   TARGETS,
 } from "./am-cmd-create.ts";
-import { join, resolve } from "@std/path";
+import { fromFileUrl, join, resolve } from "@std/path";
 import { parse as parseJsonc } from "@std/jsonc";
 import { refOfLink } from "../server/framework-pin.ts";
 import { resolveEntryPath } from "../server/paths.ts";
@@ -610,36 +610,50 @@ export async function cmdFix(
         "manual",
         "framework not found — install via install.sh, or pass --aio=<path>",
       );
-    } else if (dry) {
-      const p = await probeDepAio(dir); // read-only
-      add(
-        "dep/aio framework link",
-        p === "ok" || p === "vendored"
-          ? "ok"
-          : p === "blocked"
-          ? "manual"
-          : "would-fix",
-        p === "vendored"
-          ? "vendored copy — untouched"
-          : p === "blocked"
-          ? "dep/aio isn't a usable aio"
-          : p === "would-link"
-          ? `→ ${root}`
-          : "",
-      );
     } else {
-      const r = await linkDepAio(dir, root);
-      add(
-        "dep/aio framework link",
-        r === "linked" ? "fixed" : r === "blocked" ? "manual" : "ok",
-        r === "vendored"
-          ? "vendored copy — untouched"
-          : r === "blocked"
-          ? "dep/aio exists but isn't a usable aio — inspect it by hand"
-          : r === "linked"
-          ? `→ ${root}`
-          : "",
-      );
+      // A link that WORKS is not a link that is RIGHT. `root` is the path the
+      // app's pin resolves to; a link pointing anywhere else is the pin
+      // silently not applied — `am pin main` (or editing aioVersion by hand)
+      // followed by `am fix` used to report "ok" and build against whatever
+      // the link happened to say. That is one fact (the framework version)
+      // decided in two places, and the second one won without saying so.
+      const current = await Deno.readLink(join(dir, "dep", "aio"))
+        .then((t) => resolve(dir, "dep", t))
+        .catch(() => null);
+      const stale = current !== null && resolve(current) !== resolve(root) &&
+        (await probeDepAio(dir)) === "ok";
+      const was = stale ? ` (was ${current})` : "";
+      if (dry) {
+        const p = await probeDepAio(dir); // read-only
+        add(
+          "dep/aio framework link",
+          p === "vendored" || (p === "ok" && !stale)
+            ? "ok"
+            : p === "blocked"
+            ? "manual"
+            : "would-fix",
+          p === "vendored"
+            ? "vendored copy — untouched"
+            : p === "blocked"
+            ? "dep/aio isn't a usable aio"
+            : p === "would-link" || stale
+            ? `→ ${root}${was}`
+            : "",
+        );
+      } else {
+        const r = await linkDepAio(dir, root, stale);
+        add(
+          "dep/aio framework link",
+          r === "linked" ? "fixed" : r === "blocked" ? "manual" : "ok",
+          r === "vendored"
+            ? "vendored copy — untouched"
+            : r === "blocked"
+            ? "dep/aio exists but isn't a usable aio — inspect it by hand"
+            : r === "linked"
+            ? `→ ${root}${was}`
+            : "",
+        );
+      }
     }
   }
 
@@ -658,20 +672,38 @@ export async function cmdFix(
   } else add(".env from .env.example", "ok");
 
   // 3 — electron runtime (node_modules is gitignored)
+  //
+  // Both halves go through the framework's installer, which is the ONE thing
+  // that knows where the runtime lives and how to get it. This step used to
+  // (a) test `node_modules/electron` EXISTS — true after any `deno install`,
+  // with or without the ~100MB `dist/` the lifecycle script downloads — and
+  // (b) repair with the bare `deno install --allow-scripts=npm:electron`, the
+  // command that exits 0 having skipped that script. Net effect on the
+  // one-liner: `am fix` printed "fixed · installed npm:electron", the build one
+  // second later said "electron is not installed — run deno task
+  // install:electron", and every later `am fix` said "ok" because the empty
+  // package was there. A repair that reports success on the wrong question is
+  // worse than no repair; this one asks "is the BINARY there?" on both sides.
   if (usesElectron) {
-    const have = await exists(join(dir, "node_modules", "electron"));
+    const installer = fromFileUrl(
+      new URL("../electron-install.ts", import.meta.url),
+    );
+    const have =
+      (await run("deno", ["run", "-A", installer, "--check"], dir)).ok;
     await repair(
       "electron runtime installed",
       !have,
       async () => {
-        const r = await run(
-          "deno",
-          ["install", "--allow-scripts=npm:electron", "npm:electron"],
-          dir,
-        );
-        if (!r.ok) throw new Error(r.err || "deno install failed");
+        const r = await run("deno", ["run", "-A", installer], dir);
+        if (!r.ok) throw new Error(r.err || "electron install failed");
+        const now = await run("deno", ["run", "-A", installer, "--check"], dir);
+        if (!now.ok) {
+          throw new Error(
+            "the installer exited 0 but no Electron runtime is present",
+          );
+        }
       },
-      "installed npm:electron",
+      "downloaded the Electron runtime (npm:electron)",
     );
   }
 

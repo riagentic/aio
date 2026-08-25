@@ -28,7 +28,7 @@ Deno.test("monogram: the first character that HAS a glyph", () => {
   assertEquals(monogramChar("  my-app"), "M");
   assertEquals(monogramChar("7days"), "7");
   // A leading separator is not a letter — skip to one that is.
-  assertEquals(monogramChar("-quant"), "Q");
+  assertEquals(monogramChar("-quill"), "Q");
 });
 
 Deno.test("colour: deterministic per name, and spread across apps", () => {
@@ -38,8 +38,8 @@ Deno.test("colour: deterministic per name, and spread across apps", () => {
     "fixable",
     "modelinfo",
     "impactnews",
-    "quant",
-    "t2v",
+    "quill",
+    "tally",
   ];
   const hues = new Set(names.map((n) => iconColors(n).hue));
   // The whole point is that N running apps look like N different icons.
@@ -69,7 +69,7 @@ Deno.test("colour: the monogram clears WCAG AA on every hue", () => {
 });
 
 Deno.test("svg: self-contained, font-free, correctly sized", () => {
-  const svg = appIconSvg("quant", 128);
+  const svg = appIconSvg("quill", 128);
   assert(svg.includes('width="128"'));
   assert(svg.includes("<path"), "the monogram is geometry, not text");
   assert(
@@ -79,7 +79,7 @@ Deno.test("svg: self-contained, font-free, correctly sized", () => {
 });
 
 Deno.test("png: a real PNG whose glyph actually covers pixels", async () => {
-  const png = await appIconPng("quant", 64);
+  const png = await appIconPng("quill", 64);
   assertEquals([...png.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
   // IEND terminates it — a truncated stream still starts with the magic.
   assertEquals(
@@ -90,7 +90,7 @@ Deno.test("png: a real PNG whose glyph actually covers pixels", async () => {
   // The letter must be ON the icon: some pixels have to differ from the
   // background column at the same row. An all-background PNG is exactly the
   // failure a "did it write a file?" test cannot see.
-  const px = appIconPixels("quant", 64);
+  const px = appIconPixels("quill", 64);
   const mid = 32;
   let ink = 0;
   for (let x = 0; x < 64; x++) {
@@ -172,7 +172,7 @@ Deno.test("icon: a script with no glyphs falls back, and says so by being the sa
 });
 
 // An `icon.png` the build cannot see must be SAID, not silently replaced
-// (fezor F-2).
+// (F-2).
 //
 // Every target resolves the icon from THE app dir — the entry module's
 // directory, the same place dev serves it from. The project ROOT is the other

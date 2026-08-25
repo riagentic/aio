@@ -34,7 +34,30 @@ done
 # authoritative statement of which deno version this framework requires
 # (src/server/deno-version.ts). Checking deno first meant hardcoding that
 # number here — a second decider that would go stale the first time it moved.
+# A checkout that someone WORKS in is never moved. The canonical install is
+# always detached at a tag and clean; a clone on a branch, or with local
+# changes, is a developer's repo (AIO_HOME pointed at it, or run.sh ran inside
+# one) — and `git checkout --force <tag>` there deletes uncommitted work. That
+# happened to the framework's own working tree the first time run.sh started
+# updating unconditionally. Same rule as `am update`: leave it alone, say so,
+# and still (re)install am from whatever is checked out there.
+AIO_DEV_CHECKOUT=0
 if [ -d "$AIO_HOME/.git" ]; then
+  # Local changes are always protected. A branch counts as "worked in" unless
+  # AIO_REF says otherwise — `AIO_REF=main` is explicit, and it checks out
+  # detached below so the install never ends up ON a branch by itself.
+  # deno.lock is excluded: `deno install` from this checkout rewrites it, so
+  # counting it would make every canonical install look "worked in" after its
+  # first run and freeze it forever (measured: that is exactly what happened).
+  if [ -n "$(git -C "$AIO_HOME" status --porcelain --untracked-files=no -- . ':!deno.lock' 2>/dev/null)" ]; then
+    AIO_DEV_CHECKOUT=1
+  elif [ -z "${AIO_REF:-}" ] && git -C "$AIO_HOME" symbolic-ref -q HEAD >/dev/null 2>&1; then
+    AIO_DEV_CHECKOUT=1
+  fi
+fi
+if [ "$AIO_DEV_CHECKOUT" = 1 ]; then
+  info "$AIO_HOME is a working checkout (on a branch or with local changes) — not moving it"
+elif [ -d "$AIO_HOME/.git" ]; then
   info "updating aio in $AIO_HOME"
   git -C "$AIO_HOME" fetch --tags --force -q origin "$AIO_BRANCH" >/dev/null 2>&1 || \
     warn "could not fetch updates — continuing with the checkout that is there"
@@ -52,10 +75,13 @@ fi
 # `AIO_REF=main` follows the tip, `AIO_REF=<sha>` reproduces a report exactly.
 # The onboarding lab needs it too — without it the lab could only ever test the
 # last TAG, so a fix could not be verified until after it shipped.
-if [ -n "${AIO_REF:-}" ]; then
+if [ "$AIO_DEV_CHECKOUT" = 1 ]; then
+  ok "aio $(git -C "$AIO_HOME" describe --tags --always 2>/dev/null || echo '?') (working checkout, left as is)"
+  AIO_TAG=""
+elif [ -n "${AIO_REF:-}" ]; then
   git -C "$AIO_HOME" fetch -q --tags --force origin "$AIO_REF" 2>/dev/null || :
-  git -C "$AIO_HOME" checkout -q --force "$AIO_REF" 2>/dev/null \
-    || git -C "$AIO_HOME" checkout -q --force "origin/$AIO_REF" 2>/dev/null \
+  git -C "$AIO_HOME" checkout -q --force --detach "$AIO_REF" 2>/dev/null \
+    || git -C "$AIO_HOME" checkout -q --force --detach "origin/$AIO_REF" 2>/dev/null \
     || fail "AIO_REF=$AIO_REF is not a ref in $AIO_REPO"
   ok "aio $AIO_REF (pinned via AIO_REF)"
   AIO_TAG=""

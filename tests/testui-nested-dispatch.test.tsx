@@ -1,6 +1,6 @@
 // a field report #5 — "testUI does not drain nested async dispatch".
 //
-// `ui.up.click()` → cell `up()` → `await fezor.open(parent)` (a nested
+// `ui.up.click()` → cell `up()` → `await files.open(parent)` (a nested
 // dispatch) left the UI showing the OLD directory after settle(): the harness
 // drained the outer call, went HTML-quiet in the gap, and called it settled.
 // settle() now awaits the pending method calls themselves (bounded by the

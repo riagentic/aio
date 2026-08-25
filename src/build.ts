@@ -23,6 +23,8 @@ import { buildCli } from "./build/build-cli.ts";
 import { buildAndroid } from "./build/build-android.ts";
 import { runDenoCompile, writeServiceFile } from "./build/build-compile.ts";
 import { buildElectron } from "./build/build-electron.ts";
+import { resolveElectronVersion } from "./build/electron-runtime.ts";
+import { ELECTRON_VERSION_FILE } from "./electron/electron-runtime-fetch.ts";
 
 /**
  * Run the build pipeline. Without `cfg`, configuration is loaded from CLI
@@ -80,6 +82,26 @@ export async function build(cfg?: BuildConfig): Promise<void> {
 
   if (!doCompile && !doAndroid && !doClient && !doCli) return;
 
+  // ── Bake the Electron version into dist/ ────────────────────────────────
+  // A plain compiled binary (`--compile`, not the AppImage) whose client is
+  // Electron has to FETCH a runtime on the machine it runs on — it has no
+  // node_modules and no deno. Which version is decided here, once, by the
+  // build (installed runtime > import-map spec > framework default), and read
+  // by the launcher from the embedded dist/. Without this file the binary and
+  // the checkout could run two different Electrons, and a desktop app has no
+  // business asking its user to `deno task install:electron`.
+  if (doCompile && !doCli && !doClient && !doAndroid) {
+    const version = await resolveElectronVersion(root);
+    await Deno.mkdir(dist, { recursive: true });
+    await Deno.writeTextFile(
+      join(dist, ELECTRON_VERSION_FILE),
+      JSON.stringify({ version }) + "\n",
+    );
+    console.log(
+      `[build] \u2713 dist/${ELECTRON_VERSION_FILE} (electron ${version})`,
+    );
+  }
+
   // ── aio-client: standalone Electron connect-page AppImage ───────────────
   if (doClient) {
     await buildClient(cfg);
@@ -104,12 +126,12 @@ export async function build(cfg?: BuildConfig): Promise<void> {
   // this build writes" without shipping the previous target's leftovers. That
   // is why dist/ is staging and never a destination: `--out=` (default: the
   // project root) is where artifacts land, and loadBuildConfig refuses an
-  // --out inside dist/ (rimote R-4).
+  // --out inside dist/ (R-4).
   try {
     for await (const entry of Deno.readDir(dist)) {
       if (
         entry.name === "app.js" || entry.name === "style.css" ||
-        entry.name === "icon.png"
+        entry.name === "icon.png" || entry.name === ELECTRON_VERSION_FILE
       ) continue;
       await Deno.remove(join(dist, entry.name), { recursive: true });
     }

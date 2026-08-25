@@ -392,7 +392,7 @@ Deno.test("import map: a deno.jsonc-only app is told why its imports vanish", as
 
 // The boot lint checked a HARDCODED App.tsx, so an app that legitimately named
 // its root component something else (`ui.entry`, honoured by the dev server and
-// — since rimote R-2 — by the build) failed its own boot check while the
+// — since R-2 — by the build) failed its own boot check while the
 // server was about to serve the right file. One decider, checked here.
 Deno.test("lint: ui.entry decides which component must exist", async () => {
   await withTmpDir(async (dir) => {

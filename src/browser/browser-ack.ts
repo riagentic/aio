@@ -9,6 +9,7 @@
 
 import { ACK_TIMEOUT_MS, type AioWindow } from "../protocol/protocol-types.ts";
 import {
+  type AckCeiling,
   type AckRegistry,
   createAckRegistry,
 } from "../protocol/ack-registry.ts";
@@ -41,16 +42,25 @@ export function _setAckGraceMs(ms: number): void {
  *
  *  Read at REGISTRATION time (not captured once) so `_setAckTimeoutMs` and a
  *  late-arriving `cfg` frame both take effect. */
-function callCeilingMs(methodKey: string | undefined): number {
+function callCeilingMs(methodKey: string | undefined): AckCeiling {
   const cfg = (globalThis as AioWindow).__aioConfig?.callTimeouts;
-  const resolved =
-    (methodKey !== undefined ? cfg?.methods?.[methodKey] : undefined) ??
-      cfg?.default;
+  const perMethod = methodKey !== undefined
+    ? cfg?.methods?.[methodKey]
+    : undefined;
+  const withGrace = (ms: number) => ms <= 0 ? 0 : ms + _ackGraceMs;
+  if (perMethod === "warn") {
+    // The server warns at the DEFAULT ceiling and keeps waiting; so do we.
+    return { warnAfterMs: withGrace(cfg?.default ?? _ackTimeoutMs) };
+  }
+  const resolved = perMethod ?? cfg?.default;
   if (resolved === undefined) return _ackTimeoutMs;
-  return resolved <= 0 ? 0 : resolved + _ackGraceMs;
+  return withGrace(resolved);
 }
 
-const _registry: AckRegistry = createAckRegistry(callCeilingMs);
+const _registry: AckRegistry = createAckRegistry(
+  callCeilingMs,
+  (m) => console.warn(m),
+);
 
 /** Marks a send function that ARMS the ack clock itself when it writes the
  *  frame (and defers it while the action sits in an offline queue). The cell

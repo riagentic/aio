@@ -8,17 +8,24 @@ For build targets (AppImage, zip, systemd), see
 
 ## Setup
 
-Electron is on by default. AIO looks for (in order):
+Electron is on by default, and **nothing has to be installed by hand**. AIO
+looks for (in order):
 
 1. `$ELECTRON_PATH` env var — set by packaged launchers (`AppRun` / `run.sh` /
    `run.bat`)
 2. `node_modules/.bin/electron` — dev binary
+3. in dev: auto-install via `deno install` (the npm package, with a fallback to
+   its own `install.js` when the lifecycle script is skipped)
+4. the runtime Electron publishes, fetched once into
+   `~/.cache/aio/tools/
+   electron/<version>-<platform>/` — THE path for a
+   **compiled binary** (which has no `node_modules` and no `deno`), and the last
+   resort for dev. The version is the one the build baked into
+   `dist/electron.json` (installed runtime > `npm:electron@^x.y.z` in the import
+   map > framework default).
 
-Install for dev:
-
-```sh
-deno task install:electron
-```
+`deno task install:electron` remains for a checkout that wants the download done
+up front (CI, a machine that goes offline); it is never a required step.
 
 > **Note:** Do not use `npm install electron` — it removes Deno-managed package
 > symlinks (esbuild, etc.) from `node_modules/`.
@@ -82,6 +89,72 @@ Deno ↔ UDS/NDJSON ↔ Electron main (net.connect) ↔ IPC ↔ renderer (window
 - The renderer accesses the bridge via `window.__aioIPC`
 - Static files (HTML, JS, CSS) are served via Electron's
   `protocol.handle('aio', ...)` — no HTTP needed
+
+### Zero TCP ports — and the app's own routes
+
+A local Electron app on Linux/macOS binds **no TCP port at all** — by default,
+in dev and in prod (prod needs `dist/` readable next to the binary, the
+AppImage/AppDir layout). The window loads its page from the `aio://` scheme, and
+the boot line says `running (…, uds — no TCP port)` — printed only when it is
+literally true. A port is a cost (reachable by every process and tab on the
+machine), not a feature; an app that serves nothing to a browser or another
+service does not pay it.
+
+**The opt-out is a named port.** An app that needs a route reachable from
+**another process** over TCP — a webhook receiver, a local `curl` probe, a
+browser tab beside the window — must say so explicitly: `--port=N` (or
+`AIO_PORT`, or `aio.run({ port })`). Boot then prints
+`port N named explicitly
+— keeping a TCP listener`, and the route is on that
+loopback port. `--zero-port` is accepted as a no-op.
+
+Custom `routes` do not bring the port back. An app that declares
+
+```ts
+routes: { "/nft-image/*": async (req) => /* bytes, content-type, nosniff */ }
+```
+
+keeps rendering `<img src="/nft-image/<sha>">` — on the zero-port page that
+relative URL resolves to `aio://app/nft-image/<sha>` (the scheme is `standard`),
+the shell's `protocol.handle('aio')` proxies it over a Unix socket to the SAME
+route handler an `http://` request would reach, and the `Response` comes back
+**unchanged**: status, `content-type`, `nosniff`, `cache-control` all pass
+through. The body is **streamed** (`stream: true`; the shell resolves on headers
+and pipes the bytes), so a 100 MB image is never buffered in the Electron main
+process, and Chromium caches it by scheme+URL like any other resource.
+`fetch()`, CSS `url()` and a WebGL `TextureLoader` all work the same way. The
+same socket serves `/__aio/*`, so `am surface` / `am trigger` still reach the
+app.
+
+Where a route is served, by mode:
+
+| Mode                          | Page                      | Custom `routes` / `/__aio/*` | TCP port |
+| ----------------------------- | ------------------------- | ---------------------------- | -------- |
+| prod, electron, dist/ on disk | `aio://` off disk         | `aio://app/<path>` → UDS     | none     |
+| prod, electron, no dist/      | `http://127.0.0.1:<port>` | same origin, TCP             | one      |
+| dev, electron (default)       | `aio://` → UDS            | `aio://app/<path>` → UDS     | none     |
+| dev or prod, `--port=N`       | `http://127.0.0.1:N`      | same origin, TCP             | one      |
+| any, Windows                  | `http://127.0.0.1:<port>` | same origin, TCP             | one      |
+
+A `serverFn` is not a substitute for a route here: it returns a value over the
+message bridge, while an `<img>` needs a URL the renderer's network stack can
+resolve. Use `routes` for bytes, `serverFn` for values.
+
+The full transport matrix — dev/prod × electron/browser/server-only ×
+Linux-macOS/Windows, what listens where, what a named port changes — lives in
+one place: [transports.md](transports.md). Short form: **Windows is the
+exception** — Deno has no Unix-socket listener there, so the UDS transport (and
+the zero-port page) is not available: the app runs on WS + TCP, loopback-bound,
+and the boot line says so. A Unix-socket or named-pipe listener in Deno would
+close it ([transports.md → Windows](transports.md#windows-the-exception)).
+
+On an `aio://` page the IPC bridge is the **only** transport. The renderer never
+falls back to `ws://app/ws` (a socket that cannot exist): if the bridge is
+missing the client fails loudly — a status line, a diagnostic, and a thrown
+`page has no HTTP origin and no IPC bridge — the aio:// page must be loaded by
+the aio Electron shell`
+— instead of retrying into a blank window. The dev reload script is skipped on
+such a page as well; the bridge already delivers `reload`/`css`/`boot`.
 
 **When UDS is not used:**
 

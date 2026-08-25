@@ -67,7 +67,7 @@ export function h(
  *  anchor the next diff inserts before. So the component that came back was
  *  APPENDED instead: an approval prompt written as the first child of a panel
  *  rendered last, below a screenful of settings and off the bottom of the
- *  window (rimote R-10). Every `x ? <El/> : null` component has that shape —
+ *  window (R-10). Every `x ? <El/> : null` component has that shape —
  *  banners, toasts, modals, validation messages — and those are exactly the
  *  ones whose position carries meaning. It also made SSR disagree with the
  *  client: `vdom-ssr.ts` emits `<!---->` for a null slot, so a null-first

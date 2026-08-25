@@ -112,7 +112,9 @@ export type MethodsCellConfig<
    *  `testCell` — so a test can simply `await job.colorize()` instead of
    *  starting it and polling. Cancellation is untouched: `long` removes a
    *  deadline, `cancelOn` + `s.$signal` are still how a method is stopped.
-   *  An explicit `perfBudget.methods[...]` entry still wins. */
+   *  An explicit `perfBudget.methods[...]` entry still wins — including
+   *  `timeout: "warn"`, which keeps the ceiling as a REPORT (one warning at
+   *  the default ceiling, caller keeps waiting) for work of unknown length. */
   long?: (keyof M & string)[];
   /** Selectors — derived values, auto-scoped to cell state.
    *  Plain form: `(s) => R` receives the cell's own slice.

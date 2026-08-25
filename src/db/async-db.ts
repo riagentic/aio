@@ -170,7 +170,16 @@ export type DBOpts = {
 type Pending = { resolve: (v: unknown) => void; reject: (e: Error) => void };
 
 /** Create an async SQLite DB backed by a dedicated Worker thread (+ optional read replicas).
- *  Workers spawn lazily on first call — zero overhead if SQLite is never used. */
+ *  Workers spawn lazily on first call — zero overhead if SQLite is never used.
+ *
+ *  `PRAGMA user_version` is the APP's. aio neither reads nor writes it (since
+ *  alpha52) — a fresh file opens at `0`, and your own "have I run this" marker
+ *  can use it the standard SQLite way. History caveat: aio ≤alpha51 stamped
+ *  `1` on open, so a file created by an older aio may already read `1` without
+ *  any app migration having run; an app whose files predate alpha52 should
+ *  treat `1` as its own baseline (or keep its marker in an app table). There
+ *  is no `migrations` option on `createDB` — run yours after `createDB()`
+ *  returns (`docs/persistence/sqlite.md`). */
 export function createDB(path: string, opts: DBOpts = {}): DB {
   const pending = new Map<number, Pending>();
   // Track which pending IDs belong to which worker (for per-worker error isolation)

@@ -7,6 +7,11 @@ export {
   testMultiClient,
 } from "./testing/multi-client-test.ts";
 
+// Boot smoke: a real boot that fetches every eagerly-linked client module —
+// the check that catches a static `*.server.ts` import blank-screening the app
+// while `deno check`, lint and the unit suite stay green (field report §5.1).
+export { smoke, type SmokeResult } from "./testing/smoke-test.ts";
+
 // The OTHER architecture shape: a service plus rich clients, where the client
 // is itself an app. Its properties (identity/lock/store isolation, cell-bind
 // exclusivity, a client of app A living inside app B) only exist with more than
@@ -51,7 +56,7 @@ export {
 // private alias. "Symmetric with testCell" is not symmetric if only one of the
 // two can be imported, and the asymmetry showed: a field app had DOM coverage
 // of zero components until a positional bug shipped, because the cell tests
-// were easy to write and the component tests looked unsupported (rimote R-11).
+// were easy to write and the component tests looked unsupported (R-11).
 //
 // One testing entry point: `testCell`, `testUI` and `testComponent` together.
 export {

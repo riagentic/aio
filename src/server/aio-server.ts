@@ -85,6 +85,9 @@ export interface ServerSetupDeps<S, A> {
   // Identity & network
   appId: string;
   port: number;
+  /** Whether `port` was NAMED (`--port`, `AIO_PORT`, `aio.run({ port })`)
+   *  rather than picked free by the runtime — the zero-port opt-out. */
+  portRequested: boolean;
   prod: boolean;
   distDir: string;
   /** Real-filesystem `dist/` Electron can read from its own process, if any —
@@ -209,7 +212,7 @@ export interface ServerSetupResult {
  * that runs only on a real exposed boot. `--no-tls` and `tls: false` reach the
  * server as one decider; only the MESSAGE needs to know which was written,
  * because an instruction naming a mechanism the reader did not use sends them
- * hunting for a flag that is not in their invocation (rimote R-7 follow-up).
+ * hunting for a flag that is not in their invocation (R-7 follow-up).
  */
 export function _noTlsWarning(
   expose: boolean,
@@ -230,6 +233,44 @@ export function _noTlsWarning(
     `tokens and every action are readable and forgeable by anything on this ` +
     `network. Sound ONLY if the payload is already end-to-end encrypted or a ` +
     `TLS-terminating proxy fronts this port. ${undo} for HTTPS.`;
+}
+
+/** Zero TCP ports — THE decision, as one pure function (tested as a table).
+ *
+ *  A local desktop app that serves nothing to a browser or another service
+ *  has no reason to open a port. A port is a COST, not a feature: it is
+ *  reachable by every process and every browser tab on the machine, it is
+ *  one more thing `am` and the boot report have to name, and a wallet-class
+ *  app in a field report had it open for no reader at all. So a local
+ *  Electron app on a Unix socket (`localElectronUds`) binds NO TCP port by
+ *  default, in dev and prod alike. Two shapes of zero, differing only in
+ *  where the PAGE comes from:
+ *    • prod with a readable dist/ — the page comes off disk; the HTTP handler
+ *      is skipped entirely (`skipHttp`) UNLESS the app declares custom
+ *      `routes`, which then run on a socket the window proxies to (an
+ *      `<img src="/nft-image/x">` resolves to `aio://app/nft-image/x`).
+ *    • dev — the page and its modules are transpiled on demand, so the
+ *      handler always runs, on the socket.
+ *  Everything that needs a URL keeps a port: a browser client, `--expose`,
+ *  the thin client, prod without a readable dist/, Windows (no Unix-socket
+ *  listener in Deno — `resolveTransport` picks WS there, so
+ *  `localElectronUds` is false), and — the explicit opt-out — an app whose
+ *  port was NAMED (`--port=N`, `AIO_PORT`, `aio.run({ port })`): a route that
+ *  another process must reach over TCP (a webhook receiver, a `curl` probe, a
+ *  browser tab beside the window) is exactly the case where naming the port
+ *  is the honest spelling. */
+export function resolveZeroPort(i: {
+  prod: boolean;
+  localElectronUds: boolean;
+  canServeFromDisk: boolean;
+  /** A port was named — flag, env or config. The opt-out. */
+  portRequested: boolean;
+  routeCount: number;
+}): { zeroPort: boolean; skipHttp: boolean; useHttpSocket: boolean } {
+  const zeroPort = i.localElectronUds && !i.portRequested &&
+    (i.prod ? i.canServeFromDisk : true);
+  const skipHttp = zeroPort && i.prod && i.routeCount === 0;
+  return { zeroPort, skipHttp, useHttpSocket: zeroPort && !skipHttp };
 }
 
 export async function setupTransport<S, A>(
@@ -371,52 +412,45 @@ export async function setupTransport<S, A>(
   //   • dev — the page and its modules must be transpiled on demand, so the
   //     handler still runs; it just listens on a SOCKET instead of a port
   //     (`Deno.serve({ path })`), and Electron fetches through it.
-  // Everything else — a browser client, --expose, custom routes — genuinely
-  // needs a port, and keeps one.
+  // Everything that needs a URL — a browser client, --expose, a NAMED port —
+  // keeps one. See `resolveZeroPort` for the principle.
   const canServeFromDisk = !!electronDistDir;
   const localElectronUds = transport === "uds" && useElectron && !expose;
-  // Custom routes are somebody ELSE's entry point (a webhook, an OAuth
-  // callback). Serving them only on a socket would leave them technically
-  // alive and practically unreachable, so an app that declares any keeps its
-  // port — and is told why, because a silently-kept port is the same class of
-  // surprise as a silently-dropped one.
   const routeCount = config.routes ? Object.keys(config.routes).length : 0;
-  // Dev's route to zero is OPT-IN (`--zero-port`) and prod's is not, and that
-  // asymmetry is a KNOWN DEFECT being quarantined, not a design:
-  //
-  //   Serving the page over the socket works — the window loads, renders,
-  //   transpiles modules on demand, and `am` drives it. What does NOT work is
-  //   the reload after a source edit: the reloaded renderer stops using the
-  //   IPC bridge and tries `ws://app/ws` (its `location.host` on an `aio://`
-  //   page), which in a zero-port app is a socket that cannot exist. The
-  //   window comes back blank and does not recover. Over HTTP the same
-  //   fallback silently WORKED, which is why this never surfaced before.
-  //
-  // Hot reload is the dev loop. Until the renderer refuses to fall back to WS
-  // on a page with no HTTP origin, the default stays exactly where it was —
-  // and the capability stays reachable for anyone who wants to test it.
-  // Tracked in todo.md.
-  const zeroPortRequested = parseCli().zeroPort ?? false;
-  const _wantsZeroPort = localElectronUds &&
-    (prod ? canServeFromDisk : zeroPortRequested);
-  if (_wantsZeroPort && routeCount > 0) {
-    log.warn(
-      `${routeCount} custom HTTP route(s) are configured — keeping the TCP ` +
-        `port so they stay reachable. Without them this app would bind no ` +
-        `port at all (electron + UDS). Move the endpoint into a serverFn to ` +
-        `drop the port.`,
+  if (parseCli().zeroPort) {
+    // Accepted, never an error: scripts pass it. It was the dev opt-in before
+    // zero became the default; the opt-OUT is a named port.
+    log.info(
+      "--zero-port: already the default for a local electron app (the flag is a no-op; --port=N keeps a TCP listener)",
     );
   }
-  const zeroPort = _wantsZeroPort && routeCount === 0;
-  /** Prod's route to zero: no request handler at all. */
-  const skipHttp = zeroPort && prod;
-  /** Dev's route to zero: the handler, on a socket instead of a port. Its own
-   *  socket — the NDJSON transport owns `<appId>.sock` and one listener per
-   *  path is the rule. */
-  const httpSocketPath = zeroPort && !prod
+  const zp = resolveZeroPort({
+    prod,
+    localElectronUds,
+    canServeFromDisk,
+    portRequested: deps.portRequested,
+    routeCount,
+  });
+  const { zeroPort, skipHttp } = zp;
+  if (zeroPort && routeCount > 0) {
+    log.info(
+      `${routeCount} custom route(s) served over the socket ` +
+        `(aio://app/<path>) — no TCP port. A route another process must ` +
+        `reach over TCP (a webhook receiver) needs a named port: --port=N`,
+    );
+  }
+  if (localElectronUds && deps.portRequested && !prod) {
+    log.info(
+      `port ${port} named explicitly — keeping a TCP listener for this local ` +
+        `electron app (drop --port / AIO_PORT / config.port for zero ports)`,
+    );
+  }
+  /** The handler on a SOCKET instead of a port. Its own socket — the NDJSON
+   *  transport owns `<appId>.sock` and one listener per path is the rule. */
+  const httpSocketPath = zp.useHttpSocket
     ? resolveSocketPath(appId, "http")
     : undefined;
-  if (prod && localElectronUds && !skipHttp && routeCount === 0) {
+  if (prod && localElectronUds && !zeroPort) {
     log.warn(
       "prod+electron: no dist/ readable outside the binary (embedded VFS " +
         "only) — keeping the HTTP server so the window can load. Ship dist/ " +
@@ -535,7 +569,7 @@ export async function setupTransport<S, A>(
     }
     : createServer({
       port,
-      // Dev's zero-port route: the handler listens on a SOCKET instead of a
+      // The zero-port route: the handler listens on a SOCKET instead of a
       // TCP port (`Deno.serve({ path })`). `port` above is then unused — the
       // boot report says so rather than printing a number nothing bound.
       ...(httpSocketPath ? { socketPath: httpSocketPath } : {}),

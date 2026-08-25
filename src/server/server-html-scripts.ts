@@ -1,9 +1,15 @@
 // Inline JS script builders for dev-mode HTML shells.
 // Each function returns a JS string to embed inside <script type="module">.
 
-/** Dev reload WebSocket — live reload on file changes. Shared by AIO + React dev modes. */
+/** Dev reload WebSocket — live reload on file changes. Shared by AIO + React
+ *  dev modes. SKIPPED on a page with no HTTP origin (the aio:// zero-port
+ *  shell) or with an IPC bridge: there the bridge already delivers
+ *  reload/css/boot (browser-shared handleControlFrame), and `ws://app/ws` is a
+ *  socket that cannot exist — retrying it every 2s was noise on a blank page. */
 export function devWsScript(): string {
   return `
+    const _devWsOk = /^https?:$/.test(location.protocol) && !window.__aioIPC
+    if (!_devWsOk) console.debug('[aio] reload WS skipped: ' + (window.__aioIPC ? 'IPC bridge delivers reload' : 'no HTTP origin (' + location.protocol + ')'))
     const proto = location.protocol === 'https:' ? 'wss:': 'ws:'
     const _tk = new URLSearchParams(location.search).get('token')
     const _wsUrl = proto + '//' + location.host + '/ws' + (_tk ? '?token=' + encodeURIComponent(_tk): '')
@@ -31,7 +37,7 @@ export function devWsScript(): string {
       ws.onerror = (e) => console.warn('[aio] reload WS error:', e)
       ws.onopen = () => console.debug('[aio] reload WS connected')
     }
-    _devWs()`;
+    if (_devWsOk) _devWs()`;
 }
 
 /** Health overlay dot + panel — displays diagnostic events in bottom-right corner. */

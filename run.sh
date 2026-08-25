@@ -6,8 +6,8 @@
 #   From a repo link:        curl -fsSL .../run.sh | sh -s owner/repo
 #                            curl -fsSL .../run.sh | sh -s https://github.com/owner/repo
 #
-# What it does, in order: ensure git + deno + aio/am are installed (delegating
-# to install.sh when anything is missing), clone the repo if one was given,
+# What it does, in order: ensure git + deno + aio/am are installed AND current
+# (install.sh runs every time — it updates am in place), clone the repo if one was given,
 # `am fix` whatever the checkout needs, then PRODUCTION-build the app's default
 # target and run the artifact (`--dev` runs the dev server instead).
 # Args after `--` are passed to the app itself.
@@ -79,22 +79,33 @@ deno_ok() {
   [ "$_hp" -ge "$_wp" ]
 }
 
-if ! deno_ok || ! command -v am >/dev/null 2>&1 || [ ! -d "$AIO_HOME/.git" ]; then
+# ALWAYS, not only when something is missing. This block used to run only when
+# deno/am/the checkout was absent — so a box that had installed aio once kept
+# that am forever: the one-liner said "am ready" with a months-old framework,
+# `am fix` repaired with rules that had since been fixed, and the build ran on
+# whatever that old am linked. install.sh is idempotent (fetch, check out the
+# latest tag, reinstall am; a failed fetch keeps what is there; a DEV checkout
+# — on a branch, or with local changes — is never git-mutated), and the
+# framework the APP builds with is still its own pin — updating am never moves
+# an app. There is no reason to run the newest installer and keep the oldest am.
+if deno_ok && command -v am >/dev/null 2>&1 && [ -d "$AIO_HOME/.git" ]; then
+  info "updating aio + am (already installed)..."
+else
   info "setting up aio (deno + framework + am)..."
-  if [ -n "${AIO_INSTALL:-}" ]; then
-    sh "$AIO_INSTALL" || fail "install failed ($AIO_INSTALL)"
-  else
-    curl -fsSL "$AIO_RAW/install.sh" | sh || fail "install failed ($AIO_RAW/install.sh)"
-  fi
-  PATH="$DENO_INSTALL/bin:$HOME/.deno/bin:${DENO_INSTALL_ROOT:-$HOME/.deno}/bin:$PATH"
-  export PATH
-  hash -r 2>/dev/null || :
-  command -v deno >/dev/null 2>&1 || fail "deno still not found after install"
-  command -v am >/dev/null 2>&1 || fail "am still not found after install"
-  # install.sh owns the upgrade; if the box STILL has an old deno, say so here
-  # rather than failing later inside a build with an unrelated-looking error.
-  deno_ok || fail "deno $(deno --version | head -1 | awk '{print $2}') is older than this framework requires — install.sh could not upgrade it. Run: curl -fsSL https://deno.land/install.sh | sh"
 fi
+  if [ -n "${AIO_INSTALL:-}" ]; then
+  sh "$AIO_INSTALL" || fail "install failed ($AIO_INSTALL)"
+else
+  curl -fsSL "$AIO_RAW/install.sh" | sh || fail "install failed ($AIO_RAW/install.sh)"
+fi
+PATH="$DENO_INSTALL/bin:$HOME/.deno/bin:${DENO_INSTALL_ROOT:-$HOME/.deno}/bin:$PATH"
+export PATH
+hash -r 2>/dev/null || :
+command -v deno >/dev/null 2>&1 || fail "deno still not found after install"
+command -v am >/dev/null 2>&1 || fail "am still not found after install"
+# install.sh owns the upgrade; if the box STILL has an old deno, say so here
+# rather than failing later inside a build with an unrelated-looking error.
+deno_ok || fail "deno $(deno --version | head -1 | awk '{print $2}') is older than this framework requires — install.sh could not upgrade it. Run: curl -fsSL https://deno.land/install.sh | sh"
 ok "deno $(deno --version | head -1 | awk '{print $2}') · am ready"
 
 # ── clone (when a repo was given) ────────────────────────────────────
@@ -284,7 +295,7 @@ case "$app_name" in
     app_ext=".AppImage"
     # Strip the ARCH suffix the build appends, not "everything after the first
     # hyphen" — that turned `demo-electron-x86_64.AppImage` into `demo`, and
-    # would have installed `llama-master` as `llama`. App names contain hyphens
+    # would have installed `chat-app` as `chat`. App names contain hyphens
     # far more often than they contain arch strings.
     app_base="${app_name%.AppImage}"
     for _arch_suffix in x86_64 aarch64 arm64 armhf i686 amd64; do

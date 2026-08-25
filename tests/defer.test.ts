@@ -198,7 +198,7 @@ Deno.test({
       );
       // …and the region still degrades gracefully rather than throwing: no
       // ELEMENT, and a placeholder keeping the deferred region's position for
-      // a later successful load (rimote R-10).
+      // a later successful load (R-10).
       assertEquals(root.innerHTML, "<!---->");
       assertEquals(root.children.length, 0);
       _unmount(handle);

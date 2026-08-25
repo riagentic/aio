@@ -1,4 +1,4 @@
-// A field report from t2v (a Deno/Electron app: two prompt stages, an embedded
+// A field report from a video-generation desktop app (Deno/Electron: two prompt stages, an embedded
 // inference engine, ~250 tests) after a full UI redesign. Rated the state and
 // testing model 7/10 and took a point off for "reactivity rules that are not
 // written down" and "a test-surface resolver that answers a different question
@@ -70,7 +70,7 @@ Deno.test("signal: .get() re-renders a component exactly as .value does", async 
 // nothing restored. These two pairs must therefore BOTH pass in file order and
 // under --filter, which is the whole point.
 
-const shot = cell("t2v-shot", {
+const shot = cell("vg-shot", {
   state: { orientation: "portrait" },
   methods: {
     setOrientation(s: { orientation: string }, o: string) {
@@ -134,7 +134,7 @@ testUI(ZoomApp, "B: every kind of state starts pristine", (ui) => {
 // so a component that also forwards `t` down to an element makes one string
 // name two different things.
 
-const neg = cell("t2v-neg", {
+const neg = cell("vg-neg", {
   state: { on: false },
   methods: {
     toggle(s: { on: boolean }) {
@@ -271,7 +271,7 @@ testUI(NegApp, "names match exactly — never by substring", (ui) => {
 // The name is the address; the path was only ever a tie-breaker between
 // same-named siblings. A handle taken before a remount now survives it.
 
-const stage = cell("t2v-stage", {
+const stage = cell("vg-stage", {
   state: { stage: "a" },
   methods: {
     go(s: { stage: string }, v: string) {
@@ -330,7 +330,7 @@ testUI(
 // reader could not tell a deliberate first from an unconsidered one. `Name1`
 // now says it.
 
-const rows = cell("t2v-rows", {
+const rows = cell("vg-rows", {
   state: { items: ["a", "b", "c"], gone: [] as string[] },
   methods: {
     remove(s: { items: string[]; gone: string[] }, id: string) {
@@ -443,7 +443,7 @@ testUI(
 // is precisely what would break it. The rule itself is now written down:
 // docs/ui/reactivity-tracking.md.
 
-const studio = cell("t2v-studio", {
+const studio = cell("vg-studio", {
   state: { view: "simple", card: "image" },
   methods: {
     setView(s: { view: string }, v: string) {
@@ -498,7 +498,7 @@ testUI(
 testUI(
   StudioApp,
   "…and in the other order: the branch is live from the first render",
-  { seed: { "t2v-studio": { view: "advanced" } } },
+  { seed: { "vg-studio": { view: "advanced" } } },
   async (ui) => {
     assert(ui.html().includes("IMAGE-STAGE"), ui.html());
     await ui.vid.click();

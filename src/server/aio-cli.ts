@@ -2,7 +2,7 @@
 import { log } from "../diagnostics/logger-api.ts";
 
 /** Framework version — printed by --version, checked in tests */
-export const VERSION = "1.0.0-alpha65";
+export const VERSION = "1.0.0-alpha66";
 
 /** What `--version` prints: what this artifact IS, and what it was built with.
  *
@@ -52,10 +52,10 @@ export type CliFlags = {
   key?: string;
   isolate?: string[];
   transport?: "uds" | "ws";
-  /** `--zero-port`: in DEV + electron + UDS, serve the page and its modules
-   *  over a Unix socket so the app binds no TCP port at all. Experimental —
-   *  hot reload does not survive it yet (see `aio-server.ts`). Prod + electron
-   *  + UDS + dist already runs with zero ports and needs no flag. */
+  /** `--zero-port`: accepted as a NO-OP. Zero TCP ports is the default for a
+   *  local electron app on a Unix socket (dev and prod); the flag was the
+   *  dev opt-in before that and scripts still pass it, so it prints one info
+   *  line and changes nothing. The opt-OUT is a named port (`--port=N`). */
   zeroPort?: boolean;
   /** `--open`: after boot, hand the app's URL to the desktop's browser.
    *
@@ -265,7 +265,10 @@ export function printHelp(): void {
 Usage: deno run -A src/app.ts [flags]
 
 Flags:
-  --port=N         Server port (default: a free one, or $AIO_PORT)
+  --port=N         Server port (default: a free one, or $AIO_PORT). Naming a
+                   port is ALSO the opt-out from zero TCP ports: a local
+                   electron app binds no port unless one is named here
+                   (or via $AIO_PORT / aio.run({ port }))
   --no-persist     Disable persistence (SQLite <data>/state.db)
   --client=X       Client mode: electron|browser|cli|server-only (default: electron)
   --keep-server    Server survives Electron close (electron only)
@@ -297,8 +300,10 @@ Flags:
   --width=N        Initial window width (default: 800)
   --height=N       Initial window height (default: 600)
   --transport=X    Transport: 'uds' or 'ws' (default: auto — UDS for electron on linux/mac)
-  --zero-port      Dev + electron + UDS: serve the page over the socket too, so
-                   the app binds NO TCP port (experimental — breaks hot reload)
+  --zero-port      No-op (accepted): zero TCP ports is already the default for
+                   a local electron app on Linux/macOS — page, modules and
+                   routes go over the socket. Windows has no Unix-socket
+                   listener and keeps a loopback TCP port
   --open           Open the app in your browser after boot (default: OFF — the
                    URL is printed; a tab aio opens is one it cannot close)
   --isolate=a,b    Only activate the specified cells

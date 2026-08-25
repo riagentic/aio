@@ -62,6 +62,12 @@ export interface SyncOp {
   /** Server-issued monotonic timestamp — stamped on server broadcasts so
    *  peers can advance their sync cursor as they apply the op. */
   serverTs?: number;
+  /** The cell's declared `version` when the op was WRITTEN (server-stamped at
+   *  persist). Boot replay compares it with the version the running build
+   *  declares — an op from an older shape goes through `onMigrate` or is
+   *  skipped loudly, never applied blind (a field report, §3.1).
+   *  `-1` = the row predates the stamp (unknown). */
+  version?: number;
 }
 
 /**

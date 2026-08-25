@@ -466,7 +466,7 @@ export const counter = cell('counter', {
   });
 });
 
-// ── A WRITE is not a READ (field report llama-master #4) ────────────────
+// ── A WRITE is not a READ (field report #4) ────────────────
 //
 // `s.lastError = "…"` after the method's I/O is the one thing the method is
 // SUPPOSED to do, and it was hinted as the hazard. There is no read there to
@@ -638,7 +638,7 @@ export const counter = cell('counter', {
   });
 });
 
-// ── "use the aio logger" is an APP rule (field report llama-master #9) ────
+// ── "use the aio logger" is an APP rule (field report #9) ────
 //
 // A developer command — the report's `sync-shared.ts`, a codegen script, a
 // migration runner — prints to a terminal on purpose; it has no logger sinks

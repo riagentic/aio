@@ -28,6 +28,7 @@ import { log } from "../diagnostics/logger-api.ts";
 import { parseCli } from "./aio-cli.ts";
 import { isCompiled } from "./paths.ts";
 import { normalizeSyncConfig } from "../sync/types.ts";
+import { persistFilterOnSyncCellMessage } from "../state/cell-create.ts";
 
 /** User identity shape — matches AioUser without importing from aio.ts (avoids circular) */
 type User = { id: string; role: string };
@@ -449,6 +450,19 @@ function uiHidesState(f: ComposedCells["cells"][number]): string | null {
 function refuseFilteredSyncCells(composed: ComposedCells): void {
   for (const f of composed.cells) {
     if (!f.__aio.syncConfig) continue;
+    // The persist twin: `cell()` already refuses the cell's OWN persist filter
+    // on a sync cell; a `cellDefaults.persist` filter lands after that check
+    // and would reach the same place (the op-log cannot honour it). Same rule,
+    // same wording, one more source named.
+    if (f.__aio.persist && f.__aio.persist !== "all") {
+      throw new Error(
+        persistFilterOnSyncCellMessage(
+          f.__aio.id,
+          f.__aio.persist,
+          "cellDefaults.persist",
+        ),
+      );
+    }
     const why = uiHidesState(f);
     if (!why) continue;
     throw new Error(
@@ -504,6 +518,13 @@ function applyLocalFirst(composed: ComposedCells, enabled: boolean): void {
       filtered.push(`${f.__aio.id} (${why})`);
       continue;
     }
+    // Same for a persist filter: the op-log cannot honour one (see
+    // refuseFilteredSyncCells), so adoption declines and says so rather than
+    // converting a filtered cell into one whose filter is silently void.
+    if (f.__aio.persist && f.__aio.persist !== "all") {
+      filtered.push(`${f.__aio.id} (a persist filter)`);
+      continue;
+    }
     // Only methods-style cells replay as CRDT ops (the browser stub builds
     // its rebase reducer from the sync methods — `asyncMethods` marks that
     // factory). Adopting an actions-style cell would EXCLUDE it from KV
@@ -526,7 +547,7 @@ function applyLocalFirst(composed: ComposedCells, enabled: boolean): void {
         }`
         : "") +
       (filtered.length
-        ? `; server-only (a visible filter cannot survive CRDT replication): ${
+        ? `; server-only (a visible/persist filter cannot survive CRDT replication): ${
           filtered.join(", ")
         }`
         : ""),

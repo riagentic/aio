@@ -1,4 +1,4 @@
-// Stillness at the boundary (llama.master).
+// Stillness at the boundary (a local-LLM chat app).
 //
 // Two facts an app can be WRONG about with no error anywhere: which aio it is
 // actually RUNNING, and whether a framework default has taken over its layout.

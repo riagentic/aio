@@ -3,8 +3,8 @@
 // Cross-platform: works on Linux, macOS, Windows
 // Prevents multiple instances from corrupting shared resources
 
-import { dirname, join } from "@std/path";
-import { appDirs } from "./app-dirs.ts";
+import { dirname, join, resolve } from "@std/path";
+import { appDirs, appHome } from "./app-dirs.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { SHUTDOWN_BUDGET_MS } from "./shutdown-budget.ts";
 
@@ -25,6 +25,11 @@ export type LockData = {
   startedAt: number; // epoch ms
   status: "starting" | "started" | "stopping";
   cwd: string; // working directory (for am/instances display)
+  /** The resolved data home this instance runs from. Part of the lock's
+   *  IDENTITY (see {@linkcode lockKey}): two boots of one appId from two homes
+   *  are two apps, not a duplicate. Optional only for locks written before
+   *  alpha66 — a missing value means the default home. */
+  home?: string;
   socketPath?: string; // UDS socket path (when using UDS transport)
   trojanPort?: number; // plain-HTTP control port (when TLS active)
   // LAN-discovery metadata — present only for --expose'd apps, so any
@@ -203,9 +208,53 @@ export function pruneLockDir(): void {
   } catch { /* not empty, or already gone — either way not ours to force */ }
 }
 
-/** Full path to the lock file for a given appId */
-export function lockPath(appId: string): string {
-  return join(lockDir(), `${appId}.lock`);
+/** 8 hex chars of FNV-1a over `s` — a filename-safe tag, not a secret. */
+export function hash8(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, "0");
+}
+
+/** THE key a lock (and its sockets) is filed under: `<appId>` when the app runs
+ *  from its default home, `<appId>@<hash8(home)>` otherwise.
+ *
+ *  The lock used to be keyed by appId alone, so an app booted a second time
+ *  ON PURPOSE from an isolated home (`--<app>-home=/tmp/x` for a smoke test or
+ *  a screenshot harness) was refused as a duplicate — and the refusal named
+ *  the USER's port and pid, which is how a harness came to `kill` the user's
+ *  running wallet (a field report, §2.1). Identity is appId AND home: one
+ *  data dir, one instance. The default home keeps the plain name, so nothing
+ *  already running or already written needs migrating. */
+export function lockKey(appId: string, home?: string): string {
+  if (!home) return appId;
+  const want = resolve(home);
+  if (want === resolve(appHome(appId))) return appId;
+  return `${appId}@${hash8(want)}`;
+}
+
+/** The two halves of a lock key / lock file name. */
+export function parseLockKey(key: string): { appId: string; tag?: string } {
+  const at = key.lastIndexOf("@");
+  return at > 0
+    ? { appId: key.slice(0, at), tag: key.slice(at + 1) }
+    : { appId: key };
+}
+
+/** The key of the lock THIS process holds for `appId`, else the plain appId.
+ *  The socket paths (`paths.ts`) are named by it, so an instance's control
+ *  socket follows its lock: `am --home=<dir>` reads that lock and finds that
+ *  socket, never the default instance's. */
+export function heldLockKey(appId: string): string {
+  for (const l of AppLock.live()) if (l.appId === appId) return l.key;
+  return appId;
+}
+
+/** Full path to the lock file for a given lock key (see {@linkcode lockKey}) */
+export function lockPath(key: string): string {
+  return join(lockDir(), `${key}.lock`);
 }
 
 // ── Launch-info sidecar (am restart flag preservation) ───────
@@ -310,9 +359,11 @@ export async function isSocketAlive(socketPath: string): Promise<boolean> {
 // ── Lock File CRUD ───────────────────────────────────────────
 
 /** Read a lock file, return null if missing or corrupt */
-export function readLock(appId: string): LockData | null {
+/** Read a lock by its key — the plain appId for a default-home app, or the
+ *  `<appId>@<hash8(home)>` key {@linkcode lockKey} builds for any other home. */
+export function readLock(key: string): LockData | null {
   try {
-    const raw = Deno.readTextFileSync(lockPath(appId));
+    const raw = Deno.readTextFileSync(lockPath(key));
     const data = JSON.parse(raw) as LockData;
     // Validate the SHAPE of each field, never its truthiness.
     //
@@ -342,7 +393,7 @@ export function readLock(appId: string): LockData | null {
 
 /** Write lock file atomically — createNew for first write, overwrite for updates */
 export function writeLock(data: LockData): void {
-  const path = lockPath(data.appId);
+  const path = lockPath(lockKey(data.appId, data.home));
   try {
     Deno.writeTextFileSync(path, JSON.stringify(data));
   } catch (e) {
@@ -357,8 +408,8 @@ export function writeLock(data: LockData): void {
 /** Atomic create-new lock file — returns false if file already exists (race-safe) */
 function tryCreateLock(data: LockData): boolean {
   const encoded = new TextEncoder().encode(JSON.stringify(data));
-  const open = () =>
-    Deno.openSync(lockPath(data.appId), { createNew: true, write: true });
+  const path = lockPath(lockKey(data.appId, data.home));
+  const open = () => Deno.openSync(path, { createNew: true, write: true });
   try {
     let fd: Deno.FsFile;
     try {
@@ -368,7 +419,7 @@ function tryCreateLock(data: LockData): boolean {
       // app's shutdown pruned its (momentarily empty) scoped dir. Re-create
       // and try once more — an ENOENT here is never "someone holds the lock".
       if (!(e instanceof Deno.errors.NotFound)) throw e;
-      Deno.mkdirSync(dirname(lockPath(data.appId)), { recursive: true });
+      Deno.mkdirSync(dirname(path), { recursive: true });
       fd = open();
     }
     fd.writeSync(encoded);
@@ -379,10 +430,10 @@ function tryCreateLock(data: LockData): boolean {
   }
 }
 
-/** Remove a lock file */
-export function removeLock(appId: string): void {
+/** Remove a lock file by its key (the plain appId for a default-home app) */
+export function removeLock(key: string): void {
   try {
-    Deno.removeSync(lockPath(appId));
+    Deno.removeSync(lockPath(key));
   } catch { /* already gone */ }
 }
 
@@ -390,10 +441,21 @@ export function removeLock(appId: string): void {
 
 export class AppLock {
   readonly appId: string;
+  /** Resolved data home — half of the identity (see {@linkcode lockKey}). */
+  readonly home: string;
+  /** THE file name this lock lives under. */
+  readonly key: string;
   private acquired = false;
 
-  constructor(appId: string) {
+  constructor(appId: string, home?: string) {
     this.appId = appId;
+    this.home = resolve(home ?? appHome(appId));
+    this.key = lockKey(appId, this.home);
+  }
+
+  /** Every lock held in this process (read-only view of `_live`). */
+  static live(): readonly AppLock[] {
+    return [...AppLock._live];
   }
 
   /** Register process-termination hooks. Idempotent — safe to call from every
@@ -493,7 +555,7 @@ export class AppLock {
     const maxRetries = 30; // 3 seconds total
 
     for (let i = 0; i < maxRetries; i++) {
-      const existing = readLock(this.appId);
+      const existing = readLock(this.key);
 
       if (!existing) {
         // No lock — try atomic create
@@ -504,6 +566,7 @@ export class AppLock {
           startedAt: Date.now(),
           status: "starting",
           cwd: Deno.cwd(),
+          home: this.home,
         };
         if (tryCreateLock(data)) {
           this.acquired = true;
@@ -517,7 +580,7 @@ export class AppLock {
 
       // Lock exists but owner is us (am pre-registered) — take over
       if (existing.pid === Deno.pid) {
-        removeLock(this.appId);
+        removeLock(this.key);
         await delay(100);
         continue;
       }
@@ -525,7 +588,7 @@ export class AppLock {
       // Lock exists — check if owner is alive
       if (!isProcessAlive(existing.pid)) {
         // Dead process — clean stale lock and retry
-        removeLock(this.appId);
+        removeLock(this.key);
         await delay(100);
         continue;
       }
@@ -553,7 +616,7 @@ export class AppLock {
         log.warn(
           `[AIO] stale instance: pid ${existing.pid} is alive but ${where} refuses connections — reclaiming lock (zombie server)`,
         );
-        removeLock(this.appId);
+        removeLock(this.key);
         await delay(100);
         continue;
       }
@@ -564,7 +627,7 @@ export class AppLock {
         // budget before SIGKILL: a takeover is not a reason to truncate the
         // previous instance's final snapshot.
         await killProcess(existing.pid, SHUTDOWN_BUDGET_MS + 1000);
-        removeLock(this.appId);
+        removeLock(this.key);
         await delay(100);
         continue;
       }
@@ -574,7 +637,7 @@ export class AppLock {
     }
 
     // Exhausted retries (persistent race condition)
-    const existing = readLock(this.appId);
+    const existing = readLock(this.key);
     if (existing) return { ok: false, existing };
     // Last-ditch attempt
     const data: LockData = {
@@ -584,6 +647,7 @@ export class AppLock {
       startedAt: Date.now(),
       status: "starting",
       cwd: Deno.cwd(),
+      home: this.home,
     };
     if (tryCreateLock(data)) {
       this.acquired = true;
@@ -597,20 +661,21 @@ export class AppLock {
     // else holds it and we can't say who".
     return {
       ok: false,
-      existing: readLock(this.appId) ?? {
+      existing: readLock(this.key) ?? {
         appId: this.appId,
         pid: 0,
         port: 0,
         startedAt: Date.now(),
         status: "starting",
         cwd: "",
+        home: this.home,
       },
     };
   }
 
   /** Update lock data (e.g. status change, socketPath, trojanPort) */
-  update(partial: Partial<Omit<LockData, "appId" | "pid">>): void {
-    const existing = readLock(this.appId);
+  update(partial: Partial<Omit<LockData, "appId" | "pid" | "home">>): void {
+    const existing = readLock(this.key);
     if (!existing || existing.pid !== Deno.pid) return; // not ours
     writeLock({ ...existing, ...partial });
   }
@@ -619,9 +684,9 @@ export class AppLock {
   release(): void {
     if (!this.acquired) return;
     // Only remove if it's still ours (PID matches)
-    const existing = readLock(this.appId);
+    const existing = readLock(this.key);
     if (existing && existing.pid === Deno.pid) {
-      removeLock(this.appId);
+      removeLock(this.key);
     }
     this.acquired = false;
     this._unregisterCleanupHandlers();
@@ -630,7 +695,12 @@ export class AppLock {
 
 // ── instances() — Scan Running Apps ──────────────────────────
 
-/** Scan for running aio instances. Filters stale locks automatically. */
+/** Scan for running aio instances. Filters stale locks automatically.
+ *
+ *  A lock file is `<appId>[@<hash8(home)>].lock` (see {@linkcode lockKey});
+ *  the identity is read from the LOCK's `appId` + `home`, never parsed back
+ *  out of the file name, so a suffixed lock lists as the app it is. `home`
+ *  is always filled in — a pre-alpha66 lock means the default home. */
 export function instances(appId?: string): InstanceInfo[] {
   const dir = lockDir();
   const results: InstanceInfo[] = [];
@@ -638,19 +708,19 @@ export function instances(appId?: string): InstanceInfo[] {
   try {
     for (const entry of Deno.readDirSync(dir)) {
       if (!entry.isFile || !entry.name.endsWith(".lock")) continue;
-      const id = entry.name.slice(0, -5); // strip ".lock" suffix
-      if (appId && id !== appId) continue;
+      const key = entry.name.slice(0, -5); // strip ".lock" suffix
+      if (appId && parseLockKey(key).appId !== appId) continue;
 
-      const lock = readLock(id);
-      if (!lock) continue;
+      const lock = readLock(key);
+      if (!lock || (appId && lock.appId !== appId)) continue;
 
       const alive = isProcessAlive(lock.pid);
       if (!alive) {
         // Clean stale lock
-        removeLock(id);
+        removeLock(key);
         continue;
       }
-      results.push({ ...lock, alive });
+      results.push({ ...lock, home: lock.home ?? appHome(lock.appId), alive });
     }
   } catch { /* dir not readable */ }
 

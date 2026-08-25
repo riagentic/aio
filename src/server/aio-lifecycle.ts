@@ -36,6 +36,9 @@ export interface LifecycleDeps<S, A> {
   prod: boolean;
   /** dist/ Electron can open from its own process (never the compile VFS). */
   electronDistDir: string | undefined;
+  /** dist/ as THIS process reads it — the compile VFS in a binary. The
+   *  launcher reads the baked Electron version (`electron.json`) from here. */
+  distDir: string;
   /** The app's resolved baseDir — THE app-dir decider (WYSIDIWYSIP): the dev
    *  Electron window reads icon.png from here, the same place the prod build
    *  packages it from (cfg.appDir = the entry's directory). */
@@ -51,8 +54,8 @@ export interface LifecycleDeps<S, A> {
   transport: "uds" | "ws";
   skipHttp: boolean;
   /** Set when this app binds NO TCP port and its HTTP handler listens on a
-   *  socket instead (dev + electron + UDS). The Electron window fetches its
-   *  page and modules through it. */
+   *  socket instead (electron + UDS). The Electron window fetches its page
+   *  and modules (dev) or its custom routes (prod) through it. */
   httpSocketPath?: string;
   // Network
   port: number;
@@ -146,6 +149,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     title,
     prod,
     electronDistDir,
+    distDir,
     expose,
     singletonMode,
     childWindows,
@@ -295,7 +299,14 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     log.info(`running (${mode}, ${shell}, uds — no TCP port)`);
     if (deps.httpSocketPath) log.info(`${p("http")}${deps.httpSocketPath}`);
   } else {
-    log.info(`running (${mode}, ${shell}${transportLabel})`);
+    // A local electron app on Windows keeps a port for one reason, and the
+    // line says it: Deno has no Unix-socket listener there.
+    const windowsClause =
+      Deno.build.os === "windows" && useElectron && !expose &&
+        transport === "ws"
+        ? ", tcp — Windows has no Unix-socket listener"
+        : "";
+    log.info(`running (${mode}, ${shell}${transportLabel}${windowsClause})`);
     const wsProto = useHttps ? "wss" : "ws";
     // `bindHost` is the transport's OWN resolved answer — re-deriving it here
     // (from the flag only) made the report contradict the bind for an app
@@ -499,10 +510,11 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
       ? {
         socketPath: udsHandle.socketPath,
         baseDir: udsBaseDir,
-        // Dev's zero-port route: no dist/ to read and no port to fetch from,
-        // so the window's `aio://` handler goes through the HTTP socket for
-        // the page, its modules and every asset. Undefined whenever a TCP
-        // port exists — the window then loads over http:// exactly as before.
+        // Zero-port route: the window's `aio://` handler goes through the
+        // HTTP socket — in dev for the page, its modules and every asset; in
+        // prod (page from dist/) for the app's custom `routes` and /__aio/*.
+        // Undefined whenever a TCP port exists — the window then loads over
+        // http:// exactly as before.
         httpSocketPath: deps.httpSocketPath,
         title,
         hasCSS: udsHasCSS,
@@ -537,6 +549,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
           log,
           meta,
           udsConfig && { ...udsConfig, defaultIcon },
+          distDir,
         )
       )
       .then((proc) => {

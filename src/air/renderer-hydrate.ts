@@ -236,7 +236,7 @@ export function _hydrateNode(
     // SSR already emits `<!---->` for a null slot (vdom-ssr.ts), so hydration
     // must CONSUME that comment rather than skip it — otherwise the client
     // rebuilt the tree one node out of step and a null-first component moved
-    // on its first re-render (rimote R-10).
+    // on its first re-render (R-10).
     if (rendered == null) rendered = nullSlot();
     vnode._rendered = rendered;
     ctx.hooks?.afterComponent(vnode, rendered, hookState);

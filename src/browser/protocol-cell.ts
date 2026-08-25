@@ -1,7 +1,7 @@
 // deno-lint-ignore-file
 // cell() and aio stub — browser-side action creator factories.
 
-import { registerCell } from "../state/cell-reactive.ts";
+import { guardHiddenReplay, registerCell } from "../state/cell-reactive.ts";
 import { isAsyncFunction } from "../state/cell-impl.ts";
 import type { CellDef } from "../state/cell-types.ts";
 import { normalizeSyncConfig } from "../sync/types.ts";
@@ -216,7 +216,19 @@ export function cell(
           const args = (msg.payload as { args?: unknown[] })?.args ?? [];
           // $do served as a no-op: the server already ran the effects; a
           // replay must be state-deterministic and re-fire nothing.
-          m(withReplayDo(draft), ...args);
+          //
+          // The draft is the ui-FILTERED slice, so a hidden field is absent
+          // here even though the server-side run of the same method saw it.
+          // guardHiddenReplay installs the same reporting getter every other
+          // client read has (dev throws, prod warns-once + undefined) — a
+          // mirror of cell-reactive's guard, per the "any per-field behaviour
+          // the browser branches on lives in this stub too" rule.
+          m(
+            withReplayDo(
+              guardHiddenReplay(def as unknown as CellDef, draft),
+            ),
+            ...args,
+          );
         }
       };
     };

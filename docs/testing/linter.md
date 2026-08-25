@@ -117,6 +117,11 @@ Static analysis of `cell()` calls:
 - Mixing methods and actions styles in one cell
 - Cell with no methods and no actions (can't change state)
 - Non-standard naming (convention: lowercase with hyphens)
+- **Sync method / selector reading a `visible`-hidden field** (error) — sync
+  methods of a `sync`/`localFirst`/`scope: "client"` cell replay on the client,
+  and selectors of every cell run there, over the filtered slice; the read is
+  `undefined` (dev throws). Fix: read it in a server-side/async method, or
+  publish a non-secret fact field (`hasVault: boolean`) and read that
 
 ### 4. Performance
 
@@ -131,6 +136,10 @@ Static analysis of `cell()` calls:
 ### 5. Security
 
 - Hardcoded tokens, passwords, secrets, API keys in source
+- **Credential-named state field visible to clients** (error) — the static twin
+  of `aio.run()`'s boot refusal (`password`, `mnemonic`, `privateKey`, `apiKey`,
+  …), reported with both fixes in one line: `visible: { exclude: [...] }` or, if
+  it is genuinely public, `visible: { publicFields: [...] }`
 - `--expose` without user auth configuration
 - `.env` files that might not be in `.gitignore`
 

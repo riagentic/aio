@@ -16,8 +16,13 @@ function capture(): { lines: string[]; restore: () => void } {
   return { lines, restore: () => (console.warn = orig) };
 }
 
-Deno.test("testUI: a UI listener on the Deno global is called out", async () => {
-  const cap = capture();
+Deno.test("testUI: a UI listener on the Deno global FAILS the test", async () => {
+  // Tests are the strictest environment: the registration throws at the site
+  // (a contained onMount error) AND the next observation point rethrows it,
+  // so a green test can never hide an inert handler (field report §4.1).
+  const errs: string[] = [];
+  const origErr = console.error;
+  console.error = (...a: unknown[]) => errs.push(a.map(String).join(" "));
   try {
     const App = () => {
       onMount(() => {
@@ -26,17 +31,82 @@ Deno.test("testUI: a UI listener on the Deno global is called out", async () => 
       });
       return h("div", null, "game");
     };
-    await using ui = await testUI(App);
-    await ui.settle();
-
-    const warned = cap.lines.filter((l) => l.includes("keydown"));
-    assert(warned.length > 0, "the inert listener must be reported");
-    const msg = warned[0]!;
+    const ui = await testUI(App);
+    let thrown: unknown;
+    try {
+      await ui.settle();
+    } catch (e) {
+      thrown = e;
+    } finally {
+      await ui.dispose().catch(() => {});
+    }
+    assert(thrown instanceof Error, "settle() must rethrow the registration");
+    const msg = thrown.message;
+    assert(msg.includes("keydown"), `names the event: ${msg}`);
     assert(msg.includes("NEVER fire"), `says it will not work: ${msg}`);
     assert(msg.includes("happy-dom"), `says why: ${msg}`);
-    assert(msg.includes("fix:"), `and how to fix it: ${msg}`);
+    assert(msg.includes("ui.window"), `and names the fix: ${msg}`);
+    assert(
+      errs.some((l) => l.includes("keydown")),
+      "the hook error is also logged at the site (fail loud, twice is fine)",
+    );
   } finally {
-    cap.restore();
+    console.error = origErr;
+  }
+});
+
+Deno.test("testUI: the same registration on ui.window WORKS", async () => {
+  let fired = 0;
+  const App = () => {
+    onMount(() => {
+      // The fix the error names — the mount's own window, from the component.
+      const w = (globalThis as { window?: Window }).window!;
+      w.addEventListener("keydown", () => fired++);
+    });
+    return h("div", null, "game");
+  };
+  await using ui = await testUI(App);
+  await ui.settle();
+  assert(ui.window, "ui.window is exposed");
+  assertEquals(ui.document, ui.window.document, "ui.document is ITS document");
+  assertEquals(
+    (globalThis as { window?: unknown }).window,
+    ui.window,
+    "and globalThis.window resolves to the same object while mounted",
+  );
+  ui.window.dispatchEvent(
+    new ui.window.KeyboardEvent("keydown", { key: "a", bubbles: true }),
+  );
+  await ui.settle();
+  assertEquals(fired, 1, "the handler ran");
+});
+
+Deno.test("testUI: outside test-strict mode the global listener only warns", async () => {
+  const lines: string[] = [];
+  const orig = console.warn;
+  console.warn = (...a: unknown[]) => lines.push(a.map(String).join(" "));
+  const g = globalThis as Record<string, unknown>;
+  try {
+    const App = () => {
+      onMount(() => {
+        g.__aioDev = false; // a test that specifically wants prod leniency
+        try {
+          globalThis.addEventListener("keydown", () => {});
+        } finally {
+          g.__aioDev = true;
+        }
+      });
+      return h("div", null, "game");
+    };
+    await using ui = await testUI(App);
+    await ui.settle();
+    assert(
+      lines.some((l) => l.includes("keydown") && l.includes("NEVER fire")),
+      "prod path = observe-only warning (category a)",
+    );
+  } finally {
+    console.warn = orig;
+    g.__aioDev = true;
   }
 });
 

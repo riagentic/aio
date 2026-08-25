@@ -96,7 +96,16 @@ export type PerfBudget = {
    *  Covers BOTH method flavours: an async method's `__exec` effect (keyed from
    *  the effect payload) and the effects a SYNC method returns (keyed from the
    *  action, which is `cell:method` either way) — see {@link budgetKeyFor}. */
-  methods?: Record<string, { effect?: number; timeout?: number }>;
+  methods?: Record<
+    string,
+    {
+      effect?: number;
+      /** A number raises this method's hard deadline; `"warn"` removes it —
+       *  the caller-side wait reports once at the default ceiling and keeps
+       *  waiting instead of rejecting a method that is still running. */
+      timeout?: number | "warn";
+    }
+  >;
 };
 
 /** Per-action performance timing */
@@ -713,7 +722,10 @@ export function createDispatch<S, A, E>(
             ? perfBudget?.methods?.[methodKey]
             : undefined;
           const thisEffectBudget = perMethod?.effect ?? effectBudget;
-          const thisEffectTimeout = perMethod?.timeout ?? effectTimeout;
+          // `"warn"` = no hard deadline here; the caller-side wait reports.
+          const thisEffectTimeout = perMethod?.timeout === "warn"
+            ? 0
+            : (perMethod?.timeout ?? effectTimeout);
           // What the violation is LABELLED with (perf.log dedup key). The
           // effect's own type, except for the `cell:__exec` wrapper — that one
           // names no method, so the method key is the informative label.

@@ -29,9 +29,12 @@ irm https://raw.githubusercontent.com/riagentic/aio/main/run.ps1 | iex
 
 ## What it does, in order
 
-1. **Prerequisites** — `git` must exist; Deno is installed if missing; the
-   framework + `am` are installed via the standard installer if missing
-   (`~/.local/lib/aio`, checked out at the last tagged release).
+1. **Prerequisites** — `git` must exist; then the standard installer runs
+   **every time**: Deno is installed if missing, and the framework + `am` are
+   installed or **updated in place** (`~/.local/lib/aio`, checked out at the
+   last tagged release — so the one-liner never runs an old `am`). A checkout
+   that is being worked in (on a branch, or with local changes) is never moved.
+   The app still builds with the version it pins; updating `am` moves no app.
 2. **Clone** — with `--git <url>` (or a bare `owner/repo` / URL argument) the
    repo is cloned into `./<name>`; an existing clone is fast-forwarded.
 3. **Sanity** — the directory must be an aio app (an `"aio"` import or an

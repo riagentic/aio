@@ -1,4 +1,4 @@
-// The second ds4 batch — every one a silent-wrong-outcome or a silent hang,
+// The second audit batch — every one a silent-wrong-outcome or a silent hang,
 // which is the class this project treats as disqualifying.
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { matchRoute } from "../src/server/route.ts";

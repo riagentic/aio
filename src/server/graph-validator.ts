@@ -48,9 +48,9 @@ export type GraphResult = {
   /** Modules reachable from the entry through STATIC imports only — the set
    *  the browser eagerly links at boot. A module in `modules` but not here is
    *  a dynamic-import chunk the client may never load (the server-only escape
-   *  hatch). Exposed so app-side gates can apply their own conventions (e.g.
-   *  a field report blocks `*.server.ts` in the eager set — the dev server 404s those
-   *  files to the browser, which no generic category here can know). */
+   *  hatch). A static `*.server.ts` import inside this set is a BLOCKING
+   *  `server-only-import` (the dev server 404s the file to the browser);
+   *  `smoke()` in `aio/testing` fetches every member from a real boot. */
   eager: Set<string>;
   durationMs: number;
 };
@@ -347,6 +347,9 @@ export const BLOCKING_CATEGORIES: ReadonlySet<ErrorCategory> = new Set([
   "server-only-import",
 ]);
 
+/** aio's server-only file convention — never served to a browser. */
+const SERVER_FILE_RE = /\.server\.tsx?$/;
+
 export async function validateGraph(
   entrypoint: string,
   importMap: Record<string, string>,
@@ -361,6 +364,12 @@ export async function validateGraph(
   // Static (eager) import edges only — used to decide whether a server-only
   // import is eagerly linked (block) or reached only via dynamic import (defer).
   const staticEdges = new Map<string, string[]>();
+  // Static imports of `*.server.ts(x)` — aio's serving convention: the dev
+  // server 404s those files to the browser (server-static.ts isProtectedPath)
+  // and the prod bundler refuses them. Collected during the walk, judged after
+  // the eager set exists: static + eager ⇒ BLOCKING (the app blank-screens);
+  // reached only via dynamic import ⇒ the documented escape hatch, fine.
+  const serverFileImports: { file: string; spec: string; line: number }[] = [];
 
   async function walk(filePath: string, importerPath?: string): Promise<void> {
     if (visited.has(filePath)) {
@@ -465,6 +474,14 @@ export async function validateGraph(
     ).join("").slice(0, 16);
 
     for (const spec of specifiers) {
+      if (staticSpecs.has(spec) && SERVER_FILE_RE.test(spec)) {
+        const at = source.indexOf(spec);
+        serverFileImports.push({
+          file: filePath,
+          spec,
+          line: at < 0 ? 1 : source.slice(0, at).split("\n").length,
+        });
+      }
       const resolution = resolveSpecifier(
         spec,
         filePath,
@@ -505,6 +522,18 @@ export async function validateGraph(
     if (eager.has(p)) continue;
     eager.add(p);
     for (const dep of staticEdges.get(p) ?? []) eagerStack.push(dep);
+  }
+  for (const imp of serverFileImports) {
+    if (!eager.has(imp.file)) continue;
+    errors.push({
+      file: imp.file,
+      line: imp.line,
+      category: "server-only-import",
+      message:
+        `"${imp.spec}" is a *.server.ts module, statically imported from a client-loaded file — the dev server never serves it to the browser (404), so the app blank-screens at boot`,
+      fix:
+        `Load it lazily from a server-only path — \`const m = await import("${imp.spec}")\` inside a cell method — or use \`import type\`. A static import of a *.server.ts module is never client-safe (docs/build/imports.md).`,
+    });
   }
   // A module reached ONLY via dynamic import (`await import("aio")` /
   // `import("./x.server.ts")`) is the documented server-only escape hatch: the

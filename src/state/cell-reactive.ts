@@ -99,43 +99,42 @@ const _reactivelyBound = new WeakSet<CellDef>();
 // silent. Server-side reads (routes/effects — bound via bindCell) see
 // everything, by design.
 
-const _uiReadWarned = new Set<string>();
-
-/** Test isolation — clear the one-time hidden-read warning dedup. */
-export function _resetUiReadWarnings(): void {
-  _uiReadWarned.clear();
-}
-
-/** A client read of a field the cell hides. Dev/test THROWS, prod returns
- *  undefined and warns once.
+/** A client read of a field the cell hides THROWS — in every context, dev
+ *  and prod alike.
  *
- *  It used to only warn, everywhere — and a warning does not stop the read from
- *  type-checking as the field's declared type, so client code went on branching
- *  on `undefined` as though it were data (a field report: a lock screen
- *  asked "does a vault exist?", got `undefined` forever, and behaved). A hidden
- *  field is never readable here, so ANY such read is a bug; dev is where a bug
- *  should be unmissable, prod is where an app should still render. The fix is
- *  always the same shape: expose the non-secret FACT (`hasVault: boolean`)
- *  beside the secret and read that. */
-function reportHiddenRead(cellName: string, key: string, reason: string): void {
+ *  It used to warn (everywhere), then throw in dev and warn-once + return
+ *  `undefined` in prod. Neither half-measure held: a warning does not stop the
+ *  read from type-checking as the field's declared type, so client code went
+ *  on branching on `undefined` as though it were data (a field report: a lock
+ *  screen asked "does a vault exist?", got `undefined` forever, and behaved —
+ *  in prod, where the warning scrolled past). A hidden field is never readable
+ *  here, so ANY such read is a bug, and a bug that yields a plausible value is
+ *  worse than one that stops the page: dev == prod, one outcome table. The fix
+ *  is always the same shape — `visible: { exclude }` is doing its job:
+ *  publish the non-secret FACT (`hasVault: boolean`) beside the secret and
+ *  read that, or read the secret in a server-side/async method. */
+export function reportHiddenRead(
+  cellName: string,
+  key: string,
+  reason: string,
+  context = "read from client context",
+): never {
   const id = `${cellName}.${key}`;
-  const msg = `[aio] ${id} read from client context → undefined — ${reason}. ` +
-    `ui visibility is enforced on ALL client reads (browser and ` +
-    `standalone/electron alike). Keep the secret server-side and read it in ` +
-    `server code (routes, effects, methods); if the client needs to know ` +
-    `something ABOUT it, publish that fact as its own non-secret field.`;
-  if ((globalThis as Record<string, unknown>).__aioDev === true) {
-    throw new Error(msg);
-  }
-  if (_uiReadWarned.has(id)) return;
-  _uiReadWarned.add(id);
-  log.warn(msg);
+  throw new Error(
+    `[aio] ${id} ${context} — ${reason}. ` +
+      `ui visibility is enforced on ALL client reads (browser and ` +
+      `standalone/electron alike), in dev and prod. Two fixes: publish the ` +
+      `non-secret FACT as its own visible field (e.g. \`has${
+        (key.split(".").pop() ?? key).replace(/^./, (c) => c.toUpperCase())
+      }: boolean\`) and read that, or read \`${key}\` in a server-side/async ` +
+      `method (routes, effects, methods).`,
+  );
 }
 
 /** Deep-exclude for CLIENT reads — same shape as state-filter's pure
  *  `deepExclude`, plus a tripwire: the dropped field is re-installed as a
- *  non-enumerable reporting getter, so `account.encSecKey` throws in dev and
- *  warns-once in prod exactly like a top-level excluded field. Installed
+ *  non-enumerable reporting getter, so `account.encSecKey` throws exactly
+ *  like a top-level excluded field. Installed
  *  UNCONDITIONALLY at the leaf: on the wire path the field never even arrives
  *  (the broadcast filter strips it), and that absent field reading as a clean
  *  `undefined` was the same "undefined as data" trap, one level down.
@@ -213,6 +212,7 @@ const _hiddenKeys = new WeakMap<CellDef, Set<string>>();
 function guardHidden(
   def: CellDef,
   slice: Record<string, unknown>,
+  context?: string,
 ): Record<string, unknown> {
   let hidden = _hiddenKeys.get(def);
   if (!hidden) {
@@ -234,12 +234,29 @@ function guardHidden(
           def.__aio.id,
           prop,
           uiKeyVisibility(filter, prop).reason!,
+          context,
         );
-        return undefined;
       }
       return (target as Record<string | symbol, unknown>)[prop];
     },
   });
+}
+
+/** The replay-side twin of {@link guardHidden}: a `sync`/`localFirst` cell's
+ *  SYNC methods replay on the client against the ui-filtered draft (optimistic
+ *  rebase, `protocol-cell.ts`), so a hidden field the server-side run could
+ *  read is simply absent there — and it read as a clean `undefined` with no
+ *  tripwire, in the one runtime nobody tests by hand. Same outcome table as
+ *  every other client read: dev THROWS naming cell + field, prod warns once
+ *  and returns undefined. Writes pass straight through to the draft. */
+export function guardHiddenReplay<S extends object>(def: CellDef, draft: S): S {
+  return guardHidden(
+    def,
+    draft as unknown as Record<string, unknown>,
+    "read during client-side replay of a sync method (sync methods replay " +
+      "on the client — read hidden fields only in server-side/async " +
+      "methods, or publish a non-secret fact field)",
+  ) as unknown as S;
 }
 
 /** Install signal-backed getters on a cell for each state key, and wrap
@@ -267,16 +284,12 @@ export function bindCellReactive(
     if (nameIsTaken(def, key)) continue;
 
     // ui visibility is enforced at THIS seam for client reads — a
-    // hidden field throws in dev and reads as undefined (+ one-time loud warn)
-    // in prod, a dot-path exclude strips the nested value, exactly like the
-    // broadcast filter.
+    // hidden field THROWS (dev and prod), a dot-path exclude strips the
+    // nested value, exactly like the broadcast filter.
     const vis = uiKeyVisibility(uiFilter, key);
     Object.defineProperty(def, key, {
       get() {
-        if (vis.hidden) {
-          reportHiddenRead(cellName, key, vis.reason!);
-          return undefined;
-        }
+        if (vis.hidden) reportHiddenRead(cellName, key, vis.reason!);
         // Register a SERVER subscription for this cell:
         // reading a cell via direct access is documented as "reactive and
         // auto-tracked", but it only tracked the AIR *re-render* signal — it

@@ -140,7 +140,11 @@ Deno.test("aio_schema: a legacy (pre-versioned) db is upgraded AND stamped", asy
       assertEquals(await getAioSchemaVersion(db), 0, "legacy reads 0");
       await runDdlSteps(db);
       assertEquals(await getAioSchemaVersion(db), DB_VERSION_EPOCH);
-      // The epoch-1 reconcilers still upgrade the legacy shape.
+      // The epoch-1 reconcilers still upgrade the legacy shape — after the
+      // CREATE IF NOT EXISTS pass boot always runs first (a legacy file may
+      // hold sync_meta and no sync_ops; the ALTER on a missing table is fatal
+      // by design, see tests/ddl-fatal.test.ts).
+      for (const sql of SYNC_SCHEMA) await db.execute(sql);
       await applySyncMigrations(db);
       const meta = await db.query<{ name: string }>(
         "PRAGMA table_info(sync_meta)",

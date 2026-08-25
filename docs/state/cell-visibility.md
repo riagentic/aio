@@ -270,8 +270,31 @@ They're independent — a cell can persist everything but expose nothing to UI
 (background worker), or expose everything but persist nothing (ephemeral UI
 state).
 
+## Reading a hidden field on the client — throws, everywhere
+
+A field hidden by `visible` is enforced at the **client read seam**, not only at
+broadcast time: a component (browser, Electron, `testUI`), a selector, or the
+client-side replay of a sync method that reads `cell.secret` **throws** — in dev
+and in prod alike — naming the field, the cell, and the two fixes. It used to
+return `undefined` with one warning in prod, and a warning does not stop the
+read from type-checking as the field's declared type: a lock screen in a field
+report asked "does a vault exist?", got `undefined` forever, and behaved. A
+hidden field is never readable there, so any such read is a bug, and a bug that
+yields a plausible value is worse than one that stops the page.
+
+`visible: { exclude }` is doing its job. Either publish the non-secret **fact**
+beside the secret (`hasVault: boolean`) and read that, or read the secret in a
+server-side/async method (routes, effects, methods) — see
+[cell contexts](cell-contexts.md).
+
 ## Interaction with Sync
 
-Cells with `sync: true` use the SQLite op-log for their sync-managed fields. The
-`persist` config only controls snapshot persistence for non-sync fields. Sync
-manages its own persistence separately.
+Cells with `sync: true` are excluded from the `aio_kv` snapshot: their durable
+home is the SQLite op-log plus a compaction snapshot. A `persist` filter on such
+a cell is **refused at `cell()`** (and a `cellDefaults.persist` filter that
+would land on one is refused at `aio.run()`): an op is the method call's
+payload, written raw, so no filter can apply to it, and `persist: "none"` would
+restore an empty cell. The error names the cell, the fields and the ways out —
+remove the filter, turn sync off, or keep the transient data in a separate
+non-sync cell. Shape changes on a sync cell need `version` + `onMigrate` — see
+[CRDT sync → Persistence](../persistence/crdt.md#persistence).

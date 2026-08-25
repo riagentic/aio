@@ -1,4 +1,4 @@
-// A component that renders `null` keeps its written POSITION (rimote R-10).
+// A component that renders `null` keeps its written POSITION (R-10).
 //
 // It used to create no node and therefore no `vnode._dom` — and `_dom` is the
 // anchor the next diff inserts before. So the first time such a component

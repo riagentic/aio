@@ -168,8 +168,9 @@ export function connectCli<S>(
   // One registry PER CONNECTION (not the browser's module-level singleton):
   // `connectCli` can be called more than once in a process, and one client's
   // disconnect must never settle another's pending calls (D2).
-  const _pending = createAckRegistry(() =>
-    opts?.ackTimeoutMs ?? ACK_TIMEOUT_MS
+  const _pending = createAckRegistry(
+    () => opts?.ackTimeoutMs ?? ACK_TIMEOUT_MS,
+    (m) => log.warn(m),
   );
   // Cells bound through THIS client — released on close() so the same defs can
   // be bound again by a later client (a cell def binds to exactly ONE
@@ -406,7 +407,7 @@ export function connectCli<S>(
         // self-signed cert an exposed aio server generates: Deno's WebSocket
         // has no API to pass a CA, so the connection dies before any protocol
         // frame and the generic "check the server is running" line sends
-        // people to look at the wrong thing (rimote R-7). DENO_CERT is read
+        // people to look at the wrong thing (R-7). DENO_CERT is read
         // at process start, so this can only be said, not fixed from here.
         const tlsHint = proto === "wss:"
           ? `\n  If the server uses aio's self-signed cert, this client cannot ` +
@@ -551,8 +552,9 @@ export function connectCliUDS<S>(
   opts?: { ackTimeoutMs?: number; readyTimeoutMs?: number },
 ): CliApp<S> {
   // Same per-connection registry as the WS client — see connectCli.
-  const _udsPending = createAckRegistry(() =>
-    opts?.ackTimeoutMs ?? ACK_TIMEOUT_MS
+  const _udsPending = createAckRegistry(
+    () => opts?.ackTimeoutMs ?? ACK_TIMEOUT_MS,
+    (m) => log.warn(m),
   );
   const _bound: CellDef[] = [];
   let state: S | null = null;

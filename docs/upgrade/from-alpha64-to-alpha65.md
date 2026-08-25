@@ -110,9 +110,10 @@ You do not have to run it. A self-signed warning has never meant "unencrypted" �
 the traffic is fully encrypted either way; the warning is about
 _authentication_. `am trust` just stops you being asked.
 
-**`--zero-port`** (experimental) makes a dev electron+UDS app bind no TCP port
-at all, serving its page and modules over a second socket. It is opt-in and not
-the default: hot reload does not survive it yet. See `todo.md`.
+**`--zero-port`** (experimental in alpha65) makes a dev electron+UDS app bind no
+TCP port at all, serving its page and modules over a second socket. In alpha65
+it is opt-in; the next release makes zero the default and `--port=N` the opt-out
+(`docs/clients/transports.md`).
 
 ## Certificates now re-issue themselves
 
@@ -137,3 +138,20 @@ The one exception: an app whose cached certificate was ALREADY stale (issued on
 a different network) is re-issued on this upgrade, and clients that pinned the
 old one must pair once more. That app was already unreachable at its current
 address, so there was nothing working to break.
+
+## Retire
+
+Workarounds you may still carry for bugs that are fixed. Each was fixed in the
+version named; if you are on alpha65 you are past all of them, and the code that
+guarded against them is dead weight — delete it.
+
+| workaround you may have                                                                                                          | fixed in    | what to do now                                                                                                        |
+| -------------------------------------------------------------------------------------------------------------------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------- |
+| Writing a method's result into state (or a side channel) because `await cell.method()` in the browser resolved `undefined`       | **alpha34** | `return` the value. JSON-serializable returns cross the bridge, sync and async — [the bridge](../state/the-bridge.md) |
+| Polling state after calling a `worker: true` cell's async method because the promise resolved before the value/error arrived     | **alpha42** | `await` it. Return values and thrown errors cross the thread (`tests/cell-workers.test.ts`)                           |
+| A `key` or wrapper element forcing re-creation of a deep, unchanged subtree because a leaf ended up appended instead of replaced | **alpha22** | remove it. The `_static` fast path hands DOM handles all the way down, and a static subtree diffs correctly           |
+| Batching or delaying Electron dispatches so patches would not be lost mid-throttle on UDS                                        | **alpha22** | remove it. The UDS transport buffers patches across the throttle window instead of dropping them                      |
+
+One line of test is the safe way to retire each: a `testCell` that awaits the
+call and asserts the returned value, a `testUI` that mounts the subtree and
+asserts the leaf text after a change.

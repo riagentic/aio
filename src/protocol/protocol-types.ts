@@ -40,9 +40,20 @@ export interface AioWindow {
     /** Resolved `await cell.method()` ceilings — effectTimeoutMs +
      *  perfBudget.methods[...].timeout, so the browser waits from the SAME
      *  numbers as the server (0 = wait indefinitely). */
-    callTimeouts?: { default?: number; methods?: Record<string, number> };
+    callTimeouts?: CallTimeouts;
   };
 }
+
+/** The resolved `await cell.method()` ceilings as bridged to a client:
+ *  `default` = effectTimeoutMs, `methods` = per-method overrides — a number
+ *  (0 = wait indefinitely) or `"warn"` (report once at the default ceiling and
+ *  keep waiting; `perfBudget.methods[key].timeout: "warn"`). ONE type for
+ *  every emitter and the consumer, so a mode the server knows cannot be
+ *  silently dropped on the way to the browser. */
+export type CallTimeouts = {
+  default?: number;
+  methods?: Record<string, number | "warn">;
+};
 
 /** IPC transport (UDS mode via Electron) */
 export type AioIPC = {

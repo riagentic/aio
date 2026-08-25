@@ -1,7 +1,7 @@
 // pick-path.ts — the native "choose a file / choose a folder" dialog, once.
 //
-// THE most-requested missing API across the field reports (ayd at alpha54,
-// bw2col at alpha57, and a third app before them): aio shipped `openExternal`
+// THE most-requested missing API across the field reports (a downloader at alpha54,
+// a GPU-pipeline app at alpha57, and a third app before them): aio shipped `openExternal`
 // — "show this path to the desktop" — and nothing for the opposite direction,
 // so every desktop app that needs "pick a video" wrote the same zenity
 // wrapper. Three independent apps writing the same wrapper is a missing API,
@@ -9,7 +9,7 @@
 //
 // What they got wrong, every time, is the part that is easy to get wrong: a
 // dialog binary that is NOT INSTALLED and a user who pressed Cancel both come
-// back as "exit 1, no output". bw2col conflated them and shipped a broken
+// back as "exit 1, no output". one GPU-pipeline app conflated them and shipped a broken
 // Browse button that looked like an indecisive user. So the contract here is
 // explicit and it is the whole point of the module:
 //

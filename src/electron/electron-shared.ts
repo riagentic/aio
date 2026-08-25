@@ -167,14 +167,25 @@ export function tmplKeyboardShortcuts(): string {
  *  @param originExpr JS expression that evaluates to the app origin string */
 export function tmplWillNavigate(originExpr: string): string {
   return `  // AIO-54: Electron swallows <a> clicks before DOM dispatch — relay via IPC.
-  // only SAME-ORIGIN links are in-app navigation. A cross-origin
+  // only SAME-APP links are in-app navigation. A cross-origin
   // (external) link must never be fed to navigate() — for a routerless app that
   // pushState()s a bogus path and white-screens on reload. Send external
   // http/https to the system browser instead; block everything else.
+  //
+  // "Same app" is protocol + host, NOT \`URL.origin\`: for a custom scheme the
+  // WHATWG origin is the literal string "null", so on the zero-port page
+  // (aio://app/) every navigation — including the dev reload of the root —
+  // compared unequal, was vetoed here, and the window sat on its old document
+  // with the relay frozen (net::ERR_ABORTED, nothing logged).
+  const _sameApp = (u) => (u.protocol + '//' + u.host) === ${originExpr};
   win.webContents.on('will-navigate', (event, navUrl) => {
     let u;
-    try { u = new URL(navUrl); } catch { event.preventDefault(); return; }
-    if (u.origin === ${originExpr}) {
+    try { u = new URL(navUrl); } catch {
+      event.preventDefault();
+      console.warn('[aio:electron] navigation blocked (unparsable URL): ' + navUrl);
+      return;
+    }
+    if (_sameApp(u)) {
       if (u.pathname === '/' || u.pathname === '') return; // full reload of root
       event.preventDefault();
       win.webContents.send('__aio:navigate', navUrl); // in-app route
@@ -183,6 +194,8 @@ export function tmplWillNavigate(originExpr: string): string {
     event.preventDefault(); // external — never route it into the app
     if (u.protocol === 'http:' || u.protocol === 'https:') {
       require('electron').shell.openExternal(navUrl);
+    } else {
+      console.warn('[aio:electron] navigation blocked (not this app, not http): ' + navUrl);
     }
   });
   win.webContents.setWindowOpenHandler(({ url }) => {

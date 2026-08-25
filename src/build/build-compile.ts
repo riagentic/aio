@@ -431,7 +431,7 @@ export async function runDenoCompile(cfg: BuildConfig): Promise<boolean> {
   // staging that every build wipes and embeds wholesale, so it is never where
   // a release lands. Orchestrating several single-target builds needs one
   // directory per app; without this, callers staged into dist/ and the next
-  // build deleted it (rimote R-4).
+  // build deleted it (R-4).
   const outDir = cfg.outDir ?? root;
   const compileTarget = doElectron
     ? join(dist, "AppDir", binaryName)

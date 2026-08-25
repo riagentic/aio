@@ -58,7 +58,8 @@ If you're wiring a project by hand instead of `am create`, this is the shape:
 ## Prerequisites
 
 - [Deno 2.9+](https://deno.land) (aio tracks the latest stable Deno)
-- Electron (optional): `deno task install:electron`
+- Electron: nothing — dev auto-installs it, a compiled binary fetches it once
+  (`deno task install:electron` only pre-downloads for a checkout)
 
 ## deno.json
 
@@ -327,8 +328,9 @@ something and re-read state), see
   (jsx, jsxImportSource, import map entries, electron nodeModulesDir, Deno
   version) with a one-line fix per failure.
 
-- **"Electron not found"** -- Run `deno task install:electron`, or use
-  `--client=browser`
+- **"Electron … could not be fetched"** -- the machine cannot reach
+  github.com/electron releases (or npm, in dev). Fix the network, point
+  `$ELECTRON_PATH` at an Electron you have, or use `--client=browser`
 - **"Module not found: aio"** -- Run `deno install`, check import map
 - **State resets on restart** -- Persistence is ON by default; a reset means the
   state shape changed (old keys deep-merge with new defaults — see

@@ -1,5 +1,159 @@
 # Changelog
 
+## v1.0.0-alpha66 — no port you did not ask for (2026-08-25)
+
+### The field-report sweep — zero ports by default, a sync replay that refuses or quarantines, and phantoms that throw
+
+Worked from a field report from a desktop wallet app on alpha65. Four of the
+items below flip a default or change prod semantics — they are marked
+**(breaking)** and each names the opt-out or the fix.
+
+- **Zero TCP ports is the DEFAULT for a local Electron app (breaking).** A
+  desktop app that serves nothing to a browser or another service has no reason
+  to open a port: a port is a cost — reachable by every process and tab on the
+  machine — not a feature. Dev + electron + UDS now serves the page, its modules
+  and the app's `routes` over the socket (`aio://`), exactly as prod already did
+  with a readable `dist/`. `--zero-port` is accepted as a no-op (one info line).
+  The opt-out is `--port=N`: a local Electron app that needs a URL reachable
+  from ANOTHER process over TCP (a webhook receiver, a `curl` probe, a browser
+  tab beside the window) keeps a loopback listener on that port. `am` is
+  unaffected (UDS control). Windows is the exception — Deno has no Unix-socket
+  listener there, so Windows stays WS over a loopback-bound TCP port and the
+  boot line says so (`docs/clients/transports.md`).
+- **Hidden-field reads throw in EVERY context (breaking).** A client read of a
+  field the cell hides (`visible: { exclude }`) used to throw in dev and warn
+  once + return `undefined` in prod — and prod code went on branching on
+  `undefined` as though it were data. One rule now: throw, naming the field, the
+  cell, and the two fixes (publish a non-secret fact field, or read it in a
+  server-side/async method). The client-side replay of a sync method is the same
+  tripwire.
+- **`sync: true` + a `persist` filter is refused at `cell()` (breaking).** The
+  op-log is a sync cell's durable home and a persist filter cannot apply to it,
+  so the combination was a promise the framework could not keep. The error names
+  the cell, the fields and the three ways out: remove the filter, turn sync off,
+  or keep the transient data in a non-sync cell.
+
+- **Zero TCP ports with the app's own `routes`.** An Electron app that declared
+  a route kept its port ("move it into a serverFn") — but an `<img>`, a CSS
+  `url()` and a WebGL texture need a URL, not a value. Routes are now served
+  through the `aio://` scheme over the HTTP-on-socket handler, in dev and prod:
+  `<img src="/nft-image/x">` resolves to `aio://app/nft-image/x`, the response
+  is **streamed** (a 100 MB body is never buffered or base64'd), the scheme is
+  `stream: true`, and status/headers (`nosniff`, `content-type`, cache) arrive
+  intact. `resolveZeroPort()` is a pure decision table with a test; boot prints
+  one info line naming the count of routes on the socket **(breaking for a route
+  another process called over TCP — pass `--port=N`)**.
+- **The dev reload on the zero-port page actually reloads (measured with CDP on
+  a real window).** An edit sent `reload`, the renderer called
+  `location.reload()`, and Chromium answered `net::ERR_ABORTED` before the
+  request reached the scheme handler — the old page stayed on screen and
+  `am
+  surface` timed out forever, with nothing logged. Two causes, both fixed
+  and pinned in `tests/electron-main-relay.test.ts`: the shell's `will-navigate`
+  guard compared `URL.origin`, which is the literal string `"null"` for a custom
+  scheme, so the app's own root looked foreign and was vetoed; and a navigation
+  that never committed left the relay waiting for a `ready` the living document
+  would never send again. "Same app" is now protocol + host; `did-fail-load` on
+  the main frame hands the old document its bridge back and says so; a blocked
+  navigation is named in the log.
+- **The renderer never falls back to WS on an `aio://` page.** `_connect()` on a
+  non-http(s) origin uses the IPC bridge or fails loud (status line, diagnostic,
+  throw) — no `ws://app/ws` retry loop; the dev reload script is skipped there
+  too, since the IPC path already delivers reload/css/boot.
+- **Sync cells: replay migrates, refuses, or quarantines — never applies
+  blind.** Ops and compaction snapshots carry the cell's `version`; older ops
+  replay through `onMigrate` at each version boundary, older ops without a hook
+  and newer ops (downgrade) are skipped. Any skip or failure: dev **refuses
+  boot** naming cell/failed/total/first error/fix; prod keeps the cell at its
+  last snapshot (never `initialState`), quarantines it so no compaction writes
+  the emptiness, and reports it in `am migrations`. A persisted log without a
+  `version` warns per cell.
+- **Singleton lock keyed by appId AND home.** A second boot of the same app from
+  a different `appDir` (an isolated smoke/screenshot harness) gets its own lock
+  and sockets (`<appId>@<hash8>`), boots, and the info line names no foreign
+  port or pid. `am --home=<dir>` targets that instance; `am instances` shows
+  home. Default home keeps the plain lock name — nothing migrates.
+- **Awaited method ceiling names the fix and can warn instead of reject.** The
+  rejection line names `long: [...]`, `perfBudget.methods[m].timeout:
+  "warn"`
+  (warn at the ceiling, keep awaiting — mirrored on the browser ack path) and
+  the serialize-mutex cascade. "Fetch outside, commit with a sync reducer" is
+  now the documented pattern.
+- **Phantoms throw.** `cell.__aio.<unknown>` throws under dev/test (prod:
+  `undefined` — a phantom API, not data, so the dev-only gate stays). The gate
+  found two framework reads of slots that never existed — `syncCells` in the
+  boot report was always empty. Both fixed. `testUI` throws on a DOM handler
+  registered on `globalThis` and exposes `ui.window`/`ui.document`; `find(C, 5)`
+  matches key `"5"`.
+- **Graph gate + smoke.** A static `*.server.ts` import from a client-loaded
+  module is a blocking validator error (dev server and `check:graph`, not only
+  the prod bundle). `smoke()` on `aio/testing` boots headless and fetches every
+  eager module. `testMultiClient` clients expose `patches`/`waitForPatch`.
+- **aiol**: `sync-method-reads-hidden-field` (the read that silently answered
+  "no vault") and `credential-field-name` (boot's refusal, at lint time).
+- **am**: `dispatch` returns the method's result; `--timeout`, transport wait
+  strictly above the server's 5 s so its named reason surfaces; `am shot` is not
+  built (no CDP hook in the shell).
+- **Docs**: `docs/clients/transports.md` (the one matrix),
+  `docs/state/cell-contexts.md` (which code runs where, which combinations are
+  refused), a `## Retire` section in every upgrade guide (gated).
+
+### The one-liner keeps `am` current, and `am fix` installs Electron for real
+
+- **`run.sh` / `run.ps1` run the installer every time.** They used to call it
+  only when deno, `am` or the checkout was _missing_ — so a machine that had
+  installed aio once kept that `am` forever, and the newest one-liner ran the
+  oldest manager. `install.sh` is idempotent (fetch, check out the latest tag,
+  reinstall `am`); the app still builds with its own pin, so updating `am` never
+  moves an app.
+- **`install.sh` never git-mutates a working checkout.** With the installer now
+  running unconditionally, `AIO_HOME` pointed at a developer's clone (the e2e
+  suite does exactly that) would have been `git checkout --force`-ed to the last
+  tag — it happened to the framework's own tree once. A checkout on a branch, or
+  with local changes (`deno.lock` churn excluded), is left as is and `am` is
+  still installed from it. `AIO_REF` checks out detached.
+- **`am fix` — "electron runtime installed" asks about the binary.** It used to
+  test that `node_modules/electron` _exists_ (true after any `deno install`,
+  with or without the ~100 MB `dist/`) and repair with the bare
+  `deno install --allow-scripts=npm:electron` — the command known to exit 0
+  having skipped the download. On the one-liner that read "fixed · installed
+  npm:electron", then "electron is not installed — run deno task
+  install:electron" from the build one second later, then "ok" from every later
+  `am fix`. Both halves now go through `src/electron-install.ts` (the launcher's
+  installer; new `--check` mode answers presence only), and a repair whose
+  installer exits 0 without a runtime is a reported failure. Gates:
+  `tests/am-fix-electron-runtime.test.ts`, `tests/run-sh.test.ts`.
+- **A compiled desktop binary fetches its own Electron.** The launcher looked
+  for `node_modules/.bin/electron` under the _current directory_ and, failing
+  that, "auto-installed" by running `Deno.execPath() install npm:electron` —
+  which inside a compiled binary is the app itself
+  (`unknown flag ignored:
+  --allow-scripts=npm:electron`, then "run
+  `deno task install:electron`"). That is a chat-app report: an app installed by
+  the one-liner opened nothing until its user went back to the checkout,
+  installed Electron by hand and started the binary from there. A binary now
+  fetches the runtime Electron publishes into
+  `~/.cache/aio/tools/electron/<version>-<platform>/`, once per machine, and
+  runs it from there — no npm, no deno, no cwd. The build bakes the version into
+  `dist/electron.json` (installed runtime > import-map spec > framework
+  default), and the cross-build cache is the same directory. Dev keeps
+  `deno install` first and gets the fetch as its last resort. New module
+  `src/electron/electron-runtime-fetch.ts`; the launcher's resolution order is
+  injectable and pinned by `tests/electron-runtime-fetch.test.ts`. Measured:
+  from an empty cache the binary is on screen 19 s after launch.
+- **`am fix` relinks `dep/aio` when the pin and the link disagree.** A working
+  link was reported "ok" whatever it pointed at, so `am pin main` (or editing
+  `aioVersion`) followed by `am fix` built against the previous version without
+  a word. The pin is the fact; the link follows it
+  (`fixed → <path> (was
+  <old>)`, `would-fix` under `--dry-run`). Gate in
+  `tests/am-pin-seal.test.ts`.
+- Apps pinned to an older aio (one field app pins alpha55) get all of the above
+  the moment they move the pin — `am fix` already says how far behind a pin is,
+  and `am pin --latest` moves it after checking for removed APIs. The one-liner
+  builds with the app's pin on purpose; a fix in the framework cannot reach a
+  binary built from a framework that predates it.
+
 ## v1.0.0-alpha65 — what it opens, it closes (2026-08-23)
 
 The release about an app's footprint: the ports it binds, the windows and tabs
@@ -225,10 +379,10 @@ the meter back needs a browser-path test and is roadmapped, not pretended.
   documented parity contract — and a returned effect vanished instead of
   refusing.
 - **A live query failing to REFRESH rejected an already-committed write.**
-- Plus the ds4 low tier worked to zero (L1, L3, L4, L6–L11, L13, L15–L17, L21,
-  L23–L26), an `icon.png` at the project root now reported instead of silently
-  replaced, the path-pin false red offering the non-destructive exit first, and
-  doctor's vendored-dependency list completed.
+- Plus the static-audit low tier worked to zero (L1, L3, L4, L6–L11, L13,
+  L15–L17, L21, L23–L26), an `icon.png` at the project root now reported instead
+  of silently replaced, the path-pin false red offering the non-destructive exit
+  first, and doctor's vendored-dependency list completed.
 
 `feedback/` is down to `resolved.md` + `refused.md`; `review/` is gone (it was a
 second ledger for the same fact). `todo.md` is a 150-line roadmap again instead
@@ -289,7 +443,7 @@ now compared against the `UiTheme` union itself
 once — the seven hand-copied spellings of `"auto" | "full" | "none"` across
 server, electron, static and lifecycle now import it.
 
-### Two android-bundle fixes (rimote)
+### Two android-bundle fixes (remote-desktop report)
 
 - `import { log } from "aio"` compiled for server, browser and electron and
   failed to BUNDLE for android: the standalone entry never re-exported it. Fixed
@@ -305,10 +459,11 @@ server, electron, static and lifecycle now import it.
 
 ## 1.0.0-alpha62 — one fact, one spelling (2026-08-20)
 
-Worked from **rimote** (8/10) — a remote-desktop suite that is three aio apps in
-one repo: a headless relay plus an Electron agent and controller, verified over
-a real LAN with the agent downloaded from the relay's own page. Two things came
-out of it: one design bug, and one gap wearing five hats.
+Worked from a remote-desktop field report (8/10) — a remote-desktop suite that
+is three aio apps in one repo: a headless relay plus an Electron agent and
+controller, verified over a real LAN with the agent downloaded from the relay's
+own page. Two things came out of it: one design bug, and one gap wearing five
+hats.
 
 ### A captured reference cannot go stale in silence
 
@@ -350,16 +505,16 @@ across seeds and `proxy-array-10k` is unchanged.
 ### The multi-app repo the docs recommend, actually buildable
 
 `docs/basics/app-architectures.md` recommends "service + rich clients"; the
-build half-supported it, and rimote wrote a 260-line orchestrator to cover the
-difference. That orchestrator is now unnecessary:
+build half-supported it, and one remote-desktop suite wrote a 260-line
+orchestrator to cover the difference. That orchestrator is now unnecessary:
 
 - **`build.targets` keys are labels, `kind` names the target.** Two Electron
   apps in one repo:
   ```jsonc
   "targets": {
-    "agent":   { "kind": "electron",   "entry": "src/agent/app.ts",   "name": "rimote-agent" },
-    "control": { "kind": "electron",   "entry": "src/control/app.ts", "name": "rimote-control" },
-    "relay":   { "kind": "server-app", "entry": "src/server/app.ts",  "name": "rimote-server" }
+    "agent":   { "kind": "electron",   "entry": "src/agent/app.ts",   "name": "remote-agent" },
+    "control": { "kind": "electron",   "entry": "src/control/app.ts", "name": "remote-control" },
+    "relay":   { "kind": "server-app", "entry": "src/server/app.ts",  "name": "remote-server" }
   }
   ```
   A key that is itself a target name keeps meaning exactly what it did.
@@ -385,10 +540,10 @@ difference. That orchestrator is now unnecessary:
 
 ### A component that renders `null` keeps its place
 
-Reported from the field after the first rimote pass, and the more expensive of
-the two findings. An approval prompt written as the **first** child of a panel
-rendered **last** — below a screenful of settings, off the bottom of a window it
-did not fit in:
+Reported from the field after the first remote-desktop pass, and the more
+expensive of the two findings. An approval prompt written as the **first** child
+of a panel rendered **last** — below a screenful of settings, off the bottom of
+a window it did not fit in:
 
 ```tsx
 <main class="panel">
@@ -574,10 +729,11 @@ edits.
 ## 1.0.0-alpha61 — every write lands, and every app has a face (2026-08-18)
 
 Six field reports read together (`atomic`, `fixable`, `impactnews`, `modelinfo`,
-`quant`, `t2v` — 7.5–8.5/10, all locating the weakness at the boundary around
-the model, never in it), worked through to zero, and audited. Plus the thing
-none of them asked for and all of them needed: an app is two files of decisions
-now, and everything else has a default derived from the app's own identity.
+a trading tool and a video-generation app — 7.5–8.5/10, all locating the
+weakness at the boundary around the model, never in it), worked through to zero,
+and audited. Plus the thing none of them asked for and all of them needed: an
+app is two files of decisions now, and everything else has a default derived
+from the app's own identity.
 
 ### The write that vanished (the one that mattered)
 
@@ -756,11 +912,11 @@ Landed after the sweep, triaged before the tag:
 
 ### Refuted, in writing
 
-`feedback/refused.md` records what did not survive verification (`--port`
-silently ignored; the dev server serving stale bytes; `testUI` not exported) and
-what was declined on the merits (ambient `JSX`; per-field subscriptions —
-roadmap, not a sweep item; quant's "cut before 1.0" — the standing question for
-the beta cut, which this release consciously moves the wrong way).
+the refused log records what did not survive verification (`--port` silently
+ignored; the dev server serving stale bytes; `testUI` not exported) and what was
+declined on the merits (ambient `JSX`; per-field subscriptions — roadmap, not a
+sweep item; one report's "cut before 1.0" — the standing question for the beta
+cut, which this release consciously moves the wrong way).
 
 Suite: 4294 → 4300+ tests, 0 failed. Every gate green, including
 `deno publish --dry-run`.
@@ -880,7 +1036,7 @@ a local path:
 
 ```sh
 deno task lab                              # all five scenarios
-deno task lab riagentic/llama-master       # any public aio app, end to end
+deno task lab <user>/<repo>       # any public aio app, end to end
 deno task lab --scenario=electron
 ```
 
@@ -1040,10 +1196,10 @@ Two recovery/exposure defects found while reading the code around the above:
 
 ### The desktop surface the field reports kept writing themselves
 
-`bw2col` (a GPU-pipeline front-end, alpha57) rated the core 7.5/10 and put the
-missing points in one sentence: _"what fought us was everything outside the
-state model — dialogs, subprocesses, process signals, and long-running work."_
-Three of its asks were repeats from `ayd.md`. All four are now framework:
+A GPU-pipeline front-end (alpha57) rated the core 7.5/10 and put the missing
+points in one sentence: _"what fought us was everything outside the state model
+— dialogs, subprocesses, process signals, and long-running work."_ Three of its
+asks were repeats from the downloader report. All four are now framework:
 
 **`pickFile()` / `pickDirectory()`** (`aio/server`) — the native OS dialog
 (zenity/kdialog, `osascript`, Windows common dialogs). Three apps wrote the same
@@ -1272,9 +1428,9 @@ first, heavy tier skipped when the fast tier fails. It caught a red
 
 ### Two field reports, finally triaged
 
-`got` (a habit tracker on alpha56) and `ayd` (a downloader on alpha54) had sat
-untriaged. Each item was reproduced or read in the source before it was
-believed; the two P1s are described above, and the rest:
+A habit tracker (alpha56) and a downloader (alpha54) had sat untriaged. Each
+item was reproduced or read in the source before it was believed; the two P1s
+are described above, and the rest:
 
 - **Nothing could launch an app without a heap warning.** Two real causes: the
   over-share branch had no tolerance band while its sibling deliberately does
@@ -1548,7 +1704,7 @@ why it declined the option is the common shape — silently disabled the rule fo
 the whole file. Masked now, like every other body probe in that file. Found in
 an app whose comment did exactly that.
 
-### The t2v report — the harness stops answering a different question
+### A video-generation report — the harness stops answering a different question
 
 A field report from a Deno/Electron app (two prompt stages, an embedded
 inference engine, ~250 tests) written from a session that included a full UI
@@ -1669,10 +1825,10 @@ handles **never matched by substring** — every name match in the surface is
 ## 1.0.0-alpha56 — the empty desk (2026-08-09)
 
 A 42-finding static audit arrived, and this is the release where every one of
-them is closed: fixed with a test, or written into `feedback/refused.md` with
-the reason it will not be. Nothing was changed on the strength of a description
-— two findings were **refuted** on verification, and one was half right in a
-more interesting way than reported.
+them is closed: fixed with a test, or written into the refused log with the
+reason it will not be. Nothing was changed on the strength of a description —
+two findings were **refuted** on verification, and one was half right in a more
+interesting way than reported.
 
 Strictly additive: no removals, no renames, nothing to migrate.
 
@@ -2261,7 +2417,7 @@ matrix + ignorable-kind tier reserved for wire evolution · dead alpha27 relics
 deleted (browser `actions`/`effects`, legacy config branch).
 
 Suite 4190/0 · build-E2E 14/0 · onboard 15/0 · publish dry-run green · all
-static gates green. Field verification: risoto-aio 1018/0 + nftpass 71/0,
+static gates green. Field verification: two desktop apps (1018/0 + 71/0),
 unmigrated AND migrated.
 
 Upgrade guide: `docs/upgrade/from-alpha51-to-alpha52.md` — or just run
@@ -2269,12 +2425,13 @@ Upgrade guide: `docs/upgrade/from-alpha51-to-alpha52.md` — or just run
 
 ## 1.0.0-alpha51 — zero inbox (2026-08-07)
 
-Every open field-report item across five reports (geng-market, spacy, fezor,
-aicontrol, llama-master leftovers) is now resolved or refused — `feedback/`
-holds exactly two files again. Plus the first pass of first-class support for
-the two canonical app architectures, driven by deep analyses of two real apps.
+Every open field-report item across five reports (a marketplace, a desktop
+utility, a file manager, an agent-control app, chat-app leftovers) is now
+resolved or refused — `feedback/` holds exactly two files again. Plus the first
+pass of first-class support for the two canonical app architectures, driven by
+deep analyses of two real apps.
 
-### The auth seam (geng-market, all seven items)
+### The auth seam (a marketplace app, all seven items)
 
 - **`testUI({ user })`** — mounts an authenticated app signed in on the FIRST
   render, no `/me` stub, no auth-UI internals; `user: null` mounts anonymous;
@@ -2295,7 +2452,7 @@ the two canonical app architectures, driven by deep analyses of two real apps.
   nobody runs on a green build); aiol's Electron advice names commands that
   exist.
 
-### `am` and `aiol` honesty (spacy, all five items)
+### `am` and `aiol` honesty (a desktop utility, all five items)
 
 - `am status` probes the Unix socket a compiled (zero-TCP) app actually listens
   on — no more eternal "starting" for a running production app, and "app not
@@ -2342,7 +2499,7 @@ to end, and supported by analysis-driven fixes:
 - Doc gaps closed: wasm-bindgen `--target web` + `serveDirs` recipe;
   onMount-without-DOM guard (the doc's own example was unguarded);
   cell-method-from-`onStart` dynamic import; `access` predicate positional args.
-- Refused with reasons (feedback/refused.md): `own.setUnique`, a streaming WASM
+- Refused with reasons (the refused log): `own.setUnique`, a streaming WASM
   crossing, `writeFileAtomic`.
 - Housekeeping: ~700 MB of stale local artifacts removed (old coverage,
   AppImage, test homes); the last docs version straggler fixed — docs:check is
@@ -3074,7 +3231,7 @@ restart, no warning. All four fields now go through ONE decider
 logged** (an attack signal, not a shrug), and `_source` is re-stamped `"UI"`
 rather than deleted, so app hooks keep real provenance. Pinned in
 `tests/server.test.ts` (WS), `tests/aio-402-uds-ack.test.ts` (UDS), and
-`tests/glm-residual-guards.test.ts` (trojan — whose first version POSTed to a
+`tests/audit-residual-guards.test.ts` (trojan — whose first version POSTed to a
 route that does not exist and passed vacuously; it now proves the dispatch ran).
 
 ### Silent failures, said loud

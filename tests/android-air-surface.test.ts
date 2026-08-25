@@ -170,7 +170,7 @@ Deno.test("android aio/air: the primitives an app cannot render without are pres
 // esbuild error naming a framework internal ("No matching export in
 // aio/src/standalone-air.ts for import \"log\""), which reads as a broken
 // install rather than a missing export. That is how `log` was found in the
-// field (rimote): every part of a standalone app — cells, networking, session
+// field (a remote-desktop suite): every part of a standalone app — cells, networking, session
 // logic — has something to say when it goes wrong.
 
 /** On `aio`, deliberately NOT on the android entry: each needs a Deno process,

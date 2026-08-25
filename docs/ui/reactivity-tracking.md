@@ -48,7 +48,7 @@ function App() {
 
 Both `studio.view` and `studio.card` are read while `App` runs, so both are
 dependencies of `App`. Changing either re-renders it. (Pinned by
-`tests/t2v-feedback.test.tsx`.)
+`tests/feedback-ui-reactivity-rules.test.tsx`.)
 
 ## Dependencies are re-collected on every render
 

@@ -24,7 +24,7 @@
  * And none of them looked for `deno.jsonc` at all, so a project using the
  * documented extension was invisible to the build even with no comment in it.
  *
- * Reported by rimote (R-12). The literal counts are held by
+ * Reported from the field (R-12). The literal counts are held by
  * `tests/one-fact-one-spelling.test.ts`.
  */
 import { parse as parseJsonc } from "@std/jsonc";

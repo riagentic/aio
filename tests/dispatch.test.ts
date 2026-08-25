@@ -1020,7 +1020,7 @@ Deno.test("dispatch: DISPATCH_MAX overflow rejects dropped actions (B-4)", async
 });
 
 Deno.test("dispatch: an in-flight effect can still commit while draining", async () => {
-  // Field report (llama-master): a chat streamed from llama-server when the
+  // Field report (a local-LLM chat app): a chat streamed from a local inference server when the
   // window closed. Shutdown closes dispatch and THEN drains in-flight
   // effects — so the streaming method's next draft write hit a closed queue,
   // the method died with EFFECT_ASYNC_ERROR mid-reply, and the state it was

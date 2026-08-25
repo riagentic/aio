@@ -15,6 +15,7 @@ import {
   runTrojanGet,
 } from "./am-utils.ts";
 import {
+  clientTimeout,
   FETCH_TIMEOUT,
   httpGet,
   resolveControlPort,
@@ -732,7 +733,12 @@ export async function cmdSurface(
     );
     Deno.exit(1);
   }
-  let result = await trojanGet(port, `surface/${target}${q}`, appId, 10_000);
+  let result = await trojanGet(
+    port,
+    `surface/${target}${q}`,
+    appId,
+    clientTimeout(flags.timeout),
+  );
   let headlessRender = target === "server";
   if (!result.ok && explicit === undefined) {
     // No client connected and none requested → fall back to the headless
@@ -904,15 +910,23 @@ export async function cmdTrigger(
   //
   // The body is still printed either way: `available` is how a caller
   // self-corrects without another round-trip. Only the exit code changes.
+  const timeout = clientTimeout(flags.timeout);
   const post = async (body: Record<string, unknown>): Promise<unknown> => {
-    const r = await trojanPost(port, `trigger/${idx}`, body, appId);
+    const r = await trojanPost(port, `trigger/${idx}`, body, appId, timeout);
     if (!r.ok) {
       outError(r.error, mode);
       Deno.exit(1);
     }
-    const data = r.data as { ok?: boolean } | null;
+    // A client that never answered comes back as `{error}` in a 200 — the
+    // server's own wait expired (see `clientReplyTimeoutError`). That is a
+    // failed trigger, not a result to print under a green exit.
+    const data = r.data as { ok?: boolean; error?: string } | null;
     if (data && data.ok === false) {
       out(data, mode);
+      Deno.exit(1);
+    }
+    if (data && typeof data.error === "string") {
+      outError(data.error, mode);
       Deno.exit(1);
     }
     return r.data;

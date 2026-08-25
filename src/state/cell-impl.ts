@@ -228,21 +228,34 @@ export function callWithOpts(
 const DEFAULT_CALL_TIMEOUT_MS = 30_000;
 let _callTimeoutMs = DEFAULT_CALL_TIMEOUT_MS;
 let _callTimeoutByMethod: Record<string, number> | undefined;
+/** `perfBudget.methods[key].timeout: "warn"` — the ceiling REPORTS instead of
+ *  rejecting: one `log.warn` at N ms naming the method and the elapsed time,
+ *  and the caller keeps awaiting. The default stays reject. */
+let _callWarnMethods = new Set<string>();
 
 /** Point the caller-side wait at the app's configured effect timeouts.
- *  `0` (or a negative) means wait indefinitely. Called at boot. */
+ *  `0` (or a negative) means wait indefinitely; `"warn"` means warn at the
+ *  default ceiling and keep waiting. Called at boot. */
 export function _setCallTimeouts(
   defaultMs?: number,
-  perMethod?: Record<string, number>,
+  perMethod?: Record<string, number | "warn">,
 ): void {
   _callTimeoutMs = defaultMs ?? DEFAULT_CALL_TIMEOUT_MS;
-  _callTimeoutByMethod = perMethod;
+  const numeric: Record<string, number> = {};
+  const warn = new Set<string>();
+  for (const [k, v] of Object.entries(perMethod ?? {})) {
+    if (v === "warn") warn.add(k);
+    else numeric[k] = v;
+  }
+  _callTimeoutByMethod = perMethod ? numeric : undefined;
+  _callWarnMethods = warn;
 }
 
 /** Restore the built-in default — test isolation. */
 export function _resetCallTimeouts(): void {
   _callTimeoutMs = DEFAULT_CALL_TIMEOUT_MS;
   _callTimeoutByMethod = undefined;
+  _callWarnMethods = new Set();
   _longMethods.clear();
 }
 
@@ -274,7 +287,9 @@ export function longMethodKeys(
  *  a decision, and silently replacing it with "no ceiling" would be the
  *  framework overruling the developer. Pure: returns a new budget. */
 export function mergeLongIntoPerfBudget<
-  B extends { methods?: Record<string, { effect?: number; timeout?: number }> },
+  B extends {
+    methods?: Record<string, { effect?: number; timeout?: number | "warn" }>;
+  },
 >(
   budget: B | undefined,
   cells: readonly { __aio: { id: string; longMethods?: string[] } }[],
@@ -295,8 +310,15 @@ export function mergeLongIntoPerfBudget<
  *  method that was simply still running). */
 export function _getCallTimeouts(): {
   default: number;
-  methods?: Record<string, number>;
+  methods?: Record<string, number | "warn">;
 } {
+  // `"warn"` rides along: the browser must keep awaiting a warn-mode method
+  // exactly as this process does, not reject it at the default ceiling.
+  const warn: Record<string, "warn"> = {};
+  for (const k of _callWarnMethods) warn[k] = "warn";
+  const explicit = _callTimeoutByMethod || _callWarnMethods.size
+    ? { ...(_callTimeoutByMethod ?? {}), ...warn }
+    : undefined;
   // `long` folded in HERE, not only where the server assembles its config: the
   // browser must resolve the same ceiling this process enforces, and the
   // server bridge is not the only runtime that boots cells (the standalone
@@ -304,13 +326,13 @@ export function _getCallTimeouts(): {
   // in the one function that answers "what does the client wait?" is what keeps
   // them from drifting. An explicit per-method number still wins.
   if (_longMethods.size === 0) {
-    return { default: _callTimeoutMs, methods: _callTimeoutByMethod };
+    return { default: _callTimeoutMs, methods: explicit };
   }
-  const methods: Record<string, number> = {};
+  const methods: Record<string, number | "warn"> = {};
   for (const k of _longMethods) methods[k] = 0;
   return {
     default: _callTimeoutMs,
-    methods: { ...methods, ...(_callTimeoutByMethod ?? {}) },
+    methods: { ...methods, ...(explicit ?? {}) },
   };
 }
 
@@ -326,6 +348,31 @@ export function callTimeoutFor(method?: string): number {
   return _callTimeoutMs;
 }
 
+/** What the ceiling DOES when it is reached: `"reject"` (default) or
+ *  `"warn"` — `perfBudget.methods[key].timeout: "warn"` keeps the caller
+ *  waiting and reports once. A `long` method has no ceiling to reach. */
+export function callTimeoutModeFor(method?: string): "reject" | "warn" {
+  return method && _callWarnMethods.has(method) ? "warn" : "reject";
+}
+
+/** The one line that names the fix — shared by the reject and the warn text
+ *  so the two can never disagree about what to do. */
+function callCeilingFix(method: string, timeoutMs: number): string {
+  const [cellName, name] = method.includes(":")
+    ? method.split(":", 2)
+    : ["cell", method];
+  return `Fix: long: [${JSON.stringify(name)}] on cell(${
+    JSON.stringify(cellName)
+  }) (no ceiling), or perfBudget.methods[${
+    JSON.stringify(method)
+  }].timeout: "warn" (report at ${timeoutMs}ms, keep waiting) or a number ` +
+    `(effectTimeoutMs raises the default for every method; 0 = forever). ` +
+    `Under transaction: { serialize: true } the still-running method HOLDS ` +
+    `the cell's mutex, so every later async call on it queues behind it ` +
+    `and burns its own ceiling — one slow method cascades. Or fetch outside ` +
+    `and commit with a sync reducer (docs/state/methods.md).`;
+}
+
 /** Register a pending call — returns a Promise that resolves when resolveCall()
  *  is called. `method` ("cell:name") picks up any per-method override. */
 export function registerCall(
@@ -339,25 +386,37 @@ export function registerCall(
       _pending.set(callId, { resolve, reject });
     });
   }
+  const label = method ?? "await cell.method()";
+  const stillRunning = `The call gave up; the METHOD did not — it may still ` +
+    `be running, and if it finishes its writes will still commit, without a ` +
+    `return value reaching this caller.`;
+  const mode = callTimeoutModeFor(method);
   return new Promise((resolve, reject) => {
+    const started = Date.now();
     const expire = () => {
-      if (_pending.has(callId)) {
-        _pending.delete(callId);
-        reject(
-          new Error(
-            `${
-              method ?? "await cell.method()"
-            }: stopped waiting after ${timeoutMs}ms. The call gave up; the ` +
-              `METHOD did not — it may still be running, and if it finishes ` +
-              `its writes will still commit, without a return value reaching ` +
-              `this caller. Raise the ceiling with effectTimeoutMs (or ` +
-              `perfBudget.methods[${
-                JSON.stringify(method ?? "cell:method")
-              }].timeout), set effectTimeoutMs: 0 to wait indefinitely, or ` +
-              `move the long work off the call path.`,
-          ),
+      if (!_pending.has(callId)) return;
+      if (mode === "warn") {
+        // `timeout: "warn"`: report ONCE, keep the registration — the caller
+        // asked to be told, not abandoned. The timer is gone, so a pause /
+        // resume finds nothing to re-arm (`timer` cleared below).
+        const entry = _pending.get(callId)!;
+        entry.timer = undefined;
+        log.warn(
+          `${label}: still running after ${
+            Date.now() - started
+          }ms (ceiling ${timeoutMs}ms, timeout: "warn") — the caller keeps ` +
+            `waiting. Under transaction: { serialize: true } it also holds ` +
+            `the cell's mutex until it settles.`,
         );
+        return;
       }
+      _pending.delete(callId);
+      reject(
+        new Error(
+          `${label}: stopped waiting after ${timeoutMs}ms. ${stillRunning} ` +
+            callCeilingFix(method ?? "cell:method", timeoutMs),
+        ),
+      );
     };
     const timer = setTimeout(expire, timeoutMs);
     _pending.set(callId, {
@@ -1049,7 +1108,7 @@ export function snapshotForRead(value: unknown): unknown {
   return cloneState(value, "shallow");
 }
 
-// ── Stale-capture detection (R-1, rimote) ──────────────────────────
+// ── Stale-capture detection (R-1, a remote-desktop report) ──────────────────────────
 //
 // In a SYNC method a captured reference keeps the old object:
 //   const req = s.pending; s.pending = null; req.sid   // still "s1"

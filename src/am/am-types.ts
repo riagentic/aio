@@ -67,6 +67,17 @@ export type GlobalFlags = {
    *  `am dispatch --help` answered `{"ok":true}`, which reads as "your
    *  dispatch worked" (a field report). */
   help?: boolean;
+  /** `--home=<dir>` — target the instance of this app that runs from THAT
+   *  data home (an isolated smoke-test boot beside the user's own). Read in
+   *  ONE place (`amHome()` in am-utils) by every lock lookup, so `am
+   *  --home=/tmp/x surface 0` reaches that instance's lock and socket, never
+   *  the default one's. `AIO_APPS_DIR` is the env-level equivalent (it
+   *  relocates every app's home AND the lock dir). */
+  home?: string;
+  /** `--timeout=<ms>` — how long `am` waits for a live client to answer a
+   *  `surface`/`trigger`. Must exceed the server's own client-reply wait so
+   *  the server's NAMED reason arrives before `am` gives up. */
+  timeout?: number;
 };
 
 /** Command handler signature */

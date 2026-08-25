@@ -122,6 +122,15 @@ _read_ from `Σ`. Rules:
   **async** methods one at a time (a per-cell mutex) when RMW correctness
   matters. The mutex does **not** hold off sync methods — those are reducers and
   commit whenever they are dispatched, including mid-`await`.
+- The mutex is held until the method **settles** — not until a caller stops
+  waiting. A method that outlives the call ceiling keeps the turn, so every
+  later async call on the cell queues behind it and burns its own ceiling: one
+  slow RPC becomes a cascade. Keep network I/O out of serialized methods —
+  [fetch outside, commit with a sync
+  reducer](methods.md#network-io-fetch-outside-commit-with-a-sync-reducer) is
+  the canonical shape; `long:` / `timeout: "warn"` are for work that is
+  legitimately slow (see
+  [how long may an async method run](methods.md#how-long-may-an-async-method-run)).
 
 ### Conflict detection — what makes the isolation honest
 

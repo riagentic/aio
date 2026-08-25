@@ -1,10 +1,19 @@
 // Electron binary resolution and process spawning
 
+import { join } from "@std/path";
 import type { AioMeta, Log, ShellConfig } from "./electron-shared.ts";
 import { electronMainScript } from "./electron-scripts.ts";
 import { electronClientScript } from "./electron-client-script.ts";
 import { electronMainScriptUDS } from "./electron-uds.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { isCompiled } from "../server/paths.ts";
+import {
+  bakedElectronVersion,
+  DEFAULT_ELECTRON_VERSION,
+  electronBinIn,
+  electronSlug,
+  ensureElectronRuntime,
+} from "./electron-runtime-fetch.ts";
 
 // OS-aware packaged Electron binary path
 function distBinPath(): string {
@@ -18,8 +27,39 @@ function distBinPath(): string {
   }
 }
 
-/** Resolves an Electron binary — $ELECTRON_PATH > packaged dist > node_modules dev */
-export async function findElectronBin(log: Log): Promise<string | null> {
+/** How the launcher may obtain a runtime it cannot find. Injected so the
+ *  resolution ORDER — the part that was wrong — is a unit test, not a 100 MB
+ *  download and a display. */
+export type FindElectronOpts = {
+  /** The embedded/on-disk dist/ carrying `electron.json` (compiled binaries). */
+  distDir?: string;
+  /** Running as a compiled binary — `Deno.execPath()` is the app, not deno. */
+  compiled?: boolean;
+  /** The fetch-into-cache step (`ensureElectronRuntime`). */
+  fetchRuntime?: (
+    version: string,
+    slug: string,
+    log: Log,
+  ) => Promise<string>;
+  /** The dev-only `deno install` step (`autoInstallElectron`). */
+  denoInstall?: (log: Log) => Promise<boolean>;
+};
+
+/** Resolves an Electron binary — $ELECTRON_PATH > packaged dist > node_modules
+ *  dev > (compiled: fetched runtime cache | dev: deno install, then the cache).
+ *
+ *  The last rung is the one a COMPILED desktop app used to lack. Its runtime
+ *  was looked up under the current directory and, failing that, "installed" by
+ *  running `Deno.execPath() install npm:electron` — which inside a compiled
+ *  binary runs the app itself. So an app installed by the one-liner opened
+ *  nothing, and the message told its user to run `deno task
+ *  install:electron` in a checkout they had not been handed. A binary now
+ *  fetches the runtime its build baked (`dist/electron.json`) into the
+ *  per-user cache, once, and runs it from there — no npm, no deno, no cwd. */
+export async function findElectronBin(
+  log: Log,
+  opts: FindElectronOpts = {},
+): Promise<string | null> {
   // 1. ELECTRON_PATH env var (AppImage / custom deployment)
   const envPath = Deno.env.get("ELECTRON_PATH");
   if (envPath) {
@@ -44,18 +84,49 @@ export async function findElectronBin(log: Log): Promise<string | null> {
     : "node_modules/.bin/electron";
   if (await electronBinReady(electronBin)) return electronBin;
 
-  // 4. Auto-install on first run: `deno install` FORCE-adds electron (positional
-  //    `npm:electron`) so `deno task dev` works no matter what — even if the
-  //    app never declared electron as a dep. `--allow-scripts=npm:electron`
-  //    runs the postinstall that downloads the real binary. Loud progress.
-  if (await autoInstallElectron(log)) {
+  const compiled = opts.compiled ?? isCompiled();
+  const denoInstall = opts.denoInstall ?? ((l: Log) => autoInstallElectron(l));
+  const fetchRuntime = opts.fetchRuntime ??
+    ((v: string, slug: string, l: Log) =>
+      ensureElectronRuntime(v, slug, { log: l.info, warn: l.error }));
+
+  // 4. Dev only — auto-install on first run: `deno install` FORCE-adds
+  //    electron (positional `npm:electron`) so `deno task dev` works no matter
+  //    what — even if the app never declared electron as a dep.
+  //    `--allow-scripts=npm:electron` runs the postinstall that downloads the
+  //    real binary. Loud progress. Skipped in a compiled binary: there is no
+  //    deno to run and no project to install into.
+  if (!compiled && await denoInstall(log)) {
     if (await electronBinReady(electronBin)) return electronBin;
   }
+
+  // 5. The runtime Electron publishes, into the per-user cache. THE path for a
+  //    compiled binary; the last resort for dev (offline npm, a proxy that
+  //    blocks the lifecycle script — the zip may still be reachable).
+  const version = (await bakedElectronVersion(opts.distDir)) ??
+    DEFAULT_ELECTRON_VERSION;
+  const slug = electronSlug();
+  try {
+    const dir = await fetchRuntime(version, slug, log);
+    const bin = electronBinIn(dir);
+    await Deno.stat(bin);
+    return bin;
+  } catch (e) {
+    log.error(
+      `Electron ${version} (${slug}) could not be fetched: ${
+        e instanceof Error ? e.message : e
+      }`,
+    );
+  }
   log.error(
-    "Electron could not be installed automatically. Check your network, then " +
-      "retry `deno task dev` — or run `deno task install:electron`, which " +
-      "downloads the runtime directly (a bare `deno install` can skip the " +
-      "lifecycle script and exit 0 with nothing installed)",
+    compiled
+      ? "Electron is not available on this machine and could not be " +
+        "downloaded. Check the network (github.com/electron/electron " +
+        "releases), or point $ELECTRON_PATH at an Electron you already have."
+      : "Electron could not be installed automatically. Check your network, " +
+        "then retry `deno task dev` — or run `deno task install:electron`, " +
+        "which downloads the runtime directly (a bare `deno install` can " +
+        "skip the lifecycle script and exit 0 with nothing installed)",
   );
 
   return null;
@@ -395,11 +466,15 @@ export async function launchElectron(
     /** The app's HTTP handler on a socket — set when it binds no TCP port. */
     httpSocketPath?: string;
   },
+  /** The dist/ carrying the baked Electron version (compiled binaries). */
+  distDir?: string,
 ): Promise<Deno.ChildProcess | null> {
-  const bin = await findElectronBin(log);
+  const bin = await findElectronBin(log, { distDir });
   if (!bin) return null;
   const mode = bin.includes("node_modules")
     ? "dev"
+    : bin.includes(join("aio", "tools", "electron"))
+    ? "fetched runtime"
     : bin.includes("dist")
     ? "packaged"
     : "$ELECTRON_PATH";

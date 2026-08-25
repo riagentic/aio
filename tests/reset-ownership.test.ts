@@ -31,7 +31,6 @@ const OWNERS: Record<string, [Owner, string]> = {
   // ── the one call ────────────────────────────────────────────────
   _resetAioRuntime: ["RUNTIME", "the entry point itself"],
   _resetCellBindings: ["RUNTIME", "cell→signal bindings"],
-  _resetUiReadWarnings: ["RUNTIME", "ui-hidden read warn dedup"],
   _resetCallTimeouts: ["RUNTIME", "per-call timeout registry"],
   _resetDegraded: ["RUNTIME", "process-global degraded registry"],
   _resetMethodCancel: ["RUNTIME", "cancellation registry"],

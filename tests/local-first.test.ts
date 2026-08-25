@@ -204,7 +204,7 @@ Deno.test("localFirst: adopting a cell with existing persisted data keeps that d
   const { createDB } = await import("../src/db/async-db.ts");
   const { SYNC_SCHEMA } = await import("../src/sync/compact.ts");
   const { replaySyncOps } = await import("../src/server/aio-boot.ts");
-  const silent = { info: () => {}, error: () => {} };
+  const silent = { info: () => {}, error: () => {}, warn: () => {} };
   const reduce = (s: Record<string, unknown>) => s;
 
   const db = createDB(":memory:");

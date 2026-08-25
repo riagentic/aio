@@ -53,7 +53,7 @@ get spent, and each ships with the codemod that performs it (`aiol --safe-fix`).
 Recorded because they were asked for and are not yet decided or built — not
 because anything is broken.
 
-**From llama.master (alpha55/alpha61, 8/10):**
+**From a local-LLM chat app (alpha55/alpha61, 8/10):**
 
 - `am doctor`: "the running aio differs from `dep/aio` on disk". A live process
   holds the modules it loaded at boot, so a symlinked checkout can move
@@ -77,7 +77,7 @@ because anything is broken.
 - **Strict mode: refuse boot on unmigrated shape drift.** A permanent warning is
   a weaker instrument than a refusal.
 
-**From risoto (money software, alpha59 → triaged at alpha61):**
+**From a desktop wallet app (money software, alpha59 → triaged at alpha61):**
 
 - **Prod-parity test mode** (their #1, rightly): a harness mode where the worker
   pool is ON, every method return and error crosses a real structured-clone hop
@@ -99,11 +99,32 @@ because anything is broken.
   router to the android runtime without dragging the WS transport is the first
   cut.
 
-**From rimote (alpha61/63):** stale-capture detection is per-invocation by
-design — a reference that escapes a method (a module-level variable, a callback)
-is not tracked, because the ledger dies with the invocation. Escaping a live
-proxy is already outside the contract, so it is worth an `aiol` rule rather than
-a runtime cost on every read.
+**From a remote-desktop app (alpha61/63):** stale-capture detection is
+per-invocation by design — a reference that escapes a method (a module-level
+variable, a callback) is not tracked, because the ledger dies with the
+invocation. Escaping a live proxy is already outside the contract, so it is
+worth an `aiol` rule rather than a runtime cost on every read.
+
+## Prod parity — what the harness still fakes
+
+The gap named as the source of several multi-day field bugs: a test that is more
+permissive than production manufactures green-test-broken-prod. Three parts were
+listed; one is now closed.
+
+- **[x] The serialization hop.** A worker cell is reached by `postMessage`, so
+  every argument and return value is structured-cloned; in-isolate they were
+  passed by reference, and the boot log claimed "behaviour is identical" while a
+  function, a class instance or a live proxy passed every test and threw in
+  production. `libraryMode` now clones across that boundary for exactly the
+  cells that would have been hosted, and names the cell and the reason when it
+  cannot. `tests/prod-parity-worker-boundary.test.ts`.
+- **[ ] The worker pool itself.** Worker cells still run in-isolate under
+  `libraryMode`, so isolation (a separate heap, its own module graph, no shared
+  module state) is not reproduced. Shape: an opt-in `workers: "real"` for
+  `testServer`, paid for only by the tests that ask.
+- **[ ] Sync methods in a client context.** A non-async method called from a
+  client crosses the wire in production and is called directly in-process here.
+  This one genuinely needs the loopback/browser path, not a wrapper.
 
 ## Known gaps, stated where they are felt
 
@@ -152,31 +173,13 @@ a runtime cost on every read.
 - **Needs the user's machines** (not closable from here): the Windows and macOS
   target matrix, a real-Android device pass, the 72-hour soak, and the off-box
   remote field report.
-
-## Zero-port dev: the renderer must not fall back to WS on an `aio://` page
-
-`--zero-port` (dev + electron + UDS) serves the page, its on-demand transpiled
-modules and every asset over a Unix socket, so the app binds NO TCP port.
-Verified working end to end: the window loads, renders, `am state`/`dispatch`/
-`surface`/`trigger` all drive it, and `ss` shows zero TCP listeners.
-
-**Open defect — why it is opt-in rather than the default:** after a source edit
-the server sends `reload`, the renderer calls `location.reload()`, and the
-reloaded page stops using the IPC bridge and opens `ws://app/ws` instead —
-`buildWsUrl()` derives from `location.host`, which is `app` on an `aio://app/`
-page. In a zero-port app that socket cannot exist, so the window comes back
-blank and never recovers. Over HTTP the same fallback silently _worked_, which
-is why it never surfaced.
-
-`window.__aioIPC` IS present in the reloaded page (checked over CDP), so
-`detectIPC()` should have found it — the root cause is not yet established.
-
-Fix direction: a page with no HTTP origin must have no WS fallback at all.
-`_connect()` should refuse to build a WS when `location.protocol` is not
-http/https and wait for the bridge instead — a transport that cannot exist is
-not a fallback, and silently retrying it forever is the failure mode this
-codebase calls a quiet degradation. Once that holds, dev zero-port becomes the
-default for electron + UDS and the flag goes away.
+- **Windows zero-port** (hardware week, first item): Deno has no Unix-socket
+  listener on Windows and Node has no `AF_UNIX` there — but Node has named
+  pipes. Design: the Electron shell hosts `\\.\pipe\aio-<app>`, Deno dials it
+  with `Deno.open` (a pipe is a file object → duplex byte stream, no FFI); the
+  NDJSON envelope, control plane and page-over-socket path stay identical. Until
+  it is proven on a real Windows box the fallback is WS + TCP on `127.0.0.1`,
+  named in the boot line. See `docs/clients/transports.md`.
 
 ## `discovery: multi-app-per-host` is environment-sensitive, not hermetic
 

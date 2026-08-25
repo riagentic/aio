@@ -49,11 +49,11 @@ const lock = (appId: string, cwd: string, port: number): LockData => ({
 // ── what counts as "inside this project" ──────────────────────────────────
 
 Deno.test("isUnder: a sibling with a shared prefix is NOT inside", () => {
-  // The string-prefix bug, which would have `rimote-old` inside `rimote`.
-  assertEquals(isUnder("/home/u/rimote", "/home/u/rimote-old"), false);
-  assertEquals(isUnder("/home/u/rimote", "/home/u/rimote"), true);
-  assertEquals(isUnder("/home/u/rimote", "/home/u/rimote/dist/server"), true);
-  assertEquals(isUnder("/home/u/rimote", "/home/u"), false);
+  // The string-prefix bug, which would have `remote-old` inside `a remote-desktop report`.
+  assertEquals(isUnder("/home/u/remote", "/home/u/remote-old"), false);
+  assertEquals(isUnder("/home/u/remote", "/home/u/remote"), true);
+  assertEquals(isUnder("/home/u/remote", "/home/u/remote/dist/server"), true);
+  assertEquals(isUnder("/home/u/remote", "/home/u"), false);
 });
 
 Deno.test("projectRoot: walks UP to the deno.json", async () => {
@@ -117,14 +117,14 @@ Deno.test("stop --all: an app launched from a subdirectory is in scope", async (
     const root = await Deno.makeTempDir({ prefix: "aio-sub-" });
     try {
       await Deno.writeTextFile(join(root, "deno.json"), "{}");
-      const deep = join(root, "dist", "rimote-server");
+      const deep = join(root, "dist", "remote-server");
       await Deno.mkdir(deep, { recursive: true });
-      writeLock(lock("rimote-server", deep, 8000));
+      writeLock(lock("remote-server", deep, 8000));
 
       // Resolved from the subdirectory, as if `am stop --all` were run there.
       assertEquals(
         instancesInProject(projectRoot(deep)).map((i) => i.appId),
-        ["rimote-server"],
+        ["remote-server"],
       );
     } finally {
       await Deno.remove(root, { recursive: true });

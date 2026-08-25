@@ -6,6 +6,33 @@ framework owns the renderer, events, transport, and state, so it publishes the
 interactive surface it already knows and synchronizes every action with its own
 render/dispatch loop (no sleeps, no flake).
 
+## Testing a reducer → `testCell`
+
+A cell's methods are driven with `testCell` (or through the UI with `testUI`).
+There is no other handle: `cell.__aio` is framework-internal, and under a test
+harness a read of a name it does not have — `cell.__aio.methods`, say — THROWS
+(`[cell:<id>] __aio.<k> does not exist — drive methods with testCell/testUI`).
+It used to resolve to `undefined`, and a guard like
+`if (typeof fn === "function") { …assert… }` then passed while asserting
+nothing. `testCell` runs the reducer on the raw, unfiltered state — the server's
+context — so `visible.exclude` fields are present exactly as a server route sees
+them.
+
+```ts
+import { cell } from "aio";
+import { testCell } from "aio/testing";
+
+const todos = cell("todos", {
+  state: { items: [] as string[] },
+  methods: { add: (s, text: string) => void s.items.push(text) },
+});
+
+testCell(todos, "add", (t) => {
+  t.send.add("milk");
+  t.expect.state((s) => s.items.length === 1);
+});
+```
+
 ## In tests: `testUI`
 
 Zero boilerplate — one import, one call. The DOM is created for you, every
@@ -176,7 +203,22 @@ test is about (`Object.defineProperty(el, "clientWidth", { value: 800 })`).
 
 `document` and `window` are real under `testUI` (the mount's own happy-dom
 window), so `document.addEventListener("keydown", …)` fires. `globalThis` is NOT
-the same object — a listener there never fires, and testUI says so.
+the same object — a listener there never fires, and under the harness the
+registration FAILS the test (thrown at the site, rethrown by the next
+`settle`/`expectCell`/`waitFor`/`dispose`), naming the fix. Outside test-strict
+mode the same registration only warns.
+
+### What testUI installs
+
+`testUI` owns one happy-dom `Window` per mount (`http://localhost/`, the
+configured viewport) and publishes, on `globalThis`, `document`, `window`,
+`location` and `history` from it — restored on teardown, so files share nothing.
+The same objects are on the handle: `ui.window` and `ui.document`. Use them for
+what the component's own code would reach —
+`ui.window.dispatchEvent(new ui.window.Event("resize"))`,
+`ui.document.activeElement`, a listener registered where the component's one
+lives. `localStorage` is a fresh in-memory store per mount (`{ persist: true }`
+keeps it). Nothing is installed twice: a `document` you pass in is used as-is.
 
 For the binding every app needs, there is a primitive:
 
@@ -370,6 +412,65 @@ The same loop works in-process: `ui.surface()` →
 
 Spec: `docs/specs/2026-07-10-semantic-ui-testing.md`. Cell-level testing:
 [cell-testing.md](cell-testing.md).
+
+### Small edges (each cost an hour once)
+
+- Handles are **lazy** — `ui.find("Row", 3)` resolves on use. There is no
+  `.style` on a handle; read `.text`, `.value`, `.checked`, or assert on state.
+- `type("x")` **appends** to the current value (a user typing); `setValue("x")`
+  **replaces** it.
+- A list key is matched by its string form: `find("Row", 5)` and
+  `find("Row", "5")` both find `key={5}`.
+
+## Real boot — when testUI is not enough
+
+`testUI` mounts the client runtime in-process: no worker pool, no transport, no
+window. A bug in the worker path or in the real renderer therefore needs a real
+boot, and `aio/testing` has three primitives for it — all `await using`:
+
+| Primitive                 | Boots                         | Client                 | Use it for                                           |
+| ------------------------- | ----------------------------- | ---------------------- | ---------------------------------------------------- |
+| `testServer(config)`      | real `aio.run()`, workers on  | none — `srv.fetch`     | routes, auth, persistence, a method's server context |
+| `testMultiClient(cfg, n)` | real `aio.run()`, workers on  | n real WebSocket peers | broadcast, convergence, **received patches**         |
+| `smoke(config)`           | real `aio.run()`, dev serving | the eager module fetch | "green everywhere, blank in the window" — see below  |
+
+`testMultiClient` exposes each client's **patch stream** — what a browser tab
+actually applies, in arrival order — next to its state:
+
+```ts
+await using m = await testMultiClient({ cells: [counter] }, 2);
+await m.clients[0].dispatch(counter.increment.action(1));
+const p = await m.clients[1].waitForPatch((p) =>
+  p.path.join(".") === "counter.count"
+);
+assertEquals(p.value, 1);
+m.clients[1].patches; // every { op, path, value } received; a full-state
+//                        resend is one `replace` at the empty path
+m.clients[1].onPatch((batch) => {/* live */});
+```
+
+A hidden field (`visible.exclude`) is asserted the honest way — no patch carries
+it — rather than by the client's state merely lacking it.
+
+### Boot smoke: `smoke()`
+
+A static `import` of a `*.server.ts` module from any client-loaded file
+blank-screens the app: the dev server never serves that file to the browser. The
+graph validator refuses it statically (a blocking `server-only-import`, in the
+dev server and `deno task check:graph`), and `smoke()` is the dynamic half: it
+boots the app headless and **fetches every eagerly-linked client module** at its
+browser URL, failing on the first non-200 with the static-import chain that
+loads it.
+
+```ts
+import { smoke } from "aio/testing";
+Deno.test("boot smoke", async () => {
+  await smoke({ baseDir: ".", cells: [/* … */] });
+});
+```
+
+`baseDir` defaults to cwd and the entry to `ui.entry` (`App.tsx`); modules
+outside `baseDir` must be reachable through `serveDirs`, as in the dev server.
 
 ## Two surfaces at once: `testMultiClient`
 

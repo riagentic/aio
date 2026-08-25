@@ -23,6 +23,7 @@
 ## State — cells — the core: cells, methods, workflows, scheduling
 
 - [State Management](state/README.md) — Defining cells, managing state, and coordinating workflows.
+- [Cell contexts — which code runs where](state/cell-contexts.md) — One definition, several places it runs: server, client replay, worker, tests.
 - [Cell-Level Visibility & Persistence](state/cell-visibility.md) — Control what state each cell exposes to clients (visible) and persists to disk
 - [Cell workers (`worker: true`)](state/cell-workers.md) — A cell can run its methods in its own Deno worker — a separate isolate on a
 - [Cells — Config Shape and Anatomy](state/cells.md) — Everything is a cell.
@@ -90,6 +91,7 @@
 - [Browser](clients/browser.md) — WebSocket client API, connection lifecycle, and UI state management for browser
 - [Desktop apps that drive a CLI](clients/desktop-jobs.md) — The shape: a window, a Browse… button, a long-running external process, a
 - [Electron](clients/electron.md) — Desktop app packaging, thin client, and window management.
+- [Transports — what listens, where](clients/transports.md) — One matrix answering "which sockets does this app open?" per mode and target.
 
 ## Build & deploy — targets, dev mode, imports, scaling
 
@@ -175,6 +177,7 @@
 - [Upgrading from alpha62 to alpha63](upgrade/from-alpha62-to-alpha63.md) — One default flips, and it flips towards your app: aio's stylesheet no longer
 - [Upgrading from alpha63 to alpha64](upgrade/from-alpha63-to-alpha64.md) — Nothing in your app code changes.
 - [Upgrading from alpha64 to alpha65](upgrade/from-alpha64-to-alpha65.md) — Nothing in your app code changes.
+- [Upgrading from alpha65 to alpha66](upgrade/from-alpha65-to-alpha66.md) — Four behaviours change; three can break an app.
 - [Upgrade from v1.0.0-alpha7 to v1.0.0-alpha8](upgrade/from-alpha7-to-alpha8.md) — None.
 - [Upgrade from v1.0.0-alpha8 to v1.0.0-alpha9](upgrade/from-alpha8-to-alpha9.md) — The internal machine state field is renamed.
 - [Upgrade from v1.0.0-alpha9 to v1.0.0-alpha10](upgrade/from-alpha9-to-alpha10.md) — Alpha10 is fully additive.

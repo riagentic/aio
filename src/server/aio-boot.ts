@@ -14,7 +14,9 @@ import { createDB, type DB, initSchema, loadTables } from "../db/mod.ts";
 import { dbWorkerMissingHint } from "../db/async-db.ts";
 import { assertIdent, type TableDef } from "./sql.ts";
 import { deepMerge } from "../state/deep-merge.ts";
-import { resolveKvPath } from "./paths.ts";
+import { isCompiled, resolveKvPath } from "./paths.ts";
+import { parseCli } from "./aio-cli.ts";
+import { SYNC_VERSION_UNKNOWN } from "../sync/compact.ts";
 import { resolve } from "@std/path";
 import { appDirs } from "./app-dirs.ts";
 import {
@@ -35,6 +37,59 @@ import {
   seedSyncSnapshot,
 } from "../sync/server-store.ts";
 
+/** What the boot replay needs to know about the app beyond the reducer —
+ *  built by `bootStorage` (which has the cell metadata) and looked up by
+ *  `replaySyncOps` (which the orchestrator calls with the db only). ONE object,
+ *  keyed by the database it describes; tests pass it explicitly. */
+export interface SyncReplayContext {
+  /** Declared shape `version` per cell — absent means undeclared (0). */
+  versions: Record<string, number>;
+  /** Per-cell `onMigrate` hooks (cells that declared one or a version). */
+  migrations: Map<string, CellMigrationInfo>;
+  /** The KV version stamp of the build that last persisted — the best evidence
+   *  for rows written before the op/snapshot stamp existed (`-1`). */
+  stampedVersions: Record<string, number>;
+  /** Cells whose op-log could NOT be folded into the current shape. MUTATED
+   *  by the replay; compaction and the boot seed consult it and skip. */
+  quarantined: Set<string>;
+  /** Dev refuses to boot on a failed replay (the data is still on disk); prod
+   *  quarantines the cell and continues. Dev-stricter, never the reverse. */
+  dev: boolean;
+  /** The boot report `am migrations` prints — entries appended when present. */
+  report?: MigrationReport;
+  /** Declared defaults — fills fields a filtered snapshot left out. */
+  initialState: Record<string, unknown>;
+}
+
+const _syncContexts = new WeakMap<DB, SyncReplayContext>();
+
+/** Register the replay context for a database (bootStorage) — see
+ *  {@linkcode SyncReplayContext}. @internal */
+export function registerSyncReplayContext(
+  db: DB,
+  ctx: SyncReplayContext,
+): void {
+  _syncContexts.set(db, ctx);
+}
+
+/** The ONE dev/prod decider for the boot replay: the same signal composition
+ *  uses for its security refusals — a source run without `--prod` is dev, a
+ *  compiled binary or `--prod` is prod. */
+export function isDevBoot(): boolean {
+  return !parseCli().prod && !isCompiled();
+}
+
+/** Fill fields the durable projection dropped from a snapshot with their
+ *  declared defaults (top level — the shape a `persist: { exclude }` names).
+ *  A snapshot is assigned as the slice verbatim; without this an excluded
+ *  field came back ABSENT rather than at its default. */
+function withDefaults(
+  initial: unknown,
+  slice: Record<string, unknown>,
+): Record<string, unknown> {
+  return _isObj(initial) ? { ...initial, ...slice } : slice;
+}
+
 /** B1/AIO-416: replay each sync cell's committed op-log into state at boot.
  *  `sync: true` cells are excluded from KV, and their op-log was only ever
  *  replayed when a CLIENT connected — so a server restart with no client online
@@ -42,14 +97,41 @@ import {
  *  bug). This folds every committed op back through the composed reducer — the
  *  same path a live op takes — after KV restore + onRestore and before the first
  *  dispatch/broadcast. Pure fold: no broadcast, no effects, no server needed.
- *  Loud by design (logs a per-cell count) so the restore is never invisible. */
+ *  Loud by design (logs a per-cell count) so the restore is never invisible.
+ *
+ *  Shape changes (a field report, §3.1): every op row and every snapshot
+ *  carries the cell `version` it was written under. Replay compares it with
+ *  the version the running build declares:
+ *    - equal            → applied as-is;
+ *    - older + onMigrate → ops are folded in version order and the hook runs
+ *                          at each boundary on the current slice;
+ *    - older, no hook   → SKIPPED, loudly — never applied blind;
+ *    - newer (downgrade) → skipped, loudly.
+ *  A cell with a skipped or failed op is QUARANTINED: dev refuses to boot
+ *  (nothing is written, the data is still on disk); prod keeps the cell at its
+ *  last snapshot (never initialState), and compaction/seeding skip it so the
+ *  emptiness can never be written over the log. Per cell, per op: one cell's
+ *  failure never touches another cell's restore. */
 export async function replaySyncOps<S>(
   db: DB,
   syncCellIds: string[],
   reduce: (state: S, action: { type: string; payload?: unknown }) => S,
   state: S,
-  log: Pick<Log, "info" | "error">,
+  log: Pick<Log, "info" | "error" | "warn">,
+  /** Explicit context (tests); otherwise the one `bootStorage` registered for
+   *  this db. Absent entirely ⇒ no versions declared, dev-strict. */
+  context?: Partial<SyncReplayContext>,
 ): Promise<S> {
+  const ctx: SyncReplayContext = {
+    versions: {},
+    migrations: new Map(),
+    stampedVersions: {},
+    quarantined: new Set(),
+    dev: isDevBoot(),
+    initialState: {},
+    ..._syncContexts.get(db),
+    ...context,
+  };
   let next = state;
   for (const cell of syncCellIds) {
     let ops;
@@ -60,17 +142,39 @@ export async function replaySyncOps<S>(
       continue;
     }
 
+    const declared = ctx.versions[cell] ?? 0;
+    const hook = ctx.migrations.get(cell)?.onMigrate;
+    // A row written before the stamp existed: the build that last persisted
+    // is the best evidence of the shape it was written under; with no stamp
+    // at all, the current shape (today's behaviour, and what (c) warns about).
+    const resolveVersion = (v: number | undefined): number =>
+      v === undefined || v === SYNC_VERSION_UNKNOWN
+        ? (ctx.stampedVersions[cell] ?? declared)
+        : v;
+    // The slice the cell falls back to if its log cannot be folded: the
+    // snapshot when there is one, else whatever restore produced (defaults).
+    const before = (next as Record<string, unknown>)[cell];
+    let fallback: unknown = before;
+
     // Seed from the compaction snapshot FIRST. Compaction folds ops into
     // sync_snapshots and deletes them, so the surviving log is only the tail —
     // replaying it alone restored the cell to its initialState and then
     // broadcast that emptiness to clients as authoritative (silent data loss
     // on the first restart after 1000 ops).
     let seeded = false;
+    // The shape version the current slice is at — undefined until the
+    // snapshot or the first op says.
+    let current: number | undefined;
+    const failures: string[] = [];
+    const skipped: { older: number; newer: number } = { older: 0, newer: 0 };
     try {
       const snap = await loadSnapshot(db, cell);
       if (snap) {
-        (next as Record<string, unknown>)[cell] = snap.state;
+        const slice = withDefaults(ctx.initialState[cell], snap.state);
+        (next as Record<string, unknown>)[cell] = slice;
+        fallback = slice;
         seeded = true;
+        current = resolveVersion(snap.cellVersion);
         log.info(`sync: seeded cell "${cell}" from compaction snapshot`);
       } else if (await getLowWater(db, cell)) {
         // Compacted, but the snapshot is gone/unreadable: the pre-compaction
@@ -89,7 +193,7 @@ export async function replaySyncOps<S>(
         const restored = (next as Record<string, unknown>)[cell];
         if (restored !== undefined) {
           try {
-            await seedSyncSnapshot(db, cell, restored);
+            await seedSyncSnapshot(db, cell, restored, declared);
             log.info(
               `sync: cell "${cell}" newly adopted — seeded its sync snapshot ` +
                 `from the restored state (KV stops persisting sync cells)`,
@@ -103,25 +207,157 @@ export async function replaySyncOps<S>(
       log.error(`sync: snapshot restore failed for cell "${cell}" — ${e}`);
     }
 
-    if (ops.length === 0) {
-      if (seeded) log.info(`sync: restored cell "${cell}" from snapshot only`);
-      continue;
+    // (c) A persisted log/snapshot and no declared version: the next shape
+    // change replays blind. One line per cell, dev and prod alike — a refusal
+    // would break every existing sync app at once.
+    if (declared === 0 && (seeded || ops.length > 0)) {
+      log.warn(
+        `sync: cell "${cell}" has a persisted op-log and no \`version\` — a ` +
+          `shape change will replay old ops blind; declare version: 1 (and ` +
+          `onMigrate when the shape changes)`,
+      );
+      ctx.report?.push({
+        cell,
+        from: 0,
+        to: 0,
+        outcome: "sync-unversioned",
+      });
     }
-    let applied = 0;
-    for (const op of ops) {
+
+    const migrateSlice = (from: number): void => {
+      if (!hook) return;
+      const slice = (next as Record<string, unknown>)[cell];
+      if (!_isObj(slice)) return;
       try {
-        next = reduce(next, {
-          type: `${op.cell}:${op.action}`,
-          payload: op.payload,
-        });
-        applied++;
+        (next as Record<string, unknown>)[cell] = hook(slice, from);
+        log.info(`sync: migrated cell "${cell}" v${from} → v${declared}`);
       } catch (e) {
-        log.error(
-          `sync: replay of op ${op.id} (${op.cell}:${op.action}) failed — ${e}`,
+        failures.push(`onMigrate(v${from}) threw: ${e}`);
+      }
+    };
+
+    // The snapshot itself may predate the shape. With a hook it is NOT
+    // migrated here: the ops written under the same version fold onto it
+    // first, and the boundary (below) migrates the whole v-N world at once.
+    if (seeded && current !== undefined) {
+      if (current > declared) {
+        skipped.newer++;
+        failures.push(
+          `snapshot was written by v${current}, this build declares v${declared} (downgrade)`,
         );
+      } else if (current < declared && !hook) {
+        // Parity with the KV path: kept as-is, said out loud.
+        log.warn(
+          `migrate: sync cell "${cell}" snapshot v${current} → v${declared} but no onMigrate hook — state may be stale`,
+        );
+        ctx.report?.push({
+          cell,
+          from: current,
+          to: declared,
+          outcome: "stale",
+        });
+        current = declared;
       }
     }
-    log.info(`sync: restored cell "${cell}" from ${applied} op(s)`);
+
+    let applied = 0;
+    if (failures.length === 0 && ops.length > 0) {
+      // Version order first (a shape boundary is a migration point), dispatch
+      // order within a version — the stable sort keeps server_ts order.
+      const ordered = ops
+        .map((op, i) => ({ op, v: resolveVersion(op.version), i }))
+        .sort((a, b) => a.v - b.v || a.i - b.i);
+      let first: string | null = null;
+      for (const { op, v } of ordered) {
+        if (v > declared) {
+          skipped.newer++;
+          first ??=
+            `op ${op.id} (${op.cell}:${op.action}) was written by v${v}, this build declares v${declared} (downgrade)`;
+          continue;
+        }
+        if (v < declared && !hook) {
+          skipped.older++;
+          first ??=
+            `op ${op.id} (${op.cell}:${op.action}) was written by v${v}, this build declares v${declared} and has no onMigrate`;
+          continue;
+        }
+        if (current === undefined) current = v;
+        if (v > current) {
+          // Boundary: everything at `current` is folded — migrate, then go on.
+          migrateSlice(current);
+          current = v;
+          if (failures.length > 0) break;
+        }
+        try {
+          next = reduce(next, {
+            type: `${op.cell}:${op.action}`,
+            payload: op.payload,
+          });
+          applied++;
+        } catch (e) {
+          failures.push(`op ${op.id} (${op.cell}:${op.action}) threw: ${e}`);
+        }
+      }
+      if (first) failures.unshift(first);
+    }
+    // The last boundary: the world the log/snapshot describe ends below the
+    // declared shape (a snapshot-only cell counts — its ops were compacted).
+    if (failures.length === 0 && current !== undefined && current < declared) {
+      migrateSlice(current);
+      current = declared;
+    }
+
+    const total = ops.length;
+    const bad = failures.length > 0 || skipped.older > 0 || skipped.newer > 0;
+    if (!bad) {
+      if (total === 0) {
+        if (seeded) {
+          log.info(`sync: restored cell "${cell}" from snapshot only`);
+        }
+      } else {
+        log.info(`sync: restored cell "${cell}" from ${applied} op(s)`);
+      }
+      continue;
+    }
+
+    // ── Quarantine — ONE decider for both modes ───────────────────────
+    const failed = total - applied;
+    const fix = hook
+      ? `Fix "${cell}"'s onMigrate/methods so the op-log folds, then restart.`
+      : `Bump "${cell}"'s \`version\` and add an onMigrate(state, from) that ` +
+        `converts the older shape, then restart.`;
+    const what =
+      `${failed}/${total} op(s) could not be folded into "${cell}" ` +
+      `(${skipped.older} older-shape skipped, ${skipped.newer} newer-shape ` +
+      `skipped, ${failures.length} failed) — first: ${failures[0] ?? "n/a"}`;
+    if (ctx.dev) {
+      throw createAioError(
+        "PERSIST_SCHEMA",
+        new Error(
+          `sync: refusing to boot — ${what}.\n` +
+            `NOTHING was written: the op-log and snapshot for "${cell}" are ` +
+            `intact on disk. ${fix} (In production the cell is quarantined ` +
+            `at its last snapshot and compaction is skipped; dev refuses so ` +
+            `you see it first.)`,
+        ),
+        { cellName: cell },
+      );
+    }
+    (next as Record<string, unknown>)[cell] = fallback;
+    ctx.quarantined.add(cell);
+    ctx.report?.push({
+      cell,
+      from: current ?? declared,
+      to: declared,
+      outcome: "sync-quarantined",
+    });
+    log.error(
+      `sync: cell "${cell}" QUARANTINED — ${what}. The cell runs at its ` +
+        `${seeded ? "last snapshot" : "declared defaults"}; its snapshot ` +
+        `will not be rewritten and its op-log not compacted, so nothing on ` +
+        `disk is lost — but writes made now are not durable across a ` +
+        `restart. ${fix}`,
+    );
   }
   return next;
 }
@@ -607,7 +843,17 @@ export async function bootStorage<S>(
     fn: (a: { type: string; payload?: unknown }) => void;
   } = { fn: () => {} };
   let syncHandler: ServerSyncHandler | undefined;
-
+  // Cells the boot replay could not fold into the current shape (field report
+  // §3.1). Created here so the handler can consult it; filled by
+  // `replaySyncOps`, which the orchestrator runs after this function returns.
+  const syncQuarantined = new Set<string>();
+  // Declared shape version per cell — the stamp on every op row and snapshot.
+  const declaredVersion = (cell: string): number =>
+    cfg.cellMigrations?.get(cell)?.version ?? cfg._cellVersions?.[cell] ?? 0;
+  // A sync cell's snapshot is its RAW slice: a `persist` filter on a sync cell
+  // is refused at `cell()` and at compose time (the op-log cannot honour one),
+  // so there is no durable projection to apply here — the projection that
+  // used to live here was reachable only through the combination now refused.
   if (syncCellIds.length > 0) {
     if (asyncDb) {
       const { applySyncMigrations, SYNC_SCHEMA } = await import(
@@ -645,10 +891,13 @@ export async function bootStorage<S>(
         db: asyncDb,
         syncCellIds,
         accessCheck,
-        // Raw — server-internal (compaction snapshot = the durability record
-        // for sync cells, which are excluded from KV persistence).
+        // Server-internal (compaction snapshot = the durability record for
+        // sync cells, which are excluded from KV persistence). Raw — see the
+        // note above on why no persist projection applies.
         getCellState: (cell: string) =>
           (getState() as Record<string, Record<string, unknown>>)[cell] ?? {},
+        cellVersion: declaredVersion,
+        isQuarantined: (cell: string) => syncQuarantined.has(cell),
         // Client-facing — the same projection every other wire uses. A cell
         // hidden by `ui: "none"` is absent from it, and `null` here means
         // "must not be sent", which the handler honours by sending nothing.
@@ -699,6 +948,9 @@ export async function bootStorage<S>(
   let persistedSnapshot: Record<string, unknown> | null = null;
   // Migration + shape-drift summary, surfaced live via `am migrations`.
   let migrations: MigrationSummary | undefined;
+  // The per-cell version stamp of the build that last persisted — also the
+  // evidence the sync replay uses for rows that predate the op/snapshot stamp.
+  let stampedVersions: Record<string, number> = {};
   // Framework-parked slices (`__…` keys) this boot created — carried into
   // every persisted document alongside orphan cells, never into state.
   const parkedSlices: Record<string, unknown> = {};
@@ -772,6 +1024,7 @@ export async function bootStorage<S>(
     const VERSIONS_KEY = `${appId}:__versions`;
     const persistedVersions =
       await kvDb.get<Record<string, number>>(VERSIONS_KEY) ?? {};
+    stampedVersions = persistedVersions;
     const stateObj = state as Record<string, unknown>;
     let report: MigrationReport = [];
     if (cfg.cellMigrations?.size) {
@@ -1023,6 +1276,22 @@ export async function bootStorage<S>(
       : {}),
   });
 
+  // The replay context for this db — `replaySyncOps` (called by the
+  // orchestrator with the db alone) finds its cell metadata here.
+  if (asyncDb && syncCellIds.length > 0) {
+    registerSyncReplayContext(asyncDb, {
+      versions: Object.fromEntries(
+        syncCellIds.map((c) => [c, declaredVersion(c)]),
+      ),
+      migrations: cfg.cellMigrations ?? new Map(),
+      stampedVersions,
+      quarantined: syncQuarantined,
+      dev: isDevBoot(),
+      report: migrations?.report,
+      initialState: initialState as Record<string, unknown>,
+    });
+  }
+
   return {
     state,
     kvDb,
@@ -1262,7 +1531,9 @@ export function detectShapeDrift(
 export type CellMigrationOutcome =
   | "migrated" // onMigrate ran, version advanced
   | "stale" // version bumped but no onMigrate — kept as-is, may be stale
-  | "downgrade"; // stored version NEWER than code — running old code on new data
+  | "downgrade" // stored version NEWER than code — running old code on new data
+  | "sync-quarantined" // a sync cell's op-log could not be folded — held at its snapshot
+  | "sync-unversioned"; // a sync cell has a persisted log and no `version` (field report §3.1)
 // (There is no "reset": a throwing onMigrate used to reset the cell to its
 //  defaults, and the debounced persist then wrote that emptiness over the data
 //  the migration was supposed to transform. It now refuses to boot instead —

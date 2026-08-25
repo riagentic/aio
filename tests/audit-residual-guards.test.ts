@@ -1,4 +1,4 @@
-// Regression tests for the remaining a field report/a field report fixes that had none — each pins
+// Regression tests for the remaining field-report and audit fixes that had none — each pins
 // the behaviour at the seam the fix actually changed.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 

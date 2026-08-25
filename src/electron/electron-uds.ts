@@ -39,9 +39,11 @@ export function electronMainScriptUDS(url: string, socketPath: string, opts: {
    *  packaged app renders a different `<head>` than dev does. */
   shell?: ShellConfig;
   /** The app's HTTP handler, on a Unix socket, because this app binds no TCP
-   *  port (dev + electron + UDS). The window then serves `aio://` by proxying
-   *  to it — same handler, same HTML, same transpiled modules as `http://`
-   *  would have delivered, minus the port. */
+   *  port (electron + UDS). The window then serves `aio://` by proxying to it
+   *  — same handler, same HTML, same transpiled modules as `http://` would
+   *  have delivered, minus the port. Dev: everything goes through it. Prod
+   *  (page from dist/): only what dist/ does not hold — the app's custom
+   *  `routes` and /__aio/* — falls through to it, streamed. */
   httpSocketPath?: string;
 }): string {
   const w = opts.meta?.width ?? 800;
@@ -79,9 +81,10 @@ ${tmplParentWatch()}
 const BASE_DIR = ${JSON.stringify(opts.baseDir ?? "")};
 const HTTP_SOCK = ${JSON.stringify(opts.httpSocketPath ?? "")};
 const FROM_DISK = !!(BASE_DIR && fs.existsSync(path.join(BASE_DIR, 'app.js')));
-// Disk wins when a bundle is there: it needs no server at all. Otherwise the
-// socket, when this app has one — that is the dev app that binds no port, and
-// http:// would have nothing to answer it.
+// Disk wins when a bundle is there: the page needs no server at all (the
+// app's routes still fall through to HTTP_SOCK when it is set — see the
+// handler). Otherwise the socket, when this app has one — that is the dev
+// app that binds no port, and http:// would have nothing to answer it.
 const FROM_SOCKET = !FROM_DISK && !!HTTP_SOCK;
 const USE_PROTOCOL = FROM_DISK || FROM_SOCKET;
 // machine U11 — never silent: when a dist dir was given but its app.js is
@@ -94,31 +97,40 @@ if (BASE_DIR && !FROM_DISK) {
 if (USE_PROTOCOL) {
   protocol.registerSchemesAsPrivileged([{
     scheme: 'aio',
-    privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true }
+    // stream:true — a route response is handed to Chromium as it arrives.
+    // Without it every aio:// body (a 100 MB image included) would be held in
+    // main-process memory before the first byte reached the renderer.
+    privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true }
   }]);
 }
 
 // One request to the app's HTTP handler over its Unix socket. Node's own
-// http.request speaks this natively (a socketPath option), so the page, its modules
-// and every asset arrive through the SAME handler an http:// fetch would have
-// reached — headers, status and bytes intact, nothing re-encoded. Streaming
-// the body straight into the Response keeps binary assets binary.
+// http.request speaks this natively (a socketPath option), so the page, its
+// modules and every asset arrive through the SAME handler an http:// fetch
+// would have reached — headers, status and bytes intact, nothing re-encoded.
+//
+// STREAMED, both ways. The Response wraps the Node response body as a web
+// ReadableStream (Readable.toWeb), so the promise resolves on HEADERS and
+// Chromium reads the body as the app writes it: a 100 MB route response is
+// never buffered in this process, and an <img> starts decoding on the first
+// chunk. A request body (POST/PUT) is piped in the same way.
 function socketFetch(reqPath, method, headers, body) {
   return new Promise((resolve) => {
     const http = require('http');
+    const { Readable } = require('stream');
     const r = http.request(
       { socketPath: HTTP_SOCK, path: reqPath, method: method || 'GET', headers: headers || {} },
       (res) => {
-        const chunks = [];
-        res.on('data', (c) => chunks.push(c));
-        res.on('end', () => {
-          const h = {};
-          for (const [k, v] of Object.entries(res.headers)) {
-            if (typeof v === 'string') h[k] = v;
-            else if (Array.isArray(v)) h[k] = v.join(', ');
-          }
-          resolve(new Response(Buffer.concat(chunks), { status: res.statusCode || 200, headers: h }));
-        });
+        const h = {};
+        for (const [k, v] of Object.entries(res.headers)) {
+          if (typeof v === 'string') h[k] = v;
+          else if (Array.isArray(v)) h[k] = v.join(', ');
+        }
+        const status = res.statusCode || 200;
+        // A body-less status must not carry a stream — Response() throws.
+        const noBody = status === 204 || status === 304 || (method || 'GET') === 'HEAD';
+        if (noBody) res.resume();
+        resolve(new Response(noBody ? null : Readable.toWeb(res), { status, headers: h }));
       },
     );
     // A dead socket must not hang the window forever on a blank page. Say what
@@ -127,8 +139,8 @@ function socketFetch(reqPath, method, headers, body) {
       'aio: cannot reach the app over its socket (' + HTTP_SOCK + '): ' + e.message,
       { status: 502, headers: { 'Content-Type': 'text/plain' } },
     )));
-    if (body) r.write(body);
-    r.end();
+    if (body && typeof body.getReader === 'function') Readable.fromWeb(body).pipe(r);
+    else { if (body) r.write(body); r.end(); }
   });
 }
 
@@ -162,14 +174,13 @@ app.on('ready', () => {
       // modules, /__aio/* and the app's own routes are one surface, and a
       // second copy of the routing table in the window is how the two come to
       // disagree about what the app serves.
-      if (FROM_SOCKET) {
+      const viaSocket = () => {
         const hdrs = {};
         req.headers.forEach((v, k) => { hdrs[k] = v; });
-        const body = (req.method === 'POST' || req.method === 'PUT')
-          ? Buffer.from(await req.arrayBuffer())
-          : undefined;
-        return await socketFetch(url.pathname + url.search, req.method, hdrs, body);
-      }
+        const body = (req.method === 'GET' || req.method === 'HEAD') ? undefined : req.body;
+        return socketFetch(url.pathname + url.search, req.method, hdrs, body);
+      };
+      if (FROM_SOCKET) return await viaSocket();
       let pathname;
       try { pathname = decodeURIComponent(url.pathname); } catch { pathname = url.pathname; }
       if (pathname === '/' || pathname === '') {
@@ -198,6 +209,12 @@ app.on('ready', () => {
         const ext = path.extname(filePath).toLowerCase();
         return new Response(data, { headers: { 'Content-Type': MIME[ext] || 'application/octet-stream' } });
       } catch {
+        // Not a file in dist/. When this app has an HTTP handler on a socket,
+        // that is where the rest of the app lives — its custom routes
+        // (<img src="/nft-image/x"> resolves to aio://app/nft-image/x on this
+        // origin) and /__aio/*. Proxied unchanged, streamed. Without a socket
+        // there is nothing behind this path: 404, as before.
+        if (HTTP_SOCK) return await viaSocket();
         return new Response('Not Found', { status: 404 });
       }
     });
@@ -316,6 +333,20 @@ ${tmplBoundsTracking()}
       if (pk === 'state' || pk === 'patches') _pending.splice(i, 1);
     }
     if (lastFullState) _pending.push({ k: 'state', line: lastFullState });
+  });
+
+  // A main-frame navigation that FAILS leaves the old document in place — and
+  // that document already signalled ready once; it will not do so again. Give
+  // it its relay back, or every later frame (state, ui-surface requests, the
+  // next reload) waits on a ready that never comes: the window shows a live
+  // page that has quietly stopped answering. -3 is net::ERR_ABORTED (a vetoed
+  // or superseded navigation); any other code is a real load failure, said so.
+  win.webContents.on('did-fail-load', (e, code, desc, failedUrl, isMainFrame) => {
+    if (isMainFrame === false || rendererReady) return;
+    rendererReady = true;
+    _pump();
+    console.warn('[aio:electron] navigation to ' + failedUrl + ' failed (' + code + ' ' + desc +
+      ') — the previous document stays and keeps its bridge');
   });
 
   ipcMain.on('__aio:ready', () => {
@@ -490,9 +521,10 @@ ${tmplKeyboardShortcuts()}
 
   // AIO-73: aio:/// (no host) fails — use aio://app/ (with host component)
   win.loadURL(USE_PROTOCOL ? 'aio://app/': ${JSON.stringify(url)});
-  const _appOrigin = USE_PROTOCOL ? 'aio://app': new URL(${
+  // protocol//host on both branches — see tmplWillNavigate for why not .origin.
+  const _appOrigin = USE_PROTOCOL ? 'aio://app': (u => u.protocol + '//' + u.host)(new URL(${
     JSON.stringify(url)
-  }).origin;
+  }));
 ${tmplWillNavigate("_appOrigin")}
 });
 

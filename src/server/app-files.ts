@@ -10,7 +10,7 @@
  *
  *  • `ui.entry` was honoured by the dev server and ignored by the BUNDLER, so
  *    an app that renamed its root component rendered one thing under
- *    `deno task dev` and another once compiled (rimote R-2).
+ *    `deno task dev` and another once compiled (R-2).
  *  • the boot lint kept checking a hardcoded `App.tsx`, so an app that set
  *    `ui.entry` failed its OWN startup check while the server was about to
  *    serve the right file.

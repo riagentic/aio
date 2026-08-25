@@ -1,4 +1,4 @@
-// The ds4 audit's LOW tier, worked rather than filed.
+// The static audit's LOW tier, worked rather than filed.
 //
 // Twenty-six findings were read and accepted in triage and none was fixed at
 // the time; most turned out to be already closed by later releases. These are
