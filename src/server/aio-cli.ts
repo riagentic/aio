@@ -1,8 +1,9 @@
 // CLI parsing — pure functions, no aio.ts internal dependencies
 import { log } from "../diagnostics/logger-api.ts";
+import { findFreePort } from "./paths.ts";
 
 /** Framework version — printed by --version, checked in tests */
-export const VERSION = "1.0.0-alpha67";
+export const VERSION = "1.0.0-alpha68";
 
 /** What `--version` prints: what this artifact IS, and what it was built with.
  *
@@ -75,6 +76,10 @@ export type CliFlags = {
   logBudget?: number;
   /** Skip the legacy→`~/.<appId>` data move (app-dirs-migrate.ts). */
   noDataMigrate?: boolean;
+  /** `--cdp` / `--cdp=<port>`: open Chrome DevTools Protocol on the Electron
+   *  window (loopback only). `true` = pick a free port. OPT-IN: an app that
+   *  did not ask binds nothing, so "zero ports" stays literally true. */
+  cdp?: number | true;
 };
 
 // Deprecation hints fire ONCE per process — parseCli is re-invoked several
@@ -99,6 +104,35 @@ let _parsedDefault: CliFlags | null = null;
 export function _resetParsedCli(): void {
   _parsedDefault = null;
   _hintedBareServerUrl = false;
+  _cdpPort = undefined;
+}
+
+/** `--cdp` / `AIO_CDP` as one value: a port, `true` (pick one), or nothing.
+ *  Pure — the flag beats the env, and an unparsable value is reported and
+ *  treated as absent (never a silent default port). */
+export function parseCdp(
+  flag: number | true | undefined,
+  env: string | undefined,
+): number | true | undefined {
+  if (flag !== undefined) return flag;
+  if (env === undefined || env === "" || env === "0") return undefined;
+  if (env === "1" || env === "true") return true;
+  const n = Number(env);
+  if (Number.isInteger(n) && n > 0 && n < 65536) return n;
+  log.warn(`invalid AIO_CDP value: ${env} (1, or a port 1-65535) — ignored`);
+  return undefined;
+}
+
+let _cdpPort: number | undefined | null;
+
+/** THE CDP port for this process — undefined unless asked for (`--cdp`,
+ *  `AIO_CDP`). Decided once: the lock records it, the boot line prints it and
+ *  the Electron launch binds it, and the three must agree. */
+export function cdpPort(): number | undefined {
+  if (_cdpPort !== undefined) return _cdpPort ?? undefined;
+  const want = parseCdp(parseCli().cdp, Deno.env.get("AIO_CDP"));
+  _cdpPort = want === undefined ? null : want === true ? findFreePort() : want;
+  return _cdpPort ?? undefined;
 }
 
 /** Parses CLI flags from Deno.args (or custom array for testing) */
@@ -148,6 +182,8 @@ function _parseCliUncached(args: readonly string[]): CliFlags {
     "--log-budget=",
     "--db-path=",
     "--host=",
+    "--cdp",
+    "--cdp=",
   ];
   for (const arg of args) {
     if (arg.startsWith("--port=")) {
@@ -240,6 +276,11 @@ function _parseCliUncached(args: readonly string[]): CliFlags {
       const v = arg.slice(12);
       if (v === "uds" || v === "ws") r.transport = v;
       else log.warn(`invalid --transport value: ${v} (must be 'uds' or 'ws')`);
+    } else if (arg === "--cdp") r.cdp = true;
+    else if (arg.startsWith("--cdp=")) {
+      const n = Number(arg.slice(6));
+      if (Number.isInteger(n) && n > 0 && n < 65536) r.cdp = n;
+      else log.warn(`invalid --cdp value: ${arg.slice(6)} (must be 1-65535)`);
     } else if (arg.startsWith("--host=")) {
       // An address, not an authority — the port has its own flag. Deeper
       // validation belongs to the bind itself: Deno.serve refuses a bad
@@ -307,6 +348,9 @@ Flags:
   --open           Open the app in your browser after boot (default: OFF — the
                    URL is printed; a tab aio opens is one it cannot close)
   --isolate=a,b    Only activate the specified cells
+  --cdp[=N]        Open Chrome DevTools Protocol on the Electron window, on
+                   127.0.0.1 only (a free port unless N is given; also
+                   $AIO_CDP=1|N). Opt-in: enables "am shot" (screenshots)
   --version        Print version and exit
   --help           Show this help`);
 }

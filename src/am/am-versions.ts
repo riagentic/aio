@@ -32,7 +32,11 @@
  * exact string is the whole mechanism.
  */
 
-import { readDenoJson } from "../server/deno-json.ts";
+import {
+  LOCAL_PIN_FILE,
+  readDenoJson,
+  readFrameworkPin,
+} from "../server/deno-json.ts";
 import { compareVersions as compareRawVersions } from "../server/updates-core.ts";
 import { join } from "@std/path";
 
@@ -363,24 +367,60 @@ export async function removeVersion(
 
 // ── The app's pin ───────────────────────────────────────────
 
-/** Read `aioVersion` from an app's deno.json (null when unpinned). */
+/** The app's framework pin (null when unpinned): `.aio/pin.local` first,
+ *  then `aioVersion` in deno.json — `readFrameworkPin` is THE reader. */
 export async function readPin(appDir: string): Promise<string | null> {
-  try {
-    const cfg = ((await readDenoJson(appDir))?.config ?? {}) as {
-      aioVersion?: unknown;
-    };
-    return typeof cfg.aioVersion === "string" && cfg.aioVersion
-      ? cfg.aioVersion
-      : null;
-  } catch {
-    return null;
+  return (await readFrameworkPin(appDir)).pin;
+}
+
+/** Where a pin is RECORDED. A path pin goes to the git-ignored
+ *  `.aio/pin.local` (per-machine, never committed) and leaves `aioVersion`
+ *  alone; a version ref goes to deno.json — and REMOVES a local override, so
+ *  `am pin --latest` is really a move to that release rather than a line the
+ *  override keeps winning over. Returns what was written, for the report. */
+export async function writePin(
+  appDir: string,
+  ref: string,
+): Promise<{ file: string; removedLocal: boolean }> {
+  const local = join(appDir, LOCAL_PIN_FILE);
+  if (isPathPin(ref)) {
+    await Deno.mkdir(join(appDir, ".aio"), { recursive: true });
+    await Deno.writeTextFile(local, pathPinTarget(ref) + "\n");
+    await ensureGitIgnored(appDir, ".aio/");
+    return { file: LOCAL_PIN_FILE, removedLocal: false };
   }
+  let removedLocal = false;
+  try {
+    await Deno.remove(local);
+    removedLocal = true;
+  } catch { /* no override to remove */ }
+  await writeDenoJsonPin(appDir, ref);
+  return { file: "deno.json", removedLocal };
+}
+
+/** Append `entry` to the app's `.gitignore` when it is not already covered —
+ *  the scaffold writes `.aio/` (see am-cmd-create.ts), but an app created
+ *  before that, or by hand, must not commit its per-machine override. */
+async function ensureGitIgnored(appDir: string, entry: string): Promise<void> {
+  const path = join(appDir, ".gitignore");
+  let raw = "";
+  try {
+    raw = await Deno.readTextFile(path);
+  } catch { /* none yet */ }
+  const covered = raw.split("\n").map((l) => l.trim()).some((l) =>
+    l === entry || l === entry.replace(/\/$/, "") || l === "/" + entry
+  );
+  if (covered) return;
+  await Deno.writeTextFile(
+    path,
+    raw + (raw === "" || raw.endsWith("\n") ? "" : "\n") + entry + "\n",
+  );
 }
 
 /** Write `aioVersion` into an app's deno.json, preserving formatting elsewhere.
  *  A targeted text edit rather than a JSON round-trip: the app's config is the
  *  developer's file, and reformatting it as a side effect of pinning is rude. */
-export async function writePin(appDir: string, ref: string): Promise<void> {
+async function writeDenoJsonPin(appDir: string, ref: string): Promise<void> {
   const path = join(appDir, "deno.json");
   const raw = await Deno.readTextFile(path);
   const line = `  "aioVersion": ${JSON.stringify(ref)}`;

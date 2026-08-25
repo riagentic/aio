@@ -33,6 +33,7 @@ import {
   writeLock,
 } from "../server/single-instance-lock.ts";
 import { SHUTDOWN_BUDGET_MS } from "../server/shutdown-budget.ts";
+import { VERSION } from "../server/aio-cli.ts";
 import { detectMode, formatUptime, out, outError } from "./am-output.ts";
 import { repoRoot } from "./am-cmd-create.ts";
 import {
@@ -1274,6 +1275,18 @@ export async function cmdStatus(
   }
 }
 
+/** Does an instance's recorded aio version differ from the `am` reading it?
+ *  Unknown (a lock from before the field existed) is not a mismatch — it is
+ *  printed as `?` so the absence is visible, not asserted. Pure. */
+export function instanceAioMismatch(v: string | undefined): boolean {
+  return v !== undefined && v !== VERSION;
+}
+
+/** The `aio=` column of one `am instances` row. Pure. */
+export function instanceAioColumn(v: string | undefined): string {
+  return `aio=${v ?? "?"}${instanceAioMismatch(v) ? `  ≠ am ${VERSION}` : ""}`;
+}
+
 export function cmdInstances(_args: string[], flags: GlobalFlags): void {
   const mode = detectMode(flags);
   const all = instances();
@@ -1291,7 +1304,9 @@ export function cmdInstances(_args: string[], flags: GlobalFlags): void {
       );
       const uds = inst.socketPath ? ` (${inst.socketPath})` : "";
       console.log(
-        `${inst.appId}  pid=${inst.pid}  port=${inst.port}  ${inst.status}  ${transport}${uds}  uptime=${uptime}  home=${inst.home}  cwd=${inst.cwd}`,
+        `${inst.appId}  pid=${inst.pid}  port=${inst.port}  ${inst.status}  ${transport}${uds}  uptime=${uptime}  ${
+          instanceAioColumn(inst.aioVersion)
+        }  home=${inst.home}  cwd=${inst.cwd}`,
       );
     }
   } else {
@@ -1304,6 +1319,8 @@ export function cmdInstances(_args: string[], flags: GlobalFlags): void {
         transport: inst.socketPath ? "uds" : "ws",
         ...(inst.socketPath ? { socketPath: inst.socketPath } : {}),
         uptime: Math.round((Date.now() - inst.startedAt) / 1000),
+        aio: inst.aioVersion ?? null,
+        aioMismatch: instanceAioMismatch(inst.aioVersion),
         home: inst.home,
         cwd: inst.cwd,
       })),

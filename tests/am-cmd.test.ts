@@ -1061,17 +1061,23 @@ Deno.test("cmdPin: a path arg records a local-dev pin and links to it", async ()
     const cfg = JSON.parse(
       await Deno.readTextFile(joinPath(app, "deno.json")),
     ) as { aioVersion?: string };
-    assertEquals(cfg.aioVersion, `path:${fw}`);
+    // A path pin is per-machine: it lives in the git-ignored override, and
+    // the committed `aioVersion` is left alone for every other clone.
+    assertEquals(cfg.aioVersion, undefined);
+    assertEquals(
+      (await Deno.readTextFile(joinPath(app, ".aio", "pin.local"))).trim(),
+      fw,
+    );
     // dep/aio links to the checkout itself, not a worktree.
     assert(
       (await Deno.realPath(joinPath(app, "dep", "aio"))) ===
         (await Deno.realPath(fw)),
       "dep/aio resolves to the local checkout",
     );
-    // The warning names the trade-off.
+    // The note names where it went.
     assert(
-      logs.some((l) => l.includes("machine-specific")),
-      logs.join("\n"),
+      logs.some((l) => l.includes("pin.local")),
+      `note names the local override: ${logs.join(" | ")}`,
     );
   } finally {
     console.log = realLog;

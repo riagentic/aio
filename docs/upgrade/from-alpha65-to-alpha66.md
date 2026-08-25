@@ -65,6 +65,14 @@ compaction writes the emptiness; `am migrations` shows it). A persisted log on a
 cell with no `version` warns at boot — declare `version: 1` and the warning is
 gone.
 
+## Also changed (low risk, `aio/extras`)
+
+`readLock`, `lockPath` and `removeLock` now take a **lock key** rather than a
+bare appId, and `LockData` gained `home`. For the default home the key IS the
+appId, so `readLock(appId)` keeps working unchanged; an instance booted from a
+different `appDir` has the key `<appId>@<hash8>` and is invisible to a caller
+that passes the bare appId — list them with `am instances`, which parses both.
+
 ## Retire
 
 Workarounds you may still carry for bugs that are fixed. If you are on alpha66

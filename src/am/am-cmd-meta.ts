@@ -413,6 +413,8 @@ Inspect:
   surface --depth=N       cap the tree depth (0 = the component alone)
   trigger <idx> <path> <action> [text]  Drive the live UI (click/type/setValue/press/keyDown/keyUp/hover/focus/blur/scroll) — same engine as testUI
                           type APPENDS to the field, setValue REPLACES it (as in testUI)
+  shot [n] [--out=F.png] [--full]  PNG of the live Electron window via CDP — the app
+                          must run with --cdp (or AIO_CDP=1); --json → {file,bytes,url}
   sql <query>             Execute read-only SQL
   sql --tables            List SQLite tables
   schedules               Active scheduled effects

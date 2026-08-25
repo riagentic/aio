@@ -314,6 +314,54 @@ Two warnings you will see before anything goes wrong:
 Both appear in `am migrations` as `sync-unversioned` / `stale`; a quarantine
 appears as `sync-quarantined`.
 
+The replay ladder (fold-through-`onMigrate` per boundary, hookless-older and
+newer ops skipped, the dev refusal, the prod quarantine that never compacts, the
+`-1` stamp resolution, the unversioned warning) is pinned unit-level by
+`tests/sync/sync-replay-versions.test.ts`; the real-boot half — a v1 snapshot
+migrated through `onMigrate` on the next `aio.run()`, and the `persist`-filter
+refusal — by `tests/sync-replay-boot.test.ts`.
+
+The whole lifecycle — one app, one data directory, three builds — is proved
+**end to end** by `tests/sync-migration-e2e.test.ts`: real `aio.run()` boots,
+ops written by a real WebSocket client, SQLite read back directly. Point at it
+when you need to know what a shape change does to YOUR data; each assertion is
+one promise:
+
+- v1 ops (`cols`, `theme`) land in `sync_ops` stamped `version = 1`; the
+  adoption seed holds only the defaults — the ops are what carries the state.
+- v2 (`--prod`; rename `cols`→`columns`, add `rows`, drop `theme`):
+  `onMigrate(slice, from)` runs **exactly once** with `from = 1`, after every v1
+  op has folded — the hook sees the op-derived slice, not the defaults.
+- The live state is the migrated shape with the op-derived values (`columns: 4`,
+  not `2`), and a migrated snapshot does **not** re-run the hook on the next
+  boot.
+- The non-sync `accounts` cell's KV row is byte-identical before and after.
+- The first compaction after the migration writes the **migrated** slice into
+  `sync_snapshots` (`cell_version = 2`), never `initialState`.
+- The boot report `am migrations` prints names the cell:
+  `nav: v1→v2
+  [migrated]`.
+- v3 **without** `onMigrate`, dev: `aio.run()` rejects with
+  `sync: refusing to
+  boot`, names `"nav"`, the fix
+  (`Bump "nav"'s version and add an
+  onMigrate(state, from)`), and
+  `NOTHING was written` — the snapshot on disk is untouched.
+- v3 without `onMigrate`, prod: `nav` runs at its v2 snapshot (a new field at
+  its default; the v2 ops are **not** folded), `accounts` is untouched,
+  `log.error` says `QUARANTINED`, `am migrations` shows `sync-quarantined`, a
+  new op still lands in the log, and a server-origin write does **not** compact
+  the cell (its snapshot keeps `cell_version = 2`; the warning names it).
+- v1 booted against the v2 log (downgrade): the newer snapshot and ops are
+  skipped, reported as `sync-quarantined` with `(downgrade)` in the message, and
+  the newer ops stay on disk for the build that understands them.
+
+Keep the old methods around for as long as the log can hold their ops: an op is
+replayed through the **current** build's reducer, so a v1 `nav:setCols` op can
+only reproduce its write in a v2 build that still has `setCols` — the e2e's v2
+cell keeps `setCols`/`setTheme` next to `setColumns`/`setRows` for exactly that
+reason, and `onMigrate` maps the old fields afterwards.
+
 Rows written by an aio older than the stamp carry `-1` (unknown). They resolve
 to the version stamp of the build that last persisted (`__versions` in
 `aio_kv`), never to `0` — so an app that already declares `version: 3` does not

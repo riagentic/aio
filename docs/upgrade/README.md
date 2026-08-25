@@ -12,6 +12,9 @@ reason to keep one (gated by `deno task check:docs`).
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha67 → alpha68](from-alpha67-to-alpha68.md) — nothing breaks; two released
+  sync-replay bugs fixed by the new end-to-end migration proof, `am pin` scan
+  tokenized, per-machine path pins, `am instances` aio column, `am shot`.
 - [alpha66 → alpha67](from-alpha66-to-alpha67.md) — nothing breaks in your app
   code; Windows only: a local Electron app runs on a named pipe with no TCP port
   (`--port=N` opts out). Proven under Wine; real-Windows pass pending.

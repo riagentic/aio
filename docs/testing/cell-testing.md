@@ -6,6 +6,11 @@ Test harness that wraps `Deno.test` with typed helpers. Automatically resets all
 flows and pending async calls before each test — no teardown needed. State
 starts initialized — `t.init()` is only needed to RESET mid-test.
 
+`testCell` runs the cell in the **server context**: in-process, on the raw
+(unfiltered) state, effects collected and run by `settle()`/an awaited send —
+never the client-replay slice. A hidden field is readable here and would throw
+in a sync selector; see `docs/state/cell-contexts.md` for the full table.
+
 ```ts
 import { testCell } from "aio/testing"; // or from "aio"
 import { counter } from "./cell/counter/index.ts";

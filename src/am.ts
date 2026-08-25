@@ -88,6 +88,7 @@ import { cmdBackup, cmdData, cmdRestore } from "./am/am-cmd-data.ts";
 import { cmdPin } from "./am/am-cmd-pin.ts";
 import { cmdTheme } from "./am/am-cmd-theme.ts";
 import { cmdCost } from "./am/am-cmd-cost.ts";
+import { cmdShot } from "./am/am-cmd-shot.ts";
 import { parseGlobalFlags, resolveAmAppId, targetHome } from "./am/am-utils.ts";
 
 // ── Command map ────────────────────────────────────────────
@@ -127,6 +128,7 @@ const COMMANDS: Record<string, CmdHandler> = {
   client: cmdClient,
   surface: cmdSurface,
   trigger: cmdTrigger,
+  shot: cmdShot,
   sql: cmdSql,
   tables: cmdTables,
   schedules: cmdSchedules,
@@ -186,6 +188,23 @@ async function delegateToPathPin(): Promise<boolean> {
   // Already running from that checkout? (deno task am, or a re-exec.)
   const self = new URL(import.meta.url).pathname;
   if (self === entry) return false;
+  // A checkout from before the per-machine override (`.aio/pin.local`)
+  // cannot read the pin that just selected it — its am would see an unpinned
+  // app and re-seal it. Stay on the installed am and say so, rather than
+  // hand off to a tool that will undo the setup.
+  try {
+    const dj = await Deno.readTextFile(`${target}/src/server/deno-json.ts`);
+    if (!dj.includes("LOCAL_PIN_FILE")) {
+      console.error(
+        `am: note: path pin — the pinned checkout (${target}) predates ` +
+          `.aio/pin.local, so the installed am runs instead of its own.`,
+      );
+      return false;
+    }
+  } catch {
+    // No src/server/deno-json.ts at all: not a layout we can date (a marker
+    // checkout, a trimmed one) — nothing there can re-seal the app, delegate.
+  }
   console.error(
     `am: note: path pin — using the pinned checkout's am (${target}). ` +
       `AIO_AM_NO_DELEGATE=1 uses the installed am instead.`,

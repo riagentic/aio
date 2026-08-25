@@ -220,7 +220,7 @@ export function cell(
           // The draft is the ui-FILTERED slice, so a hidden field is absent
           // here even though the server-side run of the same method saw it.
           // guardHiddenReplay installs the same reporting getter every other
-          // client read has (dev throws, prod warns-once + undefined) — a
+          // client read has (THROWS in dev and prod, naming the field) — a
           // mirror of cell-reactive's guard, per the "any per-field behaviour
           // the browser branches on lives in this stub too" rule.
           m(

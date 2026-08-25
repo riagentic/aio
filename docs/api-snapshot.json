@@ -441,7 +441,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "d46213c771256af9"
+          "sig": "cf9a9cdd3bff266a"
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -1197,7 +1197,7 @@
         },
         "CliFlags": {
           "kind": "typeAlias",
-          "sig": "a82226d9a1be7eea"
+          "sig": "d132306c1619eb92"
         },
         "createSliceSelector": {
           "kind": "function",
@@ -1245,7 +1245,7 @@
         },
         "LockData": {
           "kind": "typeAlias",
-          "sig": "47352ea186c8664d"
+          "sig": "7d41927980887038"
         },
         "markAsync": {
           "kind": "function",
