@@ -11,7 +11,12 @@
 // boot as they always have, and `runDdlSteps` stamps the epoch; registered
 // steps (version ≥ 2) run strictly once per file, in order, fatal on any
 // refused statement.
-import { assert, assertEquals, assertRejects } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+} from "@std/assert";
 import { join } from "@std/path";
 import { createDB } from "../src/db/mod.ts";
 import type { DB } from "../src/db/types.ts";
@@ -171,7 +176,12 @@ Deno.test("aio_schema: a legacy (pre-versioned) db is upgraded AND stamped", asy
   });
 });
 
-Deno.test("aio_schema: a file stamped ABOVE the epoch is not re-stamped down", async () => {
+// Audit 2026-08-27: a file stamped ABOVE what this build knows was written by
+// a NEWER aio. The `aio_kv` layer beside this one has always refused that
+// loudly (`PERSIST_SCHEMA`, src/server/persist-schema.ts); the SQL ladder used
+// to accept it without a word and run on tables a newer build may already have
+// moved. The two now agree — and the file is still never stamped down.
+Deno.test("aio_schema: a file from a NEWER aio is refused, and left untouched", async () => {
   await withDir(async (dir) => {
     const path = join(dir, "ahead.db");
     {
@@ -181,9 +191,17 @@ Deno.test("aio_schema: a file stamped ABOVE the epoch is not re-stamped down", a
     }
     const db = createDB(path);
     try {
-      await runDdlSteps(db);
+      const e = await runDdlSteps(db).then(
+        () => null,
+        (err: Error) => err,
+      );
+      assert(e, "booting on a newer file must not be silent");
+      assertStringIncludes(e!.message, "NEWER aio");
+      assertStringIncludes(e!.message, "v7");
+      assertStringIncludes(e!.message, "upgrade aio");
+      // Nothing was changed — the version is not stamped down, and the
+      // one-row shape holds.
       assertEquals(await getAioSchemaVersion(db), 7);
-      // And the one-row shape holds.
       const { rows } = await db.query<{ n: number }>(
         `SELECT COUNT(*) AS n FROM ${AIO_SCHEMA_TABLE}`,
       );

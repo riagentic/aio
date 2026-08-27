@@ -475,8 +475,8 @@ deno compile -A --node-modules-dir=none --exclude-unused-npm \
   vendored install, `node_modules/.deno/@riagentic+aio@<version>/src` for a JSR
   one. Print it with `dbWorkerInclude()` rather than typing it.
 
-`aio build` already excludes the dev-only packages (electron, esbuild) for every
-target, which is why its binaries are small without either flag.
+`deno task build` already excludes the dev-only packages (electron, esbuild) for
+every target, which is why its binaries are small without either flag.
 
 ## electron (desktop app)
 
@@ -636,6 +636,27 @@ localStorage.
 
 **Prerequisites:** Android SDK (`$ANDROID_HOME`), Java 17+ (`$JAVA_HOME`),
 Gradle on `PATH`.
+
+### The APK's version
+
+The APK's `versionName` is deno.json's `"version"` verbatim, and its
+`versionCode` — the integer Play, an MDM and `adb install -r` actually compare —
+is derived from it:
+
+```
+major·100 000 000 + minor·1 000 000 + patch·1 000 + prerelease slot
+```
+
+The prerelease slot is `tier·250 + n`, with
+`alpha(0) < beta(1) < rc(2) <
+anything else(3)` and `n` the prerelease's
+trailing number, so `1.0.0-alpha65 < 1.0.0-beta1 < 1.0.0-rc1 < 1.0.0`. A final
+release takes 999.
+
+So a build **requires** a `"version"` in deno.json, and refuses a version that
+cannot be encoded (major > 20, minor > 99, patch > 999, or a prerelease
+numbering past 249) rather than wrapping it — a truncated `versionCode` is an
+APK that installs over a newer one.
 
 ### Onto a real phone
 

@@ -32,7 +32,12 @@ Deno.test("monogram: the first character that HAS a glyph", () => {
 });
 
 Deno.test("colour: deterministic per name, and spread across apps", () => {
-  assertEquals(iconColors("atomic").hue, iconColors("atomic").hue);
+  // Pinned, not compared against a second call of the same function: the app's
+  // colour IS its identity — it appears on the icon, the theme and the desktop
+  // frame — so the value has to survive a refactor, not merely agree with
+  // itself. (`iconColors(x) === iconColors(x)` held for any implementation.)
+  assertEquals(iconColors("atomic").hue, 312);
+  assertEquals(iconColors("atomic").bg0, "hsl(312 68% 82%)");
   const names = [
     "atomic",
     "fixable",

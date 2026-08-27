@@ -13,6 +13,9 @@ type DiskState = {
   entries: Entry[];
   scanning: boolean;
   error: string | null;
+  /** True when the scan hit its budget (see `ScanLimits` in disk.server.ts)
+   *  and these numbers are a floor, not a total. Shown, never swallowed. */
+  partial: boolean;
 };
 
 export const disk = cell("disk", {
@@ -36,6 +39,7 @@ export const disk = cell("disk", {
     entries: [] as Entry[],
     scanning: false,
     error: null as string | null,
+    partial: false,
   },
 
   // "self": opening a new folder aborts the scan still running — newest wins.
@@ -74,16 +78,21 @@ export const disk = cell("disk", {
       s.path = target;
       s.entries = [];
       s.error = null;
+      s.partial = false;
       s.scanning = true;
       s.$commit!();
 
       try {
-        const entries = await io.scanFolders(target, s.$signal!);
+        const r = await io.scanFolders(target, s.$signal!);
         // Superseded or cancelled while we were away? Just leave: the
         // transaction discards everything this call buffered after $commit —
         // the newer open() (or stop()) owns the state now.
         if (s.$signal!.aborted) return;
-        s.entries = entries;
+        s.entries = r.entries;
+        // A capped scan reports that it was capped. The alternative — showing
+        // a floor as if it were a total — is the quiet failure this whole
+        // example is a lesson against.
+        s.partial = r.partial;
       } catch (e) {
         if (s.$signal!.aborted) return;
         s.error = e instanceof Error ? e.message : String(e);

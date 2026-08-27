@@ -1,7 +1,7 @@
 import { assertEquals, assertExists } from "@std/assert";
 import { Window } from "happy-dom";
-import { Fragment, h, type VNode } from "../src/air/vdom.ts";
-import { _diff, _render } from "../src/air/vdom.ts";
+import { ErrorBoundary, Fragment, h, type VNode } from "../src/air/vdom.ts";
+import { _diff, _render, setDevMode } from "../src/air/vdom.ts";
 
 // happy-dom timers drained via win.happyDOM.close() — sanitizers re-enabled
 
@@ -546,55 +546,65 @@ Deno.test({
 
 Deno.test({
   name:
-    "AIO-116: diffUnkeyed must not set textContent on element nodes when cursor desyncs",
+    "AIO-116: a desynced text cursor keeps the element it lands on, and warns",
   async fn() {
+    // The previous version of this test was VACUOUS: it looped
+    // `if (node.nodeName === "B")` over the children, but the diff removed the
+    // <b> outright, so the assertion body never ran and the test passed while
+    // the element was being deleted. Assert on the node directly.
     const { document: doc, ctx, cleanup } = createDOM();
     const root = doc.createElement("div");
     doc.body.appendChild(root);
+    const warnings: string[] = [];
+    const origWarn = console.warn;
+    setDevMode(true);
+    console.warn = (...a: unknown[]) => warnings.push(a.map(String).join(" "));
 
-    // Initial render: parent with text child + element child
-    const v1 = h("div", null, "hello", h("span", null, "world"));
-    _render(root, v1, null, ctx);
-    const container = root.firstChild as HTMLElement;
+    try {
+      // Initial render: parent with text child + element child
+      const v1 = h("div", null, "hello", h("span", null, "world"));
+      _render(root, v1, null, ctx);
+      const container = root.firstChild as HTMLElement;
 
-    // Externally mutate DOM: replace text node with an element
-    // Simulates cursor desync (Fragment shift, external mutation, etc.)
-    const textNode = container.childNodes[0]!;
-    const injected = doc.createElement("b");
-    injected.innerHTML = "<em>keep</em><strong>this</strong>";
-    container.replaceChild(injected, textNode);
-    // DOM: [<b><em>keep</em><strong>this</strong></b>, <span>world</span>]
-    assertEquals(container.childNodes[0]!.nodeName, "B");
-    assertEquals(
-      (container.childNodes[0] as HTMLElement).childNodes.length,
-      2,
-      "<b> has 2 children before diff",
-    );
+      // Externally mutate DOM: replace the text node with an element.
+      // Simulates cursor desync (Fragment shift, external mutation, etc.)
+      const textNode = container.childNodes[0]!;
+      const injected = doc.createElement("b");
+      injected.innerHTML = "<em>keep</em><strong>this</strong>";
+      container.replaceChild(injected, textNode);
+      assertEquals(container.childNodes[0]!.nodeName, "B");
 
-    // Re-render: old vnode says "hello" (text), new says "updated" (text)
-    // BUG: cursor points to <b>, code sets <b>.textContent = "updated"
-    //       which DESTROYS <b>'s children (<em> and <strong>)
-    const v2 = h("div", null, "updated", h("span", null, "world"));
-    _diff(root, v2, v1, ctx);
+      // Re-render: old vnode says "hello" (text), new says "updated" (text).
+      const v2 = h("div", null, "updated", h("span", null, "world"));
+      _diff(root, v2, v1, ctx);
 
-    // After fix: the <b> element's children should NOT be destroyed.
-    // The diff should either skip the element or create a fresh text node.
-    // Check that no element node had its children wiped:
-    let elementCorrupted = false;
-    for (let i = 0; i < container.childNodes.length; i++) {
-      const node = container.childNodes[i]!;
-      if (node.nodeType === 1 && node.nodeName === "B") {
-        // If <b> survived, it should still have its original 2 children
-        if ((node as HTMLElement).childNodes.length < 2) {
-          elementCorrupted = true;
-        }
-      }
+      // The <b> is owned by nobody the reconciler knows about, but it is a real
+      // element with real children: deleting it silently is the bug. It stays.
+      assertEquals(
+        injected.parentNode,
+        container,
+        "the element the cursor landed on must NOT be deleted",
+      );
+      assertEquals(
+        injected.childNodes.length,
+        2,
+        "<b> keeps its own children",
+      );
+      // The new text is written positionally, before the node in the way.
+      assertEquals(container.childNodes[0]!.nodeType, 3);
+      assertEquals(container.childNodes[0]!.textContent, "updated");
+      assertEquals(container.childNodes[1], injected);
+      // And it is LOUD in dev — a silent desync is the failure this project
+      // forbids.
+      assertEquals(
+        warnings.some((w) => w.includes("instead of its text node")),
+        true,
+        `expected a dev warning, got ${JSON.stringify(warnings)}`,
+      );
+    } finally {
+      console.warn = origWarn;
+      setDevMode(false);
     }
-    assertEquals(
-      elementCorrupted,
-      false,
-      "element node children should not be destroyed by textContent assignment on wrong nodeType",
-    );
 
     await cleanup();
   },
@@ -629,6 +639,565 @@ Deno.test({
     const r3 = h("div", null, h("span", null, h("i", null)));
     _diff(root, r3, r2, ctx);
     assertEquals(root.innerHTML, "<div><span><i></i></span></div>");
+    await cleanup();
+  },
+});
+
+// ── Controlled props are re-asserted from the LIVE element ──────────────
+//
+// `value` and `checked` are the two props the USER changes behind the
+// reconciler's back: the browser writes them on every keystroke and click,
+// BEFORE the handler runs. When the handler then REFUSES the input — a length
+// cap, a validator, an unchanged cell — the next render sees
+// `prev.value === next.value` and used to write nothing, so the screen kept
+// what state REJECTED. Measured: state "ab", DOM "abcdef", permanently — and
+// `am surface` / `ui.X.value` then report a value the cell never accepted.
+Deno.test({
+  name: "controlled input: a REJECTED keystroke is undone on the next render",
+  async fn() {
+    const { document: doc, cleanup } = createDOM();
+    const { _setDocument, _unmount, mount } = await import(
+      "../src/air/aio-renderer.ts"
+    );
+    const { signal } = await import("../src/state/signal.ts");
+    _setDocument(doc);
+    const root = doc.createElement("div");
+    doc.body.appendChild(root);
+
+    const text = signal("");
+    const rejected = signal(0);
+    const App = () =>
+      h(
+        "div",
+        null,
+        h("input", {
+          value: text.value,
+          "aria-label": "t",
+          onInput: (e: Event) => {
+            const v = (e.target as HTMLInputElement).value;
+            if (v.length <= 3) text.set(v);
+            else rejected.set(rejected.peek() + 1); // refuse, show a hint
+          },
+        }),
+        h("span", null, `rejected:${rejected.value}`),
+      );
+
+    const handle = mount(root, App);
+    const input = root.querySelector("input") as HTMLInputElement;
+    const fire = () =>
+      input.dispatchEvent(
+        // deno-lint-ignore no-explicit-any
+        new (doc.defaultView as any).Event("input", { bubbles: true }),
+      );
+
+    input.value = "ab";
+    fire();
+    await new Promise((r) => setTimeout(r, 5));
+    handle._flush();
+    assertEquals(text.peek(), "ab");
+    assertEquals(input.value, "ab");
+
+    input.value = "abcdef"; // over the cap — the handler refuses it
+    fire();
+    await new Promise((r) => setTimeout(r, 5));
+    handle._flush();
+    await new Promise((r) => setTimeout(r, 5));
+    assertEquals(text.peek(), "ab", "state refused the input");
+    assertEquals(input.value, "ab", "and the DOM shows what state holds");
+
+    _unmount(handle);
+    await cleanup();
+  },
+});
+
+Deno.test({
+  name: "controlled checkbox: a REJECTED click is undone on the next render",
+  async fn() {
+    const { document: doc, cleanup } = createDOM();
+    const { _setDocument, _unmount, mount } = await import(
+      "../src/air/aio-renderer.ts"
+    );
+    const { signal } = await import("../src/state/signal.ts");
+    _setDocument(doc);
+    const root = doc.createElement("div");
+    doc.body.appendChild(root);
+
+    const on = signal(false);
+    const tries = signal(0);
+    const App = () =>
+      h(
+        "div",
+        null,
+        h("input", {
+          type: "checkbox",
+          "aria-label": "c",
+          checked: on.value,
+          onChange: () => tries.set(tries.peek() + 1), // always refuse
+        }),
+        h("span", null, `t:${tries.value}`),
+      );
+
+    const handle = mount(root, App);
+    const box = root.querySelector("input") as HTMLInputElement;
+    box.checked = true;
+    box.dispatchEvent(
+      // deno-lint-ignore no-explicit-any
+      new (doc.defaultView as any).Event("input", { bubbles: true }),
+    );
+    await new Promise((r) => setTimeout(r, 5));
+    handle._flush();
+    assertEquals(on.peek(), false);
+    assertEquals(box.checked, false, "the DOM shows what state holds");
+
+    _unmount(handle);
+    await cleanup();
+  },
+});
+
+Deno.test({
+  name: "controlled select: a REJECTED choice is undone on the next render",
+  async fn() {
+    const { document: doc, cleanup } = createDOM();
+    const { _setDocument, _unmount, mount } = await import(
+      "../src/air/aio-renderer.ts"
+    );
+    const { signal } = await import("../src/state/signal.ts");
+    _setDocument(doc);
+    const root = doc.createElement("div");
+    doc.body.appendChild(root);
+
+    const picked = signal("a");
+    const tries = signal(0);
+    const App = () =>
+      h(
+        "div",
+        null,
+        h(
+          "select",
+          {
+            "aria-label": "s",
+            value: picked.value,
+            onChange: () => tries.set(tries.peek() + 1), // always refuse
+          },
+          h("option", { value: "a" }, "A"),
+          h("option", { value: "b" }, "B"),
+        ),
+        h("span", null, `t:${tries.value}`),
+      );
+
+    const handle = mount(root, App);
+    const sel = root.querySelector("select") as HTMLSelectElement;
+    assertEquals(sel.value, "a");
+    sel.value = "b";
+    sel.dispatchEvent(
+      // deno-lint-ignore no-explicit-any
+      new (doc.defaultView as any).Event("input", { bubbles: true }),
+    );
+    await new Promise((r) => setTimeout(r, 5));
+    handle._flush();
+    assertEquals(picked.peek(), "a");
+    assertEquals(sel.value, "a", "the DOM shows what state holds");
+
+    _unmount(handle);
+    await cleanup();
+  },
+});
+
+// ── Deferred exit removal is visible to the reconciler ──────────────────
+//
+// A node kept in the DOM for its exit animation leaves the vnode tree, and
+// nothing used to MARK it — so the positional model went out of step with the
+// DOM for the whole animation. One cause, several symptoms; these pin them.
+function exitCtx(doc: Document, ms = 50) {
+  return {
+    doc,
+    onBeforeRemove: () => new Promise<void>((r) => setTimeout(r, ms)),
+  } as unknown as { doc: Document };
+}
+
+Deno.test({
+  name: "exit animation: the dying keyed row stays in place, it does not move",
+  async fn() {
+    const { document: doc, cleanup } = createDOM();
+    const root = doc.createElement("div");
+    doc.body.appendChild(root);
+    const ctx = exitCtx(doc);
+    const mk = (keys: string[]) =>
+      h("div", null, ...keys.map((k) => h("p", { key: k }, k)));
+
+    const v1 = mk(["a", "b", "c"]);
+    _render(root, v1, null, ctx);
+    const box = root.firstChild as HTMLElement;
+    assertEquals(box.textContent, "abc");
+
+    _diff(root, mk(["a", "c"]), v1, ctx);
+    // Before the fix this read "acb" — `c` was placed against an anchor that
+    // was really the dying row, so the fade happened at the BOTTOM of the list.
+    assertEquals(box.textContent, "abc", "b fades where it stands");
+
+    await new Promise((r) => setTimeout(r, 80));
+    assertEquals(box.textContent, "ac", "and then it is gone");
+    await cleanup();
+  },
+});
+
+Deno.test({
+  name: "exit animation: re-adding a key mid-exit replaces the dying row",
+  async fn() {
+    const { document: doc, cleanup } = createDOM();
+    const root = doc.createElement("div");
+    doc.body.appendChild(root);
+    const ctx = exitCtx(doc);
+    const mk = (keys: string[]) =>
+      h("div", null, ...keys.map((k) => h("p", { key: k }, k)));
+
+    const v1 = mk(["a", "b"]);
+    _render(root, v1, null, ctx);
+    const box = root.firstChild as HTMLElement;
+    const v2 = mk(["b"]);
+    _diff(root, v2, v1, ctx);
+    // "a" is still on screen, fading. Put it back before it finishes.
+    _diff(root, mk(["a", "b"]), v2, ctx);
+    // Before the fix: "<p>a</p><p>b</p><p>a</p>" — two rows for one key.
+    assertEquals(box.innerHTML, "<p>a</p><p>b</p>");
+
+    await new Promise((r) => setTimeout(r, 80));
+    assertEquals(
+      box.innerHTML,
+      "<p>a</p><p>b</p>",
+      "and the exit is cancelled",
+    );
+    await cleanup();
+  },
+});
+
+Deno.test({
+  name: "exit animation: an unkeyed list reconciles around the dying node",
+  async fn() {
+    const { document: doc, cleanup } = createDOM();
+    const root = doc.createElement("div");
+    doc.body.appendChild(root);
+    const ctx = exitCtx(doc);
+
+    const v1 = h("div", null, h("p", null, "one"), h("p", null, "two"));
+    _render(root, v1, null, ctx);
+    const box = root.firstChild as HTMLElement;
+    const v2 = h("div", null, h("p", null, "one"));
+    _diff(root, v2, v1, ctx);
+    // The remaining row keeps updating while the other one fades out.
+    const v3 = h("div", null, h("p", null, "ONE"));
+    _diff(root, v3, v2, ctx);
+    assertEquals(box.innerHTML, "<p>ONE</p><p>two</p>");
+
+    await new Promise((r) => setTimeout(r, 80));
+    assertEquals(box.innerHTML, "<p>ONE</p>");
+    await cleanup();
+  },
+});
+
+// The dev child-desync tripwire counts DOM nodes against vnode children. A
+// node held back for its exit animation belongs to no vnode, so counting it
+// made the tripwire cry "this is an aio bug; please report" at a perfectly
+// legitimate <Transition> — the loudest possible false alarm.
+Deno.test({
+  name: "exit animation: the child-desync tripwire does not false-alarm",
+  async fn() {
+    const { document: doc, cleanup } = createDOM();
+    const root = doc.createElement("div");
+    doc.body.appendChild(root);
+    const ctx = exitCtx(doc);
+    const warnings: string[] = [];
+    const origWarn = console.warn;
+    setDevMode(true);
+    console.warn = (...a: unknown[]) => warnings.push(a.map(String).join(" "));
+    try {
+      const mk = (keys: string[]) =>
+        h("div", null, ...keys.map((k) => h("p", { key: k }, k)));
+      const v1 = mk(["a", "b", "c"]);
+      _render(root, v1, null, ctx);
+      // The FIRST node exits, so the region no longer starts where the DOM
+      // does — the shape that made the tripwire report a phantom desync.
+      const v2 = mk(["b", "c"]);
+      _diff(root, v2, v1, ctx);
+      _diff(root, mk(["c", "b"]), v2, ctx); // reorder while a is still fading
+      assertEquals(
+        warnings.filter((w) => w.includes("desynced")),
+        [],
+        `false alarm: ${JSON.stringify(warnings)}`,
+      );
+    } finally {
+      console.warn = origWarn;
+      setDevMode(false);
+    }
+    await new Promise((r) => setTimeout(r, 80));
+    await cleanup();
+  },
+});
+
+// ── The same controlled props, bound to a SIGNAL ────────────────────────
+//
+// `applyProps` skips every signal-valued prop ("the binding owns it"), and what
+// the binding owns it through is an EFFECT — which runs when the SIGNAL
+// changes and never otherwise. The user typing into `<input value={sig}>`
+// changes the DOM, not the signal, so a refused keystroke had NO path back:
+// `value={s.x}` self-corrected on the next render and `value={sig}` did not,
+// which is the same divergence-by-signal the prop rule was unified to end.
+Deno.test({
+  name: "controlled input bound to a SIGNAL: a REJECTED keystroke is undone",
+  async fn() {
+    const { document: doc, cleanup } = createDOM();
+    const { _setDocument, _unmount, mount } = await import(
+      "../src/air/aio-renderer.ts"
+    );
+    const { signal } = await import("../src/state/signal.ts");
+    _setDocument(doc);
+    const root = doc.createElement("div");
+    doc.body.appendChild(root);
+
+    const text = signal("");
+    const rejected = signal(0);
+    const App = () =>
+      h(
+        "div",
+        null,
+        h("input", {
+          value: text, // the SIGNAL itself, not `text.value`
+          "aria-label": "t",
+          onInput: (e: Event) => {
+            const v = (e.target as HTMLInputElement).value;
+            if (v.length <= 3) text.set(v);
+            else rejected.set(rejected.peek() + 1); // refuse, show a hint
+          },
+        }),
+        h("span", null, `rejected:${rejected.value}`),
+      );
+
+    const handle = mount(root, App);
+    const input = root.querySelector("input") as HTMLInputElement;
+    const fire = () =>
+      input.dispatchEvent(
+        // deno-lint-ignore no-explicit-any
+        new (doc.defaultView as any).Event("input", { bubbles: true }),
+      );
+
+    input.value = "ab";
+    fire();
+    await new Promise((r) => setTimeout(r, 5));
+    handle._flush();
+    assertEquals(text.peek(), "ab");
+    assertEquals(input.value, "ab");
+
+    input.value = "abcdef"; // over the cap — the handler refuses it
+    fire();
+    await new Promise((r) => setTimeout(r, 5));
+    handle._flush();
+    await new Promise((r) => setTimeout(r, 5));
+    assertEquals(text.peek(), "ab", "state refused the input");
+    assertEquals(input.value, "ab", "and the DOM shows what state holds");
+
+    _unmount(handle);
+    await cleanup();
+  },
+});
+
+Deno.test({
+  name: "controlled checkbox bound to a SIGNAL: a REJECTED click is undone",
+  async fn() {
+    const { document: doc, cleanup } = createDOM();
+    const { _setDocument, _unmount, mount } = await import(
+      "../src/air/aio-renderer.ts"
+    );
+    const { signal } = await import("../src/state/signal.ts");
+    _setDocument(doc);
+    const root = doc.createElement("div");
+    doc.body.appendChild(root);
+
+    const on = signal(false);
+    const tries = signal(0);
+    const App = () =>
+      h(
+        "div",
+        null,
+        h("input", {
+          type: "checkbox",
+          "aria-label": "c",
+          checked: on, // the SIGNAL itself
+          onChange: () => tries.set(tries.peek() + 1), // always refuse
+        }),
+        h("span", null, `t:${tries.value}`),
+      );
+
+    const handle = mount(root, App);
+    const box = root.querySelector("input") as HTMLInputElement;
+    box.checked = true;
+    box.dispatchEvent(
+      // deno-lint-ignore no-explicit-any
+      new (doc.defaultView as any).Event("input", { bubbles: true }),
+    );
+    await new Promise((r) => setTimeout(r, 5));
+    handle._flush();
+    assertEquals(on.peek(), false);
+    assertEquals(box.checked, false, "the DOM shows what state holds");
+
+    _unmount(handle);
+    await cleanup();
+  },
+});
+
+Deno.test({
+  name: "controlled select bound to a SIGNAL: a REJECTED choice is undone",
+  async fn() {
+    const { document: doc, cleanup } = createDOM();
+    const { _setDocument, _unmount, mount } = await import(
+      "../src/air/aio-renderer.ts"
+    );
+    const { signal } = await import("../src/state/signal.ts");
+    _setDocument(doc);
+    const root = doc.createElement("div");
+    doc.body.appendChild(root);
+
+    const picked = signal("a");
+    const tries = signal(0);
+    const App = () =>
+      h(
+        "div",
+        null,
+        h(
+          "select",
+          {
+            "aria-label": "s",
+            value: picked, // the SIGNAL itself
+            onChange: () => tries.set(tries.peek() + 1), // always refuse
+          },
+          h("option", { value: "a" }, "A"),
+          h("option", { value: "b" }, "B"),
+        ),
+        h("span", null, `t:${tries.value}`),
+      );
+
+    const handle = mount(root, App);
+    const sel = root.querySelector("select") as HTMLSelectElement;
+    assertEquals(sel.value, "a");
+    sel.value = "b";
+    sel.dispatchEvent(
+      // deno-lint-ignore no-explicit-any
+      new (doc.defaultView as any).Event("input", { bubbles: true }),
+    );
+    await new Promise((r) => setTimeout(r, 5));
+    handle._flush();
+    assertEquals(picked.peek(), "a");
+    assertEquals(sel.value, "a", "the DOM shows what state holds");
+
+    _unmount(handle);
+    await cleanup();
+  },
+});
+
+// An accepted keystroke must NOT be rewritten — the re-assert is a drift check,
+// not an unconditional write, because assigning an <input>'s `value` its own
+// string still moves the caret to the end.
+Deno.test({
+  name: "controlled signal prop: an ACCEPTED value is not rewritten",
+  async fn() {
+    const { document: doc, cleanup } = createDOM();
+    const { _setDocument, _unmount, mount } = await import(
+      "../src/air/aio-renderer.ts"
+    );
+    const { signal } = await import("../src/state/signal.ts");
+    _setDocument(doc);
+    const root = doc.createElement("div");
+    doc.body.appendChild(root);
+
+    const text = signal("ab");
+    const gen = signal(0);
+    const App = () =>
+      h(
+        "div",
+        null,
+        h("input", { value: text, "aria-label": "t" }),
+        h("span", null, `g:${gen.value}`),
+      );
+    const handle = mount(root, App);
+    const input = root.querySelector("input") as HTMLInputElement;
+    let writes = 0;
+    Object.defineProperty(input, "value", {
+      configurable: true,
+      get: () => "ab",
+      set: () => writes++,
+    });
+    gen.set(1); // a render that has nothing to do with the input
+    handle._flush();
+    await new Promise((r) => setTimeout(r, 5));
+    assertEquals(
+      writes,
+      0,
+      "the element already shows it — no write, no caret jump",
+    );
+
+    _unmount(handle);
+    await cleanup();
+  },
+});
+
+// ── Exit animations inside a BOUNDARY region ────────────────────────────
+//
+// `_nextLive`/`_firstLive` made every positional walk step over a node that is
+// only finishing its exit animation — except the boundary's, which walked
+// `startAnchor.nextSibling` / `parent.firstChild` directly. So inside an
+// ErrorBoundary/Suspense region the positional model was still one node out,
+// and the region-sweep tore a dying node off the screen (leaking the
+// exiting-node counter with it, which slows every later walk in the process).
+Deno.test({
+  name: "exit animation: a dying node inside an ErrorBoundary region survives",
+  async fn() {
+    const { document: doc, cleanup } = createDOM();
+    const root = doc.createElement("div");
+    doc.body.appendChild(root);
+    const ctx = exitCtx(doc);
+
+    const Boom = () => {
+      throw new Error("nope");
+    };
+    const mk = (keys: string[], boom: boolean) =>
+      h(
+        "div",
+        null,
+        h("span", null, "BEFORE"),
+        h(
+          ErrorBoundary,
+          { fallback: () => h("span", null, "FALLBACK") },
+          ...keys.map((k) => h("p", { key: k }, k)),
+          ...(boom ? [h(Boom as never, null)] : []),
+        ),
+        h("span", null, "AFTER"),
+      );
+
+    const v1 = mk(["a", "b"], false);
+    _render(root, v1, null, ctx);
+    const box = root.firstChild as HTMLElement;
+    assertEquals(box.textContent, "BEFOREabAFTER");
+
+    const v2 = mk(["b"], false);
+    _diff(root, v2, v1, ctx); // "a" leaves the model and starts fading
+    assertEquals(box.textContent, "BEFOREabAFTER", "a fades where it stands");
+
+    // Now the boundary fails while "a" is still on screen.
+    const v3 = mk(["b"], true);
+    _diff(root, v3, v2, ctx);
+    assertEquals(
+      box.textContent,
+      "BEFOREabFALLBACKAFTER",
+      "the fallback lands in the boundary's slot; the node already fading and " +
+        "the one the boundary just retired both finish their exits, and AFTER " +
+        "is untouched",
+    );
+
+    await new Promise((r) => setTimeout(r, 80));
+    assertEquals(
+      box.textContent,
+      "BEFOREFALLBACKAFTER",
+      "and then the exit finishes on its own",
+    );
     await cleanup();
   },
 });

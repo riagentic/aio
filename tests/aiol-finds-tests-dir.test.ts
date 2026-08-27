@@ -113,3 +113,59 @@ Deno.test("aiol: app-code checks still ignore test files", async () => {
     await Deno.remove(dir, { recursive: true });
   }
 });
+
+// The other direction, and the quieter one: "is this cell tested?" ended in a
+// bare `content.includes(f.name)` — a SUBSTRING test. A cell named `app` or
+// `view` matched the word inside `src/app.ts`, `snapshot`, `viewer`… in any
+// test file that existed, so it was permanently "tested" and the rule could
+// never fire for it. A rule that cannot fire looks exactly like a rule that
+// found nothing.
+Deno.test("aiol: an untested cell named `app` is not 'tested' by a substring", async () => {
+  const dir = await project({
+    "deno.json": JSON.stringify({ imports: { aio: "jsr:@riagentic/aio@1" } }),
+    "src/app-cell.ts":
+      `import { cell } from "aio";\nexport const appCell = cell("app", { state: { n: 0 }, methods: { go(s: { n: number }) { s.n++; } } });\n`,
+    // Names `src/app.ts` and `snapshot` — neither is a use of the cell `app`.
+    "tests/other.test.ts":
+      `import { hw } from "../src/hw.ts";\nDeno.test("boots src/app.ts and takes a snapshot", () => { hw; });\n`,
+    "src/hw.ts": CELL,
+  });
+  try {
+    const { ctx, report } = await buildContext(dir);
+    const { checkTesting } = await import("../aiol/checks.ts");
+    await checkTesting(ctx);
+    const untested = report.issues.filter((i) =>
+      i.message.includes("has no test file")
+    ).map((i) => i.message);
+    assert(
+      untested.some((m) => m.includes('cell "app"')),
+      `the cell "app" has no test and must be reported:\n${
+        untested.join("\n")
+      }`,
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("aiol: a cell named as a whole word IS counted as tested", async () => {
+  const dir = await project({
+    "deno.json": JSON.stringify({ imports: { aio: "jsr:@riagentic/aio@1" } }),
+    "src/app-cell.ts":
+      `import { cell } from "aio";\nexport const appCell = cell("app", { state: { n: 0 }, methods: { go(s: { n: number }) { s.n++; } } });\n`,
+    "tests/app.test.ts":
+      `import { appCell } from "../src/app-cell.ts";\nDeno.test("app", () => { appCell; });\n`,
+  });
+  try {
+    const { ctx, report } = await buildContext(dir);
+    const { checkTesting } = await import("../aiol/checks.ts");
+    await checkTesting(ctx);
+    assertEquals(
+      report.issues.filter((i) => i.message.includes("has no test file"))
+        .length,
+      0,
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});

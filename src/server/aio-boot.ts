@@ -5,7 +5,7 @@ import {
   createPersistenceManager,
   type PersistenceManager,
 } from "./persistence.ts";
-import { createJournal, type Journal } from "./journal.ts";
+import { createJournal, type Journal, journalWatermarkKey } from "./journal.ts";
 import type { SkvInstance } from "./skv.ts";
 import { migrateLegacyKv, SKV_SCHEMA, sqliteKv } from "./skv-sqlite.ts";
 import { createDB, type DB, initSchema, loadTables } from "../db/mod.ts";
@@ -24,6 +24,7 @@ import {
   createAioError,
   reportError as reportAioError,
   type ReportErrorOpts,
+  teachableError,
 } from "../diagnostics/error.ts";
 import { makeRedactor } from "../diagnostics/redact.ts";
 import { migrateSchema, PERSIST_SCHEMA_VERSION } from "./persist-schema.ts";
@@ -191,6 +192,9 @@ export async function replaySyncOps<S>(
     let current: number | undefined;
     const failures: string[] = [];
     const skipped: { older: number; newer: number } = { older: 0, newer: 0 };
+    // Ops stamped with a version the slice has already been migrated past —
+    // the downgrade signature, and its own remedy (see `fix` below).
+    let downgradeWrites = 0;
     try {
       const snap = await loadSnapshot(db, cell);
       if (snap) {
@@ -287,11 +291,20 @@ export async function replaySyncOps<S>(
 
     let applied = 0;
     if (failures.length === 0 && ops.length > 0) {
-      // Version order first (a shape boundary is a migration point), dispatch
-      // order within a version — the stable sort keeps server_ts order.
-      const ordered = ops
-        .map((op, i) => ({ op, v: resolveVersion(op.version), i }))
-        .sort((a, b) => a.v - b.v || a.i - b.i);
+      // CHRONOLOGICAL order — `server_ts`, which is the order the live server
+      // applied them and the order `loadOpsSince` already returns. Nothing is
+      // re-sorted here.
+      //
+      // This used to sort by the op's `version` first, on the theory that a
+      // shape boundary is a migration point and version is monotonic in
+      // server_ts. It is monotonic only while an older build never runs again
+      // — and one does: a downgrade quarantines the cell and keeps stamping
+      // fresh ops with the OLDER version, which then sorted ahead of
+      // chronologically earlier ops. The replay folded a sequence the server
+      // never applied (reducers are not commutative), silently, forever.
+      // Version now drives the migration ladder only: it says WHEN to migrate
+      // between ops, never what order to fold them in.
+      const ordered = ops.map((op) => ({ op, v: resolveVersion(op.version) }));
       let first: string | null = null;
       for (const { op, v } of ordered) {
         if (v > declared) {
@@ -312,6 +325,18 @@ export async function replaySyncOps<S>(
           migrateSlice(current);
           current = v;
           if (failures.length > 0) break;
+        } else if (v < current) {
+          // An op written under a shape the state has ALREADY been migrated
+          // past — chronologically later, structurally older. There is no
+          // honest way to fold it: `onMigrate` runs on the whole slice, not on
+          // one op, and the slice is already forward. It means an older build
+          // wrote to this log after a newer one did. Refuse it by name.
+          skipped.older++;
+          downgradeWrites++;
+          first ??= `op ${op.id} (${op.cell}:${op.action}) was written by ` +
+            `v${v} AFTER v${current} ops — an older build wrote to this ` +
+            `log, and the state has already been migrated to v${current}`;
+          continue;
         }
         try {
           next = unwrapReduced(reduce(next, {
@@ -350,15 +375,19 @@ export async function replaySyncOps<S>(
     // Three different remedies for three different causes — a wrong fix line
     // is worse than none (the reader trusts it and bumps a version that only
     // needed the newer build back).
-    const fix =
-      skipped.newer > 0 && skipped.older === 0 && failures.length === 0
-        ? `This build declares "${cell}" version ${declared} but the ` +
-          `log holds ops from a NEWER shape — run the build that wrote them ` +
-          `(a downgrade never folds forward), or bump this build's version.`
-        : hook
-        ? `Fix "${cell}"'s onMigrate/methods so the op-log folds, then restart.`
-        : `Bump "${cell}"'s \`version\` and add an onMigrate(state, from) that ` +
-          `converts the older shape, then restart.`;
+    const fix = downgradeWrites > 0
+      ? `An OLDER build wrote to "${cell}"'s op-log after a newer one — its ` +
+        `ops cannot be folded onto a shape already migrated forward. Run only ` +
+        `the newer build (or restore the log from before the downgrade), then ` +
+        `restart.`
+      : skipped.newer > 0 && skipped.older === 0 && failures.length === 0
+      ? `This build declares "${cell}" version ${declared} but the ` +
+        `log holds ops from a NEWER shape — run the build that wrote them ` +
+        `(a downgrade never folds forward), or bump this build's version.`
+      : hook
+      ? `Fix "${cell}"'s onMigrate/methods so the op-log folds, then restart.`
+      : `Bump "${cell}"'s \`version\` and add an onMigrate(state, from) that ` +
+        `converts the older shape, then restart.`;
     const what =
       `${failed}/${total} op(s) could not be folded into "${cell}" ` +
       `(${skipped.older} older-shape skipped, ${skipped.newer} newer-shape ` +
@@ -388,8 +417,10 @@ export async function replaySyncOps<S>(
       `sync: cell "${cell}" QUARANTINED — ${what}. The cell runs at its ` +
         `${seeded ? "last snapshot" : "declared defaults"}; its snapshot ` +
         `will not be rewritten and its op-log not compacted, so nothing on ` +
-        `disk is lost — but writes made now are not durable across a ` +
-        `restart. ${fix}`,
+        `disk is lost — and every write to it is REFUSED at the door with an ` +
+        `\`op-rejected\` carrying the reason, rather than acknowledged and ` +
+        `then lost on the next restart. The cell is read-only until this is ` +
+        `fixed. ${fix}`,
     );
   }
   return next;
@@ -483,7 +514,7 @@ export function resolveDbBindings(
         !Array.isArray(slice[field])
       ) {
         throw new Error(
-          `[aio] db: table key "${key}" must name an ARRAY field of a cell ` +
+          `db: table key "${key}" must name an ARRAY field of a cell ` +
             `("<cell>.<field>"), but ${
               !_isObj(slice)
                 ? `there is no cell "${cellId}"`
@@ -505,7 +536,7 @@ export function resolveDbBindings(
       );
       if (owners.length > 1) {
         throw new Error(
-          `[aio] db: table "${key}" is ambiguous — cells ${
+          `db: table "${key}" is ambiguous — cells ${
             owners.map((o) => `"${o}"`).join(" and ")
           } each declare an array field "${key}". Say which one: ` +
             `db: { "${owners[0]}.${key}": table({…}) }.`,
@@ -519,7 +550,7 @@ export function resolveDbBindings(
     const prev = declaredBy.get(table);
     if (prev !== undefined) {
       throw new Error(
-        `[aio] db: keys "${prev}" and "${key}" both map to SQL table ` +
+        `db: keys "${prev}" and "${key}" both map to SQL table ` +
           `"${table}" — one of them would silently share the other's rows. ` +
           `Rename one.`,
       );
@@ -789,6 +820,43 @@ export async function bootStorage<S>(
   );
 
   let asyncDb: DB | null = null;
+
+  // THE opener for the app database — because there are TWO paths that open it
+  // (this one, for `db:` tables and sync cells; and the persistence block in
+  // section 4, for an app that only stores state) and `checkIntegrityOnBoot`
+  // was wired into only ONE of them. So for the DEFAULT app shape — no `db:`
+  // key, no sync cell — the documented integrity check was a silent no-op: a
+  // corrupt `state.db` with a perfectly good `state.db.snapshot` beside it
+  // threw `persistence unavailable: disk I/O error` and blamed file
+  // permissions, quarantined nothing, restored nothing, and named a cause that
+  // was not the cause. Verified end to end: with the check wired into both
+  // paths the file is quarantined and the snapshot restored, as documented.
+  // One opener means the two paths cannot disagree about this again.
+  //
+  // Integrity runs BEFORE any schema work: a damaged file must be dealt with
+  // before anything writes to it. When the file was quarantined (and possibly
+  // replaced from a snapshot) the handle is dead — reopen on what is there
+  // now, which may be the restored snapshot or an empty database.
+  const openAppDb = async (dbPath: string): Promise<DB> => {
+    const open = () =>
+      createDB(dbPath, dbPragmas ? { pragmas: dbPragmas } : {});
+    const db = open();
+    if (!cfg.checkIntegrityOnBoot) return db;
+    const { checkAndRecover } = await import("./db-integrity.ts");
+    const outcome = await checkAndRecover({
+      db,
+      dbPath,
+      log: {
+        info: (m: string) => log.info(m),
+        warn: (m: string) => log.warn(m),
+        error: (m: string) => log.error(m),
+      },
+    });
+    return outcome.action === "restored" || outcome.action === "quarantined"
+      ? open()
+      : db;
+  };
+
   // Sync cells need the SQLite op-log even without user tables — a
   // `sync: true` cell must never silently degrade because `db:` is absent.
   if (dbKeys.length > 0 || syncCellIds.length > 0) {
@@ -796,26 +864,7 @@ export async function bootStorage<S>(
     // OPENING the file may legitimately degrade (no permission, read-only
     // medium): the app runs from memory and says so.
     try {
-      asyncDb = createDB(dbPath, dbPragmas ? { pragmas: dbPragmas } : {});
-      // Integrity BEFORE schema: a damaged file must be dealt with before
-      // anything writes to it. When the file was quarantined (and possibly
-      // replaced from a snapshot) the handle is dead — reopen on what is there
-      // now, which may be the restored snapshot or an empty database.
-      if (cfg.checkIntegrityOnBoot) {
-        const { checkAndRecover } = await import("./db-integrity.ts");
-        const outcome = await checkAndRecover({
-          db: asyncDb,
-          dbPath,
-          log: {
-            info: (m: string) => log.info(m),
-            warn: (m: string) => log.warn(m),
-            error: (m: string) => log.error(m),
-          },
-        });
-        if (outcome.action === "restored" || outcome.action === "quarantined") {
-          asyncDb = createDB(dbPath, dbPragmas ? { pragmas: dbPragmas } : {});
-        }
-      }
+      asyncDb = await openAppDb(dbPath);
     } catch (e) {
       // Same classification as the persistence block below: a compiled binary
       // whose db worker was never embedded cannot be degraded around — the
@@ -990,9 +1039,11 @@ export async function bootStorage<S>(
   if (shouldPersist) {
     try {
       if (!asyncDb) {
-        // Persistence needs the app db even without user tables/sync cells.
+        // Persistence needs the app db even without user tables/sync cells —
+        // and this is the path the DEFAULT app takes, so it gets the same
+        // integrity check as the one above (see `openAppDb`).
         const dbPath = dbPathOverride ?? appDirs(appId, cfg.appDir).stateDb;
-        asyncDb = createDB(dbPath, dbPragmas ? { pragmas: dbPragmas } : {});
+        asyncDb = await openAppDb(dbPath);
         log.debug(`sqlite: opened for persistence at ${dbPath}`);
       }
       await asyncDb.execute(SKV_SCHEMA);
@@ -1267,15 +1318,51 @@ export async function bootStorage<S>(
   // Durable journal — opt-in, and only where there's a real file to
   // recover from (persisting, not :memory:). The persistence manager advances
   // its watermark after each committed snapshot; _run appends + replays.
-  const journal: Journal | null =
-    cfg.journal && shouldPersist && dbPathOverride !== ":memory:"
-      ? createJournal(
-        dbPathOverride
-          ? dbPathOverride + ".journal"
-          : appDirs(appId, cfg.appDir).journal,
-        { redact: makeRedactor(cfg.redactActions) },
-      )
-      : null;
+  //
+  // The watermark it resumes from is a ROW in the same SQLite file, written
+  // inside the snapshot transaction (see `journalWatermarkKey`) — never the
+  // post-commit side-file write it used to be, which replayed already-applied
+  // actions after a kill in that window. Only when the store can plan its
+  // statements; otherwise the legacy `.wm` file, which now fails loudly.
+  const journalOn = !!cfg.journal && shouldPersist &&
+    dbPathOverride !== ":memory:";
+  // …and if it was ASKED FOR and is off anyway, say so HERE, where the three
+  // inputs meet. `configConflicts` (server/config.ts) catches the config-only
+  // spellings at validate time, but `shouldPersist` also folds in
+  // `--no-persist` and `dbPathOverride` also folds in `--db-path=:memory:` —
+  // and a CLI flag that silently disarms crash recovery is exactly the case
+  // that costs data: the app boots, reports nothing, and the SIGKILL/power-cut
+  // replay the author opted into is simply absent when it is needed.
+  // Boot-fatal, like every other "your durability guarantee is not in force".
+  if (cfg.journal && !journalOn) {
+    const why = !shouldPersist
+      ? "persistence is off (--no-persist, or persist: false)"
+      : 'the database is ":memory:" (--db-path=:memory:, or dbPath)';
+    throw teachableError(
+      `journal: true asks for durable SIGKILL/power-cut recovery, but ${why}, ` +
+        `so there is no file to replay from and the journal is not running`,
+      !shouldPersist
+        ? "drop journal: true for this run, or let persistence stay on"
+        : "drop journal: true for in-memory runs, or point the database at a " +
+          "real file",
+      "docs/persistence/auto-persist.md",
+    );
+  }
+  const journalWmStored = journalOn && !!asyncDb && !!kvDb?.planSet;
+  const storedWatermark = journalWmStored
+    ? await kvDb!.get<number>(journalWatermarkKey(appId)) ?? 0
+    : undefined;
+  const journal: Journal | null = journalOn
+    ? createJournal(
+      dbPathOverride
+        ? dbPathOverride + ".journal"
+        : appDirs(appId, cfg.appDir).journal,
+      {
+        redact: makeRedactor(cfg.redactActions),
+        ...(storedWatermark !== undefined ? { storedWatermark } : {}),
+      },
+    )
+    : null;
 
   const persistence = createPersistenceManager({
     kvDb,
@@ -1307,6 +1394,12 @@ export async function bootStorage<S>(
     appId,
     getJournalSeq: journal ? () => journal.currentSeq() : undefined,
     onPersisted: journal ? (seq) => journal.setWatermark(seq) : undefined,
+    ...(journal && journalWmStored
+      ? {
+        planPersisted: (seq: number) =>
+          kvDb!.planSet!(journalWatermarkKey(appId), seq),
+      }
+      : {}),
     ...(Object.keys(orphanCells).length ? { orphanCells } : {}),
     ...(persistedSnapshot
       ? {
@@ -1572,6 +1665,7 @@ export function detectShapeDrift(
 export type CellMigrationOutcome =
   | "migrated" // onMigrate ran, version advanced
   | "stale" // version bumped but no onMigrate — kept as-is, may be stale
+  | "stamped" // first `version` this cell ever declared — nothing to convert
   | "downgrade" // stored version NEWER than code — running old code on new data
   | "sync-quarantined" // a sync cell's op-log could not be folded — held at its snapshot
   | "sync-unversioned"; // a sync cell has a persisted log and no `version` (field report §3.1)
@@ -1793,14 +1887,29 @@ export function applyCellMigrations(
           );
         }
       } else if (cellState && !info.onMigrate) {
-        log.warn(
-          `migrate: ${cellId} version ${persisted} → ${info.version} but no onMigrate hook — state may be stale`,
-        );
+        // `persisted === 0` means NEVER STAMPED, not "version zero". The shape
+        // on disk is the shape this build writes; nothing migrated, and there
+        // is nothing a hook could have done. Warning here fired once per cell
+        // on the first boot after an app adopts `version:` — twenty lines of
+        // "may be stale" about data that is not, which is how the real warning
+        // (a version GAP with no hook) gets skipped.
+        const firstStamp = persisted === 0;
+        if (firstStamp) {
+          log.info(
+            `migrate: stamping ${cellId} at version ${info.version} — first ` +
+              `time this cell declares one, so there is no older shape to ` +
+              `convert`,
+          );
+        } else {
+          log.warn(
+            `migrate: ${cellId} version ${persisted} → ${info.version} but no onMigrate hook — state may be stale`,
+          );
+        }
         report.push({
           cell: cellId,
           from: persisted,
           to: info.version,
-          outcome: "stale",
+          outcome: firstStamp ? "stamped" : "stale",
         });
       }
     }

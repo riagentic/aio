@@ -25,6 +25,48 @@ async function tree(): Promise<string> {
   return root;
 }
 
+// ── the scan is BOUNDED ──────────────────────────────────────────────────────
+//
+// `long: ["open"]` removes this method's timeout, and `app.ts` kicks a scan of
+// $HOME from `onStart` — so an unbounded walk is not "slow", it is a process
+// that pins a core for as long as it lives. aio's own boot gate boots this
+// example on every `deno task test`: measured on a real home directory, 40 s of
+// CPU in a 40 s window and still running when it was killed. The walk now
+// carries a budget and REPORTS hitting it, because a truncated number shown as
+// a total is exactly the quiet failure this example teaches against.
+Deno.test("example disk: a scan is bounded by entries and by time", async () => {
+  const io = await import("../examples/disk/disk.server.ts");
+  const root = await Deno.makeTempDir({ prefix: "aio-disk-bound-" });
+  try {
+    for (let i = 0; i < 12; i++) await Deno.mkdir(join(root, `d${i}`));
+
+    const capped = await io.scanFolders(root, new AbortController().signal, {
+      ...io.DEFAULT_LIMITS,
+      maxEntries: 3,
+    });
+    assertEquals(capped.entries.length, 3, "the entry cap is enforced");
+    assert(capped.partial, "and the caller is TOLD the answer is partial");
+
+    const timed = await io.scanFolders(root, new AbortController().signal, {
+      ...io.DEFAULT_LIMITS,
+      budgetMs: 0, // already spent
+    });
+    assert(timed.partial, "an exhausted time budget stops the walk");
+    assert(
+      timed.entries.length < 12,
+      `expected a short answer, got ${timed.entries.length}`,
+    );
+
+    // …and a scan that fits inside its budget is NOT flagged partial: the flag
+    // has to mean something, or the UI note becomes noise people learn to skip.
+    const whole = await io.scanFolders(root, new AbortController().signal);
+    assertEquals(whole.entries.length, 12);
+    assertEquals(whole.partial, false);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
 testCell(disk, "scans a folder: children sized, largest first", async (t) => {
   const root = await tree();
   try {
@@ -35,6 +77,7 @@ testCell(disk, "scans a folder: children sized, largest first", async (t) => {
     assert(s.entries[1]!.bytes >= 16);
     assertEquals(s.scanning, false);
     assertEquals(s.error, null);
+    assertEquals(s.partial, false, "a small tree fits inside the budget");
   } finally {
     await Deno.remove(root, { recursive: true });
   }

@@ -129,12 +129,12 @@ application state, and that is their data.
 
 ## Cell state reference
 
-| Field     | Meaning                                      |
-| --------- | -------------------------------------------- |
-| `enabled` | `feedback` was configured                    |
-| `status`  | idle · capturing · saved · error             |
-| `last`    | `{ id, path, createdAt, delivered }` or null |
-| `pending` | reports on disk, including automatic ones    |
-| `error`   | last failure, verbatim                       |
+| Field     | Meaning                                                                                                                       |
+| --------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `enabled` | `feedback` was configured — set by the boot-time `refresh()` once cells are bound; `false` in an app that never configured it |
+| `status`  | idle · capturing · saved · error                                                                                              |
+| `last`    | `{ id, path, createdAt, delivered }` or null                                                                                  |
+| `pending` | reports on disk, including automatic ones                                                                                     |
+| `error`   | last failure, verbatim                                                                                                        |
 
 Methods: `report(title, body?, contact?)` · `refresh()` · `dismiss()`.

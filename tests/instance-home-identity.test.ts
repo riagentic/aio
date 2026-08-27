@@ -17,6 +17,7 @@ import {
   lockKey,
   lockPath,
   parseLockKey,
+  processStartToken,
   readLock,
   removeLock,
   writeLock,
@@ -85,7 +86,17 @@ Deno.test({
       // A TRUE duplicate (same home) is refused, and `existing` is the
       // same-home instance — its port is this caller's own, never home B's.
       const dup = new AppLock(id, homeA);
-      writeLock({ ...readLock(a.key)!, pid: 1, port: 4101 }); // an alive owner
+      // An alive owner. `startToken` must be pid 1's, not the one this
+      // process's own lock carries: a lock whose pid and start-time disagree
+      // is EXACTLY the recycled-pid signature `isLockOwnerAlive` exists to
+      // catch, so pairing them would make this "alive owner" read as stale and
+      // the duplicate would be allowed in.
+      writeLock({
+        ...readLock(a.key)!,
+        pid: 1,
+        port: 4101,
+        startToken: processStartToken(1) ?? undefined,
+      });
       const r = await dup.acquire(4103);
       assert(!r.ok);
       if (!r.ok) {

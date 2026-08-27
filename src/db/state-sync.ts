@@ -4,6 +4,7 @@ import type { DB } from "./types.ts";
 import { applyDdl } from "./ddl.ts";
 import {
   assertIdent,
+  chunkParams,
   type ColumnDef,
   columnToSQL,
   createTableSQL,
@@ -552,12 +553,22 @@ export function planTables(
         else if (!rowsEqual(row, existing, cols)) toUpdate.push(row);
       }
 
-      if (toDelete.length) {
+      // Chunked, always — the parameter count here is a function of how many
+      // rows the USER removed, and SQLite refuses a statement with more than
+      // SQLITE_MAX_VARS host parameters with a bare `too many SQL variables`.
+      // One unbounded DELETE meant that pruning a big table rolled the whole
+      // shared transaction back, the `db:` baseline (deliberately) did not
+      // advance, and the identical batch was rebuilt and refused on EVERY
+      // debounce window from then on — while the state snapshot kept
+      // committing alone, so the app looked healthy and the rows came back on
+      // the next boot. A confirmed deletion, silently undone by a restart.
+      // The chunks share this transaction, so the delete is still all-or-none.
+      for (const batch of chunkParams(toDelete)) {
         stmts.push({
           sql: `DELETE FROM ${name} WHERE ${pk} IN (${
-            toDelete.map(() => "?").join(", ")
+            batch.map(() => "?").join(", ")
           })`,
-          params: toDelete,
+          params: batch,
         });
       }
       for (const row of toInsert) {

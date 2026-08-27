@@ -44,6 +44,43 @@ export type QueryOpts<T> = {
   offset?: number;
 };
 
+// ── Host-parameter limits ────────────────────────────────────────────
+//
+// SQLite refuses a statement with more host parameters (`?`) than
+// SQLITE_MAX_VARIABLE_NUMBER — 32766 on every build aio ships against — with a
+// bare `too many SQL variables`. A framework-built statement whose parameter
+// count is a function of USER DATA (n rows deleted, n ids in an `in:`) is
+// therefore a statement that works until the day the data gets big, and then
+// fails on every retry forever. Measured, not assumed: 39 999 parameters in one
+// `DELETE … WHERE id IN (…)` is refused, the shared transaction rolls back, and
+// the rows come back on the next boot.
+
+/** The real SQLite ceiling on host parameters in ONE statement. */
+export const SQLITE_MAX_VARS = 32766;
+
+/** The cap the framework chunks its OWN variadic statements to.
+ *
+ *  Deliberately far below {@linkcode SQLITE_MAX_VARS}: a chunk shares its
+ *  transaction (and, for a `DELETE`, its statement budget) with whatever else
+ *  the same window writes, and 900 is the value every SQLite driver has used as
+ *  the safe batch size since the 999 era. Chunking costs one extra prepared
+ *  statement per 900 rows; not chunking costs the user's deletion. */
+export const SQL_PARAM_CHUNK = 900;
+
+/** Split `items` into runs of at most `size` — the one chunker every
+ *  framework-built variadic statement uses, so they cannot disagree. */
+export function chunkParams<T>(
+  items: readonly T[],
+  size: number = SQL_PARAM_CHUNK,
+): T[][] {
+  if (size < 1) throw new Error(`chunkParams: size must be ≥ 1, got ${size}`);
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    out.push(items.slice(i, i + size) as T[]);
+  }
+  return out;
+}
+
 // ── Identifier validation ────────────────────────────────────────────
 
 export const IDENT_RE = /^[a-zA-Z_]\w*$/;
@@ -237,6 +274,22 @@ export function buildWhere(
         if (op.in.length === 0) clauses.push("0 = 1");
         // empty IN → match nothing
         else {
+          // A WHERE fragment is part of ONE statement, so — unlike the
+          // framework's own DELETE batches — this cannot be chunked into more
+          // statements: grouping the values into ORed `IN (…)` lists does not
+          // help, because the ceiling is per STATEMENT. Say so at the call
+          // site instead of letting SQLite answer `too many SQL variables`
+          // from three layers down.
+          if (op.in.length > SQLITE_MAX_VARS) {
+            throw new Error(
+              `db: where ${field} in [...] has ${op.in.length} values — ` +
+                `SQLite allows at most ${SQLITE_MAX_VARS} host parameters in ` +
+                `ONE statement, and a WHERE clause cannot be split across ` +
+                `statements. fix: run the query once per batch of ≤` +
+                `${SQLITE_MAX_VARS} ids and concatenate the results, or put ` +
+                `the ids in a temporary table and JOIN against it.`,
+            );
+          }
           clauses.push(`${field} IN (${op.in.map(() => "?").join(", ")})`);
           params.push(...op.in);
         }

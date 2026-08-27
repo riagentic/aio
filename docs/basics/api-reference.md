@@ -47,24 +47,24 @@ Everything below is the full reference, organized by category.
 | `call(opts, fn)`  | Call with `{ timeoutMs?, retries? }` -- wraps inter-cell calls                         |
 | `markAsync(fn)`   | Mark a method as async for minified bundles                                            |
 
-### Dispatch Introspection
+### Dispatch introspection
 
-| API                           | Description                                         |
-| ----------------------------- | --------------------------------------------------- |
-| `dispatch.getQueueDepth()`    | Current number of pending actions in dispatch queue |
-| `dispatch.getEffectBacklog()` | Number of async effects currently in-flight         |
+There is no `dispatch` object to hold: `app.dispatch` is a plain function. Queue
+depth and effect backlog are read from the loop probe, not from an import --
+`GET /__aio/vitals` (`queueDepth`, `drainRate`, `effectBacklog`) or
+`am metrics`. See [Vitals](../debugging/vitals.md#loopprobe-server).
 
 ## Server (HTTP + caller context)
 
-| API                                     | Description                                                                               |
-| --------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `route(handler, opts?)`                 | A `routes: {}` handler with `:id` params, method guard, cookies, `ctx.json/text/redirect` |
-| `serverUser()`                          | Ambient caller identity — `undefined` = anonymous or server-origin                        |
-| `serverRequest()`                       | Ambient request facts — `{ ip, headers, cookies, url, method, via }`, read-only           |
-| `serverFns(ns, fns)`                    | DEFINE server-only functions (server side)                                                |
-| `serverFn<T>(ns)`                       | CALL them from the client — a typed proxy over the WS bridge                              |
-| `generateTotpSecret()` / `totpUri(...)` | TOTP enrollment primitives for a hand-rolled 2FA UI                                       |
-| `verifyTotp(secret, code)`              | Verify a TOTP code                                                                        |
+| API                                     | Description                                                                                                                          |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `route(handler, opts?)`                 | A `routes: {}` handler with `:id` params, method guard, cookies, `ctx.json/text/redirect`                                            |
+| `serverUser()`                          | Ambient caller identity — `undefined` = anonymous or server-origin                                                                   |
+| `serverRequest()`                       | Ambient request facts — `{ ip, headers, cookies, url, method, via }`, read-only                                                      |
+| `serverFns(ns, fns)`                    | DEFINE server-only functions (server side)                                                                                           |
+| `serverFn<T>(ns)`                       | CALL them from the client — a typed proxy over the WS bridge (never queued: offline, or a connection lost mid-call, rejects at once) |
+| `generateTotpSecret()` / `totpUri(...)` | TOTP enrollment primitives for a hand-rolled 2FA UI                                                                                  |
+| `verifyTotp(secret, code)`              | Verify a TOTP code                                                                                                                   |
 
 See [routes](../examples/05-integrations.md) and [auth](../auth/auth.md).
 
@@ -121,34 +121,34 @@ Method-native workflow tools — see
 | `memo(Component, compare?)` | No-op (auto-memo via shallow prop compare)                                                                                                                                                                      |
 | `useLocal(initial)`         | Client-only state (not synced). Two forms, neither "preferred": `const [v, setV] = useLocal(0)` for a scalar; `const f = useLocal({…})` when you want `f.patch({ name })` for a form draft                      |
 | `useTimeTravel()`           | Dev-mode time-travel controls                                                                                                                                                                                   |
-| `connectDevTools()`         | Connect to Redux DevTools browser extension                                                                                                                                                                     |
+| `connectDevTools()`         | Connect to Redux DevTools browser extension — streams every state change (paired with the action that caused it); a no-op when the extension is absent                                                          |
 | `disconnectDevTools()`      | Disconnect from Redux DevTools                                                                                                                                                                                  |
 | `page(current, routes)`     | State-based routing                                                                                                                                                                                             |
 
-## Framework-agnostic Client
+## A non-AIR view layer
 
-| API                                | Description                                        |
-| ---------------------------------- | -------------------------------------------------- |
-| `client.subscribe(fn)`             | Subscribe to state changes, returns unsubscribe    |
-| `client.getState()`                | Current state snapshot (null before first message) |
-| `client.getCellState(name)`        | Single cell's state slice                          |
-| `client.send(action)`              | Send action to server                              |
-| `client.route.subscribe(fn)`       | Subscribe to URL changes                           |
-| `client.route.navigate(to, opts?)` | Navigate -- string path or history delta           |
+There is no public `client` object. `client` and `matchPath` exist on the
+BROWSER bundle entry as plumbing for generated shells, and are deliberately kept
+off `aio/air` -- `tests/air-entry.test.ts` and
+`tests/browser-air-surface.test.ts` pin that decision, with the reason for each
+name. Importing them is not supported and `deno check` refuses it.
+
+To drive aio state from React, Vue or Svelte, mount the component as an island:
+`reactIsland` (`aio/air`) for React, `island` for the rest. Everything else
+reads state through `useAio()` / a cell handle.
 
 ## URL Routing
 
-| API                            | Description                                    |
-| ------------------------------ | ---------------------------------------------- |
-| `useRoute(pattern?)`           | Subscribe to URL -- `{ path, params, search }` |
-| `useNavigate()`                | Returns `navigate` function                    |
-| `navigate(to, opts?)`          | Programmatic navigation                        |
-| `<Route>`                      | Renders `element` when `path` matches          |
-| `<Outlet>`                     | Renders matched child route in layout          |
-| `<Link to>`                    | SPA anchor with active class support           |
-| `<NavLink to>`                 | Link with automatic `active` class             |
-| `<Redirect to>`                | Navigate on mount (auth guards)                |
-| `matchPath(pat, path, exact?)` | Pattern matching utility                       |
+| API                   | Description                                    |
+| --------------------- | ---------------------------------------------- |
+| `useRoute(pattern?)`  | Subscribe to URL -- `{ path, params, search }` |
+| `useNavigate()`       | Returns `navigate` function                    |
+| `navigate(to, opts?)` | Programmatic navigation                        |
+| `<Route>`             | Renders `element` when `path` matches          |
+| `<Outlet>`            | Renders matched child route in layout          |
+| `<Link to>`           | SPA anchor with active class support           |
+| `<NavLink to>`        | Link with automatic `active` class             |
+| `<Redirect to>`       | Navigate on mount (auth guards)                |
 
 ---
 

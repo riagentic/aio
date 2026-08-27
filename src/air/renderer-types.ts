@@ -51,6 +51,10 @@ export interface ComponentInstance {
   refs?: { current: any }[];
   /** Current ref index counter (reset each render). */
   refIndex?: number;
+  /** Dev mode: how many state hooks (useRef/useSignal/useId) the PREVIOUS
+   *  render called — a change means the call order moved (see the hook-order
+   *  tripwire in renderer-rerender.ts). */
+  _hookCount?: number;
   /** Dev mode: rolling window of render timestamps for burst detection. */
   _devRenderTimestamps?: number[];
   /** Dev mode: name of the signal that triggered the last re-render. */
@@ -60,6 +64,12 @@ export interface ComponentInstance {
   /** Display name of this component — stamped on every render so a contained
    *  hook error (afterRender/onMount/onCleanup) can name where it came from. */
   _component?: string;
+  /** DevTools only: renders of THIS instance, and how long the last one took.
+   *  Maintained solely while a DevTools handle is connected
+   *  (`_isDevToolsConnected()`), so an app that never opens one pays nothing —
+   *  and read on demand by `src/air/devtools-tree.ts`, never pushed. */
+  _dtRenders?: number;
+  _dtLastMs?: number;
 }
 
 export interface RootState {
@@ -80,6 +90,15 @@ export interface RootState {
   App: ComponentFn;
   /** Per-root afterRender callback queue. */
   afterRenderQueue: AfterRenderEntry[];
+  /** Instances whose collected `onMount` callbacks are waiting for the DOM
+   *  commit. `createDom` builds into a DocumentFragment and the `appendChild`
+   *  that puts it in the document happens AFTER the subtree hook fires, so
+   *  firing onMount there ran it on a DETACHED tree: `ref.current.isConnected`
+   *  was false, `focus()` was a no-op and `getBoundingClientRect()` returned
+   *  zeros — while docs/ui/air-lifecycle.md promises exactly those work.
+   *  Drained by `_flushAfterRender`, which every commit path already calls and
+   *  which `afterRender` was already correct on. */
+  pendingMounts?: PendingMount[];
   /** Per-root counter for useId() — deterministic across renders. */
   _idCounter: number;
   /** AIO-209: cycle detection counts — persists across yield boundaries. */
@@ -94,8 +113,17 @@ export interface AfterRenderEntry {
   component?: string;
 }
 
+/** An instance's `onMount` callbacks, waiting for the DOM commit. */
+export interface PendingMount {
+  inst: ComponentInstance;
+  cbs: (() => void)[];
+  component?: string;
+}
+
 export interface HookState {
   skip: boolean;
+  /** DevTools only: when this render started. Set only while connected. */
+  dtStart?: number;
   // deno-lint-ignore no-explicit-any
   deps: Set<any> | null;
   collected: Disposable[] | null;

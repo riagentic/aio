@@ -66,6 +66,12 @@ const UNIVERSAL_TASKS = [
   "am",
   "doctor",
   "lint",
+  // Publishing a signed release is target-independent — every app that can be
+  // compiled can be published, so `am fix` restores both for all of them.
+  // `publish` is the per-release command; `ship` is keygen and CI generation,
+  // which docs and the CLI's own messages spell as `deno task ship`.
+  "publish",
+  "ship",
 ] as const;
 
 /** Task keys each declared target needs, keyed by the names accepted in
@@ -360,6 +366,13 @@ export async function cmdFix(
 ): Promise<void> {
   const mode = detectMode(flags);
   const dry = args.includes("--dry-run") || args.includes("--check");
+  // `--no-download`: repair everything that is local, and skip the steps that
+  // reach the network — the Electron runtime (~334 MB) and the dependency
+  // cache. For an offline or metered machine, and for a repair you want to
+  // finish in a second. The skipped steps are REPORTED, never silently
+  // dropped: a repair that quietly did less than it said is the failure mode
+  // this whole command exists to avoid.
+  const noDownload = args.includes("--no-download");
   // `--migrate-tasks`: convert a pre-alpha52 task matrix to the one vocabulary
   // (see migrateTasks). Opt-in because it DELETES pristine old-scaffold tasks.
   const migrate = args.includes("--migrate-tasks");
@@ -449,12 +462,26 @@ export async function cmdFix(
       }
     }
   }
-  // `install:electron` alone is NOT evidence the app ships electron — it is
-  // the optional pre-fetch convenience, and counting it made it self-keeping:
-  // a browser app with a stray install:electron looked electron-shaped, so
-  // the migration kept the very task that caused the look.
+  // Does this app actually SHIP Electron?
+  //
+  // What the app DECLARES decides it: `client`, `build.targets` — the same
+  // fleet every other part of the toolchain reads. Two weaker signals still
+  // count, because an app can be running Electron before it says so: a task
+  // that drives it (`install:electron` excluded — it is the optional pre-fetch
+  // convenience, and counting it made it self-keeping), and an import of
+  // Electron under the APP's own specifier.
+  //
+  // What must NOT count is aio's own import map. The scaffold writes every
+  // public entry point plus `"electron": "npm:electron"` into deno.json for
+  // EVERY app, browser-only included — so `imports` mentioned electron
+  // always, `am fix` on a plain browser app concluded it was an Electron app,
+  // and downloaded 334 MB of runtime nobody had asked for (and advised
+  // electron-shaped tasks and nodeModulesDir on top).
   const usesElectron =
-    Object.values(imports).some((v) => v.includes("electron")) ||
+    declaredTargets(cfg).some((t) => t.includes("electron")) ||
+    Object.entries(imports).some(([k, v]) =>
+      k !== "electron" && !k.startsWith("aio") && v.includes("electron")
+    ) ||
     Object.keys(tasks).some((t) =>
       t.includes("electron") && t !== "install:electron"
     );
@@ -684,7 +711,13 @@ export async function cmdFix(
   // install:electron", and every later `am fix` said "ok" because the empty
   // package was there. A repair that reports success on the wrong question is
   // worse than no repair; this one asks "is the BINARY there?" on both sides.
-  if (usesElectron) {
+  if (usesElectron && noDownload) {
+    add(
+      "electron runtime installed",
+      "advise",
+      "skipped (--no-download) — run `deno task install:electron` when online",
+    );
+  } else if (usesElectron) {
     const installer = fromFileUrl(
       new URL("../electron-install.ts", import.meta.url),
     );
@@ -1032,7 +1065,13 @@ export async function cmdFix(
   // Warm the dependency cache (safe — populates the local cache, surfaces any
   // remaining resolution error). Advises rather than fails on error.
   const entry = await resolveEntry(dir);
-  if (entry && !dry) {
+  if (entry && noDownload) {
+    add(
+      "dependencies cached",
+      "advise",
+      `skipped (--no-download) — run \`deno cache ${entry}\` when online`,
+    );
+  } else if (entry && !dry) {
     const r = await run("deno", ["cache", entry], dir);
     add(
       "dependencies cached",

@@ -70,16 +70,21 @@
 ## Auth — users, tokens, per-user visibility
 
 - [Authentication & Security](auth/README.md) — Access control, encryption, and multi-user support.
-- [Authentication & Security](auth/auth.md) — By default, the server binds to 127.0.0.1 (localhost only).
+- [Authentication & Security](auth/auth.md) — aio is built for trusted environments — localhost tools, LAN dashboards,
 - [Secrets & observability — what crosses the wire, what gets recorded](auth/secrets-and-observability.md) — aio's core promise is "everything through a method is an observable, loggable
 
 ## Testing — cell tests, semantic UI tests, driving the live app, linter
 
 - [Testing](testing/README.md) — Verifying cells and UIs work correctly.
+- [Cassettes — record once, replay forever](testing/cassettes.md) — Some async calls cannot be made in CI.
 - [Cell Testing](testing/cell-testing.md) — Test harness that wraps Deno.test with typed helpers.
 - [aiol — AIO Project Linter](testing/linter.md) — Static analysis tool for aio projects.
+- [Testing two apps at once — `testApps`](testing/multi-app.md) — aio documents two architectures.
 - [The onboarding lab — testing on a machine that is not yours](testing/onboarding-lab.md) — Needs docker or podman.
+- [Prod parity — what the harness reproduces, and what it fakes](testing/prod-parity.md) — A test that is more permissive than production manufactures a green suite and a
+- [Proving the tests — the mutation, vacuous-test and dead-wiring gates](testing/proving-the-tests.md) — A green suite means the tests passed.
 - [UI testing — semantic, selector-free, first-class](testing/ui-testing.md) — aio exposes every TSX component as an intuitive, deterministic API — tests and
+- [VM labs — a real Windows or macOS desktop, by hand](testing/vm-labs.md) — am lab windows and am lab macos boot a real guest OS in a container and give
 - ↗ [App Manager](clients/app-manager.md) — `am surface` / `am trigger` — observe and drive a RUNNING app, no selectors, no driver: the same loop as `testUI`, against the real thing
 
 ## Clients — browser, electron, the am manager
@@ -180,6 +185,7 @@
 - [Upgrading from alpha65 to alpha66](upgrade/from-alpha65-to-alpha66.md) — Four behaviours change; three can break an app.
 - [Upgrading from alpha66 to alpha67](upgrade/from-alpha66-to-alpha67.md) — Nothing in your app code changes.
 - [Upgrading from alpha67 to alpha68](upgrade/from-alpha67-to-alpha68.md) — Nothing in your app code changes.
+- [Upgrading from alpha68 to alpha69](upgrade/from-alpha68-to-alpha69.md) — Nothing in your app code changes.
 - [Upgrade from v1.0.0-alpha7 to v1.0.0-alpha8](upgrade/from-alpha7-to-alpha8.md) — None.
 - [Upgrade from v1.0.0-alpha8 to v1.0.0-alpha9](upgrade/from-alpha8-to-alpha9.md) — The internal machine state field is renamed.
 - [Upgrade from v1.0.0-alpha9 to v1.0.0-alpha10](upgrade/from-alpha9-to-alpha10.md) — Alpha10 is fully additive.
@@ -207,6 +213,7 @@
 
 ## deploy
 
+- [Release signing](deploy/signing.md) — An aio app updates itself by fetching a ship manifest and, if it likes what
 - [Keeping an app up to date](deploy/updates.md) — One line turns it on:
 
 ## release-notes

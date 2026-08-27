@@ -139,7 +139,17 @@ function _mentionsSecret(key: string): boolean {
 const HARD_SECRET_RE =
   /passwo?rd|passphrase|mnemonic|private[_-]?key|api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token/i;
 // …but a "public" hint (pubKey, publicKey) means it's meant to be shared.
-const PUBLIC_HINT_RE = /pub(lic)?/i;
+//
+// ANCHORED to a word boundary, because an unanchored /pub(lic)?/i matched the
+// substring ANYWHERE: `pubsubSecretKey`, `republishedApiKey` and
+// `epubPassword` all silently claimed the exemption and walked past a gate
+// that exists to refuse exactly those names. An exemption that any substring
+// can claim is not an exemption, it is a bypass — so the hint has to be the
+// START of the name or the start of a camelCase/underscore/dash word inside
+// it, which is how `pubKey`, `publicKey` and `owner_public_key` are actually
+// spelled and how `pubsub` is not.
+const PUBLIC_HINT_RE =
+  /(?:^|[_-])(?:pub|public|Pub|Public|PUB|PUBLIC)(?![a-z])|[a-z0-9](?:Pub|Public)(?![a-z])/;
 // …and these suffixes mark identifiers/metadata, not the secret itself:
 // seedId, seedPathType, keyName, encMode — nav state, not a leaked secret
 //.
@@ -305,6 +315,137 @@ function warnFieldFilters(composed: ComposedCells): void {
   }
 }
 
+/** How strong a declarative `access` rule is, as a total order over the shapes
+ *  the framework can actually compare. Used ONLY to decide "is this rule at
+ *  least as strong as that one" — never to decide a request. */
+function _accessRank(rule: Access | undefined): number {
+  if (rule === undefined) return 0; // no rule at all — any network caller
+  if (rule === true) return 1; // any authenticated user
+  if (rule === false) return 3; // server-side only, never from the network
+  return 2; // an exact role, or a predicate
+}
+
+/** True when `owner` gates AT LEAST as tightly as `listener`. Equal-rank rules
+ *  must be the SAME rule: `access: "editor"` is not `access: "admin"`, and two
+ *  different predicates are not each other. Incomparable ⇒ not satisfied — a
+ *  gate we cannot prove is a gate we do not have. */
+function _gatesAtLeastAs(
+  owner: Access | undefined,
+  listener: Access | undefined,
+): boolean {
+  const [ro, rl] = [_accessRank(owner), _accessRank(listener)];
+  if (ro > rl) return true;
+  if (ro < rl) return false;
+  return owner === listener;
+}
+
+/** THE compose-time check for access ESCALATION THROUGH `listensTo`.
+ *
+ *  The runtime gate (`dispatchNetwork` in aio-server.ts) evaluates the rule of
+ *  the cell NAMED BY THE ACTION TYPE'S PREFIX. But an action is reduced by its
+ *  owner AND by every cell that `listensTo` it — so a cell declaring
+ *  `access: "admin"` that listens to an ungated cell's action was reduced, with
+ *  the ungated cell's rule (none), whenever ANY client called that method. The
+ *  author's strongest declaration was routed around by their own wiring. The
+ *  same hole with the same shape swallowed BARE action types: the runtime gate
+ *  only runs when the type contains a `:`, and a bare `"tick"` has no owning
+ *  cell to gate at all.
+ *
+ *  It is checked HERE, once, at composition, rather than per request, because
+ *  it is a property of the WIRING and not of any caller: both cells, both
+ *  rules and the whole listener graph are known at boot, nothing about them
+ *  changes later, and a design error caught at boot can never ship. That also
+ *  means the runtime gate's `type.includes(":")` condition is SOUND rather than
+ *  lucky — a bare type reaching a gated listener cannot get past this function.
+ *
+ *  Dev REFUSES to boot; prod logs it at error level. Same category as the
+ *  credential-name gate above (dev stricter than prod, never the reverse): a
+ *  framework upgrade must not kill a running deployment, but it must never let
+ *  the hole ship out of a dev machine either. */
+function refuseAccessEscalation(composed: ComposedCells): void {
+  const byId = new Map(composed.cells.map((c) => [c.__aio.id, c]));
+  const problems: string[] = [];
+  for (const listener of composed.cells) {
+    const rule = listener.__aio.access;
+    if (rule === undefined) continue; // ungated cell — nothing to escalate to
+    for (const type of listener.__aio.foreignActions) {
+      const colon = type.indexOf(":");
+      const ownerId = colon === -1 ? undefined : type.slice(0, colon);
+      const owner = ownerId ? byId.get(ownerId) : undefined;
+      if (_gatesAtLeastAs(owner?.__aio.access, rule)) continue;
+      const shown = (r: Access | undefined) =>
+        r === undefined
+          ? "no access rule"
+          : typeof r === "function"
+          ? "access: <predicate>"
+          : `access: ${JSON.stringify(r)}`;
+      problems.push(
+        `  "${listener.__aio.id}" (${shown(rule)}) listens to "${type}", ` +
+          (owner
+            ? `owned by "${owner.__aio.id}" (${shown(owner.__aio.access)})`
+            : ownerId
+            ? `whose cell "${ownerId}" is not booted here`
+            : `a BARE action type no cell owns — nothing gates it`),
+      );
+    }
+  }
+  if (problems.length === 0) return;
+  const msg = `access escalation through listensTo — a gated cell is reduced ` +
+    `by an action that a LESS gated caller can dispatch, so its \`access\` ` +
+    `rule is bypassed:\n${problems.join("\n")}\n\n` +
+    `Fix (either one): give the action's source the same or a stronger ` +
+    `\`access\` rule, so the caller is checked before the action exists at ` +
+    `all — or drop the \`listensTo\` and have the gated cell expose its own ` +
+    `method, which the runtime gate does check.`;
+  // Dev is STRICTER (see the doc comment): refuse here, log loud in prod.
+  if (!parseCli().prod && !isCompiled()) {
+    throw new Error(`[aio] SECURITY — refusing to start. ${msg}`);
+  }
+  log.error("auth", `SECURITY: ${msg}`);
+}
+
+/** A selector may only depend on a cell that is actually booted. Throws here,
+ *  at composition, so the author gets a clear error at boot rather than at
+ *  first use. */
+function refuseUnknownSelectorDeps(composed: ComposedCells): void {
+  for (const f of composed.cells) {
+    const deps = f.__aio.selectorDeps as Record<string, readonly string[]>;
+    for (const [key, depList] of Object.entries(deps)) {
+      for (const dep of depList) {
+        if (!composed.cellNames.includes(dep)) {
+          throw new Error(
+            `[${f.__aio.id}] selector '${key}' depends on unknown cell '${dep}' — known cells: ${
+              composed.cellNames.join(", ")
+            }`,
+          );
+        }
+      }
+    }
+  }
+}
+
+/** EVERY composition-time refusal + dev warning a real boot runs, in boot
+ *  order — the single list, so there is one place that decides what a booting
+ *  app is refused for.
+ *
+ *  It is exported because the in-process harnesses do NOT boot through
+ *  `aio.run()`: `testUI`/`bootCells` compose the cells on the standalone
+ *  runtime directly, so none of these ran there. An app whose cell exposes
+ *  `apiKey` to the UI therefore went GREEN under the harness the docs push
+ *  hardest and was REFUSED the moment it started — in dev AND in prod. Tests
+ *  are the strictest environment, never the most permissive: the harness calls
+ *  this (via `src/testing/test-strict.ts`) before it boots anything.
+ *
+ *  Takes an already-composed system rather than raw entries so the caller
+ *  decides WHICH cells are in scope (the server drops client-scoped cells; the
+ *  harness mirrors that) and nothing here re-derives composition. */
+export function refuseUnsafeComposition(composed: ComposedCells): void {
+  refuseFilteredSyncCells(composed);
+  refuseAccessEscalation(composed);
+  warnFieldFilters(composed);
+  refuseUnknownSelectorDeps(composed);
+}
+
 /** Compose cells, apply defaults, build state filters + middleware chain */
 export function composeCellsWiring(
   input: ComposeCellsInput,
@@ -335,25 +476,9 @@ export function composeCellsWiring(
   applyLocalFirst(composed, input.localFirst === true);
   // AFTER defaults + local-first: both can change what a cell hides and whether
   // it syncs, so the contradiction is only decidable once they have run.
-  refuseFilteredSyncCells(composed);
-  warnFieldFilters(composed);
-  // AIO-3.1: validate cross-cell selector deps against the known cell list.
-  // Throws here so the user gets a clear error at aio.run() time, not at
-  // first use.
-  for (const f of composed.cells) {
-    const deps = f.__aio.selectorDeps as Record<string, readonly string[]>;
-    for (const [key, depList] of Object.entries(deps)) {
-      for (const dep of depList) {
-        if (!composed.cellNames.includes(dep)) {
-          throw new Error(
-            `[${f.__aio.id}] selector '${key}' depends on unknown cell '${dep}' — known cells: ${
-              composed.cellNames.join(", ")
-            }`,
-          );
-        }
-      }
-    }
-  }
+  // AIO-3.1: the whole refusal list, shared with the in-process harnesses so a
+  // test cannot pass an app that boot refuses (see refuseUnsafeComposition).
+  refuseUnsafeComposition(composed);
   const autoGetDBState = buildDBStateGetter(composed);
   const { autoGetUIState, cellPatchStrategies, cellFilterFields } =
     buildUIStateGetter(composed);
@@ -633,9 +758,18 @@ function buildUIStateGetter(composed: ComposedCells): UIStateResult {
     } else {
       cellPatchStrategies.set(f.__aio.id, "filter");
       if ("include" in resolved) {
+        // Split exactly as `exclude` is split below — a dot path is a DEEP
+        // rule on both sides, and holding `"profile.name"` in `fields` (which
+        // the patch filter compares against a single path SEGMENT) meant no
+        // patch for that cell ever matched. See `deepIncludes`.
+        const plain = resolved.include.filter((k) => !k.includes("."));
+        const deep = resolved.include
+          .filter((k) => k.includes("."))
+          .map((k) => k.split("."));
         cellFilterFields.set(f.__aio.id, {
           mode: "include",
-          fields: new Set(resolved.include),
+          fields: new Set(plain),
+          ...(deep.length > 0 ? { deepIncludes: deep } : {}),
         });
       } else if ("exclude" in resolved) {
         const plain = resolved.exclude.filter((k) => !k.includes("."));

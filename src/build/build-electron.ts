@@ -6,6 +6,7 @@
 import { join } from "@std/path";
 import {
   appimageEnv,
+  chmodIfSupported,
   copyDir,
   ensureAppimagetool,
   formatMb,
@@ -16,6 +17,18 @@ import {
 } from "./build-helpers.ts";
 import type { BuildConfig } from "./build-config.ts";
 import { isHostPlatform } from "./platforms.ts";
+import {
+  electronMissingHint,
+  ensureElectronDist,
+  ensureHostElectronDist,
+  installedElectronVersion,
+} from "./electron-runtime.ts";
+import {
+  APP_ICON,
+  APP_STYLE,
+  BUNDLE_JS,
+  DIST_DIR,
+} from "../server/app-files.ts";
 
 /** Zip a directory's CONTENTS, portably.
  *
@@ -63,9 +76,9 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
   const appDir = join(dist, "AppDir");
 
   // Copy dist/ assets into AppDir/dist/ (Electron can't read Deno's embedded VFS)
-  const appDirDist = join(appDir, "dist");
+  const appDirDist = join(appDir, DIST_DIR);
   await Deno.mkdir(appDirDist, { recursive: true });
-  for (const name of ["app.js", "style.css", "icon.png"]) {
+  for (const name of [BUNDLE_JS, APP_STYLE, APP_ICON]) {
     // A file that EXISTS in dist/ must land in the package — a swallowed copy
     // here is how a packaged app silently loses its stylesheet and stops
     // looking like dev (WYSIDIWYSIP). Only true absence is optional (and
@@ -76,7 +89,7 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
     } catch {
       exists = false;
     }
-    if (name === "app.js" && !exists) {
+    if (name === BUNDLE_JS && !exists) {
       console.error(
         `[electron] ✗ ${
           join(dist, name)
@@ -88,31 +101,18 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
   }
   console.log("[electron] \u2713 dist/ assets copied to AppDir/dist/");
 
-  // Copy Electron runtime — auto-install on first build so
-  // `compile:electron` works OUT OF THE BOX; loud manual fallback if it fails.
-  //
-  // The LOCATION comes from `electronDistDir` (electron-spawn.ts), which is the
-  // same function the runtime uses to launch. This used to be a local
-  // `node_modules/electron/dist` — one of the two layouts — so a successful
-  // auto-install was followed by "not found — run: deno task install:electron",
-  // advice that installs it exactly where this code was still not looking.
-  const { autoInstallElectron, electronDistDir } = await import(
-    "../electron/electron-spawn.ts"
-  );
-  let electronSrc = await electronDistDir(root);
+  // Copy Electron runtime — auto-install on first build so `--electron` works
+  // OUT OF THE BOX; loud manual fallback if it fails. WHERE it lives, and the
+  // install, are `ensureHostElectronDist`: one decider, shared with the
+  // `--client` target (electron-runtime.ts says why).
+  let electronSrc = await ensureHostElectronDist(root);
 
   // Cross-building: the runtime in node_modules is THIS host's. Electron
   // publishes every platform's build as a zip, so fetch the one this package
   // is for — the version comes from the runtime already installed here, so a
   // cross-built package and a local one are never two different Electrons.
   if (!isHostPlatform(cfg.platform)) {
-    const { ensureElectronDist, installedElectronVersion } = await import(
-      "./electron-runtime.ts"
-    );
-    const version = await installedElectronVersion(root) ??
-      (await autoInstallElectron({ error: console.error })
-        ? await installedElectronVersion(root)
-        : null);
+    const version = await installedElectronVersion(root);
     if (!version) {
       console.error(
         "[electron] ✗ cannot tell which Electron version to fetch for " +
@@ -130,36 +130,8 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
   }
   const electronDst = join(appDir, "electron");
   if (electronSrc === null) {
-    // `deno install npm:electron` REWRITES the app's deno.json (it adds the
-    // dependency, and re-resolving can move other pins with it). That file is
-    // the user's, and a build silently editing the config it is building from
-    // is how a pin moves and a bundle cache busts with nobody looking. We
-    // cannot decline the install — the target needs the runtime — but the
-    // mutation is detected and announced at the moment it happens, instead of
-    // being discovered later as an unexplained diff.
-    const denoJsonPath = join(root, "deno.json");
-    const before = await Deno.readTextFile(denoJsonPath).catch(() => null);
-    const installed = await autoInstallElectron({ error: console.error });
-    const after = await Deno.readTextFile(denoJsonPath).catch(() => null);
-    if (before !== null && after !== null && before !== after) {
-      console.warn(
-        `[electron] \u26a0 ${denoJsonPath} was MODIFIED by ` +
-          `\`deno install npm:electron\` (auto-install of the Electron ` +
-          `runtime). Review the diff and commit it deliberately — the next ` +
-          `build reads its pins from this file.`,
-      );
-    }
-    if (installed) electronSrc = await electronDistDir(root);
-    if (electronSrc === null) {
-      console.error(
-        "[electron] \u2717 the Electron runtime is not installed and could " +
-          "not be installed automatically. Install it by hand:\n" +
-          "      deno task install:electron\n" +
-          "  (looked in node_modules/electron/dist and " +
-          "node_modules/.deno/electron@*/node_modules/electron/dist)",
-      );
-      Deno.exit(1);
-    }
+    console.error(`[electron] \u2717 ${electronMissingHint()}`);
+    Deno.exit(1);
   }
   console.log("[electron] copying Electron runtime...");
   await copyDir(electronSrc, electronDst);
@@ -224,7 +196,7 @@ export ELECTRON_PATH="$HERE/electron/electron"
 exec "$HERE/${binaryName}" "$@"
 `;
   await Deno.writeTextFile(join(appDir, "AppRun"), appRun);
-  await Deno.chmod(join(appDir, "AppRun"), 0o755);
+  await chmodIfSupported(join(appDir, "AppRun"), 0o755);
 
   const desktop = `[Desktop Entry]
 Type=Application
@@ -341,7 +313,7 @@ exec "$HERE/${binaryName}" "$@"
 `;
   const launcherPath = join(appDir, "run.sh");
   await Deno.writeTextFile(launcherPath, launcher);
-  await Deno.chmod(launcherPath, 0o755);
+  await chmodIfSupported(launcherPath, 0o755);
   console.log("[electron] \u2713 run.sh launcher");
 
   await Deno.mkdir(cfg.outDir ?? root, { recursive: true });

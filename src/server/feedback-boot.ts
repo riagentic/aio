@@ -15,7 +15,10 @@ import type {
   FeedbackRuntime,
   SubmittedReport,
 } from "../state/feedback-cell.ts";
-import { installFeedbackRuntime } from "../state/feedback-cell.ts";
+import {
+  createFeedbackCell,
+  installFeedbackRuntime,
+} from "../state/feedback-cell.ts";
 import {
   buildReport,
   listReports,
@@ -142,6 +145,16 @@ export function _createSeenKeys(limit: number = _SEEN_LIMIT): {
 // could not finish module evaluation otherwise) and the `async` stayed behind,
 // leaving a function that promised to be awaited for no reason. Callers already
 // `await` it, which is unchanged either way.
+let _pendingBegin: (() => void) | null = null;
+
+/** Fire the boot-time `refresh()` armed by `startFeedback` — after cells are
+ *  bound, never before (dispatching before binding throws). */
+export function beginFeedback(): void {
+  const begin = _pendingBegin;
+  _pendingBegin = null;
+  begin?.();
+}
+
 export function startFeedback(deps: StartFeedbackDeps): StartedFeedback {
   const cfg = resolveFeedback(deps.feedback);
   const userCfg: FeedbackConfig = deps.feedback === true
@@ -203,6 +216,14 @@ export function startFeedback(deps: StartFeedbackDeps): StartedFeedback {
   // Static — see the note in updates-boot.ts: a dynamic import from inside the
   // call an app top-level-awaits can leave module evaluation unable to finish.
   installFeedbackRuntime(runtime);
+  // The cell learns it is configured through one `refresh()` — which cannot
+  // run HERE (methods bind after the server is up); armed now, fired by
+  // `beginFeedback()` once binding is done. Same shape as `beginUpdates`.
+  _pendingBegin = () => {
+    void createFeedbackCell().refresh().catch((e) =>
+      log.warn("feedback", `refresh at boot failed: ${e}`)
+    );
+  };
 
   // Automatic capture. Deduped by message so one repeating fault produces one
   // report, not one per occurrence.

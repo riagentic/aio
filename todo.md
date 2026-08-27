@@ -41,12 +41,14 @@ get spent, and each ships with the codemod that performs it (`aiol --safe-fix`).
   becomes types-only (`createDB` lives on `aio/server`); an `@internal` sweep of
   `aio/sync` and `aio/state-core` (~40 symbols); the browser surface gets the
   snapshot twin the android surface already has.
-- **Internals + blobs.** `protocol/`↔`state` decomposition; boundary-gate
-  tightening (unused edges, unused permissions, root files that launder
-  imports); offline-queue unification (one factory, one drop policy);
-  `PRAGMA user_version` plus one ordered fatal DDL runner; `app.blobs` —
-  content-addressed files under `appDirs().files`, HTTP Range streaming,
-  `put/get/stream/url`.
+- **Internals.** `protocol/`↔`state` decomposition; boundary-gate tightening
+  (unused edges, unused permissions, root files that launder imports);
+  offline-queue unification (one factory, one drop policy);
+  `PRAGMA user_version` plus one ordered fatal DDL runner. (`app.blobs` came off
+  this list: it SHIPPED in full — content-addressed files under
+  `appDirs().files`, `put/get/stream/info/url/delete/list`, HTTP Range
+  streaming, `openBlobStore()` for headless. See
+  `docs/persistence/big-data.md`.)
 
 ## Open asks from field reports
 
@@ -109,7 +111,7 @@ worth an `aiol` rule rather than a runtime cost on every read.
 
 The gap named as the source of several multi-day field bugs: a test that is more
 permissive than production manufactures green-test-broken-prod. Three parts were
-listed; one is now closed.
+listed; all three are now closed.
 
 - **[x] The serialization hop.** A worker cell is reached by `postMessage`, so
   every argument and return value is structured-cloned; in-isolate they were
@@ -118,13 +120,63 @@ listed; one is now closed.
   production. `libraryMode` now clones across that boundary for exactly the
   cells that would have been hosted, and names the cell and the reason when it
   cannot. `tests/prod-parity-worker-boundary.test.ts`.
-- **[ ] The worker pool itself.** Worker cells still run in-isolate under
-  `libraryMode`, so isolation (a separate heap, its own module graph, no shared
-  module state) is not reproduced. Shape: an opt-in `workers: "real"` for
-  `testServer`, paid for only by the tests that ask.
-- **[ ] Sync methods in a client context.** A non-async method called from a
-  client crosses the wire in production and is called directly in-process here.
-  This one genuinely needs the loopback/browser path, not a wrapper.
+- **[x] The worker pool itself.** Worker cells run in-isolate under
+  `libraryMode` (the entry module is the test file), so isolation — a separate
+  heap, its own module graph, no shared module state — was not reproduced, and a
+  cell holding anything at module scope behaved one way in every test and
+  another in production. `testServer({ workers: "real", workerEntry })` now
+  spawns the real thing from a real app entry, paid for only by the tests that
+  ask; every way of asking for it and getting nothing throws at the call.
+  Strictness travels with the thread (`__aioDev` crosses on the init message),
+  so the worker isolate is never more permissive than the one that spawned it,
+  and an uncloneable argument now REJECTS on the real path too — `postMessage`
+  throws synchronously, out of a call the contract says always returns a
+  promise, so one mistake had two shapes depending on whether a worker happened
+  to be hosted. `tests/prod-parity-real-workers.test.ts` measures both halves —
+  the module graph is separate, and the main isolate keeps ticking through a
+  700ms burn — the same properties `tests/build-e2e.test.ts` measures on a
+  compiled binary.
+- **[x] Sync methods in a client context.** A non-async method called from a
+  client crosses the wire; the harness called it in-process, so four differences
+  were invisible to the whole suite (JSON arguments, a JSON-vetted return, a
+  throw arriving as a message with no stack, and `access: false` refusing the
+  client and not the server). `testMultiClient`'s clients now have
+  `call(cell, method, ...args)` — the real path, a real socket to a real
+  `aio.run()` — and an unknown cell or method rejects instead of resolving
+  `undefined` off an ack the server sends for any frame.
+  `tests/prod-parity-client-sync-call.test.ts` asserts each difference with the
+  in-process and wire results side by side.
+
+  Both are documented in `docs/testing/prod-parity.md`, which is also the honest
+  list of what the harness still does NOT reproduce (the browser's own renderer;
+  a second process).
+
+- **[x] The harness fires the frozen-state tripwire.** `bootCells` never passes
+  `freezeState`, which read as "the in-process harness cannot fire it". It can —
+  the standalone runtime defaults it on and Immer's `autoFreeze` is never
+  disabled (verified by forcing `freezeState: false` and watching committed
+  state come back frozen anyway) — but nothing checked it, so the fact lived in
+  a `??`. `tests/prod-parity-harness-strictness.test.ts` is that check, for
+  `bootCells` and `testServer`.
+
+## Tracked debt (not defects)
+
+- **94 test files opt out of a sanitizer.** `sanitizeResources: false` /
+  `sanitizeOps: false` is a test saying it may leak a resource or an op, and at
+  that count the suite can no longer tell "this test cleans up" from "nobody
+  checked". Each one is a judgement about a specific test, so this is a
+  file-by-file pass, not a sweep — and the ratchet shape (`check:silent-catch`,
+  `check:vacuous`) is the right instrument: freeze the count, only ever lower
+  it. Reported by a process-lifecycle audit (2026-08-22), still open.
+- **A one-step "start fresh" for a blocked release**
+  (`apply({ retireData:
+  true })`) and a public **`aio.stop()` /
+  `aio.restart()`**. Both asked for by an app that had to write ~200 lines to
+  archive its profile, retire `data/` and relaunch across two processes. The
+  shape is right and the pieces exist in `updates-runtime.ts`; both want their
+  own release and their own gate run — "restart yourself" has to hold on every
+  target and every launcher, which is a test matrix rather than a function. See
+  `feedback/refused.md`.
 
 ## Known gaps, stated where they are felt
 
@@ -139,7 +191,14 @@ listed; one is now closed.
   only caller of the render meter and the transport that replaced it never
   picked it up: `renderBudget` is accepted, validated and bridged, and nothing
   measures staleness or pending patches; `vitals-ping` has no sender, so
-  `/__aio/vitals` reports `clients: []`; `DevToolsHandle.tree` is `[]` forever.
+  `/__aio/vitals` reports `clients: []`. (`DevToolsHandle.tree` came OFF this
+  list in alpha69: it is now walked from the live AIR roots on demand —
+  pull-based deliberately, because publishing after each flush re-renders any
+  component that displays the tree, which changes the tree. The freeze
+  diagnostic came off too: it had reported "unreachable for 0.0s" with a null
+  hint every time, because the duration was recomputed from the timestamp
+  stamped on that very transition and the snapshot hardcoded the transport layer
+  healthy, which made the hint rule written for it structurally unreachable.)
   Boot now says so, and so does `docs/debugging/vitals.md`, because
   config-accepted-then-silently-dropped is the class this project calls
   disqualifying — but saying it is not fixing it. The fix is an `initVitals`
@@ -158,6 +217,16 @@ listed; one is now closed.
     in one process sharing a cell name share cancellation. The honest fix keys
     it by app identity, threading an app id through `registerCall` and every
     dispatch that reaches it.
+  - `cell-worker-host.ts` builds its `createDispatch` without `freezeState`,
+    while the main isolate passes `config.freezeState ?? !prod`. A worker cell's
+    committed state is therefore frozen only by Immer's `autoFreeze` (never
+    disabled), not additionally deep-frozen — a narrower tripwire inside a
+    worker than outside it, in dev and prod alike. The flag is captured when the
+    dispatch is created, and the host creates its dispatch BEFORE the `init`
+    message that carries `prod` arrives, so the fix is either deferring dispatch
+    creation until `init` or making `freezeState` a getter in `dispatch.ts` — a
+    hot-path change that deserves its own gate run. Found while closing the
+    prod-parity items above; `workers: "real"` makes it reachable from a test.
 
 ## Standing policy
 
@@ -197,24 +266,26 @@ Fix direction: give the responder a per-run nonce and have the sweep keep only
 answers carrying it. The test then measures ITS responder instead of the
 neighbourhood, and stays meaningful on a busy network.
 
-## `install.sh` fails against a repo created under a restrictive umask
+## `install.sh` against a repo created under a restrictive umask — DIAGNOSED (alpha69)
 
-`git` writes loose objects with the process umask applied. Under `umask 077`
-they land as `400` (owner-read only) instead of git's usual `444`, and a local
-`git clone` of that repo then fails:
+`git` applies the process umask when it writes loose objects, so commits made
+under `umask 077` land as `400` (owner-read) instead of git's usual `444`. The
+owner can still clone such a repo; **another user cannot read the objects at
+all**, which is what the onboarding lab does — and git reports:
 
 ```
 fatal: failed to copy file to '…/.git/objects/fc/afa…': Permission denied
 ```
 
-Hit for real: `deno task lab` failed all four install scenarios because this
-repo had nine `400` objects, all written by commits made in a shell whose umask
-was `077`. `chmod 444` on them fixed it.
+Hit again on 2026-08-27: 38 objects and several hundred working-tree files
+written by agents running under a tight umask failed `deno task lab`.
 
-`umask 077` is a reasonable hardening choice, not a mistake, so a developer can
-have a perfectly good repo that `install.sh` cannot clone — and the error names
-git internals rather than the cause.
+**Not fixable on the installer's side** — a clone must READ what it cannot read,
+so `--no-hardlinks` and the `file://` transport fail identically (both were
+tried; both still open the object). It is a property of the source repo.
 
-Fix direction: `install.sh` should not depend on the source repo's object modes.
-Either normalize after cloning, or fetch the way a stranger would (the remote
-path already works — only the local-source path reads objects directly).
+What alpha69 changed: `install.sh` now RECOGNISES the failure and names the
+cause and the fix (`chmod -R o+rX <repo>/.git`, and `umask 022` before
+committing) instead of leaving git internals as the only clue. That is the whole
+of what this side can do, so this item is closed as diagnosed rather than
+carried as a defect.

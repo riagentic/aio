@@ -47,7 +47,16 @@ export function _invokeSsrStartHook(): void {
  *  emitted the bare boolean token `disabled` for every tag, so the server sent
  *  `<div disabled="">` where the client builds `<div disabled="true">`: the
  *  same vnode, two documents, and an attribute selector that matches on one
- *  render and not the other. Same question, one answer. */
+ *  render and not the other. Same question, one answer.
+ *
+ *  Keyed by the ATTRIBUTE name, because that is what the lookup below holds —
+ *  `_propAttr` has already mapped the JSX name to it. The one entry that was
+ *  keyed by its JSX name instead (`readOnly`, whose attribute is `readonly`)
+ *  could therefore never be found: `<input readOnly>` fell through to the
+ *  generic branch and shipped `readonly="true"` where mount builds
+ *  `readonly=""`. That is a divergence hydration then REPORTS — the renderer's
+ *  loudest dev warning, fired on correct code. `defaultChecked` needs no entry
+ *  of its own: `_propAttr` maps it to `checked`, which is here. */
 const _BOOL_ATTR_TAGS: Readonly<Record<string, ReadonlySet<string>>> = {
   checked: new Set(["input"]),
   selected: new Set(["option"]),
@@ -60,7 +69,7 @@ const _BOOL_ATTR_TAGS: Readonly<Record<string, ReadonlySet<string>>> = {
     "select",
     "textarea",
   ]),
-  readOnly: new Set(["input", "textarea"]),
+  readonly: new Set(["input", "textarea"]),
   multiple: new Set(["input", "select"]),
 };
 

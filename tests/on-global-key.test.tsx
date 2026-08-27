@@ -75,3 +75,40 @@ testUI(
     assertEquals(hits(), ["escape"]);
   },
 );
+
+// The callback must be the LATEST one, not the one the first render happened
+// to have. The listener is registered inside `onMount`, which runs once, so
+// closing over the argument froze it at mount: a handler reading a value that
+// changes (`() => go(page + 1)`) kept firing with render 1's copy forever.
+// Measured `[1, 1, 1]` where the app expects `[1, 2, 3]`. `useRaf`/`useInterval`
+// already solve this with a ref and document it; this is the same solution.
+const page = signal(1);
+const seen = signal<number[]>([]);
+
+function Pager() {
+  const current = page(); // subscribes, so the component re-renders
+  onGlobalKey("n", () => seen.set([...seen(), current]));
+  return (
+    <div>
+      <button t="btn">{String(current)}</button>
+    </div>
+  );
+}
+
+testUI(
+  Pager,
+  "the chord runs the LATEST callback, not render 1's",
+  async (ui) => {
+    page.set(1);
+    seen.set([]);
+    await ui.btn.press("n");
+    page.set(2);
+    await ui.settle();
+    await ui.btn.press("n");
+    page.set(3);
+    await ui.settle();
+    await ui.btn.press("n");
+    await ui.settle();
+    assertEquals(seen(), [1, 2, 3]);
+  },
+);

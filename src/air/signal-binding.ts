@@ -9,7 +9,12 @@ import { styleValue } from "./ssr-utils.ts";
 // landed as a literal attribute SVG ignores, and `disabled` on a non-form
 // element became an invisible JS expando. Same prop, different DOM, purely
 // because the value was a signal.
-import { _RESERVED_PROPS, _writeProp } from "./prop-write.ts";
+import {
+  _controlDrifted,
+  _isControlled,
+  _RESERVED_PROPS,
+  _writeProp,
+} from "./prop-write.ts";
 
 /** Check if a value is a Signal (duck-typing: _subscribers + set + peek).
  *
@@ -48,6 +53,14 @@ export function bindSignalProps(
       let prev: unknown;
       const dispose = effect(() => {
         const val = sig.value;
+        // A controlled prop already showing `val` is not rewritten: assigning
+        // an <input>'s `value` its own string still moves the caret to the end
+        // in every browser, and the effect re-runs for reasons the user did not
+        // cause. Same rule as the diff path, same decider.
+        if (_isControlled(el, k) && !_controlDrifted(el, k, val)) {
+          prev = val;
+          return;
+        }
         _writeProp(el, k, val, prev);
         prev = val;
       });
@@ -78,6 +91,40 @@ export function bindSignalProps(
     _signalBindingCleanups.set(el, cleanups);
   }
 }
+
+/** Re-assert the CONTROLLED props (`value`, `checked`) whose value is a Signal.
+ *
+ *  `applyProps` skips every signal-valued prop because this module owns it —
+ *  but what this module owns it through is an EFFECT, and an effect runs when
+ *  the SIGNAL changes. The user typing into `<input value={sig}>` changes the
+ *  DOM, not the signal; when the handler then refuses the input (a cap, a
+ *  validator, a cell that declined the write) nothing in the system has a
+ *  reason to run, and the element keeps showing a value the state rejected —
+ *  permanently, and reported as real by `am surface` and `ui.X.value`.
+ *
+ *  The diff calls this once per render, which is the same moment the plain-value
+ *  path re-asserts in `applyProps`. Drifted-only, so an accepted keystroke never
+ *  moves a caret; `peek()` so a render never subscribes to the signal.
+ *
+ *  `<select value={sig}>` is re-asserted here too and AGAIN by
+ *  `applyChildDependentProps` after the children are in place — the write only
+ *  lands once the matching `<option>` exists. */
+export function reassertControlledSignalProps(
+  el: HTMLElement,
+  props: Record<string, unknown>,
+): void {
+  for (const k of _CONTROLLED_PROPS) {
+    const v = props[k];
+    if (!isSignal(v)) continue;
+    const rv = (v as Signal<unknown>).peek();
+    if (!_controlDrifted(el, k, rv)) continue;
+    _writeProp(el, k, rv);
+  }
+}
+
+/** The props a user can move behind the reconciler's back — `_isControlled`
+ *  answers for an element, this is the key set to LOOK for. */
+const _CONTROLLED_PROPS = ["value", "checked"] as const;
 
 /** Dispose all signal-binding effects for an element. */
 export function cleanupSignalBindings(el: Element): void {

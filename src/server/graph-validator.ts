@@ -1,5 +1,6 @@
 // src/graph-validator.ts
 import { resolve } from "@std/path";
+import { SERVER_FILE_RE } from "../entries.ts";
 
 /** Error categories for module validation failures */
 export type ErrorCategory =
@@ -347,9 +348,6 @@ export const BLOCKING_CATEGORIES: ReadonlySet<ErrorCategory> = new Set([
   "server-only-import",
 ]);
 
-/** aio's server-only file convention — never served to a browser. */
-const SERVER_FILE_RE = /\.server\.tsx?$/;
-
 export async function validateGraph(
   entrypoint: string,
   importMap: Record<string, string>,
@@ -370,6 +368,9 @@ export async function validateGraph(
   // the eager set exists: static + eager ⇒ BLOCKING (the app blank-screens);
   // reached only via dynamic import ⇒ the documented escape hatch, fine.
   const serverFileImports: { file: string; spec: string; line: number }[] = [];
+  // Static imports of the framework's own SERVER entry (`aio/server`), judged
+  // by the same static+eager rule. See SERVER_ONLY_SPECS.
+  const serverEntryImports: { file: string; spec: string; line: number }[] = [];
 
   async function walk(filePath: string, importerPath?: string): Promise<void> {
     if (visited.has(filePath)) {
@@ -459,9 +460,30 @@ export async function validateGraph(
     const platformErrors = checkPlatformSafety(source, filePath);
     errors.push(...platformErrors);
 
+    // THE import list is the SOURCE's, not esbuild's output: esbuild elides an
+    // import whose bindings are unused, so a typo'd path in a file nobody
+    // reads a symbol from was invisible here — no terminal error, no overlay,
+    // an unchanged page, while `deno check` failed on the same file. Dev must
+    // never be the more lenient environment. The transpiled specifiers are
+    // unioned in because the transpiler ADDS some of its own (jsx-runtime).
+    const sourceImports = extractSourceImports(source);
+    const lineOf = new Map<string, number>();
+    for (const i of sourceImports) {
+      if (!lineOf.has(i.spec)) lineOf.set(i.spec, i.line);
+    }
     const byKind = extractImportsByKind(transpiled);
-    const specifiers = [...byKind.static, ...byKind.dynamic];
-    const staticSpecs = new Set(byKind.static);
+    const staticSpecs = new Set([
+      ...byKind.static,
+      ...sourceImports.filter((i) => i.kind === "static").map((i) => i.spec),
+    ]);
+    const dynamicSpecs = new Set([
+      ...byKind.dynamic,
+      ...sourceImports.filter((i) => i.kind === "dynamic").map((i) => i.spec),
+    ]);
+    for (const d of dynamicSpecs) {
+      if (staticSpecs.has(d)) dynamicSpecs.delete(d);
+    }
+    const specifiers = [...staticSpecs, ...dynamicSpecs];
     const staticDeps: string[] = [];
     const deps: string[] = [];
 
@@ -473,14 +495,28 @@ export async function validateGraph(
       b.toString(16).padStart(2, "0")
     ).join("").slice(0, 16);
 
+    // The line an import is written on — from the source scan when we have it,
+    // else located in the raw text. A "module not found" with no line is a
+    // grep the user has to run themselves.
+    const specLine = (spec: string): number => {
+      const known = lineOf.get(spec);
+      if (known !== undefined) return known;
+      const at = source.indexOf(spec);
+      return at < 0 ? 1 : source.slice(0, at).split("\n").length;
+    };
+
     for (const spec of specifiers) {
       if (staticSpecs.has(spec) && SERVER_FILE_RE.test(spec)) {
-        const at = source.indexOf(spec);
-        serverFileImports.push({
-          file: filePath,
-          spec,
-          line: at < 0 ? 1 : source.slice(0, at).split("\n").length,
-        });
+        serverFileImports.push({ file: filePath, spec, line: specLine(spec) });
+      }
+      // A STATIC `import … from "aio/server"` in a browser-reachable file.
+      // Not a missing mapping — the browser import map omits `aio/server` ON
+      // PURPOSE (it is SQLite + worker code), so telling the user to add
+      // `"npm:aio/server"` sends them after a package that does not exist.
+      // Reported once the eager set is known, so the documented dynamic
+      // escape hatch stays silent.
+      if (staticSpecs.has(spec) && SERVER_ONLY_SPECS.has(spec)) {
+        serverEntryImports.push({ file: filePath, spec, line: specLine(spec) });
       }
       const resolution = resolveSpecifier(
         spec,
@@ -493,7 +529,12 @@ export async function validateGraph(
         if (staticSpecs.has(spec)) staticDeps.push(resolution.path);
         await walk(resolution.path, filePath);
       } else if (resolution.kind === "error") {
-        errors.push(resolution.error);
+        errors.push({
+          ...resolution.error,
+          line: resolution.error.line ?? specLine(spec),
+          lineText: resolution.error.lineText ??
+            source.split("\n")[specLine(spec) - 1]?.trim(),
+        });
       }
     }
     staticEdges.set(filePath, staticDeps);
@@ -533,6 +574,18 @@ export async function validateGraph(
         `"${imp.spec}" is a *.server.ts module, statically imported from a client-loaded file — the dev server never serves it to the browser (404), so the app blank-screens at boot`,
       fix:
         `Load it lazily from a server-only path — \`const m = await import("${imp.spec}")\` inside a cell method — or use \`import type\`. A static import of a *.server.ts module is never client-safe (docs/build/imports.md).`,
+    });
+  }
+  for (const imp of serverEntryImports) {
+    if (!eager.has(imp.file)) continue;
+    errors.push({
+      file: imp.file,
+      line: imp.line,
+      category: "server-only-import",
+      message:
+        `"${imp.spec}" is aio's SERVER entry (SQLite, workers, the filesystem), statically imported from a browser-loaded file — the browser import map omits it deliberately, so the page dies at boot with "Failed to resolve module specifier"`,
+      fix:
+        `This is a server-only module in a client graph, NOT a missing dependency — there is no npm package to add, and adding one to deno.json will not help. Either move the import into a cell METHOD (\`const { createDB } = await import("${imp.spec}")\` — methods run on the server), or put it in a \`*.server.ts\` module and import THAT lazily. See docs/build/imports.md.`,
     });
   }
   // A module reached ONLY via dynamic import (`await import("aio")` /
@@ -659,6 +712,63 @@ export function extractImportsByKind(
     if (m[1] && isSpecifier(m[1])) dynamicSpecs.push(m[1]);
   }
   return { static: staticSpecs, dynamic: dynamicSpecs };
+}
+
+/** Every import written in the SOURCE, with the line it is written on.
+ *
+ *  {@link extractImportsByKind} reads esbuild's OUTPUT, and esbuild has already
+ *  elided any import whose bindings are unused — so a typo'd path in a source
+ *  file nobody reads a symbol from was invisible to the whole validator: no
+ *  terminal error, no overlay, an unchanged page, while `deno check` failed.
+ *  Dev was LENIENT where the type-checker was strict, which is backwards.
+ *
+ *  Type-only imports are skipped (erased before runtime; they may legally name
+ *  a `.d.ts` or a types-only package), and so are non-JS assets — the dev
+ *  transpiler strips `import "./style.css"` on purpose. */
+export function extractSourceImports(
+  source: string,
+): Array<{ spec: string; kind: "static" | "dynamic"; line: number }> {
+  const cleaned = source
+    .replace(/\/\/.*$/gm, "")
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "));
+  const out: Array<{ spec: string; kind: "static" | "dynamic"; line: number }> =
+    [];
+  const lineAt = (i: number) => cleaned.slice(0, i).split("\n").length;
+  const isSpecifier = (s: string) =>
+    s.length > 0 && !/[\s,;(){}\[\]<>`]/.test(s);
+  // Non-JS assets the transpiler handles or strips — never module-resolved.
+  const ASSET_RE =
+    /\.(css|scss|sass|less|styl|png|jpe?g|gif|svg|webp|avif|ico|woff2?|ttf|otf|mp[34]|wav|webm)$/i;
+  const push = (
+    spec: string | undefined,
+    kind: "static" | "dynamic",
+    idx: number,
+  ) => {
+    if (!spec || !isSpecifier(spec) || ASSET_RE.test(spec)) return;
+    out.push({ spec, kind, line: lineAt(idx) });
+  };
+  let m: RegExpExecArray | null;
+  // `import ... from "x"` / `export ... from "x"`. The `type` keyword right
+  // after import/export marks an erased import — skipped.
+  const FROM_RE =
+    /(?:^|[;\n}])\s*(import|export)\s+(type\s+)?([^;\n]*?)\bfrom\s*["']([^"']+)["']/g;
+  while ((m = FROM_RE.exec(cleaned)) !== null) {
+    // `import { type A, type B } from` is still a value import of the module;
+    // only `import type {…}` / `export type {…}` erase it entirely.
+    if (m[2]) continue;
+    // lastIndex, not m.index: the match STARTS at the statement boundary (the
+    // newline before `import`), which reports the previous line.
+    push(m[4], "static", FROM_RE.lastIndex);
+  }
+  const BARE_RE = /(?:^|[;\n}])\s*import\s*["']([^"']+)["']/g;
+  while ((m = BARE_RE.exec(cleaned)) !== null) {
+    push(m[1], "static", BARE_RE.lastIndex);
+  }
+  const DYNAMIC_RE = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g;
+  while ((m = DYNAMIC_RE.exec(cleaned)) !== null) {
+    push(m[1], "dynamic", DYNAMIC_RE.lastIndex);
+  }
+  return out;
 }
 
 /** All import specifiers (static + dynamic) from transpiled JS output. */

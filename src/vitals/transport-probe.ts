@@ -106,7 +106,12 @@ export function createTransportProbeClient(config: TransportProbeClientConfig) {
 /** Configuration for the server-side transport probe — thresholds and freeze/recovery callbacks. */
 export type TransportProbeServerConfig = {
   thresholds: VitalThresholds;
-  onClientFrozen?: (clientId: string) => void;
+  /** A client crossed into `frozen`. `unreachableFor` is the ping gap that
+   *  triggered it — the measurement the threshold was compared against, handed
+   *  to the caller because it is the only place that still has it. Recomputing
+   *  it from `frozenSince` (stamped on this very transition) can only ever
+   *  yield ~0, which is what every disconnect diagnostic used to report. */
+  onClientFrozen?: (clientId: string, unreachableFor: number) => void;
   onClientRecovered?: (clientId: string) => void;
   /** Clock for every timestamp this probe records AND compares. Injectable so
    *  tests can advance time without sleeping — never so a caller can supply a
@@ -179,7 +184,7 @@ export function createTransportProbeServer(config: TransportProbeServerConfig) {
 
         if (next === "frozen" && prev !== "frozen") {
           c.frozenSince = at;
-          onClientFrozen?.(c.clientId);
+          onClientFrozen?.(c.clientId, gap);
         } else if (prev === "frozen" && next !== "frozen") {
           delete c.frozenSince;
           c.status = "recovered";

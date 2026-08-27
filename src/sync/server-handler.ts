@@ -5,6 +5,7 @@ import { enc } from "../protocol/envelope.ts";
 import type { DB } from "../db/types.ts";
 import { takeRejectionFor } from "../state/rejection-tracker.ts";
 import type { HLC, SyncOp } from "./types.ts";
+import { SYNC_DEFAULTS } from "./types.ts";
 import { createHLC, type HLClock } from "./hlc.ts";
 import { compactSyncOps } from "./compact.ts";
 import {
@@ -165,6 +166,111 @@ export function createServerSyncHandler(
     return next;
   }
 
+  // ── Quarantine: a cell whose log the boot replay could not fold ───────
+  // The quarantine promise is "the cell runs at its last snapshot, its
+  // snapshot is not rewritten and its op-log is not compacted, so nothing on
+  // disk is lost". `tryCompact` kept the second half; NOTHING kept the first.
+  // A quarantined cell went on accepting, persisting, dispatching, ACKING and
+  // broadcasting ops — the client is told its write is durable while the boot
+  // log says it is not, and the next restart replays a log that still cannot
+  // be folded, so the write is gone. And because compaction stays off, the log
+  // grows without bound and every boot re-quarantines: no escape without DB
+  // surgery. A write it cannot make durable must be REFUSED, loudly, at the
+  // door — the same `op-rejected` the client already knows how to surface.
+  const _quarantineWarned = new Set<string>();
+  function quarantineReason(cell: string): string {
+    return `cell "${cell}" is quarantined since boot: its op-log could not be ` +
+      `replayed into the shape this build declares, so a write cannot be made ` +
+      `durable (the next restart would lose it). Fix the cell's \`version\` / ` +
+      `onMigrate so the log folds, then restart the server — the log and the ` +
+      `snapshot on disk are intact meanwhile.`;
+  }
+  /** Refuse a client write to a quarantined cell — reason on the wire, once
+   *  per cell in the log. Returns true when the caller must stop. */
+  function refuseIfQuarantined(
+    opId: string,
+    cell: string,
+    socket: WebSocket,
+  ): boolean {
+    if (!deps.isQuarantined?.(cell)) return false;
+    const reason = quarantineReason(cell);
+    try {
+      socket.send(enc("op-rejected", { opId, cell, reason }));
+    } catch { /* client gone */ }
+    deps.log.warn(`[sync:server] op ${opId} refused — ${reason}`);
+    return true;
+  }
+
+  // ── Clock drift: an op stamped in the future ──────────────────────────
+  // `HLClock.receive` refuses to follow a remote clock more than `maxDrift`
+  // ahead — which protects the local clock and NOTHING else. The drifted op
+  // itself was still persisted, dispatched, broadcast and kept with its future
+  // HLC, so every last-write-wins comparison against it lost for the whole
+  // drift window: one machine with a wrong clock quietly won every conflict,
+  // everywhere, and nothing said why.
+  //
+  // Refused here rather than clamped. The server is the one place a decision
+  // binds every replica, and clamping would rewrite the HLC of an op its
+  // origin already holds under the original stamp — one op id with two
+  // orderings is worse than the bug. The origin is told (`op-rejected`), its
+  // optimistic view rolls back and `sync.onRejected` fires.
+  //
+  // FUTURE only. An op stamped in the past is the offline queue working as
+  // designed (retention defaults to 4h) and loses LWW on merit; refusing it
+  // would delete offline-first.
+  //
+  // And the refusal STICKS to the op id. `ahead` is measured against the
+  // server's wall clock, which moves — so the identical op, delivered again a
+  // minute later (a duplicate still in flight, or the pending buffer of a
+  // `sync-req` that was already on the wire when the rejection went out),
+  // measured under the limit and was ACCEPTED. The origin had already been
+  // told the change was refused: `onRejected` fired, the optimistic view
+  // rolled back, the op was pruned from its buffer — and then the change
+  // landed on the server and every peer anyway. A refusal whose answer depends
+  // on when the frame happens to arrive is not a decision, and D11 promises a
+  // decision. (Found by the chaos suite, seed 724, 2026-08-27.)
+  //
+  // In-memory and bounded on purpose: the only way a refused op comes back is
+  // a frame that was already in flight on THIS connection, and a restart drops
+  // those with the socket. The reason text is remembered with the id so the
+  // re-refusal says the same thing the first one did, rather than quoting a
+  // drift that has since shrunk.
+  const REFUSED_IDS_CAP = 4096;
+  const _refusedForDrift = new Map<string, string>();
+  function rememberRefusal(opId: string, reason: string): void {
+    _refusedForDrift.set(opId, reason);
+    if (_refusedForDrift.size > REFUSED_IDS_CAP) {
+      // Maps iterate in insertion order — evict the oldest.
+      _refusedForDrift.delete(_refusedForDrift.keys().next().value!);
+    }
+  }
+  function refuseIfDrifted(
+    opId: string,
+    cell: string,
+    hlc: HLC,
+    socket: WebSocket,
+  ): boolean {
+    const remembered = _refusedForDrift.get(opId);
+    const ahead = hlc[0] - Date.now();
+    if (remembered === undefined && ahead <= SYNC_DEFAULTS.maxDrift) {
+      return false;
+    }
+    const reason = remembered ??
+      `clock drift: this change is stamped ${Math.round(ahead / 1000)}s ` +
+        `ahead of the server (limit ${
+          SYNC_DEFAULTS.maxDrift / 1000
+        }s). It is ` +
+        `refused because it would win every last-write-wins comparison until ` +
+        `the clocks meet. Correct this device's system clock (turn on ` +
+        `automatic time sync) and the change can be made again.`;
+    rememberRefusal(opId, reason);
+    try {
+      socket.send(enc("op-rejected", { opId, cell, reason }));
+    } catch { /* client gone */ }
+    deps.log.warn(`[sync:server] op ${opId} (${cell}) refused — ${reason}`);
+    return true;
+  }
+
   /** The op's cursor position for an ack. A fresh insert already knows it; a
    *  duplicate (resend after a lost ack) has to ask the store — the row, or
    *  the tombstone if compaction rolled the row over. `null` only when the
@@ -252,6 +358,10 @@ export function createServerSyncHandler(
         );
         return;
       }
+      // Refuse before persist: an ack is a durability promise, and a
+      // quarantined cell cannot keep it (see `refuseIfQuarantined`).
+      if (refuseIfQuarantined(op.id, op.cell, socket)) return;
+      if (refuseIfDrifted(op.id, op.cell, op.hlc, socket)) return;
       // AUTH-1: enforce the cell's declarative `access` rule on the sync path
       // too. Without this, a client that passes /ws (any authed user in
       // per-user mode) could mutate an `access:"admin"` cell via an op frame,
@@ -446,9 +556,28 @@ export function createServerSyncHandler(
       }
       const sync = r as {
         clientId: string;
+        /** Monotonic id of THIS request, echoed on the response so the client
+         *  can tell which request it answers (see SyncRequest.reqId). */
+        reqId?: number;
+        /** The requester's per-session nonce (see SyncRequest). Absent from a
+         *  client built before it existed. */
+        session?: string;
         cells: Record<string, { lastHlc: HLC | null; lastServerTs?: number }>;
         pendingOps: SyncOp[];
       };
+      // "Ops of the client asking" — by SESSION when it says which, because
+      // the client id alone is a persisted UUID that two clones of one profile
+      // share, and filtering on it made each clone's ops invisible to the
+      // other forever. The op id carries the nonce (`clientId-session-n`), so
+      // the prefix IS the answer; without a session we keep the old client-id
+      // rule rather than start echoing an old client's ops back at it.
+      const ownPrefix = typeof sync.session === "string" && sync.session !== ""
+        ? `${sync.clientId}-${sync.session}-`
+        : null;
+      const isRequestersOwnOp = (o: SyncOp): boolean =>
+        ownPrefix !== null
+          ? o.id.startsWith(ownPrefix)
+          : o.hlc[2] === sync.clientId;
 
       (async () => {
         // Persist pending ops under per-cell lock (prevents compact race)
@@ -460,6 +589,13 @@ export function createServerSyncHandler(
             continue;
           }
           if (!syncCells.has(pending.cell)) continue;
+          // Same quarantine gate as handleOp: this is the path that carries a
+          // reconnect's whole offline queue, so it is the one that would put
+          // the most undurable writes into a log nobody can fold.
+          if (refuseIfQuarantined(pending.id, pending.cell, socket)) continue;
+          if (
+            refuseIfDrifted(pending.id, pending.cell, pending.hlc, socket)
+          ) continue;
           // Same access gate as handleOp — pending ops are client-submitted.
           if (deps.accessCheck && !deps.accessCheck(pending.cell, meta.user)) {
             deps.log.warn(
@@ -609,6 +745,24 @@ export function createServerSyncHandler(
           )
         ) {
           if (!syncCells.has(cell)) continue;
+          // A quarantined cell is served NOTHING — not a snapshot, not a
+          // cursor. Its live state is the pre-quarantine snapshot (the log did
+          // not fold), so sending it would overwrite the client's confirmed
+          // state with older data, and echoing a cursor would seal the ops the
+          // server could not fold ABOVE it — the client would never ask again.
+          // Silence here leaves the client on what it already has, which is at
+          // least not wrong, and its cursor unmoved so a fixed build catches it
+          // up. Said once per cell: this repeats on every sync round.
+          if (deps.isQuarantined?.(cell)) {
+            if (!_quarantineWarned.has(cell)) {
+              _quarantineWarned.add(cell);
+              deps.log.warn(
+                `[sync:server] serving no state for "${cell}" — ` +
+                  `${quarantineReason(cell)} (logged once per cell)`,
+              );
+            }
+            continue;
+          }
 
           await withLock(cell, async () => {
             // Reserve the cell's cursor FIRST, inside its lock: persists for
@@ -679,6 +833,14 @@ export function createServerSyncHandler(
                     `a socket. This client cannot converge on this cell: drop ` +
                     `sync or drop the ui filter.`,
                 );
+                // The cursor was RESERVED above, before we knew the cell could
+                // not be served. Leaving it in the echo tells the client
+                // "everything up to here is covered" for a cell it was sent
+                // nothing about — it advances past ops it never received and
+                // never asks for them again. Take the promise back with the
+                // data it was standing for.
+                delete serverTsMap[cell];
+                delete lowWaterMap[cell];
                 return;
               }
               useSnapshot = true;
@@ -710,12 +872,19 @@ export function createServerSyncHandler(
               responseOps.push(
                 ...(rebuilding
                   ? ops
-                  : ops.filter((o) => o.hlc[2] !== sync.clientId)),
+                  : ops.filter((o) => !isRequestersOwnOp(o))),
               );
             }
           });
         }
 
+        // Echo the request id when the client sent one: with two catch-ups in
+        // flight, a response that cannot say which request it answers opened
+        // the client's ordering gate for BOTH (see the engine's `hold`).
+        const reqId =
+          typeof sync.reqId === "number" && Number.isFinite(sync.reqId)
+            ? { reqId: sync.reqId }
+            : {};
         const response = useSnapshot
           ? {
             mode: "snapshot" as const,
@@ -723,12 +892,14 @@ export function createServerSyncHandler(
             ops: responseOps,
             lowWater: lowWaterMap,
             lastServerTs: serverTsMap,
+            ...reqId,
           }
           : {
             mode: "incremental" as const,
             ops: responseOps,
             lowWater: lowWaterMap,
             lastServerTs: serverTsMap,
+            ...reqId,
           };
 
         try {

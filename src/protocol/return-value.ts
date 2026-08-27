@@ -35,7 +35,12 @@ import { log } from "../diagnostics/logger-api.ts";
 // The JSON round-trip comparison itself lives in wire-value.ts — ONE walk,
 // shared with the argument guard (the other direction of the same wire).
 export type { LossyConversion } from "./wire-value.ts";
-import { findLossy, formatLossy, type LossyConversion } from "./wire-value.ts";
+import {
+  findLossy,
+  formatLossy,
+  type LossyBudget,
+  type LossyConversion,
+} from "./wire-value.ts";
 
 /** Result of vetting a return value for transport. */
 export interface SerializedReturn {
@@ -43,8 +48,21 @@ export interface SerializedReturn {
   value: unknown;
   /** True when the original value could not be transported as-is. */
   dropped: boolean;
-  /** Values that survived, but not intact. Empty when the trip was exact. */
+  /** Values that survived, but not intact. Empty when the trip was exact —
+   *  unless `truncated`, in which case empty means "nothing found in the part
+   *  that was checked". */
   lossy: LossyConversion[];
+  /** The comparison walk gave up before the end of the value (see
+   *  `wire-value.ts`'s MAX_NODES).
+   *
+   *  Without it `lossy: []` reads as "this value crossed the wire EXACTLY",
+   *  which a walk that stopped early cannot know — the measured case is a
+   *  30 000-key object with a trailing `Date`, reported as a clean bill of
+   *  health. `serializeArgs` — the OTHER direction of the same wire, sharing
+   *  the same walk for exactly this reason — has always returned it; this half
+   *  dropped the budget on the floor and reported the exactness it could not
+   *  establish. */
+  truncated: boolean;
 }
 
 /** Vet a method's return value for the ack frame. Returns a JSON-clean value,
@@ -58,7 +76,7 @@ export function serializeReturn(
   what?: string,
 ): SerializedReturn {
   if (value === undefined) {
-    return { value: undefined, dropped: false, lossy: [] };
+    return { value: undefined, dropped: false, lossy: [], truncated: false };
   }
   let round: unknown;
   try {
@@ -67,17 +85,23 @@ export function serializeReturn(
     const json = JSON.stringify(value);
     if (json === undefined) {
       // A bare function/symbol stringifies to `undefined` without throwing.
-      return { value: undefined, dropped: true, lossy: [] };
+      return { value: undefined, dropped: true, lossy: [], truncated: false };
     }
     round = JSON.parse(json);
   } catch {
-    return { value: undefined, dropped: true, lossy: [] };
+    return { value: undefined, dropped: true, lossy: [], truncated: false };
   }
 
   const lossy: LossyConversion[] = [];
-  findLossy(value, round, "value", lossy, { n: 0 });
+  const budget: LossyBudget = { n: 0 };
+  findLossy(value, round, "value", lossy, budget);
   if (lossy.length > 0) warnLossy(lossy, what);
-  return { value: round, dropped: false, lossy };
+  return {
+    value: round,
+    dropped: false,
+    lossy,
+    truncated: budget.truncated === true,
+  };
 }
 
 /** Say exactly what changed. Loud in dev AND prod: a corrupted return value is

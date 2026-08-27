@@ -1,4 +1,7 @@
 import { log } from "../diagnostics/logger-api.ts";
+import { teachMessage } from "../diagnostics/error.ts";
+import { hasBothFilterModes, nearestOf } from "../state/cell-helpers.ts";
+import { classifySource } from "./updates-core.ts";
 
 // Runtime config validation & documentation — extracted from aio.ts (AIO-52)
 // Types are erased at runtime. These sets are the runtime source of truth.
@@ -78,6 +81,74 @@ export function misplacedDenoJsonKeys(
   );
 }
 
+/** Keys aio reads inside the `build: {}` block of an app's deno.json.
+ *
+ *  The ONLY aio config object with no typo gate. `aio.run({...})` exits on an
+ *  unknown key, `cell({...})` refuses one with a did-you-mean, `ui: {}` is
+ *  allowlisted — and `build: { target: [...] }` (singular) built the default
+ *  target set and said nothing, which reads as `--targets` being broken rather
+ *  than the key being misspelled.
+ *
+ *  Readers: `normalizeTargets` (targets/platforms) and `build-config.ts`
+ *  (out/server/ui). A key added there belongs here. */
+export const VALID_BUILD_KEYS = new Set<string>([
+  "targets", // string[] | Record<label, { kind, entry, ui, name, platforms }>
+  "platforms", // OS/arch list, e.g. ["linux-x64", "darwin-arm64"]
+  "out", // output directory (default: dist/)
+  "server", // LAN/remote address a shipped CLIENT defaults to
+  "ui", // UI component path override, relative to the app dir
+  // Read by `v8FlagsArg` (build-compile.ts documents this as THE place to
+  // declare V8 flags, and for a COMPILED binary it is the only channel for a
+  // heap ceiling — the flag cannot be raised at run time).
+  "v8Flags",
+  // Read by `shipApp` and `am publish`: the release channel this build is
+  // stamped with. The stamp outranks the config literal at run time, which is
+  // what stops a test build updating itself into the public release.
+  "channel",
+]);
+
+/** Keys a target override may carry in the object form of `build.targets`. */
+export const VALID_BUILD_TARGET_KEYS = new Set<string>([
+  "kind",
+  "entry",
+  "ui",
+  "name",
+  "platforms",
+]);
+
+/** Unknown keys in a deno.json `build: {}` block (and in each object-form
+ *  target override), already phrased with a did-you-mean. Pure — the caller
+ *  reports. Returns `[]` for a missing or non-object block, which is the
+ *  normal case: `build` is optional. */
+export function unknownBuildKeys(build: unknown): string[] {
+  if (!build || typeof build !== "object" || Array.isArray(build)) return [];
+  const say = (path: string, key: string, valid: Set<string>) => {
+    const near = nearestOf(key, valid);
+    return `${path}${key}${near ? ` (did you mean "${near}"?)` : ""}`;
+  };
+  const out: string[] = [];
+  for (const k of Object.keys(build as Record<string, unknown>)) {
+    if (!VALID_BUILD_KEYS.has(k)) out.push(say("build.", k, VALID_BUILD_KEYS));
+  }
+  // …and inside the object form of `targets`, where a misspelled `entry` is
+  // the same class of silence one level deeper: the target builds, from the
+  // wrong module.
+  const targets = (build as { targets?: unknown }).targets;
+  if (targets && typeof targets === "object" && !Array.isArray(targets)) {
+    for (
+      const [label, o] of Object.entries(targets as Record<string, unknown>)
+    ) {
+      if (!o || typeof o !== "object" || Array.isArray(o)) continue;
+      for (const k of Object.keys(o as Record<string, unknown>)) {
+        if (!VALID_BUILD_TARGET_KEYS.has(k)) {
+          out.push(say(`build.targets.${label}.`, k, VALID_BUILD_TARGET_KEYS));
+        }
+      }
+    }
+  }
+  return out;
+}
+
 export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "appId",
   "reduce",
@@ -151,6 +222,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "_onCheckpointRestore",
   "_cellNames",
   "_workerCells",
+  "_workerEntry",
   "_healthGetter",
   "_reduceBreakdown",
   "_onReportOptsReady",
@@ -214,6 +286,7 @@ export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
   "redactActions",
   "childWindows",
   "libraryMode",
+  "_workerEntry", // internal: testServer({ workers: "real" })
   "syncIntervalMs",
   "fullStateThreshold",
   "routes",
@@ -252,7 +325,7 @@ export const CONFIG_DOCS: Record<string, [string, string]> = {
   ],
   updates: [
     "off",
-    'release source URL ("https://…" / "file://…" / a git repo) — or { source, auto, check, channel, key }',
+    'release source URL ("https://…" / "file://…" / a git repo) — or { source, kind, auto, check, channel, key, keys, canApply, allowUnsigned, prerelease }',
   ],
   appId: ["", "unique app identity — lock file, UDS socket, KV/SQLite paths"],
   appVersion: ["", "app version string — logged on startup"],
@@ -323,11 +396,14 @@ export const CONFIG_DOCS: Record<string, [string, string]> = {
     'custom HTTP routes — "/path" or "/prefix/*" → handler (uploads, webhooks)',
   ],
   maxConnections: ["100", "max concurrent WebSocket clients"],
-  allowedOrigins: ["", "extra allowed WS origins beyond localhost + own host"],
+  allowedOrigins: [
+    "",
+    "extra hosts/origins this app may be reached as — the WS Origin check AND the Host (DNS-rebinding) gate read this one list",
+  ],
   strictOrigin: ["false", "require Origin header on WS upgrade in expose mode"],
   trustProxyHeader: [
     "",
-    'behind a trusted reverse proxy: read the real client IP from this header (e.g. "x-forwarded-for") for lockout/abuse bucketing',
+    'behind a trusted reverse proxy: read the real client IP from this header\'s RIGHTMOST hop (e.g. "x-forwarded-for") for lockout/abuse bucketing',
   ],
   wsLimits: [
     "hardened",
@@ -448,8 +524,8 @@ export const UI_DOCS: Record<string, [string, string]> = {
     'desktop window frame: "standard" | "themed" | "none"',
   ],
   theme: [
-    '"auto"',
-    'default stylesheet — "auto" (steps aside for your style.css) | "full" (keep it alongside yours) | "none"',
+    '"tokens"',
+    'default stylesheet — "tokens" (variables only, nothing paints) | "auto" (steps aside for your style.css) | "full" (keep it alongside yours) | "none"',
   ],
 };
 
@@ -603,10 +679,22 @@ export function validateConfig(
 ): void {
   const unknown = Object.keys(obj).filter((k) => !validKeys.has(k));
   if (unknown.length > 0) {
+    // …with the near miss named. `cell()` has refused an unknown key with
+    // "did you mean" since alpha52 and `aio.run()` printed a 90-row table and
+    // left the reader to find the typo in it; the two are the same class of
+    // mistake and now get the same sentence. `nearestOf` is THE spelling of
+    // that suggestion (state/cell-helpers.ts) — never a second copy.
+    const named = unknown.map((k) => {
+      const near = nearestOf(k, validKeys);
+      return near ? `${k} (did you mean "${near}"?)` : k;
+    });
     log.error(
-      `\n[aio] CONFIG ERROR: unknown ${label} key(s): ${unknown.join(", ")}`,
+      teachMessage(
+        `unknown ${label} key(s): ${named.join(", ")}`,
+        `remove them, or fix the spelling — the full list of valid keys is below`,
+      ),
     );
-    log.error(`\n[aio] Valid configuration:\n`);
+    log.error(`\nValid configuration:\n`);
     log.error(formatValidConfig());
     exit(1);
   }
@@ -617,18 +705,62 @@ export function validateConfig(
   for (const [key, allowed] of Object.entries(ENUM_VALUES)) {
     const v = obj[key];
     if (v !== undefined && !allowed.includes(v as string)) {
+      const near = typeof v === "string" ? nearestOf(v, allowed) : null;
       log.error(
-        `\n[aio] CONFIG ERROR: ${label}.${key} is ${
-          JSON.stringify(v)
-        } — must be one of ${allowed.map((a) => JSON.stringify(a)).join(", ")}`,
+        teachMessage(
+          `${label}.${key} is ${JSON.stringify(v)}, which is not one of ${
+            allowed.map((a) => JSON.stringify(a)).join(", ")
+          }`,
+          near
+            ? `did you mean ${JSON.stringify(near)}?`
+            : `use one of ${allowed.map((a) => JSON.stringify(a)).join(", ")}`,
+        ),
       );
       exit(1);
     }
   }
+  // ── Couplings between keys that are each individually valid ──────────
+  //
+  // Only from the TOP-LEVEL pass: the `ui` pass sees `{ width, height }` with
+  // no `client` beside it, and half a config cannot answer a question about
+  // two keys.
+  if (label === "ui") return;
+  for (const c of configConflicts(obj)) {
+    // Deduped by text: `aio.run()` validates the CellsConfig on the way in and
+    // the composed AioConfig on the way through, so every conflict is seen
+    // twice in one boot and a diagnostic printed twice reads as a loop.
+    if (_reportedConflicts.has(c.what)) continue;
+    _reportedConflicts.add(c.what);
+    const msg = teachMessage(c.what, c.fix, c.doc);
+    if (c.level === "error") {
+      log.error(msg);
+      exit(1);
+    } else {
+      log.warn(msg);
+    }
+  }
+}
+
+const _reportedConflicts = new Set<string>();
+
+/** Test seam: forget which conflicts have already been reported. @internal */
+export function _resetConfigConflicts(): void {
+  _reportedConflicts.clear();
 }
 
 /** Config keys whose value is one of a fixed set. Checked by
- *  {@linkcode validateConfig} alongside the key allowlist. */
+ *  {@linkcode validateConfig} alongside the key allowlist.
+ *
+ *  EVERY enum-valued option belongs here. The list held two entries while six
+ *  options had a fixed value set, so `client: "Electron"` — capital E, the
+ *  spelling every doc uses in prose — fell through the key allowlist, failed
+ *  the `=== "electron"` test in the launcher and started a BROWSER app with no
+ *  message of any kind. A key allowlist catches a misspelled key; this is the
+ *  only thing that catches a misspelled VALUE.
+ *
+ *  `tests/config-enum-values.test.ts` compares each list against the union in
+ *  `aio-types.ts`, so a value added to a type without being added here is a red
+ *  test rather than a documented option refused at boot. */
 export const ENUM_VALUES: Record<string, readonly string[]> = {
   chrome: ["standard", "themed", "none"],
   // Every member of `UiTheme` (aio-types.ts) — a missing one is not a lenient
@@ -636,4 +768,368 @@ export const ENUM_VALUES: Record<string, readonly string[]> = {
   // missing here from the day it was documented; `tests/config-enum-values.
   // test.ts` now compares this list against the type's own union.
   theme: ["tokens", "auto", "full", "none"],
+  client: ["electron", "browser", "cli", "server-only"],
+  transport: ["uds", "ws", "auto"],
+  persistMode: ["single", "multi"],
+  perfCheck: ["on", "off"],
 };
+
+// ─── Couplings: keys that are each valid and wrong TOGETHER ──────────────────
+//
+// A key allowlist answers "is this a real option" and an enum list answers "is
+// this a real value". Neither can answer "do these two options contradict each
+// other", and that is the class an audit found fourteen live instances of —
+// every one of them silent. Two cost data outright:
+//
+//   • `auth: { requireVerified: true }` with no `sendMail` answers signup with
+//     `verificationSent: true` — a LIE, nothing was sent — and then refuses
+//     every login with 403 forever. The account cannot be recovered from
+//     inside the app.
+//   • `journal: true` under `persist: false` or `dbPath: ":memory:"` resolves
+//     to `null`. The app boots, reports nothing, and the SIGKILL/power-cut
+//     recovery the author asked for is simply absent when it is needed.
+//
+// The rest invert intent or leave an option inert. Each is stated as CAUSE and
+// FIX, in the one teachable format, and refused (or warned) at boot rather
+// than discovered in production.
+//
+// PURE — no logging, no exit, no `Deno` — so every conflict is a table-driven
+// unit test rather than a boot the test has to survive.
+
+/** One config contradiction: what is wrong, and the one-line fix. */
+export type ConfigConflict = {
+  /** `"error"` — the app would lose data or do the OPPOSITE of what was asked;
+   *  boot is refused. `"warn"` — an option is inert, nothing is destroyed. */
+  level: "error" | "warn";
+  /** The config keys involved, most-specific first. For tests and tooling. */
+  keys: string[];
+  /** Cause — what the combination actually does. */
+  what: string;
+  /** Fix — one line the author can act on without reading a doc. */
+  fix: string;
+  /** Optional doc path. */
+  doc?: string;
+};
+
+/** `{ include: [...], exclude: [...] }` on the same filter — `include` wins and
+ *  `exclude` is dropped on the floor.
+ *
+ *  The predicate itself lives with the filters, in `state/cell-helpers.ts`:
+ *  `cell()`'s own `visible`/`persist` are refused there too (a throw — the
+ *  normalizer destroys the evidence before boot), and one fact decided in two
+ *  layers is how the two spellings would drift apart. */
+const bothFilterModes = hasBothFilterModes;
+
+/** Every contradiction between two otherwise-valid keys of one config object.
+ *  Pure. Order is stable (declaration order) so a test can pin it. */
+export function configConflicts(
+  cfg: Record<string, unknown>,
+): ConfigConflict[] {
+  const out: ConfigConflict[] = [];
+  const obj = (v: unknown): Record<string, unknown> | null =>
+    v && typeof v === "object" ? v as Record<string, unknown> : null;
+
+  // ── 1. auth.requireVerified without sendMail — a lockout, and a lie ──
+  const auth = obj(cfg.auth);
+  if (auth?.requireVerified === true && typeof auth.sendMail !== "function") {
+    out.push({
+      level: "error",
+      keys: ["auth.requireVerified", "auth.sendMail"],
+      what:
+        `auth.requireVerified is on but auth.sendMail is not set, so no account can ever ` +
+        `be verified: signup answers { verificationSent: true } without sending anything, ` +
+        `and every later login is refused 403 email_unverified — permanently`,
+      fix:
+        `give auth.sendMail a transport (SMTP/SES/console — yours), or drop ` +
+        `auth.requireVerified until you have one`,
+      doc: "docs/auth/auth.md",
+    });
+  }
+
+  // ── 2. journal without a file to journal INTO ────────────────────────
+  if (cfg.journal === true) {
+    const memoryDb = cfg.dbPath === ":memory:";
+    if (cfg.persist === false || memoryDb) {
+      const cause = cfg.persist === false
+        ? "persist is false"
+        : 'dbPath is ":memory:"';
+      out.push({
+        level: "error",
+        keys: ["journal", cfg.persist === false ? "persist" : "dbPath"],
+        what:
+          `journal: true asks for durable SIGKILL/power-cut recovery, but ${cause}, ` +
+          `so there is no file to replay from — the journal resolves to null and the ` +
+          `app boots with no recovery at all`,
+        fix: cfg.persist === false
+          ? `remove journal: true, or turn persistence on (persist defaults to true)`
+          : `remove journal: true for in-memory runs, or point dbPath at a real file`,
+        doc: "docs/persistence/auto-persist.md",
+      });
+    }
+  }
+
+  // ── 3. include AND exclude on one filter — exclude is dropped ────────
+  const defaults = obj(cfg.cellDefaults);
+  for (const kind of ["visible", "ui", "persist"] as const) {
+    if (bothFilterModes(defaults?.[kind])) {
+      out.push({
+        level: "error",
+        keys: [`cellDefaults.${kind}.include`, `cellDefaults.${kind}.exclude`],
+        what:
+          `cellDefaults.${kind} sets BOTH include and exclude — include wins and exclude is ` +
+          `discarded without a word, so every field you listed in exclude is ${
+            kind === "persist"
+              ? "written to the database"
+              : "sent to every client"
+          } if it also appears (directly or by omission) under include`,
+        fix: `keep ONE of them: include is an allowlist (nothing else is ${
+          kind === "persist" ? "persisted" : "exposed"
+        }), exclude is a denylist (everything else is)`,
+        doc: "docs/state/cells.md",
+      });
+    }
+  }
+
+  // ── 4. updates: nothing polls, but a manual check auto-installs ──────
+  const updates = obj(cfg.updates);
+  if (updates?.check === false && updates.auto === true) {
+    out.push({
+      level: "warn",
+      keys: ["updates.check", "updates.auto"],
+      what:
+        `updates.auto is on while updates.check is false — nothing ever polls, so the ` +
+        `unattended install can only happen on a manual updates.check() call. As written ` +
+        `this app will not update itself`,
+      fix:
+        `set check: true (or an interval in ms) to actually poll, or drop auto: true if ` +
+        `manual-only was the intent`,
+      doc: "docs/deploy/updates.md",
+    });
+  }
+
+  // ── 5. `long` methods overridden by an explicit per-method timeout ───
+  //
+  // `long` means "no ceiling" (cell-impl resolves it to 0); a
+  // `perfBudget.methods["cell:method"].timeout` is consulted FIRST and wins.
+  // Two ways to say the same thing, and the quieter one loses.
+  const perfBudget = obj(cfg.perfBudget);
+  const methodBudgets = obj(perfBudget?.methods);
+  if (methodBudgets) {
+    const longKeys = new Set<string>();
+    for (const cell of Array.isArray(cfg.cells) ? cfg.cells : []) {
+      const aio = obj(obj(cell)?.__aio);
+      const id = typeof aio?.id === "string" ? aio.id : null;
+      const longs = aio?.longMethods;
+      if (!id || !Array.isArray(longs)) continue;
+      for (const m of longs) longKeys.add(`${id}:${m}`);
+    }
+    for (const [key, budget] of Object.entries(methodBudgets)) {
+      if (!longKeys.has(key)) continue;
+      if (obj(budget)?.timeout === undefined) continue;
+      out.push({
+        level: "error",
+        keys: [`perfBudget.methods["${key}"].timeout`, "long"],
+        what: `"${key}" is declared long (no call ceiling) AND given ` +
+          `perfBudget.methods["${key}"].timeout — the explicit timeout wins, so the ` +
+          `method is abandoned at that deadline and \`long\` does nothing`,
+        fix:
+          `keep one: drop "${key}" from the cell's \`long\` list if the deadline is real, ` +
+          `or remove the per-method timeout if it should run unbounded`,
+        doc: "docs/debugging/performance.md",
+      });
+    }
+  }
+
+  // ── 6. killExisting with no lock to take over ────────────────────────
+  const singletonOff = cfg.singleton === false || cfg.libraryMode === true;
+  if (cfg.killExisting === true && singletonOff) {
+    const why = cfg.singleton === false
+      ? "singleton: false"
+      : "libraryMode: true";
+    out.push({
+      level: "error",
+      keys: [
+        "killExisting",
+        cfg.singleton === false ? "singleton" : "libraryMode",
+      ],
+      what:
+        `killExisting asks to take over the running instance, but ${why} means no instance ` +
+        `lock is acquired at all — nothing is killed, nothing is taken over, and a second ` +
+        `copy simply starts alongside the first`,
+      fix:
+        `remove killExisting, or remove ${why} so there is a single instance to take over`,
+      doc: "docs/state/lifecycle.md",
+    });
+  }
+
+  // ── 7. singleton asked for and silently overridden ───────────────────
+  if (cfg.singleton === true && cfg.libraryMode === true) {
+    out.push({
+      level: "error",
+      keys: ["singleton", "libraryMode"],
+      what:
+        `singleton: true and libraryMode: true contradict each other — libraryMode wins and ` +
+        `the instance lock is never taken, so the "refuse to start if already running" ` +
+        `guarantee you asked for is not in force`,
+      fix:
+        `drop singleton: true (libraryMode implies no lock), or drop libraryMode if this is ` +
+        `a real app rather than a test/embedding host`,
+      doc: "docs/state/lifecycle.md",
+    });
+  }
+
+  // ── 8. transport: "uds" with a client that cannot open a socket ──────
+  //
+  // An explicit "uds" is honoured unconditionally (paths.ts resolveTransport):
+  // it is NOT downgraded for a browser client, so the app comes up listening on
+  // a Unix socket that no browser can reach and prints a URL nobody can open.
+  if (cfg.transport === "uds") {
+    const client = typeof cfg.client === "string" ? cfg.client : undefined;
+    if (client && client !== "electron") {
+      out.push({
+        level: "error",
+        keys: ["transport", "client"],
+        what:
+          `transport: "uds" with client: "${client}" — the local socket is honoured as ` +
+          `written, but only the Electron client speaks it. The server will come up on a ` +
+          `socket a ${
+            client === "browser" ? "browser" : client
+          } client cannot connect to`,
+        fix:
+          `use transport: "ws" (or drop transport and let "auto" decide — it picks uds only ` +
+          `for a local electron app)`,
+        doc: "docs/clients/electron.md",
+      });
+    }
+    if (cfg.expose === true) {
+      out.push({
+        level: "error",
+        keys: ["transport", "expose"],
+        what:
+          `transport: "uds" with expose: true — a Unix socket is local by definition, and an ` +
+          `explicit "uds" is not downgraded, so the app serves nothing on the network it was ` +
+          `just told to serve`,
+        fix:
+          `drop transport: "uds" (expose needs "ws"), or drop expose if this app is local`,
+        doc: "docs/clients/electron.md",
+      });
+    }
+  }
+
+  // ── 9. serverUrl launches Electron whatever `client` says ────────────
+  //
+  // `""` is meaningful (the --connect page), so this asks `=== undefined`.
+  if (cfg.serverUrl !== undefined) {
+    const client = typeof cfg.client === "string" ? cfg.client : undefined;
+    if (client && client !== "electron") {
+      out.push({
+        level: "error",
+        keys: ["serverUrl", "client"],
+        what:
+          `serverUrl is set with client: "${client}" — the thin-client path runs BEFORE ` +
+          `client is resolved, so it launches Electron regardless and then exits. ` +
+          `client: "${client}" has no effect`,
+        fix:
+          `remove client: "${client}" if a thin Electron client is what you want, or remove ` +
+          `serverUrl and point the ${client} client at the server itself`,
+        doc: "docs/clients/electron.md",
+      });
+    }
+  }
+
+  // ── 10. ui.width/height where no window is ever opened ───────────────
+  //
+  // NOT "outside Electron": the browser shell emits them as metas and the
+  // WS-transport Electron launcher reads them back. They are inert only where
+  // there is no window at all.
+  const ui = obj(cfg.ui);
+  if (ui && (ui.width !== undefined || ui.height !== undefined)) {
+    const client = typeof cfg.client === "string" ? cfg.client : undefined;
+    if (client === "cli" || client === "server-only") {
+      out.push({
+        level: "warn",
+        keys: ["ui.width", "ui.height", "client"],
+        what:
+          `ui.width/ui.height are set with client: "${client}", which opens no window — ` +
+          `the values are read and then never used by anything`,
+        fix:
+          `remove them, or use client: "electron"/"browser" if this app is meant to have a ` +
+          `window`,
+      });
+    }
+  }
+
+  // ── 11. two session TTLs, and each is read by a different half ───────
+  const sessions = obj(cfg.sessions);
+  if (sessions?.ttlMs !== undefined && auth?.ttlMs !== undefined) {
+    out.push({
+      level: "error",
+      keys: ["sessions.ttlMs", "auth.ttlMs"],
+      what:
+        `sessions.ttlMs (${sessions.ttlMs}) and auth.ttlMs (${auth.ttlMs}) are both set and ` +
+        `neither wins outright: the session STORE takes its default from sessions.ttlMs, ` +
+        `while every /__aio/auth login issues its token AND sets its cookie Max-Age from ` +
+        `auth.ttlMs`,
+      fix:
+        `set the TTL in ONE place — auth.ttlMs if you use the built-in login flows, ` +
+        `sessions.ttlMs if you issue tokens yourself`,
+      doc: "docs/auth/auth.md",
+    });
+  }
+  if (
+    sessions?.ttlMs !== undefined && auth?.ttlMs === undefined &&
+    cfg.auth !== undefined && cfg.auth !== false
+  ) {
+    out.push({
+      level: "warn",
+      keys: ["sessions.ttlMs", "auth.ttlMs"],
+      what:
+        `sessions.ttlMs is set and auth.ttlMs is not — issued tokens honour it, but the ` +
+        `login cookie's Max-Age falls back to the built-in 30 days, so the browser keeps a ` +
+        `cookie for a session the store has already expired`,
+      fix: `set auth: { ttlMs: ${sessions.ttlMs} } to the same value`,
+      doc: "docs/auth/auth.md",
+    });
+  }
+
+  // ── 12. a git source ignores every manifest-trust option ─────────────
+  if (updates && typeof updates.source === "string") {
+    let kind: string | null = null;
+    try {
+      kind = classifySource(
+        updates.source,
+        updates.kind as "manifest" | "git" | undefined,
+      );
+    } catch {
+      // aio-ok: classifySource REFUSES an ambiguous source rather than guessing,
+      // and the real caller raises exactly that error a moment later with the
+      // same message. A validator that cannot tell which kind this is has no
+      // opinion about which options that kind reads — it must not pre-empt (or
+      // duplicate) the refusal.
+      kind = null;
+    }
+    if (kind === "git") {
+      const ignored = ["key", "keys", "allowUnsigned", "prerelease"]
+        .filter((k) => updates[k] !== undefined);
+      if (ignored.length > 0) {
+        out.push({
+          level: "warn",
+          keys: ignored.map((k) => `updates.${k}`),
+          what:
+            `updates.source is a git repository, and the git path never reads ${
+              ignored.map((k) => `updates.${k}`).join(", ")
+            } — a repository has no manifest and nothing to sign, so an update is trusted ` +
+            `because you trust the repo, not because anything was verified`,
+          fix:
+            `remove ${
+              ignored.join(", ")
+            }, or publish signed artifacts with \`deno task ship\` and ` +
+            `point updates.source at them (kind: "manifest")`,
+          doc: "docs/deploy/updates.md",
+        });
+      }
+    }
+  }
+
+  return out;
+}

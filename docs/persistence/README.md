@@ -4,7 +4,9 @@ How AIO stores, syncs, and transports state.
 
 ## Overview
 
-- [How It Works](how-it-works.md) — end-to-end: state change → disk → restore
+- [How It Works](how-it-works.md) — end-to-end: state change → disk → restore,
+  and [the durability contract](how-it-works.md#the-durability-contract): what
+  survives a kill, a power cut, and a bounded shutdown
 - [Where Files Live](where-files-live.md) — `~/.<app>/data` is the whole backup;
   `am data` / `am backup` / `am restore`
 

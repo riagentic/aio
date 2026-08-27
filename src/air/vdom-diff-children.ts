@@ -3,7 +3,15 @@
 
 import { _devMode, _devWarn, _domNodeCount } from "./vdom-types.ts";
 import type { RenderCtx, VNode } from "./vdom-types.ts";
-import { getDom, isChildOf, removeDom } from "./vdom-remove.ts";
+import {
+  _cancelExitFor,
+  _firstLive,
+  _markExitKey,
+  _nextLive,
+  getDom,
+  isChildOf,
+  removeDom,
+} from "./vdom-remove.ts";
 import { createDom } from "./vdom-render.ts";
 
 /** Diff function signature — injected from vdom-diff.ts to break circular dep.
@@ -118,11 +126,13 @@ export function _regionFirst(
   parent: Node,
   startAnchor: Node | null,
 ): Node | null {
-  if (!startAnchor) return parent.firstChild;
+  // Exiting nodes (mid animation, owned by no vnode) are stepped over — the
+  // region's first node is the first one the reconciler still owns.
+  if (!startAnchor) return _firstLive(parent);
   // The anchor sits outside the region, so it must have survived; if it did
   // not, the region's bounds are unknowable and a guess would be worse than
   // an honest null.
-  return isChildOf(startAnchor, parent) ? startAnchor.nextSibling : null;
+  return isChildOf(startAnchor, parent) ? _nextLive(startAnchor) : null;
 }
 
 function diffUnkeyed(
@@ -140,16 +150,16 @@ function diffUnkeyed(
   // text" corruption). All positional walks + inserts are anchored to the region.
   startAnchor: Node | null = null,
 ): void {
-  const regionStart: ChildNode | null = startAnchor
-    ? startAnchor.nextSibling
-    : parent.firstChild;
+  const regionStart: Node | null = startAnchor
+    ? _nextLive(startAnchor)
+    : _firstLive(parent);
 
   // Snapshot DOM nodes for old children BEFORE mutations, walking from the
   // region start. `cursor` ends at the node just past the region — a stable
   // reference (outside the region) used as the insertion anchor for new nodes so
   // growth lands inside the region instead of at the parent's end.
   const oldDoms: (Node | null)[] = [];
-  let cursor: ChildNode | null = regionStart;
+  let cursor: Node | null = regionStart;
   for (let i = 0; i < oldChildren.length; i++) {
     const child = oldChildren[i]!;
     const dom = getDom(child);
@@ -157,7 +167,7 @@ function diffUnkeyed(
       oldDoms.push(dom);
       const count = _domNodeCount(child);
       for (let j = 0; j < count; j++) {
-        cursor = cursor?.nextSibling ?? null;
+        cursor = _nextLive(cursor);
       }
     } else {
       oldDoms.push(cursor);
@@ -167,7 +177,7 @@ function diffUnkeyed(
       // sibling there duplicates/misplaces it (AIO-414 " tail" duplication).
       const count = _domNodeCount(child);
       for (let j = 0; j < count; j++) {
-        cursor = cursor?.nextSibling ?? null;
+        cursor = _nextLive(cursor);
       }
     }
   }
@@ -191,13 +201,14 @@ function diffUnkeyed(
       if (oldDom && oldDom.nodeType === 3) {
         if (String(nc) !== String(oc)) oldDom.textContent = String(nc);
       } else {
-        const newText = ctx.doc.createTextNode(String(nc));
-        if (oldDom && isChildOf(oldDom, parent)) {
-          parent.insertBefore(newText, oldDom);
-          parent.removeChild(oldDom);
-        } else {
-          parent.insertBefore(newText, regionEnd);
-        }
+        // The cursor points at something that is NOT a text node — the
+        // positional model has desynced. This branch used to `removeChild` it:
+        // a silent deletion of a DOM element the vnode tree still owns (its
+        // vnode keeps a `_dom` pointing at a detached node, so it stops
+        // updating), with no warning even in dev — while `_diff`'s own
+        // text branch, for the identical situation, KEEPS the node and warns.
+        // Two deciders for one question. There is now one: `_diff`'s.
+        diffFn(parent, nc, oc, ctx, isSvg, oldDom ?? regionEnd);
       }
     } else {
       // The positional node is the ONLY handle on a bare-text old child: it
@@ -229,11 +240,13 @@ function _placeSpan(
   let n: Node | null = first;
   for (let i = 0; i < count && n; i++) {
     nodes.push(n);
-    n = n.nextSibling;
+    n = _nextLive(n);
   }
   let placed = lastPlaced;
   for (const node of nodes) {
-    const anchor: Node | null = placed ? placed.nextSibling : parent.firstChild;
+    // The anchor skips exiting nodes: a row still fading out is not a slot in
+    // the list, and treating it as one is what sent it to the bottom.
+    const anchor: Node | null = placed ? _nextLive(placed) : _firstLive(parent);
     if (node !== anchor) parent.insertBefore(node, anchor);
     placed = node;
   }
@@ -264,9 +277,9 @@ function diffKeyed(
   // Walking from parent.firstChild would assume the region starts at the
   // parent's first child and misalign non-keyed DOM nodes for mid-parent
   // Fragments, removing/moving the wrong nodes.
-  let cursor: ChildNode | null = startAnchor
-    ? startAnchor.nextSibling
-    : parent.firstChild;
+  let cursor: Node | null = startAnchor
+    ? _nextLive(startAnchor)
+    : _firstLive(parent);
   for (const oc of (oldChildren as (VNode | string | number)[])) {
     if (
       typeof oc === "object" && oc !== null && (oc as VNode).key !== undefined
@@ -276,7 +289,7 @@ function diffKeyed(
       oldMap.set((oc as VNode).key!, oc as VNode);
       const count = _domNodeCount(oc);
       for (let j = 0; j < count; j++) {
-        cursor = cursor?.nextSibling ?? null;
+        cursor = _nextLive(cursor);
       }
     } else {
       oldNonKeyed.push(oc);
@@ -285,7 +298,7 @@ function diffKeyed(
         oldNonKeyedDoms.push(dom);
         const count = _domNodeCount(oc);
         for (let j = 0; j < count; j++) {
-          cursor = cursor?.nextSibling ?? null;
+          cursor = _nextLive(cursor);
         }
       } else {
         oldNonKeyedDoms.push(cursor);
@@ -293,10 +306,41 @@ function diffKeyed(
         // component, 1 for bare text — a hardcoded 1 skips the next sibling.
         const count = _domNodeCount(oc);
         for (let j = 0; j < count; j++) {
-          cursor = cursor?.nextSibling ?? null;
+          cursor = _nextLive(cursor);
         }
       }
     }
+  }
+
+  // The keys `next` asks for — known BEFORE any placement, which is what lets
+  // the departures happen first (below).
+  const nextKeys = new Set<string | number>();
+  for (const nc of (nextChildren as (VNode | string | number)[])) {
+    if (typeof nc === "object" && nc !== null && nc.key !== undefined) {
+      nextKeys.add(nc.key);
+    }
+  }
+
+  // Remove old keyed nodes not in next — BEFORE placing the survivors, not
+  // after. A deferred removal (exit animation) leaves its node in the DOM, and
+  // a node that is not yet FLAGGED as exiting is indistinguishable from a live
+  // slot: placement anchored on it and pushed the survivors past the dying row,
+  // so `["a","b","c"] → ["a","c"]` rendered `a,c,b` — the dying row teleported
+  // to the bottom for the whole fade. Departures first, then placement, and the
+  // anchors only ever see nodes the tree still owns.
+  for (const oc of oldChildren) {
+    if (oc.key !== undefined && !nextKeys.has(oc.key)) {
+      removeDom(parent, oc, ctx);
+      // If the removal was DEFERRED for an exit animation, remember which key
+      // the surviving node belongs to (see _cancelExitFor).
+      _markExitKey(getDom(oc), oc.key);
+    }
+  }
+  // AIO-417: shadowed old duplicates whose key IS used are matched by nothing —
+  // remove them or they orphan. (Unused keys are already handled just above,
+  // which iterates oldChildren and thus removes every dup of an unused key.)
+  for (const oc of oldShadowedDups) {
+    if (nextKeys.has(oc.key!)) removeDom(parent, oc, ctx);
   }
 
   const usedKeys = new Set<string | number>();
@@ -348,8 +392,8 @@ function diffKeyed(
         }
         if (textDom) {
           const a: Node | null = lastPlaced
-            ? lastPlaced.nextSibling
-            : parent.firstChild;
+            ? _nextLive(lastPlaced)
+            : _firstLive(parent);
           if (textDom !== a) parent.insertBefore(textDom, a);
           lastPlaced = textDom;
         }
@@ -364,8 +408,8 @@ function diffKeyed(
         );
         if (newDom) {
           const anchor = lastPlaced
-            ? lastPlaced.nextSibling
-            : parent.firstChild;
+            ? _nextLive(lastPlaced)
+            : _firstLive(parent);
           parent.insertBefore(newDom, anchor);
           lastPlaced = newDom;
         }
@@ -389,12 +433,15 @@ function diffKeyed(
         lastPlaced = _placeSpan(parent, dom, _domNodeCount(nc), lastPlaced);
       }
     } else {
+      // A key coming BACK while its old row is still animating out must
+      // replace that row, not stack a second one beside it.
+      _cancelExitFor(parent, key);
       // New node — create and insert at correct position
       const newDom = createDom(nc, ctx, isSvg, parent);
       if (newDom) {
         const anchor2: Node | null = lastPlaced
-          ? lastPlaced.nextSibling
-          : parent.firstChild;
+          ? _nextLive(lastPlaced)
+          : _firstLive(parent);
         parent.insertBefore(newDom, anchor2);
         // AIO-177/AIO-248: a multi-node child (Fragment, boundary, or a
         // component that renders one) arrives as a DocumentFragment that the
@@ -402,28 +449,16 @@ function diffKeyed(
         // did not move, so the first inserted node is the one after it;
         // advance to the LAST one so the next child lands beyond the span.
         let node: Node | null = lastPlaced
-          ? lastPlaced.nextSibling
-          : parent.firstChild;
+          ? _nextLive(lastPlaced)
+          : _firstLive(parent);
         for (let i = 1; i < _domNodeCount(nc) && node; i++) {
-          node = node.nextSibling;
+          node = _nextLive(node);
         }
         if (node) lastPlaced = node;
       }
     }
   }
 
-  // Remove old keyed nodes not in next
-  for (const oc of oldChildren) {
-    if (oc.key !== undefined && !usedKeys.has(oc.key)) {
-      removeDom(parent, oc, ctx);
-    }
-  }
-  // AIO-417: shadowed old duplicates whose key WAS used are matched by nothing —
-  // remove them or they orphan. (Unused keys are already handled just above,
-  // which iterates oldChildren and thus removes every dup of an unused key.)
-  for (const oc of oldShadowedDups) {
-    if (usedKeys.has(oc.key!)) removeDom(parent, oc, ctx);
-  }
   // Remove excess old non-keyed children not matched above (AIO-114)
   for (let i = nkIdx; i < oldNonKeyed.length; i++) {
     removeDom(parent, oldNonKeyed[i]!, ctx, oldNonKeyedDoms[i] ?? null);

@@ -7,6 +7,7 @@ import type {
   VitalLayer,
   VitalsConfig,
   VitalsSnapshot,
+  VitalStatus,
   VitalThresholds,
 } from "./types.ts";
 import { DEFAULT_THRESHOLDS } from "./types.ts";
@@ -82,10 +83,21 @@ export function createVitalsSystem(config: VitalsConfig): VitalsSystem {
   const loopProbe = createLoopProbe(thresholds);
   const serverTransport = createTransportProbeServer({
     thresholds,
-    onClientFrozen: (clientId) => {
-      const c = serverTransport.getClientLiveness(clientId);
-      const frozenFor = c?.frozenSince ? Date.now() - c.frozenSince : 0;
-      fireAlert("transport", "frozen", frozenFor, thresholds.transport.frozen);
+    // `unreachableFor` is the ping gap the probe just measured — the number
+    // the threshold was compared against. It used to be recomputed here as
+    // `Date.now() - c.frozenSince`, and `frozenSince` is stamped AT this
+    // transition, so the answer was ~0 every single time: every disconnect
+    // alert carried `measured: 0` and the reporter printed "DISCONNECTED —
+    // client unreachable for 0.0s". A diagnostic whose one number can only
+    // ever be zero says less than no number at all.
+    onClientFrozen: (clientId, unreachableFor) => {
+      void clientId;
+      fireAlert(
+        "transport",
+        "frozen",
+        unreachableFor,
+        thresholds.transport.frozen,
+      );
     },
     onClientRecovered: (_clientId) => {
       fireAlert("transport", "recovered", 0, 0);
@@ -101,13 +113,7 @@ export function createVitalsSystem(config: VitalsConfig): VitalsSystem {
         status: loopProbe.getStatus(),
         firstDegradedAt: loopProbe.getFirstDegradedAt(),
       }),
-      getTransportSnapshot: () => ({
-        clients: serverTransport.getAllClients().map((c) => ({
-          id: c.clientId,
-          status: c.status,
-          frozenFor: c.frozenSince ? Date.now() - c.frozenSince : undefined,
-        })),
-      }),
+      getTransportSnapshot: () => ({ clients: clientRows() }),
     })
     : null;
 
@@ -172,9 +178,56 @@ export function createVitalsSystem(config: VitalsConfig): VitalsSystem {
     });
   }
 
+  /** The client rows every consumer of transport liveness reads.
+   *
+   *  ONE decider, because "how long has this client been unreachable" was
+   *  computed in three places and all three computed it from `frozenSince` —
+   *  which is stamped at the moment the client is declared frozen, so the
+   *  answer was zero by construction, forever.
+   *
+   *  The honest measurement is the gap since the last sign of life, which is
+   *  also exactly what the freeze threshold is compared against. */
+  function clientRows(): Array<
+    { id: string; status: string; frozenFor?: number; gap: number }
+  > {
+    const at = Date.now();
+    return serverTransport.getAllClients().map((c) => ({
+      id: c.clientId,
+      status: c.status,
+      gap: at - c.lastPing,
+      frozenFor: c.status === "frozen" ? at - c.lastPing : undefined,
+    }));
+  }
+
   function buildSnapshot(): VitalsSnapshot {
     const loopVitals = loopProbe.getVitals();
+    const rows = clientRows();
+    // The transport layer of the snapshot, from the probe that actually
+    // measures it. It used to be hardcoded `healthy / 0`, which made THREE of
+    // the hint engine's rules structurally unreachable on the server — rule 3
+    // among them, the one written for exactly the alert this snapshot is
+    // built for ("Network connection stalled. No pong in Nms"). So every
+    // client-freeze alert went out with `hint: null` and the reporter fell
+    // back to its generic string, while the rule that had the answer sat
+    // one field away.
+    //
+    // The WORST client speaks for the layer: a freeze alert is raised per
+    // client, and the layer is degraded exactly when some client is.
+    const worst = rows.reduce<{ status: string; gap: number } | null>(
+      (m, r) => (m === null || r.gap > m.gap ? r : m),
+      null,
+    );
+    const frozenSince = serverTransport.getAllClients()
+      .map((c) => c.frozenSince)
+      .filter((t): t is number => typeof t === "number")
+      .sort((a, b) => a - b)[0] ?? null;
     return {
+      // The server has NO render probe — render is a browser-side measurement
+      // (`render-meter.ts`) and never reaches this snapshot. Reported as
+      // healthy because the server genuinely has nothing to say about it, not
+      // because it measured anything; the hint rules that read it (1, 4, 5, 6)
+      // are client-side rules and cannot fire here. Said out loud so the next
+      // reader does not mistake this for a measurement.
       render: {
         status: "healthy",
         measured: 0,
@@ -182,7 +235,11 @@ export function createVitalsSystem(config: VitalsConfig): VitalsSystem {
         firstDegradedAt: null,
         visible: true,
       },
-      transport: { status: "healthy", measured: 0, firstDegradedAt: null },
+      transport: {
+        status: (worst?.status as VitalStatus) ?? "healthy",
+        measured: worst?.gap ?? 0,
+        firstDegradedAt: frozenSince,
+      },
       loop: {
         ...loopVitals,
         status: loopProbe.getStatus(),
@@ -221,11 +278,7 @@ export function createVitalsSystem(config: VitalsConfig): VitalsSystem {
     checkAndAlert,
     getEndpointData: () => ({
       server: { loop: loopProbe.getVitals() },
-      clients: serverTransport.getAllClients().map((c) => ({
-        id: c.clientId,
-        status: c.status,
-        frozenFor: c.frozenSince ? Date.now() - c.frozenSince : undefined,
-      })),
+      clients: clientRows(),
     }),
     getLoopVitalsForPong: () => loopProbe.getVitals(),
     formatTimelineSummary: () => {
@@ -286,11 +339,7 @@ export {
   createTransportProbeClient,
   createTransportProbeServer,
 } from "./transport-probe.ts";
-export {
-  classifySeverity,
-  detectCascadeOrigin,
-  evaluateHints,
-} from "./hints.ts";
+export { classifySeverity, evaluateHints } from "./hints.ts";
 export { createPressureMonitor } from "./pressure-monitor.ts";
 export type {
   PressureMonitorAPI,

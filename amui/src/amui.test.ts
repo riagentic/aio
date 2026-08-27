@@ -7,8 +7,9 @@ import { h } from "../../src/air/vdom.ts";
 import { manager, reconcileDetail, refusalOf } from "./manager.ts";
 import type { DiscoveredProject, ProjectDetail } from "./manager.ts";
 import App from "./App.tsx";
-import { readProjectMeta } from "./server/scan.ts";
-import { psStats, readFile } from "./server/proc.ts";
+import { readProjectMeta } from "./server/scan.server.ts";
+import { psStats, readFile } from "./server/proc.server.ts";
+import { freePort } from "../../src/testing/server-test.ts";
 
 // ── manager cell (hermetic) ──────────────────────────────────────────────────
 testCell(manager, "initial state is empty and idle", (t) => {
@@ -120,7 +121,7 @@ testCell(
   manager,
   "amui lists itself as a monitorable `self` project",
   async (t) => {
-    const { selfDir } = await import("./server/scan.ts");
+    const { selfDir } = await import("./server/scan.server.ts");
     await t.send.discover();
     t.expect.state((s) => {
       const me = s.projects.find((p) => p.path === selfDir());
@@ -135,7 +136,7 @@ testCell(
   manager,
   "select on the self entry populates detail with self: true",
   async (t) => {
-    const { selfDir } = await import("./server/scan.ts");
+    const { selfDir } = await import("./server/scan.server.ts");
     await t.send.discover();
     await t.send.select(selfDir());
     t.expect.state((s) =>
@@ -149,7 +150,7 @@ for (const action of ["start", "stop", "restart"] as const) {
     manager,
     `${action} refuses to act on amui itself`,
     async (t) => {
-      const { selfDir } = await import("./server/scan.ts");
+      const { selfDir } = await import("./server/scan.server.ts");
       await t.send.discover();
       const before = t.getState().projects.length;
       await t.send[action](selfDir());
@@ -165,7 +166,7 @@ for (const action of ["start", "stop", "restart"] as const) {
 // The scan roots must include ~/aio-apps and the launch-dir walk-up, and the
 // framework repo itself must never appear as a managed project.
 Deno.test("discoverProjects: roots cover ~/aio-apps + cwd; excludes the framework", async () => {
-  const { discoverProjects } = await import("./server/scan.ts");
+  const { discoverProjects } = await import("./server/scan.server.ts");
   const { projects, roots } = await discoverProjects();
   assert(roots.some((r) => r.endsWith("/aio-apps")), "includes ~/aio-apps");
   assert(
@@ -176,7 +177,7 @@ Deno.test("discoverProjects: roots cover ~/aio-apps + cwd; excludes the framewor
   // spelling (`!p.name.includes("riagentic")`) would have gone vacuously green
   // the moment the package was renamed, while still listing the framework repo
   // as a manageable app.
-  const { selfDir } = await import("./server/scan.ts");
+  const { selfDir } = await import("./server/scan.server.ts");
   const repoRoot = selfDir().split("/").slice(0, -1).join("/");
   assert(
     !projects.some((p) => p.path === repoRoot),
@@ -409,7 +410,7 @@ Deno.test("parseLogLine: framework, client, and raw lines", async () => {
 });
 
 Deno.test("readLogs: prefers the app's own log dir, falls back to the old one", async () => {
-  const { readLogs } = await import("./server/proc.ts");
+  const { readLogs } = await import("./server/proc.server.ts");
   const dir = await Deno.makeTempDir();
   try {
     // No log yet → missing.
@@ -558,7 +559,7 @@ Deno.test("highlight: colors TS/JSON, leaves unknown + huge files plain", async 
 });
 
 Deno.test("runtimeInfo: dev deno process → runtime root is the project dir", async () => {
-  const { runtimeInfo } = await import("./server/proc.ts");
+  const { runtimeInfo } = await import("./server/proc.server.ts");
   // Our own process is `deno` running from this repo — kind dev, exe = deno.
   const ri = await runtimeInfo(Deno.pid, "/tmp/proj");
   // On Linux /proc resolves; elsewhere it falls back to the project dir.
@@ -627,7 +628,7 @@ Deno.test("readProjectMeta: a non-aio deno.json is not flagged aio", async () =>
 });
 
 Deno.test("runTask: cancel via signal terminates promptly (never hangs)", async () => {
-  const { runTask } = await import("./server/proc.ts");
+  const { runTask } = await import("./server/proc.server.ts");
   const dir = await Deno.makeTempDir();
   try {
     await Deno.writeTextFile(
@@ -652,7 +653,7 @@ Deno.test("runTask: cancel via signal terminates promptly (never hangs)", async 
 });
 
 Deno.test("listFiles: walks the tree, ignores deps/junk, reports truncation", async () => {
-  const { listFiles } = await import("./server/proc.ts");
+  const { listFiles } = await import("./server/proc.server.ts");
   const dir = await Deno.makeTempDir();
   try {
     await Deno.mkdir(`${dir}/src`);
@@ -704,7 +705,7 @@ Deno.test("readFile: reads within the project, blocks path traversal", async () 
 });
 
 Deno.test("findCellSource: locates the cell definition, not references", async () => {
-  const { findCellSource } = await import("./server/proc.ts");
+  const { findCellSource } = await import("./server/proc.server.ts");
   const dir = await Deno.makeTempDir();
   try {
     await Deno.mkdir(`${dir}/src`, { recursive: true });
@@ -734,7 +735,7 @@ Deno.test("findCellSource: locates the cell definition, not references", async (
 // never walking pseudo-filesystems or network mounts — cheap reach, no nonsense.
 // (`AMUI_ROOTS` was `AUI_ROOTS` until the aui→amui rename caught up with it.)
 Deno.test("scan: explicit AMUI_ROOTS is honoured verbatim", async () => {
-  const { _internals } = await import("./server/scan.ts");
+  const { _internals } = await import("./server/scan.server.ts");
   const prev = Deno.env.get("AMUI_ROOTS");
   Deno.env.set("AMUI_ROOTS", "/work/apps:/mnt/projects");
   try {
@@ -752,7 +753,7 @@ Deno.test("scan: explicit AMUI_ROOTS is honoured verbatim", async () => {
 });
 
 Deno.test("scan: never walks pseudo-filesystems or machine state", async () => {
-  const { _internals } = await import("./server/scan.ts");
+  const { _internals } = await import("./server/scan.server.ts");
   for (const p of ["/proc", "/sys", "/dev", "/var", "/etc", "/mnt", "/media"]) {
     assert(
       _internals.NEVER_WALK.has(p),
@@ -760,4 +761,190 @@ Deno.test("scan: never walks pseudo-filesystems or machine state", async () => {
        network mount blocks for seconds`,
     );
   }
+});
+
+// ── a wedged app must not read as a healthy one ──────────────────────────────
+//
+// amui reads a running app through its control plane. `refusalOf` only ever
+// matched AUTH-shaped errors, so a TRANSPORT failure — the app hung, its port
+// gone, the process wedged — left `controlError` null, `tick()` kept the last
+// good health/vitals bundle, and `detail.at` was refreshed unconditionally.
+// Measured against a fully dead target: status "ok", uptime 99, connections 1,
+// a timestamp still advancing every second, and no banner anywhere. That is
+// the dishonest degradation this file's own comments claim to have fixed.
+testCell(
+  manager,
+  "tick: an unreachable control plane is reported, not painted as healthy",
+  async (t) => {
+    const port = freePort(); // nothing listens — every control read refuses
+    t.init({
+      detail: baseDetail({
+        running: true,
+        appId: "wedged",
+        pid: 2147483646, // effectively never live
+        port,
+        at: "2020-01-01T00:00:00.000Z",
+        uptimeSec: 42,
+        connections: 7,
+      }),
+      health: {
+        status: "ok",
+        version: "1.0.0-alphaX",
+        cells: { c: { status: "ok", enabled: true, errors: 0 } },
+      },
+    });
+    await t.send.tick();
+    t.expect.state((s) =>
+      typeof s.controlError === "string" && s.controlError.length > 0
+    );
+    t.expect.state((s) => s.detail?.at === "2020-01-01T00:00:00.000Z");
+    t.expect.state((s) =>
+      s.detail?.uptimeSec === null && s.detail?.connections === null
+    );
+  },
+);
+
+// ── tick() is single-flight ──────────────────────────────────────────────────
+//
+// Every sibling loader here carries an in-flight flag; tick() — the one on a 1s
+// interval, doing six control round-trips per run — did not. Against a slow app
+// the next tick started before the last had finished, and both read-modify-wrote
+// the SAME rolling-history snapshot, so the later write dropped the earlier
+// sample (measured: 3 ticks in, 2 samples out) while the app took two concurrent
+// bursts of control traffic instead of one.
+testCell(
+  manager,
+  "tick: a tick that overlaps another does no work and steals no flag",
+  async (t) => {
+    const port = freePort();
+    const detail = baseDetail({
+      running: true,
+      appId: "slow",
+      pid: 2147483646,
+      port,
+      cpuPct: 5,
+    });
+    // A tick is already in flight (the 1s interval fired again mid-round-trip).
+    t.init({ detail, cpuHistory: [], ticking: true });
+    await t.send.tick();
+    t.expect.state((s) => s.cpuHistory.length === 0);
+    t.expect.state((s) => s.ticking === true);
+
+    // …and with nothing in flight it does its work and always clears the flag.
+    t.init({ detail, cpuHistory: [], ticking: false });
+    await t.send.tick();
+    t.expect.state((s) => s.cpuHistory.length === 1);
+    t.expect.state((s) => s.ticking === false);
+  },
+);
+
+// ── the file viewer never reads the machine owner's secrets ──────────────────
+//
+// `findRepoRoot` walked TWELVE levels up looking for a `.git`. Plenty of people
+// keep their dotfiles in git, so for them the walk found `~/.git` and the
+// Codebase tab became a browser of the entire home directory — `.ssh/id_rsa`
+// and `.aws/credentials` listed in the tree, opened by the viewer, and copied
+// into amui's cell state (and from there into the DOM and every synced client).
+Deno.test("amui: $HOME is never a repo root, and secret dirs are never read", async () => {
+  const { findRepoRoot, listFiles, readFile, touchesSecretDir } = await import(
+    "./server/proc.server.ts"
+  );
+  const home = await Deno.makeTempDir({ prefix: "aio-amui-home-" });
+  try {
+    // The fake home is PASSED, never installed into Deno.env — every amui test
+    // shares this process, and a global env mutation is how one test starts
+    // failing because of another.
+    // A real repo BELOW $HOME still resolves — the guard must not blind the
+    // feature it protects.
+    await Deno.mkdir(`${home}/code/wallet/src`, { recursive: true });
+    await Deno.mkdir(`${home}/code/wallet/.git`);
+    assertEquals(
+      await findRepoRoot(`${home}/code/wallet/src`, home),
+      `${home}/code/wallet`,
+    );
+
+    // …but $HOME itself is not a repo, however many `.git` dirs sit in it.
+    await Deno.mkdir(`${home}/.git`);
+    await Deno.mkdir(`${home}/.ssh`);
+    await Deno.writeTextFile(`${home}/.ssh/id_rsa`, "PRIVATE KEY");
+    await Deno.mkdir(`${home}/.aws`);
+    await Deno.writeTextFile(`${home}/.aws/credentials`, "aws_secret=x");
+    await Deno.mkdir(`${home}/loose/app`, { recursive: true });
+    assertEquals(await findRepoRoot(`${home}/loose/app`, home), null);
+
+    // Even pointed straight at a home dir, the tree hides them…
+    const { nodes } = await listFiles(home);
+    assertEquals(
+      nodes.filter((n) => /^\.(ssh|aws|gnupg)(\/|$)/.test(n.path)),
+      [],
+      "secret directories must never appear in the file tree",
+    );
+    // …and the READ refuses by name, so a path from anywhere else cannot get in.
+    assert(touchesSecretDir(home, ".ssh/id_rsa"));
+    const r = await readFile(home, ".ssh/id_rsa");
+    assertEquals(r.ok, false);
+    assertStringIncludes(r.error ?? "", ".ssh");
+    assert(
+      !(r.content ?? "").includes("PRIVATE KEY"),
+      "the key's bytes must never reach cell state",
+    );
+  } finally {
+    await Deno.remove(home, { recursive: true });
+  }
+});
+
+// ── amui itself must BUILD ───────────────────────────────────────────────────
+//
+// No gate built amui, and it had not been buildable for some time: `manager.ts`
+// reached aio's server internals with a bare `await import("../../src/am/…")`,
+// which READS as server-only and is not — esbuild bundles a dynamic import of a
+// local module, so `am-http.ts`, `scan.ts` and `proc.ts` landed in the browser
+// graph and dragged `@std/path`/`node:crypto` in with them. Every build ended
+// `✗ discarded dist/app.js`, so amui's own `compile` task and `"client":
+// "electron"` were dead while `.katana/amui.md` called it production-ready.
+//
+// THE convention the bundler enforces is a `*.server.ts` FILE NAME — not a
+// `server/` folder, not the dynamic form of the import. This runs the real
+// bundler, because only the bundler knows.
+Deno.test({
+  name: "amui: the browser bundle builds (no server-only module leaks in)",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  fn: async () => {
+    const amuiDir = new URL("..", import.meta.url).pathname;
+    // `--out=` is where COMPILED artifacts land; the browser bundle is always
+    // staged in `dist/` (src/build.ts: "dist/ is staging and never a
+    // destination"). Reading the bundle from an --out directory found nothing
+    // there and failed with a bare ENOENT that named neither the build nor the
+    // convention — so the test that exists to prove amui builds could not say
+    // whether it had.
+    const bundle = `${amuiDir}dist/app.js`;
+    {
+      const cmd = new Deno.Command(Deno.execPath(), {
+        args: ["run", "-A", "../src/build.ts", "--force"],
+        cwd: amuiDir,
+        stdout: "piped",
+        stderr: "piped",
+      });
+      const r = await cmd.output();
+      const text = new TextDecoder().decode(r.stdout) +
+        new TextDecoder().decode(r.stderr);
+      assertEquals(
+        r.code,
+        0,
+        `amui does not build — its compile task and Electron client are dead ` +
+          `while this fails:\n${text}`,
+      );
+      assert(
+        !/discarded/.test(text),
+        `the bundle was refused:\n${text}`,
+      );
+      const js = await Deno.readTextFile(bundle).catch(() => null);
+      assert(
+        js !== null,
+        `the build reported success and wrote no bundle at ${bundle}:\n${text}`,
+      );
+      assert(js!.length > 1000, "an empty bundle is not a bundle");
+    }
+  },
 });

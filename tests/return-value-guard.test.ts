@@ -8,7 +8,12 @@ import { serializeReturn } from "../src/protocol/return-value.ts";
 
 Deno.test("serializeReturn: undefined passes as undefined, not dropped", () => {
   const r = serializeReturn(undefined);
-  assertEquals(r, { value: undefined, dropped: false, lossy: [] });
+  assertEquals(r, {
+    value: undefined,
+    dropped: false,
+    lossy: [],
+    truncated: false,
+  });
 });
 
 Deno.test("serializeReturn: primitives round-trip", () => {
@@ -27,19 +32,43 @@ Deno.test("serializeReturn: plain objects/arrays round-trip by value", () => {
 
 Deno.test("serializeReturn: a bare function is dropped to undefined", () => {
   const r = serializeReturn(() => 42);
-  assertEquals(r, { value: undefined, dropped: true, lossy: [] });
+  assertEquals(r, {
+    value: undefined,
+    dropped: true,
+    lossy: [],
+    // A dropped value was never walked, so the walk cannot have run out of
+    // budget — `truncated` is the pair-property `serializeArgs` already
+    // reported and `serializeReturn` used to throw away.
+    truncated: false,
+  });
 });
 
 Deno.test("serializeReturn: BigInt (JSON.stringify throws) is dropped", () => {
   const r = serializeReturn(10n);
-  assertEquals(r, { value: undefined, dropped: true, lossy: [] });
+  assertEquals(r, {
+    value: undefined,
+    dropped: true,
+    lossy: [],
+    // A dropped value was never walked, so the walk cannot have run out of
+    // budget — `truncated` is the pair-property `serializeArgs` already
+    // reported and `serializeReturn` used to throw away.
+    truncated: false,
+  });
 });
 
 Deno.test("serializeReturn: a circular structure is dropped, never throws", () => {
   const a: Record<string, unknown> = {};
   a.self = a;
   const r = serializeReturn(a);
-  assertEquals(r, { value: undefined, dropped: true, lossy: [] });
+  assertEquals(r, {
+    value: undefined,
+    dropped: true,
+    lossy: [],
+    // A dropped value was never walked, so the walk cannot have run out of
+    // budget — `truncated` is the pair-property `serializeArgs` already
+    // reported and `serializeReturn` used to throw away.
+    truncated: false,
+  });
 });
 
 Deno.test("serializeReturn: functions nested in an object are stripped by JSON", () => {

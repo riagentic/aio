@@ -14,7 +14,7 @@
 // row onward NOTHING the app writes — no cell, no other table, no session — ever
 // reaches disk again.
 
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertMatch } from "@std/assert";
 // @ts-ignore node:sqlite types unavailable when an old @types/node shadows them
 import { DatabaseSync } from "node:sqlite";
 import { createPersistenceManager } from "../src/server/persistence.ts";
@@ -123,7 +123,13 @@ Deno.test("persist: a row SQLite refuses does not stop the state snapshot", asyn
     state.notes = { items: [{ id: 1, v: "ok" }, { id: 2, v: null }], n: 2 };
     await p.flushPersist();
 
-    assert(errors.length > 0, "the failure must be reported, not swallowed");
+    const said = errors.map((e) => String((e as Error)?.cause ?? e)).join("\n");
+    assertMatch(
+      said,
+      /NOT NULL|notes/i,
+      `the failure must be reported by what SQLite refused, not merely ` +
+        `reported: ${said}`,
+    );
     assertEquals(
       await snapshotN(rec.db),
       2,

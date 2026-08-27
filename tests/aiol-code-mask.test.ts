@@ -55,6 +55,47 @@ Deno.test("codeMatches: an apostrophe in JSX text can't swallow later lines", ()
   assertEquals(names(src), ["widget"], "unterminated quotes stop at the line");
 });
 
+// The apostrophe's twin, and the expensive one: `'` and `"` cannot cross a
+// line, so a stray one blinded at most the rest of ITS line — a stray BACKTICK
+// blinded the file to EOF. Every masked rule below it stopped firing, including
+// the error-severity ones (`Deno.*` in a browser file, a credential-named
+// visible field), with no output to notice.
+Deno.test("codeMask: a stray backtick doesn't blind the rest of the file", () => {
+  const src = "const v = <p>press ` to search</p>;\n" +
+    'Deno.env.get("SECRET");\n';
+  const mask = codeMask(src);
+  assertEquals(
+    mask[src.indexOf("Deno.env")],
+    1,
+    "code after an unterminated backtick is still code",
+  );
+});
+
+Deno.test("codeMatches: an unterminated backtick can't swallow later lines", () => {
+  const src = "const v = <p>press ` to search</p>;\n" +
+    'export const w = cell("widget", {});';
+  assertEquals(
+    names(src),
+    ["widget"],
+    "an unterminated template literal is ordinary text",
+  );
+});
+
+Deno.test("codeMask: an escaped line continuation still spans its lines", () => {
+  // The bail must not swallow a legal `"a\<newline>b"` — the quote branch
+  // stops at the first UNESCAPED newline, exactly where it always did.
+  const src = 'const s = "a\\\nb";\nexport const w = cell("widget", {});';
+  const mask = codeMask(src);
+  assertEquals(mask[src.indexOf('b"')], 0, "the continued body is not code");
+  assertEquals(names(src), ["widget"]);
+});
+
+Deno.test("codeMask: a CLOSED template literal is still masked", () => {
+  const src =
+    'const t = `cell("ghost", {})`;\nexport const w = cell("real", {});';
+  assertEquals(names(src), ["real"], "a real template's body stays not-code");
+});
+
 async function cellsOf(source: string) {
   const dir = await Deno.makeTempDir();
   try {

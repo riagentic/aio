@@ -133,6 +133,13 @@ export function useSpring(config: SpringConfig = {}): SpringValue {
         cancelAnimationFrame(rafId);
         rafId = undefined;
       }
+      // The frame is cancelled, so nothing will ever clear `animating` again —
+      // and `to()` starts a spring only `if (!animating)`. Left true, a
+      // disposed spring reported itself as forever-animating and every later
+      // `to()` was a silent no-op (a spring reused after a dispose, or a UI
+      // reading `.animating` to show a "settling" state, simply stopped).
+      // Disposing means "not animating".
+      animatingSig.set(false);
     },
   };
 }

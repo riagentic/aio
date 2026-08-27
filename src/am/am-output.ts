@@ -12,11 +12,23 @@ export function detectMode(flags: GlobalFlags): OutputMode {
   return Deno.stdout.isTerminal() ? "pretty" : "json";
 }
 
-/** Formatted output — respects quiet/json/pretty mode */
+/** Formatted output — respects quiet/json/pretty mode.
+ *
+ *  In `json` mode the payload is ALWAYS a JSON object. A command that only has
+ *  a human sentence to say used to reach `JSON.stringify("…")`, which is a
+ *  JSON *string*: `am create x | tee` (and therefore every CI log and every
+ *  coding agent, since a pipe IS json mode) got one long quoted line with
+ *  literal `\n` escapes in it instead of data. Wrapping it as `{ message }`
+ *  costs a human nothing — they see the pretty branch — and gives a parser a
+ *  shape it can address. A command with real structure to report gives an
+ *  object here and it is passed through untouched; that is always the better
+ *  answer, and `am create` was the last one that did not. */
 export function out(data: unknown, mode: OutputMode): void {
   if (mode === "quiet") return;
   if (mode === "json") {
-    console.log(JSON.stringify(data));
+    console.log(
+      JSON.stringify(typeof data === "string" ? { message: data } : data),
+    );
   } else {
     if (typeof data === "string") console.log(data);
     else console.log(JSON.stringify(data, null, 2));

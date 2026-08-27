@@ -255,16 +255,29 @@ export function resolveAppDirs(opts: {
   );
 }
 
-/** Create the directories an app needs. `data/` is 0700 because it holds the
- *  auth store and a TLS private key — consolidation put secrets next to
- *  innocuous state, so the mode has to assume the worst file in the tree. */
+/** Create the directories an app needs, each locked to its owner.
+ *
+ *  `data/` is 0700 because it holds the auth store and a TLS private key —
+ *  consolidation put secrets next to innocuous state, so the mode has to
+ *  assume the worst file in the tree.
+ *
+ *  `logs/` gets the same treatment, and so does `home` above them, because
+ *  "the worst file in the tree" applies there too: the boot banner writes the
+ *  share link (`share: …?token=<app key>`) into the app log, an app log carries
+ *  whatever an app chose to log, and both directories were left at the umask —
+ *  0775 on a stock Ubuntu, i.e. every local account could read a live
+ *  credential. The mode of a directory is decided by what it can ever hold,
+ *  never by what today's file happens to be. */
 export function ensureAppDirs(dirs: AppDirs): void {
+  Deno.mkdirSync(dirs.home, { recursive: true });
   Deno.mkdirSync(dirs.data, { recursive: true });
   Deno.mkdirSync(dirs.logs, { recursive: true });
-  try {
-    // Windows has no POSIX mode; chmod throws there.
-    if (Deno.build.os !== "windows") Deno.chmodSync(dirs.data, 0o700);
-  } catch { /* best-effort — a restrictive umask or FS may refuse */ }
+  if (Deno.build.os === "windows") return; // no POSIX mode; chmod throws
+  for (const dir of [dirs.home, dirs.data, dirs.logs]) {
+    try {
+      Deno.chmodSync(dir, 0o700);
+    } catch { /* best-effort — a restrictive umask or FS may refuse */ }
+  }
 }
 
 /** Create `<home>/app` and lock it to its owner. Returns the path.

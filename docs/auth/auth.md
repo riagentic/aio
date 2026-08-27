@@ -1,5 +1,13 @@
 # Authentication & Security
 
+aio is built for **trusted environments** — localhost tools, LAN dashboards,
+small teams, desktop apps. The server binds `127.0.0.1` unless you pass
+`--expose`, and an app is public until you ask for a key or for users. For
+anything internet-facing, terminate TLS at a reverse proxy and name the domain
+in `allowedOrigins`; the full posture and its known limitations are in
+[Security model](#security-model) and
+[Intended deployment model](#intended-deployment-model) below.
+
 ## Remote access (`--expose`)
 
 By default, the server binds to `127.0.0.1` (localhost only). Use `--expose` to
@@ -548,14 +556,30 @@ configured — carrying the current page as the post-login return path. Props:
 
 ### Email verification & password reset
 
-Plug in any mail transport — the framework does the tokens:
+**aio ships no mail transport, so out of the box there is no end-user password
+recovery.** The framework does the token half — mint, hash, expire, burn — and
+hands the message to `auth.sendMail`, a hook whose body you write. With no
+`sendMail` configured, `POST /__aio/auth/verify/request` and
+`POST /__aio/auth/reset/request` answer `501 mail_not_configured`, `<SignIn/>`
+hides its "Forgot password?" link, and the only way back into a locked-out
+account is the operator: `am auth passwd <id>`. (Turning on
+`auth.requireVerified` without a `sendMail` is refused at boot — it would lock
+out every account that ever signs up.)
+
+Plug in a transport and both flows work. The hook is
+`({ to, subject, text }) => void | Promise<void>` — anything that delivers the
+text qualifies:
 
 ```ts
 await aio.run({
   cells: [/* … */],
   auth: {
     requireVerified: true, // no login until the email is proven
-    sendMail: ({ to, subject, text }) => sendWithSesOrSmtp(to, subject, text),
+    sendMail: ({ to, subject, text }) => {
+      // YOU write this body — aio has no SMTP/SES/Postmark client to offer.
+      // This version is real and deliberately useless: it prints the mail.
+      console.log(`[mail] to=${to} subject=${subject}\n${text}`);
+    },
   },
 });
 ```
@@ -793,13 +817,14 @@ from `ui`.
 
 ### Known limitations
 
-| Limitation                                   | Mitigation                                                                                                                                                           |
-| -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Self-signed cert warning in browsers         | One-time "trust" click; or use `--cert`/`--key` with a CA-signed cert                                                                                                |
-| Token appears in URL (`?token=`)             | Use `Authorization: Bearer <token>` header instead; avoid sharing URLs in logs                                                                                       |
-| Token regenerates on restart                 | Compile targets pin the token via env or config; `am` tooling doesn't capture it                                                                                     |
-| `users:` tokens are static secrets in source | Use environment variables: `'alice-token': Deno.env.get('ALICE_TOKEN')!`                                                                                             |
-| `--expose` origin policy                     | Origin is always validated: localhost + the server's own host + `allowedOrigins` pass, everything else is 403; `strictOrigin: true` additionally requires the header |
+| Limitation                                   | Mitigation                                                                                                                                                                                         |
+| -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Self-signed cert warning in browsers         | One-time "trust" click; or use `--cert`/`--key` with a CA-signed cert                                                                                                                              |
+| Token appears in URL (`?token=`)             | Use `Authorization: Bearer <token>` header instead; avoid sharing URLs in logs                                                                                                                     |
+| Token regenerates on restart                 | Compile targets pin the token via env or config; `am` tooling doesn't capture it                                                                                                                   |
+| `users:` tokens are static secrets in source | Use environment variables: `'alice-token': Deno.env.get('ALICE_TOKEN')!`                                                                                                                           |
+| `--expose` origin policy                     | Origin is always validated (exposed or not): the server's own origin — host AND scheme — plus `allowedOrigins` pass, everything else is 403; `strictOrigin: true` additionally requires the header |
+| DNS rebinding                                | The `Host` header is validated on every request: loopback names, IP literals, the bound host and `allowedOrigins` pass; any other domain is 403                                                    |
 
 ### Intended deployment model
 
@@ -820,12 +845,30 @@ location / {
   proxy_http_version 1.1;
   proxy_set_header Upgrade $http_upgrade;
   proxy_set_header Connection "upgrade";
-  # OVERWRITE (not add to) the forwarded header: aio keys its per-client abuse
-  # budget on it, and a client-settable value would let an attacker mint a
-  # fresh bucket per request.
-  proxy_set_header X-Forwarded-For $remote_addr;
+  # aio reads the RIGHTMOST hop of this header (the address the nearest
+  # trusted proxy observed) and keys its per-client abuse budget on it. The
+  # standard append idiom is therefore safe; the leftmost element is client
+  # input and is never read.
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  # Pass the real Host through — aio validates it (DNS-rebinding defense), and
+  # the domain must also be named in `allowedOrigins` below.
+  proxy_set_header Host $host;
 }
 ```
+
+Because the app is reached under a name it does not otherwise know, name that
+domain — the same list the WebSocket origin check reads:
+
+```ts
+await aio.run({
+  cells: [/* … */],
+  allowedOrigins: ["app.example.com"],
+});
+```
+
+Without it every proxied request is refused with a 403 that says so. That is
+deliberate: an app on loopback that answers to any `Host` is reachable from a
+page on any domain whose DNS points at 127.0.0.1.
 
 Caddy is simpler — `reverse_proxy localhost:8000` with automatic HTTPS (it sets
 `X-Forwarded-For` itself).

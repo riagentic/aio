@@ -808,16 +808,28 @@ Deno.test("am-cli: snapshot — dumps state as JSON", async () => {
 });
 
 Deno.test("am-cli: snapshot save — writes file", async () => {
-  const tmp = await Deno.makeTempFile({ suffix: ".json" });
+  // A path that does NOT exist yet — what a person types. `makeTempFile`
+  // CREATES the file, and `snapshot save` now refuses to write over one (the
+  // same rule `am backup` has always had); using it here tested the refusal
+  // by accident and called it a failure.
+  const dir = await Deno.makeTempDir();
+  const tmp = `${dir}/snap.json`;
   try {
     await withTrojanServer(async () => {
       const r = await runAm(["snapshot", "save", tmp]);
       assertEquals(r.code, 0);
       const saved = JSON.parse(await Deno.readTextFile(tmp));
       assertEquals(saved.count, 10);
+
+      // …and the second save refuses, rather than replacing it silently.
+      const again = await runAm(["snapshot", "save", tmp]);
+      assertEquals(again.code, 1, "an existing file is never clobbered");
+      // --force is the way past, said on purpose.
+      const forced = await runAm(["snapshot", "save", tmp, "--force"]);
+      assertEquals(forced.code, 0);
     });
   } finally {
-    await Deno.remove(tmp).catch(() => {});
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
   }
 });
 

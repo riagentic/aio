@@ -208,3 +208,41 @@ Deno.test({
     }
   },
 });
+
+// A load that resolves AFTER the component unmounted used to arm a fresh
+// `loadingMinMs` timer — one the cleanup that had already run could never
+// clear. Nothing moved the state off "loading" at unmount, so every guard on
+// the resolve path let it through.
+Deno.test({
+  name: "Defer: a load that resolves after unmount arms nothing",
+  async fn() {
+    const { document: doc, root, cleanup } = createDOM();
+    _setDocument(doc);
+    let resolveLoad!: () => void;
+    let componentRendered = 0;
+    const App = () =>
+      h(Defer, {
+        trigger: "immediate",
+        loadingMinMs: 50,
+        load: () =>
+          new Promise<{ default: () => unknown }>((r) => {
+            resolveLoad = () =>
+              r({
+                default: () => {
+                  componentRendered++;
+                  return h("b", null, "late");
+                },
+              });
+          }),
+      });
+
+    const handle = mount(root, App);
+    await delay(5);
+    _unmount(handle); // gone before the module arrives
+    resolveLoad();
+    await delay(120); // longer than loadingMinMs — the timer must never fire
+    assertEquals(componentRendered, 0);
+    assertEquals(root.innerHTML, "");
+    await cleanup();
+  },
+});

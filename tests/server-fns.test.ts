@@ -7,6 +7,7 @@ import {
   serverFn,
   serverFns,
 } from "../src/server/server-fns.ts";
+import { setConnected } from "../src/state/state-signals.ts";
 import {
   _registerSfnTransport,
   _resetSfnClient,
@@ -107,6 +108,7 @@ Deno.test("browser proxy: request/response over a fake transport, errors + parit
   });
 
   // Fake transport: client "sfn" frames are served by the REAL server invoke.
+  setConnected(true); // a registered transport that is not connected DROPS
   _registerSfnTransport((raw) => {
     const { d } = JSON.parse(raw) as {
       d: { cid: string; ns: string; name: string; args: unknown[] };
@@ -201,6 +203,7 @@ Deno.test("browser proxy: an unencodable ARGUMENT is refused by name, before any
   _resetServerFns();
   serverFns("t-args", { take: (...a: unknown[]) => a.length });
   const sent: string[] = [];
+  setConnected(true); // a registered transport that is not connected DROPS
   _registerSfnTransport((raw) => {
     sent.push(raw);
     const { d } = JSON.parse(raw) as {
@@ -242,6 +245,7 @@ Deno.test("browser proxy: lossy ARGUMENTS warn loudly — the other direction of
       return "ok";
     },
   });
+  setConnected(true); // a registered transport that is not connected DROPS
   _registerSfnTransport((raw) => {
     const { d } = JSON.parse(raw) as {
       d: { cid: string; ns: string; name: string; args: unknown[] };
@@ -282,5 +286,65 @@ Deno.test("browser proxy: lossy ARGUMENTS warn loudly — the other direction of
   }
   assertEquals(warnings, []);
   _resetSfnClient();
+  _resetServerFns();
+});
+
+// ── In-flight calls must SETTLE when the connection does ─────────────
+//
+// Measured before the fix: `_pending` had no disconnect/teardown path at all,
+// so a call whose socket died waited out the full 30s and then reported
+// "server unreachable or the function hung" — about a call the client itself
+// had already lost. And a call made while offline was dropped by the raw send
+// with no queue, no error and no trace: the same 30s of silence.
+
+Deno.test("browser proxy: a disconnect settles in-flight calls at once", async () => {
+  _resetSfnClient();
+  _resetServerFns();
+  setConnected(true);
+  _registerSfnTransport(
+    () => {/* frame goes nowhere — the server never replies */},
+  );
+  const api = clientServerFn<{ slow: () => Promise<void> }>("t-drop");
+  const call = api.slow();
+  // The socket dies. The frame is gone; nothing will ever answer it.
+  setConnected(false);
+  const err = await assertRejects(() => call, Error);
+  assert(err.message.includes('serverFn("t-drop").slow'), err.message);
+  assert(err.message.includes("connection"), err.message);
+  assert(
+    !err.message.includes("timed out"),
+    `must not be reported as a timeout: ${err.message}`,
+  );
+  _resetSfnClient();
+  _resetServerFns();
+});
+
+Deno.test("browser proxy: a call made while offline fails immediately, not in 30s", async () => {
+  _resetSfnClient();
+  _resetServerFns();
+  const sent: string[] = [];
+  setConnected(false);
+  _registerSfnTransport((raw) => void sent.push(raw));
+  const api = clientServerFn<{ go: () => Promise<void> }>("t-off");
+  const started = Date.now();
+  const err = await assertRejects(() => api.go(), Error);
+  assert(Date.now() - started < 1000, "must not wait out the 30s ceiling");
+  assert(err.message.includes('serverFn("t-off").go'), err.message);
+  assert(err.message.includes("never queued"), err.message);
+  assertEquals(sent.length, 0, "nothing may go on a dead wire");
+  _resetSfnClient();
+  _resetServerFns();
+});
+
+Deno.test("browser proxy: resetting the client settles what it drops", async () => {
+  _resetSfnClient();
+  _resetServerFns();
+  setConnected(true);
+  _registerSfnTransport(() => {});
+  const api = clientServerFn<{ hang: () => Promise<void> }>("t-reset");
+  const call = api.hang();
+  _resetSfnClient(); // teardown: the pending entry is discarded…
+  const err = await assertRejects(() => call, Error); // …so its caller hears it
+  assert(err.message.includes('serverFn("t-reset").hang'), err.message);
   _resetServerFns();
 });

@@ -446,20 +446,22 @@ Deno.test("android --release: the artifact is the file gradle really wrote", () 
 
 // ── --expose auth integration ───────────────────────────────────
 
-Deno.test("build: --remote sets expose=true in server config", async () => {
-  // This is validated at runtime in server tests, but verify the build flag logic
-  // build.ts --remote sets doRemote which affects compile:browser:remote and compile:service:remote
-  // The actual behavior: --remote enables token generation and 0.0.0.0 binding
-  // Integration test coverage is in server.test.ts for auth
-  assertEquals(true, true); // placeholder - actual auth tested in integration.test.ts
-});
+// REMOVED: "build: --remote sets expose=true in server config" was
+// `assertEquals(true, true)` under a comment saying the real coverage lived
+// elsewhere. It did: `serviceExecFlags: remote service exposes the server`
+// (below) asserts exactly this claim, through parseCli, on the flags the
+// compiled binary is actually launched with. A placeholder that names an
+// invariant it does not test is worse than no test — it is a green tick
+// against an unguarded line.
 
 // ── build-all (multi-target orchestrator) ─────────────────────────
 
 import {
   buildAll,
   isArtifactName,
+  normalizeTargets,
   placedName,
+  suffixedTargets,
   TARGETS,
   unsafeOutDir,
 } from "../src/build-all.ts";
@@ -554,17 +556,59 @@ Deno.test("build-all: isArtifactName recognizes artifacts, rejects source", () =
   assert(!isArtifactName("myapp.ts", bin), "source sharing the name");
 });
 
-Deno.test("build-all: placedName disambiguates only on collision", () => {
-  const used = new Set<string>();
-  assertEquals(placedName("myapp", used, "browser"), "myapp");
-  used.add("myapp");
-  // bare binary collision → suffix
-  assertEquals(placedName("myapp", used, "server"), "myapp-server");
-  // extension collision → suffix before ext
-  const u2 = new Set(["myapp.apk"]);
+// THE regression: the artifact's name used to depend on what else happened to
+// be built in the same command. `--targets=cli` wrote `dist/myapp` (over the
+// browser binary sitting there); `--targets=browser,cli` wrote `dist/myapp`
+// and `dist/myapp-cli`. Same target, two names, decided by collision order.
+Deno.test("build-all: an artifact's name is the TARGET's, not the invocation's", () => {
+  const declared = ["browser", "cli", "server"];
+  const oneApp = () => "myapp"; // every target builds the same app
+  const full = suffixedTargets(declared, normalizeTargets(declared), oneApp);
+  // The first declared target keeps the bare name; the others carry a label.
+  assertEquals([...full].sort(), ["cli", "server"]);
+  assertEquals(placedName("myapp", "browser", full), "myapp");
+  assertEquals(placedName("myapp", "cli", full), "myapp-cli");
   assertEquals(
-    placedName("myapp.apk", u2, "android-client"),
+    placedName("myapp.apk", "android-client", new Set(["android-client"])),
     "myapp-android-client.apk",
+  );
+  // …and the name a SUBSET build produces is identical to the one the full
+  // build produces, for every subset — the property that was broken. A target
+  // that is not declared at all (`--targets=cli` on a browser-only project)
+  // joins the universe rather than stealing the declared one's name.
+  for (const subset of [["cli"], ["cli", "server"], declared, ["server"]]) {
+    const s = suffixedTargets(
+      declared,
+      normalizeTargets(declared, subset.join(",")),
+      oneApp,
+    );
+    for (const t of subset) {
+      assertEquals(
+        placedName("myapp", t, s),
+        placedName("myapp", t, full),
+        `${t} built as [${subset.join(",")}]`,
+      );
+    }
+  }
+  assertEquals(
+    [...suffixedTargets(
+      ["browser"],
+      normalizeTargets(undefined, "cli"),
+      oneApp,
+    )],
+    ["cli"],
+    "an undeclared target does not take the declared one's name",
+  );
+  // Two targets that are two DIFFERENT apps (one repo, `relay` + `myapp`)
+  // collide over nothing, so neither is suffixed.
+  const twoApps = { server: { name: "relay" }, browser: {} };
+  assertEquals(
+    [...suffixedTargets(
+      twoApps,
+      normalizeTargets(twoApps),
+      (t) => t.appName ?? "myapp",
+    )],
+    [],
   );
 });
 

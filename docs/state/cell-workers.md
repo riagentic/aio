@@ -109,15 +109,38 @@ honoured across a thread boundary:
 | `machine`         | transitions are evaluated in the main reduce                            | model states in plain fields                 |
 | `selectors`       | computed against the main isolate's state                               | read fields directly, or compute in a method |
 
-## Where it silently stays in-isolate
+## Where it stays in-isolate — and how to ask for the real thing
 
-Both cases log once, and behavior is identical — only the isolation is missing:
+**`libraryMode`** (tests, embedded hosts): the entry module is a test file, not
+your app, so there is nothing to host a worker from. `testCell` and `testServer`
+therefore exercise the same method bodies in-process — fast and debuggable. It
+logs once.
 
-- **`libraryMode`** (tests, embedded hosts): the entry module is a test file,
-  not your app, so there is nothing to host a worker from. `testCell` and
-  `testServer` therefore exercise the same method bodies in-process — fast and
-  debuggable.
-- **Compiled binaries**: the entry isn't a local module a worker can import yet.
+The **serialization** boundary is still reproduced there: arguments and return
+values are structured-cloned for exactly the cells that would have been hosted,
+so a function or a class instance fails in the test rather than in production.
+What is missing is **isolation** — in-isolate, the cell shares the test's module
+graph, so a module-scope cache, counter or handle is one instance where
+production has two.
+
+When that difference is the thing under test, name a real entry and get real
+workers:
+
+```ts
+await using srv = await testServer({
+  cells: [reports],
+  workers: "real",
+  workerEntry: import.meta.resolve("./reports-app.ts"),
+});
+```
+
+Full recipe, and the client-call half of the same problem, in
+[testing/prod-parity.md](../testing/prod-parity.md).
+
+**Compiled binaries** are NOT a case: Deno embeds the entry and reports it as a
+`file://` URL, so a compiled app hosts its worker cells for real. Measured, not
+assumed — `tests/build-e2e.test.ts` runs a compiled binary and checks the main
+isolate keeps ticking while a worker cell burns its thread.
 
 ## How it works
 

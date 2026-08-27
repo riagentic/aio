@@ -2,7 +2,12 @@
 // Phase logic lives in aio-boot, aio-dispatch, aio-server, aio-lifecycle, aio-run-helpers.
 // Cell composition logic lives in aio-composition and aio-cells-bridge.
 
-import { APP_STYLE, appHasStylesheet, UI_ENTRY } from "./app-files.ts";
+import {
+  APP_STYLE,
+  appHasStylesheet,
+  BUNDLE_JS,
+  UI_ENTRY,
+} from "./app-files.ts";
 import { readLocalPinSync } from "./deno-json.ts";
 import { createShutdownOrchestrator, registerRuntime } from "./shutdown.ts";
 import { _registerAuthStore } from "./auth-context.ts";
@@ -22,7 +27,8 @@ import {
 } from "../diagnostics/time-travel.ts";
 import { createScheduleManager } from "../state/schedule.ts";
 import { createOwnManager, isOwnEffect } from "../state/own.ts";
-import { getLogger, log } from "../diagnostics/logger-api.ts";
+import { getLogger, log, setLogger } from "../diagnostics/logger-api.ts";
+import type { LogSink } from "../diagnostics/logger-types.ts";
 import { timeTravelEnabled } from "../diagnostics/types.ts";
 import { teachableError } from "../diagnostics/error.ts";
 
@@ -95,7 +101,7 @@ import {
   versionLine,
 } from "./aio-cli.ts";
 import { awaitPredecessor } from "./updates-apply.ts";
-import { startFeedback } from "./feedback-boot.ts";
+import { beginFeedback, startFeedback } from "./feedback-boot.ts";
 import {
   beginUpdates,
   confirmPendingUpdate,
@@ -203,12 +209,54 @@ validateVersion();
  *
  *  CLI wins over config: the operator running the binary overrides the author.
  *  Structural param so it works for both CellsConfig (outer `run`) and
- *  AioConfig (inner `_run`) without importing either. */
+ *  AioConfig (inner `_run`) without importing either.
+ *
+ *  `host` IS an exposure decision, and it was a SECOND, unguarded one.
+ *  `host: "0.0.0.0"` (or a LAN address, or `--host=…`) binds every interface
+ *  while `expose` stayed false — so no shared key was generated, no auto-TLS
+ *  ran, `strictOrigin` was ignored and not one of the "this app is OPEN"
+ *  warnings fired. The app was reachable from the network with no credential
+ *  at all, which is precisely the state `--expose` exists to make loud. This
+ *  function's whole reason to exist is that exposure has ONE decider, so it
+ *  reads both keys. A loopback `host` (the default, or an explicit
+ *  `--host=127.0.0.1`) is not exposure and changes nothing. */
 export function _exposeOf(
-  cli: { expose?: boolean },
-  config: { expose?: boolean },
+  cli: { expose?: boolean; host?: string },
+  config: { expose?: boolean; host?: string },
 ): boolean {
-  return cli.expose ?? config.expose ?? false;
+  if (cli.expose ?? config.expose ?? false) return true;
+  return _hostIsExposed(cli.host ?? config.host);
+}
+
+/** WHY this app counts as exposed, spelled the way its author wrote it.
+ *
+ *  Mirrors {@link _exposeOf} branch for branch, because a warning that names
+ *  the wrong cause costs more time than no warning at all: once a non-loopback
+ *  `host` became a second source of exposure, every "--expose with …" line was
+ *  telling an author about a flag they had never typed. Three call sites spelled
+ *  this fact for themselves and two of them were wrong the moment that landed —
+ *  so it is decided here, once. */
+export function exposeReason(
+  cli: { expose?: boolean; host?: string },
+  config: { expose?: boolean; host?: string },
+): string {
+  if (cli.expose) return "--expose";
+  if (config.expose) return "expose: true";
+  if (cli.host && _hostIsExposed(cli.host)) return `--host=${cli.host}`;
+  const h = config.host;
+  if (h && _hostIsExposed(h)) return `host: ${JSON.stringify(h)}`;
+  return "--expose";
+}
+
+/** True when binding this host reaches something other than loopback.
+ *  Unknown/unparsable names fail CLOSED (treated as exposed): an app bound to
+ *  a name we cannot classify must get the loud treatment, not the quiet one. */
+export function _hostIsExposed(host: string | undefined): boolean {
+  if (host === undefined) return false;
+  const h = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  if (h === "") return false;
+  return !(h === "127.0.0.1" || h === "::1" || h === "localhost" ||
+    h.startsWith("127."));
 }
 
 /** Resolve `config.tls` into the three transport knobs the server reads.
@@ -453,6 +501,29 @@ function _inferBaseDir(): string {
   return join(Deno.cwd(), "src");
 }
 
+/** A LogSink that writes EVERY line to stderr — installed only for
+ *  `--aio-data-contract`, whose stdout is a machine-read JSON document.
+ *
+ *  Nothing is dropped: a boot that fails while answering the query must still
+ *  say why, and `2>&1` puts it all back. Only the stream changes. */
+function stderrOnlyLogSink(): LogSink {
+  return {
+    logDir: "",
+    pub(lvl, cat, msg, data) {
+      const d = data ? "  " + JSON.stringify(data) : "";
+      // aio-ok: this IS the levelled sink, redirected. `--aio-data-contract`
+      // must put ONLY its JSON on stdout (aio's own `ship` parses it), so
+      // every framework line is re-emitted on stderr — nothing is dropped,
+      // `2>&1` restores the normal view, and the level is carried in the text.
+      console.error(`${lvl.toUpperCase()}  ${cat}  ${msg}${d}`);
+    },
+    perf() {},
+    flush() {
+      return Promise.resolve();
+    },
+  };
+}
+
 /** Single entry point — boots KV, server, electron, wires everything. CLI
  *  args override config. (perfect-aio D9: the legacy 2-arg
  *  `aio.run(initialState, config)` overload was removed — zero callers
@@ -472,6 +543,19 @@ async function run<S extends Record<string, unknown>>(
 ): Promise<AioApp<S, any>>;
 // deno-lint-ignore no-explicit-any
 async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
+  // ── `--help` is a QUERY: it must not boot the app ──
+  //
+  // This check used to live in `_run`, three phases later — by which time the
+  // composition report had printed ("cells: counter", "cells: counter
+  // visible=all persist=all") and, worse, the logger had ROTATED the app's log
+  // files: `app.log` → `app.log.1`, one generation lost off the end of `keep`
+  // every time someone asked what the flags were. Asking a binary for its usage
+  // is the safest thing anyone does with it; it must have no side effects at
+  // all. Same reasoning as `--aio-data-contract` below, one step earlier.
+  if (parseCli().help) {
+    printHelp();
+    Deno.exit(0);
+  }
   // Fail fast on an unsupported Deno — aio uses ≥2.9 behavior directly.
   assertDenoVersion();
   if (b !== undefined) {
@@ -482,6 +566,20 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
 
   // Cells-based API: aio.run(cellsConfig) — zero-config: aio.run()
   const fc = (a ?? {}) as CellsConfig;
+  // ── `--aio-data-contract` is a QUERY, and its stdout is MACHINE-READ ──
+  //
+  // `aio ship` and `updates-rebuild` run `<binary> --aio-data-contract` and
+  // JSON.parse its stdout. Booting normally wrote the composition report, the
+  // log-rotation notice and the contract itself through the logger, so stdout
+  // was four INFO lines plus a JSON body whose first line carried a timestamp
+  // preamble — unparseable, and `ship` silently published every release with
+  // "data NOT DECLARED", which is the guarantee the update feature leads with.
+  // Silencing by level is not the fix either (it removed the contract too).
+  // So: for this mode ONLY, every framework line goes to stderr for the whole
+  // boot and stdout carries the JSON and nothing else (printed raw, below).
+  // Observe-only, and identical in dev and prod.
+  const _contractMode = parseCli().dataContract;
+  if (_contractMode) setLogger(stderrOnlyLogSink());
   validateConfig(
     fc as unknown as Record<string, unknown>,
     VALID_FEATURES_CONFIG_KEYS,
@@ -749,7 +847,7 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
     }
     if (_openCells.length) {
       const mode = _exposed
-        ? (parseCli().expose ? "--expose" : "expose: true")
+        ? exposeReason(parseCli(), fc as { expose?: boolean; host?: string })
         : "multi-user auth";
       log.warn(
         `${mode} with visible="all" on cells: ${
@@ -772,8 +870,10 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
       }),
     );
 
-    // Logger
-    const logger = await initLogger(fc);
+    // Logger — skipped in `--aio-data-contract` mode: installing it would
+    // replace the stderr-only sink (putting boot lines back on the parsed
+    // stdout) and rotate the app's log files for what is only a query.
+    const logger = _contractMode ? null : await initLogger(fc);
     (globalThis as Record<string, unknown>).__aioCells = composed;
 
     // Mutable app ref for closures
@@ -805,6 +905,7 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
     // Cells are bound — the update check can now call cell methods. Armed in
     // _run, fired here, because dispatching before binding throws.
     beginUpdates();
+    beginFeedback();
 
     // AIO-418: fire the user's onStart NOW — after the callable cell
     // method surface is bound — so seeding via a cell method (members.seed())
@@ -862,7 +963,16 @@ async function _run<S, A, E>(
     // What this build promises about data already on disk. Derived from the
     // very same cell versions and onMigrate hooks the boot path uses, so a
     // published contract cannot drift from what the binary actually does.
-    log.info(JSON.stringify(
+    //
+    // `console.log`, NOT `log.info`: this stdout is parsed (`aio ship`,
+    // `updates-rebuild`). The logger stamps every line with a timestamp and a
+    // category, which prefixed the JSON's first line and made every published
+    // manifest data-less. run() has already routed the framework's own lines
+    // to stderr for this mode, so this is the only thing on stdout.
+    // aio-ok: the machine-readable answer itself. `log.info` would prefix it
+    // with a timestamp and a category and make it unparseable — which is the
+    // exact defect this mode was fixed for.
+    console.log(JSON.stringify(
       deriveDataContract(
         config._cellMigrations ?? new Map(),
         PERSIST_SCHEMA_VERSION,
@@ -904,12 +1014,6 @@ async function _run<S, A, E>(
   registerAppDirs(appId, _dirs);
   // Always create them: auth.db / app.key / state.db all open files inside.
   ensureAppDirs(_dirs);
-  // Did the last boot install something? Count this attempt, or — having spent
-  // them — put the old artifact back and let the supervisor start it. Runs in
-  // the NEW build, because it is the only thing present to judge itself.
-  if (!config.libraryMode && await judgePendingUpdate(_dirs.data, log)) {
-    Deno.exit(1);
-  }
   if (!config.libraryMode) {
     // A packaged app unpacks itself BEFORE any of our code runs, so this can
     // only observe where that happened — and say so when it happened somewhere
@@ -936,10 +1040,14 @@ async function _run<S, A, E>(
     // The same numbers the warning uses, stated unconditionally: an app that
     // died of "out of memory" with the machine half empty is a support thread
     // that starts with "what was the ceiling?".
+    // A compiled binary's ceiling was decided by whoever ran the build, not by
+    // this machine — the line says which, so a number the reader cannot change
+    // from here is never presented as this machine's allowance.
     _heapLine = describeHeapPolicy(
       Math.floor(((await currentHeapLimitBytes()) ?? 0) / (1024 * 1024)) ||
         null,
       physicalMemoryBytes(),
+      isCompiled(),
     );
     sweepAppPayloadDir(_dirs);
     const unsafeUnpack = checkUnpackLocation(_dirs);
@@ -998,6 +1106,19 @@ async function _run<S, A, E>(
     },
   );
 
+  // Did the last boot install something? Count this attempt, or — having spent
+  // them — put the old artifact back and let the supervisor start it. Runs in
+  // the NEW build, because it is the only thing present to judge itself.
+  //
+  // AFTER the lock, deliberately. It used to run before, so a boot REFUSED by
+  // the singleton lock still burned an attempt: start an already-running app
+  // twice and the third launch rolled back a perfectly healthy update. A boot
+  // that never got as far as owning the app cannot be evidence about the build.
+  if (!config.libraryMode && await judgePendingUpdate(_dirs.data, log)) {
+    appLock?.release();
+    Deno.exit(1);
+  }
+
   // Thin client mode
   if (
     await handleThinClient(cli.serverUrl ?? config.serverUrl, (_v) => {
@@ -1026,7 +1147,7 @@ async function _run<S, A, E>(
     let sawDistDir: string | undefined;
     for (const dir of candidates) {
       try {
-        await Deno.stat(join(dir, "app.js"));
+        await Deno.stat(join(dir, BUNDLE_JS));
         distDir = dir;
         prod = true;
         log.info("auto-detected dist/app.js → prod mode");
@@ -1080,7 +1201,7 @@ async function _run<S, A, E>(
       })
     ) {
       try {
-        await Deno.stat(join(dir, "app.js"));
+        await Deno.stat(join(dir, BUNDLE_JS));
         electronDistDir = dir;
         break;
       } catch { /* not found */ }
@@ -1636,25 +1757,45 @@ async function _run<S, A, E>(
   // Actions for a `worker: true` cell bypass the main queue entirely; only the
   // patches they commit come back through `dispatch`. Inert (identity routing)
   // when no cell is flagged.
+  // Where a worker cell's host boots from. In production that is always the
+  // app's own entry. Under libraryMode the main module is a TEST (or a host
+  // app), not this app — spawning a worker on it would re-run the test file in
+  // another thread — so worker cells run in-isolate, exactly like testCell. The
+  // SERIALIZATION boundary is still reproduced below; the isolation is not, and
+  // it says so once.
+  //
+  // `_workerEntry` is the ONE way out, set by `testServer({ workers: "real" })`:
+  // the test names a real app-entry module, so the workers are real workers and
+  // the test measures isolation instead of assuming it. See
+  // docs/testing/prod-parity.md.
+  if (config._workerEntry !== undefined && !config.libraryMode) {
+    // The only legitimate setter is `testServer({ workers: "real" })`, which
+    // always runs under libraryMode. Outside it, an app's worker entry is its
+    // OWN entry — accepting an override there would silently host worker cells
+    // from someone else's module, which is a data-owner change, not a tweak.
+    throw new Error(
+      `[aio] _workerEntry is a test-harness key and is only accepted under ` +
+        `libraryMode. An app's worker cells are hosted from its own entry ` +
+        `(Deno.mainModule); remove _workerEntry, or use ` +
+        `testServer({ workers: "real", workerEntry }) in a test ` +
+        `(docs/testing/prod-parity.md).`,
+    );
+  }
+  const _workerEntry = config._workerEntry ?? Deno.mainModule;
+  const _hostWorkers = !config.libraryMode || config._workerEntry !== undefined;
   const workerPool = createCellWorkerPool({
-    // libraryMode means the entry module is a TEST (or a host app), not this
-    // app — spawning a worker on it would re-run the test file in another
-    // thread. Worker cells then run in-isolate, exactly like testCell: same
-    // behavior, no isolation, and it says so once.
-    cells: (config.libraryMode
-      ? []
-      : config._workerCells ?? []) as unknown as Parameters<
+    cells:
+      (_hostWorkers ? config._workerCells ?? [] : []) as unknown as Parameters<
         typeof createCellWorkerPool
       >[0]["cells"],
-    entry: Deno.mainModule,
+    entry: _workerEntry,
     prod,
     getSlice: (cell) =>
       ((state as Record<string, unknown>)[cell] ?? {}) as Record<
         string,
         unknown
       >,
-    dispatch: (a) =>
-      dispatch(a as unknown as A),
+    dispatch: (a) => dispatch(a as unknown as A),
     // An effect handed back by a worker executes HERE, where the runtime lives.
     // A schedule effect is NOT an action — dispatching it would do nothing at
     // all, and the schedule would silently never fire.
@@ -1678,7 +1819,7 @@ async function _run<S, A, E>(
   /** Cells that WOULD run in a worker but are running in this isolate because a
    *  test owns the entry module. Empty in production. */
   const _inIsolateWorkerCells = new Set(
-    config.libraryMode && !prod
+    !_hostWorkers && !prod
       ? (config._workerCells ?? []).map((f) => f.__aio.id)
       : [],
   );
@@ -1689,7 +1830,9 @@ async function _run<S, A, E>(
         [..._inIsolateWorkerCells].join(", ")
       }) run in-isolate — a test owns the entry module, so there is nothing to ` +
         `host them from. Isolation is not reproduced; the SERIALIZATION ` +
-        `boundary is (see below).`,
+        `boundary is (see below). For the real thing, boot with ` +
+        `testServer({ workers: "real", workerEntry }) ` +
+        `(docs/testing/prod-parity.md).`,
     );
   }
   _reseedWorkerCells = () => workerPool.reseed();
@@ -1894,9 +2037,14 @@ async function _run<S, A, E>(
   const _keyRes = (expose && !users && !_resolveUser)
     ? resolveAppKey(appId, _effKey)
     : { key: undefined, persisted: false, explicit: false };
+  // Named once, in the author's own spelling — see `exposeReason`.
+  const _why = exposeReason(
+    parseCli(),
+    config as { expose?: boolean; host?: string },
+  );
   if (_keyDefaulted && _keyRes.key) {
     log.warn(
-      `--expose with no \`key\` configured — generated a shared app key ` +
+      `${_why} with no \`key\` configured — generated a shared app key ` +
         `(persisted at ${appKeyPath(appId)}, mode 0600; stable across ` +
         `restarts). The share link below carries it; devices pair by PIN. ` +
         `This is the alpha52 default. To run OPEN to everyone on the ` +
@@ -1905,7 +2053,7 @@ async function _run<S, A, E>(
   }
   if (_cfgKey === false && expose && !_perUserAuth) {
     log.warn(
-      `--expose with key: false — this app is OPEN: anyone who can reach ` +
+      `${_why} with key: false — this app is OPEN: anyone who can reach ` +
         `the port can read broadcast state and call methods. If that is not ` +
         `intended, delete \`key: false\` (a shared key is generated) or add ` +
         `per-user auth (users/resolveUser/auth).`,
@@ -2028,16 +2176,13 @@ async function _run<S, A, E>(
   const _snap = asyncDb?.snapshot?.bind(asyncDb);
   const _snapshotDb = _snap ? (path: string) => _snap(path) : undefined;
 
-  // Whatever was pending has now booted far enough to serve — confirm it, so a
-  // later boot does not roll back a version that works.
-  if (!config.libraryMode) confirmPendingUpdate(_dirs.data, log);
-
   // Updates: opt-in, and off by default in libraryMode (a test or a host app
   // owns this process; nothing it did should replace a binary).
   const _updates = config.updates && !config.libraryMode
     ? await startUpdates({
       updates: config.updates,
       dataDir: _dirs.data,
+      appName: appId,
       appVersion: _resolveAppVersion(
         config.appVersion,
         _denoJsonVersion(),
@@ -2081,6 +2226,10 @@ async function _run<S, A, E>(
         cells: Object.keys(config._cellMethods ?? {}),
         channel: _updates?.channel,
         getState: () => app.getState() as Record<string, unknown>,
+        // The app's own `visible` declaration screens the state a report
+        // carries — see ReportSources.visible. Same map the trojan `fields`
+        // route serves, so there is one answer to "what may leave the server".
+        visible: config._cellFields,
         getTimeline: () => timeline.entries(),
       },
     })
@@ -2226,6 +2375,15 @@ async function _run<S, A, E>(
     appLock,
     log,
   });
+
+  // Whatever was pending has now booted far enough to SERVE — confirm it, so a
+  // later boot does not roll back a version that works.
+  //
+  // After startLifecycle, not before it. "Healthy" used to mean "bound a
+  // socket", which a build that throws in `onStart`, fails to open its window
+  // or dies in a schedule passes without doing anything an app is for — and
+  // confirming it threw away the only rollback it had.
+  if (!config.libraryMode) confirmPendingUpdate(_dirs.data, log);
 
   // Boot is DONE: the crash guard may now supervise runtime rejections. Until
   // this line a rejection means "the app refused to start" (a throwing

@@ -29,6 +29,12 @@ class MainActivity : AppCompatActivity() {
             .build()
         webView = WebView(this).apply {
             settings.javaScriptEnabled = true
+            // NOTE: the page above is an https origin, so it may not open a
+            // plaintext ws:// or http:// connection. An app talking to a LAN
+            // server over plain http renders perfectly and connects to nothing.
+            // Serve that server over TLS (wss://), or add
+            // `settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW`
+            // here via an <app>/android/ overlay — it is a whole-app setting.
             settings.domStorageEnabled = true
             webViewClient = object : WebViewClient() {
                 override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {

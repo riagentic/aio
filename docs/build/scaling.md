@@ -259,9 +259,17 @@ The `breakdown` field on `PerfMetric` provides phase-level timing:
   Use `@import` for multiple files
 - **`$p` and `$d` are reserved** — don't use as state keys (used internally for
   delta patches)
-- **WS message size limit** — messages over 1MB are silently dropped
-- **Actions dropped while offline** — `send()` silently drops when server
-  unreachable. Initial connect race queues up to 100 actions
+- **WS message size limit** — a frame over 1MB (`wsLimits.maxMessageBytes`) is
+  refused, never silently. The server logs it at error level, writes the same
+  line to that client's log store (readable with `am logs`), and sends the
+  client back an error frame carrying `message_too_large`, code `1009`, and the
+  size it rejected
+- **Offline send queue is bounded at 100 actions** — `send()` does not drop when
+  the server is unreachable, it queues. At the cap the OLDEST queued action is
+  dropped (newest wins — one policy everywhere), and the drop is loud: a warning
+  naming the action type, a diagnostic event carrying the type and the cap, and
+  a REJECTED ack, so a caller awaiting that action hears the failure instead of
+  hanging
 - **Max concurrent WebSocket connections** (configurable via `maxConnections`) —
   new connections get HTTP 503. Auto-retries with exponential backoff. Raise:
   `aio.run({ maxConnections: 1000 })`

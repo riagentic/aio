@@ -46,7 +46,12 @@ Deno.test("removals: every row is well-formed and internally consistent", () => 
       /^v\d+\.\d+\.\d+(-alpha\d+)?$/,
       `${r.key}: lastGood is a tag a user can pass to \`am pin\``,
     );
-    assert(r.hint.trim().length > 0, `${r.key}: hint is the migration`);
+    // A hint is the migration a user follows, so it has to be a sentence —
+    // `length > 0` was satisfied by any single character.
+    assert(
+      r.hint.trim().split(/\s+/).length >= 3,
+      `${r.key}: hint must SAY how to migrate, got ${JSON.stringify(r.hint)}`,
+    );
     assertMatch(r.guide, /^docs\/.+\.md$/, `${r.key}: guide is a repo doc`);
   }
 });

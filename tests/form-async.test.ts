@@ -162,3 +162,54 @@ Deno.test({
     assertEquals(form.fields.name.error, null);
   },
 });
+
+// `bind()` used to return a LIVE GETTER for `value`. Its result is handed
+// straight to `h()` as props (the shape this file's source docstring shows), so
+// the getter moved the read out of the render pass: the component never
+// subscribed to the field, and `prev.value === next.value` was unconditionally
+// true because both getters read the same live field — the DOM value was never
+// rewritten. Measured: `form.reset()` left the typed text on screen.
+Deno.test("form.bind(): reset() puts the DOM back, and the value is a snapshot", async () => {
+  const { Window } = await import("happy-dom");
+  const { h } = await import("../src/air/vdom.ts");
+  const { _setDocument, _unmount, mount } = await import(
+    "../src/air/aio-renderer.ts"
+  );
+  const win = new Window({ url: "https://localhost" });
+  const doc = win.document as unknown as Document;
+  _setDocument(doc);
+  const root = doc.createElement("div");
+  doc.body.appendChild(root);
+
+  const form = useForm({ name: { initial: "start" } });
+
+  // bind() hands back plain data, not a live getter — the props a render
+  // describes must be the values that render saw.
+  const bound = form.bind("name");
+  assertEquals(Object.getOwnPropertyDescriptor(bound, "value")?.get, undefined);
+  assertEquals(bound.value, "start");
+
+  const App = () => h("input", form.bind("name"));
+  const handle = mount(root, App);
+  const input = root.querySelector("input") as HTMLInputElement;
+  assertEquals(input.value, "start");
+
+  input.value = "typed";
+  input.dispatchEvent(
+    // deno-lint-ignore no-explicit-any
+    new (doc.defaultView as any).Event("input", { bubbles: true }),
+  );
+  await new Promise((r) => setTimeout(r, 5));
+  handle._flush();
+  assertEquals(form.fields.name.value, "typed");
+  assertEquals(input.value, "typed");
+
+  form.reset();
+  await new Promise((r) => setTimeout(r, 5));
+  handle._flush();
+  assertEquals(form.fields.name.value, "start");
+  assertEquals(input.value, "start", "reset() must clear the DOM too");
+
+  _unmount(handle);
+  win.happyDOM.close();
+});

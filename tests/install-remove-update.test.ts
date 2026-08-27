@@ -81,6 +81,9 @@ Deno.test("update: adds a version and re-points the link — never flattens it",
       staged,
       fromVersion: "1.0.0",
       toVersion: "2.0.0",
+      // Stand-in files: this pins the rename/symlink mechanics, not whether a
+      // downloaded program runs (smokeTestArtifact has its own tests).
+      smoke: false,
     });
 
     // The link is STILL a link…
@@ -121,6 +124,7 @@ Deno.test("rollback: re-points the link back, leaving both versions", async () =
       staged,
       fromVersion: "1.0.0",
       toVersion: "2.0.0",
+      smoke: false, // stand-in files — see above
     });
 
     await restoreArtifact(link, previous);
@@ -156,6 +160,7 @@ Deno.test("update: a plain (non-installed) artifact keeps the old flat behaviour
       staged,
       fromVersion: "1.0.0",
       toVersion: "2.0.0",
+      smoke: false, // stand-in files — see above
     });
     assertEquals(await Deno.readTextFile(current), "new");
     assertEquals(await Deno.readTextFile(previous), "old");
@@ -335,6 +340,7 @@ Deno.test("update: the swap prunes, keeping the new one and its predecessor", as
       fromVersion: "0.3.0",
       toVersion: "0.4.0",
       keepVersions: 2,
+      smoke: false, // stand-in files — see above
     });
 
     const left = [...Deno.readDirSync(join(dir, "versions"))].map((e) => e.name)

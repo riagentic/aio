@@ -73,7 +73,11 @@ async function runtimeFor(source: string, appVersion: string) {
   const dataDir = join(root, "data");
   await Deno.mkdir(dataDir, { recursive: true });
   const artifact = join(root, "app");
-  await Deno.writeTextFile(artifact, "APP");
+  // The bytes the release host publishes FOR THIS VERSION. It matters now: a
+  // differing digest at the same version is itself an update, so an artifact
+  // whose bytes do not match the published `appVersion` is not "current" and
+  // the 304 this file is about would never be reached.
+  await Deno.writeTextFile(artifact, `APP ${appVersion}`);
   return {
     dataDir,
     rt: createUpdatesRuntime({
@@ -97,7 +101,7 @@ Deno.test("updates: an unresolved OFFER is never short-circuited by a 304", asyn
   const host = await releaseHost("2.0.0");
   try {
     const { rt, dataDir } = await runtimeFor(host.source, "1.0.0");
-    const first = await rt.check();
+    const first = await rt.check({ dismissed: null });
     assertEquals(first.kind, "offer", "v2 is offered to a v1 install");
 
     assertEquals(
@@ -106,7 +110,7 @@ Deno.test("updates: an unresolved OFFER is never short-circuited by a 304", asyn
       "an offer is unresolved — nothing about it may be cached",
     );
 
-    const second = await rt.check();
+    const second = await rt.check({ dismissed: null });
     assertEquals(
       second.kind,
       "offer",
@@ -127,12 +131,12 @@ Deno.test("updates: 'you are current' IS cached — the next check costs a 304",
   const host = await releaseHost("1.0.0");
   try {
     const { rt, dataDir } = await runtimeFor(host.source, "1.0.0");
-    const first = await rt.check();
+    const first = await rt.check({ dismissed: null });
     assertEquals(first.kind, "current");
     const cached = readTrust(dataDir).etagCurrent;
     assert(cached, "the one cacheable decision is cached");
 
-    const second = await rt.check();
+    const second = await rt.check({ dismissed: null });
     assertEquals(second.kind, "current");
     assertEquals(
       host.conditional,
@@ -152,10 +156,31 @@ Deno.test("updates: a legacy poisoned `etag` is ignored, so a hidden offer reapp
     const { rt, dataDir } = await runtimeFor(host.source, "1.0.0");
     const { writeTrust } = await import("../src/server/updates-check.ts");
     writeTrust(dataDir, { etag: `"rel-2.0.0"` }); // what the bug left behind
-    const res = await rt.check();
+    const res = await rt.check({ dismissed: null });
     assertEquals(res.kind, "offer", "the offer is visible again");
     assertEquals(host.conditional, [false], "the poisoned tag was not sent");
   } finally {
     await host.stop();
   }
+});
+
+// The other way the cache lies. `dismiss()` ("Not now") makes the decision
+// `current` — the user has SEEN this release and postponed it. Caching that
+// manifest's ETag turns the postponement into a permanent "you are the latest":
+// every later check sends `if-none-match`, gets a 304, and the release can
+// never be offered again, on this boot or any future one. Only a genuine "there
+// is nothing newer" may be cached.
+Deno.test("updates: a dismissal never caches the ETag", async () => {
+  const dataDir = await Deno.makeTempDir({ prefix: "aio-upd-dismiss-" });
+  const { cacheCurrentEtag } = await import("../src/server/updates-check.ts");
+
+  cacheCurrentEtag(dataDir, `"rel-2.0.0"`, { dismissed: true });
+  assertEquals(
+    readTrust(dataDir).etagCurrent,
+    undefined,
+    "'not now' is not 'nothing is there'",
+  );
+
+  cacheCurrentEtag(dataDir, `"rel-1.0.0"`, { dismissed: false });
+  assertEquals(readTrust(dataDir).etagCurrent, `"rel-1.0.0"`);
 });

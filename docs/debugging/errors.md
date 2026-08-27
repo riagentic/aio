@@ -57,29 +57,30 @@ In prod mode, errors are compact one-liners:
 
 ### Error codes reference
 
-| Code                 | Source      | What happened                                                 |
-| -------------------- | ----------- | ------------------------------------------------------------- |
-| `REDUCE_ERROR`       | Reducer     | Reducer threw or returned invalid shape                       |
-| `EFFECT_ERROR`       | Effect      | Sync effect (executor) threw                                  |
-| `EFFECT_TIMEOUT`     | Effect      | Async effect exceeded timeout (default 30s)                   |
-| `EFFECT_ASYNC_ERROR` | Effect      | Async effect promise rejected                                 |
-| `HOOK_ERROR`         | Hook        | `beforeReduce`, `onAction`, or `onEffect` hook threw          |
-| `INIT_ERROR`         | Lifecycle   | Cell `onInit` callback threw                                  |
-| `DESTROY_ERROR`      | Lifecycle   | Cell `onDestroy` callback threw                               |
-| `MACHINE_BLOCKED`    | Routing     | Action blocked by internal routing guard (warn-level)         |
-| `QUEUE_OVERFLOW`     | Dispatch    | Dispatch queue exceeded 10,000 entries                        |
-| `DISPATCH_LOOP`      | Dispatch    | 1,000 iterations detected -- dispatch recovers after draining |
-| `DISPATCH_CLOSED`    | Dispatch    | Action dispatched after close() -- dropped, not applied       |
-| `MEMORY_PRESSURE`    | Memory      | Heap above warning threshold (default 75%)                    |
-| `MEMORY_CRITICAL`    | Memory      | Heap above critical threshold (default 90%)                   |
-| `BUDGET_REDUCE`      | Performance | Reducer exceeded time budget (default 100ms)                  |
-| `BUDGET_EFFECT`      | Performance | Effect exceeded time budget (default 5ms)                     |
-| `PERSIST_ERROR`      | Persistence | State persist to SQLite failed -- in memory, lost on exit     |
-| `PERSIST_SCHEMA`     | Persistence | Stored state's persistence-schema version is incompatible     |
-| `TX_CONFLICT`        | Effect      | Transactional method's reads went stale -- commit refused     |
-| `UI_FREEZE`          | Vitals      | UI/main thread stalled past the freeze threshold (warn)       |
-| `TRANSPORT_STALL`    | Vitals      | WS transport made no progress under backpressure (warn)       |
-| `LOOP_SATURATED`     | Vitals      | Event loop saturated -- work queued faster than it drains     |
+| Code                 | Source      | What happened                                                  |
+| -------------------- | ----------- | -------------------------------------------------------------- |
+| `REDUCE_ERROR`       | Reducer     | Reducer threw or returned invalid shape                        |
+| `EFFECT_ERROR`       | Effect      | Sync effect (executor) threw                                   |
+| `EFFECT_TIMEOUT`     | Effect      | Async effect exceeded timeout (default 30s)                    |
+| `EFFECT_ASYNC_ERROR` | Effect      | Async effect promise rejected                                  |
+| `HOOK_ERROR`         | Hook        | `beforeReduce`, `onAction`, or `onEffect` hook threw           |
+| `INIT_ERROR`         | Lifecycle   | Cell `onInit` callback threw                                   |
+| `DESTROY_ERROR`      | Lifecycle   | Cell `onDestroy` callback threw                                |
+| `MACHINE_BLOCKED`    | Routing     | Action blocked by internal routing guard (warn-level)          |
+| `QUEUE_OVERFLOW`     | Dispatch    | Dispatch queue exceeded 10,000 entries                         |
+| `DISPATCH_LOOP`      | Dispatch    | 1,000 iterations detected -- dispatch recovers after draining  |
+| `DISPATCH_CLOSED`    | Dispatch    | Action dispatched after close() -- dropped, not applied        |
+| `DISPATCH_ABORTED`   | Dispatch    | Drain loop threw outside every guard -- queued actions dropped |
+| `MEMORY_PRESSURE`    | Memory      | Heap above warning threshold (default 75%)                     |
+| `MEMORY_CRITICAL`    | Memory      | Heap above critical threshold (default 90%)                    |
+| `BUDGET_REDUCE`      | Performance | Reducer exceeded time budget (default 100ms)                   |
+| `BUDGET_EFFECT`      | Performance | Effect exceeded time budget (default 5ms)                      |
+| `PERSIST_ERROR`      | Persistence | State persist to SQLite failed -- in memory, lost on exit      |
+| `PERSIST_SCHEMA`     | Persistence | Stored state's persistence-schema version is incompatible      |
+| `TX_CONFLICT`        | Effect      | Transactional method's reads went stale -- commit refused      |
+| `UI_FREEZE`          | Vitals      | UI/main thread stalled past the freeze threshold (warn)        |
+| `TRANSPORT_STALL`    | Vitals      | WS transport made no progress under backpressure (warn)        |
+| `LOOP_SATURATED`     | Vitals      | Event loop saturated -- work queued faster than it drains      |
 
 ### Error layer identification
 
@@ -233,10 +234,19 @@ archives shift up, and anything past `backupKeep` is removed. `.1` is always the
 run that just ended — including the crash you restarted because of, and the dev
 run a cell-file save just respawned.
 
-Nothing rotates a log mid-run, so `logBudget` is what actually bounds the disk:
-after rotating, archives are evicted **oldest run first** until `logs/` fits,
-and every eviction is logged. Live files are counted but never evicted — if they
-alone exceed the budget you get a warning, not a deleted log.
+`logBudget` is what actually bounds the disk, and it is enforced **during the
+run**, not only at the next start: after rotating, archives are evicted **oldest
+run first** until `logs/` fits, and every eviction is logged. The ceiling is
+re-checked as lines are written, and when this run's own live logs are what
+exceeded it they are rotated mid-run (or wiped, under `--no-backup-logs`) so the
+eviction has something to evict — announced in `app.log`, with the reason and
+how to raise the ceiling. Bytes in the directory that the logger does not own
+(`stdout.log`, `checkpoint.json`, `actions.jsonl`) are counted but never
+evicted; if those alone exceed the budget you get a warning, not a deleted log.
+
+A single log line is capped at 16 KB (truncated with a marker saying how much
+was dropped) — a log line is not a data channel. Lines forwarded from a client
+are capped at 8 KB.
 
 - `--no-backup-logs` — wipe on start (the old default), archives included.
 - `--log-budget=500MB` (or bytes, or `0` for unlimited).

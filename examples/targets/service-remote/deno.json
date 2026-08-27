@@ -21,6 +21,15 @@
   "tasks": {
     "dev": "deno run -A src/app.ts --client=server-only",
     "dev:expose": "deno run -A src/app.ts --client=server-only --expose",
-    "compile": "deno run -A ../../../src/build.ts --compile --service --headless --remote"
+    "build": "deno run -A ../../../src/build-all.ts --build-spec=../../../src/build.ts",
+    "compile": "deno run -A ../../../src/build-all.ts --build-spec=../../../src/build.ts --targets=server",
+    "check": "deno check src/",
+    "lint": "deno run -A ../../../aiol/mod.ts",
+    "am": "deno run -A ../../../src/am.ts"
+  },
+  "build": {
+    "targets": [
+      "server"
+    ]
   }
 }

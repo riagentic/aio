@@ -112,6 +112,12 @@ export default function App() {
           scanning…
         </p>
       )}
+      {!disk.scanning && disk.partial && (
+        <p t="partial" style={{ color: "#a70" }}>
+          stopped at this scan's budget — the sizes below are a floor, not a
+          total. Rescan to continue.
+        </p>
+      )}
 
       <Folders />
     </div>

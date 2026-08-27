@@ -402,7 +402,22 @@ export type CronFields = {
   dow: number[]; // 0-6 (Sun=0)
 };
 
-function parseField(field: string, min: number, max: number): number[] {
+/** One cron field, expanded.
+ *
+ *  `name` and `pattern` exist only for the error messages. The old text was
+ *  `invalid cron range: 1-70 (0-59)` — it never said WHICH of the five fields
+ *  was wrong and never echoed the pattern it came from, so a reader with
+ *  `"0 1-70 * * *"` in a config file had to work out that `(0-59)` meant
+ *  minutes. Its sibling branch (`invalid cron step`) already named the fix; the
+ *  range branch simply had not caught up. */
+function parseField(
+  field: string,
+  min: number,
+  max: number,
+  name: string,
+  pattern: string,
+): number[] {
+  const where = `${name} field of cron pattern "${pattern}"`;
   const values: number[] = [];
   for (const part of field.split(",")) {
     const trimmed = part.trim();
@@ -412,7 +427,8 @@ function parseField(field: string, min: number, max: number): number[] {
       const step = Number(trimmed.slice(2));
       if (!Number.isInteger(step) || step < 1) {
         throw new Error(
-          `invalid cron step: ${trimmed} — step must be a positive integer, e.g. "*/5"`,
+          `invalid step "${trimmed}" in the ${where} — a step must be a ` +
+            `positive integer, e.g. "*/5" (every 5th value from ${min}).`,
         );
       }
       for (let i = min; i <= max; i += step) values.push(i);
@@ -421,7 +437,10 @@ function parseField(field: string, min: number, max: number): number[] {
       const [rangePart, stepPart] = trimmed.split("/");
       const [startStr, endStr] = (rangePart ?? "").split("-");
       if (!startStr || !endStr) {
-        throw new Error(`invalid cron range: ${trimmed} (${min}-${max})`);
+        throw new Error(
+          `invalid range "${trimmed}" in the ${where} — a range needs both ` +
+            `ends, written low-high within ${min}-${max}, e.g. "${min}-${max}".`,
+        );
       }
       const start = Number(startStr), end = Number(endStr);
       const step = stepPart ? Number(stepPart) : 1;
@@ -429,18 +448,26 @@ function parseField(field: string, min: number, max: number): number[] {
         !Number.isInteger(start) || !Number.isInteger(end) || start < min ||
         end > max || start > end
       ) {
-        throw new Error(`invalid cron range: ${trimmed} (${min}-${max})`);
+        throw new Error(
+          `invalid range "${trimmed}" in the ${where} — ${name} accepts ` +
+            `${min}-${max}, low end first. Got ${startStr}-${endStr}.`,
+        );
       }
       if (!Number.isInteger(step) || step < 1) {
         throw new Error(
-          `invalid cron step: ${trimmed} — step must be a positive integer, e.g. "1-5/2"`,
+          `invalid step "${trimmed}" in the ${where} — a step must be a ` +
+            `positive integer, e.g. "1-5/2" (every 2nd value from 1 to 5).`,
         );
       }
       for (let i = start; i <= end; i += step) values.push(i);
     } else {
       const n = Number(trimmed);
       if (!Number.isInteger(n) || n < min || n > max) {
-        throw new Error(`invalid cron value: ${trimmed} (${min}-${max})`);
+        throw new Error(
+          `invalid value "${trimmed}" in the ${where} — ${name} accepts a ` +
+            `whole number ${min}-${max}, "*", a list ("1,15"), a range ` +
+            `("1-5") or a step ("*/5").`,
+        );
       }
       values.push(n);
     }
@@ -453,15 +480,17 @@ export function parseCron(pattern: string): CronFields {
   const parts = pattern.trim().split(/\s+/);
   if (parts.length !== 5) {
     throw new Error(
-      `cron pattern must have 5 fields, got ${parts.length}: "${pattern}"`,
+      `cron pattern must have 5 space-separated fields ` +
+        `(minute hour day-of-month month day-of-week), got ${parts.length}: ` +
+        `"${pattern}". Example: "0 3 * * *" — 03:00 every day.`,
     );
   }
   return {
-    minute: parseField(parts[0]!, 0, 59),
-    hour: parseField(parts[1]!, 0, 23),
-    dom: parseField(parts[2]!, 1, 31),
-    month: parseField(parts[3]!, 1, 12),
-    dow: parseField(parts[4]!, 0, 6),
+    minute: parseField(parts[0]!, 0, 59, "minute", pattern),
+    hour: parseField(parts[1]!, 0, 23, "hour", pattern),
+    dom: parseField(parts[2]!, 1, 31, "day-of-month", pattern),
+    month: parseField(parts[3]!, 1, 12, "month", pattern),
+    dow: parseField(parts[4]!, 0, 6, "day-of-week", pattern),
   };
 }
 
@@ -602,6 +631,10 @@ export function createScheduleManager(
   cancelAll: () => void;
   cancelByPrefix: (prefix: string) => void;
   active: () => string[];
+  /** @internal Total per-id bookkeeping entries, across every map. Exists so
+   *  "the registry does not grow without bound" can be ASSERTED (a leak that
+   *  `active()` cannot see is a leak nothing can catch). */
+  _bookkeepingSize: () => number;
 } {
   const clock = opts.timers ?? realTimers;
   const timers = new Map<string, TimerEntry>();
@@ -648,6 +681,16 @@ export function createScheduleManager(
     epochs.delete(id);
     inFlight.delete(id);
     skips.delete(id);
+    // Not the collision warning: that is "once per id, ever", and a replace is
+    // exactly what it warns about — clearing it here would make it warn on
+    // every replace. It is bounded by `spentId()` and `cancelAll()` instead.
+  }
+
+  /** Every per-id bookkeeping map, for an id that no longer exists at all. */
+  function forgetId(id: string): void {
+    cancelTimer(id);
+    warnedCollisions.delete(id);
+    staticIds.delete(id);
   }
 
   function setTimer(
@@ -758,17 +801,38 @@ export function createScheduleManager(
       // all unreachable, while the rejection escaped as an unhandled one
       //. Awaiting is what routes a real failure into the handler.
       // Returned so `skipIfRunning` can await the tick it just started.
-      return await dispatch(action);
+      const result = await dispatch(action);
+      // A one-shot is SPENT the moment its dispatch lands: the timer entry is
+      // already gone and the epoch only had to outlive the retry window, which
+      // just closed. Leaving it behind grew `epochs` by one entry per unique
+      // id for the life of the process — and one-shot ids are routinely unique
+      // (`toast:<uuid>`, `retry:<jobId>`), so a long-running app's registry
+      // grew without bound while `active()` reported nothing.
+      if (
+        (kind === "after" || kind === "at") && !timers.has(id) &&
+        epochs.get(id) === epoch
+      ) {
+        epochs.delete(id);
+        skips.delete(id);
+      }
+      return result;
     } catch (e) {
-      log.error(`schedule: dispatch '${id}' failed: ${e}`);
-      // The dispatch loop is gone (shutdown): there is nothing to retry into,
-      // and re-arming a timer here would resurrect one `cancelAll()` just
-      // cleared.
+      // CLASSIFY BEFORE REPORTING. The dispatch loop being gone is a normal
+      // shutdown race, not a failure: `dispatch()` already reports it, at warn,
+      // once per action type, with the rest suppressed. Logging at error above
+      // this check meant every clean exit printed one ERROR per live schedule —
+      // measured at seven lines in a real app, immediately above its own
+      // `stopped … errors=0` summary, for a condition the next three lines
+      // exist to handle.
       const closed = (e as { code?: string })?.code === "DISPATCH_CLOSED";
       if (closed) {
+        // There is nothing to retry into, and re-arming a timer here would
+        // resurrect one `cancelAll()` just cleared.
+        log.debug(`schedule: '${id}' dropped — the dispatch loop is closed`);
         cancelTimer(id);
         return;
       }
+      log.error(`schedule: dispatch '${id}' failed: ${e}`);
       if (kind === "every" || kind === "cron") {
         // A REPEATING schedule survives a failed tick. One transient failure —
         // a network blip inside a poll, a momentary queue overflow — must not
@@ -919,10 +983,21 @@ export function createScheduleManager(
     // mix-up or a restored deadline, both of which the author wants to know
     // about the moment it happens.
     if (target <= clock.now()) {
+      // `at` is REPLACE semantics: issuing it for an id cancels whatever that
+      // id was. Returning early kept the previous job armed, so re-pointing a
+      // reminder at a time that turned out to be in the past left the OLD one
+      // to fire — a schedule the app believed it had moved. Cancel first, then
+      // say what happened, both halves in one line.
+      const replaced = timers.has(id) || epochs.has(id);
+      cancelTimer(id);
       log.warn(
         `schedule: at '${id}' is in the past (${time}, ${
           Math.round((clock.now() - target) / 1000)
-        }s ago) — it will never fire and is not registered. Times are UTC.`,
+        }s ago) — it will never fire and is not registered${
+          replaced
+            ? `; the previous '${id}' schedule it replaces was CANCELLED`
+            : ""
+        }. Times are UTC.`,
       );
       return;
     }
@@ -1073,8 +1148,14 @@ export function createScheduleManager(
   }
 
   function cancelAll(): void {
-    for (const id of [...timers.keys()]) cancelTimer(id);
+    for (const id of [...timers.keys()]) forgetId(id);
     timers.clear();
+    // Every id is gone, so every per-id note about one is too. These three
+    // were the maps `cancelAll` did not clear, which is how a process that
+    // boots and tears down apps in a loop (every test file, every dev restart)
+    // kept a growing record of ids nothing could ever refer to again.
+    warnedCollisions.clear();
+    staticIds.clear();
     // A one-shot whose tick is in flight has no timer entry left, only an
     // epoch — clearing the epochs is what makes "cancelled" stick for the
     // retry that has not been scheduled yet. Shutdown Phase 7 calls this.
@@ -1089,8 +1170,15 @@ export function createScheduleManager(
     const match = prefix + ":";
     // Epoch keys as well as timer keys: an in-flight one-shot is only in the
     // former, and a disabled cell must not have a retry come back to life.
-    for (const id of new Set([...timers.keys(), ...epochs.keys()])) {
-      if (id === prefix || id.startsWith(match)) cancelTimer(id);
+    for (
+      const id of new Set([
+        ...timers.keys(),
+        ...epochs.keys(),
+        ...staticIds,
+        ...warnedCollisions,
+      ])
+    ) {
+      if (id === prefix || id.startsWith(match)) forgetId(id);
     }
   }
 
@@ -1098,10 +1186,26 @@ export function createScheduleManager(
     return [...timers.keys()];
   }
 
-  return { handle, start, cancelAll, cancelByPrefix, active };
+  return {
+    handle,
+    start,
+    cancelAll,
+    cancelByPrefix,
+    active,
+    _bookkeepingSize: () =>
+      timers.size + epochs.size + inFlight.size + skips.size +
+      staticIds.size + warnedCollisions.size,
+  };
 }
 
 // ── Virtual clock ───────────────────────────────────────────────────
+
+/** Let every already-queued microtask run, the way a real turn of the event
+ *  loop does before the next timer callback. Ten rounds covers the promise
+ *  chains a scheduled tick realistically builds (each `await` costs one). */
+async function _drainMicrotasks(): Promise<void> {
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+}
 
 /** A deterministic {@linkcode ScheduleTimers}: nothing fires until `advance()`.
  *
@@ -1114,8 +1218,9 @@ export function createScheduleManager(
 export function createVirtualTimers(
   start = Date.now(),
 ): ScheduleTimers & {
-  /** Move time forward, firing everything that comes due, in order. */
-  advance: (ms: number) => void;
+  /** Move time forward, firing everything that comes due, in order — and
+   *  draining microtasks between fires, as the real event loop does. */
+  advance: (ms: number) => Promise<void>;
   /** Number of armed timers — a leak check for a harness teardown. */
   pending: () => number;
 } {
@@ -1144,7 +1249,7 @@ export function createVirtualTimers(
     clearInterval: clear,
     now: () => now,
     pending: () => q.size,
-    advance(ms: number): void {
+    async advance(ms: number): Promise<void> {
       const target = now + Math.max(0, ms);
       // A guard, but a LOUD one: a runaway re-arming schedule (an interval of
       // 0, an `after` that re-schedules itself with no delay) would otherwise
@@ -1165,6 +1270,16 @@ export function createVirtualTimers(
         if (next.every > 0) next.due = now + next.every;
         else q.delete(next.id);
         next.fn();
+        // The real event loop separates two timer callbacks by a full turn:
+        // every microtask the first one queued has run before the second
+        // starts. Firing them back-to-back made the harness MORE FORGIVING
+        // than production — a tick whose promise chain had already settled in
+        // reality was still "running" here, so `skipIfRunning` skipped where
+        // production would fire (and every retry/backoff chain resolved a beat
+        // late). A test environment that is softer than production is how
+        // green-test-broken-prod is manufactured; this is the one place the
+        // virtual clock could be honest about it for free.
+        await _drainMicrotasks();
       }
       now = target;
     },

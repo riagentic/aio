@@ -135,5 +135,10 @@ Deno.test("ship: collectSources builds paths with join (no mixed separators)", a
     !/`\$\{d\}\/\$\{e\.name\}`/.test(src),
     "hardcoded '/' concatenation is a latent Windows bug — use join()",
   );
-  assertStringIncludes(src, 'import { join } from "@std/path"');
+  // Named-import lists grow; what matters is that `join` comes from @std/path
+  // at all, not the exact spelling of that line.
+  assert(
+    /import\s*\{[^}]*\bjoin\b[^}]*\}\s*from\s*"@std\/path"/.test(src),
+    "ship.ts must take `join` from @std/path",
+  );
 });

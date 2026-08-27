@@ -4,8 +4,9 @@
 // machine, so an aio app on a 32 GB box died of "out of memory" with 28 GB
 // free. An app was not limited by aio; it was limited by a default nobody
 // chose.
-import { assertEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 import {
+  compiledMaxHeapMB,
   describeHeapPolicy,
   HEAP_FLOOR_MB,
   maxHeapFlagArgs,
@@ -73,6 +74,15 @@ Deno.test("heap: the FLOOR is never reported as a share someone asked for", () =
   // about the framework's own minimum, unactionable from the app.
   assertEquals(overAdvisedShare(HEAP_FLOOR_MB, 8 * GB), null, "8 GB laptop");
   assertEquals(overAdvisedShare(HEAP_FLOOR_MB, 4 * GB), null, "4 GB machine");
+  // V8 hands back slightly more than the floor it was given (4096 → 4192), and
+  // that 96 MB used to be enough to call V8's own default "a share someone
+  // asked for" — on every machine of 8 GB or less, on every boot.
+  assertEquals(
+    overAdvisedShare(4192, 8 * GB),
+    null,
+    "V8's rounding, not a decision",
+  );
+  assertEquals(overAdvisedShare(4192, 4 * GB), null, "…on a tiny machine too");
   // Above the floor, on a machine where that really is a large share, still speaks.
   const over = overAdvisedShare(6144, 8 * GB);
   assertEquals(over !== null && over > 0.7, true, "a real over-ask is said");
@@ -172,4 +182,112 @@ Deno.test("heap: nothing to measure, nothing to say", async () => {
     totalBytes: () => null,
   });
   assertEquals(said, []);
+});
+
+// ── The number a BINARY carries, and the line it prints ───────────────────────
+//
+// Found by booting a cross-compiled Windows binary in a real 8 GB VM: it said
+// `heap 46.7 GB max of 8.0 GB RAM`. 46.7 GB is 25% of the 187 GB machine that
+// BUILT it. V8 fixes the ceiling at isolate creation and a compiled binary
+// ignores DENO_V8_FLAGS (measured), so the build is the only place it can be
+// set — and a build that sets it from its OWN RAM ships a number that is right
+// on exactly one machine in the world.
+
+Deno.test("heap: a compiled artifact never carries the BUILD machine's share", () => {
+  const buildHost = 187 * GB;
+  // Nothing declared → nothing baked. V8's own default is the policy floor and
+  // it is the same on every machine; 25% of the builder is not.
+  assertEquals(compiledMaxHeapMB(undefined, buildHost), {
+    mb: null,
+    note: null,
+  });
+  assertEquals(compiledMaxHeapMB("default", buildHost), {
+    mb: null,
+    note: null,
+  });
+  assertEquals(compiledMaxHeapMB(null, null), { mb: null, note: null });
+});
+
+Deno.test("heap: an absolute maxHeap travels; a percentage says whose it is", () => {
+  const buildHost = 187 * GB;
+  // A SIZE means the same thing on every machine — the one form that can be
+  // baked honestly.
+  assertEquals(compiledMaxHeapMB("12GB", buildHost).mb, 12288);
+  assertEquals(compiledMaxHeapMB("12GB", buildHost).note, null);
+  assertEquals(compiledMaxHeapMB(512, buildHost).mb, HEAP_FLOOR_MB, "floored");
+  // A PERCENTAGE cannot be re-resolved inside the binary, so it silently
+  // becomes "25% of whoever built it". Honoured — someone asked — but never
+  // silently: the note is the build log's one chance to say it.
+  const pct = compiledMaxHeapMB("25%", buildHost);
+  assertEquals(pct.mb, Math.floor((buildHost * 0.25) / (1024 * 1024)));
+  assert(pct.note !== null, "a build-host percentage must be said out loud");
+  assert(pct.note!.includes("BUILD MACHINE"), pct.note!);
+  assert(pct.note!.includes("8GB"), "and it must name the fix");
+  // An unmeasurable build host has no number to bake — and says so rather than
+  // guessing one.
+  const unknown = compiledMaxHeapMB("25%", null);
+  assertEquals(unknown.mb, null);
+  assert(unknown.note !== null, "silence would be a ceiling nobody chose");
+});
+
+Deno.test("heap: the boot line is TRUE on the machine reading it", () => {
+  // The exact line from the field: 46.7 GB of ceiling on a machine with 8 GB of
+  // RAM. "46.7 GB max of 8.0 GB RAM" is two true numbers in a false sentence —
+  // it reads as an allowance this machine granted.
+  const line = describeHeapPolicy(47800, 8 * GB, true);
+  assert(line.includes("46.7 GB max"), line);
+  assert(line.includes("8.0 GB"), line);
+  assert(
+    /MORE than this machine/.test(line),
+    `the line must state the relation, not imply the wrong one: ${line}`,
+  );
+  assert(line.includes("unreachable"), line);
+  assert(
+    line.includes("built"),
+    `a ceiling the reader cannot change must say where it came from: ${line}`,
+  );
+  assert(
+    !/47800|of 8\.0 GB RAM/.test(line),
+    `it must not claim the machine granted it: ${line}`,
+  );
+  // A ceiling the machine really does allow reads exactly as before.
+  assertEquals(describeHeapPolicy(8192, 32 * GB), "8.0 GB max of 32.0 GB RAM");
+  // …and a compiled binary says so even when the number is fine, because the
+  // reader cannot change it from here either way.
+  assert(describeHeapPolicy(8192, 32 * GB, true).includes("built"));
+});
+
+Deno.test("heap: a ceiling above the machine's RAM warns, with cause and fix", async () => {
+  const said: string[] = [];
+  await reportHeapCeiling({ warn: (m) => said.push(m) }, {
+    limitBytes: () => Promise.resolve(47800 * 1024 * 1024),
+    totalBytes: () => 8 * GB,
+  });
+  assertEquals(said.length, 1, said.join(" | "));
+  const msg = said[0]!;
+  assert(msg.includes("46.7 GB"), msg);
+  assert(msg.includes("8.0 GB"), msg);
+  assert(msg.includes("MORE than"), msg);
+  assert(/BUILD time/.test(msg), `the CAUSE: ${msg}`);
+  assert(msg.includes("maxHeap"), `the FIX: ${msg}`);
+  assert(msg.includes("rebuild"), `the FIX, runnable: ${msg}`);
+});
+
+Deno.test("heap: the FLOOR above a tiny machine's RAM is not a warning", () => {
+  // A 4 GB machine gets V8's ~4 GB default and nobody decided that. Warning
+  // about the framework's own minimum is the "nothing can launch this app
+  // without a heap warning" field report, in a new place.
+  return (async () => {
+    const said: string[] = [];
+    const log = { warn: (m: string) => said.push(m) };
+    await reportHeapCeiling(log, {
+      limitBytes: () => Promise.resolve(4192 * 1024 * 1024),
+      totalBytes: () => 4 * GB,
+    });
+    await reportHeapCeiling(log, {
+      limitBytes: () => Promise.resolve(4192 * 1024 * 1024),
+      totalBytes: () => 2 * GB,
+    });
+    assertEquals(said, []);
+  })();
 });

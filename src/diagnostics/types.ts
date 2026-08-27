@@ -1,5 +1,6 @@
 // src/diagnostics/types.ts — Shared types for the diagnostics module
 
+import { log } from "./logger-api.ts";
 import type { MemoryConfig } from "./memory-monitor.ts";
 import type { VitalsConfig } from "../vitals/types.ts";
 
@@ -78,7 +79,31 @@ export function resolveOptions(
     ? undefined
     : (isProd ? config.prod : config.dev);
   if (!overrides) return { ...defaults };
+  if (isProd) _warnProdIgnored(overrides);
   return { ...defaults, ...overrides };
+}
+
+/** Options that are accepted, merged — and then not consulted in prod.
+ *  Value = why, and what to do instead. */
+const PROD_IGNORED: Record<string, string> = {
+  timeTravel:
+    "time travel keeps a full state history in memory and broadcasts it on " +
+    "every dispatch, so it is a dev-only tool: `timeTravelEnabled()` returns " +
+    "false for prod regardless of this setting. Fix: drop the override, or " +
+    "run the app in dev (`--dev`) when you need the history.",
+};
+
+/** A setting that is read, merged and then ignored is worse than one that is
+ *  rejected: it looks configured. Said once per boot, at the site that
+ *  discards it. */
+function _warnProdIgnored(overrides: DiagnosticsOptions): void {
+  for (const [key, why] of Object.entries(PROD_IGNORED)) {
+    if ((overrides as Record<string, unknown>)[key] === undefined) continue;
+    log.warn(
+      `[aio] diagnostics.prod.${key} is set but has no effect in production — ` +
+        why,
+    );
+  }
 }
 
 /** Is time-travel on, given the mode and the RESOLVED diagnostics options?

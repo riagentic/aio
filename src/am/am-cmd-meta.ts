@@ -69,6 +69,57 @@ function canonicalRoot(): string {
     `${Deno.env.get("HOME") ?? ""}/.local/lib/aio`;
 }
 
+/** Why `am update` must not `git checkout --force` in this checkout, or null.
+ *
+ *  THE historical data-loss bug in this project: an unconditional
+ *  `git checkout --force <tag>` inside a working repo deletes uncommitted
+ *  work, and it wiped the framework's own tree twice. It was fixed in
+ *  `install.sh` (its AIO_DEV_CHECKOUT block) and NOWHERE ELSE — `am update`
+ *  re-implements fetch+checkout and guarded on LOCATION instead: "is this the
+ *  canonical install?". But `canonicalRoot()` reads `AIO_HOME`, so
+ *  `AIO_HOME=~/code/aio am update` answers yes for a developer's own repo and
+ *  walks straight past the guard. One fact, two deciders, one of them fixed.
+ *
+ *  So this is install.sh's rule, in TypeScript, applied to the same inputs:
+ *  local changes are always protected; a checkout ON A BRANCH counts as worked
+ *  in (the canonical install is always detached at a tag). `deno.lock` is
+ *  excluded for install.sh's measured reason — `deno install` from the
+ *  checkout rewrites it, so counting it would freeze every canonical install
+ *  after its first run.
+ *
+ *  Pure, so both answers are testable without a repo. */
+export function gitMutationRefusal(
+  st: {
+    root: string;
+    dirty: string[];
+    onBranch: string | null;
+    force: boolean;
+  },
+): string | null {
+  if (st.force) return null;
+  if (st.dirty.length === 0 && !st.onBranch) return null;
+  const why = st.dirty.length > 0
+    ? `it has uncommitted changes:\n` +
+      st.dirty.slice(0, 10).map((l) => `      ${l}`).join("\n") +
+      (st.dirty.length > 10 ? `\n      … and ${st.dirty.length - 10} more` : "")
+    : `it is on a branch (${st.onBranch}) — the canonical install is always ` +
+      `detached at a tag, so this is a checkout someone WORKS in`;
+  return `refusing to git-update ${st.root}: ${why}\n` +
+    `  \`git checkout --force <tag>\` here would DELETE that work. ` +
+    `(This is the bug that wiped aio's own tree twice.)\n` +
+    `  fix: commit or stash it, then re-run — or \`am update --force\` to ` +
+    `move this checkout anyway (your changes are gone).`;
+}
+
+/** `git status --porcelain` lines that mean "worked in", by install.sh's rule.
+ *  Untracked files are excluded (checkout does not remove them); so is
+ *  deno.lock. Exported for the test that pins the two spellings together. */
+export function dirtyLines(porcelain: string): string[] {
+  return porcelain.split("\n").map((l) => l.trim()).filter((l) =>
+    l.length > 0 && !/\bdeno\.lock$/.test(l)
+  );
+}
+
 export async function cmdUpdate(
   args: string[],
   flags: GlobalFlags,
@@ -156,6 +207,25 @@ export async function cmdUpdate(
         text: capture ? new TextDecoder().decode(o.stdout).trim() : "",
       };
     };
+    // Before ANY git mutation — the fetch is harmless, the checkout is not,
+    // and refusing after the fetch would still be refusing at the right time,
+    // but refusing before it keeps the two rules in one place.
+    const refusal = gitMutationRefusal({
+      root,
+      dirty: dirtyLines(
+        (await git(["status", "--porcelain", "--untracked-files=no"], true))
+          .text,
+      ),
+      onBranch:
+        (await git(["symbolic-ref", "--quiet", "--short", "HEAD"], true))
+          .text ||
+        null,
+      force: !!flags.force,
+    });
+    if (refusal) {
+      outError(refusal, mode);
+      Deno.exit(1);
+    }
     if ((await git(["fetch", "--tags", "--force", "origin"])).code !== 0) {
       outError(`git fetch failed in ${root} — check network`, mode);
       Deno.exit(1);
@@ -328,13 +398,22 @@ Onboard:
                           one verb, the object says which)
   uninstall               Remove am (your aio apps are untouched)
 
+Release:
+  publish [--key=K]       Build, sign and lay out the channel directory an
+                          update client fetches (<dir>/<channel>/<os>-<arch>.json
+                          beside its artifact). --dir=DIR --channel=C --notes=…
+                          --targets=… --target=<one, when two build for one
+                          platform> --no-build (publish what dist/ holds)
+
 Visual manager:
   ui                      Open amui, the visual app manager (Electron;
                           \`am ui --client=browser\` opens a browser tab instead)
 
 Process (singleton — one instance per app identity):
-  start [component]       Start the app (kills zombies, refuses if already
-                          running). In a project that declares COMPONENTS —
+  start [component]       Start the app and WAIT until it answers (--no-wait
+                          returns as soon as it is spawned; --wait=N sets the
+                          budget). Kills zombies, refuses if already
+                          running. In a project that declares COMPONENTS —
                           several entries in one repo — plain "am start" starts
                           all of them and "am start <label>" starts one.
   stop [component]        Graceful shutdown (SIGTERM → SIGKILL). Stops the
@@ -392,6 +471,17 @@ Framework version:
   pin main                Follow the branch tip (a moving target)
   pin --latest            Pin the newest release
 
+Manual VM labs (a REAL desktop you click around in — not a gate):
+  lab windows             Boot Windows in a container, mount dist/, print the
+                          viewer URL (first run installs: ~10-20 min, tens of GB)
+  lab macos               The same for macOS (setup is partly MANUAL)
+  lab <os> --status|--stop|--reset   up? / clean shutdown / delete the VM disk
+                          Flags: --port=N --ram=8G --cpus=4 --disk=64G
+                          --version=11 --dist=<dir> --tunnel
+                          See docs/testing/vm-labs.md — and note this is the
+                          manual tier: \`deno task test:wine\` and
+                          \`deno task lab\` are the automated ones.
+
 Look:
   theme adopt             Take aio's stylesheet INTO this app (src/aio-theme.css)
                           — yours from then on: editable, in your git history,
@@ -444,7 +534,9 @@ Scaffold:
 
 Repair (a clone that does not run yet):
   fix                     Full repair: dep/aio symlink, env, electron, config,
-                          tasks — the one to run after a git clone
+                          tasks — the one to run after a git clone.
+                          --dry-run reports without writing; --no-download
+                          skips the network steps (Electron, deno cache)
   link                    Just the dep/aio symlink (fix does this and more)
 
 Auth (apps running with auth: true) — run "am auth" for all of them:
@@ -473,12 +565,14 @@ Other:
 --json: machine-readable output for EVERY command — the scripting interface
         (errors included; a non-zero exit still means failed)
 
-Flags: --app=X  --port=N  --entry=<path>  --wait[=N]  --json  --quiet  --body='{...}'  --args='[...]'  --filter=X  --lines=N  --follow/-f  --transport=ws|uds  --client-index=N/-i N  --all  --home=<dir>  --timeout=<ms>
+Flags: --app=X  --port=N  --entry=<path>  --wait[=N]  --no-wait  --json  --quiet  --body='{...}'  --args='[...]'  --filter=X  --lines=N  --follow/-f  --transport=ws|uds  --client-index=N/-i N  --all  --home=<dir>  --timeout=<ms>
 
 --app: target specific app by ID (default: resolved from deno.json name)
 --home: target the instance of that app running from <dir> (an isolated
         second boot); AIO_APPS_DIR is the env-level equivalent
 --timeout: ms to wait for a live client (surface/trigger; default 8000)
 --entry: override entry point (default: deno.json "entry" > src/app.ts)
---wait: start/stop block until complete (default 10s/5s). state polls every Ns.`);
+--wait: start/stop block until complete (default 10s/5s) — start does this by
+        default; --no-wait returns the moment the child is spawned.
+        state polls every Ns.`);
 }

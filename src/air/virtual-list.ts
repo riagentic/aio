@@ -100,7 +100,13 @@ export function useVirtualList<T>(
     // per list, like `_warnA11yOnce` / `_hinted` elsewhere.
     if (!warnedItems) {
       warnedItems = true;
-      console.warn("[aio:virtualList] items must be an array or Signal<array>");
+      console.warn(
+        `[aio:virtualList] items is ${
+          items === null ? "null" : typeof items
+        }, not an array or a Signal holding one — THE LIST IS RENDERING EMPTY. ` +
+          `Pass items={myArray} or items={mySignal} (the signal itself, not ` +
+          `mySignal.value — the list reads it so it can re-render on change).`,
+      );
     }
     return [] as T[];
   };
@@ -110,12 +116,21 @@ export function useVirtualList<T>(
   > = computed(() => {
     const items = getItems();
     const scrollTop = scrollTopSig.value;
-    const startIndex = Math.max(
-      0,
-      Math.floor(scrollTop / safeItemHeight) - overscan,
-    );
     const visibleCount = Math.ceil(containerHeight / safeItemHeight) +
       2 * overscan;
+    // The window start is clamped at BOTH ends. The upper clamp is the one
+    // that was missing: when `items` SHRINKS under a scrolled list (a filter
+    // typed into a search box, a page of results replaced by a shorter one)
+    // the scroll offset still describes a row that no longer exists, so
+    // `startIndex` landed past `items.length`, `endIndex` clamped BELOW it,
+    // and the loop produced nothing — a blank list with a live scrollbar and
+    // no error. Clamping to the last full window shows the end of the new
+    // list, which is what a scrolled-to-the-bottom list should show.
+    const maxStart = Math.max(0, items.length - visibleCount);
+    const startIndex = Math.min(
+      Math.max(0, Math.floor(scrollTop / safeItemHeight) - overscan),
+      maxStart,
+    );
     const endIndex = Math.min(items.length, startIndex + visibleCount);
 
     const result: { item: T; index: number; offset: number }[] = [];

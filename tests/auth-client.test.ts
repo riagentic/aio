@@ -36,14 +36,21 @@ Deno.test("authClient: signup → me → changePassword → login lifecycle", as
     assertEquals(r.user.id, "alice");
     assertEquals((await ac.me(r.token))?.id, "alice");
 
-    // Wrong login maps to a friendly Error, not a silent undefined.
-    let msg = "";
+    // Wrong login maps to a friendly Error, not a silent undefined — and
+    // "friendly" means a SENTENCE. This assertion used to read
+    // `assertEquals(msg, "invalid_credentials")` under that same comment: the
+    // raw server code went into Error.message, and an app doing the obvious
+    // `catch (e) => setError(e.message)` showed its users snake_case. The code
+    // is still there to branch on; it is just no longer the human text.
+    let msg = "", code = "";
     try {
       await ac.login("alice", "wrong-wrong-1");
     } catch (e) {
       msg = (e as Error).message;
+      code = (e as { code?: string }).code ?? "";
     }
-    assertEquals(msg, "invalid_credentials");
+    assertEquals(msg, "Incorrect username or password.");
+    assertEquals(code, "invalid_credentials");
 
     // changePassword rotates: the returned session works, the old dies.
     const rotated = await ac.changePassword(

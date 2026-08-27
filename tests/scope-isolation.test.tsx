@@ -18,7 +18,7 @@
 // (see renderer-hydrate.ts).
 //
 // So the invariant is asserted directly, once per path, instead of reviewed.
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { Window } from "happy-dom";
 import { _openScopeDepth, signal } from "../src/state/signal.ts";
 import { ErrorBoundary, h, renderToString } from "../src/air/vdom.ts";
@@ -144,7 +144,11 @@ Deno.test("scope isolation: the SSR streamer leaves no scope open", async () => 
       );
     let out = "";
     for await (const chunk of renderToStream(h(App, null))) out += chunk;
-    assert(out.length > 0);
+    // The stream must carry BOTH halves: the component that rendered fine and
+    // the boundary's fallback for the one that threw. `out.length > 0` was
+    // true of a stream carrying only an empty <div>.
+    assertStringIncludes(out, "<i>1</i>");
+    assertStringIncludes(out, "<p>e</p>");
     assert(clean(), "renderToStream left a scope open");
   } finally {
     cleanup();

@@ -20,8 +20,15 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 
 import {
+  BUILD_BOOL_FLAGS,
+  BUILD_VALUE_FLAGS,
+  FLEET_BOOL_FLAGS,
+  FLEET_VALUE_FLAGS,
+  SHIP_BOOL_FLAGS,
+  SHIP_VALUE_FLAGS,
   unknownBuildFlags,
   unknownFleetFlags,
+  unknownShipFlags,
 } from "../src/build/build-flags.ts";
 import { standardTasks, TARGETS } from "../src/am/am-cmd-create.ts";
 
@@ -95,6 +102,41 @@ Deno.test("fleet flags: build-all accepts its own vocabulary and nothing else", 
   ]);
 });
 
+Deno.test("ship flags: the release CLI has the same gate, and it matters more", () => {
+  assertEquals(
+    unknownShipFlags([
+      "./dist/app",
+      "--src=src",
+      "--name=n",
+      "--version=1.0.0",
+      "--key=k.json",
+      "--channel=prod",
+      "--target=binary",
+      "--url=https://x/y",
+      "--notes=hi",
+      "--min-from=1.0.0",
+      "--data=c.json",
+      "--no-data",
+      "--out=ship.json",
+      "--channel-dir=site",
+      "--github",
+      "--stdout",
+      "--force",
+    ]),
+    [],
+  );
+  // The three that publish a DIFFERENT release in silence: a misspelled --key
+  // publishes UNSIGNED, a misspelled --no-data runs the probe it meant to
+  // skip, a misspelled --min-from drops the floor clients check.
+  assertEquals(unknownShipFlags(["bin", "--keys=k.json"]), ["--keys=k.json"]);
+  assertEquals(unknownShipFlags(["bin", "--no-dta"]), ["--no-dta"]);
+  assertEquals(unknownShipFlags(["bin", "--min-form=1.0.0"]), [
+    "--min-form=1.0.0",
+  ]);
+  // The binary itself is positional and must not be read as a flag.
+  assertEquals(unknownShipFlags(["./dist/app"]), []);
+});
+
 // ── 2. the refusal is real, through the actual entry points ─────────────────
 
 const BUILD = join(import.meta.dirname ?? ".", "..", "src", "build.ts");
@@ -148,6 +190,48 @@ Deno.test("build-all: an unknown flag is refused before anything is built", asyn
   assertStringIncludes(r.out, "--targets", "names the real flag");
 });
 
+Deno.test("build-all: `--allow-server-only` reaches the single-target build", async () => {
+  // The Android gate refuses a standalone APK whose graph reaches server-only
+  // code and names `--allow-server-only` as the way out. The fleet did not
+  // know that flag, and the fleet IS the build path (`deno task build` /
+  // `deno task compile`), so the advice pointed at a command no scaffolded app
+  // could run. Accepted here, and forwarded verbatim.
+  const r = await runBuild(BUILD_ALL, [
+    "--targets=browser",
+    "--allow-server-only",
+  ]);
+  assert(
+    !r.out.includes("unknown flag"),
+    `the fleet must accept --allow-server-only:\n${r.out}`,
+  );
+  const src = await Deno.readTextFile(BUILD_ALL);
+  assertStringIncludes(
+    src.replace(/\/\/.*$/gm, ""),
+    'args.push("--allow-server-only")',
+    "accepting it is only half — it has to be forwarded to the target build",
+  );
+});
+
+Deno.test("ship: an unknown flag is refused before anything is published", async () => {
+  const ship = join(
+    import.meta.dirname ?? ".",
+    "..",
+    "src",
+    "build",
+    "ship.ts",
+  );
+  const r = await new Deno.Command(Deno.execPath(), {
+    args: ["run", "-A", ship, "/bin/true", "--keys=release-key.json"],
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  const out = new TextDecoder().decode(r.stdout) +
+    new TextDecoder().decode(r.stderr);
+  assertEquals(r.code, 1, `expected a refusal, got:\n${out}`);
+  assertStringIncludes(out, "--keys=release-key.json");
+  assertStringIncludes(out, "--key=", "the real spelling is in the message");
+});
+
 // ── 3. `deno task compile` == `deno task build --targets=<target>` ──────────
 // The one-decider contract, one step stronger since alpha52: `compile` is not
 // a SECOND flag table that must be kept equal to the fleet's — it IS the fleet
@@ -183,4 +267,121 @@ Deno.test("scaffold: the build/compile tasks use flags the FLEET understands", (
       );
     }
   }
+});
+
+// ── 4. the vocabulary IS the whole vocabulary ───────────────────────────────
+//
+// Sections 1–3 check the tables against hand-written lists, which is the same
+// hand-maintained invariant one layer along: a flag added to an entry point
+// and forgotten here is read fine and refused by nothing, and a flag that is
+// only in the table documents something no code reads. Both already happened —
+// `--print-install-root` was read by `src/build.ts` and absent from
+// `BUILD_BOOL_FLAGS` (harmless only by accident of ordering: build.ts answers
+// it before loadBuildConfig validates), and `--allow-server-only` was a real
+// build flag the FLEET refused, which made the Android refusal name a way out
+// no scaffolded app could take.
+//
+// So the source is the input: every `--flag` an entry point actually reads
+// must be in that entry point's table.
+
+/** Flag literals `src` reads from its argv, with comments stripped so a flag
+ *  merely DISCUSSED in a doc comment is not mistaken for one that is read. */
+function flagsReadBy(src: string): string[] {
+  const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+  const found = new Set<string>();
+  // `args.includes("--x")` — a boolean.
+  for (const m of code.matchAll(/\bargs\.includes\("(--[a-z0-9-]+)"\)/gi)) {
+    found.add(m[1]!);
+  }
+  // `a.startsWith("--x=")` / `a.startsWith("--x")` — a value flag or a prefix
+  // test; either way the entry point reads that spelling.
+  for (const m of code.matchAll(/\.startsWith\("(--[a-z0-9-]+)=?"\)/gi)) {
+    found.add(m[1]!);
+  }
+  // The `flag("x")` helper both fleet and ship use: `--x=<value>`.
+  for (const m of code.matchAll(/\bflag\("([a-z0-9-]+)"\)/gi)) {
+    found.add(`--${m[1]!}`);
+  }
+  return [...found].sort();
+}
+
+/** The table's spellings, with `=` stripped from the value flags. */
+const vocabulary = (
+  bools: readonly string[],
+  values: readonly string[],
+): Set<string> => new Set([...bools, ...values]);
+
+Deno.test("build flags: every flag the SOURCE reads is in its table", async () => {
+  const root = new URL("..", import.meta.url).pathname;
+  const read = async (rel: string) => await Deno.readTextFile(join(root, rel));
+
+  const cases: [string, string[], Set<string>][] = [
+    [
+      "src/build.ts + src/build/build-config.ts",
+      [
+        ...flagsReadBy(await read("src/build.ts")),
+        ...flagsReadBy(await read("src/build/build-config.ts")),
+      ],
+      vocabulary(BUILD_BOOL_FLAGS, BUILD_VALUE_FLAGS),
+    ],
+    [
+      "src/build-all.ts",
+      flagsReadBy(await read("src/build-all.ts")),
+      vocabulary(FLEET_BOOL_FLAGS, FLEET_VALUE_FLAGS),
+    ],
+    [
+      "src/build/ship.ts",
+      flagsReadBy(await read("src/build/ship.ts")),
+      vocabulary(SHIP_BOOL_FLAGS, SHIP_VALUE_FLAGS),
+    ],
+  ];
+
+  const missing: string[] = [];
+  for (const [where, reads, known] of cases) {
+    for (const f of reads) {
+      if (!known.has(f)) missing.push(`${where} reads ${f}`);
+    }
+  }
+  assertEquals(
+    missing,
+    [],
+    `these flags are READ but not in the entry point's vocabulary, so the ` +
+      `refusal gate would reject a caller who passes one — and the "known:" ` +
+      `line the refusal prints is a lie:\n     ${missing.join("\n     ")}`,
+  );
+});
+
+Deno.test("build flags: no table entry is a flag nothing reads", async () => {
+  const root = new URL("..", import.meta.url).pathname;
+  const read = async (rel: string) => await Deno.readTextFile(join(root, rel));
+  const buildReads = new Set([
+    ...flagsReadBy(await read("src/build.ts")),
+    ...flagsReadBy(await read("src/build/build-config.ts")),
+    // Read from the BuildConfig the two files above produce, but spelled in
+    // the bundle's refusal — the gate below only needs to know it is real.
+    ...flagsReadBy(await read("src/build/build-bundle.ts")),
+  ]);
+  const fleetReads = new Set(flagsReadBy(await read("src/build-all.ts")));
+  const shipReads = new Set([
+    ...flagsReadBy(await read("src/build/ship.ts")),
+  ]);
+
+  const stray: string[] = [];
+  const check = (
+    where: string,
+    table: readonly string[],
+    reads: Set<string>,
+  ) => {
+    for (const f of table) if (!reads.has(f)) stray.push(`${where}: ${f}`);
+  };
+  check("BUILD", [...BUILD_BOOL_FLAGS, ...BUILD_VALUE_FLAGS], buildReads);
+  check("FLEET", [...FLEET_BOOL_FLAGS, ...FLEET_VALUE_FLAGS], fleetReads);
+  check("SHIP", [...SHIP_BOOL_FLAGS, ...SHIP_VALUE_FLAGS], shipReads);
+  assertEquals(
+    stray,
+    [],
+    `these flags are ACCEPTED but nothing reads them — a caller passing one ` +
+      `gets no refusal and no effect, which is the exact silence this module ` +
+      `exists to remove:\n     ${stray.join("\n     ")}`,
+  );
 });

@@ -29,7 +29,9 @@ import {
   _unmount,
   hydrate,
   mount,
+  onCleanup,
 } from "../src/air/aio-renderer.ts";
+import { signal } from "../src/state/signal.ts";
 
 function env() {
   const win = new Window({ url: "https://localhost" });
@@ -284,4 +286,76 @@ Deno.test("hydrate: a throwing subtree does not leak the component instance stac
   } finally {
     cleanup();
   }
+});
+
+// A hydration MISMATCH throws the server markup away and re-renders from
+// scratch — correct, and it used to leak every component instance created
+// before the mismatch was noticed. Their `onCleanup` never ran and their signal
+// subscriptions stayed live, so the page ended up with two subscribers per
+// component: every change re-rendered twice, and one subscription outlived
+// `_unmount` entirely (cross-test pollution, since `testUI` tears down that
+// way). Measured before the fix: 2 subscribers for 1 live component.
+Deno.test({
+  name: "hydrate: a mismatch does not leak the instances created before it",
+  fn() {
+    const { doc, cleanup } = env();
+    const count = signal(0);
+    let cleanups = 0;
+
+    function Row() {
+      void count.value;
+      onCleanup(() => cleanups++);
+      return h("span", null, `n=${count.value}`);
+    }
+    const App: ComponentFn = () =>
+      h("div", null, h(Row, null), h("span", null, "tail"));
+
+    const host = doc.createElement("main");
+    doc.body.appendChild(host);
+    // <Row> hydrates cleanly; the SIBLING after it does not — so the mismatch
+    // is discovered with a live instance already behind it.
+    host.innerHTML = "<div><span>n=0</span><b>wrong</b></div>";
+
+    const handle = hydrate(host, App);
+    const subs = () =>
+      (count as unknown as { _subscribers: Set<unknown> })._subscribers.size;
+
+    assertEquals(cleanups, 1, "the discarded instance was unmounted");
+    assertEquals(subs(), 1, "exactly one live subscriber after the re-render");
+    assertEquals(host.querySelectorAll("span").length, 2);
+
+    _unmount(handle);
+    assertEquals(subs(), 0, "no subscription outlives the unmount");
+    cleanup();
+  },
+});
+
+// An ATTRIBUTE that differs between server and client used to be kept forever:
+// `class="server"` won over the component's `class="client"` with no warning
+// and no self-heal — and no later render fixed it either, because the diff
+// compares new props against OLD PROPS and skips what did not change between
+// renders. Text mismatches were already repaired; attributes were the silent
+// half of the same rule.
+Deno.test({
+  name: "hydrate: a server/client attribute divergence is repaired, not kept",
+  fn() {
+    const { doc, cleanup } = env();
+    const App: ComponentFn = () =>
+      h("div", { class: "client", "data-x": "2", title: "t" }, "hi");
+
+    const host = doc.createElement("main");
+    doc.body.appendChild(host);
+    host.innerHTML = '<div class="server" data-x="1">hi</div>';
+
+    const handle = hydrate(host, App);
+    const div = host.firstElementChild as HTMLElement;
+    assertEquals(div.getAttribute("class"), "client");
+    assertEquals(div.getAttribute("data-x"), "2");
+    assertEquals(div.getAttribute("title"), "t");
+    // ...and the server DOM was adopted, not replaced (that is the whole point
+    // of hydrating): the text node survived.
+    assertEquals(div.textContent, "hi");
+    _unmount(handle);
+    cleanup();
+  },
 });

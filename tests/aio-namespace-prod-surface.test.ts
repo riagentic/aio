@@ -8,7 +8,7 @@
 // nothing downstream absorbs a repeat either — an unauthenticated request that
 // costs the server far more than the caller. That is the amplifier shape, and
 // it does not get to exist in production for a route nothing calls.
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { createServer } from "../src/server/server.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { join } from "@std/path";
@@ -125,7 +125,12 @@ Deno.test({
       const r = await fetch(url + "/__aio/air.js");
       assertEquals(r.status, 200, "dev must still serve /__aio/air.js");
       const body = await r.text();
-      assert(body.length > 0, "dev /__aio/air.js must not be empty");
+      assertStringIncludes(
+        body,
+        "export",
+        "dev /__aio/air.js must be the transpiled AIR module, not merely " +
+          "a non-empty body",
+      );
     });
   },
 });

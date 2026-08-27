@@ -251,7 +251,7 @@ testCell(
 // entry the two disagreed: `am start` ran it, amui refused it — and with a
 // stale `src/app.ts` still on disk, amui launched the WRONG file.
 Deno.test("amui resolves an app's entry exactly like `am start` does", async () => {
-  const { resolveEntry } = await import("../amui/src/server/proc.ts");
+  const { resolveEntry } = await import("../amui/src/server/proc.server.ts");
   const { resolveEntry: amResolveEntry } = await import(
     "../src/am/am-utils.ts"
   );
@@ -446,7 +446,9 @@ testCell(
       );
       // …and nothing was spawned on top of it (the launcher log is the proof:
       // startApp creates it the moment it runs).
-      const { startLogPath } = await import("../amui/src/server/proc.ts");
+      const { startLogPath } = await import(
+        "../amui/src/server/proc.server.ts"
+      );
       let spawned = true;
       try {
         await Deno.stat(startLogPath(dir));

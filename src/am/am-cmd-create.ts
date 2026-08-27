@@ -135,6 +135,7 @@ export function frameworkSpecs(source: boolean): {
   am: string;
   doctor: string;
   aiol: string;
+  ship: string;
   electronInstall: string;
 } {
   // EVERY public entry point, not just the ones the template happens to use:
@@ -171,6 +172,7 @@ export function frameworkSpecs(source: boolean): {
     am: spec("aio/am"),
     doctor: spec("aio/doctor"),
     aiol: spec("aio/aiol"),
+    ship: spec("aio/ship"),
     electronInstall: spec("aio/electron-install"),
   };
 }
@@ -224,10 +226,38 @@ export function standardTasks(
     build: fleet,
     // compile = build, narrowed to the default target.
     compile: `${fleet} --targets=${target}`,
+    // The release pair. They are two tasks because they answer two different
+    // questions, at two different frequencies:
+    //
+    //   publish — EVERY release. Build, sign, and lay out the channel
+    //     directory a client actually fetches, in one step. `aio ship` signs
+    //     ONE artifact and stops; the layout that makes those two files
+    //     reachable lived only in prose, and both documented flows got it
+    //     wrong (one wrote a manifest with no data contract, the other wrote
+    //     it to a path no client requests). Both fail the same way: silently,
+    //     permanently, on the users' machines, weeks later.
+    //   ship — ONCE, ever, plus the corners. `deno task ship keygen` makes the
+    //     signing key `publish` needs; `deno task ship github` writes the CI
+    //     workflow. Docs and the CLI's own messages spell both of those as
+    //     `ship`, so the task has to exist for those instructions to be true.
+    //
+    // Both are scaffolded because publishing was otherwise undiscoverable: an
+    // app author with neither task has no reason to know either command
+    // exists, and the alternative they reach for — copying a binary somewhere
+    // — produces an app that can never update itself.
+    publish: `deno run -A ${fw.am} publish`,
+    ship: `deno run -A ${fw.ship}`,
     test: "deno test -A",
     check: "deno check src/",
     fmt: "deno fmt",
-    lint: `deno run -A ${fw.aiol}`,
+    // BOTH linters, in one task. `aiol` knows the aio rules and NOTHING about
+    // the language: a scaffolded app whose `lint` ran aiol alone was never
+    // checked for an unused import, an `any`, an unawaited promise or a
+    // shadowed name — the whole `deno lint` rule set, silently absent from
+    // every app aio scaffolds while the task's name promised it. The framework
+    // repo runs both (`lint` = deno lint, `lint:aio` = aiol); an app gets one
+    // task that does the same, because two tasks is one more to remember.
+    lint: `deno lint src/ && deno run -A ${fw.aiol}`,
     doctor: `deno run -A ${fw.doctor}`,
     am: `deno run -A ${fw.am}`,
     // Convenience: pre-fetch the Electron binary without launching. Not
@@ -316,6 +346,14 @@ export function legacyStandardTasks(
     // The framework's launcher already falls back to that installer; this is
     // the same code, so the task and the launcher cannot disagree.
     "install:electron": `deno run -A ${fw.electronInstall}`,
+    // `deno task ship dist/<artifact>` — turn a built artifact into a signed,
+    // channel-bound release manifest (and the channel directory to publish).
+    // Scaffolded because publishing was otherwise undiscoverable: an app author
+    // with no `ship` task has no reason to know the command exists, and the
+    // alternative they reach for — copying a binary somewhere — produces an app
+    // that can never update itself. Run with no argument, it prints its usage.
+    publish: `deno run -A ${fw.am} publish`,
+    ship: `deno run -A ${fw.ship}`,
     test: "deno test -A",
     am: `deno run -A ${fw.am}`,
     doctor: `deno run -A ${fw.doctor}`,
@@ -374,17 +412,40 @@ export function denoJson(
       jsx: "react-jsx",
       jsxImportSource: "aio",
     },
-    imports: { ...fw.imports, electron: "npm:electron" },
+    // `electron` is scaffolded ONLY for a desktop app. Mapping it
+    // unconditionally cost every browser/cli/server app the whole Electron
+    // npm tree — the installer plus @electron/get, extract-zip, undici,
+    // sumchecker, @types/node: ~9 MB downloaded and materialised into
+    // node_modules for a counter that never opens a window. Nothing is lost:
+    // `deno task dev --client=electron` from a browser app still works,
+    // because the launcher auto-installs Electron on demand
+    // (electron-spawn.ts `autoInstallElectron`, "even when the app didn't
+    // declare electron as a dep") and the version resolver falls back to the
+    // framework default (electron-runtime.ts `resolveElectronVersion`).
+    imports: target === "electron"
+      ? { ...fw.imports, electron: "npm:electron" }
+      : fw.imports,
     tasks,
   };
   return JSON.stringify(obj, null, 2) + "\n";
 }
 
+// A release SIGNING key committed to the repo is the worst thing in this list:
+// whoever has it can publish an update every install of this app will accept,
+// signed, and the app itself pins the matching public key. `aio ship keygen`
+// writes outside the work tree by default and refuses a path inside one, but
+// the name is also ignored here — belt and braces, because a key restored from
+// a backup or written by hand must not ride out on a `git add -A`.
 const GITIGNORE = `.aio/
 dist/
 node_modules/
 dep/
 *.sqlite
+
+# Release signing keys — NEVER commit these (see \`aio ship keygen\`)
+release-key.json
+*-release-key.json
+*.release-key.json
 `;
 
 /** Full file set for a new project — pure (path → content), no disk I/O.
@@ -426,7 +487,16 @@ export async function cmdCreate(
   flags: GlobalFlags,
 ): Promise<void> {
   const mode = detectMode(flags);
-  const opts = parseCreateArgs(args);
+  // `--force` is a GLOBAL flag: `parseGlobalFlags` consumes it into
+  // `flags.force` and never re-emits it, so `parseCreateArgs(args)` — which
+  // has its own `--force` and its own test — never saw the one the user
+  // typed. `am create <existing-dir> --force` was therefore unbypassable, and
+  // the refusal told them to pass the flag they had just passed. The test that
+  // covered it called the parser directly, so it stayed green through all of
+  // it. Both spellings are honoured here; the global one is the one that
+  // reaches this function.
+  const parsed = parseCreateArgs(args);
+  const opts = { ...parsed, force: parsed.force || !!flags.force };
 
   if (!opts.name) {
     fail(
@@ -558,7 +628,12 @@ export async function cmdCreate(
   // Make it a real project from second one — best-effort, never fatal.
   const gitInit = await tryGitInit(dir);
 
-  if (flags.json) {
+  // `mode`, NOT `flags.json`: stdout that is not a tty IS json mode (that is
+  // what `detectMode` decides), so `am create x | tee`, every CI log and every
+  // coding agent used to fall through to the HUMAN branch below and receive
+  // `JSON.stringify(<pretty text>)` — one quoted line of escaped newlines.
+  // The structured payload is the answer for both of the ways a machine asks.
+  if (mode === "json") {
     out({
       created: opts.name,
       template: opts.template,
@@ -566,7 +641,7 @@ export async function cmdCreate(
       aioVersion: pinnedVersion ?? null,
       files: Object.keys(files),
       git: gitInit,
-    }, "json");
+    }, mode);
     return;
   }
 

@@ -119,3 +119,28 @@ Deno.test("config docs: the two audited lies stay fixed", () => {
       "generated key under expose",
   );
 });
+
+// The `updates` row is the ONLY place an author is told what the object may
+// hold — `deno task doctor` and the "Valid configuration" table both print it.
+// It had drifted four keys behind `UpdatesConfig` (`kind`, `allowUnsigned`,
+// `prerelease`, and the newer `keys`/`canApply`), so a feature could ship
+// unreachable: nothing else names it, and the type is not readable at runtime.
+// Read the keys out of the type declaration and require each to appear.
+Deno.test("config docs: the updates row names every UpdatesConfig key", async () => {
+  const src = await Deno.readTextFile(
+    new URL("../src/server/updates-core.ts", import.meta.url),
+  );
+  const start = src.indexOf("export type UpdatesConfig = {");
+  assert(start >= 0, "UpdatesConfig moved — this gate needs its new home");
+  const body = src.slice(start, src.indexOf("\n};", start));
+  const keys = [...body.matchAll(/^  ([a-zA-Z]+)\??:/gm)].map((m) => m[1]!);
+  assert(keys.length >= 8, `parsed too few keys: ${keys.join(", ")}`);
+  const row = CONFIG_DOCS.updates![1];
+  const missing = keys.filter((k) => !row.includes(k));
+  assertEquals(
+    missing,
+    [],
+    `the updates help row omits ${missing.join(", ")} — an author has no ` +
+      `other place to learn they exist. Row: ${row}`,
+  );
+});

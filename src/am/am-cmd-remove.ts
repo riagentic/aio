@@ -21,7 +21,24 @@ import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
 import { instances } from "../server/single-instance-lock.ts";
 import { readRecord } from "../server/install-record.ts";
+import { readPending } from "../server/updates-apply.ts";
 import { cmdUpdate } from "./am-cmd-meta.ts";
+import { appNameError } from "./am-utils.ts";
+
+/** Deleting an app's DATA is the one step with no way back — `~/.<appId>/`
+ *  holds state, logs, keys and user files, and no reinstall returns them. So
+ *  it is confirmed at a terminal, and in a script it has to be said twice
+ *  (`--data --force`) instead of once. Pure — the caller does the prompting,
+ *  so both branches are testable without a tty.
+ *
+ *  The PROGRAM is not confirmed: reinstalling it is one command. */
+export function dataRemovalGate(
+  opts: { data: boolean; force: boolean; interactive: boolean },
+): "skip" | "ask" | "force" | "refuse" {
+  if (!opts.data) return "skip";
+  if (opts.force) return "force";
+  return opts.interactive ? "ask" : "refuse";
+}
 
 async function exists(path: string): Promise<boolean> {
   try {
@@ -65,6 +82,14 @@ export async function cmdRemove(
     );
     Deno.exit(1);
   }
+  // `join()` NORMALIZES, so an unvalidated name is a path traversal with a
+  // recursive delete on the end of it: `am remove ..` resolved to $HOME and
+  // ~/.local and removed both (measured, exit 0). See appNameError.
+  const nameErr = appNameError(name, "am remove");
+  if (nameErr) {
+    outError(nameErr, mode);
+    Deno.exit(1);
+  }
 
   const footprint = await installedFootprint(name);
   const present = footprint.filter((f) => f.present);
@@ -80,6 +105,36 @@ export async function cmdRemove(
       mode,
     );
     Deno.exit(1);
+  }
+
+  // Data is unrecoverable, so it is confirmed before anything is deleted —
+  // not after the program is already gone.
+  const gate = dataRemovalGate({
+    data: !!flags.data && hasData,
+    force: !!flags.force,
+    interactive: Deno.stdin.isTerminal() && mode === "pretty",
+  });
+  if (gate === "refuse") {
+    outError(
+      `am remove ${name} --data would DELETE ${dataDir} — state, logs, ` +
+        `keys and user files. There is no undo and no reinstall that brings ` +
+        `them back.\n` +
+        `  This is not a terminal, so it cannot be confirmed here.\n` +
+        `  fix: am remove ${name} --data --force   (say it twice, on purpose)\n` +
+        `  or:  am remove ${name}                  (removes the PROGRAM, keeps the data)`,
+      mode,
+    );
+    Deno.exit(1);
+  }
+  if (gate === "ask") {
+    const answer = prompt(
+      `DELETE ${dataDir} — state, logs, keys, user files? There is no undo.\n` +
+        `  type the app name to confirm:`,
+    );
+    if (answer?.trim() !== name) {
+      outError(`not confirmed — nothing was removed`, mode);
+      Deno.exit(1);
+    }
   }
 
   // A running app whose binary is deleted keeps running from an unlinked
@@ -232,6 +287,13 @@ export async function cmdUpgrade(
   // a distinction no one can guess from the words, only from having been told.
   // `am update` still works and says this.
   if (!name) return await cmdUpdate([], flags);
+  // Same reason as `am remove`: this name reaches installedAppPaths/appDirs
+  // and, through run.sh, an install path.
+  const upNameErr = appNameError(name, "am upgrade");
+  if (upNameErr) {
+    outError(upNameErr, mode);
+    Deno.exit(1);
+  }
   const rec = await readRecord(name);
   if (!rec) {
     outError(
@@ -249,6 +311,27 @@ export async function cmdUpgrade(
     );
     Deno.exit(1);
   }
+  // TWO updaters, one artifact. `am upgrade` rebuilds and reinstalls from the
+  // recorded source; the app's own updater may have swapped a release in
+  // minutes ago and be waiting for the next boot to decide whether it worked.
+  // Running both is how the version a rollback marker names as `previous` gets
+  // pruned out from under it — the app then fails, tries to roll back, and
+  // finds nothing to roll back TO. So: refuse, name the fix.
+  const pending = readPending(appDirs(name).data);
+  if (pending) {
+    outError(
+      `"${name}" has an in-app update in flight (${pending.from} → ` +
+        `${pending.to}) that has not yet proven itself.\n` +
+        `  Upgrading now could delete the version it would roll back to.\n` +
+        `  Start the app once and let it confirm or roll back, then retry.\n` +
+        `  (or, to force it: rm ${
+          join(appDirs(name).data, "update-pending.json")
+        })`,
+      mode,
+    );
+    Deno.exit(1);
+  }
+
   const running = (await instances()).find((i) => i.appId === name);
   if (running) {
     // Not a refusal: the swap is a symlink move, so it is safe. But the

@@ -213,14 +213,14 @@ interface SyncConfig {
 }
 ```
 
-| Setting             | Default            | Description                                                                                                                                                 |
-| ------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `merge`             | `{}` (all LWW)     | Per-field merge strategy                                                                                                                                    |
-| `identity`          | `{}` (auto `"id"`) | Identity field for set merges                                                                                                                               |
-| `offline.retention` | `"4h"`             | How long to keep offline ops — digits + `ms`/`s`/`m`/`h`/`d` (e.g. `"7d"`). A value this cannot read throws at boot rather than falling back to the default |
-| `pendingCap`        | `500`              | Max unconfirmed ops before blocking                                                                                                                         |
-| `maxDrift`          | `60000`            | Max clock skew (ms)                                                                                                                                         |
-| `compactOps`        | `1000`             | Server compacts after N ops                                                                                                                                 |
+| Setting             | Default            | Description                                                                                                                                                                                                                                                                     |
+| ------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `merge`             | `{}` (all LWW)     | Per-field merge strategy                                                                                                                                                                                                                                                        |
+| `identity`          | `{}` (auto `"id"`) | Identity field for set merges                                                                                                                                                                                                                                                   |
+| `offline.retention` | `"4h"`             | How long to keep offline ops — digits + `ms`/`s`/`m`/`h`/`d` (e.g. `"7d"`). A value this cannot read throws at boot rather than falling back to the default                                                                                                                     |
+| `pendingCap`        | `500`              | Max unconfirmed ops before blocking                                                                                                                                                                                                                                             |
+| `maxDrift`          | `60000`            | Max clock skew (ms). An op stamped further **ahead** than this is refused by the server with an `op-rejected` naming the skew — it would win every last-write-wins comparison until the clocks meet. Ops stamped in the **past** are always accepted: that is the offline queue |
+| `compactOps`        | `1000`             | Server compacts after N ops                                                                                                                                                                                                                                                     |
 
 ## Sync Status
 
@@ -278,13 +278,22 @@ Every op row and every snapshot is stamped with the cell's declared `version` at
 the moment it was written. At boot the stamp is compared with the version the
 running build declares:
 
-| stored vs declared      | `onMigrate` declared | what replay does                                                                  |
-| ----------------------- | -------------------- | --------------------------------------------------------------------------------- |
-| equal                   | —                    | applied as-is                                                                     |
-| older                   | yes                  | ops fold in version order; at each version boundary `onMigrate(slice, from)` runs |
-| older                   | no                   | ops **skipped**, never applied blind; snapshot kept with a `stale` warning        |
-| newer (downgrade)       | —                    | ops **skipped**                                                                   |
-| reducer throws on an op | —                    | the op counts as failed                                                           |
+| stored vs declared                       | `onMigrate` declared | what replay does                                                                       |
+| ---------------------------------------- | -------------------- | -------------------------------------------------------------------------------------- |
+| equal                                    | —                    | applied as-is                                                                          |
+| older                                    | yes                  | at each version boundary `onMigrate(slice, from)` runs, then the ops of the next shape |
+| older                                    | no                   | ops **skipped**, never applied blind; snapshot kept with a `stale` warning             |
+| newer (downgrade)                        | —                    | ops **skipped**                                                                        |
+| older than a shape already migrated past | —                    | ops **skipped** — an older build wrote after a newer one (see below)                   |
+| reducer throws on an op                  | —                    | the op counts as failed                                                                |
+
+Ops fold in **`server_ts` order — the order the server applied them** — and the
+`version` stamp decides only _when_ to migrate between them. (It used to be the
+sort key, which is the same order only while an older build never runs again. A
+downgrade quarantines the cell and keeps writing, stamping fresh ops with the
+older version, and those then sorted ahead of chronologically earlier ops: the
+replay folded a sequence that never happened. Reducers are not commutative, so
+that is a different state, kept forever.)
 
 A cell with a skipped or failed op is **quarantined** — one decider, two
 outcomes:
@@ -295,8 +304,12 @@ outcomes:
 - **prod** (`--prod` or a compiled binary): the cell runs at its **last
   snapshot** (never `initialState`), `log.error` says so once, and **compaction
   and the boot seed skip the cell** — its snapshot is never rewritten and its
-  ops never deleted. Writes made while quarantined are not durable across a
-  restart; fix the version/hook and restart.
+  ops never deleted. Client **writes to that cell are refused** while it is
+  quarantined: the op is not persisted, not dispatched and not acked, and the
+  client gets an `op-rejected` naming the quarantine and the fix (an ack is a
+  durability promise, and a log that cannot be folded cannot keep it). The cell
+  is also served no catch-up state, so no client is handed the pre-quarantine
+  snapshot as if it were current. Fix the version/hook and restart.
 
 The quarantine exists because of a real incident (a field report, §3.1): a field
 was added to a sync cell, every replayed op threw, the cell came up at its

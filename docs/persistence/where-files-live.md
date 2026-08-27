@@ -83,10 +83,11 @@ logger is up_ end up. The framework's own structured logs are the other files.
 
 Every one of them keeps history: on start the live file rotates to `.1` and the
 older archives shift up, bounded by `backupKeep` (7) and by a byte ceiling over
-the whole directory (`logBudget`, 200 MB), which evicts the oldest run first and
-says so in `app.log`. `--no-backup-logs` restores the old wipe-on-start.
-`stdout.log` rotates too — done by `am` just before it spawns the app, because
-the shell redirect that writes it holds the fd for the life of the run.
+the whole directory (`logBudget`, 200 MB) — enforced during the run as well as
+at start — which evicts the oldest run first and says so in `app.log`.
+`--no-backup-logs` restores the old wipe-on-start. `stdout.log` rotates too —
+done by `am` just before it spawns the app, because the shell redirect that
+writes it holds the fd for the life of the run.
 
 ## The program vs its data
 
@@ -267,6 +268,67 @@ A test that boots a real app process inherits the same default, so pin it:
 `libraryMode: true` (what `bootCells()` and `testCell()` use) already defaults
 its data dir under `baseDir`, so in-process tests are hermetic without any
 flags.
+
+### The harness sandboxes app directories for you
+
+The first use of any aio harness in a process (`testCell`, `testUI`,
+`testComponent`, `testServer`, `testMultiClient`, `testApps`, `bootCells`)
+points `AIO_APPS_DIR` at a fresh temp directory and removes it on unload —
+unless the runner already set `AIO_APPS_DIR`, in which case that wins.
+
+So `appDirs(appId)` inside app code under test resolves into a sandbox, not into
+the developer's real `~/.<appId>`. This is not a nicety: a field report's server
+tests installed a fixture binary into the real install for the whole project,
+and the pollution then hid a second bug by making two tests pass against an
+artefact that existed only on that machine.
+
+### Pinning a directory a test controls
+
+When a test needs a fixture at a path the app will actually look at — a binary
+under `data/files`, a certificate under `data/tls` — compute the paths, create
+them, and register them, all from `aio/testing`:
+
+| Function                    | Signature                                                    |
+| --------------------------- | ------------------------------------------------------------ |
+| `appDirs(appId, home?)`     | `(string, string?) => AppDirs` — **computes**, never creates |
+| `ensureAppDirs(dirs)`       | `(AppDirs) => void` — creates `home`/`data`/`logs` at `0700` |
+| `registerAppDirs(id, dirs)` | `(string, AppDirs) => void` — app code now resolves here     |
+
+```ts
+import { assertEquals } from "@std/assert";
+import { join } from "@std/path";
+import { appDirs, ensureAppDirs, registerAppDirs } from "aio/testing";
+
+Deno.test("the importer reads the fixture from the app's files dir", async () => {
+  const dirs = appDirs("my-app", await Deno.makeTempDir());
+  ensureAppDirs(dirs);
+  registerAppDirs("my-app", dirs); // app code now resolves to `dirs`
+
+  await Deno.mkdir(dirs.files, { recursive: true });
+  await Deno.writeTextFile(join(dirs.files, "seed.csv"), "a,b\n1,2\n");
+
+  assertEquals(appDirs("my-app").files, dirs.files);
+});
+```
+
+The three do exactly one job each, which is why there are three:
+
+- **`appDirs`** is the resolver every part of the framework asks (the auth
+  store, the app key, `am`, a profile export). With no explicit `home`, a
+  registered answer wins; otherwise it falls back to the default rule. It is
+  also exported from `aio/server` for app code that just wants a path.
+- **`ensureAppDirs`** creates `home`, `data` and `logs` and chmods all three to
+  `0700` (a no-op on Windows, which has no POSIX mode). It creates only those
+  three — `files`, `tls` and the rest are made by whoever writes them, so a test
+  that wants `dirs.files` on disk makes it itself, as above.
+- **`registerAppDirs`** is the override. `aio.run()` calls it once per app so
+  that every module in the process agrees with what boot resolved; a test calls
+  it to point one appId at a directory it owns. It beats the `AIO_APPS_DIR`
+  sandbox for that appId, and it is process-wide — register under an appId no
+  other test uses.
+
+A registration lives for the rest of the process, so give each test its own
+appId rather than re-registering one name.
 
 ## Upgrading from an older aio
 

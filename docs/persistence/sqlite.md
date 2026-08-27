@@ -242,6 +242,115 @@ accept one re-run. A fresh file opens at `0`. `createDB` has no `migrations`
 option; run yours after it returns (an ordered, recorded `migrations: [...]`
 option is a possible later addition).
 
+## Live queries (`reactiveDB`)
+
+`query()` is a snapshot: you asked, you got rows, they are stale the moment the
+next write lands. For a derived view a UI keeps on screen — a balance, a
+leaderboard, "unread per folder" over 200k rows — that means either keeping the
+whole table in cell state (RAM, and a full re-broadcast per write) or
+hand-wiring a recompute after every mutation and forgetting one.
+
+`reactiveDB(db)` wraps a `DB` so `select()` returns a **live query** instead: it
+re-runs and notifies whenever a write _through the same wrapper_ touches one of
+the tables it reads.
+
+```ts
+import { createDB, reactiveDB } from "aio/db";
+
+const db = reactiveDB(createDB("./inbox.db"));
+await db.execute(
+  "CREATE TABLE IF NOT EXISTS mail (id INTEGER PRIMARY KEY, " +
+    "folder TEXT NOT NULL, unread INTEGER NOT NULL)",
+);
+
+const unread = await db.select<{ folder: string; n: number }>(
+  "SELECT folder, COUNT(*) AS n FROM mail WHERE unread = 1 GROUP BY folder",
+);
+
+const off = unread.subscribe((rows) => {
+  console.log("unread now", rows);
+});
+
+await db.execute("INSERT INTO mail (folder, unread) VALUES ('inbox', 1)");
+// → the subscriber fired; unread.rows is already refreshed
+
+off();
+unread.dispose();
+await db.close();
+```
+
+`reactiveDB` is exported from both `aio/db` and `aio/server` (the same
+function). It wraps any `DB` — `createDB()`, or `app.db` inside a running app.
+
+### What invalidates what
+
+Change detection is **by table**, parsed out of the SQL:
+
+- a query's `tables` are the names after `FROM` and `JOIN`, lowercased
+- a write's tables are the names after `INSERT INTO`, `UPDATE`, `DELETE FROM`,
+  `REPLACE INTO`
+- a write invalidates every live query whose `tables` intersect it; unrelated
+  tables never fire
+
+Transactions:
+
+| Form                           | Invalidates                                                |
+| ------------------------------ | ---------------------------------------------------------- |
+| `transaction([{ sql, … }, …])` | exactly the tables written by the statements, after commit |
+| `transaction(async (tx) => …)` | **every** live query, after commit                         |
+
+The callback form cannot see the SQL up front, so it invalidates everything — a
+correct superset that never misses a change, at the cost of re-running views a
+transaction did not touch. Prefer the array form when the statement list is
+known.
+
+### The seam
+
+**Writes must go through the wrapper.** A write issued against the underlying
+`DB` — or by another process against the same file — is invisible to the change
+feed, and the live query keeps serving the rows it last read. That is the seam,
+not a bug: the wrapper knows only what passes through it. Wrap once and use the
+wrapper everywhere, or call `refresh()` yourself after an outside write.
+
+### `ReactiveQuery`
+
+| Member          | What it is                                                            |
+| --------------- | --------------------------------------------------------------------- |
+| `rows`          | `T[]` — the latest rows, refreshed **in place** (same array identity) |
+| `tables`        | `ReadonlySet<string>` — what this query is invalidated by             |
+| `subscribe(cb)` | notify on every subsequent refresh; returns an unsubscribe function   |
+| `refresh()`     | `Promise<void>` — force a re-run and notify now                       |
+| `dispose()`     | stop tracking: removed from the change feed, subscribers cleared      |
+
+`select()` fills `rows` before it resolves, and does **not** notify for that
+first fill (there are no subscribers yet). A `select()` whose SQL is invalid
+rejects there — the one place a live query is allowed to fail loudly.
+
+`dispose()` is not optional bookkeeping: an undisposed query keeps being re-run
+on every matching write for the life of the `DB`. Dispose it when the view goes
+away.
+
+### After the write is committed, nothing can un-commit it
+
+Two things run after a write lands: the re-run, and your subscribers. Both are
+error-isolated, and the reasoning is the same for each — the write is already
+committed, so a throw travelling back out of `execute()` would report a failure
+that did not happen, and the caller would retry a landed write.
+
+So a re-run that throws (a busy database, a view whose SQL no longer resolves)
+and a subscriber that throws are both caught and logged at `error` level on the
+`db` channel, naming what happened:
+
+```
+a live query failed to refresh after a write — the write is COMMITTED,
+and this query's rows are now STALE: …
+```
+
+A subscriber that throws does not stop the other subscribers. Neither failure is
+silent — a live query that quietly stopped refreshing is exactly the stale-UI
+bug this feature exists to prevent — but neither one is allowed to describe a
+committed write as undone.
+
 ## Integrity & snapshots
 
 A file that holds data a user would miss eventually meets a power cut mid-write,
@@ -253,7 +362,41 @@ const { ok, problems } = await app.db.checkIntegrity(); // PRAGMA quick_check
 ```
 
 `snapshot()` copies at a single point in time (never half-written) and compacts
-on the way out — call it on a schedule, and the copy is what recovery uses.
+on the way out. It writes to a temp file beside the destination, runs
+`quick_check` on the COPY, and only then renames it over the destination — so
+calling it on a schedule works, the destination is replaced atomically, and a
+snapshot is never silently a corrupt copy of a damaged file. At every instant
+the path holds either the previous good snapshot or the new one.
+
+```ts
+// A rolling snapshot: one file, replaced in place.
+const snapshot = `${dir}/state.db.snapshot`;
+setInterval(() => {
+  app.db.snapshot(snapshot).catch((e) => log.error(`snapshot failed: ${e}`));
+}, 15 * 60_000);
+```
+
+`snapshot()` is what `checkIntegrityOnBoot` restores from, and it keeps exactly
+one generation. **Dated history is the app's own job** — copy the fresh snapshot
+aside and prune, so a corruption you notice late still has something older to
+come back to:
+
+```ts
+const KEEP = 7;
+async function rollSnapshot(dir: string) {
+  const snapshot = `${dir}/state.db.snapshot`;
+  await app.db.snapshot(snapshot); // atomic; verified before it lands
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  await Deno.copyFile(snapshot, `${dir}/state.db.${stamp}.bak`);
+  const dated = [...Deno.readDirSync(dir)]
+    .map((e) => e.name)
+    .filter((n) => n.endsWith(".bak"))
+    .sort(); // the stamp is ISO, so lexical order is chronological
+  for (const old of dated.slice(0, Math.max(0, dated.length - KEEP))) {
+    await Deno.remove(`${dir}/${old}`);
+  }
+}
+```
 
 ```ts
 await aio.run({ checkIntegrityOnBoot: true });
@@ -272,9 +415,18 @@ db: restored from …/state.db.snapshot — changes made AFTER that snapshot are
     not in it; the damaged original is at …
 ```
 
-With no snapshot the app starts **empty** and says so, loudly, rather than
-booting on a file SQLite cannot read. Off by default: only apps holding data
-worth this deserve the per-boot scan.
+The snapshot is checked before it is installed. If it is damaged too, it is
+**not** restored and nothing is deleted — both files stay on disk for a real
+recovery tool, and the app says so.
+
+With no usable snapshot the app starts **empty** and says so, loudly, rather
+than booting on a file SQLite cannot read. Off by default: only apps holding
+data worth this deserve the per-boot scan.
+
+`.corrupt-<timestamp>` copies are full-size copies of the database, and
+`am backup` archives whatever is in the data directory. aio keeps the **3 most
+recent** automatically and reports each one it removes; anything older than that
+is yours to keep by copying it somewhere else first.
 
 ## Transactions
 
@@ -423,8 +575,8 @@ cannot see in the module graph. It must be embedded explicitly — otherwise the
 binary compiles, boots, and dies on the first DB call with
 `Module not found: …/src/db/db-worker.ts`.
 
-`aio build` / `deno task build` do this for you. Compiling an entry yourself,
-take the flags from the framework rather than typing a path:
+`deno task build` does this for you. Compiling an entry yourself, take the flags
+from the framework rather than typing a path:
 
 ```ts
 import { dbWorkerInclude } from "aio/build";

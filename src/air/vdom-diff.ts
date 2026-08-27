@@ -20,7 +20,13 @@ import {
   applyChildDependentProps,
   applyProps,
 } from "./vdom-props.ts";
-import { _advance, getDom, isChildOf, removeDom } from "./vdom-remove.ts";
+import {
+  _advance,
+  _firstLive,
+  getDom,
+  isChildOf,
+  removeDom,
+} from "./vdom-remove.ts";
 import { createDom } from "./vdom-render.ts";
 import { _getActiveDelegationRoot, _setDelegationRoot } from "./vdom-events.ts";
 import {
@@ -162,6 +168,20 @@ export function _diff(
       const fresh = ctx.doc.createTextNode(String(next));
       if (oldDom && isChildOf(oldDom, parent)) {
         parent.insertBefore(fresh, oldDom);
+        // Loud in dev: the node in the way is real and stays (deleting it
+        // would take a subtree the vnode tree still owns), but the cursor
+        // landing on a non-text node means the positional model desynced —
+        // which is a reconciler bug, not an app one.
+        _devWarn(
+          "text-cursor-not-text",
+          `A text child (${JSON.stringify(String(old))} → ${
+            JSON.stringify(String(next))
+          }) was diffed against a <${
+            (oldDom as Element).nodeName ?? "?"
+          }> instead of its text node, so it was written next to it rather ` +
+            `than updated in place. The node in the way was kept. This is an ` +
+            `aio bug; please report the component's child shape.`,
+        );
       } else {
         parent.appendChild(fresh);
         _devWarn(
@@ -522,7 +542,10 @@ function _diffElement(
   // after the child diff, so options created in THIS pass are selectable.
   applyChildDependentProps(dom, nv.props, ov.props);
 
-  if (_devMode) _assertRegionAlignment(nv, dom.firstChild, true);
+  // `_firstLive`, not `firstChild`: a node kept in the DOM for its exit
+  // animation belongs to no vnode, so counting it made this tripwire cry
+  // "this is an aio bug; please report" at a perfectly legitimate <Transition>.
+  if (_devMode) _assertRegionAlignment(nv, _firstLive(dom), true);
 
   if (nv._signalChildren || ov._signalChildren) {
     _cleanupSignalTextChildren(dom);

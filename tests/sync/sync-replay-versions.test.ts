@@ -187,10 +187,17 @@ Deno.test("field report §3.1 — prod: the cell is quarantined at its snapshot,
       broadcastRaw: { fn: () => {} },
       log: l.log,
     });
-    // (1) server-write flush, (2) a forced compaction via handleOp's path.
+    // (1) server-write flush must not compact the quarantined cell…
     handler.noteServerWrite(CELL);
     await handler.flushServerWrites();
-    const { socket } = recordingSocket();
+    await until(() =>
+      l.warn.some((m) => /compaction of "vault" skipped/.test(m))
+    );
+    // …and (2) a client write must be REFUSED, not accepted. Accepting it
+    // acked a write the server cannot make durable: the op goes into a log
+    // that already fails to fold, so the next boot re-quarantines and the
+    // change is gone — while the client was told it landed (H2).
+    const { socket, frames } = recordingSocket();
     await handler.handleOp(
       {
         id: "o3",
@@ -202,15 +209,22 @@ Deno.test("field report §3.1 — prod: the cell is quarantined at its snapshot,
       { id: "c1" },
       socket,
     );
-    await until(() =>
-      l.warn.some((m) => /compaction of "vault" skipped/.test(m))
+    assert(
+      !frames.some((f) => f.t === "sync-ack"),
+      "a quarantined cell must not ack — the ack is a durability promise",
+    );
+    assert(
+      frames.some((f) =>
+        f.t === "op-rejected" && /quarantine/.test(String(f.d.reason))
+      ),
+      `the client must be told why — got ${JSON.stringify(frames)}`,
     );
 
-    // Snapshot untouched, log intact (+ the new op, durable in the log).
+    // Snapshot untouched, log intact and UNGROWN — nothing on disk moved.
     assertEquals((await loadSnapshot(db, CELL))?.state, { entries: ["seed"] });
     assertEquals(
       (await loadOpsSince(db, CELL, null, null)).map((o) => o.id),
-      ["o1", "o2", "o3"],
+      ["o1", "o2"],
     );
   } finally {
     close();

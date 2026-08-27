@@ -250,3 +250,96 @@ Deno.test({
     await cleanup();
   },
 });
+
+// dispose() aborted the fetch and left `loading` true forever — its
+// continuations early-return on `disposed`, so nothing would ever clear it.
+// Every `{r.loading.value ? <Spinner/> : …}` in the app then spun for good.
+Deno.test("resource: dispose() clears loading", async () => {
+  const r = resource(
+    () => 1,
+    () => new Promise<number>((res) => setTimeout(() => res(1), 1000)),
+  );
+  assertEquals(r.loading.value, true);
+  r.dispose();
+  assertEquals(r.loading.value, false, "a torn-down resource is not loading");
+  await Promise.resolve();
+});
+
+// `value` and `latest` MUST be distinguishable, or one of them is dead weight
+// and its documentation is unfalsifiable.
+//
+// They used to be the same signal in every reachable state: `value` kept the
+// previous fetch's data during a refetch (AIO-256, deliberate) AND after a
+// failure (not deliberate — the error branch simply never touched it). So the
+// test above ("`.latest` persists through refetch") asserted something `value`
+// did too, and an app rendering `{r.value ? <Rows/> : <Spinner/>}` showed stale
+// rows beside a live error, indistinguishable from fresh ones.
+//
+// A failure is an ANSWER: there is no result, so `value` holds none, and
+// `latest` is where the last good value stays.
+Deno.test({
+  name: "resource: a FAILED refetch clears .value and keeps .latest",
+  async fn() {
+    const src = signal("a");
+    const res = resource(
+      () => src.value,
+      (key: string) =>
+        key === "a"
+          ? Promise.resolve("result-a")
+          : Promise.reject(new Error("refetch failed")),
+    );
+
+    await delay(10);
+    assertEquals(res.value, "result-a");
+    assertEquals(res.latest.value, "result-a");
+
+    src.set("b");
+    await delay(10);
+    assertEquals(res.loading.value, false);
+    assertExists(res.error.value);
+    assertEquals(
+      res.value,
+      undefined,
+      "a failed fetch produced no result — `value` must not report the " +
+        "previous one as if it were current",
+    );
+    assertEquals(
+      res.latest.value,
+      "result-a",
+      "`latest` is the last SUCCESSFUL value — it survives the failure",
+    );
+
+    res.dispose();
+  },
+});
+
+Deno.test({
+  name: "resource: a successful refetch still shows stale data (AIO-256 SWR)",
+  async fn() {
+    // The other half of the contract, pinned beside it so a future change
+    // cannot quietly turn the loading window into a flash of undefined.
+    let release: ((v: string) => void) | undefined;
+    const src = signal("a");
+    const res = resource(
+      () => src.value,
+      (key: string) =>
+        key === "a"
+          ? Promise.resolve("result-a")
+          : new Promise<string>((r) => (release = r)),
+    );
+
+    await delay(10);
+    src.set("b");
+    await delay(5);
+    assertEquals(res.loading.value, true);
+    assertEquals(res.value, "result-a", "stale-while-revalidate, not a flash");
+    assertEquals(res.error.value, undefined);
+
+    release!("result-b");
+    await delay(10);
+    assertEquals(res.value, "result-b");
+    assertEquals(res.latest.value, "result-b");
+
+    res.dispose();
+  },
+});

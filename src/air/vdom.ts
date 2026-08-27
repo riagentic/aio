@@ -44,6 +44,7 @@ export {
   _setDelegationRoot,
   _setWrapped,
   _teardownDelegation,
+  _wrapHandler,
 } from "./vdom-events.ts";
 
 // ── Signal/action helpers (vdom-helpers.ts) ──────────────────────────

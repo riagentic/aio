@@ -55,7 +55,8 @@ import {
 import { backoffDelay } from "../protocol/transport-shared.ts";
 import { _showStatus } from "../protocol/protocol-status.ts";
 import { _setDegradedRelay, degradedReport } from "../diagnostics/degraded.ts";
-import { offlineQueue } from "../state/offline-queue.ts";
+import { offlineQueue, type QueuedEntry } from "../state/offline-queue.ts";
+import { _takeOfflineQueue as _coreTakeOfflineQueue } from "../state/state-transport.ts";
 
 let _ws: WebSocket | null = null;
 let _closed = false;
@@ -165,12 +166,54 @@ _registerSyncTransport(
 _registerSfnTransport((raw) => _sendRaw(raw));
 let _syncOnline: ((v: boolean) => void) | null = null;
 
-function _sendRaw(msg: string): void {
+/** Raw frame out, no queue and no ack — sync ops, serverFn calls, log frames,
+ *  `client-state` replies. Returns whether it actually left.
+ *
+ *  NO TRANSPORT is a normal, expected state (the page has not connected yet, or
+ *  it is offline) and stays silent here: every caller answers for it in its own
+ *  terms — the sync engine holds the op in its buffer, `serverFn` rejects the
+ *  call by name, `console` still prints locally.
+ *
+ *  A transport that REFUSES THE WRITE is not. The socket says OPEN and throws
+ *  anyway, so no `onclose` follows and no reconnect is scheduled: the frame is
+ *  gone and nothing else in this process will ever learn it. It used to be
+ *  swallowed by a bare catch labelled "buffer full" — the same silent drop the
+ *  action path two functions below carries a paragraph about NOT doing. */
+let _rawDropWarned = false;
+function _sendRaw(msg: string): boolean {
   if (_ws && _ws.readyState === WebSocket.OPEN) {
     try {
       _ws.send(msg);
-    } catch { /* buffer full */ }
-  } else if (_ipc && _ipcConnected) _ipc.send(msg);
+      return true;
+    } catch (e) {
+      if (!_rawDropWarned) {
+        _rawDropWarned = true;
+        console.error(
+          `[aio:air] the WebSocket refused a write while reporting OPEN (${
+            e instanceof Error ? e.message : String(e)
+          }) — that frame was DROPPED. Unqueued frames go this way: sync ops, ` +
+            `serverFn calls, forwarded console lines. Further drops are not ` +
+            `repeated.`,
+        );
+        diagEmit({
+          type: "browser-air-transport:raw-send-failed",
+          severity: "error",
+          source: "browser-air-transport",
+          message:
+            "Transport refused a write on an OPEN socket — frame dropped",
+          detail: { kind: msg.slice(0, 40) },
+          hint: "The send buffer is full or the socket is closing. Unqueued " +
+            "frames (sync ops, serverFn, log) are lost, not retried.",
+        });
+      }
+      return false;
+    }
+  }
+  if (_ipc && _ipcConnected) {
+    _ipc.send(msg);
+    return true;
+  }
+  return false;
 }
 
 /** One demux for both AIR transports (WS + IPC): decode once, route. */
@@ -284,12 +327,64 @@ function _noteQueued(): void {
   });
 }
 
-function _flushQueue(send: (d: string) => void) {
-  const q = _queue.drain();
+/** Empty BOTH offline queues and return everything waiting, in the order the
+ *  user acted.
+ *
+ *  Called BEFORE the transport is installed, on purpose: installing it is what
+ *  makes the isomorphic core flush its own queue (state-core's setTransport →
+ *  flushOfflineQueue), and that is exactly the replay whose order we are
+ *  fixing. Two queues exist for a structural reason (cell-method dispatch here,
+ *  `useCell().send` in the core, which cannot import this module) — but "what
+ *  did the user do, and in what order" is ONE fact, and replaying one whole
+ *  queue after the other silently reordered it. */
+function _takePending(): QueuedEntry[] {
+  const mine = _queue.drainEntries();
+  const core = _coreTakeOfflineQueue();
   _connectionDegraded = false;
   _offlineWarned = false;
-  for (const a of q) {
-    send(enc("action", a));
+  if (core.length === 0) return mine;
+  if (mine.length === 0) return core;
+  return [...mine, ...core].sort((a, b) => a.seq - b.seq);
+}
+
+/** Replay `pending` through `send`.
+ *
+ *  A send that throws stops the replay and hands the REMAINDER back to the
+ *  queue at the place in line it already had. It used to drain first and send
+ *  second, so a throw mid-flush lost every action after it AND left their
+ *  callers pending forever — both lost and unanswered, the one outcome the
+ *  queue contract forbids. The socket that refuses a write is offline in every
+ *  way that matters to these actions, which is precisely what the queue is
+ *  for: they wait for the next open. */
+function _flushPending(pending: QueuedEntry[], send: (d: string) => void) {
+  for (let i = 0; i < pending.length; i++) {
+    const a = pending[i]!.action;
+    try {
+      send(enc("action", a));
+    } catch (err) {
+      const rest = pending.slice(i);
+      for (const e of rest) _queue.push(e.action, e.seq);
+      _updateDegraded();
+      console.warn(
+        `[aio:air] offline flush stopped after ${i} action(s) — the transport ` +
+          `refused the write (${
+            err instanceof Error ? err.message : String(err)
+          }). The remaining ${rest.length} action(s) are back in the queue, in ` +
+          `order, and replay on the next connection; none of them were lost ` +
+          `and none of their callers were left waiting on a frame that is not ` +
+          `coming.`,
+      );
+      diagEmit({
+        type: "browser-air-transport:flush-failed",
+        severity: "warning",
+        source: "browser-air-transport",
+        message: "Offline flush failed part-way — remainder re-queued",
+        detail: { sent: i, requeued: rest.length },
+        hint: "The connection dropped again mid-replay; the queue is intact",
+      });
+      _noteQueued();
+      return;
+    }
     // The frame is out now — this is when a queued call's ack clock starts.
     if (a.cid) _armAckTimer(a.cid);
   }
@@ -357,11 +452,13 @@ function _connectIPC() {
     _retry = 0;
     if (_wasConnected) _status("Connected", "#2a2", 2000);
     _wasConnected = true;
+    // Before _coreSetTransport — installing it flushes the core's queue.
+    const pending = _takePending();
     _coreSetTransport({ send: (d: string) => _ipc!.send(d), close: () => {} });
     _coreSetConnected(true);
     _syncOnline?.(true);
     _coreResendSubs();
-    _flushQueue((d) => _ipc!.send(d));
+    _flushPending(pending, (d) => _ipc!.send(d));
     _wireDegradedRelay();
     if (!_ipcPingTimer) {
       _ipcPingTimer = setInterval(() => {
@@ -444,6 +541,8 @@ function _connect() {
   ws.onopen = () => {
     _connecting = false;
     _retry = 0;
+    // Before _coreSetTransport — installing it flushes the core's queue.
+    const pending = _takePending();
     _coreSetTransport({ send: (d) => ws.send(d), close: () => ws.close() });
     _coreSetConnected(true);
     _syncOnline?.(true);
@@ -456,7 +555,7 @@ function _connect() {
     if (_wasConnected) _status("Connected", "#2a2", 2000);
     _wasConnected = true;
     _coreResendSubs();
-    _flushQueue((d) => ws.send(d));
+    _flushPending(pending, (d) => ws.send(d));
     _wireDegradedRelay();
   };
   ws.onmessage = (e) => {

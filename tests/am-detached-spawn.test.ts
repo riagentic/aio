@@ -35,7 +35,10 @@ Deno.test("posix spec: sh -c nohup … & echo $! (detached, log-merged)", () => 
   );
   assertEquals(spec.cmd, "sh");
   const cmd = spec.args[1]!;
-  assertStringIncludes(cmd, "nohup deno 'run' '-A' 'app.ts'");
+  // The BINARY is absolute and quoted — never the bare word `deno`, which the
+  // child shell would resolve from ITS PATH, yielding a pid for a process that
+  // never execs (see am-process-safety.test.ts).
+  assertStringIncludes(cmd, `nohup '${Deno.execPath()}' 'run' '-A' 'app.ts'`);
   assertStringIncludes(cmd, ">'/tmp/o.log' 2>&1 & echo $!");
 });
 

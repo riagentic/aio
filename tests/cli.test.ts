@@ -1,4 +1,9 @@
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
 import { parseCli, VERSION } from "../src/server/aio.ts";
 import { versionLine } from "../src/server/aio-cli.ts";
 import {
@@ -20,14 +25,22 @@ Deno.test("parseCli: --port=3000", () => {
   assertEquals(r.port, 3000);
 });
 
-Deno.test("parseCli: --port with invalid value ignored", () => {
-  const r = parseCli(["--port=abc"]);
-  assertEquals(r.port, undefined);
+// A flag is an instruction. Every one of these used to warn and boot on the
+// DEFAULT, so `--port=abc` picked a random free port and the app came up
+// somewhere its author was not looking. Refusal names the value AND the form.
+Deno.test("parseCli: --port with an unusable value is refused, not ignored", () => {
+  const e = assertThrows(() => parseCli(["--port=abc"]), Error);
+  assertStringIncludes((e as Error).message, "--port=abc");
+  assertStringIncludes((e as Error).message, "1-65535");
 });
 
-Deno.test("parseCli: --port=0 and --port=70000 ignored", () => {
+Deno.test("parseCli: --port=0 means 'pick one'; --port=70000 is refused", () => {
+  // 0 is the universal spelling for an ephemeral port and is what aio does by
+  // default, so it is accepted and leaves `port` unset. Strictness that
+  // refused it would be a regression, not a fix.
   assertEquals(parseCli(["--port=0"]).port, undefined);
-  assertEquals(parseCli(["--port=70000"]).port, undefined);
+  assertThrows(() => parseCli(["--port=70000"]), Error, "--port=70000");
+  assertThrows(() => parseCli(["--port=-1"]), Error, "--port=-1");
 });
 
 Deno.test("parseCli: boolean flags", () => {
@@ -50,15 +63,36 @@ Deno.test("parseCli: --title=MyApp", () => {
   assertEquals(r.title, "MyApp");
 });
 
-Deno.test("parseCli: unknown flag does not crash", () => {
-  const r = parseCli(["--unknown-flag"]);
-  assertEquals(r.verbose, false); // still parses fine
+// `cell()` refuses an unknown KEY with a did-you-mean; the CLI now refuses an
+// unknown FLAG the same way. The motivating case: `--experse` warned once,
+// scrolled past in the boot banner, and the app bound 127.0.0.1 while its
+// author believed it was serving the LAN.
+Deno.test("parseCli: unknown flag is refused", () => {
+  const e = assertThrows(() => parseCli(["--unknown-flag"]), Error);
+  assertStringIncludes((e as Error).message, "unknown flag: --unknown-flag");
+  assertStringIncludes((e as Error).message, "--help");
 });
 
-Deno.test("parseCli: mixed known and unknown flags", () => {
-  const r = parseCli(["--verbose", "--foo", "--port=9000"]);
+Deno.test("parseCli: a near-miss flag names the flag it meant", () => {
+  const e = assertThrows(() => parseCli(["--experse"]), Error);
+  assertStringIncludes((e as Error).message, "did you mean --expose");
+});
+
+Deno.test("parseCli: an unknown flag among known ones still refuses", () => {
+  assertThrows(
+    () => parseCli(["--verbose", "--foo", "--port=9000"]),
+    Error,
+    "unknown flag: --foo",
+  );
+});
+
+// The escape hatch: an app with its own arguments puts them after a bare `--`,
+// exactly as every other CLI does. Without it, strictness would make aio the
+// only framework whose apps cannot take arguments.
+Deno.test("parseCli: everything after a bare -- belongs to the app", () => {
+  const r = parseCli(["--verbose", "--", "--foo", "--port=1"]);
   assertEquals(r.verbose, true);
-  assertEquals(r.port, 9000);
+  assertEquals(r.port, undefined); // not aio's to read
 });
 
 Deno.test("parseCli: --version sets version flag", () => {
@@ -117,8 +151,11 @@ Deno.test("parseCli: bare --server-url sets empty string", () => {
 });
 
 Deno.test("parseCli: --server-url-like flag is unknown, not swallowed by --server-url prefix", () => {
-  const r = parseCli(["--server-url-transform=foo"]);
-  assertEquals(r.serverUrl, undefined);
+  assertThrows(
+    () => parseCli(["--server-url-transform=foo"]),
+    Error,
+    "unknown flag: --server-url-transform=foo",
+  );
 });
 
 Deno.test("parseCli: --client=server-only flag", () => {
@@ -132,9 +169,9 @@ Deno.test("parseCli: --width and --height", () => {
   assertEquals(r.height, 768);
 });
 
-Deno.test("parseCli: --width and --height ignore invalid values", () => {
-  assertEquals(parseCli(["--width=abc"]).width, undefined);
-  assertEquals(parseCli(["--height=-1"]).height, undefined);
+Deno.test("parseCli: --width and --height refuse invalid values", () => {
+  assertThrows(() => parseCli(["--width=abc"]), Error, "--width=abc");
+  assertThrows(() => parseCli(["--height=-1"]), Error, "--height=-1");
 });
 
 Deno.test("electronMainScript: uses full URL", () => {
@@ -320,9 +357,10 @@ Deno.test("parseCli: --transport=ws", () => {
   assertEquals(r.transport, "ws");
 });
 
-Deno.test("parseCli: --transport=invalid ignored", () => {
-  const r = parseCli(["--transport=tcp"]);
-  assertEquals(r.transport, undefined);
+Deno.test("parseCli: --transport with an unusable value is refused", () => {
+  const e = assertThrows(() => parseCli(["--transport=tcp"]), Error);
+  assertStringIncludes((e as Error).message, "--transport=tcp");
+  assertStringIncludes((e as Error).message, "uds");
 });
 
 Deno.test("parseCli: no --transport returns undefined", () => {
@@ -347,9 +385,27 @@ Deno.test("parseCli: --client=cli", () => {
   assertEquals(r.client, "cli");
 });
 
-Deno.test("parseCli: --client with invalid value ignored", () => {
-  const r = parseCli(["--client=invalid"]);
-  assertEquals(r.client, undefined);
+Deno.test("parseCli: --client with an unusable value is refused", () => {
+  const e = assertThrows(() => parseCli(["--client=invalid"]), Error);
+  assertStringIncludes((e as Error).message, "--client=invalid");
+  assertStringIncludes((e as Error).message, "server-only");
+});
+
+// The capital-E case: it passes every key check, fails `=== "electron"`, and
+// used to start a browser app with no message at all.
+Deno.test("parseCli: --client=Electron names the value it meant", () => {
+  const e = assertThrows(() => parseCli(["--client=Electron"]), Error);
+  assertStringIncludes((e as Error).message, "did you mean --client=electron");
+});
+
+// `--width=1200px` matched NO branch: no assignment, no warning, an 800px
+// window, and nothing anywhere saying why.
+Deno.test("parseCli: --width with a unit suffix is refused by name", () => {
+  const e = assertThrows(() => parseCli(["--width=1200px"]), Error);
+  assertStringIncludes((e as Error).message, "--width=1200px");
+  assertStringIncludes((e as Error).message, "--width=1200");
+  assertThrows(() => parseCli(["--height=800px"]), Error, "--height=800px");
+  assertEquals(parseCli(["--width=1200"]).width, 1200);
 });
 
 Deno.test("parseCli: --kill-existing", () => {
@@ -598,7 +654,8 @@ Deno.test("versionLine: defaults to the running framework version", () => {
 Deno.test("parseCli: --host= binds one address; empty is refused", () => {
   assertEquals(parseCli(["--host=192.168.1.20"]).host, "192.168.1.20");
   assertEquals(parseCli(["--host=[::1]"]).host, "[::1]");
-  // Empty is a warning, not a bind to "" — the expose default stays in force.
-  assertEquals(parseCli(["--host="]).host, undefined);
+  // Empty is refused, never a bind to "" — an operator who typed `--host=`
+  // meant to type an address, and the expose default is not what they asked for.
+  assertThrows(() => parseCli(["--host="]), Error, "--host=(empty)");
   assertEquals(parseCli([]).host, undefined);
 });

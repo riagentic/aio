@@ -4,8 +4,8 @@
 // it out of the browser bundle). Discovery, per-app detail (trojan API), live
 // CPU/memory sampling, task running, and safe file access all live here.
 import { cell } from "aio";
-import type { DiscoveredProject, ProjectMeta } from "./server/scan.ts";
-import type { FileNode, LogSource, RuntimeInfo } from "./server/proc.ts";
+import type { DiscoveredProject, ProjectMeta } from "./server/scan.server.ts";
+import type { FileNode, LogSource, RuntimeInfo } from "./server/proc.server.ts";
 
 export type {
   DiscoveredProject,
@@ -118,8 +118,12 @@ interface Diag {
    *  app through `/__aio/trojan/*`, and every panel here degrades to null on
    *  failure — which turned an auth refusal into a screen of empty boxes with
    *  no cause. The refusal carries its own diagnosis (see `am-http.ts`); carry
-   *  it to the UI instead of dropping it. */
+   *  it to the UI instead of dropping it. Set for a TRANSPORT failure too —
+   *  see `controlErrorOf`. */
   controlError: string | null;
+  /** True when at least ONE control read got an answer. False = the app is not
+   *  talking to us at all, and nothing below it may be presented as current. */
+  answered: boolean;
 }
 
 const HIST = 60; // rolling metric samples kept for the charts
@@ -136,6 +140,41 @@ export function refusalOf(
     if (/unauthor|forbidden|credential|admin/i.test(r.error)) return r.error;
   }
   return null;
+}
+
+/** The first NON-auth failure — a transport verdict: the port is gone, the
+ *  socket refuses, the app hung, the route 404s. */
+export function transportErrorOf(
+  results: { ok: boolean; error?: string }[],
+): string | null {
+  for (const r of results) {
+    if (r.ok || !r.error) continue;
+    if (/unauthor|forbidden|credential|admin/i.test(r.error)) continue;
+    return r.error;
+  }
+  return null;
+}
+
+/** THE verdict on a set of control-plane reads: the credential refusal if
+ *  there is one (it carries the actionable diagnosis), otherwise the transport
+ *  failure.
+ *
+ *  `refusalOf` alone was the bug. It matched auth errors ONLY, so an app whose
+ *  control plane had simply STOPPED ANSWERING produced no verdict at all:
+ *  `controlError` stayed null, `tick()`'s "keep the last good bundle so panels
+ *  don't flicker" kept painting the last healthy sample, and `detail.at` was
+ *  stamped with `now` on every tick. Measured against a fully dead target the
+ *  dashboard read `status: ok`, `uptime 42`, `connections 7`, a timestamp
+ *  advancing once a second, and no banner — indefinitely. Every panel here is
+ *  a claim about a LIVE process; a claim that cannot be checked must say so.
+ *
+ *  These calls are only ever made for an app the registry says is RUNNING
+ *  (`select`/`tick` both guard on it), so "it did not answer" is news, not the
+ *  noise the auth-only filter was protecting against. */
+export function controlErrorOf(
+  results: { ok: boolean; error?: string }[],
+): string | null {
+  return refusalOf(results) ?? transportErrorOf(results);
 }
 
 /** Parse a Result<string> JSON body, tolerating errors → null. */
@@ -240,7 +279,7 @@ async function fetchDiag(
   port: number,
   appId: string,
 ): Promise<Diag> {
-  const { trojanGet, httpGet } = await import("../../src/am/am-http.ts");
+  const { trojanGet, httpGet } = await import("./server/control.server.ts");
   const [healthR, vitalsR, clientsR, historyR, promR] = await Promise.all([
     httpGet(port, "/__aio/health", appId),
     httpGet(port, "/__aio/vitals", appId),
@@ -264,7 +303,15 @@ async function fetchDiag(
     clients,
     history: entries ? entries.slice(-HISTORY_MAX) : null,
     mem: promR.ok ? parsePromMem(promR.data as string) : null,
-    controlError: refusalOf([clientsR, historyR]),
+    controlError: controlErrorOf([
+      healthR,
+      vitalsR,
+      clientsR,
+      historyR,
+      promR,
+    ]),
+    answered: healthR.ok || vitalsR.ok || clientsR.ok || historyR.ok ||
+      promR.ok,
   };
 }
 
@@ -465,7 +512,7 @@ function applyScan(
 /** Scan the disk + registry and fold the result into state (shared by discover
  *  and the post-action refreshes). Throws only if the scan import fails. */
 async function rescanInto(s: ScanTarget): Promise<void> {
-  const { discoverProjects } = await import("./server/scan.ts");
+  const { discoverProjects } = await import("./server/scan.server.ts");
   const { projects, roots } = await discoverProjects();
   applyScan(s, projects, roots);
 }
@@ -476,7 +523,7 @@ async function rescanInto(s: ScanTarget): Promise<void> {
  *  — `am` and the trojan route — so the UI alone is not a guard). Returns a
  *  refusal message, or null when the path is some other app. */
 async function refuseSelf(path: string): Promise<string | null> {
-  const { selfPaths } = await import("./server/scan.ts");
+  const { selfPaths } = await import("./server/scan.server.ts");
   return (await selfPaths()).has(path)
     ? "that's amui itself — manage it from the shell that launched it"
     : null;
@@ -516,9 +563,12 @@ export const manager = cell("manager", {
     history: null as ActionEntry[] | null,
     mem: null as MemInfo | null,
     aioVersion: null as string | null, // framework version the app runs
-    /** Set when the running app refused amui's control-plane reads — shown
-     *  instead of leaving every panel mysteriously empty. */
+    /** Set when the running app refused amui's control-plane reads, or stopped
+     *  answering them at all — shown instead of leaving every panel
+     *  mysteriously empty (or, worse, showing the last healthy sample). */
     controlError: null as string | null,
+    /** tick() is in flight — see the guard in `tick`. */
+    ticking: false,
     // logs (tailed from the app's ~/.<appId>/logs — no streaming endpoint)
     logs: null as LogLine[] | null,
     logPath: null as string | null,
@@ -625,7 +675,7 @@ export const manager = cell("manager", {
         ? { ...(proj.running as NonNullable<DiscoveredProject["running"]>) }
         : null;
       const { listFiles, findRepoRoot, runtimeInfo } = await import(
-        "./server/proc.ts"
+        "./server/proc.server.ts"
       );
       // App Files = the RUNTIME tree. For a running app, inspect its process
       // (dev → source dir, AppImage → the unpacked mount, binary → its dir);
@@ -658,11 +708,12 @@ export const manager = cell("manager", {
         history: null,
         mem: null,
         controlError: null,
+        answered: false,
       };
       if (running) {
         const { appId, port, pid } = running;
-        const { trojanGet } = await import("../../src/am/am-http.ts");
-        const { psStats } = await import("./server/proc.ts");
+        const { trojanGet } = await import("./server/control.server.ts");
+        const { psStats } = await import("./server/proc.server.ts");
         const [config, metrics, cells, errors, schedules, ps, d] = await Promise
           .all([
             trojanGet(port, "config", appId),
@@ -674,7 +725,9 @@ export const manager = cell("manager", {
             fetchDiag(port, appId),
           ]);
         diag = d;
-        diag.controlError ??= refusalOf([config, metrics, cells, errors]);
+        diag.controlError ??= controlErrorOf([config, metrics, cells, errors]);
+        diag.answered ||= config.ok || metrics.ok || cells.ok || errors.ok ||
+          schedules.ok;
         base.config = config.ok
           ? (config.data as ProjectDetail["config"])
           : null;
@@ -729,7 +782,7 @@ export const manager = cell("manager", {
       if (!proj || s.repoRoot === null) return;
       const root = s.repoRoot;
       s.codebaseLoading = true;
-      const { listFiles } = await import("./server/proc.ts");
+      const { listFiles } = await import("./server/proc.server.ts");
       let nodes: FileNode[] = [];
       let truncated = false;
       try {
@@ -760,7 +813,7 @@ export const manager = cell("manager", {
       s.detailStateLoading = true;
       s.detailStateError = null;
       const { appId, port } = proj.running;
-      const { trojanGet } = await import("../../src/am/am-http.ts");
+      const { trojanGet } = await import("./server/control.server.ts");
       // Full merged state (every cell) + per-field persist/ui flags in parallel.
       const [r, f] = await Promise.all([
         trojanGet(port, "state", appId),
@@ -809,7 +862,7 @@ export const manager = cell("manager", {
       s.logLoading = true;
       s.logError = null;
       try {
-        const { readLogs } = await import("./server/proc.ts");
+        const { readLogs } = await import("./server/proc.server.ts");
         // appId unlocks the app's own `~/.<appId>/logs/` (alpha38 layout).
         const r = await readLogs(path, src, 500, proj.running?.appId ?? null);
         if (s.selectedPath !== path) return;
@@ -845,66 +898,94 @@ export const manager = cell("manager", {
         !before || !before.running || before.pid === null ||
         before.port === null
       ) return;
-      const { pid, port, path } = before;
-      const appId = before.appId!;
-      // Snapshot the histories to PLAIN arrays. The async method's `s` exposes
-      // array state as a proxy whose spread iterator throws ("not iterable")
-      // even though Array.isArray() passes; plain() (JSON round-trip) reads it
-      // via index access instead. Same proxy hazard as detail — see plain().
-      const snap = (v: unknown): number[] => Array.isArray(v) ? plain(v) : [];
-      const cpuHist = snap(s.cpuHistory);
-      const memHist = snap(s.memHistory);
-      const heapHist = snap(s.heapHistory);
-      const reduceHist = snap(s.reduceHistory);
-      const queueHist = snap(s.queueHistory);
-      const { trojanGet } = await import("../../src/am/am-http.ts");
-      const { psStats } = await import("./server/proc.ts");
-      const [metrics, ps, diag] = await Promise.all([
-        trojanGet(port, "metrics", appId),
-        psStats(pid),
-        fetchDiag(port, appId),
-      ]);
-      // Re-read AFTER the awaits — a stop()/select() may have superseded us
-      // during the (up to a few second) trojan/ps round-trip. Drop this sample
-      // rather than resurrecting the stale snapshot.
-      const d = plain(s.detail);
-      if (!d || d.path !== path || !d.running) return;
-      const cpu = ps?.cpuPct ?? d.cpuPct ?? 0;
-      const mem = ps?.memMb ?? d.memMb ?? 0;
-      const heapMb = diag.mem
-        ? Math.round(diag.mem.heapUsed / 1_048_576)
-        : null;
-      s.cpuHistory = [...cpuHist, cpu].slice(-HIST);
-      s.memHistory = [...memHist, mem].slice(-HIST);
-      if (heapMb !== null) s.heapHistory = [...heapHist, heapMb].slice(-HIST);
-      if (diag.vitals) {
-        s.reduceHistory = [...reduceHist, diag.vitals.loop.p95ReduceTime]
-          .slice(-HIST);
-        s.queueHistory = [...queueHist, diag.vitals.loop.queueDepth].slice(
-          -HIST,
-        );
+      // In-flight guard — the same one every sibling loader has. tick() is on a
+      // 1s interval and does five control round-trips; against a slow (or
+      // hung) app the next tick started before this one finished, and two
+      // ticks read-modify-wrote the SAME rolling-history snapshot, so the
+      // later write silently dropped the earlier sample. Measured: 3 ticks in,
+      // 2 samples out. A skipped tick is a missing sample; an overlapping tick
+      // is a CORRUPTED history, and the charts are the whole point of it.
+      if (s.ticking) return;
+      s.ticking = true;
+      try {
+        await tickBody();
+      } finally {
+        s.ticking = false;
       }
-      // Diagnostics degrade independently: keep the last good bundle if a probe
-      // momentarily fails, so the panels don't flicker to empty.
-      if (diag.health) s.health = diag.health;
-      if (diag.vitals) s.vitals = diag.vitals;
-      if (diag.clients) s.clients = diag.clients;
-      if (diag.history) s.history = diag.history;
-      if (diag.mem) s.mem = diag.mem;
-      s.controlError = diag.controlError;
-      if (diag.health?.version) s.aioVersion = diag.health.version;
-      s.detail = {
-        ...d,
-        cpuPct: ps?.cpuPct ?? d.cpuPct,
-        memMb: ps?.memMb ?? d.memMb,
-        uptimeSec: metrics.ok
-          ? (metrics.data as { uptime: number }).uptime
-          : d.uptimeSec,
-        connections: metrics.ok
-          ? (metrics.data as { connections: number }).connections
-          : d.connections,
-        at: new Date().toISOString(),
-      };
+
+      async function tickBody() {
+        const { pid, port, path } = before!;
+        const appId = before!.appId!;
+        // Snapshot the histories to PLAIN arrays. The async method's `s` exposes
+        // array state as a proxy whose spread iterator throws ("not iterable")
+        // even though Array.isArray() passes; plain() (JSON round-trip) reads it
+        // via index access instead. Same proxy hazard as detail — see plain().
+        const snap = (v: unknown): number[] => Array.isArray(v) ? plain(v) : [];
+        const cpuHist = snap(s.cpuHistory);
+        const memHist = snap(s.memHistory);
+        const heapHist = snap(s.heapHistory);
+        const reduceHist = snap(s.reduceHistory);
+        const queueHist = snap(s.queueHistory);
+        const { trojanGet } = await import("./server/control.server.ts");
+        const { psStats } = await import("./server/proc.server.ts");
+        const [metrics, ps, diag] = await Promise.all([
+          trojanGet(port!, "metrics", appId),
+          psStats(pid!),
+          fetchDiag(port!, appId),
+        ]);
+        // Re-read AFTER the awaits — a stop()/select() may have superseded us
+        // during the (up to a few second) trojan/ps round-trip. Drop this sample
+        // rather than resurrecting the stale snapshot.
+        const d = plain(s.detail);
+        if (!d || d.path !== path || !d.running) return;
+        const cpu = ps?.cpuPct ?? d.cpuPct ?? 0;
+        const mem = ps?.memMb ?? d.memMb ?? 0;
+        const heapMb = diag.mem
+          ? Math.round(diag.mem.heapUsed / 1_048_576)
+          : null;
+        s.cpuHistory = [...cpuHist, cpu].slice(-HIST);
+        s.memHistory = [...memHist, mem].slice(-HIST);
+        if (heapMb !== null) s.heapHistory = [...heapHist, heapMb].slice(-HIST);
+        if (diag.vitals) {
+          s.reduceHistory = [...reduceHist, diag.vitals.loop.p95ReduceTime]
+            .slice(-HIST);
+          s.queueHistory = [...queueHist, diag.vitals.loop.queueDepth].slice(
+            -HIST,
+          );
+        }
+        // Diagnostics degrade independently: keep the last good bundle if a probe
+        // momentarily fails, so the panels don't flicker to empty.
+        if (diag.health) s.health = diag.health;
+        if (diag.vitals) s.vitals = diag.vitals;
+        if (diag.clients) s.clients = diag.clients;
+        if (diag.history) s.history = diag.history;
+        if (diag.mem) s.mem = diag.mem;
+        s.controlError = diag.controlError ?? controlErrorOf([metrics]);
+        if (diag.health?.version) s.aioVersion = diag.health.version;
+        s.detail = {
+          ...d,
+          cpuPct: ps?.cpuPct ?? d.cpuPct,
+          memMb: ps?.memMb ?? d.memMb,
+          // A reading that could not be refreshed and cannot be re-checked is
+          // not a reading. When NOTHING answered, the live tiles go to "—"
+          // rather than keeping the last number from a process that may be gone.
+          uptimeSec: metrics.ok
+            ? (metrics.data as { uptime: number }).uptime
+            : diag.answered
+            ? d.uptimeSec
+            : null,
+          connections: metrics.ok
+            ? (metrics.data as { connections: number }).connections
+            : diag.answered
+            ? d.connections
+            : null,
+          // THE timestamp only advances on an answer. Stamping it with `now`
+          // unconditionally is what let a wedged app look freshly polled forever
+          // — the one field on the page whose whole job is to say how current
+          // everything else is.
+          at: diag.answered || metrics.ok ? new Date().toISOString() : d.at,
+        };
+      }
     },
 
     /** Run a method on a running app (trojan dispatch — the "run method" button). */
@@ -921,7 +1002,7 @@ export const manager = cell("manager", {
           return;
         }
       }
-      const { trojanPost } = await import("../../src/am/am-http.ts");
+      const { trojanPost } = await import("./server/control.server.ts");
       // ONE decider for the wire envelope. A cell method is called with
       // POSITIONAL arguments and its payload form is `{args:[…]}` (the reducer
       // reads `payload.args`); a plain redux-style action carries its payload
@@ -929,7 +1010,7 @@ export const manager = cell("manager", {
       // named payload reached a `cell:method` as NO arguments at all — and the
       // trojan still answered ok, so amui reported "dispatched". Use `am`'s
       // rule instead of a second copy of it.
-      const { envelopePayload } = await import("../../src/am/am-cmd-state.ts");
+      const { envelopePayload } = await import("./server/control.server.ts");
       const r = await trojanPost(
         proj.running.port,
         "dispatch",
@@ -954,7 +1035,7 @@ export const manager = cell("manager", {
       }
       const name = path.split("/").pop();
       s.actionMsg = `starting ${name}…`;
-      const { startApp, awaitBoot } = await import("./server/proc.ts");
+      const { startApp, awaitBoot } = await import("./server/proc.server.ts");
       const r = await startApp(path, "browser");
       if (!r.ok) {
         s.actionMsg = `start failed: ${r.error}`;
@@ -980,7 +1061,7 @@ export const manager = cell("manager", {
       const { appId, port, pid } = proj.running;
       const name = proj.name;
       s.actionMsg = `stopping ${name}…`;
-      const { stopApp, awaitDown } = await import("./server/proc.ts");
+      const { stopApp, awaitDown } = await import("./server/proc.server.ts");
       const r = await stopApp(port, appId, pid);
       if (s.detail && s.detail.path === path) {
         s.detail = { ...plain(s.detail), running: false, status: "stopping" };
@@ -1010,7 +1091,7 @@ export const manager = cell("manager", {
       const name = path.split("/").pop();
       s.actionMsg = `restarting…`;
       const { startApp, stopApp, awaitBoot, awaitDown } = await import(
-        "./server/proc.ts"
+        "./server/proc.server.ts"
       );
       if (proj?.running) {
         const { appId, port, pid } = proj.running;
@@ -1043,7 +1124,7 @@ export const manager = cell("manager", {
       s.taskRunning = task;
       s.taskOutput = `$ deno task ${task}\n(running — cancellable)…`;
       s.taskCode = null;
-      const { runTask } = await import("./server/proc.ts");
+      const { runTask } = await import("./server/proc.server.ts");
       try {
         const r = await runTask(path, task, s.$signal);
         s.taskCode = r.code;
@@ -1071,7 +1152,7 @@ export const manager = cell("manager", {
      *  `rel` is relative to (the app dir for App Files, the repo root for the
      *  Codebase tab). Oversized/binary files are refused with a message. */
     async openFile(s, base: string, rel: string) {
-      const { readFile } = await import("./server/proc.ts");
+      const { readFile } = await import("./server/proc.server.ts");
       const r = await readFile(base, rel);
       s.openFilePath = rel;
       s.openFileBase = base;
@@ -1092,7 +1173,9 @@ export const manager = cell("manager", {
       s.fileNotice = null;
       s.fileTruncated = false;
       s.openFileHint = null;
-      const { findCellSource, readFile } = await import("./server/proc.ts");
+      const { findCellSource, readFile } = await import(
+        "./server/proc.server.ts"
+      );
       const found = await findCellSource(base, cellName);
       if (s.selectedPath !== path) return;
       if (!found) {
@@ -1133,7 +1216,7 @@ export const manager = cell("manager", {
       }
       s.createBusy = true;
       s.createMsg = null;
-      const { createApp } = await import("./server/proc.ts");
+      const { createApp } = await import("./server/proc.server.ts");
       const r = await createApp(name);
       s.createBusy = false;
       s.createMsg = r.ok ? `created ${r.dir}` : `create failed: ${r.error}`;

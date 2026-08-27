@@ -106,8 +106,10 @@ export const CROSS_COMPILABLE = new Set([
   // fetch for the target (electron-runtime.ts), and its package there is a
   // directory + launcher + zip: no OS-specific tooling. Linux is the exception
   // and it is a TOOL constraint, not a runtime one — see below.
+  //
+  // NOT `electron-client`: that target has only an AppImage packager, so it
+  // does not cross OSes at all (crossCompileBlocker states the rule).
   "electron",
-  "electron-client",
 ]);
 
 /** Why `target` cannot be built for `platform` from this host, or null when it
@@ -124,6 +126,29 @@ export function crossCompileBlocker(
   platform?: string,
   host: string = hostPlatform(),
 ): string | null {
+  // `electron-client` is the standalone connect-page client, and `buildClient`
+  // packages it as an AppImage on EVERY host — there is no zip path for it.
+  // So it is not "electron, cross-buildable to Windows/macOS": it is
+  // Linux-only, in both directions. Saying otherwise let the fleet dispatch
+  // `electron-client [windows]`, which reached `buildClient`, hit its
+  // `os !== "linux"` refusal, and failed the whole run — so `--all-platforms`
+  // on any repo declaring this target was a guaranteed red build. Two
+  // deciders; this is the one that gets to answer.
+  if (target === "electron-client") {
+    const spec = platform ? PLATFORMS[platform] : undefined;
+    const hostSpec = PLATFORMS[host];
+    if (spec && spec.os !== "linux") {
+      return "the standalone Electron client is packaged as an AppImage " +
+        "(Linux only) — build the `electron` target for a Windows/macOS " +
+        "package, or `cli-client` for a headless one";
+    }
+    if (spec && (hostSpec?.os !== "linux" || hostSpec.arch !== spec.arch)) {
+      return "an AppImage is assembled by `appimagetool`, a native binary " +
+        `for the arch it assembles — build ${platform} on a ${spec.arch} ` +
+        "Linux host (or its CI runner)";
+    }
+    return null;
+  }
   if (target.startsWith("electron")) {
     const spec = platform ? PLATFORMS[platform] : undefined;
     if (!platform || !spec || platform === host) return null;

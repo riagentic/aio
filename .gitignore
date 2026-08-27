@@ -17,6 +17,12 @@ android-template/build/
 
 # Secrets
 .env
+# Release signing keys — a committed one lets anyone publish an update every
+# install of the app accepts. `aio ship keygen` refuses to write inside a work
+# tree; this catches one that arrives any other way.
+release-key.json
+*-release-key.json
+*.release-key.json
 
 # Build / test artifacts
 log/

@@ -51,9 +51,24 @@ type Entry = {
   escalated: boolean;
   since: number;
   lastError: string;
+  /** Last time this tracker was resolved — the eviction order below. */
+  touched: number;
 };
 
+/** How many distinct names may be watched at once.
+ *
+ *  `degraded()` is PUBLIC API and its natural use is per-resource —
+ *  ``degraded(`fetch:${url}`)`` — so an uncapped registry is a leak with an
+ *  app-controlled key. Every sibling registry in this module already bounds
+ *  itself (`_clientRegistry`: 16 per client, names 64 chars, errors 200), and
+ *  the diagnostic bus prunes its dedup map; this one did not, in the module
+ *  whose whole job is noticing that something has been failing forever. */
+const REGISTRY_CAP = 512;
+
 const _registry = new Map<string, Entry>();
+/** Said once per episode: a cap that evicts silently is the same defect one
+ *  level down from the one this module exists to fix. */
+let _capWarned = false;
 
 /** One escalation/recovery event, as relayed across a transport. */
 export type DegradedChange = {
@@ -162,6 +177,41 @@ export function clientDegradedReport(): {
   return [...byName.values()];
 }
 
+/** Make room for one more name. Least-recently-used first, and an operation
+ *  currently IN a degraded episode is live signal — evicted only when there is
+ *  nothing else left to drop. */
+function _evictForNewName(incoming: string): void {
+  if (_registry.size < REGISTRY_CAP) return;
+  let victim: Entry | undefined;
+  for (const e of _registry.values()) {
+    if (victim === undefined) {
+      victim = e;
+      continue;
+    }
+    // Prefer a non-escalated entry; among equals, the oldest touch.
+    if (victim.escalated !== e.escalated) {
+      if (victim.escalated) victim = e;
+      continue;
+    }
+    if (e.touched < victim.touched) victim = e;
+  }
+  if (!victim) return;
+  _registry.delete(victim.name);
+  if (!_capWarned) {
+    _capWarned = true;
+    log.warn(
+      `[aio] degraded(): more than ${REGISTRY_CAP} distinct names are being ` +
+        `watched at once — evicting the least recently used ("${victim.name}"` +
+        `${victim.escalated ? ", which was still degraded" : ""}) to make ` +
+        `room for "${incoming}". Cause: a name built per resource, e.g. ` +
+        "degraded(`fetch:${url}`), creates one tracker per URL and the " +
+        `registry is what remembers "this has been failing for hours". ` +
+        `Fix: use a stable name — degraded("fetch") — and put the resource ` +
+        `in the error passed to fail(), which is what the report shows.`,
+    );
+  }
+}
+
 /** Watch a best-effort operation. Same name ⇒ same tracker, so a module-level
  *  `const cache = degraded("nft-cache")` and a per-call lookup agree.
  *
@@ -175,21 +225,31 @@ export function degraded(
   opts: { after?: number } = {},
 ): Degraded {
   const after = Math.max(1, opts.after ?? DEFAULT_AFTER);
+  // Capped like the client-side twin: the KEY too, not just the reported
+  // field — an uncapped key is an uncapped allocation, and `degraded()` names
+  // come from app code. Two names identical for their first 64 characters
+  // share a tracker, which is the right trade for a vocabulary that is
+  // supposed to be small and fixed.
+  const key = name.slice(0, NAME_CAP);
   // Resolved PER CALL, not captured: a handle held across `_resetDegraded()`
   // (test teardown) must re-register instead of counting on an orphaned entry
   // the report can no longer see.
   const resolve = (): Entry => {
-    let entry = _registry.get(name);
+    let entry = _registry.get(key);
     if (!entry) {
+      _evictForNewName(key);
       entry = {
-        name,
+        name: key,
         after,
         failures: 0,
         escalated: false,
         since: 0,
         lastError: "",
+        touched: Date.now(),
       };
-      _registry.set(name, entry);
+      _registry.set(key, entry);
+    } else {
+      entry.touched = Date.now();
     }
     return entry;
   };
@@ -199,7 +259,7 @@ export function degraded(
     // race for whichever registered first — in the module whose whole point
     // is that nothing diverges silently.
     log.warn(
-      `[aio] degraded("${name}"): after=${after} requested, but this name ` +
+      `[aio] degraded("${key}"): after=${after} requested, but this name ` +
         `was created with after=${first.after} — keeping ${first.after}. ` +
         `Use one threshold per name.`,
     );
@@ -207,21 +267,22 @@ export function degraded(
 
   const fail = (err: unknown): void => {
     const e = resolve();
-    e.lastError = err instanceof Error ? err.message : String(err);
+    e.lastError = (err instanceof Error ? err.message : String(err))
+      .slice(0, ERROR_CAP);
     if (e.failures === 0) e.since = Date.now();
     e.failures++;
     if (e.escalated || e.failures < e.after) return;
     e.escalated = true;
-    const msg = `${name}: degraded — ${e.failures} consecutive failures, ` +
+    const msg = `${key}: degraded — ${e.failures} consecutive failures, ` +
       `last: ${e.lastError}. This operation is best-effort, so each failure ` +
       `alone is survivable; repeating means the feature behind it is off.`;
     log.error(`[aio] ${msg}`);
     diagEmit({
       // Per-subsystem type: the bus dedups by TYPE, so a shared "degraded" key
       // would let one wedged subsystem hide another's escalation.
-      type: `degraded:${name}`,
+      type: `degraded:${key}`,
       severity: "error",
-      source: name,
+      source: key,
       message: msg,
       detail: { failures: e.failures, since: e.since, lastError: e.lastError },
       hint: "Fix the underlying cause, or stop treating this path as optional.",
@@ -234,13 +295,13 @@ export function degraded(
     if (e.escalated) {
       const held = Date.now() - e.since;
       log.info(
-        `[aio] ${name}: recovered after ${e.failures} failures (${held}ms)`,
+        `[aio] ${key}: recovered after ${e.failures} failures (${held}ms)`,
       );
       diagEmit({
-        type: `degraded-recovered:${name}`,
+        type: `degraded-recovered:${key}`,
         severity: "info",
-        source: name,
-        message: `${name}: recovered after ${e.failures} failures`,
+        source: key,
+        message: `${key}: recovered after ${e.failures} failures`,
         detail: { failures: e.failures, durationMs: held },
       });
       relayChange(e, "up");
@@ -294,9 +355,16 @@ export function degradedReport(): {
   return out;
 }
 
+/** Test hook: how many trackers are live right now. A long-running server
+ *  must not accumulate one per resource ever touched. */
+export function _degradedRegistrySize(): number {
+  return _registry.size;
+}
+
 /** Test isolation — drop every tracker, relay, and client record. */
 export function _resetDegraded(): void {
   _registry.clear();
   _clientRegistry.clear();
   _relay = null;
+  _capWarned = false;
 }

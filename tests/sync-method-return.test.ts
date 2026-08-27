@@ -1,7 +1,7 @@
 import { assertEquals } from "@std/assert";
 import { bindCell, cell, composeCells } from "../src/state/cell.ts";
 import { schedule } from "../src/state/schedule.ts";
-import { testCell } from "../src/testing/cell-test.ts";
+import { bootCells, testCell } from "../src/testing/cell-test.ts";
 
 // AIO-427: a sync method may RETURN a value that `await cell.method()` resolves
 // with — the same ergonomics as an async method, without forcing `async` +
@@ -134,6 +134,10 @@ Deno.test("427: returning a slice of DRAFT state survives (no revoked proxy)", a
 });
 
 Deno.test("427: returning a ScheduleEffect still schedules — value is undefined", async () => {
+  // A schedule effect needs a runtime that owns a CLOCK. The bare composed
+  // executor this file's `boot()` builds has none, and used to drop the effect
+  // silently; it now refuses loudly and names `bootCells`, so this test uses
+  // the runtime the effect actually requires.
   const c = cell("sched", {
     state: { n: 0 },
     methods: {
@@ -143,9 +147,13 @@ Deno.test("427: returning a ScheduleEffect still schedules — value is undefine
       },
     },
   });
-  boot(c);
-  const v = await (c as unknown as { tick: () => Promise<unknown> }).tick();
-  assertEquals(v, undefined, "an effect return is not a transported value");
+  const h = await bootCells([c as never]);
+  try {
+    const v = await (c as unknown as { tick: () => Promise<unknown> }).tick();
+    assertEquals(v, undefined, "an effect return is not a transported value");
+  } finally {
+    h.dispose();
+  }
 });
 
 Deno.test("427: a void sync method resolves undefined", async () => {

@@ -9,10 +9,11 @@ One vocabulary (alpha52): the scaffold ships ONE `dev` task (runtime flags pass
 through) and ONE build pipeline (`build` = every target in deno.json
 `build.targets`; `compile` = the same pipeline narrowed to the default target,
 recorded in deno.json `"client"`). There is no per-target task matrix — a target
-name (`server`, `browser`, `electron`, `android`, `cli`, `electron-client`,
-`android-client`, `cli-client`) is the one spelling, shared by `build.targets`,
-`--targets=`, and the manifest. The headless role is spelled `server` (never
-`service`).
+name (`server`, `server-app`, `browser`, `electron`, `android`, `cli`,
+`electron-client`, `android-client`, `cli-client`) is the one spelling, shared
+by `build.targets`, `--targets=`, and the manifest. The headless role is spelled
+`server` (never `service`); `server-app` is its twin that also serves its own
+page (both emit a systemd unit beside the binary).
 
 - you can build server application
 - you can build electron application
@@ -39,8 +40,9 @@ name (`server`, `browser`, `electron`, `android`, `cli`, `electron-client`,
   - the declared fleet: `deno task build` (deno.json
   `"build": { "targets": [...] }`)
   - any one-off target: `deno task build --targets=<name>` — names: `server` ·
-  `browser` · `electron` · `android` · `cli` · `electron-client` ·
-  `android-client` · `cli-client` (`deno task build --list`)
+  `server-app` · `browser` · `electron` · `android` · `cli` ·
+  `electron-client` · `android-client` · `cli-client`
+  (`deno task build --list`)
 
 ## Migration
 

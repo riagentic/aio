@@ -270,11 +270,11 @@ failure.
 ## `aio/server` — the explicit server-only surface
 
 Server-only symbols (SQLite `createDB`/`DEFAULT_PRAGMAS`, CLI/UDS `connectCli`/
-`connectCliUDS`, `aio ship` signing) live behind **`aio/server`**. The whole
-entry is server-only, so importing from it in an isomorphic module (a cell, or a
-lib a cell pulls in) is the boundary violation — `aiol` flags a static
-`aio/server` import in a cell-shared file as an error, and a client build can
-map the entry to a stub.
+`connectCliUDS`, `deno task ship` signing) live behind **`aio/server`**. The
+whole entry is server-only, so importing from it in an isomorphic module (a
+cell, or a lib a cell pulls in) is the boundary violation — `aiol` flags a
+static `aio/server` import in a cell-shared file as an error, and a client build
+can map the entry to a stub.
 
 - **Right:** `import { createDB } from "aio/server"` in a `*.server.ts` module,
   or `const { createDB } = await import("aio/server")` behind a server guard.

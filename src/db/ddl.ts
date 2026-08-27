@@ -183,6 +183,23 @@ export async function runDdlSteps(
     }
   }
   const from = await getAioSchemaVersion(db);
+  // A file stamped ABOVE what this build knows was written by a NEWER aio.
+  // There is no step down the ladder — the newer build may have moved tables
+  // this one still reads by their old shape — so running on it is not a
+  // degraded mode, it is silent misreading of the user's data. The `aio_kv`
+  // layer beside it has always refused this, loudly (`PERSIST_SCHEMA`, see
+  // migrateSchema in src/server/persist-schema.ts); the SQL ladder accepted it
+  // without a word. The two now agree.
+  if (from > max) {
+    throw new Error(
+      `db: this database file was written by a NEWER aio — its schema is ` +
+        `v${from} and this build knows v${max}. A newer build may have ` +
+        `changed tables this one still reads by their old shape, so booting ` +
+        `on it would misread your data rather than fail. fix: upgrade aio ` +
+        `(the version that wrote this file, or later), or point the app at a ` +
+        `backup taken by this version. Nothing was changed.`,
+    );
+  }
   let v = from;
   for (const step of ordered) {
     if (step.version <= v) continue; // already ran on this file

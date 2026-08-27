@@ -2,7 +2,8 @@
  * @module
  * Build bundle — esbuild bundling step, freshness cache check, asset copying.
  */
-import { UI_ENTRY } from "../server/app-files.ts";
+import { APP_ICON, APP_STYLE, UI_ENTRY } from "../server/app-files.ts";
+import { DENO_JSON_NAMES } from "../server/deno-json.ts";
 import { basename, dirname, join, relative, resolve } from "@std/path";
 import { bundleFrameworkEntries, ESBUILD_JSX } from "./esbuild-shared.ts";
 import {
@@ -15,6 +16,7 @@ import { makeHttpPlugin } from "./build-integrity.ts";
 import type { BuildConfig } from "./build-config.ts";
 import { VERSION } from "../server/aio-cli.ts";
 import { VERSION_STAMP } from "../protocol/protocol-version.ts";
+import { SERVER_FILE_RE } from "../entries.ts";
 import { appIconPng, appIconSvg } from "./app-icon.ts";
 import { misplacedIconHint, resolveAppIcon } from "./build-helpers.ts";
 
@@ -191,10 +193,25 @@ export async function isBundleFresh(cfg: BuildConfig): Promise<boolean> {
     if (!outStat.mtime) return false; // AIO-227: can't verify freshness → rebuild
     const outMtime = outStat.mtime.getTime();
 
-    // deno.json is an input esbuild never sees: it supplies the import map and
-    // compilerOptions the bundle was built with.
-    const dj = await Deno.stat(join(root, "deno.json"));
-    if (dj.mtime && dj.mtime.getTime() >= outMtime) return false;
+    // The app's config is an input esbuild never sees: it supplies the import
+    // map the bundle was built with. BOTH names — `DENO_JSON_NAMES` is the
+    // decider and deno reads either, so statting the literal "deno.json" meant
+    // a `.jsonc` project fell into the catch below and answered "not fresh"
+    // FOREVER: measured, every single build re-ran esbuild. Fail-safe, and
+    // therefore invisible — and it also left the real rule (a config edit
+    // invalidates the bundle) unexpressed for those projects, correct only by
+    // the accident of never caching at all.
+    for (const name of DENO_JSON_NAMES) {
+      let dj: Deno.FileInfo;
+      try {
+        dj = await Deno.stat(join(root, name));
+      } catch {
+        continue; // not this spelling
+      }
+      // Equal mtimes count as stale, same as an input below.
+      if (!dj.mtime || dj.mtime.getTime() >= outMtime) return false;
+      break; // deno reads the FIRST match — so do we
+    }
 
     const inputs = await readBundleInputs(root, out, appDir);
     if (!inputs || inputs.length === 0) return false;
@@ -515,18 +532,19 @@ export async function runBundle(
         ) => [spec, join(dirname(frameworkSrcDir), rel)]),
       )
       : {};
-    const buildConfig = {
-      compilerOptions: mainConfig.compilerOptions,
-      imports: {
-        ...(mainConfig.imports as Record<string, string>),
-        ...aioImports,
-      },
+    // The import map this bundle resolves through: the app's own, plus THE
+    // `aio*` table. It is handed to esbuild as `alias` below — and only as
+    // `alias`. It used to be serialized to `<root>/_build.json` as well, a
+    // file esbuild was never told about and nothing else has ever read: a
+    // write and a delete in the user's project root, per build, for nobody.
+    // (The app's `compilerOptions` went into that file too. JSX is decided by
+    // ESBUILD_JSX — one config for the dev transpiler and the prod bundler, so
+    // dev and prod cannot compile differently — which is why there was nothing
+    // to pass on.)
+    const imports: Record<string, string> = {
+      ...(mainConfig.imports as Record<string, string>),
+      ...aioImports,
     };
-    const buildConfigPath = join(root, "_build.json");
-    await Deno.writeTextFile(
-      buildConfigPath,
-      JSON.stringify(buildConfig, null, 2),
-    );
 
     // Generate temp entry
     const buildEntryPath = join(root, "_build_entry.tsx");
@@ -539,11 +557,7 @@ export async function runBundle(
 
     // esbuild alias: skip npm:/jsr: specifiers (resolved via node_modules)
     const esbuildAlias: Record<string, string> = {};
-    for (
-      const [k, v] of Object.entries(
-        buildConfig.imports as Record<string, string>,
-      )
-    ) {
+    for (const [k, v] of Object.entries(imports)) {
       if (!v.startsWith("npm:") && !v.startsWith("jsr:")) esbuildAlias[k] = v;
     }
 
@@ -585,7 +599,6 @@ export async function runBundle(
     } catch (e) {
       console.error(`[build] \u2717 esbuild failed: ${e}`);
     } finally {
-      await Deno.remove(buildConfigPath).catch(() => {});
       await Deno.remove(buildEntryPath).catch(() => {});
     }
 
@@ -620,7 +633,7 @@ export async function runBundle(
       console.error(
         "       These do not exist in a browser. The bundle would build and " +
           "then throw at first use, showing a blank page.\n" +
-          (leaks.some(([spec]) => spec.endsWith(".server.ts"))
+          (leaks.some(([spec]) => SERVER_FILE_RE.test(spec))
             ? "       fix: a *.server.ts module is server-only BY CONVENTION " +
               "— import it dynamically from the method that needs it " +
               '(`const { x } = await import("./io.server.ts")`), never ' +
@@ -629,6 +642,51 @@ export async function runBundle(
               '{ x } = await import("node:…")` is server-side and stays out ' +
               "of the client graph — or move the code into a `*.server.ts` " +
               "module and import THAT dynamically."),
+      );
+      await refuseBundle(root, out);
+    }
+
+    // ── the RESOLVED graph, not the specifiers we happened to see ──
+    //
+    // Everything above reads the spelling of an import as WRITTEN. That is one
+    // hop short of the truth, and the audit walked through the gap four ways,
+    // each of them building clean and printing `✓ dist/app.js`:
+    //
+    //   ① `vault.server.tsx` — the plugin's filter was `/\.server\.ts$/`, so
+    //      the `.tsx` twin was never intercepted at all. Its contents were
+    //      grepped out of dist/app.js. (Meanwhile the DEV server refused to
+    //      serve the same file: prod strictly more permissive than dev.)
+    //   ② `"vault": "./x.server.ts"` in the import map — esbuild's `alias`
+    //      substitutes AFTER a plugin's filter runs, so the plugin only ever
+    //      saw the bare specifier `vault`.
+    //   ③ a template-literal `import(`./${name}.server.ts`)`.
+    //   ④ `await import("aio/server")` — the DOCUMENTED lazy pattern — which
+    //      returns external without recording anything.
+    //
+    // A specifier filter cannot close a gap that opens between the specifier
+    // and the file. esbuild already tells us which files it actually read:
+    // `metafile.inputs` is the resolved graph, so that is what gets checked.
+    // One check, all four defeats, and no new information to collect.
+    const graphLeaks = Object.keys(metaInputs ?? {}).filter((f) =>
+      SERVER_FILE_RE.test(f)
+    ).sort();
+    if (graphLeaks.length > 0) {
+      console.error(
+        "[build] \u2717 server-only file(s) are IN the browser bundle:",
+      );
+      for (const f of graphLeaks) console.error(`         ${f}`);
+      console.error(
+        "       A *.server.* module is server-only BY CONVENTION — the dev " +
+          "server refuses to serve one, and anything it holds (keys, tokens, " +
+          "queries, internal hosts) is readable by anyone who opens " +
+          "dist/app.js.\n" +
+          "       This is the RESOLVED graph, so it catches what a specifier " +
+          "check cannot: a .server.tsx twin, an import-map alias pointing at " +
+          "a server file, and a computed import().\n" +
+          "       fix: import it dynamically from the cell method that needs " +
+          'it (`const { x } = await import("./io.server.ts")`), never ' +
+          "statically from client-reachable code — and check your import map " +
+          "for an alias that resolves to one.",
       );
       await refuseBundle(root, out);
     }
@@ -690,14 +748,14 @@ export async function runBundle(
   // default 8px body margin). WYSIDIWYSIP: one decider, and a copy failure of
   // an EXISTING stylesheet is a broken build, never an optional skip.
   await Deno.mkdir(dist, { recursive: true });
-  const styleSrc = join(appDir, "style.css");
+  const styleSrc = join(appDir, APP_STYLE);
   let hasStyle = false;
   try {
     await Deno.stat(styleSrc);
     hasStyle = true;
   } catch { /* no style.css at the app dir; legacy src/ checked below */ }
   if (hasStyle) {
-    await Deno.copyFile(styleSrc, join(dist, "style.css"));
+    await Deno.copyFile(styleSrc, join(dist, APP_STYLE));
     console.log("[build] \u2713 dist/style.css");
   } else if (appDir !== join(root, "src")) {
     // The legacy trap, made loud: a style.css at src/ that the app-dir rule
@@ -705,7 +763,7 @@ export async function runBundle(
     // prod differ from dev in the other direction. Refuse with the fix.
     let strayStyle = false;
     try {
-      await Deno.stat(join(root, "src", "style.css"));
+      await Deno.stat(join(root, "src", APP_STYLE));
       strayStyle = true;
     } catch { /* no stray stylesheet */ }
     if (strayStyle) {
@@ -721,7 +779,7 @@ export async function runBundle(
     // Deletion must ship too: an mtime walk cannot see a REMOVED file, so a
     // stale dist/style.css would keep styling prod after dev went unstyled —
     // the white-border bug in reverse. Same for icon.png below.
-    await Deno.remove(join(dist, "style.css")).catch(() => {});
+    await Deno.remove(join(dist, APP_STYLE)).catch(() => {});
   }
 
   // Copy icon.png to dist/ if it exists (same decider as style.css)
@@ -733,7 +791,7 @@ export async function runBundle(
     console.warn(`[build] \u26a0 ${misplacedIconHint(misplacedIcon, appDir)}`);
   }
   if (iconSrc) {
-    await Deno.copyFile(iconSrc, join(dist, "icon.png"));
+    await Deno.copyFile(iconSrc, join(dist, APP_ICON));
     await Deno.remove(join(dist, "icon.svg")).catch(() => {});
     console.log("[build] \u2713 dist/icon.png");
   } else {
@@ -746,7 +804,7 @@ export async function runBundle(
     // set by loadBuildConfig, but the bundle step is also driven by harnesses
     // with a hand-built config — the icon label must resolve to SOMETHING.
     const label = appTitle ?? binaryName ?? basename(appDir);
-    await Deno.writeFile(join(dist, "icon.png"), await appIconPng(label, 512));
+    await Deno.writeFile(join(dist, APP_ICON), await appIconPng(label, 512));
     await Deno.writeTextFile(join(dist, "icon.svg"), appIconSvg(label));
     console.log(`[build] \u2713 dist/icon.png (default, "${label}")`);
   }

@@ -84,6 +84,22 @@ export function createDom(
     return ctx.doc.createTextNode(String(vnode));
   }
 
+  // Not a VNode at all — an array, a promise, a plain object. The most common
+  // cause is a component returning a LIST (`return items.map(…)`), which React
+  // allows and AIR does not. It used to die eleven frames deeper on
+  // `Cannot use 'in' operator to search for 'onInput' in undefined`, naming
+  // nothing; `_tagComponentError` adds the component to this one.
+  if ((vnode as VNode).tag === undefined) {
+    throw new Error(
+      `A component returned ${
+        Array.isArray(vnode)
+          ? `an array of ${vnode.length}`
+          : `a ${typeof vnode}`
+      } where AIR expects a single node. Wrap the list in a fragment: ` +
+        `<>{items.map(…)}</> (or h(Fragment, null, ...items)).`,
+    );
+  }
+
   // Null placeholder — comment node preserving child position (AIO-107)
   if (vnode.tag === _Null) {
     const comment = ctx.doc.createComment("");

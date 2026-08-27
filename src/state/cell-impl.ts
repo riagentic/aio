@@ -590,24 +590,51 @@ function _rejectUnsafeMutation(reason: string, m: Mutation): never {
   throw new Error(msg);
 }
 
-/** Soft warn for a mutation dropped because an intermediate path key is null/undefined.
- *  Does NOT throw — preserves long-standing behavior, but surfaces the silent drop
- *  via diag bus + console.warn so app authors can find missing initialization. */
-function _warnDroppedMutation(reason: string, m: Mutation): void {
+/** A mutation could not be applied because the tree it addresses is not the
+ *  shape it was recorded against (a null/undefined parent, or an array op on
+ *  something that is not an array).
+ *
+ *  `strict` is the difference between a PREVIEW and a COMMIT. The overlay
+ *  replay is a preview — the same batch is replayed on every read, and a path
+ *  that is not there yet may well be there by the time the batch commits — so
+ *  it warns and carries on. The commit is the last word: dropping a write
+ *  there and returning normally told the caller a change had landed that never
+ *  did, which is the exact class `batcher.settled()` exists to kill (it only
+ *  ever saw errors the dispatch REJECTED, and a warn is not a rejection). At
+ *  the commit the drop throws, the reduce fails, the write-set is discarded
+ *  and the method that made the write rejects — dev, prod and every harness
+ *  alike. */
+function _warnDroppedMutation(
+  reason: string,
+  m: Mutation,
+  strict = false,
+): void {
   const detail = { reason, path: m.path, op: m.op ?? null };
-  const msg = `[aio:cell] dropped mutation — ${reason} (path=${
-    JSON.stringify(m.path)
-  })`;
+  const where = `path=${JSON.stringify(m.path)}${
+    m.op ? `, op=${String(m.op)}` : ""
+  }`;
+  const msg = `[aio:cell] dropped mutation — ${reason} (${where})`;
+  const hint = "An async-method mutation walked through a null/undefined " +
+    "parent, or addressed a non-array with an array op. Initialize the " +
+    "parent object/array in the cell's declared state, or guard the access " +
+    "in the method.";
   diagEmit({
     type: "mutation-dropped",
-    severity: "warning",
+    severity: strict ? "error" : "warning",
     source: "cell",
     message: msg,
     detail,
-    hint: "An async-method mutation walked through a null/undefined parent. " +
-      "Initialize the parent object/array, or guard the access in the method.",
+    hint,
   });
-  log.warn(msg);
+  if (!strict) {
+    log.warn(msg);
+    return;
+  }
+  throw new Error(
+    `[aio:cell] a write was REFUSED at commit — ${reason} (${where}). ` +
+      `The value never reached state, so the method that made it fails ` +
+      `instead of resolving as if it had landed. ${hint}`,
+  );
 }
 
 // ── Transactional conflict detection ───────────────────────────────────
@@ -668,6 +695,9 @@ function overlaps(path: string, set: Set<string>): boolean {
   return false;
 }
 
+/** A path segment that addresses an array slot by position. */
+const ARRAY_INDEX = /^(?:0|[1-9][0-9]*)$/;
+
 const readPath = (key: string): string[] =>
   key.length === 0 ? [] : key.split(PATH_SEP);
 
@@ -701,6 +731,35 @@ export function conflictPath(
     if (!overlaps(w, watch.reads)) continue;
     if (moved(w)) return readPath(w).join(".");
   }
+  // Re-addressed positions. An array index is a POSITION, not a name: `items.0`
+  // means "whatever is first now", and a concurrent `unshift`/`splice`/`sort`
+  // makes it name a different element. `moved(w)` cannot see that — it compares
+  // the value AT the path, and `items.0.done` was `false` before the insert and
+  // is `false` after, because it is a different element's `false`. Measured:
+  // `s.items[0].done = true` marked the WRONG element under `transaction: true`
+  // and under `{ serialize: true }` alike, and the caller was told `ok`. What
+  // moved is the element the index resolves to, so that is what gets compared.
+  //
+  // Only arrays, and only positions the method actually traversed: an object
+  // KEY is a stable name (`s.user.name` still means the same field however
+  // `user` changed), so container traversal by key stays a blind write —
+  // last-writer-wins by intent, exactly as documented.
+  for (const w of watch.writes) {
+    const seg = readPath(w);
+    for (let i = 1; i < seg.length; i++) {
+      const idx = seg[i]!;
+      if (!ARRAY_INDEX.test(idx)) continue;
+      const parent = seg.slice(0, i);
+      if (!watch.reads.has(watchKey(parent))) continue;
+      if (!Array.isArray(getNestedValue(origin, parent))) continue;
+      const el = [...parent, idx];
+      if (
+        !Object.is(getNestedValue(origin, el), getNestedValue(live, el))
+      ) {
+        return el.join(".");
+      }
+    }
+  }
   if (!strictReads) return null;
   // Serializable: a read that fed no write still decided something. Skip only
   // EXACT write matches (loop above validated that very path) — an overlap
@@ -726,6 +785,7 @@ export function getNestedValue(obj: unknown, path: string[]): unknown {
 function deleteNestedKey(
   obj: Record<string, unknown>,
   m: Mutation,
+  strict: boolean,
 ): void {
   const path = m.path;
   if (path.length === 0) return;
@@ -735,13 +795,14 @@ function deleteNestedKey(
       _warnDroppedMutation(
         `null intermediate at path[${i - 1}] for delete`,
         m,
+        strict,
       );
       return;
     }
     current = (current as Record<string, unknown>)[path[i]!];
   }
   if (current === null || current === undefined) {
-    _warnDroppedMutation(`null parent for delete leaf`, m);
+    _warnDroppedMutation(`null parent for delete leaf`, m, strict);
     return;
   }
   delete (current as Record<string, unknown>)[path[path.length - 1]!];
@@ -821,19 +882,24 @@ export function materializeValue(v: unknown): unknown {
 function setNestedValue(
   obj: Record<string, unknown>,
   m: Mutation,
+  strict: boolean,
 ): void {
   const path = m.path;
   if (path.length === 0) return;
   let current: unknown = obj;
   for (let i = 0; i < path.length - 1; i++) {
     if (current === null || current === undefined) {
-      _warnDroppedMutation(`null intermediate at path[${i - 1}] for set`, m);
+      _warnDroppedMutation(
+        `null intermediate at path[${i - 1}] for set`,
+        m,
+        strict,
+      );
       return;
     }
     current = (current as Record<string, unknown>)[path[i]!];
   }
   if (current === null || current === undefined) {
-    _warnDroppedMutation(`null parent for set leaf`, m);
+    _warnDroppedMutation(`null parent for set leaf`, m, strict);
     return;
   }
   (current as Record<string, unknown>)[path[path.length - 1]!] = ownedValue(
@@ -844,10 +910,15 @@ function setNestedValue(
 function applyArrayOp(
   obj: Record<string, unknown>,
   m: Mutation,
+  strict: boolean,
 ): void {
   const arr = m.path.length === 0 ? obj : getNestedValue(obj, m.path);
   if (!Array.isArray(arr)) {
-    _warnDroppedMutation(`target at path is not an array (op=${m.op})`, m);
+    _warnDroppedMutation(
+      `target at path is not an array (op=${m.op})`,
+      m,
+      strict,
+    );
     return;
   }
   // Args cloned for the same reason as set values: a pushed object enters the
@@ -863,6 +934,10 @@ function applyArrayOp(
 export function applyMutations(
   s: Record<string, unknown>,
   mutations: Mutation[],
+  /** `true` at the COMMIT (the `__set` reduce), where a write that cannot be
+   *  applied must FAIL the method rather than be warned about and skipped.
+   *  Left `false` for the read-your-writes overlay, which is a preview. */
+  strict = false,
 ): void {
   if (!Array.isArray(mutations)) {
     _rejectUnsafeMutation(
@@ -884,7 +959,7 @@ export function applyMutations(
       );
     }
     if (m.op === "delete") {
-      deleteNestedKey(s, m);
+      deleteNestedKey(s, m, strict);
     } else if (m.op !== undefined) {
       if (typeof m.op !== "string" || !ARRAY_MUTATORS.has(m.op)) {
         _rejectUnsafeMutation(
@@ -894,9 +969,9 @@ export function applyMutations(
           m,
         );
       }
-      applyArrayOp(s, m);
+      applyArrayOp(s, m, strict);
     } else {
-      setNestedValue(s, m);
+      setNestedValue(s, m, strict);
     }
   }
 }
@@ -1533,10 +1608,19 @@ export function createLiveProxy<S extends Record<string, unknown>>(
       // cached one predates an overwrite of this path — a fresh fetch is a
       // NEW capture).
       if (value !== null && typeof value === "object") {
-        return nestedProxy(
-          [...path, key],
-          path.length === 0 ? key : pathKey + PATH_SEP + key,
-        );
+        const childKey = path.length === 0 ? key : pathKey + PATH_SEP + key;
+        // Traversing INTO a container is a read of that container, and it was
+        // not recorded — this branch returned before `noteRead` ever ran. So
+        // `s.items[0].done = true` recorded a write at `items.0.done` and no
+        // read at all: `conflictPath` only validates writes that overlap a
+        // read, so there was nothing to check, and `strictReads` validated an
+        // EMPTY read set. Measured against a concurrent `unshift`: the wrong
+        // element was marked done under `transaction: true` AND under
+        // `{ serialize: true }`, and the caller was told `ok`. Which element
+        // `items[0]` names is a fact this method depends on; depending on it
+        // is a read.
+        noteRead?.(childKey);
+        return nestedProxy([...path, key], childKey);
       }
 
       // AIO-4.3: any other function value on a non-array is a usage we

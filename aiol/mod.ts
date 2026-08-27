@@ -247,9 +247,75 @@ export async function lint(projectDir: string): Promise<Report> {
   return report;
 }
 
+/** Every flag aiol accepts. One list, so `--help` and the refusal below can
+ *  never disagree about what exists. */
+const FLAGS = [
+  "--safe-fix",
+  "--no-hints",
+  "--quiet-hints",
+  "--json",
+  "--no-color",
+  "--help",
+  "-h",
+  "--version",
+  "-v",
+] as const;
+
+/** The accepted flag closest to `given`, or null. Levenshtein ≤ 3 over a
+ *  ten-word vocabulary — cheap, and it catches the real misses (`--safefix`,
+ *  `--safe_fix`, `--fix`). */
+export function nearestFlag(given: string): string | null {
+  const dist = (a: string, b: string): number => {
+    let prev = [...Array(b.length + 1).keys()];
+    for (let i = 1; i <= a.length; i++) {
+      const cur = [i];
+      for (let j = 1; j <= b.length; j++) {
+        cur[j] = Math.min(
+          prev[j]! + 1,
+          cur[j - 1]! + 1,
+          prev[j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1),
+        );
+      }
+      prev = cur;
+    }
+    return prev[b.length]!;
+  };
+  let best: string | null = null;
+  let bestD = 4;
+  for (const f of FLAGS) {
+    const d = dist(given, f);
+    if (d < bestD) {
+      bestD = d;
+      best = f;
+    }
+  }
+  return best;
+}
+
 if (import.meta.main) {
   const args = Deno.args.filter((a) => !a.startsWith("-"));
   const flags = new Set(Deno.args.filter((a) => a.startsWith("-")));
+
+  // An unknown flag is a REFUSAL, not a no-op. `aiol . --safefix` used to lint,
+  // fix nothing, and exit 0 — the caller reads "clean" and ships. Every other
+  // surface in this project refuses an unknown key with a did-you-mean; the
+  // linter that enforces that must not be the exception.
+  const unknown = [...flags].filter((f) =>
+    !(FLAGS as readonly string[]).includes(f)
+  );
+  if (unknown.length > 0) {
+    for (const f of unknown) {
+      const near = nearestFlag(f);
+      console.error(
+        `aiol: unknown flag ${f}${near ? ` — did you mean ${near}?` : ""}`,
+      );
+    }
+    console.error(
+      `Known flags: ${FLAGS.join(" ")}   (--help for what they do)`,
+    );
+    Deno.exit(2);
+  }
+
   const json = flags.has("--json");
   const safeFix = flags.has("--safe-fix");
   const hideHints = flags.has("--no-hints") || flags.has("--quiet-hints");
@@ -265,7 +331,11 @@ Flags:
                  code is unaffected — only errors fail)
   --json         Output as JSON (always includes hints)
   --no-color     Disable color output
-  --help         Show this help
+  --version, -v  Print the version
+  --help, -h     Show this help
+
+An unknown flag is refused (exit 2) with the flag it probably meant — a flag
+that silently does nothing is worse than one that fails.
 
 Scans an aio project directory and reports:
   ✗ errors   — will break at runtime

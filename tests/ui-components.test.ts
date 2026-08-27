@@ -258,14 +258,13 @@ Deno.test("ui: Modal Escape-to-close listens on the render document", async () =
   await ui.settle();
   // The Escape listener attaches to AIR's render document — dispatch
   // a real keydown there. If this env can't build a KeyboardEvent, skip cleanly.
-  try {
-    win.document.dispatchEvent(
-      new win.KeyboardEvent("keydown", { key: "Escape" }),
-    );
-    assertEquals(closes, 1);
-  } catch {
-    // KeyboardEvent unsupported in this DOM shim — render/backdrop paths cover it.
-  }
+  // The assertion used to sit inside a `try` with an empty `catch`, so the
+  // test passed whether Escape closed the modal, failed to, or never fired at
+  // all. Build the event first — THAT is the part allowed to be unsupported —
+  // and let the assertion stand on its own.
+  const esc = new win.KeyboardEvent("keydown", { key: "Escape" });
+  win.document.dispatchEvent(esc);
+  assertEquals(closes, 1, "Escape on the render document must close the modal");
   await ui.dispose();
 });
 

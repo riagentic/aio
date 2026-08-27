@@ -257,12 +257,14 @@ describe("getLowWater", () => {
 
 describe("SYNC_DEFAULTS", () => {
   it("pins the documented default values (no extra keys)", () => {
+    // Exact, both ways: an extra key here is a setting that looks
+    // configurable and is read by nobody — `compactIntervalMs` and
+    // `syncRetryMs` sat here for months doing exactly that (nothing has ever
+    // compacted on a timer, and the catch-up retry lives at its call site).
     assertEquals(SYNC_DEFAULTS, {
       maxDrift: 60_000,
       pendingCap: 500,
       compactOps: 1000,
-      compactIntervalMs: 3_600_000,
-      syncRetryMs: 10_000,
       defaultRetention: "4h",
     });
   });
@@ -272,8 +274,6 @@ describe("SYNC_DEFAULTS", () => {
       SYNC_DEFAULTS.maxDrift,
       SYNC_DEFAULTS.pendingCap,
       SYNC_DEFAULTS.compactOps,
-      SYNC_DEFAULTS.compactIntervalMs,
-      SYNC_DEFAULTS.syncRetryMs,
     ];
     for (const n of numeric) {
       assert(

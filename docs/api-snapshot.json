@@ -17,11 +17,11 @@
         },
         "AioError": {
           "kind": "class",
-          "sig": "1a356505261c707e"
+          "sig": "da235437e1afa2c7"
         },
         "AioErrorCode": {
           "kind": "typeAlias",
-          "sig": "c95752f69332c9bd"
+          "sig": "584ac2baf0a131a8"
         },
         "AioMeta": {
           "kind": "typeAlias",
@@ -97,7 +97,7 @@
         },
         "CellsConfig": {
           "kind": "typeAlias",
-          "sig": "c962b186362fb93b"
+          "sig": "bf68a2db15d87813"
         },
         "CellStatus": {
           "kind": "typeAlias",
@@ -145,7 +145,7 @@
         },
         "DBOpts": {
           "kind": "typeAlias",
-          "sig": "cc0d8a775b0827b2"
+          "sig": "ea81cfaacd4e393a"
         },
         "degraded": {
           "kind": "function",
@@ -401,7 +401,7 @@
         },
         "TestContext": {
           "kind": "typeAlias",
-          "sig": "97103b78d6a41cd0"
+          "sig": "eb39657f5b093bea"
         },
         "text": {
           "kind": "function",
@@ -441,7 +441,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "cf9a9cdd3bff266a"
+          "sig": "cde3e50b4cec203f"
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -466,6 +466,10 @@
         "lint": {
           "kind": "function",
           "sig": "f0e5fcec1b5e0548"
+        },
+        "nearestFlag": {
+          "kind": "function",
+          "sig": "94ef82c1f38d312b"
         },
         "printReport": {
           "kind": "function",
@@ -1035,11 +1039,11 @@
         },
         "shipApp": {
           "kind": "function",
-          "sig": "4ed030a7714e19e9"
+          "sig": "c0e14937d57d0be0"
         },
         "ShipManifest": {
           "kind": "typeAlias",
-          "sig": "9cdb74799c421f12"
+          "sig": "be405ff60ef870c7"
         },
         "v8FlagsArg": {
           "kind": "function",
@@ -1067,11 +1071,15 @@
         },
         "placedName": {
           "kind": "function",
-          "sig": "75beaaee0849569a"
+          "sig": "ba792e25d92639bb"
         },
         "ResolvedTarget": {
           "kind": "interface",
           "sig": "f6dbbad07731f24d"
+        },
+        "suffixedTargets": {
+          "kind": "function",
+          "sig": "df577d68ffd8d447"
         },
         "TargetOverride": {
           "kind": "interface",
@@ -1099,7 +1107,7 @@
         },
         "DBOpts": {
           "kind": "typeAlias",
-          "sig": "cc0d8a775b0827b2"
+          "sig": "ea81cfaacd4e393a"
         },
         "DEFAULT_PRAGMAS": {
           "kind": "variable",
@@ -1209,7 +1217,7 @@
         },
         "deepFreeze": {
           "kind": "function",
-          "sig": "0b485dfebfbb2ebb"
+          "sig": "2dfd71336a67dbe7"
         },
         "DiagEvent": {
           "kind": "typeAlias",
@@ -1245,7 +1253,7 @@
         },
         "LockData": {
           "kind": "typeAlias",
-          "sig": "7d41927980887038"
+          "sig": "cbc1bbc86b1d1967"
         },
         "markAsync": {
           "kind": "function",
@@ -1282,6 +1290,14 @@
         "SingletonMode": {
           "kind": "typeAlias",
           "sig": "b3159f1c4b221ecf"
+        },
+        "teachableError": {
+          "kind": "function",
+          "sig": "02250b529e77d1cd"
+        },
+        "teachMessage": {
+          "kind": "function",
+          "sig": "c66a25d54ba9f7c3"
         },
         "VitalAlert": {
           "kind": "typeAlias",
@@ -1333,7 +1349,7 @@
         },
         "ReportSources": {
           "kind": "typeAlias",
-          "sig": "ba88a17d0b094bc3"
+          "sig": "878f7c73ffb8584c"
         },
         "SubmittedReport": {
           "kind": "typeAlias",
@@ -1421,7 +1437,7 @@
         },
         "DBOpts": {
           "kind": "typeAlias",
-          "sig": "cc0d8a775b0827b2"
+          "sig": "ea81cfaacd4e393a"
         },
         "DEFAULT_PRAGMAS": {
           "kind": "variable",
@@ -1503,6 +1519,10 @@
     },
     "./ship": {
       "symbols": {
+        "artifactFormat": {
+          "kind": "function",
+          "sig": "73cc385d8009527f"
+        },
         "buildShipManifest": {
           "kind": "function",
           "sig": "7747ea6601590c9e"
@@ -1515,6 +1535,14 @@
           "kind": "typeAlias",
           "sig": "ea78670033e797b3"
         },
+        "declaredTargetKinds": {
+          "kind": "function",
+          "sig": "be50916f7114f3d8"
+        },
+        "defaultKeyPath": {
+          "kind": "function",
+          "sig": "e593f6f74266a6e3"
+        },
         "generateSigningKey": {
           "kind": "function",
           "sig": "3fa468fe7e07a2c0"
@@ -1523,9 +1551,49 @@
           "kind": "function",
           "sig": "764b5503991ec79e"
         },
+        "gitWorkTreeOf": {
+          "kind": "function",
+          "sig": "7e2d149ed2d023b5"
+        },
+        "isUpdateTarget": {
+          "kind": "function",
+          "sig": "f3c2390e51853854"
+        },
+        "keyFingerprint": {
+          "kind": "function",
+          "sig": "c775b97a194371de"
+        },
         "manifestCore": {
           "kind": "function",
           "sig": "d792e46fb22db38d"
+        },
+        "manifestFileName": {
+          "kind": "function",
+          "sig": "f5f57ba72f68c836"
+        },
+        "notRunnableExit": {
+          "kind": "function",
+          "sig": "4205e9e778291489"
+        },
+        "parseDataContract": {
+          "kind": "function",
+          "sig": "a8c8da4c41fd4e52"
+        },
+        "parseSigningKey": {
+          "kind": "function",
+          "sig": "2693bcbe171c5cf7"
+        },
+        "publishInstructions": {
+          "kind": "function",
+          "sig": "fee3f1faae5d8905"
+        },
+        "SAFE_TOKEN": {
+          "kind": "variable",
+          "sig": "31106cff66da787c"
+        },
+        "safeTokenReason": {
+          "kind": "function",
+          "sig": "2305641ef1a4f638"
         },
         "sha256Hex": {
           "kind": "function",
@@ -1533,19 +1601,23 @@
         },
         "shipApp": {
           "kind": "function",
-          "sig": "4ed030a7714e19e9"
+          "sig": "c0e14937d57d0be0"
         },
         "ShipExpectations": {
           "kind": "typeAlias",
-          "sig": "5a106b7dce39e96a"
+          "sig": "b238db4c192a77b7"
         },
         "ShipManifest": {
           "kind": "typeAlias",
-          "sig": "9cdb74799c421f12"
+          "sig": "be405ff60ef870c7"
+        },
+        "UPDATE_TARGETS": {
+          "kind": "variable",
+          "sig": "078e0f91383eabb4"
         },
         "UpdateTarget": {
           "kind": "typeAlias",
-          "sig": "1fb6ec6de1e2aa04"
+          "sig": "c30e8a3809a5b7e8"
         },
         "verifyManifestClaims": {
           "kind": "function",
@@ -1609,7 +1681,7 @@
         },
         "SYNC_DEFAULTS": {
           "kind": "variable",
-          "sig": "6feac054ea43abc7"
+          "sig": "23ec67cd7bcc923a"
         },
         "SyncConfig": {
           "kind": "interface",
@@ -1639,6 +1711,10 @@
           "kind": "typeAlias",
           "sig": "c373a4f479975d72"
         },
+        "ApplyOptions": {
+          "kind": "typeAlias",
+          "sig": "3108dfbc5a0a53ca"
+        },
         "bootCells": {
           "kind": "function",
           "sig": "b1dd0d475b7f35e6"
@@ -1659,6 +1735,14 @@
           "kind": "typeAlias",
           "sig": "1023dc9f0cb35c9d"
         },
+        "CheckOptions": {
+          "kind": "typeAlias",
+          "sig": "b5b29e156f56ab69"
+        },
+        "CheckResult": {
+          "kind": "typeAlias",
+          "sig": "1685eee8b23cc6e1"
+        },
         "createCassette": {
           "kind": "function",
           "sig": "c28816d34136e846"
@@ -1678,6 +1762,10 @@
         "generateUITypes": {
           "kind": "function",
           "sig": "8bc0a08a33112cf8"
+        },
+        "installUpdatesRuntime": {
+          "kind": "function",
+          "sig": "bd1dddbca8b72ee1"
         },
         "openCassette": {
           "kind": "function",
@@ -1721,7 +1809,7 @@
         },
         "TestClient": {
           "kind": "interface",
-          "sig": "168ff83b0c7996af"
+          "sig": "1a1aef24088e89e2"
         },
         "testComponent": {
           "kind": "function",
@@ -1737,7 +1825,7 @@
         },
         "TestContext": {
           "kind": "typeAlias",
-          "sig": "97103b78d6a41cd0"
+          "sig": "eb39657f5b093bea"
         },
         "testgen": {
           "kind": "variable",
@@ -1749,7 +1837,7 @@
         },
         "testMultiClient": {
           "kind": "function",
-          "sig": "a149f2ffc2c55402"
+          "sig": "22477d164778c49c"
         },
         "TestMultiClient": {
           "kind": "interface",
@@ -1757,11 +1845,15 @@
         },
         "testServer": {
           "kind": "function",
-          "sig": "52ea2a0e7aa93003"
+          "sig": "8643b1d428d565c0"
         },
         "TestServer": {
           "kind": "interface",
           "sig": "5f3bf9056626145f"
+        },
+        "TestServerConfig": {
+          "kind": "typeAlias",
+          "sig": "c5298acbb5b2c9f4"
         },
         "testUI": {
           "kind": "function",
@@ -1775,6 +1867,10 @@
           "kind": "interface",
           "sig": "d3d86c5801ecaf39"
         },
+        "TestWorkerMode": {
+          "kind": "typeAlias",
+          "sig": "fb0261171940c183"
+        },
         "totpCode": {
           "kind": "function",
           "sig": "83ffe83084ff0003"
@@ -1786,6 +1882,10 @@
         "UIElementHandle": {
           "kind": "interface",
           "sig": "3294c0d14c1d294e"
+        },
+        "UpdatesRuntime": {
+          "kind": "typeAlias",
+          "sig": "45f9a9a0567f099d"
         }
       }
     },
@@ -1955,17 +2055,33 @@
     },
     "./updates": {
       "symbols": {
+        "ApplyOptions": {
+          "kind": "typeAlias",
+          "sig": "3108dfbc5a0a53ca"
+        },
         "AvailableUpdate": {
           "kind": "typeAlias",
-          "sig": "dc316007c4c74e84"
+          "sig": "50e2578e4322a47a"
         },
         "BlockedUpdate": {
           "kind": "typeAlias",
           "sig": "00223f278dc486fc"
         },
+        "CheckOptions": {
+          "kind": "typeAlias",
+          "sig": "b5b29e156f56ab69"
+        },
+        "CheckResult": {
+          "kind": "typeAlias",
+          "sig": "1685eee8b23cc6e1"
+        },
         "CompatVerdict": {
           "kind": "typeAlias",
           "sig": "2d2d636640102202"
+        },
+        "installUpdatesRuntime": {
+          "kind": "function",
+          "sig": "bd1dddbca8b72ee1"
         },
         "updates": {
           "kind": "variable",
@@ -1973,11 +2089,11 @@
         },
         "UpdatesCell": {
           "kind": "typeAlias",
-          "sig": "8203a45b6833b44d"
+          "sig": "2b9ab8c25b01e810"
         },
         "UpdatesConfig": {
           "kind": "typeAlias",
-          "sig": "ca4015692480d9be"
+          "sig": "96dd65c94b6135f7"
         },
         "UpdatesInput": {
           "kind": "typeAlias",
@@ -1987,9 +2103,13 @@
           "kind": "typeAlias",
           "sig": "b15231178a63080d"
         },
+        "UpdatesRuntime": {
+          "kind": "typeAlias",
+          "sig": "45f9a9a0567f099d"
+        },
         "UpdatesState": {
           "kind": "typeAlias",
-          "sig": "79684d9329b99b6c"
+          "sig": "a7bff6d58f3d90e9"
         },
         "UpdateStatus": {
           "kind": "typeAlias",

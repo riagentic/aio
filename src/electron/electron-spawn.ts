@@ -1,6 +1,6 @@
 // Electron binary resolution and process spawning
 
-import { join } from "@std/path";
+import { dirname, join } from "@std/path";
 import type { AioMeta, Log, ShellConfig } from "./electron-shared.ts";
 import { electronMainScript } from "./electron-scripts.ts";
 import { electronClientScript } from "./electron-client-script.ts";
@@ -15,15 +15,35 @@ import {
   ensureElectronRuntime,
 } from "./electron-runtime-fetch.ts";
 
-// OS-aware packaged Electron binary path
-function distBinPath(): string {
-  switch (Deno.build.os) {
-    case "darwin":
-      return "dist/mac/aio-ui-electron.app/Contents/MacOS/aio-ui-electron";
-    case "windows":
-      return "dist/win-unpacked/aio-ui-electron.exe";
-    default:
-      return "dist/linux-unpacked/aio-ui-electron";
+/** The runtime a SHIPPED package carries beside its executable.
+ *
+ *  `build-electron.ts` puts the whole Electron dist in `./electron/` next to
+ *  the binary, and the Linux AppRun / `run.bat` / `run.sh` launchers export
+ *  `$ELECTRON_PATH` at it. Nothing looked for it directly — so the Windows
+ *  README's own instruction ("double-click myapp.exe") skipped the launcher,
+ *  found no candidate, and fell through to a ~100 MB download of the runtime
+ *  that was sitting in the same folder. Offline it printed "Electron is not
+ *  available on this machine", with Electron right there.
+ *
+ *  Resolved against the EXECUTABLE, never the cwd: a packaged app is started
+ *  from wherever its user happens to be. (In dev `Deno.execPath()` is `deno`
+ *  itself, so this simply never matches — one candidate that stats and fails,
+ *  before the node_modules rung that dev actually uses.)
+ *
+ *  This replaces three hardcoded `dist/{mac,win-unpacked,linux-unpacked}/…`
+ *  paths — the electron-builder layout, which this repo has not produced for a
+ *  long time. They stat'd relative to the CWD and could never match anything
+ *  aio builds. */
+export function packagedElectronCandidates(
+  execPath?: string,
+  os: string = Deno.build.os,
+): string[] {
+  try {
+    return [
+      electronBinIn(join(dirname(execPath ?? Deno.execPath()), "electron"), os),
+    ];
+  } catch {
+    return [];
   }
 }
 
@@ -35,6 +55,9 @@ export type FindElectronOpts = {
   distDir?: string;
   /** Running as a compiled binary — `Deno.execPath()` is the app, not deno. */
   compiled?: boolean;
+  /** The executable to resolve the shipped-runtime candidate against.
+   *  Injected in tests; defaults to `Deno.execPath()`. */
+  execPath?: string;
   /** The fetch-into-cache step (`ensureElectronRuntime`). */
   fetchRuntime?: (
     version: string,
@@ -71,12 +94,12 @@ export async function findElectronBin(
     }
   }
 
-  // 2. Packaged binary (electron-builder output)
-  const distBin = distBinPath();
-  try {
-    await Deno.stat(distBin);
-    return distBin;
-  } catch { /* no packaged binary */ }
+  // 2. The runtime this package SHIPS, beside the executable.
+  for (const cand of packagedElectronCandidates(opts.execPath)) {
+    try {
+      if ((await Deno.stat(cand)).isFile) return cand;
+    } catch { /* not this layout */ }
+  }
 
   // 3. node_modules dev binary
   const electronBin = Deno.build.os === "windows"
@@ -496,6 +519,22 @@ export async function launchElectron(
       cdpPort ? `, cdp 127.0.0.1:${cdpPort}` : ""
     })`,
   );
+  // `childWindows` is served by the UDS shell's PRELOAD (`__aioIPC.openWindow`,
+  // and the `<webview>` gate that rides with it). The WebSocket shell — taken
+  // whenever the app has a TCP port (`--expose`, `--port=N`, `transport:
+  // "ws"`) — has no preload, so `__aioIPC` is simply not there and the app's
+  // own `openWindow` call dies in the renderer as `undefined is not an
+  // object`, a long way from the config that caused it. Say it here, where the
+  // decision is actually made.
+  if (!uds && meta?.childWindows) {
+    log.error(
+      "childWindows: true, but this window is on the WebSocket transport " +
+        "(this app has a TCP port), where the IPC preload that provides " +
+        "`__aioIPC.openWindow` is not installed — openWindow and <webview> " +
+        "will not work. Drop --expose/--port so the local window uses its " +
+        'own socket, or set transport: "uds".',
+    );
+  }
   // Mechanical passthrough — `socketPath` is positional, everything else the
   // caller declared rides across untouched. Never re-list the keys here.
   const { socketPath: _sock, ...udsOpts } = uds ?? { socketPath: "" };

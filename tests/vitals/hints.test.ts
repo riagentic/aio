@@ -1,9 +1,5 @@
 import { assertEquals, assertExists } from "@std/assert";
-import {
-  classifySeverity,
-  detectCascadeOrigin,
-  evaluateHints,
-} from "../../src/vitals/hints.ts";
+import { classifySeverity, evaluateHints } from "../../src/vitals/hints.ts";
 import type { VitalHint, VitalsSnapshot } from "../../src/vitals/types.ts";
 import { DEFAULT_THRESHOLDS } from "../../src/vitals/types.ts";
 
@@ -159,32 +155,6 @@ Deno.test("hints: all healthy returns null", () => {
 });
 
 // Cascade Detection
-Deno.test("hints: cascade origin is earliest degraded probe", () => {
-  const timelines = [
-    {
-      probe: "render" as const,
-      firstDegradedAt: 300,
-      firstWarningAt: null,
-      firstFrozenAt: null,
-      recoveredAt: null,
-    },
-    {
-      probe: "transport" as const,
-      firstDegradedAt: 200,
-      firstWarningAt: null,
-      firstFrozenAt: null,
-      recoveredAt: null,
-    },
-    {
-      probe: "loop" as const,
-      firstDegradedAt: 100,
-      firstWarningAt: null,
-      firstFrozenAt: null,
-      recoveredAt: null,
-    },
-  ];
-  assertEquals(detectCascadeOrigin(timelines), "loop");
-});
 
 // Severity Classification
 Deno.test("hints: severity — 2 probes with measurement + correlation = likely", () => {

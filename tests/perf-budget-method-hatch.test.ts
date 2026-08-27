@@ -163,3 +163,25 @@ Deno.test("perf: the violation is still LABELLED by the effect, not the method",
   );
   assertEquals(async_[0]!.context.actionType, "auth:genKeypair");
 });
+
+// …and the framework's OWN cells are exempt from the app-facing budget.
+//
+// `updates:check` is one network round-trip fired at boot. On a cold DNS it
+// takes 5.5 ms, blows the 5 ms effect budget, and a healthy hello-world's first
+// `am errors` was three red framework ERRORs advising a `perfBudget` override
+// for a method the app author never wrote. A diagnostic nobody can act on is
+// noise — and noise is how the ones that matter get ignored.
+Deno.test("perf: aio's own cells never bill the app for a budget violation", () => {
+  for (const cell of ["updates", "feedback"]) {
+    assertEquals(
+      run({ type: `${cell}:check` }, [EXEC(cell, "check")], 14),
+      [],
+      `${cell} is the framework's cell, not the app's`,
+    );
+  }
+  // The identical violation in an APP cell is still reported, in full — the
+  // exemption is by owner, not a weakened budget.
+  const app = run({ type: "notes:save" }, [EXEC("notes", "save")], 14);
+  assertEquals(app.length, 1);
+  assertEquals(app[0]!.code, "BUDGET_EFFECT");
+});

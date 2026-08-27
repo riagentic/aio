@@ -78,6 +78,10 @@ export type CellInfo = {
   /** Removed 1.x config keys this cell still uses (see src/state/removals.ts). */
   removedKeys: string[];
   hasSelectors: boolean;
+  /** `version: N` — what makes this cell visible to the update data gate. */
+  hasVersion: boolean;
+  /** `persist: false` — this cell keeps nothing on disk. */
+  persistFalse: boolean;
   /** `worker: true` — this cell's methods run on their own thread. */
   isWorker: boolean;
   stateKeys: string[];
@@ -92,6 +96,16 @@ export type LintContext = {
   denoJson: DenoJsonConfig | null;
   denoJsonPath: string | null;
   sourceFiles: SourceFile[];
+  /** Every `.css` under src/ and at the project root. `styleCss` is THE app
+   *  stylesheet; this is the whole set, so a multi-sheet app is not
+   *  half-checked. */
+  cssFiles: SourceFile[];
+  /** Files the scan refused to read (too large, unreadable) — carried out to a
+   *  finding, never swallowed: a linter that reads nothing is indistinguishable
+   *  from a clean project. */
+  skipped: { path: string; reason: string }[];
+  /** Top-level directories that hold `.ts`/`.tsx` outside the scanned roots. */
+  unscannedDirs: string[];
   /** False for a project that does not CONSUME aio (the framework repo itself,
    *  a tool, a library). App-shaped rules must not fire there — see
    *  `looksLikeApp`. */

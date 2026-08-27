@@ -22,6 +22,15 @@
   },
   "tasks": {
     "dev": "deno run -A src/app.ts --client=browser",
-    "compile": "deno run -A ../../../src/build.ts --compile"
+    "build": "deno run -A ../../../src/build-all.ts --build-spec=../../../src/build.ts",
+    "compile": "deno run -A ../../../src/build-all.ts --build-spec=../../../src/build.ts --targets=browser",
+    "check": "deno check src/",
+    "lint": "deno run -A ../../../aiol/mod.ts",
+    "am": "deno run -A ../../../src/am.ts"
+  },
+  "build": {
+    "targets": [
+      "browser"
+    ]
   }
 }

@@ -6,6 +6,7 @@ import { randomUuid } from "../rand.ts";
 import type { HLC, SyncOp } from "./types.ts";
 import type { OpBufferStorage } from "./op-buffer.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { degraded } from "../diagnostics/degraded.ts";
 
 type CellDoc = {
   ops: SyncOp[];
@@ -81,10 +82,40 @@ export function createLocalStorageOpStorage(
       return { ops: [] };
     }
   };
+  // A refused `setItem` is NOT a retryable blip, and it does not "degrade to
+  // memory-only" either: `read` goes back to localStorage on every call, so
+  // there is no in-memory copy to fall back on. Quota exhausted, or storage
+  // disabled (private mode, a blocked third-party context), means every unsent
+  // change in this cell is gone at the next reload — while `saveOp` resolves
+  // and the engine goes on believing the op is queued. That is the one failure
+  // the offline queue exists to prevent, and it was swallowed by a bare catch.
+  //
+  // Said ONCE per cell at error level (it is data loss, not a hiccup — and
+  // repeating it on every keystroke is what made the original invisible), and
+  // routed through `degraded` so a queue that has stopped persisting shows up
+  // in health output rather than only in one console line.
+  const storeHealth = degraded("sync:offline-queue");
+  const writeFailed = new Set<string>();
   const write = (cell: string, doc: CellDoc): void => {
     try {
       localStorage.setItem(key(cell), JSON.stringify(doc));
-    } catch { /* quota/private mode — degrade to memory-only semantics */ }
+      writeFailed.delete(cell);
+      storeHealth.ok();
+    } catch (e) {
+      storeHealth.fail(e);
+      if (writeFailed.has(cell)) return;
+      writeFailed.add(cell);
+      log.error(
+        "sync",
+        `the offline queue for "${cell}" could not be written to ` +
+          `localStorage (${e}) — unsent changes in this cell will NOT survive ` +
+          `a reload, and the sync engine is not told. Usual causes: the ` +
+          `origin's storage quota is full (clear it, or reduce what the app ` +
+          `keeps there) or storage is disabled for this context (private ` +
+          `mode, a blocked third-party frame). Reported once per cell until ` +
+          `a write succeeds again.`,
+      );
+    }
   };
 
   return {

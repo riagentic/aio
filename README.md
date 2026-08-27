@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <code>v1.0.0-alpha68</code> · <a href="LICENSE">MIT</a> ·
+  <code>v1.0.0-alpha69</code> · <a href="LICENSE">MIT</a> ·
   <a href="docs/content.md">Docs</a> ·
   <a href="docs/basics/quickstart.md">Quickstart</a> ·
   <a href="CHANGELOG.md">Changelog</a>

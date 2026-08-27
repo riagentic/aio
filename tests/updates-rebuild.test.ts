@@ -95,6 +95,51 @@ Deno.test("git rebuild: clones the ref, builds it, and reports the artifact + co
   }
 });
 
+Deno.test("git rebuild: an unreadable data contract is NAMED, not swallowed", async () => {
+  // It was swallowed. The gate then reported "not declared", whose standard
+  // advice is "re-publish with `aio ship`" — nonsense for a repository, where
+  // the answer comes from the binary that was just built. The commonest cause
+  // is the app printing something (a banner, a warning) on stdout before aio
+  // boots, and nothing said so.
+  const src = await repo({ contract: "Starting up...\\n{ oops" });
+  const work = await Deno.makeTempDir({ prefix: "aio-git-work-" });
+  const lines: string[] = [];
+  const log = {
+    info: () => {},
+    warn: (...a: unknown[]) => lines.push(a.map(String).join(" ")),
+    error: () => {},
+    debug: () => {},
+  } as unknown as Log;
+  try {
+    const r = await rebuildFromGit({
+      source: src,
+      ref: "main",
+      workDir: work,
+      log,
+    });
+    assert(r.ok, r.ok ? "" : r.error);
+    if (!r.ok) return;
+    // The build still produced an artifact — the CONTRACT is what is unknown.
+    assertEquals(r.contract, undefined);
+    assert(r.contractError, "the reason is carried, not dropped");
+    assertStringIncludes(r.contractError!, "--aio-data-contract");
+    assertStringIncludes(r.contractError!, "not JSON");
+    // …and the advice fits a repository, not a published release.
+    assert(
+      !/aio ship/.test(r.contractError!),
+      `advice for a git source must not be "re-publish": ${r.contractError}`,
+    );
+    assertStringIncludes(r.contractError!, src);
+    assert(
+      lines.some((l) => l.includes("not JSON")),
+      `it is said out loud: ${lines.join(" | ")}`,
+    );
+  } finally {
+    await Deno.remove(src, { recursive: true });
+    await Deno.remove(work, { recursive: true });
+  }
+});
+
 Deno.test("git rebuild: a failing build reports the app's own reason", async () => {
   const src = await repo({ buildFails: true });
   const work = await Deno.makeTempDir({ prefix: "aio-git-work-" });

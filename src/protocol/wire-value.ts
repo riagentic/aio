@@ -17,9 +17,14 @@ import { log } from "../diagnostics/logger-api.ts";
 //   Uint8Array  → {"0":1,"1":2,…}     class instance → plain object
 //   an object with toJSON → whatever toJSON felt like returning
 //
-// This module is BROWSER-SAFE by construction: no logger (the structured
-// logger pulls in @std/path for rotation, which no browser import map
-// provides — same rule diagnostics/degraded.ts follows), no Deno APIs.
+// This module is BROWSER-SAFE by construction: no Deno APIs, and its ONE
+// import is `logger-api` — the console-fallback facade, which pulls in no
+// @std/path and no file rotation (the structured logger CORE does, which is
+// the thing no browser import map provides; `diagnostics/degraded.ts` follows
+// the same rule). The header used to justify the invariant with "no logger"
+// while line 1 imported one: the invariant held, the stated reason did not,
+// and a future edit trusting that comment — "we already avoid the logger, so
+// importing logger-core is fine" — breaks the bundle with a blank screen.
 
 /** One value that changed shape on the way through JSON. */
 export interface LossyConversion {
@@ -34,7 +39,17 @@ export interface LossyConversion {
 /** Cap on reported paths and on the comparison walk, so a huge value cannot
  *  turn a diagnostic into a performance problem. */
 export const MAX_REPORTED = 8;
-const MAX_NODES = 20_000;
+export const MAX_NODES = 20_000;
+
+/** The walk's budget — and, when the walk had to stop early, the fact that it
+ *  did. `truncated` is not bookkeeping: `lossy: []` means "this value crossed
+ *  the wire EXACTLY", and a walk that gave up after `MAX_NODES` cannot know
+ *  that. Measured: a 30 000-key object with a trailing `Date` reported
+ *  `lossy: 0` — a clean bill of health for a value that arrives corrupted —
+ *  while the same `Date` placed FIRST reported `lossy: 1`. Reachable at
+ *  ~2 000 items × 10 fields, in the module whose entire purpose is "no silent
+ *  wire corruption". */
+export type LossyBudget = { n: number; truncated?: boolean };
 
 function typeName(v: unknown): string {
   if (v === null) return "null";
@@ -64,9 +79,26 @@ export function findLossy(
   round: unknown,
   path: string,
   out: LossyConversion[],
-  budget: { n: number },
+  budget: LossyBudget,
 ): void {
-  if (out.length >= MAX_REPORTED || budget.n++ > MAX_NODES) return;
+  if (out.length >= MAX_REPORTED) return;
+  if (budget.n++ > MAX_NODES) {
+    // Stopping is right; stopping SILENTLY is not. Once per walk — the cap is
+    // hit once per subtree and this must not become a per-node flood.
+    if (!budget.truncated) {
+      budget.truncated = true;
+      log.warn(
+        `[aio] this value is too large to verify: the JSON round-trip check ` +
+          `stopped after ${MAX_NODES} nodes (at ${path}). Anything beyond ` +
+          `that point was NOT compared, so "no lossy conversions" is not a ` +
+          `guarantee for this value. Cause: a value with more than ` +
+          `${MAX_NODES} nodes crossing the wire (~2 000 items x 10 fields). ` +
+          `Fix: send less per call — a page of rows, or ids the client ` +
+          `resolves — which is also what the wire wants.`,
+      );
+    }
+    return;
+  }
 
   const t = typeof orig;
   if (orig === null || t === "boolean" || t === "string") {
@@ -151,6 +183,9 @@ export interface SerializedArgs {
   dropped: boolean;
   /** Arguments that survived, but not intact. Empty when the trip was exact. */
   lossy: LossyConversion[];
+  /** True when the value was too large to walk fully — `lossy` is then a
+   *  partial finding, NOT proof that the trip was exact. */
+  truncated: boolean;
 }
 
 /** Vet a call's arguments before they go on the wire.
@@ -172,10 +207,11 @@ export function serializeArgs(
   try {
     round = JSON.parse(JSON.stringify(args));
   } catch {
-    return { args, dropped: true, lossy: [] };
+    return { args, dropped: true, lossy: [], truncated: false };
   }
   const lossy: LossyConversion[] = [];
-  findLossy(args, round, "args", lossy, { n: 0 });
+  const budget: LossyBudget = { n: 0 };
+  findLossy(args, round, "args", lossy, budget);
   if (lossy.length > 0) {
     log.warn(
       `[aio] ${what ?? "a call"} was called with arguments JSON cannot carry ` +
@@ -185,5 +221,10 @@ export function serializeArgs(
         `instances).`,
     );
   }
-  return { args: round as unknown[], dropped: false, lossy };
+  return {
+    args: round as unknown[],
+    dropped: false,
+    lossy,
+    truncated: budget.truncated === true,
+  };
 }

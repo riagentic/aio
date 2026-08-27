@@ -21,7 +21,7 @@
  * — see `crossCompileBlocker`.
  */
 import { join } from "@std/path";
-import { readDenoJson } from "../server/deno-json.ts";
+import { DENO_JSON_NAMES, readDenoJson } from "../server/deno-json.ts";
 import {
   DEFAULT_ELECTRON_VERSION,
   electronRuntimeDir,
@@ -108,4 +108,67 @@ export async function resolveElectronVersion(root = "."): Promise<string> {
     if (m) return m[1]!;
   } catch { /* no deno.json here — the default below */ }
   return DEFAULT_ELECTRON_VERSION;
+}
+
+/** THE Electron runtime this HOST has, installing it once if it has none.
+ *
+ *  Every packaging target needs the same three things and must not each grow
+ *  its own answer to them:
+ *
+ *   1. WHERE the runtime is — `electronDistDir`, which knows both node_modules
+ *      layouts. `build-client.ts` checked `node_modules/electron/dist` and
+ *      nothing else, which is the exact bug `electronDistDir`'s own doc
+ *      comment describes as fixed: the build auto-installs Electron, fails to
+ *      find what it just installed, and tells the user to run
+ *      `deno task install:electron` — which installs it to the same place the
+ *      build is still not looking. It was fixed for `--electron` and left
+ *      standing for `--client`, one function away.
+ *   2. INSTALLING it when absent, rather than refusing a first build.
+ *   3. Saying so when `deno install npm:electron` REWRITES the app's config,
+ *      because a build silently editing the file it builds from is how a pin
+ *      moves with nobody looking.
+ *
+ *  Returns the `dist` directory, or null when the runtime could not be
+ *  obtained (the caller prints its own target-flavoured refusal). */
+export async function ensureHostElectronDist(
+  root: string,
+  log: { warn: (m: string) => void; error: (m: string) => void } = console,
+): Promise<string | null> {
+  const { autoInstallElectron, electronDistDir } = await import(
+    "../electron/electron-spawn.ts"
+  );
+  const found = await electronDistDir(root);
+  if (found !== null) return found;
+
+  // BOTH config names: an app on `deno.jsonc` would otherwise never be told
+  // its config had been rewritten (`readDenoJson`'s list is the decider).
+  const before = new Map<string, string>();
+  for (const name of DENO_JSON_NAMES) {
+    const text = await Deno.readTextFile(join(root, name)).catch(() => null);
+    if (text !== null) before.set(name, text);
+  }
+  const installed = await autoInstallElectron({ error: log.error });
+  for (const [name, text] of before) {
+    const after = await Deno.readTextFile(join(root, name)).catch(() => null);
+    if (after !== null && after !== text) {
+      log.warn(
+        `[electron] \u26a0 ${join(root, name)} was MODIFIED by ` +
+          `\`deno install npm:electron\` (auto-install of the Electron ` +
+          `runtime). Review the diff and commit it deliberately — the next ` +
+          `build reads its pins from this file.`,
+      );
+    }
+  }
+  return installed ? await electronDistDir(root) : null;
+}
+
+/** The one sentence every target prints when the host has no Electron runtime
+ *  and could not get one. Names BOTH layouts, because "not found" that names
+ *  only one of them is what sent people round the install loop. */
+export function electronMissingHint(): string {
+  return "the Electron runtime is not installed and could not be installed " +
+    "automatically. Install it by hand:\n" +
+    "      deno task install:electron\n" +
+    "  (looked in node_modules/electron/dist and " +
+    "node_modules/.deno/electron@*/node_modules/electron/dist)";
 }

@@ -1,6 +1,7 @@
 // Static file serving & virtual route handler — extracted from server.ts
 // Handles all HTTP requests (non-WS): HTML pages, transpilation, __aio/* endpoints, static files
-import { UI_ENTRY } from "./app-files.ts";
+import { APP_ICON, BUNDLE_JS, UI_ENTRY } from "./app-files.ts";
+import { SERVER_FILE_RE } from "../entries.ts";
 import type { CallTimeouts } from "../protocol/protocol-types.ts";
 import { extname, join, resolve, SEPARATOR } from "@std/path";
 import { formatPrometheus } from "./server-metrics.ts";
@@ -65,7 +66,7 @@ export function isProtectedPath(pathname: string, prod = false): boolean {
   }
   const last = segments[segments.length - 1] ?? "";
   if (prod && /\.tsx?$/.test(last)) return true;
-  return /\.server\.tsx?$/.test(last);
+  return SERVER_FILE_RE.test(last);
 }
 
 /** Resolve a `/__aio/<rel>` request to a framework source file, or null.
@@ -317,7 +318,7 @@ export function createStaticHandler(deps: StaticDeps): {
       if (prod && absDistDir) {
         if (_uiBundlePresent === undefined) {
           try {
-            await Deno.stat(join(absDistDir, "app.js"));
+            await Deno.stat(join(absDistDir, BUNDLE_JS));
             _uiBundlePresent = true;
           } catch {
             _uiBundlePresent = false;
@@ -504,7 +505,7 @@ export function createStaticHandler(deps: StaticDeps): {
         // component than the running `ui.entry` is the dev≠prod divergence in
         // its purest form — the page renders, just the wrong app. Refuse, and
         // name both sides and the fix.
-        if (file === "app.js") {
+        if (file === BUNDLE_JS) {
           const stampUi =
             body.match(/globalThis\.__aioBundleUi\s*=\s*"([^"]*)"/)?.[1] ??
               UI_ENTRY;
@@ -726,7 +727,7 @@ export function createStaticHandler(deps: StaticDeps): {
   async function _warnIfStaleArtifact(file: string): Promise<void> {
     if (_staleWarned.has(file)) return;
     _staleWarned.add(file);
-    const src = file === "app.js" ? null : join(deps.absBaseDir, file);
+    const src = file === BUNDLE_JS ? null : join(deps.absBaseDir, file);
     if (!src) return; // app.js has no single source file — the bundle has many
     try {
       const [a, b] = await Promise.all([
@@ -763,7 +764,7 @@ export function createStaticHandler(deps: StaticDeps): {
       for (const dir of dirs) {
         for (
           const [file, type] of [
-            ["icon.png", "image/png"],
+            [APP_ICON, "image/png"],
             ["icon.svg", "image/svg+xml"],
           ] as const
         ) {

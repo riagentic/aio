@@ -3,7 +3,11 @@
 // emits a test skeleton that re-dispatches the flow, ready for assertions.
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
-import { defaultJournalPath, resolveAmAppId } from "./am-utils.ts";
+import {
+  defaultJournalPath,
+  overwriteRefusal,
+  resolveAmAppId,
+} from "./am-utils.ts";
 // THE sentinel, not a copy of it — one decider for "this payload was
 // redacted" across every sink (journal, timeline, am). am → diagnostics is an
 // allowed boundary edge.
@@ -137,6 +141,20 @@ export async function cmdRecord(
 ): Promise<void> {
   const mode = detectMode(flags);
   const outPath = args.find((a) => !a.startsWith("--"));
+  // A generated test is written over the file at this path. `am backup`
+  // refuses to clobber; this did it silently — and the file most likely to be
+  // sitting at `tests/foo.test.ts` is the hand-written test it replaces.
+  if (outPath) {
+    const clobber = overwriteRefusal(
+      outPath,
+      !!flags.force,
+      "a generated replay test",
+    );
+    if (clobber) {
+      outError(clobber, mode);
+      Deno.exit(1);
+    }
+  }
   const fromFlag = args.find((a) => a.startsWith("--from="));
   const journalPath = fromFlag
     ? fromFlag.slice("--from=".length)

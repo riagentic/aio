@@ -23,11 +23,25 @@
  *    is why the rule is a fraction of the machine and not simply "lots".
  *
  * WHERE IT IS APPLIED, and why it has to be more than one place: a `deno run`
- * reads `--v8-flags` / `DENO_V8_FLAGS` at launch, so a launcher can compute the
- * right number for THIS machine. A COMPILED binary cannot — measured: it
- * ignores `DENO_V8_FLAGS` entirely, and only `deno compile --v8-flags=` reaches
- * it. So a shipped artifact carries a number chosen on the BUILD machine, and
- * the runtime monitor is what keeps it honest on a smaller one.
+ * reads `--v8-flags` / `DENO_V8_FLAGS` at launch, so a launcher (`am start`,
+ * `run.sh`) computes the right number for THIS machine and the rule holds. A
+ * COMPILED binary cannot — measured: it ignores `DENO_V8_FLAGS` entirely, and
+ * only `deno compile --v8-flags=` reaches it. The ceiling in an artifact is
+ * therefore fixed at BUILD time, on a machine that is not the user's.
+ *
+ * WHICH IS WHY A BUILD NEVER BAKES THE BUILD MACHINE'S SHARE. It used to: an
+ * undeclared app got 25% of whatever built it. A binary cross-compiled on a
+ * 187 GB host booted in an 8 GB Windows VM and reported `heap 46.7 GB max of
+ * 8.0 GB RAM` — 25% of a machine the user has never seen, six times more heap
+ * than the box has RAM, so V8 would have grown past physical memory without
+ * ever deciding to collect and let the OS kill the process instead. A number
+ * that is right only on the builder's desk is not a policy, it is a leak.
+ * {@link compiledMaxHeapMB} is the build-side decider: an ABSOLUTE
+ * `memory.maxHeap` travels (someone chose it, and it means the same thing
+ * everywhere), a PERCENTAGE says loudly that it was resolved against the build
+ * host, and an app that declared nothing ships with V8's own default — the
+ * floor, identical on every machine. More than the floor on a big machine is
+ * one config line away, and {@link reportHeapCeiling} names it at boot.
  *
  * WORKERS ARE COVERED. Measured on Deno 2.9: a Worker isolate inherits the
  * flag, in `deno run` and in a compiled binary alike (4192 MB default, 16480 MB
@@ -159,7 +173,13 @@ export function overAdvisedShare(
   // asked for more than the automatic share when nobody had asked for
   // anything, and no app setting could silence it (a field report: "nothing
   // can launch this app without a heap warning").
-  if (mb <= HEAP_FLOOR_MB) return null;
+  // …and the same 10% band the share comparison below has, for the same
+  // reason: V8 hands back a little MORE than the floor it was given (4096 →
+  // 4192), and 4192 > 4096 was enough to call V8's own default "a share
+  // someone asked for". On every machine of 8 GB or less that fired on every
+  // boot of a bare `deno run` — the exact warning this branch was written to
+  // stop, defeated by 96 MB of rounding.
+  if (mb <= HEAP_FLOOR_MB * 1.1) return null;
   const share = (mb * 1024 * 1024) / totalBytes;
   // The same 10% band the under-policy branch has, for the same reason: V8
   // reports slightly more than it was asked for (46.6 GB granted → 46.7 GB
@@ -175,17 +195,101 @@ export function maxHeapFlagArgs(mb: number | null): string[] {
   return mb === null ? [] : [`--v8-flags=--max-old-space-size=${mb}`];
 }
 
-/** Human summary for a boot line or a build log. */
+/** The heap ceiling to BAKE into a compiled artifact, and what to say about it.
+ *
+ *  `deno compile --v8-flags=` is the only channel into a binary's V8 (measured:
+ *  a compiled binary ignores `DENO_V8_FLAGS`), so whatever this returns is the
+ *  ceiling on every machine the artifact ever runs on. That rules out the
+ *  automatic 25% share: it is a measurement of the BUILD host, and a build host
+ *  is not evidence about the user's laptop. Shipping it produced a binary that
+ *  told an 8 GB VM it had 46.7 GB of heap.
+ *
+ *  So:
+ *   • nothing declared → `null`, no flag, V8's own default (~4 GB — the policy
+ *     FLOOR). Identical on every machine, and never lower than today.
+ *   • an ABSOLUTE `memory.maxHeap` ("12GB", 8192) → baked as-is (floored). The
+ *     author chose a size; a size means the same thing on every machine.
+ *   • a PERCENTAGE ("25%") → resolved against the build host, with a `note`
+ *     saying exactly that. It cannot be re-resolved later, and a caller that
+ *     prints the note turns a silent leak into a build-log line.
+ *
+ *  Pure: the build host's RAM is an argument, never a read. */
+export function compiledMaxHeapMB(
+  declared: string | number | null | undefined,
+  buildHostBytes: number | null,
+): { mb: number | null; note: string | null } {
+  if (declared === undefined || declared === null || declared === "") {
+    return { mb: null, note: null };
+  }
+  const gb = (bytes: number) => `${(bytes / (1024 ** 3)).toFixed(1)} GB`;
+  if (typeof declared === "string") {
+    const s = declared.trim().toLowerCase();
+    if (s === "default") return { mb: null, note: null };
+    if (/^\d+(?:\.\d+)?\s*%$/.test(s)) {
+      if (buildHostBytes === null) {
+        return {
+          mb: null,
+          note: `memory.maxHeap is "${declared}" and this build machine will ` +
+            `not report its RAM, so there is no number to bake — the binary ` +
+            `ships with V8's default (~${
+              (HEAP_FLOOR_MB / 1024).toFixed(0)
+            } GB). Declare an absolute size ("8GB") to ship a ceiling.`,
+        };
+      }
+      const mb = Math.max(
+        HEAP_FLOOR_MB,
+        parseMaxHeap(s, buildHostBytes) ?? HEAP_FLOOR_MB,
+      );
+      return {
+        mb,
+        note: `memory.maxHeap is "${declared}" — a share of THIS BUILD ` +
+          `MACHINE (${gb(buildHostBytes)} → ${
+            (mb / 1024).toFixed(1)
+          } GB), baked in. V8 fixes its ceiling at startup and a compiled ` +
+          `binary ignores DENO_V8_FLAGS, so the binary carries that number ` +
+          `onto every machine it runs on, however small. Declare an absolute ` +
+          `size ("8GB") when the target is not this machine.`,
+      };
+    }
+  }
+  const mb = parseMaxHeap(declared, buildHostBytes);
+  return { mb: mb === null ? null : Math.max(HEAP_FLOOR_MB, mb), note: null };
+}
+
+/** Human summary for a boot line or a build log.
+ *
+ *  `mb` is the ceiling this process ACTUALLY has, `totalBytes` the RAM of the
+ *  machine reading the line — and the line has to be true on that machine. The
+ *  old one read `${gb} max of ${gb} RAM`, which states a ceiling and a machine
+ *  and implies the second granted the first. In a compiled binary it does not:
+ *  the ceiling was fixed by whoever ran the build. A 187 GB build host shipped
+ *  a binary that greeted an 8 GB Windows VM with `heap 46.7 GB max of 8.0 GB
+ *  RAM` — two true numbers arranged into a false sentence, and the one thing a
+ *  reader needed (this machine cannot reach that) was the part left out.
+ *
+ *  `fixedAtBuild` (pass `isCompiled()`) marks the ceiling as an artifact of the
+ *  build rather than of this machine — a compiled binary cannot re-resolve it,
+ *  and the reader should not go looking for the local setting that "caused" it.
+ */
 export function describeHeapPolicy(
   mb: number | null,
   totalBytes: number | null,
+  fixedAtBuild = false,
 ): string {
   if (mb === null) return "V8 default (machine memory unknown)";
   const gb = (n: number) => `${(n / 1024).toFixed(1)} GB`;
-  const of = totalBytes === null
-    ? ""
-    : ` of ${gb(totalBytes / (1024 * 1024))} RAM`;
-  return `${gb(mb)} max${of}`;
+  const where = fixedAtBuild ? " (fixed when this binary was built)" : "";
+  if (totalBytes === null) return `${gb(mb)} max${where}`;
+  const totalMB = totalBytes / (1024 * 1024);
+  // Above the machine's own RAM the ceiling is not a limit, it is a fiction:
+  // V8 will not collect before the OS runs out, so say what the reader can act
+  // on instead of a share that does not exist.
+  if (mb > totalMB) {
+    return `${gb(mb)} max — MORE than this machine's ${
+      gb(totalMB)
+    } of RAM, so unreachable here${where}`;
+  }
+  return `${gb(mb)} max of ${gb(totalMB)} RAM${where}`;
 }
 
 /** This isolate's heap ceiling in bytes, or null when `node:v8` is absent. */
@@ -230,6 +334,35 @@ export async function reportHeapCeiling(
   const want = resolveMaxHeapMB(total);
   if (limit === null || want === null) return;
   const haveMB = Math.floor(limit / (1024 * 1024));
+  const totalMB = total === null ? null : Math.floor(total / (1024 * 1024));
+  // A ceiling ABOVE the machine's own RAM is its own failure, and worse than
+  // the over-share below it: V8 decides how eagerly to collect from the ceiling
+  // it was given, so it will grow past physical memory believing it has room
+  // and the OS kills the process — an "out of memory" with no warning from the
+  // runtime that caused it. It reached a user exactly this way: a binary
+  // cross-compiled on a 187 GB host, booted in an 8 GB Windows VM, reporting
+  // 46.7 GB of heap. The floor is excluded (a 4 GB default on a 4 GB machine is
+  // nobody's decision, and warning about it is the "nothing can launch this app
+  // without a heap warning" field report all over again).
+  if (
+    totalMB !== null && haveMB > totalMB && haveMB > HEAP_FLOOR_MB * 1.1
+  ) {
+    log.warn(
+      `heap ceiling is ${(haveMB / 1024).toFixed(1)} GB — MORE than this ` +
+        `machine's ${
+          (totalMB / 1024).toFixed(1)
+        } GB of RAM. V8 fixes the ceiling when the isolate starts (a compiled ` +
+        `binary bakes it at BUILD time, on a machine that may be far larger), ` +
+        `so it cannot be lowered from here — and until it is, V8 grows the ` +
+        `heap past this machine's memory before it collects, and the OS kills ` +
+        `the process. Fix: set "memory": { "maxHeap": "${
+          Math.max(HEAP_FLOOR_MB, resolveMaxHeapMB(total) ?? HEAP_FLOOR_MB) /
+          1024
+        }GB" } in the app's deno.json and rebuild, or launch with \`am start\`, ` +
+        `which sizes the ceiling on the machine it starts.`,
+    );
+    return;
+  }
   // Granted more than the automatic share: not an error — someone asked — but
   // it is the fact that explains a frozen desktop three months from now.
   const over = overAdvisedShare(haveMB, total);
@@ -239,7 +372,8 @@ export async function reportHeapCeiling(
         (over * 100).toFixed(0)
       }% of this machine's RAM, above the ${
         (HEAP_FRACTION * 100).toFixed(0)
-      }% an app gets automatically. Deliberate (memory.maxHeap), and worth ` +
+      }% an app gets automatically. Chosen (memory.maxHeap, or baked when ` +
+        `this binary was built), and worth ` +
         `knowing: this app can now squeeze the rest of the machine. A hard total ` +
         `belongs to the OS — systemd MemoryMax=, or a container limit.`,
     );
@@ -284,7 +418,10 @@ export async function reportHeapCeiling(
       `it cannot be raised from here — an app that needs more will fail with ` +
       `"out of memory" while the machine still has room. Launch with ` +
       `\`am start\`, or add --v8-flags=--max-old-space-size=${want} to the ` +
-      `deno run. Compiled builds bake it in.` +
+      `deno run. A COMPILED binary cannot be raised at all from here — it ` +
+      `carries what the build baked, so set "memory": { "maxHeap": "${
+        (want / 1024).toFixed(0)
+      }GB" } in deno.json and rebuild.` +
       (deps.stampPath && !deps.always
         ? ` (said once per machine — --verbose repeats it)`
         : ``),

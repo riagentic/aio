@@ -1,7 +1,18 @@
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
-import { batch, computed, effect, signal } from "../src/state/signal.ts";
-import { Fragment, h } from "../src/air/vdom.ts";
+import {
+  _computedCollectEnd,
+  _computedCollectStart,
+  _computedDisposeAll,
+  batch,
+  computed,
+  type Disposable,
+  effect,
+  signal,
+} from "../src/state/signal.ts";
+import { ErrorBoundary, Fragment, h, lazy, Suspense } from "../src/air/vdom.ts";
+import { onCleanup } from "../src/air/aio-renderer.ts";
+import type { VNode } from "../src/air/vdom-types.ts";
 import {
   _setDocument,
   _unmount,
@@ -350,22 +361,84 @@ Deno.test({
       });
       return h("div", null, `${doubled.value}`);
     };
+    // The number of subscribers a per-render computed is ALLOWED to leave
+    // behind is zero, and that is the only thing this test ever meant. It used
+    // to assert call counts and innerHTML — both of which stayed green while
+    // every render permanently added a dependency link to `a`, because
+    // `computed()` registered the ComputedImpl instance for disposal while
+    // handing the caller a different (callable) object that owned the real
+    // `_unsubs`. Count the subscribers, or the leak is invisible.
+    const subs = () =>
+      (a as unknown as { _subscribers: Set<unknown> })
+        ._subscribers.size;
+    const before = subs();
     const handle = mount(root, App);
     assertEquals(computedCalls, 1);
     assertEquals(root.innerHTML, "<div>2</div>");
+    const mounted = subs();
     // Re-render: old computed should be disposed, new one created
     a.set(5);
     handle._flush();
     // Should be 2 (one from initial, one from re-render) — NOT accumulating
     assertEquals(computedCalls, 2);
     assertEquals(root.innerHTML, "<div>10</div>");
+    assertEquals(subs(), mounted, "re-render #1 added a permanent subscriber");
     // Third render
     a.set(10);
     handle._flush();
     assertEquals(computedCalls, 3);
     assertEquals(root.innerHTML, "<div>20</div>");
+    assertEquals(subs(), mounted, "re-render #2 added a permanent subscriber");
+    // …and unmount gives every one of them back.
     _unmount(handle);
+    assertEquals(subs(), before, "unmount left subscribers on the signal");
     await cleanup();
+  },
+});
+
+Deno.test({
+  name: "signal: computed dispose() unlinks the object computed() returned",
+  fn() {
+    const a = signal(1);
+    const subs = () =>
+      (a as unknown as { _subscribers: Set<unknown> })
+        ._subscribers.size;
+    const before = subs();
+    for (let i = 0; i < 5; i++) {
+      const list = _computedCollectStart();
+      const c = computed(() => a.value * 2);
+      c.value; // force the recompute that takes the subscription
+      _computedCollectEnd(list);
+      assertEquals(list.length, 1, "computed was not collected");
+      _computedDisposeAll(list);
+    }
+    // 5 rounds used to leave 5 permanent subscribers, each retaining its
+    // render closure, and every write then walked a set that only grows.
+    assertEquals(subs(), before);
+  },
+});
+
+Deno.test({
+  name: "signal: nested collect scopes are a stack, not one slot",
+  fn() {
+    const a = signal(1);
+    const outer = _computedCollectStart();
+    const cOuterBefore = computed(() => a.value);
+    const inner = _computedCollectStart();
+    const cInner = computed(() => a.value);
+    _computedCollectEnd(inner);
+    // The parent scope must still be OPEN here — with a single slot the
+    // child's End nulled it and everything the parent created afterwards was
+    // collected by nobody, so it was never disposed.
+    const cOuterAfter = computed(() => a.value);
+    _computedCollectEnd(outer);
+    assertEquals(inner.length, 1);
+    assertEquals(outer.length, 2);
+    assertEquals(outer.includes(cOuterBefore as unknown as Disposable), true);
+    assertEquals(outer.includes(cOuterAfter as unknown as Disposable), true);
+    assertEquals(inner.includes(cInner as unknown as Disposable), true);
+    _computedDisposeAll(inner);
+    _computedDisposeAll(outer);
   },
 });
 
@@ -1154,6 +1227,161 @@ Deno.test({
       "AIO-177: keyed Fragment reorder — C should be after B, not inserted between A and B",
     );
 
+    _unmount(handle);
+    await cleanup();
+  },
+});
+
+// ── Root unmount must reach FALLBACK subtrees ──────────────────────────
+//
+// `removeDom` (vdom-remove.ts) knows that an ErrorBoundary/Suspense showing its
+// fallback has its subtree in `_rendered`, not in `children`. The root
+// `_unmount` walk did not — two deciders — so a full unmount walked into an
+// empty `children` array and left the fallback mounted: `onCleanup` never
+// fired and a signal subscription SURVIVED the unmount, while the
+// conditional-removal path through `removeDom` correctly reached zero.
+// `testUI` tears down with `_unmount`, so that was cross-test pollution.
+Deno.test({
+  name: "_unmount: an ErrorBoundary FALLBACK subtree is unmounted too",
+  async fn() {
+    const { document, root, cleanup } = createDOM();
+    _setDocument(document);
+
+    const sig = signal(0);
+    let cleaned = 0;
+    function FallbackBody() {
+      void sig.value;
+      onCleanup(() => cleaned++);
+      return h("p", null, "fallback");
+    }
+    function Boom(): never {
+      throw new Error("boom");
+    }
+    const App = () =>
+      h(
+        ErrorBoundary,
+        { fallback: () => h(FallbackBody, null) },
+        h(Boom, null),
+      );
+
+    const handle = mount(root, App);
+    const subs = () =>
+      (sig as unknown as { _subscribers: Set<unknown> })._subscribers.size;
+    assertEquals(subs(), 1, "the fallback subscribed");
+
+    _unmount(handle);
+    assertEquals(cleaned, 1, "the fallback's onCleanup ran");
+    assertEquals(subs(), 0, "and no subscription outlived the unmount");
+    await cleanup();
+  },
+});
+
+// ── A lazy() that FAILS, with no ErrorBoundary above it ─────────────────
+//
+// Four defects lived on this one path: nothing was logged (a spinner forever
+// with an empty console), the re-throw reached `_rerenderRoot` from a promise
+// continuation as an UNHANDLED REJECTION, `state.vnode` was never updated so
+// every later render appended ANOTHER fallback (1, 2, 3, 4…), and the failing
+// import was retried on every render with no backoff.
+Deno.test({
+  name:
+    "lazy: a failed import is loud, retried on a backoff, and rendered once",
+  async fn() {
+    const { document, root, cleanup } = createDOM();
+    _setDocument(document);
+
+    let requests = 0;
+    const errs: string[] = [];
+    const origError = console.error;
+    console.error = (...a: unknown[]) => errs.push(a.map(String).join(" "));
+
+    try {
+      const Broken = lazy(() => {
+        requests++;
+        return Promise.reject(new Error("net down"));
+      });
+      const tick = signal(0);
+      const App = () =>
+        h(
+          "div",
+          null,
+          h(Suspense, { fallback: h("i", null, "loading") }, h(Broken, null)),
+        );
+
+      const handle = mount(root, App);
+      // The rejection must not escape as an unhandled rejection — if it did,
+      // this test file would not even finish.
+      await new Promise((r) => setTimeout(r, 20));
+      handle._flush();
+      await new Promise((r) => setTimeout(r, 20));
+
+      assertEquals(requests, 1);
+      assertEquals(
+        errs.some((e) => e.includes("[aio:lazy] dynamic import failed")),
+        true,
+        `the failure must be reported, got ${JSON.stringify(errs)}`,
+      );
+
+      for (let i = 1; i <= 5; i++) {
+        tick.set(i);
+        await new Promise((r) => setTimeout(r, 5));
+        handle._flush();
+      }
+      await new Promise((r) => setTimeout(r, 20));
+
+      assertEquals(requests, 1, "no retry storm — the backoff has not elapsed");
+      assertEquals(
+        root.querySelectorAll("i").length,
+        1,
+        "exactly one fallback, not one per render",
+      );
+
+      _unmount(handle);
+    } finally {
+      console.error = origError;
+    }
+    await cleanup();
+  },
+});
+
+// A <Suspense> aborts its child loop at the FIRST lazy that throws, so the
+// siblings after it were never rendered and never started: they loaded one
+// after another, each waiting for the previous one's re-render — N round trips
+// where the network could have done them at once. The boundary now STARTS the
+// direct-child lazies it can see.
+Deno.test({
+  name: "Suspense: sibling lazies start together, not one after another",
+  async fn() {
+    const { document, root, cleanup } = createDOM();
+    _setDocument(document);
+
+    const started: string[] = [];
+    const mk = (name: string, ms: number) =>
+      lazy(() => {
+        started.push(name);
+        return new Promise<{ default: () => VNode }>((r) =>
+          setTimeout(() => r({ default: () => h("i", null, name) }), ms)
+        );
+      });
+    const A = mk("a", 20);
+    const B = mk("b", 20);
+
+    const App = () =>
+      h(
+        Suspense,
+        { fallback: h("span", null, "…") },
+        h(A, null),
+        h(B, null),
+      );
+
+    const handle = mount(root, App);
+    // Both imports are in flight before either has resolved.
+    assertEquals(started, ["a", "b"]);
+
+    await new Promise((r) => setTimeout(r, 60));
+    handle._flush();
+    await new Promise((r) => setTimeout(r, 20));
+    assertEquals(root.textContent, "ab");
     _unmount(handle);
     await cleanup();
   },

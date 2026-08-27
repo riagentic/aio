@@ -159,6 +159,22 @@ value _derived_ from other reads) is write skew, which snapshot isolation
 permits by definition; use `{ serialize: true }` when such derived writes must
 be safe.
 
+**An array index is a position, not a name.** `s.items[0].done = true` says
+"whatever is first now", and a concurrent `unshift`/`splice`/`sort` makes it
+name a different element — so a write that reaches through an array index is
+validated against the ELEMENT that index resolved to at entry, under both
+levels. If that element moved, the call conflicts (naming `s.items.0`), because
+committing would mark a row this method never looked at. An `push` that leaves
+element 0 alone is not a conflict: identity is the comparator and structural
+sharing keeps untouched elements equal. Object keys are unaffected —
+`s.user.name` means the same field however `user` changed, so it stays a blind
+write.
+
+A write the store **cannot apply** — a path whose parent no longer exists, an
+array op on something that is no longer an array — also rejects the call, at
+every isolation level including none. The write did not land, so the method that
+made it fails rather than resolving as if it had.
+
 On conflict the whole write-set is discarded and the call **rejects** with an
 `AioError` (code `TX_CONFLICT` — match on it to retry) naming the path. Set
 `transaction: { conflict: "warn" }` to report and commit anyway; there is no

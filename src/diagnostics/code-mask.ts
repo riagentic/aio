@@ -59,22 +59,50 @@ export function codeMask(src: string): Uint8Array {
       continue;
     }
     // String / template literal — contents are not code, quotes are.
+    //
+    // The CLOSING delimiter is found FIRST, so an UNTERMINATED literal can be
+    // handled as what it almost always is: a quote character in prose. It
+    // blanks to the end of its line and no further.
+    //
+    // That bail existed for `'` and `"` (one apostrophe in `it's fine` must not
+    // swallow the next line) and NOT for `` ` ``, whose literals may legally
+    // cross lines. So one stray backtick — `press \` to search` in JSX copy —
+    // blanked the mask from there to END OF FILE, and every rule that reads
+    // masked code stopped firing for the rest of the file: silently, with no
+    // output to notice, error-severity security rules included. Same bail now,
+    // one spelling, all three delimiters; a TERMINATED template literal still
+    // spans as many lines as it likes.
     if (c === '"' || c === "'" || c === "`") {
-      i++;
-      while (i < src.length) {
-        if (src[i] === "\\") {
-          mask[i] = 0;
-          mask[i + 1] = 0;
-          i += 2;
+      let j = i + 1;
+      let close = -1;
+      for (; j < src.length; j++) {
+        if (src[j] === "\\") {
+          j++; // the escaped char is body, never a delimiter
           continue;
         }
-        if (src[i] === c) break;
-        // An unterminated single/double-quoted string can't cross a line —
-        // bail so one stray apostrophe doesn't blind the rest of the file.
-        if (c !== "`" && src[i] === "\n") break;
-        mask[i++] = 0;
+        if (src[j] === c) {
+          close = j;
+          break;
+        }
+        if (c !== "`" && src[j] === "\n") break;
       }
-      i++;
+      if (close === -1) {
+        // Unterminated. For `'` / `"` the scan already stopped at the first
+        // unescaped newline, and `j` is exactly where the old lexer stopped —
+        // so a real line continuation (`"a\<newline>b"`) still spans, byte for
+        // byte as before. A template literal has no such stop, so its bail is
+        // the first newline outright: that is the whole point.
+        const stop = c === "`"
+          ? (src.indexOf("\n", i + 1) === -1
+            ? src.length
+            : src.indexOf("\n", i + 1))
+          : j;
+        for (let k = i + 1; k < stop; k++) mask[k] = 0;
+        i = stop === src.length ? src.length : stop;
+        continue;
+      }
+      for (let k = i + 1; k < close; k++) mask[k] = 0;
+      i = close + 1;
       continue;
     }
     // Regex literal — `/…/flags`; contents (incl. quotes) are not code.

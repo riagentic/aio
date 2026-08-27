@@ -5,6 +5,15 @@ import {
   VALID_UI_KEYS,
   validateConfig,
 } from "../src/server/aio.ts";
+import { ENUM_VALUES } from "../src/server/config.ts";
+
+/** A value each key will ACCEPT. `"test"` is fine for the free-form keys and
+ *  is now a boot error for the enumerated ones — `client`, `transport`,
+ *  `persistMode`, `perfCheck`, `chrome`, `theme` — which is the point of
+ *  ENUM_VALUES: a key allowlist catches a misspelled KEY, and only this catches
+ *  a misspelled VALUE. Reading the allowlist here rather than hardcoding six
+ *  names means a seventh enumerated option cannot quietly break this test. */
+const sample = (k: string): unknown => ENUM_VALUES[k]?.[0] ?? "test";
 
 // Test helper: inject fake exit that captures the code instead of killing the process
 function fakeExit(): {
@@ -22,7 +31,7 @@ function fakeExit(): {
 
 Deno.test("validateConfig: accepts all valid AioConfig keys", () => {
   const obj: Record<string, unknown> = {};
-  for (const k of VALID_AIO_CONFIG_KEYS) obj[k] = "test";
+  for (const k of VALID_AIO_CONFIG_KEYS) obj[k] = sample(k);
   validateConfig(obj, VALID_AIO_CONFIG_KEYS, "AioConfig");
 });
 
@@ -39,7 +48,7 @@ Deno.test("validateConfig: rejects unknown AioConfig key", () => {
 
 Deno.test("validateConfig: accepts all valid CellsConfig keys", () => {
   const obj: Record<string, unknown> = {};
-  for (const k of VALID_FEATURES_CONFIG_KEYS) obj[k] = "test";
+  for (const k of VALID_FEATURES_CONFIG_KEYS) obj[k] = sample(k);
   validateConfig(obj, VALID_FEATURES_CONFIG_KEYS, "CellsConfig");
 });
 

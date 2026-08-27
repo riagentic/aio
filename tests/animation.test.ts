@@ -87,3 +87,17 @@ Deno.test("useSpring: mass=0 guard — no divide by zero", () => {
   assertEquals(s.value, 100);
   assertEquals(Number.isFinite(s.value), true);
 });
+
+// dispose() cancelled the frame and left `animating` true forever — and `to()`
+// starts a spring only `if (!animating)`, so every later `to()` was a silent
+// no-op, and any UI reading `.animating` showed a permanent "settling" state.
+Deno.test("useSpring: dispose() clears animating, so to() is not dead after it", () => {
+  const s = useSpring({ initial: 0 });
+  s.to(100);
+  s.dispose();
+  assertEquals(s.animating, false, "a disposed spring is not animating");
+  s.to(50);
+  // In a DOM-less environment `to()` settles immediately; the point is that it
+  // DID something instead of early-returning on a stuck `animating` flag.
+  assertEquals(s.value, 50);
+});

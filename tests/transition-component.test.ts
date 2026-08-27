@@ -128,3 +128,40 @@ Deno.test({
     await win.happyDOM.close();
   },
 });
+
+// Leaving cancels arriving — and cancelling an entrance has to remove the
+// keyframes it injected, not just clear the timer that would have. Clearing
+// only the timer threw away the ONE thing that would ever have removed the
+// injected <style>: measured 5 leaked <style> nodes in <head> after 5 toggles,
+// unbounded for any toggled modal or toast.
+Deno.test({
+  name: "Transition: an enter interrupted by an exit leaks no <style>",
+  async fn() {
+    const { win, doc, root } = createDOM();
+    _setDocument(doc);
+    const show = signal(false);
+    const App = () =>
+      h(
+        Transition,
+        { enter: fade, exit: fade, options: { duration: 200 } },
+        show.value ? h("div", null, "modal") : null,
+      );
+
+    const handle = mount(root, App);
+    const styles = () => doc.head.querySelectorAll("style").length;
+    for (let i = 0; i < 5; i++) {
+      show.set(true);
+      await new Promise((r) => setTimeout(r, 2));
+      handle._flush();
+      show.set(false); // interrupts the entrance
+      await new Promise((r) => setTimeout(r, 2));
+      handle._flush();
+    }
+    // Let every exit finish; each removes its own <style>.
+    await new Promise((r) => setTimeout(r, 400));
+    assertEquals(styles(), 0, `leaked ${styles()} <style> nodes in <head>`);
+
+    _unmount(handle);
+    await win.happyDOM.close();
+  },
+});

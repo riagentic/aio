@@ -62,6 +62,7 @@ import {
   cmdVersion,
 } from "./am/am-cmd-meta.ts";
 import { cmdCreate } from "./am/am-cmd-create.ts";
+import { cmdPublish } from "./am/am-cmd-publish.ts";
 import { cmdTrust } from "./am/am-cmd-trust.ts";
 import { cmdLink } from "./am/am-cmd-link.ts";
 import { cmdFix } from "./am/am-cmd-fix.ts";
@@ -89,6 +90,7 @@ import { cmdPin } from "./am/am-cmd-pin.ts";
 import { cmdTheme } from "./am/am-cmd-theme.ts";
 import { cmdCost } from "./am/am-cmd-cost.ts";
 import { cmdShot } from "./am/am-cmd-shot.ts";
+import { cmdLab } from "./am/am-cmd-lab.ts";
 import { parseGlobalFlags, resolveAmAppId, targetHome } from "./am/am-utils.ts";
 
 // ── Command map ────────────────────────────────────────────
@@ -147,9 +149,14 @@ const COMMANDS: Record<string, CmdHandler> = {
   auth: cmdAuth,
   // Meta
   create: cmdCreate,
+  // build → ship → the channel directory a client actually fetches. The one
+  // step of the release that lived only in prose (see am-cmd-publish.ts).
+  publish: cmdPublish,
+  release: cmdPublish, // the other word people reach for
   add: cmdAdd,
   new: cmdNew, // deprecated alias of `add` — prints the rename, still works
   pin: cmdPin, // which aio version this app builds against
+  lab: cmdLab, // a REAL Windows/macOS desktop in a container, driven by hand
   theme: cmdTheme, // adopt aio's stylesheet INTO the app, as a file it owns
   link: cmdLink, // just the dep/aio symlink
   fix: cmdFix, // full clone repair (symlink + env + electron + config + …)

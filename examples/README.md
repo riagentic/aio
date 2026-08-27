@@ -1,10 +1,13 @@
 # Examples
 
 New project? Don't copy these — run **`am create my-app`** (see the root
-README). The two apps below are exactly what `am create --template=…` scaffolds;
-they live here as the canonical template source + CI fixtures, all
-runtime-tested (`tests/examples.test.ts`), UI-tested
-(`tests/examples-ui.test.ts`), and type-checked in CI.
+README), which is where the templates actually live (`src/am/am-cmd-create.ts`).
+These are CI fixtures: the same two apps the `--template=…` flags scaffold, kept
+here so they are runtime-tested (`tests/examples.test.ts`), UI-tested
+(`tests/examples-ui.test.ts`), lint-gated (`tests/examples-lint.test.ts`) and
+type-checked on every run. They are not the source the scaffold reads, and
+calling them "the canonical template source" was how they drifted a generation
+behind it in the first place.
 
 ## Templates (what `am create` scaffolds)
 
@@ -55,22 +58,37 @@ transport, no polling, no version comparison, no dialog framework. See
 build/boot smoke fixtures** (not learn-from examples), so every compile target
 stays honest:
 
-| Target                    | Dir                | Interface                                 |
-| ------------------------- | ------------------ | ----------------------------------------- |
-| `compile:browser`         | `browser/`         | server + AIR UI (JSX, no React)           |
-| `compile:browser:remote`  | `browser-remote/`  | exposed server (`dev:expose`)             |
-| `compile:electron`        | `electron/`        | desktop window + embedded server          |
-| `compile:electron:remote` | `electron-remote/` | thin client, connect page                 |
-| `compile:cli`             | `cli/`             | headless server + `deno task client` REPL |
-| `compile:cli:remote`      | `cli-remote/`      | thin WS client (`src/client.ts`)          |
-| `compile:android`         | `android/`         | APK — standalone WebView runtime          |
-| `compile:android:remote`  | `android-remote/`  | thin client APK, connect page             |
-| `compile:service`         | `service/`         | headless daemon + systemd unit            |
-| `compile:service:remote`  | `service-remote/`  | exposed headless daemon                   |
+Each one builds with `deno task compile` (its own default target) or
+`deno task build` (every target in its `deno.json` → `build.targets`) — the
+alpha52 vocabulary, the same two tasks `am create` scaffolds. The
+`build.targets` name in the third column is what `deno task build --targets=…`
+accepts.
+
+| Dir                | `build.targets`   | Interface                                 |
+| ------------------ | ----------------- | ----------------------------------------- |
+| `browser/`         | `browser`         | server + AIR UI (JSX, no React)           |
+| `browser-remote/`  | `server-app`      | exposed server (`dev:expose`)             |
+| `electron/`        | `electron`        | desktop window + embedded server          |
+| `electron-remote/` | `electron-client` | thin client, connect page                 |
+| `cli/`             | `cli`             | headless server + `deno task client` REPL |
+| `cli-remote/`      | `cli-client`      | thin WS client (`src/client.ts`)          |
+| `android/`         | `android`         | APK — standalone WebView runtime          |
+| `android-remote/`  | `android-client`  | thin client APK, connect page             |
+| `service/`         | _(none)_          | headless daemon + systemd unit            |
+| `service-remote/`  | `server`          | exposed headless daemon                   |
 
 Notes:
 
-- Electron targets need the runtime once: `deno task install:electron`.
+- `service/` is the one fixture the fleet vocabulary cannot name: every named
+  service target (`server`, `server-app`) carries `--remote`, which is exactly
+  what makes it `service-remote`. It keeps a single-target `compile` and
+  declares no `build.targets`, rather than pretending to be its own twin.
+- Electron targets need the runtime once: `deno task install:electron` — which
+  runs aio's installer (`src/electron-install.ts`). It is NOT
+  `deno install --allow-scripts=npm:electron`: that command exits 0 having
+  skipped the lifecycle script, leaving no `dist/`, and the build then advises
+  running the task that just did nothing. Both examples shipped the broken form
+  until it was caught here.
 - Android targets need `$ANDROID_HOME` + JDK + Gradle (see
   `docs/build/targets.md`).
 - Remote-server examples authenticate when run with `--expose` — token is

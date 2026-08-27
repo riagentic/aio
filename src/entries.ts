@@ -45,9 +45,12 @@ export const AIO_ENTRY_PATHS: Readonly<Record<string, string>> = {
   // `aio/extras` (isScheduleEffect, createSliceSelector). aiol reports the
   // dead specifiers and `--safe-fix` rewrites the imports.
   "aio/build": "src/build.ts",
-  // `aio ship` — run-only: it is a CLI that turns a built artifact into a
-  // signed, channel-bound release. Without an entry it was reachable only from
-  // inside this repo, which made the published release story unusable.
+  // `aio ship` — runnable AND importable, the same shape as `aio/build` above.
+  // It is the CLI that turns a built artifact into a signed, channel-bound
+  // release, and it is also where the verification primitives live
+  // (`generateSigningKey`, `keyFingerprint`, `verifyShipManifest`,
+  // `manifestCore`), which an app or a CI step legitimately imports to check a
+  // release itself — see docs/deploy/signing.md.
   "aio/ship": "src/build/ship.ts",
   "aio/build-all": "src/build-all.ts",
   "aio/dev-android": "src/dev-android.ts",
@@ -73,7 +76,6 @@ export const AIO_ENTRY_PATHS: Readonly<Record<string, string>> = {
  *  docs/build/targets.md, docs/persistence/sqlite.md), so it must be mapped. */
 export const AIO_RUN_ONLY_ENTRIES: ReadonlySet<string> = new Set([
   "aio/electron-install",
-  "aio/ship",
   "aio/build-all",
   "aio/dev-android",
   "aio/android-install",
@@ -126,3 +128,35 @@ export const SERVER_ONLY_AIO_SYMBOLS: ReadonlySet<string> = new Set([
   "syncTables",
   "reactiveDB",
 ]);
+
+/** THE server-only FILE convention: `<name>.server.<ext>` is never served to a
+ *  browser and never enters a client bundle.
+ *
+ *  Five places decided what that means, and they disagreed:
+ *
+ *  | site                             | accepted            |
+ *  | -------------------------------- | ------------------- |
+ *  | `server/graph-validator.ts`      | `.server.ts(x)`     |
+ *  | `server/server-static.ts`        | `.server.ts(x)`     |
+ *  | `testing/smoke-test.ts`          | `.server.ts(x)`     |
+ *  | `build/esbuild-plugin.ts`        | `.server.ts` only   |
+ *  | `aiol/checks.ts`                 | `.server.ts` only   |
+ *
+ *  So the dev server REFUSED TO SERVE `x.server.tsx` and the production build
+ *  SHIPPED it — prod strictly more permissive than dev, which is the one
+ *  direction this project never allows. Measured: a `.server.tsx` module's
+ *  contents were grepped straight out of `dist/app.js` after a build that
+ *  printed `✓ dist/app.js` and exited 0.
+ *
+ *  The extension set is deliberately wide: `.js`/`.mjs`/`.cjs`/`.jsx` are
+ *  reachable in a client graph (a published package, a generated file, an
+ *  Android bundle input), and a convention with a hole is not a convention.
+ *  It matches on a resolved PATH or a specifier tail — never on a bare name —
+ *  and tolerates esbuild's `?query`/`#hash` suffixes, which appear on real
+ *  metafile keys. */
+export const SERVER_FILE_RE: RegExp = /\.server\.[cm]?[jt]sx?(?:[?#].*)?$/;
+
+/** True when `path` names a server-only module by the file convention. */
+export function isServerOnlyFile(path: string): boolean {
+  return SERVER_FILE_RE.test(path);
+}

@@ -261,6 +261,20 @@ const SERVER_TARGETS = [
     html: false,
     tls: true,
   },
+  // `server-app` is `server` WITHOUT --headless: the same exposed binary and
+  // systemd unit, plus its own page (a status UI, a download shelf, a
+  // dashboard). It is the one server-ish target this table never built, and it
+  // is exactly the combination the others cannot stand in for — `browser`
+  // proves the bundle is embedded but never exposes; `server` exposes but has
+  // no page to serve. A build that shipped one without the other would pass
+  // every row above it.
+  {
+    target: "server-app",
+    build: ["--compile", "--service", "--remote"],
+    flags: ["--expose"],
+    html: true,
+    tls: true,
+  },
 ] as const;
 
 for (const t of SERVER_TARGETS) {
@@ -365,7 +379,11 @@ Deno.test({
         const out = new TextDecoder().decode(p.stdout) +
           new TextDecoder().decode(p.stderr);
         assertEquals(p.code, 0, `cli binary failed to run:\n${out}`);
-        assert(out.trim().length > 0, "cli binary printed nothing");
+        assertStringIncludes(
+          out,
+          "Usage:",
+          "the cli binary must print its own help, not merely some output",
+        );
       } finally {
         await Deno.remove(runCwd, { recursive: true }).catch(() => {});
       }

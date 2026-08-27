@@ -3,7 +3,12 @@
 // commands (against a fake control-port HTTP server). These are the CLI's
 // user-facing behaviors; the HTTP seam (trojanGet/Post, httpGet) is exercised
 // for real — only the aio server behind it is canned.
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertMatch,
+  assertStringIncludes,
+} from "@std/assert";
 import {
   cmdInstances,
   cmdStatus,
@@ -406,7 +411,12 @@ Deno.test("am: inspect usage errors exit 1 without touching the server", async (
       const code = await withExitStub(fn);
       assertEquals(code, 1, `${name} exits 1`);
     });
-    assert(logs.length > 0, `${name} prints usage (stdout in --json)`);
+    assertStringIncludes(
+      logs.join("\n"),
+      "usage:",
+      `${name} must print the USAGE line (stdout in --json), not merely ` +
+        `something`,
+    );
   }
 });
 
@@ -417,7 +427,15 @@ Deno.test("am: unreachable server → clean error + exit 1", async () => {
     const code = await withExitStub(() => cmdClients([], flags));
     assertEquals(code, 1);
   });
-  assert(logs.length > 0, "reports the connection failure (stdout in --json)");
+  // Not "it printed something": the one line it prints must be the machine
+  // contract (`{"error": …}`) and must NAME the connection failure. A stray
+  // debug line satisfied `logs.length > 0`.
+  const said = JSON.parse(logs[0]!) as { error?: string };
+  assertMatch(
+    said.error ?? "",
+    /fetch|connect|refus|blocked/i,
+    `am must report WHY it could not reach the app — got ${logs[0]}`,
+  );
 });
 
 Deno.test("am: cmdHealth — unreachable reports unhealthy, exit 1", async () => {
@@ -770,7 +788,10 @@ Deno.test("cmdFix: adds missing standard tasks, never overwrites existing ones",
       }),
     );
     Deno.chdir(dir);
-    await cmdFix([], {});
+    // `--no-download`: this asserts on CONFIG repair, and the network steps
+    // (the Electron runtime, `deno cache`) are neither the subject nor
+    // something a test should fetch. They are reported as skipped.
+    await cmdFix(["--no-download"], {});
     const cfg = JSON.parse(
       await Deno.readTextFile(joinPath(dir, "deno.json")),
     ) as { tasks: Record<string, string> };
@@ -817,7 +838,10 @@ Deno.test("cmdFix: a browser-only app gets no android/cli/service tasks", async 
       }),
     );
     Deno.chdir(dir);
-    await cmdFix([], {});
+    // `--no-download`: this asserts on CONFIG repair, and the network steps
+    // (the Electron runtime, `deno cache`) are neither the subject nor
+    // something a test should fetch. They are reported as skipped.
+    await cmdFix(["--no-download"], {});
     const cfg = JSON.parse(
       await Deno.readTextFile(joinPath(dir, "deno.json")),
     ) as { tasks: Record<string, string> };
@@ -863,7 +887,10 @@ Deno.test("cmdFix: a browser-only app gets no android/cli/service tasks", async 
 
     // Idempotent: a second repair changes nothing at all.
     const before = await Deno.readTextFile(joinPath(dir, "deno.json"));
-    await cmdFix([], {});
+    // `--no-download`: this asserts on CONFIG repair, and the network steps
+    // (the Electron runtime, `deno cache`) are neither the subject nor
+    // something a test should fetch. They are reported as skipped.
+    await cmdFix(["--no-download"], {});
     assertEquals(await Deno.readTextFile(joinPath(dir, "deno.json")), before);
   } finally {
     console.log = realLog;
@@ -893,7 +920,10 @@ Deno.test("cmdFix: build.targets in OBJECT form declares the same fleet as the a
       }),
     );
     Deno.chdir(dir);
-    await cmdFix([], {});
+    // `--no-download`: this asserts on CONFIG repair, and the network steps
+    // (the Electron runtime, `deno cache`) are neither the subject nor
+    // something a test should fetch. They are reported as skipped.
+    await cmdFix(["--no-download"], {});
     const cfg = JSON.parse(
       await Deno.readTextFile(joinPath(dir, "deno.json")),
     ) as { tasks: Record<string, string> };

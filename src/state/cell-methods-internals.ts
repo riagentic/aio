@@ -421,7 +421,11 @@ export function buildMethodsReducer(
     // Handle batched mutations from async methods
     if (ownKey.startsWith("__set")) {
       const payload = action.payload as { mutations: Mutation[] };
-      applyMutations(s, payload.mutations);
+      // STRICT: this is the commit, the last word. A write that cannot be
+      // applied here throws, the reduce fails, and the async method that made
+      // it rejects — instead of a warn on the console while its caller is told
+      // the change landed.
+      applyMutations(s, payload.mutations, true);
       return;
     }
 
@@ -493,6 +497,29 @@ export function buildMethodsExecutor(
   const txConfig = (config as {
     transaction?: boolean | { serialize?: boolean; conflict?: string };
   } | undefined)?.transaction;
+  // `transaction: { serialize: false }` reads like "transactions off" and turns
+  // them ON — the OBJECT is the opt-in, whatever is inside it, and `serialize`
+  // is a knob of an already-enabled transaction whose default is already
+  // `false`. So that spelling is either redundant (you wanted them on) or the
+  // exact opposite of what it looks like (you wanted them off), and the
+  // difference is invisible: pinned reads make a stand-down guard inert and
+  // buffered writes stop a spinner ever reaching the client, with no error.
+  // Refuse it at the `cell()` site, where the author can still read this.
+  if (
+    typeof txConfig === "object" && txConfig !== null &&
+    txConfig.serialize === false
+  ) {
+    throw new Error(
+      `[cell:${name}] \`transaction: { serialize: false }\` turns transactions ` +
+        `ON — any object value is the opt-in, and \`serialize: false\` is ` +
+        `already the default for an enabled transaction, so this spelling ` +
+        `either says nothing or says the opposite of what it reads like. ` +
+        `FIX: \`transaction: false\` (or omit \`transaction\`) to turn them ` +
+        `OFF; \`transaction: true\` for the default transactional behaviour; ` +
+        `\`transaction: { conflict: "warn" }\` to configure an enabled ` +
+        `transaction without the redundant key.`,
+    );
+  }
   const serialize = typeof txConfig === "object" && !!txConfig?.serialize;
   // What to do when a read the method made has been overwritten by someone else
   // before it commits: "abort" (default — reject the call, commit nothing) or
@@ -773,7 +800,6 @@ export function buildMethodsExecutor(
           proxy as Parameters<AsyncMethod<Record<string, unknown>>>[0],
           ..._args,
         )
-          .finally(() => untrack())
           .then(async (value) => {
             // Cancelled ⇒ the transaction ABORTS. The spec is explicit
             // (docs/state/transactional-methods.md §4, "Abort"): a method that
@@ -803,6 +829,14 @@ export function buildMethodsExecutor(
                     `write(s) discarded (transaction abort)`,
                 );
               }
+              // A cancelled transaction still has to answer for what it
+              // ALREADY published: an `s.$commit()` earlier in the method
+              // dispatched a real write-set, and if the store REFUSED it that
+              // rejection was dropped on the floor — this was the one exit
+              // that skipped `settled()`. Cancellation means "the rest did not
+              // happen", never "whatever already happened is fine". A throw
+              // here lands in the .catch below and rejects the caller.
+              await batcher.settled();
               // No effects either: scheduling follow-up work is the one thing
               // a cancelled call must not do. Resolving `undefined` matches
               // the cancellation path the docs tell methods to take.
@@ -820,6 +854,16 @@ export function buildMethodsExecutor(
             // that is current? A throw here lands in the .catch below, which
             // discards the write-set and rejects the caller — the whole point
             // is that a lost update can never be the quiet outcome.
+            // Last check before the commit. The body-settled check above ran
+            // before this method awaited its effect-return and its own commit
+            // machinery; an abort that lands in between must still abort — the
+            // whole point of holding the tracking open past the body.
+            if (transactional && controller.signal.aborted) {
+              batcher.discard();
+              await batcher.settled(); // same reason as the branch above
+              resolveCall(_callId, undefined);
+              return;
+            }
             guardCommit();
             batcher.flush();
             // …then find out whether the store ACCEPTED it. A refused write-set
@@ -915,7 +959,18 @@ export function buildMethodsExecutor(
               payload: { _method, error: String(e) },
               _source: "Effect",
             } as Msg);
-          });
+          })
+          // Untrack LAST, not on a `.finally` in front of the commit.
+          //
+          // `untrack()` takes this call's controller out of the cancellable
+          // set, and it used to run the moment the method BODY settled —
+          // before `guardCommit()`, `flush()` and `settled()`. A cancelOn
+          // trigger firing in that window found nothing to abort, so a
+          // `transaction: true` method committed its whole write-set AFTER its
+          // own trigger had fired: the documented supersession pattern
+          // (`cancelOn: { run: "self" }`) silently lost the race it exists to
+          // win. The call is cancellable until its writes are actually in.
+          .finally(() => untrack());
       };
       // serialize: chain behind the previous transactional call (runs on both
       // fulfil + reject so one failure doesn't wedge the queue). Else run now.

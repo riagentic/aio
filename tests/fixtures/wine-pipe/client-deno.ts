@@ -5,7 +5,13 @@
 // `am state` uses is what gets exercised. Prints `RESULT {"tests":[…]}`.
 import { connectLocal } from "../../../src/server/local-listen.ts";
 
-const [pipe] = Deno.args;
+const pipe = Deno.args[0];
+if (!pipe) {
+  console.error(
+    "usage: client-deno.ts <\\\\.\\pipe\\name> — the host prints it as READY <pipe>",
+  );
+  Deno.exit(2);
+}
 const tests: { name: string; ok: boolean; ms: number; error?: string }[] = [];
 const enc = new TextEncoder();
 
@@ -75,9 +81,11 @@ function assertEchoes(lines: string[], got: string[]) {
     throw new Error(`got ${got.length}/${lines.length}`);
   }
   for (let i = 0; i < lines.length; i++) {
-    if (got[i] !== `{"echo":${lines[i]}}`) {
+    // The length check above already proved every index is present.
+    const line = got[i]!;
+    if (line !== `{"echo":${lines[i]}}`) {
       throw new Error(
-        `line ${i} out of order or corrupted (${got[i].slice(0, 60)}…)`,
+        `line ${i} out of order or corrupted (${line.slice(0, 60)}…)`,
       );
     }
   }

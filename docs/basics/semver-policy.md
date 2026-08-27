@@ -15,8 +15,8 @@ The public surface is exactly what the CI-enforced snapshot locks
   `aio/aiol`) — names, kinds, and signatures
 - the wire protocol as negotiated by the `proto` `{v,min}` handshake
 - the persistence schema as stamped by `<appId>:__schema`
-- documented CLI flags (`aio create`, `--expose`, `--port`, …) and the six
-  scaffolded `deno.json` lines `aio doctor` validates
+- documented CLI flags (`am create`, `--expose`, `--port`, …) and the six
+  scaffolded `deno.json` lines `deno task doctor` validates
 
 **Not** public API: `_`-prefixed or `@internal` symbols, `src/` folder layout,
 log/error message wording (error _codes_ are stable), and undocumented behavior

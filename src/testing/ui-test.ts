@@ -11,9 +11,21 @@
 // Interactions dispatch real DOM event sequences through AIR's own delegation —
 // faithful to a user, never calling handlers directly.
 
-import { _armTestStrict } from "./test-strict.ts";
+import {
+  _armTestStrict,
+  _watchUnobservedCalls,
+  type CallFailureLedger,
+} from "./test-strict.ts";
+// Server-touching, so NOT in test-strict.ts — see boot-refusals.ts.
+import { _refuseUnsafeCells } from "./boot-refusals.ts";
+import { formatCellState } from "./test-format.ts";
+import { frozenWriteMessage, isFrozenWriteError } from "../state/immutable.ts";
 import { _resetRootSignals } from "../state/signal.ts";
-import { _pendingCallPromises } from "../state/method-cancel.ts";
+import { _resetAioRuntime } from "../state/runtime-reset.ts";
+import {
+  _inflightMethodKeys,
+  _pendingCallPromises,
+} from "../state/method-cancel.ts";
 import type { AioUser, AuthFeatures } from "../protocol/protocol-types.ts";
 import { _setDocument, _unmount, mount } from "../air/aio-renderer.ts";
 import { getRegisteredCells } from "../state/cell-reactive.ts";
@@ -22,6 +34,7 @@ import type { MountHandle, RootState } from "../air/renderer-types.ts";
 import { _rootStateMap } from "../air/renderer-state.ts";
 import {
   _isForwardedHandle,
+  _resetSurfaceWarnings,
   buildUISurface,
   findComponents,
   findElementsDeep,
@@ -38,6 +51,7 @@ import {
   triggerDragTo,
   triggerScroll,
   triggerSelect,
+  triggerSetChecked,
 } from "../air/ui-trigger.ts";
 
 // deno-lint-ignore no-explicit-any
@@ -579,6 +593,14 @@ export function testUI(
       try {
         await fn(ui);
       } catch (e) {
+        // Same teaching as testCell's: a frozen-state write from outside a
+        // method surfaces as raw engine text that names neither the rule nor
+        // the fix. The cell is not knowable here (the write could be to any
+        // booted cell), so the message speaks generally.
+        const raw = e instanceof Error ? e.message : String(e);
+        if (e instanceof Error && isFrozenWriteError(raw)) {
+          e.message = frozenWriteMessage(raw);
+        }
         bodyErr = { e };
       }
       // Always dispose. dispose drains the action queue — un-awaited action
@@ -616,7 +638,13 @@ function _installViewport(win: AnyDoc, width: number, height: number): void {
   ) {
     try {
       Object.defineProperty(el, prop, { get: () => value, configurable: true });
-    } catch { /* a DOM that already reports layout — leave it alone */ }
+    } catch {
+      // aio-ok: a capability probe, not an operation. `clientWidth` is
+      // non-configurable on any DOM that implements real layout (a browser, a
+      // future happy-dom), and there the property already answers honestly —
+      // which is strictly better than the number this would have installed.
+      // There is nothing to report and nothing to retry.
+    }
   }
 }
 
@@ -673,25 +701,105 @@ function _warnOnFakeLayout(win: AnyDoc): void {
           return v;
         },
       });
-    } catch { /* non-configurable — nothing to say */ }
+    } catch {
+      // aio-ok: the property is non-configurable in this runtime, so the
+      // harness cannot install its own — the caller gets the runtime's, which
+      // is the correct fallback and needs no report.
+    }
   }
+}
+
+/** Everything a HALF-BUILT mount has already installed into the process.
+ *
+ *  Setup installs `document`, `window`, `location`, `history`, `matchMedia`
+ *  and `localStorage` as globals, patches `addEventListener`, boots the cells
+ *  and mounts the tree — and any of those steps can throw (a component that
+ *  explodes on first render; a boot refusal; a seed naming no cell). The
+ *  initializer never returned, so there is no handle, `await using` has
+ *  nothing to dispose, and every global stayed. The next `testUI` in the
+ *  process then hit its own `if (globalThis[key]) continue` guard and ADOPTED
+ *  the dead test's document: `body.children` grew 1 → 2 → 3, `ui.html()`
+ *  showed a previous test's markup, and no later `dispose()` could ever clean
+ *  it (nothing owned those globals any more).
+ *
+ *  So setup records what it installed HERE, in a value the caller holds, and
+ *  the caller undoes exactly that on a throw. */
+type PartialMount = {
+  /** Globals we DEFINED (deleted on teardown). */
+  owned: string[];
+  /** Globals we PATCHED (restore callbacks). */
+  restore: (() => void)[];
+  /** The happy-dom window we created, if any. */
+  window: AnyDoc;
+  /** Undo a cell boot that already happened (state + process-global runtime). */
+  reset?: () => void;
+  /** Unmount an AIR tree that already mounted. */
+  unmount?: () => void;
+};
+
+/** Undo a mount that threw halfway — the same steps `dispose()` runs, in the
+ *  same order. Every step is independent: one failing must not strand the
+ *  rest, and the original error is what the test needs to see. */
+function _teardownPartialMount(p: PartialMount): void {
+  const step = (what: string, fn: () => void) => {
+    try {
+      fn();
+    } catch (e) {
+      // Loud, not silent: teardown of a failed mount that itself fails leaves
+      // the process dirty, and the NEXT test pays for it. The mount's own
+      // error still propagates — this only makes sure the second failure is
+      // not invisible.
+      console.error(
+        `[aio:testUI] tearing down a failed mount: ${what} threw — the ` +
+          `process may still hold this test's globals: ${e}`,
+      );
+    }
+  };
+  step("unmount", () => p.unmount?.());
+  step("runtime reset", () => p.reset?.());
+  step("window close", () => {
+    p.window?.happyDOM?.close()?.catch?.(() => {
+      // aio-ok: happy-dom teardown is fire-and-forget here exactly as it is in
+      // `unmount()`; the mount's own error is the one that must surface.
+    });
+    p.window = null;
+  });
+  step("globals", () => {
+    for (const key of p.owned.splice(0)) delete (globalThis as AnyDoc)[key];
+  });
+  for (const restore of p.restore.splice(0)) step("restore", restore);
 }
 
 async function _mountTestUI(
   App: ComponentFn,
   opts: TestUIOptions,
 ): Promise<TestUI> {
+  // A throw anywhere in setup must leave the process exactly as it found it —
+  // see PartialMount.
+  const partial: PartialMount = { owned: [], restore: [], window: null };
+  try {
+    return await _buildTestUI(App, opts, partial);
+  } catch (e) {
+    _teardownPartialMount(partial);
+    throw e;
+  }
+}
+
+async function _buildTestUI(
+  App: ComponentFn,
+  opts: TestUIOptions,
+  partial: PartialMount,
+): Promise<TestUI> {
   let doc: AnyDoc = opts.document ?? (globalThis as AnyDoc).document;
   // Auto-DOM: create a happy-dom window when none was provided — and own its
   // lifecycle (closed on dispose). Lazy import keeps the DOM dep out of
   // production code paths entirely.
   let ownedWindow: AnyDoc = null;
-  // Globals we installed from the owned window (restored on dispose).
-  // Local hotfix: was referenced but never declared — TS2304 +
-  // ReferenceError on the auto-DOM path.
-  const _ownedGlobals: string[] = [];
+  // Globals we installed from the owned window (restored on dispose) — held in
+  // `partial` so a throw before we return can undo them too.
+  const _ownedGlobals: string[] = partial.owned;
   /** Teardown callbacks for globals we PATCHED (rather than defined). */
-  const _restoreGlobals: (() => void)[] = [];
+  const _restoreGlobals: (() => void)[] = partial.restore;
   if (!doc) {
     try {
       // Computed specifier ON PURPOSE: cell.ts re-exports testCell, so this
@@ -710,6 +818,7 @@ async function _mountTestUI(
         height: vh,
       });
       doc = ownedWindow.document;
+      partial.window = ownedWindow; // so a later throw still closes it
       _installViewport(ownedWindow, vw, vh);
       _warnOnFakeLayout(ownedWindow);
       // `document` and `window` as GLOBALS, from the same owned window.
@@ -886,7 +995,12 @@ async function _mountTestUI(
   } else if (!opts.persist) {
     try {
       _existingLS.clear();
-    } catch { /* read-only host storage — best effort */ }
+    } catch {
+      // aio-ok: the host's localStorage is read-only (Deno's --location store
+      // under some permissions). Clearing is a hermeticity nicety, not a
+      // correctness requirement — the mount below uses a per-mount persist
+      // key, so a stale entry cannot reach this test's state.
+    }
   }
 
   // Boot the cells on the local dispatch loop (the android/standalone runtime —
@@ -894,7 +1008,7 @@ async function _mountTestUI(
   // `cell()` the App transitively imported has self-registered — boot them
   // all; pass { cells } only to restrict the set.
   let resetRuntime: (() => void) | undefined;
-  let advanceSchedules: ((ms: number) => void) | undefined;
+  let advanceSchedules: ((ms: number) => Promise<void>) | undefined;
   // The standalone (server-authoritative) app handle — exposed via
   // ui.serverState()/ui.fullState() so a test can read UNFILTERED state,
   // including `ui.exclude`d fields a server route legitimately reads.
@@ -902,6 +1016,7 @@ async function _mountTestUI(
   let seedState:
     | ((p: Record<string, Record<string, unknown>>) => void)
     | undefined;
+  let ledger: CallFailureLedger | undefined;
   const cells = opts.cells ?? [...getRegisteredCells().values()];
   // The state that does NOT live in a cell. A module-level `signal()` survives
   // a mount exactly as a cell singleton does, and used to be the half nothing
@@ -911,6 +1026,11 @@ async function _mountTestUI(
   // most of it. Before the cells boot, and independent of whether this app has
   // any: a signals-only UI leaked just as hard.
   if (!opts.persist) _resetRootSignals();
+  // Every boot refusal a real `aio.run()` performs, BEFORE anything boots.
+  // testUI composes on the standalone runtime, which is not the server's boot
+  // path — so an app whose cell exposes a credential to the UI passed here and
+  // was refused the moment it started, in dev and in prod alike.
+  _refuseUnsafeCells(cells);
   if (cells.length > 0) {
     const standalone = await import("../standalone-air.ts");
     // Opt into virtual time BEFORE anything registers a schedule — the same
@@ -922,7 +1042,19 @@ async function _mountTestUI(
     // runtime state (keeping the registry) so this mount re-composes from the
     // cells' declared initials — no cross-test leaks. Skipped when the test
     // opts into persistence (it wants continuity across runs).
-    if (!opts.persist) standalone._resetState();
+    if (!opts.persist) {
+      standalone._resetState();
+      // …and the PROCESS-GLOBAL half of the runtime, which `_resetState()` does
+      // not own: `_pending` (in-flight calls), the degraded registry, the
+      // cancel registry, subscriptions, warn-dedup sets. `testCell` has always
+      // reset these; testUI never did, so ONE hung method leaked into `_pending`
+      // for the rest of the process and every later `settle()` burned its whole
+      // budget on a promise that would never resolve — then returned as if the
+      // app had quiesced. Every assertion after that point was unguarded.
+      // AFTER `_resetState()`: that call destroys the previous mount's cells,
+      // and their onDestroy hooks must still find their methods bound.
+      _resetAioRuntime();
+    }
     standaloneApp = await standalone.aio.run({
       appId: "testui",
       cells,
@@ -938,6 +1070,24 @@ async function _mountTestUI(
     seedState = standalone._seedState;
     // Dispose does a state-only reset (keeps the registry so re-mounts boot).
     resetRuntime = standalone._resetState;
+    // A failing async method NOBODY awaited must not pass for silence — the
+    // same ledger `testCell` keeps, so the same app code cannot pass one
+    // harness and fail the other (see test-strict.ts). `onClick={() =>
+    // todo.add()}` is exactly this shape. Installed after the boot, because it
+    // wraps the bound methods the boot just installed.
+    ledger = _watchUnobservedCalls(cells);
+    partial.restore.push(() => ledger?.restore());
+    // A throw AFTER the cells booted (the seed, the first render) must not
+    // leave them booted for the next test either.
+    partial.reset = () => {
+      standalone._resetState();
+      _resetAioRuntime();
+    };
+  } else if (!opts.persist) {
+    // A signals-only UI boots no cells, but the process-global runtime residue
+    // is the SAME process — a `_pending` entry left by an earlier test makes
+    // this mount's `settle()` lie exactly as hard.
+    _resetAioRuntime();
   }
 
   // Ambient identity — installed BEFORE the first render so the very first
@@ -961,13 +1111,32 @@ async function _mountTestUI(
     _restoreGlobals.push(() => auth._resetAuthUi());
   }
 
+  // Duplicate-`t` reports are deduped per process (the surface is rebuilt on
+  // every observation), so each mount starts fresh — otherwise the FIRST test
+  // in a file gets the warning and every later one is silent about its own.
+  _resetSurfaceWarnings();
   _setDocument(doc);
   const root = doc.createElement("div");
   doc.body.appendChild(root);
   const handle: MountHandle = mount(root, App);
+  partial.unmount = () => _unmount(handle);
   const state: RootState | undefined = _rootStateMap.get(handle);
 
-  async function settle(): Promise<void> {
+  /** Why the last `settle()` stopped, when it stopped for the wrong reason.
+   *  `null` once the app really did go quiet. */
+  let _gaveUp: string | null = null;
+
+  /** Wait for the app to go quiet.
+   *
+   *  `strict` decides what happens when the iteration budget runs out. It used
+   *  to be a plain `return` in every case — so "the app quiesced" and "I gave
+   *  up waiting" were the SAME answer, and every assertion after settle() ran
+   *  against a half-finished app while looking guarded. Now the reason is
+   *  recorded either way, and the OBSERVATION points (`ui.settle()`,
+   *  `ui.advance()`) throw it. The retry loops (`expectCell`, `waitFor`) pass
+   *  `strict: false` — giving up on one poll is normal there — and fold
+   *  `_gaveUp` into their own timeout message instead. */
+  async function settle(strict = false): Promise<void> {
     let prev = "";
     for (let i = 0; i < maxIter; i++) {
       handle._flush();
@@ -978,17 +1147,45 @@ async function _mountTestUI(
       // that gap as settled and the UI showed the old state (a field
       // report). Await what is actually pending — bounded by the iteration
       // budget, so a deliberately long-running call (a stream driving
-      // progressive UI) degrades to plain quiescence instead of wedging
-      // settle().
+      // progressive UI) is REPORTED rather than silently called settled.
       const pending = _pendingCallPromises();
       if (pending.length > 0) {
         await Promise.race([Promise.allSettled(pending), tick()]);
-        prev = "in-flight"; // never valid HTML — forces ≥1 more quiet round
+        prev = "in-flight"; // never valid HTML — forces ≥1 more quiet round
         continue;
       }
       const now = root.innerHTML as string;
-      if (now === prev && i > 0) return;
+      if (now === prev && i > 0) {
+        _gaveUp = null;
+        // "Everything has landed" includes "and here is what went wrong": an
+        // async method that failed with nobody awaiting it surfaces here,
+        // exactly as it does in `testCell`.
+        ledger?.raise();
+        return;
+      }
       prev = now;
+    }
+    // A method that failed is a likelier explanation than a slow one, and it
+    // names a line in the app rather than a budget in the harness.
+    ledger?.raise();
+    const stillPending = _pendingCallPromises().length;
+    const why = stillPending > 0
+      ? `${stillPending} method call(s) are still in flight \u2014 ${
+        _inflightMethodKeys().join(", ") || "(unnamed calls)"
+      }`
+      : "the rendered HTML never stopped changing (a render that re-renders " +
+        "itself \u2014 e.g. a signal written during render)";
+    _gaveUp =
+      `testUI: settle() gave up after ${maxIter} iterations. ${why}.\n` +
+      `  Nothing after this point is guarded: the app has NOT quiesced.\n` +
+      `  fix: await the call itself; drive time with \`await ui.advance(ms)\` ` +
+      `if it waits on a schedule; raise the budget with ` +
+      `\`testUI(App, { settleIterations: n })\` for a legitimately long ` +
+      `render; or give the method an abort path (\`s.$signal\`).`;
+    if (strict) {
+      const msg = _gaveUp;
+      _gaveUp = null; // reported here — never twice
+      throw new Error(msg);
     }
   }
 
@@ -1113,6 +1310,10 @@ async function _mountTestUI(
       _globalListenerFailures.length = 0;
       throw inert;
     }
+    // …and an async cell method that failed with nobody awaiting it. Last,
+    // because the two above are failures of the TEST's own actions and name
+    // the line that caused them; this one names the app's method.
+    ledger?.raise();
   }
 
   function elementHandle(resolveInfo: () => UIElementInfo): UIElementHandle {
@@ -1143,19 +1344,6 @@ async function _mountTestUI(
         fn(el());
         await settle();
       });
-    // check()/uncheck() only mean something on a checkbox/radio. On anything
-    // else `e.checked` is undefined, so `check()` used to CLICK a plain button
-    // and report success — a silent wrong-thing-done.
-    const assertCheckable = (verb: string) => {
-      const i = resolveInfo();
-      if (typeof i.checked !== "boolean") {
-        throw new Error(
-          `testUI: cannot ${verb} "${i.name}" — the ${i.tag} has no checked ` +
-            `state (only a checkbox/radio does)\n` +
-            `  use .click() for a plain control`,
-        );
-      }
-    };
     return {
       get info() {
         return resolveInfo();
@@ -1213,17 +1401,29 @@ async function _mountTestUI(
       select(value: string) {
         return act("select on", (e) => triggerSelect(e, value), true);
       },
+      // check()/uncheck() only mean something on a checkbox/radio — and the
+      // rule lives in ui-trigger.ts, so the live tier (`am trigger … check`)
+      // cannot drift from it. It used to be duplicated here, and the copy in
+      // the live tier let a "check" click a plain <button>.
       check() {
-        return act("check", (e) => {
-          assertCheckable("check");
-          if (!e.checked) triggerAction(e, "click");
-        });
+        return act(
+          null,
+          (e) =>
+            triggerSetChecked(e, true, {
+              name: resolveInfo().name,
+              prefix: "testUI: ",
+            }),
+        );
       },
       uncheck() {
-        return act("uncheck", (e) => {
-          assertCheckable("uncheck");
-          if (e.checked) triggerAction(e, "click");
-        });
+        return act(
+          null,
+          (e) =>
+            triggerSetChecked(e, false, {
+              name: resolveInfo().name,
+              prefix: "testUI: ",
+            }),
+        );
       },
       clear() {
         return act("clear", (e) => triggerClear(e), true);
@@ -1315,7 +1515,11 @@ async function _mountTestUI(
       let elsewhere: UIElementInfo[] = [];
       try {
         elsewhere = liveElements(currentSurface(), name);
-      } catch { /* unmounted — plain listing below */ }
+      } catch {
+        // aio-ok: `currentSurface()` throws when nothing is mounted, and this
+        // is the failure path already — we are only enriching the error the
+        // caller is about to get with "the name lives over here instead".
+      }
       if (hoisted.length > 1) {
         fail(
           `testUI: "${name}" matches ${hoisted.length} elements under ` +
@@ -1395,7 +1599,11 @@ async function _mountTestUI(
     let unique = false;
     try {
       unique = liveElements(selectScope(), name).length === 1;
-    } catch { /* not mounted yet — component semantics only */ }
+    } catch {
+      // aio-ok: `currentSurface()` throws before the first mount. "Not
+      // mounted" is the same answer as "no unique element by that name" —
+      // both mean this handle stays a plain component handle.
+    }
     if (!unique) return comp;
     const eh = elementHandle(() => {
       const els = liveElements(selectScope(), name);
@@ -1624,6 +1832,26 @@ async function _mountTestUI(
     );
   };
 
+  /** The state `expectCell`'s predicate just read — the booted slice from the
+   *  standalone store, falling back to the cell def's own view for a client
+   *  cell (whose state lives in the page runtime, not the server store). */
+  const cellStateFor = (cell: AnyDoc): unknown => {
+    const id = cell?.__aio?.id as string | undefined;
+    const slice = id === undefined
+      ? undefined
+      : standaloneApp?.getState()?.[id];
+    if (slice !== undefined) return slice;
+    try {
+      // A client cell: read its declared keys off the reactive def.
+      const keys = Object.keys((cell?.__aio?.state ?? {}) as object);
+      const out: Record<string, unknown> = {};
+      for (const k of keys) out[k] = (cell as Record<string, unknown>)[k];
+      return out;
+    } catch {
+      return undefined;
+    }
+  };
+
   const api = {
     surface: () => serializeSurface(currentSurface()),
     // The mount's OWN window and document — the same objects `window` and
@@ -1657,15 +1885,17 @@ async function _mountTestUI(
     // (surfacing failures from un-awaited actions), then waits quiescence.
     settle: async () => {
       await drain();
-      await settle();
+      // strict: this IS the observation point. "Quiesced" and "gave up" must
+      // not be the same answer here.
+      await settle(true);
     },
     // Advance the virtual schedule clock by `ms` and fire everything now due —
     // drives toast auto-dismiss / debounce / backoff / poll deterministically
     // in tests. Then settles so the UI reflects the fired actions.
     advance: async (ms: number) => {
-      advanceSchedules?.(ms);
+      await advanceSchedules?.(ms);
       await drain();
-      await settle();
+      await settle(true); // an observation point too — see settle above
     },
     html: () => String(root.innerHTML),
     present: (name: string, kind?: UIKind): boolean => showing(name, kind),
@@ -1706,8 +1936,19 @@ async function _mountTestUI(
           `directly after ui.settle() (client cells are invisible to the ` +
           `server store and to \`am state\`; \`am surface\` sees their UI).`
         : "";
+      // The state the predicate saw. `t.expect.state` has printed it since it
+      // existed; `expectCell` said only "failed for cell 'notes'", so the two
+      // assertion APIs for the same fact disagreed on whether a failure is
+      // worth explaining — and the one people are told to use was the useless
+      // one. Same formatter, so they cannot drift again.
       throw new Error(
-        msg ?? `testUI: expectCell failed for cell '${id}'.${scopeNote}`,
+        `${
+          msg ?? `testUI: expectCell failed for cell '${id}'.${scopeNote}`
+        } state: ${formatCellState(cellStateFor(cell))}` +
+          // The predicate may be false only because the app never went quiet —
+          // that is a different bug with a different fix, and saying so beats
+          // sending the reader after a predicate that is fine.
+          (_gaveUp ? `\n  ${_gaveUp}` : ""),
       );
     },
     async waitFor(
@@ -1737,7 +1978,10 @@ async function _mountTestUI(
       if (lastErr !== undefined) throw lastErr;
       throw new Error(
         `testUI: waitFor timed out${opts?.msg ? ` — ${opts.msg}` : ""}.\n` +
-          "  current surface: " + surfaceDigest(currentSurface()),
+          "  current surface: " + surfaceDigest(currentSurface()) +
+          // "waited 3s and the predicate stayed false" reads as an app bug; if
+          // settle() was giving up every poll, it is not (see settle()).
+          (_gaveUp ? `\n  ${_gaveUp}` : ""),
       );
     },
     find(component: string, key?: string | number): UIComponentHandle {
@@ -1747,11 +1991,20 @@ async function _mountTestUI(
     },
     unmount() {
       _unmount(handle);
+      ledger?.restore(); // put the cells' own methods back before the reset
       resetRuntime?.();
+      // The process-global half — see the note at boot. Teardown that leaves
+      // `_pending` populated hands the NEXT test a `settle()` that can only
+      // time out.
+      _resetAioRuntime();
       // Owned window: close in the background (fire-and-forget is safe for
       // happy-dom; use dispose() when you need to await it).
-      ownedWindow?.happyDOM?.close()?.catch?.(() => {});
+      ownedWindow?.happyDOM?.close()?.catch?.(() => {
+        // aio-ok: teardown is fire-and-forget by design here — dispose() is
+        // the spelling that awaits it.
+      });
       ownedWindow = null;
+      partial.window = null;
       for (const key of _ownedGlobals.splice(0)) {
         delete (globalThis as AnyDoc)[key];
       }
@@ -1764,10 +2017,13 @@ async function _mountTestUI(
         await drain();
       } finally {
         _unmount(handle);
+        ledger?.restore(); // put the cells' own methods back before the reset
         resetRuntime?.();
+        _resetAioRuntime(); // see unmount() — process-global residue
         if (ownedWindow) {
           await ownedWindow.happyDOM?.close();
           ownedWindow = null;
+          partial.window = null;
         }
         for (const key of _ownedGlobals.splice(0)) {
           delete (globalThis as AnyDoc)[key];
@@ -1791,7 +2047,9 @@ async function _mountTestUI(
       try {
         surf = currentSurface();
       } catch {
-        /* nothing mounted yet — fall through to lazy component find */
+        // aio-ok: `currentSurface()` throws before the first mount. Nothing is
+        // on screen yet BY DEFINITION, so the lazy handle below (which
+        // re-resolves at use time) is the correct answer, not an error.
       }
       if (surf && findComponents(surf, name).length > 0) {
         // Shadow rule: if the name ALSO uniquely addresses an
