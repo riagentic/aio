@@ -225,6 +225,25 @@ export function useForm<T extends Record<string, unknown>>(
     };
   }
 
+  /** The current values, as a free function.
+   *
+   *  `validate()` used to reach them through `this.values()`, which made the
+   *  whole method depend on HOW it was called: `form.validate()` worked, and
+   *  `const { validate } = form; validate()` — the idiomatic way to take a
+   *  handler out of an API object, and the way a submit button gets one — threw
+   *  `Cannot read properties of undefined (reading 'values')`, naming neither
+   *  the form nor the cause. Worse, it only did so when `options.validators`
+   *  was set, because that is the only branch that dereferenced `this`: the
+   *  same call site worked until the day someone added a cross-field rule.
+   *  Nothing here needs a receiver, so nothing here has one. */
+  const values = (): T => {
+    const result: Record<string, unknown> = {};
+    for (const [name, f] of Object.entries(fieldStates)) {
+      result[name] = f.value;
+    }
+    return result as T;
+  };
+
   return {
     fields: fieldStates as { [K in keyof T]: FieldState<T[K]> },
     get valid() {
@@ -240,13 +259,7 @@ export function useForm<T extends Record<string, unknown>>(
       }
       return false;
     },
-    values(): T {
-      const result: Record<string, unknown> = {};
-      for (const [name, f] of Object.entries(fieldStates)) {
-        result[name] = f.value;
-      }
-      return result as T;
-    },
+    values,
     validate(): boolean {
       let valid = true;
       for (const f of Object.values(fieldStates)) {
@@ -255,7 +268,7 @@ export function useForm<T extends Record<string, unknown>>(
       }
       // Cross-field validators
       if (options?.validators) {
-        const vals = this.values();
+        const vals = values();
         for (const validator of options.validators) {
           const result = validator(vals);
           if (result) {
@@ -279,9 +292,22 @@ export function useForm<T extends Record<string, unknown>>(
     bind(name: keyof T) {
       const f = fieldStates[name as string]!;
       return {
-        get value() {
-          return f.value;
-        },
+        // A plain VALUE, read HERE — not a live getter.
+        //
+        // `bind()` is called in the component body and its result is handed
+        // straight to `h()` as props (`h("input", form.bind("name"))`, the
+        // shape this file's own docstring shows). A getter moved the read out
+        // of the render pass and into `applyProps`, and cost two things:
+        //
+        //  * the component never SUBSCRIBED to the field — the read happened
+        //    after the render's tracking window closed;
+        //  * `prev.value === next.value` was unconditionally true, because both
+        //    getters read the same live field. The DOM value was therefore
+        //    never rewritten, so `form.reset()` left the typed text on screen.
+        //
+        // Read eagerly and both go away: the body subscribes, and the props
+        // carry the snapshot the render actually described.
+        value: f.value,
         onInput: (e: Event) => f.set((e.target as HTMLInputElement).value),
         onBlur: () => f.touch(),
       };
@@ -304,6 +330,27 @@ export function useForm<T extends Record<string, unknown>>(
 export function useFieldArray<T>(initial: T[] = []): FieldArrayState<T> {
   const sig = signal<T[]>([...initial]);
 
+  /** An index outside the list is a no-op — and used to be a SILENT one. The
+   *  three mutators all guarded their bounds and returned, so `remove(i)` with
+   *  a stale `i` (the row was already gone, the index came from a filtered
+   *  view, the list re-sorted between render and click) changed nothing and
+   *  said nothing: the row stayed on screen and there was no thread to pull.
+   *
+   *  Observe-only, so dev and prod behave identically — prod still no-ops,
+   *  dev additionally says which call it was. Not a throw: an index that went
+   *  stale between a render and a click is a real race in correct code, and
+   *  breaking the handler over it would be the worse trade. */
+  const outOfRange = (op: string, index: number, len: number): true => {
+    if ((globalThis as Record<string, unknown>).__aioDev === true) {
+      console.warn(
+        `[aio] useFieldArray.${op}(${index}) is out of range — the list holds ` +
+          `${len} item(s), so nothing changed. The index is stale or came ` +
+          `from a different list.`,
+      );
+    }
+    return true;
+  };
+
   return {
     get items() {
       return sig.value;
@@ -313,20 +360,34 @@ export function useFieldArray<T>(initial: T[] = []): FieldArrayState<T> {
     },
     remove(index: number) {
       const arr = [...sig.peek()];
-      if (index < 0 || index >= arr.length) return;
+      if (index < 0 || index >= arr.length) {
+        outOfRange("remove", index, arr.length);
+        return;
+      }
       arr.splice(index, 1);
       sig.set(arr);
     },
     move(from: number, to: number) {
       const arr = [...sig.peek()];
-      if (from < 0 || from >= arr.length || to < 0 || to > arr.length) return;
+      if (from < 0 || from >= arr.length) {
+        outOfRange("move", from, arr.length);
+        return;
+      }
+      // `to === length` is the append position, so it is in range.
+      if (to < 0 || to > arr.length) {
+        outOfRange("move", to, arr.length);
+        return;
+      }
       const [item] = arr.splice(from, 1);
       arr.splice(to, 0, item!);
       sig.set(arr);
     },
     set(index: number, item: T) {
       const arr = [...sig.peek()];
-      if (index < 0 || index >= arr.length) return;
+      if (index < 0 || index >= arr.length) {
+        outOfRange("set", index, arr.length);
+        return;
+      }
       arr[index] = item;
       sig.set(arr);
     },

@@ -49,7 +49,22 @@ export type AmbientContext = {
 export type ToWorker =
   /** Seed the worker with the authoritative slice (after persistence/migration
    *  ran on the main isolate) and the run-mode flags it needs. */
-  | { t: "init"; state: Record<string, unknown>; prod: boolean }
+  | {
+    t: "init";
+    state: Record<string, unknown>;
+    prod: boolean;
+    /** The owner's `__aioDev` flag, carried across the thread.
+     *
+     *  Every dev tripwire — frozen-state enforcement, the readonly hint, the
+     *  hidden-field read guard — reads `globalThis.__aioDev`, and a worker gets
+     *  a FRESH global. Without this the worker isolate was strictly more
+     *  permissive than the isolate that spawned it: under `testServer({ workers:
+     *  "real" })` a mutation that throws in-isolate would pass in a real worker,
+     *  which is the green-test/broken-prod trade this whole boundary exists to
+     *  remove. Tests are the strictest environment, never the most permissive.
+     */
+    dev: boolean;
+  }
   /** Run one action. `id` correlates the reply. */
   | { t: "call"; id: number; action: Msg; ctx?: AmbientContext }
   /** Graceful stop — the worker aborts its in-flight methods, streams their

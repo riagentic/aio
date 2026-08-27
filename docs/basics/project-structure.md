@@ -8,7 +8,8 @@
 src/
   app.ts              <- aio.run({ cells }) -- wiring only
   App.tsx             <- root layout + routing only
-  cell/               <- aio cell definitions (state + methods)
+  cell.ts             <- THE cell (state + methods) -- while there is one
+  cell/               <- one file per cell, once there are several
   type/               <- all exported types, always
   lib/                <- pure functions, no aio imports
   ui/                 <- components
@@ -18,12 +19,22 @@ src/
 
 ```
 tests/
+  cell.test.ts        <- what `am create` scaffolds
   cell/counter.test.ts
   lib/math.test.ts
 ```
 
-Five folders under `src/`, one beside it, two root files. That is the entire
+Four folders under `src/`, one beside it, three root files. That is the entire
 app.
+
+> **`cell.ts` or `cell/` — one rule, not two spellings.** A file for one cell, a
+> folder for many, and the folder is `cell/` (singular), never `cells/`.
+> `am
+> create` scaffolds `src/cell.ts` and the quickstart teaches it; the
+> moment a second cell exists, `src/cell.ts` becomes `src/cell/<name>.ts` and
+> every import moves with it. Everything below that says `cell/` applies
+> unchanged to a single `cell.ts` — the placement rule is the same, the file is
+> just not a folder yet.
 
 > **One place, and only one.** Tests live in `tests/` at the project root — what
 > `am create` scaffolds, what the quickstart's `deno task test` runs, and what
@@ -62,33 +73,35 @@ fails the build with the fix in the message.
 
 ## Zero-Thought Placement Rules
 
-| What you wrote                     | Where it goes        | Rule                           |
-| ---------------------------------- | -------------------- | ------------------------------ |
-| `export type` / `export interface` | `type/`              | Always. No exceptions.         |
-| `cell()` definition                | `cell/`              | Always. One cell per file.     |
-| Extracted method helper            | `cell/` next to cell | Imports aio = stays with cell. |
-| Pure function, no aio import       | `lib/`               | Always.                        |
-| Component / JSX                    | `ui/`                | Always.                        |
-| Test                               | `tests/`             | Mirrors `src/`.                |
-| `aio.run()`                        | `app.ts`             | One file.                      |
+| What you wrote                     | Where it goes           | Rule                           |
+| ---------------------------------- | ----------------------- | ------------------------------ |
+| `export type` / `export interface` | `type/`                 | Always. No exceptions.         |
+| `cell()` definition                | `cell.ts`, then `cell/` | One cell per file, always.     |
+| Extracted method helper            | `cell/` next to cell    | Imports aio = stays with cell. |
+| Pure function, no aio import       | `lib/`                  | Always.                        |
+| Component / JSX                    | `ui/`                   | Always.                        |
+| Test                               | `tests/`                | Mirrors `src/`.                |
+| `aio.run()`                        | `app.ts`                | One file.                      |
 
 ---
 
 ## Import Rules (Enforceable by Linter)
 
-| Folder   | Can import from                    |
-| -------- | ---------------------------------- |
-| `type/`  | nothing (zero deps)                |
-| `lib/`   | `type/` only                       |
-| `cell/`  | `type/` + `lib/` + `aio`           |
-| `ui/`    | `type/` + `lib/` + `cell/` + `aio` |
-| `tests/` | anything                           |
+| Folder              | Can import from                      |
+| ------------------- | ------------------------------------ |
+| `type/`             | nothing (zero deps)                  |
+| `lib/`              | `type/` only                         |
+| `cell.ts` / `cell/` | `type/` + `lib/` + `aio`             |
+| `ui/`               | `type/` + `lib/` + the cells + `aio` |
+| `tests/`            | anything                             |
 
 Types flow down. Logic flows down. Nothing flows up.
 
 ---
 
 ## Small App (Flat)
+
+Two cells, so `src/cell.ts` has become `src/cell/`.
 
 ```
 src/

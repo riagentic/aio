@@ -53,6 +53,20 @@ export { isScheduleEffect } from "../state/schedule.ts";
 /** Deep diagnostic detail types — the shapes vitals/diagnostics emit.
  *  (The CONFIG types stay on the main entry with `aio.run()`.) */
 export type { AioErrorContext, AioErrorSource } from "../diagnostics/error.ts";
+
+/** The framework's own error format, so an app's boot checks can speak it.
+ *
+ *      <what>
+ *        → fix: <fix>
+ *        → docs: <doc>
+ *
+ *  `teachMessage` returns the text (for `log.warn`/`log.error`, which supply
+ *  the category); `teachableError` returns it as a throwable, prefixed `[aio]`
+ *  because a thrown Error lands on a bare stderr. An app that validates its own
+ *  config at startup should not have to invent a second shape for the same
+ *  sentence — an audit of 40 error sites found only 21 naming both cause and
+ *  fix, and every one that did had reinvented the format. */
+export { teachableError, teachMessage } from "../diagnostics/error.ts";
 export type {
   CellStateSize,
   MemoryReport,

@@ -30,9 +30,8 @@
 import { dec } from "../protocol/envelope.ts";
 import { connectCli } from "../server/cli-client.ts";
 import type { CliApp } from "../server/cli-client.ts";
-import type { CellsConfig } from "../server/aio-types.ts";
 import { _armTestStrict } from "./test-strict.ts";
-import { testServer } from "./server-test.ts";
+import { testServer, type TestServerConfig } from "./server-test.ts";
 
 /** One connected surface. */
 export interface TestClient {
@@ -59,6 +58,31 @@ export interface TestClient {
     pred: (p: Patch) => boolean,
     opts?: { timeoutMs?: number },
   ): Promise<Patch>;
+  /** Call a cell method THE WAY A CLIENT DOES — over this client's socket.
+   *
+   *  The gap this closes: a non-async method called from a browser tab, an
+   *  Electron window or `am` crosses the wire. The in-process call every test
+   *  writes (`counter.add(x)`, `testCell`, `testUI`) does not — it hands the
+   *  argument over by reference, on a trusted `_source`, and gets the real
+   *  object back. Over the wire the payload is JSON, the return value is
+   *  JSON-vetted (`serializeReturn`), the action is re-stamped `_source: "UI"`,
+   *  and a throw comes back as a message with no stack. Four differences that
+   *  a test calling the method in-process cannot see, and that the client sees
+   *  on every single call.
+   *
+   *  Resolves with the server's acked return value; REJECTS with the server's
+   *  refusal. `tests/prod-parity-client-sync-call.test.ts` pins each
+   *  difference against the in-process call, side by side.
+   *
+   *  ```ts
+   *  const back = await m.clients[0].call("todos", "add", "milk");
+   *  ```
+   */
+  call<T = unknown>(
+    cell: string,
+    method: string,
+    ...args: unknown[]
+  ): Promise<T>;
   /** Underlying connection, for anything this surface doesn't cover. */
   readonly cli: CliApp<Record<string, unknown>>;
 }
@@ -79,7 +103,12 @@ export type Patch = {
 // reconnect goes to the client whose previous socket closed). Refcounted so
 // two harnesses in one process share one wrapper and restore the original
 // once the last one closes.
-type Sink = { push(batch: Patch[]): void; socket: WebSocket | null };
+type Sink = {
+  push(batch: Patch[]): void;
+  /** One per-action ack — the reply to a client-context method call. */
+  ack(cid: string, ok: boolean, value: unknown, error?: string): void;
+  socket: WebSocket | null;
+};
 const _sinks = new Set<Sink>();
 let _constructing: Sink | null = null;
 let _wrapDepth = 0;
@@ -109,6 +138,16 @@ function _installSocketCapture(): void {
           owner.push(frame.d as Patch[]);
         } else if (frame.t === "state") {
           owner.push([{ op: "replace", path: [], value: frame.d }]);
+        } else if (frame.t === "ack") {
+          const d = (frame.d ?? {}) as {
+            cid?: string;
+            ok?: boolean;
+            value?: unknown;
+            error?: string;
+          };
+          if (typeof d.cid === "string") {
+            owner.ack(d.cid, d.ok !== false, d.value, d.error);
+          }
         }
       });
     }
@@ -152,6 +191,11 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  *  margin is for a loaded machine, and `converged({ settleMs })` raises it. */
 const DEFAULT_SETTLE_MS = 80;
 
+/** How long a client-context `call()` waits for its ack before failing loudly.
+ *  Deliberately the same order as the CLI client's own ack ceiling: a call that
+ *  never comes back must name the method, not hang out the test's timeout. */
+const CALL_TIMEOUT_MS = 5_000;
+
 /** Stable JSON for comparing two views of the same state. */
 function canon(v: unknown): string {
   return JSON.stringify(v, (_k, val) => {
@@ -174,7 +218,7 @@ function canon(v: unknown): string {
  * they receive the same broadcasts a browser would, in the same order.
  */
 export async function testMultiClient(
-  config: CellsConfig,
+  config: TestServerConfig,
   count = 2,
 ): Promise<TestMultiClient> {
   _armTestStrict(); // tests are the strictest environment, never the most permissive
@@ -195,17 +239,46 @@ export async function testMultiClient(
   // stays as the ceiling for a genuinely slow round trip.
   const NOOP_GRACE_MS = 250;
 
+  // What a client is ALLOWED to call, taken from the very cells this app was
+  // booted with. `call()` checks against it rather than sending a typo into the
+  // void: an unknown action type is ignored by the server and acked `ok`, so a
+  // misspelled method would resolve with `undefined` and the test would pass
+  // for the wrong reason — the silent-success shape this harness exists to
+  // eliminate.
+  const methodsByCell = new Map<string, string[]>();
+  for (const entry of config.cells ?? []) {
+    const def = "__aio" in entry ? entry : entry.cell;
+    methodsByCell.set(
+      def.__aio.id,
+      (def.__aio.actionKeys ?? []).filter((k) => !k.startsWith("__")),
+    );
+  }
+
   const sinks: Sink[] = [];
   _installSocketCapture();
   try {
     for (let i = 0; i < count; i++) {
       const patches: Patch[] = [];
       const patchListeners = new Set<(b: readonly Patch[]) => void>();
+      /** cid → the `call()` waiting for its ack. */
+      const acks = new Map<
+        string,
+        { ok: (v: unknown) => void; fail: (e: Error) => void }
+      >();
       const sink: Sink = {
         socket: null,
         push: (batch) => {
           patches.push(...batch);
           for (const fn of patchListeners) fn(batch);
+        },
+        ack: (cid, ok, value, error) => {
+          const waiter = acks.get(cid);
+          if (!waiter) return; // not ours (connectCli's own bound calls)
+          acks.delete(cid);
+          if (ok) waiter.ok(value);
+          else {waiter.fail(
+              new Error(error ?? "the server refused the action"),
+            );}
         },
       };
       _sinks.add(sink);
@@ -269,12 +342,79 @@ export async function testMultiClient(
           patchListeners.delete(cb);
         };
       };
+      /** The client path, end to end: an action frame with a correlation id
+       *  goes out this socket, the server sanitizes it (`_source: "UI"`),
+       *  dispatches it, and acks with the JSON-vetted return value. Nothing is
+       *  shortcut — this is the same frame a browser tab sends. */
+      const call = <T>(
+        cellName: string,
+        method: string,
+        ...args: unknown[]
+      ): Promise<T> => {
+        const known = methodsByCell.get(cellName);
+        if (!known) {
+          return Promise.reject(
+            new Error(
+              `testMultiClient: client ${i} cannot call "${cellName}.${method}" — ` +
+                `this app has no cell "${cellName}". Cells: ` +
+                `${[...methodsByCell.keys()].join(", ") || "(none)"}.`,
+            ),
+          );
+        }
+        if (!known.includes(method)) {
+          return Promise.reject(
+            new Error(
+              `testMultiClient: cell "${cellName}" has no method "${method}". ` +
+                `Methods: ${
+                  known.join(", ") || "(none)"
+                }. (An unknown action ` +
+                `type is ignored by the server and acked OK, so this would ` +
+                `otherwise resolve with undefined and pass.)`,
+            ),
+          );
+        }
+        const cid = crypto.randomUUID();
+        const p = new Promise<T>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            acks.delete(cid);
+            reject(
+              new Error(
+                `testMultiClient: client ${i} got no ack for ` +
+                  `"${cellName}.${method}" within ${CALL_TIMEOUT_MS}ms.`,
+              ),
+            );
+          }, CALL_TIMEOUT_MS);
+          acks.set(cid, {
+            ok: (v) => {
+              clearTimeout(timer);
+              resolve(v as T);
+            },
+            fail: (e) => {
+              clearTimeout(timer);
+              reject(e);
+            },
+          });
+        });
+        lastSendAt = Date.now();
+        // `cid` rides on the action frame — cli-client passes the object
+        // through untouched, and the server answers any frame carrying one.
+        cli.send(
+          {
+            type: `${cellName}:${method}`,
+            payload: { args },
+            cid,
+          } as unknown as { type: string; payload?: unknown },
+        );
+        return p;
+      };
+
       clients.push({
         index: i,
         cli,
         patches,
         onPatch,
         waitForPatch,
+        call,
         state: <T>(cell: string) =>
           ((cli.state ?? {}) as Record<string, unknown>)[cell] as T,
         fullState: () => (cli.state ?? {}) as Record<string, unknown>,

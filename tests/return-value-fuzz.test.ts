@@ -15,6 +15,13 @@
 import { assert, assertEquals } from "@std/assert";
 import { fuzzEnvInt } from "./fuzz-seed.ts";
 import { serializeReturn } from "../src/protocol/return-value.ts";
+import { serializeArgs } from "../src/protocol/wire-value.ts";
+import {
+  findLossy,
+  type LossyBudget,
+  type LossyConversion,
+  MAX_NODES,
+} from "../src/protocol/wire-value.ts";
 import { bootCells } from "../src/testing/cell-test.ts";
 import { cell } from "../src/state/cell-create.ts";
 
@@ -298,4 +305,142 @@ Deno.test("return-value: a SYNC method returning null resolves null, like the as
   } finally {
     h.dispose();
   }
+});
+
+// ── past the walk's own budget ───────────────────────────────────────
+//
+// The fuzzer above composes 1–4-key objects, so it could never reach the
+// walk's `MAX_NODES` cap — and the cap `return`ed in silence. A 30 000-key
+// object with a trailing `Date` reported `lossy: []` ("exact trip"); the SAME
+// `Date` placed first reported `lossy: 1`. A verdict that depends on key order
+// is not a verdict, and this is the module whose entire purpose is that
+// nothing crosses the wire corrupted and quiet.
+
+/** Capture what the guard says while `fn` runs. */
+function captureWarnings(fn: () => void): string[] {
+  const out: string[] = [];
+  const w = console.warn, e = console.error;
+  console.warn = (...a: unknown[]) => out.push(a.map(String).join(" "));
+  console.error = (...a: unknown[]) => out.push(a.map(String).join(" "));
+  try {
+    fn();
+  } finally {
+    console.warn = w;
+    console.error = e;
+  }
+  return out;
+}
+
+function wide(extra: Record<string, unknown>, keys: number): {
+  orig: Record<string, unknown>;
+  round: unknown;
+} {
+  const orig: Record<string, unknown> = {};
+  for (let i = 0; i < keys; i++) orig[`k${i}`] = i;
+  Object.assign(orig, extra);
+  return { orig, round: JSON.parse(JSON.stringify(orig)) };
+}
+
+Deno.test("wire-value: a walk that could not finish says so, instead of reporting EXACT", () => {
+  const { orig, round } = wide({ due: new Date(0) }, MAX_NODES + 10_000);
+  const out: LossyConversion[] = [];
+  const budget: LossyBudget = { n: 0 };
+  const said = captureWarnings(() =>
+    findLossy(orig, round, "value", out, budget)
+  );
+  assert(
+    budget.truncated === true,
+    "the walk stopped early and did not record it — `lossy: []` then reads " +
+      "as a clean bill of health for a value nobody checked",
+  );
+  assert(
+    said.some((m) => m.includes("too large to verify")),
+    `the truncation must be loud, once: ${JSON.stringify(said)}`,
+  );
+});
+
+Deno.test("wire-value: the truncation warning fires once per walk, not per node", () => {
+  const { orig, round } = wide({}, MAX_NODES * 2);
+  const out: LossyConversion[] = [];
+  const said = captureWarnings(() =>
+    findLossy(orig, round, "value", out, { n: 0 })
+  );
+  assertEquals(
+    said.filter((m) => m.includes("too large to verify")).length,
+    1,
+    "a per-node warning on a 40 000-node value is a log flood",
+  );
+});
+
+Deno.test("wire-value: fuzz — beyond MAX_NODES, EXACT is never reported in silence", () => {
+  let seed = SEED ^ 0x9e37;
+  const rnd = () =>
+    (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  const pick = <T>(a: T[]) => a[Math.floor(rnd() * a.length)]!;
+  const lossyClasses = CLASSES.filter((c) => c.verdict === "lossy");
+
+  for (let round = 0; round < Math.min(ROUNDS, 12); round++) {
+    // A lossy value at a RANDOM position in a value wider than the budget:
+    // before the cap it must be named, after it the walk must admit it stopped.
+    const part = pick(lossyClasses);
+    const keys = MAX_NODES + Math.floor(rnd() * 10_000);
+    const at = Math.floor(rnd() * keys);
+    const orig: Record<string, unknown> = {};
+    for (let i = 0; i < keys; i++) {
+      if (i === at) orig.marked = part.make();
+      orig[`k${i}`] = i;
+    }
+    if (!("marked" in orig)) orig.marked = part.make();
+    const rt = JSON.parse(JSON.stringify(orig));
+    const out: LossyConversion[] = [];
+    const budget: LossyBudget = { n: 0 };
+    captureWarnings(() => findLossy(orig, rt, "value", out, budget));
+    const repro =
+      `FUZZ_SEED=${SEED} round ${round}: ${part.name} at key ${at} of ${keys}`;
+    assert(
+      out.length > 0 || budget.truncated === true,
+      `a lossy value reported EXACT with no truncation flag — ${repro}`,
+    );
+  }
+});
+
+// ── the two directions of one wire ──────────────────────────────────────
+//
+// `serializeArgs` (call → server) and `serializeReturn` (server → caller) walk
+// the SAME comparison (`findLossy`), and `wire-value.ts` says out loud that
+// they share it "so the two directions cannot drift". They drifted anyway, on
+// the field added to fix silent truncation: `serializeArgs` returned
+// `truncated`, `serializeReturn` built a budget, threw it away, and went on
+// reporting `lossy: []` — "this value crossed the wire EXACTLY" — for a value
+// whose walk had given up two thirds of the way through.
+//
+// Asserted as a PROPERTY of the pair rather than of either half: whatever one
+// direction can say about a value, the other must be able to say too.
+Deno.test("wire-value: both directions report truncation, or neither is trusted", () => {
+  const { orig } = wide({ due: new Date(0) }, MAX_NODES + 10_000);
+
+  const ret = captureWarnings(() => serializeReturn(orig, "fuzz:truncated"));
+  const r = serializeReturn(orig, "fuzz:truncated");
+  const a = serializeArgs([orig], "fuzz:truncated");
+  void ret;
+
+  assertEquals(
+    r.truncated,
+    true,
+    "the RETURN direction reported an exact trip for a walk that stopped early",
+  );
+  assertEquals(a.truncated, true, "the ARGUMENT direction lost its budget too");
+  // The pair, stated as the invariant: same value, same verdict.
+  assertEquals(r.truncated, a.truncated);
+});
+
+Deno.test("wire-value: a value the walk finished is NOT flagged truncated", () => {
+  // The mirror — `truncated` must mean something, so it has to be false for
+  // every ordinary value.
+  const small = serializeReturn({ a: 1, b: [1, 2, 3], c: "x" }, "fuzz:small");
+  assertEquals(small.truncated, false);
+  assertEquals(small.lossy, []);
+  assertEquals(serializeReturn(undefined).truncated, false);
+  assertEquals(serializeReturn(() => {}).truncated, false);
+  assertEquals(serializeArgs([{ a: 1 }], "fuzz:small").truncated, false);
 });

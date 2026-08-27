@@ -133,11 +133,42 @@ export function Link(
   const isActive = (exact || to === "/")
     ? path === to
     : path === to || path.startsWith(to + "/");
+  // A click this router must NOT take over. Every one of these is a gesture the
+  // browser already handles correctly, and intercepting it replaces the user's
+  // intent with an in-page route change:
+  //
+  //  • a modified / non-primary click — open in a new tab, a new window, save;
+  //  • `target` (other than `_self`) or `download` on the anchor — the author
+  //    said where this goes, and `<Link to="/x" target="_blank">` silently
+  //    navigated in place instead (measured);
+  //  • a destination on another ORIGIN, or a non-http scheme (`mailto:`,
+  //    `tel:`) — there is no in-app route there. `<Link to="https://…">` used
+  //    to `preventDefault()` and then throw a SecurityError out of
+  //    `history.pushState`, so the link did nothing at all.
+  //
+  // In every case the handler simply returns and the anchor's own `href` does
+  // the right thing.
+  function ownedByBrowser(e: MouseEvent): boolean {
+    if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) {
+      return true;
+    }
+    const el = e.currentTarget as HTMLAnchorElement | null;
+    const target = el?.getAttribute?.("target");
+    if (target && target !== "_self") return true;
+    if (el?.hasAttribute?.("download")) return true;
+    if (typeof location === "undefined") return false;
+    try {
+      const url = new URL(to, location.href);
+      if (url.origin !== location.origin) return true;
+      if (url.protocol !== "http:" && url.protocol !== "https:") return true;
+    } catch {
+      // Not a URL this router can resolve — let the anchor try.
+      return true;
+    }
+    return false;
+  }
   function handleClick(e: Event) {
-    const me = e as MouseEvent;
-    if (
-      me.button !== 0 || me.metaKey || me.ctrlKey || me.shiftKey || me.altKey
-    ) return;
+    if (ownedByBrowser(e as MouseEvent)) return;
     e.preventDefault();
     navigate(to, { replace: rep });
   }

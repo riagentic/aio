@@ -119,10 +119,10 @@ export type { TestContext } from "./src/cell-test.ts";
  *
  * With timeout/retry:
  * ```ts
- * const result = await call({ timeout: 5000, retries: 2 }, () => inventory.reserve(items))
+ * const result = await call({ timeoutMs: 5000, retries: 2 }, () => inventory.reserve(items))
  * ```
  */
-/** Wrap an inter-cell call with timeout and/or retry — `call({ timeout: 5000 }, () => f.method())`. */
+/** Wrap an inter-cell call with timeout and/or retry — `call({ timeoutMs: 5000 }, () => f.method())`. */
 export { call } from "./src/state/cell-impl.ts";
 /** Method types for cell definitions — sync, async, call options */
 export type {

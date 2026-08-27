@@ -117,7 +117,19 @@ async function smokeServerExample(
   }
 }
 
-// Thin-client examples serve a connect page — boot headless, expect HTML on /.
+// Thin-client examples serve a connect page — boot headless, then prove the
+// page a user would actually get.
+//
+// `html.includes("<")` was the whole assertion here, and it is true of every
+// error page ever served. `examples/targets/electron-remote/` had NO `App.tsx`
+// at all: the framework's shell answered 200 with a document whose only job is
+// to `import('/App.tsx')`, that import 404'd, the client never mounted — and
+// this test stayed green over it for as long as it existed. A test that cannot
+// fail is worse than no test: it is a standing claim that something was
+// checked.
+//
+// So: the shell must reference the component, the component must be SERVED,
+// and it must be a real default-exporting page.
 async function smokeConnectPageExample(target: string): Promise<void> {
   const port = freePort();
   const proc = spawnExample(target, "src/app.ts", [
@@ -131,8 +143,34 @@ async function smokeConnectPageExample(target: string): Promise<void> {
       return res.ok ? body : null;
     });
     assert(
-      html.includes("<"),
-      `${target}: expected HTML, got: ${html.slice(0, 80)}`,
+      /<!DOCTYPE html>/i.test(html) && html.includes("</html>"),
+      `${target}: expected an HTML document, got: ${html.slice(0, 120)}`,
+    );
+    assert(
+      html.includes("App.tsx"),
+      `${target}: the shell must mount /App.tsx — got: ${html.slice(0, 200)}`,
+    );
+    // THE assertion the old one was missing: the module the shell imports has
+    // to exist. A 404 here is a client that renders nothing, forever.
+    const res = await fetch(`http://localhost:${port}/App.tsx`);
+    const src = await res.text();
+    assert(
+      res.ok,
+      `${target}: GET /App.tsx → ${res.status} — the connect page cannot ` +
+        `mount. Add src/App.tsx (see targets/android-remote for the shape).`,
+    );
+    // Served TRANSPILED, so the source spelling is gone: the dev server emits
+    // `export { App as default }`. Assert on what actually arrives — the
+    // default binding, plus the JSX the page is made of.
+    assert(
+      /export\s*\{[^}]*\bas\s+default\b/.test(src) ||
+        /export\s+default\b/.test(src),
+      `${target}: /App.tsx exports no default — the shell has nothing to ` +
+        `render. Got: ${src.slice(0, 200)}`,
+    );
+    assert(
+      src.includes("jsx-runtime") && src.includes("Connect"),
+      `${target}: /App.tsx is not the connect page. Got: ${src.slice(0, 200)}`,
     );
   } finally {
     await kill(proc);

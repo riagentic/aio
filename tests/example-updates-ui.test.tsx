@@ -23,7 +23,17 @@ const AVAILABLE = {
   channel: "stable",
   current: "1.0.0",
   status: "idle",
-  available: { version: "1.1.0", notes: "faster boot", migrates: true },
+  available: {
+    version: "1.1.0",
+    reason: "1.1.0 is newer than 1.0.0",
+    notes: "faster boot",
+    migrates: true,
+    signed: true,
+    keyFingerprint: "0badc0ffee11",
+    size: null,
+    releasedAt: null,
+    warnings: [],
+  },
 };
 
 testUI(
@@ -48,12 +58,17 @@ testUI(
 
     // "Not now" is a real refusal: the offer goes away and the version is
     // remembered, so it is not re-offered on the next render.
+    // Whether the release is authenticated, and by which key, where the
+    // decision is actually made.
+    assertStringIncludes(html, "signed");
+    assertStringIncludes(html, "0badc0ffee11");
+
     await ui.NotNowButton.click();
+    const { updates } = await import("../src/updates.ts");
     await ui.expectCell(
-      // deno-lint-ignore no-explicit-any
-      (await import("../src/updates.ts")).updates as any,
-      // deno-lint-ignore no-explicit-any
-      (u: any) => u.available === null && u.dismissed === "1.1.0",
+      updates,
+      (u: { available: unknown; dismissed: unknown }) =>
+        u.available === null && u.dismissed === "1.1.0",
       "dismiss() clears the offer and records the version",
     );
     assert(

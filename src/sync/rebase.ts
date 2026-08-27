@@ -1,7 +1,31 @@
 // src/sync/rebase.ts — Replay unconfirmed ops on confirmed state (CRDT rebase)
 import type { SyncOp } from "./types.ts";
 
-/** Reducer that applies a sync action to state, returning null if the op is invalid.
+/** The reducer COULD NOT apply the op — it threw, or the op is not
+ *  applicable at all.
+ *
+ *  Deliberately not `null`. `null` is the contract's "applied, changed
+ *  nothing", and the engine acts on it: the op counts as folded, its id goes
+ *  into the applied set and the cursor moves past it. The browser reducer used
+ *  to map a reducer THROW onto that same `null`, so a crashing reducer
+ *  reported success — the op was marked applied, the cursor advanced, and it
+ *  could never be re-delivered: the server had it, the client never would, and
+ *  nothing on either side could see the difference. Two different facts need
+ *  two different values. */
+export const REDUCER_FAILED: unique symbol = Symbol.for(
+  "aio.sync.reducerFailed",
+);
+
+/** What a {@linkcode SyncReducer} may answer: the next state, `null` (applied,
+ *  no change) or {@linkcode REDUCER_FAILED} (could not apply).
+ *  @internal Engine/framework wiring — not public API. */
+export type SyncReducerResult =
+  | Record<string, unknown>
+  | null
+  | typeof REDUCER_FAILED;
+
+/** Reducer that applies a sync action to state, returning null if the op
+ *  changed nothing and {@linkcode REDUCER_FAILED} if it could not be applied.
  *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
  */
 export type SyncReducer = (
@@ -10,7 +34,7 @@ export type SyncReducer = (
   payload: unknown,
   /** Cell the op belongs to — lets one reducer serve many cells. */
   cell?: string,
-) => Record<string, unknown> | null;
+) => SyncReducerResult;
 
 /**
  * Result of replaying unconfirmed ops: optimistic state, dropped and surviving ops.
@@ -52,7 +76,10 @@ export function rebase(
     // on the first property read, and the offending op counted as SURVIVING,
     // so it was replayed on every subsequent rebase. Drop it instead:
     // one bad op cannot take the whole cell down with it.
-    if (next === null || next === undefined) {
+    if (next === null || next === undefined || next === REDUCER_FAILED) {
+      // REDUCER_FAILED lands here for the same reason `undefined` does: an op
+      // the reducer cannot apply must not become the fold's state, and must
+      // not count as surviving (it would be replayed on every later rebase).
       dropped.push(op);
     } else {
       state = next;

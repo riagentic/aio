@@ -287,8 +287,35 @@ function elementName(
   let name = base;
   let i = 2;
   while (taken.has(name)) name = `${base}${i++}`;
+  if (explicit && name !== base) warnDuplicateHandle(base, name);
   taken.add(name);
   return name;
+}
+
+/** Names already reported as duplicated — the surface is rebuilt on every
+ *  observation (each `testUI` assertion, each `am surface` poll), so the report
+ *  has to be once per name, not once per walk. */
+const _warnedDuplicateT = new Set<string>();
+
+/** An EXPLICIT `t="save"` is a promise: that element is addressable by that
+ *  name. Two of them silently became `save` and `save2`, so `ui.save` drove
+ *  whichever came first in tree order and the other was reachable only by a
+ *  name nobody wrote. The de-dupe still happens (an unaddressable element would
+ *  be worse) — it just stops being silent. */
+function warnDuplicateHandle(base: string, assigned: string): void {
+  if (_warnedDuplicateT.has(base)) return;
+  _warnedDuplicateT.add(base);
+  console.warn(
+    `[aio:ui] duplicate t="${base}" on the surface — this element is ` +
+      `addressable as "${assigned}", not "${base}". A \`t\` handle is meant ` +
+      `to be unique within its component; rename one of them (or drop \`t\` ` +
+      `and let the label name it).`,
+  );
+}
+
+/** Test isolation — forget which duplicate handles have been reported. */
+export function _resetSurfaceWarnings(): void {
+  _warnedDuplicateT.clear();
 }
 
 function eventKinds(v: VNode): string[] {

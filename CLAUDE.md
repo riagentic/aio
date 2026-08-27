@@ -29,7 +29,7 @@ deno task test:core         # skip env-dependent tests (build, server, tls, elec
 deno task test:e2e          # real-browser + subscription e2e
 deno task test:onboard      # install→create→dev→compile→android E2E (release gate)
 deno task test:build        # artifact E2E: every target's binary boots from a FOREIGN cwd
-deno task check             # type-check src/ mod.ts aiol/ examples/ + amui
+deno task check             # type-check src/ mod.ts aiol/ examples/ tests/ + amui
 deno task lint              # deno lint src/
 deno task lint:aio          # aiol — the custom project linter
 deno task check:boundaries        # src/ folder dependency matrix gate
@@ -189,8 +189,8 @@ initial-state curl proves nothing about whether a method actually runs.
 ## Katas & release gates
 
 `.katana/*.md` are the project's quality specs (core, docs, testing, targets,
-examples, release, onboard, amui, goals, meta). `/use-katana` audits the repo
-against them. `.katana/docs.md` defines what counts as documentation —
+examples, release, onboard, amui, updates, goals, meta). `/use-katana` audits
+the repo against them. `.katana/docs.md` defines what counts as documentation —
 `CLAUDE.md`, `todo.md`, `perfect-aio.md`, `.katana/`, `feedback/`, and
 `RELEASE_NOTES-*.md` are explicitly exempt; don't "tidy" them into `docs/`.
 

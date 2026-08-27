@@ -231,19 +231,36 @@ Deno.test("L4: a second bad list still warns", async () => {
 });
 
 // ── L1: the enter-cleanup timer outliving its element ───────────────────────
-Deno.test("L1: an element that leaves cancels its pending enter timer", async () => {
-  const src = await Deno.readTextFile(
-    new URL("../src/air/transition-component.ts", import.meta.url),
+//
+// "Leaving cancels arriving" is now ONE decider in transition.ts, shared by
+// <Transition> and <TransitionGroup>. It used to be written twice and the two
+// copies disagreed: the group armed an UNTRACKED timeout that fired mid-exit
+// and wiped the exit animation, while the component tracked its timer and
+// merely CLEARED it on exit — throwing away the one thing that would ever have
+// removed the keyframes the entrance injected (measured: 5 leaked <style>
+// nodes in <head> over 5 toggles). Cancelling must do BOTH.
+Deno.test("L1: leaving cancels arriving — one decider, and it cleans up", async () => {
+  const shared = await Deno.readTextFile(
+    new URL("../src/air/transition.ts", import.meta.url),
   );
+  const cancel = shared.slice(shared.indexOf("export function _cancelEnter"));
   assert(
-    src.includes("_enterTimers"),
-    "the enter timer must be tracked to be cancellable",
+    cancel.includes("clearTimeout") && cancel.includes("_removeTransition"),
+    "_cancelEnter must clear the timer AND remove the injected keyframes",
   );
-  const exitHandler = src.slice(src.indexOf("_exitHandlers.set(dom,"));
-  assert(
-    exitHandler.slice(0, 400).includes("clearTimeout"),
-    "leaving must cancel arriving",
-  );
+  for (const file of ["transition-component.ts", "transition-group.ts"]) {
+    const src = await Deno.readTextFile(
+      new URL(`../src/air/${file}`, import.meta.url),
+    );
+    assert(
+      src.includes("_trackEnter("),
+      `${file} must track its enter animation through the shared decider`,
+    );
+    assert(
+      src.includes("_cancelEnter("),
+      `${file}'s exit handler must cancel a pending enter`,
+    );
+  }
 });
 
 // The dead-code half of L9's neighbourhood: `patch` still WORKS for the state

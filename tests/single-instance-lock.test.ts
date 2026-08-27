@@ -39,8 +39,17 @@ Deno.test("resolveAppId: infers from deno.json when omitted (zero-config)", () =
 });
 
 Deno.test("resolveAppId: inference is deterministic and slugified", () => {
-  assertEquals(resolveAppId(), resolveAppId());
+  // `resolveAppId() === resolveAppId()` was true of every implementation,
+  // including one that returns "" — and this id names the lock file and the
+  // data directory, so a wrong one loses the app's state. Pin the value and
+  // the SHAPE instead, on both the inferred and the explicit path.
+  assertEquals(resolveAppId(), "aio");
   assertEquals(/^[a-z0-9-]+$/.test(resolveAppId()), true);
+  for (const raw of ["My App/2.0", "  Ünïcode  Näme "]) {
+    const id = resolveAppId(raw);
+    assertEquals(/^[a-z0-9-]+$/.test(id), true, `${raw} → ${id}`);
+  }
+  assertEquals(resolveAppId("My App/2.0"), "my-app-2-0");
 });
 
 // ── lockPath ──

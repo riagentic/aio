@@ -6,11 +6,14 @@ import * as fix from "./fixes.ts";
 import {
   declaredEntryPaths,
   declaredTargetKinds,
+  isTestPath,
   isToolingPath,
+  SCANNED_ROOTS,
 } from "./context.ts";
 import { RESERVED_KEYS } from "../src/state/cell-types.ts";
 import {
   AIO_LIBRARY_ENTRIES,
+  isServerOnlyFile,
   SERVER_ONLY_AIO_SYMBOLS,
 } from "../src/entries.ts";
 import { removalMessage, removalOf } from "../src/state/removals.ts";
@@ -20,6 +23,11 @@ import {
 } from "../src/server/framework-pin.ts";
 import { readFrameworkPinSync } from "../src/server/deno-json.ts";
 import { codeMatches, codeText } from "./scan.ts";
+import {
+  unknownBuildKeys,
+  VALID_BUILD_KEYS,
+  VALID_BUILD_TARGET_KEYS,
+} from "../src/server/config.ts";
 
 // ══════════════════════════════════════════════════════════════════════
 // 1. PROJECT CONFIG (deno.json)
@@ -66,7 +74,19 @@ export const checkConfig: Checker = (ctx) => {
   // the framework's package identity; "move it into aio.run()" names a call
   // that does not exist in this repo.
   if (dj.appId && ctx.isApp) {
-    const passesAppId = /\bappId\s*:/.test(ctx.appEntry?.content ?? "");
+    // Read on CODE offsets: the scaffold's own entry opens with a comment that
+    // names `appId`, and a raw `.test()` calls that "already moved".
+    const entry = ctx.appEntry;
+    const passesAppId = entry
+      ? codeMatches(entry.content, /\bappId\s*:/g).length > 0
+      : false;
+    // Where the value would GO. Without a real `aio.run(` in code there is no
+    // second half of the migration, and the fix must not perform the first —
+    // deleting `appId` alone renames the app's lock file, SQLite path and UDS
+    // socket, orphaning its data on the next boot.
+    const runSite = entry
+      ? codeMatches(entry.content, /\baio\.run\s*\(\s*(\{|\))/g).length > 0
+      : false;
     report(
       passesAppId ? "hint" : "warn",
       "config",
@@ -74,12 +94,25 @@ export const checkConfig: Checker = (ctx) => {
         ? `appId "${dj.appId}" is in deno.json AND aio.run() — the aio.run() one wins; the deno.json key only helps \`am\` find the app`
         : `appId "${dj.appId}" in deno.json — move to aio.run({ appId: "${dj.appId}" }) (compiled builds can't read deno.json)`,
       {
+        ...(entry ? { file: entry.relative } : {}),
         fix: passesAppId
           ? 'Optional: remove "appId" from deno.json (aio.run() already sets it)'
-          : 'Remove "appId" from deno.json and add appId to aio.run()',
+          : `Add appId: "${dj.appId}" to aio.run() FIRST, then remove the key ` +
+            `from deno.json — --safe-fix does both, in that order`,
         // Only offer the codemod when the value isn't already in the entry —
         // otherwise --safe-fix would "fix" a correct app.
-        ...(passesAppId ? {} : { safeFix: fix.fixRemoveAppId }),
+        ...(passesAppId
+          ? {}
+          : runSite
+          ? { safeFix: fix.fixMoveAppIdToRun(entry!.path) }
+          : {
+            manual: entry
+              ? `the safe fix declines: no \`aio.run(\` call in ${entry.relative} ` +
+                `to put appId into, and deleting the key alone would rename the app`
+              : `the safe fix declines: no entry module found, and deleting the ` +
+                `key alone would rename the app (appId names its lock file, ` +
+                `SQLite path and UDS socket)`,
+          }),
       },
     );
   }
@@ -444,7 +477,7 @@ export const checkStructure: Checker = async (ctx) => {
           file: appEntry.relative,
           fix:
             'Add appId: "my-app" to aio.run(), or a "title" field to deno.json',
-          safeFix: fix.fixAddAppIdToRun,
+          safeFix: fix.fixAddAppIdToRun(appEntry.path),
         },
       );}
 
@@ -489,10 +522,14 @@ export const checkCells: Checker = (ctx) => {
   // learns the fix from `deno task lint` before it even boots.
   for (const f of cells) {
     for (const key of f.removedKeys) {
+      // An ERROR that fails the gate has to say WHERE. This one named the cell
+      // and nothing else, so in a repo with several cell files the reader's
+      // first move was a grep — and the linter knows the answer.
       report(
         "error",
         "cells",
         removalMessage(removalOf(key), `cell "${f.name}"`),
+        { file: f.file.relative, line: f.line },
       );
     }
   }
@@ -599,23 +636,20 @@ export const checkCells: Checker = (ctx) => {
       );
     }
 
-    // No methods and no actions
-    if (!f.hasMethods && !f.hasActions) {
+    // No methods. `actions:` was removed in alpha27 (src/state/removals.ts) and
+    // the loop above already reports it by name — so it must not appear here as
+    // half of an acceptable answer. A linter that offers the style it has just
+    // declared removed sends you to write code its next run rejects.
+    if (!f.hasMethods) {
       report(
         "warn",
         "cells",
-        `cell "${f.name}" has no methods and no actions — it can't change state`,
-        loc,
-      );
-    }
-
-    // Both methods and actions (mixing styles)
-    if (f.hasMethods && f.hasActions) {
-      report(
-        "warn",
-        "cells",
-        `cell "${f.name}" has both methods and actions — pick one style`,
-        loc,
+        `cell "${f.name}" has no methods — nothing can change its state`,
+        {
+          ...loc,
+          fix:
+            "methods: { increment(s, by = 1) { s.count += by; } } — one method per action",
+        },
       );
     }
 
@@ -723,9 +757,11 @@ export const checkPerformance: Checker = (ctx) => {
   // of 85 warnings, which is how a true warning gets trained away.
   for (const file of sourceFiles) {
     if (!ctx.isApp) break;
-    if (file.name.endsWith(".test.ts")) continue;
-    // A build script has no clients, and blocking until it finishes is its job.
-    if (isToolingPath(file.relative)) continue;
+    // A build script has no clients, and blocking until it finishes is its
+    // job; neither does a TEST, whose sync I/O nobody is waiting behind.
+    // `isTestPath` rather than a `.test.ts` name check: that spelling missed
+    // `.test.tsx`, `_test.ts` and everything under a `test/` directory.
+    if (isToolingPath(file.relative) || isTestPath(file.relative)) continue;
     for (const api of syncApis) {
       // Code only — the API named in a comment or a string isn't a call.
       if (codeText(file.content).includes(api)) {
@@ -749,7 +785,7 @@ export const checkPerformance: Checker = (ctx) => {
   // `new Promise((r) => setTimeout(r, 0))` — that's a microtask hop, not a
   // timer schedule would replace — and any line carrying `aiol-ok`.
   for (const file of sourceFiles) {
-    if (file.name.endsWith(".test.ts") || file.name === "app.ts") continue;
+    if (file.name === "app.ts" || isTestPath(file.relative)) continue;
     // A cell defined in a benchmark is a fixture — nobody observes or cancels
     // its timers.
     if (isToolingPath(file.relative)) continue;
@@ -839,12 +875,12 @@ export const checkPerformance: Checker = (ctx) => {
   // The path rule wins over the content heuristic: a benchmark that defines a
   // cell still reads as `isAppSurface`, and it is still tooling.
   const isTooling = (f: typeof sourceFiles[number]) =>
-    isToolingPath(f.relative) ||
+    isToolingPath(f.relative) || isTestPath(f.relative) ||
     (!isAppSurface(f) && (!inAppSourceDir(f) || /^#!/.test(f.content)));
   const isCliClient = (f: typeof sourceFiles[number]) =>
     /\bconnectCli\b/.test(codeText(f.content));
   for (const file of sourceFiles) {
-    if (file.name.endsWith(".test.ts")) continue;
+    if (isTestPath(file.relative)) continue;
     if (isCliClient(file)) continue;
     if (isTooling(file)) continue;
     const logLines = file.lines
@@ -959,6 +995,39 @@ export const checkPersistence: Checker = (ctx) => {
   const { appEntry, sourceFiles, report, pass } = ctx;
 
   if (!appEntry) return;
+
+  // ── the update data gate only protects cells that declare a version ──
+  //
+  // `_cellVersions` collects cells with `version > 0`; `_versionStamp` stamps
+  // only those; `dataCompatibility` iterates only what was stamped. So a cell
+  // that never declared `version` is invisible to the gate — a release that
+  // renames one of its fields is offered to every install as compatible, the
+  // merge drops the field, and the persist window writes the loss back.
+  //
+  // Reported ONLY for an app that configures `updates`, because that is the
+  // only app for which it is load-bearing: a cell in an app that never updates
+  // itself has nothing to be protected from, and firing there would make this
+  // the next warning people learn to scroll past. One line for all of them,
+  // not one per cell — twenty lines is its own kind of silence.
+  if (/\bupdates\s*:/.test(appEntry.content)) {
+    const unguarded = ctx.cells.filter((c) => !c.hasVersion && !c.persistFalse);
+    if (unguarded.length > 0) {
+      report(
+        "warn",
+        "data",
+        `${unguarded.length} cell(s) persist and declare no \`version\`, so ` +
+          `the update data gate cannot protect them: ${
+            unguarded.map((c) => c.name).join(", ")
+          }. A release that changes one of their shapes is offered as ` +
+          `compatible and the old field is dropped on merge. Add ` +
+          `\`version: 1\` to each (and an \`onMigrate\` when the shape ` +
+          `changes) — the first stamp is free and converts nothing.`,
+        { file: unguarded[0]!.file.relative, line: unguarded[0]!.line },
+      );
+    } else if (ctx.cells.length > 0) {
+      pass("every persisted cell declares a version — the data gate covers it");
+    }
+  }
 
   // Strip comments so a `db:` mention inside a comment doesn't false-positive
   //.
@@ -1157,7 +1226,10 @@ export const checkUI: Checker = (ctx) => {
   // check (check/test/lint) passes. THE set is SERVER_ONLY_AIO_SYMBOLS from
   // src/entries.ts (alpha52 one-decider — graph-validator imports the same).
   for (const file of cellFiles) {
-    // Skip .tsx files — already checked above
+    // A .tsx cell file's imports are already read by the browserCheckedFiles
+    // loop above (it starts with every .tsx). Only the import scan is
+    // duplicated here; the Deno.* scan moved OUT of this loop precisely
+    // because this `continue` was silently exempting components from it.
     if (file.ext === ".tsx") continue;
 
     // Named/default imports
@@ -1210,12 +1282,37 @@ export const checkUI: Checker = (ctx) => {
         }
       }
     }
+  }
 
-    // Deno.* usage. The old "is there a `//` or a `*` earlier on this line?"
-    // heuristic was wrong in BOTH directions: `s.count = 2 * Deno.pid` was
-    // silently skipped (a `*` is multiplication, not a comment), and a
-    // `Deno.readTextFile` named inside a STRING was reported as an ERROR that
-    // fails the gate. `codeText` is the one decider for "is this real code".
+  // Deno.* usage — over EVERY file that enters the browser bundle, which is
+  // what `browserCheckedFiles` means: the components (.tsx) and the cell
+  // modules they share. The scan used to sit inside the cell-file loop, under
+  // a `if (file.ext === ".tsx") continue` whose stated reason was "already
+  // checked above" — but the loop above reads import SPECIFIERS only, so
+  // `Deno.*` was never checked in a .tsx at all. Identical `Deno.env.get`
+  // was a gate-failing ERROR in `src/cell.ts` and produced ZERO output in
+  // `src/App.tsx` — the file that most literally IS the browser bundle.
+  //
+  // The old "is there a `//` or a `*` earlier on this line?" heuristic was
+  // wrong in BOTH directions: `s.count = 2 * Deno.pid` was silently skipped
+  // (a `*` is multiplication, not a comment), and a `Deno.readTextFile` named
+  // inside a STRING was reported as an ERROR that fails the gate. `codeText`
+  // is the one decider for "is this real code".
+  for (const file of browserCheckedFiles) {
+    // A component or cell under scripts/ or tools/ is build-time code — it is
+    // never bundled, and Deno.* is its whole job. Neither is a TEST file: a
+    // `*.test.tsx` is run by `deno test`, and `Deno.test` is its first line.
+    // Reporting those made this rule wrong 55 times out of 55 in one real app
+    // — an ERROR-level gate at that ratio is one its author turns off, and
+    // then it stops catching the case it was written for (`Deno.env.get` in a
+    // component, which blank-pages the client).
+    if (isToolingPath(file.relative) || isTestPath(file.relative)) continue;
+    const isCellFile = cellFiles.includes(file);
+    // …and neither is a `*.server.tsx`: the build marks those external, so
+    // they never enter the bundle. (A cell file keeps its old verdict — a cell
+    // is shared with the browser whatever the file is named, and the import
+    // rules above are what decide whether that file leaks.)
+    if (!isCellFile && isServerOnlyFile(file.relative)) continue;
     const code = codeText(file.content);
     for (const m of code.matchAll(/\bDeno\.\w+/g)) {
       const before = code.slice(0, m.index);
@@ -1223,13 +1320,16 @@ export const checkUI: Checker = (ctx) => {
       report(
         "error",
         "ui",
-        `${file.relative}:${lineIdx} — ${
-          m[0]
-        } is server-only but this file contains a cell() definition shared with the browser bundle`,
+        `${file.relative}:${lineIdx} — ${m[0]} is server-only but this file ${
+          isCellFile
+            ? "contains a cell() definition shared with the browser bundle"
+            : "is compiled into the browser bundle"
+        }, where the \`Deno\` global does not exist — the client throws \`Deno is not defined\` at first render`,
         {
           file: file.relative,
           line: lineIdx,
-          fix: "Move Deno.* calls to a server-only file or async method",
+          fix:
+            "Read it on the server — in a cell method, or in a *.server.ts module loaded with a dynamic import — and put the value in cell state; the component reads the state.",
         },
       );
     }
@@ -1309,7 +1409,7 @@ export const checkUI: Checker = (ctx) => {
       const target = m[1]!;
       // *.server.ts is the first-class convention (AIO-55): the build marks
       // these dynamic imports external, so they never enter the browser bundle.
-      if (target.endsWith(".server.ts")) continue;
+      if (isServerOnlyFile(target)) continue;
       // Resolve target file
       const dir = file.relative.replace(/[^/]+$/, "");
       const resolved = ctx.sourceFiles.find((f) => {
@@ -1385,22 +1485,43 @@ export const checkTesting: Checker = (ctx) => {
   if (cells.length === 0) return;
 
   // Check each cell has a test
+  // A cell counts as tested when a test file NAMES it — quoted (the cell id) or
+  // as a whole identifier (the imported binding). The bare `includes(f.name)`
+  // this used to end with was a SUBSTRING test, so a cell called `app` or
+  // `view` matched the word inside `src/app.ts`, `snapshot`, `viewer`… in every
+  // test file that existed. Those cells were permanently "tested" and the rule
+  // could never fire for them — the exact shape of a rule that looks alive and
+  // is not.
   const testedCells = new Set<string>();
+  const escape = (x: string) => x.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&");
   for (const tf of testFiles) {
     for (const f of cells) {
-      if (
-        tf.content.includes(`'${f.name}'`) ||
-        tf.content.includes(`"${f.name}"`) || tf.content.includes(f.name)
-      ) {
+      // Two honest signals: the test names the cell ID as a STRING, or it
+      // IMPORTS the module the cell is declared in.
+      //
+      // The bare `content.includes(f.name)` this used to end with was a
+      // SUBSTRING test: a cell called `app` or `view` matched the word inside
+      // `src/app.ts`, `snapshot` or `viewer` in any test file that existed, so
+      // it was permanently "tested" and the rule could never fire for it — a
+      // rule that cannot fire is indistinguishable from a rule that found
+      // nothing.
+      const quoted = new RegExp(`['"\`]${escape(f.name)}['"\`]`);
+      const importsIt = new RegExp(
+        `from\\s*['"][^'"]*${escape(f.file.name)}['"]`,
+      );
+      if (quoted.test(tf.content) || importsIt.test(tf.content)) {
         testedCells.add(f.name);
       }
     }
   }
 
   // A cell defined under scripts/ or tools/ is a fixture (a benchmark's
-  // workload), not a shipped surface waiting for a test file.
+  // workload), not a shipped surface waiting for a test file — and neither is
+  // one defined inside a test, which would otherwise be told to go and write
+  // itself a test file.
   const untestedCells = cells.filter((f) =>
-    !testedCells.has(f.name) && !isToolingPath(f.file.relative)
+    !testedCells.has(f.name) && !isToolingPath(f.file.relative) &&
+    !isTestPath(f.file.relative)
   );
   if (untestedCells.length === 0) {
     pass(`all ${cells.length} cells have tests`);
@@ -1976,6 +2097,31 @@ export const checkBuild: Checker = async (ctx) => {
   if (tasks["compile:android"]) {
     pass("Android target configured");
   }
+
+  // The `build: {}` block was the one aio config object with no typo gate.
+  // `aio.run({...})` exits on an unknown key and `cell({...})` refuses one with
+  // a did-you-mean; `build: { target: [...] }` (singular) silently built the
+  // default target set, which reads as `--targets` being broken.
+  const strayBuild = unknownBuildKeys(denoJson?.build);
+  if (strayBuild.length > 0) {
+    report(
+      "error",
+      "build",
+      `deno.json build block has ${
+        strayBuild.length === 1 ? "an unknown key" : "unknown keys"
+      }: ${strayBuild.join(", ")} — aio never reads ${
+        strayBuild.length === 1 ? "it" : "them"
+      }, so ${strayBuild.length === 1 ? "it does" : "they do"} nothing`,
+      {
+        fix: `valid build keys: ${[...VALID_BUILD_KEYS].join(", ")}; ` +
+          `inside an object-form target: ${
+            [...VALID_BUILD_TARGET_KEYS].join(", ")
+          }`,
+      },
+    );
+  } else if (denoJson?.build) {
+    pass("build block keys");
+  }
 };
 
 // ══════════════════════════════════════════════════════════════════════
@@ -2307,11 +2453,16 @@ export const checkUpgrade: Checker = (ctx) => {
   let found = 0;
 
   // call({ timeout }) → call({ timeoutMs }) — the alias still works.
+  //
+  // The option is the call's OWN top-level key. `\{[^}]*\}` stopped at the
+  // first `}`, which for `call({ retry: { timeout: 30 } })` is the inner one,
+  // so a field of the caller's own data was reported as a deprecated option —
+  // and --safe-fix rewrote it to `timeoutMs`, silently changing what that
+  // object means. `topLevelKeyOffsets` is the shared decider (scan.ts): the
+  // rule and the fix ask the same question and cannot disagree.
   for (const file of [...tsFiles, ...tsxFiles]) {
-    // Code only: `timeout:` in a comment or a string is not a call option.
-    const code = codeText(file.content);
-    const m = /\bcall\s*\(\s*\{[^}]*\btimeout\s*:/.exec(code);
-    if (!m) continue;
+    const offsets = fix.callTimeoutSites(file.content);
+    if (offsets.length === 0) continue;
     found++;
     report(
       "error",
@@ -2320,7 +2471,7 @@ export const checkUpgrade: Checker = (ctx) => {
         `call() now throws on the old key; use \`timeoutMs\``,
       {
         file: file.relative,
-        line: code.slice(0, m.index).split("\n").length,
+        line: file.content.slice(0, offsets[0]).split("\n").length,
         fix: "call({ timeoutMs: 5000 }, () => other.method())",
         safeFix: fix.fixCallTimeoutMs(file.path),
       },
@@ -2335,11 +2486,17 @@ export const checkUpgrade: Checker = (ctx) => {
     `\\b(${[...SERVER_ONLY_AIO_SYMBOLS].join("|")})\\b`,
   );
   for (const file of [...tsFiles, ...tsxFiles]) {
-    // NOT codeText() here: it blanks string bodies, and the module specifier
-    // IS a string — the check would match nothing. Anchored to a real import
-    // statement instead, same as the legacy-path rule.
+    // `codeMatches`, not `codeText`: codeText blanks string bodies and the
+    // module specifier IS a string, so masking that way makes the rule unable
+    // to match its own violation. Filtering by where the match STARTS keeps the
+    // specifier readable while rejecting one that begins inside a comment or a
+    // template literal — an `import { createDB } from "aio"` in a scaffolder's
+    // template is a line of the GENERATED app, and --safe-fix was rewriting it.
     const code = file.content;
-    const m = /(?:^|\n)\s*import\s*\{([^}]*)\}\s*from\s*["']aio["']/.exec(code);
+    const [m] = codeMatches(
+      code,
+      /(?:^|\n)\s*import\s*\{([^}]*)\}\s*from\s*["']aio["']/g,
+    );
     if (!m || !SERVER_ONLY.test(m[1]!)) continue;
     found++;
     report(
@@ -2364,10 +2521,11 @@ export const checkUpgrade: Checker = (ctx) => {
   const DYN =
     /(?:\{([^}]*)\}\s*=\s*await\s+import\(\s*["']aio["']\s*\))|(?:\(\s*await\s+import\(\s*["']aio["']\s*\)\s*\)\s*\.\s*(\w+))/g;
   for (const file of [...tsFiles, ...tsxFiles]) {
-    const code = file.content; // real strings needed — specifiers ARE strings
-    let dm: RegExpExecArray | null;
-    DYN.lastIndex = 0;
-    while ((dm = DYN.exec(code)) !== null) {
+    // Masked the same way, and for the same reason: the raw scan reported
+    // `await import("aio")` written inside a code-generator's template literal
+    // and let --safe-fix edit it.
+    const code = file.content;
+    for (const dm of codeMatches(code, DYN)) {
       const names = dm[1] ?? dm[2] ?? "";
       if (!SERVER_ONLY.test(names)) continue;
       found++;
@@ -2562,15 +2720,30 @@ function doSpans(code: string): Array<[number, number]> {
  *  assignment, an increment, or a mutating call on a draft field
  *  (`s.list.push(...)`). */
 function writesDraftBefore(code: string, at: number): boolean {
-  const before = code.slice(0, at);
-  const header =
-    /[ \t]*(?:async\s+)?[A-Za-z_$][\w$]*\s*\(\s*_?s\b[^)]*\)\s*\{/g;
-  let start = -1;
-  for (const m of before.matchAll(header)) start = m.index + m[0].length;
+  // The window starts at the INNERMOST enclosing function, whatever its
+  // parameter list. Anchoring only on `(s` headers meant a method that takes
+  // NO draft (`addTwice() { … }`) walked past its own header and inherited the
+  // PREVIOUS method's body — so `s.items.push(t)` in the method above counted
+  // as "this method already wrote", and the queued-calls case below could
+  // never be reached.
+  const start = enclosingMethodStart(code, at);
   if (start < 0) return false;
-  const body = before.slice(start);
+  const body = code.slice(start, at);
   return /\bs\s*\.\s*[\w$]+\s*(?:=[^=]|\+=|-=|\*=|\/=|\?\?=|\|\|=|&&=|\+\+|--|\.\s*(?:push|pop|shift|unshift|splice|sort|reverse|set|delete|add|clear)\s*\()/
     .test(body) || /Object\s*\.\s*assign\s*\(\s*s\b/.test(body);
+}
+
+/** Offset just after the header of the innermost function enclosing `at`
+ *  (`name(…) {`, `async name(…) {`), or -1. Used to group self-calls by the
+ *  method they are written in. Deliberately matches any parameter list — the
+ *  method that queues two calls is often the one that takes NO draft at all. */
+function enclosingMethodStart(code: string, at: number): number {
+  const before = code.slice(0, at);
+  const header =
+    /(?:^|[\n{,;)])[ \t]*(?:async\s+)?(?:\*\s*)?[A-Za-z_$][\w$]*\s*\([^)]*\)\s*\{/g;
+  let start = -1;
+  for (const m of before.matchAll(header)) start = m.index + m[0].length;
+  return start;
 }
 
 export const checkSelfMethodCall: Checker = (ctx) => {
@@ -2599,30 +2772,66 @@ export const checkSelfMethodCall: Checker = (ctx) => {
       `(?<![.\\w$])${varName}\\s*\\.\\s*(${c.methodNames.join("|")})\\s*\\(`,
       "g",
     );
+    // Candidate self-calls inside the cell literal, grouped by the method they
+    // are written in — two in ONE method is its own trap (see below).
+    const hits: Array<{ at: number; method: string; owner: number }> = [];
     for (const m of code.matchAll(call)) {
       const at = m.index;
       if (at < span[0] || at > span[1]) continue; // outside the cell literal
       if (skip.some(([s, e]) => at > s && at < e)) continue; // inside $do()
-      // …and only when the caller has ALREADY WRITTEN to its draft. That is
-      // the whole trap: the nested call runs against committed state and
-      // cannot see that write. With no prior write there is nothing to miss —
-      // `examples/disk`'s `up()` awaiting `disk.open(parent)` is a deliberate
-      // supersession, and flagging it would be flagging the documented answer.
-      if (!writesDraftBefore(code, at)) continue;
+      hits.push({ at, method: m[1]!, owner: enclosingMethodStart(code, at) });
+    }
+    const perMethod = new Map<number, number>();
+    for (const h of hits) {
+      perMethod.set(h.owner, (perMethod.get(h.owner) ?? 0) + 1);
+    }
+
+    for (const { at, method, owner } of hits) {
+      // TWO self-calls in one method body: the SECOND one is the trap even
+      // when the caller never touched its own draft. Calls are queued, so the
+      // second runs against state committed before the first — `addTwice() {
+      // notes.add(); notes.add() }` returns `{"ok":true}` and adds one item,
+      // with zero diagnostics. `writesDraftBefore` cannot see this: there is
+      // no draft write to see.
+      const queued = (perMethod.get(owner) ?? 0) > 1 && owner >= 0;
+      // …otherwise only when the caller has ALREADY WRITTEN to its draft. That
+      // is the other half of the trap: the nested call runs against committed
+      // state and cannot see that write. With no prior write and only ONE call
+      // there is nothing to miss — `examples/disk`'s `up()` awaiting
+      // `disk.open(parent)` is a deliberate supersession, and flagging it would
+      // be flagging the documented answer.
+      if (!queued && !writesDraftBefore(code, at)) continue;
       const line = code.slice(0, at).split("\n").length;
       if (isSuppressed(c.file.lines, line - 1)) continue;
+      if (queued && !writesDraftBefore(code, at)) {
+        report(
+          "warn",
+          "patterns",
+          `${c.file.relative}:${line} — \`${varName}.${method}()\` is one of ` +
+            `${perMethod.get(owner)} calls to ${c.name}'s OWN methods in a ` +
+            `single method. Each one is queued and runs as its own ` +
+            `transaction against COMMITTED state, so the second sees the ` +
+            `state from before the first — the method returns ` +
+            `\`{"ok":true}\` having done a fraction of what it reads like. ` +
+            `Do the work once in a plain function the method calls directly ` +
+            `(\`apply${
+              method.charAt(0).toUpperCase() + method.slice(1)
+            }(s, …)\`), taking the draft \`s\` — or dispatch each call from ` +
+            `an effect (\`s.$do(...)\`), which runs after the commit.`,
+          { file: c.file.relative, line, manual: "extract a plain helper" },
+        );
+        continue;
+      }
       report(
         "warn",
         "patterns",
-        `${c.file.relative}:${line} — \`${varName}.${
-          m[1]
-        }()\` is called from inside ` +
+        `${c.file.relative}:${line} — \`${varName}.${method}()\` is called from inside ` +
           `${c.name}'s own method. A nested same-cell call runs as its OWN ` +
           `transaction against COMMITTED state, so it cannot see the write ` +
           `this method is halfway through making — the value it reads is the ` +
           `one from before. Extract the shared work into a plain function ` +
           `both methods call (\`apply${
-            m[1]!.charAt(0).toUpperCase() + m[1]!.slice(1)
+            method.charAt(0).toUpperCase() + method.slice(1)
           }(s, …)\`), or dispatch it from an effect (\`s.$do(...)\`), which ` +
           `runs after the commit.`,
         { file: c.file.relative, line, manual: "extract a plain helper" },
@@ -2742,31 +2951,33 @@ export const checkAlpha52: Checker = (ctx) => {
     const code = codeText(file.content);
     const lineOf = (idx: number) => code.slice(0, idx).split("\n").length;
 
-    // The safe fix rewrites `return effect` → `s.$do(...)` ONLY when the
-    // method's draft param is literally `s` — `startPoll(_s)` would need a
-    // rename the fix must not make. Same predicate the fix uses, asked at
-    // report time, so a declined-by-design site says [manual] + why instead
-    // of wearing a [fixable] that survives every --safe-fix run.
+    // Will --safe-fix actually rewrite THIS site? The fix's own planner
+    // answers, at report time — a draft param that is not `s`, a return-type
+    // annotation it cannot narrow, a typed draft with no `"aio"` import clause
+    // to hang `MethodDraftServed` on, a `return` sharing its line with other
+    // code: each is a deliberate decline, and each used to render `[fixable]`
+    // and survive every run, which is indistinguishable from a broken tool.
+    // One planner, so the label and the behaviour cannot drift apart.
     const effectSiteOpts = (at: number, line: number) => {
-      const param = fix.enclosingMethodParam(file.content, at);
-      return param === "s"
-        ? {
+      const declined = fix.returnEffectDecline(file.content, at);
+      if (declined === null) {
+        return {
           file: file.relative,
           line,
           fix: "s.$do(schedule.after(...)); return;",
           safeFix: fix.fixReturnEffectsToDo(file.path),
-        }
-        : {
-          file: file.relative,
-          line,
-          fix: param === null
-            ? "rewrite by hand: draft.$do(effect); return;"
-            : `rename the draft param '${param}' to 's' and rerun ` +
-              `--safe-fix, or rewrite by hand: ${param}.$do(effect); return;`,
-          manual: param === null
-            ? "the safe fix declines: not inside a recognizable cell method"
-            : `the safe fix declines: the draft param is '${param}', not 's'`,
         };
+      }
+      const param = fix.enclosingMethodParam(file.content, at);
+      return {
+        file: file.relative,
+        line,
+        fix: param === null || param === "s"
+          ? "rewrite by hand: s.$do(effect); return;"
+          : `rename the draft param '${param}' to 's' and rerun ` +
+            `--safe-fix, or rewrite by hand: ${param}.$do(effect); return;`,
+        manual: declined,
+      };
     };
 
     // return-ed effects → s.$do
@@ -3513,7 +3724,7 @@ export const checkOldWayPerfBudget: Checker = (ctx) => {
 // per unit of effort on their list.
 
 export const checkTestHandleSelectors: Checker = (ctx) => {
-  const { tsFiles, tsxFiles, sourceFiles, styleCss, report } = ctx;
+  const { tsFiles, tsxFiles, cssFiles, styleCss, report } = ctx;
   const sel = /\[\s*t\s*(?:=|\^=|\*=|\$=|~=|\|=)/;
   for (const file of [...tsFiles, ...tsxFiles]) {
     const code = codeText(file.content);
@@ -3541,12 +3752,13 @@ export const checkTestHandleSelectors: Checker = (ctx) => {
       );
     }
   }
-  // …and the same mistake in a stylesheet. `styleCss` is THE app stylesheet
-  // (loaded separately by buildContext); any other .css that made it into the
-  // source list is checked too, so a multi-sheet app is not half-covered.
+  // …and the same mistake in a stylesheet. This used to filter `sourceFiles`
+  // for `.css`, which is always empty — the file scan collects .ts/.tsx only —
+  // so "a multi-sheet app is not half-covered" was a comment describing a
+  // branch that could not run. `cssFiles` is the real set.
   const sheets = [
     ...(styleCss ? [styleCss] : []),
-    ...sourceFiles.filter((f) => f.ext === ".css" && f !== styleCss),
+    ...cssFiles.filter((f) => f.path !== styleCss?.path),
   ];
   for (const file of sheets) {
     const lines = file.content.split("\n");
@@ -3891,7 +4103,8 @@ export const checkSyncMethodHiddenReads: Checker = (ctx) => {
 // .test.ts pins them against the source), so the lint and the boot agree.
 const HARD_SECRET_RE =
   /passwo?rd|passphrase|mnemonic|private[_-]?key|api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token/i;
-const PUBLIC_HINT_RE = /pub(lic)?/i;
+const PUBLIC_HINT_RE =
+  /(?:^|[_-])(?:pub|public|Pub|Public|PUB|PUBLIC)(?![a-z])|[a-z0-9](?:Pub|Public)(?![a-z])/;
 const NONSECRET_SUFFIX_RE =
   /(Id|Ids|Type|Name|Count|Index|Idx|At|Ref|Kind|Length|Len|Path|Mode|Status|Flag|Enabled|Visible|Label|Order|Version|Ms|Sec|Secs|Seconds|Bytes|Kb|Mb|Gb|Hz|Pct|Percent|Ratio|Rate|Total|Avg|Min|Max|Size|Width|Height|Duration|Elapsed)$/;
 
@@ -3959,7 +4172,170 @@ export const checkCredentialFieldName: Checker = (ctx) => {
   }
 };
 
+// ══════════════════════════════════════════════════════════════════════
+// EMPTY COLLECTION LITERALS IN CELL STATE
+// ══════════════════════════════════════════════════════════════════════
+//
+// `state: { items: [] }` infers `never[]`, and every use of `items` in every
+// method then fails with `Property 'x' does not exist on type 'never'` — a
+// cascade of errors that point at the METHODS and never at the declaration
+// that caused them. It is the first mistake a new app makes (measured on a
+// fresh `am create`: one unannotated `[]` produced five errors, none of which
+// named the array, the cell, or the fix).
+//
+// TypeScript cannot say it better, because from its side nothing is wrong at
+// the declaration. The linter can: it knows this is CELL STATE, where an empty
+// collection is always a placeholder for something.
+
+export const checkEmptyStateCollection: Checker = (ctx) => {
+  const { cells, report } = ctx;
+  for (const c of cells) {
+    if (c.file.name.endsWith(".test.ts") || !c.stateIsLiteral) continue;
+    const code = codeText(c.file.content);
+    const span = cellLiteralSpan(code, c.line);
+    if (!span) continue;
+    const lit = code.slice(span[0], span[1]);
+    const sm = /\bstate\s*:\s*\{/.exec(lit);
+    if (!sm) continue;
+    const sIdx = sm.index + sm[0].length;
+    let depth = 1, sEnd = sIdx;
+    for (let i = sIdx; i < lit.length && depth > 0; i++) {
+      if (lit[i] === "{") depth++;
+      else if (lit[i] === "}") {
+        depth--;
+        if (depth === 0) sEnd = i;
+      }
+    }
+    const stateBlock = lit.slice(sIdx, sEnd);
+    // `key: []` / `key: {}` / `key: new Map()` — the empty forms whose type is
+    // useless. A trailing `as …` / `satisfies …` is the annotation we are
+    // asking for, so it is never reported.
+    const EMPTY =
+      /([$\w]+)\s*:\s*(\[\s*\]|new\s+(?:Map|Set)\s*\(\s*\))(?!\s*(?:as|satisfies)\b)/g;
+    for (const m of stateBlock.matchAll(EMPTY)) {
+      // Top level of `state:` only — a nested `{ filters: { tags: [] } }` is
+      // the same trap but the fix reads differently, and being conservative is
+      // what keeps a rule worth reading.
+      let kd = 0;
+      for (const ch of stateBlock.slice(0, m.index)) {
+        if (ch === "{" || ch === "[") kd++;
+        else if (ch === "}" || ch === "]") kd--;
+      }
+      if (kd !== 0) continue;
+      const at = span[0] + sIdx + m.index;
+      const line = code.slice(0, at).split("\n").length;
+      if (isSuppressed(c.file.lines, line - 1)) continue;
+      const key = m[1]!;
+      const isArray = m[2]!.startsWith("[");
+      const example = isArray
+        ? `${key}: [] as ${
+          key.charAt(0).toUpperCase() + key.slice(1).replace(/s$/, "")
+        }[]`
+        : `${key}: ${m[2]!.replace(/\(\s*\)$/, "()")} as ${
+          m[2]!.startsWith("new Map") ? "Map<string, Item>" : "Set<string>"
+        }`;
+      report(
+        "warn",
+        "cells",
+        `${c.file.relative}:${line} — \`${key}: ${m[2]}\` in ${c.name}'s ` +
+          `state has no element type, so TypeScript infers ` +
+          `${isArray ? "`never[]`" : "an empty collection type"} and EVERY ` +
+          `use of \`s.${key}\` in every method fails with ` +
+          `"does not exist on type 'never'" — errors that point at the ` +
+          `methods and never at this line. ` +
+          `fix: annotate the element type here — \`${example}\` ` +
+          `(declare the type above the cell, or inline it: ` +
+          `\`[] as { id: number; title: string }[]\`).`,
+        {
+          file: c.file.relative,
+          line,
+          manual: "annotate the element type",
+        },
+      );
+    }
+  }
+};
+
+// ══════════════════════════════════════════════════════════════════════
+// 27. WHAT THE SCAN COULD NOT READ
+// ══════════════════════════════════════════════════════════════════════
+//
+// A linter that reads nothing prints exactly what a clean project prints: no
+// findings, a green verdict, exit 0. Two silent skips produced that — a file
+// over 512 KB, and any code outside the scanned roots — and an audit planted a
+// credential field and a `Deno.env` leak in a project laid out as `app/` and
+// got `Files: 0`, no findings, exit 0. Coverage is now stated, and NO coverage
+// is an error, because "I found nothing" and "I looked at nothing" must never
+// print the same thing.
+
+export const checkScanCoverage: Checker = (ctx) => {
+  const { sourceFiles, skipped, unscannedDirs, projectDir, report, pass } = ctx;
+
+  for (const s of skipped) {
+    report(
+      "warn",
+      "scan",
+      `${s.path} was NOT read (${s.reason}) — every rule is silent about it, ` +
+        `which reads exactly like a clean file`,
+      {
+        file: s.path,
+        fix:
+          "Split it, or generate it into a directory aiol does not scan, so the " +
+          "silence is deliberate rather than accidental",
+      },
+    );
+  }
+
+  if (sourceFiles.length === 0) {
+    report(
+      "error",
+      "scan",
+      `no source files found in ${projectDir} — aiol read ZERO files, so every ` +
+        `check below it passed by default. Its scan covers ${
+          SCANNED_ROOTS.join("/, ")
+        }/ and root-level .ts/.tsx${
+          unscannedDirs.length
+            ? `; this project keeps code in ${
+              unscannedDirs.map((d) => `${d}/`).join(", ")
+            }`
+            : ""
+        }`,
+      {
+        fix: unscannedDirs.length
+          ? `Move the app's code under src/ (or point aiol at the right ` +
+            `directory: \`aiol ${unscannedDirs[0]}\`)`
+          : "Run aiol from the project root, or pass the project directory",
+      },
+    );
+    return;
+  }
+
+  if (unscannedDirs.length > 0) {
+    report(
+      "hint",
+      "scan",
+      `${
+        unscannedDirs.map((d) => `${d}/`).join(", ")
+      } hold .ts/.tsx that aiol does not read — its scan covers ${
+        SCANNED_ROOTS.join("/, ")
+      }/ and root-level files`,
+      {
+        fix:
+          "Move shipped code under src/ (or build/dev code under scripts/ or " +
+          "tools/) so it is checked; nothing in those directories is.",
+      },
+    );
+  }
+
+  pass(
+    `${sourceFiles.length} file(s) read${
+      skipped.length ? ` (${skipped.length} skipped, listed above)` : ""
+    }`,
+  );
+};
+
 export const ALL_CHECKS: Checker[] = [
+  checkScanCoverage,
   checkConfig,
   checkStructure,
   checkCells,
@@ -3986,4 +4362,5 @@ export const ALL_CHECKS: Checker[] = [
   checkTestHandleSelectors,
   checkSyncMethodHiddenReads,
   checkCredentialFieldName,
+  checkEmptyStateCollection,
 ];

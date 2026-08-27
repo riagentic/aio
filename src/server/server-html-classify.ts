@@ -1,5 +1,9 @@
 // Browser error classification — actionable fix suggestions for common dev errors.
 
+/** aio's own server-side entries. THE list also lives in graph-validator.ts
+ *  (`SERVER_ONLY_SPECS`) and lint.ts; all three name the same fact. */
+const AIO_SERVER_SPECS = new Set(["aio/server"]);
+
 /** Classifies browser errors and returns actionable fix suggestions */
 export function classifyBrowserError(
   message: string,
@@ -25,6 +29,26 @@ export function classifyBrowserError(
   if (missingModule) {
     const pkg = missingModule[1]!;
     const isRelative = pkg.startsWith("./") || pkg.startsWith("../");
+    // aio's own SERVER entries are absent from the browser import map ON
+    // PURPOSE — SQLite, workers, the filesystem. This is a CATEGORY error the
+    // framework can name exactly, and the generic advice below is actively
+    // harmful for it: `npm:aio/server` is not a package that exists, so the
+    // user edits deno.json, restarts, and lands on the same blank page.
+    if (AIO_SERVER_SPECS.has(pkg)) {
+      return {
+        classification: "server-only-import",
+        label: "Server-Only Import",
+        fix:
+          `"${pkg}" is aio's SERVER entry (SQLite, workers, the filesystem). ` +
+          `The browser import map omits it deliberately, so this is a ` +
+          `server-only module in a CLIENT graph — NOT a missing dependency. ` +
+          `There is no npm package to add and editing deno.json will not ` +
+          `help. Move the import into a cell METHOD ` +
+          `(\`const { createDB } = await import("${pkg}")\` — methods run ` +
+          `on the server), or into a *.server.ts module imported lazily. ` +
+          `\`deno task lint\` names the exact file:line.`,
+      };
+    }
     return {
       classification: isRelative ? "missing-relative-import" : "missing-import",
       label: "Import Error",

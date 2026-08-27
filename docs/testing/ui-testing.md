@@ -65,12 +65,28 @@ testUI(App, "add a todo end-to-end", async (ui) => {
   `scroll({top, left})`, `dragTo(other)` (full HTML5 DnD sequence with a shared
   DataTransfer).
 - **What a user cannot do, a test cannot do** — the harness is never more
-  permissive than the browser. Driving a `disabled` control, typing into (or
-  clearing) a `readonly` one, `select()`ing a value with no option or a disabled
-  option, `select()`ing on something that is not a `<select>`, or `check()`ing
-  something with no checked state all **fail loud** naming the element and what
-  exists. Assert the state instead (`.disabled`, `.readonly`). The same rules
-  apply to `am trigger` — one implementation serves both tiers.
+  permissive than the browser. Each of these **fails loud**, naming the element
+  and what exists:
+  - driving a `disabled` control, or typing into / clearing a `readonly` one;
+  - `select()`ing a value with no option, a disabled option, or on something
+    that is not a `<select>`;
+  - `check()`/`uncheck()` on something with no checked state (a `<button>` is
+    not a checkbox — this used to CLICK it and report success on the `am` tier);
+  - clicking, typing or dragging something the user cannot see —
+    `display: none`, `visibility: hidden`, the `hidden` attribute, on the
+    element or on any ancestor, and `<input type="hidden">`;
+  - typing into anything that is not an `<input>`/`<textarea>` (a `<div>` has no
+    value; `contenteditable` is not driven), or past its `maxLength`.
+
+  Assert the state instead (`.disabled`, `.readonly`). The same rules apply to
+  `am trigger` — one implementation serves both tiers (`src/air/ui-trigger.ts`),
+  and both are pinned by `tests/ui-harness-fidelity.test.tsx`.
+- **Events are the browser's, not a shortcut** — `type()` fires
+  keydown/input/keyup per character and `blur()` commits the edit with a
+  `change` before the `blur` (so an `onChange` handler really runs); a modified
+  click (`click({ ctrlKey: true })`) lets the control's own activation behaviour
+  toggle a checkbox/radio, exactly as an unmodified click does; `mouseenter`
+  does not bubble.
 - Reads: `.text`, `.value`, `.checked`, `.disabled`, `.readonly`, `.required`,
   `ui.surface()`, `ui.html()`; waits: `ui.waitFor(pred)`. The four booleans
   **always answer with a boolean**, `false` included:
@@ -140,6 +156,35 @@ Options — only when you need control (all optional):
 | `user`             | — (identity unresolved)        | mount an authenticated app     |
 | `authFeatures`     | all `false`                    | `<SignIn/>` feature adaptation |
 
+### `settle()` never guesses
+
+`ui.settle()` and `ui.advance(ms)` wait for the app to go quiet: the render loop
+stops changing the HTML and no cell method is still in flight. When the
+`settleIterations` budget runs out they **throw**, naming what is still running
+(`todos:load`, `sync:pull`) or saying that the HTML never stopped changing.
+
+They used to return either way, which made "the app quiesced" and "I gave up
+waiting" the same answer — so every assertion after a settle that gave up ran
+against a half-finished app while looking guarded. The retry loops
+(`expectCell`, `waitFor`) still poll, and fold the same explanation into their
+own timeout message.
+
+A legitimately long cascade takes `settleIterations`; a legitimately long call
+should be awaited, or driven with `ui.advance(ms)` if it waits on a schedule.
+
+### A failing call nobody awaited fails the test
+
+`onClick={() => todo.add()}` is the ordinary shape, and it awaits nothing. When
+that method rejects, production logs it and dispatches `cell:__error`; it does
+not pretend the call succeeded, and neither does the harness — the failure
+surfaces at the next observation point (`settle`, `expectCell`, `waitFor`,
+`dispose`), naming the method.
+
+Awaiting the call — including `await assertRejects(() => todo.add())` — counts
+as observing it, and it is not reported a second time. This is the rule
+`testCell` has always used; `testUI` and `bootCells` now use it too, so the same
+app code cannot pass one harness and fail another.
+
 ### Testing an authenticated app (`user`)
 
 An app that opens with `useUser()` renders `<SignIn/>` for `null` — so without
@@ -207,6 +252,17 @@ the same object — a listener there never fires, and under the harness the
 registration FAILS the test (thrown at the site, rethrown by the next
 `settle`/`expectCell`/`waitFor`/`dispose`), naming the fix. Outside test-strict
 mode the same registration only warns.
+
+### When setup fails
+
+A mount that throws — a component that explodes on first render, a boot refusal,
+a seed naming no cell — leaves **nothing** behind. `testUI` installs
+`document`/`window`/`location`/`history`/`matchMedia`/`localStorage` and patches
+`addEventListener` before it renders, and a throw used to leak all of them: the
+next mount's "is one already installed?" guard then adopted the dead test's
+document (`body.children` growing 1 → 2 → 3), and no `dispose()` could reach it,
+because the initializer never returned a handle for `await using` to dispose.
+Setup now undoes exactly what it installed, in the same order `dispose()` does.
 
 ### What testUI installs
 
@@ -430,9 +486,16 @@ boot, and `aio/testing` has three primitives for it — all `await using`:
 
 | Primitive                 | Boots                         | Client                 | Use it for                                           |
 | ------------------------- | ----------------------------- | ---------------------- | ---------------------------------------------------- |
-| `testServer(config)`      | real `aio.run()`, workers on  | none — `srv.fetch`     | routes, auth, persistence, a method's server context |
-| `testMultiClient(cfg, n)` | real `aio.run()`, workers on  | n real WebSocket peers | broadcast, convergence, **received patches**         |
+| `testServer(config)`      | real `aio.run()`              | none — `srv.fetch`     | routes, auth, persistence, a method's server context |
+| `testMultiClient(cfg, n)` | real `aio.run()`              | n real WebSocket peers | broadcast, convergence, **received patches**         |
 | `smoke(config)`           | real `aio.run()`, dev serving | the eager module fetch | "green everywhere, blank in the window" — see below  |
+
+A `worker: true` cell still runs **in-isolate** under all three: the entry
+module is the test file, so there is nothing to host a worker from. The
+serialization boundary is reproduced either way; for the isolation as well, pass
+`testServer({ workers: "real", workerEntry })` — see
+[prod-parity.md](prod-parity.md), which is also where the differences between an
+in-process method call and a client's call are listed.
 
 `testMultiClient` exposes each client's **patch stream** — what a browser tab
 actually applies, in arrival order — next to its state:
@@ -508,6 +571,11 @@ Deno.test("both windows see the same order", async () => {
 - `m.serverState(cell)` — the truth every client should converge on
 - `m.converged({ timeoutMs, settleMs })` — throws naming the divergent client
   and cell, so a failure says which surface fell behind
+- `m.clients[i].call(cell, method, ...args)` — call a method **the way a client
+  does**, over that client's socket: JSON arguments, a JSON-vetted return value,
+  `_source: "UI"` at the server, and a rejection on refusal. The in-process call
+  (`orders.add("widget")`) skips all four; see
+  [prod-parity.md](prod-parity.md#a-client-calling-a-method--clientcall)
 - `m.dispatchAll(action)` — the same action from every client at once, which is
   the concurrency case you cannot reason about from the outside:
 

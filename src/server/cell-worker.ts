@@ -215,14 +215,23 @@ export function createCellWorker(
 
   const send = (msg: ToWorker) => worker.postMessage(msg);
 
-  send({ t: "init", state: deps.initialState(), prod: deps.prod });
+  /** `__aioDev` as this isolate sees it — see the `dev` field on ToWorker. */
+  const devFlag = (): boolean =>
+    (globalThis as Record<string, unknown>).__aioDev === true;
+
+  send({
+    t: "init",
+    state: deps.initialState(),
+    prod: deps.prod,
+    dev: devFlag(),
+  });
 
   return {
     cell: name,
     ready: () => readyPromise,
     reseed(slice: Record<string, unknown>): void {
       if (closed) return;
-      send({ t: "init", state: slice, prod: deps.prod });
+      send({ t: "init", state: slice, prod: deps.prod, dev: devFlag() });
     },
     call(action: Msg): Promise<unknown> {
       if (closed) {
@@ -238,7 +247,32 @@ export function createCellWorker(
       const p = new Promise<unknown>((resolve, reject) => {
         inflight.set(id, { resolve, reject, callId });
       });
-      send({ t: "call", id, action, ctx: ambient() });
+      try {
+        send({ t: "call", id, action, ctx: ambient() });
+      } catch (e) {
+        // `postMessage` refuses an uncloneable argument SYNCHRONOUSLY, so this
+        // used to throw out of a call the contract says always returns a
+        // promise (cell-catalog: "All bound methods return a Promise") — a
+        // `.catch()` on the call would not see it, and neither would the
+        // in-isolate path, which rejects with a teachable message instead. Two
+        // shapes for one mistake, decided by whether a worker happened to be
+        // hosted. Reject, in the same words.
+        inflight.delete(id);
+        const why = e instanceof Error ? e.message : String(e);
+        const err = new Error(
+          `cell "${name}" is a worker cell, and its action payload cannot ` +
+            `cross a worker boundary: ${why}.\n` +
+            `It is reached by postMessage, so every argument is ` +
+            `structured-cloned. Pass plain data (no functions, class ` +
+            `instances, or live cell proxies); \`{ ...obj }\` off a proxy is ` +
+            `already materialised.`,
+        );
+        if (callId) {
+          resolveCall(callId, undefined, err);
+          return Promise.resolve(undefined);
+        }
+        return Promise.reject(err);
+      }
       return p;
     },
     async close(): Promise<void> {

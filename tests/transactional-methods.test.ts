@@ -101,6 +101,13 @@ Deno.test("transaction: a throw discards the whole write-set", async () => {
 });
 
 Deno.test("transaction: s.$commit() publishes mid-method, then reads a fresh snapshot", async () => {
+  // The method waits on a gate the TEST opens, so "mid-flight" is an actual
+  // suspension point rather than a guess at how many microtasks the framework
+  // spends between the body returning and the caller resolving. (It was the
+  // guess; a chain one `.then` shorter made the method finish first and the
+  // test read the final value.)
+  let open!: () => void;
+  const gate = new Promise<void>((r) => open = r);
   const c = cell("txn_commit", {
     transaction: true,
     state: { step: 0 },
@@ -108,7 +115,7 @@ Deno.test("transaction: s.$commit() publishes mid-method, then reads a fresh sna
       async run(s: { step: number }) {
         s.step = 1;
         (s as unknown as { $commit: () => void }).$commit(); // publish mid-method
-        await Promise.resolve();
+        await gate;
         // After $commit, a read sees the just-committed snapshot (step=1).
         s.step = s.step + 10; // 1 + 10
       },
@@ -119,8 +126,9 @@ Deno.test("transaction: s.$commit() publishes mid-method, then reads a fresh sna
     const p = (c as Any).run();
     await Promise.resolve();
     await Promise.resolve();
-    // The mid-method $commit is visible before the method returns.
+    // The mid-method $commit is visible while the method is still suspended.
     assertEquals((c as Any).step, 1, "$commit published step=1 mid-flight");
+    open();
     await p;
     await h.settle();
     assertEquals((c as Any).step, 11, "post-commit read saw 1, then +10");

@@ -99,6 +99,39 @@ Deno.test("example contacts: the UI creates, edits and deletes", async () => {
     (c) => c.contacts[0]!.email === "ada@lovelace.dev",
   );
 
+  // A row edit the cell REFUSES must not throw the typing away.
+  //
+  // Row Save called `contacts.update()` without awaiting it and closed edit
+  // mode unconditionally, so a rejected update silently dropped what the user
+  // wrote and left the old value on screen with no error anywhere — in the
+  // example whose whole subject is validation, and whose own `Editor.submit`
+  // three functions up gets it right. The existing test only ever drove the
+  // VALID path, so it never touched the branch.
+  ui["edit-1"].click();
+  await ui.settle();
+  ui["email-edit"].clear();
+  ui["email-edit"].type("broken");
+  ui["save-1"].click();
+  await ui.waitFor(
+    () => ui.surface().text.includes("not an email address"),
+    "the row's validation failure is shown, not swallowed",
+  );
+  // Still editing, still holding what was typed — the value is not lost.
+  assertEquals(ui["email-edit"].value, "broken");
+  await ui.expectCell(
+    contacts,
+    (c) => c.contacts[0]!.email === "ada@lovelace.dev",
+  );
+
+  // …and fixing it succeeds and closes the editor.
+  ui["email-edit"].clear();
+  ui["email-edit"].type("ada@example.org");
+  ui["save-1"].click();
+  await ui.expectCell(
+    contacts,
+    (c) => c.contacts[0]!.email === "ada@example.org",
+  );
+
   ui["delete-1"].click();
   await ui.expectCell(contacts, (c) => c.contacts.length === 0);
 });

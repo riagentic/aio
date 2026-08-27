@@ -31,10 +31,9 @@ import {
   _currentCollector,
   _instanceStack,
   _setCurrentCollector,
-  _setInsideMount,
 } from "./renderer-state.ts";
 import { _flushPending } from "./renderer-flush.ts";
-import { _componentName, _reportHookError } from "./hook-error.ts";
+import { _componentName } from "./hook-error.ts";
 
 // ── Schedule ──────────────────────────────────────────────────────────
 
@@ -82,6 +81,36 @@ export function _setFlushDevMode(v: boolean): void {
 
 const DEV_RENDER_LIMIT = 50;
 
+/** Dev tripwire: the state hooks (`useRef`/`useSignal`/`useId`) are matched
+ *  across renders BY CALL ORDER — index 0 is index 0 forever.
+ *
+ *  That makes a CONDITIONAL hook silently swap ref identities: skip one
+ *  `useRef` on a later render and every ref after it shifts up one slot, so a
+ *  component quietly starts reading someone else's ref. Nothing said so, while
+ *  `docs/ui/air-lifecycle.md` opened by claiming the opposite ("Unlike React, you
+ *  can call them conditionally or in loops") — true for `onMount`/`onCleanup`,
+ *  which are collected as a list, and false for exactly these three.
+ *
+ *  Observe-only and dev-only, so prod behaves identically. */
+function _checkHookOrder(
+  inst: ComponentInstance,
+  count: number,
+  name: string,
+): void {
+  if (!_devMode) return;
+  const prev = inst._hookCount;
+  inst._hookCount = count;
+  if (prev === undefined || prev === count) return;
+  console.error(
+    `[aio-dev] <${name}> called ${count} state hooks this render but ${prev} ` +
+      `last render. useRef/useSignal/useId are matched by CALL ORDER, so a ` +
+      `hook behind an \`if\` (or in a loop whose length changes) shifts every ` +
+      `later hook onto a different slot — the component silently starts ` +
+      `reading another ref's value. Call them unconditionally at the top of ` +
+      `the body; put the condition inside the value instead.`,
+  );
+}
+
 export function _rerenderComponent(inst: ComponentInstance): void {
   if (inst.disposed) return;
 
@@ -100,7 +129,12 @@ export function _rerenderComponent(inst: ComponentInstance): void {
         ? (inst.vnode.tag.name || "Anonymous")
         : "Component";
       console.warn(
-        `[aio-dev] ${name} re-rendered ${DEV_RENDER_LIMIT} times in rapid succession. Possible infinite loop.`,
+        `[aio-dev] ${name} re-rendered ${DEV_RENDER_LIMIT} times in under a ` +
+          `second — a render is WRITING state that the same render READS, so ` +
+          `every render schedules the next one. Two fixes: move the write into ` +
+          `an event handler or onMount (a render must only read), or wrap the ` +
+          `read in untrack(() => …) if the value is genuinely a one-shot ` +
+          `initialisation that must not subscribe.`,
       );
     }
   }
@@ -169,6 +203,7 @@ export function _rerenderComponent(inst: ComponentInstance): void {
     }
   }
   _setCurrentCollector(null);
+  _checkHookOrder(inst, inst.refIndex ?? 0, inst._component ?? "Component");
   _trackEnd(deps);
   _computedCollectEnd(collected);
   _effectCollectEnd(effectCollected);
@@ -201,6 +236,8 @@ export function _rerenderComponent(inst: ComponentInstance): void {
     vnode._dom = dom ?? undefined;
 
     if (_devStart) {
+      inst._dtRenders = (inst._dtRenders ?? 0) + 1;
+      inst._dtLastMs = performance.now() - _devStart;
       const name = typeof vnode.tag === "function"
         ? (vnode.tag.name || "Anonymous")
         : "Component";
@@ -354,6 +391,9 @@ export function _createHooks(rootState: RootState): VDomHooks {
         effectCollected,
         parentDom,
         isSvg,
+        // Only while someone is looking — `performance.now()` on every
+        // component of every render is not free.
+        dtStart: _isDevToolsConnected() ? performance.now() : undefined,
       };
     },
 
@@ -434,6 +474,19 @@ export function _createHooks(rootState: RootState): VDomHooks {
         }
       }
 
+      _checkHookOrder(
+        inst,
+        collector.refIndex ?? 0,
+        _componentName(vnode.tag),
+      );
+      // The mount/diff render path. `_recordRender` only ever saw the SIGNAL
+      // path, so a component that renders because its parent did was invisible
+      // to DevTools; the per-instance counters `devtools.tree` reports are
+      // maintained on both.
+      if (hs.dtStart !== undefined) {
+        inst._dtRenders = (inst._dtRenders ?? 0) + 1;
+        inst._dtLastMs = performance.now() - hs.dtStart;
+      }
       _subscribeComponentDeps(inst, hs.deps!);
       _instanceStack.push(inst);
 
@@ -460,11 +513,18 @@ export function _createHooks(rootState: RootState): VDomHooks {
         }
       }
 
-      // AIO-390: fire onMount now that the subtree's DOM + refs are committed,
-      // so `ref.current` is the real node inside onMount. Children's afterSubtree
-      // already ran during subtree build, so they mount before their parent
-      // (bottom-up, matching React). Instance is still on the stack, so onMount's
-      // onCleanup routing (AIO-76) is unchanged.
+      // AIO-390: QUEUE onMount now that the subtree's DOM + refs are built, so
+      // `ref.current` is the real node inside onMount. Children queue before
+      // their parent (bottom-up, matching React).
+      //
+      // Queued, not fired: `createDom` builds into a DocumentFragment and the
+      // `appendChild` that puts it in the document happens AFTER this hook, so
+      // firing here ran every onMount on a DETACHED tree — `isConnected` false,
+      // `focus()` a no-op, `getBoundingClientRect()` all zeros, while
+      // docs/ui/air-lifecycle.md promises focus and measurement work here. The
+      // drain is `_flushAfterRender` (renderer-flush.ts), which every commit
+      // path already calls and which `afterRender` was already correct on:
+      // one decider for "the DOM is committed", two hooks.
       //
       // AIO-400: fire ONCE per instance. A re-render that re-executes the
       // component body (any non-memoized render — e.g. children changed) calls
@@ -480,22 +540,12 @@ export function _createHooks(rootState: RootState): VDomHooks {
           inst.mounted = true;
           const cbs = inst.mountCallbacks;
           inst.mountCallbacks = [];
-          _setCurrentCollector(inst as unknown as LifecycleCollector);
-          _setInsideMount(true);
-          try {
-            // Guard each hook: one throwing onMount must not abort the mount
-            // flush of its siblings or collapse the surface.
-            for (const cb of cbs) {
-              try {
-                cb();
-              } catch (e) {
-                _reportHookError("onMount", e, _componentName(vnode.tag));
-              }
-            }
-          } finally {
-            _setInsideMount(false);
-            _setCurrentCollector(null);
-          }
+          const root = inst._root;
+          (root.pendingMounts ??= []).push({
+            inst,
+            cbs,
+            component: _componentName(vnode.tag),
+          });
         }
       }
       // NOTE: an instance that collected NO callbacks is deliberately left

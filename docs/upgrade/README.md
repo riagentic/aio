@@ -12,6 +12,12 @@ reason to keep one (gated by `deno task check:docs`).
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha68 → alpha69](from-alpha68-to-alpha69.md) — no app-code break, but
+  **five stricter security defaults** a reverse-proxied or `host: "0.0.0.0"`
+  deployment must read; publishing becomes one command (`deno task publish`), a
+  compiled binary's self-update is proven end to end in CI, a `<Markdown>` XSS
+  bypass is closed, and three behaviours are corrected to match what their docs
+  already said (`resource().value`, `<Link>`, hydration warnings).
 - [alpha67 → alpha68](from-alpha67-to-alpha68.md) — nothing breaks; two released
   sync-replay bugs fixed by the new end-to-end migration proof, `am pin` scan
   tokenized, per-machine path pins, `am instances` aio column, `am shot`.

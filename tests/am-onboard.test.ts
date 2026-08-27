@@ -21,6 +21,13 @@ Deno.test("parseCreateArgs: name + default template", () => {
   assertEquals(o.mirror, undefined);
 });
 
+// This test was VACUOUS for the flag it names. `parseCreateArgs` is not what
+// sees the user's argv: `am.ts` runs `parseGlobalFlags` first, and that
+// CONSUMES `--force` into `flags.force` without re-emitting it — so
+// `parseCreateArgs(args)` never received one. `am create <existing-dir>
+// --force` was unbypassable, and the refusal told you to pass the flag you had
+// just passed. Calling the parser directly kept this green through all of it.
+// The end-to-end case is below.
 Deno.test("parseCreateArgs: --template + --force + --mirror", () => {
   const o = parseCreateArgs([
     "todo-app",
@@ -80,6 +87,16 @@ Deno.test("denoJson: the scaffold emits the dieted task set EXACTLY", () => {
     "doctor",
     "fmt",
     "lint",
+    // The release pair, both scaffolded: an app with neither task has no reason
+    // to know either command exists, and publishing is part of the lifecycle,
+    // not an extra. `publish` is every release (build → sign → the channel
+    // LAYOUT a client actually fetches — the half that lived only in prose,
+    // which both documented flows got wrong). `ship` is once-ever plus the
+    // corners: `deno task ship keygen` makes the key `publish` needs, and
+    // `deno task ship github` writes the CI workflow — spellings the docs and
+    // the CLI's own messages both use, so the task must exist for them.
+    "publish",
+    "ship",
     "test",
   ]);
   // dev works out of the box (browser — no toolchain, no electron download).
@@ -92,6 +109,13 @@ Deno.test("denoJson: the scaffold emits the dieted task set EXACTLY", () => {
   assertEquals(dj.tasks.test, "deno test -A");
   assertEquals(dj.tasks.check, "deno check src/");
   assertEquals(dj.tasks.fmt, "deno fmt");
+  // BOTH linters. `aiol` knows the aio rules and NOTHING about the language, so
+  // a `lint` task that ran it alone left every scaffolded app unchecked by
+  // `deno lint` — no unused-import, no `any`, no unawaited promise — while the
+  // task's name promised otherwise. The framework repo runs both; an app gets
+  // one task that does the same.
+  assertStringIncludes(dj.tasks.lint!, "deno lint src/");
+  assertStringIncludes(dj.tasks.lint!, "aiol/mod.ts");
   assertEquals(dj.compilerOptions.jsxImportSource, "aio");
   // The default shell is recorded under the alpha52 key name.
   assertEquals(dj.client, "browser");
@@ -396,3 +420,46 @@ for (const tpl of ["counter", "todo"] as const) {
     }
   });
 }
+
+// The flag as a USER types it, through the whole chain: parseGlobalFlags →
+// cmdCreate. Nothing below the CLI can prove this.
+Deno.test({
+  name: "am create --force: the flag survives the global parser and lands",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  async fn() {
+    const cwd = await Deno.makeTempDir({ prefix: "am-create-force-" });
+    try {
+      await Deno.mkdir(resolve(cwd, "myapp"));
+      await Deno.writeTextFile(resolve(cwd, "myapp/keepme.txt"), "existing");
+      const run = async (...args: string[]) => {
+        const o = await new Deno.Command(Deno.execPath(), {
+          args: ["run", "-A", resolve(REPO_ROOT, "src/am.ts"), ...args],
+          cwd,
+          stdout: "piped",
+          stderr: "piped",
+        }).output();
+        const d = new TextDecoder();
+        return { code: o.code, out: d.decode(o.stdout) + d.decode(o.stderr) };
+      };
+
+      // Without it: refused, and the refusal names the way past.
+      const no = await run("create", "myapp");
+      assert(no.code !== 0, "a non-empty directory is never clobbered");
+      assertStringIncludes(no.out, "--force");
+
+      // With it: it works. This is the assertion the parser-level test could
+      // not make.
+      const yes = await run("create", "myapp", "--force");
+      assertEquals(
+        yes.code,
+        0,
+        `am create --force must be bypassable:\n${yes.out}`,
+      );
+      await Deno.stat(resolve(cwd, "myapp/deno.json")); // it scaffolded
+      await Deno.stat(resolve(cwd, "myapp/keepme.txt")); // …without wiping
+    } finally {
+      await Deno.remove(cwd, { recursive: true }).catch(() => {});
+    }
+  },
+});

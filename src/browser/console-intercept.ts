@@ -14,11 +14,6 @@ let _send: SendFn | null = null;
 let _installed = false;
 let _forwarding = false;
 
-/** Update the send function (e.g. after reconnect). Pass null to disable. */
-export function setConsoleSend(send: SendFn | null): void {
-  _send = send;
-}
-
 /** Stringify console args, joined with space, truncated to MAX_MSG_LEN. */
 export function _serialize(args: unknown[]): string {
   const parts = args.map((a) => {
@@ -97,6 +92,16 @@ let _origConsole: {
 } | null = null;
 
 export function installConsoleIntercept(send: SendFn): void {
+  // The send channel is refreshed on every call, BEFORE the idempotence guard
+  // below — so a re-install after a reconnect re-points the forwarder even
+  // though the console wrappers are only installed once.
+  //
+  // There is no separate `setConsoleSend`: there was one, documented "e.g.
+  // after reconnect", and nothing ever called it. Nothing needed to. The one
+  // caller (`browser-air-transport.ts`) passes `_sendRaw`, a module-level
+  // function that resolves the CURRENT socket/IPC channel at call time, so a
+  // reconnect never leaves a stale send pinned here. A setter for a problem
+  // that does not exist reads as a problem that is being handled.
   _send = send;
   if (_installed) return;
   _installed = true;

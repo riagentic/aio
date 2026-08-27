@@ -3,7 +3,7 @@
 // are detached so a started app survives amui, and outputs are size-capped.
 import { isAbsolute, join, normalize, relative } from "@std/path";
 import { appDirs } from "aio/server";
-import { readProjectMeta } from "./scan.ts";
+import { readProjectMeta } from "./scan.server.ts";
 
 const LOG_MAX = 200_000; // cap captured task output
 const VIEW_MAX = 2_000_000; // 2 MB — files larger than this show a size notice
@@ -101,7 +101,7 @@ export async function stopApp(
   pid: number,
 ): Promise<{ ok: boolean; error?: string }> {
   try {
-    const { trojanPost } = await import("../../../src/am/am-http.ts");
+    const { trojanPost } = await import("./control.server.ts");
     const r = await trojanPost(port, "shutdown", undefined, appId);
     if (r.ok) return { ok: true };
   } catch { /* fall through to signal */ }
@@ -133,7 +133,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** Is an app registered as running from `dir`? */
 async function registeredAt(dir: string): Promise<boolean> {
   const { instances } = await import(
-    "../../../src/server/single-instance-lock.ts"
+    "./control.server.ts"
   );
   return instances().some((i) => i.alive && i.cwd === dir);
 }
@@ -158,7 +158,7 @@ export async function awaitBoot(
   timeoutMs = BOOT_TIMEOUT_MS,
 ): Promise<{ up: true } | { up: false; reason: string }> {
   const { isProcessAlive } = await import(
-    "../../../src/server/single-instance-lock.ts"
+    "./control.server.ts"
   );
   const deadline = Date.now() + timeoutMs;
   let died = false;
@@ -279,8 +279,17 @@ export interface FileNode {
 const FILE_CAP = 1200; // max nodes surfaced (keeps the tree responsive)
 const FILE_DEPTH = 6; // max recursion depth
 
+/** Directories amui must never list, read, or copy into cell state — whatever
+ *  root it is pointed at. Not "not worth showing": these hold the machine
+ *  owner's private keys and cloud credentials, and amui's file viewer reads a
+ *  file's TEXT into synced cell state and from there into the DOM. A tree walk
+ *  that can reach them is an exfiltration path, so the refusal lives next to
+ *  the walk AND next to the read (`readFile`), not in the caller. */
+const SECRET_DIRS = new Set([".ssh", ".aws", ".gnupg"]);
+
 // Directories never worth showing a developer: VCS, deps, build output, caches.
 const IGNORE_DIRS = new Set([
+  ...SECRET_DIRS,
   "node_modules",
   "dist",
   "build",
@@ -363,12 +372,35 @@ export async function runtimeInfo(
   };
 }
 
+/** How far above the app amui will look for an enclosing repo. A monorepo puts
+ *  an app a handful of directories under its root; twelve levels was not a
+ *  bound, it was "keep going". */
+const REPO_WALK_MAX = 6;
+
 /** Walk up from `dir` to the enclosing git repository root (first ancestor with
  *  a `.git`). Returns null when the app isn't inside a repo. Lets the Codebase
- *  tab show the whole repo when the app is a subdir of a larger monorepo. */
-export async function findRepoRoot(dir: string): Promise<string | null> {
+ *  tab show the whole repo when the app is a subdir of a larger monorepo.
+ *
+ *  It STOPS at $HOME, and never accepts $HOME (or anything above it) as a repo
+ *  root. Plenty of people keep their dotfiles in git, and for them this walked
+ *  twelve levels up, found `~/.git`, and made the Codebase tab a browser of the
+ *  entire home directory — `.ssh/id_rsa` and `.aws/credentials` listed in the
+ *  tree, readable in the viewer, and copied into amui's cell state (and from
+ *  there into the DOM, and into every synced client). "The repo that contains
+ *  the app" is never the home directory; treating it as one is not a wider
+ *  view, it is a different thing entirely. */
+export async function findRepoRoot(
+  dir: string,
+  homeDir?: string,
+): Promise<string | null> {
+  // Taken as an argument (defaulting to the env) so a test can pin a fake home
+  // WITHOUT mutating `Deno.env` — that is process-global, and this module runs
+  // in the same process as every other amui test.
+  const home = homeDir ?? Deno.env.get("HOME") ?? Deno.env.get("USERPROFILE") ??
+    "";
   let cur = dir;
-  for (let i = 0; i < 12; i++) {
+  for (let i = 0; i < REPO_WALK_MAX; i++) {
+    if (home && cur === home) break; // at $HOME — a repo root cannot be here
     try {
       const st = await Deno.stat(join(cur, ".git"));
       if (st.isDirectory || st.isFile) return cur; // .git dir or worktree file
@@ -421,8 +453,13 @@ export async function listFiles(
   return { nodes, truncated };
 }
 
+/** Does any segment of `rel` (or of `dir` itself) name a secret directory? */
+export function touchesSecretDir(dir: string, rel: string): boolean {
+  return `${dir}/${rel}`.split("/").some((seg) => SECRET_DIRS.has(seg));
+}
+
 /** Read a file's content (text; oversized/binary files are refused with a
- *  message, not opened; traversal- and symlink-guarded). */
+ *  message, not opened; traversal-, symlink- and secret-guarded). */
 export async function readFile(
   dir: string,
   rel: string,
@@ -436,6 +473,21 @@ export async function readFile(
 }> {
   const abs = safeJoin(dir, rel);
   if (!abs) return { ok: false, error: "path outside project" };
+  // The listing already hides these (SECRET_DIRS), but a path can arrive here
+  // from a dispatch amui did not draw — and the whole point is that this file's
+  // TEXT ends up in synced cell state and in the DOM. Refused at the read, by
+  // name, so the two cannot drift apart.
+  if (touchesSecretDir(dir, rel)) {
+    return {
+      ok: false,
+      error:
+        `refusing to read ${rel}: amui never opens ${
+          [...SECRET_DIRS].join("/")
+        } — those hold private keys and cloud credentials, and this viewer copies ` +
+        `a file's contents into cell state and into every connected client. ` +
+        `Open it in your editor if you need it.`,
+    };
+  }
   try {
     // Resolve symlinks and re-check containment — safeJoin is lexical, so a
     // symlink INSIDE the project pointing at /etc/passwd would otherwise be

@@ -78,6 +78,35 @@ async function sendOps(
   return ids;
 }
 
+/** Send ONE op and expect the server to refuse it — returns the reason. */
+async function sendOpExpectingRefusal(
+  port: number,
+  op: { cell: string; action: string; payload: unknown },
+): Promise<string> {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+  await new Promise((r) => ws.addEventListener("open", r, { once: true }));
+  let reason: string | null = null;
+  let acked = false;
+  ws.addEventListener("message", (e) => {
+    const f = JSON.parse(e.data as string);
+    if (f?.t === "op-rejected") reason = String(f.d.reason);
+    if (f?.t === "sync-ack") acked = true;
+  });
+  const id = `op-${++_opSeq}`;
+  ws.send(JSON.stringify({
+    v: 2,
+    t: "op",
+    d: { id, hlc: [Date.now(), _opSeq, "e2e"] as HLC, ...op },
+  }));
+  for (let i = 0; i < 500 && reason === null && !acked; i++) {
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  ws.close();
+  assert(!acked, "a refused op must never be acked");
+  assert(reason !== null, "the server said nothing about the refused op");
+  return reason;
+}
+
 // ── read the data directory back, with the app STOPPED ────────────────────
 type Snap = { state: Any; cell_version: number } | null;
 async function readDisk(dir: string): Promise<{
@@ -389,11 +418,25 @@ Deno.test({
             JSON.stringify(rep)
           }`,
         );
-        // a new op still lands in the log…
+        // …and a client write is REFUSED while the cell is quarantined: the
+        // ack is a durability promise, and a log that cannot be folded cannot
+        // keep it (the op would sit in a log that re-quarantines on the next
+        // boot, so the change would be gone with nothing said).
         const before = (await readDisk(dir)).ops.length;
-        await sendOps(c.port!, [
-          { cell: "nav", action: "setRows", payload: { args: [9] } },
-        ]);
+        const refusal = await sendOpExpectingRefusal(c.port!, {
+          cell: "nav",
+          action: "setRows",
+          payload: { args: [9] },
+        });
+        assert(
+          /quarantined/.test(refusal) && /onMigrate|version/.test(refusal),
+          `the refusal names the cause and the fix: ${refusal}`,
+        );
+        assertEquals(
+          (await readDisk(dir)).ops.length,
+          before,
+          "a refused op never reaches the log",
+        );
         // …and a server-origin write must NOT compact the quarantined cell.
         warnings.length = 0;
         await c.dispatch({ type: "nav:setRows", payload: { args: [10] } });
@@ -413,8 +456,8 @@ Deno.test({
       );
       assertEquals(
         d3.ops.map((o) => [o.action, o.version]),
-        [["setColumns", 2], ["setRows", 3]],
-        "the v2 op is intact and the new v3 op landed in the log",
+        [["setColumns", 2]],
+        "the v2 op is intact and the refused op never joined it",
       );
       assertEquals(JSON.stringify(d3.kv), accountsBytes, "accounts untouched");
 
@@ -431,7 +474,10 @@ Deno.test({
         );
         assert(
           errors.some((e) =>
-            /cell "nav" QUARANTINED — 2\/2 op\(s\) could not be folded/.test(
+            // One op, not two: the v3 write this build's predecessor made was
+            // REFUSED while the cell was quarantined, so the log holds only
+            // the v2 op the downgrade cannot fold.
+            /cell "nav" QUARANTINED — 1\/1 op\(s\) could not be folded/.test(
               e,
             ) &&
             /1 newer-shape skipped/.test(e) &&
@@ -439,6 +485,18 @@ Deno.test({
               .test(e)
           ),
           `newer ops skipped + said: ${errors.join(" | ")}`,
+        );
+        // The line must say what quarantine DOES now. It used to promise that
+        // writes "are not durable across a restart" — true when a quarantined
+        // cell still accepted and ACKED them; since they are refused at the
+        // door with an `op-rejected` reason, that sentence sent the reader
+        // looking for lost data instead of a read-only cell.
+        assert(
+          errors.some((e) =>
+            /cell "nav" QUARANTINED/.test(e) && /REFUSED at the door/.test(e) &&
+            /op-rejected/.test(e) && !/not durable/.test(e)
+          ),
+          `the refusal is named, not "not durable": ${errors.join(" | ")}`,
         );
         assertEquals(
           (d.getState() as Any).nav,
@@ -450,8 +508,8 @@ Deno.test({
       }
       assertEquals(
         (await readDisk(dir)).ops.length,
-        2,
-        "the newer ops are still on disk for the build that understands them",
+        1,
+        "the newer op is still on disk for the build that understands it",
       );
     } finally {
       log.error = origErr;

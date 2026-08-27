@@ -28,8 +28,6 @@
 // tests/wire-serves.test.ts parses the routers' `case "…":` labels and pins
 // them against it, so a new kind cannot ship silently unrouted.
 
-import type { Patch } from "immer";
-
 /** Every wire-frame kind, with direction (C→S / S→C / both). */
 export type Kind =
   | "proto" // both — version hello {v,min}
@@ -134,6 +132,15 @@ export function isIgnorableKind(t: string): boolean {
  *  Pinned against the live routers by tests/wire-serves.test.ts, so adding a
  *  kind to FRAME_KINDS without routing it (or routing one without recording
  *  it) is a red gate, not a silent drop at runtime.
+ *
+ *  A CATALOGUE, read only by that gate — deliberately, and not a wire the
+ *  routers forgot to plug in. Each `case` does different work with a different
+ *  payload, so nothing here could BE the dispatch: a router driven by this set
+ *  would need a handler table per transport, which is the same list written
+ *  again with functions attached, and it would trade an exhaustive `switch`
+ *  (which the type-checker and a reader can both see through) for indirection.
+ *  What matters is that the two cannot drift apart silently, and the gate
+ *  parses the real routers in BOTH directions to guarantee exactly that.
  *
  *  Deliberate omissions, per transport:
  *  • ws (server-ws.ts, C→S): everything a client sends EXCEPT "ping" — WS has
@@ -280,34 +287,24 @@ export type AckPayload = {
   /** Error message when ok:false — rejects the awaiting caller. */
   error?: string;
 };
-export type PatchesPayload = Patch[];
-export type OpPayload = {
-  id: string;
-  hlc: [number, number, string];
-  cell: string;
-  action: string;
-  payload?: unknown;
-  serverTs?: number;
-};
-export type SyncReqPayload = {
-  clientId: string;
-  cells: unknown;
-  pendingOps?: unknown;
-};
-export type SyncResPayload = {
-  mode: "snapshot" | "incremental";
-  ops: unknown[];
-  snapshot?: unknown;
-  lowWater?: unknown;
-  lastServerTs?: number;
-};
-export type SyncAckPayload = {
-  cell: string;
-  opId: string;
-  serverHlc: [number, number, string];
-};
-export type OpRejectedPayload = { opId: string; cell: string; reason: string };
-export type SyncErrPayload = { reason: string };
+// The CRDT frames — "op", "sync-req", "sync-res", "sync-ack", "op-rejected",
+// "sync-err" — deliberately have NO payload type here. Their shapes live in
+// `src/sync/types.ts` (`OpMessage`, `SyncRequest`, `SyncResponse`,
+// `AckMessage`, `OpRejectedMessage`), next to the code that builds and reads
+// them, and that is the only place they may live.
+//
+// A second copy sat here, unused by anything (`enc` takes `unknown`), and it
+// had already drifted from the wire in three ways that each read as a fact:
+// `lastServerTs` typed `number` when it is a PER-CELL `Record<string, number>`;
+// `sync-ack` with no `serverTs`, the cursor position the whole
+// snapshot-watermark mechanism turns on; `sync-req` with neither `reqId` nor
+// `session`, the two fields that keep overlapping catch-ups and cloned client
+// ids apart. Nothing broke, because nothing read them — a maintainer would
+// have. Same reason `SyncResponse.rebase` was deleted rather than left
+// looking like protocol. Pinned by tests/wire-envelope.test.ts.
+//
+// `PatchesPayload = Patch[]` (immer) went with them: also unread, and `Patch[]`
+// says it better than a name for it does.
 export type SfnPayload = {
   cid: string;
   ns: string;

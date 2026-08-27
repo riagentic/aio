@@ -44,11 +44,132 @@ export function isChildOf(
   return false;
 }
 
-/** Step a positional cursor forward over a child's realized DOM span. */
+// ── Exiting nodes ─────────────────────────────────────────────────────
+
+/** A node kept in the DOM only to finish an exit animation.
+ *
+ *  Deferred removal (see {@link removeDom}) leaves the node in the document
+ *  while its vnode leaves the tree — and nothing marked it, so the reconciler's
+ *  positional model went out of step with the DOM for the whole animation. Four
+ *  measured symptoms, one cause: a keyed `["a","b","c"] → ["a","c"]` rendered
+ *  `a,c,b` (the dying row teleported to the bottom for the whole fade); an
+ *  unkeyed list clobbered the exiting node and left stale text on the page
+ *  forever; the dev child-desync tripwire cried "this is an aio bug" at a
+ *  perfectly legitimate exit; and re-adding a key mid-exit showed a duplicate
+ *  row. Flagged, every positional walk can step over them and the model is
+ *  true again. */
+interface ExitState {
+  __aioExiting?: true;
+  __aioExitKey?: string | number;
+  __aioExitCancel?: () => void;
+}
+
+/** How many nodes are mid-exit anywhere in the process. Exit animations are
+ *  rare and short-lived, while `_nextLive`/`_firstLive` sit on the hot path of
+ *  every diff — so when it is zero (the overwhelmingly common case) the walks
+ *  are exactly the plain `nextSibling`/`firstChild` they were before. */
+let _exiting = 0;
+
+/** True for a node the reconciler no longer owns — it is only finishing its
+ *  exit animation. @internal */
+export function _isExiting(node: Node | null | undefined): boolean {
+  return _exiting > 0 && !!node &&
+    (node as unknown as ExitState).__aioExiting === true;
+}
+
+/** The next sibling the reconciler can SEE (exiting nodes stepped over). */
+export function _nextLive(node: Node | null | undefined): Node | null {
+  let n: Node | null = node?.nextSibling ?? null;
+  if (_exiting === 0) return n;
+  while (n && (n as unknown as ExitState).__aioExiting === true) {
+    n = n.nextSibling;
+  }
+  return n;
+}
+
+/** The parent's first reconciler-visible child. */
+export function _firstLive(parent: Node): Node | null {
+  let n: Node | null = parent.firstChild;
+  if (_exiting === 0) return n;
+  while (n && (n as unknown as ExitState).__aioExiting === true) {
+    n = n.nextSibling;
+  }
+  return n;
+}
+
+/** Flag a node as exiting and record how to end the exit early. @internal */
+function _markExiting(dom: Node, cancel: () => void): void {
+  const s = dom as unknown as ExitState;
+  if (s.__aioExiting !== true) _exiting++;
+  s.__aioExiting = true;
+  s.__aioExitCancel = cancel;
+}
+
+function _clearExiting(dom: Node): void {
+  const s = dom as unknown as ExitState;
+  if (s.__aioExiting === true) _exiting--;
+  delete s.__aioExiting;
+  delete s.__aioExitKey;
+  delete s.__aioExitCancel;
+}
+
+/** Record which KEY an exiting node used to hold, so re-adding that key can
+ *  cancel the exit instead of rendering the row twice. @internal */
+export function _markExitKey(
+  dom: Node | null,
+  key: string | number,
+): void {
+  if (dom && _isExiting(dom)) {
+    (dom as unknown as ExitState).__aioExitKey = key;
+  }
+}
+
+/** End an in-flight exit for `key` under `parent`, if one is running.
+ *  Re-adding a key while its exit animates must REPLACE the dying row, not
+ *  stack a second one next to it. @internal */
+export function _cancelExitFor(parent: Node, key: string | number): void {
+  if (_exiting === 0) return; // nothing is exiting — never scan the children
+  const kids = parent.childNodes;
+  for (let i = 0; i < kids.length; i++) {
+    const n = kids[i] as unknown as ExitState;
+    if (n.__aioExiting && n.__aioExitKey === key) {
+      n.__aioExitCancel?.();
+      return;
+    }
+  }
+}
+
+/** Step a positional cursor forward over a child's realized DOM span.
+ *  Exiting nodes are not part of any child's span — they belong to no vnode. */
 export function _advance(node: Node | null, count: number): Node | null {
   let n = node;
-  for (let i = 0; i < count; i++) n = n?.nextSibling ?? null;
+  for (let i = 0; i < count; i++) n = _nextLive(n);
   return n;
+}
+
+/** What lives UNDER a vnode — the ONE answer every teardown walk uses.
+ *
+ *  It is not always `vnode.children`: a component's real subtree is its
+ *  `_rendered` output, and an ErrorBoundary/Suspense showing a FALLBACK has its
+ *  children unmounted and the fallback in their place. `removeDom` knew that
+ *  rule; `_removeDomCleanup` and the root `_unmount` walk did not, so a root
+ *  unmount left every fallback subtree mounted — `onCleanup` never fired and a
+ *  signal subscription SURVIVED the unmount, while the conditional-removal path
+ *  through `removeDom` correctly reached zero. `testUI` teardown uses `_unmount`,
+ *  so that was cross-test pollution. Three walkers, one rule. */
+export function _cleanupChildren(
+  vnode: VNode,
+): readonly (VNode | string | number)[] {
+  if (typeof vnode.tag === "function") {
+    return vnode._rendered != null ? [vnode._rendered] : [];
+  }
+  if (
+    (vnode.tag === ErrorBoundary || vnode.tag === Suspense) &&
+    vnode._rendered != null
+  ) {
+    return [vnode._rendered];
+  }
+  return vnode.children;
 }
 
 /** Cleanup component instances without removing DOM (for type-mismatch replacement). */
@@ -59,7 +180,6 @@ export function _removeDomCleanup(
   if (typeof vnode !== "object") return;
   if (typeof vnode.tag === "function") {
     ctx.hooks?.unmountComponent(vnode);
-    if (vnode._rendered != null) _removeDomCleanup(vnode._rendered, ctx);
   }
   // Cleanup actions before nulling refs
   if (typeof vnode.tag === "string" && vnode._dom) {
@@ -72,14 +192,8 @@ export function _removeDomCleanup(
   if (typeof vnode.tag === "string" && vnode.props.ref) {
     _callRef(vnode.props.ref, null, _componentName(vnode.tag));
   }
-  if (
-    vnode.tag === Fragment || vnode.tag === ErrorBoundary ||
-    vnode.tag === Suspense || vnode.tag === Portal ||
-    typeof vnode.tag === "string"
-  ) {
-    for (const child of vnode.children) {
-      if (typeof child === "object") _removeDomCleanup(child, ctx);
-    }
+  for (const child of _cleanupChildren(vnode)) {
+    if (typeof child === "object") _removeDomCleanup(child, ctx);
   }
 }
 
@@ -205,6 +319,7 @@ export function removeDom(
               if (typeof child === "object") _removeDomCleanup(child, ctx);
             }
           }
+          _clearExiting(dom);
           if (isChildOf(dom, parent)) parent.removeChild(dom);
         };
         const timeout = setTimeout(() => {
@@ -218,6 +333,10 @@ export function removeDom(
           clearTimeout(timeout);
           _cleanup();
         };
+        // The node stays in the DOM but leaves the vnode tree: flag it so every
+        // positional walk steps over it (see _isExiting) instead of mistaking
+        // it for a node some vnode still owns.
+        _markExiting(dom, _doRemove);
         result.then(_doRemove, (e) => {
           console.error("[aio:vdom] onBeforeRemove rejected:", e);
           _doRemove();

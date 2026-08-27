@@ -38,6 +38,14 @@ export const BUILD_BOOL_FLAGS = [
   // developer asserting what the build cannot see.
   "--allow-server-only",
   "--print-app-tmpdir",
+  // Same shape, the other directory: WHERE a built artifact gets installed.
+  // `run.sh` asks rather than hardcoding `~/app`, so the installer, `am
+  // remove` and the updater cannot drift into three opinions about where an
+  // app lives. It was read by build.ts and missing from this table — harmless
+  // only because build.ts answers it before `loadBuildConfig` validates. The
+  // vocabulary is supposed to be the whole vocabulary; the source gate in
+  // tests/build-flags.test.ts now checks that it is.
+  "--print-install-root",
 ] as const;
 
 /** Every `--flag=value` the single-target build understands. */
@@ -68,6 +76,13 @@ export const FLEET_BOOL_FLAGS = [
   // platform in the table. What a target cannot cross-build is printed with
   // its reason, so "all" never quietly means "some".
   "--all-platforms",
+  // Forwarded verbatim to the single-target build (only `--android` consults
+  // it). It belongs here because the fleet IS the build path since alpha52:
+  // `deno task build` and `deno task compile` both run through build-all, so a
+  // flag the fleet does not know is a flag no scaffolded app can pass. The
+  // Android refusal names `--allow-server-only` as its way out, and that way
+  // out was reachable only by invoking the framework's build.ts by hand.
+  "--allow-server-only",
 ] as const;
 
 /** Every `--flag=value` the fleet build understands. */
@@ -104,6 +119,46 @@ export function unknownBuildFlags(args: readonly string[]): string[] {
  *  over deno.json's whole list instead of the one target asked for. */
 export function unknownFleetFlags(args: readonly string[]): string[] {
   return unknown(args, FLEET_BOOL_FLAGS, FLEET_VALUE_FLAGS);
+}
+
+/** Every boolean flag `aio ship` (and its `keygen` / `github` subcommands)
+ *  understands. */
+export const SHIP_BOOL_FLAGS = [
+  "--github",
+  "--no-data",
+  "--stdout",
+  "--force",
+] as const;
+
+/** Every `--flag=value` `aio ship` understands. */
+export const SHIP_VALUE_FLAGS = [
+  "--src",
+  "--name",
+  "--version",
+  "--key",
+  "--channel",
+  "--target",
+  "--url",
+  "--notes",
+  "--min-from",
+  "--data",
+  "--out",
+  "--channel-dir",
+] as const;
+
+/** The `--flags` `aio ship` does NOT understand.
+ *
+ *  Same rule as the two build entry points, and the stakes are higher here
+ *  than anywhere else in the toolchain: `ship` reads every flag with
+ *  `args.find(a => a.startsWith("--k="))`, so a misspelled one is ABSENT and
+ *  the default takes over silently. `--keys=release-key.json` publishes an
+ *  UNSIGNED manifest; `--no-dta` runs the data probe instead of skipping it;
+ *  `--min-form=` drops the floor a client checks before installing. All three
+ *  produce a well-formed release whose defect only shows up on other people's
+ *  machines, days later — exactly the shape build-flags.ts exists to make
+ *  impossible. */
+export function unknownShipFlags(args: readonly string[]): string[] {
+  return unknown(args, SHIP_BOOL_FLAGS, SHIP_VALUE_FLAGS);
 }
 
 /** Human list of a vocabulary, for the refusal message. */

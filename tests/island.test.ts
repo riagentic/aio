@@ -189,3 +189,105 @@ Deno.test({
     await cleanup();
   },
 });
+
+// Every test above uses a prop-LESS island, which is exactly why the most
+// destructive island bug went unseen: `onCleanup` sat in the component BODY, so
+// it ran before every RE-RENDER, not only at unmount. `<Chart n={count}/>`
+// mounted, then tore the external component down on the first `n` change — and
+// `onMount` is once-per-instance, so nothing ever rebuilt it. Measured:
+// mounts 1, unmounts 1, and a permanently empty <div>. Reactive props were dead,
+// silently.
+Deno.test({
+  name: "island: a changing prop updates the island, never unmounts it",
+  async fn() {
+    const { document: doc, root, cleanup } = createDOM();
+    _setDocument(doc);
+    const count = signal(0);
+    let mounts = 0, unmounts = 0, updates = 0;
+
+    const Widget = island({
+      load: () => Promise.resolve({ default: "Fake" }),
+      mount: (container, _c, props) => {
+        mounts++;
+        container.innerHTML = `<span>n=${props.n}</span>`;
+        return {
+          update(p) {
+            updates++;
+            container.innerHTML = `<span>n=${p.n}</span>`;
+          },
+          unmount() {
+            unmounts++;
+            container.innerHTML = "";
+          },
+        };
+      },
+      props: () => ({ n: count.value }),
+    });
+
+    function App() {
+      return h("div", null, h(Widget, { n: count.value }));
+    }
+
+    const handle = mount(root, App);
+    await delay(10);
+    handle._flush();
+    assertEquals(root.querySelector("span")?.textContent, "n=0");
+
+    count.set(1);
+    await delay(10);
+    handle._flush();
+    await delay(10);
+
+    assertEquals(unmounts, 0, "a prop change must not unmount the island");
+    assertEquals(mounts, 1, "mounted exactly once");
+    assertEquals(updates, 1, "the external component was UPDATED instead");
+    assertEquals(root.querySelector("span")?.textContent, "n=1");
+
+    _unmount(handle);
+    assertEquals(unmounts, 1, "and it IS unmounted when the tree goes away");
+    await cleanup();
+  },
+});
+
+// Same, with a `loading` placeholder — the placeholder is the island's initial
+// child, so a re-render also has to leave the externally-injected DOM alone.
+Deno.test({
+  name: "island: a changing prop survives a loading placeholder",
+  async fn() {
+    const { document: doc, root, cleanup } = createDOM();
+    _setDocument(doc);
+    const count = signal(0);
+
+    const Widget = island({
+      load: () => Promise.resolve({ default: "Fake" }),
+      mount: (container, _c, props) => {
+        container.innerHTML = `<span>n=${props.n}</span>`;
+        return {
+          update(p) {
+            container.innerHTML = `<span>n=${p.n}</span>`;
+          },
+          unmount() {
+            container.innerHTML = "";
+          },
+        };
+      },
+      props: () => ({ n: count.value }),
+      loading: () => h("em", null, "loading..."),
+    });
+
+    function App() {
+      return h("div", null, h(Widget, { n: count.value }));
+    }
+
+    const handle = mount(root, App);
+    await delay(10);
+    handle._flush();
+    count.set(1);
+    await delay(10);
+    handle._flush();
+    await delay(10);
+    assertEquals(root.innerHTML, "<div><div><span>n=1</span></div></div>");
+    _unmount(handle);
+    await cleanup();
+  },
+});

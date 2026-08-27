@@ -6,9 +6,11 @@ import type { VNode } from "./vdom.ts";
 import { h } from "./vdom.ts";
 import {
   _applyTransition,
+  _cancelEnter,
   _isHTMLElement,
   _raf,
   _removeTransition,
+  _trackEnter,
   type TransitionFn,
   type TransitionOptions,
 } from "./transition.ts";
@@ -136,10 +138,11 @@ export function TransitionGroup(props: TransitionGroupProps): VNode {
               "in",
               dom.ownerDocument,
             );
-            setTimeout(
-              () => _removeTransition(handle),
-              result.duration + (result.delay ?? 0),
-            );
+            // TRACKED (transition.ts) — the same decider <Transition> uses.
+            // Untracked, this timeout survived the item's departure and fired
+            // mid-exit, restoring `style.animation` and wiping the exit
+            // animation in flight.
+            _trackEnter(dom, handle, result.duration + (result.delay ?? 0));
           } else if (result.tick) {
             _runTickTransition(dom, {
               duration: result.duration,
@@ -151,6 +154,9 @@ export function TransitionGroup(props: TransitionGroupProps): VNode {
         // Register exit handler for all items
         if (exitFn) {
           _groupExitHandlers.set(dom, (el: HTMLElement) => {
+            // Leaving cancels arriving — clears the enter timer AND removes the
+            // keyframes it injected.
+            _cancelEnter(el);
             const result = exitFn(el, opts);
             if (result.css) {
               const handle = _applyTransition(

@@ -6,9 +6,11 @@ import type { VNode } from "./vdom.ts";
 import { h } from "./vdom.ts";
 import {
   _applyTransition,
+  _cancelEnter,
   _isHTMLElement,
   _raf,
   _removeTransition,
+  _trackEnter,
   type TransitionFn,
   type TransitionOptions,
 } from "./transition.ts";
@@ -75,16 +77,14 @@ let _onMount: ((fn: () => void) => void) | null = null;
 let _onCleanup: ((fn: () => void) => void) | null = null;
 let _afterRender: ((fn: () => void) => void) | null = null;
 
-/** Lazily resolve lifecycle hooks from aio-renderer. @internal */
-export async function _initLifecycleHooks(): Promise<void> {
-  if (_onMount) return;
-  const mod = await import("./aio-renderer.ts");
-  _onMount = mod.onMount;
-  _onCleanup = mod.onCleanup;
-  _afterRender = mod.afterRender;
-}
-
-/** Synchronously set lifecycle hooks (for eager init or testing). @internal */
+/** Set the lifecycle hooks. Called by `aio-renderer.ts` at import time — the
+ *  indirection exists only to keep this module out of an import cycle with it.
+ *
+ *  There was a second, LAZY resolver beside this one (`_initLifecycleHooks`,
+ *  `await import("./aio-renderer.ts")`) for the same three hooks. Nothing ever
+ *  called it: the renderer wires them eagerly, which it must, because a
+ *  `<Transition>` cannot wait on a dynamic import in the middle of a render.
+ *  Two ways to set one thing, one of them unreachable. @internal */
 export function _setLifecycleHooks(
   onMount: (fn: () => void) => void,
   onCleanup: (fn: () => void) => void,
@@ -111,12 +111,6 @@ interface _TransitionChildProps {
 // signal change. Keyed by the DOM node, so a genuinely new element (a
 // keyed swap) still animates in.
 const _entered = new WeakSet<HTMLElement>();
-/** Pending enter-cleanup timers, so a element that leaves before its entrance
- *  finishes takes its timer with it (see the enter branch below). */
-const _enterTimers = new WeakMap<
-  HTMLElement,
-  ReturnType<typeof setTimeout>
->();
 
 function _TransitionChild(props: _TransitionChildProps): VNode {
   const { enter, exit, options, child } = props;
@@ -132,19 +126,9 @@ function _TransitionChild(props: _TransitionChildProps): VNode {
       const result = enter(dom, options);
       if (result.css) {
         const handle = _applyTransition(dom, result, "in", dom.ownerDocument);
-        // Cleared if this element goes away first. The timer is bounded by the
-        // animation, so an uncleared one was a small leak rather than a bug —
-        // but it kept the handle (and the detached <style> node it points at)
-        // alive for the duration, and this project guards exactly this class
-        // everywhere else (`defer.ts` clears its own timer).
-        const t = setTimeout(
-          () => {
-            _enterTimers.delete(dom);
-            _removeTransition(handle);
-          },
-          result.duration + (result.delay ?? 0),
-        );
-        _enterTimers.set(dom, t);
+        // Tracked in transition.ts, which <TransitionGroup> shares — one
+        // decider for "this element is animating in".
+        _trackEnter(dom, handle, result.duration + (result.delay ?? 0));
       } else if (result.tick) {
         _runTickTransition(dom, {
           duration: result.duration,
@@ -161,13 +145,12 @@ function _TransitionChild(props: _TransitionChildProps): VNode {
       if (!dom || !_isHTMLElement(dom)) return;
 
       _exitHandlers.set(dom, (el: HTMLElement) => {
-        // Leaving cancels arriving: the enter-cleanup timer has nothing left to
-        // clean up once this element is on its way out.
-        const pending = _enterTimers.get(el);
-        if (pending !== undefined) {
-          clearTimeout(pending);
-          _enterTimers.delete(el);
-        }
+        // Leaving cancels arriving. Clearing the timer alone was not enough:
+        // that timer was the only thing that would ever have removed the
+        // keyframes the entrance injected, so every enter-interrupted-by-exit
+        // cycle leaked a <style> into <head> (measured 1 → 5 over 5 toggles).
+        // _cancelEnter does BOTH.
+        _cancelEnter(el);
         const result = exit(el, options);
         if (result.css) {
           const handle = _applyTransition(el, result, "out", el.ownerDocument);
@@ -220,7 +203,26 @@ export function _runTickTransition(
       const t = direction === "in" ? progress : 1 - progress;
       try {
         result.tick(t, 1 - t);
-      } catch {
+      } catch (e) {
+        // A throwing `tick` used to be swallowed WHOLE: the loop stopped and
+        // the element was left wherever the last good frame put it — an
+        // enter transition frozen at `opacity: 0.37`, permanently, with
+        // nothing in the console to connect it to. The element is a user's
+        // callback away from correct, so the two halves are separated: say
+        // what happened, then land the element on the state the transition
+        // PROMISED rather than abandoning it mid-flight. A final tick that
+        // throws too is the same broken callback, already reported.
+        console.error(
+          `[aio-renderer] transition ${
+            direction === "in" ? "enter" : "exit"
+          } tick threw — the animation stopped and the element was snapped to ` +
+            `its final state:`,
+          e,
+        );
+        const end = direction === "in" ? 1 : 0;
+        try {
+          result.tick(end, 1 - end);
+        } catch { /* same callback, already reported */ }
         resolve();
         return;
       }

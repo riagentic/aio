@@ -7,6 +7,15 @@ export {
   testMultiClient,
 } from "./testing/multi-client-test.ts";
 
+// `testServer()`'s own config type — an `aio.run()` config plus the harness's
+// knobs (`workers: "real"` + `workerEntry`, which reproduce a worker cell's
+// ISOLATION and not just its serialization boundary). Named here so a test can
+// declare the object it passes; see docs/testing/prod-parity.md.
+export type {
+  TestServerConfig,
+  TestWorkerMode,
+} from "./testing/server-test.ts";
+
 // Boot smoke: a real boot that fetches every eagerly-linked client module —
 // the check that catches a static `*.server.ts` import blank-screening the app
 // while `deno check`, lint and the unit suite stay green (field report §5.1).
@@ -73,3 +82,25 @@ export {
 // for an enrollment primitive (`generateTotpSecret`/`totpUri`/`verifyTotp`
 // in `aio` are that).
 export { totpCode } from "./server/auth-totp.ts";
+
+// The `updates` cell's platform half, for a test of an update banner. The
+// server installs the real runtime at boot; a test installs a stub that
+// answers `check()` with the offer it wants to see, then drives the UI:
+//
+//   installUpdatesRuntime({ kind: "manifest", channel: "prod", current: "1.0.0",
+//     exposed: false, check: async () => ({ kind: "offer", update: { … } }),
+//     apply: async () => {}, setChannel: async () => {} });
+//
+// `update` is an `AvailableUpdate` — version, reason, notes, size, releasedAt,
+// migrates, signed, keyFingerprint, warnings. `apply(opts)` receives
+// `{ acceptDataLoss }` when the caller opened that door.
+//
+// Pass `null` to take it back out. A field report (a desktop app) reached it
+// through `dep/aio/src/state/…` — a seam a test needs is a seam we export.
+export {
+  type ApplyOptions,
+  type CheckOptions,
+  type CheckResult,
+  installUpdatesRuntime,
+  type UpdatesRuntime,
+} from "./state/updates-cell.ts";

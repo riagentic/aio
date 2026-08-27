@@ -95,6 +95,21 @@ export function nearestOf(
  * Nested `exclude` (dot-paths like `"accounts.encSecKey"`) IS supported — only
  * the head field is validated (deeper segments may be dynamic / array items).
  */
+/** `{ include: [...], exclude: [...] }` on ONE filter — `include` wins and
+ *  `exclude` is dropped on the floor (see `normalizeUiFilter` below and
+ *  `state-filter.ts`, which both answer `"include" in filter` first).
+ *
+ *  THE decider for that question, asked from two layers: `cell()`'s own filters
+ *  go through {@link validateFieldFilters} (a throw — `normalizeUiFilter`
+ *  destroys the evidence before boot, so nothing downstream could see it), and
+ *  `aio.run({ cellDefaults })` goes through `configConflicts`
+ *  (`src/server/config.ts`, a config error). Same fact, one implementation. */
+export function hasBothFilterModes(v: unknown): boolean {
+  if (!v || typeof v !== "object") return false;
+  const f = v as Record<string, unknown>;
+  return Array.isArray(f.include) && Array.isArray(f.exclude);
+}
+
 export function validateFieldFilters(
   name: string,
   state: Record<string, unknown> | undefined,
@@ -106,6 +121,28 @@ export function validateFieldFilters(
   const check = (kind: "visible" | "persist", filter: unknown): void => {
     if (!filter || typeof filter !== "object") return;
     const f = filter as Record<string, unknown>;
+    // BOTH lists is not a filter — it is two filters, and only the first one
+    // runs. Every reader (`state-filter.ts`, `normalizeUiFilter`) answers
+    // `"include" in filter` first and returns, so the `exclude` list is
+    // discarded without a word: `visible: { include: ["a","b"], exclude:
+    // ["b.secret"] }` sends `b.secret` to every client. `normalizeUiFilter`
+    // then drops the key entirely, so nothing downstream can even see that it
+    // was written. Refuse here, where the evidence still exists.
+    if (hasBothFilterModes(f)) {
+      throw new Error(
+        `[cell:${name}] ${kind} sets BOTH \`include\` and \`exclude\` — they ` +
+          `are two different filters and only \`include\` is applied, so ` +
+          `\`exclude\` (${
+            (f.exclude as unknown[]).map((k) => JSON.stringify(k)).join(", ")
+          }) is silently discarded${
+            kind === "visible"
+              ? " and every field it names is sent to clients anyway"
+              : " and every field it names is written to the database anyway"
+          }. FIX: pick one — \`include\` to allow-list the fields, or ` +
+          `\`exclude\` to deny-list them (\`exclude\` accepts nested paths ` +
+          `like "a.secret", \`include\` does not).`,
+      );
+    }
     for (const mode of ["include", "exclude"] as const) {
       const keys = f[mode];
       if (!Array.isArray(keys)) continue;

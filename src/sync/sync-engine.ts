@@ -5,7 +5,12 @@ import type { HLC, SyncConfig, SyncOp, SyncStatus } from "./types.ts";
 import { SYNC_DEFAULTS } from "./types.ts";
 import type { OpBuffer } from "./op-buffer.ts";
 import { compareHLC, createHLC, type HLClock } from "./hlc.ts";
-import { rebase, type SyncReducer } from "./rebase.ts";
+import {
+  rebase,
+  REDUCER_FAILED,
+  type SyncReducer,
+  type SyncReducerResult,
+} from "./rebase.ts";
 import type { SyncConflict } from "./types.ts";
 import { mergeField } from "./merge.ts";
 import { log } from "../diagnostics/logger-api.ts";
@@ -60,6 +65,8 @@ export interface SyncEngine {
   handleRemoteOp(op: SyncOp): Promise<void>;
   handleSyncResponse(response: {
     mode: string;
+    /** Which request this answers — see `SyncRequest.reqId`. */
+    reqId?: number;
     ops?: SyncOp[];
     rebase?: SyncOp[];
     snapshot?: Record<string, Record<string, unknown>>;
@@ -90,6 +97,18 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
   // counter passed the previous session's high mark. A per-engine nonce makes
   // the id self-contained: no part of it depends on what survived storage.
   const _session = randomUuid().slice(0, 8);
+  /** Every op id this engine issues, and nothing else. */
+  const _ownPrefix = `${deps.clientId}-${_session}-`;
+  /** An op THIS session issued — the only op that can be a live echo of our
+   *  own send.
+   *
+   *  Echo suppression used to ask `op.hlc[2] === clientId`, and the client id
+   *  is a localStorage UUID: a cloned browser profile, a copied Electron app
+   *  directory or a restored backup yields two LIVE clients carrying the same
+   *  one, and each then dropped the other's ops as its own echo — mutually
+   *  invisible, forever, with nothing said. The session nonce already in every
+   *  op id is the identity that is actually per client instance. */
+  const isOwnSessionOp = (opId: string): boolean => opId.startsWith(_ownPrefix);
   const clock: HLClock = createHLC(deps.clientId);
   let online = true;
   const statuses = new Map<string, SyncStatus>();
@@ -120,6 +139,22 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
   // enumerates what it contains — so the server states the watermark instead
   // and the ack carries its own position for comparison.
   const _snapshotTs = new Map<string, number>();
+
+  // The highest server position this cell's CONFIRMED state reflects —
+  // whichever way it got there (a snapshot install, or an op/ack folded above
+  // one). A snapshot is only ever an improvement while its watermark is at
+  // least this high: `reserveServerTs` hands back the log's HIGH WATER, so two
+  // catch-ups reserved before the same write both quote the same position, and
+  // installing the second one THREW AWAY every op folded above it in between
+  // — the op existed on the server and on every peer, and vanished from this
+  // client until something happened to re-deliver it. (Found by the two-cell
+  // chaos fuzzer, 2026-08-27; it reproduces on the single-cell suite's code.)
+  const _confirmedTs = new Map<string, number>();
+  function noteConfirmedTs(cell: string, ts: number | undefined): void {
+    if (ts === undefined) return;
+    const cur = _confirmedTs.get(cell);
+    if (cur === undefined || ts > cur) _confirmedTs.set(cell, ts);
+  }
 
   const APPLIED_IDS_CAP = 2048;
   const _appliedIds = new Map<string, Set<string>>();
@@ -184,6 +219,15 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     | { kind: "op"; op: SyncOp };
   const _catchup = new Set<string>();
   const _deferred = new Map<string, Deferred[]>();
+  // The id of the last catch-up this engine sent. A response says which
+  // request it answers (`reqId`), and only the answer to the LATEST one opens
+  // the gate: two catch-ups can be outstanding at once (a reconnect while a
+  // manual `requestSync` is in flight), and response #1's `dropHeld()` used to
+  // open the gate for response #2 as well — every frame arriving in between
+  // then applied AHEAD of the older ops #2 was still carrying, which is
+  // exactly the misordering the gate exists to prevent. Self-healing: a lost
+  // response leaves the gate shut only until the next request is answered.
+  let _reqSeq = 0;
   /** Hold `item` until the outstanding catch-up for `cell` lands; false when
    *  there is none (or the hold is full) and the caller must apply it now. */
   function hold(cell: string, item: Deferred): boolean {
@@ -212,6 +256,33 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     log.warn(
       "sync",
       `reducer returned undefined for action "${action}" in cell "${cell}". Expected state object or null. (logged once)`,
+    );
+  }
+
+  // ── A fold that FAILED ────────────────────────────────────────────────
+  // The reducer could not apply the op (it threw — `REDUCER_FAILED` — or it
+  // returned `undefined`, which is a buggy reducer). Two things must NOT
+  // happen, and both used to: the op must not be remembered as applied (the
+  // mark ran BEFORE the reducer, so an error marked it applied and every
+  // re-delivery was then deduped away), and this cell's cursor must not move
+  // past it (the cursor is the only thing that can bring it back). The server
+  // applied the op; the client did not; nothing else in the system can see the
+  // difference — so say it, once per failure, at error level.
+  const _foldFailed = new Set<string>();
+  function foldFailure(
+    cell: string,
+    opId: string,
+    action: string,
+    via: string,
+  ): void {
+    _foldFailed.add(cell);
+    log.error(
+      "sync",
+      `${cell}: the reducer could not apply op ${opId} ("${action}", via ` +
+        `${via}) — the op is NOT applied, NOT marked applied, and this cell's ` +
+        `sync cursor stays where it is so the server re-delivers it. Fix ` +
+        `${cell}.${action} so it can replay this payload (a sync method must ` +
+        `fold its own payload into its own state without throwing).`,
     );
   }
 
@@ -270,6 +341,27 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     const snapTs = _snapshotTs.get(cell);
     const inSnapshot = pending !== undefined && serverTs !== undefined &&
       snapTs !== undefined && serverTs <= snapTs;
+    // A modern server (it stated a snapshot watermark) that cannot state THIS
+    // op's position: the only way that happens is a compaction tombstone
+    // written before the `server_ts` column existed (pre-alpha43), re-acking a
+    // resend. The fact is gone from the database, so neither answer is safe —
+    // applying may double the op, skipping may lose it — and guessing quietly
+    // is the one thing that must not happen. We apply (a doubled entry is
+    // visible; a lost one is not) and say so, with the way out.
+    if (
+      pending !== undefined && serverTs === undefined && snapTs !== undefined
+    ) {
+      log.warn(
+        "sync",
+        `${cell}: the server acked op ${opId} without its log position while a ` +
+          `catch-up snapshot is installed, so it cannot be told whether the ` +
+          `snapshot already contains this change. Cause: a compaction ` +
+          `tombstone written by an aio older than alpha43 (they expire 24h ` +
+          `after the last compaction, so this stops on its own). The change is ` +
+          `applied; if this cell shows a duplicated entry, reload the page — ` +
+          `that rebuilds the cell from the server.`,
+      );
+    }
     if (pending && !inSnapshot) {
       const confirmed = deps.getConfirmedState()[cell] ?? {};
       const next = deps.reducer(
@@ -278,12 +370,32 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         pending.payload,
         cell,
       );
-      // Reducer contract: null = no-op. undefined is treated as a bug.
-      if (next === undefined) {
+      // Reducer contract: null = no-op, REDUCER_FAILED = could not apply,
+      // undefined = a buggy reducer. Only a real state object is committed.
+      if (next === REDUCER_FAILED) {
+        foldFailure(cell, opId, pending.action, "ack");
+      } else if (next === undefined) {
         _warnUndefReducer(cell, pending.action);
       } else if (next !== null) {
         deps.setConfirmedState(cell, next);
       }
+    }
+    if (pending !== undefined) {
+      // This op is now IN confirmed state — folded just above, or carried by
+      // the snapshot the watermark points at. Record it in the same applied-id
+      // set every other path uses, because a catch-up can hand it back:
+      // `handleSync` re-delivers a client's own ops unfiltered whenever that
+      // cell's cursor is still 0 (the "rebuilding from nothing" case), and
+      // acks deliberately do not advance the cursor — so a live client that
+      // acked an op before its first response for that cell landed got the op
+      // back and applied it a SECOND time. `foldCatchupOp`'s own-op guard only
+      // covers ops still awaiting an ack, which this one no longer is.
+      // (Found by the two-cell chaos fuzzer, 2026-08-27; reproduces on the
+      // single-cell suite's code too.) After a reload the set is empty and
+      // confirmed state is empty with it, so a re-delivery is applied exactly
+      // as it should be.
+      markApplied(cell, opId);
+      noteConfirmedTs(cell, serverTs);
     }
     await deps.buffer.confirm(cell, opId, serverHlc);
     await rebaseCell(cell);
@@ -320,23 +432,71 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
       logDuplicate(cell, op.id, "catch-up");
       return Promise.resolve();
     }
-    markApplied(cell, op.id);
+    // …and the SNAPSHOT watermark, for the ops the id set structurally cannot
+    // see. A snapshot is the server's live state at a reserved position, so it
+    // contains every op at or below that position — but it never enumerates
+    // them, so `_appliedIds` stays empty for all of them.
+    //
+    // Reachable whenever two catch-ups overlap (a reconnect while a manual
+    // `requestSync` is outstanding — the case `reqId` exists for): request #1
+    // is answered with a SNAPSHOT at position S, request #2 was sent with the
+    // older cursor and is answered INCREMENTALLY with the very ops that
+    // snapshot folded in. Both responses are for this client, both are valid,
+    // and folding #2's ops on top of #1's snapshot applied each of them a
+    // second time — permanently, on the client only.
+    //
+    // Same rule the held-op and ack paths already use (`serverTs <= snapTs`
+    // ⇒ the snapshot has it); this was the third place that needed it and the
+    // one that did not have it. An op that cannot state its position
+    // (pre-alpha43 server) is folded as before — unknown position, previous
+    // behaviour, never a silent guess.
+    const snapTs = _snapshotTs.get(cell);
+    if (
+      snapTs !== undefined && op.serverTs !== undefined && op.serverTs <= snapTs
+    ) {
+      logDuplicate(cell, op.id, "catch-up under snapshot");
+      markApplied(cell, op.id);
+      return Promise.resolve();
+    }
     const confirmed = deps.getConfirmedState()[cell] ?? {};
     const next = deps.reducer(confirmed, op.action, op.payload, op.cell);
     // Same guard the ack and remote-op paths carry: `null` is the contract's
     // no-op, `undefined` is a buggy reducer. Letting it through set confirmed
     // state to undefined, and the next rebase read
     // `getConfirmedState()[cell] ?? {}` — every confirmed field silently gone.
+    //
+    // The applied-mark comes AFTER the fold, and only for a fold that
+    // happened: marking first meant a failed op could never be re-delivered.
+    if (next === REDUCER_FAILED) {
+      foldFailure(cell, op.id, op.action, "catch-up");
+      return Promise.resolve();
+    }
     if (next === undefined) {
       _warnUndefReducer(cell, op.action);
-    } else if (next !== null) {
-      deps.setConfirmedState(cell, next);
+      _foldFailed.add(cell); // nothing was applied — keep it re-deliverable
+      return Promise.resolve();
     }
+    markApplied(cell, op.id);
+    noteConfirmedTs(cell, op.serverTs);
+    if (next !== null) deps.setConfirmedState(cell, next);
     return Promise.resolve();
   }
 
   /** Fold a remote op into confirmed state. Caller holds the cell lock. */
   async function foldRemoteOp(op: SyncOp): Promise<void> {
+    // An op stamped with OUR client id that this session did not issue is
+    // either a clone's (apply it — it is a different client) or one of ours
+    // resent from an earlier session after a reload. The pending buffer is the
+    // one thing that can tell them apart: an op we are still awaiting an ack
+    // for enters confirmed state through THAT ack, never here. Only paid for
+    // when the ids actually collide.
+    if (op.hlc[2] === deps.clientId) {
+      const pending = await deps.buffer.getUnconfirmed(op.cell);
+      if (pending.some((o) => o.id === op.id)) {
+        logDuplicate(op.cell, op.id, "own-op echo (awaiting ack)");
+        return;
+      }
+    }
     clock.receive(op.hlc);
     const meta = await deps.buffer.getMeta(op.cell);
     // Op-id dedup: same op delivered twice (duplicated broadcast, or a
@@ -347,17 +507,26 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     // delivery. The id set only skips provably-applied ops.
     const isDup = alreadyApplied(op.cell, op.id);
     const confirmed = deps.getConfirmedState()[op.cell] ?? {};
-    let next: Record<string, unknown> | null | undefined = null;
+    let next: SyncReducerResult | undefined = null;
     if (isDup) {
       logDuplicate(op.cell, op.id, "broadcast");
     } else {
-      markApplied(op.cell, op.id);
       next = deps.reducer(confirmed, op.action, op.payload, op.cell);
+      // Mark applied only after a fold that actually happened (see
+      // `foldFailure`) — and leave without touching the watermark below when
+      // it did not, so nothing seals an op this client never applied.
+      if (next === REDUCER_FAILED) {
+        foldFailure(op.cell, op.id, op.action, "broadcast");
+        return;
+      }
       if (next === undefined) {
         _warnUndefReducer(op.cell, op.action);
-      } else if (next !== null) {
-        deps.setConfirmedState(op.cell, next);
+        _foldFailed.add(op.cell);
+        return;
       }
+      markApplied(op.cell, op.id);
+      noteConfirmedTs(op.cell, op.serverTs);
+      if (next !== null) deps.setConfirmedState(op.cell, next);
     }
     // Advance the compaction watermark (lastHlc, never regressing) — the
     // server uses it only to decide snapshot-vs-incremental. Deliberately
@@ -522,7 +691,13 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
       // op's effect: once here, once via the sync-ack path (the op is still
       // pending locally). Own ops only ever enter confirmed state through
       // handleAck.
-      if (op.hlc[2] === deps.clientId) {
+      //
+      // Keyed on the op ID, not the HLC node: the node is the shared,
+      // persisted client id, and two clones of one profile carry the same one
+      // (see `isOwnSessionOp`). An op of OURS from an earlier session — an
+      // unconfirmed op resent after a reload — is caught in `foldRemoteOp`,
+      // where the pending buffer can be consulted.
+      if (isOwnSessionOp(op.id)) {
         logDuplicate(op.cell, op.id, "own-op echo");
         return Promise.resolve();
       }
@@ -563,12 +738,29 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
       const getLW = (f: string): HLC =>
         isPerCell ? (lw as Record<string, HLC>)[f] ?? clock.now() : lw as HLC;
 
-      // The catch-up has landed, so the gate opens: take everything it held
-      // and fold it WITH the response, in one ordered batch per cell (see
-      // `hold` and the batch below). One sync-req covers every cell and
-      // produces exactly this one response, so the whole gate clears here.
+      // The catch-up has landed: take everything it held and fold it WITH the
+      // response, in one ordered batch per cell (see `hold` and the batch
+      // below). One sync-req covers every cell and produces exactly this one
+      // response, so the whole queue drains here — ALWAYS, even for a response
+      // that is not the latest. Holding a queue ACROSS a response while
+      // folding that response's ops inverts exactly the pairs the gate exists
+      // to protect: a held broadcast can sit BELOW an op the response carries.
+      //
+      // What the request id decides is whether the gate RE-OPENS. Two
+      // catch-ups can be outstanding at once (a reconnect while a manual
+      // `requestSync` is in flight), and response #1's `dropHeld()` used to
+      // open the gate for response #2 as well — so every frame arriving in
+      // between applied immediately and #2's older ops replayed on top, the
+      // very misordering the gate exists to prevent. The gate now opens only
+      // for the answer to the LATEST request. A lost response costs one more
+      // round of holding, never a stall: the next request's answer opens it.
+      // A server that does not echo `reqId` (an older build) puts us back on
+      // "any response opens the gate", which is what it always did.
+      const rid = response.reqId;
+      const answersLatest = rid === undefined || rid >= _reqSeq;
       const held = new Map(_deferred);
-      dropHeld();
+      _deferred.clear();
+      if (answersLatest) _catchup.clear();
 
       // Process each affected cell: snapshot → ops → rebase (all under one lock)
       const affected = new Set([
@@ -577,18 +769,38 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         ...held.keys(),
       ]);
       const cursorSaved = new Set<string>();
-      for (const cell of affected) {
-        await withLock(cell, async () => {
-          const snap = snapshots.get(cell);
-          const snapTs = snap === undefined
+      function foldCell(cell: string): Promise<void> {
+        // A previous response's failure for this cell is re-decided by THIS
+        // batch: it either folds cleanly (cursor moves) or fails again.
+        _foldFailed.delete(cell);
+        return withLock(cell, async () => {
+          const snapAny = snapshots.get(cell);
+          const snapTs = snapAny === undefined
             ? undefined
             : response.lastServerTs?.[cell] ?? _snapshotTs.get(cell);
+          // A snapshot that does not reach as far as this cell's confirmed
+          // state already does is not an update — it is a rollback (see
+          // `_confirmedTs`). Keep what we have; the response's own ops still
+          // fold below, deduped by id.
+          const covered = _confirmedTs.get(cell);
+          const stale = snapAny !== undefined && snapTs !== undefined &&
+            covered !== undefined && snapTs < covered;
+          if (stale) {
+            deps.log?.debug?.(
+              `[sync] ${cell}: ignoring a catch-up snapshot at position ` +
+                `${snapTs} — confirmed state already covers ${covered}`,
+            );
+          }
+          const snap = stale ? undefined : snapAny;
           if (snap) {
             deps.setConfirmedState(cell, snap);
             // The cursor this snapshot reflects — every op at or below it is
             // already in `snap`, which is what keeps a late ack from applying
             // one of them twice (see `_snapshotTs`).
-            if (typeof snapTs === "number") _snapshotTs.set(cell, snapTs);
+            if (typeof snapTs === "number") {
+              _snapshotTs.set(cell, snapTs);
+              noteConfirmedTs(cell, snapTs);
+            }
             await deps.buffer.saveSnapshot(cell, {
               state: snap,
               hlc: getLW(cell),
@@ -626,11 +838,30 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
           }
           for (const h of heldItems) {
             if (h.kind === "op") {
-              // Held under a snapshot: it reached us BEFORE the response, so
-              // on a FIFO connection the server applied it before capturing
-              // the snapshot — replaying it would apply it twice (a snapshot
-              // cannot enumerate what it holds, so the id dedup cannot see it).
-              if (snapTs !== undefined) {
+              // Held under a snapshot: it may already be IN the snapshot —
+              // a snapshot cannot enumerate what it holds, so the id dedup
+              // cannot see it and replaying it would apply it twice.
+              //
+              // "May", not "is". The op's own position decides, exactly as it
+              // does for a held ack below: `serverTs <= snapTs` means it was
+              // persisted before the snapshot was captured (in it — skip);
+              // ABOVE the watermark means it was persisted AFTER, and it is
+              // precisely the op the snapshot does NOT contain.
+              //
+              // That gap is reachable with two or more sync cells: the
+              // response is built cell by cell, each under its own lock, so
+              // cell A is snapshotted at ts N, A's lock is released, the
+              // server awaits cell B — and a peer op for A persisted in that
+              // window is broadcast, arrives first on the FIFO connection, and
+              // is held. Dropping it was silent divergence that healed only at
+              // the next reconnect. An op that cannot state its position
+              // (pre-alpha43 server) is still dropped: unknown means unsafe,
+              // and the next catch-up re-delivers it (only a response advances
+              // the cursor).
+              if (
+                snapTs !== undefined &&
+                (h.op.serverTs === undefined || h.op.serverTs <= snapTs)
+              ) {
                 logDuplicate(cell, h.op.id, "held under snapshot");
                 continue;
               }
@@ -672,7 +903,7 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
               }
             }
           }
-          if (newLastHlc) {
+          if (newLastHlc && !_foldFailed.has(cell)) {
             // Per-cell cursor from the server; preserve the stored one when
             // the response doesn't cover this cell — overwriting with
             // undefined would regress to the ambiguous HLC cursor and cause
@@ -711,21 +942,56 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         });
       }
 
+      for (const cell of affected) {
+        // ONE cell's failure is ONE cell's failure. A throw while applying
+        // cell A's ops used to escape `handleSyncResponse` entirely: every
+        // later cell in `affected` was skipped, and so was the trailing
+        // cursor-advance loop — one bad reducer took the whole catch-up down,
+        // for every cell, with the response already consumed and unrepeatable.
+        try {
+          await foldCell(cell);
+        } catch (e) {
+          // The cell is NOT covered by this response — hold its cursor so the
+          // next catch-up re-delivers what it missed.
+          _foldFailed.add(cell);
+          log.error(
+            "sync",
+            `${cell}: applying the catch-up response threw (${e}) — this ` +
+              `cell's cursor is held so the server re-delivers these ops; ` +
+              `other cells in the response were unaffected. Fix the ${cell} ` +
+              `reducer/storage error above.`,
+          );
+        }
+      }
+
       // Cells the server echoed a cursor for but delivered nothing (e.g. the
       // only above-cursor ops were our own, filtered from the echo): advance
       // the stored cursor anyway — otherwise it stalls and the server
       // re-loads + re-filters those ops every round. Never regress.
       for (const [cell, ts] of Object.entries(response.lastServerTs ?? {})) {
         if (cursorSaved.has(cell)) continue;
-        await withLock(cell, async () => {
-          const prev = await deps.buffer.getMeta(cell);
-          if (ts > (prev?.lastServerTs ?? 0)) {
-            await deps.buffer.saveMeta(cell, {
-              lastHlc: prev?.lastHlc ?? null,
-              lastServerTs: ts,
-            });
-          }
-        });
+        // …but NEVER for a cell whose fold failed: the echoed cursor covers
+        // ops this client did not apply, and sealing them above the cursor is
+        // exactly the permanent, silent divergence the hold exists to prevent.
+        if (_foldFailed.has(cell)) continue;
+        try {
+          await withLock(cell, async () => {
+            const prev = await deps.buffer.getMeta(cell);
+            if (ts > (prev?.lastServerTs ?? 0)) {
+              await deps.buffer.saveMeta(cell, {
+                lastHlc: prev?.lastHlc ?? null,
+                lastServerTs: ts,
+              });
+            }
+          });
+        } catch (e) {
+          log.error(
+            "sync",
+            `${cell}: could not save the echoed sync cursor (${e}) — the ` +
+              `cell will re-request these ops on the next catch-up. Check the ` +
+              `offline queue's storage (localStorage quota/permissions).`,
+          );
+        }
       }
     },
 
@@ -791,9 +1057,16 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
       // otherwise open the gate before it was closed and leave it shut with no
       // response left to open it.
       for (const cell of Object.keys(deps.cells)) _catchup.add(cell);
+      const reqId = ++_reqSeq;
       try {
         deps.send(enc("sync-req", {
           clientId: deps.clientId,
+          reqId,
+          // The per-session nonce, so the server can filter OUR ops out of the
+          // catch-up without filtering out a clone that shares our client id
+          // (see `isOwnSessionOp`). A server that predates the field falls
+          // back to the client-id filter, exactly as before.
+          session: _session,
           cells,
           pendingOps: allPending,
         }));

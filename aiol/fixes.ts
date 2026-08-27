@@ -2,8 +2,8 @@
 // Every fix here is guaranteed to be harmless: no behavior change, no data loss.
 // Only adds missing config, removes dead code, or normalizes formatting.
 
-import { basename, join } from "@std/path";
-import { codeText } from "./scan.ts";
+import { basename, join, resolve } from "@std/path";
+import { codeMatches, codeText, topLevelKeyOffsets } from "./scan.ts";
 import { SERVER_ONLY_AIO_SYMBOLS } from "../src/entries.ts";
 
 // Derived from THE set (src/entries.ts, alpha52 one-decider) — never restated.
@@ -68,11 +68,122 @@ async function patchDenoJson(
 
 // ── Config fixes ────────────────────────────────────────────────────
 
-/** Remove appId from deno.json (moved to aio.run()) */
-export function fixRemoveAppId(projectDir: string): Promise<boolean> {
-  return patchDenoJson(projectDir, (c) => {
-    delete c.appId;
-  });
+/** `appId` normalized the way aio resolves it — lowercase, `[a-z0-9-]`, no
+ *  leading/trailing or doubled dashes. Empty means "nothing here names the
+ *  app", which is a REFUSAL, never a default: `appId` names the lock file, the
+ *  SQLite path and the UDS socket, so inventing one ("my-app") points a real
+ *  app at another app's data. */
+function slugAppId(raw: string): string {
+  return raw.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+/** Read + parse the project's deno.json / deno.jsonc. `null` when it is
+ *  missing or not plain JSON (a jsonc with real comments) — the caller must
+ *  then decline rather than half-apply. */
+async function readConfig(
+  projectDir: string,
+): Promise<{ path: string; config: DenoJsonConfig } | null> {
+  for (const name of ["deno.json", "deno.jsonc"]) {
+    const path = join(projectDir, name);
+    let text: string;
+    try {
+      text = await Deno.readTextFile(path);
+    } catch {
+      continue;
+    }
+    try {
+      return { path, config: JSON.parse(text) as DenoJsonConfig };
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/** Insert `appId: "<id>"` into the entry module's `aio.run(...)` call.
+ *
+ *  Matching is on CODE offsets: the first RAW `aio.run({` in a file can be the
+ *  one inside a doc comment or inside a scaffolder's template literal, and the
+ *  insertion then landed in a comment (or in generated text) while reporting
+ *  success. Both call spellings are handled — `aio.run({ … })` and the
+ *  zero-config `aio.run()` the scaffold also emits.
+ *
+ *  Returns false, loudly, when there is no call to insert into. */
+async function insertAppIdIntoRun(
+  entryPath: string,
+  appId: string,
+): Promise<boolean> {
+  let content: string;
+  try {
+    content = await Deno.readTextFile(entryPath);
+  } catch {
+    console.error(`[aiol] cannot read ${entryPath} — appId not moved`);
+    return false;
+  }
+  if (codeMatches(content, /\bappId\s*:/g).length > 0) return false; // already set
+  const [site] = codeMatches(content, /\baio\.run\s*\(\s*(\{|\))/g);
+  if (!site) {
+    console.error(
+      `[aiol] no \`aio.run(\` call in ${entryPath} — appId "${appId}" left in ` +
+        `deno.json rather than deleted from the only place that states it`,
+    );
+    return false;
+  }
+  const at = site.index! + site[0]!.length - 1; // the `{` or the `)`
+  // Follow the call's own shape: a one-line `aio.run({ … })` gains an inline
+  // key, a multi-line one gains a line. (aiol is fmt-agnostic; producing
+  // something `deno fmt` leaves alone is still the courteous default.)
+  const key = content[at + 1] === "\n"
+    ? `\n  appId: "${appId}",`
+    : ` appId: "${appId}",`;
+  const patched = site[1] === "{"
+    ? content.slice(0, at + 1) + key + content.slice(at + 1)
+    : `${content.slice(0, at)}{ appId: "${appId}" }${content.slice(at)}`;
+  await Deno.writeTextFile(entryPath, patched);
+  return true;
+}
+
+/** Move `appId` out of deno.json and INTO `aio.run()` — one migration, not
+ *  half of one.
+ *
+ *  This fix used to be the delete alone. A compiled build cannot read
+ *  deno.json, so the rule is right that the value has to reach `aio.run()` —
+ *  but deleting the only place that states it, without adding the other half,
+ *  renames the app: `appId` names the lock file, the SQLite path and the UDS
+ *  socket, so the next boot came up under a DIFFERENT identity and the app's
+ *  own data was orphaned on disk. Insert first; delete only once the insert
+ *  landed. */
+export function fixMoveAppIdToRun(
+  entryPath: string,
+): (projectDir: string) => Promise<boolean> {
+  return async (projectDir: string) => {
+    const cfg = await readConfig(projectDir);
+    if (!cfg) {
+      console.error(
+        `[aiol] cannot safe-fix appId: ${projectDir}'s config is missing or ` +
+          `is not plain JSON — move it by hand (aio.run({ appId: … })), then ` +
+          `delete the key.`,
+      );
+      return false;
+    }
+    const appId = typeof cfg.config.appId === "string" ? cfg.config.appId : "";
+    if (!appId) return false;
+    // 1. the value reaches the code that a compiled build actually runs …
+    if (!await insertAppIdIntoRun(entryPath, appId)) return false;
+    // 2. … and only THEN does deno.json stop stating it.
+    if (
+      !await patchDenoJson(projectDir, (c) => {
+        delete c.appId;
+      })
+    ) {
+      console.error(
+        `[aiol] appId "${appId}" is now set in ${entryPath}, but could not be ` +
+          `removed from deno.json — harmless (aio.run() wins), delete it by hand.`,
+      );
+    }
+    return true;
+  };
 }
 
 /** Rename deno.json `target` → `client` (alpha52 one-vocabulary rename: the
@@ -166,40 +277,44 @@ export function fixAddTestTask(projectDir: string): Promise<boolean> {
   });
 }
 
-/** Add appId to aio.run() in src/app.ts — derives from deno.json appId or directory name */
-export function fixAddAppIdToRun(projectDir: string): Promise<boolean> {
-  return (async () => {
-    const appTs = join(projectDir, "src", "app.ts");
-    let content: string;
-    try {
-      content = await Deno.readTextFile(appTs);
-    } catch {
+/** Add `appId` to `aio.run()` when NOTHING names the app yet — derived from
+ *  deno.json (`appId` > `title` > `name`), else the project directory's name.
+ *
+ *  Three things this used to get wrong, all of which renamed apps:
+ *   • `basename(projectDir)` on the DOCUMENTED invocation `aiol .` is
+ *     `basename(".")` → `""` → the fallback fired and every app it touched was
+ *     branded `my-app`. The path is resolved first, and an unusable name is a
+ *     REFUSAL now, not a default.
+ *   • the insertion point was the first RAW `aio.run({`, so a match inside a
+ *     comment or a template literal won.
+ *   • the target was a hardcoded `src/app.ts`, ignoring the entry the project
+ *     DECLARES in deno.json — the rule knows it, so the rule passes it in. */
+export function fixAddAppIdToRun(
+  entryPath: string,
+): (projectDir: string) => Promise<boolean> {
+  return async (projectDir: string) => {
+    const cfg = await readConfig(projectDir);
+    const c = cfg?.config ?? {};
+    const named = [
+      c.appId,
+      c.title,
+      typeof c.name === "string" ? c.name.split("/").pop() : undefined,
+    ]
+      .find((v): v is string => typeof v === "string" && v.trim() !== "");
+    const appId = slugAppId(named ?? basename(resolve(projectDir)));
+    if (!appId) {
+      console.error(
+        `[aiol] nothing names this app — no appId/title/name in deno.json and ` +
+          `the directory name (${
+            basename(resolve(projectDir))
+          }) has no usable characters. ` +
+          `Add appId: "…" to aio.run() by hand; it names the lock file, the ` +
+          `SQLite path and the UDS socket, so it must not be guessed.`,
+      );
       return false;
     }
-    if (content.includes("appId")) return false; // already has it
-
-    // Derive appId: prefer deno.json value, fallback to directory name
-    let appId: string;
-    try {
-      const dj = JSON.parse(
-        await Deno.readTextFile(join(projectDir, "deno.json")),
-      ) as { appId?: string };
-      appId = dj.appId ?? basename(projectDir);
-    } catch {
-      appId = basename(projectDir);
-    }
-    appId = appId.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-+/g, "-")
-      .replace(/^-|-$/g, "") || "my-app";
-
-    // Insert appId after `aio.run({`
-    const patched = content.replace(
-      /aio\.run\(\{/,
-      `aio.run({\n  appId: '${appId}',`,
-    );
-    if (patched === content) return false;
-    await Deno.writeTextFile(appTs, patched);
-    return true;
-  })();
+    return await insertAppIdIntoRun(entryPath, appId);
+  };
 }
 
 // ── Source file fixes ───────────────────────────────────────────────
@@ -281,18 +396,38 @@ export function fixRemoveCreateRootImport(
 // the major (docs/basics/semver-policy.md), so these are ergonomics, never
 // emergencies — but they're mechanical, so the linter can just do them.
 
+/** Offsets of every `timeout` key that is a TOP-LEVEL option of a `call(`.
+ *
+ *  THE decider for the deprecated-option rule and for its fix alike. Scoping
+ *  used to be `\{[^}]*\}`, which does not stop at a nested `{`: in
+ *  `call({ retry: { timeout: 30 } })` the user's own data matched, and the fix
+ *  rewrote it — a silent meaning change inside a function whose contract is
+ *  "no behaviour change". Pure. */
+export function callTimeoutSites(src: string): number[] {
+  const out: number[] = [];
+  for (const m of codeMatches(src, /\bcall\s*\(\s*\{/g)) {
+    const open = m.index! + m[0].length - 1;
+    out.push(...topLevelKeyOffsets(src, open, "timeout"));
+  }
+  return out;
+}
+
 /** `call({ timeout: N }, fn)` → `call({ timeoutMs: N }, fn)`. Scoped to the
- *  options object of a `call(` — a `timeout:` key anywhere else is untouched. */
+ *  options object of a `call(` — a `timeout:` key anywhere else, nested data
+ *  included, is untouched. */
 export function fixCallTimeoutMs(filePath: string): () => Promise<boolean> {
   return async () => {
     try {
       const content = await Deno.readTextFile(filePath);
-      const patched = content.replace(
-        /\bcall\s*\(\s*\{[^}]*\}/g,
-        (opts) => opts.replace(/\btimeout(\s*:)/g, "timeoutMs$1"),
-      );
-      if (patched === content) return false;
-      await Deno.writeTextFile(filePath, patched);
+      const sites = callTimeoutSites(content);
+      if (sites.length === 0) return false;
+      // Right to left, so earlier offsets stay valid.
+      let out = content;
+      for (const at of [...sites].sort((a, b) => b - a)) {
+        out = out.slice(0, at) + "timeoutMs" + out.slice(at + "timeout".length);
+      }
+      if (out === content) return false;
+      await Deno.writeTextFile(filePath, out);
       return true;
     } catch {
       return false;
@@ -639,6 +774,210 @@ function planAnnotation(
  *   • anything not confidently rewritable — a non-`s` draft param, an opaque
  *     alias annotation, an unparseable union — leaves the whole METHOD
  *     unfixed (the report stays; conservative beats broken). */
+/** One `return <effect>` statement the fix looked at, and its verdict.
+ *  `reason === null` means "will be rewritten"; anything else is the decline,
+ *  in the words the report prints. */
+type EffectSiteVerdict = { start: number; end: number; reason: string | null };
+
+type Edit = { start: number; end: number; text: string };
+
+/** THE plan for one file: what `--safe-fix` will rewrite, and — for every site
+ *  it will not — why.
+ *
+ *  One decider, because the alternative shipped: the rule advertised
+ *  `[fixable]` on every effect return, the fix silently declined several
+ *  classes of them (an opaque return-type annotation, an annotated draft with
+ *  no `"aio"` import clause to add `MethodDraftServed` to, a `return` that is
+ *  not the first token on its line), and the finding came back `[fixable]`
+ *  after every run — indistinguishable from a broken tool. */
+function planReturnEffects(src: string): {
+  edits: Edit[];
+  needServedImport: boolean;
+  verdicts: EffectSiteVerdict[];
+} {
+  const methods = methodSpans(src);
+  /** Innermost method whose body contains `at`. */
+  const enclosing = (at: number): MethodSpan | null => {
+    let best: MethodSpan | null = null;
+    for (const ms of methods) {
+      if (at > ms.bodyOpen && at < ms.bodyClose) {
+        if (!best || ms.bodyOpen > best.bodyOpen) best = ms;
+      }
+    }
+    return best;
+  };
+
+  // 1. Collect every provably-effect return statement.
+  type Site = {
+    start: number; // start of `return` keyword
+    indent: string;
+    lead: string; // the matched ^|\n
+    stmtEnd: number; // after the optional `;`
+    inner: string; // the $do argument list
+    method: MethodSpan;
+  };
+  const sites: Site[] = [];
+  const verdicts: EffectSiteVerdict[] = [];
+  const re = /(^|\n)([ \t]*)return\s+(schedule\.\w+\s*\(|own\.\w+\s*\(|\[)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(src)) !== null) {
+    const exprStart = m.index + m[0].length - m[3]!.length;
+    const openIdx = src.indexOf(m[3]!.startsWith("[") ? "[" : "(", exprStart);
+    const end = balancedEnd(src, openIdx);
+    if (end === -1) continue;
+    const expr = src.slice(exprStart, end + 1);
+    const start = m.index + m[1]!.length + m[2]!.length;
+    // Provably effects: a bare schedule./own. call, or an array literal
+    // whose every element is one.
+    if (expr.startsWith("[")) {
+      const arr = expr.slice(1, -1).trim();
+      if (arr.length === 0) continue; // `return []` is a VALUE
+      const parts = splitTopLevel(arr, ",");
+      const allEffects = parts.every((p) =>
+        /^\s*(schedule|own)\.\w+\s*\(/.test(p) && p.trim().length > 0
+      );
+      if (!allEffects) continue;
+    }
+    const method = enclosing(m.index + m[0].length);
+    if (!method) {
+      verdicts.push({
+        start,
+        end: end + 1,
+        reason: "the safe fix declines: not inside a recognizable cell method",
+      });
+      continue;
+    }
+    if (method.param !== "s") {
+      verdicts.push({
+        start,
+        end: end + 1,
+        reason:
+          `the safe fix declines: the draft param is '${method.param}', not 's'`,
+      });
+      continue;
+    }
+    let stmtEnd = end + 1;
+    if (src[stmtEnd] === ";") stmtEnd++;
+    sites.push({
+      start,
+      indent: m[2]!,
+      lead: m[1]!,
+      stmtEnd,
+      inner: expr.startsWith("[") ? expr.slice(1, -1).trim() : expr,
+      method,
+    });
+  }
+
+  // 2. Per method: does any VALUE return remain after the rewrite?
+  const byMethod = new Map<MethodSpan, Site[]>();
+  for (const s of sites) {
+    byMethod.set(s.method, [...(byMethod.get(s.method) ?? []), s]);
+  }
+  const edits: Edit[] = [];
+  let needServedImport = false;
+  // The augmentation writes `MethodDraftServed` — it needs an `"aio"`
+  // import clause to land in. Without one, those methods stay unfixed.
+  const hasAioImportClause = /import\s*\{[^}]*\}\s*from\s*["']aio["']/.test(
+    src,
+  );
+  const decline = (list: Site[], reason: string) => {
+    for (const s of list) {
+      verdicts.push({ start: s.start, end: s.stmtEnd, reason });
+    }
+  };
+  for (const [method, list] of byMethod) {
+    // Body with this method's rewritten statements blanked out.
+    let body = src.slice(method.bodyOpen + 1, method.bodyClose);
+    for (const s of list) {
+      const from = s.start - (method.bodyOpen + 1);
+      const to = s.stmtEnd - (method.bodyOpen + 1);
+      body = body.slice(0, from) + " ".repeat(to - from) + body.slice(to);
+    }
+    const hasValueReturns = /\breturn\s+[^;\s}]/.test(body);
+    const plan = planAnnotation(
+      method.annText,
+      method.isAsync,
+      hasValueReturns,
+    );
+    if (plan.action === "skip") {
+      // whole method stays unfixed
+      decline(
+        list,
+        `the safe fix declines: the method's return type \`${method.annText}\` ` +
+          `names an effect but cannot be rewritten mechanically — drop or ` +
+          `narrow it by hand first`,
+      );
+      continue;
+    }
+    // An ANNOTATED `s` replaces the contextual draft type, so the rewritten
+    // `s.$do(...)` needs `MethodDraftServed` intersected into it. Decided
+    // BEFORE any edit is pushed — infeasible ⇒ the method stays unfixed.
+    const needsAugment = method.paramAnnText !== null &&
+      !method.paramAnnText.includes("MethodDraftServed");
+    if (needsAugment && !hasAioImportClause) {
+      decline(
+        list,
+        `the safe fix declines: the draft param is typed, so the rewrite needs ` +
+          `\`MethodDraftServed\`, and this file has no \`import { … } from "aio"\` ` +
+          `clause to add it to`,
+      );
+      continue;
+    }
+    if (plan.action === "strip") {
+      edits.push({ start: method.annStart, end: method.annEnd, text: " " });
+    } else if (plan.action === "narrow") {
+      edits.push({
+        start: method.annStart,
+        end: method.annEnd,
+        text: `${plan.narrowed} `,
+      });
+    }
+    if (needsAugment) {
+      const t = method.paramAnnText!;
+      const needsParens = splitTopLevel(t, "|").length > 1;
+      const augmented = needsParens
+        ? `s: (${t}) & MethodDraftServed`
+        : `s: ${t} & MethodDraftServed`;
+      edits.push({
+        start: method.paramStart,
+        end: method.paramEnd,
+        text: augmented,
+      });
+      needServedImport = true;
+    }
+    for (const s of list) {
+      // Tail statement (only whitespace to the body's `}`) → the bare
+      // `return;` would be dead code; elsewhere it must stay (early exit).
+      const tail = src.slice(s.stmtEnd, method.bodyClose).trim() === "";
+      edits.push({
+        start: s.start,
+        end: s.stmtEnd,
+        text: tail
+          ? `s.$do(${s.inner});`
+          : `s.$do(${s.inner});\n${s.indent}return;`,
+      });
+      verdicts.push({ start: s.start, end: s.stmtEnd, reason: null });
+    }
+  }
+  return { edits, needServedImport, verdicts };
+}
+
+/** Why `--safe-fix` will NOT rewrite the effect return at `at`, or null when it
+ *  will. Asked by the RULE at report time, so a declined site renders
+ *  `[manual]` with the reason instead of a `[fixable]` that survives every run.
+ *  Same planner the fix runs, so the two can never disagree. */
+export function returnEffectDecline(src: string, at: number): string | null {
+  const { verdicts } = planReturnEffects(src);
+  for (const v of verdicts) {
+    if (at >= v.start && at <= v.end) return v.reason;
+  }
+  // The fix only rewrites a `return` that OPENS its line — it replaces the
+  // whole statement. `if (x) return schedule.after(...)` is a real finding the
+  // fix will never touch, and it wore [fixable] forever.
+  return "the safe fix declines: it rewrites only a `return` that starts its " +
+    "own line (this one shares a line with other code)";
+}
+
 export function fixReturnEffectsToDo(filePath: string): () => Promise<boolean> {
   return async () => {
     let src: string;
@@ -647,145 +986,21 @@ export function fixReturnEffectsToDo(filePath: string): () => Promise<boolean> {
     } catch {
       return false;
     }
-    const methods = methodSpans(src);
-    /** Innermost method whose body contains `at`. */
-    const enclosing = (at: number): MethodSpan | null => {
-      let best: MethodSpan | null = null;
-      for (const ms of methods) {
-        if (at > ms.bodyOpen && at < ms.bodyClose) {
-          if (!best || ms.bodyOpen > best.bodyOpen) best = ms;
-        }
-      }
-      return best;
-    };
-
-    // 1. Collect every provably-effect return statement.
-    type Site = {
-      start: number; // start of `return` keyword
-      indent: string;
-      lead: string; // the matched ^|\n
-      stmtEnd: number; // after the optional `;`
-      inner: string; // the $do argument list
-      method: MethodSpan;
-    };
-    const sites: Site[] = [];
-    const re = /(^|\n)([ \t]*)return\s+(schedule\.\w+\s*\(|own\.\w+\s*\(|\[)/g;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(src)) !== null) {
-      const exprStart = m.index + m[0].length - m[3]!.length;
-      const openIdx = src.indexOf(m[3]!.startsWith("[") ? "[" : "(", exprStart);
-      const end = balancedEnd(src, openIdx);
-      if (end === -1) continue;
-      const expr = src.slice(exprStart, end + 1);
-      // Provably effects: a bare schedule./own. call, or an array literal
-      // whose every element is one.
-      if (expr.startsWith("[")) {
-        const arr = expr.slice(1, -1).trim();
-        if (arr.length === 0) continue; // `return []` is a VALUE
-        const parts = splitTopLevel(arr, ",");
-        const allEffects = parts.every((p) =>
-          /^\s*(schedule|own)\.\w+\s*\(/.test(p) && p.trim().length > 0
-        );
-        if (!allEffects) continue;
-      }
-      const method = enclosing(m.index + m[0].length);
-      if (!method || method.param !== "s") continue;
-      let stmtEnd = end + 1;
-      if (src[stmtEnd] === ";") stmtEnd++;
-      sites.push({
-        start: m.index + m[1]!.length + m[2]!.length,
-        indent: m[2]!,
-        lead: m[1]!,
-        stmtEnd,
-        inner: expr.startsWith("[") ? expr.slice(1, -1).trim() : expr,
-        method,
-      });
-    }
-    if (sites.length === 0) return false;
-
-    // 2. Per method: does any VALUE return remain after the rewrite?
-    const byMethod = new Map<MethodSpan, Site[]>();
-    for (const s of sites) {
-      byMethod.set(s.method, [...(byMethod.get(s.method) ?? []), s]);
-    }
-    type Edit = { start: number; end: number; text: string };
-    const edits: Edit[] = [];
-    let needServedImport = false;
-    // The augmentation writes `MethodDraftServed` — it needs an `"aio"`
-    // import clause to land in. Without one, those methods stay unfixed.
-    const hasAioImportClause = /import\s*\{[^}]*\}\s*from\s*["']aio["']/.test(
-      src,
-    );
-    for (const [method, list] of byMethod) {
-      // Body with this method's rewritten statements blanked out.
-      let body = src.slice(method.bodyOpen + 1, method.bodyClose);
-      for (const s of list) {
-        const from = s.start - (method.bodyOpen + 1);
-        const to = s.stmtEnd - (method.bodyOpen + 1);
-        body = body.slice(0, from) + " ".repeat(to - from) + body.slice(to);
-      }
-      const hasValueReturns = /\breturn\s+[^;\s}]/.test(body);
-      const plan = planAnnotation(
-        method.annText,
-        method.isAsync,
-        hasValueReturns,
-      );
-      if (plan.action === "skip") continue; // whole method stays unfixed
-      // An ANNOTATED `s` replaces the contextual draft type, so the rewritten
-      // `s.$do(...)` needs `MethodDraftServed` intersected into it. Decided
-      // BEFORE any edit is pushed — infeasible ⇒ the method stays unfixed.
-      const needsAugment = method.paramAnnText !== null &&
-        !method.paramAnnText.includes("MethodDraftServed");
-      if (needsAugment && !hasAioImportClause) continue; // nowhere to import
-      if (plan.action === "strip") {
-        edits.push({ start: method.annStart, end: method.annEnd, text: " " });
-      } else if (plan.action === "narrow") {
-        edits.push({
-          start: method.annStart,
-          end: method.annEnd,
-          text: `${plan.narrowed} `,
-        });
-      }
-      if (needsAugment) {
-        const t = method.paramAnnText!;
-        const needsParens = splitTopLevel(t, "|").length > 1;
-        const augmented = needsParens
-          ? `s: (${t}) & MethodDraftServed`
-          : `s: ${t} & MethodDraftServed`;
-        edits.push({
-          start: method.paramStart,
-          end: method.paramEnd,
-          text: augmented,
-        });
-        needServedImport = true;
-      }
-      for (const s of list) {
-        // Tail statement (only whitespace to the body's `}`) → the bare
-        // `return;` would be dead code; elsewhere it must stay (early exit).
-        const tail = src.slice(s.stmtEnd, method.bodyClose).trim() === "";
-        edits.push({
-          start: s.start,
-          end: s.stmtEnd,
-          text: tail
-            ? `s.$do(${s.inner});`
-            : `s.$do(${s.inner});\n${s.indent}return;`,
-        });
-      }
-    }
+    const { edits, needServedImport } = planReturnEffects(src);
     if (edits.length === 0) return false;
 
-    // 3. Apply from the end so offsets stay valid.
+    // Apply from the end so offsets stay valid.
     edits.sort((a, b) => b.start - a.start);
     let out = src;
     for (const e of edits) {
       out = out.slice(0, e.start) + e.text + out.slice(e.end);
     }
     if (out === src) return false;
-    // 4. A stripped annotation may have been the file's LAST use of the effect
-    //    type — the orphaned `type ScheduleEffect` import then fails the app's
-    //    own `deno lint` (no-unused-vars). Prune it.
+    // A stripped annotation may have been the file's LAST use of the effect
+    // type — the orphaned `type ScheduleEffect` import then fails the app's
+    // own `deno lint` (no-unused-vars). Prune it.
     out = pruneOrphanedEffectTypeImports(out);
-    // 5. And the augmentation's type has to be importable.
+    // And the augmentation's type has to be importable.
     if (needServedImport) out = ensureServedImport(out);
     await Deno.writeTextFile(filePath, out);
     return true;

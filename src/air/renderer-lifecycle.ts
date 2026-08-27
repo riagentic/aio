@@ -15,6 +15,22 @@ export function _setLifecycleDevMode(v: boolean): void {
   _devMode = v;
 }
 
+/** `onMount`/`onCleanup` outside a render were dropped in SILENCE, while
+ *  `afterRender`, `useRef` and `useSignal` all say so for the identical
+ *  mistake. The symptom was "my subscription never runs" with nothing to
+ *  search for. Observe-only, so dev and prod behave identically — prod drops
+ *  it exactly as before, dev additionally names it. */
+function _warnOutsideRender(hook: string): void {
+  if (!_devMode) return;
+  console.warn(
+    `[aio-dev] ${hook}() called outside a component render — there is no ` +
+      `component to attach it to, so the callback was DROPPED. It only works ` +
+      `in a component body (or, for onCleanup, inside an onMount callback); ` +
+      `from a timer, a promise continuation or an event handler there is ` +
+      `nothing to bind its lifetime to.`,
+  );
+}
+
 // ── onMount / onCleanup ───────────────────────────────────────────────
 
 /**
@@ -22,7 +38,10 @@ export function _setLifecycleDevMode(v: boolean): void {
  * Must be called inside a component function body during render.
  */
 export function onMount(fn: () => void): void {
-  if (!_currentCollector) return;
+  if (!_currentCollector) {
+    _warnOutsideRender("onMount");
+    return;
+  }
   _currentCollector.mountCallbacks.push(fn);
 }
 
@@ -32,7 +51,10 @@ export function onMount(fn: () => void): void {
  * - Called inside onMount(): runs ONLY on unmount (AIO-76 fix).
  */
 export function onCleanup(fn: () => void): void {
-  if (!_currentCollector) return;
+  if (!_currentCollector) {
+    _warnOutsideRender("onCleanup");
+    return;
+  }
   if (_insideMount && "mountCleanupCallbacks" in _currentCollector) {
     (_currentCollector as ComponentInstance).mountCleanupCallbacks.push(fn);
   } else {
@@ -84,14 +106,27 @@ export function onGlobalKey(
   fn: (e: KeyboardEvent) => void,
   chord: KeyChord = {},
 ): void {
-  const want = key.toLowerCase();
+  // The LATEST callback, chord and key — refreshed every render, read at event
+  // time. The listener is registered inside `onMount`, which runs ONCE, so
+  // closing over the arguments froze them at mount: a handler reading a value
+  // that changes (`() => save(draft)`, `() => go(page + 1)`) kept firing with
+  // render 1's copy forever — measured `[1, 1, 1]` where the app expected
+  // `[1, 2, 3]`. `useRaf`/`useInterval` in raf.ts already solve exactly this
+  // with a ref, and say so; this is the same solution, so the three agree.
+  const fnRef = useRef(fn);
+  fnRef.current = fn;
+  const chordRef = useRef(chord);
+  chordRef.current = chord;
+  const keyRef = useRef(key);
+  keyRef.current = key;
   onMount(() => {
     const doc = _activeRoot?.root?.ownerDocument ??
       (globalThis as { document?: Document }).document;
     if (!doc) return;
     const handler = (ev: Event) => {
       const e = ev as KeyboardEvent;
-      if ((e.key ?? "").toLowerCase() !== want) return;
+      const chord = chordRef.current;
+      if ((e.key ?? "").toLowerCase() !== keyRef.current.toLowerCase()) return;
       if (chord.ctrl !== undefined && e.ctrlKey !== chord.ctrl) return;
       if (chord.meta !== undefined && e.metaKey !== chord.meta) return;
       if (chord.alt !== undefined && e.altKey !== chord.alt) return;
@@ -109,7 +144,7 @@ export function onGlobalKey(
           t?.isContentEditable
         ) return;
       }
-      fn(e);
+      fnRef.current(e);
     };
     doc.addEventListener("keydown", handler);
     onCleanup(() => doc.removeEventListener("keydown", handler));

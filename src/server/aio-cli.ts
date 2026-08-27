@@ -1,9 +1,11 @@
 // CLI parsing — pure functions, no aio.ts internal dependencies
 import { log } from "../diagnostics/logger-api.ts";
+import { teachableError } from "../diagnostics/error.ts";
+import { nearestOf } from "../state/cell-helpers.ts";
 import { findFreePort } from "./paths.ts";
 
 /** Framework version — printed by --version, checked in tests */
-export const VERSION = "1.0.0-alpha68";
+export const VERSION = "1.0.0-alpha69";
 
 /** What `--version` prints: what this artifact IS, and what it was built with.
  *
@@ -86,6 +88,19 @@ export type CliFlags = {
 // times in one boot, and the same line five times reads as an error loop.
 let _hintedBareServerUrl = false;
 
+// The other accepted aliases warned about NOTHING. `--kill-existing` and
+// `--backup-logs` were documented as "kept so existing scripts don't break",
+// which is only half a deprecation: a script keeps working AND never learns
+// there is a current spelling, so the old one outlives every release that was
+// supposed to retire it. `--server-url` already had this hint; these are the
+// same rule, on the same one-per-process guard.
+const _hintedAliases = new Set<string>();
+function hintAlias(spelling: string, msg: string): void {
+  if (_hintedAliases.has(spelling)) return;
+  _hintedAliases.add(spelling);
+  log.warn(msg);
+}
+
 // …and so does every other warning this function emits, for the same reason.
 // Guarding them one at a time was the old approach and it missed
 // `unknown flag ignored:`, which duly printed 5-7 times in a single boot — a
@@ -104,6 +119,7 @@ let _parsedDefault: CliFlags | null = null;
 export function _resetParsedCli(): void {
   _parsedDefault = null;
   _hintedBareServerUrl = false;
+  _hintedAliases.clear();
   _cdpPort = undefined;
 }
 
@@ -146,6 +162,27 @@ export function parseCli(args: readonly string[] = Deno.args): CliFlags {
   return parsed;
 }
 
+/** A flag whose VALUE is unusable — named, with the accepted form.
+ *
+ *  Every one of these used to `log.warn` and carry on with the default, so
+ *  `--port=abc` booted on a random port and `--client=Electron` booted an
+ *  Electron app while the author was debugging why `browser` did nothing.
+ *  A flag is an instruction; an instruction that cannot be carried out is a
+ *  refusal, not a suggestion. */
+function badValue(
+  flag: string,
+  got: string,
+  accepted: string,
+  near?: string | null,
+): Error {
+  return teachableError(
+    `${flag}=${got === "" ? "(empty)" : got} is not a value ${flag} accepts`,
+    near
+      ? `did you mean ${flag}=${near}? Expected ${accepted}.`
+      : `pass ${accepted}`,
+  );
+}
+
 function _parseCliUncached(args: readonly string[]): CliFlags {
   const r: CliFlags = { verbose: false };
   const known = [
@@ -184,12 +221,32 @@ function _parseCliUncached(args: readonly string[]): CliFlags {
     "--host=",
     "--cdp",
     "--cdp=",
+    // Internal: carried by a process the updater relaunched, so it can wait for
+    // its predecessor to release the app lock (see RELAUNCH_FLAG in
+    // updates-apply.ts). Listed here because it is aio's OWN flag — without it
+    // every self-update boot printed "unknown flag ignored" about it.
+    "--__aio-relaunch-after=",
   ];
   for (const arg of args) {
+    if (arg === "--") break; // everything after `--` belongs to the app
     if (arg.startsWith("--port=")) {
       const n = Number(arg.slice(7));
-      if (Number.isInteger(n) && n > 0 && n < 65536) r.port = n;
-      else log.warn(`invalid --port value: ${arg.slice(7)} (must be 1-65535)`);
+      // `--port=0` is the universal spelling for "let the OS pick one", and it
+      // is what aio does by default — so it is ACCEPTED and leaves `port`
+      // unset, not refused. Scripts and tests pass it deliberately; refusing it
+      // would make strictness a regression rather than a fix. Anything that is
+      // neither a usable port nor 0 is a value the operator meant and cannot
+      // have.
+      if (n === 0) {
+        /* pick a free port — already the default */
+      } else if (Number.isInteger(n) && n > 0 && n < 65536) r.port = n;
+      else {
+        throw badValue(
+          "--port",
+          arg.slice(7),
+          "a port 1-65535, or 0 to let the runtime pick a free one",
+        );
+      }
     } else if (arg === "--no-persist") r.persist = false;
     else if (arg.startsWith("--client=")) {
       const v = arg.slice(9);
@@ -197,9 +254,14 @@ function _parseCliUncached(args: readonly string[]): CliFlags {
         v === "electron" || v === "browser" || v === "cli" ||
         v === "server-only"
       ) r.client = v;
-      else {log.warn(
-          `invalid --client value: ${v} (must be electron|browser|cli|server-only)`,
-        );}
+      else {
+        throw badValue(
+          "--client",
+          v,
+          "one of electron, browser, cli, server-only",
+          nearestOf(v, ["electron", "browser", "cli", "server-only"]),
+        );
+      }
     } else if (arg === "--keep-server") r.keepServer = true;
     else if (arg.startsWith("--title=")) r.title = arg.slice(8);
     else if (arg === "--verbose") r.verbose = true;
@@ -230,12 +292,24 @@ function _parseCliUncached(args: readonly string[]): CliFlags {
     // `--takeover` is the preferred spelling; `--kill-existing` stays as the
     // accepted alias so existing scripts don't break.
     else if (arg === "--kill-existing" || arg === "--takeover") {
+      if (arg === "--kill-existing") {
+        hintAlias(
+          arg,
+          "--kill-existing is now --takeover (the old spelling still works)",
+        );
+      }
       r.killExisting = true;
     } else if (arg.startsWith("--db-path=")) r.dbPath = arg.slice(10);
     // `--backup-logs` is now the DEFAULT, kept so existing scripts still parse;
     // `--no-backup-logs` is the one that changes anything (wipe on start).
-    else if (arg === "--backup-logs") r.backupLogs = true;
-    else if (arg === "--no-backup-logs") r.backupLogs = false;
+    else if (arg === "--backup-logs") {
+      hintAlias(
+        arg,
+        "--backup-logs is the DEFAULT now and does nothing (the flag still " +
+          "parses); --no-backup-logs is the one that changes anything",
+      );
+      r.backupLogs = true;
+    } else if (arg === "--no-backup-logs") r.backupLogs = false;
     else if (arg.startsWith("--log-budget=")) {
       // Bytes, or a `<n>MB`/`<n>GB` suffix — a bare number in a flag about disk
       // is ambiguous enough that both spellings have to work.
@@ -247,8 +321,10 @@ function _parseCliUncached(args: readonly string[]): CliFlags {
         ];
         r.logBudget = Math.floor(Number(m[1]) * mult);
       } else {
-        log.warn(
-          `[aio] ignoring --log-budget=${raw} — expected bytes or e.g. 200MB`,
+        throw badValue(
+          "--log-budget",
+          raw,
+          "a byte count, or a number with a B/KB/MB/GB suffix, e.g. --log-budget=200MB",
         );
       }
     } // Opt out of the one-time move to ~/.<appId> (app-dirs-migrate.ts).
@@ -261,11 +337,28 @@ function _parseCliUncached(args: readonly string[]): CliFlags {
     else if (arg.startsWith("--cert=")) r.cert = arg.slice(7);
     else if (arg.startsWith("--key=")) r.key = arg.slice(6);
     else if (arg.startsWith("--width=")) {
+      // `--width=1200px` used to match no branch at all: no assignment, no
+      // warning, and an 800px window. A unit suffix is the obvious thing to
+      // type, so it is the obvious thing to refuse BY NAME.
       const n = Number(arg.slice(8));
       if (Number.isInteger(n) && n > 0) r.width = n;
+      else {
+        throw badValue(
+          "--width",
+          arg.slice(8),
+          "a whole number of pixels, e.g. --width=1200",
+        );
+      }
     } else if (arg.startsWith("--height=")) {
       const n = Number(arg.slice(9));
       if (Number.isInteger(n) && n > 0) r.height = n;
+      else {
+        throw badValue(
+          "--height",
+          arg.slice(9),
+          "a whole number of pixels, e.g. --height=800",
+        );
+      }
     } else if (arg.startsWith("--isolate=")) {
       r.isolate = arg.slice(10).split(",").map((s) => s.trim()).filter(Boolean);
     } else if (arg === "--zero-port") {
@@ -275,12 +368,23 @@ function _parseCliUncached(args: readonly string[]): CliFlags {
     } else if (arg.startsWith("--transport=")) {
       const v = arg.slice(12);
       if (v === "uds" || v === "ws") r.transport = v;
-      else log.warn(`invalid --transport value: ${v} (must be 'uds' or 'ws')`);
+      else {
+        throw badValue(
+          "--transport",
+          v,
+          "'uds' (the local socket) or 'ws'",
+          nearestOf(v, ["uds", "ws"]),
+        );
+      }
     } else if (arg === "--cdp") r.cdp = true;
     else if (arg.startsWith("--cdp=")) {
       const n = Number(arg.slice(6));
       if (Number.isInteger(n) && n > 0 && n < 65536) r.cdp = n;
-      else log.warn(`invalid --cdp value: ${arg.slice(6)} (must be 1-65535)`);
+      else {throw badValue(
+          "--cdp",
+          arg.slice(6),
+          "a port 1-65535, or bare --cdp to pick a free one",
+        );}
     } else if (arg.startsWith("--host=")) {
       // An address, not an authority — the port has its own flag. Deeper
       // validation belongs to the bind itself: Deno.serve refuses a bad
@@ -288,12 +392,34 @@ function _parseCliUncached(args: readonly string[]): CliFlags {
       // spelling.
       const v = arg.slice(7).trim();
       if (v !== "") r.host = v;
-      else log.warn("invalid --host value: empty (an IP or hostname)");
+      else {throw badValue(
+          "--host",
+          "",
+          "an IP or hostname, e.g. --host=192.168.1.20",
+        );}
     } else if (
       arg.startsWith("--") &&
       !known.some((k) => k.endsWith("=") ? arg.startsWith(k) : arg === k)
     ) {
-      log.warn(`unknown flag ignored: ${arg} — run with --help for usage`);
+      // REFUSED, not ignored. `--experse` used to warn and boot: the app bound
+      // 127.0.0.1 while its author believed it was on the LAN, and the one
+      // line saying so scrolled past among the boot banner. `cell()` has
+      // refused an unknown key with a did-you-mean since alpha52; a flag is
+      // the same mistake with higher stakes, because a flag is what an
+      // operator types at 2am.
+      const name = arg.split("=")[0]!;
+      const near = nearestOf(
+        name,
+        known.map((k) => k.endsWith("=") ? k.slice(0, -1) : k),
+      );
+      throw teachableError(
+        `unknown flag: ${arg}`,
+        near
+          ? `did you mean ${near}${
+            known.includes(near + "=") ? "=<value>" : ""
+          }? Run with --help for every flag; put an app's own arguments after a bare \`--\`.`
+          : `run with --help for every flag aio accepts; put an app's own arguments after a bare \`--\`, where aio stops parsing.`,
+      );
     }
   }
   return r;
@@ -352,5 +478,9 @@ Flags:
                    127.0.0.1 only (a free port unless N is given; also
                    $AIO_CDP=1|N). Opt-in: enables "am shot" (screenshots)
   --version        Print version and exit
-  --help           Show this help`);
+  --help           Show this help
+
+An unknown flag or an unusable value is REFUSED, not ignored — "--experse"
+used to bind loopback while its author believed the app was on the LAN.
+Everything after a bare "--" is left for the app to parse: aio stops there.`);
 }

@@ -7,13 +7,21 @@
  */
 
 import { batch, type Signal, signal } from "./signal.ts";
-import { log } from "../diagnostics/logger-api.ts";
+import {
+  deepFreeze,
+  FREEZE_SIZE_LIMIT,
+  noteFreezeSkipped,
+} from "./immutable.ts";
 
 // ── Dev-only deep freeze for cell signal values ─────────────────────
 // AIO-4.4: in dev, deep-freeze the value before installing it in a cell
 // signal so component-side mutations throw "Cannot assign to read only
-// property" with a clear hint. Skip slices >100KB to keep dev boot snappy.
-const FREEZE_SIZE_LIMIT = 100_000;
+// property" with a clear hint. Skip slices over the shared ceiling to keep dev
+// boot snappy — and SAY SO, which the local copy of this ceiling did not.
+//
+// The freeze itself is `immutable.ts`'s: this file used to carry a third
+// hand-written `deepFreeze`, the only one with NO cycle guard at all (a cyclic
+// slice recursed until the stack blew).
 
 function _maybeFreezeInDev<T>(value: T): T {
   if ((globalThis as Record<string, unknown>).__aioDev !== true) return value;
@@ -26,13 +34,7 @@ function _maybeFreezeInDev<T>(value: T): T {
     return value; // circular — skip
   }
   if (size > FREEZE_SIZE_LIMIT) {
-    if (!(globalThis as Record<string, unknown>).__aioFreezeSkipped) {
-      (globalThis as Record<string, unknown>).__aioFreezeSkipped = true;
-      // One-time warn to keep dev boot snappy.
-      log.info(
-        `[aio] dev freeze skipped: cell slice > ${FREEZE_SIZE_LIMIT}B`,
-      );
-    }
+    noteFreezeSkipped("cell slice");
     return value;
   }
   try {
@@ -40,17 +42,6 @@ function _maybeFreezeInDev<T>(value: T): T {
   } catch {
     return value;
   }
-}
-
-function deepFreeze<T>(obj: T): T {
-  if (obj === null || typeof obj !== "object") return obj;
-  Object.freeze(obj);
-  for (const v of Object.values(obj as Record<string, unknown>)) {
-    if (v !== null && typeof v === "object" && !Object.isFrozen(v)) {
-      deepFreeze(v);
-    }
-  }
-  return obj;
 }
 
 // ── HMR-safe singleton cache ─────────────────────────────────────────

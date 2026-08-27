@@ -4,11 +4,18 @@
 
 import type { VNode } from "./vdom.ts";
 import { _diff, _setDelegationRoot, h } from "./vdom.ts";
-import type { RootState } from "./renderer-types.ts";
+import type {
+  ComponentInstance,
+  LifecycleCollector,
+  RootState,
+} from "./renderer-types.ts";
 import {
   _activeRoot,
   _currentCollector,
+  _instanceStack,
   _setActiveRoot,
+  _setCurrentCollector,
+  _setInsideMount,
 } from "./renderer-state.ts";
 import { _rerenderComponent } from "./renderer-rerender.ts";
 import { _reportHookError } from "./hook-error.ts";
@@ -55,7 +62,68 @@ export function afterRender(fn: () => void): void {
   }
 }
 
+/** Run the `onMount` callbacks queued during this commit.
+ *
+ *  They are queued rather than fired inside `afterSubtree` because the subtree
+ *  is still a detached DocumentFragment there (see renderer-rerender.ts). This
+ *  runs at the same point `afterRender` does — the DOM IS committed — so
+ *  `ref.current.isConnected` is true, `focus()` lands and
+ *  `getBoundingClientRect()` measures, exactly as docs/ui/air-lifecycle.md
+ *  says. onMount still runs BEFORE afterRender, and children before parents. */
+function _flushMounts(root: RootState): void {
+  const queue = root.pendingMounts;
+  if (!queue || queue.length === 0) return;
+  root.pendingMounts = [];
+  for (const entry of queue) {
+    const inst = entry.inst;
+    if (inst.disposed) continue; // removed again before the commit landed
+    // Rebuild the ancestor chain so useContext() inside onMount still resolves
+    // (the render-time stack is long gone by now).
+    const ancestors: ComponentInstance[] = [];
+    let a = inst.parent;
+    while (a) {
+      ancestors.push(a);
+      a = a.parent;
+    }
+    for (let i = ancestors.length - 1; i >= 0; i--) {
+      _instanceStack.push(ancestors[i]!);
+    }
+    _instanceStack.push(inst);
+    _setCurrentCollector(inst as unknown as LifecycleCollector);
+    _setInsideMount(true);
+    try {
+      // Guard each hook: one throwing onMount must not abort the mount flush
+      // of its siblings or collapse the surface.
+      for (const cb of entry.cbs) {
+        try {
+          cb();
+        } catch (e) {
+          _reportHookError("onMount", e, entry.component);
+        }
+      }
+    } finally {
+      _setInsideMount(false);
+      _setCurrentCollector(null);
+      for (let i = 0; i <= ancestors.length; i++) _instanceStack.pop();
+    }
+  }
+}
+
 export function _flushAfterRender(root: RootState): void {
+  // onMount first (a mount callback may itself schedule an afterRender), and
+  // in a loop because a mount callback can commit more DOM.
+  let guard = 0;
+  while (root.pendingMounts && root.pendingMounts.length > 0) {
+    if (++guard > 100) {
+      console.error(
+        "[aio-renderer] onMount queue did not drain after 100 passes — " +
+          "an onMount is mounting components in a loop. Dropping the rest.",
+      );
+      root.pendingMounts = [];
+      break;
+    }
+    _flushMounts(root);
+  }
   const cbs = root.afterRenderQueue;
   if (cbs.length === 0) return;
   root.afterRenderQueue = [];
@@ -181,8 +249,6 @@ export function _flushPending(root: RootState): void {
 
 // ── Full root re-render ───────────────────────────────────────────────
 
-import type { ComponentInstance } from "./renderer-types.ts";
-
 /** Full root-level re-render (used when lazy components resolve). */
 export function _rerenderRoot(state: RootState): void {
   if (state.disposed) return;
@@ -196,7 +262,23 @@ export function _rerenderRoot(state: RootState): void {
   _setDelegationRoot(state.root);
   try {
     const vnode = h(state.App, null);
-    _diff(state.root, vnode, oldVnode, state.ctx);
+    try {
+      _diff(state.root, vnode, oldVnode, state.ctx);
+    } catch (e) {
+      // This runs from a lazy loader's promise continuation, so an escaping
+      // throw was an UNHANDLED REJECTION — nothing named the component, and
+      // under Deno it took the whole process down. Report it here instead.
+      console.error(
+        "[aio-renderer] Root re-render failed (a lazy component rejected, or " +
+          "a render threw with no <ErrorBoundary> above it). The page keeps " +
+          "the DOM this pass had already committed:",
+        e,
+      );
+    }
+    // Committed or not, the tree the reconciler must diff against NEXT time is
+    // this one. Leaving `state.vnode` on the pre-throw vnode made every later
+    // render re-insert what the failed pass had already put in the DOM — a
+    // second fallback, then a third, then a fourth.
     state.vnode = vnode;
     _flushAfterRender(state);
   } finally {

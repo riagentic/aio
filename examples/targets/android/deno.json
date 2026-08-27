@@ -22,6 +22,16 @@
   },
   "tasks": {
     "dev": "deno run -A src/app.ts",
-    "compile": "deno run -A ../../../src/build.ts --android"
+    "build": "deno run -A ../../../src/build-all.ts --build-spec=../../../src/build.ts",
+    "compile": "deno run -A ../../../src/build-all.ts --build-spec=../../../src/build.ts --targets=android",
+    "install:android": "deno run -A ../../../src/android-install.ts",
+    "check": "deno check src/",
+    "lint": "deno run -A ../../../aiol/mod.ts",
+    "am": "deno run -A ../../../src/am.ts"
+  },
+  "build": {
+    "targets": [
+      "android"
+    ]
   }
 }

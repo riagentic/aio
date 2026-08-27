@@ -55,6 +55,12 @@ const OWNERS: Record<string, [Owner, string]> = {
 
   // ── owned by a harness ──────────────────────────────────────────
   _resetAuthUi: ["HARNESS", "testUI installs and restores the ambient user"],
+  _resetSurfaceWarnings: [
+    "HARNESS",
+    "duplicate-`t` report dedup; testUI clears it at mount so every test " +
+    "hears about its own surface. src/state's one call may not reach " +
+    "src/air (boundaries), and the live `am` tier wants warn-once per process",
+  ],
   _resetCellRegistry: [
     "MANUAL",
     "deliberately NOT in the one call — clearing it disarms every later " +
@@ -66,6 +72,11 @@ const OWNERS: Record<string, [Owner, string]> = {
   // not a blessing — it is a debt with a name. Prefer moving one up to RUNTIME
   // over adding another here.
   _resetForwardedHandles: ["MANUAL", "advisory-only observation; test-local"],
+  // Once-per-Host warn dedup for the DNS-rebinding refusal. MANUAL on purpose:
+  // production never wants it cleared — forgetting which Hosts were reported is
+  // exactly what would make that log floodable by attacker-chosen input — so
+  // only the test that proves "once per Host, and bounded" resets it.
+  _resetHostWarnings: ["MANUAL", "warn dedup; clearing it in prod is the bug"],
   _resetParsedCli: [
     "MANUAL",
     "memoized boot-path parse; lives in src/server, which src/state's one " +
@@ -73,12 +84,29 @@ const OWNERS: Record<string, [Owner, string]> = {
     "Deno.args twice needs it — every other test passes an explicit array " +
     "and never touches the cache",
   ],
+  _resetConfigConflicts: [
+    "MANUAL",
+    "the once-per-process dedup for config COUPLING reports (server/config.ts). " +
+    "Same boundary as _resetParsedCli: src/state's one call may not import " +
+    "src/server. And the dedup is what it is FOR — aio.run() validates the " +
+    "CellsConfig on the way in and the composed AioConfig on the way through, " +
+    "so one boot sees every conflict twice. Only a test that asserts the " +
+    "reporting half needs to forget it",
+  ],
   _resetPendingFactories: ["MANUAL", "own-effect factories; lifecycle-shaped"],
   _resetServerOnlyStatic: [
     "MANUAL",
     "build-scoped, not runtime: the bundler calls it at the START of each " +
     "esbuild run so one build's server-only-import findings cannot be " +
     "attributed to the next. Nothing in the app runtime touches it",
+  ],
+  _resetFeedbackRate: [
+    "LIFECYCLE",
+    "the feedback report budget; `installFeedbackRuntime` clears it, and that is what boot and every teardown already call",
+  ],
+  _resetMachineHostname: [
+    "MANUAL",
+    "one memoized `Deno.hostname()` for the Host gate. A machine does not rename itself mid-process, so nothing needs to forget it; only a test asserting the gate's rule against a controlled hostname does",
   ],
   _resetReadOnlyHint: ["MANUAL", "lives in src/air — state must not import it"],
   _resetInitialShapeKeys: ["MANUAL", "protocol shape-drift keys"],
@@ -89,6 +117,10 @@ const OWNERS: Record<string, [Owner, string]> = {
   _resetStatus: ["MANUAL", "client status"],
   _resetTracking: ["MANUAL", "telemetry opt-in"],
   _resetToasts: ["MANUAL", "aio/ui toast queue"],
+  _resetMarkdownWarnings: [
+    "MANUAL",
+    "aio/ui <Markdown> dropped-href report dedup; lives in src/ui, which src/state's one call may not import",
+  ],
   _resetDevTools: ["MANUAL", "devtools bridge"],
   _resetTestDisplay: ["MANUAL", "test display"],
   _resetBlobStores: ["MANUAL", "db blob stores"],

@@ -405,6 +405,15 @@ export function authFailBudgetExceeded(
 // timestamps (that is all the threshold test can need), and every so often a
 // sweep drops keys whose whole window has passed.
 const SWEEP_EVERY = 256;
+/** Hard ceiling on distinct keys. The opportunistic sweep only runs every
+ *  SWEEP_EVERY records and only drops keys whose window has already passed —
+ *  so a client rotating its address faster than the window drains (trivial
+ *  behind a forwarding header, and merely cheap from a botnet) grew this map
+ *  without bound between sweeps. A bound that holds under ADVERSARIAL input
+ *  cannot be "we tidy up now and then": at the ceiling, sweep first, and if
+ *  that frees nothing, drop the oldest keys. Losing the oldest strikes is the
+ *  correct failure — they are the ones closest to expiring anyway. */
+const AUTH_FAIL_MAX_KEYS = 10_000;
 let _sinceSweep = 0;
 function _sweepExpired(now: number): void {
   for (const [key, ts] of _authFails) {
@@ -422,6 +431,17 @@ export function recordAuthFail(
   now = Date.now(),
 ): void {
   const key = clientKey ?? "*";
+  if (_authFails.size >= AUTH_FAIL_MAX_KEYS && !_authFails.has(key)) {
+    _sweepExpired(now);
+    // Map iteration is insertion-ordered, so the front IS the oldest. Drop
+    // back to 90% rather than exactly one, so a saturated map does not pay an
+    // eviction on every single request.
+    const target = Math.floor(AUTH_FAIL_MAX_KEYS * 0.9);
+    for (const k of _authFails.keys()) {
+      if (_authFails.size <= target) break;
+      _authFails.delete(k);
+    }
+  }
   const prior = _authFails.get(key) ?? [];
   const fails = prior.filter((t) => now - t < AUTH_FAIL_WINDOW_MS);
   fails.push(now);
@@ -441,4 +461,172 @@ export function recordAuthFail(
 /** Test isolation. */
 export function _resetAuthFails(): void {
   _authFails.clear();
+}
+
+// ── Host gate — DNS-rebinding defense (ONE decider) ──────────────────────────
+//
+// A page on evil.com whose DNS record flips to 127.0.0.1 becomes SAME-ORIGIN
+// with an app served on loopback: the browser attaches the app's cookies, the
+// WS `isOwnHost` check (Origin vs the request's own Host) passes because both
+// say `evil.com`, and in public mode there is no credential to miss. The
+// attacker then reads `/__aio/trojan/state` (raw, unfiltered, secrets and all),
+// dispatches, runs SQL and replaces the whole state.
+//
+// The only header that carries the NAME the browser used is `Host`, so that is
+// what has to be checked, and it has to be checked in ONE place that the HTTP
+// path, the trojan and the WS upgrade all pass through (`handleRequest`) —
+// three copies of a rebinding gate is how one of them rots.
+//
+// The rule is "is this a name this server is actually reachable as?", and the
+// load-bearing half of it is that an IP LITERAL cannot be rebound: a browser
+// only sends `Host: 10.0.0.5` for a page whose origin IS `http://10.0.0.5`,
+// which means it connected to that address with no DNS in the loop. That is
+// what keeps `--expose` (LAN IPs, and the share link) working untouched while
+// every attacker-controlled DOMAIN is refused.
+
+/** Bare hostname of a `Host` header value: port stripped, IPv6 brackets
+ *  removed, lowercased. `""` when there is nothing to check. */
+export function _hostnameOfHeader(hostHeader: string): string {
+  const h = hostHeader.trim().toLowerCase();
+  if (h.startsWith("[")) {
+    const close = h.indexOf("]");
+    return close === -1 ? h.slice(1) : h.slice(1, close);
+  }
+  const i = h.lastIndexOf(":");
+  return i === -1 ? h : h.slice(0, i);
+}
+
+const _IPV4_RE = /^\d{1,3}(?:\.\d{1,3}){3}$/;
+
+/** An IP literal — v4 dotted quad, or anything with a `:` in it (v6, already
+ *  de-bracketed by `_hostnameOfHeader`). Cannot be the product of DNS. */
+function _isIpLiteral(hostname: string): boolean {
+  if (_IPV4_RE.test(hostname)) {
+    return hostname.split(".").every((o) => Number(o) <= 255);
+  }
+  return hostname.includes(":");
+}
+
+/** This machine's own name, once. `Deno.hostname()` needs `--allow-sys`; an app
+ *  running without it simply has no hostname to allow (loopback + IP literals +
+ *  `allowedOrigins` still work), so a denial is not an error. */
+let _machineHost: string | null | undefined;
+function _machineHostname(): string | null {
+  if (_machineHost !== undefined) return _machineHost;
+  try {
+    _machineHost = Deno.hostname().toLowerCase() || null;
+  } catch {
+    _machineHost = null;
+  }
+  return _machineHost;
+}
+
+/** Test isolation — re-read `Deno.hostname()`. @internal */
+export function _resetMachineHostname(): void {
+  _machineHost = undefined;
+}
+
+/** May this server answer a request that says it was reached as `hostHeader`?
+ *
+ *  Allowed: no Host at all (a non-browser client — there is no name to rebind),
+ *  any IP literal, `localhost` and `*.localhost`, the address this app is bound
+ *  to, this machine's own hostname, and anything the app listed in
+ *  `allowedOrigins` (hostname, `host:port`, full origin, or `"*"`).
+ *  Everything else is a foreign domain pointed at this server. */
+export function hostAllowed(
+  hostHeader: string | null,
+  opts: { bindHost?: string; allowedOrigins?: string[] },
+): boolean {
+  if (hostHeader === null || hostHeader.trim() === "") return true;
+  const raw = hostHeader.trim().toLowerCase();
+  const name = _hostnameOfHeader(hostHeader);
+  if (name === "") return true;
+  if (_isIpLiteral(name)) return true;
+  if (name === "localhost" || name.endsWith(".localhost")) return true;
+  const bind = opts.bindHost?.trim().toLowerCase();
+  if (bind && bind !== "0.0.0.0" && bind !== "::" && bind === name) return true;
+  if (name === _machineHostname()) return true;
+  for (const entry of opts.allowedOrigins ?? []) {
+    if (entry === "*") return true;
+    const e = entry.trim().toLowerCase();
+    if (e === name || e === raw) return true;
+    // A full origin (`https://app.example.com`) is the documented spelling for
+    // the WS check, so it must mean the same thing here — otherwise the same
+    // deployment needs the same fact written twice, in two spellings.
+    if (e.includes("://")) {
+      try {
+        const u = new URL(e);
+        if (u.hostname === name || u.host === raw) return true;
+      } catch { /* not a URL — the literal compares above already ran */ }
+    }
+  }
+  return false;
+}
+
+/** Hosts already reported, so a rebinding attempt cannot flood the log. Bounded:
+ *  the set is the attacker's input, and an unbounded one is a memory leak they
+ *  control. */
+const _hostWarned = new Set<string>();
+const HOST_WARN_MAX = 32;
+
+/** The refusal, naming the Host we got, what this app answers to, and the one
+ *  config key that widens it. `null` when the caller may proceed. */
+export function hostRefusal(
+  req: Request,
+  addr: Deno.Addr | undefined,
+  opts: { bindHost?: string; allowedOrigins?: string[] },
+): Response | null {
+  // A Unix socket / named pipe carries no meaningful authority in `Host` (the
+  // URL is synthesised as `http://app<target>`), and it is same-machine,
+  // same-user by construction — there is no DNS to rebind.
+  if (addr?.transport === "unix") return null;
+  const hostHeader = req.headers.get("host");
+  if (hostAllowed(hostHeader, opts)) return null;
+  _reportHostRefusal(hostHeader);
+  const bind = opts.bindHost && opts.bindHost !== "0.0.0.0" &&
+      opts.bindHost !== "::"
+    ? `, ${opts.bindHost}`
+    : "";
+  return new Response(
+    `Forbidden — Host "${hostHeader}" is not a name this app is served as.\n\n` +
+      `This app answers to localhost, to any IP address it is bound on${bind}` +
+      `, and to whatever is listed in allowedOrigins. A request whose Host is ` +
+      `some other domain is the shape of a DNS-rebinding attack: a page on ` +
+      `that domain would become same-origin with this app and could read raw ` +
+      `state and dispatch actions with no credential.\n\n` +
+      `Fix: if this app really is reached as "${hostHeader}" (a reverse proxy, ` +
+      `a custom domain), name it — aio.run({ allowedOrigins: ["${
+        _hostnameOfHeader(hostHeader ?? "")
+      }"] }) — which is the same list the WebSocket origin check reads.`,
+    { status: 403, headers: { "Content-Type": "text/plain; charset=utf-8" } },
+  );
+}
+
+/** Say it on the SERVER too, once per Host.
+ *
+ *  The refusal reaches whoever made the request; the person who has to act on
+ *  it is the operator, and they were reading a log that said nothing. A
+ *  reverse-proxied deployment therefore failed as "users report Forbidden,
+ *  nothing in the log" — the shape that turns a one-line config fix into an
+ *  afternoon. Once per Host, and bounded, because the value is attacker-chosen. */
+function _reportHostRefusal(hostHeader: string | null): void {
+  const name = _hostnameOfHeader(hostHeader ?? "");
+  if (name === "" || _hostWarned.has(name)) return;
+  if (_hostWarned.size >= HOST_WARN_MAX) return;
+  _hostWarned.add(name);
+  log.warn(
+    "auth",
+    `refused a request whose Host is "${name}" — this app is not served as ` +
+      `that name, and a page on it would otherwise become same-origin with ` +
+      `this app (DNS rebinding). If this app really IS reached as "${name}" ` +
+      `— a reverse proxy, a custom domain — name it once: ` +
+      `aio.run({ allowedOrigins: ["${name}"] }). Said once per Host.`,
+  );
+}
+
+/** Test seam: forget which Hosts have been reported. Production never wants it —
+ *  forgetting is exactly what would make this log floodable. */
+// aio-ok: a test-only reset for once-per-process state; forgetting in production is what would make this log floodable.
+export function _resetHostWarnings(): void {
+  _hostWarned.clear();
 }

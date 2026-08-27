@@ -65,6 +65,51 @@ export async function writeRecord(rec: InstallRecord): Promise<string> {
   return path;
 }
 
+/** Bring an install record in line with a version the IN-APP updater just
+ *  swapped in.
+ *
+ *  `installed.json` had exactly one writer — `run.sh` — so an app that updated
+ *  itself five times still reported the version it was first installed at.
+ *  `am installed` was wrong, `am upgrade` decided what to rebuild from a stale
+ *  number, and its prune could delete the very version an in-flight rollback
+ *  marker names as `previous`.
+ *
+ *  A no-op when there is no record: a bare binary somebody copied to
+ *  `/usr/local/bin` is not an `am`-managed install, and inventing a record for
+ *  it would make `am` claim to manage something it cannot. Never fatal — an
+ *  update that worked must not be reported as failed because a bookkeeping file
+ *  could not be rewritten — but never silent either. */
+export async function reconcileInstalledVersion(
+  dir: string,
+  next: { version?: string; artifact?: string },
+): Promise<boolean> {
+  const path = join(dir, "installed.json");
+  let rec: InstallRecord;
+  try {
+    rec = JSON.parse(await Deno.readTextFile(path)) as InstallRecord;
+  } catch {
+    return false; // not an `am`-managed install — nothing to keep in sync
+  }
+  if (!rec || typeof rec.name !== "string") return false;
+  const updated: InstallRecord = {
+    ...rec,
+    version: next.version ?? rec.version,
+    artifact: next.artifact ?? rec.artifact,
+    installedAt: new Date().toISOString(),
+  };
+  try {
+    await Deno.writeTextFile(path, JSON.stringify(updated, null, 2) + "\n");
+    return true;
+  } catch (e) {
+    log.warn(
+      `[aio] update: installed ${updated.version ?? "the new version"} but ` +
+        `could not update ${path} (${e}) — \`am installed\` will report the ` +
+        `previous version until it is fixed by hand.`,
+    );
+    return false;
+  }
+}
+
 /** Would installing `source` over the existing install replace a DIFFERENT
  *  app? Returns the previous source when it disagrees, else null.
  *

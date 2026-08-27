@@ -21,6 +21,15 @@
   },
   "tasks": {
     "dev": "deno run -A src/client.ts",
-    "compile": "deno run -A ../../../src/build.ts --compile --cli --remote"
+    "build": "deno run -A ../../../src/build-all.ts --build-spec=../../../src/build.ts",
+    "compile": "deno run -A ../../../src/build-all.ts --build-spec=../../../src/build.ts --targets=cli-client",
+    "check": "deno check src/",
+    "lint": "deno run -A ../../../aiol/mod.ts",
+    "am": "deno run -A ../../../src/am.ts"
+  },
+  "build": {
+    "targets": [
+      "cli-client"
+    ]
   }
 }

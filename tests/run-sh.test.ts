@@ -220,3 +220,115 @@ Deno.test("install.sh: never git-mutates a working checkout (on a branch, or dir
   );
   await Deno.remove(tmp, { recursive: true });
 });
+
+// ── the one-liner cannot silently do nothing ────────────────────────────────
+
+Deno.test("install.sh: a TRUNCATED download is a syntax error, never a partial run", async () => {
+  // `curl … | sh` executes bytes as they arrive. A connection that dies
+  // mid-transfer used to run the prefix that made it through and exit 0 —
+  // truncated just past `git checkout --force <tag>`, that is a wiped working
+  // tree reported as success. The body lives inside `main()`, called on the
+  // last line, so an incomplete script is an unterminated function.
+  const full = await Deno.readTextFile(join(REPO_ROOT, "install.sh"));
+  assert(
+    /\nmain "\$@"\s*$/.test(full),
+    "install.sh must END by calling main — that call is the guard",
+  );
+  const cut = full.indexOf('checkout -q --force "$AIO_TAG"');
+  assert(cut > 0, "the destructive line the guard exists for is still there");
+  // Cut at the END of that line: a clean command boundary, the worst case.
+  const truncated = full.slice(0, full.indexOf("\n", cut) + 1);
+  const home = await Deno.makeTempDir({ prefix: "aio-trunc-home-" });
+  const p = new Deno.Command("sh", {
+    // No arguments: exactly how the pipe delivers it.
+    stdin: "piped",
+    stdout: "piped",
+    stderr: "piped",
+    env: { HOME: home, AIO_HOME: join(home, "aio") },
+    clearEnv: false,
+  }).spawn();
+  const w = p.stdin.getWriter();
+  await w.write(new TextEncoder().encode(truncated));
+  await w.close();
+  const out = await p.output();
+  assert(
+    out.code !== 0,
+    `a truncated installer exited ${out.code} — it must never report success. ` +
+      dec.decode(out.stdout),
+  );
+  await Deno.remove(home, { recursive: true }).catch(() => {});
+});
+
+Deno.test("install.sh + run.sh: set -u, so an unset $HOME never becomes /", async () => {
+  for (const f of ["install.sh", "run.sh"]) {
+    const src = await Deno.readTextFile(join(REPO_ROOT, f));
+    assert(
+      /^set -eu$/m.test(src),
+      `${f} must run under \`set -eu\` — without -u, "$HOME/.local/lib/aio" ` +
+        `with HOME unset is "/.local/lib/aio" and the installer clones into ` +
+        `the filesystem root`,
+    );
+    const p = await new Deno.Command("env", {
+      args: ["-u", "HOME", "sh", join(REPO_ROOT, f)],
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    assertEquals(p.code, 1, `${f} must refuse without $HOME`);
+    assert(
+      dec.decode(p.stderr).includes("HOME"),
+      `${f} must NAME $HOME as the cause: ${dec.decode(p.stderr)}`,
+    );
+  }
+});
+
+Deno.test("run.sh: a failed or empty installer download is DETECTED", async () => {
+  // `curl … | sh || fail` reads sh's status, and /bin/sh has no pipefail — a
+  // 404 or a dropped connection made sh exit 0 and run.sh announce
+  // "updating aio + am" having installed nothing.
+  const src = await Deno.readTextFile(join(REPO_ROOT, "run.sh"));
+  assert(
+    !/curl[^\n]*\$AIO_RAW\/install\.sh"\s*\|\s*sh/.test(src),
+    "run.sh must not pipe the installer straight into sh — the exit status " +
+      "of that pipeline is sh's, and a failed download is invisible",
+  );
+
+  const home = await Deno.makeTempDir({ prefix: "aio-run-dl-" });
+  const cwd = await Deno.makeTempDir({ prefix: "aio-run-cwd-" });
+  const base = { HOME: home, AIO_HOME: join(home, "aio") };
+
+  // (a) the download itself fails — a port nothing listens on.
+  const bad = await new Deno.Command("sh", {
+    args: [join(REPO_ROOT, "run.sh")],
+    cwd,
+    env: { ...base, AIO_RAW: "http://127.0.0.1:1/aio" },
+    clearEnv: false,
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  assertEquals(bad.code, 1);
+  assert(
+    dec.decode(bad.stderr).includes("could not download the installer"),
+    dec.decode(bad.stderr) + dec.decode(bad.stdout),
+  );
+
+  // (b) the download SUCCEEDS and is empty — curl's own exit code is 0.
+  const raw = await Deno.makeTempDir({ prefix: "aio-run-raw-" });
+  await Deno.writeTextFile(join(raw, "install.sh"), "");
+  const empty = await new Deno.Command("sh", {
+    args: [join(REPO_ROOT, "run.sh")],
+    cwd,
+    env: { ...base, AIO_RAW: `file://${raw}` },
+    clearEnv: false,
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  assertEquals(empty.code, 1);
+  assert(
+    dec.decode(empty.stderr).includes("EMPTY"),
+    dec.decode(empty.stderr) + dec.decode(empty.stdout),
+  );
+
+  for (const d of [home, cwd, raw]) {
+    await Deno.remove(d, { recursive: true }).catch(() => {});
+  }
+});

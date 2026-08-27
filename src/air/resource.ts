@@ -3,13 +3,28 @@ import type { Signal } from "../state/signal.ts";
 
 /** The return type of resource(). */
 export interface Resource<T> {
-  /** Current data value — undefined while loading or after error. */
+  /** The last fetch's RESULT.
+   *
+   *  Stale-while-revalidate during a refetch (AIO-256): a source change keeps
+   *  the previous value on screen instead of flashing `undefined`, so a list
+   *  does not blink every time its filter moves. `loading` is what says a
+   *  fetch is in flight.
+   *
+   *  `undefined` after a FAILED fetch, because there is no result. That is the
+   *  one state where this and {@linkcode Resource.latest} differ, and the
+   *  difference is the point: a failed refetch used to leave the old value
+   *  here, so `{r.value ? <View/> : <Spinner/>}` rendered stale data as though
+   *  it were current, with the failure visible only to code that also checked
+   *  `error`. Keep showing the old data deliberately — read `latest` — or
+   *  handle the error; do not get it by accident. */
   readonly value: T | undefined;
   /** Boolean signal — true while fetching. */
   readonly loading: Signal<boolean>;
   /** Error signal — set if the last fetch threw. */
   readonly error: Signal<unknown>;
-  /** Last successful value — persists through refetch cycles. */
+  /** The last SUCCESSFUL value — it survives both a refetch and a failure.
+   *  This is the one to render when you want the previous data to stay on
+   *  screen while the new fetch is in flight or after it failed. */
   readonly latest: Signal<T | undefined>;
   /** Manually re-trigger the fetch with the current source. */
   refetch(): void;
@@ -58,6 +73,15 @@ export function resource<S, T>(
         if (ac.signal.aborted || disposed) return;
         batch(() => {
           error.set(err);
+          // There is no result, so `value` holds none. It used to keep the
+          // PREVIOUS fetch's data — which made `value` and `latest` the same
+          // signal in every reachable state (so `latest`'s documented purpose
+          // could not be observed, and the test for it asserted nothing), and
+          // left an app rendering stale rows beside a live error with no way
+          // to tell them from fresh ones. Stale-while-revalidate is for the
+          // LOADING window (AIO-256); a failure is an answer, and `latest`
+          // is where the last good value stays.
+          data.set(undefined);
           loading.set(false);
         });
       },
@@ -95,6 +119,12 @@ export function resource<S, T>(
       disposed = true;
       if (abortController) abortController.abort();
       disposeEffect();
+      // The in-flight fetch is aborted and its continuations early-return on
+      // `disposed`, so nothing will ever clear `loading` again. Left true, a
+      // disposed resource reported itself as forever-loading and every
+      // `{r.loading.value ? <Spinner/> : …}` in the app spun for good. A
+      // resource that has been torn down is not loading.
+      loading.set(false);
     },
   };
 }

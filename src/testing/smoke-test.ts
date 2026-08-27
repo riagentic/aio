@@ -11,6 +11,7 @@
 //   Deno.test("boot smoke", async () => { await smoke({ baseDir: "." }); });
 
 import { join, relative, resolve } from "@std/path";
+import { SERVER_FILE_RE } from "../entries.ts";
 import type { CellsConfig } from "../server/aio-types.ts";
 import { UI_ENTRY } from "../server/app-files.ts";
 import {
@@ -150,7 +151,7 @@ export async function smoke(
         `smoke: ${t.url} → HTTP ${res.status} — the browser would fail to boot.\n` +
           `  loaded by: ${chain(t.file)}\n` +
           `  fix: ${
-            /\.server\.tsx?$/.test(t.url)
+            SERVER_FILE_RE.test(t.url)
               ? "a *.server.ts module is never served to the browser; import it dynamically from a cell method (docs/build/imports.md)"
               : "check the file exists under baseDir (or a serveDirs root) and is not a dotfile/protected path"
           }`,

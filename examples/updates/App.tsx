@@ -25,10 +25,26 @@ export default function App() {
           <span style={{ flex: "1" }}>
             <strong>Version {updates.available.version}</strong> is available
             {updates.available.notes ? ` — ${updates.available.notes}` : ""}.
+            {
+              /* `reason` says WHY, which matters when the version is the one
+                already running: a re-published build of 1.2.3 is a real update
+                with different bytes, and "1.2.3 is available" alone reads as a
+                bug. */
+            }
+            {` (${updates.available.reason}.)`}
             {/* Say it before they click, not after. */}
             {updates.available.migrates
               ? " Your data will be migrated (a backup is taken first)."
               : ""} The app will restart.
+            {
+              /* Whether this release is authenticated, and by which key. An app
+                running with allowUnsigned should say so where it is acted on. */
+            }
+            <small style={{ display: "block", color: "#495057" }}>
+              {updates.available.signed
+                ? `signed · key ${updates.available.keyFingerprint}`
+                : "UNSIGNED — its contents are not authenticated"}
+            </small>
           </span>
           <button type="button" onClick={() => updates.apply()}>Update</button>
           <button type="button" onClick={() => updates.dismiss()}>
@@ -46,16 +62,56 @@ export default function App() {
         <div
           style={{ ...bar, background: "#fff4e6", border: "1px solid #ffa94d" }}
         >
-          <span>
+          <span style={{ flex: "1" }}>
             <strong>Version {updates.blocked.version}</strong>{" "}
             exists but cannot be installed: {updates.blocked.blockers.join(" ")}
           </span>
+          {
+            /* A notice with no way to put it away is a notice people learn to
+              ignore — `dismiss()` accepts a blocked release too. */
+          }
+          <button type="button" onClick={() => updates.dismiss()}>
+            Hide
+          </button>
         </div>
       )}
 
+      {
+        /* These render because the cell publishes mid-method (`s.$commit()`).
+          Under a plain transactional method the whole write-set commits once at
+          return, so this panel could never appear — the status went straight
+          from "available" to gone. */
+      }
+      {updates.status === "checking" && (
+        <div style={{ ...bar, background: "#f1f3f5" }}>Checking…</div>
+      )}
       {updates.status === "downloading" && (
         <div style={{ ...bar, background: "#f1f3f5" }}>
           Downloading… {Math.round(updates.progress * 100)}%
+        </div>
+      )}
+      {updates.status === "applying" && (
+        <div style={{ ...bar, background: "#f1f3f5" }}>Installing…</div>
+      )}
+      {updates.status === "staged" && (
+        <div style={{ ...bar, background: "#f1f3f5" }}>
+          Installed — restarting…
+        </div>
+      )}
+
+      {/* "Not now" is not "never". */}
+      {updates.dismissed && !updates.available && (
+        <div style={{ ...bar, background: "#f8f9fa" }}>
+          <span style={{ flex: "1" }}>
+            You said no to {updates.dismissed}.
+          </span>
+          <button
+            type="button"
+            onClick={() =>
+              updates.undismiss()}
+          >
+            Show it again
+          </button>
         </div>
       )}
 

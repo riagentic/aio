@@ -88,3 +88,66 @@ Deno.test("am add cell: piped stdout gets the JSON document, not a stringified s
     await Deno.remove(dir, { recursive: true });
   }
 });
+
+// The same defect, in the command a person runs FIRST. `am create x | tee`,
+// every CI log and every coding agent got `JSON.stringify(<the pretty text>)`:
+// one quoted line with literal \n escapes, unusable as data and unreadable as
+// prose. Driven through a REAL pipe (a spawned process whose stdout is piped),
+// because that is the condition — `detectMode` reads `isTerminal()`, and an
+// in-process test cannot tell you what a pipe does.
+Deno.test({
+  name: "am create: a PIPED stdout is a JSON document, not a quoted sentence",
+  sanitizeResources: false,
+  fn: async () => {
+    const dir = await Deno.makeTempDir({ prefix: "am-create-pipe-" });
+    try {
+      const am = new URL("../src/am.ts", import.meta.url).pathname;
+      const out = await new Deno.Command(Deno.execPath(), {
+        args: [
+          "run",
+          "-A",
+          "--config",
+          new URL("../deno.json", import.meta.url).pathname,
+          am,
+          "create",
+          "piped-app",
+        ],
+        cwd: dir,
+        stdout: "piped", // ← the whole point
+        stderr: "piped",
+      }).output();
+      const stdout = new TextDecoder().decode(out.stdout);
+      assertEquals(
+        out.code,
+        0,
+        new TextDecoder().decode(out.stderr),
+      );
+      const doc = JSON.parse(stdout.trim().split("\n").at(-1)!);
+      assertEquals(
+        typeof doc,
+        "object",
+        `a JSON string is not a payload: ${stdout.slice(0, 120)}`,
+      );
+      const d = doc as { created: string; target: string; files: string[] };
+      assertEquals(d.created, "piped-app");
+      assertEquals(d.target, "browser");
+      assert(d.files.includes("deno.json"), "names the files it wrote");
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
+});
+
+// The layer guarantee behind it: in json mode `out()` NEVER emits a bare JSON
+// string. A command with nothing but a sentence to say still hands a parser an
+// addressable shape.
+Deno.test("out(): json mode always emits an object", async () => {
+  const { out } = await import("../src/am/am-output.ts");
+  const lines = await captureLog(() => {
+    out("x unlocked", "json");
+    out({ ok: true }, "json");
+    return Promise.resolve();
+  });
+  assertEquals(JSON.parse(lines[0]!), { message: "x unlocked" });
+  assertEquals(JSON.parse(lines[1]!), { ok: true });
+});

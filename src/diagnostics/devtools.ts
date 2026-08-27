@@ -26,7 +26,7 @@ export interface RenderEvent {
 
 /** Live inspection handle returned by {@linkcode connectAioDevTools}. */
 export interface DevToolsHandle {
-  /** Current component tree (signal-tracked for live updates). */
+  /** The live component tree, walked from the mounted AIR roots when read. */
   readonly tree: ComponentTreeNode[];
   /** Recent render events (signal-tracked, ring buffer). */
   readonly renders: RenderEvent[];
@@ -46,10 +46,28 @@ let _reduxDevTools: any = null;
 /** Reserved name prefix — lets `_recordRender` recognize a render that was
  *  triggered by devtools' own signals (see the self-observation note there). */
 const DEVTOOLS_SIG_PREFIX = "__aioDevtools:";
-const _treeSig: Signal<ComponentTreeNode[]> = signal<ComponentTreeNode[]>(
-  [],
-  `${DEVTOOLS_SIG_PREFIX}tree`,
-);
+/** Where the live component tree comes from. The renderer registers it at
+ *  import time (`src/air/devtools-tree.ts`); nothing else can, because
+ *  `diagnostics` may not import `air`.
+ *
+ *  PULL, not push, and deliberately so. This used to be a `_treeSig` signal fed
+ *  by an exported `_updateTree` "called by the renderer periodically in dev
+ *  mode" — which nothing ever called, so the documented `tree` handle returned
+ *  an empty array for the life of the feature. Restoring it as a push channel
+ *  would have been worse than dead: a component that RENDERS the tree
+ *  subscribes to that signal, so publishing after each flush re-renders it,
+ *  which bumps its own render count, which changes the tree, which publishes
+ *  again — the self-observation loop `_recordRender` already has a guard
+ *  against. Reading on demand cannot loop, costs nothing when no one asks, and
+ *  is always current. */
+let _treeSource: (() => ComponentTreeNode[]) | null = null;
+
+/** @internal Register the renderer's component-tree walker. */
+export function _setComponentTreeSource(
+  fn: (() => ComponentTreeNode[]) | null,
+): void {
+  _treeSource = fn;
+}
 const _rendersSig: Signal<RenderEvent[]> = signal<RenderEvent[]>(
   [],
   `${DEVTOOLS_SIG_PREFIX}renders`,
@@ -90,7 +108,7 @@ function _tryConnectReduxDevTools(): boolean {
  * Automatically connects to Redux DevTools Extension if available.
  *
  * ```ts
- * const devtools = connectDevTools();
+ * const devtools = connectAioDevTools();
  * // Read devtools.tree for component hierarchy
  * // Read devtools.renders for recent re-render events
  * ```
@@ -101,7 +119,9 @@ export function connectAioDevTools(): DevToolsHandle {
 
   return {
     get tree() {
-      return _treeSig.value;
+      // No AIR root mounted (or no renderer in this build) — an empty tree is
+      // the honest answer, not a stand-in for one that was never collected.
+      return _treeSource?.() ?? [];
     },
     get renders() {
       return _rendersSig.value;
@@ -168,15 +188,6 @@ export function _recordRender(event: RenderEvent): void {
       _reduxDevTools = null;
     }
   }
-}
-
-/**
- * Update the component tree snapshot (called by the renderer periodically in dev mode).
- * @internal
- */
-export function _updateTree(tree: ComponentTreeNode[]): void {
-  if (!_connected) return;
-  _treeSig.set(tree);
 }
 
 /** Check if DevTools is currently connected. */

@@ -205,3 +205,56 @@ Deno.test({
     }
   },
 });
+
+// ── the two shells must answer `ui.chrome` the same way ─────────────────────
+//
+// aio generates TWO Electron main scripts and picks between them by TRANSPORT:
+// `electronMainScriptUDS` when the app talks to itself over a local socket
+// (the default for a local desktop app since alpha66), and `electronMainScript`
+// over WebSocket whenever the app has a TCP port — `--expose`, `--port=N`, or
+// `transport: "ws"`.
+//
+// Only the UDS one read `ui.chrome` and `childWindows`. So `ui.chrome: "none"`
+// gave a frameless window under `deno task dev` and a fully framed one under
+// `deno task dev --expose`: the same config, two windows, no warning. `ui.chrome`
+// is one of the three identity-derived defaults the framework promises look the
+// same everywhere the app appears, which is what makes a transport-dependent
+// answer a divergence rather than a detail.
+//
+// This is a source-level parity gate (no display, always on) because the
+// divergence is in what the scripts SAY; the E2E above proves the UDS half
+// meets a real window.
+
+Deno.test("ui.chrome + childWindows: both generated shells decide identically", async () => {
+  const { electronMainScript } = await import(
+    "../src/electron/electron-scripts.ts"
+  );
+  const shape = (src: string) => ({
+    frame: src.match(/b\.frame\s*=\s*(\w+)/)?.[1],
+    webview: src.match(/webviewTag:\s*(\w+)/)?.[1],
+  });
+  for (const chrome of ["standard", "themed", "none"] as const) {
+    for (const childWindows of [false, true]) {
+      const meta = { title: "parity", chrome, childWindows };
+      const ws = shape(electronMainScript("http://127.0.0.1:3000", meta));
+      const uds = shape(
+        electronMainScriptUDS("aio://app/", "/tmp/parity.sock", { meta }),
+      );
+      assertEquals(
+        ws,
+        uds,
+        `chrome=${chrome} childWindows=${childWindows}: the WebSocket shell ` +
+          `and the UDS shell must build the same window`,
+      );
+      assertEquals(
+        ws.frame,
+        String(chrome === "standard"),
+        `chrome=${chrome}: only "standard" keeps the OS frame`,
+      );
+      assertEquals(ws.webview, String(childWindows));
+    }
+  }
+  // …and the default, which is what most apps get.
+  const bare = shape(electronMainScript("http://127.0.0.1:3000"));
+  assertEquals(bare, { frame: "true", webview: "false" });
+});

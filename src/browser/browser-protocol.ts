@@ -194,21 +194,12 @@ export function _resetTracking(): void {
   _coreCancelSubsTimer();
 }
 
-// ── Snapshot helpers ─────────────────────────────────────────────────
-
-export function _getSnapshot(): unknown {
-  return _coreHasState() ? _coreGetState() : null;
-}
-export function _getServerSnapshot(): unknown {
-  return null;
-}
-
-// ── Send cache ──────────────────────────────────────────────────────
-
-export const _cellSendCache = new WeakMap<
-  _CoreCellRef,
-  Record<string, (...args: unknown[]) => void>
->();
+// No `_getSnapshot` / `_getServerSnapshot` here. They were the other two
+// thirds of a `useSyncExternalStore` triple next to `_subscribe`, from before
+// AIR existed — and nothing in the framework, the tests or an app ever called
+// them (`_getServerSnapshot` returned a bare `null`). AIR subscribes through
+// signals, not a store snapshot; a seam that looks like an integration point
+// but is wired to nothing is worse than no seam at all.
 
 // ── _projectWithSharing ─────────────────────────────────────────────
 
@@ -293,6 +284,7 @@ import {
 } from "./protocol-router.ts";
 import {
   _callConnectFn,
+  _noteDispatch,
   _subscribe,
   _vitalsRenderMeter as _vmRenderMeter,
 } from "./protocol-subscription.ts";
@@ -321,6 +313,10 @@ export const client: {
     return s[name] ?? null;
   },
   send(action: { type: string; payload?: unknown }): void {
+    // Note it BEFORE the transport check. An action dispatched while the
+    // socket is down is still this client's action — it queues, lands on
+    // reconnect, and the state frame it produces belongs to it.
+    _noteDispatch(action);
     if (_clientSend) _clientSend(action);
   },
   route: {
@@ -378,6 +374,13 @@ export function _makeSendWrapper(
   return wrapTransport(
     plainSend,
     (action: { type: string; payload?: unknown }) => {
+      // The other half of the pair named in `_noteDispatch`'s doc: every bound
+      // cell method reaches the transport through here, including the
+      // CRDT-routed and boot-buffered branches below. Both halves live in this
+      // file so they cannot drift apart unseen; noting in only one of them
+      // attributes the other half's state frames to `@@aio/state`, which is
+      // what DevTools showed for every action for the life of the feature.
+      _noteDispatch(action);
       if (_syncRoute) {
         if (_syncRoute(action)) return;
         plainSend(action);
@@ -555,10 +558,10 @@ export function _resetEnsured(): void {
 
 // ── Visibility guard ────────────────────────────────────────────────
 
-export let _visibilityHandler: (() => void) | null = null;
-export function _setVisibilityHandler(h: (() => void) | null): void {
-  _visibilityHandler = h;
-}
+// Module-local, and no setter: the handler is installed once at load and
+// nothing ever replaced it. (The exported `_setVisibilityHandler` that used to
+// sit here was reachable from nowhere in src/ or tests/.)
+let _visibilityHandler: (() => void) | null = null;
 if (typeof document !== "undefined") {
   _visibilityHandler = () => {
     if (_vmRenderMeter) {

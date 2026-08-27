@@ -50,6 +50,15 @@ const ALLOWED = new Map<string, string>([
     "src/diagnostics/logger-core.ts",
     "the logger reporting that it cannot write its own files",
   ],
+  // Same class, one level up: the last-words handler's log sink is INJECTED,
+  // and the branch below only runs because that sink threw while reporting a
+  // crash. Routing the fallback through a logger would be routing it through
+  // the thing that just failed — and losing the crash is the one outcome this
+  // file exists to prevent.
+  [
+    "src/diagnostics/crash-handler.ts",
+    "the crash reporter reporting that the logger threw while reporting a crash",
+  ],
   // The Electron trio below emit the MAIN-PROCESS script as a string. That
   // code runs in Electron's Node, which has no `log` — a bulk conversion that
   // rewrote them turned the reconnect path into a ReferenceError, so a backend
@@ -88,6 +97,13 @@ Deno.test("output: runtime code never prints without a level", async () => {
       lines.forEach((line, i) => {
         // A mention inside a comment is documentation, not a print.
         const code = line.replace(/^\s*(\/\/|\*).*$/, "");
+        // A LINE-level opt-out, same shape as `// aio-ok: server-only`. The
+        // allowlist above exempts a whole FILE, which is too blunt for a file
+        // that legitimately owns one raw write among hundreds of levelled
+        // ones — the stdout a machine-readable mode must not pollute, say.
+        // The reason has to be written down, so the exemption is reviewable.
+        const near = lines.slice(Math.max(0, i - 6), i + 1).join("\n");
+        if (/\/\/\s*aio-ok:/.test(near)) return;
         if (
           /(?<![\w.])console\.(log|info|warn|error|debug|group)\s*\(/.test(code)
         ) {
@@ -291,9 +307,17 @@ function templateSpans(s: string): [number, number][] {
  *  output is its answer, not a log line, and `am state --json` must stay
  *  machine-readable. But a DIAGNOSTIC among that output has the same duty as a
  *  log line: say whether the reader has to act. These are the markers that do
- *  it — a symbol, or the word itself. */
+ *  it — a symbol, or the word itself.
+ *
+ *  `▸` and `✓` are in the set because they answer the question too, with a
+ *  "no": they are this repo's established step and success markers (see
+ *  `scripts/lab.ts`, `scripts/wine-pipe.ts`, `src/am/am-cmd-lab.ts`), and a
+ *  long-running command writes its PROGRESS to stderr precisely so stdout
+ *  stays machine-readable. A step line that says "this is a step" has told
+ *  the reader what they need; what this gate exists to catch is the
+ *  unmarked sentence that could equally be a failure. */
 const CLI_MARKERS =
-  /✗|✘|⚠|✖|❌|\berror\b|\bErrors?\b|\bwarn(ing)?\b|\bnote:|\bhint:|\busage:|\bfailed\b|\bcannot\b|\bnot found\b|\brefus/i;
+  /✗|✘|⚠|✖|❌|▸|✓|\berror\b|\bErrors?\b|\bwarn(ing)?\b|\bnote:|\bhint:|\busage:|\bfailed\b|\bcannot\b|\bnot found\b|\brefus/i;
 
 Deno.test("output: a CLI diagnostic says whether you have to act", async () => {
   // Scanned: the first STRING LITERAL of each console.warn/error call. A call

@@ -7,7 +7,26 @@
 # Re-running updates aio + am in place (same as `am update`). Uninstall with
 # `am uninstall`. Override the location with AIO_HOME, or a fork/branch with
 # AIO_REPO / AIO_BRANCH.
-set -e
+#
+# TRUNCATION GUARD. This script is piped straight into `sh`, which executes it
+# as it arrives: a connection that dies mid-transfer runs the PREFIX that made
+# it through and exits 0. Truncated just past `git checkout --force <tag>` that
+# is a wiped working tree and a cheerful zero exit. Everything below therefore
+# lives inside `main()`, which is only ever CALLED on the last line — an
+# incomplete download reaches sh as an unterminated function and is a syntax
+# error, which is what a half-delivered installer should be.
+#
+# `set -u` for the same class of failure one level down: with $HOME unset,
+# `$HOME/.local/lib/aio` is `/.local/lib/aio` and the installer starts cloning
+# into the filesystem root.
+set -eu
+
+main() {
+
+[ -n "${HOME:-}" ] || {
+  printf "\033[31m✗\033[0m %s\n" "\$HOME is not set, so there is nowhere to install to. Set it (export HOME=/home/you) and re-run, or set AIO_HOME to an explicit directory." >&2
+  exit 1
+}
 
 AIO_HOME="${AIO_HOME:-$HOME/.local/lib/aio}"
 AIO_REPO="${AIO_REPO:-https://github.com/riagentic/aio}"
@@ -67,9 +86,31 @@ else
   # "check network", which is one of a dozen causes — a proxy, a missing CA
   # bundle, no disk, an ownership guard, a private repo. Reporting the wrong
   # cause confidently is worse than reporting none.
-  _clone_err=$(git clone -q "$AIO_REPO" "$AIO_HOME" 2>&1) \
-    || fail "git clone failed for $AIO_REPO:
-${_clone_err:-(git said nothing)}"
+  # A LOCAL source is cloned by reading its loose objects, and git writes those
+  # with the process umask applied — so a repo whose commits were made under
+  # `umask 077` holds 400 (owner-read) objects. Another user then cannot read
+  # them at all, and git reports "failed to copy file to
+  # '…/.git/objects/…': Permission denied", which names git internals rather
+  # than the cause. Nothing on this side can fix it (a clone must READ what it
+  # cannot read), so the job here is to say what actually happened.
+  if ! _clone_err=$(git clone -q "$AIO_REPO" "$AIO_HOME" 2>&1); then
+    _hint=""
+    case "$_clone_err" in
+      *"Permission denied"*.git/objects/*)
+        _unreadable=$(find "$AIO_REPO/.git/objects" -type f ! -perm -o+r 2>/dev/null | wc -l)
+        [ "${_unreadable:-0}" -gt 0 ] && _hint="
+
+$AIO_REPO has $_unreadable git object(s) that only their owner can read.
+git applies the process umask when it writes objects, so commits made in a
+shell with \`umask 077\` land as 400 instead of 444 — a perfectly good repo
+that another user cannot clone. Fix it at the source:
+  chmod -R o+rX $AIO_REPO/.git
+(and \`umask 022\` before committing, so it does not come back)."
+        ;;
+    esac
+    fail "git clone failed for $AIO_REPO:
+${_clone_err:-(git said nothing)}${_hint}"
+  fi
 fi
 # An explicit ref wins over everything: `AIO_REF=v1.0.0-alpha57` pins a release,
 # `AIO_REF=main` follows the tip, `AIO_REF=<sha>` reproduces a report exactly.
@@ -373,3 +414,7 @@ fi
 printf "\n${bold}Next:${reset}\n"
 printf "  am create my-app   ${dim}# scaffold a new aio app (points at %s)${reset}\n" "$AIO_HOME"
 printf "  cd my-app && deno task dev\n"
+
+}
+
+main "$@"

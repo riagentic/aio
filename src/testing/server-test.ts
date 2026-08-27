@@ -25,6 +25,102 @@ export interface TestServer<S = unknown> {
   [Symbol.asyncDispose](): Promise<void>;
 }
 
+/** How `worker: true` cells run under a test server.
+ *
+ *  - `"in-isolate"` (the default) — the cell's methods run on the test's own
+ *    isolate. The SERIALIZATION boundary is still reproduced (arguments and
+ *    return values are structured-cloned, `tests/prod-parity-worker-boundary.test.ts`),
+ *    but isolation is not: the worker cell shares this isolate's module graph,
+ *    so module-level state is shared where production keeps it separate.
+ *  - `"real"` — spawn one real Deno worker per `worker: true` cell, from
+ *    `workerEntry`. Its own heap, its own module graph, no shared module
+ *    state — what a compiled app does. Costs a worker spawn per cell, so it is
+ *    opt-in and paid for only by the tests that ask.
+ *
+ *  See docs/testing/prod-parity.md. */
+export type TestWorkerMode = "in-isolate" | "real";
+
+/** `testServer()` config — an `aio.run()` config plus the harness's own knobs. */
+export type TestServerConfig = CellsConfig & {
+  /** Host `worker: true` cells on real Deno workers. Requires `workerEntry`. */
+  workers?: TestWorkerMode;
+  /** With `workers: "real"`: the module a worker boots from — a REAL app entry
+   *  that defines the same cells and calls `aio.run()` when it is a cell host:
+   *
+   *  ```ts
+   *  // heavy-app.ts — imported by the test AND re-imported by the worker
+   *  export const heavy = cell("heavy", { worker: true, ... });
+   *  if (isCellWorker()) await aio.run({ cells: [heavy], libraryMode: true });
+   *  ```
+   *
+   *  Pass `import.meta.resolve("./heavy-app.ts")`. It cannot default to
+   *  `Deno.mainModule`: under a test that is the test file, and a worker on it
+   *  would re-run the whole test in another thread. */
+  workerEntry?: string | URL;
+};
+
+/** Resolve + check `workers`/`workerEntry`, returning the `_workerEntry` to
+ *  pass through (or undefined for the default in-isolate mode).
+ *
+ *  Every branch here throws rather than degrading: a test that ASKED for real
+ *  workers and silently got in-isolate ones is exactly the green-test/broken-
+ *  prod trade this option exists to remove. */
+function resolveWorkerMode(config: TestServerConfig): string | undefined {
+  const { workers, workerEntry } = config;
+  if (workers !== undefined && workers !== "in-isolate" && workers !== "real") {
+    throw new Error(
+      `testServer: workers must be "in-isolate" or "real" — got ` +
+        `${JSON.stringify(workers)}.`,
+    );
+  }
+  if (workers !== "real") {
+    if (workerEntry !== undefined) {
+      throw new Error(
+        'testServer: workerEntry was given without workers: "real", so it ' +
+          'would govern nothing. Add workers: "real", or drop workerEntry.',
+      );
+    }
+    return undefined;
+  }
+  if (workerEntry === undefined) {
+    throw new Error(
+      'testServer: workers: "real" needs workerEntry — the module each cell ' +
+        "worker boots from.\n" +
+        "  It cannot be inferred: under a test the main module is the TEST " +
+        "file, and a worker on it re-runs the test in another thread.\n" +
+        '  Pass workerEntry: import.meta.resolve("./my-app.ts") — a module ' +
+        "that defines the same cells and calls aio.run() when isCellWorker().\n" +
+        "  (docs/testing/prod-parity.md)",
+    );
+  }
+  const url = workerEntry instanceof URL ? workerEntry.href : workerEntry;
+  if (!url.startsWith("file:")) {
+    throw new Error(
+      `testServer: workerEntry must be a file: URL (a worker cannot be ` +
+        `spawned from "${url}"). Use import.meta.resolve("./my-app.ts").`,
+    );
+  }
+  try {
+    Deno.statSync(new URL(url));
+  } catch {
+    throw new Error(
+      `testServer: workerEntry "${url}" does not exist. Without this check ` +
+        `the failure is a 30s "did not become ready" timeout at boot.`,
+    );
+  }
+  const workerCells = (config.cells ?? [])
+    .map((e) => ("__aio" in e ? e : e.cell))
+    .filter((f) => f.__aio.worker === true)
+    .map((f) => f.__aio.id);
+  if (workerCells.length === 0) {
+    throw new Error(
+      'testServer: workers: "real" but no cell in `cells` has worker: true — ' +
+        "the option would do nothing. Flag the cell, or drop the option.",
+    );
+  }
+  return url;
+}
+
 /** Grab a free TCP port by binding to 0 and releasing it. Use it for any test
  *  server the harness doesn't boot for you — a hand-picked or pid-derived port
  *  eventually collides with another test file and flakes the suite. */
@@ -38,11 +134,23 @@ export function freePort(): number {
 /** Boot an aio app for a test — libraryMode (never exits the process), a free
  *  port, a throwaway data dir, and `persist: false` by default. Everything is
  *  overridable via `config` (pass `persist: true`, a fixed `port`, `routes`,
- *  `users`, …). `await using srv = await testServer({ cells: [...] })`. */
+ *  `users`, …). `await using srv = await testServer({ cells: [...] })`.
+ *
+ *  `worker: true` cells run in-isolate by default (a test owns the entry
+ *  module, so there is nothing to host them from). Pass
+ *  `{ workers: "real", workerEntry }` to spawn the real thing — separate heap,
+ *  separate module graph — for the tests that need isolation reproduced.
+ *  See docs/testing/prod-parity.md. */
 export async function testServer<S = unknown>(
-  config: CellsConfig,
+  config: TestServerConfig,
 ): Promise<TestServer<S>> {
   _armTestStrict(); // tests are the strictest environment, never the most permissive
+  // Before anything is allocated — a misconfigured harness must not leave a
+  // temp directory behind on its way to throwing.
+  const workerEntryUrl = resolveWorkerMode(config);
+  // Harness-only keys: they must not reach aio.run(), which rejects an unknown
+  // config key by design.
+  const { workers: _w, workerEntry: _we, ...runConfig } = config;
   const port = config.port ?? freePort();
   const madeDir = !config.baseDir;
   const baseDir = config.baseDir ??
@@ -51,7 +159,8 @@ export async function testServer<S = unknown>(
     client: "server-only",
     persist: false,
     appId: `test-${crypto.randomUUID().slice(0, 8)}`,
-    ...config,
+    ...runConfig,
+    ...(workerEntryUrl ? { _workerEntry: workerEntryUrl } : {}),
     // Forced — a test must never let aio.run() call Deno.exit(), and the port /
     // dir are ours to manage.
     libraryMode: true,

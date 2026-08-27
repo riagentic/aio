@@ -11,7 +11,7 @@
 //
 // Every test here fires the real code paths, deterministically, in
 // microseconds.
-import { assert, assertEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import {
   createScheduleManager,
   createVirtualTimers,
@@ -63,22 +63,22 @@ Deno.test("after: a 35-day delay fires in 35 days, not immediately", async () =>
   mgr.handle(schedule.after("reminder", 35 * DAY, { type: "Remind" }));
   // The whole point: setTimeout stores its delay in an int32, so an unclamped
   // 35-day timer used to fire on the NEXT TICK.
-  clock.advance(50);
+  await clock.advance(50);
   assertEquals(fired.length, 0, "a 35-day reminder must not fire in 50ms");
-  clock.advance(34 * DAY);
+  await clock.advance(34 * DAY);
   assertEquals(fired.length, 0, "…nor a day early");
-  clock.advance(DAY);
+  await clock.advance(DAY);
   await flush();
   assertEquals(fired.length, 1, "…and it must actually fire on day 35");
   assertEquals(mgr.active(), [], "a fired one-shot leaves no timer behind");
 });
 
-Deno.test("after: a beyond-ceiling delay says so, once", () => {
+Deno.test("after: a beyond-ceiling delay says so, once", async () => {
   const clock = createVirtualTimers(0);
   const { lines, log } = capture();
   const mgr = createScheduleManager(() => {}, log, { timers: clock });
   mgr.handle(schedule.after("reminder", 35 * DAY, { type: "Remind" }));
-  clock.advance(10 * DAY); // several 24h re-checks
+  await clock.advance(10 * DAY); // several 24h re-checks
   const warns = lines.filter((l) =>
     l.level === "warn" && l.msg.includes("setTimeout ceiling")
   );
@@ -110,7 +110,7 @@ Deno.test("backoff: an uncapped attempt cannot collapse into a hot loop", async 
     { timers: clock },
   );
   mgr.handle(e);
-  clock.advance(60_000);
+  await clock.advance(60_000);
   await flush();
   assertEquals(fired.length, 0, "a capped backoff does not fire in a minute");
 });
@@ -171,15 +171,15 @@ Deno.test("cron: a leap-day pattern survives and fires on Feb 29", async () => {
     lines.map((l) => l.msg).join("\n"),
   );
 
-  clock.advance(Date.UTC(2028, 1, 28) - CRON_START);
+  await clock.advance(Date.UTC(2028, 1, 28) - CRON_START);
   await flush();
   assertEquals(fired.length, 0, "not before Feb 29");
-  clock.advance(DAY);
+  await clock.advance(DAY);
   await flush();
   assertEquals(fired.length, 1, "fires on 2028-02-29T00:00Z");
   assertEquals(mgr.active(), ["leap"], "and re-arms for 2032 instead of dying");
 
-  clock.advance(4 * 366 * DAY);
+  await clock.advance(4 * 366 * DAY);
   await flush();
   assertEquals(fired.length, 2, "the next leap day fires as well");
 });
@@ -224,7 +224,7 @@ Deno.test("cron: a failing tick is reported (it used to log nothing)", async () 
 
   mgr.handle(schedule.cron("tick", "* * * * *", { type: "Tick" }));
   for (let i = 0; i < 5; i++) {
-    clock.advance(60_000);
+    await clock.advance(60_000);
     await flush();
   }
   assertEquals(n, 5, "a repeating schedule survives failed ticks");
@@ -250,13 +250,56 @@ Deno.test("cron: a CLOSED dispatch loop stops the schedule", async () => {
   );
 
   mgr.handle(schedule.cron("tick", "* * * * *", { type: "Tick" }));
-  clock.advance(60_000);
+  await clock.advance(60_000);
   await flush();
   assertEquals(n, 1);
   assertEquals(mgr.active(), [], "cron must not re-arm through a shutdown");
-  clock.advance(10 * 60_000);
+  await clock.advance(10 * 60_000);
   await flush();
   assertEquals(n, 1, "and it must not keep firing during the drain");
+});
+
+// …and it stops the schedule QUIETLY. A closed dispatch loop is a normal
+// shutdown race — `dispatch()` already reports it at warn, once per action
+// type — so the schedule layer classifying it as an error meant every clean
+// exit printed one ERROR per live schedule, measured at seven lines in a real
+// app, directly above that app's own `stopped … errors=0` summary. A shutdown
+// that shouts about itself teaches people to read past shutdown output.
+Deno.test("cron: a CLOSED dispatch loop is not an ERROR", async () => {
+  const clock = createVirtualTimers(Date.UTC(2026, 0, 1));
+  const { log, lines } = capture();
+  const mgr = createScheduleManager(
+    () => {
+      const e = new Error("dispatch closed") as Error & { code: string };
+      e.code = "DISPATCH_CLOSED";
+      return Promise.reject(e) as unknown as void;
+    },
+    log,
+    { timers: clock },
+  );
+  mgr.handle(schedule.cron("tick", "* * * * *", { type: "Tick" }));
+  await clock.advance(60_000);
+  await flush();
+  const errors = lines.filter((l) => l.level === "error");
+  assertEquals(
+    errors.map((l) => l.msg),
+    [],
+    "a closed dispatch loop is handled three lines later, not shouted about",
+  );
+  // A dispatch that failed for ANY OTHER reason is still an error — the point
+  // is classification, not silence.
+  const mgr2 = createScheduleManager(
+    () => Promise.reject(new Error("boom")) as unknown as void,
+    log,
+    { timers: clock },
+  );
+  mgr2.handle(schedule.cron("tick2", "* * * * *", { type: "Tick" }));
+  await clock.advance(60_000);
+  await flush();
+  assert(
+    lines.some((l) => l.level === "error" && l.msg.includes("tick2")),
+    `a real failure must still be an error: ${JSON.stringify(lines)}`,
+  );
 });
 
 Deno.test("cron: re-arming itself is not a same-id collision", async () => {
@@ -268,7 +311,7 @@ Deno.test("cron: re-arming itself is not a same-id collision", async () => {
   const { lines, log } = capture();
   const mgr = createScheduleManager(() => {}, log, { timers: clock });
   mgr.handle(schedule.cron("nightly", "* * * * *", { type: "Tick" }));
-  clock.advance(5 * 60_000);
+  await clock.advance(5 * 60_000);
   await flush();
   assert(
     !has(lines, "warn", "set dynamically twice"),
@@ -300,12 +343,12 @@ Deno.test("retry: cancelAll() during an in-flight failed tick is final", async (
   const mgr = createScheduleManager(fn, log, { timers: clock });
 
   mgr.handle(schedule.after("save", 1000, { type: "Save" }));
-  clock.advance(1000); // fires; the rejection is still in flight
+  await clock.advance(1000); // fires; the rejection is still in flight
   mgr.cancelAll(); // ← shutdown Phase 7 does exactly this
   await flush();
 
   assertEquals(mgr.active(), [], "cancelAll() must actually cancel");
-  clock.advance(60_000);
+  await clock.advance(60_000);
   await flush();
   assertEquals(calls.length, 1, "the retry must not resurrect the schedule");
 });
@@ -317,11 +360,11 @@ Deno.test("retry: schedule.cancel during an in-flight failed tick is honoured", 
   const mgr = createScheduleManager(fn, log, { timers: clock });
 
   mgr.handle(schedule.after("save", 1000, { type: "Save" }));
-  clock.advance(1000);
+  await clock.advance(1000);
   mgr.handle(schedule.cancel("save")); // the app's own cancel, same window
   await flush();
 
-  clock.advance(60_000);
+  await clock.advance(60_000);
   await flush();
   assertEquals(calls.length, 1, "a cancelled schedule stays cancelled");
   assertEquals(mgr.active(), []);
@@ -343,14 +386,14 @@ Deno.test("retry: a same-id replacement is not clobbered by the old retry", asyn
   );
 
   mgr.handle(schedule.after("save", 1000, { type: "Old" }));
-  clock.advance(1000); // Old fires and rejects
+  await clock.advance(1000); // Old fires and rejects
   mgr.handle(schedule.after("save", 2000, { type: "New" })); // replaces the id
   await flush();
 
-  clock.advance(2000);
+  await clock.advance(2000);
   await flush();
   assertEquals(seen, ["Old", "New"]);
-  clock.advance(60_000);
+  await clock.advance(60_000);
   await flush();
   assertEquals(seen, ["Old", "New"], "the old retry must not run at all");
 });
@@ -363,10 +406,10 @@ Deno.test("retry: a live one-shot still retries a failed dispatch", async () => 
   const mgr = createScheduleManager(fn, log, { timers: clock });
 
   mgr.handle(schedule.after("save", 1000, { type: "Save" }));
-  clock.advance(1000);
+  await clock.advance(1000);
   await flush();
   for (let i = 0; i < 4; i++) {
-    clock.advance(5000);
+    await clock.advance(5000);
     await flush();
   }
   assertEquals(calls.length, 4, "1 fire + 3 retries");
@@ -381,10 +424,10 @@ Deno.test("cancelByPrefix reaches an in-flight one-shot (cell disable)", async (
   const mgr = createScheduleManager(fn, log, { timers: clock });
 
   mgr.handle(schedule.after("mycell:save", 1000, { type: "Save" }));
-  clock.advance(1000);
+  await clock.advance(1000);
   mgr.cancelByPrefix("mycell"); // the cell was just disabled
   await flush();
-  clock.advance(60_000);
+  await clock.advance(60_000);
   await flush();
   assertEquals(calls.length, 1);
 });
@@ -412,7 +455,7 @@ Deno.test("skipIfRunning: a hung tick is audible, not silent", async () => {
   mgr.handle(
     schedule.every("poll", 100, { type: "Poll" }, { skipIfRunning: true }),
   );
-  clock.advance(60_000); // 600 due ticks; exactly one of them ever ran
+  await clock.advance(60_000); // 600 due ticks; exactly one of them ever ran
   await flush();
   assertEquals(calls.length, 1, "the wedge itself is the documented behaviour");
   const warns = lines.filter((l) =>
@@ -431,7 +474,7 @@ Deno.test("skipIfRunning: cancel + re-create the same id clears the guard", asyn
   mgr.handle(
     schedule.every("poll", 100, { type: "Poll" }, { skipIfRunning: true }),
   );
-  clock.advance(1000);
+  await clock.advance(1000);
   await flush();
   assertEquals(calls.length, 1);
 
@@ -442,7 +485,7 @@ Deno.test("skipIfRunning: cancel + re-create the same id clears the guard", asyn
   mgr.handle(
     schedule.every("poll", 100, { type: "Poll" }, { skipIfRunning: true }),
   );
-  clock.advance(100);
+  await clock.advance(100);
   await flush();
   assertEquals(calls.length, 2, "a re-created schedule is not born wedged");
 });
@@ -466,10 +509,10 @@ Deno.test("skipIfRunning: a settled tick resets the consecutive-skip count", asy
   mgr.handle(
     schedule.every("poll", 100, { type: "Poll" }, { skipIfRunning: true }),
   );
-  clock.advance(500); // 4 skips — under the threshold
+  await clock.advance(500); // 4 skips — under the threshold
   resolveTick!();
   await flush();
-  clock.advance(100);
+  await clock.advance(100);
   await flush();
   assertEquals(calls.length, 2);
   assert(
@@ -492,13 +535,106 @@ Deno.test("at: a past target warns instead of vanishing", () => {
   );
 });
 
+Deno.test("at: a past target still REPLACES the job it was issued for", async () => {
+  // `at` is replace semantics — issuing it for an id cancels whatever that id
+  // was. The past-target branch warned and RETURNED, leaving the previous job
+  // armed: re-pointing a reminder at a time that turned out to be in the past
+  // let the OLD one fire, a schedule the app believed it had moved.
+  const clock = createVirtualTimers(Date.UTC(2026, 0, 1));
+  const fired: string[] = [];
+  const { lines, log } = capture();
+  const mgr = createScheduleManager(
+    ((a: { type: string }) => {
+      fired.push(a.type);
+      return Promise.resolve();
+    }) as unknown as Parameters<typeof createScheduleManager>[0],
+    log,
+    { timers: clock },
+  );
+  mgr.handle(schedule.at("promo", "2026-01-03T00:00:00Z", { type: "Old" }));
+  assertEquals(mgr.active(), ["promo"]);
+  mgr.handle(schedule.at("promo", "2025-12-31T00:00:00Z", { type: "New" }));
+  assertEquals(mgr.active(), [], "the replaced job stayed armed");
+  assert(has(lines, "warn", "was CANCELLED"));
+  await clock.advance(10 * DAY);
+  assertEquals(fired, [], "the schedule it replaced fired anyway");
+});
+
 // ── the virtual clock itself ────────────────────────────────────────
 
-Deno.test("virtual clock: a runaway re-arm throws instead of hanging", () => {
+Deno.test("virtual clock: a runaway re-arm throws instead of hanging", async () => {
   const clock = createVirtualTimers(0);
   const tick = () => {
     clock.setTimeout(tick, 0);
   };
   tick();
-  assertThrows(() => clock.advance(1), Error, "re-arming itself");
+  await assertRejects(() => clock.advance(1), Error, "re-arming itself");
+});
+
+Deno.test("virtual clock: microtasks drain between fires, as a real turn does", async () => {
+  // Two timer callbacks are separated by a full turn of the event loop in
+  // production: every microtask the first queued has run before the second
+  // starts. The virtual clock fired them back-to-back, so the harness was MORE
+  // FORGIVING than production — `skipIfRunning` skipped a tick whose promise
+  // had already settled in reality, and every retry/backoff chain resolved a
+  // beat late. A test env softer than prod manufactures green-test-broken-prod.
+  const clock = createVirtualTimers(0);
+  const order: string[] = [];
+  clock.setTimeout(() => {
+    order.push("fire1");
+    Promise.resolve().then(() => order.push("micro1"));
+  }, 10);
+  clock.setTimeout(() => order.push("fire2"), 20);
+  await clock.advance(50);
+  assertEquals(order, ["fire1", "micro1", "fire2"]);
+});
+
+Deno.test("skipIfRunning: a tick that has already settled does not skip the next", async () => {
+  const clock = createVirtualTimers(0);
+  const { log } = capture();
+  let fires = 0;
+  const mgr = createScheduleManager(
+    // Settles on a microtask — the common case (an async method that awaits
+    // nothing slow). Back-to-back fires left it "running" and skipped.
+    () => {
+      fires++;
+      return Promise.resolve();
+    },
+    log,
+    { timers: clock },
+  );
+  mgr.handle(
+    schedule.every("poll", 100, { type: "Poll" }, { skipIfRunning: true }),
+  );
+  await clock.advance(500);
+  mgr.cancelAll();
+  assertEquals(fires, 5, "settled ticks were skipped as if still running");
+});
+
+Deno.test("schedule: a spent one-shot leaves no bookkeeping behind", async () => {
+  // One-shot ids are routinely UNIQUE (`toast:<uuid>`, `retry:<jobId>`), and
+  // the epoch map deliberately outlives the fire so a failed tick's retry can
+  // tell "cancelled" from "already fired". Nothing ever removed it once that
+  // retry window closed, so a long-running app grew one entry per id forever
+  // while `active()` reported nothing at all.
+  const clock = createVirtualTimers(0);
+  const { log } = capture();
+  const mgr = createScheduleManager(
+    (() => Promise.resolve()) as unknown as Parameters<
+      typeof createScheduleManager
+    >[0],
+    log,
+    { timers: clock },
+  );
+  const base = mgr._bookkeepingSize();
+  for (let i = 0; i < 200; i++) {
+    mgr.handle(schedule.after(`toast:${i}`, 10, { type: "Dismiss" }));
+    await clock.advance(20);
+  }
+  assertEquals(mgr.active(), []);
+  assertEquals(
+    mgr._bookkeepingSize(),
+    base,
+    "200 spent one-shots left bookkeeping behind",
+  );
 });

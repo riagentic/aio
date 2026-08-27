@@ -1281,3 +1281,169 @@ Deno.test("dispatch: BigInt state survives the REAL diagnostics hook (differ inc
     await Deno.remove(dir, { recursive: true }).catch(() => {});
   }
 });
+
+// ── A throw inside the drain loop must not wedge dispatch ────────────
+//
+// `depth--; dispatching = false;` used to sit AFTER the loop, on the success
+// path only, and several call sites inside the loop are unguarded (deepFreeze,
+// setState, onPerf, getBreakdown, reportPerf). One throw therefore left
+// `dispatching === true` for the life of the process: every later dispatch
+// queued, returned a promise, and nothing ever drained it — the cell went
+// silent, with no second error.
+
+Deno.test("deepFreeze: a typed array in state is skipped, not thrown on", () => {
+  // `Object.freeze` throws "Cannot freeze array buffer views with elements" on
+  // a non-empty typed array. Immer's own freeze skips non-draftables, so PROD
+  // was fine and DEV (freezeState: !prod) died — a dev/prod divergence in the
+  // forbidden direction, with the action's write lost on top.
+  const state = { bytes: new Uint8Array([1, 2, 3]), n: { deep: 1 } };
+  const frozen = deepFreeze(state);
+  assertEquals(Object.isFrozen(frozen), true);
+  assertEquals(Object.isFrozen(frozen.n), true);
+  assertEquals(Object.isFrozen(frozen.bytes), false); // skipped, on purpose
+  assertEquals([...frozen.bytes], [1, 2, 3]);
+});
+
+Deno.test("dispatch: a Uint8Array in state under freezeState does not wedge dispatch", async () => {
+  let state: Record<string, unknown> = {};
+  const dispatch = createDispatch<
+    Record<string, unknown>,
+    { type: string; payload?: unknown },
+    { type: string }
+  >({
+    reduce: (s, a) => ({ state: { ...s, [a.type]: a.payload }, effects: [] }),
+    execute: () => {},
+    getState: () => state,
+    setState: (s) => {
+      state = s;
+    },
+    onDone: () => {},
+    log: noop,
+    debug: false,
+    freezeState: true, // the dev default
+  });
+  await dispatch({ type: "bytes", payload: new Uint8Array([1, 2, 3]) });
+  assertEquals(Object.keys(state), ["bytes"]); // the write LANDED
+  // …and the next action still settles. It used to hang forever.
+  await dispatch({ type: "ok", payload: 1 });
+  assertEquals(Object.keys(state), ["bytes", "ok"]);
+});
+
+Deno.test("dispatch: an unguarded throw in the drain body rejects every stranded caller and resets", async () => {
+  let state: Record<string, unknown> = {};
+  let boom = true;
+  const errors: AioError[] = [];
+  const dispatch = createDispatch<
+    Record<string, unknown>,
+    { type: string },
+    { type: string }
+  >({
+    reduce: (s, a) => ({ state: { ...s, [a.type]: 1 }, effects: [] }),
+    execute: () => {},
+    getState: () => state,
+    // Stands in for every unguarded call site in the loop body.
+    setState: (s) => {
+      if (boom) {
+        boom = false;
+        throw new Error("setState blew up");
+      }
+      state = s;
+    },
+    onDone: () => {},
+    log: noop,
+    debug: false,
+    reportOpts: { onError: (e) => errors.push(e) },
+  });
+
+  let first: Promise<unknown> | null = null;
+  let threw: unknown = null;
+  try {
+    first = dispatch({ type: "first" });
+  } catch (e) {
+    threw = e; // the cause propagates to the caller — that half was always loud
+  }
+  assertEquals(String(threw).includes("setState blew up"), true);
+  // The stranded caller learns its action was NOT applied…
+  const err = errors.find((e) => e.code === "DISPATCH_ABORTED");
+  assertEquals(err !== undefined, true, "no DISPATCH_ABORTED reported");
+  assertEquals(first, null);
+  // …and dispatch is usable again on the very next call.
+  await dispatch({ type: "after" });
+  assertEquals(Object.keys(state), ["after"]);
+});
+
+Deno.test("dispatch: a queued action stranded by a throw rejects instead of hanging", async () => {
+  let state: Record<string, unknown> = {};
+  let boom = false;
+  const dispatch = createDispatch<
+    Record<string, unknown>,
+    { type: string },
+    { type: string }
+  >({
+    // The first action's reduce queues a second one, then the commit of the
+    // FIRST blows up — so entry #2 is sitting in the queue when the loop dies.
+    reduce: (s, a) => {
+      if (a.type === "first") {
+        boom = true;
+        queued = dispatch({ type: "second" });
+      }
+      return { state: { ...s, [a.type]: 1 }, effects: [] };
+    },
+    execute: () => {},
+    getState: () => state,
+    setState: (s) => {
+      if (boom) {
+        boom = false;
+        throw new Error("commit blew up");
+      }
+      state = s;
+    },
+    onDone: () => {},
+    log: noop,
+    debug: false,
+  });
+  let queued: Promise<unknown> | null = null;
+  try {
+    dispatch({ type: "first" });
+  } catch { /* loud, expected */ }
+  assertEquals(queued !== null, true);
+  const outcome = await Promise.race([
+    queued!.then(() => "resolved", (e) => `rejected:${(e as AioError).code}`),
+    new Promise((r) => setTimeout(() => r("HUNG"), 300)),
+  ]);
+  assertEquals(outcome, "rejected:DISPATCH_ABORTED");
+});
+
+Deno.test("dispatch: the loop guard agrees with the queue cap", async () => {
+  // 1500 actions is a legitimate fan-out (a bulk import dispatching per row).
+  // The queue accepted them — cap 10 000 — and the drain then rejected 501 of
+  // them as a "possible infinite loop", because the iteration ceiling was 1000.
+  // Two answers to "how many actions may exist at once"; the app could do
+  // nothing about the second, since the first had already said yes.
+  let n = 0;
+  const dispatch = createDispatch<
+    { n: number },
+    { type: string },
+    { type: string }
+  >({
+    reduce: (s) => ({ state: { n: s.n + 1 }, effects: [] }),
+    execute: () => {},
+    getState: () => ({ n }),
+    setState: (s) => {
+      n = s.n;
+    },
+    onDone: () => {},
+    log: noop,
+    debug: false,
+  });
+  const all: Promise<unknown>[] = [];
+  for (let i = 0; i < 1500; i++) all.push(dispatch({ type: `bulk:${i}` }));
+  const results = await Promise.allSettled(all);
+  const rejected = results.filter((r) => r.status === "rejected");
+  assertEquals(
+    rejected.length,
+    0,
+    `${rejected.length} legitimate actions were rejected`,
+  );
+  assertEquals(n, 1500);
+});

@@ -25,7 +25,7 @@ import {
 } from "./vdom.ts";
 import { _cleanupActions } from "./vdom-helpers.ts";
 import { _componentName } from "./hook-error.ts";
-import { removeDom } from "./vdom-remove.ts";
+import { _cleanupChildren, removeDom } from "./vdom-remove.ts";
 import { Portal } from "./vdom-types.ts";
 import { cleanupSignalBindings } from "./signal-binding.ts";
 import { _getExitHandler, _setLifecycleHooks } from "./transition-component.ts";
@@ -58,6 +58,9 @@ import { _setSignalDevMode } from "../state/signal.ts";
 /** Re-export the reactive `signal` primitive so air consumers (e.g. the ui kit)
  *  get it through the air surface without reaching into `state` directly. */
 export { signal } from "../state/signal.ts";
+// Registers the renderer's component-tree walker with DevTools (import for
+// the side effect — `connectAioDevTools().tree` reads through it).
+import "./devtools-tree.ts";
 import { _setHydrateDoc } from "./renderer-hydrate.ts";
 
 // -- Re-exports (public API -- all importers use aio-renderer.ts) ------
@@ -124,8 +127,16 @@ function _devA11yCheck(tag: string, props: Record<string, unknown>): void {
       '[aio-dev] <img> missing "alt" attribute. Add alt="" for decorative images or descriptive text for meaningful ones.',
     );
   }
+  // `role="presentation"` / `role="none"` is the author declaring that this
+  // element carries no semantics — a scrim, an overlay, a decorative wrapper
+  // whose click is a convenience the keyboard reaches another way (a modal's
+  // Escape). Telling them to bolt a keydown onto a non-focusable div is advice
+  // that helps nobody, and the framework's own <Modal> backdrop tripped it, so
+  // the warning arrived about markup the app could not change.
+  const presentational = props.role === "presentation" || props.role === "none";
   if (
     props.onClick &&
+    !presentational &&
     !props.onKeyDown &&
     !props.onKeyUp &&
     !props.onKeyPress &&
@@ -270,7 +281,7 @@ function _unmountTree(
   if (vnode == null || typeof vnode !== "object") return;
   if (typeof vnode.tag === "function") {
     ctx.hooks?.unmountComponent(vnode);
-    _unmountTree(vnode._rendered ?? null, ctx);
+    for (const child of _cleanupChildren(vnode)) _unmountTree(child, ctx);
   } else if (vnode.tag === Portal) {
     // AIO-418: Portal children live in props.target, NOT under the mount root —
     // the final `root.innerHTML = ""` never touches them, so a full unmount
@@ -301,7 +312,12 @@ function _unmountTree(
       }
       _callRef(vnode.props.ref, null, _componentName(vnode.tag));
     }
-    for (const child of vnode.children) {
+    // `_cleanupChildren` (vdom-remove.ts) is THE rule for what lives under a
+    // vnode — an ErrorBoundary/Suspense in FALLBACK state has its `_rendered`
+    // there, not its children. Walking `children` blindly left every fallback
+    // subtree mounted on a root unmount (leaked onCleanup + live signal
+    // subscriptions, and `testUI` teardown goes through here).
+    for (const child of _cleanupChildren(vnode)) {
       _unmountTree(child, ctx);
     }
   }

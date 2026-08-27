@@ -2,10 +2,14 @@
 // child-dependent props. The prop→DOM write itself lives in prop-write.ts, which
 // the signal binder shares: one rule, two callers.
 
-import { batch } from "../state/signal.ts";
-import { isSignal, resolveSignalProp } from "./signal-binding.ts";
+import {
+  isSignal,
+  reassertControlledSignalProps,
+  resolveSignalProp,
+} from "./signal-binding.ts";
 import {
   _attrNS,
+  _controlDrifted,
   _propAttr,
   _RESERVED_PROPS,
   _writeProp,
@@ -21,6 +25,7 @@ import {
   _getWrapped,
   _mapEventName,
   _setWrapped,
+  _wrapHandler,
 } from "./vdom-events.ts";
 
 // ── Child-dependent props ─────────────────────────────────────────────
@@ -45,8 +50,10 @@ function _isChildDependent(el: HTMLElement, k: string): boolean {
 }
 
 /** Apply the props {@link _isChildDependent} deferred — call AFTER children are
- *  built/diffed/hydrated. Same skip rule as `applyProps` (unchanged value is
- *  not rewritten), so it never fights a user's in-between selection. */
+ *  built/diffed/hydrated. Skips only when the LIVE element already shows the
+ *  value (see {@link _controlDrifted}), never on "the vnode said the same thing
+ *  last time" — a `<select>` the user changed and the cell REFUSED kept the
+ *  user's choice on screen forever. */
 export function applyChildDependentProps(
   el: HTMLElement,
   next: Record<string, unknown>,
@@ -58,13 +65,23 @@ export function applyChildDependentProps(
     if ("value" in prev) (el as any).value = "";
     return;
   }
+  // A SIGNAL value is read here too, untracked. It used to return early
+  // ("the signal binding owns it") — but that binding's effect only runs when
+  // the SIGNAL changes, and a user picking a different <option> changes the
+  // DOM, not the signal. `<select value={sig}>` whose handler refused the
+  // choice therefore kept showing the refused option forever, while the exact
+  // same select bound to plain state corrected itself on the next render.
   const raw = next.value;
-  if (isSignal(raw)) return; // the signal binding owns it
   const rv = resolveSignalProp(raw);
-  if ("value" in prev && resolveSignalProp(prev.value) === rv) return;
+  if (!_controlDrifted(el, "value", rv)) return;
   // deno-lint-ignore no-explicit-any
   (el as any).value = rv ?? "";
 }
+
+// `_isControlled`/`_controlDrifted` live in prop-write.ts — the leaf both prop
+// paths share. The signal binder needs the SAME decider (see
+// `reassertControlledSignalProps`), and a second copy here is how `value={sig}`
+// and `value={s.x}` would start behaving differently again.
 
 // ── applyProps ────────────────────────────────────────────────────────
 
@@ -139,7 +156,9 @@ export function applyProps(
     if (_RESERVED_PROPS.has(k)) continue;
     const rv = resolveSignalProp(v);
     if (isSignal(v)) continue; // Signal binding handles ongoing updates via effect
-    if (prev[k] === rv) continue;
+    // The last vnode is not evidence about a CONTROLLED prop — the user may
+    // have moved it since. See _controlDrifted.
+    if (prev[k] === rv && !_controlDrifted(el, k, rv)) continue;
 
     if (k.startsWith("on")) {
       const evt = _mapEventName(
@@ -159,14 +178,14 @@ export function applyProps(
         _deleteWrapped(el, evt);
         continue;
       }
-      // Wrap handler in batch() to coalesce multiple signal writes into one render
-      const handler = rv as EventListener;
-      const wrapped = (e: Event) => batch(() => handler(e));
+      // One wrapper for both paths (vdom-events.ts): signal writes batched
+      // into a single render, and a throwing handler contained + reported.
+      const wrapped = _wrapHandler(rv as EventListener, evt);
       const delegationRoot = _getActiveDelegationRoot();
       if (_DELEGATED_EVENTS.has(evt) && delegationRoot) {
         // Delegated: store in lookup map — root listener dispatches via composedPath
         _ensureDelegation(delegationRoot, evt);
-        _setWrapped(el, evt, wrapped);
+        _setWrapped(el, evt, wrapped, delegationRoot);
       } else {
         // Non-delegated (focus, blur, scroll, etc.): per-element listener
         const oldWrapped = _getWrapped(el, evt);
@@ -187,6 +206,13 @@ export function applyProps(
       _writeProp(el, k, value, before);
     }
   }
+
+  // Signal-valued props were skipped above ("the binding owns them"), but that
+  // binding is an EFFECT: it fires when the signal changes and never otherwise,
+  // so a controlled input the user moved and the handler refused has no path
+  // back to the state's value at all. This is the diff's per-render hook, so
+  // the re-assert happens here — the decider is shared, not copied.
+  reassertControlledSignalProps(el, next);
 }
 
 /** A style object with its signal-valued declarations dropped — those have

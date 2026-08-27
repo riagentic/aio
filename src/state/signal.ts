@@ -66,6 +66,13 @@ interface Subscriber {
   prepare?: () => void;
   execute: () => void;
   invalidate?: () => void;
+  /** Set by every unsubscribe path. A flush SNAPSHOTS the pending set before
+   *  running it, so a subscriber that unsubscribed during phase 1 (or during
+   *  an earlier subscriber's phase 2) was still run from that snapshot: an
+   *  unmounted component's callback firing after it was torn down, reading
+   *  state it no longer belongs to. Unsubscribing has to cancel the
+   *  notification already in the queue, not just future ones. */
+  dead?: boolean;
 }
 
 type CleanupFn = () => void;
@@ -86,7 +93,20 @@ export function _trackEnd(
   deps: Set<SignalImpl<unknown>>,
 ): Set<SignalImpl<unknown>> {
   const popped = _trackStack.pop();
-  if (popped !== deps) throw new Error("Signal tracking stack mismatch");
+  if (popped !== deps) {
+    // An INTERNAL invariant of the renderer's dependency tracking: every
+    // `_trackStart()` is popped by its own `_trackEnd()`, in order. Nothing an
+    // app writes can reach this — it means aio itself unbalanced the stack.
+    // The old text ("Signal tracking stack mismatch") sent readers hunting
+    // through their own components for a mistake that is not there.
+    throw new Error(
+      "[aio] internal invariant broken: the signal tracking stack was popped " +
+        "out of order (_trackEnd received a frame that is not the one " +
+        "_trackStart pushed). This is an aio bug, not yours — please report " +
+        "it at https://github.com/riagentic/aio/issues with the component or " +
+        "cell method that was rendering when it happened.",
+    );
+  }
   return deps;
 }
 
@@ -126,8 +146,8 @@ export function _openScopeDepth(): {
 } {
   return {
     track: _trackStack.length,
-    computed: _computedCollector !== null,
-    effect: _effectCollector !== null,
+    computed: _computedCollectors.length > 0,
+    effect: _effectCollectors.length > 0,
   };
 }
 
@@ -193,9 +213,15 @@ function _flush(): void {
       }
       const pending = [..._pendingSubscribers];
       _pendingSubscribers.clear();
-      // Phase 1: prepare (cleanup) — track failures
-      const phase1Failed = new Set<Subscriber>();
+      // Phase 1: prepare (cleanup). A cleanup that throws is REPORTED, never
+      // allowed to cancel phase 2: skipping the re-run does not undo the
+      // partial cleanup, it only leaves the subscriber showing the value from
+      // before the write while the signal already holds the new one — the
+      // stale-view failure, arrived at silently. (Measured with a
+      // consistently-throwing cleanup: the effect ran on every OTHER write.)
+      // "Value changed ⇒ subscribers told" holds on every path.
       for (const sub of pending) {
+        if (sub.dead) continue;
         if (sub.prepare) {
           try {
             sub.prepare();
@@ -203,13 +229,12 @@ function _flush(): void {
             log.error("signal", "effect cleanup error:", {
               detail: String(e),
             });
-            phase1Failed.add(sub);
           }
         }
       }
-      // Phase 2: execute (re-run) — skip those that failed phase 1
+      // Phase 2: execute (re-run)
       for (const sub of pending) {
-        if (phase1Failed.has(sub)) continue;
+        if (sub.dead) continue; // unsubscribed since the snapshot was taken
         try {
           sub.execute();
         } catch (e) {
@@ -222,6 +247,13 @@ function _flush(): void {
   } finally {
     _flushing = false;
   }
+}
+
+/** Cancel a subscriber's pending notification as well as its future ones.
+ *  Both halves, or "unsubscribed" only means "from now on, mostly". */
+function _retire(sub: Subscriber): void {
+  sub.dead = true;
+  _pendingSubscribers.delete(sub);
 }
 
 /** Propagate a dependency change to its subscribers. Computed links carry an
@@ -362,7 +394,7 @@ class SignalImpl<T> implements Omit<Signal<T>, never> {
     ) {
       if (this._name && _devMode) {
         log.warn(
-          `[aio] signal "${this._name}" update skipped (shallow-equal)`,
+          `signal "${this._name}" update skipped (shallow-equal)`,
         );
       }
       return;
@@ -387,6 +419,7 @@ class SignalImpl<T> implements Omit<Signal<T>, never> {
     this._subscribers.add(sub);
     return () => {
       this._subscribers.delete(sub);
+      _retire(sub);
     };
   }
 }
@@ -499,8 +532,8 @@ class ComputedImpl<T> {
 
   constructor(fn: () => T) {
     this._fn = fn;
-    // Register with active computed collector (for renderer cleanup)
-    if (_computedCollector) _computedCollector.push(this);
+    // Registration deliberately does NOT happen here — see `computed()`. The
+    // object the renderer must be handed is the CALLABLE, not `this`.
   }
 
   dispose(): void {
@@ -577,7 +610,24 @@ class ComputedImpl<T> {
 
 /** Create a derived signal that recomputes when its dependencies change. */
 export function computed<T>(fn: () => T): Computed<T> {
-  return _callable<T, ComputedImpl<T>, Computed<T>>(new ComputedImpl(fn));
+  const c = _callable<T, ComputedImpl<T>, Computed<T>>(new ComputedImpl(fn));
+  // Register the CALLABLE, never the instance. `_callable` COPIES the
+  // instance's own fields onto a new function object, and `_recompute`
+  // reassigns `_unsubs`/`_deps` on whichever object it runs against — the
+  // callable, since that is the only object anyone ever holds. Registering
+  // `this` from the constructor (as this did) handed the renderer a hollow
+  // twin: `dispose()` walked ITS `_unsubs`, which stayed the empty array from
+  // construction, so every dependency link survived the dispose. Measured: 5
+  // render rounds left 5 permanent subscribers on the source signal, each
+  // retaining its render closure, and every later write walked a set that only
+  // ever grows. `_subscribers` is shared by reference (one Set), which is
+  // exactly why the leak was invisible from the outside.
+  if (_computedCollectors.length > 0) {
+    _computedCollectors[_computedCollectors.length - 1]!.push(
+      c as unknown as Disposable,
+    );
+  }
+  return c;
 }
 
 // ── Computed collector (for renderer cleanup) ────────────────────────
@@ -585,18 +635,52 @@ export function computed<T>(fn: () => T): Computed<T> {
 /** Opaque disposable handle returned by the collector. */
 export type Disposable = { dispose(): void };
 
-let _computedCollector: Disposable[] | null = null;
+/** A STACK, mirroring `_trackStack`, not a single slot.
+ *
+ *  Component renders nest: `beforeComponent`/`afterComponent` open and close a
+ *  collection scope per component, and a child renders inside its parent's
+ *  open scope. With one slot the child's `Start` overwrote the parent's and the
+ *  child's `End` set the slot to `null`, so every computed the PARENT created
+ *  after its first child was collected by nobody — never disposed, and its
+ *  dependency links outlived the component. The dependency tracker next door
+ *  has been a stack all along; these two were the odd ones out. */
+const _computedCollectors: Disposable[][] = [];
+
+/** Remove `list` from a collector stack, tolerating (but reporting) an
+ *  out-of-order close. Unlike `_trackEnd` this repairs rather than throws:
+ *  these lists also carry DISPOSAL, so unwinding a render on a bookkeeping
+ *  mismatch would leak the very computeds/effects the close exists to free. */
+function _popCollector<T>(stack: T[][], list: T[], kind: string): void {
+  const top = stack.length - 1;
+  if (top >= 0 && stack[top] === list) {
+    stack.pop();
+    return;
+  }
+  const i = stack.lastIndexOf(list);
+  if (i < 0) return; // already closed — idempotent, nothing to repair
+  stack.splice(i, 1);
+  log.error(
+    "signal",
+    `${kind} collector closed out of order — ${
+      stack.length - i
+    } inner scope(s) were still open. ` +
+      `A render path opened a collection scope and did not close it; the ` +
+      `stack was repaired, but the inner scopes' computeds/effects may now be ` +
+      `attributed to the wrong component. Check that every _${kind}CollectStart ` +
+      `has a matching End on BOTH the success and throw paths.`,
+  );
+}
 
 /** Start collecting computed instances created during a render pass. */
 export function _computedCollectStart(): Disposable[] {
   const list: Disposable[] = [];
-  _computedCollector = list;
+  _computedCollectors.push(list);
   return list;
 }
 
 /** Stop collecting and return the collected computeds. */
 export function _computedCollectEnd(list: Disposable[]): void {
-  if (_computedCollector === list) _computedCollector = null;
+  _popCollector(_computedCollectors, list, "computed");
 }
 
 /** Dispose all computeds in a list (cleanup on re-render). */
@@ -618,18 +702,19 @@ export function _computedDisposeAll(list: Disposable[]): void {
 
 // ── Effect collector (for renderer auto-dispose) ─────────────────────
 
-let _effectCollector: (() => void)[] | null = null;
+/** A stack, for the same reason as `_computedCollectors`. */
+const _effectCollectors: (() => void)[][] = [];
 
 /** Start collecting effect dispose functions created during a render pass. */
 export function _effectCollectStart(): (() => void)[] {
   const list: (() => void)[] = [];
-  _effectCollector = list;
+  _effectCollectors.push(list);
   return list;
 }
 
 /** Stop collecting effect dispose functions. */
 export function _effectCollectEnd(list: (() => void)[]): void {
-  if (_effectCollector === list) _effectCollector = null;
+  _popCollector(_effectCollectors, list, "effect");
 }
 
 /** Dispose all collected effects (cleanup on unmount or re-render). */
@@ -658,10 +743,14 @@ export function effect(fn: () => void | CleanupFn): CleanupFn {
   const sub: Subscriber = {
     prepare: () => {
       if (disposed) return;
-      if (cleanup) {
-        cleanup();
-        cleanup = undefined;
-      }
+      // Clear FIRST, then run. A cleanup that throws used to leave itself
+      // installed: `cleanup = undefined` sat after the call, so the next flush
+      // ran the same throwing cleanup again, phase 1 failed again, and the
+      // effect's execute was skipped forever — one bad cleanup wedged the
+      // effect permanently, with only a log line to show for it.
+      const c = cleanup;
+      cleanup = undefined;
+      if (c) c();
     },
     execute: () => {
       if (disposed) return;
@@ -674,15 +763,21 @@ export function effect(fn: () => void | CleanupFn): CleanupFn {
         cleanup = fn();
       } finally {
         _trackEnd(deps);
-      }
-
-      // AIO-188: fn() may have called dispose() (self-dispose).
-      // Don't re-subscribe to deps if already disposed.
-      if (disposed) return;
-
-      for (const dep of deps) {
-        dep._subscribers.add(sub);
-        unsubs.push(() => dep._subscribers.delete(sub));
+        // Re-subscribe on EVERY exit path, including the throw. This used to
+        // sit after the try, so an effect body that threw once had already
+        // dropped every old subscription and never took a new one: it was
+        // silently unlinked from the graph and could not run again for the
+        // life of the page (the throw itself is reported by `_flush`, which
+        // made it look survivable). The deps collected before the throw are
+        // the ones it read; keeping them means the next change re-runs it.
+        // AIO-188: fn() may have called dispose() (self-dispose) — an effect
+        // that disposed itself must not re-subscribe.
+        if (!disposed) {
+          for (const dep of deps) {
+            dep._subscribers.add(sub);
+            unsubs.push(() => dep._subscribers.delete(sub));
+          }
+        }
       }
     },
   };
@@ -691,17 +786,27 @@ export function effect(fn: () => void | CleanupFn): CleanupFn {
   sub.execute();
 
   const dispose = () => {
+    if (disposed) return; // idempotent
     disposed = true;
-    if (cleanup) {
-      cleanup();
-      cleanup = undefined;
+    _retire(sub);
+    const c = cleanup;
+    cleanup = undefined;
+    try {
+      if (c) c();
+    } finally {
+      // Unlinking is NOT optional. Before this `finally`, a cleanup that threw
+      // during dispose skipped the unsubscribe loop entirely, so a disposed
+      // effect kept every dependency link — the component was gone and its
+      // effect still ran on every write.
+      for (const unsub of unsubs) unsub();
+      unsubs = [];
     }
-    for (const unsub of unsubs) unsub();
-    unsubs = [];
   };
 
   // Register with effect collector if active (renderer auto-dispose)
-  if (_effectCollector) _effectCollector.push(dispose);
+  if (_effectCollectors.length > 0) {
+    _effectCollectors[_effectCollectors.length - 1]!.push(dispose);
+  }
 
   return dispose;
 }

@@ -20,6 +20,9 @@
   },
   "tasks": {
     "dev": "deno run -A src/app.ts --client=server-only",
-    "compile": "deno run -A ../../../src/build.ts --compile --service --headless"
+    "compile": "deno run -A ../../../src/build.ts --compile --service --headless",
+    "check": "deno check src/",
+    "lint": "deno run -A ../../../aiol/mod.ts",
+    "am": "deno run -A ../../../src/am.ts"
   }
 }

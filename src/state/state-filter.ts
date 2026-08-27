@@ -13,6 +13,17 @@ export type PatchFilterFields = {
    *  "encSecKey"]) — removed everywhere under the head field, traversing
    *  arrays element-wise. Exclude mode only. */
   deepExcludes?: string[][];
+  /** Parsed dot-path INCLUDES (`"profile.name"` → ["profile", "name"]).
+   *  Include mode only, and the mirror of `deepExcludes`.
+   *
+   *  Without it, `fields` held the literal string `"profile.name"` while the
+   *  patch filter compared it against the first path SEGMENT (`"profile"`) —
+   *  never equal, so every patch for that cell was dropped. It failed closed
+   *  (nothing leaked) and it failed SILENTLY: the field arrived once in the
+   *  full-state frame and then never moved again, so an included field looked
+   *  like a broken one. `applyCellFieldFilter` had already learned dot paths
+   *  on both sides; this is the patch path learning the same spelling. */
+  deepIncludes?: string[][];
 };
 
 /** Deep-remove the field at `segs` under `value`. Arrays are traversed
@@ -129,7 +140,12 @@ export function applyCellFieldFilter(
   return undefined;
 }
 
-/** Client-read visibility of ONE state key under a cell's ui filter.
+/** Client-read visibility of ONE state key under a cell's visibility filter.
+ *
+ *  The `reason` strings name the key the APP AUTHOR writes — `visible:`, which
+ *  is what `ui:` was renamed to in alpha52. They said `ui.exclude` for three
+ *  releases after the rename, so the best error message in the framework sent
+ *  people grepping their own code for a key that is not in it.
  *  Used by the client read seam (bindCellReactive) so `ui:` visibility holds
  *  on the cell object itself — not just at broadcast time. In standalone/
  *  electron there is no broadcast to filter, so without this the "secret"
@@ -143,16 +159,16 @@ export function uiKeyVisibility(
 ): { hidden: boolean; reason?: string; deepSegs?: string[][] } {
   if (!filter || filter === "all") return { hidden: false };
   if (filter === "none") {
-    return { hidden: true, reason: 'the cell has ui: "none"' };
+    return { hidden: true, reason: 'the cell declares visible: "none"' };
   }
   if ("include" in filter) {
     return filter.include.includes(key)
       ? { hidden: false }
-      : { hidden: true, reason: "the field is not in ui.include" };
+      : { hidden: true, reason: "the field is not in visible.include" };
   }
   if ("exclude" in filter) {
     if (filter.exclude.includes(key)) {
-      return { hidden: true, reason: "the field is listed in ui.exclude" };
+      return { hidden: true, reason: "the field is listed in visible.exclude" };
     }
     const deepSegs = filter.exclude
       .filter((p) => p.includes(".") && p.split(".")[0] === key)
@@ -222,7 +238,48 @@ export function filterPatchesByStrategy(
       if (op.path.length === 0) return undefined; // root replacement -> full fallback
       const seg = String(op.path[0]);
       if (ff.mode === "include") {
-        if (ff.fields.has(seg)) kept.push(op);
+        // The whole top-level field is included — nothing to project.
+        if (ff.fields.has(seg)) {
+          kept.push(op);
+          continue;
+        }
+        const deeps = (ff.deepIncludes ?? []).filter((segs) => segs[0] === seg);
+        if (deeps.length === 0) continue; // field not included at all
+        let within = false;
+        const ancestorRests: string[][] = [];
+        for (const segs of deeps) {
+          const m = matchDeepPath(op.path, segs);
+          if (m.kind === "within") {
+            within = true;
+            break;
+          }
+          if (m.kind === "ancestor") ancestorRests.push(m.rest);
+        }
+        // The op targets the included path or something under it — send it.
+        if (within) {
+          kept.push(op);
+          continue;
+        }
+        if (ancestorRests.length === 0) continue; // a sibling path — not ours
+        // The op replaces/removes an ANCESTOR of an included path. A remove
+        // carries no data, so it passes through as-is (the client must drop
+        // the branch too). A replacement carries the whole ancestor value, so
+        // only the included sub-branches of it are sent.
+        if (!("value" in op)) {
+          kept.push(op);
+          continue;
+        }
+        let projected: unknown = MISSING;
+        for (const rest of ancestorRests) {
+          const picked = pickPath((op as { value: unknown }).value, rest);
+          if (picked === MISSING) continue;
+          projected = projected === MISSING
+            ? picked
+            : mergePicked(projected, picked);
+        }
+        // Nothing included survives in this value — the client's projection is
+        // unchanged by it, so there is nothing to send.
+        if (projected !== MISSING) kept.push({ ...op, value: projected });
         continue;
       }
       // exclude mode: top-level drop, then deep-path handling

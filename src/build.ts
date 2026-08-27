@@ -16,6 +16,7 @@ import { readDenoJson } from "./server/deno-json.ts";
 import { join } from "@std/path";
 import { type BuildConfig, loadBuildConfig } from "./build/build-config.ts";
 import { appDirs, installRoot } from "./server/app-dirs.ts";
+import { APP_ICON, APP_STYLE, BUNDLE_JS } from "./server/app-files.ts";
 import { slugify } from "./server/single-instance-lock.ts";
 import { ensureEmbeddedBundle, runBundle } from "./build/build-bundle.ts";
 import { buildClient } from "./build/build-client.ts";
@@ -130,8 +131,8 @@ export async function build(cfg?: BuildConfig): Promise<void> {
   try {
     for await (const entry of Deno.readDir(dist)) {
       if (
-        entry.name === "app.js" || entry.name === "style.css" ||
-        entry.name === "icon.png" || entry.name === ELECTRON_VERSION_FILE
+        entry.name === BUNDLE_JS || entry.name === APP_STYLE ||
+        entry.name === APP_ICON || entry.name === ELECTRON_VERSION_FILE
       ) continue;
       await Deno.remove(join(dist, entry.name), { recursive: true });
     }

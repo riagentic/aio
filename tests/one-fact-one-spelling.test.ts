@@ -31,12 +31,22 @@ import { assertEquals } from "@std/assert";
 const LEDGER: Record<string, { pattern: RegExp; files: number; use: string }> =
   {
     "App.tsx": { pattern: /"App\.tsx"/g, files: 5, use: "UI_ENTRY" },
-    "style.css": { pattern: /"style\.css"/g, files: 6, use: "APP_STYLE" },
-    // 6 → 5: the four targets that each resolved `<appDir>/icon.png` for
-    // themselves now ask `resolveAppIcon` (F-2), which is also what tells
-    // them an icon is sitting at the project root where the build cannot see it.
-    "icon.png": { pattern: /"icon\.png"/g, files: 5, use: "APP_ICON" },
-    "app.js": { pattern: /"app\.js"/g, files: 6, use: "BUNDLE_JS" },
+    // 6 → 2: every build-side copy now reads APP_STYLE; what is left is the
+    // runtime's own two sites.
+    "style.css": { pattern: /"style\.css"/g, files: 2, use: "APP_STYLE" },
+    // 6 → 5 → 0. The four targets that each resolved `<appDir>/icon.png` for
+    // themselves ask `resolveAppIcon` (F-2), which is also what tells them an
+    // icon is sitting at the project root where the build cannot see it — and
+    // the remaining raw copies (the build's dist/ sweep, the AppImage payload
+    // list, the static server's asset table) now read the constants.
+    //
+    // Zero, not "a smaller number": APP_ICON and BUNDLE_JS were DECLARED as
+    // the one-fact-one-spelling home and had no importer in `src/` at all, so
+    // this ledger was capping the literals at whatever count they already had
+    // — the gate asleep, guarding a migration nobody had performed. A ceiling
+    // of 0 is the only one that cannot go back to sleep.
+    "icon.png": { pattern: /"icon\.png"/g, files: 0, use: "APP_ICON" },
+    "app.js": { pattern: /"app\.js"/g, files: 0, use: "BUNDLE_JS" },
     "src/app.ts": {
       pattern: /"src\/app\.ts"/g,
       files: 6,

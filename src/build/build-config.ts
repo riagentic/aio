@@ -3,7 +3,7 @@
  * Build configuration — parses CLI flags, reads deno.json, derives all shared build state.
  */
 import { readDenoJson } from "../server/deno-json.ts";
-import { UI_ENTRY } from "../server/app-files.ts";
+import { BUNDLE_JS, DIST_DIR, UI_ENTRY } from "../server/app-files.ts";
 import { basename, dirname, join, resolve, SEPARATOR } from "@std/path";
 import { slugify } from "./build-helpers.ts";
 import { appIdFromConfig } from "../server/single-instance-lock.ts";
@@ -165,8 +165,8 @@ function assertKnownFlags(args: readonly string[]): void {
 export async function loadBuildConfig(): Promise<BuildConfig> {
   assertKnownFlags(Deno.args);
   const root = Deno.cwd();
-  const dist = resolve(join(root, "dist"));
-  const out = join(dist, "app.js");
+  const dist = resolve(join(root, DIST_DIR));
+  const out = join(dist, BUNDLE_JS);
 
   // framework src/ root — this module lives in src/build/, entries live at src/
   const frameworkBase = new URL("..", import.meta.url);

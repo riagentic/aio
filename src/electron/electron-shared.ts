@@ -118,6 +118,42 @@ ${save}
 }`;
 }
 
+/** THE window-shape rule, for BOTH generated shells: how much of the frame the
+ *  OS draws (`ui.chrome`) and whether remote content may render inside the app
+ *  (`childWindows` → `<webview>`).
+ *
+ *  It lives here because it was decided TWICE and only once correctly. The UDS
+ *  shell read `meta.chrome` and `meta.childWindows`; the WebSocket shell — the
+ *  one taken whenever the app has a TCP port, i.e. `--expose`, `--port=N`, or
+ *  `transport: "ws"` — read neither. So the same `ui.chrome: "none"` produced a
+ *  frameless window under `deno task dev` and a fully framed one under
+ *  `deno task dev --expose`: one config, two windows, no warning. `ui.chrome`
+ *  is one of the three identity-derived defaults the framework promises are
+ *  the same everywhere the app appears, which makes a transport-dependent
+ *  answer exactly the divergence class this project refuses.
+ *
+ *  Emits the `b.webPreferences = …` / `b.frame = …` pair; `extra` carries the
+ *  keys only one shell has (the UDS preload). Expects `b` in scope. */
+export function tmplWindowShape(
+  meta: AioMeta | undefined,
+  extra: Record<string, string> = {},
+): string {
+  const prefs = [
+    "nodeIntegration: false",
+    "contextIsolation: true",
+    // webviewTag rides the same childWindows opt-in as openWindow: both are
+    // "render remote content inside the app". Off by default; a <webview>
+    // without the gate simply does not render.
+    `webviewTag: ${JSON.stringify(!!meta?.childWindows)}`,
+    ...Object.entries(extra).map(([k, v]) => `${k}: ${v}`),
+  ];
+  return `  b.webPreferences = { ${prefs.join(", ")} };
+  // ui.chrome: "themed"/"none" drop the OS frame. "themed" gets aio's own
+  // title bar back from the page shell (server-html-gen); "none" is a bare
+  // canvas and the app draws whatever it wants, including its drag region.
+  b.frame = ${JSON.stringify((meta?.chrome ?? "standard") === "standard")};`;
+}
+
 /** Debounced bounds tracking (resize/move/close) — returns CJS lines to insert inside ready */
 export function tmplBoundsTracking(): string {
   return `  let t;

@@ -7,6 +7,8 @@
 // Dev-mode protection comes from: dynamic import map (Layer 1b),
 // aiol lint checks (Layer 2), and error overlay (Layer 3).
 
+import { SERVER_FILE_RE } from "../entries.ts";
+
 /** Static server-only imports seen in the last client build:
  *  `specifier → the modules that statically import it`.
  *
@@ -86,7 +88,7 @@ export function aioBrowserPlugin(): {
       // server-only helper modules. Cell methods run server-side; any
       // import('../foo.server.ts') inside them is dead code in the browser bundle.
       build.onResolve(
-        { filter: /\.server\.ts$/ },
+        { filter: SERVER_FILE_RE },
         (args: { path: string; kind: string; importer: string }) => {
           if (args.kind === "dynamic-import") {
             recordDynamic(args.importer, args.path);
@@ -114,8 +116,19 @@ export function aioBrowserPlugin(): {
       // import stays a loud build error, as it must.
       build.onResolve(
         { filter: /^aio\/(server|build)$/ },
-        (args: { path: string; kind: string }) => {
+        (args: { path: string; kind: string; importer: string }) => {
           if (args.kind === "dynamic-import") {
+            // RECORDED, not just externalized. This is the one server-only
+            // door that was opened silently: every other route into server
+            // code lands in `serverOnlyDynamic`, and a standalone Android
+            // build refuses when the client graph reaches ANY of them,
+            // because an APK is a WebView with no Deno runtime to run them.
+            // `await import("aio/server")` — the documented lazy pattern —
+            // skipped that ledger entirely, so the one import most likely to
+            // appear in a real app was the one the Android gate could not
+            // see: build SUCCEEDS, APK installs, UI renders, buttons do
+            // nothing.
+            recordDynamic(args.importer, args.path);
             return { path: args.path, external: true };
           }
           return undefined;

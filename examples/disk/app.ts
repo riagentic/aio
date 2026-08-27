@@ -9,6 +9,10 @@ await aio.run({
   // about the METHOD, so it lives on the cell as `long: ["open"]` (see
   // cell.ts). Keyed by a string in this file, nothing would follow a rename.
   onStart: () => {
+    // Bounded by `ScanLimits` in disk.server.ts — a scan kicked from boot must
+    // cost a known amount. An unbounded recursive walk of $HOME here saturated
+    // a core for as long as the process lived, in every app AND in aio's own
+    // example boot gate.
     disk.open();
   },
 });

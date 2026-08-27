@@ -143,6 +143,21 @@ export async function compactSyncOps(deps: CompactDeps): Promise<void> {
   );
 }
 
+/** `version` / `cell_version` value of a row written before the stamp existed.
+ *
+ *  ONE decider for both halves of the schema. It used to be a literal in three
+ *  places and they had drifted: {@linkcode SYNC_MIGRATIONS} added the columns
+ *  with `DEFAULT -1` (UNKNOWN — resolve the shape from the KV version stamp)
+ *  while {@linkcode SYNC_SCHEMA} created them with `DEFAULT 0` (KNOWN — "this
+ *  row was written under the cell's default version"). Same framework, same
+ *  column, opposite meanings, decided by nothing but how old the database
+ *  happened to be. No writer relies on the default today — every insert stamps
+ *  the value — so the disagreement was invisible, which is exactly how it
+ *  would have shipped: the first unstamped row would mean "already current"
+ *  on a fresh install and "unknown, migrate me" on an upgraded one, and the
+ *  symptom is `onMigrate` skipped (or re-run) over real data. */
+export const SYNC_VERSION_UNKNOWN = -1;
+
 /**
  * SQL to initialize sync tables. Run once during aio.run().
 
@@ -153,7 +168,7 @@ export const SYNC_SCHEMA: string[] = [
     id TEXT PRIMARY KEY, cell TEXT NOT NULL, action TEXT NOT NULL,
     payload TEXT NOT NULL, hlc_phys INTEGER NOT NULL, hlc_cnt INTEGER NOT NULL,
     hlc_node TEXT NOT NULL, server_ts INTEGER NOT NULL,
-    version INTEGER NOT NULL DEFAULT 0)`,
+    version INTEGER NOT NULL DEFAULT ${SYNC_VERSION_UNKNOWN})`,
   `CREATE INDEX IF NOT EXISTS idx_sync_ops_cell_hlc
     ON sync_ops(cell, hlc_phys, hlc_cnt, hlc_node)`,
   // Delivery reads by server_ts (`loadOpsSince`), and the cursor reservation
@@ -165,7 +180,7 @@ export const SYNC_SCHEMA: string[] = [
   `CREATE TABLE IF NOT EXISTS sync_snapshots (
     cell TEXT PRIMARY KEY, version INTEGER NOT NULL, state TEXT NOT NULL,
     hlc_phys INTEGER NOT NULL, hlc_cnt INTEGER NOT NULL, hlc_node TEXT NOT NULL,
-    cell_version INTEGER NOT NULL DEFAULT 0)`,
+    cell_version INTEGER NOT NULL DEFAULT ${SYNC_VERSION_UNKNOWN})`,
   `CREATE TABLE IF NOT EXISTS sync_meta (
     cell TEXT PRIMARY KEY, low_water TEXT NOT NULL,
     last_compact INTEGER NOT NULL, op_count INTEGER NOT NULL,
@@ -195,12 +210,9 @@ export const SYNC_MIGRATIONS: string[] = [
   // never 0, or every existing app that declares `version: N` + `onMigrate`
   // would re-run its hook over already-current data on the first boot after
   // this upgrade. Fresh rows are always stamped explicitly.
-  `ALTER TABLE sync_ops ADD COLUMN version INTEGER NOT NULL DEFAULT -1`,
-  `ALTER TABLE sync_snapshots ADD COLUMN cell_version INTEGER NOT NULL DEFAULT -1`,
+  `ALTER TABLE sync_ops ADD COLUMN version INTEGER NOT NULL DEFAULT ${SYNC_VERSION_UNKNOWN}`,
+  `ALTER TABLE sync_snapshots ADD COLUMN cell_version INTEGER NOT NULL DEFAULT ${SYNC_VERSION_UNKNOWN}`,
 ];
-
-/** `version` / `cell_version` value of a row written before the stamp existed. */
-export const SYNC_VERSION_UNKNOWN = -1;
 
 /** Apply {@linkcode SYNC_MIGRATIONS}, tolerating the already-applied case.
  *

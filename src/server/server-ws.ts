@@ -203,6 +203,12 @@ export interface WsDeps {
   /** When true AND expose=true, require Origin header on WS upgrade.
    *  Plugs F-6: empty/absent Origin is otherwise accepted by the handshake. */
   strictOrigin?: boolean;
+  /** True when this server speaks TLS. The Origin check is otherwise
+   *  SCHEME-BLIND: `http://app.example.com` and `https://app.example.com` are
+   *  different origins to a browser but compared equal here, so a plaintext
+   *  page (a downgrade, a stripped proxy hop, a stale bookmark) opened an
+   *  authenticated socket against the https app it is NOT same-origin with. */
+  secure?: boolean;
   clientCounter: { value: number };
   bootId: string;
   /** Resolved client config — sent as an early "cfg" frame so a shell
@@ -363,6 +369,8 @@ export function createWsManager(deps: WsDeps): WsManager {
   // F-4: IP/client-key denylist with TTL. Survives socket reconnects so
   // abusive clients can't reset their strike count by opening new connections.
   const abuseDenylist = new Map<string, number>(); // key → expiresAt (epoch ms)
+  /** Ceiling on distinct denylisted keys — see `_addToDenylist`. */
+  const ABUSE_DENYLIST_MAX_KEYS = 10_000;
   function _isDenied(key: string | undefined): boolean {
     if (!key) return false;
     const expiresAt = abuseDenylist.get(key);
@@ -375,7 +383,24 @@ export function createWsManager(deps: WsDeps): WsManager {
   }
   function _addToDenylist(key: string | undefined): void {
     if (!key) return;
-    abuseDenylist.set(key, Date.now() + ABUSE_DENYLIST_MS);
+    const now = Date.now();
+    // BOUNDED, because every entry is remote-fed. Entries were removed only
+    // when the SAME key came back and found itself expired — an attacker
+    // rotating addresses never comes back, so each one left a permanent entry
+    // and the map was a memory pump driven from outside. Expire first, then
+    // (still full) drop the oldest: insertion order is age order, and the
+    // oldest strikes are the ones nearest expiry anyway.
+    if (abuseDenylist.size >= ABUSE_DENYLIST_MAX_KEYS) {
+      for (const [k, exp] of abuseDenylist) {
+        if (now > exp) abuseDenylist.delete(k);
+      }
+      const target = Math.floor(ABUSE_DENYLIST_MAX_KEYS * 0.9);
+      for (const k of abuseDenylist.keys()) {
+        if (abuseDenylist.size <= target) break;
+        abuseDenylist.delete(k);
+      }
+    }
+    abuseDenylist.set(key, now + ABUSE_DENYLIST_MS);
   }
 
   // Derive request kind from the outgoing command envelope for the dedup key
@@ -426,7 +451,12 @@ export function createWsManager(deps: WsDeps): WsManager {
           allowed.includes("*");
         // a page this very server served has Origin === our Host header
         const hostHeader = req.headers.get("host");
-        const isOwnHost = hostHeader !== null && u.host === hostHeader;
+        // Same host AND same scheme. `Host` carries no scheme, so the
+        // server's own transport is what the origin must match: an https app
+        // is not same-origin with an http page of the same name.
+        const schemeOk = u.protocol === (deps.secure ? "https:" : "http:");
+        const isOwnHost = hostHeader !== null && u.host === hostHeader &&
+          schemeOk;
         // A SUBMITTED origin cannot certify itself. This used to exempt ANY
         // loopback hostname — so `Origin: http://localhost:1234` walked past
         // the gate unconditionally, under `--expose` included. A port is not
@@ -439,8 +469,14 @@ export function createWsManager(deps: WsDeps): WsManager {
         if (!isAllowed && !isOwnHost) {
           deps.debug(
             `ws: rejected origin ${origin} — not this server's own origin ` +
-              `(${hostHeader ?? "no Host header"}); add it to allowedOrigins ` +
-              `if it is meant to connect`,
+              `(${deps.secure ? "https" : "http"}://${
+                hostHeader ?? "no Host header"
+              })${
+                !schemeOk && hostHeader !== null && u.host === hostHeader
+                  ? ` — the host matches but the SCHEME does not; this server ` +
+                    `speaks ${deps.secure ? "https" : "http"}`
+                  : ""
+              }; add it to allowedOrigins if it is meant to connect`,
           );
           return new Response("Forbidden", { status: 403 });
         }
@@ -659,10 +695,15 @@ export function createWsManager(deps: WsDeps): WsManager {
   }
 
   function _cleanupVitals(meta: ClientMeta): void {
+    // UNCONDITIONAL, and first: `meta.id` is per connection, so anything left
+    // keyed by it outlives the socket for the life of the process. The delete
+    // used to sit inside the vitals gate below, which made "is vitals on?" the
+    // decider for whether a per-connection map ever shrank — two deciders for
+    // one fact, and the leaking one was the prod default.
+    payloadStats.delete(meta.id);
     if (deps.vitalsSystem) {
       deps.vitalsSystem.serverTransport.removeClient(meta.id);
       deps.vitalsSystem.pressureMonitor?.onClientDisconnect(meta.id);
-      payloadStats.delete(meta.id);
     }
   }
 

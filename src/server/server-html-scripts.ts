@@ -40,53 +40,18 @@ export function devWsScript(): string {
     if (_devWsOk) _devWs()`;
 }
 
-/** Health overlay dot + panel — displays diagnostic events in bottom-right corner. */
-export function healthOverlayScript(): string {
-  return `
-    // ── Health Overlay ──
-    var _diagDot = document.createElement('div')
-    Object.assign(_diagDot.style, {position:'fixed',bottom:'12px',right:'12px',zIndex:'99999',width:'8px',height:'8px',borderRadius:'50%',background:'#2a2',cursor:'pointer',display:'none',transition:'background .3s',boxShadow:'0 0 4px rgba(0,0,0,.3)'})
-    document.body.appendChild(_diagDot)
-    var _diagBadge = document.createElement('div')
-    Object.assign(_diagBadge.style, {position:'absolute',top:'-8px',right:'-4px',fontSize:'9px',background:'#e25',color:'#fff',borderRadius:'6px',padding:'0 3px',lineHeight:'14px',display:'none'})
-    _diagDot.appendChild(_diagBadge)
-    var _diagPanel = document.createElement('div')
-    Object.assign(_diagPanel.style, {position:'fixed',bottom:'28px',right:'12px',zIndex:'99998',width:'400px',maxHeight:'300px',overflow:'auto',background:'#1a1a1a',border:'1px solid #333',borderRadius:'8px',font:'12px/1.6 monospace',color:'#ccc',display:'none',boxShadow:'0 4px 16px rgba(0,0,0,.5)'})
-    document.body.appendChild(_diagPanel)
-    var _diagEvents = [], _diagUnread = 0
-    _diagDot.onclick = function() {
-      var show = _diagPanel.style.display === 'none'
-      _diagPanel.style.display = show ? 'block': 'none'
-      if (show) { _diagUnread = 0; _updateDiagDot() }
-    }
-    function _updateDiagDot() {
-      var hasErr = _diagEvents.some(function(e) { return e.severity === 'error' })
-      var hasWarn = _diagEvents.some(function(e) { return e.severity === 'warning' })
-      _diagDot.style.background = hasErr ? '#e25': hasWarn ? '#ea0': '#2a2'
-      _diagBadge.style.display = _diagUnread > 0 ? 'block': 'none'
-      _diagBadge.textContent = String(_diagUnread)
-    }
-    function _renderDiagPanel() {
-      var cutoff = Date.now() - 60000
-      _diagEvents = _diagEvents.filter(function(e) { return e.ts > cutoff })
-      if (!_diagEvents.length) { _diagDot.style.display = 'none'; _diagPanel.style.display = 'none'; return }
-      _diagPanel.innerHTML = _diagEvents.map(function(ev) {
-        var c = ev.severity === 'error' ? '#e25': ev.severity === 'warning' ? '#ea0': '#888'
-        var age = Math.round((Date.now() - ev.ts) / 1000)
-        return '<div style="padding:6px 10px;border-bottom:1px solid #2a2a2a">'
-          + '<span style="color:' + c + '">\\u25CF</span> '
-          + '<b>' + esc(ev.type) + '</b> <span style="color:#555">' + age + 's ago</span>'
-          + '<div style="color:#aaa;margin:2px 0">' + esc(ev.message) + '</div>'
-          + (ev.hint ? '<div style="color:#98c379;font-size:11px">\\u2192 ' + esc(ev.hint) + '</div>': '')
-          + '</div>'
-      }).join('')
-    }
-    window._aioDiag = function(ev) {
-      _diagEvents.push(ev)
-      _diagUnread++
-      _diagDot.style.display = 'block'
-      _updateDiagDot()
-      if (_diagPanel.style.display !== 'none') _renderDiagPanel()
-    }
-    setInterval(function() { if (_diagPanel.style.display !== 'none') _renderDiagPanel() }, 10000)`;
-}
+// The 50-line dev "health overlay" (a corner dot + a panel rendering
+// `window._aioDiag` events) lived here from the day it was written and was
+// never injected into any shell — generated markup with no route to a page.
+// Two doc comments and a test header described it as if it existed.
+//
+// It is gone rather than wired, for two reasons. It duplicated a sink that
+// already works: `_deliverDiag` (src/protocol/protocol-diagnostics.ts) falls
+// back to the console whenever the page defines no `window._aioDiag`, which
+// was every page, so nothing was ever lost by the overlay's absence. And
+// injecting DOM code that has never once executed into every dev page is a
+// regression risk taken on behalf of a feature nobody asked for.
+//
+// `window._aioDiag` remains the documented hook: a page (or an app's own dev
+// tooling) that defines it receives every diagnostic event, and the console
+// fallback covers every page that does not.

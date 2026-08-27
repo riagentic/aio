@@ -157,10 +157,81 @@ export const DEFAULT_PRAGMAS = [
   "PRAGMA foreign_keys = ON",
 ];
 
+/** The pragma a statement sets, lowercased (`PRAGMA synchronous = FULL` →
+ *  `synchronous`), so two spellings of the same setting are one key. */
+export function pragmaName(stmt: string): string {
+  const m = /^\s*PRAGMA\s+([A-Za-z0-9_.]+)/i.exec(stmt);
+  return (m ? m[1]! : stmt.trim()).toLowerCase();
+}
+
+/** Custom pragmas OVER the defaults, matched by pragma name.
+ *
+ *  `dbPragmas` used to REPLACE the list wholesale, so an app that asked for one
+ *  setting — the documented `PRAGMA synchronous = FULL` for durable data —
+ *  silently lost every other default with it. Measured on this driver: the file
+ *  then opens in rollback-journal mode instead of WAL (readers block writers,
+ *  and the crash-recovery story changes), with no `busy_timeout` (a concurrent
+ *  write fails immediately with `database is locked` instead of waiting 5s) and
+ *  the default 2MB page cache. Nothing said any of it had happened.
+ *  (`foreign_keys = ON` survives by luck — node:sqlite enforces foreign keys by
+ *  default — which is exactly why this must not be left to luck: the table
+ *  planner emits `PRAGMA defer_foreign_keys = ON` for a schema with references
+ *  and that is a no-op when they are off.)
+ *
+ *  Overriding one pragma now overrides exactly that pragma; turning a default
+ *  OFF is still possible, by saying so (`PRAGMA foreign_keys = OFF`). */
+/** Pragmas that WRITE to the file, so a readonly connection cannot run them.
+ *
+ *  `journal_mode = WAL` rewrites the database header, and SQLite answers
+ *  `attempt to write a readonly database` on any file that is not already in
+ *  WAL — a `VACUUM INTO` snapshot, for one, which is exactly the file the
+ *  integrity check has to open readonly before restoring it. Dropping it for
+ *  readonly connections changes nothing for a file that IS in WAL (the pragma
+ *  is a no-op there) and makes the readonly open work everywhere else. */
+const READONLY_UNSAFE_PRAGMAS = new Set(["journal_mode"]);
+
+/** The pragmas to send on open, for this connection's mode. */
+export function pragmasFor(
+  readonly: boolean,
+  overrides?: readonly string[],
+): string[] {
+  const merged = mergePragmas(DEFAULT_PRAGMAS, overrides);
+  return readonly
+    ? merged.filter((p) => !READONLY_UNSAFE_PRAGMAS.has(pragmaName(p)))
+    : merged;
+}
+
+export function mergePragmas(
+  defaults: readonly string[],
+  overrides?: readonly string[],
+): string[] {
+  if (!overrides?.length) return [...defaults];
+  const byName = new Map(overrides.map((p) => [pragmaName(p), p]));
+  const defaultNames = new Set(defaults.map(pragmaName));
+  return [
+    ...defaults.map((d) => byName.get(pragmaName(d)) ?? d),
+    ...overrides.filter((p) => !defaultNames.has(pragmaName(p))),
+  ];
+}
+
 /** Options for createDB — readonly mode, custom pragmas, read replicas */
 export type DBOpts = {
   readonly?: boolean;
+  /** PRAGMAs to apply on open. Merged OVER {@linkcode DEFAULT_PRAGMAS} by
+   *  pragma name (see {@linkcode mergePragmas}) — naming one does not drop the
+   *  rest. */
   pragmas?: string[];
+  /** How long one worker request may take before it is rejected, in ms.
+   *  `0` disables the ceiling.
+   *
+   *  There was no ceiling at all: a worker that dies WITHOUT firing `onerror`
+   *  (an OOM-killed isolate, a host that terminated it) left every in-flight
+   *  `db.query()` pending forever — and a `db.query()` on the dispatch path
+   *  that never settles is a method call that never returns, which looks
+   *  exactly like a slow app. A request that cannot finish now fails, loudly
+   *  and by name, instead of hanging. Raise it for an app whose legitimate
+   *  statements (a VACUUM over many GB) run longer. */
+  requestTimeoutMs?: number;
   /** Spawn N additional readonly Workers on the same WAL-mode file.
    *  query() round-robins across readers; execute()/transaction() always go to the writer.
    *  Enables parallel reads without write contention. Default: 0 (writer-only). */
@@ -168,6 +239,11 @@ export type DBOpts = {
 };
 
 type Pending = { resolve: (v: unknown) => void; reject: (e: Error) => void };
+
+/** Default ceiling on one worker request (see {@linkcode DBOpts.requestTimeoutMs}).
+ *  Generous on purpose — it exists to convert a HANG into an error, not to
+ *  police slow queries. */
+export const DB_REQUEST_TIMEOUT_MS = 120_000;
 
 /** Create an async SQLite DB backed by a dedicated Worker thread (+ optional read replicas).
  *  Workers spawn lazily on first call — zero overhead if SQLite is never used.
@@ -218,22 +294,67 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
         }
         ids.clear();
       }
-      // Terminate zombie worker and clear refs so next call respawns
+      // Terminate the zombie and clear refs so the next call respawns.
+      //
+      // `ready = null` makes ensureWorkers() run again, and that used to PUSH a
+      // fresh set of readers onto the existing array: every respawn leaked the
+      // surviving workers (each holding an open SQLite handle) and left
+      // duplicate readers in the round-robin. Take the whole pool down with the
+      // worker that died — one respawn, one pool.
       try {
         w.terminate();
       } catch { /* ignore */ }
       ready = null;
       if (writerWorker === w) writerWorker = null;
       readerWorkers = readerWorkers.filter((rw) => rw !== w);
+      _teardownPool();
     };
   }
 
   // Send a message to a specific worker (no gate — used for open and close)
+  const timeoutMs = opts.requestTimeoutMs ?? DB_REQUEST_TIMEOUT_MS;
   function sendTo<T>(w: Worker, msg: WorkerMsg): Promise<T> {
     const id = nextId++;
     return new Promise<T>((resolve, reject) => {
-      pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
+      // `close` runs its own bounded race in close() — a second ceiling here
+      // would only make shutdown fail twice.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const settle = <A>(fn: (a: A) => void) => (a: A) => {
+        if (timer !== undefined) clearTimeout(timer);
+        fn(a);
+      };
+      pending.set(id, {
+        resolve: settle(resolve) as (v: unknown) => void,
+        reject: settle(reject),
+      });
       workerPending.get(w)?.add(id);
+      if (timeoutMs > 0 && msg.type !== "close") {
+        timer = setTimeout(() => {
+          const p = pending.get(id);
+          if (!p) return;
+          pending.delete(id);
+          workerPending.get(w)?.delete(id);
+          const sql = "sql" in msg
+            ? ` — ${String(msg.sql).slice(0, 200)}`
+            : msg.type === "transaction"
+            ? ` — a ${msg.stmts.length}-statement transaction`
+            : "";
+          reject(
+            new Error(
+              `db: the SQLite worker did not answer a "${msg.type}" within ` +
+                `${timeoutMs}ms${sql}. Either the statement is genuinely ` +
+                `slower than that, or the worker died without reporting it ` +
+                `(an OOM-killed isolate fires no error event) — in which ` +
+                `case this request would otherwise never settle, and a ` +
+                `db call on the dispatch path would hang forever. fix: raise ` +
+                `\`requestTimeoutMs\` for legitimately long statements, or ` +
+                `look for what killed the worker.`,
+            ),
+          );
+        }, timeoutMs);
+        // Never hold the process open for a timer that only guards a hang.
+        Deno.unrefTimer?.(timer as unknown as number);
+      }
       w.postMessage({ ...msg, id });
     });
   }
@@ -253,15 +374,33 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
       type: "open",
       path,
       readonly,
-      pragmas: opts.pragmas ?? DEFAULT_PRAGMAS,
+      pragmas: pragmasFor(readonly, opts.pragmas),
     });
     return { worker: w, opening };
+  }
+
+  /** Terminate every worker still held and forget them, so the next call
+   *  rebuilds the pool from nothing. Called when any worker dies (they share
+   *  one file and one open/ready gate) and before every respawn. */
+  function _teardownPool(): void {
+    for (const w of [writerWorker, ...readerWorkers]) {
+      if (!w) continue;
+      try {
+        w.terminate();
+      } catch { /* already gone */ }
+    }
+    writerWorker = null;
+    readerWorkers = [];
+    readerIndex = 0;
+    ready = null;
   }
 
   // Lazily spawn writer + all readers, wait for all to be ready.
   // Writer opens first so the file exists before readers try readonly open.
   function ensureWorkers(): Promise<void> {
     if (ready) return ready;
+    // A respawn starts from an empty pool — never on top of the old one.
+    _teardownPool();
 
     let numReaders = opts.readers ?? 0;
     // AIO-421: an in-memory DB lives inside ONE Worker — reader Workers
@@ -356,8 +495,16 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
       // deno-lint-ignore no-explicit-any
     ): Promise<any> {
       if (_inTransaction) {
+        // The old text advised "use savepoints if needed". aio has no
+        // savepoint API, so the one actionable-looking phrase in the message
+        // pointed at nothing the reader could type.
         throw new Error(
-          "nested db.transaction() would deadlock — use savepoints if needed",
+          "db.transaction() called while another transaction is open on this " +
+            "connection — it would deadlock, so it is refused. Fix: pass the " +
+            "`tx` handle your outer transaction already gave you down to the " +
+            "helper instead of opening a second one (tx.execute/tx.query run " +
+            "inside the transaction you are already in), or move the inner " +
+            "work outside the outer db.transaction() callback.",
         );
       }
 
@@ -405,14 +552,68 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
     // `VACUUM INTO` runs on the WRITER and cannot sit inside a transaction, so
     // it goes through the same serial write lock every other write uses — a
     // snapshot can never catch a half-applied transaction.
+    //
+    // It is written to a TEMP path, verified, and renamed over the destination.
+    // `VACUUM INTO` REFUSES a path that already exists, so the documented
+    // rolling-snapshot recipe — call it on a schedule, recovery restores the
+    // latest — worked exactly once: every later call rejected, and an app that
+    // did not catch it recovered to its first-ever state. And the copy was
+    // never checked, so a snapshot could silently be a corrupt copy of a
+    // corrupt file: the one thing recovery is supposed to fall back to.
+    //
+    // Temp + verify + rename also means a snapshot is never half-written: at
+    // every instant `path` is either the previous good snapshot or the new one.
     async snapshot(path: string): Promise<void> {
-      await withWriterLock(() =>
-        gate<QueryResult>({
-          type: "execute",
-          sql: "VACUUM INTO ?",
-          params: [path],
-        })
-      );
+      const tmp = `${path}.tmp-${Date.now().toString(36)}-${
+        Math.random().toString(36).slice(2, 8)
+      }`;
+      const SCHEMA = "aio_snapcheck";
+      try {
+        await withWriterLock(async () => {
+          await gate<QueryResult>({
+            type: "execute",
+            sql: "VACUUM INTO ?",
+            params: [tmp],
+          });
+          // Verify the COPY, not the original — attached on the writer, which
+          // is the connection that just wrote it.
+          await gate<QueryResult>({
+            type: "execute",
+            sql: `ATTACH DATABASE ? AS ${SCHEMA}`,
+            params: [tmp],
+          });
+          try {
+            const { rows } = await gate<QueryResult<{ quick_check: string }>>(
+              { type: "query", sql: `PRAGMA ${SCHEMA}.quick_check` },
+              true,
+            );
+            const problems = rows
+              .map((r) => r.quick_check)
+              .filter((v) => typeof v === "string" && v !== "ok");
+            if (problems.length) {
+              throw new Error(
+                `db: the snapshot written to ${path} did not pass ` +
+                  `quick_check — ${problems.slice(0, 3).join("; ")}. It was ` +
+                  `NOT installed: whatever ${path} held before is still ` +
+                  `there. A snapshot that is itself damaged is worse than no ` +
+                  `snapshot, because recovery would restore it. fix: check ` +
+                  `the source database (db.checkIntegrity()) and the disk.`,
+              );
+            }
+          } finally {
+            await gate<QueryResult>({
+              type: "execute",
+              sql: `DETACH DATABASE ${SCHEMA}`,
+            }).catch(
+              () => {/* nothing attached — the VACUUM already failed */},
+            );
+          }
+        });
+        await Deno.rename(tmp, path); // atomic replace
+      } catch (e) {
+        await Deno.remove(tmp).catch(() => {/* never written */});
+        throw e;
+      }
     },
     async checkIntegrity(): Promise<{ ok: boolean; problems: string[] }> {
       const { rows } = await gate<QueryResult<{ quick_check: string }>>(

@@ -81,7 +81,7 @@ Deno.test("B7: ui.exclude field read from client context THROWS naming cell.fiel
   const m = members as unknown as { roster: string[]; pins?: unknown };
   assertEquals(m.roster, ["alice", "bob"], "visible field stays live");
   const msg = assertHiddenThrows("b7-members.pins", () => m.pins);
-  assert(msg.includes("ui.exclude"), `names the cause: ${msg}`);
+  assert(msg.includes("visible.exclude"), `names the cause: ${msg}`);
   assert(msg.includes("hasPins: boolean"), `names the fact-field fix: ${msg}`);
   assert(msg.includes("server-side/async"), `names the server fix: ${msg}`);
   assert(msg.includes("dev and prod"), `says it holds everywhere: ${msg}`);
@@ -127,7 +127,7 @@ Deno.test("B7: ui.include hides non-included fields on client reads", () => {
     "b7-stats.internalBuffer",
     () => s.internalBuffer,
   );
-  assert(msg.includes("ui.include"), `names include-mode cause: ${msg}`);
+  assert(msg.includes("visible.include"), `names include-mode cause: ${msg}`);
   reset();
 });
 
@@ -169,7 +169,7 @@ Deno.test("B7: selectors in client context see the FILTERED slice (no leak)", ()
   // read that could quietly fabricate an answer.
   assertEquals(v.count(), 2, "selector over visible fields works");
   const msg = assertHiddenThrows("b7-vault.masterKey", () => v.leak());
-  assert(msg.includes("ui.exclude"), "and say why");
+  assert(msg.includes("visible.exclude"), "and say why");
   reset();
 });
 
@@ -436,7 +436,7 @@ Deno.test("B7: a DEEP excluded field read is loud — throws in dev and prod, sp
     "b7-deep-loud.accounts.encSecKey",
     () => list[0]!.encSecKey,
   );
-  assert(msg.includes("ui.exclude"), msg);
+  assert(msg.includes("visible.exclude"), msg);
   assert(msg.includes("hasEncSecKey: boolean"), `fix names the LEAF: ${msg}`);
 
   // Spreads / keys / JSON of the parent never trip it — only the named read.

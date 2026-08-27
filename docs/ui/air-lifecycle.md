@@ -1,7 +1,17 @@
 # AIR Lifecycle, Context & Error Handling
 
 All lifecycle hooks must be called **inside a component function body** during
-render. Unlike React, you _can_ call them conditionally or in loops.
+render.
+
+`onMount` and `onCleanup` are collected as a **list**, so — unlike React — you
+_can_ call those conditionally or in loops.
+
+`useRef`, `useSignal` and `useId` are **not** in that group: they are matched
+across renders **by call order**, so index 0 is index 0 forever. A hook behind
+an `if` (or in a loop whose length changes) shifts every later hook onto a
+different slot, and the component silently starts reading another ref's value.
+Call those three unconditionally at the top of the body and put the condition
+inside the value. Dev mode reports it when the count changes between renders.
 
 ---
 
@@ -11,11 +21,12 @@ render. Unlike React, you _can_ call them conditionally or in loops.
 function onMount(fn: () => void): void;
 ```
 
-Runs **once** after the component's first render — and, since AIO-390, **after
-the component's DOM subtree and refs are committed**. Inside `onMount`,
-`ref.current` is the real node, so imperative setup (`getContext`, `focus()`,
-measuring, third-party widgets) works directly. Children mount before their
-parents (bottom-up, like React).
+Runs **once** after the component's first render — and **after the component's
+DOM subtree and refs are committed to the document**. Inside `onMount`,
+`ref.current` is the real node and `ref.current.isConnected` is `true`, so
+imperative setup (`getContext`, `focus()`, `getBoundingClientRect()`,
+third-party widgets) works directly. Children mount before their parents
+(bottom-up, like React).
 
 ```tsx
 import { onCleanup, onMount, signal, useRef } from "aio/air";

@@ -7,6 +7,7 @@ import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
 import {
   amCtx,
+  overwriteRefusal,
   parsePayload,
   resolveAmAppId,
   resolvePath,
@@ -574,6 +575,13 @@ export async function cmdSnapshot(
 
   if (sub === "save") {
     const file = args[1] ?? "snapshot.json";
+    // `am backup` refuses to write over an existing file; this wrote over it
+    // silently. One family, one rule.
+    const clobber = overwriteRefusal(file, !!flags.force, "a state snapshot");
+    if (clobber) {
+      outError(clobber, mode);
+      Deno.exit(1);
+    }
     const result = await httpGet(port, "/__aio/snapshot", appId);
     if (!result.ok) {
       outError(result.error, mode);

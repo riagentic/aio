@@ -172,21 +172,56 @@ Deno.test("virtualList: scroll to end shows last items", () => {
   assertEquals(visible[visible.length - 1]!.item, "item-99");
 });
 
-Deno.test("virtualList: scroll past end clamps to available items", () => {
+Deno.test("virtualList: scroll past end shows the last window, not a blank list", () => {
+  // The previous version of this test was VACUOUS: `visible` was EMPTY, so its
+  // `for (const v of visible)` body never executed and it passed while the list
+  // rendered nothing at all. Assert the window itself.
   const items = Array.from({ length: 10 }, (_, i) => i);
   const vl = useVirtualList({
     items,
     itemHeight: 40,
-    containerHeight: 200,
+    containerHeight: 200, // 5 rows fit
     overscan: 0,
   });
 
   vl.scrollToIndex(100); // Way past end
   const visible = vl.visible;
-  // All items should still be bounded by array length
-  for (const v of visible) {
-    assertEquals(v.index < 10, true);
-  }
+  assertEquals(visible.length, 5, "a full window of rows, never blank");
+  assertEquals(visible[0]!.index, 5);
+  assertEquals(visible[visible.length - 1]!.index, 9);
+  for (const v of visible) assertEquals(v.index < 10, true);
+});
+
+Deno.test("virtualList: items shrinking under a scrolled list does not blank it", () => {
+  // The field shape: a long list is scrolled, then a filter cuts it to a few
+  // rows. The scroll offset still describes a row that no longer exists.
+  const items = signal(Array.from({ length: 1000 }, (_, i) => `item-${i}`));
+  const vl = useVirtualList({
+    items,
+    itemHeight: 40,
+    containerHeight: 200, // 5 rows
+    overscan: 0,
+  });
+
+  vl.scrollToIndex(900);
+  assertEquals(vl.visible.length, 5);
+  assertEquals(vl.visible[0]!.index, 900);
+
+  items.set(Array.from({ length: 8 }, (_, i) => `item-${i}`));
+  const after = vl.visible;
+  assertEquals(after.length, 5, "must not go blank when items shrink");
+  assertEquals(after[0]!.index, 3);
+  assertEquals(after[after.length - 1]!.item, "item-7");
+
+  // And a list shorter than one window shows all of it, from the top.
+  items.set(["only"]);
+  assertEquals(vl.visible.length, 1);
+  assertEquals(vl.visible[0]!.index, 0);
+
+  // Empty is still legitimately empty.
+  items.set([]);
+  assertEquals(vl.visible.length, 0);
+  assertEquals(vl.totalHeight, 0);
 });
 
 // ── Signal-based items ─────────────────────────────────────────────

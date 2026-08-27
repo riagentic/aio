@@ -31,6 +31,65 @@ class ThrowingWS {
   close() {}
 }
 
+// ORDER MATTERS: the unqueued case runs first. Its report is once per
+// process (a wedged socket must not turn every forwarded console line into
+// two), and the queued test below prints its own RAM-only warning, which
+// console interception sends down exactly this path.
+// The same socket, the UNQUEUED path.
+//
+// `_sendRaw` carries every frame that has no queue and no ack behind it — sync
+// ops, serverFn calls, forwarded console lines, `client-state` replies. Its
+// whole failure handling was `catch { /* buffer full */ }`, two functions above
+// the action path that carries a paragraph about why swallowing a refused write
+// is wrong. A socket that reports OPEN and throws produces no `onclose`, so no
+// reconnect is scheduled either: the frame is gone and nothing in the process
+// ever learns it.
+//
+// Driven through the live module: console interception is wired to `_sendRaw`
+// at import, so a `console.log` after the fake socket is open takes exactly
+// that path.
+Deno.test("air transport: a refused UNQUEUED write is reported, not swallowed", async () => {
+  const g = globalThis as Record<string, unknown>;
+  const prevWS = g.WebSocket;
+  const prevLoc = g.location;
+  g.WebSocket = ThrowingWS;
+  if (!prevLoc) {
+    g.location = {
+      protocol: "http:",
+      host: "localhost:1234",
+      search: "",
+      origin: "http://localhost:1234",
+    };
+  }
+  const { diagSubscribe, initDiagnosticBus } = await import(
+    "../src/diagnostics/diagnostic-bus.ts"
+  );
+  initDiagnosticBus(true);
+  const seen: string[] = [];
+  const unsub = diagSubscribe((e) => seen.push(e.type));
+  try {
+    await import("../src/browser/browser-air-transport.ts");
+    const { ensureConnected } = await import(
+      "../src/browser/browser-protocol.ts"
+    );
+    ensureConnected();
+    assert(ThrowingWS.last !== null, "the transport opened a socket");
+    // A forwarded console line is an unqueued raw frame.
+    console.log("[test] a line the transport will refuse");
+    assert(
+      seen.includes("browser-air-transport:raw-send-failed"),
+      `a write the socket refused on the UNQUEUED path must be reported — ` +
+        `these frames are never retried, so a silent drop is the last anyone ` +
+        `hears of them. Saw: ${JSON.stringify([...new Set(seen)])}`,
+    );
+  } finally {
+    unsub();
+    if (prevWS === undefined) delete g.WebSocket;
+    else g.WebSocket = prevWS;
+    if (!prevLoc) delete g.location;
+  }
+});
+
 Deno.test("air transport: a throwing socket queues under the SAME cap and diagnostics", async () => {
   const g = globalThis as Record<string, unknown>;
   const prevWS = g.WebSocket;

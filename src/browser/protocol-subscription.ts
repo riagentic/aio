@@ -7,6 +7,7 @@ import {
   isInitialStateReceived as _coreHasState,
 } from "../state-core.ts";
 import { _diagEmit } from "../protocol/protocol-diagnostics.ts";
+import { _sendDevTools } from "./protocol-devtools.ts";
 import type { RenderMeterAPI } from "../vitals/render-meter.ts";
 import type { createTransportProbeClient } from "../vitals/transport-probe.ts";
 
@@ -50,15 +51,49 @@ export function _setListenerHighWater(n: number): void {
 
 export const _listeners = new Listeners<unknown>();
 
-export function _notify() {
-  _listeners.notify(_coreHasState() ? _coreGetState() : null);
+/** The last action this client dispatched, waiting to be paired with the state
+ *  it produced (DevTools shows action → resulting state). Null for a state that
+ *  arrived on its own — another client's write, a server-side effect. */
+let _lastAction: { type: string; payload?: unknown } | null = null;
+
+/** Record an outgoing action for the DevTools trace. Called by the send path
+ *  (browser-protocol's send wrapper + `client.send`). */
+export function _noteDispatch(
+  action: { type: string; payload?: unknown },
+): void {
+  _lastAction = action;
+}
+
+/** A new state is live: tell every subscriber, and the DevTools extension.
+ *
+ *  Nothing called this. `client.subscribe(fn)` — a documented public API
+ *  (docs/basics/api-reference.md) — therefore registered a listener that never
+ *  fired: measured at ZERO callbacks across a full state frame AND a patch.
+ *  (The AIR renderer reads through signals, which is why the app itself worked
+ *  and only the framework-agnostic client was dead.) `_sendDevTools` was the
+ *  same story: `connectDevTools()` sent one `init` and never another frame, so
+ *  the extension showed an empty action log for the life of the page.
+ *
+ *  Both are wired from ONE place — the moment a state is applied — mirroring
+ *  the standalone renderer's twin (`src/standalone-air.ts`'s `_notify`, called
+ *  from its `onDone`). */
+export function _notify(): void {
+  const state = _coreHasState() ? _coreGetState() : null;
+  _listeners.notify(state);
+  const action = _lastAction;
+  _lastAction = null;
+  _sendDevTools(action ?? { type: "@@aio/state" }, state);
 }
 
 // ── State version & readiness ───────────────────────────────────────
 
 export let _stateVersion = 0;
+/** A new state has been applied (full frame or patch) — the transport's single
+ *  "state changed" seam. Bumps the version AND notifies: a version bump that
+ *  did not notify is what left `client.subscribe` silent. */
 export function _incStateVersion(): void {
   _stateVersion++;
+  _notify();
 }
 export function _resetStateVersion(): void {
   _stateVersion = 0;
@@ -67,7 +102,14 @@ export function _resetStateVersion(): void {
 let _stateReadyResolve: (() => void) | null = null;
 let _stateReadyPromise: Promise<void> | null = null;
 
-/** Called from _notify() when state first arrives — resolves the readiness promise. */
+/** Resolve the readiness promise `_waitForState()` hands out.
+ *
+ *  Called by the TRANSPORT, right after it applies a state frame
+ *  (`browser-air-transport.ts`'s `_handleState`) — not by `_notify()`, which
+ *  this doc used to claim. A doc comment naming a caller is a claim the
+ *  compiler never checks, and the one function in this file whose named callers
+ *  did not exist (`_noteDispatch`) misattributed every DevTools frame for the
+ *  life of the feature. */
 export function _resolveStateReady(): void {
   if (_stateReadyResolve) {
     _stateReadyResolve();

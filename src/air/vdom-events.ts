@@ -1,6 +1,8 @@
 // VDOM event delegation — single root listener per event type instead of per-element.
 // Non-bubbling events (focus, blur, scroll, etc.) remain per-element.
 
+import { batch } from "../state/signal.ts";
+
 // ── Delegated event set ────────────────────────────────────────────
 // Common bubbling events use a single root listener instead of per-element
 // addEventListener. This reduces listener count from O(elements) to O(event types).
@@ -40,6 +42,16 @@ export const _DELEGATED_EVENTS = new Set([
 // ── Per-element wrapped listener storage ───────────────────────────
 // Per-element map of { eventName -> handler } for delegated event dispatch.
 const _wrappedListeners = new WeakMap<Element, Map<string, EventListener>>();
+
+/** Which delegation root OWNS an element's delegated handlers.
+ *
+ *  `_wrappedListeners` is global, so it answered "does this element have an
+ *  onClick" without ever answering "whose onClick". Mount a second root into a
+ *  container that sits INSIDE a live root — which `island()` does by
+ *  construction — and both roots' listeners walked the same composedPath and
+ *  both found the inner element's handler: every inner click fired twice.
+ *  Ownership is recorded at registration, and the dispatch loop honours it. */
+const _handlerOwner = new WeakMap<Element, Element>();
 
 // Tracks which delegation roots have listeners registered per event type,
 // and the actual listener references for proper cleanup (AIO-197).
@@ -81,7 +93,13 @@ export function _ensureDelegation(root: Element, evt: string): void {
         // Duck-type Element check (nodeType 1) — avoid instanceof which fails
         // in test environments (happy-dom) where global Element is undefined.
         if ((node as Node).nodeType !== 1) continue;
-        const handler = _wrappedListeners.get(node as Element)?.get(evt);
+        const el = node as Element;
+        // Only the root that REGISTERED this element's handlers may dispatch
+        // them — otherwise a root nested inside another live root fires every
+        // inner handler twice.
+        const owner = _handlerOwner.get(el);
+        if (owner !== undefined && owner !== root) continue;
+        const handler = _wrappedListeners.get(el)?.get(evt);
         if (handler) {
           // SPA default: a handled form submit never navigates — no more
           // `e.preventDefault()` boilerplate in every onSubmit. Opt back
@@ -146,13 +164,21 @@ export function _getWrapped(
   return _wrappedListeners.get(el)?.get(evt);
 }
 
-export function _setWrapped(el: Element, evt: string, fn: EventListener): void {
+export function _setWrapped(
+  el: Element,
+  evt: string,
+  fn: EventListener,
+  /** The delegation root that owns this registration (delegated events only).
+   *  Recorded so a nested root cannot dispatch another root's handlers. */
+  owner?: Element | null,
+): void {
   let map = _wrappedListeners.get(el);
   if (!map) {
     map = new Map();
     _wrappedListeners.set(el, map);
   }
   map.set(evt, fn);
+  if (owner) _handlerOwner.set(el, owner);
 }
 
 export function _deleteWrapped(el: Element, evt: string): void {
@@ -161,7 +187,29 @@ export function _deleteWrapped(el: Element, evt: string): void {
   map.delete(evt);
   if (map.size === 0) {
     _wrappedListeners.delete(el);
+    _handlerOwner.delete(el);
   }
+}
+
+/** The ONE wrapper a JSX event handler gets, whichever path wires it up:
+ *  writes batched into a single render, and a throw CONTAINED and reported.
+ *
+ *  The containment used to live only in the delegated dispatch loop, so a
+ *  handler on any non-delegated event — focus, blur, scroll, mouseenter,
+ *  mouseleave, wheel, the composition events, every media event — threw into
+ *  the browser with nothing naming it, and in a test the throw surfaced (if at
+ *  all) as an unrelated failure somewhere later. Same wrapper, same rule. */
+export function _wrapHandler(
+  handler: EventListener,
+  evt: string,
+): EventListener {
+  return (e: Event) => {
+    try {
+      batch(() => handler(e));
+    } catch (err) {
+      console.error(`[aio] event handler error (on${evt}):`, err);
+    }
+  };
 }
 
 // ── onChange → onInput mapping (AIO-72: React compat) ──────────────

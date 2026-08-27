@@ -46,6 +46,41 @@ let runtime: FeedbackRuntime | null = null;
 /** Install the platform half. Called once by the server at boot. */
 export function installFeedbackRuntime(r: FeedbackRuntime | null): void {
   runtime = r;
+  _reportTimes.length = 0;
+}
+
+// ── Rate limit ───────────────────────────────────────────────────────────────
+//
+// `report()` is deliberately ANONYMOUS (`access` is not declared: refusing
+// anonymous reports on an exposed app silences the people most likely to hit
+// something). Every call serializes the app's state, writes it to disk and
+// POSTs it to the configured sink — so "anonymous" plus "unlimited" was a
+// remote disk-fill and an outbound-traffic amplifier reachable by anyone who
+// could load the page, and there was nothing an author could set to stop it.
+//
+// A BUDGET, not an auth rule: a human pressing a Report button hits this
+// never, and a script hits it immediately. Process-wide rather than per
+// client, because the abuse is the WRITES, and the caller identity on an
+// anonymous endpoint is worth nothing anyway.
+const REPORT_MAX = 5;
+const REPORT_WINDOW_MS = 60_000;
+const _reportTimes: number[] = [];
+
+/** Test isolation — forget the window. @internal */
+export function _resetFeedbackRate(): void {
+  _reportTimes.length = 0;
+}
+
+/** Record this attempt; false when the budget for the window is spent. */
+function _reportBudgetOk(now = Date.now()): boolean {
+  while (
+    _reportTimes.length > 0 && now - _reportTimes[0]! >= REPORT_WINDOW_MS
+  ) {
+    _reportTimes.shift();
+  }
+  if (_reportTimes.length >= REPORT_MAX) return false;
+  _reportTimes.push(now);
+  return true;
 }
 
 /** The `feedback` cell's state — whether reporting is enabled, the last
@@ -126,6 +161,7 @@ export function createFeedbackCell(): FeedbackCell {
 
     methods: {
       async report(s, title: string, body?: string, contact?: string) {
+        s.enabled = runtime !== null;
         if (!runtime) {
           s.error = "feedback is not configured for this app";
           s.status = "error";
@@ -134,6 +170,18 @@ export function createFeedbackCell(): FeedbackCell {
         if (!title.trim()) {
           // A report with no title is a row nobody triages.
           s.error = "a report needs a one-line description of the problem";
+          s.status = "error";
+          return;
+        }
+        if (!_reportBudgetOk()) {
+          // Refused OUT LOUD — the caller is told, and told when to retry.
+          // A silently dropped report is worse than a refused one: the person
+          // filing it believes the maintainer has it.
+          s.error = `too many reports — this app accepts ${REPORT_MAX} per ` +
+            `minute and that budget is spent. Wait a minute and send it again ` +
+            `(each report writes a copy of app state to disk and to the ` +
+            `configured sink, so the cap is what keeps that from being a ` +
+            `remote disk-fill).`;
           s.status = "error";
           return;
         }
@@ -156,6 +204,11 @@ export function createFeedbackCell(): FeedbackCell {
       },
 
       async refresh(s) {
+        // `enabled` is a fact about CONFIG, not the network: true exactly when
+        // the server installed a runtime at boot (boot fires one refresh once
+        // cells are bound — see beginFeedback). Never written anywhere else,
+        // so an app gating its UI on it sees the truth, not `false` forever.
+        s.enabled = runtime !== null;
         if (!runtime) return;
         try {
           s.pending = await runtime.count();

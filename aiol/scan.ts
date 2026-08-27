@@ -31,3 +31,51 @@ export function codeMatches(
   const mask = codeMask(src);
   return [...src.matchAll(re)].filter((m) => mask[m.index!] === 1);
 }
+
+/** Offsets of the TOP-LEVEL `<key>:` positions inside the object literal whose
+ *  `{` sits at `open`. Depth-aware and mask-aware, so a key of a NESTED object
+ *  is not this object's key and a `key:` inside a string or comment is nothing
+ *  at all.
+ *
+ *  It exists because `\{[^}]*\}` does not stop at a nested `{`: it stops at the
+ *  first `}`, which for `call({ retry: { timeout: 30 } })` is the INNER one, so
+ *  the user's own `retry.timeout` field was read as the call's deprecated
+ *  option — reported as an error, and REWRITTEN to `timeoutMs` by --safe-fix,
+ *  against that fix's own "no behaviour change" guarantee. One decider, used by
+ *  the rule and by the fix, so the two can never disagree about which key they
+ *  are looking at. Pure. */
+export function topLevelKeyOffsets(
+  src: string,
+  open: number,
+  key: string,
+): number[] {
+  if (src[open] !== "{") return [];
+  const mask = codeMask(src);
+  const out: number[] = [];
+  let depth = 0;
+  for (let i = open; i < src.length; i++) {
+    if (mask[i] !== 1) continue; // string / comment / regex body
+    const ch = src[i]!;
+    if (ch === "{" || ch === "[" || ch === "(") {
+      depth++;
+      continue;
+    }
+    if (ch === "}" || ch === "]" || ch === ")") {
+      depth--;
+      if (depth <= 0) break; // this object closed
+      continue;
+    }
+    if (depth !== 1 || !src.startsWith(key, i)) continue;
+    // A key is preceded (past whitespace) by the opening `{` or a comma —
+    // never by anything else. Without that, `{ ms: cond ? timeout : 0 }` reads
+    // its ternary's `:` as a key's colon.
+    let b = i - 1;
+    while (b > open && /\s/.test(src[b]!)) b--;
+    if (src[b] !== "{" && src[b] !== ",") continue;
+    let a = i + key.length;
+    while (a < src.length && /\s/.test(src[a]!)) a++;
+    if (src[a] !== ":") continue;
+    out.push(i);
+  }
+  return out;
+}

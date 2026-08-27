@@ -123,22 +123,81 @@ export function isToolingPath(relative: string): boolean {
   return p.startsWith("scripts/") || p.startsWith("tools/");
 }
 
+/** A TEST file — by name (`*.test.ts(x)`, `*_test.ts(x)`) or by living under a
+ *  `test/` or `tests/` segment anywhere in the path.
+ *
+ *  The twin of {@link isToolingPath}, for the same reason and against the same
+ *  failure. `SCANNED_ROOTS` includes `test/` and `tests/` on purpose — most
+ *  rules apply there, and a test that misuses the API is worth reporting. What
+ *  does NOT apply is the premise "this file is compiled into the browser
+ *  bundle": a `*.test.tsx` is run by `deno test`, never bundled, and `Deno.test`
+ *  is the first line of it.
+ *
+ *  Without this predicate the `Deno.*` rule reported every UI test file as
+ *  shipped code — measured at 55 ERRORs across 16 files in one app, all false,
+ *  while `check:graph` walked the real module graph from `App.tsx` and found no
+ *  blocking import at all. An ERROR-level gate that is wrong 55 times out of 55
+ *  is a gate its author turns off, and then it stops catching the real one it
+ *  was written for (`Deno.env.get` in a component, which produces a blank
+ *  page). That is the failure `isToolingPath` names above; test paths were
+ *  simply never added to it. */
+export function isTestPath(relative: string): boolean {
+  const p = relative.replaceAll("\\", "/");
+  return /(^|\/)tests?\//.test(p) || /\.test\.tsx?$/.test(p) ||
+    /_test\.tsx?$/.test(p);
+}
+
+/** Directories the scan reads, project-relative. Anything else is skipped —
+ *  which is fine, and must be SAID rather than assumed (see `Skip`). */
+export const SCANNED_ROOTS: readonly string[] = [
+  "src",
+  ...OPTIONAL_ROOTS,
+  "tests",
+  "test",
+];
+
+/** Directories that are never a project's own source: build output, the
+ *  vendored framework, dependency caches. Not "skipped" — not code. */
+const NOT_SOURCE_DIRS = new Set([
+  ...IGNORE_DIRS,
+  "dep",
+  "vendor",
+  "coverage",
+  "target",
+  "out",
+  "build",
+]);
+
+/** One file (or directory) the scan REFUSED, and why. A linter that reads
+ *  nothing looks exactly like a clean project: same silence, same exit 0. Every
+ *  refusal is carried out to a finding instead of being swallowed here. */
+export type Skip = { path: string; reason: string };
+
 /** Recursively collect source files */
 async function collectFiles(
   dir: string,
   root: string,
   out: SourceFile[],
+  skipped: Skip[],
 ): Promise<void> {
   try {
     for await (const entry of Deno.readDir(dir)) {
       const path = join(dir, entry.name);
       if (entry.isDirectory) {
         if (IGNORE_DIRS.has(entry.name)) continue;
-        await collectFiles(path, root, out);
+        await collectFiles(path, root, out, skipped);
       } else if (entry.isFile && SOURCE_EXTS.has(extname(entry.name))) {
         try {
           const stat = await Deno.stat(path);
-          if (stat.size > MAX_FILE_SIZE) continue;
+          if (stat.size > MAX_FILE_SIZE) {
+            skipped.push({
+              path: relative(root, path),
+              reason: `${Math.round(stat.size / 1024)} KB — over aiol's ${
+                MAX_FILE_SIZE / 1024
+              } KB per-file limit`,
+            });
+            continue;
+          }
           const content = await Deno.readTextFile(path);
           out.push({
             path,
@@ -148,10 +207,47 @@ async function collectFiles(
             content,
             lines: content.split("\n"),
           });
-        } catch { /* unreadable */ }
+        } catch (e) {
+          skipped.push({
+            path: relative(root, path),
+            reason: `unreadable — ${e instanceof Error ? e.message : e}`,
+          });
+        }
       }
     }
   } catch { /* dir unreadable */ }
+}
+
+/** Top-level directories that hold `.ts`/`.tsx` the scan never reads.
+ *
+ *  Bounded on purpose — direct children and one level below — so this costs a
+ *  couple of `readDir`s, not a walk of the vendored framework. */
+async function unscannedCodeDirs(projectDir: string): Promise<string[]> {
+  const holdsCode = async (dir: string, depth: number): Promise<boolean> => {
+    try {
+      for await (const e of Deno.readDir(dir)) {
+        if (e.isFile && SOURCE_EXTS.has(extname(e.name))) return true;
+        if (
+          e.isDirectory && depth > 0 && !NOT_SOURCE_DIRS.has(e.name) &&
+          !e.name.startsWith(".")
+        ) {
+          if (await holdsCode(join(dir, e.name), depth - 1)) return true;
+        }
+      }
+    } catch { /* unreadable */ }
+    return false;
+  };
+  const out: string[] = [];
+  try {
+    for await (const e of Deno.readDir(projectDir)) {
+      if (!e.isDirectory || e.name.startsWith(".")) continue;
+      if (NOT_SOURCE_DIRS.has(e.name) || SCANNED_ROOTS.includes(e.name)) {
+        continue;
+      }
+      if (await holdsCode(join(projectDir, e.name), 1)) out.push(e.name);
+    }
+  } catch { /* root unreadable */ }
+  return out.sort();
 }
 
 /** Read and parse deno.json or deno.jsonc */
@@ -203,6 +299,8 @@ function extractCells(files: SourceFile[]): CellInfo[] {
         removedKeys: info.removedKeys,
         hasSelectors: info.hasSelectors,
         isWorker: info.isWorker,
+        hasVersion: info.hasVersion,
+        persistFalse: info.persistFalse,
         stateKeys: info.stateKeys,
         stateIsLiteral: info.stateIsLiteral,
         methodNames: info.methodNames,
@@ -223,6 +321,10 @@ function parseCellConfig(source: string): {
   removedKeys: string[];
   hasSelectors: boolean;
   isWorker: boolean;
+  /** `version: N` — what makes this cell visible to the update data gate. */
+  hasVersion: boolean;
+  /** `persist: false` — this cell keeps nothing on disk. */
+  persistFalse: boolean;
   stateKeys: string[];
   stateIsLiteral: boolean;
   methodNames: string[];
@@ -241,6 +343,8 @@ function parseCellConfig(source: string): {
       removedKeys: [],
       hasSelectors: false,
       isWorker: false,
+      hasVersion: false,
+      persistFalse: false,
       stateKeys: [],
       stateIsLiteral: false,
       methodNames: [],
@@ -273,6 +377,8 @@ function parseCellConfig(source: string): {
       removedKeys: [],
       hasSelectors: false,
       isWorker: false,
+      hasVersion: false,
+      persistFalse: false,
       stateKeys: [],
       stateIsLiteral: false,
       methodNames: [],
@@ -300,6 +406,8 @@ function parseCellConfig(source: string): {
   const removedKeys = removalsInSource(block).map((h) => h.removal.key);
   const hasSelectors = /\bselectors\s*:/.test(block);
   const isWorker = /\bworker\s*:\s*true\b/.test(block);
+  const hasVersion = /\bversion\s*:\s*\d+/.test(block);
+  const persistFalse = /\bpersist\s*:\s*false\b/.test(block);
 
   // Extract state keys from state: { key1: ..., key2: ... }
   // Use brace matching instead of [^}] to handle nested objects/arrays
@@ -382,6 +490,8 @@ function parseCellConfig(source: string): {
     removedKeys,
     hasSelectors,
     isWorker,
+    hasVersion,
+    persistFalse,
     stateKeys,
     methodNames,
     actionNames,
@@ -395,6 +505,7 @@ export async function buildContext(
   const issues: Issue[] = [];
   const passed: string[] = [];
   const sourceFiles: SourceFile[] = [];
+  const skipped: Skip[] = [];
 
   // Read deno.json
   const { config: denoJson, path: denoJsonPath } = await readDenoJson(
@@ -403,7 +514,7 @@ export async function buildContext(
 
   // Collect source files from src/ and project root
   const srcDir = join(projectDir, "src");
-  await collectFiles(srcDir, projectDir, sourceFiles);
+  await collectFiles(srcDir, projectDir, sourceFiles, skipped);
   // …and every other directory a project keeps REAL code in. `src/` + root was
   // the whole scan, so a project's build scripts, release gates and dev tools —
   // the code that decides what ships — were the one part the linter never read.
@@ -417,7 +528,7 @@ export async function buildContext(
     } catch {
       continue; // this project has no such directory
     }
-    await collectFiles(path, projectDir, sourceFiles);
+    await collectFiles(path, projectDir, sourceFiles, skipped);
   }
   // Scan root .ts/.tsx files
   try {
@@ -426,7 +537,15 @@ export async function buildContext(
       try {
         const path = join(projectDir, entry.name);
         const stat = await Deno.stat(path);
-        if (stat.size > MAX_FILE_SIZE) continue;
+        if (stat.size > MAX_FILE_SIZE) {
+          skipped.push({
+            path: entry.name,
+            reason: `${Math.round(stat.size / 1024)} KB — over aiol's ${
+              MAX_FILE_SIZE / 1024
+            } KB per-file limit`,
+          });
+          continue;
+        }
         const content = await Deno.readTextFile(path);
         // Don't duplicate files already in sourceFiles
         if (!sourceFiles.some((f) => f.path === path)) {
@@ -442,6 +561,59 @@ export async function buildContext(
       } catch { /* unreadable */ }
     }
   } catch { /* root unreadable */ }
+
+  // Every stylesheet under src/ (and at the root). The test-handle rule used to
+  // reach for "any other .css in sourceFiles" — a branch that could never run,
+  // because the file scan only ever collects .ts/.tsx. A multi-sheet app was
+  // silently half-checked by a rule whose own comment said it wasn't.
+  const cssFiles: SourceFile[] = [];
+  const collectCss = async (dir: string) => {
+    let entries: Deno.DirEntry[];
+    try {
+      entries = [];
+      for await (const e of Deno.readDir(dir)) entries.push(e);
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const path = join(dir, e.name);
+      if (e.isDirectory) {
+        if (!IGNORE_DIRS.has(e.name)) await collectCss(path);
+        continue;
+      }
+      if (!e.isFile || extname(e.name) !== ".css") continue;
+      try {
+        const content = await Deno.readTextFile(path);
+        cssFiles.push({
+          path,
+          relative: relative(projectDir, path),
+          name: e.name,
+          ext: ".css",
+          content,
+          lines: content.split("\n"),
+        });
+      } catch { /* unreadable */ }
+    }
+  };
+  await collectCss(srcDir);
+  try {
+    for await (const e of Deno.readDir(projectDir)) {
+      if (!e.isFile || extname(e.name) !== ".css") continue;
+      const path = join(projectDir, e.name);
+      if (cssFiles.some((f) => f.path === path)) continue;
+      try {
+        const content = await Deno.readTextFile(path);
+        cssFiles.push({
+          path,
+          relative: e.name,
+          name: e.name,
+          ext: ".css",
+          content,
+          lines: content.split("\n"),
+        });
+      } catch { /* unreadable */ }
+    }
+  } catch { /* root unreadable — the source scan reports it */ }
 
   // Read CSS
   let styleCss: SourceFile | null = null;
@@ -477,7 +649,7 @@ export async function buildContext(
     try {
       const path = join(projectDir, dir);
       if ((await Deno.stat(path)).isDirectory) {
-        await collectFiles(path, projectDir, testSources);
+        await collectFiles(path, projectDir, testSources, skipped);
       }
     } catch { /* no such directory */ }
   }
@@ -511,6 +683,9 @@ export async function buildContext(
     denoJson,
     denoJsonPath,
     sourceFiles,
+    cssFiles,
+    skipped,
+    unscannedDirs: await unscannedCodeDirs(projectDir),
     isApp: looksLikeApp(denoJson),
     tsxFiles,
     tsFiles,

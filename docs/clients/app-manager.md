@@ -136,9 +136,10 @@ vendored `dep/aio` copy** (a committed directory, not a symlink) is **never
 touched** — `am fix` only ever creates or repairs a symlink, it will not delete
 deliberately-vendored framework code.
 
-**Related:** `am doctor` diagnoses deno.json config only (read-only, PASS/FAIL);
-`am link` is the narrow primitive that only (re)creates the `dep/aio` symlink
-(`--aio=<path>` / `$AIO_HOME` to point it elsewhere). `am fix` includes both.
+**Related:** `deno task doctor` diagnoses deno.json config only (read-only,
+PASS/FAIL); `am link` is the narrow primitive that only (re)creates the
+`dep/aio` symlink (`--aio=<path>` / `$AIO_HOME` to point it elsewhere). `am fix`
+includes both.
 
 ## App identity
 
@@ -537,8 +538,8 @@ re-downloaded. Several apps on one machine can pin several versions at once.
 
 **Drift is a failure, not a note.** If `dep/aio` points somewhere other than the
 pin, `am pin` says so and exits non-zero (usable as a CI check), and
-`aio doctor` fails the `framework pin matches dep/aio` line. `am fix` corrects
-it.
+`deno task doctor` fails the `framework pin matches dep/aio` line. `am fix`
+corrects it.
 
 Two escape hatches, both deliberate: `--aio=<path>` (and `am create --mirror`)
 link a live checkout for framework development, and a real directory at
@@ -661,6 +662,31 @@ instance, as everywhere in `am`.
 
 `--pose=<json>` is **not** supported: the app decides its own camera. Expose a
 cell method that sets the view, drive it with `am dispatch`, then `am shot`.
+
+## Manual VM labs (`am lab`)
+
+A real Windows or macOS desktop in a container, driven by hand from a browser,
+with the app's `dist/` mounted into the guest. This is the manual tier next to
+`deno task test:wine` (headless, a gate) and `deno task lab` (Ubuntu, a gate) —
+nothing here runs in `deno task test`.
+
+```sh
+am lab windows              # boot it, mount dist/, print the viewer URL
+am lab windows --status     # up? which port? how big is the VM disk?
+am lab windows --stop       # clean guest shutdown, then remove the container
+am lab windows --reset      # DELETE the VM disk (tens of GB) and start over
+am lab macos                # the same, but setup is partly MANUAL
+```
+
+Flags: `--port=N` (default: a free one), `--ram=8G`, `--cpus=4`, `--disk=64G`,
+`--version=11`, `--dist=<dir>`, `--tunnel`.
+
+The VM disk lives in `~/.cache/aio/labs/<os>/` and survives `--stop`, so the
+first start installs an OS (Windows: ~10-20 min unattended, tens of GB) and
+every later start is a boot. Both labs hand `dist/` to the guest at
+`http://host.lan:8007/`, and print the command to paste; Windows can also mount
+it as `\\host.lan\Data`, macOS cannot mount it at all. Full detail, costs,
+preflight fixes and licensing: [VM labs](../testing/vm-labs.md).
 
 ## Monitoring
 

@@ -3,6 +3,7 @@ import { dirname, join, resolve } from "@std/path";
 import { toolCacheDir } from "../electron/electron-runtime-fetch.ts";
 export { toolCacheDir };
 import { appIconPng, appIconSvg } from "./app-icon.ts";
+import { APP_ICON } from "../server/app-files.ts";
 
 /** The appimagetool release this build pins to.
  *
@@ -28,6 +29,26 @@ const APPIMAGETOOL_HASHES: Record<string, string> = {
   i686: "7ad9ff47c203aae0149b18f6df9e3018b2e2f470ea644a0413e3ded39e9e3bdb",
 };
 
+/** `Deno.chmod`, on the platforms that have one.
+ *
+ *  THE spelling for this in the build. `Deno.chmod` is not implemented on
+ *  Windows and THROWS `NotSupported` — so every launcher the build writes
+ *  (`AppRun`, the macOS `run.sh`, the Android `gradlew`) killed a build that
+ *  merely happened to be running on a Windows host, and the failure named a
+ *  file the developer never wrote. Cross-building for Linux from Windows is a
+ *  supported thing to want; a mode bit that platform cannot express is not a
+ *  reason to refuse.
+ *
+ *  Only the guard was ever in doubt, so it lives in exactly one place: adding
+ *  a fifth `await Deno.chmod(...)` reintroduces the bug, calling this cannot. */
+export async function chmodIfSupported(
+  path: string,
+  mode: number,
+): Promise<void> {
+  if (Deno.build.os === "windows") return; // no POSIX mode bits to set
+  await Deno.chmod(path, mode);
+}
+
 /** Slugify a string for use as binary/app name */
 export function slugify(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") ||
@@ -51,7 +72,7 @@ export async function copyDir(src: string, dst: string): Promise<void> {
       try {
         const info = await Deno.stat(srcPath);
         if (info.mode !== null && info.mode & 0o111) {
-          await Deno.chmod(dstPath, info.mode);
+          await chmodIfSupported(dstPath, info.mode);
         }
       } catch { /* no mode — skip chmod */ }
     }
@@ -321,13 +342,13 @@ export async function resolveAppIcon(
   root: string,
   appDir: string,
 ): Promise<{ icon: string | null; misplaced: string | null }> {
-  const wanted = join(appDir, "icon.png");
+  const wanted = join(appDir, APP_ICON);
   try {
     await Deno.stat(wanted);
     return { icon: wanted, misplaced: null };
   } catch { /* no icon where the build looks — is one nearby? */ }
   if (resolve(root) === resolve(appDir)) return { icon: null, misplaced: null };
-  const atRoot = join(root, "icon.png");
+  const atRoot = join(root, APP_ICON);
   try {
     await Deno.stat(atRoot);
     return { icon: null, misplaced: atRoot };
@@ -340,7 +361,7 @@ export async function resolveAppIcon(
 export function misplacedIconHint(misplaced: string, appDir: string): string {
   return `found ${misplaced}, which the build does not read — the app dir is ` +
     `${appDir} (the entry's directory, the same place dev serves it from). ` +
-    `Move it to ${join(appDir, "icon.png")} to use it.`;
+    `Move it to ${join(appDir, APP_ICON)} to use it.`;
 }
 
 /** Write the app's DEFAULT icon (SVG + PNG) beside each other, named
@@ -508,7 +529,7 @@ export async function ensureAppimagetool(
   }
 
   await Deno.writeFile(toolPath, bytes);
-  await Deno.chmod(toolPath, 0o755);
+  await chmodIfSupported(toolPath, 0o755);
   console.log("[appimage] ✓ appimagetool cached");
   return toolPath;
 }

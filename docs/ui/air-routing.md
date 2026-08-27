@@ -205,7 +205,7 @@ function ProtectedPage() {
 
 ## Path Pattern Syntax
 
-Used by `<Route path>`, `useRoute(pattern)`, and `matchPath()`:
+Used by `<Route path>` and `useRoute(pattern)`:
 
 | Pattern               | Matches                             | Params                   |
 | --------------------- | ----------------------------------- | ------------------------ |

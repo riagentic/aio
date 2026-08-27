@@ -14,11 +14,11 @@ export const _diagLastEmit = new Map<
 
 /** Deliver one diagnostic event to whatever sink the page has.
  *
- *  THE sink decision, in one place. `window._aioDiag` is the optional dev
- *  overlay; it is defined by `healthOverlayScript()` in the server's dev shell,
- *  which is currently not injected anywhere — so in practice the overlay is
- *  absent. Every call site used to be `if (typeof _w._aioDiag === "function")
- *  _w._aioDiag(ev)`, written out four times, which meant that with no overlay
+ *  THE sink decision, in one place. `window._aioDiag` is an optional hook a
+ *  page (or an app's own dev tooling) may define to receive every diagnostic
+ *  event; aio ships no overlay that defines it, so in practice it is absent.
+ *  Every call site used to be `if (typeof _w._aioDiag === "function")
+ *  _w._aioDiag(ev)`, written out four times, which meant that with no hook
  *  EVERY client-side diagnostic — the events whose entire job is to surface
  *  silent failures — was itself silently dropped. A framework's diagnostics
  *  going quiet is the one failure it must never have.

@@ -13,16 +13,29 @@ looks for (in order):
 
 1. `$ELECTRON_PATH` env var — set by packaged launchers (`AppRun` / `run.sh` /
    `run.bat`)
-2. `node_modules/.bin/electron` — dev binary
-3. in dev: auto-install via `deno install` (the npm package, with a fallback to
+2. `./electron/` **beside the executable** — the runtime the shipped Windows and
+   macOS zips already carry. Resolved against the executable, never the cwd, so
+   double-clicking `myapp.exe` (which skips `run.bat` and therefore
+   `$ELECTRON_PATH`) finds the Electron that is sitting in the same folder
+   instead of downloading a second one.
+3. `node_modules/.bin/electron` — dev binary
+4. in dev: auto-install via `deno install` (the npm package, with a fallback to
    its own `install.js` when the lifecycle script is skipped)
-4. the runtime Electron publishes, fetched once into
+5. the runtime Electron publishes, fetched once into
    `~/.cache/aio/tools/
    electron/<version>-<platform>/` — THE path for a
    **compiled binary** (which has no `node_modules` and no `deno`), and the last
    resort for dev. The version is the one the build baked into
    `dist/electron.json` (installed runtime > `npm:electron@^x.y.z` in the import
    map > framework default).
+
+The fetched runtime is **verified before it is unpacked**: its SHA-256 is
+checked against the release's own `SHASUMS256.txt` and a mismatch refuses rather
+than warns — these bytes become the process the app runs as. One download at a
+time per machine (a lock file), staged into a sibling directory and renamed into
+place, so two apps starting at once cannot delete each other's runtime. Set
+`$ELECTRON_MIRROR` to fetch the release from somewhere other than
+`github.com/electron/electron/releases/download/`.
 
 `deno task install:electron` remains for a checkout that wants the download done
 up front (CI, a machine that goes offline); it is never a required step.

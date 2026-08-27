@@ -1,4 +1,4 @@
-import { assertEquals, assertThrows } from "@std/assert";
+import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import {
   createScheduleManager,
   createVirtualTimers,
@@ -230,10 +230,22 @@ Deno.test("parseCron: :00 and :30 (0,30 * * * *)", () => {
   assertEquals(f.minute, [0, 30]);
 });
 
-Deno.test("parseCron: invalid pattern throws", () => {
-  assertThrows(() => parseCron("* * *"), Error, "5 fields");
-  assertThrows(() => parseCron("99 * * * *"), Error, "invalid cron value");
-  assertThrows(() => parseCron("*/0 * * * *"), Error, "invalid cron step");
+// Every cron refusal names the FIELD and echoes the PATTERN. `invalid cron
+// range: 1-70 (0-59)` said neither, so a reader holding "0 1-70 * * *" had to
+// deduce that "(0-59)" meant minutes; the step branch beside it had named its
+// fix all along.
+Deno.test("parseCron: invalid pattern throws, naming the field and echoing the pattern", () => {
+  assertThrows(() => parseCron("* * *"), Error, "5 space-separated fields");
+  const v = assertThrows(() => parseCron("99 * * * *"), Error);
+  assertStringIncludes((v as Error).message, 'invalid value "99"');
+  assertStringIncludes((v as Error).message, "minute field");
+  assertStringIncludes((v as Error).message, '"99 * * * *"');
+  const st = assertThrows(() => parseCron("*/0 * * * *"), Error);
+  assertStringIncludes((st as Error).message, 'invalid step "*/0"');
+  assertStringIncludes((st as Error).message, "minute field");
+  // The field named is the field that is wrong — not always the first one.
+  const dow = assertThrows(() => parseCron("* * * * 9"), Error);
+  assertStringIncludes((dow as Error).message, "day-of-week field");
 });
 
 Deno.test("nextCronTime: computes correct next fire", () => {
@@ -294,7 +306,10 @@ Deno.test("parseCron: month range (0 0 1 6-8 *)", () => {
 });
 
 Deno.test("parseCron: invalid range throws (5-1 * * * *)", () => {
-  assertThrows(() => parseCron("5-1 * * * *"), Error, "invalid cron range");
+  const e = assertThrows(() => parseCron("5-1 * * * *"), Error);
+  assertStringIncludes((e as Error).message, 'invalid range "5-1"');
+  assertStringIncludes((e as Error).message, "minute field");
+  assertStringIncludes((e as Error).message, "low end first");
 });
 
 Deno.test("parseCron: step on month (0 0 * */3 *)", () => {

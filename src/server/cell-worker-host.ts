@@ -247,6 +247,12 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
   self.onmessage = async (ev: MessageEvent<ToWorker>) => {
     const msg = ev.data;
     if (msg.t === "init") {
+      // Arm the same dev tripwires the owner runs with, BEFORE the first call
+      // (`ready` is posted from here, and no call can arrive before it). A
+      // worker gets a fresh global, so without this the worker isolate is more
+      // permissive than the one that spawned it — the exact asymmetry
+      // `testServer({ workers: "real" })` exists to close.
+      if (msg.dev) (globalThis as Record<string, unknown>).__aioDev = true;
       // The authoritative slice — persistence and migrations already ran on the
       // main isolate, so this is the state of record, not our defaults.
       state = { [name]: { ...msg.state } };

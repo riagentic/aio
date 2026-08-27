@@ -48,6 +48,13 @@ const fileFilter = signal("");
 // Codebase source: the app's own dir (eager) vs the enclosing repo root (lazy).
 // Only offered when they differ (a monorepo, or an AppImage's unpacked mount).
 const codebaseSrc = signal<"app" | "repo">("app");
+// Per-cell JSON arguments for the Cells tab's ▶ buttons. Every method used to
+// be a ONE-CLICK dispatch with an EMPTY payload and no confirmation — beside a
+// Stop button that asks "Stop <app>?" first. So `orders:cancelAll` was one
+// misclick, and `user:setEmail` was one misclick that called a method with no
+// arguments at all, which the trojan happily reported as "dispatched". A write
+// into a live app is at least as consequential as stopping it.
+const dispatchArgs = signal<Record<string, string>>({});
 let _lastPath: string | null = null;
 let _stateReqPath: string | null = null; // sync dedupe for StateTab auto-load
 
@@ -445,10 +452,13 @@ function Header({ d }: { d: ProjectDetail }) {
         </div>
       )}
       {
-        /* The app refused amui's control-plane reads. Every panel below reads
-          through `/__aio/trojan/*`, so without this the whole detail view is
-          just empty — a silent 401 with no path forward is exactly what makes
-          people turn auth off in dev. The refusal carries its own diagnosis. */
+        /* The app refused amui's control-plane reads, or stopped answering
+          them. Every panel below reads through `/__aio/trojan/*`, so without
+          this the whole detail view is just empty — a silent 401 with no path
+          forward is exactly what makes people turn auth off in dev, and a
+          silent TRANSPORT failure is worse still: the panels keep showing the
+          last healthy sample of an app that is no longer talking. The verdict
+          carries its own diagnosis (see `am-http.ts`). */
       }
       {manager.controlError && (
         <div
@@ -462,7 +472,8 @@ function Header({ d }: { d: ProjectDetail }) {
             whiteSpace: "pre-wrap",
           }}
         >
-          ⚠ this app refused amui's control plane{"\n"}
+          ⚠ amui cannot read this app's control plane — the panels below are the
+          LAST reading, not the current one{"\n"}
           {manager.controlError}
         </div>
       )}
@@ -791,6 +802,19 @@ function CellsTab({ d }: { d: ProjectDetail }) {
     manager.openCellSource(d.path, name);
     activeTab.set("codebase");
   };
+  const args = (name: string) => dispatchArgs.value[name] ?? "";
+  /** Dispatch a method into a LIVE app — the same weight as Stop/Restart, and
+   *  now the same ceremony. The confirmation shows the exact call, including
+   *  "with NO arguments" when that is what is about to happen: a method that
+   *  takes parameters called with none is a silent no-op the trojan still
+   *  reports as "dispatched". */
+  const run = (d: ProjectDetail, name: string, m: string) => {
+    const payload = args(name).trim();
+    const call = payload ? `${name}:${m}(${payload})` : `${name}:${m}()`;
+    const note = payload ? "" : "\n\nIt will be called with NO arguments.";
+    if (!confirm(`Run ${call} on ${d.name}?${note}`)) return;
+    manager.dispatch(d.path, `${name}:${m}`, payload);
+  };
   return (
     <div>
       {manager.dispatchMsg && (
@@ -857,8 +881,8 @@ function CellsTab({ d }: { d: ProjectDetail }) {
                   <button
                     key={m}
                     type="button"
-                    title={`Run ${name}:${m}()`}
-                    onClick={() => manager.dispatch(d.path, `${name}:${m}`, "")}
+                    title={`Run ${name}:${m}(${args(name) || ""})`}
+                    onClick={() => run(d, name, m)}
                     style={{ ...btn, padding: "4px 10px", fontSize: "12px" }}
                   >
                     ▶ {m}
@@ -866,6 +890,42 @@ function CellsTab({ d }: { d: ProjectDetail }) {
                 ))}
             </div>
           </div>
+          {(cells[name] ?? []).length > 0 && (
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+                marginTop: "8px",
+              }}
+            >
+              <span
+                style={{ color: C.dim, fontSize: "11px", fontFamily: mono }}
+              >
+                args
+              </span>
+              <input
+                t={`args-${name}`}
+                value={args(name)}
+                placeholder='[] — JSON arguments, e.g. ["ada@example.com"]'
+                onInput={(e) =>
+                  dispatchArgs.set({
+                    ...dispatchArgs.value,
+                    [name]: (e.target as HTMLInputElement).value,
+                  })}
+                style={{
+                  flex: 1,
+                  fontFamily: mono,
+                  fontSize: "11px",
+                  padding: "3px 6px",
+                  background: C.bg,
+                  color: C.text,
+                  border: `1px solid ${C.border}`,
+                  borderRadius: "3px",
+                }}
+              />
+            </div>
+          )}
         </div>
       ))}
     </div>

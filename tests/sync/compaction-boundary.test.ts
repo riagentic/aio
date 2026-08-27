@@ -12,12 +12,21 @@
 // replay (snapshot + surviving ops — see aio-boot's replaySyncOps) applies it
 // twice. And it compounds: the next compaction snapshots the doubled state
 // while the op still survives, so every restart adds another copy.
+//
+// The server now REFUSES an op stamped more than `maxDrift` ahead (see
+// tests/sync/clock-drift.test.ts), so a live client can no longer create one —
+// but the rows are still out there: every log written by a build before that
+// refusal can hold them, and compaction has to roll them over. So these tests
+// put the fast-clocked op in the log the way it can still arrive: already
+// persisted, already applied, its HLC above anything the server's clock
+// followed. The boundary must be `server_ts`, never the HLC.
 import { assertEquals } from "@std/assert";
 import { createServerSyncHandler } from "../../src/sync/server-handler.ts";
 import {
   _resetServerTsForTest,
   loadOpsSince,
   loadSnapshot,
+  persistOp,
 } from "../../src/sync/server-store.ts";
 import { SYNC_DEFAULTS } from "../../src/sync/types.ts";
 import type { HLC } from "../../src/sync/types.ts";
@@ -64,9 +73,7 @@ Deno.test("an op from a fast-clocked client is compacted with the rest", async (
     });
     const { socket, frames } = recordingSocket();
 
-    // A normal op, and one from a client whose clock runs far ahead — beyond
-    // maxDrift, so the server refuses to follow it forward.
-    const ahead = Date.now() + 10 * SYNC_DEFAULTS.maxDrift;
+    // A normal op through the front door…
     await handler.handleOp(
       {
         id: "a",
@@ -78,22 +85,22 @@ Deno.test("an op from a fast-clocked client is compacted with the rest", async (
       { id: "c" },
       socket,
     );
-    await handler.handleOp(
-      {
-        id: "b",
-        hlc: [ahead, 0, "fast"] as HLC,
-        cell: CELL,
-        action: "add",
-        payload: "b",
-      },
-      { id: "c" },
-      socket,
-    );
     await until(
-      () => frames.filter((f) => f.t === "sync-ack").length >= 2,
-      "both ops acked",
+      () => frames.filter((f) => f.t === "sync-ack").length >= 1,
+      "first op acked",
     );
-    assertEquals(live.items, ["a", "b"], "both applied to live state");
+    // …and one already in the log from a build that predates the drift
+    // refusal: its HLC is far ahead of anything this server's clock followed.
+    const ahead = Date.now() + 10 * SYNC_DEFAULTS.maxDrift;
+    await persistOp(db, {
+      id: "b",
+      hlc: [ahead, 0, "fast"] as HLC,
+      cell: CELL,
+      action: "add",
+      payload: "b",
+    });
+    live = reduce(live, "b"); // it was applied when it was accepted
+    assertEquals(live.items, ["a", "b"], "both are in live state");
 
     // Compaction folds live state into the snapshot and rolls the log over.
     handler.noteServerWrite(CELL);
@@ -134,18 +141,18 @@ Deno.test("compaction leaves nothing behind that the snapshot already holds", as
     });
     const { socket, frames } = recordingSocket();
 
-    // Mixed clocks: behind, on time, far ahead.
+    // Mixed clocks: behind and on time arrive live; far-ahead is a row from an
+    // older build (a live one is refused — see clock-drift.test.ts).
     const now = Date.now();
-    const clocks: HLC[] = [
+    const live_clocks: HLC[] = [
       [now - 5_000, 0, "slow"],
       [now, 0, "ok"],
-      [now + 10 * SYNC_DEFAULTS.maxDrift, 3, "fast"],
     ];
-    for (let i = 0; i < clocks.length; i++) {
+    for (let i = 0; i < live_clocks.length; i++) {
       await handler.handleOp(
         {
           id: `op${i}`,
-          hlc: clocks[i]!,
+          hlc: live_clocks[i]!,
           cell: CELL,
           action: "add",
           payload: `p${i}`,
@@ -155,9 +162,18 @@ Deno.test("compaction leaves nothing behind that the snapshot already holds", as
       );
     }
     await until(
-      () => frames.filter((f) => f.t === "sync-ack").length >= clocks.length,
+      () =>
+        frames.filter((f) => f.t === "sync-ack").length >= live_clocks.length,
       "all acked",
     );
+    await persistOp(db, {
+      id: "op2",
+      hlc: [now + 10 * SYNC_DEFAULTS.maxDrift, 3, "fast"] as HLC,
+      cell: CELL,
+      action: "add",
+      payload: "p2",
+    });
+    live = reduce(live, "p2");
 
     handler.noteServerWrite(CELL);
     await handler.flushServerWrites();

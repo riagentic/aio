@@ -19,6 +19,7 @@ import { join } from "@std/path";
 import { _redactCheckpointState } from "../diagnostics/checkpoint.ts";
 import { diagRecent } from "../diagnostics/diagnostic-bus.ts";
 import { noRedaction, type Redactor } from "../diagnostics/redact.ts";
+import type { CellFieldFlags } from "./aio-types.ts";
 import type { TimelineEntry } from "./timeline.ts";
 import { type BuildFacts, buildFacts } from "./boot-facts.ts";
 
@@ -86,6 +87,14 @@ export const REPORT_LIMITS = {
   timelineEntries: 100,
   diagnostics: 50,
   logLines: 200,
+  /** Characters of the free-text `body` kept. `title` has been capped since
+   *  day one; `body` was not, so `feedback.report()` — anonymous and
+   *  uncapped on an exposed app — accepted an arbitrarily large string,
+   *  wrote it to disk and POSTed it. A cap is not censorship: a report body
+   *  longer than this is not a description, it is a payload. */
+  bodyChars: 20_000,
+  /** Characters of `contact`. An address, not an essay. */
+  contactChars: 200,
   /** Bytes of serialized state before it is dropped rather than truncated —
    *  half a state tree is misleading in a way that no state is not. */
   stateBytes: 256 * 1024,
@@ -111,7 +120,75 @@ export type ReportSources = {
   /** The app's redaction rule. Defaults to redacting nothing, which is only
    *  correct for an app that declared nothing. */
   redact?: Redactor;
+  /** Cell id → state key → the flags composition derived from the cell's own
+   *  `visible` declaration (the same map the trojan `fields` route serves).
+   *
+   *  A report carries state, and the app already said which fields must never
+   *  leave the server — so that declaration is the report's default redactor,
+   *  not an unrelated setting the author has to remember to repeat under
+   *  `redactActions`. Without it a `visible: "none"` field was serialized to
+   *  disk and POSTed in full, which is the one thing declaring it prevents.
+   *
+   *  Absent ⇒ nothing is screened, and a report carrying state SAYS SO in
+   *  `truncated` rather than looking as if it had been. */
+  visible?: CellFieldFlags;
 };
+
+/** Project raw state through each cell's declared `visible` flags. A field the
+ *  app hides from clients is not in the report either; a cell that hides every
+ *  field is withheld whole and named. Cells with no entry (nothing declared)
+ *  pass through — that IS the declaration. */
+function _applyDeclaredVisibility(
+  raw: Record<string, unknown>,
+  visible: CellFieldFlags | undefined,
+  truncated: string[],
+): Record<string, unknown> {
+  if (!visible || Object.keys(visible).length === 0) {
+    truncated.push(
+      "state was NOT screened by cell `visible` declarations — this report " +
+        "carries every field, including any the app hides from clients",
+    );
+    return raw;
+  }
+  const out: Record<string, unknown> = {};
+  const withheld: string[] = [];
+  const dropped: string[] = [];
+  for (const [cell, slice] of Object.entries(raw)) {
+    const flags = visible[cell];
+    if (!flags || slice === null || typeof slice !== "object") {
+      out[cell] = slice;
+      continue;
+    }
+    const kept: Record<string, unknown> = {};
+    let any = false;
+    for (
+      const [key, value] of Object.entries(slice as Record<string, unknown>)
+    ) {
+      const flag = flags[key];
+      if (flag && flag.ui === false) {
+        dropped.push(`${cell}.${key}`);
+        continue;
+      }
+      kept[key] = value;
+      any = true;
+    }
+    if (!any && Object.keys(slice as object).length > 0) withheld.push(cell);
+    else out[cell] = kept;
+  }
+  if (withheld.length) {
+    truncated.push(
+      `cells withheld whole — every field is hidden from clients: ${
+        withheld.join(", ")
+      }`,
+    );
+  }
+  if (dropped.length) {
+    truncated.push(
+      `fields hidden from clients were omitted: ${dropped.join(", ")}`,
+    );
+  }
+  return out;
+}
 
 function safeSize(v: unknown): number {
   try {
@@ -178,8 +255,17 @@ export async function buildReport(
       cells: src.cells,
     },
   };
-  if (input.body) report.body = input.body;
-  if (input.contact) report.contact = input.contact;
+  if (input.body) {
+    report.body = input.body.slice(0, REPORT_LIMITS.bodyChars);
+    if (input.body.length > REPORT_LIMITS.bodyChars) {
+      truncated.push(
+        `body truncated to ${REPORT_LIMITS.bodyChars} of ${input.body.length} chars`,
+      );
+    }
+  }
+  if (input.contact) {
+    report.contact = input.contact.slice(0, REPORT_LIMITS.contactChars);
+  }
   if (src.channel) report.app.channel = src.channel;
   if (src.commit) report.app.commit = src.commit;
 
@@ -187,7 +273,13 @@ export async function buildReport(
   try {
     const raw = src.getState?.();
     if (raw) {
-      const safe = _redactCheckpointState(raw, redact);
+      // The app's own `visible` declaration runs FIRST — it is the strongest
+      // statement anyone made about this data, and `redactActions` (built for
+      // action payloads) knows nothing about it. A cell with `visible: "none"`
+      // contributes nothing; `include`/`exclude` are applied field by field,
+      // exactly as they are for a browser.
+      const screened = _applyDeclaredVisibility(raw, src.visible, truncated);
+      const safe = _redactCheckpointState(screened, redact);
       if (redact.cells.size > 0) {
         const withheld = src.cells.filter((c) => redact.cells.has(c));
         if (withheld.length) report.redactedCells = withheld;

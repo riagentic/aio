@@ -2,26 +2,136 @@
  * @module
  * Build compile — withDevExcluded symlink manager + deno compile step + systemd service file.
  */
-import { readDenoJson, readDenoJsonSync } from "../server/deno-json.ts";
+import {
+  DENO_JSON_NAMES,
+  readDenoJson,
+  readDenoJsonSync,
+} from "../server/deno-json.ts";
 import { isProcessAlive } from "../server/single-instance-lock.ts";
 import { dirname, fromFileUrl, isAbsolute, join, relative } from "@std/path";
 import { artifactName } from "./platforms.ts";
 import {
+  compiledMaxHeapMB,
   physicalMemoryBytes,
-  resolveMaxHeapMB,
 } from "../server/heap-policy.ts";
 import type { BuildConfig } from "./build-config.ts";
 
-// Dev-only packages excluded from all compile targets
-const _devTopLevel = ["electron", "esbuild"];
-const _devDenoPrefixes = [
-  "electron@",
-  "esbuild@",
-  "@esbuild+",
-  "@electron+",
-];
+/** npm packages the FRAMEWORK only ever needs at BUILD / DEV / TEST time.
+ *  None of them is reachable from a compiled binary:
+ *   - `esbuild`   — the dev transpiler and the bundler; prod serves `dist/app.js`.
+ *   - `electron`  — the npm package is the INSTALLER. A compiled desktop app
+ *                   fetches its own Electron runtime (`build/electron-runtime.ts`).
+ *   - `happy-dom` — `testUI` and the headless `am surface` route, and
+ *                   `server.ts` only wires that route up when `!prod`.
+ *
+ *  Their TRANSITIVE closure goes too, and that closure is where the weight is:
+ *  happy-dom 13 MB, @electron-internal/extract-zip 7 MB, @types/node 2.4 MB,
+ *  undici 1.6 MB — 25 MB in a hello-world binary. A name-prefix list could
+ *  never have caught them (`@electron-internal+…` does not start with
+ *  `@electron+`, and `undici` looks like nobody's dependency), which is why
+ *  this is a graph walk over the layout deno already wrote. */
+const DEV_ONLY_PACKAGES = ["electron", "esbuild", "happy-dom"];
 
 type SavedLink = { path: string; target: string; isDir: boolean };
+
+/** A `node_modules/.deno` entry name → its package name
+ *  (`@electron+get@5.1.0` → `@electron/get`, `immer@10.2.0` → `immer`).
+ *  `null` for anything that is not `<pkg>@<version>` — notably the flat
+ *  `.deno/node_modules` fallback dir, which is not a package. */
+export function denoNmPackageName(dir: string): string | null {
+  const at = dir.lastIndexOf("@");
+  if (at <= 0) return null;
+  return dir.slice(0, at).replace("+", "/");
+}
+
+/** Which `.deno` entries are reachable ONLY through a dev-only package — i.e.
+ *  the set that is safe to leave out of the binary.
+ *
+ *  Pure over the edge map so the rule is unit-testable without a node_modules
+ *  tree. Anything a REAL dependency can also reach is kept, so widening
+ *  {@link DEV_ONLY_PACKAGES} can only ever shrink the binary, never break it. */
+export function devOnlyClosure(
+  graph: Map<string, Set<string>>,
+  devRoots: readonly string[],
+  keepRoots: readonly string[],
+): string[] {
+  const reach = (roots: readonly string[]) => {
+    const seen = new Set<string>();
+    const queue = [...roots];
+    while (queue.length) {
+      const n = queue.pop()!;
+      if (!graph.has(n) || seen.has(n)) continue;
+      seen.add(n);
+      for (const d of graph.get(n)!) if (!seen.has(d)) queue.push(d);
+    }
+    return seen;
+  };
+  const keep = reach(keepRoots);
+  return [...reach(devRoots)].filter((d) => !keep.has(d)).sort();
+}
+
+/** Resolve one symlink to the `.deno` entry it lands in, or null. */
+async function _denoEntryOf(
+  denoDir: string,
+  linkPath: string,
+): Promise<string | null> {
+  try {
+    const target = await Deno.readLink(linkPath);
+    const abs = isAbsolute(target) ? target : join(dirname(linkPath), target);
+    const rel = relative(denoDir, abs);
+    if (rel.startsWith("..") || isAbsolute(rel)) return null;
+    const first = rel.split("/")[0]!;
+    return denoNmPackageName(first) ? first : null;
+  } catch {
+    return null; // not a symlink, or it dangles
+  }
+}
+
+/** Every symlink directly under `dir`, one scope level deep
+ *  (`@scope/pkg` lives in a real `@scope/` directory). */
+async function _linksIn(dir: string): Promise<string[]> {
+  const out: string[] = [];
+  try {
+    for await (const e of Deno.readDir(dir)) {
+      const p = join(dir, e.name);
+      if (e.isSymlink) out.push(p);
+      else if (e.isDirectory && e.name.startsWith("@")) {
+        try {
+          for await (const i of Deno.readDir(p)) {
+            if (i.isSymlink) out.push(join(p, i.name));
+          }
+        } catch { /* raced away */ }
+      }
+    }
+  } catch { /* no such dir */ }
+  return out;
+}
+
+/** The dependency edges deno's `.deno` layout already records: every package
+ *  dir carries its OWN `node_modules/`, whose symlinks point at the sibling
+ *  `.deno` entries that package may resolve. */
+export async function readDenoNmGraph(
+  denoDir: string,
+): Promise<Map<string, Set<string>>> {
+  const graph = new Map<string, Set<string>>();
+  const entries: string[] = [];
+  try {
+    for await (const e of Deno.readDir(denoDir)) {
+      if (e.isDirectory && denoNmPackageName(e.name)) entries.push(e.name);
+    }
+  } catch {
+    return graph; // no .deno — nothing to exclude
+  }
+  for (const name of entries) {
+    const deps = new Set<string>();
+    for (const link of await _linksIn(join(denoDir, name, "node_modules"))) {
+      const dep = await _denoEntryOf(denoDir, link);
+      if (dep && dep !== name) deps.add(dep);
+    }
+    graph.set(name, deps);
+  }
+  return graph;
+}
 
 /** Temporarily remove dev symlinks, run compile callback, restore symlinks. Returns callback result. */
 export async function withDevExcluded(
@@ -78,16 +188,24 @@ async function _withDevExcluded(
   fn: (excludes: string[]) => Promise<boolean>,
 ): Promise<boolean> {
   const denoDir = join(nmDir, ".deno");
-  const excludes: string[] = [];
-  try {
-    for await (const e of Deno.readDir(denoDir)) {
-      if (
-        e.isDirectory && _devDenoPrefixes.some((p) => e.name.startsWith(p))
-      ) {
-        excludes.push(join(denoDir, e.name));
-      }
-    }
-  } catch { /* no .deno dir */ }
+
+  // Which `.deno` entries only a dev-only package can reach. The ROOTS are the
+  // project's own direct dependencies — the top-level `node_modules/<pkg>`
+  // symlinks deno writes for the import map — split into dev-only and real.
+  // Reading the roots from the tree (rather than assuming DEV_ONLY_PACKAGES is
+  // the whole story) is what makes the walk safe for an app whose own deps
+  // happen to share a package with electron or happy-dom.
+  const graph = await readDenoNmGraph(denoDir);
+  const devRoots: string[] = [];
+  const keepRoots: string[] = [];
+  for (const link of await _linksIn(nmDir)) {
+    const entry = await _denoEntryOf(denoDir, link);
+    if (!entry) continue;
+    const pkg = denoNmPackageName(entry)!;
+    (DEV_ONLY_PACKAGES.includes(pkg) ? devRoots : keepRoots).push(entry);
+  }
+  const excluded = new Set(devOnlyClosure(graph, devRoots, keepRoots));
+  const excludes = [...excluded].map((e) => join(denoDir, e));
 
   const saved: SavedLink[] = [];
   async function _rm(path: string): Promise<void> {
@@ -115,12 +233,35 @@ async function _withDevExcluded(
 
   let ok = false;
   try {
-    // AIO-226: removal inside try so finally always restores on error
-    for (const name of _devTopLevel) await _rm(join(nmDir, name));
-    for (const scope of ["@electron", "@esbuild"]) {
-      await _rmDir(join(denoDir, "node_modules", scope));
+    // AIO-226: removal inside try so finally always restores on error.
+    //
+    // `--exclude` prunes a directory, but deno FOLLOWS a symlink that points
+    // into it and re-embeds the target anyway — that is why `.bin/electron`
+    // and `.bin/esbuild` alone kept dragging their packages back in. So every
+    // link into an excluded dir is held aside for the duration of the compile:
+    // the project's own `node_modules/<pkg>`, the flat `.deno/node_modules`
+    // fallback, and `.bin/*`. Restored in `finally`, whatever happens.
+    for (
+      const dir of [nmDir, join(denoDir, "node_modules"), join(nmDir, ".bin")]
+    ) {
+      for (const link of await _linksIn(dir)) {
+        const entry = await _denoEntryOf(denoDir, link);
+        if (entry && excluded.has(entry)) await _rm(link);
+      }
     }
-    await _rm(join(nmDir, ".bin", "esbuild"));
+    // Scope dirs left empty by the pass above (`@electron/`, `@esbuild/`) are
+    // removed whole so the VFS carries no empty husks.
+    for (const dir of [nmDir, join(denoDir, "node_modules")]) {
+      try {
+        for await (const e of Deno.readDir(dir)) {
+          if (!e.isDirectory || !e.name.startsWith("@")) continue;
+          const scope = join(dir, e.name);
+          let empty = true;
+          for await (const _ of Deno.readDir(scope)) empty = false;
+          if (empty) await _rmDir(scope); // saved, so `finally` puts it back
+        }
+      } catch { /* dir gone */ }
+    }
 
     console.log(
       `[${tag}] excluding ${excludes.length} dev dirs, removed ${saved.length} symlinks`,
@@ -153,18 +294,31 @@ async function _withDevExcluded(
   return ok;
 }
 
-/** `--include` args embedding the SQLite worker. It's loaded via
- *  `new Worker(new URL(...))` — deno compile can't trace that statically —
- *  and EVERY compiled binary needs it since B4a (persistence always opens
- *  the worker-thread DB for the aio_kv store). */
+/** `--include` args for the workers `deno compile` cannot trace. Each is
+ *  started from a `new URL(…, import.meta.url)` handed to a Worker
+ *  constructor, which is invisible to the module graph, so without an explicit include the binary
+ *  builds green and dies in the user's hands with "Module not found" the first
+ *  time that worker starts — on the build box it passes, because the VFS falls
+ *  through to the real file still sitting at the same absolute path.
+ *
+ *   - `db/db-worker.ts`      — EVERY binary needs it since B4a (persistence
+ *                              always opens the worker-thread DB for aio_kv).
+ *   - `state/blocking-worker.ts` — the `blocking()` pool (public, mod.ts).
+ *
+ *  `tests/worker-includes.test.ts` enumerates every `new Worker(new URL(…))`
+ *  in `src/` and asserts each one is listed here, so a THIRD worker cannot be
+ *  added without this list learning about it. */
 export function dbWorkerInclude(): string[] {
-  const dbWorker = new URL("../db/db-worker.ts", import.meta.url);
+  const workers = [
+    new URL("../db/db-worker.ts", import.meta.url),
+    new URL("../state/blocking-worker.ts", import.meta.url),
+  ];
   // fromFileUrl, not .pathname: pathname keeps percent-encoding (a space in
   // the path becomes %20) and on Windows yields "/C:/…" — either way deno
   // compile cannot find the worker and every build ships without it.
-  return dbWorker.protocol === "file:"
-    ? ["--include", fromFileUrl(dbWorker)]
-    : [];
+  return workers.flatMap((u) =>
+    u.protocol === "file:" ? ["--include", fromFileUrl(u)] : []
+  );
 }
 
 // Dirs never scanned for app assets (deps / build output / VCS / vendored fw).
@@ -261,14 +415,24 @@ export async function assetIncludes(root: string): Promise<string[]> {
     }
   }
 
-  // 3) deno.json itself — the app's IDENTITY (version, title, target). The
+  // 3) the app's config itself — its IDENTITY (version, title, client). The
   //    runtime reads it relative to the entry module, so a binary knows its own
   //    version instead of falling back to "0.0.0" or, worse, adopting the
   //    version of whatever project it happens to be launched from.
-  try {
-    await Deno.stat(join(root, "deno.json"));
-    add("deno.json");
-  } catch { /* no deno.json — nothing to embed */ }
+  //
+  //    BOTH names: `DENO_JSON_NAMES` is the decider and every reader honours
+  //    `.jsonc`, so embedding the literal "deno.json" shipped a `.jsonc` app
+  //    with no identity at all — title "AIO App", version 0.0.0, `"client":
+  //    "browser"` ignored so the shell silently defaulted to Electron, and an
+  //    appId taken from the binary's FILE NAME (which moves the data dir on
+  //    every renamed install).
+  for (const name of DENO_JSON_NAMES) {
+    try {
+      await Deno.stat(join(root, name));
+      add(name);
+      break; // deno reads the FIRST match — embed exactly that one
+    } catch { /* not this name — try the next */ }
+  }
 
   return rels.flatMap((r) => ["--include", r]);
 }
@@ -353,19 +517,28 @@ export async function v8FlagsArg(root: string): Promise<string[]> {
     }
     flags.push(flag);
   }
-  // The heap ceiling is added unless the app already set one. V8 freezes it at
+  // The heap ceiling, unless the app already set one by hand. V8 freezes it at
   // isolate creation and a COMPILED binary ignores DENO_V8_FLAGS entirely
-  // (measured) — so `deno compile --v8-flags=` is the ONLY way a shipped
-  // artifact gets anything but the ~4 GB default, whatever the machine it lands
-  // on. That default is what killed an app on a 32 GB box with 28 GB free.
+  // (measured), so `deno compile --v8-flags=` is the ONLY channel — and
+  // whatever goes in here is the ceiling on every machine the artifact ever
+  // reaches.
   //
-  // Resolved against the BUILD machine, which is the honest limit of a baked
-  // number: it is a headroom choice, not a measurement of the user's hardware.
-  // The runtime monitor is what keeps it safe on a smaller one, and it applies
-  // to worker isolates too — a Worker inherits the flag (measured, in both
-  // `deno run` and a compiled binary), contrary to what these docs long said.
+  // Which is why it is NOT the build machine's 25% share any more. It was: a
+  // binary cross-compiled on a 187 GB host booted in an 8 GB Windows VM and
+  // announced `heap 46.7 GB max of 8.0 GB RAM` — six times the box's memory,
+  // taken from a machine its user has never seen. `compiledMaxHeapMB` bakes
+  // only what travels (see it for the whole rule): an absolute
+  // `memory.maxHeap`, a percentage with a build-log line saying whose
+  // percentage it is, and otherwise nothing at all — V8's own ~4 GB default,
+  // which is the policy FLOOR and identical on every machine. An app that
+  // wants more than the floor in a shipped binary says so in one config line,
+  // and the boot report names that line when the machine allows more.
   if (!flags.some((f) => f.startsWith("--max-old-space-size"))) {
-    const mb = resolveMaxHeapMB(physicalMemoryBytes(), declaredMaxHeap(root));
+    const { mb, note } = compiledMaxHeapMB(
+      declaredMaxHeap(root),
+      physicalMemoryBytes(),
+    );
+    if (note) console.warn(`[compile] \u26a0 ${note}`);
     if (mb !== null) flags.push(`--max-old-space-size=${mb}`);
   }
   return flags.length ? [`--v8-flags=${flags.join(",")}`] : [];
@@ -536,9 +709,19 @@ Type=simple
 ExecStart=/usr/local/bin/${binaryName} ${
     execFlags.join(" ")
   }  # adjust path after install
-Restart=on-failure
+# Restart=always, not on-failure: an aio app that updates ITSELF stops with a
+# clean exit code 0 on purpose, so the supervisor starts the new binary. Under
+# on-failure systemd treats that as "it meant to stop" and leaves the service
+# DOWN — every successful auto-update took the app offline until someone
+# noticed.
+Restart=always
 RestartSec=5
 User=${user}
+# Tells the app it is supervised, so it EXITS after an update instead of
+# spawning its own successor (two processes fighting over one app lock). systemd
+# sets INVOCATION_ID, which aio also honours; this is the explicit spelling for
+# any other supervisor.
+Environment=AIO_SUPERVISED=1
 Environment=HOME=${home}
 
 [Install]

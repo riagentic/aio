@@ -1,5 +1,10 @@
 // src/diagnostic-bus.ts — Lightweight diagnostic event bus
-// Works in both Deno (server) and browser — no platform-specific APIs.
+// Works in both Deno (server) and browser — no platform-specific APIs. The one
+// import is `logger-api`, the console-fallback facade that `degraded.ts` (same
+// folder, same isomorphic constraint) already uses: it pulls in no @std/path
+// and no file rotation, so the browser bundle stays intact.
+
+import { log } from "./logger-api.ts";
 
 /** Severity levels for diagnostic events */
 export type DiagnosticSeverity = "error" | "warning" | "info";
@@ -78,6 +83,7 @@ export function initDiagnosticBus(dev: boolean): void {
   _listeners = new Set();
   _dedup = new Map();
   _suppressed = new Map();
+  _broken = new WeakSet();
 }
 
 /** Returns whether diagnostic bus is in dev mode */
@@ -130,8 +136,45 @@ export function diagEmit(event: Omit<DiagnosticEvent, "ts">): void {
   // AIO-273: snapshot before iteration to prevent skip/duplicate on subscribe/unsubscribe during notification
   const snapshot = [..._listeners];
   for (const fn of snapshot) {
-    fn(full);
+    // Guarded per subscriber, for the same reason `mod.ts` guards each log
+    // writer: one failing writer must not take out the others. Unguarded, a
+    // throwing subscriber did BOTH the things this bus exists to prevent —
+    // it escaped to diagEmit's caller (which is usually framework
+    // error-handling code, so the report became a second failure), and it
+    // skipped every subscriber registered after it. The live subscribers are
+    // the structured logger, feedback auto-capture and the WS relay (file I/O
+    // per connection), so one `writeClientLog` throw meant the diagnostic
+    // reached neither app.log nor feedback.
+    try {
+      fn(full);
+    } catch (err) {
+      try {
+        _reportBrokenListener(fn, err);
+      } catch { /* the reporter's own sink is down — the fan-out still runs */ }
+    }
   }
+}
+
+/** Subscribers whose failure has already been reported. A permanently broken
+ *  subscriber fails on EVERY event, so reporting per event would turn one
+ *  defect into a log flood — the noise that hides the next real diagnostic. */
+let _broken = new WeakSet<DiagnosticListener>();
+
+function _reportBrokenListener(fn: DiagnosticListener, err: unknown): void {
+  if (_broken.has(fn)) return;
+  _broken.add(fn);
+  const what = err instanceof Error ? (err.stack ?? err.message) : String(err);
+  // Through the logger, at ERROR: a subscriber that silently stops receiving
+  // diagnostics is exactly the failure this bus exists to surface, so the line
+  // has to carry a level and reach error.log — not just a terminal someone
+  // may or may not be watching (`tests/every-message-has-a-level.test.ts`).
+  log.error(
+    `[aio] a diagnostic subscriber threw and was skipped for this and every ` +
+      `later event (reported once): ${what}\n` +
+      `Cause: diagSubscribe() callbacks run inside diagEmit, on the emitter's ` +
+      `stack. Fix: make the subscriber total — wrap its own I/O in try/catch ` +
+      `— or unsubscribe it; the events it drops are not replayed.`,
+  );
 }
 
 /**

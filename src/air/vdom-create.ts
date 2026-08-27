@@ -12,7 +12,11 @@ import type {
   Portal,
   Suspense,
 } from "./vdom-types.ts";
-import { _getLazyListeners, _takePendingLazyListeners } from "./vdom-lazy.ts";
+import {
+  _getLazyListeners,
+  _preloadLazy,
+  _takePendingLazyListeners,
+} from "./vdom-lazy.ts";
 import { _reportHookError } from "./hook-error.ts";
 
 // ── h() — JSX factory ────────────────────────────────────────────────
@@ -223,13 +227,21 @@ export function _registerLazyListeners(
   // The lazy that actually threw — at any depth, including inside a wrapper
   // component whose vnode says nothing about what it renders.
   _takePendingLazyListeners()?.add(cb);
-  // …plus any lazy sitting directly in the boundary's children. A sibling
-  // lazy that has not rendered yet never threw, so it is not in the pending
-  // slot; registering it here keeps one resolution waking the boundary once.
+  // …plus any lazy sitting directly in the boundary's children, which is where
+  // the PARALLELISM comes from. The boundary aborts its child loop at the first
+  // lazy that throws, so the siblings after it were never rendered and never
+  // started: they loaded one after another, each waiting for the previous one's
+  // re-render, for N round trips where the network could have done them at
+  // once. Registering a listener alone did nothing about that — by the time a
+  // sibling started, it had already put itself in the pending slot — so this
+  // loop STARTS them too.
   for (const child of children) {
     if (typeof child === "object" && typeof child.tag === "function") {
       const listeners = _getLazyListeners(child.tag);
-      if (listeners) listeners.add(cb);
+      if (listeners) {
+        listeners.add(cb);
+        _preloadLazy(child.tag);
+      }
     }
   }
 }

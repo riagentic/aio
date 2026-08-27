@@ -3,7 +3,7 @@
 // first frame, compatible clients proceed, incompatible clients are closed
 // loudly with 4505 (the refusal reason stays v1-readable — the one shim),
 // and hello-less receive-only clients still get state.
-import { assertEquals, assertExists } from "@std/assert";
+import { assertEquals, assertExists, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { dec, enc } from "../src/protocol/envelope.ts";
 import {
@@ -156,7 +156,10 @@ Deno.test("proto: incompatible client is closed with 4505 and __proto-err", asyn
     ws.send('{"v":2,"t":"proto","d":{"v":99,"min":99}}');
     await closedP;
     assertEquals(closeCode, PROTOCOL_MISMATCH_CLOSE_CODE);
-    assertEquals(protoErr.length > 0, true);
+    // Not "some string arrived" — the reason has to be the one a human can
+    // act on, naming WHICH side is old. A non-empty constant passed before.
+    assertStringIncludes(protoErr, "the peer requires ≥ v99");
+    assertStringIncludes(protoErr, "older build");
   });
 });
 

@@ -173,16 +173,26 @@ default is ~4 GB regardless of the machine, which is how an app dies of "out of
 memory" on a 32 GB box with 28 GB free.
 
 - `am start`, `run.sh` and the test harness resolve it for the machine they are
-  on and pass `--v8-flags=--max-old-space-size=N`.
-- A compiled binary bakes it at build time — measured: a compiled artifact
-  **ignores `DENO_V8_FLAGS`**, so `deno compile --v8-flags=` is the only way in.
-  The baked number comes from the BUILD machine, so treat it as headroom rather
-  than a measurement of the user's hardware.
+  on and pass `--v8-flags=--max-old-space-size=N`. That is the rule working as
+  written: the number is decided where the app runs.
+- **A compiled binary is the exception, and it is a hard one.** Measured: a
+  compiled artifact **ignores `DENO_V8_FLAGS`**, and V8 fixes the ceiling when
+  the isolate is created, so `deno compile --v8-flags=` is the only channel and
+  the number is frozen at build time. A build therefore bakes only what travels:
+  an absolute `memory.maxHeap`. An app that declares nothing ships with V8's ~4
+  GB default — the floor, identical on every machine — and the boot report names
+  `memory.maxHeap` when the machine it lands on allows more. (A percentage such
+  as `"25%"` is honoured but resolved against the BUILD machine; the build log
+  says so. It once shipped silently: a binary cross-compiled on a 187 GB host
+  greeted an 8 GB VM with a 46.7 GB ceiling.)
 - A bare `deno run src/app.ts` gets V8's default; the app warns at boot, naming
   the flag to add.
 - Override per app with `"memory": { "maxHeap": "12GB" }` in deno.json (`"25%"`,
-  `"512MB"`, a number of MB, or `"default"`). An explicit value is still clamped
-  to 25% — the cap protects the machine.
+  `"512MB"`, a number of MB, or `"default"`). An explicit value is honoured even
+  above 25%; the boot line says so rather than clamping it.
+- The boot line reports the ceiling this process actually has, against the RAM
+  of the machine reading it — and says when the ceiling exceeds that RAM, which
+  means V8 will grow past physical memory before it collects.
 
 **Workers inherit the ceiling.** Measured on Deno 2.9 in both `deno run` and a
 compiled binary: a Worker isolate reports the same `heap_size_limit` as the main

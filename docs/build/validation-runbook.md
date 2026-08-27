@@ -35,7 +35,7 @@ On machine A (the server):
 
 ```sh
 am create remote-check && cd remote-check
-deno task dev:expose          # binds 0.0.0.0, prints the share link + key
+deno task dev --expose        # binds 0.0.0.0, prints the share link + key
 ```
 
 On machine B (same LAN, then ideally a different network):

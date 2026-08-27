@@ -29,6 +29,9 @@ export type GlobalFlags = {
   filter?: string;
   lines?: number;
   wait?: number;
+  /** `--no-wait` — return as soon as the child is spawned, without waiting for
+   *  it to be reachable. `am start` WAITS by default (see cmdStart). */
+  noWait?: boolean;
   follow?: boolean;
   entry?: string;
   transport?: string;

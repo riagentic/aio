@@ -145,7 +145,7 @@ function runReal(p: Program): Ev[] {
   return (async () => {
     for (const ops of p.rounds) {
       for (const [op, ph] of ops) if (ph === "pre") mgr.handle(effect(op));
-      clock.advance(STEP);
+      await clock.advance(STEP);
       for (const [op, ph] of ops) if (ph === "mid") mgr.handle(effect(op));
       const now = clock.now();
       const due = pending.filter((x) => x.due <= now);
@@ -183,9 +183,18 @@ function runModel(p: Program): Ev[] {
   };
   let settles: Settle[] = [];
 
-  /** The step boundary a tick that fired at `t` settles on. */
-  const boundary = (t: number, extra: number) =>
-    Math.ceil((t + extra) / STEP) * STEP;
+  /** When a tick that fired at `t` settles.
+   *
+   *  A SLOW tick's promise is resolved by the harness after `advance()`
+   *  returns, so it lands on the step boundary past `SLOW`. A fast one settles
+   *  in the same virtual instant it fired: the virtual clock drains microtasks
+   *  between fires, exactly as a real turn of the event loop does between two
+   *  timer callbacks. (It used to fire them back-to-back with no drain, so an
+   *  already-settled tick still counted as running and `skipIfRunning` skipped
+   *  where production fires — the harness being more forgiving than
+   *  production.) */
+  const settleTime = (t: number, slow: boolean) =>
+    slow ? Math.ceil((t + SLOW) / STEP) * STEP : t;
 
   const apply = (op: Op): void => {
     if (op.op === "cancel") {
@@ -206,6 +215,21 @@ function runModel(p: Program): Ev[] {
     e.due = curTime + op.ms;
   };
 
+  /** One tick's settlement, at virtual time `at`. A rejected ONE-SHOT re-arms
+   *  once, 5s from when it settled — which for a fast tick is the instant it
+   *  fired, not the end of the step. */
+  const settleOne = (s: Settle, at: number): void => {
+    if ((gen.get(s.id) ?? 0) !== s.gen) return; // cancelled/replaced: dead
+    if (inFlightUntil.get(s.id) === s.at) inFlightUntil.delete(s.id);
+    if (!s.reject || !s.fromAfter) return;
+    if (s.retryCount >= MAX_RETRIES) return;
+    entries.set(s.id, {
+      kind: "retry",
+      due: at + RETRY_MS,
+      count: s.retryCount + 1,
+    });
+  };
+
   let curTime = 0;
   for (let r = 0; r < p.rounds.length; r++) {
     const start = r * STEP, end = start + STEP;
@@ -224,33 +248,30 @@ function runModel(p: Program): Ev[] {
       if (!pick || !pickId) break;
       const t = pick.due;
       const b = p.behavior[pickId]!;
-      const settleAt = boundary(t, b.slow ? SLOW : 0);
+      const settleAt = settleTime(t, b.slow);
+      const isEvery = pick.kind === "every";
+      const count = pick.kind === "retry" ? pick.count : 0;
       if (pick.kind === "every") {
         pick.due = t + pick.ms;
         if (pick.skip && t <= (inFlightUntil.get(pickId) ?? -1)) continue; // skipped
         evs.push({ t, id: pickId });
         if (pick.skip) inFlightUntil.set(pickId, settleAt);
-        settles.push({
-          id: pickId,
-          at: settleAt,
-          reject: !b.ok,
-          retryCount: 0,
-          gen: gen.get(pickId) ?? 0,
-          fromAfter: false,
-        });
       } else {
-        const count = pick.kind === "retry" ? pick.count : 0;
         entries.delete(pickId); // a one-shot's entry is spent when it fires
         evs.push({ t, id: pickId });
-        settles.push({
-          id: pickId,
-          at: settleAt,
-          reject: !b.ok,
-          retryCount: count,
-          gen: gen.get(pickId) ?? 0,
-          fromAfter: true,
-        });
       }
+      const s: Settle = {
+        id: pickId,
+        at: settleAt,
+        reject: !b.ok,
+        retryCount: isEvery ? 0 : count,
+        gen: gen.get(pickId) ?? 0,
+        fromAfter: !isEvery,
+      };
+      // A fast tick settles inside the same fire loop — before this round's
+      // `mid` ops, which is exactly when the real manager now handles it.
+      if (b.slow) settles.push(s);
+      else settleOne(s, t);
     }
 
     curTime = end; // a mid-phase op is issued once the clock has advanced
@@ -260,17 +281,7 @@ function runModel(p: Program): Ev[] {
     // was cancelled or replaced while the tick was in flight.
     const dueNow = settles.filter((s) => s.at <= end);
     settles = settles.filter((s) => s.at > end);
-    for (const s of dueNow) {
-      if ((gen.get(s.id) ?? 0) !== s.gen) continue; // cancelled/replaced: dead
-      if (inFlightUntil.get(s.id) === s.at) inFlightUntil.delete(s.id);
-      if (!s.reject || !s.fromAfter) continue;
-      if (s.retryCount >= MAX_RETRIES) continue;
-      entries.set(s.id, {
-        kind: "retry",
-        due: end + RETRY_MS,
-        count: s.retryCount + 1,
-      });
-    }
+    for (const s of dueNow) settleOne(s, end);
   }
   return evs;
 }

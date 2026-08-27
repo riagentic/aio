@@ -272,14 +272,37 @@ function closeHandle(h: Handle): void {
   if (h !== null) k32().CloseHandle(h);
 }
 
+/** Did the blocking wait itself fail?
+ *
+ *  `INFINITE` rules out `WAIT_TIMEOUT`, so anything other than `WAIT_OBJECT_0`
+ *  means the wait machinery failed (a closed or invalid event handle) — not an
+ *  outcome of the I/O the caller started. The distinction is the whole point:
+ *  the return value used to be discarded, so a failed wait fell through to
+ *  `GetOverlappedResult` on an operation that had never completed and reported
+ *  whatever `GetLastError` happened to hold, under the WRONG call's name. This
+ *  file's rule is that every Win32 failure throws an Error naming the call that
+ *  failed. */
+export function waitFailed(rc: number): boolean {
+  return rc !== WAIT_OBJECT_0;
+}
+
 /** Wait for one started overlapped operation to finish; return the byte count
- *  or the Win32 error code. Never throws — the caller decides what a code
- *  means on its path (a read's BROKEN_PIPE is EOF, a connect's is a failure). */
+ *  or the Win32 error code. Never throws for an operation OUTCOME — the caller
+ *  decides what a code means on its path (a read's BROKEN_PIPE is EOF, a
+ *  connect's is a failure). A failure of the WAIT is not an outcome, and has no
+ *  meaning any caller could act on, so it throws. */
 async function finishOverlapped(
   h: Handle,
   ev: { h: Handle; ovl: Uint8Array },
 ): Promise<{ ok: true; bytes: number } | { ok: false; code: number }> {
-  await k32().WaitForSingleObject(ev.h, INFINITE);
+  const rc = await k32().WaitForSingleObject(ev.h, INFINITE);
+  if (waitFailed(rc)) {
+    throw winError(
+      "WaitForSingleObject",
+      k32().GetLastError(),
+      `overlapped event (rc=0x${rc.toString(16)})`,
+    );
+  }
   const bytes = new Uint8Array(4);
   const ok = k32().GetOverlappedResult(h, ev.ovl, bytes, 0);
   if (!ok) return { ok: false, code: k32().GetLastError() };

@@ -18,10 +18,10 @@ import {
   triggerAction,
   triggerChar,
   triggerClear,
-  triggerClick,
   triggerDragTo,
   triggerScroll,
   triggerSelect,
+  triggerSetChecked,
 } from "./ui-trigger.ts";
 
 /** A trigger request from the server (a "ui-trigger" frame payload). */
@@ -142,9 +142,22 @@ export async function runUITrigger(
     }
     if (req.action === "type") {
       (info._el as HTMLElement).focus?.();
+      let typed = 0;
       for (const ch of req.text ?? "") {
-        const fresh = findByPath(req.path) ?? info;
+        // Re-resolve between characters (controlled inputs re-render). A MISS
+        // used to fall back to the element captured before the first
+        // keystroke — by then detached from the document, so the remaining
+        // characters went into a node no user can see and the reply still said
+        // `ok: true`. If the control left the surface mid-word, say so.
+        const fresh = findByPath(req.path);
+        if (!fresh?._el || (fresh._el as Element).isConnected === false) {
+          throw new Error(
+            `"${req.path}" left the live surface after ${typed} character(s) ` +
+              `— the rest of ${JSON.stringify(req.text ?? "")} was not typed`,
+          );
+        }
         triggerChar(fresh._el, ch);
+        typed++;
         await new Promise((r) => setTimeout(r, 0));
       }
     } else if (req.action === "select") {
@@ -152,8 +165,10 @@ export async function runUITrigger(
     } else if (req.action === "clear") {
       triggerClear(info._el);
     } else if (req.action === "check" || req.action === "uncheck") {
-      const el = info._el as Element & { checked?: boolean };
-      if (el.checked !== (req.action === "check")) triggerClick(info._el);
+      // ONE guard, shared with testUI: `el.checked` is `undefined` on a
+      // <button>, so the old `el.checked !== want` comparison clicked anything
+      // it was pointed at and reported ok.
+      triggerSetChecked(info._el, req.action === "check", { name: req.path });
     } else if (req.action === "scroll") {
       const to: { top?: number; left?: number } = {};
       for (const m of (req.text ?? "").matchAll(/(top|left)\s*=\s*(-?\d+)/g)) {

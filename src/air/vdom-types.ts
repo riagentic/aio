@@ -232,8 +232,16 @@ export function _setDevA11yCheck(
   _devA11yCheckFn = fn;
 }
 
+/** Distinct warning ids kept before the set is recycled. Ids are not always
+ *  from a fixed vocabulary — `dup-key-${key}` and the per-element hydration
+ *  ids are derived from app data — so the set grew without bound in a long dev
+ *  session. Recycling costs at most a repeated warning, which is the harmless
+ *  direction. */
+const _DEV_WARN_CAP = 500;
+
 export function _devWarn(id: string, msg: string): void {
   if (!_devMode || _devWarned.has(id)) return;
+  if (_devWarned.size >= _DEV_WARN_CAP) _devWarned.clear();
   _devWarned.add(id);
   console.warn(`[aio-dev] ${msg}`);
 }

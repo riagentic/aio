@@ -15,13 +15,16 @@ import { ensureVersion, readPin } from "./am-versions.ts";
  *  the checkout am itself runs from › the default install location. Verified to
  *  actually be an aio checkout (has mod.ts) before use. */
 export function resolveAioRoot(args: string[]): string | null {
-  const flag = args.find((a) => a.startsWith("--aio="))?.slice(6);
+  const flag = aioFlagValue(args);
   const home = Deno.env.get("AIO_HOME");
+  const userHome = Deno.env.get("HOME") ?? Deno.env.get("USERPROFILE");
   const candidates = [
     flag ? resolve(Deno.cwd(), flag) : undefined,
     home,
     repoRoot(),
-    `${Deno.env.get("HOME") ?? ""}/.local/lib/aio`,
+    // Skipped entirely when there is no home — `""/.local/lib/aio` is
+    // `/.local/lib/aio`, a path in the filesystem root that means nothing.
+    userHome ? join(userHome, ".local", "lib", "aio") : undefined,
   ];
   for (const c of candidates) {
     if (!c) continue;
@@ -31,6 +34,50 @@ export function resolveAioRoot(args: string[]): string | null {
     } catch { /* not an aio checkout — try next */ }
   }
   return null;
+}
+
+/** The value of `--aio`, in BOTH spellings.
+ *
+ *  Only `--aio=<path>` was ever read, so `am link --aio /path/to/aio` — the
+ *  form every other CLI on the machine accepts, and the one the shell's own
+ *  tab-completion of a path produces — was silently IGNORED: am linked against
+ *  whatever it found on its own and reported success, and the developer's
+ *  explicit choice of checkout vanished without a word.
+ *
+ *  A bare `--aio` with nothing after it is refused rather than treated as
+ *  absent: it can only mean the value was lost. Pure. */
+export function aioFlagValue(args: string[]): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a.startsWith("--aio=")) return a.slice(6);
+    if (a === "--aio") {
+      const next = args[i + 1];
+      if (next === undefined || next.startsWith("-")) {
+        throw new Error(
+          "--aio needs a path to an aio checkout (`--aio /path/to/aio`, or " +
+            "`--aio=/path/to/aio`). It was given nothing.",
+        );
+      }
+      return next;
+    }
+  }
+  return undefined;
+}
+
+/** `args` with `--aio` and its value removed — so a positional scan beside it
+ *  cannot mistake the PATH for a version ref. Pure. */
+export function withoutAioFlag(args: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a.startsWith("--aio=")) continue;
+    if (a === "--aio") {
+      i++; // drop its value too
+      continue;
+    }
+    out.push(a);
+  }
+  return out;
 }
 
 /** True when the app's deno.json actually uses the `dep/aio` source layout. */
@@ -132,7 +179,7 @@ export async function cmdLink(
     outError(
       "can't find the aio framework to link against. Install it with\n" +
         "  curl -fsSL https://raw.githubusercontent.com/riagentic/aio/main/install.sh | sh\n" +
-        "then re-run `am link`, or pass --aio=<path-to-aio-checkout>.",
+        "then re-run `am link`, or pass --aio <path-to-aio-checkout>.",
       mode,
     );
     Deno.exit(1);
@@ -148,7 +195,7 @@ export async function cmdLink(
   // escape hatch, and it says so in the output so nobody is misled.
   let root = install;
   let pin: string | null = null;
-  const explicitRoot = args.some((a) => a.startsWith("--aio="));
+  const explicitRoot = aioFlagValue(args) !== undefined;
   if (!explicitRoot) {
     pin = await readPin(dir);
     if (pin) {
