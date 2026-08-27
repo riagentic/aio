@@ -125,6 +125,27 @@ export interface AckMessage {
  */
 export interface SyncRequest {
   clientId: string;
+  /** Per-SESSION nonce of the requesting engine — the same nonce its op ids
+   *  carry (`clientId-session-counter`).
+   *
+   *  `clientId` is persisted, so two live clients can share one: a cloned
+   *  browser profile, a copied Electron app directory, a restored backup.
+   *  Filtering "the client's own ops" out of a catch-up by client id alone
+   *  therefore hid each clone's ops from the other, permanently. With the
+   *  session the server filters exactly the requester's own ops. Optional: a
+   *  client built before the field simply omits it and the server falls back
+   *  to the client-id rule. */
+  session?: string;
+  /** Monotonic per-engine id of this request, echoed on the response.
+   *
+   *  Two catch-ups can be in flight at once (a reconnect while a manual
+   *  `requestSync` is outstanding). Without the id the FIRST response opened
+   *  the ordering gate for BOTH, so frames arriving before the second response
+   *  applied ahead of the older ops that response carries — the exact
+   *  misordering the gate exists to prevent. Optional: a server that does not
+   *  echo it puts the client back on the previous (any-response-opens)
+   *  behaviour. */
+  reqId?: number;
   cells: Record<string, { lastHlc: HLC | null; lastServerTs?: number }>;
   pendingOps: SyncOp[];
 }
@@ -138,6 +159,8 @@ export interface SyncRequest {
 export type SyncResponse =
   | {
     mode: "incremental";
+    /** Echo of the request's `reqId` (see SyncRequest). */
+    reqId?: number;
     ops: SyncOp[];
     // No `rebase?: SyncOp[]` here. It was declared, read by the client
     // (`handleSyncResponse` fed its HLCs into the clock) and NEVER written by
@@ -152,6 +175,8 @@ export type SyncResponse =
   }
   | {
     mode: "snapshot";
+    /** Echo of the request's `reqId` (see SyncRequest). */
+    reqId?: number;
     snapshot: Record<string, unknown>;
     ops: SyncOp[];
     lowWater: HLC | Record<string, HLC>;
@@ -159,13 +184,18 @@ export type SyncResponse =
     lastServerTs?: Record<string, number>;
   };
 
-/** Default sync config values */
+/** Default sync config values.
+ *
+ *  Every key here has a reader. `compactIntervalMs` and `syncRetryMs` did not:
+ *  nothing has ever compacted on a timer (compaction is triggered by op count
+ *  and by the server-write debounce) and nothing retried on that interval (a
+ *  catch-up is driven by reconnect, and the `sync-err` backoff lives at its own
+ *  call site in browser-sync). A default nobody reads is a setting that
+ *  silently does not exist — removed rather than left looking configurable. */
 export const SYNC_DEFAULTS = {
   maxDrift: 60_000,
   pendingCap: 500,
   compactOps: 1000,
-  compactIntervalMs: 3_600_000,
-  syncRetryMs: 10_000,
   defaultRetention: "4h",
 } as const;
 

@@ -330,3 +330,59 @@ Deno.test("browser-sync: each cell's own retention reaches the eviction rule", a
     "and an unknown cell is not an error here",
   );
 });
+
+// ── Booting without usable localStorage ──────────────────────────────
+//
+// Every localStorage access in the sync path catches and degrades: reads come
+// back empty, writes go nowhere, and `clientId` falls back to a fresh uuid.
+// Each of those is the right LOCAL decision and together they were a silent
+// lie — `sync: true` kept claiming durable offline state while the offline
+// queue no longer survived a reload and the client took a NEW HLC identity on
+// every load. A private window, blocked site data, or a partitioned
+// third-party context all land here.
+Deno.test("browser-sync: booting without usable localStorage is LOUD", async () => {
+  const prev = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  Object.defineProperty(globalThis, "localStorage", {
+    // Exactly what a browser with site data blocked does: the accessor throws.
+    get() {
+      throw new Error("access to storage is not allowed from this context");
+    },
+    configurable: true,
+  });
+  const errs: string[] = [];
+  const orig = console.error;
+  console.error = (...a: unknown[]) => {
+    const line = a.map(String).join(" ");
+    if (line.includes("[aio:sync]")) errs.push(line);
+    else orig(...a);
+  };
+  try {
+    _resetBrowserSync();
+    _resetCellRegistry();
+    registerCell(makeSyncCell("bs-nostore"));
+    const engine = initBrowserSync(() => {});
+    await new Promise((r) => setTimeout(r, 10));
+    assert(engine, "sync must still boot — degraded, not dead");
+    assertEquals(
+      errs.length,
+      1,
+      `booting without localStorage must be reported exactly once — got:\n` +
+        errs.join("\n"),
+    );
+    assert(
+      errs[0]!.includes("no usable localStorage"),
+      `the report must name the cause: ${errs[0]}`,
+    );
+    assert(
+      errs[0]!.includes("reload") && errs[0]!.includes("identity"),
+      `the report must name BOTH consequences — unsent changes lost on ` +
+        `reload, and a new sync identity each load: ${errs[0]}`,
+    );
+  } finally {
+    console.error = orig;
+    _resetBrowserSync();
+    _resetCellRegistry();
+    if (prev) Object.defineProperty(globalThis, "localStorage", prev);
+    else delete (globalThis as Record<string, unknown>).localStorage;
+  }
+});

@@ -52,7 +52,22 @@ export function installCrashHandler(deps: CrashHandlerDeps): () => void {
           stack: stack ?? "no stack",
           cells: health?.cells as unknown as Record<string, unknown>,
         });
-      } catch { /* logger failed during crash */ }
+      } catch (logErr) {
+        // The last-words logger just became the thing that lost the last
+        // words: swallowing here meant a crash whose ONLY record was the one
+        // the broken logger did not write. console is the sink that cannot
+        // itself be misconfigured — the crash first, then why it was not
+        // logged properly.
+        console.error(
+          `[crash-handler] ${label}: ${msg}\n${stack ?? "no stack"}`,
+        );
+        console.error(
+          `[crash-handler] the logger ALSO failed while reporting that ` +
+            `crash: ${logErr}. Cause: the injected log sink threw. Fix: check ` +
+            `the log directory's permissions and free space — this crash is ` +
+            `in the console only.`,
+        );
+      }
       if (typeof Deno !== "undefined" && "writeTextFileSync" in Deno) {
         try {
           writeEmergencyCheckpoint();

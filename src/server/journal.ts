@@ -16,6 +16,22 @@ import {
 import type { Redactor } from "../diagnostics/redact.ts";
 import { runWithUser } from "./auth-context.ts";
 import type { AioUser } from "./aio-types.ts";
+import { log } from "../diagnostics/logger-api.ts";
+
+/** The store row that holds a journal's watermark.
+ *
+ *  The watermark used to live in a `<journal>.wm` side file written AFTER the
+ *  snapshot transaction committed — so a kill in between replayed actions that
+ *  were already in the snapshot (replay RE-REDUCES; it is not idempotent, and a
+ *  `deposit` applied twice is money), and a failed `.wm` write was swallowed by
+ *  a bare `catch {}`, after which every later boot replayed a growing
+ *  already-applied tail, silently, forever. Both were reproduced.
+ *
+ *  As a row in the same SQLite file, the watermark is written INSIDE the
+ *  transaction that writes the snapshot it describes: the two are true at the
+ *  same instant or neither is. */
+export const journalWatermarkKey = (appId: string): string =>
+  `${appId}:__journal_wm`;
 
 export type JournalEntry = {
   seq: number;
@@ -170,6 +186,12 @@ export function parseJournal(text: string): JournalEntry[] {
 export function createJournal(
   path: string,
   opts: {
+    /** The watermark the STORE holds for this journal, when the store owns it
+     *  (see {@linkcode journalWatermarkKey}). Present ⇒ `setWatermark` records
+     *  nothing on its own: the persistence transaction already did, atomically.
+     *  Absent ⇒ the legacy `<journal>.wm` side file, which is what a journal
+     *  used outside an app (the unit tests) still uses. */
+    storedWatermark?: number;
     sync?: boolean;
     /** Action types whose PAYLOAD must never be written to disk.
      *
@@ -187,11 +209,16 @@ export function createJournal(
 ): Journal {
   const redacted = opts.redact ?? noRedaction;
   const wmPath = path + ".wm";
+  const storeOwnsWatermark = opts.storedWatermark !== undefined;
   let seq = 0;
   let wm = 0;
-  // Recover prior state on open.
+  // Recover prior state on open. When the store owns the watermark a `.wm`
+  // file may still exist — written by a build from before the move — so take
+  // the HIGHER of the two: replaying what is already in the snapshot is the
+  // failure this whole file is about.
+  if (storeOwnsWatermark) wm = opts.storedWatermark!;
   try {
-    wm = parseInt(Deno.readTextFileSync(wmPath), 10) || 0;
+    wm = Math.max(wm, parseInt(Deno.readTextFileSync(wmPath), 10) || 0);
   } catch { /* no watermark yet */ }
   try {
     const existing = parseJournal(Deno.readTextFileSync(path));
@@ -266,9 +293,26 @@ export function createJournal(
     watermark: () => wm,
     setWatermark(s) {
       wm = s;
-      try {
-        Deno.writeTextFileSync(wmPath, String(s));
-      } catch { /* best-effort */ }
+      // The store already recorded this seq, in the same transaction as the
+      // snapshot — writing it again here would only re-open the window.
+      if (!storeOwnsWatermark) {
+        try {
+          Deno.writeTextFileSync(wmPath, String(s));
+        } catch (e) {
+          // NEVER swallowed. A watermark that cannot be written means every
+          // later boot replays an already-applied tail — silently, and growing.
+          log.error(
+            "journal",
+            `could not record the journal watermark at ${wmPath} — ${e}. ` +
+              `Until this succeeds, every restart REPLAYS actions that are ` +
+              `already in the persisted snapshot (replay re-reduces; it is ` +
+              `not idempotent). fix: make ${wmPath} writable (check disk ` +
+              `space and permissions), or run the journal under an app, ` +
+              `where the watermark is a row in state.db written inside the ` +
+              `snapshot transaction.`,
+          );
+        }
+      }
       // Compact: keep only the unpersisted tail (seq > wm). Atomic via rename.
       // The temp file carries the SAME 0600 mode as the journal it replaces:
       // it holds the same action payloads, and the rename makes it the
@@ -294,7 +338,17 @@ export function createJournal(
           { mode: 0o600 },
         );
         Deno.renameSync(tmp, path);
-      } catch { /* compaction is an optimization — safe to skip */ }
+      } catch (e) {
+        // Compaction is an optimization — the watermark alone decides what is
+        // replayed — but a journal that can never be compacted grows without
+        // bound, so it is said once rather than never.
+        log.warn(
+          "journal",
+          `could not compact ${path} — ${e}. Nothing is replayed twice ` +
+            `(the watermark decides that), but the file keeps growing until ` +
+            `this succeeds.`,
+        );
+      }
     },
     currentSeq: () => seq,
     close() {/* writes are synchronous — nothing buffered */},

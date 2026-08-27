@@ -15,7 +15,7 @@ import {
   resolveAppId,
   writeLock,
 } from "../server/single-instance-lock.ts";
-import { join } from "@std/path";
+import { basename, join } from "@std/path";
 import { appDirs, registerAppDirs } from "../server/app-dirs.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, fail, out, outError } from "./am-output.ts";
@@ -131,7 +131,12 @@ export function resolveAmAppId(flag?: string): string {
     const fromCfg = cfg.title ?? cfg.name?.split("/").pop();
     if (fromCfg) return resolveAppId(fromCfg);
   } catch { /* no deno.json */ }
-  const dir = Deno.cwd().split("/").filter(Boolean).pop();
+  // `basename`, not `split("/")`: the server infers the same last rung from a
+  // `file:` URL (always `/`-separated), but `Deno.cwd()` on Windows is
+  // `C:\proj\app` — which `split("/")` returns WHOLE, so `am` computed the
+  // appId `c-proj-app` for the app the runtime calls `app`. Two identities for
+  // one project means two lock files, and `am` talking past its own app.
+  const dir = basename(Deno.cwd());
   if (dir) return resolveAppId(dir);
   throw new Error(
     '[am] missing appId — pass --app=X, add "appId" to deno.json, or set appId in aio.run()',
@@ -478,6 +483,9 @@ export function parseGlobalFlags(
     else if (a.startsWith("--lines=")) flags.lines = num(a.slice(8), "--lines");
     else if (a.startsWith("--wait=")) flags.wait = num(a.slice(7), "--wait");
     else if (a === "--wait") flags.wait = 0; // bare --wait = use default
+    // `am start` waits by default; this is the opt-out for a script that only
+    // wants the process spawned (see cmdStart).
+    else if (a === "--no-wait") flags.noWait = true;
     else if (a === "--follow" || a === "-f") flags.follow = true;
     else if (a.startsWith("--entry=")) flags.entry = a.slice(8);
     else if (a.startsWith("--transport=")) flags.transport = a.slice(12);
@@ -655,4 +663,58 @@ export async function runTrojanPost(
     Deno.exit(1);
   }
   out(result.data, ctx.mode);
+}
+
+// ── App names are names, never paths ────────────────────────
+
+/** THE shape of an app name — one decider for every command that takes one.
+ *
+ *  `am create` has always validated its name; `am remove` and `am upgrade`
+ *  took theirs raw and fed it straight to `join()`, which NORMALIZES. So
+ *  `am remove ..` resolved `~/app/..` → `$HOME` and `~/.local/bin/..` →
+ *  `~/.local` and deleted both, recursively, exit 0 (measured); `am remove .`
+ *  took `~/app` (every installed app) and `~/.local/bin` (every symlink on the
+ *  machine, aio's and not); `am remove . --data` resolved its data dir to
+ *  `dirname($HOME)`. An app name that is not a plain name is never a typo
+ *  worth guessing at — it is the only input that can turn a two-word command
+ *  into `rm -rf $HOME`.
+ *
+ *  Leading `.` is excluded on purpose: that is what makes `.`, `..` and
+ *  `../../..` unrepresentable rather than merely unlikely. */
+export const APP_NAME_RE = /^[a-z0-9][a-z0-9._-]*$/i;
+
+/** `null` when `name` is a plain app name, else the refusal — cause AND fix. */
+export function appNameError(name: string, verb: string): string | null {
+  if (APP_NAME_RE.test(name)) return null;
+  return `"${name}" is not an app name — ${verb} takes the NAME of an ` +
+    `installed app, never a path.\n` +
+    `  A name starts with a letter or digit, then letters, digits, '-', ` +
+    `'_', '.'\n` +
+    `  (".", ".." and "a/b" are refused because join() normalizes them: ` +
+    `am remove .. would delete $HOME)\n` +
+    `  fix: am installed   # lists the names this machine has`;
+}
+
+/** Refuse to write over a file that is already there, unless `--force`.
+ *
+ *  `am backup` has always guarded exactly this: "already exists — pick another
+ *  destination". `am snapshot save <path>` and `am record <path>` took an
+ *  arbitrary path and clobbered it without a word — same command family, same
+ *  kind of argument, opposite behaviour, and the difference is invisible until
+ *  the file that vanishes is one someone needed. Returns the refusal, or null.
+ *
+ *  Pure over the filesystem's answer, so the message is testable. */
+export function overwriteRefusal(
+  path: string,
+  force: boolean,
+  what: string,
+): string | null {
+  if (force) return null;
+  try {
+    Deno.statSync(path);
+  } catch {
+    return null; // nothing there — free to write
+  }
+  return `${path} already exists — refusing to overwrite it with ${what}.\n` +
+    `  fix: pick another path, or pass --force to replace it.`;
 }

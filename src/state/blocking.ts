@@ -79,6 +79,29 @@ function workerUrl(): URL | string {
   return _workerUrl;
 }
 
+/** Classify a worker startup failure, or null when it is something else.
+ *
+ *  `new Worker(new URL("./blocking-worker.ts", import.meta.url))` is invisible
+ *  to `deno compile`'s module graph, so a binary built without `--include` for
+ *  it runs perfectly on the build box — where the VFS falls through to the real
+ *  file still on disk — and dies in the user's hands with a bare
+ *  `Module not found`, from a file they have never heard of, naming a path
+ *  inside `/tmp/deno-compile-…`. Same failure, and the same answer, as
+ *  `db-worker.ts` (see `src/db/async-db.ts`). Pure. */
+export function blockingWorkerMissingHint(message: string): string | null {
+  if (!/module not found/i.test(message)) return null;
+  if (!message.includes("blocking-worker.ts")) return null;
+  return `${message}\n\n` +
+    `schedule.blocking() runs its work in a Worker, and this binary does not ` +
+    `carry the worker module. \`new Worker(new URL(…))\` is invisible to ` +
+    `\`deno compile\`'s module graph, so the module has to be embedded ` +
+    `explicitly:\n` +
+    `    deno compile -A --include <aio-src>/src/state/blocking-worker.ts <your-entry.ts>\n` +
+    `aio's own build does this; a hand-rolled compile script gets the exact ` +
+    `flags from \`import { dbWorkerInclude } from "aio/build"\`. This is NOT a ` +
+    `permissions problem and NOT a bug in your function.`;
+}
+
 export function createBlockingPool(opts?: { size?: number }): BlockingPool {
   const size = Math.max(1, opts?.size ?? DEFAULT_SIZE);
   const _warnedDupId = new Set<string>();
@@ -106,9 +129,18 @@ export function createBlockingPool(opts?: { size?: number }): BlockingPool {
     };
     w.onerror = (e) => {
       const task = active.get(w);
+      const hint = blockingWorkerMissingHint(e.message ?? "");
+      if (hint) e.preventDefault?.(); // we are reporting it, precisely
       if (task) {
         active.delete(w);
-        task.reject(new Error(`blocking worker crashed: ${e.message}`));
+        task.reject(
+          new Error(hint ?? `blocking worker crashed: ${e.message}`),
+        );
+      } else if (hint) {
+        // Nothing was in flight to reject — the module is missing for every
+        // task that will ever run here, so say it once rather than let a bare
+        // "Module not found" reach the user with no context.
+        log.error("blocking", hint);
       }
       retire(w); // don't reuse a crashed worker
       pump();

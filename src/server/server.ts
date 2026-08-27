@@ -54,6 +54,7 @@ import {
   armLocalControl,
   authFailBudgetExceeded,
   clearSessionCookie,
+  hostRefusal,
   localControlAuthorized,
   recordAuthFail,
   trojanDenialForUserMode,
@@ -126,6 +127,17 @@ export function _resetSecurityWarnings(): void {
   _proxyCollapseWarned = false;
   _tokenInUrlWarned = false;
 }
+
+/** The framework's own diagnostic routes. Public on a public app (that is what
+ *  a dev panel and a `curl /__aio/health` are for), but NEVER anonymous on an
+ *  app that has accounts: they describe the app rather than serve it. Listed
+ *  once so the anonymous fall-through and any future gate read the same set. */
+const _ANON_DENIED_DIAGNOSTICS = [
+  "/__aio/health",
+  "/__aio/metrics",
+  "/__aio/vitals",
+  "/__aio/error",
+] as const;
 
 /** True when a request originates from the SAME MACHINE — loopback TCP or a
  *  Unix socket. The trojan control plane uses this to stay off the network
@@ -432,6 +444,8 @@ export function createServer(config: ServerConfig): ServerHandle {
     expose: config.expose,
     allowedOrigins: config.allowedOrigins,
     strictOrigin: config.strictOrigin,
+    // The scheme half of the Origin check — see `secure` in WsDeps.
+    secure: !!config.cert,
     // Revocation must reach sockets that are ALREADY open — the store is the
     // only thing that knows a session died (see `_revalidate` in server-ws).
     revalidateSession: _sessionResolver
@@ -627,15 +641,41 @@ export function createServer(config: ServerConfig): ServerHandle {
   ): Promise<Response> => {
     const url = new URL(req.url);
     const { pathname } = url;
+    // ── THE Host gate — DNS-rebinding defense, one decider ──
+    // FIRST, ahead of every other rule, because it answers a question the
+    // rules below all assume: "is this request even addressed to this app?".
+    // A tab on evil.com whose DNS flips to 127.0.0.1 is same-origin with a
+    // loopback app — its cookies ride along, the WS `isOwnHost` check passes
+    // (Origin and Host both say evil.com), and in public mode there is no
+    // credential to miss. From there `/__aio/trojan/state` is a raw,
+    // unfiltered state read and `/dispatch`, `/sql`, `/snapshot`, `/shutdown`
+    // are one POST each. HTTP, static, the trojan and the `/ws` upgrade all
+    // funnel through this function, so the rule is written exactly once.
+    const hostDenied = hostRefusal(req, info?.remoteAddr, {
+      bindHost: config.host ?? (config.expose ? "0.0.0.0" : "127.0.0.1"),
+      allowedOrigins: config.allowedOrigins,
+    });
+    if (hostDenied) return hostDenied;
     // F-4: derive a stable client key for cross-connection abuse tracking
     // (denylist, per-IP auth-fail budget, lockout bucketing).
     // TCP: remote hostname (IP). UDS: no key — in-process trust, skip denylist.
     // Behind a trusted reverse proxy the TCP peer is the proxy — every client
     // would collapse into ONE bucket (shared auth budget = trivial global
-    // login DoS). When `trustProxyHeader` is set, take the CLIENT ip from the
-    // FIRST hop of that header instead. Opt-in: honoring a client-settable
+    // login DoS). When `trustProxyHeader` is set, take the client ip from the
+    // RIGHTMOST hop of that header instead. Opt-in: honoring a client-settable
     // header without a proxy in front would let an attacker forge a fresh key
     // per request and evade the budget entirely.
+    //
+    // RIGHTMOST, never leftmost. `X-Forwarded-For` is APPENDED to by every hop
+    // (that is the nginx/Caddy idiom the docs prescribe: `proxy_set_header
+    // X-Forwarded-For $proxy_add_x_forwarded_for`), so element 0 is whatever
+    // the CLIENT sent — pure attacker input. Reading it handed an attacker a
+    // fresh abuse bucket per request: 30 bad tokens with a rotating first hop
+    // never reached the 429 that ten from a fixed address do, which defeated
+    // the per-IP auth budget, the 6-digit pairing-PIN budget (brute-forceable
+    // inside its 3-minute TTL) and the WS denylist in one move. The LAST
+    // element is the address the nearest trusted proxy actually observed, and
+    // nothing downstream of that proxy can write it.
     const addr = info?.remoteAddr;
     const peerKey = addr && "hostname" in addr &&
         typeof addr.hostname === "string"
@@ -644,8 +684,9 @@ export function createServer(config: ServerConfig): ServerHandle {
     let clientKey = peerKey;
     if (config.trustProxyHeader && peerKey) {
       const fwd = req.headers.get(config.trustProxyHeader);
-      const first = fwd?.split(",")[0]?.trim();
-      if (first) clientKey = first;
+      const hops = fwd?.split(",") ?? [];
+      const last = hops[hops.length - 1]?.trim();
+      if (last) clientKey = last;
     } else if (_perUserAuth && !config.trustProxyHeader) {
       // Bucket collapse used to be SILENT. Warn from EVIDENCE — a forwarding
       // header on a real request — not from a guess about the deployment.
@@ -838,6 +879,32 @@ export function createServer(config: ServerConfig): ServerHandle {
         // must not read stored binaries through the same door.
         if (pathname.startsWith("/__aio/blobs/")) {
           return new Response("Unauthorized", { status: 401, headers: extra });
+        }
+        // Nor the DIAGNOSTIC surface. `authFlows` makes the shell public so
+        // SignIn can render; it says nothing about telemetry. Anonymously,
+        // these answered: how many cells there are and how big each one is,
+        // the ids and user ids of every connected client, connection and
+        // dispatch counts, and the app's most recent error STRINGS — which is
+        // a live map of an app whose whole point is that you must log in to
+        // see anything. They are operator surfaces, so they answer to an
+        // account, exactly like /__aio/snapshot two lines up.
+        if (_ANON_DENIED_DIAGNOSTICS.some((p) => pathname === p)) {
+          return new Response(
+            `Unauthorized — ${pathname} reports on this app's internals ` +
+              `(cell sizes, connected clients, recent errors) and requires a ` +
+              `signed-in user. The app SHELL is public so the sign-in page can ` +
+              `render; nothing behind it is.\n\n` +
+              // The one thing an operator needs and would otherwise have to
+              // discover the hard way: a liveness probe does not need a
+              // credential, because it does not need this endpoint. Without
+              // this line the fix people reach for is giving their monitoring
+              // an account — which is a credential in a config file, sitting
+              // there forever, to answer "is it up".
+              `For a liveness/readiness probe, use GET / — it answers 200 ` +
+              `anonymously on this app (that is what makes the sign-in page ` +
+              `reachable) and needs no credential.`,
+            { status: 401, headers: extra },
+          );
         }
 
         // …but NEVER to the control plane. serveStatic mounts the trojan, and
@@ -1094,7 +1161,15 @@ export function createServer(config: ServerConfig): ServerHandle {
           trojanPort = addr.port;
         },
       },
-      async (req) => {
+      async (req, info) => {
+        // The Host gate is a security rule, so it holds on BOTH listeners —
+        // this one is plain HTTP on loopback, which is exactly what a rebound
+        // domain reaches. Same decider, no second copy of the rule.
+        const denied = hostRefusal(req, info?.remoteAddr, {
+          bindHost: "127.0.0.1",
+          allowedOrigins: config.allowedOrigins,
+        });
+        if (denied) return denied;
         // Authenticate trojan requests on localhost — same rules as main server
         if (config.token) {
           const url = new URL(req.url);

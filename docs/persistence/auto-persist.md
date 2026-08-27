@@ -16,6 +16,12 @@ single `state.db`. On restart, persisted state is **deep-merged** with
 - Type mismatches (e.g. persisted `null` where initial has an object) fall back
   to initial
 
+Writes are **debounced** (`persistDebounceMs`, default 100 ms), so a method that
+has returned is committed in memory and broadcast, but not yet on disk. What
+that means for a kill, a power cut and a clean shutdown is written down in
+[the durability contract](how-it-works.md#the-durability-contract) — read it
+before you decide whether you need `journal: true`.
+
 ## Per-Cell Persistence
 
 Each cell declares what gets persisted. Default: `"all"` (everything persists).

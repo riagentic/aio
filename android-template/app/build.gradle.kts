@@ -11,8 +11,8 @@ android {
         applicationId = "{{APPLICATION_ID}}"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = {{VERSION_CODE}}
+        versionName = "{{VERSION_NAME}}"
     }
 
     buildTypes {

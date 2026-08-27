@@ -21,7 +21,15 @@
 #        AIO_RAW (raw base for fetching install.sh) ·
 #        AIO_INSTALL (local install.sh path — offline/tests)
 # Windows: use run.ps1 (`irm .../run.ps1 | iex`).
-set -e
+#
+# `set -u`: with $HOME unset every `$HOME/...` path below silently becomes a
+# path under the filesystem root. Fail instead.
+set -eu
+
+[ -n "${HOME:-}" ] || {
+  printf "\033[31m✗\033[0m %s\n" "\$HOME is not set, so there is nowhere to install to. Set it (export HOME=/home/you) and re-run." >&2
+  exit 1
+}
 
 AIO_HOME="${AIO_HOME:-$HOME/.local/lib/aio}"
 AIO_BRANCH="${AIO_BRANCH:-main}"
@@ -93,10 +101,29 @@ if deno_ok && command -v am >/dev/null 2>&1 && [ -d "$AIO_HOME/.git" ]; then
 else
   info "setting up aio (deno + framework + am)..."
 fi
-  if [ -n "${AIO_INSTALL:-}" ]; then
+if [ -n "${AIO_INSTALL:-}" ]; then
   sh "$AIO_INSTALL" || fail "install failed ($AIO_INSTALL)"
 else
-  curl -fsSL "$AIO_RAW/install.sh" | sh || fail "install failed ($AIO_RAW/install.sh)"
+  # DOWNLOAD, THEN RUN. `curl … | sh || fail` cannot detect a failure: in a
+  # POSIX pipeline the exit status is the LAST command's — `sh`'s — and there
+  # is no `pipefail` in /bin/sh. A 404, a dropped connection, an empty body:
+  # `sh` reads nothing, exits 0, `|| fail` never fires, and run.sh went on to
+  # announce "updating aio + am" having installed nothing at all. The
+  # truncation case is worse still and is handled on install.sh's own side
+  # (its body is wrapped in `main()`), but a status we can actually read
+  # belongs here.
+  _installer="${TMPDIR:-/tmp}/aio-install.$$.sh"
+  curl -fsSL "$AIO_RAW/install.sh" -o "$_installer" \
+    || { rm -f "$_installer"; fail "could not download the installer from $AIO_RAW/install.sh — check the network, or set AIO_RAW/AIO_BRANCH"; }
+  [ -s "$_installer" ] \
+    || { rm -f "$_installer"; fail "the installer downloaded from $AIO_RAW/install.sh is EMPTY — refusing to run it"; }
+  if sh "$_installer"; then
+    rm -f "$_installer"
+  else
+    _rc=$?
+    rm -f "$_installer"
+    fail "install failed ($AIO_RAW/install.sh, exit $_rc)"
+  fi
 fi
 PATH="$DENO_INSTALL/bin:$HOME/.deno/bin:${DENO_INSTALL_ROOT:-$HOME/.deno}/bin:$PATH"
 export PATH

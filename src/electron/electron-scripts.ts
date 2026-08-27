@@ -8,6 +8,7 @@ import {
   tmplKeyboardShortcuts,
   tmplParentWatch,
   tmplWillNavigate,
+  tmplWindowShape,
   toSlug,
 } from "./electron-shared.ts";
 
@@ -30,7 +31,7 @@ ${tmplBounds()}
 
 app.on('ready', () => {
   const b = loadBounds(${w}, ${h});
-  b.webPreferences = { nodeIntegration: false, contextIsolation: true };
+${tmplWindowShape(meta)}
   const win = new BrowserWindow(b);
   if (b.x == null) win.center();
 ${tmplBoundsTracking()}

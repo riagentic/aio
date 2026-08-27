@@ -12,7 +12,8 @@
 //
 //   fast    every static gate + every release SURFACE (version triple,
 //           dated CHANGELOG entry, upgrade guide written AND listed)
-//   heavy   the three real-execution suites (test, onboard, build)
+//   heavy   the real-execution suites (test, onboard, build), the mutation
+//           gate, and the check that the suite left nothing running
 //
 // Every fast gate runs even after one fails — a release report that stops at
 // the first problem makes you re-run the whole thing per fix. The heavy tier is
@@ -124,6 +125,10 @@ const FAST: [string, string[]][] = [
   ["lint", ["deno", "task", "lint"]],
   ["lint:aio", ["deno", "task", "lint:aio"]],
   ["check:boundaries", ["deno", "task", "check:boundaries"]],
+  ["check:silent-catch", ["deno", "task", "check:silent-catch"]],
+  ["check:vacuous", ["deno", "task", "check:vacuous"]],
+  ["check:dead-wiring", ["deno", "task", "check:dead-wiring"]],
+  ["check:log-prefix", ["deno", "task", "check:log-prefix"]],
   ["check:api", ["deno", "task", "check:api"]],
   ["check:docs", ["deno", "task", "check:docs"]],
   ["update:docs (no diff)", ["deno", "task", "update:docs", "--", "--check"]],
@@ -133,6 +138,19 @@ const FAST: [string, string[]][] = [
 
 const HEAVY: [string, string[]][] = [
   ["test", ["deno", "task", "test"]],
+  // Straight after the suite, because that is the only moment the answer means
+  // anything: an aio process still serving here was started by a test that did
+  // not clean up after itself. A field report measured a `--expose` server on
+  // 0.0.0.0 left running for 5.5 hours by a hung test — a ghost in
+  // `am discover`, invisible to `am instances`. The script existed and no gate
+  // ran it, so nothing ever noticed. It names the process and its lock, so a
+  // failure here is readable even when the culprit is something else you have
+  // running on this machine.
+  ["check:orphans", ["deno", "task", "check:orphans"]],
+  // ~30 s: breaks each load-bearing invariant on purpose and requires its
+  // named test to go red. Heavy because it runs `deno test` twice per entry,
+  // not because it is slow to fail.
+  ["check:mutations", ["deno", "task", "check:mutations"]],
   ["test:onboard", ["deno", "task", "test:onboard"]],
   ["test:build", ["deno", "task", "test:build"]],
 ];

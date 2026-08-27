@@ -22,15 +22,25 @@ const AIO_ROOT = join(import.meta.dirname ?? ".", "..");
 
 Deno.test("aio/build exports dbWorkerInclude — the include args, not folklore", async () => {
   const args = dbWorkerInclude();
-  assertEquals(args.length, 2, "one --include pair");
-  assertEquals(args[0], "--include");
+  // One pair per untraceable worker. `tests/worker-includes.test.ts` is the
+  // gate that says WHICH workers those are (it scans `src/` for every
+  // `new Worker(new URL(…))`); this pins the shape and that each path is real.
+  assertEquals(args.length % 2, 0, "flat --include/path pairs");
+  assert(args.length >= 2, "at least the SQLite worker");
+  const paths: string[] = [];
+  for (let i = 0; i < args.length; i += 2) {
+    assertEquals(args[i], "--include");
+    paths.push(args[i + 1]!);
+  }
   assert(
-    args[1]!.endsWith(join("src", "db", "db-worker.ts")),
-    `points at the worker, got ${args[1]}`,
+    paths.some((p) => p.endsWith(join("src", "db", "db-worker.ts"))),
+    `the SQLite worker is in there, got ${paths.join(", ")}`,
   );
-  // and at a file that actually exists — an --include of a wrong path is
-  // accepted by deno compile and only fails in the user's hands
-  assert((await Deno.stat(args[1]!)).isFile, "the worker file exists");
+  // …and every path is a file that actually exists — an --include of a wrong
+  // path is accepted by deno compile and only fails in the user's hands.
+  for (const p of paths) {
+    assert((await Deno.stat(p)).isFile, `${p} exists`);
+  }
 });
 
 Deno.test("aio/build exports compileArgs — a hand-rolled compile can match aio's", () => {

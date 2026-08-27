@@ -12,6 +12,16 @@ binary. Persistence, real-time sync, auth, scheduling, UI, and build targets are
 one system — the integration work between those layers is the product's job, not
 yours.
 
+## Trusted environments, by default
+
+aio's security model targets **trusted environments**: localhost tools, LAN
+dashboards, small teams, desktop apps. The server binds `127.0.0.1` unless you
+pass `--expose`, and every app is public until you ask for a key or users. That
+is a deliberate default, not an oversight — for anything internet-facing, put a
+TLS-terminating reverse proxy in front and name the domain in `allowedOrigins`.
+The full posture, the known limitations, and the nginx/Caddy recipes are in
+[Authentication & Security](../auth/auth.md#security-model).
+
 ## Deliberately not for
 
 - **Content/marketing sites & SEO** — AIR is client-rendered with basic SSR;
@@ -23,6 +33,40 @@ yours.
 - **Other runtimes** — aio is Deno-native (compile, workers). No Node/Bun.
 - **Renderer pluralism** — AIR is the renderer. React compat exists as shims
   (`aio/air/compat`) for migration, not as a parallel first-class path.
+
+## Non-goals
+
+Things aio does not do, and what to do instead. Each is a scope decision, not a
+gap waiting on a patch.
+
+- **i18n / localization** — there is not one `Intl.*` call in `src/`, and every
+  framework-emitted string (CLI output, boot lines, error overlay, `<SignIn/>`,
+  auth mail subjects) is hardcoded English. Nothing constrains your app: format
+  with `Intl` and keep the locale in a cell like any other state.
+- **Outbound notifications** — no mail, webhook, push, or desktop-notification
+  transport ships with the framework. `auth.sendMail` is a hook _shape_ only
+  (`{ to, subject, text }`); with none supplied, the verify and reset routes
+  answer `501 mail_not_configured` instead of pretending. Send from a method or
+  effect with whatever client you already use.
+- **ACME / Let's Encrypt, and containers** — `--expose` issues its own
+  certificate: one name-constrained root CA per user (`~/.aio/ca`, valid only
+  for loopback, `.local`, and RFC1918), and a leaf re-issued whenever the
+  machine's addresses change. Clients pin the root once (`am trust`,
+  `am profile`). Public-CA issuance is not implemented — pass `--tls-cert` /
+  `--tls-key`, or terminate at Caddy/nginx. No Dockerfile, image, or
+  orchestration either: a compiled binary plus a data directory is the unit of
+  deployment.
+- **CORS and security headers** — the server sends
+  `X-Content-Type-Options:
+  nosniff` and nothing else. No `Access-Control-*`,
+  no `Content-Security-Policy`, `Strict-Transport-Security`, or
+  `X-Frame-Options`. Cross-origin is _refused_ by the `Origin` and `Host` checks
+  rather than negotiated; a proxy in front is where a public deployment adds the
+  rest.
+- **End-user password recovery** — the framework mints and burns the reset
+  tokens, but it cannot deliver them without a `sendMail` transport you write.
+  Until then, recovery is an operator action (`am auth passwd <id>`). See
+  [password recovery](../auth/auth.md#email-verification--password-reset).
 
 ## Trade-offs we chose
 

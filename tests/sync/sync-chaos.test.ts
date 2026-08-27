@@ -25,6 +25,18 @@
 //      a missing id = lost op),
 //  (d) all pending buffers drain to empty.
 //
+// Axes (2026-08-27 — an adversarial audit found H1 in the gap this suite left):
+// the suite fuzzed ONE cell and ONE append-only action, so it structurally
+// could not produce the two-cell snapshot race (H1: the response is built cell
+// by cell, each under its own lock, so an op persisted between two cells'
+// locks is broadcast, held, and was then dropped by a watermark it sits ABOVE)
+// and it never saw a non-commutative reducer, where a wrong ORDER is a wrong
+// answer that no set comparison can see. Now: TWO cells, four actions
+// (append / REMOVE / overwrite / counter), per-client clock skew including
+// skew past `maxDrift` (which the server refuses — so refusal handling is
+// exercised too), and a `counter` merge strategy on the second cell so the
+// conflict path in the engine actually executes.
+//
 // Reproducibility: seeded mulberry32. On failure the episode seed is printed;
 // replay a single episode with SYNC_CHAOS_SEED=<seed>.
 
@@ -51,7 +63,7 @@ import {
   type SyncEngine,
 } from "../../src/sync/sync-engine.ts";
 import type { HLC, SyncOp } from "../../src/sync/types.ts";
-import { normalizeSyncConfig } from "../../src/sync/types.ts";
+import { normalizeSyncConfig, SYNC_DEFAULTS } from "../../src/sync/types.ts";
 
 // ── PRNG ───────────────────────────────────────────────────────────────
 /** mulberry32 — tiny seeded PRNG, good enough for schedules. */
@@ -108,43 +120,77 @@ function createTestDb(): { db: DB; close: () => void } {
 }
 
 // ── shared cell semantics ──────────────────────────────────────────────
-const CELL = "chaos";
+const CELL = "chaos"; // cell A
+const CELL_B = "chaos2"; // cell B — the second cell H1 needs
+const CELLS = [CELL, CELL_B];
 const silentLog = { debug: () => {}, warn: () => {}, error: () => {} };
 
-/** Every op appends its unique payload id AND bumps a counter — the items
- *  list is an exact application ledger (dup id = double-apply, missing id =
- *  lost op); the counter is a redundant cross-check. */
+/** Four actions, three of them NOT commutative:
+ *   - `bump`   append `id` to items (+ counter) — the original append-only op;
+ *   - `drop`   REMOVE an item — reordering it against its `bump` changes the
+ *              answer, and applying it twice is invisible in the result, which
+ *              is exactly why the journal below (not the items list) is the
+ *              exactly-once ledger;
+ *   - `set`    overwrite `value` — pure last-write-wins, so order IS the value;
+ *   - `tick`   add to `n`, the field cell B declares as a `counter` merge.
+ *
+ *  `journal` records EVERY applied op id in apply order: a duplicate id is a
+ *  double-apply, a missing id is a lost op, and a different sequence is a
+ *  different history — one field that sees all three. */
 function reduceCell(
   s: Record<string, unknown>,
   action: string,
   payload: unknown,
 ): Record<string, unknown> {
-  if (action === "bump") {
-    const p = payload as { id: string; n: number };
-    return {
-      count: ((s.count as number) ?? 0) + p.n,
-      items: [...((s.items as string[]) ?? []), p.id],
-    };
+  const p = payload as { id: string; n?: number; target?: string; v?: string };
+  const journal = [...((s.journal as string[]) ?? []), p.id];
+  switch (action) {
+    case "bump":
+      return {
+        ...s,
+        journal,
+        count: ((s.count as number) ?? 0) + (p.n ?? 1),
+        items: [...((s.items as string[]) ?? []), p.id],
+      };
+    case "drop":
+      return {
+        ...s,
+        journal,
+        items: ((s.items as string[]) ?? []).filter((i) => i !== p.target),
+      };
+    case "set":
+      return { ...s, journal, value: p.v };
+    case "tick":
+      return { ...s, journal, n: ((s.n as number) ?? 0) + (p.n ?? 1) };
+    default:
+      return s;
   }
-  return s;
 }
 
-const canon = (s: Record<string, unknown>) => ({
-  count: (s.count as number) ?? 0,
-  items: [...((s.items as string[]) ?? [])].sort(),
+const emptyCell = (): Record<string, unknown> => ({
+  count: 0,
+  items: [],
+  journal: [],
+  value: "",
+  n: 0,
 });
 
-/** The ledger AS APPLIED — order included.
- *
- *  `canon` sorts, and sorting hides the whole class of bug where a client
- *  applies the right ops in the wrong ORDER: it is a set comparison, and it
- *  passed for years while clients folded catch-up batches in an order the
- *  server never used. Real reducers (`s.value = x`, `s.items.filter(...)`)
- *  are not commutative, so a different order is a different state — kept
- *  forever, on the client only, with nothing to compare against. The client
- *  must reproduce the server's sequence exactly. */
+/** The whole cell, order included. Nothing is sorted: sorting is a set
+ *  comparison, and it hides the entire class of bug where a client applies the
+ *  right ops in the wrong ORDER — which for `drop`/`set` is simply a different
+ *  answer, kept forever, on the client only, with nothing to compare against.
+ *  The client must reproduce the server's sequence exactly. */
+const canon = (s: Record<string, unknown>) => ({
+  count: (s.count as number) ?? 0,
+  items: [...((s.items as string[]) ?? [])],
+  journal: [...((s.journal as string[]) ?? [])],
+  value: (s.value as string) ?? "",
+  n: (s.n as number) ?? 0,
+});
+
+/** The ledger AS APPLIED — every op id, in apply order. */
 const asApplied = (s: Record<string, unknown>) => [
-  ...((s.items as string[]) ?? []),
+  ...((s.journal as string[]) ?? []),
 ];
 
 const micro = async (n = 24) => {
@@ -162,8 +208,11 @@ interface Client {
   socket: WebSocket;
   buffer: OpBuffer;
   engine: SyncEngine;
-  confirmed: () => Record<string, unknown>;
-  optimistic: () => Record<string, unknown>;
+  /** Wall-clock skew (ms) applied to the ops this client SENDS — a machine
+   *  whose clock is wrong. Past `maxDrift` the server refuses the op. */
+  skew: number;
+  confirmed: (cell: string) => Record<string, unknown>;
+  optimistic: (cell: string) => Record<string, unknown>;
   dedupDrops: () => number;
 }
 
@@ -176,6 +225,12 @@ interface Stats {
   compactions: number;
   clientDedupDrops: number;
   serverDedupDrops: number;
+  /** Ops the server refused for clock drift (M5) — the client must drop them. */
+  driftRejected: number;
+  /** Conflicts the engine's merge/onConflict path actually resolved. */
+  conflicts: number;
+  /** Non-append ops issued — the order-sensitive half of the fuzz. */
+  destructive: number;
 }
 
 async function runEpisode(seed: number, stats: Stats): Promise<void> {
@@ -185,11 +240,23 @@ async function runEpisode(seed: number, stats: Stats): Promise<void> {
   _resetServerTsForTest();
   const { db, close } = createTestDb();
   try {
+    // Ground truth: every op id issued, and every one the server refused.
+    // The ledger is keyed by the PAYLOAD id (what the reducer journals); the
+    // wire carries the engine's op id, so the two are bridged as ops go out.
+    const issued = new Set<string>();
+    const rejected = new Set<string>();
+    const ledgerIdOf = new Map<string, string>();
+
     // ── server ─────────────────────────────────────────────────────────
-    let serverState: Record<string, unknown> = { count: 0, items: [] };
+    const serverState: Record<string, Record<string, unknown>> = {
+      [CELL]: emptyCell(),
+      [CELL_B]: emptyCell(),
+    };
     const dispatch = (a: { type: string; payload?: unknown }) => {
-      const action = a.type.slice(a.type.indexOf(":") + 1);
-      serverState = reduceCell(serverState, action, a.payload);
+      const idx = a.type.indexOf(":");
+      const cell = a.type.slice(0, idx);
+      const action = a.type.slice(idx + 1);
+      serverState[cell] = reduceCell(serverState[cell]!, action, a.payload);
     };
     const clients: Client[] = [];
     const broadcastRaw = {
@@ -209,9 +276,9 @@ async function runEpisode(seed: number, stats: Stats): Promise<void> {
       createServerSyncHandler({
         dispatch,
         db,
-        syncCellIds: [CELL],
-        getCellState: () => serverState,
-        getClientCellState: () => serverState,
+        syncCellIds: CELLS,
+        getCellState: (cell) => serverState[cell]!,
+        getClientCellState: (cell) => serverState[cell]!,
         broadcastRaw,
         log: serverLog,
       });
@@ -230,9 +297,24 @@ async function runEpisode(seed: number, stats: Stats): Promise<void> {
     const nClients = 2 + Math.floor(rand() * 3); // 2–4
     for (let i = 0; i < nClients; i++) {
       const buffer = createOpBuffer(createMemoryStorage());
-      let confirmed: Record<string, unknown> = { count: 0, items: [] };
-      let optimistic: Record<string, unknown> = confirmed;
+      const confirmed: Record<string, Record<string, unknown>> = {
+        [CELL]: emptyCell(),
+        [CELL_B]: emptyCell(),
+      };
+      const optimistic: Record<string, Record<string, unknown>> = {
+        [CELL]: confirmed[CELL]!,
+        [CELL_B]: confirmed[CELL_B]!,
+      };
       let dedupDrops = 0;
+      // One client per episode runs a wrong clock: mostly a survivable skew
+      // (inside maxDrift, so the op is accepted and its HLC really is out of
+      // order), rarely a wild one the server must refuse outright.
+      const skewRoll = rand();
+      const skew = i !== 0
+        ? 0
+        : skewRoll < 0.5
+        ? Math.floor((rand() - 0.5) * SYNC_DEFAULTS.maxDrift)
+        : SYNC_DEFAULTS.maxDrift * (2 + Math.floor(rand() * 4));
       const c = {
         i,
         gen: 0,
@@ -240,25 +322,36 @@ async function runEpisode(seed: number, stats: Stats): Promise<void> {
         inbox: [],
         outbox: [],
         buffer,
-        confirmed: () => confirmed,
-        optimistic: () => optimistic,
+        skew,
+        confirmed: (cell: string) => confirmed[cell]!,
+        optimistic: (cell: string) => optimistic[cell]!,
         dedupDrops: () => dedupDrops,
       } as unknown as Client;
       c.socket = newSocket(c);
       c.engine = createSyncEngine({
         clientId: `c${i}`,
-        cells: { [CELL]: normalizeSyncConfig(true) },
+        cells: {
+          [CELL]: normalizeSyncConfig(true),
+          // A real merge strategy, so `mergeField` and the conflict callback
+          // execute inside the ENGINE and not only in unit tests.
+          [CELL_B]: normalizeSyncConfig({
+            merge: { n: "counter" },
+            onConflict: (cs) => {
+              stats.conflicts += cs.length;
+            },
+          }),
+        },
         buffer,
         send: (msg) => {
           if (c.connected) c.outbox.push(msg);
         },
         reducer: (s, action, payload) => reduceCell(s, action, payload),
-        getConfirmedState: () => ({ [CELL]: confirmed }),
-        setConfirmedState: (_f, s) => {
-          confirmed = s;
+        getConfirmedState: () => confirmed,
+        setConfirmedState: (cell, s) => {
+          confirmed[cell] = s;
         },
-        onStateUpdate: (_f, o) => {
-          optimistic = o;
+        onStateUpdate: (cell, o) => {
+          optimistic[cell] = o;
         },
         log: {
           warn: () => {},
@@ -273,10 +366,40 @@ async function runEpisode(seed: number, stats: Stats): Promise<void> {
     // ── network primitives ─────────────────────────────────────────────
     const deliverC2S = async (c: Client, msg: string) => {
       const m = JSON.parse(msg);
+      // A wrong clock is a property of the MACHINE, so it shows up in the
+      // wall-clock half of every HLC this client stamps. Applied on the wire
+      // (the engine reads the real Date.now) — same observable effect on the
+      // server, deterministic per seed.
+      type WireOp = {
+        id: string;
+        hlc: [number, number, string];
+        payload?: { id?: string };
+      };
+      const skewOp = <T extends WireOp>(o: T): T => ({
+        ...o,
+        hlc: [o.hlc[0] + c.skew, o.hlc[1], o.hlc[2]] as [
+          number,
+          number,
+          string,
+        ],
+      });
+      const note = <T extends WireOp>(o: T): T => {
+        if (o.payload?.id) ledgerIdOf.set(o.id, o.payload.id);
+        return o;
+      };
       if (m.t === "op") {
-        await handler.handleOp(m.d, { id: `s${c.i}` }, c.socket);
+        await handler.handleOp(skewOp(note(m.d)), { id: `s${c.i}` }, c.socket);
       } else if (m.t === "sync-req") {
-        handler.handleSync(m.d, { id: `s${c.i}` }, c.socket);
+        handler.handleSync(
+          {
+            ...m.d,
+            pendingOps: (m.d.pendingOps ?? []).map((o: WireOp) =>
+              skewOp(note(o))
+            ),
+          },
+          { id: `s${c.i}` },
+          c.socket,
+        );
       }
     };
     const deliverS2C = async (c: Client, msg: string) => {
@@ -298,6 +421,29 @@ async function runEpisode(seed: number, stats: Stats): Promise<void> {
       } else if (m.t === "sync-res") {
         await c.engine.handleSyncResponse(m.d);
       } else if (m.t === "op-rejected") {
+        // The only refusal this suite produces is the clock-drift one (M5).
+        //
+        // The ledger records it HERE, where the client hears it — not where
+        // the server decides it. A refusal is only final once it lands: the
+        // client then drops the op and never sends it again, so "refused" and
+        // "applied nowhere" become the same fact. A refusal the network eats
+        // leaves the op in the client's pending buffer, and it keeps coming
+        // back until some later round answers it.
+        //
+        // This is also the assertion that pins the refusal's stickiness: the
+        // server measures drift against ITS wall clock, which moves, so the
+        // same op re-delivered later used to measure under the limit and be
+        // ACCEPTED — after its origin had already been told it was refused,
+        // rolled the optimistic view back and pruned it. If that ever comes
+        // back, the op lands in the server journal while sitting in `rejected`
+        // and the exactly-once assertion below goes red. (Seed 724.)
+        if (/clock drift/.test(String(m.d.reason))) {
+          const led = ledgerIdOf.get(m.d.opId);
+          if (led !== undefined && !rejected.has(led)) {
+            stats.driftRejected++;
+            rejected.add(led);
+          }
+        }
         await c.engine.handleRejection(m.d.cell, m.d.opId, m.d.reason);
       } // sync-err: client would back off and retry — settle retries anyway
     };
@@ -339,12 +485,17 @@ async function runEpisode(seed: number, stats: Stats): Promise<void> {
       // snapshot step is not optional once compaction is in the picture:
       // compaction DELETES the ops it folded, so the log alone restores the
       // cell to its initialState.
-      serverState = { count: 0, items: [] };
-      const snap = await loadSnapshot(db, CELL);
-      if (snap) serverState = snap.state;
-      const ops = await loadOpsSince(db, CELL, null, null);
-      for (const op of ops) {
-        serverState = reduceCell(serverState, op.action, op.payload);
+      for (const cell of CELLS) {
+        serverState[cell] = emptyCell();
+        const snap = await loadSnapshot(db, cell);
+        if (snap) serverState[cell] = snap.state;
+        for (const op of await loadOpsSince(db, cell, null, null)) {
+          serverState[cell] = reduceCell(
+            serverState[cell]!,
+            op.action,
+            op.payload,
+          );
+        }
       }
       for (const c of clients) reconnect(c);
     };
@@ -358,19 +509,47 @@ async function runEpisode(seed: number, stats: Stats): Promise<void> {
     // means ops that no longer exist anywhere — ran untested.
     const compact = async () => {
       stats.compactions++;
-      handler.noteServerWrite(CELL);
+      handler.noteServerWrite(CELLS[pickIndex(CELLS.length)]!);
       await handler.flushServerWrites(); // same lock, without the debounce wait
     };
 
     // ── op issuance (ground truth ledger) ──────────────────────────────
+    // (`issued`/`rejected` are declared above the network so the socket can
+    // record refusals as the server makes them.)
+    // The ledger is now the set of ISSUED op ids (minus the ones the server
+    // refused): with `drop`/`set` in play the final state is not a function of
+    // the issue order — only of the server's apply order — so the server IS
+    // the expected value, and what every client must reproduce exactly,
+    // sequence included.
     let opSeq = 0;
-    const issued: { id: string; n: number }[] = [];
     const localOp = async (c: Client) => {
-      const n = 1 + Math.floor(rand() * 3);
       const id = `op-c${c.i}-${++opSeq}`;
-      issued.push({ id, n });
+      const cell = CELLS[pickIndex(CELLS.length)]!;
+      issued.add(id);
       stats.ops++;
-      await c.engine.handleLocalAction(CELL, "bump", { id, n });
+      const r = rand();
+      if (r < 0.55) {
+        await c.engine.handleLocalAction(cell, "bump", {
+          id,
+          n: 1 + Math.floor(rand() * 3),
+        });
+        return;
+      }
+      stats.destructive++;
+      if (r < 0.75) {
+        // Remove something that plausibly exists — the interesting case is a
+        // `drop` racing the `bump` that created its target.
+        const live = (c.optimistic(cell).items as string[]) ?? [];
+        const target = live.length > 0 ? live[pickIndex(live.length)]! : "none";
+        await c.engine.handleLocalAction(cell, "drop", { id, target });
+      } else if (r < 0.9) {
+        await c.engine.handleLocalAction(cell, "set", { id, v: id });
+      } else {
+        await c.engine.handleLocalAction(cell, "tick", {
+          id,
+          n: 1 + Math.floor(rand() * 3),
+        });
+      }
     };
 
     // ── chaos schedule ─────────────────────────────────────────────────
@@ -411,20 +590,28 @@ async function runEpisode(seed: number, stats: Stats): Promise<void> {
           stats.dupsInjected++;
         }
       } else if (r < 0.80) {
-        // drop: any c2s; s2c only acks/responses (an original broadcast can
-        // only die with its connection — that's the disconnect event)
+        // drop. c2s: any single frame (every client→server path is idempotent
+        // or covered by a resend). s2c: the CONNECTION, never one frame.
+        //
+        // The suite used to drop individual acks and sync responses while
+        // leaving the connection up — and that is not something TCP can do,
+        // for exactly the reason the header already gives for broadcasts:
+        // loss IS connection death. The fiction has teeth. A lost ack on a
+        // LIVE connection lets the client fold later ops into confirmed
+        // state, and the op's own re-ack then arrives with a server position
+        // BELOW them — a history the server never had, and one no
+        // implementation can repair in place (confirmed state is a replay;
+        // you cannot insert into the middle of it). Under TCP that ack cannot
+        // be late: it rides the same connection ahead of those ops, and if the
+        // connection dies the op simply stays pending and comes back through
+        // the GATED resend path, which orders it by its server position.
         const c = clients[pickIndex(clients.length)]!;
         if (rand() < 0.5 && c.outbox.length) {
           c.outbox.splice(pickIndex(c.outbox.length), 1);
           stats.drops++;
-        } else {
-          const droppable = c.inbox
-            .map((m, idx) => ({ m, idx }))
-            .filter(({ m }) => JSON.parse(m).t !== "op");
-          if (droppable.length) {
-            c.inbox.splice(droppable[pickIndex(droppable.length)]!.idx, 1);
-            stats.drops++;
-          }
+        } else if (c.connected) {
+          disconnect(c); // suffix loss both ways — the real shape of s2c loss
+          stats.drops++;
         }
       } else if (r < 0.87) {
         const c = clients[pickIndex(clients.length)]!;
@@ -478,58 +665,63 @@ async function runEpisode(seed: number, stats: Stats): Promise<void> {
       await drainAll();
       drained = true;
       for (const c of clients) {
-        if ((await c.buffer.getUnconfirmed(CELL)).length > 0) drained = false;
+        for (const cell of CELLS) {
+          if ((await c.buffer.getUnconfirmed(cell)).length > 0) drained = false;
+        }
       }
     }
 
     // ── invariants ─────────────────────────────────────────────────────
     // (d) pending buffers drained
     for (const c of clients) {
-      const pending = await c.buffer.getUnconfirmed(CELL);
-      assertEquals(
-        pending.length,
-        0,
-        `client c${c.i}: pending ops did not drain`,
-      );
+      for (const cell of CELLS) {
+        const pending = await c.buffer.getUnconfirmed(cell);
+        assertEquals(
+          pending.length,
+          0,
+          `client c${c.i}: pending ops did not drain (${cell})`,
+        );
+      }
     }
-    const expected = {
-      count: issued.reduce((a, o) => a + o.n, 0),
-      items: issued.map((o) => o.id).sort(),
-    };
-    // (c) exactly-once on the server: no dup ids, none lost
-    const dupsOf = (items: string[]) =>
-      [...items].sort().filter((id, i, a) => id === a[i - 1]);
-    const sItems = (serverState.items as string[]) ?? [];
-    assertEquals(
-      dupsOf(sItems),
-      [],
-      "server applied op(s) twice",
+    const dupsOf = (ids: string[]) =>
+      [...ids].sort().filter((id, i, a) => id === a[i - 1]);
+    // (c) exactly-once on the server: every issued op applied once, none lost,
+    // none doubled — refused ops (clock drift) excluded, they exist nowhere.
+    const serverJournal = CELLS.flatMap((cell) =>
+      asApplied(serverState[cell]!)
     );
-    assertEquals(canon(serverState), expected, "server state != issued ops");
-    // (a)+(b)+(c) every client converges to the server, exactly once
+    assertEquals(dupsOf(serverJournal), [], "server applied op(s) twice");
+    assertEquals(
+      [...serverJournal].sort(),
+      [...issued].filter((id) => !rejected.has(id)).sort(),
+      "server journal != the ops that were issued and accepted",
+    );
+    // (a)+(b)+(c) every client converges to the server — per cell, exactly
+    // once, and in the SERVER's sequence, not merely with the same contents.
     for (const c of clients) {
-      const items = (c.confirmed().items as string[]) ?? [];
-      assertEquals(
-        dupsOf(items),
-        [],
-        `client c${c.i} applied op(s) twice`,
-      );
-      assertEquals(
-        canon(c.confirmed()),
-        expected,
-        `client c${c.i} confirmed state diverged`,
-      );
-      assertEquals(
-        canon(c.optimistic()),
-        expected,
-        `client c${c.i} optimistic state diverged`,
-      );
-      // …and in the SERVER's order, not merely with the same contents.
-      assertEquals(
-        asApplied(c.confirmed()),
-        asApplied(serverState),
-        `client c${c.i} applied the ops in a different ORDER than the server`,
-      );
+      for (const cell of CELLS) {
+        assertEquals(
+          dupsOf(asApplied(c.confirmed(cell))),
+          [],
+          `client c${c.i} applied op(s) twice (${cell})`,
+        );
+        assertEquals(
+          canon(c.confirmed(cell)),
+          canon(serverState[cell]!),
+          `client c${c.i} confirmed state diverged (${cell})`,
+        );
+        assertEquals(
+          canon(c.optimistic(cell)),
+          canon(serverState[cell]!),
+          `client c${c.i} optimistic state diverged (${cell})`,
+        );
+        assertEquals(
+          asApplied(c.confirmed(cell)),
+          asApplied(serverState[cell]!),
+          `client c${c.i} applied the ops of ${cell} in a different ORDER ` +
+            `than the server`,
+        );
+      }
       stats.clientDedupDrops += c.dedupDrops();
     }
   } finally {
@@ -557,6 +749,9 @@ Deno.test("sync chaos: clients converge exactly-once under dup/drop/reorder/reco
     compactions: 0,
     clientDedupDrops: 0,
     serverDedupDrops: 0,
+    driftRejected: 0,
+    conflicts: 0,
+    destructive: 0,
   };
 
   if (env !== undefined) {
@@ -583,9 +778,21 @@ Deno.test("sync chaos: clients converge exactly-once under dup/drop/reorder/reco
   console.log(
     `[sync-chaos] ok — ops=${stats.ops} dupsInjected=${stats.dupsInjected} ` +
       `drops=${stats.drops} reconnects=${stats.reconnects} restarts=${stats.restarts} ` +
-      `compactions=${stats.compactions} ` +
+      `compactions=${stats.compactions} destructive=${stats.destructive} ` +
+      `driftRejected=${stats.driftRejected} conflicts=${stats.conflicts} ` +
       `dedupDrops(client=${stats.clientDedupDrops}, server=${stats.serverDedupDrops})`,
   );
+  // ── coverage of the SEED SET, never of one episode ───────────────────
+  // Every assertion below says "this suite exercised X". That is a property
+  // of the whole seed set, not of any single schedule: a replayed episode may
+  // legitimately never compact, never duplicate, never roll a wild skew.
+  // Applying them to a replay made `SYNC_CHAOS_SEED=<n>` — the line the
+  // failure message tells you to paste — report FAILED for a seed that
+  // converged perfectly, with a message ("chaos never exercised client-side
+  // dedup") that reads as a finding. A replay must answer exactly one
+  // question: did THIS schedule converge. (Only `driftRejected` had this
+  // gate; the other four had drifted away from it.)
+  if (env !== undefined) return;
   // The chaos schedule must actually exercise the dedup layers — a suite
   // that never produces a duplicate proves nothing.
   assert(
@@ -602,6 +809,18 @@ Deno.test("sync chaos: clients converge exactly-once under dup/drop/reorder/reco
   assert(
     stats.compactions > 0,
     "chaos never compacted the op-log",
+  );
+  // Order-sensitive ops are the whole point of the second half of this suite:
+  // an append-only fuzz cannot tell a wrong ORDER from a right one.
+  assert(
+    stats.destructive > 0,
+    "chaos never issued a remove/overwrite/counter op",
+  );
+  // The clock-skew axis must actually reach the server's refusal (M5) —
+  // otherwise the rejection path is asserted by nothing.
+  assert(
+    stats.driftRejected > 0,
+    "chaos never produced an op the server refused for clock drift",
   );
 });
 

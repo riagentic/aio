@@ -1,13 +1,12 @@
 // renderer-hydrate.ts — SSR hydration: attach to existing server-rendered DOM.
 // Provides: hydrate, _hydrateNode, _hydrateProps.
 
-import { batch } from "../state/signal.ts";
 import {
   bindSignalProps,
   cleanupSignalBindings,
   isSignal,
 } from "./signal-binding.ts";
-import { _writeProp } from "./prop-write.ts";
+import { _RESERVED_PROPS, _writeProp } from "./prop-write.ts";
 import { _DOM_PROPS } from "./vdom-types.ts";
 import type { ComponentFn, RenderCtx, VNode } from "./vdom.ts";
 import {
@@ -22,6 +21,7 @@ import {
   _render,
   _setDelegationRoot,
   _setWrapped,
+  _wrapHandler,
   ErrorBoundary,
   Fragment,
   getDom,
@@ -30,9 +30,10 @@ import {
   SVG_TAGS,
 } from "./vdom.ts";
 import { _registerLazyListeners, nullSlot } from "./vdom-create.ts";
+import { _removeDomCleanup } from "./vdom-remove.ts";
 import { _cleanupActions } from "./vdom-helpers.ts";
 import { applyChildDependentProps } from "./vdom-props.ts";
-import { _devWarn } from "./vdom-types.ts";
+import { _devMode, _devWarn } from "./vdom-types.ts";
 import { _getExitHandler } from "./transition-component.ts";
 import { _getGroupExitHandler } from "./transition-group.ts";
 import type { MountHandle, RootState } from "./renderer-types.ts";
@@ -125,10 +126,18 @@ export function hydrate(root: any, App: ComponentFn): MountHandle {
           `HTML parsing merges them into one text node, which cannot be ` +
           `hydrated as two.`,
       );
-      // Hydration mismatch — release the signal-binding effects, signal-text
-      // bindings, and action cleanups created for elements hydrated before the
-      // mismatch. Without this, those effects stay alive and keep mutating DOM
-      // nodes that innerHTML="" is about to detach (leak + stale writes).
+      // Hydration mismatch — every component instance created BEFORE the
+      // mismatch is about to be thrown away with the markup, and nothing was
+      // unmounting them: their `onCleanup` never ran and their signal
+      // subscriptions stayed live, so the full client render that follows left
+      // TWO subscribers per component (measured: 2 for 1 live component, a
+      // double re-render on every change, and one subscription outliving
+      // `_unmount`). `_removeDomCleanup` is the same teardown `removeDom` runs.
+      _removeDomCleanup(vnode, state.ctx);
+      // ...then release the signal-binding effects, signal-text bindings, and
+      // action cleanups for elements hydrated before the mismatch. Without
+      // this, those effects stay alive and keep mutating DOM nodes that
+      // innerHTML="" is about to detach (leak + stale writes).
       cleanupSignalBindings(root);
       _cleanupSignalTextChildren(root);
       if (typeof (root as HTMLElement).setAttribute === "function") {
@@ -370,7 +379,62 @@ export function _hydrateNode(
   return 1;
 }
 
-/** Apply event listeners, signal bindings, and refs during hydration (attrs already set). */
+/** One scratch element per document, reused by `_canonStyle`. Dev-only path. */
+const _styleProbes = new WeakMap<Document, HTMLElement>();
+
+/** A `style` attribute as the CSSOM spells it.
+ *
+ *  `style` is the one attribute the server and the client write the same
+ *  declarations into with DIFFERENT spelling: the SSR writer joins pairs by
+ *  hand (`color:red;margin-top:4px`), while `_writeProp` goes through
+ *  `el.style`, and the CSSOM re-serializes (`color: red; margin-top: 4px;`).
+ *  Comparing the raw strings therefore reported EVERY server-rendered `style`
+ *  prop as a server/client divergence — the renderer's loudest dev warning,
+ *  fired on correct code, telling the author to go looking for a
+ *  `Date`/`random`/`window` that is not there. A warning that cries wolf on the
+ *  most ordinary prop there is trains people to ignore the channel that
+ *  reports the real ones.
+ *
+ *  The CSSOM is the one decider for what a style attribute MEANS, so both
+ *  sides go through it before they are compared. A genuine difference
+ *  (`color: red` vs `color: blue`) still survives normalization and still
+ *  warns. */
+function _canonStyle(el: HTMLElement, css: string): string {
+  const doc = el.ownerDocument as Document | null;
+  if (!doc) return css;
+  let probe = _styleProbes.get(doc);
+  if (!probe) {
+    probe = doc.createElement("span");
+    _styleProbes.set(doc, probe);
+  }
+  probe.style.cssText = css;
+  return probe.style.cssText;
+}
+
+/** The element's attributes as a plain record — dev only, for divergence
+ *  reporting. */
+function _attrSnapshot(el: HTMLElement): Record<string, string> {
+  const out: Record<string, string> = {};
+  const attrs = el.attributes;
+  if (!attrs) return out;
+  for (let i = 0; i < attrs.length; i++) {
+    const a = attrs[i]!;
+    out[a.name] = a.name === "style" ? _canonStyle(el, a.value) : a.value;
+  }
+  return out;
+}
+
+function _attrDiff(
+  before: Record<string, string>,
+  after: Record<string, string>,
+): string[] {
+  const names = new Set([...Object.keys(before), ...Object.keys(after)]);
+  const out: string[] = [];
+  for (const n of names) if (before[n] !== after[n]) out.push(n);
+  return out.sort();
+}
+
+/** Apply event listeners, signal bindings, and refs during hydration. */
 function _hydrateProps(el: HTMLElement, props: Record<string, unknown>): void {
   // AIO-166: detect onChange+onInput collision on form elements
   const _isFormEl = el.tagName === "INPUT" || el.tagName === "TEXTAREA" ||
@@ -384,31 +448,60 @@ function _hydrateProps(el: HTMLElement, props: Record<string, unknown>): void {
         el,
         k === "onChange" ? _hasOnInput : undefined,
       );
-      const handler = v as EventListener;
-      const wrapped = ((e: Event) => batch(() => handler(e))) as EventListener;
+      // Same wrapper the mount path uses (vdom-events.ts) — batched writes,
+      // contained throw.
+      const wrapped = _wrapHandler(v as EventListener, evt);
       if (_isDelegated(evt) && _activeRoot) {
         _ensureDelegation(_activeRoot.root, evt);
-        _setWrapped(el, evt, wrapped);
+        _setWrapped(el, evt, wrapped, _activeRoot.root);
       } else {
         el.addEventListener(evt, wrapped);
         _setWrapped(el, evt, wrapped);
       }
     }
   }
-  // Form state is a DOM PROPERTY, and not every property has a content
-  // attribute for the markup to carry (`indeterminate` has none at all). The
-  // parser only infers `.value`/`.checked` from the attributes it recognizes,
-  // and hydration never ran `applyProps`, so anything markup could not express
-  // was simply never applied: the control came up in a state the vnode tree
-  // does not describe and no later render fixed it (the diff compares the new
-  // props against the old ones and skips what did not change). `_writeProp` is
-  // the same decider the mount path uses.
+  // Every non-event prop is (re)applied through `_writeProp` — the SAME decider
+  // the mount path uses — rather than trusted to the server's markup.
+  //
+  // Two things were broken by not doing this:
+  //
+  //  * Form state is a DOM PROPERTY and not every property has a content
+  //    attribute for markup to carry (`indeterminate` has none at all), so
+  //    anything markup could not express was simply never applied.
+  //  * An ATTRIBUTE that differs between server and client was kept FOREVER.
+  //    `class="server"` won over the client's `class="client"` with no warning
+  //    and no self-heal, because no later render fixes it either: the diff
+  //    compares the new props against the OLD PROPS and skips what did not
+  //    change between renders. Text mismatches were already repaired;
+  //    attributes were the silent half.
+  //
+  // Divergence is repaired in both dev and prod (prod must not render markup
+  // the component does not describe); dev additionally says so.
+  const _before = _devMode ? _attrSnapshot(el) : null;
   for (const [k, v] of Object.entries(props)) {
-    if (!_DOM_PROPS.has(k) || !(k in el) || isSignal(v)) continue;
+    if (_RESERVED_PROPS.has(k) || k.startsWith("on") || isSignal(v)) continue;
+    // The server already emitted this html and the children were hydrated out
+    // of it — rewriting innerHTML here would throw all of that away.
+    if (k === "dangerouslySetInnerHTML") continue;
     // `<select>.value` needs its <option>s — applyChildDependentProps owns it
     // and runs after the children are hydrated.
     if (k === "value" && el.tagName === "SELECT") continue;
+    if (_DOM_PROPS.has(k) && !(k in el)) continue; // not a property here
     _writeProp(el, k, v);
+  }
+  if (_before) {
+    const diverged = _attrDiff(_before, _attrSnapshot(el));
+    if (diverged.length > 0) {
+      _devWarn(
+        `hydrate-attr-${el.tagName}-${diverged.join(",")}`,
+        `hydrate() found <${el.tagName.toLowerCase()}> with server markup ` +
+          `that disagrees with the component on ${
+            diverged.join(", ")
+          } — repaired to what the component says. Server and client rendered ` +
+          `different props (Date/random/window in render, or an environment ` +
+          `difference).`,
+      );
+    }
   }
   bindSignalProps(el, props);
   if (props.ref) _callRef(props.ref, el, el.tagName?.toLowerCase());

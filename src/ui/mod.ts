@@ -193,6 +193,18 @@ export function Checkbox(props: CheckboxProps): VNode {
     ...rest(props, ["checked", "label", "onChange", "class"]),
     type: "checkbox",
     checked,
+    // The wrapping <label> below IS a valid accessible-name association (HTML
+    // has had implicit labelling forever), but it is invisible to anything
+    // that looks at the input's own props — including this framework's dev
+    // a11y check, which told the author their labelled checkbox had no label,
+    // about markup the kit wrote and they could not change. Name it outright:
+    // same name, visible to the checker, to a screen reader, and to the
+    // semantic surface. A caller-supplied name always wins (`rest` is spread
+    // above, and this only fills a gap).
+    ...(typeof label === "string" && label.trim() &&
+        props["aria-label"] === undefined
+      ? { "aria-label": label.trim() }
+      : {}),
     // Unlabelled, the box IS the component, so the caller's `class` belongs on
     // it — it used to be swallowed (only the label row ever received it), so
     // `<Checkbox class="mine"/>` silently rendered without "mine".
@@ -362,6 +374,23 @@ export function Table<Row extends Record<string, unknown>>(
             key: getKey ? getKey(row, i) : i,
             class: onRowClick ? "aio-tr aio-tr--click" : "aio-tr",
             onClick: onRowClick ? () => onRowClick(row, i) : undefined,
+            // A row that responds to a CLICK and to nothing else is unreachable
+            // for anyone not holding a mouse — and it is the kit's own markup,
+            // so the app author had no way to fix it. It also tripped this
+            // framework's own dev a11y check ("<tr> has onClick but no keyboard
+            // handler"), pointing at code they did not write. Put the row in
+            // the tab order and activate it on Enter/Space, which is what a
+            // button does.
+            ...(onRowClick
+              ? {
+                tabIndex: 0,
+                onKeyDown: (e: KeyboardEvent) => {
+                  if (e.key !== "Enter" && e.key !== " ") return;
+                  e.preventDefault(); // Space must not scroll the page
+                  onRowClick(row, i);
+                },
+              }
+              : {}),
           },
           ...columns.map((c) =>
             h(
@@ -509,6 +538,12 @@ export function Modal(props: ModalProps): VNode | null {
       // outside to close"). A caller-supplied `t` still wins (it comes from
       // `rest`, spread after).
       t: "modalBackdrop",
+      // A scrim carries no semantics of its own — the dialog inside does. Said
+      // outright (the ARIA-standard way to say it) so assistive tech does not
+      // announce a stray group, and so the click-without-a-keyboard-handler
+      // rule does not fire on it: the keyboard way out of a modal is Escape,
+      // which this component installs, not a keydown on a non-focusable div.
+      role: "presentation",
       ...rest(props, [
         "open",
         "onClose",
@@ -824,6 +859,25 @@ interface ToastItem {
 // Module-level reactive queue — one host renders it; `toast()` pushes to it.
 const _toasts = signal<ToastItem[]>([]);
 let _toastSeq = 0;
+/** Live auto-dismiss timers, by toast id. */
+const _toastTimers = new Map<number, ReturnType<typeof setTimeout>>();
+
+/** THE way a toast goes away — one decider for every affordance.
+ *
+ *  There were two: `toast()`'s returned `dismiss` (which clears the
+ *  auto-dismiss timer) and the × button inside {@link ToastHost} (which filtered
+ *  the queue and left the timer running). The × is the one a USER clicks, so
+ *  the leak the returned closure was fixed for was still live on the only path
+ *  that happens by itself: measured — dismiss by ×, one `setTimeout` set, zero
+ *  cleared, per toast, in a helper an app calls on every save. */
+function dismissToast(id: number): void {
+  const timer = _toastTimers.get(id);
+  if (timer !== undefined) {
+    clearTimeout(timer);
+    _toastTimers.delete(id);
+  }
+  _toasts.set(_toasts.peek().filter((t) => t.id !== id));
+}
 
 /** Show a toast. Returns a dismiss function; auto-dismisses after `duration`
  *  ms (default 4000; pass 0 to keep it until dismissed). Call from anywhere —
@@ -836,23 +890,11 @@ export function toast(
   const id = ++_toastSeq;
   const variant = opts?.variant ?? "info";
   _toasts.set([..._toasts.peek(), { id, message, variant }]);
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const dismiss = () => {
-    // Clearing on manual dismiss: the auto-dismiss timer used to survive the ×
-    // and fire later against an already-filtered list — a no-op, but one live
-    // timer per dismissed toast for the rest of its duration, in a helper an
-    // app calls on every save.
-    if (timer !== undefined) {
-      clearTimeout(timer);
-      timer = undefined;
-    }
-    _toasts.set(_toasts.peek().filter((t) => t.id !== id));
-  };
   const duration = opts?.duration ?? 4000;
   if (duration > 0 && typeof setTimeout !== "undefined") {
-    timer = setTimeout(dismiss, duration);
+    _toastTimers.set(id, setTimeout(() => dismissToast(id), duration));
   }
-  return dismiss;
+  return () => dismissToast(id);
 }
 
 /** The container that renders active toasts — place once at your app root
@@ -881,8 +923,7 @@ export function ToastHost(props: Common = {}): VNode {
           type: "button",
           class: "aio-toast__x",
           "aria-label": "Dismiss",
-          onClick: () =>
-            _toasts.set(_toasts.peek().filter((x) => x.id !== t.id)),
+          onClick: () => dismissToast(t.id),
         }, "×"),
       )
     ),
@@ -892,6 +933,10 @@ export function ToastHost(props: Common = {}): VNode {
 /** Test/reset hook — clear the toast queue between tests.
  *  @internal */
 export function _resetToasts(): void {
+  // Timers too: a queue emptied without them leaves one live timer per
+  // outstanding toast, which is a leaked op the next test inherits.
+  for (const timer of _toastTimers.values()) clearTimeout(timer);
+  _toastTimers.clear();
   _toasts.set([]);
   _toastSeq = 0;
 }

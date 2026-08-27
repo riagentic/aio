@@ -5,6 +5,9 @@ import { _domNodeCount, _LAZY_PENDING } from "./vdom-types.ts";
 import type { RenderCtx, VNode } from "./vdom-types.ts";
 import {
   _advance,
+  _firstLive,
+  _isExiting,
+  _nextLive,
   _removeDomCleanup,
   getDom,
   isChildOf,
@@ -33,17 +36,26 @@ export type DiffChildrenFn = (
 // to `before, after, <recovered>`. Capture where the old region sat
 // BEFORE removing it, then put the new content back in the same place.
 
-/** The region's first live node, before any mutation. */
+/** The region's first live node, before any mutation.
+ *
+ *  `_nextLive`/`_firstLive`, not `nextSibling`/`firstChild`: a node kept in the
+ *  DOM only to finish its exit animation belongs to no vnode, so counting it as
+ *  the region's first node put a boundary's whole span one position off. A
+ *  `<Suspense>`/`<ErrorBoundary>` (or a Fragment region) that fell back while a
+ *  sibling row was fading out rebuilt its content around the dying node —
+ *  measured as content appended after the region, and as the dev child-desync
+ *  tripwire firing on a legitimate exit. Everywhere else the reconciler already
+ *  steps over them; inside a boundary it did not. */
 function _regionStart(
   parent: Node,
   ov: VNode,
   startAnchor: Node | null,
 ): Node | null {
   const d = getDom(ov);
-  if (d && isChildOf(d, parent)) return d;
+  if (d && isChildOf(d, parent) && !_isExiting(d)) return d;
   return startAnchor && isChildOf(startAnchor, parent)
-    ? startAnchor.nextSibling
-    : parent.firstChild;
+    ? _nextLive(startAnchor)
+    : _firstLive(parent);
 }
 
 /** The live node that FOLLOWS the boundary's old region, or null when the
@@ -74,7 +86,11 @@ function _regionAnchor(
     const v = region[i];
     if (v == null) continue;
     const d = getDom(v as VNode | string | number);
-    if (d && isChildOf(d, parent)) return d.nextSibling;
+    // `_nextLive`: the node after the region's last child may be a sibling
+    // that is only finishing its exit animation, and anchoring the boundary's
+    // new content before a node the reconciler no longer owns inserts it in
+    // the wrong slot for the whole duration of that animation.
+    if (d && isChildOf(d, parent)) return _nextLive(d);
   }
   return null;
 }
@@ -133,11 +149,18 @@ function _retireRegion(
   _removeRegion(parent, ov.children, ctx, first, end);
   if (!known) return;
   let n: Node | null = startAnchor && isChildOf(startAnchor, parent)
-    ? startAnchor.nextSibling
-    : parent.firstChild;
+    ? _nextLive(startAnchor)
+    : _firstLive(parent);
   while (n && n !== end) {
-    const next: Node | null = n.nextSibling;
-    parent.removeChild(n);
+    // `_nextLive` and the skip: a node mid-exit is NOT leftover debris from a
+    // failed diff — `removeDom` deliberately left it standing so its exit
+    // animation can finish, and it removes itself when it does. Sweeping it
+    // here tore the animation off the screen AND leaked the exiting-node
+    // counter (nothing would ever clear the flag on a node the reconciler
+    // detached behind the animation's back), which slows every positional walk
+    // in the process for the rest of the session.
+    const next: Node | null = _nextLive(n);
+    if (!_isExiting(n)) parent.removeChild(n);
     n = next;
   }
 }

@@ -38,4 +38,11 @@ const lines = [
 ];
 
 await Deno.writeTextFile(outputFile, lines.join("\n"));
+// Format it here, or the next `deno fmt` shows the generated file as a diff and
+// the regenerate step looks like it did something it did not.
+await new Deno.Command("deno", {
+  args: ["fmt", outputFile],
+  stdout: "null",
+  stderr: "null",
+}).output();
 console.log(`✓ src/build/android-template.ts — ${entries.length} files`);

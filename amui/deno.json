@@ -2,9 +2,16 @@
   "title": "amui",
   "version": "0.1.0",
   "nodeModulesDir": "auto",
-  "unstable": ["kv"],
+  "unstable": [
+    "kv"
+  ],
   "compilerOptions": {
-    "lib": ["deno.ns", "deno.unstable", "dom", "dom.iterable"],
+    "lib": [
+      "deno.ns",
+      "deno.unstable",
+      "dom",
+      "dom.iterable"
+    ],
     "jsx": "react-jsx",
     "jsxImportSource": "aio"
   },
@@ -23,8 +30,14 @@
   "tasks": {
     "dev": "deno run -A src/app.ts --client=browser",
     "dev:electron": "deno run -A src/app.ts --client=electron",
-    "install:electron": "deno install --allow-scripts=npm:electron npm:electron",
-    "compile": "deno run -A ../src/build.ts --compile --electron",
+    "install:electron": "deno run -A ../src/electron-install.ts",
+    "build": "deno run -A ../src/build-all.ts --build-spec=../src/build.ts",
+    "compile": "deno run -A ../src/build-all.ts --build-spec=../src/build.ts --targets=electron",
     "test": "deno test -A"
+  },
+  "build": {
+    "targets": [
+      "electron"
+    ]
   }
 }

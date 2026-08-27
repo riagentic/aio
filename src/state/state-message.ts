@@ -81,7 +81,7 @@ export function handleMessage(data: any): HandleResult {
     if (!Array.isArray(data.$patches)) {
       // Safety: a message carrying $patches as a non-array is malformed wire
       // protocol — never fall through to full-state replacement with it.
-      log.warn("[aio] malformed $patches (not an array) — dropped");
+      log.warn("malformed $patches (not an array) — dropped");
       return "dropped";
     }
     const prev = _stateSignal.peek();
@@ -97,7 +97,7 @@ export function handleMessage(data: any): HandleResult {
       for (const seg of p.path) {
         if (typeof seg === "string" && _BLOCKED_KEYS.has(seg)) {
           log.warn(
-            `[aio] dropped $patches with reserved path segment "${seg}"`,
+            `dropped $patches with reserved path segment "${seg}"`,
           );
           return "dropped";
         }
@@ -127,7 +127,7 @@ export function handleMessage(data: any): HandleResult {
       return "delta";
     } catch (e) {
       // applyPatches failed — client state desynced, request full state from server
-      log.warn("[aio] applyPatches failed, requesting resync:", {
+      log.warn("applyPatches failed, requesting resync:", {
         detail: String(e),
       });
       const transport = _getTransport();

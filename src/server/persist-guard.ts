@@ -23,13 +23,15 @@
 export interface PersistIssue {
   /** Dotted path from the state root, e.g. `cart.items.0.addedAt`. */
   path: string;
-  /** What it is: "undefined" | "NaN" | "Infinity" | "Date" | "Map" | "Set" | "function" | "symbol" | "bigint" */
+  /** What it is: "undefined" | "NaN" | "Infinity" | "Date" | "Map" | "Set" | "function" | "symbol" | "bigint" | "circular" */
   kind: string;
   /** What JSON would store instead. */
   becomes: string;
 }
 
 const LOSSY: Record<string, string> = {
+  bigint: "nothing — JSON refuses it and the whole write is REFUSED",
+  circular: "nothing — JSON refuses it and the whole write is REFUSED",
   undefined: "the key is dropped entirely",
   NaN: "null",
   Infinity: "null",
@@ -81,6 +83,10 @@ function classify(raw: unknown): string | null {
   }
   if (typeof raw === "function") return "function";
   if (typeof raw === "symbol") return "symbol";
+  // Named, even though JSON THROWS on it rather than mangling it: the throw
+  // reaches the caller with no path in it, and "which field" is the whole
+  // question a guard exists to answer.
+  if (typeof raw === "bigint") return "bigint";
   if (raw === null || typeof raw !== "object") return null;
   if (isPlainData(raw)) return null;
   return raw.constructor?.name || "object";
@@ -99,12 +105,121 @@ function classifySerialized(raw: unknown, val: unknown): string | null {
   return null;
 }
 
+// ── Values JSON REFUSES (as opposed to mangles) ──────────────────────
+//
+// A `BigInt` and a cyclic reference are different from everything above: JSON
+// does not corrupt them, it throws — `Do not know how to serialize a BigInt` /
+// `Converting circular structure to JSON` — with NO path in the message. That
+// throw used to escape the guard entirely and land in the persistence
+// manager's outer catch, where it was reported as "getDBState threw" and took
+// EVERY cell's write down with it, on every window, forever.
+//
+// So the throw is caught here and re-thrown as this error, which knows exactly
+// which field it was. Finding the field costs one extra walk, and that walk
+// only ever runs on the failure path.
+
+/** A value JSON refuses outright, located by path. */
+export class PersistSerializeError extends Error {
+  /** Dotted path from the value's own root, e.g. `settings.limit`. `""` when
+   *  the offending value IS the root. */
+  readonly path: string;
+  /** "bigint" | "circular" | "threw" (a getter/toJSON that threw) | "unknown" */
+  readonly kind: string;
+  constructor(path: string, kind: string, cause: unknown) {
+    super(
+      `${path || "the value itself"} is ${
+        kind === "bigint"
+          ? "a BigInt"
+          : kind === "circular"
+          ? "a circular reference"
+          : kind === "threw"
+          ? "a value whose toJSON()/getter threw"
+          : "a value"
+      }, which JSON cannot represent at all — so nothing is written, not even ` +
+        `a mangled version. fix: ${FIX[kind] ?? FIX.unknown}`,
+      { cause },
+    );
+    this.name = "PersistSerializeError";
+    this.path = path;
+    this.kind = kind;
+  }
+
+  /** The same failure located from a PARENT's root. This error knows the path
+   *  inside the value it was thrown for; the caller knows what that value is
+   *  called (a cell name), and the operator needs both in one path. */
+  withPrefix(prefix: string): PersistSerializeError {
+    return new PersistSerializeError(
+      this.path ? `${prefix}.${this.path}` : prefix,
+      this.kind,
+      this.cause,
+    );
+  }
+}
+
+const FIX: Record<string, string> = {
+  bigint:
+    `store it as a string (\`String(n)\`) or, when it fits, a number — and ` +
+    `convert back on read`,
+  circular:
+    `state is a data tree, not an object graph: replace the back-reference ` +
+    `with the id it points at, and look the parent up when you need it`,
+  threw: `make the getter/toJSON total, or keep the value out of state`,
+  unknown: `keep the value out of persisted state (\`persist: { exclude: ` +
+    `[...] }\`) or store a JSON-shaped stand-in`,
+};
+
+/** Locate the first value JSON refuses, mirroring JSON.stringify's own walk
+ *  (own enumerable keys, `toJSON` first, ancestors only for the cycle check).
+ *  Returns null when nothing here explains a throw. */
+export function findUnserializable(
+  value: unknown,
+): { path: string; kind: string } | null {
+  const ancestors = new Set<object>();
+  const walk = (
+    v: unknown,
+    path: string,
+  ): { path: string; kind: string } | null => {
+    if (typeof v === "bigint") return { path, kind: "bigint" };
+    if (v === null || typeof v !== "object") return null;
+    let val: unknown = v;
+    const maybe = v as { toJSON?: (k?: string) => unknown };
+    if (typeof maybe.toJSON === "function") {
+      try {
+        val = maybe.toJSON();
+      } catch {
+        return { path, kind: "threw" };
+      }
+      if (typeof val === "bigint") return { path, kind: "bigint" };
+      if (val === null || typeof val !== "object") return null;
+    }
+    const obj = val as object;
+    if (ancestors.has(obj)) return { path, kind: "circular" };
+    ancestors.add(obj);
+    try {
+      const entries: [string, unknown][] = Array.isArray(obj)
+        ? (obj as unknown[]).map((x, i) => [String(i), x])
+        : Object.entries(obj as Record<string, unknown>);
+      for (const [k, child] of entries) {
+        const hit = walk(child, path ? `${path}.${k}` : k);
+        if (hit) return hit;
+      }
+    } catch {
+      return { path, kind: "threw" };
+    } finally {
+      ancestors.delete(obj);
+    }
+    return null;
+  };
+  return walk(value, "");
+}
+
 /**
  * Serialize `value` and report every field JSON would corrupt.
  *
  * Returns the JSON text (so the caller reuses this pass rather than
- * stringifying twice) plus the issues found. `BigInt` is not listed: JSON
- * THROWS on it, which is already loud, and the throw propagates.
+ * stringifying twice) plus the issues found. A value JSON REFUSES (a `BigInt`,
+ * a cycle) is not an issue in that list — nothing is written at all — so it
+ * throws {@linkcode PersistSerializeError}, which names the exact path.
  */
 export function stringifyWithIssues(
   value: unknown,
@@ -114,7 +229,7 @@ export function stringifyWithIssues(
   // `this`, so remember which object each holder was reached by. Depth-first
   // order makes the parent's path known before any of its children are seen.
   const pathOf = new WeakMap<object, string>();
-  const json = JSON.stringify(value, function (this: unknown, key, val) {
+  const replacer = function (this: unknown, key: string, val: unknown) {
     const holder = this as Record<string, unknown>;
     const base = (holder && typeof holder === "object")
       ? pathOf.get(holder as object) ?? ""
@@ -136,7 +251,18 @@ export function stringifyWithIssues(
       pathOf.set(val as object, here);
     }
     return val;
-  });
+  };
+  let json: string;
+  try {
+    json = JSON.stringify(value, replacer);
+  } catch (e) {
+    // JSON refused the value outright. The native message names no field, so
+    // find it: without a path this reaches the operator as "Do not know how to
+    // serialize a BigInt" with nothing to act on.
+    const at = findUnserializable(value) ??
+      { path: "", kind: e instanceof RangeError ? "threw" : "unknown" };
+    throw new PersistSerializeError(at.path, at.kind, e);
+  }
   return { json: json ?? "null", issues };
 }
 

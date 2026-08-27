@@ -35,7 +35,9 @@ function token(css: string, name: string, block: "light" | "dark"): string {
 }
 
 Deno.test("theme: the accent is the app's own, and stable", () => {
-  assertEquals(appHue("notekeeper"), appHue("notekeeper"));
+  // Pinned rather than compared against itself: an app that changes colour
+  // between releases looks like a different app on the user's desktop.
+  assertEquals(appHue("notekeeper"), 55);
   const hues = new Set(
     ["notekeeper", "atomic", "quill", "tally", "ledger"].map(appHue),
   );

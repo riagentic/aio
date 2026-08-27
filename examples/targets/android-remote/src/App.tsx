@@ -1,4 +1,12 @@
-// Connect page — user enters the exposed server's URL
+// Connect page — user enters the exposed server's URL.
+//
+// A thin client has no local UI beyond this: the server it connects to serves
+// the real one. This file existing is the whole difference between a window
+// that asks for an address and a window that renders nothing at all — the
+// framework shell imports `/App.tsx`, so without it the page 404s on its own
+// mount and the client can never start. Its twin (the other `*-remote` target)
+// is the SAME page in another shell; tests/examples-lint.test.ts keeps them
+// byte-identical apart from the app name.
 import { useLocal } from "aio/air";
 
 export default function App() {

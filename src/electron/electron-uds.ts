@@ -16,6 +16,7 @@ import {
   tmplKeyboardShortcuts,
   tmplParentWatch,
   tmplWillNavigate,
+  tmplWindowShape,
   toSlug,
   udsPreloadScript,
   udsProdHTML,
@@ -222,16 +223,7 @@ app.on('ready', () => {
   }
 
   const b = loadBounds(${w}, ${h});
-  // webviewTag rides the same childWindows opt-in as openWindow: both are
-  // "render remote content inside the app" capabilities. Off by default; a <webview> without the gate
-  // simply doesn't render.
-  b.webPreferences = { nodeIntegration: false, contextIsolation: true, preload: preloadFile, webviewTag: ${
-    JSON.stringify(!!opts.meta?.childWindows)
-  } };
-  // ui.chrome: "themed"/"none" drop the OS frame. "themed" gets aio's own
-  // title bar back from the page shell (server-html-gen); "none" is a bare
-  // canvas and the app draws whatever it wants, including its drag region.
-  b.frame = ${JSON.stringify((opts.meta?.chrome ?? "standard") === "standard")};
+${tmplWindowShape(opts.meta, { preload: "preloadFile" })}
   const win = new BrowserWindow(b);
   if (b.x == null) win.center();
 

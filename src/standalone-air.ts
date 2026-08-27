@@ -285,9 +285,10 @@ function _scheduler(): ReturnType<typeof createScheduleManager> {
 }
 
 /** Advance the virtual clock by `ms`, firing every schedule that comes due —
- *  `after` once, `every`/`cron` re-arming, exactly as production would. */
-export function _advanceSchedules(ms: number): void {
-  _clock?.advance(ms);
+ *  `after` once, `every`/`cron` re-arming, exactly as production would, with
+ *  microtasks draining between fires the way a real turn of the loop does. */
+export function _advanceSchedules(ms: number): Promise<void> {
+  return _clock?.advance(ms) ?? Promise.resolve();
 }
 
 /** Reset the virtual clock + pending schedules (per-mount test isolation). */

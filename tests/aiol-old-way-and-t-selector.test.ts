@@ -30,7 +30,9 @@ async function issues(
       JSON.stringify({ imports: { aio: "jsr:@riagentic/aio@1.0.0" } }),
     );
     for (const [rel, src] of Object.entries(files)) {
-      await Deno.writeTextFile(join(dir, rel), src);
+      const p = join(dir, rel);
+      await Deno.mkdir(p.replace(/[^/\\]+$/, ""), { recursive: true });
+      await Deno.writeTextFile(p, src);
     }
     const { ctx, report } = await buildContext(dir);
     await check(ctx);
@@ -105,6 +107,22 @@ Deno.test("aiol: a [t=] CSS rule is flagged too", async () => {
   assertEquals(found.length, 1);
   assert(found[0]!.message.includes("matches nothing"), found[0]!.message);
   assertEquals(found[0]!.line, 2);
+});
+
+// The rule's own comment promised "a multi-sheet app is not half-covered" —
+// and the branch that kept that promise filtered `sourceFiles` for `.css`, a
+// list that only ever holds .ts/.tsx. It could not run. Every stylesheet other
+// than the ONE the context loads by name went unchecked.
+Deno.test("aiol: a SECOND stylesheet is checked, not just src/style.css", async () => {
+  const found = await issues({
+    "src/style.css": `.panel { color: red }\n`,
+    "src/theme.css": `[t="save-button"] { border: 0 }\n`,
+    "src/parts/cards.css": `[t="card"] { margin: 0 }\n`,
+  }, checkTestHandleSelectors);
+  assertEquals(
+    found.map((i) => `${i.file}:${i.line}`).sort(),
+    ["src/parts/cards.css:1", "src/theme.css:1"],
+  );
 });
 
 Deno.test("aiol: ordinary selectors and ordinary [t] code are untouched", async () => {

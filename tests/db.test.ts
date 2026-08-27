@@ -588,7 +588,10 @@ Deno.test("db: transaction callback", async (t) => {
               await db.transaction(async () => {}); // nested — must throw
             }),
           Error,
-          "nested db.transaction()",
+          // Names the refusal AND a fix the reader can type. The old text
+          // advised "use savepoints if needed" — aio has no savepoint API, so
+          // its one actionable-looking phrase pointed at nothing.
+          "pass the `tx` handle your outer transaction already gave you",
         );
       },
     );

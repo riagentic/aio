@@ -19,7 +19,7 @@
 
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
-import { resolveAioRoot } from "./am-cmd-link.ts";
+import { resolveAioRoot, withoutAioFlag } from "./am-cmd-link.ts";
 import { join, relative, resolve } from "@std/path";
 import {
   compareVersions,
@@ -38,7 +38,7 @@ import {
   syncFrameworkDeps,
   writePin,
 } from "./am-versions.ts";
-import { LOCAL_PIN_FILE } from "../server/deno-json.ts";
+import { DENO_JSON_NAMES, LOCAL_PIN_FILE } from "../server/deno-json.ts";
 import {
   isPathPin,
   linkSatisfiesPin,
@@ -235,21 +235,35 @@ export async function cmdPin(
   const root = resolveAioRoot(args);
   if (!root) {
     outError(
-      "can't locate the aio install — reinstall via install.sh or pass --aio=<path>",
+      "can't locate the aio install — reinstall via install.sh or pass --aio <path>",
       mode,
     );
     Deno.exit(1);
   }
 
-  try {
-    await Deno.stat(`${appDir}/deno.json`);
-  } catch {
-    outError(`no deno.json in ${appDir} — run this inside an aio app`, mode);
+  // BOTH names Deno accepts — `DENO_JSON_NAMES` is the decider, and a `.jsonc`
+  // app was told it was not an aio app at all.
+  let hasConfig = false;
+  for (const name of DENO_JSON_NAMES) {
+    try {
+      await Deno.stat(`${appDir}/${name}`);
+      hasConfig = true;
+      break;
+    } catch { /* try the other name */ }
+  }
+  if (!hasConfig) {
+    outError(
+      `no ${DENO_JSON_NAMES.join(" or ")} in ${appDir} — run this inside an ` +
+        `aio app`,
+      mode,
+    );
     Deno.exit(1);
   }
 
   const wantLatest = args.includes("--latest");
-  const explicit = args.find((a) => !a.startsWith("--"));
+  // `--aio <path>` carries its value as a separate argument, and that value is
+  // a PATH — never the version ref this positional scan is looking for.
+  const explicit = withoutAioFlag(args).find((a) => !a.startsWith("--"));
   const pinned = await readPin(appDir);
 
   // No target → report only. Never changes anything, so it is safe to run
@@ -369,7 +383,27 @@ export async function cmdPin(
   const wrote = await writePin(appDir, res.ref);
   // The other half of the pin: align the framework-owned dep entries in the
   // app's map with what THIS version declares (see syncFrameworkDeps).
-  const deps = await syncFrameworkDeps(appDir, res.path);
+  //
+  // The pin is ALREADY WRITTEN by the time this runs, so a throw here used to
+  // surface as an unhandled `SyntaxError` from `JSON.parse` — on a deno.jsonc
+  // with a comment in it, which Deno itself accepts — leaving an app pinned,
+  // linked, and told nothing except a stack trace. The pin stands; say what
+  // did not happen and how to finish it.
+  let deps: Awaited<ReturnType<typeof syncFrameworkDeps>> = [];
+  try {
+    deps = await syncFrameworkDeps(appDir, res.path);
+  } catch (e) {
+    outError(
+      `pinned to aio ${res.ref} (dep/aio → ${res.path}), but the framework ` +
+        `dependency entries could NOT be synced: ${
+          e instanceof Error ? e.message : String(e)
+        }\n` +
+        `  The pin itself is written. Fix the app config so it parses, then ` +
+        `re-run \`am pin ${res.ref}\` to finish the sync.`,
+      mode,
+    );
+    Deno.exit(1);
+  }
   const minDeno = await pinnedMinDeno(res.path);
 
   out(

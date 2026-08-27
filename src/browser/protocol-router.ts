@@ -126,6 +126,18 @@ export function navigate(
     console.error(`[aio:navigate] Invalid URL: ${to}`);
     return;
   }
+  // A CROSS-ORIGIN destination cannot be a history entry — `pushState` throws a
+  // SecurityError for one, by spec. That throw used to escape `navigate()`
+  // uncaught (from inside a click handler, after `preventDefault()` had already
+  // run), so `navigate("https://example.com/x")` and `<Link to="https://…">`
+  // did NOTHING at all: no navigation, no history entry, and a framework-level
+  // "event handler error" as the only trace. Leaving the app IS what an
+  // absolute cross-origin URL asks for, so do it — a real navigation, which
+  // is exactly what the plain `<a>` would have done.
+  if (url.origin !== location.origin) {
+    location.assign(url.href);
+    return;
+  }
   if (opts?.replace) history.replaceState(null, "", url);
   else history.pushState(null, "", url);
   _rSync();

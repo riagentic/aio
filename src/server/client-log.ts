@@ -25,12 +25,16 @@ const _rate = new Map<number, { count: number; warned: boolean }>();
 let _logDir = ".aio/log";
 let _resetTimer: ReturnType<typeof setTimeout> | null = null;
 let _writeErrors = 0;
+/** Whether this process has already tightened the current `client.log`. One
+ *  chmod per file per boot, not one per append. */
+let _modeFixed = false;
 
 // ── Public API ────────────────────────────────────────────────────────
 
 /** Set the directory where client.log will be written. */
 export function initClientLog(logDir: string): void {
   _logDir = logDir;
+  _modeFixed = false; // a different file — tighten that one too
 }
 
 /** Append a client log entry. Fire-and-forget; safe to call from WS handler. */
@@ -97,14 +101,33 @@ export function disposeClientLog(): void {
     _resetTimer = null;
   }
   _rate.clear();
+  _modeFixed = false;
 }
 
 // ── Internals ─────────────────────────────────────────────────────────
 
 function _append(line: string): void {
   const path = `${_logDir}/client.log`;
-  Deno.writeTextFile(path, line, { append: true }).then(() => {
+  // 0600 + the chmod half, exactly as `logger-core.ts` documents it and
+  // `action-log.ts` obeys it. This was the one log writer in the repo that
+  // did neither, and it is the worst file to miss: `client.log` holds every
+  // line a browser or Electron renderer forwarded — session state, request
+  // URLs, whatever an app console-logs — plus the diagnostics relayed to it.
+  // Measured with umask 022 it landed 0644, readable by every local account,
+  // and on-start rotation re-created it 0644 on every boot, so the hole
+  // re-opened itself after each restart.
+  //
+  // `mode` applies only when the file is CREATED, and a log outlives many
+  // boots — so a file an older build left at 0644 needs the chmod too. Once
+  // per file per boot; best-effort, because Windows and mode-less filesystems
+  // have nothing to set and losing the renderer's voice over a chmod would be
+  // the worse trade.
+  Deno.writeTextFile(path, line, { append: true, mode: 0o600 }).then(() => {
     _writeErrors = 0; // reset on success
+    if (!_modeFixed) {
+      _modeFixed = true;
+      if (Deno.build.os !== "windows") Deno.chmod(path, 0o600).catch(() => {});
+    }
   }).catch((e) => {
     if (_writeErrors < 3) {
       _writeErrors++;

@@ -3,7 +3,8 @@
 
 import { UI_ENTRY } from "./app-files.ts";
 import { enc } from "../protocol/envelope.ts";
-import { join } from "@std/path";
+import { basename, dirname, join } from "@std/path";
+import { DENO_JSON_NAMES } from "./deno-json.ts";
 import type { GraphResult } from "./graph-validator.ts";
 import { validateGraph } from "./graph-validator.ts";
 import {
@@ -34,6 +35,38 @@ export interface WatcherDeps {
    *  process and cannot hot-reload, so dev restarts the process; without a
    *  handler the watcher falls back to warning once per file. */
   onCellChange?: (path: string) => void;
+  /** How long graph validation gets before the reload goes out without it.
+   *  Injected only by tests — see {@link GRAPH_TIMEOUT_MS}. */
+  graphTimeoutMs?: number;
+}
+
+/** Trailing-edge debounce: batch a burst of saves into one reload. */
+export const DEBOUNCE_MS = 100;
+
+/** …but never wait longer than this in total. A trailing-edge debounce with no
+ *  ceiling is not a debounce, it is a cancel: a generator, a formatter, or a
+ *  `git checkout` touching files every <100 ms pushed the timer forward
+ *  forever, so the busiest possible moment — the one where you most want the
+ *  page to catch up — was the one that never reloaded at all. */
+export const DEBOUNCE_MAX_MS = 500;
+
+/** How long import-graph validation gets before the reload goes out anyway. */
+export const GRAPH_TIMEOUT_MS = 2_000;
+
+/** The debounce delay to use, given how long the current burst has already
+ *  been held. Pure — the max-wait ceiling is a unit test, not a stopwatch. */
+export function _debounceDelay(waitedMs: number): number {
+  return Math.max(0, Math.min(DEBOUNCE_MS, DEBOUNCE_MAX_MS - waitedMs));
+}
+
+/** The project config files this watcher looks for: both names Deno accepts,
+ *  next to the app and one level up (the scaffold keeps deno.json at the
+ *  project root, flat apps next to the entry). Pure. */
+export function _configPaths(absBaseDir: string): string[] {
+  const up = dirname(absBaseDir);
+  return [absBaseDir, up].flatMap((dir) =>
+    DENO_JSON_NAMES.map((name) => join(dir, name))
+  );
 }
 
 /** Handle returned by createFileWatcher */
@@ -48,6 +81,20 @@ export interface FileWatcher {
   shutdown: () => void;
 }
 
+/** The changed files, as a person would name them: project-relative, and
+ *  summarised once a burst gets long (a `deno fmt` or a branch switch touches
+ *  dozens and the line must stay one line). */
+function describeChanged(paths: string[]): string {
+  if (paths.length === 0) return "the project";
+  const cwd = Deno.cwd();
+  const rel = paths.map((p) =>
+    p.startsWith(cwd + "/") ? p.slice(cwd.length + 1) : p
+  );
+  return rel.length <= 3
+    ? rel.join(", ")
+    : `${rel.slice(0, 3).join(", ")} +${rel.length - 3} more`;
+}
+
 /** Factory — creates a self-contained file watcher with debouncing and health monitoring */
 export function createFileWatcher(deps: WatcherDeps): FileWatcher {
   const { absBaseDir, port, debug } = deps;
@@ -55,14 +102,21 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
   // --- Debounce state ---
   let reloadTimer: ReturnType<typeof setTimeout> | null = null;
   let reloadIsFull = false;
+  /** When the current debounce burst started (0 = no burst in flight). */
+  let debounceStartedAt = 0;
+  /** The files that caused the burst in flight — named in the reload line. */
+  const changedInBurst = new Set<string>();
 
   // --- Graph validation state ---
   let graphResult: GraphResult | null = null;
   let graphWasRed = false;
   let graphGeneration = 0;
+  let _saidGraphTimeout = false;
+  const graphTimeoutMs = deps.graphTimeoutMs ?? GRAPH_TIMEOUT_MS;
 
   // --- Watcher state ---
   let fsWatcher: Deno.FsWatcher | null = null;
+  let configWatcher: Deno.FsWatcher | null = null;
   let watcherActive = false;
   const _warnedCellFiles = new Set<string>(); // a field report: warn once per cell file
   let _sentinelOk = false;
@@ -83,18 +137,6 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
     } catch {
       return false;
     }
-  }
-
-  /** The project config next to the app (baseDir) and one level up — the
-   *  scaffold keeps deno.json at the project root, flat apps next to the entry. */
-  function _denoJsonPaths(): string[] {
-    const up = absBaseDir.slice(0, absBaseDir.lastIndexOf("/"));
-    return [
-      join(absBaseDir, "deno.json"),
-      join(absBaseDir, "deno.jsonc"),
-      join(up, "deno.json"),
-      join(up, "deno.jsonc"),
-    ];
   }
 
   let _warnedImportMap = false;
@@ -151,19 +193,26 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
     path = normPath(path);
     clearTranspileCaches(path);
     if (!path.endsWith(".css")) reloadIsFull = true;
+    changedInBurst.add(path);
     if (reloadTimer) clearTimeout(reloadTimer);
-    // 100ms debounce — batch rapid file changes into single reload
+    // Trailing-edge debounce with a MAX WAIT — see DEBOUNCE_MAX_MS.
+    if (debounceStartedAt === 0) debounceStartedAt = Date.now();
     reloadTimer = setTimeout(() => {
       reloadTimer = null;
+      const startedAt = debounceStartedAt;
+      debounceStartedAt = 0;
       const wasFullReload = reloadIsFull;
       reloadIsFull = false;
+      const changed = [...changedInBurst];
+      changedInBurst.clear();
+      const burstStartedAt = startedAt;
 
       (async () => {
         // Re-validate import graph on file change (dev mode only)
         if (fileExists(join(absBaseDir, deps.uiEntry ?? UI_ENTRY))) {
           const gen = ++graphGeneration;
           const timeout = new Promise<null>((r) =>
-            setTimeout(() => r(null), 2000)
+            setTimeout(() => r(null), graphTimeoutMs)
           );
           const revalTranspile = (s: string, f: string) => transpile(s, f);
           const validation = validateGraph(
@@ -175,14 +224,32 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
           // Stale validation — a newer file change already started a new validation
           if (gen !== graphGeneration) return;
           if (result === null) {
-            // AIO-280: timeout — keep previous result, don't assume valid
-            debug(
-              "graph: ⚠ validation timed out (>2s) — keeping previous state",
-            );
-            return;
+            // Timeout — keep the PREVIOUS graph result (a slow validation is
+            // not evidence the graph broke) and carry on to the broadcast.
+            //
+            // This used to `return` here, before any broadcast, with the
+            // explanation going to `debug` — suppressed unless someone ran
+            // with --verbose. On a project big enough to exceed the budget
+            // that meant every save did nothing at all, silently: no reload,
+            // no error, no line. A reload the graph could not vet in time is
+            // still the right thing to send; the compiler and the module-error
+            // overlay catch what the pre-check would have.
+            if (!_saidGraphTimeout) {
+              _saidGraphTimeout = true;
+              log.warn(
+                "watch",
+                `import-graph validation did not finish within ${
+                  graphTimeoutMs / 1000
+                }s, so this reload went out unchecked — you get the browser ` +
+                  `reload, just not the pre-flight error overlay. Usually a ` +
+                  `very large or deeply nested import graph. (said once)`,
+              );
+            }
+          } else {
+            _saidGraphTimeout = false;
+            graphResult = result;
+            deps.onGraphResult?.(result);
           }
-          graphResult = result;
-          deps.onGraphResult?.(result);
         }
 
         if (graphResult && !graphResult.valid) {
@@ -209,24 +276,81 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
           debug(`${signal} → broadcasting to clients`);
           deps.broadcastWs(enc(signal));
           deps.onReload?.(signal);
+          // …and SAY SO. A successful hot reload was the one dev-loop event
+          // with no terminal line at all: every failure printed something,
+          // success printed nothing, so the only way to tell "it reloaded"
+          // from "the watcher is not watching this file" was to go and look at
+          // the browser. One line closes the loop.
+          log.info(
+            "watch",
+            `${signal === "css" ? "restyled" : "reloaded"} ${
+              describeChanged(changed)
+            } (${Date.now() - burstStartedAt}ms)`,
+          );
         }
       })().catch((err) => debug(`graph: unexpected error — ${err}`));
-    }, 100);
+    }, _debounceDelay(Date.now() - debounceStartedAt));
+  }
+
+  /** Watch the project config for edits. The import map is read ONCE at boot,
+   *  so adding a dependency while the server runs makes the watcher rescan
+   *  against a STALE map — the new import "doesn't exist" and the module-errors
+   *  page blames your code. We cannot hot-swap the map (it is baked into the
+   *  served import map and the transpile cache), so scheduleReload says so,
+   *  loudly and once.
+   *
+   *  The DIRECTORY is watched, not the file. An inotify watch is on an inode:
+   *  every editor that saves atomically (write a temp file, rename it over the
+   *  target — vim, VS Code, `deno fmt`, most formatters) replaces that inode,
+   *  so a file watch fired for the FIRST such save and then went permanently
+   *  deaf. Non-recursive, and filtered to the config names, so this cannot pull
+   *  a whole project root (node_modules included) into the watch set. */
+  function startConfigWatcher(): void {
+    const dirs = new Set<string>();
+    for (const cfg of _configPaths(absBaseDir)) {
+      if (!fileExists(cfg)) continue;
+      const dir = dirname(cfg);
+      // Already covered by the recursive app watch — a second watch would only
+      // double every event.
+      if (
+        dir === absBaseDir || dir.startsWith(absBaseDir + "/") ||
+        dir.startsWith(absBaseDir + "\\")
+      ) continue;
+      dirs.add(dir);
+    }
+    if (dirs.size === 0) return;
+    try {
+      configWatcher = Deno.watchFs([...dirs], { recursive: false });
+    } catch (e) {
+      log.warn(
+        "watch",
+        `cannot watch the project config in ${
+          [...dirs].join(", ")
+        } (${e}) — a deno.json edit will not be reported. Restart after ` +
+          `changing it.`,
+      );
+      return;
+    }
+    const names = new Set<string>(DENO_JSON_NAMES);
+    (async () => {
+      try {
+        for await (const event of configWatcher!) {
+          if (event.kind === "access") continue;
+          for (const path of event.paths) {
+            if (names.has(basename(path))) {
+              scheduleReload(path);
+            }
+          }
+        }
+      } catch { /* closed on shutdown, or the dir went away */ }
+    })();
   }
 
   function startWatcher(): boolean {
     try {
-      // Also watch the project's deno.json: the import map is read ONCE at
-      // boot, so adding a dependency while the server runs makes the watcher
-      // rescan against a STALE map — the new import "doesn't exist", and the
-      // module-errors page blames your code. We can't
-      // hot-swap the map (it is baked into the served import map and the
-      // transpile cache), so say so, loudly and once.
       const paths = _sentinelOk ? [absBaseDir, SENTINEL] : [absBaseDir];
-      for (const dj of _denoJsonPaths()) {
-        if (fileExists(dj)) paths.push(dj);
-      }
       fsWatcher = Deno.watchFs(paths, { recursive: true });
+      startConfigWatcher();
       watcherActive = true;
       (async () => {
         try {
@@ -317,6 +441,10 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
         try {
           fsWatcher?.close();
         } catch { /* already closed */ }
+        try {
+          configWatcher?.close();
+        } catch { /* already closed */ }
+        configWatcher = null;
         startWatcher();
       }
     }, 30_000);
@@ -326,6 +454,10 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
   function shutdown(): void {
     if (reloadTimer) clearTimeout(reloadTimer);
     fsWatcher?.close();
+    try {
+      configWatcher?.close();
+    } catch { /* already closed */ }
+    configWatcher = null;
     if (healthTimer) {
       clearInterval(healthTimer);
       healthTimer = null;

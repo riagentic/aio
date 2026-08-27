@@ -19,8 +19,8 @@ import {
 } from "../src/build/platforms.ts";
 import { compileArgs, v8FlagsArg } from "../src/build/build-compile.ts";
 import {
+  HEAP_FLOOR_MB,
   physicalMemoryBytes,
-  resolveMaxHeapMB,
 } from "../src/server/heap-policy.ts";
 import {
   androidApplicationId,
@@ -104,18 +104,35 @@ Deno.test("platforms: only deno-compile targets may cross-compile", () => {
   // published zip fetched for the TARGET, and the package there is a directory
   // + launcher + zip. No OS-specific tooling is involved, so refusing it was a
   // rule that cost users a CI matrix for nothing.
+  for (const p of ["windows", "macos", "macos-arm64"]) {
+    assertEquals(
+      crossCompileBlocker("electron", p, "linux"),
+      null,
+      `electron → ${p} cross-builds from a Linux host`,
+    );
+  }
+  // …and `electron-client` does NOT, however much it looks like its sibling.
+  //
+  // This assertion used to loop both targets together and expect null for
+  // both, which made the drift a CHECKED claim: `buildClient` has only an
+  // AppImage packager (no zip path at all) and refuses anything but Linux, so
+  // the fleet dispatched `electron-client [windows]`, the single-target build
+  // died, and the whole run went red. `--all-platforms` on any repo declaring
+  // this target could not succeed. A test asserting a capability the packager
+  // never had is worse than no test: it is the drift, notarized.
+  for (const p of ["windows", "macos", "macos-arm64"]) {
+    const why = crossCompileBlocker("electron-client", p, "linux");
+    assert(why, `electron-client → ${p} must be REFUSED, not attempted`);
+    assert(
+      why!.includes("AppImage"),
+      `electron-client → ${p}: the refusal must name the reason: ${why}`,
+    );
+  }
+  // The ONE real constraint on the Linux package, and it is a TOOL constraint:
+  // an AppImage is assembled by `appimagetool`, a native binary for the arch it
+  // assembles. Refused WITH the reason, never quietly emitted as a host
+  // artifact under a foreign name. True of both Electron targets.
   for (const t of ["electron", "electron-client"]) {
-    for (const p of ["windows", "macos", "macos-arm64"]) {
-      assertEquals(
-        crossCompileBlocker(t, p, "linux"),
-        null,
-        `${t} → ${p} cross-builds from a Linux host`,
-      );
-    }
-    // The ONE real constraint, and it is a TOOL constraint: a Linux Electron
-    // package is an AppImage, and `appimagetool` is a native binary for the
-    // arch it assembles. Refused WITH the reason, never quietly emitted as a
-    // host artifact under a foreign name.
     for (
       const [platform, host] of [
         ["linux", "macos"],
@@ -277,18 +294,72 @@ async function withDenoJson<T>(
   }
 }
 
-Deno.test("v8FlagsArg: an app that declares nothing still gets a heap ceiling", async () => {
-  // This USED to assert "no flag at all". That default is what killed an app on
-  // a 32 GB machine with 28 GB free: V8's ceiling is ~4 GB whatever the box, a
-  // compiled binary ignores DENO_V8_FLAGS, and `deno compile --v8-flags=` is
-  // the only way in. So the absent case is precisely the one that needs it.
-  const want = resolveMaxHeapMB(physicalMemoryBytes());
-  const expected = want === null
-    ? [] // a machine we cannot measure — leave V8 alone rather than guess
-    : [`--v8-flags=--max-old-space-size=${want}`];
-  assertEquals(await withDenoJson({ name: "x" }, v8FlagsArg), expected);
-  assertEquals(await withDenoJson({ build: {} }, v8FlagsArg), expected);
-  assertEquals(await withDenoJson(undefined, v8FlagsArg), expected);
+Deno.test("v8FlagsArg: an undeclared app never inherits the BUILD machine's RAM", async () => {
+  // This has been both ways, and the second one shipped a defect.
+  //
+  // It started as "no flag at all", which is V8's ~4 GB default whatever the
+  // box — the default that killed an app on a 32 GB machine with 28 GB free.
+  // The fix baked 25% of the BUILD machine, and that number then travelled: a
+  // binary cross-compiled on a 187 GB host booted in an 8 GB Windows VM and
+  // reported `heap 46.7 GB max of 8.0 GB RAM`. Six times the RAM the machine
+  // has, so V8 never collects before the OS kills the process, and nothing in
+  // the app can lower it — a compiled binary ignores DENO_V8_FLAGS (measured)
+  // and V8 fixes the ceiling at isolate creation.
+  //
+  // The build machine's size is not evidence about the user's machine. An app
+  // that declares nothing therefore ships with V8's own default (the policy
+  // FLOOR, identical everywhere); more than that is one `memory.maxHeap` line,
+  // and `reportHeapCeiling` names that line at boot on a machine with room.
+  for (const cfg of [{ name: "x" }, { build: {} }, undefined]) {
+    assertEquals(await withDenoJson(cfg, v8FlagsArg), []);
+  }
+});
+
+Deno.test("v8FlagsArg: a declared ABSOLUTE ceiling travels with the binary", async () => {
+  // A size means the same thing on every machine, so it is the one form that
+  // can honestly be baked. The floor still applies.
+  assertEquals(
+    await withDenoJson({ memory: { maxHeap: "12GB" } }, v8FlagsArg),
+    ["--v8-flags=--max-old-space-size=12288"],
+  );
+  assertEquals(
+    await withDenoJson({ memory: { maxHeap: 512 } }, v8FlagsArg),
+    [`--v8-flags=--max-old-space-size=${HEAP_FLOOR_MB}`],
+    "below the floor is raised to it, never lowered",
+  );
+  assertEquals(
+    await withDenoJson({ memory: { maxHeap: "default" } }, v8FlagsArg),
+    [],
+    "an explicit opt-out bakes nothing",
+  );
+});
+
+Deno.test("v8FlagsArg: a PERCENT ceiling is the build host's, and says so out loud", async () => {
+  // "25%" cannot be re-resolved in a compiled binary, so it silently becomes
+  // "25% of whoever built it". It is still honoured — the author asked — but
+  // the build log states whose percentage it is, because that is the only
+  // moment anyone can act on it.
+  const said: string[] = [];
+  const warn = console.warn;
+  console.warn = (m: unknown) => said.push(String(m));
+  let got: string[];
+  try {
+    got = await withDenoJson({ memory: { maxHeap: "50%" } }, v8FlagsArg);
+  } finally {
+    console.warn = warn;
+  }
+  const total = physicalMemoryBytes();
+  if (total === null) {
+    assertEquals(got, [], "an unmeasurable build host bakes nothing");
+  } else {
+    const want = Math.max(
+      HEAP_FLOOR_MB,
+      Math.floor((total * 0.5) / (1024 * 1024)),
+    );
+    assertEquals(got, [`--v8-flags=--max-old-space-size=${want}`]);
+  }
+  assertEquals(said.length, 1, `the build must say it: ${said.join(" | ")}`);
+  assertEquals(said[0]!.includes("BUILD MACHINE"), true, said[0]);
 });
 
 Deno.test("v8FlagsArg: an explicit max-old-space-size is never second-guessed", async () => {
@@ -304,16 +375,15 @@ Deno.test("v8FlagsArg: an explicit max-old-space-size is never second-guessed", 
 });
 
 Deno.test("v8FlagsArg: other declared flags keep the ceiling alongside them", async () => {
-  const want = resolveMaxHeapMB(physicalMemoryBytes());
   const got = await withDenoJson(
-    { build: { v8Flags: ["--expose-gc"] } },
+    { build: { v8Flags: ["--expose-gc"] }, memory: { maxHeap: "12GB" } },
     v8FlagsArg,
   );
   assertEquals(got.length, 1);
   assertEquals(got[0]!.includes("--expose-gc"), true);
   assertEquals(
-    got[0]!.includes(`--max-old-space-size=${want}`),
-    want !== null,
+    got[0]!.includes("--max-old-space-size=12288"),
+    true,
     "a declared flag must not cost the app its heap ceiling",
   );
 });

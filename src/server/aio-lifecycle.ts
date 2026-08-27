@@ -17,6 +17,7 @@ import { discoverySupported, startDiscoveryResponder } from "./discovery.ts";
 import { instances, isProcessAlive } from "./single-instance-lock.ts";
 import { shutdownAllRuntimes } from "./shutdown.ts";
 import { generatePin } from "./pairing.ts";
+import { appKeyPath } from "./app-key.ts";
 import type { Log } from "../diagnostics/logger-api.ts";
 import type { DB } from "../db/mod.ts";
 import type { ScheduleDef } from "../state/schedule.ts";
@@ -370,19 +371,41 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     log.info(`${p("maxconn")}${maxConnections}`);
   }
 
-  // Share URLs — shown separately so they're easy to copy
+  // Share URLs — shown separately so they're easy to copy.
+  //
+  // The link CARRIES THE KEY, deliberately: it is how the operator hands the
+  // app to someone, and `am`, the onboarding lab and the aio client all read
+  // it. Redacting it here does not protect the key, it deletes the feature —
+  // the key is equally readable in `app.key`.
+  //
+  // What was actually broken is where this line LANDS. The banner goes to the
+  // terminal AND to `<logs>/app.log`, and that file was created at the umask
+  // (0664 on a stock distro, in a 0775 directory) — so a live, forever
+  // credential sat in a world-readable file. The fix belongs at the sink, and
+  // it is there: the log dir is 0700 (app-dirs.ts) and every log file is 0600
+  // (logger-core.ts), which is exactly the protection `app.key` itself has.
+  // The share link is no more exposed than the key file it names.
+  //
+  // The warning below also used to claim `--expose … origin checks disabled`.
+  // That was never true: the WebSocket Origin check runs on EVERY upgrade,
+  // exposed or not (server-ws.ts), and the Host gate now runs on every request
+  // (server-auth.ts). Saying a defense is off when it is on is how an operator
+  // opens a hole to fix a problem they do not have.
   if (expose && users) {
     log.warn(
-      `--expose: bound to 0.0.0.0 — per-user token auth, origin checks disabled`,
+      `--expose: bound to 0.0.0.0 — reachable by anyone on this network; ` +
+        `per-user token auth is the only thing in front of it`,
     );
     for (const [t, u] of Object.entries(users)) {
       log.info(`share (${u.id}/${u.role}): ${url}?token=${t}`);
     }
   } else if (expose && token) {
     log.warn(
-      `--expose: bound to 0.0.0.0 — key auth, origin checks disabled`,
+      `--expose: bound to 0.0.0.0 — reachable by anyone on this network; ` +
+        `the app key is the only thing in front of it`,
     );
     log.info(`share: ${url}?token=${token}`);
+    log.info(`key file: ${appKeyPath(appId)} (owner-only)`);
     // Friendly pairing: the aio client enters this code once to pull the
     // profile (cert + key) and connect forever — no file to hand over.
     const pin = generatePin();

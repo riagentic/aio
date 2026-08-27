@@ -3,7 +3,7 @@
 // has consciously accepted its hints can lint cleanly. The JSON output always
 // keeps every issue. (User request: make a 0-noise `lint:aio` run possible.)
 import { assert, assertEquals } from "@std/assert";
-import { printReport } from "../aiol/mod.ts";
+import { nearestFlag, printReport } from "../aiol/mod.ts";
 import type { Report } from "../aiol/types.ts";
 
 function capture(fn: () => void): string {
@@ -72,4 +72,30 @@ Deno.test("aiol: a clean project's verdict claims only what was checked", () => 
   // verdict now names its scope and points at fmt.
   assert(out.includes("No architectural issues found"));
   assert(out.includes("deno fmt"));
+});
+
+// ── An unknown flag is a refusal, not a no-op ────────────────────────
+//
+// `aiol . --safefix` used to lint, fix nothing, and exit 0. The caller reads
+// "clean" and ships — the flag it asked for never ran. Every other surface in
+// this project refuses an unknown key with a did-you-mean; the linter that
+// enforces that must not be the exception.
+
+Deno.test("aiol: a misspelled flag is refused, with the flag it meant", () => {
+  assertEquals(nearestFlag("--safefix"), "--safe-fix");
+  assertEquals(nearestFlag("--safe_fix"), "--safe-fix");
+  assertEquals(nearestFlag("--jsom"), "--json");
+  assertEquals(nearestFlag("--nohints"), "--no-hints");
+});
+
+Deno.test("aiol: an unknown flag exits non-zero and names the alternatives", async () => {
+  const mod = new URL("../aiol/mod.ts", import.meta.url).pathname;
+  const out = await new Deno.Command(Deno.execPath(), {
+    args: ["run", "-A", mod, ".", "--safefix"],
+    env: { NO_COLOR: "1" },
+  }).output();
+  assertEquals(out.code, 2, "a flag that did nothing must not exit 0");
+  const err = new TextDecoder().decode(out.stderr);
+  assert(err.includes("unknown flag --safefix"), err);
+  assert(err.includes("did you mean --safe-fix?"), err);
 });

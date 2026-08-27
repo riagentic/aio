@@ -9,7 +9,7 @@ import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { enc } from "../protocol/envelope.ts";
 import { _BLOCKED_KEYS } from "./state-array-utils.ts";
 import { _setSubsSendFn, trackPath } from "./state-subs.ts";
-import { offlineQueue } from "./offline-queue.ts";
+import { offlineQueue, type QueuedEntry } from "./offline-queue.ts";
 import { log } from "../diagnostics/logger-api.ts";
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -133,6 +133,17 @@ export function flushOfflineQueue(): void {
   for (const action of _offlineQueue.drain()) {
     _transport.send(enc("action", action));
   }
+}
+
+/** Empty this queue and hand back its arrival-stamped entries.
+ *
+ *  The browser transport takes both queues this way on reconnect and replays
+ *  the MERGE, so the two of them go out in the order the user acted rather
+ *  than one whole queue after the other. Nothing else may call it: whoever
+ *  takes these entries owes their callers a send or a rejection.
+ *  @internal Cross-module wiring — not public API, stripped from the snapshot. */
+export function _takeOfflineQueue(): QueuedEntry[] {
+  return _offlineQueue.drainEntries();
 }
 
 // ── Send ─────────────────────────────────────────────────────────────

@@ -104,6 +104,40 @@ Deno.test("bundle cache: an edit to ANY real input invalidates it — whatever i
   }
 });
 
+Deno.test("bundle cache: the app CONFIG is an input, under either of its names", async () => {
+  // deno.json supplies the import map esbuild resolved through, so editing it
+  // must invalidate the bundle — and `deno.jsonc` is just as legal a spelling
+  // (`DENO_JSON_NAMES` is the decider; every OTHER reader in the build honours
+  // both). The freshness check statted the literal "deno.json", so for a
+  // `.jsonc` project the stat threw, the catch answered "not fresh", and the
+  // cache never hit ONCE — measured: every build re-ran esbuild, silently,
+  // forever. Fail-safe, which is why nothing noticed; and it left the real
+  // rule unexpressed for those projects, correct only by never caching.
+  for (const name of ["deno.json", "deno.jsonc"]) {
+    const { root, workspace } = await scenario();
+    try {
+      if (name !== "deno.json") {
+        await Deno.rename(join(root, "deno.json"), join(root, name));
+      }
+      const cfg = cfgFor(root);
+      assertEquals(
+        await isBundleFresh(cfg),
+        true,
+        `${name}: a project whose config predates its bundle must CACHE`,
+      );
+      await sleep(15);
+      await Deno.writeTextFile(join(root, name), "{ /* edited */ }");
+      assertEquals(
+        await isBundleFresh(cfg),
+        false,
+        `${name}: an edited config must invalidate the bundle`,
+      );
+    } finally {
+      await Deno.remove(workspace, { recursive: true });
+    }
+  }
+});
+
 Deno.test("bundle cache: a DELETED input is a change too", async () => {
   const { root, workspace, inputs } = await scenario();
   try {

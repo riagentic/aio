@@ -42,18 +42,6 @@ const _moduleCache = new Map<
 >();
 
 /**
- * Clear the island module cache for a specific key, or all cached islands.
- * Only affects islands with explicit cacheKey configured.
- */
-export function clearIslandCache(cacheKey?: string | number): void {
-  if (cacheKey !== undefined) {
-    _moduleCache.delete(cacheKey);
-  } else {
-    _moduleCache.clear();
-  }
-}
-
-/**
  * Mount external framework components into AIR pages.
  * Returns an AIR component function that handles lazy loading,
  * signal-to-props bridging, and cleanup on unmount.
@@ -117,6 +105,21 @@ export function island<M = unknown>(config: IslandConfig<M>): ComponentFn {
     const loadedRef = useRef(false);
 
     onMount(() => {
+      // Registered INSIDE onMount ⇒ unmount-only (the AIO-76 routing). In the
+      // component BODY `onCleanup` also fires before EVERY re-render, and an
+      // island re-renders whenever a prop changes — so `<Chart n={count}/>`
+      // mounted, then tore the external component down on the first `n` change
+      // and never rebuilt it (onMount is once-per-instance): a permanently
+      // empty <div>, silently. Every island test used a prop-LESS island, so
+      // nothing caught it. Same rule as compat.ts's useEffect and raf.ts.
+      onCleanup(() => {
+        disposedRef.current = true;
+        if (disposeRef.current) disposeRef.current();
+        if (handleRef.current) handleRef.current.unmount();
+        handleRef.current = null;
+        disposeRef.current = null;
+      });
+
       loadModule().then((mod) => {
         loadedRef.current = true;
         if (disposedRef.current) return; // unmounted while loading — bail
@@ -163,14 +166,6 @@ export function island<M = unknown>(config: IslandConfig<M>): ComponentFn {
           err,
         );
       });
-    });
-
-    onCleanup(() => {
-      disposedRef.current = true;
-      if (disposeRef.current) disposeRef.current();
-      if (handleRef.current) handleRef.current.unmount();
-      handleRef.current = null;
-      disposeRef.current = null;
     });
 
     // Loading placeholder is rendered as initial children of the container div.

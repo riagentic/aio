@@ -1,8 +1,10 @@
 // Tests for broadcast-utils.ts — subscription-aware filtering
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import {
   filterPatchesBySubs,
   filterStateBySubs,
+  MAX_SUB_LEN,
+  MAX_SUBS,
   parseSubs,
   type PatchEntry,
 } from "../src/protocol/broadcast-utils.ts";
@@ -124,4 +126,64 @@ Deno.test("parseSubs: empty array returns empty Set", () => {
   const result = parseSubs(JSON.stringify([]));
   assertEquals(result instanceof Set, true);
   assertEquals(result!.size, 0);
+});
+
+// ── the subs frame is client-supplied, and was unbounded ─────────────
+//
+// One frame could declare a million subscription paths. The parsed Set is held
+// per CONNECTION and walked on EVERY broadcast, so the cost is permanent and
+// per-client — anonymous-reachable on a public app, while the `op` handler
+// directly below it in server-ws.ts validates rigorously.
+
+Deno.test("parseSubs: a frame past the path cap is refused, loudly", () => {
+  const said: string[] = [];
+  const w = console.warn, e = console.error;
+  console.warn = (...a: unknown[]) => said.push(a.map(String).join(" "));
+  console.error = (...a: unknown[]) => said.push(a.map(String).join(" "));
+  try {
+    const flood = Array.from({ length: MAX_SUBS + 1 }, (_, i) => `c${i}`);
+    assertEquals(
+      parseSubs(flood),
+      undefined,
+      "an oversized subs frame must be refused, not truncated: a client " +
+        "that thinks it is subscribed to something it is not gets a UI that " +
+        "silently stops updating",
+    );
+    // A million-string frame is the real shape — and must not be walked.
+    assertEquals(parseSubs(new Array(1_000_000).fill("c")), undefined);
+    // Even with the wildcard in it: the frame itself is the abuse.
+    assertEquals(parseSubs([...flood, "*"]), undefined);
+    assert(
+      said.some((m) => m.includes("subs frame refused")),
+      `a silent cap is the same defect one level down: ${JSON.stringify(said)}`,
+    );
+  } finally {
+    console.warn = w;
+    console.error = e;
+  }
+});
+
+Deno.test("parseSubs: a path past the length cap is refused", () => {
+  const w = console.warn, e = console.error;
+  console.warn = () => {};
+  console.error = () => {};
+  try {
+    assertEquals(parseSubs(["ok", "x".repeat(MAX_SUB_LEN + 1)]), undefined);
+    // The honest cases keep working, in both spellings.
+    assertEquals(
+      parseSubs(["todos", "todos.items"]),
+      new Set(["todos", "todos.items"]),
+    );
+    assertEquals(parseSubs('["todos"]'), new Set(["todos"]));
+    assertEquals(parseSubs(["*"]), null);
+    assertEquals(parseSubs("not json"), undefined);
+    assertEquals(
+      parseSubs(Array.from({ length: MAX_SUBS }, (_, i) => `c${i}`))?.size,
+      MAX_SUBS,
+      "the cap itself is allowed — an off-by-one here breaks real clients",
+    );
+  } finally {
+    console.warn = w;
+    console.error = e;
+  }
 });

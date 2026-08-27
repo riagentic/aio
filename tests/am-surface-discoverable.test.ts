@@ -16,7 +16,8 @@ const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
  *    ls → instances · logs → log · new → add
  *    tt → timetravel      (the only abbreviation in a surface that spells out)
  *    tables → sql --tables (one fixed query, not a second command)
- *    update → upgrade      (one verb; the OBJECT says am-itself or an app) */
+ *    update → upgrade      (one verb; the OBJECT says am-itself or an app)
+ *    release → publish     (the same act; "publish" names what it produces) */
 const ALIASES = new Set([
   "ls",
   "logs",
@@ -24,6 +25,9 @@ const ALIASES = new Set([
   "tt",
   "tables",
   "update",
+  // release → publish (one verb; "publish" is what it does to the channel
+  // directory, and it is the word the docs use)
+  "release",
 ]);
 
 async function amCommands(): Promise<string[]> {

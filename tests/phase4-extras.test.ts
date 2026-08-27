@@ -379,17 +379,33 @@ Deno.test({
 });
 
 Deno.test({
-  name: "useForm: bind returns reactive props",
+  name: "useForm: bind returns a SNAPSHOT of the field, plus its handlers",
   async fn() {
+    // `bind()` used to return a live `get value()`. Its result goes straight to
+    // `h()` as props, so the getter moved the read out of the render pass: the
+    // component never SUBSCRIBED to the field, and `prev.value === next.value`
+    // was unconditionally true (both getters read the same live field), so the
+    // DOM value was never rewritten — `form.reset()` left the typed text on
+    // screen. Each render calls `bind()` again; that call is the read.
     const form = useForm({ name: { initial: "" } });
     const bound = form.bind("name");
     assertEquals(bound.value, "");
+    assertEquals(
+      Object.getOwnPropertyDescriptor(bound, "value")?.get,
+      undefined,
+      "plain data, not a getter",
+    );
 
     // Simulate input event
     const fakeEvent = { target: { value: "typed" } } as unknown as Event;
     bound.onInput(fakeEvent);
     assertEquals(form.fields.name.value, "typed");
-    assertEquals(bound.value, "typed");
+    assertEquals(
+      bound.value,
+      "",
+      "the OLD props still describe the old render",
+    );
+    assertEquals(form.bind("name").value, "typed", "the next render sees it");
 
     // Simulate blur
     bound.onBlur();
@@ -445,8 +461,12 @@ Deno.test({
     const dt = connectAioDevTools();
     assertEquals(dt.connected, true);
     assertEquals(dt.totalRenders, 0);
-    assertEquals(dt.tree.length, 0);
     assertEquals(dt.renders.length, 0);
+    // `tree` is no longer a per-handle buffer that starts empty: it is walked
+    // from the LIVE AIR roots on demand (it used to be a signal nothing ever
+    // wrote, so "empty" was the only value it could have). It reports whatever
+    // this process has mounted, which this test does not own.
+    assert(Array.isArray(dt.tree));
 
     _recordRender({
       component: "TestComp",

@@ -15,6 +15,7 @@ import { PERSIST_SCHEMA_VERSION } from "./persist-schema.ts";
 import {
   describeIssues,
   type PersistIssue,
+  PersistSerializeError,
   stringifyWithIssues,
 } from "./persist-guard.ts";
 
@@ -94,6 +95,15 @@ export interface PersistenceConfig {
    *  journal can advance its watermark + compact the persisted prefix. Undefined
    *  (journal off) ⇒ the persist path is byte-identical to before. */
   onPersisted?: (seq: number) => void;
+  /** Opt-in journal: the statements that RECORD that seq durably, run inside
+   *  the same transaction as the snapshot they describe.
+   *
+   *  `onPersisted` alone was a post-commit callback, so a kill between COMMIT
+   *  and it replayed actions already in the snapshot — replay re-reduces, so a
+   *  `deposit` applied twice. Planning the watermark closes that window: the
+   *  snapshot and the mark that says "this snapshot includes up to seq" are one
+   *  write. When this is set, `onPersisted` is bookkeeping only (compaction). */
+  planPersisted?: (seq: number) => SkvStmt[];
   /** Stored-but-undeclared cell slices found at boot. Carried into
    *  EVERY persisted document verbatim, so user data is never dropped because
    *  a build stopped declaring its cell. */
@@ -211,6 +221,86 @@ export function createPersistenceManager(
   // old behaviour.
   const _cellSer = new Map<string, { ref: unknown; size: number }>();
 
+  // ── One unserializable cell must not take the app's data with it ─────
+  //
+  // A `BigInt` (or a cyclic reference) anywhere in state made `JSON.stringify`
+  // THROW before the guard could name it. The throw escaped the whole per-cell
+  // loop, `_planKv` returned null, and EVERY cell's write was lost — on every
+  // window and on the shutdown flush, forever, under a message that named
+  // neither the cell nor the path and blamed `getDBState`. The write is planned
+  // per cell now, so one refused value costs exactly that cell's row.
+  //
+  // What that cell's row keeps is its LAST COMMITTED value: in multi mode by
+  // simply not rewriting the row, and in single mode — where the whole document
+  // is one row — by writing the last good value back in its place. If this
+  // process has never written the cell, the stored slice is read from the store
+  // once (`_seedLastGood`) so the fallback is what is actually on disk; a cell
+  // with nothing on disk is simply omitted, because there is nothing to lose.
+  const _lastGood = new Map<string, unknown>();
+  /** `_lastGood` value meaning "the store holds nothing for this cell". */
+  const NO_STORED = Symbol("no stored value");
+  const _refusedReported = new Set<string>();
+
+  /** A cell whose value JSON refuses — named by cell AND path, with the fix,
+   *  once per distinct (path, kind). */
+  function _reportRefusedCell(cellName: string, e: unknown): void {
+    const se = e instanceof PersistSerializeError
+      ? e.withPrefix(cellName)
+      : null;
+    const key = se ? `${se.path}|${se.kind}` : `${cellName}|unknown`;
+    if (_refusedReported.has(key)) return;
+    _refusedReported.add(key);
+    const err = new Error(
+      `persist: cell "${cellName}" was NOT written — ${
+        se ? se.message : e instanceof Error ? e.message : String(e)
+      }\n  Its stored row keeps the last value that was written successfully; ` +
+        `every OTHER cell still persists. This repeats on every persist ` +
+        `window until the value is fixed.`,
+      { cause: e },
+    );
+    log.error(err.message);
+    _reportPersistError(err);
+  }
+
+  /** Thrown out of `_planKv` when single mode cannot write the document
+   *  without first learning what the store already holds for `cells`. */
+  class NeedsStoredFallback extends Error {
+    constructor(readonly cells: string[]) {
+      super(`persist: need the stored value of ${cells.join(", ")}`);
+    }
+  }
+
+  /** Read the stored document once and remember each named cell's slice, so a
+   *  single-mode rewrite can carry it through verbatim instead of dropping it.
+   *  A cell the store does not hold is marked NO_STORED — omitting it then
+   *  loses nothing. */
+  async function _seedLastGood(cells: string[]): Promise<void> {
+    let stored: Record<string, unknown> | null;
+    try {
+      stored = await kvDb!.get<Record<string, unknown>>(persistKey);
+    } catch (e) {
+      // Seeding NOTHING is deliberate: a read that FAILED is not evidence that
+      // the store holds nothing, and treating it as such would drop the cell
+      // from a document that REPLACES the stored row — deleting exactly the
+      // data this path exists to protect. The snapshot is skipped this cycle
+      // instead, loudly, and retried on the next one.
+      log.error(
+        `persist: could not read the stored snapshot back — ${e}. The state ` +
+          `snapshot is not written this cycle rather than risk dropping a ` +
+          `cell whose stored value could not be read.`,
+      );
+      _reportPersistError(e);
+      return;
+    }
+    for (const c of cells) {
+      const has = stored !== null && typeof stored === "object" && c in stored;
+      _lastGood.set(
+        c,
+        has ? (stored as Record<string, unknown>)[c] : NO_STORED,
+      );
+    }
+  }
+
   function _reportPersistError(e: unknown): void {
     const err = createAioError("PERSIST_ERROR", e, {});
     reportAioError(err, getReportOpts());
@@ -227,34 +317,101 @@ export function createPersistenceManager(
   // money migration applied twice, silently. A version is a fact about the
   // stored SHAPE, and an older build cannot make newer data older; it can
   // only fail to understand it (which boot warns about, loudly).
+  //
+  // And it rides in the SAME TRANSACTION as the snapshot it describes.
+  //
+  // It used to be two `kvDb.set` calls made AFTER the transaction committed,
+  // with its own catch-and-log. So there was a window — a SIGKILL, an OOM, a
+  // power cut, or simply a failing write — in which state was on disk with no
+  // version beside it. The next boot then read `persisted = 0` and re-ran
+  // `onMigrate(state, 0)` over already-migrated data: verified end to end as a
+  // v1→v2 "amounts are now cents" migration applying twice, 101 → 10100. That
+  // is the exact failure the monotonic stamp and the downgrade guard exist to
+  // prevent, reached through a crash window instead of a rollback. One
+  // transaction closes the window: either the state and the version that
+  // describes it are both there, or neither is.
   let _storedVersions: Record<string, number> | null = null;
-  async function _stampVersions(): Promise<void> {
-    if (!kvDb || !cfg.appId) return;
+
+  /** Read the stored version map once, before anything plans a write. The
+   *  stamp is MONOTONIC per cell, which requires knowing what is stored: a
+   *  failed read must NOT be treated as `{}` (that would let an older build
+   *  stamp a newer file downward, which is the bug this guards). */
+  async function _loadStoredVersions(): Promise<void> {
+    if (!kvDb || !cfg.appId || _storedVersions !== null) return;
     try {
-      await kvDb.set(`${cfg.appId}:__schema`, PERSIST_SCHEMA_VERSION);
-      if (cfg.cellVersions) {
-        const key = `${cfg.appId}:__versions`;
-        if (_storedVersions === null) {
-          _storedVersions = await kvDb.get<Record<string, number>>(key) ?? {};
-        }
-        const next = { ..._storedVersions };
-        let changed = false;
-        for (const [cell, v] of Object.entries(cfg.cellVersions)) {
-          const highest = Math.max(v, next[cell] ?? 0);
-          if (highest !== next[cell]) {
-            next[cell] = highest;
-            changed = true;
-          }
-        }
-        if (changed) {
-          await kvDb.set(key, next);
-          _storedVersions = next;
+      _storedVersions =
+        await kvDb.get<Record<string, number>>(`${cfg.appId}:__versions`) ?? {};
+    } catch (e) {
+      log.error(
+        `persist: could not read the stored cell versions ` +
+          `(${cfg.appId}:__versions) — ${e}. State is still written; the ` +
+          `version stamp is skipped this cycle rather than risk stamping a ` +
+          `newer file with older versions.`,
+      );
+      _reportPersistError(e);
+    }
+  }
+
+  /** WHAT gets stamped — one decider, used by both the planned (in-transaction)
+   *  and the direct write paths. Empty when nothing needs stamping or when the
+   *  stored map could not be read. */
+  function _versionStamp(): {
+    pairs: [string, unknown][];
+    commit: () => void;
+  } {
+    if (!kvDb || !cfg.appId || _storedVersions === null) {
+      return { pairs: [], commit: () => {} };
+    }
+    const pairs: [string, unknown][] = [
+      [`${cfg.appId}:__schema`, PERSIST_SCHEMA_VERSION],
+    ];
+    let next: Record<string, number> | null = null;
+    if (cfg.cellVersions) {
+      const merged = { ..._storedVersions };
+      let changed = false;
+      for (const [cell, v] of Object.entries(cfg.cellVersions)) {
+        const highest = Math.max(v, merged[cell] ?? 0);
+        if (highest !== merged[cell]) {
+          merged[cell] = highest;
+          changed = true;
         }
       }
+      if (changed) {
+        pairs.push([`${cfg.appId}:__versions`, merged]);
+        next = merged;
+      }
+    }
+    return {
+      pairs,
+      commit: () => {
+        if (next) _storedVersions = next;
+      },
+    };
+  }
+
+  /** The direct-write twin, for a store that cannot plan its statements (none
+   *  ships today). Same decider, same monotonicity — but NOT atomic with the
+   *  snapshot, which is why the planned path above is the one every real app
+   *  takes. */
+  async function _stampVersions(): Promise<void> {
+    const stamp = _versionStamp();
+    if (!stamp.pairs.length) return;
+    try {
+      for (const [k, v] of stamp.pairs) await kvDb!.set(k, v);
+      stamp.commit();
     } catch (e) {
       log.error(`persist: version stamp failed — ${e}`);
       _reportPersistError(e);
     }
+  }
+
+  /** The journal watermark for this window, as statements that ride in the
+   *  SAME transaction as the snapshot. Empty when the journal is off or when
+   *  the stored mark already says this seq. */
+  let _committedWm = 0;
+  function _planWatermark(seq: number): SkvStmt[] {
+    if (!cfg.planPersisted || seq === _committedWm) return [];
+    return cfg.planPersisted(seq);
   }
 
   /** The `db:` table writes for ONE state read — built, not executed, so they
@@ -335,6 +492,9 @@ export function createPersistenceManager(
     const changed: Record<string, unknown> = {};
     const pendingSer: [string, { ref: unknown; size: number }][] = [];
     const freshIssues: PersistIssue[] = [];
+    // Cells whose value JSON refused this window. Reported by name and path;
+    // never allowed to cost another cell its write.
+    const refused: string[] = [];
     if (perCell) {
       for (const [cellName, v] of Object.entries(doc)) {
         const hit = _cellSer.get(cellName);
@@ -342,7 +502,16 @@ export function createPersistenceManager(
           _guardCellSize(cellName, hit.size); // hard overruns stay loud
           continue;
         }
-        const { json, issues } = stringifyWithIssues(v);
+        let json: string;
+        let issues: PersistIssue[];
+        try {
+          ({ json, issues } = stringifyWithIssues(v));
+        } catch (e) {
+          // THE per-cell boundary. Everything below still plans and writes.
+          _reportRefusedCell(cellName, e);
+          refused.push(cellName);
+          continue;
+        }
         for (const i of issues) {
           // Same dotted-from-the-root paths the whole-document scan produced.
           freshIssues.push({
@@ -355,7 +524,15 @@ export function createPersistenceManager(
         pendingSer.push([cellName, { ref: v, size: json.length }]);
       }
     } else {
-      freshIssues.push(...stringifyWithIssues(dbState).issues);
+      // Not a per-cell document (an engine-level caller): there is no cell to
+      // isolate, so a refusal is the whole write — named with its path all the
+      // same, instead of a bare "getDBState threw".
+      try {
+        freshIssues.push(...stringifyWithIssues(dbState).issues);
+      } catch (e) {
+        _reportRefusedCell(persistKey, e);
+        return null;
+      }
     }
     {
       const fresh = freshIssues.filter((i) => !_warnedPersistPaths.has(i.path));
@@ -382,15 +559,32 @@ export function createPersistenceManager(
       // unchanged cell's row.
       const removedKeys = prevPersistedKeys.filter((k) => !(k in doc));
       const toWrite = perCell ? changed : doc;
+      const rows = kvDb.planSetMulti?.(persistKey, toWrite, removedKeys) ??
+        null;
+      const stamp = _versionStamp();
+      const planned = asyncDb !== null && rows !== null;
+      const wm = planned ? _planWatermark(seq) : [];
       return {
-        stmts: kvDb.planSetMulti?.(persistKey, toWrite, removedKeys) ?? null,
+        stmts: rows === null ? null : [
+          ...rows,
+          ...stamp.pairs.flatMap(([k, v]) => kvDb.planSet!(k, v)),
+          ...wm,
+        ],
         write: async () =>
           (await kvDb!.setMulti(persistKey, toWrite, removedKeys)).ok,
         commit: async () => {
           prevPersistedKeys = keys;
-          for (const [k, e] of pendingSer) _cellSer.set(k, e);
-          for (const k of removedKeys) _cellSer.delete(k);
-          await _stampVersions();
+          for (const [k, e] of pendingSer) {
+            _cellSer.set(k, e);
+            _lastGood.set(k, e.ref); // the bytes this row now holds
+          }
+          for (const k of removedKeys) {
+            _cellSer.delete(k);
+            _lastGood.delete(k);
+          }
+          if (planned) stamp.commit(); // stamped inside the transaction above
+          else await _stampVersions();
+          if (wm.length) _committedWm = seq;
           cfg.onPersisted?.(seq); // watermark advances only on a committed write
           log.debug(
             `persist: saved multi (${
@@ -403,15 +597,47 @@ export function createPersistenceManager(
     // Single mode: one JSON blob. Any size — SQLite, not Deno.Kv. The write
     // is the whole document by contract (one row), so only the scan above
     // benefits from the cache.
+    //
+    // One row means a refused cell cannot simply be left out of the write: the
+    // document REPLACES what is stored, so omitting the cell would delete its
+    // data. Each refused cell is written back as its last known good value
+    // instead — from this process's own last committed write, or read once
+    // from the store. Only a cell the store has never held is omitted, and
+    // that omits nothing.
+    let toStore = dbState;
+    if (refused.length) {
+      const need = refused.filter((c) => !_lastGood.has(c));
+      if (need.length) throw new NeedsStoredFallback(need);
+      const out = { ...doc };
+      for (const c of refused) {
+        const good = _lastGood.get(c);
+        if (good === NO_STORED) delete out[c];
+        else out[c] = good;
+      }
+      toStore = out;
+    }
+    const row = kvDb.planSet?.(persistKey, toStore) ?? null;
+    const stamp = _versionStamp();
+    const planned = asyncDb !== null && row !== null;
+    const wm = planned ? _planWatermark(seq) : [];
     return {
-      stmts: kvDb.planSet?.(persistKey, dbState) ?? null,
+      stmts: row === null ? null : [
+        ...row,
+        ...stamp.pairs.flatMap(([k, v]) => kvDb.planSet!(k, v)),
+        ...wm,
+      ],
       write: async () => {
-        await kvDb!.set(persistKey, dbState);
+        await kvDb!.set(persistKey, toStore);
         return true;
       },
       commit: async () => {
-        for (const [k, e] of pendingSer) _cellSer.set(k, e);
-        await _stampVersions();
+        for (const [k, e] of pendingSer) {
+          _cellSer.set(k, e);
+          _lastGood.set(k, e.ref); // the bytes this row now holds
+        }
+        if (planned) stamp.commit(); // stamped inside the transaction above
+        else await _stampVersions();
+        if (wm.length) _committedWm = seq;
         cfg.onPersisted?.(seq); // watermark advances only on a committed write
         log.debug("persist: saved single");
       },
@@ -434,6 +660,9 @@ export function createPersistenceManager(
    *  One read makes the two halves describe the same instant; one transaction
    *  makes them land together or not at all. */
   async function _persistOnce(): Promise<void> {
+    // Before anything is planned: the version stamp rides in the SAME
+    // transaction as the snapshot, and building it needs the stored map.
+    await _loadStoredVersions();
     const snap = getState();
 
     let sql: { stmts: SkvStmt[]; commit: () => void } | null = null;
@@ -447,11 +676,24 @@ export function createPersistenceManager(
     }
 
     let kv: ReturnType<typeof _planKv> = null;
-    try {
-      kv = _planKv(snap);
-    } catch (e) {
-      log.error(`persist: getDBState threw — ${e}`);
-      _reportPersistError(e);
+    // Two attempts at most: the first can ask (exactly once) for what the
+    // store already holds for a cell whose value JSON refuses, so the
+    // single-mode document can carry that cell through untouched.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        kv = _planKv(snap);
+        break;
+      } catch (e) {
+        if (e instanceof NeedsStoredFallback && attempt === 0 && kvDb) {
+          await _seedLastGood(e.cells);
+          continue;
+        }
+        // Not "getDBState threw" — that named one of several things this plan
+        // does, and was wrong for every failure anyone actually hit.
+        log.error(`persist: could not plan the state write — ${e}`);
+        _reportPersistError(e);
+        break;
+      }
     }
 
     // The atomic path — one file, one transaction. This is the path every

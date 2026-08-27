@@ -37,6 +37,28 @@ const OPT_OUT_ENV = "AIO_NO_DEV_RESTART";
  *  own reasons, and its exit code is passed through exactly as before. */
 export const FAILED_RESTART_WINDOW_MS = 15_000;
 
+/** A restart-code exit THIS soon after the spawn is not a developer saving a
+ *  file — nobody edits twice in a second. It is a loop: an external formatter,
+ *  an editor's own watcher, or a second aio watcher touching a cell file, each
+ *  touch asking for another restart. Left alone that spawns processes as fast
+ *  as the machine allows. */
+export const RESTART_STORM_MS = 1_000;
+
+/** Consecutive storm-speed restarts tolerated before the supervisor throttles
+ *  and says why. Five is comfortably above any real save burst. */
+export const RESTART_STORM_LIMIT = 5;
+
+/** How long the supervisor waits before each restart once a storm is
+ *  detected — enough that a runaway toolchain costs one process per interval
+ *  instead of a fork bomb, short enough that a real edit still lands fast. */
+export const RESTART_STORM_COOLDOWN_MS = 5_000;
+
+/** The delay before the next respawn, given how many storm-speed restarts have
+ *  happened back to back. Pure — the throttle is a unit test, not a stopwatch. */
+export function restartThrottleDelay(rapidStreak: number): number {
+  return rapidStreak >= RESTART_STORM_LIMIT ? RESTART_STORM_COOLDOWN_MS : 0;
+}
+
 /** Source extensions whose change ends the wait after a failed restart. */
 const SOURCE_EXT = new Set([
   ".ts",
@@ -200,11 +222,27 @@ async function superviseForever(): Promise<never> {
       });
     } catch { /* signal not supported here */ }
   }
+  let rapidStreak = 0;
+  let saidStorm = false;
   while (true) {
     const spawnedAt = Date.now();
     const child = new Deno.Command(Deno.execPath(), {
       args,
-      env: { [CHILD_ENV]: "1" },
+      env: {
+        [CHILD_ENV]: "1",
+        // Die with the supervisor. Without this the child is a plain orphan:
+        // close the terminal (or `kill -9` the supervisor) and the supervisor
+        // goes while the CHILD survives — holding the port and the
+        // single-instance lock with nothing supervising it, so the next
+        // `deno task dev` is refused with "Already running" and the developer
+        // has to hunt the pid. Headless apps make it worse: they deliberately
+        // ignore SIGHUP so an unattended app survives a closed shell
+        // (aio-lifecycle.ts), which is right for `nohup` and exactly wrong
+        // here. `AIO_PARENT_PID` is the mechanism that already exists for this
+        // (electron-spawn.ts sets it for the same reason) — the supervised
+        // child is the case it was written for.
+        AIO_PARENT_PID: String(Deno.pid),
+      },
       stdin: "inherit",
       stdout: "inherit",
       stderr: "inherit",
@@ -212,7 +250,33 @@ async function superviseForever(): Promise<never> {
     stop.child = child;
     const status = await child.status;
     stop.child = null;
-    if (status.code === RESTART_EXIT_CODE) continue;
+    if (status.code === RESTART_EXIT_CODE) {
+      // Same `spawnedAt` guard the crash branch below uses. A restart that
+      // arrives within a second of the spawn was not asked for by a human.
+      rapidStreak = Date.now() - spawnedAt < RESTART_STORM_MS
+        ? rapidStreak + 1
+        : 0;
+      const delay = restartThrottleDelay(rapidStreak);
+      if (delay > 0 && !saidStorm) {
+        saidStorm = true;
+        log.warn(
+          "watch",
+          `${rapidStreak} restarts in under ${
+            RESTART_STORM_MS / 1000
+          }s each — something other than you is touching a cell file ` +
+            `(an editor's format-on-save, a second watcher, a generator). ` +
+            `Throttling to one restart every ${
+              RESTART_STORM_COOLDOWN_MS / 1000
+            }s so this does not spawn processes without end. Fix: stop the ` +
+            `other writer, or set ${OPT_OUT_ENV}=1 to turn auto-restart off ` +
+            `and restart by hand.`,
+        );
+      }
+      if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+      continue;
+    }
+    rapidStreak = 0;
+    saidStorm = false;
     // A signal ended it: `am kill`, a `kill -9`, Ctrl-C reaching the child
     // directly. Someone wanted it dead; the supervisor goes too. A clean 0 is
     // `am stop` or the window closing — same answer. A crash after it had

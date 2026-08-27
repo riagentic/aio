@@ -3,6 +3,7 @@
 import type { ScheduleEffect } from "./schedule.ts";
 import type { OwnEffect } from "./own.ts";
 import { pendingCallsFor } from "./method-cancel.ts";
+import { isFrameworkCell } from "./framework-cells.ts";
 import type { ReduceBreakdown } from "../diagnostics/time-travel.ts";
 import {
   type AioError,
@@ -127,25 +128,27 @@ const DEFAULT_EFFECT_BUDGET = 5;
  *  "feels instant" budget. */
 export const DEV_FRAME_BUDGET_MS = 16;
 
-/** Deep freeze for dev mode immutability checking */
-export function deepFreeze<T>(obj: T, _seen?: WeakSet<object>): T {
-  if (obj === null || typeof obj !== "object") return obj;
-  if (Object.isFrozen(obj)) return obj;
-  const seen = _seen ?? new WeakSet();
-  if (seen.has(obj as object)) return obj; // cycle guard
-  seen.add(obj as object);
-  Object.freeze(obj);
-  for (const key of Object.keys(obj as Record<string, unknown>)) {
-    const val = (obj as Record<string, unknown>)[key];
-    if (val !== null && typeof val === "object") deepFreeze(val, seen);
-  }
-  return obj;
-}
+/** Deep freeze for dev mode immutability checking.
+ *
+ *  Re-exported, not reimplemented: this was one of THREE hand-written
+ *  `deepFreeze`s that had drifted apart (see `state/immutable.ts`). */
+export { deepFreeze } from "./immutable.ts";
+import { deepFreeze } from "./immutable.ts";
 
-/** Safety limit — prevents infinite effect→dispatch loops */
-const DISPATCH_MAX = 1000;
-/** Queue depth limit — prevents unbounded memory growth from burst dispatches */
+/** Queue depth limit — prevents unbounded memory growth from burst dispatches.
+ *  THE number: whatever the queue is allowed to hold, the drain must be
+ *  allowed to process. */
 const QUEUE_MAX = 10_000;
+/** Safety limit — prevents infinite effect→dispatch loops.
+ *
+ *  It was 1000 against a queue of 10 000, which is two answers to "how many
+ *  actions may exist at once": a legitimate 1500-action effect cascade (a bulk
+ *  import fanning out per row) filled the queue happily and then had 501 of
+ *  its actions REJECTED as a "possible infinite loop" — an accusation the app
+ *  could do nothing about, because the queue itself had said yes. Loud and
+ *  recoverable, but wrong. The loop guard is the same bound as the queue: past
+ *  it, something really is generating actions without end. */
+const DISPATCH_MAX = QUEUE_MAX;
 
 /** Dependencies injected into the dispatch loop by the host runtime */
 export type DispatchDeps<S, A, E> = {
@@ -250,12 +253,13 @@ export function createDispatch<S, A, E>(
   // of that type, and the failure is observe-only — one report per type, plus a
   // running count so a suppressed storm is still visible.
   const hookFailures = new Map<string, number>();
-  const queue: {
+  type QueueEntry = {
     action: A;
     resolve: (value?: unknown) => void; // AIO-427: carries a method's return value
     reject: (e: AioError) => void;
     cid: string;
-  }[] = [];
+  };
+  const queue: QueueEntry[] = [];
 
   const _reportOpts: ReportErrorOpts = {
     onError: deps.reportOpts?.onError,
@@ -295,6 +299,22 @@ export function createDispatch<S, A, E>(
     methodKey?: string | null,
   ): void {
     if (!perfEnabled) return;
+    // The framework's OWN cells are measured, never billed to the app.
+    //
+    // `updates:check` is one network round-trip at boot; on a cold DNS it
+    // takes 5.5 ms and blew a 5 ms effect budget, so a healthy hello-world
+    // greeted its author with three red framework ERRORs advising a
+    // `perfBudget` override for a method they did not write and cannot change.
+    // A diagnostic nobody can act on is noise, and noise is how the ones that
+    // matter get ignored. Still recorded in perf.log (below) — observable, not
+    // an error.
+    const perfCell = type?.split(":")[0];
+    if (isFrameworkCell(perfCell)) {
+      if (perfLog) {
+        perfLog(source, type ?? "unknown", duration, budget, getBreakdown?.());
+      }
+      return;
+    }
     const code: AioErrorCode = source === "reduce"
       ? "BUDGET_REDUCE"
       : "BUDGET_EFFECT";
@@ -489,398 +509,442 @@ export function createDispatch<S, A, E>(
     let iterations = 0;
     let overflowed = false;
     depth++;
-    for (;;) { // outer loop: drain queue → onDone → re-drain if onDone queued more
-      while (queue.length > 0) {
-        if (++iterations > DISPATCH_MAX) {
-          const err = createAioError(
-            "DISPATCH_LOOP",
-            `dispatch overflow (${DISPATCH_MAX} iterations, depth ${depth}) — possible infinite loop`,
-            { actionType: tag(queue[0]!.action) },
-          );
-          reportAioError(err, _reportOpts);
-          // B-4: dropped actions must REJECT, not resolve — `await cell.method()`
-          // has to learn the state change was never applied. Same contract as
-          // close() and QUEUE_OVERFLOW above.
-          for (const entry of queue) {
-            entry.reject(err);
+    // The entry currently being reduced/committed. If anything in the drain
+    // body throws, this is the caller nobody would otherwise ever answer.
+    let inFlight: QueueEntry | null = null;
+    try {
+      for (;;) { // outer loop: drain queue → onDone → re-drain if onDone queued more
+        while (queue.length > 0) {
+          if (++iterations > DISPATCH_MAX) {
+            const err = createAioError(
+              "DISPATCH_LOOP",
+              `dispatch overflow (${DISPATCH_MAX} iterations, depth ${depth}) — possible infinite loop`,
+              { actionType: tag(queue[0]!.action) },
+            );
+            reportAioError(err, _reportOpts);
+            // B-4: dropped actions must REJECT, not resolve — `await cell.method()`
+            // has to learn the state change was never applied. Same contract as
+            // close() and QUEUE_OVERFLOW above.
+            for (const entry of queue) {
+              entry.reject(err);
+            }
+            queue.length = 0;
+            try {
+              onDone();
+            } catch (e) {
+              const err2 = createAioError("EFFECT_ERROR", e, {
+                actionType: "onDone",
+              });
+              reportAioError(err2, _reportOpts);
+            }
+            clearCorrelationId();
+            overflowed = true;
+            break;
           }
-          queue.length = 0;
+          const entry = queue.shift()!;
+          inFlight = entry;
+          setCorrelationId(entry.cid);
+          const current = entry.action;
+          if (deps.debug) log.debug(`action → reduce: ${tag(current)}`);
+
+          let reduced: {
+            state: S;
+            effects: (E | ScheduleEffect | OwnEffect)[];
+            ret?: unknown; // AIO-427: transported return value
+          };
+          const actionType = (current as Record<string, unknown>)?.type as
+            | string
+            | undefined;
+
+          // Measure reduce time
+          const reduceStart = performance.now();
+          try {
+            reduced = reduce(getState(), current);
+          } catch (e) {
+            const err = createAioError("REDUCE_ERROR", e, {
+              cellName: actionType?.split(":")[0],
+              actionType,
+            }, getState() as Record<string, unknown>);
+            reportAioError(err, _reportOpts);
+            // Emit a diag event so the health overlay / diagnostic bus
+            // subscribers see reduce failures — previously only EFFECT_ERROR
+            // paths emitted, so the blank-screen health card stayed silent
+            // while a reducer crashed on every dispatch.
+            diagEmit({
+              type: "reduce-error",
+              severity: "error",
+              source: "dispatch",
+              message: `Reduce threw for action '${actionType ?? "?"}': ${
+                e instanceof Error ? e.message : String(e)
+              }`,
+              detail: { actionType, cellName: actionType?.split(":")[0] },
+              hint:
+                "Check the cell method body — the reducer threw before producing a new state.",
+            });
+            // B-4: a reducer throw means the state change never applied —
+            // `await cell.method()` must learn the action failed, not resolve
+            // cleanly. Mirrors QUEUE_OVERFLOW / DISPATCH_CLOSED contract.
+            entry.reject(err);
+            inFlight = null;
+            clearCorrelationId();
+            continue;
+          }
+          const reduceDuration = performance.now() - reduceStart;
+
+          // Track total effect time for this action
+          let totalEffectDuration = 0;
+
+          // Check reduce performance budget
+          if (reduceDuration > reduceBudget) {
+            reportPerf("reduce", reduceDuration, reduceBudget, actionType);
+          }
+
+          if (
+            !reduced || typeof reduced !== "object" || !("state" in reduced) ||
+            !Array.isArray(reduced.effects)
+          ) {
+            const err = createAioError(
+              "REDUCE_ERROR",
+              `reduce() must return { state, effects[] } — got ${
+                JSON.stringify(reduced)
+              }`,
+              { cellName: actionType?.split(":")[0], actionType },
+            );
+            reportAioError(err, _reportOpts);
+            // B-4: malformed reduce shape = action not applied — reject the
+            // awaiter so `await cell.method()` learns the failure rather than
+            // resolving as if the state had advanced.
+            entry.reject(err);
+            inFlight = null;
+            clearCorrelationId();
+            continue;
+          }
+
+          // Deep-clone effects to detach from Immer draft references.
+          // Without this, effects created inside produce() hold revoked draft refs
+          // that crash on JSON.stringify or property access after produce() finalizes.
+          // Clone individually so one non-cloneable effect doesn't drop all (AIO-139).
+          // Audit F-8: a non-cloneable effect is REPORTED and DROPPED — never
+          // silently coerced via JSON round-trip (that lost undefined/NaN/Infinity
+          // /Date and corrupted the executor's payload contract).
+          if (reduced.effects.length) {
+            const cloned: (E | ScheduleEffect | OwnEffect)[] = [];
+            for (const eff of reduced.effects) {
+              try {
+                cloned.push(structuredClone(eff));
+              } catch (cloneErr) {
+                const effType = (eff as Record<string, unknown> | null)?.type as
+                  | string
+                  | undefined;
+                const err = createAioError(
+                  "EFFECT_ERROR",
+                  `effect "${effType ?? "?"}" from action "${
+                    tag(current)
+                  }" is not structuredClone-able — dropped. ` +
+                    `Effects must be plain JSON-shaped objects (no functions, DOM nodes, class instances, etc). ` +
+                    `Original: ${
+                      cloneErr instanceof Error
+                        ? cloneErr.message
+                        : String(cloneErr)
+                    }`,
+                  {
+                    cellName: actionType?.split(":")[0],
+                    actionType,
+                    effectType: effType,
+                  },
+                );
+                reportAioError(err, _reportOpts);
+                // do NOT push — drop the effect rather than corrupt its payload
+              }
+            }
+            reduced = { ...reduced, effects: cloned };
+          }
+
+          const prev = getState();
+          const nextState = freezeState
+            ? deepFreeze(reduced.state)
+            : reduced.state;
+          setState(nextState);
+          if (
+            deps.debug && prev !== reduced.state &&
+            typeof reduced.state === "object" && reduced.state &&
+            typeof prev === "object" && prev
+          ) {
+            const changed = Object.keys(
+              reduced.state as Record<string, unknown>,
+            )
+              .filter((k) =>
+                (reduced.state as Record<string, unknown>)[k] !==
+                  (prev as Record<string, unknown>)[k]
+              );
+            if (changed.length) {
+              log.debug(`state: changed [${changed.join(", ")}]`);
+            }
+          }
+          // `afterAction` is OBSERVE-ONLY (diagnostics, journal, timeline). The
+          // state is already committed here, so a hook that throws must NOT
+          // unwind dispatch: unguarded it escaped the drain loop, left every
+          // queued action's promise forever unsettled (`await cell.method()`
+          // hanging), and — reaching the top as an unhandled rejection — took the
+          // process down. One BigInt in state, via the diagnostics differ, was
+          // enough. Report loudly, then continue: the action itself succeeded.
+          if (deps.afterAction) {
+            try {
+              const r = deps.afterAction(prev as S, nextState, current) as
+                | undefined
+                | Promise<void>;
+              // A hook declared `void` may still hand back a promise; its
+              // rejection has to land here too, not on the process.
+              if (r && typeof (r as Promise<void>).then === "function") {
+                (r as Promise<void>).catch((e) =>
+                  reportHookFailure(e, current)
+                );
+              }
+            } catch (e) {
+              reportHookFailure(e, current);
+            }
+          }
+
+          for (const effect of reduced.effects) {
+            if (
+              !effect ||
+              typeof (effect as Record<string, unknown>).type !== "string"
+            ) {
+              const actionType = tag(current);
+              // Keyed by the action TYPE, which is what "logged once per action"
+              // says. `tag()` renders type + full payload, so keying on it warned
+              // once per distinct PAYLOAD — the same broken reducer shouting on
+              // every keystroke — and grew the set by one entry per call for the
+              // life of the process.
+              const warnKey = typeof (current as { type?: unknown })?.type ===
+                  "string"
+                ? (current as { type: string }).type
+                : actionType;
+              if (!warnedInvalidEffect.has(warnKey)) {
+                warnedInvalidEffect.add(warnKey);
+                log.warn(
+                  `reducer returned invalid effect (missing .type string) — ` +
+                    `skipping. Action was: ${actionType} (logged once per action)`,
+                );
+                diagEmit({
+                  type: "effect-invalid",
+                  severity: "warning",
+                  source: "dispatch",
+                  message:
+                    `Invalid effect skipped (missing .type) from action '${actionType}'`,
+                  detail: { actionType },
+                  hint:
+                    "Effects must be plain objects with a .type string. Check your reducer return value.",
+                });
+              }
+              continue;
+            }
+            if (deps.debug) log.debug(`effect → execute: ${tag(effect)}`);
+
+            const effectType = (effect as Record<string, unknown>)?.type as
+              | string
+              | undefined;
+            // `cell:__exec` carries the method name in its payload — that is what a
+            // per-method budget is keyed by, since the effect TYPE is the same for
+            // every async method of a cell. A sync method's effects carry no
+            // method name, so the key falls back to the ACTION (`cell:method`).
+            const methodKey = budgetKeyFor(effect, actionType);
+            const perMethod = methodKey
+              ? perfBudget?.methods?.[methodKey]
+              : undefined;
+            const thisEffectBudget = perMethod?.effect ?? effectBudget;
+            // `"warn"` = no hard deadline here; the caller-side wait reports.
+            const thisEffectTimeout = perMethod?.timeout === "warn"
+              ? 0
+              : (perMethod?.timeout ?? effectTimeout);
+            // What the violation is LABELLED with (perf.log dedup key). The
+            // effect's own type, except for the `cell:__exec` wrapper — that one
+            // names no method, so the method key is the informative label.
+            const perfLabel = effectType && !effectType.endsWith(":__exec")
+              ? effectType
+              : (methodKey ?? effectType);
+            const effectStart = performance.now();
+
+            try {
+              const r = execute(effect);
+              const effectDuration = performance.now() - effectStart;
+              totalEffectDuration += effectDuration;
+
+              // Check effect performance budget (sync portion only)
+              // Async effects return promises immediately — we measure sync time
+              if (effectDuration > thisEffectBudget) {
+                reportPerf(
+                  "effect",
+                  effectDuration,
+                  thisEffectBudget,
+                  perfLabel,
+                  methodKey,
+                );
+              }
+
+              // catch rejected promises from async effects + hard timeout
+              if (r && typeof (r as Promise<void>).catch === "function") {
+                effectsInFlight++;
+                const promise = r as Promise<void>;
+                // Capture CID now — async callbacks fire after clearCorrelationId()
+                const asyncCid = entry.cid;
+                // Hard timeout: report error and stop tracking the effect.
+                // The underlying promise may still complete, but the framework
+                // considers the effect failed after effectTimeout ms.
+                let settled = false;
+                const tid = thisEffectTimeout > 0
+                  ? setTimeout(() => {
+                    if (settled) return;
+                    effectsInFlight--;
+                    settled = true;
+                    const err = createAioError(
+                      "EFFECT_TIMEOUT",
+                      `async effect hard-timeout: ${
+                        effectType ?? "?"
+                      } exceeded ${thisEffectTimeout}ms — the framework stopped ` +
+                        `TRACKING it. The method itself was NOT stopped and was ` +
+                        `not observed to crash: it may still be running, and if ` +
+                        `it finishes its writes still commit. Under ` +
+                        `transaction:{serialize:true} it also still holds the ` +
+                        `cell's turn, so later calls queue behind it until it ` +
+                        `settles. A method that is legitimately this slow ` +
+                        `should say so (long: ["name"] on the cell); one that ` +
+                        `should be stoppable needs cancelOn + s.$signal.`,
+                      {
+                        cellName: effectType?.split(":")[0],
+                        effectType,
+                        duration: thisEffectTimeout,
+                        budget: thisEffectTimeout,
+                      },
+                      undefined,
+                      asyncCid,
+                    );
+                    reportAioError(err, _reportOpts);
+                    // "Abandoned" has to mean abandoned. The tracked promise was
+                    // only removed from `effectPromises` when the underlying
+                    // promise SETTLED — so an effect that never settles (a hung
+                    // await that ignores its signal) left the set non-empty
+                    // forever and `drain()` waited on work the timeout had
+                    // already given up on: a shutdown that hangs on an effect
+                    // nobody is waiting for. Two words, two behaviours, one of
+                    // them silent.
+                    if (_trackedRef) effectPromises.delete(_trackedRef);
+                  }, thisEffectTimeout)
+                  : null;
+                // Assigned immediately below; the timeout closure needs the same
+                // reference the set holds.
+                let _trackedRef: Promise<void> | null = null;
+                const tracked = promise
+                  .then(() => {
+                    if (tid !== null) clearTimeout(tid);
+                    if (!settled) effectsInFlight--;
+                    settled = true;
+                  })
+                  .catch((e) => {
+                    if (tid !== null) clearTimeout(tid);
+                    if (!settled) effectsInFlight--;
+                    if (settled) { // AIO-235: log real error even after timeout
+                      log.warn(
+                        `async effect '${
+                          effectType ?? "?"
+                        }' rejected after timeout: ${
+                          e instanceof Error ? e.message : String(e)
+                        }`,
+                      );
+                      return;
+                    }
+                    settled = true;
+                    const err = createAioError(
+                      "EFFECT_ASYNC_ERROR",
+                      e,
+                      {
+                        cellName: effectType?.split(":")[0],
+                        actionType,
+                        effectType,
+                      },
+                      undefined,
+                      asyncCid,
+                    );
+                    reportAioError(err, _reportOpts);
+                  }).finally(() => effectPromises.delete(tracked));
+                _trackedRef = tracked;
+                effectPromises.add(tracked);
+              }
+            } catch (e) {
+              const err = createAioError("EFFECT_ERROR", e, {
+                cellName: effectType?.split(":")[0],
+                actionType,
+                effectType,
+              });
+              reportAioError(err, _reportOpts);
+            }
+          }
+
+          // Report per-action performance timing
+          if (onPerf && actionType) {
+            onPerf({
+              actionType,
+              reduce: reduceDuration,
+              effects: totalEffectDuration,
+              budget: { reduce: reduceBudget, effect: effectBudget },
+              breakdown: getBreakdown?.(),
+            });
+          }
+          entry.resolve(reduced.ret);
+          inFlight = null;
+          clearCorrelationId();
+        }
+
+        // onDone (persist + broadcast) runs while dispatching=true so re-entrant dispatches queue
+        // Skip if overflow already called onDone (AIO-118: avoid double call)
+        if (!overflowed) {
           try {
             onDone();
           } catch (e) {
-            const err2 = createAioError("EFFECT_ERROR", e, {
-              actionType: "onDone",
-            });
-            reportAioError(err2, _reportOpts);
-          }
-          clearCorrelationId();
-          overflowed = true;
-          break;
-        }
-        const entry = queue.shift()!;
-        setCorrelationId(entry.cid);
-        const current = entry.action;
-        if (deps.debug) log.debug(`action → reduce: ${tag(current)}`);
-
-        let reduced: {
-          state: S;
-          effects: (E | ScheduleEffect | OwnEffect)[];
-          ret?: unknown; // AIO-427: transported return value
-        };
-        const actionType = (current as Record<string, unknown>)?.type as
-          | string
-          | undefined;
-
-        // Measure reduce time
-        const reduceStart = performance.now();
-        try {
-          reduced = reduce(getState(), current);
-        } catch (e) {
-          const err = createAioError("REDUCE_ERROR", e, {
-            cellName: actionType?.split(":")[0],
-            actionType,
-          }, getState() as Record<string, unknown>);
-          reportAioError(err, _reportOpts);
-          // Emit a diag event so the health overlay / diagnostic bus
-          // subscribers see reduce failures — previously only EFFECT_ERROR
-          // paths emitted, so the blank-screen health card stayed silent
-          // while a reducer crashed on every dispatch.
-          diagEmit({
-            type: "reduce-error",
-            severity: "error",
-            source: "dispatch",
-            message: `Reduce threw for action '${actionType ?? "?"}': ${
-              e instanceof Error ? e.message : String(e)
-            }`,
-            detail: { actionType, cellName: actionType?.split(":")[0] },
-            hint:
-              "Check the cell method body — the reducer threw before producing a new state.",
-          });
-          // B-4: a reducer throw means the state change never applied —
-          // `await cell.method()` must learn the action failed, not resolve
-          // cleanly. Mirrors QUEUE_OVERFLOW / DISPATCH_CLOSED contract.
-          entry.reject(err);
-          clearCorrelationId();
-          continue;
-        }
-        const reduceDuration = performance.now() - reduceStart;
-
-        // Track total effect time for this action
-        let totalEffectDuration = 0;
-
-        // Check reduce performance budget
-        if (reduceDuration > reduceBudget) {
-          reportPerf("reduce", reduceDuration, reduceBudget, actionType);
-        }
-
-        if (
-          !reduced || typeof reduced !== "object" || !("state" in reduced) ||
-          !Array.isArray(reduced.effects)
-        ) {
-          const err = createAioError(
-            "REDUCE_ERROR",
-            `reduce() must return { state, effects[] } — got ${
-              JSON.stringify(reduced)
-            }`,
-            { cellName: actionType?.split(":")[0], actionType },
-          );
-          reportAioError(err, _reportOpts);
-          // B-4: malformed reduce shape = action not applied — reject the
-          // awaiter so `await cell.method()` learns the failure rather than
-          // resolving as if the state had advanced.
-          entry.reject(err);
-          clearCorrelationId();
-          continue;
-        }
-
-        // Deep-clone effects to detach from Immer draft references.
-        // Without this, effects created inside produce() hold revoked draft refs
-        // that crash on JSON.stringify or property access after produce() finalizes.
-        // Clone individually so one non-cloneable effect doesn't drop all (AIO-139).
-        // Audit F-8: a non-cloneable effect is REPORTED and DROPPED — never
-        // silently coerced via JSON round-trip (that lost undefined/NaN/Infinity
-        // /Date and corrupted the executor's payload contract).
-        if (reduced.effects.length) {
-          const cloned: (E | ScheduleEffect | OwnEffect)[] = [];
-          for (const eff of reduced.effects) {
-            try {
-              cloned.push(structuredClone(eff));
-            } catch (cloneErr) {
-              const effType = (eff as Record<string, unknown> | null)?.type as
-                | string
-                | undefined;
-              const err = createAioError(
-                "EFFECT_ERROR",
-                `effect "${effType ?? "?"}" from action "${
-                  tag(current)
-                }" is not structuredClone-able — dropped. ` +
-                  `Effects must be plain JSON-shaped objects (no functions, DOM nodes, class instances, etc). ` +
-                  `Original: ${
-                    cloneErr instanceof Error
-                      ? cloneErr.message
-                      : String(cloneErr)
-                  }`,
-                {
-                  cellName: actionType?.split(":")[0],
-                  actionType,
-                  effectType: effType,
-                },
-              );
-              reportAioError(err, _reportOpts);
-              // do NOT push — drop the effect rather than corrupt its payload
-            }
-          }
-          reduced = { ...reduced, effects: cloned };
-        }
-
-        const prev = getState();
-        const nextState = freezeState
-          ? deepFreeze(reduced.state)
-          : reduced.state;
-        setState(nextState);
-        if (
-          deps.debug && prev !== reduced.state &&
-          typeof reduced.state === "object" && reduced.state &&
-          typeof prev === "object" && prev
-        ) {
-          const changed = Object.keys(reduced.state as Record<string, unknown>)
-            .filter((k) =>
-              (reduced.state as Record<string, unknown>)[k] !==
-                (prev as Record<string, unknown>)[k]
-            );
-          if (changed.length) {
-            log.debug(`state: changed [${changed.join(", ")}]`);
-          }
-        }
-        // `afterAction` is OBSERVE-ONLY (diagnostics, journal, timeline). The
-        // state is already committed here, so a hook that throws must NOT
-        // unwind dispatch: unguarded it escaped the drain loop, left every
-        // queued action's promise forever unsettled (`await cell.method()`
-        // hanging), and — reaching the top as an unhandled rejection — took the
-        // process down. One BigInt in state, via the diagnostics differ, was
-        // enough. Report loudly, then continue: the action itself succeeded.
-        if (deps.afterAction) {
-          try {
-            const r = deps.afterAction(prev as S, nextState, current) as
-              | undefined
-              | Promise<void>;
-            // A hook declared `void` may still hand back a promise; its
-            // rejection has to land here too, not on the process.
-            if (r && typeof (r as Promise<void>).then === "function") {
-              (r as Promise<void>).catch((e) => reportHookFailure(e, current));
-            }
-          } catch (e) {
-            reportHookFailure(e, current);
-          }
-        }
-
-        for (const effect of reduced.effects) {
-          if (
-            !effect ||
-            typeof (effect as Record<string, unknown>).type !== "string"
-          ) {
-            const actionType = tag(current);
-            // Keyed by the action TYPE, which is what "logged once per action"
-            // says. `tag()` renders type + full payload, so keying on it warned
-            // once per distinct PAYLOAD — the same broken reducer shouting on
-            // every keystroke — and grew the set by one entry per call for the
-            // life of the process.
-            const warnKey = typeof (current as { type?: unknown })?.type ===
-                "string"
-              ? (current as { type: string }).type
-              : actionType;
-            if (!warnedInvalidEffect.has(warnKey)) {
-              warnedInvalidEffect.add(warnKey);
-              log.warn(
-                `reducer returned invalid effect (missing .type string) — ` +
-                  `skipping. Action was: ${actionType} (logged once per action)`,
-              );
-              diagEmit({
-                type: "effect-invalid",
-                severity: "warning",
-                source: "dispatch",
-                message:
-                  `Invalid effect skipped (missing .type) from action '${actionType}'`,
-                detail: { actionType },
-                hint:
-                  "Effects must be plain objects with a .type string. Check your reducer return value.",
-              });
-            }
-            continue;
-          }
-          if (deps.debug) log.debug(`effect → execute: ${tag(effect)}`);
-
-          const effectType = (effect as Record<string, unknown>)?.type as
-            | string
-            | undefined;
-          // `cell:__exec` carries the method name in its payload — that is what a
-          // per-method budget is keyed by, since the effect TYPE is the same for
-          // every async method of a cell. A sync method's effects carry no
-          // method name, so the key falls back to the ACTION (`cell:method`).
-          const methodKey = budgetKeyFor(effect, actionType);
-          const perMethod = methodKey
-            ? perfBudget?.methods?.[methodKey]
-            : undefined;
-          const thisEffectBudget = perMethod?.effect ?? effectBudget;
-          // `"warn"` = no hard deadline here; the caller-side wait reports.
-          const thisEffectTimeout = perMethod?.timeout === "warn"
-            ? 0
-            : (perMethod?.timeout ?? effectTimeout);
-          // What the violation is LABELLED with (perf.log dedup key). The
-          // effect's own type, except for the `cell:__exec` wrapper — that one
-          // names no method, so the method key is the informative label.
-          const perfLabel = effectType && !effectType.endsWith(":__exec")
-            ? effectType
-            : (methodKey ?? effectType);
-          const effectStart = performance.now();
-
-          try {
-            const r = execute(effect);
-            const effectDuration = performance.now() - effectStart;
-            totalEffectDuration += effectDuration;
-
-            // Check effect performance budget (sync portion only)
-            // Async effects return promises immediately — we measure sync time
-            if (effectDuration > thisEffectBudget) {
-              reportPerf(
-                "effect",
-                effectDuration,
-                thisEffectBudget,
-                perfLabel,
-                methodKey,
-              );
-            }
-
-            // catch rejected promises from async effects + hard timeout
-            if (r && typeof (r as Promise<void>).catch === "function") {
-              effectsInFlight++;
-              const promise = r as Promise<void>;
-              // Capture CID now — async callbacks fire after clearCorrelationId()
-              const asyncCid = entry.cid;
-              // Hard timeout: report error and stop tracking the effect.
-              // The underlying promise may still complete, but the framework
-              // considers the effect failed after effectTimeout ms.
-              let settled = false;
-              const tid = thisEffectTimeout > 0
-                ? setTimeout(() => {
-                  if (settled) return;
-                  effectsInFlight--;
-                  settled = true;
-                  const err = createAioError(
-                    "EFFECT_TIMEOUT",
-                    `async effect hard-timeout: ${
-                      effectType ?? "?"
-                    } exceeded ${thisEffectTimeout}ms — the framework stopped ` +
-                      `TRACKING it. The method itself was NOT stopped and was ` +
-                      `not observed to crash: it may still be running, and if ` +
-                      `it finishes its writes still commit. Under ` +
-                      `transaction:{serialize:true} it also still holds the ` +
-                      `cell's turn, so later calls queue behind it until it ` +
-                      `settles. A method that is legitimately this slow ` +
-                      `should say so (long: ["name"] on the cell); one that ` +
-                      `should be stoppable needs cancelOn + s.$signal.`,
-                    {
-                      cellName: effectType?.split(":")[0],
-                      effectType,
-                      duration: thisEffectTimeout,
-                      budget: thisEffectTimeout,
-                    },
-                    undefined,
-                    asyncCid,
-                  );
-                  reportAioError(err, _reportOpts);
-                  // "Abandoned" has to mean abandoned. The tracked promise was
-                  // only removed from `effectPromises` when the underlying
-                  // promise SETTLED — so an effect that never settles (a hung
-                  // await that ignores its signal) left the set non-empty
-                  // forever and `drain()` waited on work the timeout had
-                  // already given up on: a shutdown that hangs on an effect
-                  // nobody is waiting for. Two words, two behaviours, one of
-                  // them silent.
-                  if (_trackedRef) effectPromises.delete(_trackedRef);
-                }, thisEffectTimeout)
-                : null;
-              // Assigned immediately below; the timeout closure needs the same
-              // reference the set holds.
-              let _trackedRef: Promise<void> | null = null;
-              const tracked = promise
-                .then(() => {
-                  if (tid !== null) clearTimeout(tid);
-                  if (!settled) effectsInFlight--;
-                  settled = true;
-                })
-                .catch((e) => {
-                  if (tid !== null) clearTimeout(tid);
-                  if (!settled) effectsInFlight--;
-                  if (settled) { // AIO-235: log real error even after timeout
-                    log.warn(
-                      `async effect '${
-                        effectType ?? "?"
-                      }' rejected after timeout: ${
-                        e instanceof Error ? e.message : String(e)
-                      }`,
-                    );
-                    return;
-                  }
-                  settled = true;
-                  const err = createAioError(
-                    "EFFECT_ASYNC_ERROR",
-                    e,
-                    {
-                      cellName: effectType?.split(":")[0],
-                      actionType,
-                      effectType,
-                    },
-                    undefined,
-                    asyncCid,
-                  );
-                  reportAioError(err, _reportOpts);
-                }).finally(() => effectPromises.delete(tracked));
-              _trackedRef = tracked;
-              effectPromises.add(tracked);
-            }
-          } catch (e) {
             const err = createAioError("EFFECT_ERROR", e, {
-              cellName: effectType?.split(":")[0],
-              actionType,
-              effectType,
+              actionType: "onDone",
             });
             reportAioError(err, _reportOpts);
           }
         }
-
-        // Report per-action performance timing
-        if (onPerf && actionType) {
-          onPerf({
-            actionType,
-            reduce: reduceDuration,
-            effects: totalEffectDuration,
-            budget: { reduce: reduceBudget, effect: effectBudget },
-            breakdown: getBreakdown?.(),
-          });
-        }
-        entry.resolve(reduced.ret);
-        clearCorrelationId();
+        // If onDone queued new actions, loop back to drain them
+        // AIO-229: also break on overflow to prevent infinite loop if onDone dispatches
+        if (queue.length === 0 || overflowed) break;
+      } // end outer loop
+    } finally {
+      // `depth--; dispatching = false;` used to sit after the loop, on the
+      // success path only. Any throw from inside the drain body therefore left
+      // `dispatching === true` FOREVER: every later dispatch pushed onto the
+      // queue, saw the flag, returned a promise, and nothing ever drained it
+      // again — the cell went silent after the first error, in prod as in dev.
+      // One reachable trigger: a `Uint8Array` in cell state with `freezeState`
+      // on (the dev default), where `Object.freeze` throws on a non-empty
+      // typed array. Reset is not optional; it belongs in a `finally`.
+      depth--;
+      dispatching = false;
+      clearCorrelationId();
+      // Nobody is going to drain what is left, and a promise that neither
+      // resolves nor rejects is the one outcome the queue contract forbids
+      // (same rule as close(), QUEUE_OVERFLOW and DISPATCH_LOOP). Only reached
+      // when the loop exited abnormally — a normal exit leaves both empty.
+      if (inFlight || queue.length > 0) {
+        const err = createAioError(
+          "DISPATCH_ABORTED",
+          `the dispatch drain loop aborted; ${
+            (inFlight ? 1 : 0) + queue.length
+          } action(s) were NOT applied. The action being processed threw ` +
+            `outside every per-action guard — the error above this one names ` +
+            `the cause. Dispatch itself has been reset and accepts new ` +
+            `actions; the listed actions must be retried by their callers.`,
+          { actionType: inFlight ? tag(inFlight.action) : undefined },
+        );
+        reportAioError(err, _reportOpts);
+        const stranded = inFlight ? [inFlight, ...queue] : [...queue];
+        queue.length = 0;
+        inFlight = null;
+        for (const e of stranded) e.reject(err);
       }
-
-      // onDone (persist + broadcast) runs while dispatching=true so re-entrant dispatches queue
-      // Skip if overflow already called onDone (AIO-118: avoid double call)
-      if (!overflowed) {
-        try {
-          onDone();
-        } catch (e) {
-          const err = createAioError("EFFECT_ERROR", e, {
-            actionType: "onDone",
-          });
-          reportAioError(err, _reportOpts);
-        }
-      }
-      // If onDone queued new actions, loop back to drain them
-      // AIO-229: also break on overflow to prevent infinite loop if onDone dispatches
-      if (queue.length === 0 || overflowed) break;
-    } // end outer loop
-    depth--;
-    dispatching = false;
+    }
     return promise;
   }
 

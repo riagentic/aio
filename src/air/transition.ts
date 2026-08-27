@@ -120,6 +120,53 @@ export function _removeTransition(handle: TransitionHandle): void {
   handle.styleEl.remove();
 }
 
+// ── In-flight enter animations ──────────────────────────────────────
+//
+// ONE decider for "this element is animating IN", shared by <Transition> and
+// <TransitionGroup>. They each had their own copy and the copies disagreed:
+//
+//  * <TransitionGroup> armed an UNTRACKED `setTimeout(() => _removeTransition)`.
+//    An item that entered and left within the enter duration had that orphan
+//    fire mid-exit, restoring `style.animation` and WIPING the exit animation
+//    in flight.
+//  * <Transition> tracked the timer and CLEARED it on exit — which fixed the
+//    wipe and created a leak: the cleared timer was the only thing that would
+//    ever have removed the injected `<style>`. Measured 1 → 5 `<style>` nodes
+//    in `<head>` over 5 toggles, unbounded for any toggled modal or toast.
+//
+// Both are the same question — "leaving cancels arriving" — so both call these.
+
+const _enterCleanups = new WeakMap<HTMLElement, {
+  timer: ReturnType<typeof setTimeout>;
+  handle: TransitionHandle;
+}>();
+
+/** Arm the cleanup of an enter animation on `el`, `ms` from now. Replaces any
+ *  enter already in flight on the same element. @internal */
+export function _trackEnter(
+  el: HTMLElement,
+  handle: TransitionHandle,
+  ms: number,
+): void {
+  _cancelEnter(el);
+  const timer = setTimeout(() => {
+    _enterCleanups.delete(el);
+    _removeTransition(handle);
+  }, ms);
+  _enterCleanups.set(el, { timer, handle });
+}
+
+/** End an in-flight enter animation NOW — clears its pending cleanup AND
+ *  removes the keyframes it injected, so neither the timer nor the `<style>`
+ *  outlives the element's arrival. @internal */
+export function _cancelEnter(el: HTMLElement): void {
+  const pending = _enterCleanups.get(el);
+  if (!pending) return;
+  clearTimeout(pending.timer);
+  _enterCleanups.delete(el);
+  _removeTransition(pending.handle);
+}
+
 /** Check if a node is an HTMLElement (Deno/happy-dom compat). @internal */
 export function _isHTMLElement(node: Node): node is HTMLElement {
   const HtmlEl = node.ownerDocument?.defaultView?.HTMLElement ??

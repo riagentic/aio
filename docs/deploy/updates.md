@@ -62,16 +62,30 @@ migrate from. That contract is measured from the binary
 (`<binary> --aio-data-contract`), not guessed from source, so it cannot promise
 something the build does not do.
 
-| Your cell declares               | Can migrate from | An install holding v1 data  |
-| -------------------------------- | ---------------- | --------------------------- |
-| `version: 2` **and** `onMigrate` | v1 and up        | offered, backup taken first |
-| `version: 2`, **no** `onMigrate` | v2 only          | **never offered**           |
-| unchanged `version`              | —                | offered                     |
+| Your cell declares               | Can migrate from | An install holding v1 data                  |
+| -------------------------------- | ---------------- | ------------------------------------------- |
+| `version: 2` **and** `onMigrate` | v1 and up        | offered, backup taken first                 |
+| `version: 2`, **no** `onMigrate` | v2 only          | **never offered**                           |
+| unchanged `version`              | —                | offered                                     |
+| **no `version` at all**          | —                | **offered — the gate cannot see this cell** |
+
+**Read that last row before anything else.** The gate protects the cells that
+declare a `version`. A cell that never declared one is not stamped on disk, is
+not in the contract, and is not checked — so a release that renames one of its
+fields is offered to every install as compatible, the merge drops the field, and
+the persist window writes the loss back. Nothing about the app looks wrong until
+the data is gone.
+
+Declaring one is free and converts nothing: the first `version: 1` on an
+existing install stamps the shape already on disk and runs no hook (the boot
+line says `stamping <cell> at version 1`). Add `onMigrate` later, when the shape
+actually changes. `deno task lint` warns, once, listing every persisted cell in
+an updating app that has no version.
 
 The second row is the one that matters. Bumping a cell version and forgetting
 the migration used to be a data-loss incident at some user's next boot. Now it
-is an update they are simply never shown — and `aio ship` tells you at publish
-time.
+is an update they are simply never shown — and `deno task publish` tells you at
+publish time.
 
 When an update _does_ migrate, aio takes a consistent backup of the store
 (SQLite `VACUUM INTO`) **before** swapping anything, and records its path so a
@@ -122,22 +136,57 @@ It is a default, not a lock. Most specific wins:
 ```
 --channel=test                 this run
 AIO_UPDATE_CHANNEL=test        this environment
-(pinned at install)            this machine
-updates: { channel: "test" }   this app
-(the artifact's stamp)         ← the default
+(pinned by setChannel)         this machine
+(the artifact's stamp)         this build      ← the default
+updates: { channel: "test" }   this source tree
 "prod"
 ```
 
+The stamp outranks the config literal on purpose. The literal is a property of
+the source tree — every build made from it carries it — while the stamp is a
+property of the artifact somebody is actually running. A build stamped `test`
+made from a tree whose config says `prod` is a test build, and letting the
+literal win is exactly the silent "the tester's build updated itself into the
+public release" the stamp exists to prevent. Say something else per run
+(`--channel`, `AIO_UPDATE_CHANNEL`) or per install (`updates.setChannel()`); a
+one-off flag is never pinned.
+
 Poll cadence follows the channel: `dev` 1m · `test` 5m · `prod` 6h, jittered,
 and conditional (`If-None-Match`), so an unchanged check costs a 304 and no
-body. Override with `check: <ms>`, or `check: false` for manual-only.
+body. Override with `check: <ms>`, or `check: false` for manual-only. `check`
+must be `true`, `false`, or a number of milliseconds **>= 1000** — anything else
+throws at boot naming the value, because a negative interval silently never
+polled and `NaN` became a tight loop against the release host.
 
 ## Publishing
 
 ```sh
+deno task ship keygen                      # once, ever
+# → wrote ~/.aio/keys/<app>-release-key.json   (private; never commit it)
+deno task publish --key=~/.aio/keys/myapp-release-key.json
+# → ./release/prod/ — upload that directory to <source>/
+```
+
+`publish` is build → sign → **lay out the channel directory a client actually
+fetches**, in one step. That last part is the one worth naming: a client asks
+for `<source>/<channel>/<os>-<arch>.json`, and a release whose manifest is not
+at exactly that path is invisible. Not an error — invisible. The app reports "no
+updates available" forever, on the users' machines, and nothing anywhere says
+why.
+
+Useful flags: `--dir=/srv/releases` (where to stage), `--channel=test`,
+`--notes="fixes the sync bug"`, `--no-build` (publish what `dist/` already
+holds). Unsigned is allowed for a local or air-gapped channel, and every step
+says so out loud — but a client only installs unsigned releases if the app opted
+in.
+
+The long way is the same three steps by hand, if you want to see them:
+
+```sh
 deno task compile
-deno run -A jsr:@riagentic/aio/ship ./dist/wallet --channel=prod --key=release-key.json
-# → wallet.ship.json, next to the artifact. Copy both to <source>/prod/.
+deno task ship ./dist/wallet --channel=prod --key=release-key.json
+# → wallet.ship.json, next to the artifact. Copy BOTH into <source>/prod/,
+#   with the manifest named <os>-<arch>.json.
 ```
 
 Or let CI do it:
@@ -148,20 +197,34 @@ deno run -A jsr:@riagentic/aio/ship github --channel=prod
 ```
 
 That writes a workflow which builds on Linux, macOS and Windows, signs each
-artifact, and publishes into the channel layout above as a GitHub Release. Put
-the output of `ship keygen` in the repo secret `AIO_SIGNING_KEY`, then point the
-app at the release base URL:
+artifact, and publishes the channel layout above to **GitHub Pages**. Put the
+output of `ship keygen` in the repo secret `AIO_SIGNING_KEY`, enable Pages once
+(Settings → Pages → Source: GitHub Actions), then point the app at the site:
 
 ```ts
-updates: "https://github.com/OWNER/REPO/releases/latest/download";
+updates: "https://OWNER.github.io/REPO";
 ```
+
+**Not** a release download URL. A client asks for
+`<base>/<channel>/<os>-<arch>.json`; GitHub Release assets are a FLAT list with
+no directories, so `.../releases/latest/download/prod/linux-x86_64.json` cannot
+exist and never will. Pointing an app there produces a permanent, silent "no
+updates available". Any host that serves a directory tree works — Pages, S3, R2,
+nginx, a mounted share.
 
 It is emitted, not integrated: the layout is the part aio owns, and a workflow
 file does the rest natively without the framework depending on a forge's API.
 Edit it freely — it is a normal file in your repo.
 
-`aio ship keygen > release-key.json` makes the signing key. Publish only the
-public half — it rides inside the manifest.
+`deno task ship keygen` makes the signing key, writing it OUTSIDE your repo
+(`~/.aio/keys/<app>-release-key.json`) and printing the path plus the public
+half. Redirecting it — `keygen > release-key.json` — captures that summary, not
+the key: a valid-looking JSON file with a `publicKey` and no private half, which
+signs nothing. Use the file at the printed path, or `keygen --stdout` to pipe
+the real pair somewhere (a CI secret). Publish only the public half — it rides
+inside the manifest. [Release signing](signing.md) is the full API: key
+generation and fingerprints, key rotation, what `manifestCore` covers, and the
+two verification functions a publisher or a third-party checker calls.
 
 The signature covers the **whole manifest core**: version, digest, channel,
 target, platform, and the data contract. That matters more than it sounds.
@@ -210,7 +273,9 @@ successor itself.
 - **Running from source** (`deno task dev`) — detection works identically, so
   you can develop your update banner against a real `file://` source. `apply()`
   refuses, loudly: there is no artifact to swap.
-- **Android** — detection only; APKs install through the OS.
+- **Android** — detection only. An app cannot replace its own APK, so a newer
+  release is reported like a blocked one, carrying the **link to the package**
+  so the user can open it in the system installer.
 
 Every target shares one spine — fetch → verify → gate → stage → swap → restart →
 roll back if it does not come up. Only the swap and the restart differ.
@@ -239,23 +304,234 @@ update is needed.
 | `check`         | `true`             | `false` = manual only · a number = interval ms  |
 | `channel`       | the artifact stamp | Directory (manifest) or ref (git)               |
 | `key`           | trust on first use | Pin the signing key explicitly                  |
+| `keys`          | —                  | Extra accepted keys, for a rotation             |
+| `canApply`      | —                  | `() => boolean` — may an update land RIGHT NOW? |
 | `allowUnsigned` | `false`            | Accept unsigned releases                        |
 | `kind`          | inferred           | `"manifest"` or `"git"` when a URL is ambiguous |
+| `prerelease`    | `dev` only         | Follow `2.1.0-rc.1`-style versions              |
+
+### `canApply` — the one hook that cannot be defaulted
+
+```ts
+updates: {
+  source: "https://releases.example.com/wallet",
+  auto: true,
+  canApply: () => !wallet.signing && !editor.dirty,
+}
+```
+
+Consulted before **every** apply — the button, the unattended `auto` path, and
+the terminal prompt all go through it. Only the app knows what it is in the
+middle of: a signature being collected, an unsaved document, a transaction that
+has not committed. A `false` refuses the install, says so, and leaves the
+release standing for the next check. A hook that throws is treated as a refusal,
+not as permission.
+
+**Work belongs here.** The hook is awaited, it runs before a byte is downloaded,
+and a throw fails closed carrying its own message — so something that must
+succeed before an install can simply happen in it:
+
+```ts
+canApply: async () => {
+  if (wallet.signing || editor.dirty) return false;
+  await archiveTo(`${home}/backup/backup-${today}.zip`); // throws → no install
+  return true;
+},
+```
+
+This is the only seam that covers all three doors. A backup taken behind the
+button is a promise `auto: true` and the terminal prompt break in silence.
+
+Without it, `auto: true` has no guard of any kind — which is right for a service
+and a surprise on a desktop, so an Electron install with `auto: true` and no
+`canApply` says so loudly at boot.
 
 ## Cell state reference
 
-| Field                 | Meaning                                                                |
-| --------------------- | ---------------------------------------------------------------------- |
-| `enabled`             | `updates` was configured                                               |
-| `status`              | idle · checking · available · blocked · downloading · applying · error |
-| `available`           | `{ version, notes, size, releasedAt, migrates, warnings }` or null     |
-| `blocked`             | `{ version, blockers }` — newer, but unsafe here                       |
-| `progress`            | 0..1 while downloading                                                 |
-| `current` · `channel` | what is running, and what it follows                                   |
-| `lastChecked`         | ISO timestamp                                                          |
-| `error`               | last failure, verbatim                                                 |
+| Field                 | Meaning                                                                         |
+| --------------------- | ------------------------------------------------------------------------------- |
+| `enabled`             | `updates` was configured — true from boot, not from the first answer            |
+| `status`              | idle · checking · available · blocked · downloading · applying · staged · error |
+| `available`           | see below, or null                                                              |
+| `blocked`             | `{ version, blockers }` — newer, but unsafe here                                |
+| `progress`            | 0..1 while downloading                                                          |
+| `current` · `channel` | what is running, and what it follows                                            |
+| `lastChecked`         | ISO timestamp                                                                   |
+| `dismissed`           | the version the user said no to (persisted)                                     |
+| `backupPath`          | the pre-migration backup this install took, or null — set before the swap       |
+| `error`               | last failure, verbatim                                                          |
 
-Methods: `check()` · `apply()` · `dismiss()` · `setChannel(name)`.
+`available` is
+`{ version, reason, notes, size, releasedAt, migrates, signed, keyFingerprint, warnings }`.
+
+- **`reason`** is the sentence to show. It matters because the version on offer
+  can be the version already running — see below.
+- **`signed`** and **`keyFingerprint`** are what the user is being asked to
+  trust. An app running with `allowUnsigned` should say so where the button is,
+  not only in a log.
+
+Every status is observable by a client, including `checking` and `downloading`:
+the cell publishes mid-method (`s.$commit()`), so a spinner and a progress bar
+are ordinary reactive reads.
+
+Methods: `check()` · `apply(opts?)` · `dismiss()` · `undismiss()` ·
+`setChannel(name)`.
+
+`dismiss()` holds across polls and restarts: the dismissed version is persisted,
+handed to every later check, and only a version **newer** than it is offered
+again. It accepts a **blocked** release as its subject too — a notice with no
+way to put it away is a notice people learn to ignore. `undismiss()` is the way
+back.
+
+### A new BUILD of the same version
+
+A re-published `1.2.3` with different bytes is a real update, and it is
+detected: the install records the SHA-256 of the artifact it is running (the
+digest verified at the last swap, or measured once from the artifact itself),
+and a manifest whose digest differs at the same version is offered with
+`reason: "same version, new build…"`.
+
+An install that cannot establish its own digest stays quiet and says so — "never
+offer on ignorance" — rather than re-downloading its own bytes.
+
+Version comparison ignores build metadata (`1.2.3+abc` is the release `1.2.3`,
+not a prerelease of it), and a version string that cannot be ordered is refused
+by name. In particular an app that cannot determine its own version refuses to
+compare rather than reading itself as `0.0.0`, which with `auto: true` was an
+infinite download → swap → restart loop.
+
+### A blocked release on a FRESH install
+
+"Blocked" is a statement about the data on this machine, not about the release.
+An install with no stamped versions — a new machine, or one whose profile has
+been retired — has nothing to be incompatible with, so the same release is
+offered normally. That is what makes "start fresh" a real answer to a block, and
+it holds by construction: the gate compares against what is stamped on disk, and
+a fresh profile has nothing stamped.
+
+aio has no one-step "retire my data and take it" verb. An app that wants one
+archives the profile, moves `data/` aside (never deletes it), and relaunches —
+the next boot is a fresh install and the release is offered. Doing that from
+inside the running process is the hard part: the profile cannot be moved from
+under the process holding it. Two processes is the honest shape — write a marker
+beside the profile, quit, and let the next boot act on it before persistence
+opens.
+
+### Overriding the data gate
+
+The gate is right almost always, and when it is wrong it is wrong permanently: a
+contract published with a mistake blocks that app's every future release, on
+every install, forever. So there is a door, and it is heavy:
+
+```ts
+await updates.apply({ acceptDataLoss: true });
+```
+
+It installs a **blocked** release — but only one the caller was shown the
+blockers for, only if a backup can actually be taken (it refuses otherwise), and
+it takes that backup before the download starts, logs every blocker at error
+level, and names the file it wrote. Nothing else changes: the default is still
+"never offered, and `apply()` refuses".
+
+## When your delivery is not a shape aio can verify
+
+`updates: { source }` covers a directory of signed manifests and a git ref — the
+two aio knows how to check, verify and install. Some apps deliver differently:
+an internal artifact server with its own auth, an MDM push, a signed blob the
+app already syncs. For those, the platform half is replaceable whole:
+
+```ts
+import { installUpdatesRuntime, updates } from "aio/updates";
+
+installUpdatesRuntime({
+  kind: "manifest",
+  channel: "stable",
+  current: appVersion,
+  exposed: false,
+  check: async () => {
+    const r = await ourArtifactServer.latest(); // your transport, your auth
+    return r.version === appVersion
+      ? { kind: "current", reason: "up to date" }
+      : {
+        kind: "offer",
+        update: { version: r.version /* … */ },
+      };
+  },
+  apply: async () => {
+    await ourInstaller.run(); // your download, your verification, your swap
+  },
+  setChannel: async (c) => void await ourArtifactServer.follow(c),
+});
+```
+
+Everything else still works: the cell state a UI binds to, the dismissal that
+holds across polls, `canApply`, phase and progress reporting, and the same
+`testUI` story below.
+
+**Two things to know.**
+
+It is **exclusive** with `updates:` in `aio.run()`. Boot refuses rather than
+replacing your implementation with aio's, because configuration that is quietly
+overruled is worse than configuration that is refused.
+
+And **the guarantees become yours**. aio's runtime is where the signature is
+verified against a pinned key, the download is bounded and checked against the
+signed digest, the data contract is measured from the built artifact, and a
+backup is taken before a migration. A runtime that skips those installs whatever
+the source served. If what you need is a different _transport_ rather than a
+different _trust model_, prefer a `source` aio can read.
+
+## Testing your update banner
+
+The cell's platform half is injected, so a test installs a stub in its place and
+drives the UI it renders — no source, no network:
+
+```tsx
+import { installUpdatesRuntime, testUI } from "aio/testing";
+import { updates } from "aio/updates";
+import { App } from "./App.tsx";
+
+installUpdatesRuntime({
+  kind: "manifest",
+  channel: "prod",
+  current: "1.0.0",
+  exposed: false,
+  check: () =>
+    Promise.resolve({
+      kind: "offer",
+      update: {
+        version: "2.0.0",
+        reason: "2.0.0 is newer than 1.0.0",
+        notes: null,
+        size: null,
+        releasedAt: null,
+        migrates: false,
+        signed: true,
+        keyFingerprint: "0badc0ffee11",
+        warnings: [],
+      },
+    }),
+  apply: () => Promise.resolve(),
+  setChannel: () => Promise.resolve(),
+});
+
+testUI(App, "the banner offers 2.0.0 and Not now dismisses it", async (ui) => {
+  await updates.check();
+  await ui.expectCell(updates, (u) => u.available?.version === "2.0.0");
+  ui.NotNowButton.click();
+  await ui.expectCell(updates, (u) => u.dismissed === "2.0.0");
+});
+```
+
+`check(opts)` receives `{ dismissed }` — what the cell persisted — so a stub can
+mirror the real rule (answer `current` when `opts.dismissed` is the version it
+would offer). `installUpdatesRuntime(null)` takes the stub out again.
+
+The other route needs no runtime at all:
+`testUI(App, { seed: { updates: {
+status: "available", available: { … } } } })`
+(or `ui.seed({ updates: { … } })` mid-test) pins the cell state directly, for a
+test that only cares how the banner renders.
 
 ## Security summary
 
@@ -269,3 +545,9 @@ Methods: `check()` · `apply()` · `dismiss()` · `setChannel(name)`.
   loopback-bound app every client is already on the machine
 - Configuring `updates` forces the `net` capability into the compiled binary's
   least-privilege flags, so the check cannot fail in production only
+
+## Related
+
+- [Release signing](signing.md) — the `aio/ship` API: keys, fingerprints,
+  rotation, `manifestCore`, `verifyShipManifest`, `SAFE_TOKEN`
+- [Build targets](../build/targets.md) — what `deno task build` produces

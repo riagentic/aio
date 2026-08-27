@@ -1,13 +1,7 @@
 // ─── Vital Signs — Hint Engine ──────────────────────────────────────────────
 // Pure functions: snapshot in → diagnostic hint out. No side effects.
 
-import type {
-  ProbeTimeline,
-  VitalHint,
-  VitalLayer,
-  VitalsSnapshot,
-  VitalThresholds,
-} from "./types.ts";
+import type { VitalHint, VitalsSnapshot, VitalThresholds } from "./types.ts";
 
 /**
  * Classify hint severity based on evidence strength.
@@ -25,18 +19,17 @@ export function classifySeverity(
 }
 
 /**
- * Find the probe that degraded first — the cascade origin.
- */
-export function detectCascadeOrigin(timelines: ProbeTimeline[]): VitalLayer {
-  const withDeg = timelines.filter((t) => t.firstDegradedAt !== null);
-  if (withDeg.length === 0) return "render";
-  withDeg.sort((a, b) => a.firstDegradedAt! - b.firstDegradedAt!);
-  return withDeg[0]!.probe;
-}
-
-/**
- * Evaluate a vitals snapshot against 7 pattern rules (server-side: rules 1-6).
+ * Evaluate a vitals snapshot against 7 pattern rules.
  * Returns a diagnostic hint or null (healthy / hidden window).
+ *
+ * WHICH RULES CAN FIRE WHERE. Every rule reading `snap.render` is CLIENT-side
+ * only: the render probe is a browser measurement (`render-meter.ts`) and the
+ * server's snapshot reports render as healthy because it has nothing to say,
+ * not because it measured anything. So the server reaches rules 2 and 3; the
+ * browser reaches all of them. (The comment here used to say "server-side:
+ * rules 1-6", and the server's snapshot hardcoded transport healthy as well,
+ * which left rule 2 alone reachable — including for the client-freeze alert
+ * rule 3 was written for.)
  *
  * Rule priority (first match wins):
  *   #6  Visibility filter       → null (discard)

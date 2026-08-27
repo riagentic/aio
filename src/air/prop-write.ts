@@ -149,7 +149,14 @@ export function _writeProp(
       return;
     }
     // AIO-170: a null/false style clears everything.
-    el.style.cssText = "";
+    //
+    // Removing the ATTRIBUTE, not blanking `cssText`: both clear every inline
+    // declaration, but `cssText = ""` MATERIALIZES an empty `style=""` on an
+    // element that never had one — so `style={active ? styles : null}` built a
+    // `<div style="">` on the client where SSR (which emits nothing for a null
+    // style) built a bare `<div>`. Same vnode, two documents, and hydration
+    // reported it as a server/client divergence.
+    el.removeAttribute("style");
     return;
   }
   if (k === "dangerouslySetInnerHTML") {
@@ -176,4 +183,50 @@ export function _writeProp(
   }
   if (ns) el.setAttributeNS(ns, k, String(v));
   else el.setAttribute(_attrName(k), String(v));
+}
+
+// ── Controlled props ──────────────────────────────────────────────────
+
+/** Props the USER can change behind the reconciler's back.
+ *
+ *  Everything else in the DOM only changes because a render wrote it, so
+ *  "the last vnode said the same value" is a sound reason to skip the write.
+ *  For these it is not: the browser mutates `value`/`checked` on every
+ *  keystroke and click, BEFORE the handler runs. When the handler then refuses
+ *  the input — a length cap, a validator, an unchanged cell — the next render
+ *  sees `prev.value === next.value` and writes nothing, so the screen keeps
+ *  what state REJECTED. Measured: an input capped at 3 chars ended with state
+ *  `"ab"` and DOM `"abcdef"`, permanently; `am surface` and `ui.X.value` then
+ *  report a value the cell never accepted.
+ *
+ *  The fix is to compare against the LIVE element, not against the last vnode.
+ *  It is still a skip — an input already showing the state's value is not
+ *  rewritten, so a caret never moves for an accepted keystroke.
+ *
+ *  It lives HERE, beside `_writeProp`, because both prop paths need it and the
+ *  bug is identical on each: `applyProps` skips a prop whose vnode value did
+ *  not change, and the signal binder's effect does not even RUN when the signal
+ *  did not change. A copy in one of them would leave `value={sig}` drifting
+ *  while `value={s.x}` self-corrects — the same divergence-by-signal this
+ *  module was created to end. */
+export function _isControlled(el: HTMLElement, k: string): boolean {
+  const tag = el.tagName;
+  if (k === "value") {
+    return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+  }
+  if (k === "checked") return tag === "INPUT";
+  return false;
+}
+
+/** True when `k` is controlled AND the element no longer shows `rv`. */
+export function _controlDrifted(
+  el: HTMLElement,
+  k: string,
+  rv: unknown,
+): boolean {
+  if (!_isControlled(el, k)) return false;
+  const cur = (el as unknown as Record<string, unknown>)[k];
+  // `_writeProp` assigns `v ?? ""`, so that is the value the DOM would hold.
+  if (k === "checked") return Boolean(cur) !== Boolean(rv ?? "");
+  return String(cur ?? "") !== String(rv ?? "");
 }

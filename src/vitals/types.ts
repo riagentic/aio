@@ -127,15 +127,6 @@ export type RenderFreezeReport = {
   memoryAfter?: number;
 };
 
-/** Timeline of status transitions for a single probe layer — first degraded/warning/frozen/recovered timestamps. */
-export type ProbeTimeline = {
-  probe: VitalLayer;
-  firstDegradedAt: number | null;
-  firstWarningAt: number | null;
-  firstFrozenAt: number | null;
-  recoveredAt: number | null;
-};
-
 /** Point-in-time snapshot of all three vitals layers — render, transport, and loop. */
 export type VitalsSnapshot = {
   render: {
@@ -158,15 +149,6 @@ export type VitalsSnapshot = {
     status: VitalStatus;
     firstDegradedAt: number | null;
   };
-};
-
-/** Freeze cascade analysis — duration, origin layer, cascade order, and probe snapshots. */
-export type FreezeTimeline = {
-  totalDuration: number;
-  cascadeOrigin: VitalLayer;
-  cascadeOrder: ProbeTimeline[];
-  hint: VitalHint | null;
-  probeSnapshots: VitalsSnapshot;
 };
 
 /** Vitals system configuration — heartbeat interval, thresholds, hints, backpressure, and alert callback. */

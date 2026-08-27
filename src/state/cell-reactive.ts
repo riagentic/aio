@@ -14,6 +14,7 @@ import { trackPath } from "./state-subs.ts";
 import { nameIsTaken } from "./cell-helpers.ts";
 import { applyCellFieldFilter, uiKeyVisibility } from "./state-filter.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { unregisterCancelOn } from "./method-cancel.ts";
 
 // ── Cell registry ────────────────────────────────────────────────────
 // Every cell() call registers here. Browser binding iterates this set.
@@ -75,6 +76,12 @@ export function _releaseCellBindings(defs: Iterable<CellDef>): void {
   for (const def of defs) {
     (def.__aio as Record<string, unknown>).bound = false;
     _reactivelyBound.delete(def);
+    // A cancelOn trigger is a claim on THIS binding's in-flight calls, so it
+    // ends with the binding. It used to outlive it: the registry only ever
+    // grew, and the next app to use the same cell name inherited a dead app's
+    // triggers. `cell-compose` re-registers on every compose, so a re-bind
+    // gets them all back.
+    unregisterCancelOn(def.__aio.id);
   }
 }
 
@@ -82,6 +89,7 @@ export function _resetCellBindings(): void {
   for (const def of _cellRegistry.values()) {
     (def.__aio as Record<string, unknown>).bound = false;
     _reactivelyBound.delete(def);
+    unregisterCancelOn(def.__aio.id); // the claim ends with the binding
   }
 }
 
@@ -122,7 +130,7 @@ export function reportHiddenRead(
   const id = `${cellName}.${key}`;
   throw new Error(
     `[aio] ${id} ${context} — ${reason}. ` +
-      `ui visibility is enforced on ALL client reads (browser and ` +
+      `\`visible:\` is enforced on ALL client reads (browser and ` +
       `standalone/electron alike), in dev and prod. Two fixes: publish the ` +
       `non-secret FACT as its own visible field (e.g. \`has${
         (key.split(".").pop() ?? key).replace(/^./, (c) => c.toUpperCase())
@@ -312,7 +320,7 @@ export function bindCellReactive(
                 reportHiddenRead(
                   cellName,
                   `${key}.${segs.join(".")}`,
-                  "the field is under a ui.exclude path",
+                  "the field is under a visible.exclude path",
                 )),
             v,
           );

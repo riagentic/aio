@@ -21,7 +21,11 @@ export type LogKind =
   | "perf"
   | "client";
 
-const KINDS: LogKind[] = [
+/** Exported so the ONE list of log files has one decider: the mid-run budget
+ *  pass (`logger-core`) needs to weigh exactly the files this policy governs,
+ *  and a second hand-kept copy of the list is how `client.log` was forgotten
+ *  by rotation in the first place. */
+export const KINDS: LogKind[] = [
   "app",
   "debug",
   "error",

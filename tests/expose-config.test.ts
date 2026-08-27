@@ -15,7 +15,11 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
-import { _exposeOf, _resolveAppVersion } from "../src/server/aio.ts";
+import {
+  _exposeOf,
+  _resolveAppVersion,
+  exposeReason,
+} from "../src/server/aio.ts";
 import { parseCli } from "../src/server/aio-cli.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
@@ -353,4 +357,59 @@ Deno.test({
       await Deno.remove(dir, { recursive: true }).catch(() => {});
     }
   },
+});
+
+// …and the warnings that fire BECAUSE of it must name what the author wrote.
+//
+// A message naming the wrong cause costs more time than no message: once a
+// non-loopback `host` became a second source of exposure, every "--expose
+// with …" line was telling an author about a flag they had never typed. Three
+// call sites spelled this for themselves and two were wrong the moment that
+// landed. One decider now, and it mirrors `_exposeOf` branch for branch — so
+// every input that exposes has a reason, and no input that does not can
+// produce one.
+Deno.test("exposeReason: every way in is named the way it was written", () => {
+  assertEquals(exposeReason({ expose: true }, {}), "--expose");
+  assertEquals(exposeReason({}, { expose: true }), "expose: true");
+  assertEquals(exposeReason({ host: "0.0.0.0" }, {}), "--host=0.0.0.0");
+  assertEquals(exposeReason({}, { host: "0.0.0.0" }), 'host: "0.0.0.0"');
+  assertEquals(
+    exposeReason({}, { host: "192.168.1.5" }),
+    'host: "192.168.1.5"',
+  );
+  // The flag outranks the config key, exactly as `_exposeOf` reads them.
+  assertEquals(
+    exposeReason({ expose: true }, { host: "0.0.0.0" }),
+    "--expose",
+  );
+  // A loopback host is not a reason, because it is not exposure.
+  assertEquals(_exposeOf({}, { host: "127.0.0.1" }), false);
+});
+
+// The pairing, as a property: anything `_exposeOf` calls exposed has a reason
+// that names a real input, and the two can never disagree about which.
+Deno.test("exposeReason: mirrors _exposeOf on every combination", () => {
+  const opts = [undefined, true] as const;
+  const hosts = [undefined, "127.0.0.1", "localhost", "0.0.0.0", "10.0.0.4"];
+  for (const cliExpose of opts) {
+    for (const cfgExpose of opts) {
+      for (const cliHost of hosts) {
+        for (const cfgHost of hosts) {
+          const cli = { expose: cliExpose, host: cliHost };
+          const cfg = { expose: cfgExpose, host: cfgHost };
+          if (!_exposeOf(cli, cfg)) continue;
+          const why = exposeReason(cli, cfg);
+          const names = why === "--expose"
+            ? cliExpose === true || (!cliExpose && !cfgExpose)
+            : why === "expose: true"
+            ? cfgExpose === true
+            : why.includes(String(cliHost)) || why.includes(String(cfgHost));
+          assert(
+            names,
+            `exposed by ${JSON.stringify({ cli, cfg })} but blamed "${why}"`,
+          );
+        }
+      }
+    }
+  }
 });

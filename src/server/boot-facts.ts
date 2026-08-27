@@ -138,8 +138,21 @@ export function bootLines(
   // all, and the running app was the one thing that could not say which.
   const client = sourced(extra.client);
   if (client) lines.push(["client", client]);
-  const entry = sourced(extra.entry);
-  if (entry) lines.push(["entry", entry]);
+  // Inside a compiled binary `Deno.mainModule` is a path in the EMBEDDED
+  // filesystem, whose root mirrors the BUILD machine's directory layout
+  // (`/tmp/deno-compile-<name>/home/alice/proj/src/app.ts`). It answers "which
+  // entry is running", which a repo with several apps needs — but it is not a
+  // file on the machine reading the report, and printing it with a bare
+  // `(default)` invited people to go looking for it.
+  if (extra.entry?.value !== undefined && extra.entry.value !== null) {
+    lines.push([
+      "entry",
+      facts.build === "compiled"
+        ? `${extra.entry.value} (embedded in the binary — a build-machine ` +
+          `path, not a file here)`
+        : sourced(extra.entry)!,
+    ]);
+  }
   if (extra.bind) lines.push(["bind", extra.bind]);
   const portLine = sourced(extra.port);
   if (portLine) lines.push(["port", portLine]);

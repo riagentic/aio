@@ -43,7 +43,9 @@ Deno.test("createDB(:memory:, {readers}) stays single-Worker — reads see write
     await db.close();
   }
   assert(
-    warnings.length > 0,
-    "must warn that readers are ignored for :memory:",
+    warnings.some((w) => w.includes("ignored for an in-memory DB")),
+    `must warn that readers are ignored for :memory: — got ${
+      JSON.stringify(warnings)
+    }`,
   );
 });

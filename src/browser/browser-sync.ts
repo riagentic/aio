@@ -16,6 +16,7 @@
 import { randomUuid } from "../rand.ts";
 import { createSyncEngine, type SyncEngine } from "../sync/sync-engine.ts";
 import { createOpBuffer, parseRetention } from "../sync/op-buffer.ts";
+import { REDUCER_FAILED, type SyncReducerResult } from "../sync/rebase.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { createLocalStorageOpStorage } from "../sync/browser-storage.ts";
 import type { SyncConfig } from "../sync/types.ts";
@@ -25,6 +26,12 @@ import { getCellSignal } from "../state/state-signals.ts";
 import type { CellDef, Msg } from "../state/cell-types.ts";
 import { produce } from "immer";
 import { degraded } from "../diagnostics/degraded.ts";
+import { _armAckTimer, _rejectAck, _resolveAck } from "./browser-ack.ts";
+
+/** How long to wait before re-requesting a catch-up the server just failed.
+ *  Short on purpose: a `sync-err` leaves this client stale until it asks
+ *  again, and the server has already done the expensive part (it failed). */
+const SYNC_ERR_RETRY_MS = 2_000;
 
 let _engine: SyncEngine | null = null;
 let _syncCells: Map<string, CellDef> | null = null;
@@ -53,6 +60,44 @@ export function getBrowserSyncEngine(): SyncEngine | null {
   return _engine;
 }
 
+/** `localStorage` is unusable here — reported once, at the moment the sync
+ *  engine boots without it.
+ *
+ *  Every localStorage access in the sync path catches and degrades: the op
+ *  buffer reads as empty, writes go nowhere, and `clientId` falls back to a
+ *  fresh uuid. Individually each is the right local decision; together they
+ *  turn `sync: true` into something it does not claim to be, SILENTLY — the
+ *  offline queue stops surviving a reload (unsent changes are simply gone),
+ *  and this client gets a NEW HLC identity on every load, so the server sees a
+ *  stranger each time. A private window, a browser set to block site data, or
+ *  a page in a partitioned third-party context all land here, and none of them
+ *  is exotic. Whatever the app can do about it, it is owed the fact. */
+let _storageWarned = false;
+function reportNoStorage(e: unknown): void {
+  if (_storageWarned) return;
+  _storageWarned = true;
+  const why = e instanceof Error ? e.message : String(e);
+  console.error(
+    `[aio:sync] this browser has no usable localStorage (${why}) — sync is ` +
+      `running WITHOUT durable offline state. Two consequences: unsent ` +
+      `changes do not survive a reload (the offline queue is gone with the ` +
+      `page), and this client gets a new sync identity on every load. Common ` +
+      `causes: a private window, site data blocked, or a partitioned ` +
+      `third-party context.`,
+  );
+  diagEmit({
+    type: "sync-no-storage",
+    severity: "error",
+    source: "sync",
+    message:
+      "Sync booted without usable localStorage — no durable offline state",
+    detail: { reason: why },
+    hint:
+      "Unsent changes are lost on reload and the client's HLC identity is " +
+      "ephemeral. Site data must be available for offline durability.",
+  });
+}
+
 /** Stable per-browser client id (persisted — HLC identity must survive reloads). */
 function clientId(): string {
   const KEY = "__aio_sync:clientId";
@@ -62,15 +107,32 @@ function clientId(): string {
     const id = randomUuid().slice(0, 8);
     localStorage.setItem(KEY, id);
     return id;
-  } catch {
+  } catch (e) {
+    reportNoStorage(e);
     return randomUuid().slice(0, 8);
   }
 }
 
 /** Route a local action (already `{type: "cell:method", payload}`) through
- *  the engine. Returns true when handled (caller must not plain-send). */
+ *  the engine. Returns true when handled (caller must not plain-send).
+ *
+ *  THE ROUTE THAT CLAIMS A CALL ALSO SETTLES IT. An action reaching here was
+ *  registered as a pending ack by the cell binding (`cell-reactive.ts` tags it
+ *  with a `cid` and returns the caller a promise), and the op that leaves here
+ *  carries NO cid — the server acks the op, not the call, so no ack frame can
+ *  ever settle that promise. The send wrapper meanwhile inherits
+ *  `ARMS_ACK_TIMER` from the plain transport, so no clock was armed either:
+ *  `await todos.add("milk")` hung forever at every ceiling and left one
+ *  permanent entry in the pending map per call. (Measured; the field reports of
+ *  "sync cells just don't work" are this.)
+ *
+ *  A sync cell is LOCAL-FIRST, so the honest settle point is "the op is
+ *  applied optimistically and durably queued" — exactly when
+ *  `handleLocalAction` resolves — not "the server confirmed", which may be
+ *  hours away on a queued offline op. The clock is armed too, so an engine that
+ *  never resolves fails loudly instead of hanging. */
 export function handleSyncLocalAction(
-  action: { type: string; payload?: unknown },
+  action: { type: string; payload?: unknown; cid?: string },
 ): boolean {
   if (!_engine || !_syncCells) return false;
   const idx = action.type.indexOf(":");
@@ -79,8 +141,21 @@ export function handleSyncLocalAction(
   if (!_syncCells.has(cell)) return false;
   const method = action.type.slice(idx + 1);
   if (method.startsWith("__")) return false; // framework-internal — plain path
-  _engine.handleLocalAction(cell, method, action.payload).catch((e) =>
-    console.warn(`[aio:sync] local op failed: ${e}`)
+  const cid = typeof action.cid === "string" ? action.cid : undefined;
+  if (cid) _armAckTimer(cid);
+  _engine.handleLocalAction(cell, method, action.payload).then(
+    () => {
+      if (cid) _resolveAck(cid);
+    },
+    (e) => {
+      console.warn(`[aio:sync] local op failed: ${e}`);
+      if (cid) {
+        _rejectAck(
+          cid,
+          e instanceof Error ? e : new Error(`local op failed: ${String(e)}`),
+        );
+      }
+    },
   );
   return true;
 }
@@ -148,7 +223,7 @@ export function handleSyncMessage(t: string, d: unknown): void {
       const engine = _engine;
       setTimeout(() => {
         if (engine) watch("sync:request", engine.requestSync());
-      }, 2000);
+      }, SYNC_ERR_RETRY_MS);
       return;
     }
   }
@@ -216,8 +291,10 @@ export function initBrowserSync(
     action: string,
     payload: unknown,
     cell?: string,
-  ): Record<string, unknown> | null => {
+  ): SyncReducerResult => {
     const def = cell ? cells.get(cell) : undefined;
+    // Not a cell we can replay: nothing to apply, and nothing was lost —
+    // that IS the no-op case.
     if (!def) return null;
     try {
       return produce(state, (draft) => {
@@ -227,8 +304,13 @@ export function initBrowserSync(
         );
       }) as Record<string, unknown>;
     } catch (e) {
+      // REDUCER_FAILED, never `null`. `null` is the engine's "applied, changed
+      // nothing" — returning it here reported success for a method that threw,
+      // so the engine marked the op applied and advanced the cursor past it:
+      // the server had the change, this client never would, and no
+      // re-delivery could reach it again. The two facts get two values.
       console.warn(`[aio:sync] reducer failed for ${cell}:${action}: ${e}`);
-      return null;
+      return REDUCER_FAILED;
     }
   };
 
@@ -295,4 +377,5 @@ export function setSyncOnline(online: boolean): void {
 export function _resetBrowserSync(): void {
   _engine = null;
   _syncCells = null;
+  _storageWarned = false;
 }

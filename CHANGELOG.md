@@ -1,5 +1,334 @@
 # Changelog
 
+## v1.0.0-alpha69 — wired, and proven end to end (2026-08-27)
+
+The release where updating stopped being a feature tested in pieces. A real
+`deno compile` binary now replaces itself and serves the new build on every CI
+run, and the audit that got it there found the same shape everywhere else:
+something declared, documented, and never actually connected to anything.
+
+### Updating
+
+- **A compiled binary updates itself, in CI.**
+  `tests/updates-artifact-e2e.test.ts` builds two real artifacts of one app —
+  v0.1.0, and a v0.2.0 carrying a method the older build does not have —
+  publishes both through the shipped publish path, runs the old one, and asks it
+  to update. The decisive read is that method: a version string can be wrong
+  about which bytes are running; a method that did not exist cannot. Part of
+  `deno task test:build`.
+- **A real `aio.run` boot is proven to wire the update cell.**
+  `tests/updates-boot-e2e.test.ts` — a child process, because `aio.run`
+  deliberately disables updates under `libraryMode`, which every in-process
+  harness sets. Nothing had ever tested the assembly between the config key and
+  the cell, and that is the seam two shipped bugs came through last release.
+- **`deno task publish`** — build, sign, and lay out the channel directory a
+  client actually fetches, in one command. Scaffolded into new apps, restored by
+  `am fix`. The layout was the half that lived only in prose, and both
+  documented flows got it wrong.
+- **`am publish` can publish a `server` app at all.** Those targets emit a
+  systemd unit beside the binary, and the one-manifest-per-platform guard read
+  the two files as two rival releases — refusing with a message whose suggested
+  fix was already in effect. A companion file is now recognised from its own
+  first bytes, reported, and not published.
+- **`ship keygen > key.json` no longer silently produces a useless key.** The
+  redirect captures the printed summary — valid JSON, a `publicKey`, no private
+  half — and `--key` on it later died with a bare WebCrypto `TypeError` naming
+  nothing. `parseSigningKey()` separates the three ways a key file can be wrong,
+  and the summary case points at the `keyPath` the file itself carries. The docs
+  that taught the redirect were the source of it.
+- **A broken artifact is refused as a broken artifact.** An exit-127 build was
+  reported as a data-contract problem and offered `--no-data` — which signs and
+  publishes it. Split in two: "did not run" offers no hatch, and `--no-data` now
+  names cross-compilation as the case it is for. Underneath it, `--no-data`
+  skipped the only step that executes the artifact, so `artifactFormat()`
+  (ELF/PE/Mach-O/ZIP/shebang) now gates `shipApp` before the hash and signature.
+
+### Security
+
+Five defaults are stricter. Each closes a hole that was proven reachable, and
+each refusal names the config key that widens it again — see the upgrade guide.
+
+- **DNS rebinding.** A request whose `Host` is a foreign domain is refused,
+  naming `allowedOrigins` (the same key and spellings the WebSocket origin check
+  uses). `evil.com` could read raw state out of a local dev app.
+- **Exposure had two deciders and one was silent.** A non-loopback `host` now
+  takes the `--expose` path — key, auto-TLS, strict origin. An app reachable
+  from the network with no credential at all is the state `--expose` exists to
+  make loud. Unparsable names fail closed.
+- `/__aio/health|metrics|vitals|error` are no longer anonymous on an app with
+  accounts; `access` cannot be escalated through `listensTo` (refused at compose
+  time, naming both cells); `androidVersion()` refuses a project with no
+  `"version"` rather than inventing one. Each of the five was then re-read
+  against a second bar — make an attacker's life hard, and nobody else's harder
+  — which changed three of them:
+
+- **A refused Host is reported on the server, once per Host and bounded.** The
+  403 reaches whoever made the request; the person who has to act on it is the
+  operator, who was reading a log that said nothing. A reverse-proxied
+  deployment failed as "users report Forbidden, nothing in the log" — the shape
+  that turns a one-line `allowedOrigins` fix into an afternoon.
+- **Every exposure warning now names what the AUTHOR wrote.** Once a
+  non-loopback `host` became a second source of exposure, "`--expose` with no
+  `key` configured" was telling people about a flag they had never typed. Three
+  call sites spelled this for themselves and two were wrong the moment that
+  landed; `exposeReason()` is the one decider, mirrored branch for branch
+  against `_exposeOf` by a property test.
+- **The diagnostics 401 names the door that IS open.** `GET /` answers 200
+  anonymously — that is what makes the sign-in page reachable — so a liveness or
+  readiness probe needs no credential. Without saying so, the fix people reach
+  for is putting an account in a monitoring config, forever, to answer "is it
+  up".
+
+- **`<Markdown>` scheme bypass, closed.** The guard used `trim()`; the URL
+  parser a browser runs on an `href` also strips leading C0 control characters,
+  so `[click](\u0000javascript:alert(1))` passed the check and resolved to
+  `javascript:` in the browser. The check now normalizes the way the parser does
+  and emits the string it checked. The test sweeps every prefix the parser
+  discards, using `new URL` as its oracle so it cannot drift the way the check
+  did.
+
+### Sync, and what a fuzzer found
+
+- **A catch-up response could apply ops a snapshot already contained** — two
+  overlapping catch-ups (a reconnect while a manual `requestSync()` is
+  outstanding, the exact case `reqId` exists for). A snapshot never enumerates
+  what it folded in, so every one of those ops applied twice, permanently, on
+  that client only. The `serverTs <= snapTs` rule existed in two of the three
+  places that needed it. Found by `sync-chaos` seed 1738.
+- **A clock-drift refusal was a reading, not a decision** — measured against the
+  server's moving wall clock, so the same op delivered again minutes later was
+  accepted after its origin had been told it was refused and had rolled back.
+  The refusal now sticks to the op id. Found by seed 724; >14,000 chaos episodes
+  clean after both fixes.
+- **The offline queue lost writes silently when localStorage refused** — a bare
+  catch annotated "degrade to memory-only", which is not what happened: nothing
+  was retained, while `saveOp` resolved and the engine believed the op was
+  queued. Now loud, per cell, with a `degraded` marker.
+
+### Things that were declared and never wired
+
+- **A gate for the whole class.** `deno task check:dead-wiring` — every symbol
+  exported from a non-entry `src/` file must be reached from `src/` itself.
+  Ledgered like `check:vacuous`, and it found all of the following.
+- `_noteDispatch` — exported, its doc naming its callers, called by nothing, so
+  every DevTools state frame was attributed to a placeholder action for the life
+  of the feature.
+- `devtools.tree` — returned `[]` forever while its own JSDoc showed a usage
+  example. Now walks the live AIR roots on demand (pull-based on purpose: the
+  push channel would re-render any component that displays the tree, which
+  changes the tree).
+- `healthOverlayScript` — 50 lines of dev overlay, generated and injected
+  nowhere, described as real by two doc comments and a test header. Deleted; the
+  console fallback it duplicated was never missing anything.
+- `APP_ICON` / `BUNDLE_JS` / `DIST_DIR` — the declared home for three names,
+  with no importer, while `one-fact-one-spelling` capped the raw literals at
+  whatever count they already had. The gate was asleep, guarding a migration
+  nobody performed. Both ceilings are now **0**.
+- `setConsoleSend`, `_getSnapshot`/`_getServerSnapshot`/`_setVisibilityHandler`,
+  `_initLifecycleHooks`, `clearIslandCache`, `_cellSendCache` — deleted.
+
+### Correctness in the UI
+
+- **The hydration divergence warning cried wolf on ordinary code** — any element
+  with an inline `style`, every `<input readOnly>`, and
+  `style={cond ? {…} :
+  null}` in its false state. Three separate causes, all
+  fixed; a 33-case parity matrix requires zero warnings.
+- **`<Link>` hijacked clicks the browser owns** — `target="_blank"` navigated in
+  place, and a cross-origin link did nothing at all while throwing a
+  SecurityError out of the click handler.
+- **`aio/ui` tripped the framework's own a11y warnings** on markup the app
+  author could not change — including one real defect: `<Table onRowClick>`
+  rendered mouse-only rows with no keyboard path.
+- `useForm().validate` threw when destructured (only with `validators` set);
+  `useFieldArray` swallowed out-of-range indices; a throwing transition `tick`
+  left the element frozen mid-animation, silently; `toast()`'s `×` leaked the
+  auto-dismiss timer the returned `dismiss` cleared; `resource().value` kept a
+  stale value through an error its own doc said it would clear.
+
+### Testing and the gates
+
+- `deno task check` type-checks `tests/` too — a `src` type change that broke a
+  test used to take a 12-minute suite run to surface, and costs about four
+  seconds here.
+- `check:vacuous` stopped crying wolf: a guarded `throw` is an assertion written
+  longhand, `.map(` needs an actual callback block to be a loop, and
+  `.length > 0` on an array is a real claim. 28 false positives cleared.
+- The `server-app` target gets an artifact E2E — the one server-ish target the
+  table never built, and the combination the others cannot stand in for.
+- `settle()` distinguishes a parked method from a churning dispatch loop, and
+  says which.
+- Every message the framework prints carries a level; `am log` groups by event
+  rather than by line, and a plain text log is no longer one giant event that
+  made `--filter` filter nothing.
+
+### Two gates that had started crying wolf
+
+Both were introduced by this release's own work, and both were caught by a field
+review before it shipped.
+
+- **`aiol` reported 55 ERRORs in one app, every one of them false.** The
+  browser-bundle rule reads every `.tsx` under the scanned roots — which include
+  `test/` and `tests/` by design — and there was no test-path predicate anywhere
+  in the linter, so `Deno.test` in a `*.test.tsx` was reported as code compiled
+  into the browser bundle. An ERROR-level gate that is wrong 55 times out of 55
+  is one its author turns off, and then it stops catching the real case it was
+  written for (`Deno.env.get` in a component, which blank-pages the client).
+  `isTestPath` now sits beside `isToolingPath`, which had already made this
+  exact argument in its own doc comment — and the sweep went with it: the "sync
+  I/O blocks the event loop", "use schedule instead of setTimeout", "this cell
+  has no test file" and "use structured logging" rules skipped `.test.ts` **by
+  file name**, which missed `.test.tsx`, `_test.ts` and everything under a
+  `test/` directory. A cell written as a fixture inside a test was told to stop
+  blocking clients it does not have and to go and write itself a test file.
+- **Seven ERROR lines on every clean shutdown.** A schedule whose tick lost the
+  race with `close()` logged at error BEFORE the branch that classifies the
+  rejection as a normal shutdown — three lines above the app's own
+  `stopped … errors=0` summary. `dispatch()` already reports that case, at warn,
+  once per action type. Classified first now, and a dispatch that failed for any
+  other reason is still an error.
+
+### Updating, after a fourth field review
+
+- **`updates.backupPath`** — the pre-migration backup was computed, logged, and
+  written into the pending marker so a rollback could name it, and stopped
+  there. A UI could not show the file holding the user's data after a rollback
+  or an `acceptDataLoss` install.
+- **`canApply` says that work belongs in it.** It is awaited, it runs before a
+  byte is downloaded, and a throw fails closed carrying its own message — so a
+  backup, a queue flush or closing a device can happen there, and "it failed"
+  and "no update happens" become one event. It is also the only seam covering
+  all three doors (the button, `auto: true`, the terminal prompt), so the same
+  work anywhere else is a promise the other two break in silence. The semantics
+  were already right; nothing said so.
+- **`CheckResult` and `CheckOptions` are exported from `aio/updates`.** They are
+  the argument and return type of `updates.check()` — production types that
+  could only be named by importing a testing entry.
+
+### The data gate, after a fourth-round audit of the whole spine
+
+The spine held — detect, verify, gate, stage, swap, self-verify, roll back — and
+the "a fresh install may take a blocked release" clause holds by construction.
+What did not hold was the gate's own precondition.
+
+- **An app with unversioned cells had NO data gate, and nothing said so.** Cell
+  versions are collected, stamped and compared only for cells that declare
+  `version`, so a cell that never did is invisible to the gate: a release that
+  renames one of its fields is offered as compatible, the merge drops the field,
+  and the persist window writes the loss back. One reporting app had 35 cells,
+  20 persisted, no `version:` anywhere. `deno task lint` now warns once, listing
+  them — but only for an app that configures `updates`, because a cell in an app
+  that never updates itself has nothing to be protected from. The docs gained
+  the row and the reason, including that the first stamp converts nothing.
+- **Cross-compiled artifacts were published with no contract**, so the moment an
+  app versioned its cells, every Windows and macOS install holding data was
+  permanently blocked by every release cut on Linux — and the refusal told the
+  publisher to do what they had just done. The contract is a property of the
+  SOURCE, so `am publish` probes the host artifact once and stamps that answer
+  into every platform's manifest, naming which got it and loudly naming any that
+  still went without.
+- **Found while fixing that: `am publish` never passed the platform through.**
+  `shipApp` defaults it to the host, so every cross-compiled manifest of a fleet
+  build claimed the building machine's platform — all written to the same
+  `<os>-<arch>.json`, each overwriting the last, while the client asking for its
+  own name got a 404. Now taken from the same `PLATFORMS` table the build
+  resolved the artifact from.
+- **First-versioning warned as if the data were stale** — twenty `may be stale`
+  lines on the first boot after an app adopts `version:`, about data that had
+  not moved. `0` means never stamped, not "version zero"; it is an INFO
+  `stamping <cell> at version 1` now, and only a real gap without a hook is
+  still a warning.
+- `updates.enabled` returns to false when the runtime is removed, so a UI gated
+  on it can be tested for its absence; `installUpdatesRuntime` and
+  `UpdatesRuntime` are exported from `aio/updates`, with boot refusing the
+  ambiguity if an app both installs its own runtime and configures `updates:`;
+  and `CellContract.migratesFrom`'s doc no longer describes an option that never
+  existed.
+
+### Onboarding
+
+- **`install.sh` names the umask trap instead of leaving git internals as the
+  clue.** git applies the process umask when it writes loose objects, so commits
+  made under `umask 077` land as `400`: the owner can still clone, another user
+  cannot read them at all, and the installer died with "failed to copy file to
+  '…/.git/objects/…': Permission denied". Nothing on the installer's side can
+  fix it — a clone must read what it cannot read, and `--no-hardlinks` and the
+  `file://` transport were both tried and fail identically — so it now
+  recognises the failure and names the cause and the one-line fix
+  (`chmod -R o+rX <repo>/.git`).
+
+### Manual VM labs
+
+- **One artifact hand-off, identical on both labs.** `am lab windows` and
+  `am lab macos` now serve `dist/` to the guest at `http://host.lan:8007/` — the
+  image's own dnsmasq record, so nothing is configured inside either guest — and
+  print the fetch command **with the real filename in it**, not prose. Bound to
+  the guest-facing bridge address only, never published to the host.
+- `am lab macos` boots Apple's recovery installer for real (~4 min to a
+  desktop). Verified end to end: a file from the host's `dist/` fetched and read
+  inside a live macOS guest, and inside a live Windows 11 guest, by the same
+  command. The macOS installation itself stays manual — the recovery installer
+  has no unattended path — so the lab prints four numbered steps and an honest
+  time budget instead of the words "partly manual".
+- **A disk is not an install.** QEMU creates `data.img` at full nominal size
+  with zero blocks allocated, so every returning macOS operator was told "first
+  run, budget 60+ min". "Installed" now means real blocks. macOS storage is also
+  per-version, with a warning before a second OS install starts beside the
+  first.
+- The wrong artifact architecture is named up front (both guests are QEMU
+  x86_64) rather than handing over a command that dies with "Bad CPU type in
+  executable" an hour into an install. `--status` reports whether the share is
+  serving and the last fetch the guest actually made — the only evidence
+  `host.lan` resolves in there.
+- A one-line licence notice, once per lab: macOS virtualisation is permitted
+  only on Apple hardware, so this is a local testing tier and never a CI path.
+
+### Build and targets
+
+- **Electron cross-compilation was impossible on every host** — the cache check
+  and the post-unpack validation both looked for the _host_ OS's binary, so
+  fetching `win32-x64` unpacked `electron.exe`, looked for `electron`, and
+  blamed Electron's release. The headline capability of `--platforms` could not
+  succeed anywhere.
+- `--client` could not find an Electron the framework had just installed (a
+  third reader of a rule the doc comment says must have one); `electron-client`
+  claimed to cross-build and went red when it tried, with a test asserting the
+  wrong behaviour; `--allow-server-only` was named by a refusal and unknown to
+  the fleet that had become the build path; `aio ship` had no unknown-flag gate
+  — `--keys=k.json` published unsigned.
+- `build.v8Flags` and `build.channel` are recognised config keys. Both were read
+  by the framework and missing from the allowlist, so `lint:aio` — a release
+  gate — reported a correctly configured app as wrong.
+
+- **`feedback.enabled` was never written either** — the same dead-field class as
+  `updates.enabled`, found by the same report. `refresh()`/`report()` record
+  whether a runtime is installed, and boot fires one `refresh()` after cells
+  bind (`beginFeedback`, the twin of `beginUpdates`), so a UI gated on
+  `feedback.enabled` renders when feedback is configured and never otherwise.
+
+Four items from a desktop app's field report on `updates`, each grep-verified:
+
+- **`updates.enabled` is now written.** It was declared, documented and
+  initialised to `false` — and never set. `check()` writes `enabled`, `kind`,
+  `channel` and `current` from the installed runtime (the boot check fires once
+  cells are bound), so it is true in every app that configured `updates` and
+  stays false everywhere else. The doc's state table says exactly this.
+- **`dismiss()` now holds past the next poll.** The cell persisted the dismissal
+  and `decide`/`decideGit` honoured it, but the runtime never passed one to the
+  other, so "Not now" lasted one poll. `UpdatesRuntime.check()` now takes
+  `{ dismissed }` from the cell and threads it into both decisions. For a git
+  source `decideGit` also matches the label the cell actually stores
+  (`<version> (<short sha>)`), not only the full sha it could never hold.
+- **`prerelease` exists.** `decide()` refused prereleases with "set
+  `prerelease: true`", naming an option `UpdatesConfig` did not have. Added
+  `prerelease?: boolean` — default `true` on the `dev` channel, `false`
+  elsewhere — threaded to the manifest decision, documented in the config table,
+  and the refusal names the exact key (`updates: { prerelease: true }`).
+- **`aio/testing` exports the update seam:** `installUpdatesRuntime`,
+  `UpdatesRuntime`, `CheckOptions`, `CheckResult`. A "test your update banner"
+  example (stub runtime + `testUI`, type-checked by the docs gate) is in
+  `docs/deploy/updates.md`, alongside the `seed` route.
+
 ## v1.0.0-alpha68 — proven in anger (2026-08-25)
 
 The follow-up to a desktop wallet's second field report: every round-one item it

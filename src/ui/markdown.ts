@@ -23,16 +23,75 @@ export interface MarkdownProps {
   class?: string;
 }
 
-/** True for an href we'll render as a link — http(s), mailto, or a relative /
- *  anchor path. Everything else (javascript:, data:, vbscript:, …) is dropped. */
-function safeHref(url: string): boolean {
-  const u = url.trim();
-  if (u === "") return false;
-  if (/^(https?:|mailto:)/i.test(u)) return true;
+/** The href a browser will actually navigate to, for an href this renderer is
+ *  willing to emit — http(s), mailto, or a relative / anchor path — or `null`
+ *  when the scheme is one we drop (javascript:, data:, vbscript:, …).
+ *
+ *  It returns the string to EMIT, not just a verdict, because the check and the
+ *  value have to be the same string. `.trim()` alone was not: the WHATWG URL
+ *  parser — the one every browser uses to resolve an `href` — REMOVES leading
+ *  and trailing C0 controls and spaces, and removes tab/LF/CR from anywhere in
+ *  the URL, before it looks at the scheme. `String.prototype.trim` removes
+ *  whitespace but not C0 controls, so a single NUL in front of a scheme made
+ *  the two disagree:
+ *
+ *      safeHref("\u0000javascript:alert(1)")  → true   (no leading [a-z], so
+ *                                                       "not a scheme")
+ *      new URL("\u0000javascript:alert(1)")   → javascript:alert(1)
+ *
+ *  — i.e. exactly the vector this module's "safe by construction" claim is
+ *  about, in the one place it takes attacker-controlled input. Every C0 control
+ *  U+0001–U+001F works the same way, and `[^)\s]+` in the link/image patterns
+ *  happily captures them (`\s` covers tab/LF/CR/FF/VT, not the rest).
+ *
+ *  So the string is normalized the way the parser will normalize it, the
+ *  decision is made on THAT, and that is also what gets written into the
+ *  attribute. One string, one answer. */
+function normalizeHref(url: string): string | null {
+  const u = url
+    // Removed from anywhere in a URL by the parser.
+    .replace(/[\t\n\r]/g, "")
+    // Leading/trailing C0 control or space. The control characters are the
+    // POINT here — they are exactly what the URL parser discards and what the
+    // old check did not — so the lint rule is disabled deliberately.
+    // deno-lint-ignore no-control-regex
+    .replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, "");
+  if (u === "") return null;
+  if (/^(https?:|mailto:)/i.test(u)) return u;
   // relative / absolute-path / anchor / query — no scheme means same-origin
-  if (/^[./#?]/.test(u)) return true;
+  if (/^[./#?]/.test(u)) return u;
   // a bare "example.com/x" (no scheme, no leading slash) — treat as relative
-  return !/^[a-z][a-z0-9+.-]*:/i.test(u);
+  return /^[a-z][a-z0-9+.-]*:/i.test(u) ? null : u;
+}
+
+/** Hrefs already reported, so a re-render does not re-report them. Bounded:
+ *  the source is untrusted, and an unbounded set of attacker strings is a leak.
+ *  @internal test seam via {@linkcode _resetMarkdownWarnings}. */
+const _warnedHrefs = new Set<string>();
+
+/** A dropped link is a VISIBLE hole in the page (the text stays, the link is
+ *  gone) with no cause anywhere — say what happened, once per href, in dev.
+ *  Observe-only: prod drops exactly the same href, silently. */
+function warnDroppedHref(url: string): void {
+  if ((globalThis as Record<string, unknown>).__aioDev !== true) return;
+  if (_warnedHrefs.has(url)) return;
+  if (_warnedHrefs.size >= 50) _warnedHrefs.clear();
+  _warnedHrefs.add(url);
+  console.warn(
+    `[aio:ui] <Markdown> dropped a link/image target with an unsupported ` +
+      `scheme: ${
+        JSON.stringify(url.slice(0, 120))
+      }. Only http(s), mailto and ` +
+      `relative paths are rendered — the link text is kept, the target is not.`,
+  );
+}
+
+/** @internal test isolation — forget which dropped hrefs were reported. The
+ *  dedup above is per-process, so a test that asserts the report has to re-arm
+ *  it; nothing in src/ resets warn dedup. */
+// aio-ok: a test-only seam, deliberately unreachable from the product.
+export function _resetMarkdownWarnings(): void {
+  _warnedHrefs.clear();
 }
 
 // ── Inline parsing (bold, italic, code, links, images) ──────────────────────
@@ -64,9 +123,11 @@ function parseInline(text: string): VChild[] {
     m = /^!\[([^\]]*)\]\(([^)\s]+)\)/.exec(rest);
     if (m) {
       flush();
-      if (safeHref(m[2]!)) {
-        out.push(h("img", { src: m[2]!, alt: m[1]!, class: "aio-md__img" }));
+      const src = normalizeHref(m[2]!);
+      if (src) {
+        out.push(h("img", { src, alt: m[1]!, class: "aio-md__img" }));
       } else {
+        warnDroppedHref(m[2]!);
         out.push(m[1]!); // unsafe src → keep the alt text only
       }
       i += m[0].length;
@@ -76,17 +137,19 @@ function parseInline(text: string): VChild[] {
     m = /^\[([^\]]+)\]\(([^)\s]+)\)/.exec(rest);
     if (m) {
       flush();
-      if (safeHref(m[2]!)) {
+      const href = normalizeHref(m[2]!);
+      if (href) {
         out.push(
           h("a", {
-            href: m[2]!,
+            href,
             class: "aio-md__a",
-            ...(/^https?:/i.test(m[2]!)
+            ...(/^https?:/i.test(href)
               ? { target: "_blank", rel: "noopener noreferrer" }
               : {}),
           }, ...parseInline(m[1]!)),
         );
       } else {
+        warnDroppedHref(m[2]!);
         out.push(...parseInline(m[1]!)); // drop the href, keep the text
       }
       i += m[0].length;

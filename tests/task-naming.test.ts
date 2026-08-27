@@ -37,7 +37,6 @@ const VERBS = new Set([
   "fmt",
   "compile",
   "dev",
-  "discover",
   "example",
   "install",
   "lab",
@@ -46,13 +45,21 @@ const VERBS = new Set([
   "soak",
   "test",
   "update",
-  "validate",
+  // NOT "validate" and NOT "discover". Both were in this list for exactly one
+  // reason each: to let `validate:matrix` (an alias of `check:matrix`) and
+  // `discover` (an alias of `am discover`) pass the gate. A verb that exists
+  // only so a deprecated alias can be legal is the vocabulary paying rent for
+  // the thing it was supposed to retire — the aliases are gone (alpha64
+  // announced both renames), and the words went with them.
 ]);
 
 /** Bare names that are TOOLS, not actions — `deno task am status` runs a
  *  program whose own first argument is the verb. A tool may not take a
  *  qualifier: `am:something` would be a third grammar. */
-const TOOLS = new Set(["am", "amui", "doctor", "docs", "preflight"]);
+// `docs` was an alias of `update:api-ref` and is gone with it — the doc tasks
+// are `check:docs` / `check:doc-coverage` / `update:docs` / `update:api-ref`,
+// all verb-first.
+const TOOLS = new Set(["am", "amui", "doctor", "preflight"]);
 
 function taskNames(json: string): string[] {
   const parsed = JSON.parse(json) as { tasks?: Record<string, unknown> };
@@ -122,11 +129,21 @@ Deno.test("tasks: the scaffold stays on a diet", () => {
   // Every task is something a reader has to skim past to find the one they
   // want. alpha52 deleted the per-target explosion (dev:browser, dev:electron,
   // compile:remote:cli, …) on purpose; this keeps it deleted.
+  //
+  // The ceiling is a conversation, not a number: raising it should cost an
+  // argument. 12 → 13 in alpha69 bought `publish`, and the argument is that
+  // `publish` and `ship` answer different questions at different frequencies —
+  // `publish` every release (build → sign → the channel LAYOUT a client
+  // fetches, the half that used to live only in prose), `ship` once ever
+  // (`ship keygen` makes the key `publish` needs, `ship github` writes the CI
+  // workflow), with both spellings baked into the docs and into the CLI's own
+  // messages. What the diet exists to refuse is a task PER TARGET; a second
+  // verb in a lifecycle that genuinely has two steps is not that.
   for (const target of ["browser", "electron", "android", "cli", "server"]) {
     const tasks = Object.keys(standardTasks(false, target as "browser"));
     assert(
-      tasks.length <= 12,
-      `${target}: ${tasks.length} scaffolded tasks — the diet was 10 ` +
+      tasks.length <= 13,
+      `${target}: ${tasks.length} scaffolded tasks — the ceiling is 13 ` +
         `(${tasks.join(", ")})`,
     );
   }

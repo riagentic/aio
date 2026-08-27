@@ -5,7 +5,7 @@
 
 import { join } from "@std/path";
 import { appDirs } from "../server/app-dirs.ts";
-import type { GlobalFlags } from "./am-types.ts";
+import type { GlobalFlags, OutputMode } from "./am-types.ts";
 import { detectMode, fail, formatUptime, out, outError } from "./am-output.ts";
 import {
   amCtx,
@@ -69,6 +69,96 @@ export async function cmdClients(
   flags: GlobalFlags,
 ): Promise<void> {
   await runTrojanGet(amCtx(flags), "clients");
+}
+
+/** One roster entry, as the `clients` route serves it. */
+type ClientRow = {
+  index: number;
+  type?: string;
+  transport?: string;
+};
+
+/** Which client a UI command should drive.
+ *
+ *  The client "index" reads like a list position and is not one: the server
+ *  hands out a MONOTONIC counter, so after a single page reload the app's only
+ *  UI client is index 6, and the `am surface 0` taught by the docs answers
+ *  `client 0 not connected (connected: 6, 7)`. Worse, before that reload index
+ *  0 was usually the dev server's `browser-reload` socket — a real, connected
+ *  client with no UI on it, which answered nothing until the request timed out
+ *  five seconds later, guessing that the app's "main thread is busy".
+ *
+ *  So the index stops being the primary way to say which client: the default
+ *  is the NEWEST UI client, which is what a person means every time, and an
+ *  index given explicitly is checked against the roster BEFORE anything is
+ *  sent — a miss or a non-UI socket is refused instantly, with the reason and
+ *  the indices that would work.
+ *
+ *  Returns the index to drive, or null when no UI client is connected (the
+ *  caller decides: `surface` renders headlessly, `trigger` cannot).
+ *  Exits on a refusal — the message IS the answer. */
+export async function resolveUiClient(
+  port: number,
+  appId: string | undefined,
+  explicit: number | undefined,
+  mode: OutputMode,
+): Promise<number | null> {
+  const roster = await trojanGet(port, "clients", appId, 10_000);
+  if (!roster.ok || !Array.isArray(roster.data)) {
+    // The roster is how this command knows anything; without it, an index the
+    // caller typed is the ONLY information available, and refusing on the
+    // strength of a failed probe would make `am` less capable than it was.
+    // (An `am` newer than the app it is talking to lands here.) No index and
+    // no roster leaves nothing to pick — the caller falls back (a headless
+    // render) or says so.
+    return explicit ?? null;
+  }
+  const choice = chooseUiClient(roster.data as ClientRow[], explicit);
+  if (choice.error) {
+    outError(choice.error, mode);
+    Deno.exit(1);
+  }
+  return choice.index;
+}
+
+/** The decision half of {@linkcode resolveUiClient} — pure, so the refusals
+ *  are a unit test rather than a claim. `index: null` = no UI client at all. */
+export function chooseUiClient(
+  rows: readonly ClientRow[],
+  explicit: number | undefined,
+): { index: number | null; error?: string } {
+  // A reload socket is the dev server's HMR channel. It is connected, it is
+  // counted, and it has no UI — naming it is never what anyone meant.
+  const isUi = (c: ClientRow) => !String(c.type ?? "").endsWith("-reload");
+  const ui = rows.filter(isUi);
+  const list = (cs: readonly ClientRow[]) =>
+    cs.map((c) => `${c.index}${c.type ? ` (${c.type})` : ""}`).join(", ") ||
+    "none";
+  if (explicit === undefined) {
+    // Newest last: the client that connected most recently is the page in
+    // front of you.
+    const pick = ui.at(-1);
+    return { index: pick ? pick.index : null };
+  }
+  const hit = rows.find((c) => c.index === explicit);
+  if (!hit) {
+    return {
+      index: null,
+      error: `client ${explicit} is not connected (connected: ${list(rows)}).
+The index is a counter the server increments per connection, not a position — one page reload moves it. Run the command with NO index to drive the newest UI client, or read \`am clients\` for the current numbers.`,
+    };
+  }
+  if (!isUi(hit)) {
+    return {
+      index: null,
+      error:
+        `client ${explicit} is the dev server's ${hit.type} socket, not a UI client — it has no surface to read or drive, and addressing it simply waits until the request times out.
+UI clients: ${
+          list(ui)
+        }. Run the command with NO index to drive the newest one.`,
+    };
+  }
+  return { index: hit.index };
 }
 
 export async function cmdClient(
@@ -154,6 +244,36 @@ export async function cmdSchedules(
   await runTrojanGet(amCtx(flags), "schedules");
 }
 
+/** A log line that BEGINS an event: the framework's `formatText`
+ *  (`2026-08-26 23:31:50.755  INFO  …`) or the client log's bracketed stamp
+ *  (`[t] [INFO ] [client:0] …`). */
+const LOG_EVENT_START = /^(\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d|\[)/;
+
+/** A log line that CONTINUES the event above it: a stack frame, a line of the
+ *  error box, an indented wrap of a long message.
+ *
+ *  This is the half that decides, not `LOG_EVENT_START`. Asking only "does
+ *  this line start an event" makes every line an aio log line is not — an
+ *  app's own `console.log`, a redirected stdout — a continuation of whatever
+ *  came before it, so a file with no framework headers folded into ONE event:
+ *  `--lines=50` showed the whole file, and `--filter` matched the file as a
+ *  unit and returned every line, filtering nothing. */
+const LOG_EVENT_CONT = /^(\s{2,}|[\u2500-\u257f])/;
+
+/** Fold raw log lines into events. Pure — the unit `--lines=N` selects.
+ *  A leading fragment (the file was rotated mid-event) is its own event
+ *  rather than being dropped. */
+export function groupLogEvents(lines: readonly string[]): string[][] {
+  const events: string[][] = [];
+  for (const line of lines) {
+    const cont = events.length > 0 && !LOG_EVENT_START.test(line) &&
+      LOG_EVENT_CONT.test(line);
+    if (cont) events[events.length - 1]!.push(line);
+    else events.push([line]);
+  }
+  return events;
+}
+
 export async function cmdLog(
   args: string[],
   flags: GlobalFlags,
@@ -176,18 +296,25 @@ export async function cmdLog(
   let offset = 0;
   try {
     const content = Deno.readTextFileSync(LOG_FILE);
-    let lines = content.split("\n");
+    // EVENTS, not lines. `--lines=N` used to slice the file's last N text
+    // lines, so a tail that ended inside a stack trace or an error box started
+    // mid-frame with no timestamp, no level and no message — the most common
+    // case, since the entries worth reading are the multi-line ones. A filter
+    // matches the whole event too: `am log error` keeps the stack that belongs
+    // to the error rather than the one line the word appeared on.
+    let events = groupLogEvents(content.split("\n"));
     if (filter) {
       const lc = filter.toLowerCase();
-      lines = lines.filter((l) => l.toLowerCase().includes(lc));
+      events = events.filter((e) => e.join("\n").toLowerCase().includes(lc));
     }
-    const tail = lines.slice(-n);
+    const tail = events.slice(-n).flat();
     if (mode === "json") {
       // deno-lint-ignore no-control-regex
       const clean = tail.map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
       out({
-        total: lines.length,
-        shown: clean.length,
+        // Counts are of EVENTS — the unit `--lines=N` now selects.
+        total: events.length,
+        shown: Math.min(events.length, n),
         filter: filter ?? null,
         lines: clean,
       }, mode);
@@ -698,18 +825,26 @@ export async function cmdSurface(
   // `Number("mian")` is NaN — which used to be sent as the path segment
   // `surface/NaN` and come back as a confusing server-side miss.
   let target: string | number = "server";
+  // No index = the newest UI client (the page in front of you), resolved from
+  // the roster rather than assumed to be 0 — see resolveUiClient. An explicit
+  // index is validated against that same roster before anything is sent.
+  let noUiClient = false;
   if (explicit !== "server") {
-    const idx = explicit === undefined
-      ? { ok: true as const, value: 0 }
-      : parseNumArg(String(explicit), "client index", {
+    let want: number | undefined;
+    if (explicit !== undefined) {
+      const idx = parseNumArg(String(explicit), "client index", {
         min: 0,
         integer: true,
       });
-    if (!idx.ok) {
-      outError(`${idx.error} — pass a client index or "server"`, mode);
-      Deno.exit(1);
+      if (!idx.ok) {
+        outError(`${idx.error} — pass a client index or "server"`, mode);
+        Deno.exit(1);
+      }
+      want = idx.value;
     }
-    target = idx.value;
+    const picked = await resolveUiClient(port, appId, want, mode);
+    if (picked === null) noUiClient = true;
+    else target = picked;
   }
   // `--full` lifts the text cap: element/component text is capped so a surface
   // stays scannable, and a cut is now marked with "…" — but a generated command
@@ -733,12 +868,17 @@ export async function cmdSurface(
     );
     Deno.exit(1);
   }
-  let result = await trojanGet(
-    port,
-    `surface/${target}${q}`,
-    appId,
-    clientTimeout(flags.timeout),
-  );
+  let result = noUiClient
+    // Nothing to ask: go straight to the headless render below instead of
+    // spending the client timeout on a client the roster already said is not
+    // there.
+    ? { ok: false as const, error: "no UI client connected" }
+    : await trojanGet(
+      port,
+      `surface/${target}${q}`,
+      appId,
+      clientTimeout(flags.timeout),
+    );
   let headlessRender = target === "server";
   if (!result.ok && explicit === undefined) {
     // No client connected and none requested → fall back to the headless
@@ -800,7 +940,9 @@ export async function cmdSurface(
       ? `this is a server-side render — am trigger drives a CONNECTED ` +
         `client: open the app (or start it with --client=browser), then ` +
         `am surface 0`
-      : `trigger with: am trigger ${target} "<Component…:Element>" <action> [text]`,
+      // No index in the hint: `am trigger` drives the newest UI client, and a
+      // number copied from here is stale the moment the page reloads.
+      : `trigger with: am trigger "<Component…:Element>" <action> [text]`,
   );
 }
 
@@ -841,7 +983,7 @@ export function parseChord(
   };
 }
 
-/** `am trigger <clientIdx> <path> <action> [text]` — faithfully simulate a
+/** `am trigger [clientIdx] <path> <action> [text]` — faithfully simulate a
  *  user interaction on a live client via the semantic surface (same event
  *  sequences as testUI). Full testUI action set: click, dblclick, type,
  *  setValue, press, hover, focus, blur, select, check, uncheck, clear, scroll,
@@ -861,8 +1003,22 @@ export async function cmdTrigger(
   const mode = detectMode(flags);
   const appId = resolveAmAppId(flags.app);
   const port = resolvePort(flags.port, appId);
-  const [idxStr, path, action, text] = args;
-  const idx = Number(idxStr);
+  // ── the index is OPTIONAL, and it is not the first thing anyone types ──
+  //
+  // `am surface` needs no index (it drives the newest UI client); `am trigger`
+  // REQUIRED one — the asymmetry alone made the documented observe→act→observe
+  // loop wrong every second step, and the number it required is a monotonic
+  // counter that one page reload invalidates. Both spellings work:
+  //
+  //   am trigger "<path>" <action> [text]       ← the newest UI client
+  //   am trigger 3 "<path>" <action> [text]     ← that client, checked first
+  const positional = args.filter((a) => !a.startsWith("--"));
+  const leadsWithIndex = positional.length > 0 &&
+    /^\d+$/.test(positional[0]!);
+  const [path, action, text] = leadsWithIndex
+    ? positional.slice(1)
+    : positional;
+  const wantIdx = leadsWithIndex ? Number(positional[0]) : undefined;
   const actions = new Set([
     "click",
     "dblclick",
@@ -881,9 +1037,10 @@ export async function cmdTrigger(
     "scroll",
     "dragTo",
   ]);
-  if (!Number.isInteger(idx) || !path || !action || !actions.has(action)) {
+  if (!path || !action || !actions.has(action)) {
     outError(
-      'usage: am trigger <clientIdx> "<Component…:Element>" <action> [text]\n' +
+      'usage: am trigger "<Component…:Element>" <action> [text]\n' +
+        '       am trigger <clientIdx> "<…>" <action> [text]   # a specific client\n' +
         "actions: click, dblclick, type <text>, setValue <text>, press, keyDown,\n" +
         "         keyUp, hover, focus, blur, select <value>, check, uncheck,\n" +
         '         clear, scroll "top=200 left=0", dragTo "<target path>"\n' +
@@ -891,7 +1048,7 @@ export async function cmdTrigger(
         "  (same words, same meanings as testUI's ui.X.type / ui.X.setValue)\n" +
         "keyDown/keyUp hold/release a key (games, drag) — pair them around frames\n" +
         'modifiers: press "ctrl+Enter" · click "ctrl" · click "ctrl+shift"\n' +
-        "discover paths with: am surface <clientIdx>",
+        "discover paths with: am surface",
       mode,
     );
     Deno.exit(1);
@@ -911,6 +1068,19 @@ export async function cmdTrigger(
   // The body is still printed either way: `available` is how a caller
   // self-corrects without another round-trip. Only the exit code changes.
   const timeout = clientTimeout(flags.timeout);
+  // Resolved from the roster BEFORE the first action: a stale index or the dev
+  // server's reload socket is refused here, instantly and by name, instead of
+  // being sent an action nothing will ever answer.
+  const idx = await resolveUiClient(port, appId, wantIdx, mode);
+  if (idx === null) {
+    outError(
+      `no UI client is connected, so there is nothing to drive. Open the app ` +
+        `(am open) and try again — \`am surface\` can still show you a ` +
+        `server-side render of the UI in the meantime.`,
+      mode,
+    );
+    Deno.exit(1);
+  }
   const post = async (body: Record<string, unknown>): Promise<unknown> => {
     const r = await trojanPost(port, `trigger/${idx}`, body, appId, timeout);
     if (!r.ok) {

@@ -46,6 +46,20 @@ export type LockData = {
   /** Chrome DevTools Protocol port of the instance's desktop window, when
    *  one is open and debuggable. Reserved: written as undefined for now. */
   cdpPort?: number;
+  /** A kernel stamp that changes when a pid is REUSED — see
+   *  {@linkcode processStartToken}.
+   *
+   *  A pid on its own is not an identity. This lock file outlives a reboot
+   *  whenever `XDG_RUNTIME_DIR` is unset (the base is then `/tmp`, which
+   *  Debian and Ubuntu do NOT clear at boot — contradicting
+   *  `docs/persistence/where-files-live.md:34`), and pids wrap. So every kill
+   *  site — `am stop`, `killProcess`, `acquire(killExisting)`, the parent
+   *  watch, `am kill --stale` — was one recycled pid away from SIGTERMing an
+   *  unrelated program of the user's, on the strength of a number in a file.
+   *  Written when the lock is created; absent on locks written before
+   *  alpha69 and on platforms that cannot report it, where the pid alone is
+   *  all there is. */
+  startToken?: string;
 };
 
 /** What a boot records about itself beyond identity — see {@linkcode LockData}. */
@@ -345,6 +359,65 @@ export function isProcessAlive(pid: number): boolean {
   }
 }
 
+/** A stamp the KERNEL controls that changes when a pid is recycled, or null
+ *  when this platform cannot say.
+ *
+ *  Linux: field 22 of `/proc/<pid>/stat` — the process's start time in clock
+ *  ticks since boot. (Field 2, `comm`, may contain spaces and parentheses, so
+ *  it is cut at the LAST `)` before splitting — a bug every naive parse of
+ *  this file has.) macOS: `ps -o lstart=`, second resolution, which is enough:
+ *  a pid that wrapped all the way around inside one second is not the case
+ *  this guards.
+ *
+ *  Pure read, no signal, no side effect. Returns null (rather than throwing)
+ *  for a pid that is gone — the caller's liveness check owns that answer. */
+export function processStartToken(pid: number): string | null {
+  if (!(pid > 0)) return null;
+  try {
+    if (Deno.build.os === "linux") {
+      const stat = Deno.readTextFileSync(`/proc/${pid}/stat`);
+      const after = stat.slice(stat.lastIndexOf(")") + 2);
+      const f = after.split(" ");
+      // stat fields are 1-based and `after` begins at field 3, so field 22 is
+      // index 19.
+      const ticks = f[19];
+      return ticks && /^\d+$/.test(ticks) ? ticks : null;
+    }
+    if (Deno.build.os === "darwin") {
+      const r = new Deno.Command("ps", {
+        args: ["-o", "lstart=", "-p", String(pid)],
+        stdout: "piped",
+        stderr: "null",
+      }).outputSync();
+      if (!r.success) return null;
+      const t = new TextDecoder().decode(r.stdout).trim();
+      return t || null;
+    }
+  } catch { /* no /proc entry, no ps, no permission — we simply cannot say */ }
+  return null;
+}
+
+/** Is the process this lock names still THE process the lock was written for?
+ *
+ *  `isProcessAlive` answers "does some process have this pid", which is a
+ *  different question and the one every kill site used to ask. A lock that
+ *  survived a reboot names a pid the kernel has since handed to somebody
+ *  else, and SIGTERM does not ask who it is talking to.
+ *
+ *  Fails SAFE in the only direction that is safe: when either token is
+ *  unavailable (an old lock, Windows, a pid we cannot read) this falls back to
+ *  liveness — which is exactly the old behaviour, never worse. When both are
+ *  known and they DIFFER, the pid was recycled and the answer is no. */
+export function isLockOwnerAlive(
+  lock: { pid: number; startToken?: string },
+): boolean {
+  if (!isProcessAlive(lock.pid)) return false;
+  if (!lock.startToken) return true;
+  const now = processStartToken(lock.pid);
+  if (now === null) return true;
+  return now === lock.startToken;
+}
+
 /** Check if a TCP port has something listening */
 export async function isPortInUse(port: number): Promise<boolean> {
   try {
@@ -439,8 +512,31 @@ function tryCreateLock(data: LockData): boolean {
     fd.writeSync(encoded);
     fd.close();
     return true;
-  } catch {
-    return false; // file already exists (another process won the race)
+  } catch (e) {
+    // `false` means ONE thing: the file is already there, so another process
+    // won the race. It used to mean "anything went wrong", and the caller
+    // renders that as `[AIO] Already running` + exit 1 — which for a lock dir
+    // that cannot be written is a lie about a machine problem, after a 3-second
+    // retry loop looking for an owner that does not exist (measured: 3041 ms,
+    // then "Already running: probe-app", pid 0).
+    //
+    // The triggers are ordinary: a read-only or full /tmp, `/tmp/aio` owned by
+    // another uid when XDG_RUNTIME_DIR is unset (Docker, ssh without logind,
+    // cron), SELinux. In every one of them the app cannot boot and the message
+    // sends the operator to look for a process.
+    if (e instanceof Deno.errors.AlreadyExists) return false;
+    throw new Error(
+      `cannot write the single-instance lock ${path}: ${
+        e instanceof Error ? e.message : String(e)
+      }\n` +
+        `  This is not "already running" — the lock DIRECTORY is unusable ` +
+        `(read-only or full filesystem, owned by another user, or blocked by ` +
+        `SELinux/AppArmor).\n` +
+        `  fix: make ${dirname(path)} writable by this user, or point the ` +
+        `lock dir somewhere writable with XDG_RUNTIME_DIR=… (or AIO_APPS_DIR=… ` +
+        `to scope the whole instance).`,
+      { cause: e },
+    );
   }
 }
 
@@ -577,6 +673,10 @@ export class AppLock {
       status: "starting",
       cwd: Deno.cwd(),
       home: this.home,
+      // Recorded WITH the pid, because the pid alone is not an identity.
+      ...(processStartToken(Deno.pid) !== null
+        ? { startToken: processStartToken(Deno.pid)! }
+        : {}),
       ...(meta.aioVersion !== undefined ? { aioVersion: meta.aioVersion } : {}),
       ...(meta.cdpPort !== undefined ? { cdpPort: meta.cdpPort } : {}),
     });
@@ -603,8 +703,11 @@ export class AppLock {
         continue;
       }
 
-      // Lock exists — check if owner is alive
-      if (!isProcessAlive(existing.pid)) {
+      // Lock exists — check if the OWNER is alive (not merely "some process
+      // has that pid": a lock under /tmp outlives a reboot, and a recycled pid
+      // would make this refuse to boot on account of a stranger's process, or
+      // — with killExisting — kill it).
+      if (!isLockOwnerAlive(existing)) {
         // Dead process — clean stale lock and retry
         removeLock(this.key);
         await delay(100);
@@ -644,7 +747,7 @@ export class AppLock {
         // Kill the old instance — SIGTERM, then wait out the WHOLE graceful
         // budget before SIGKILL: a takeover is not a reason to truncate the
         // previous instance's final snapshot.
-        await killProcess(existing.pid, SHUTDOWN_BUDGET_MS + 1000);
+        await killProcess(existing.pid, SHUTDOWN_BUDGET_MS + 1000, existing);
         removeLock(this.key);
         await delay(100);
         continue;
@@ -723,7 +826,12 @@ export function instances(appId?: string): InstanceInfo[] {
       const lock = readLock(key);
       if (!lock || (appId && lock.appId !== appId)) continue;
 
-      const alive = isProcessAlive(lock.pid);
+      // By OWNER, not by pid: a lock that survived a reboot (the base is
+      // `/tmp` whenever XDG_RUNTIME_DIR is unset, and /tmp is not cleared at
+      // boot on Debian/Ubuntu) names a pid the kernel has since reused, and
+      // `isProcessAlive` would call that stale lock a running app — which is
+      // how `am stop` came to SIGTERM a stranger.
+      const alive = isLockOwnerAlive(lock);
       if (!alive) {
         // Clean stale lock
         removeLock(key);
@@ -788,8 +896,24 @@ export async function descendantPids(pid: number): Promise<number[]> {
 export async function killProcess(
   pid: number,
   grace = KILL_GRACE_MS,
+  expect?: { startToken?: string },
 ): Promise<void> {
   if (!isProcessAlive(pid)) return;
+  // `expect` is the lock that named this pid. If it recorded a start token and
+  // the live process's does not match, the pid was RECYCLED: signalling it
+  // would kill whatever the user happens to be running now. Refusing is the
+  // only safe answer, and it is loud — a caller that wanted a process gone has
+  // to know it is not gone.
+  if (expect?.startToken && !isLockOwnerAlive({ pid, ...expect })) {
+    throw new Error(
+      `refusing to signal pid ${pid}: it is no longer the process that ` +
+        `recorded this lock (the pid was reused — the lock outlived a reboot, ` +
+        `which happens whenever XDG_RUNTIME_DIR is unset and the lock dir is ` +
+        `under /tmp).\n` +
+        `  fix: the lock is stale — remove it (am stop --stale) rather than ` +
+        `killing pid ${pid}, which now belongs to something else.`,
+    );
+  }
   // Ask first, kill second.
   const kids = await descendantPids(pid);
   try {

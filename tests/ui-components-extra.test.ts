@@ -190,3 +190,92 @@ Deno.test("ui/Toast: error variant gets role=alert", async () => {
   await ui.dispose();
   _resetToasts();
 });
+
+// Every way a toast can go away must clear its auto-dismiss timer.
+//
+// There were two dismissal paths and only one of them did: `toast()`'s returned
+// closure cleared the timer (and carried a comment saying why), while the ×
+// button inside `ToastHost` filtered the queue and left it running. The × is
+// the path a USER takes, so the leak lived exactly where it would actually
+// happen — one live timer per dismissed toast, for the rest of its duration,
+// in a helper an app calls on every save. Every existing toast test passed
+// `duration: 0`, so no timer was ever armed and nothing could have caught it.
+//
+// Counted rather than reasoned about: arm real timers, take each dismissal
+// path, and require `clearTimeout` to have matched `setTimeout` by the end.
+Deno.test("ui/Toast: every dismissal path clears its auto-dismiss timer", async () => {
+  _resetToasts();
+  // A distinctive duration, so only the TOAST timers are counted — the
+  // harness arms plenty of its own.
+  const DUR = 60_000;
+  let set = 0, cleared = 0;
+  const armed = new Set<unknown>();
+  const realSet = globalThis.setTimeout;
+  const realClear = globalThis.clearTimeout;
+  // deno-lint-ignore no-explicit-any
+  (globalThis as any).setTimeout = (
+    fn: unknown,
+    ms?: number,
+    ...a: unknown[]
+  ) => {
+    // deno-lint-ignore no-explicit-any
+    const id = (realSet as any)(fn, ms, ...a);
+    if (ms === DUR) {
+      set++;
+      armed.add(id);
+    }
+    return id;
+  };
+  // deno-lint-ignore no-explicit-any
+  (globalThis as any).clearTimeout = (id: unknown) => {
+    if (armed.delete(id)) cleared++;
+    // deno-lint-ignore no-explicit-any
+    return (realClear as any)(id);
+  };
+  try {
+    const { ui } = await mountWithWin(() => h(ToastHost, null));
+
+    // Checked after EACH path, never only at the end: a later path (or the
+    // reset in `finally`) would otherwise clear an earlier path's leaked timer
+    // and the tally would balance while the bug stood.
+    const balanced = (what: string) => {
+      assertEquals(
+        cleared,
+        set,
+        `${what} must clear the timer it armed — ${set} armed, ${cleared} ` +
+          `cleared. A timer that outlives its toast is a leaked op per ` +
+          `dismissal, and this helper is called on every save.`,
+      );
+    };
+
+    // 1 — the returned closure.
+    const dismiss = toast("by closure", { duration: DUR });
+    await ui.settle();
+    assertEquals(set, 1, "a toast arms exactly one auto-dismiss timer");
+    dismiss();
+    await ui.settle();
+    balanced("the dismiss function toast() returns");
+
+    // 2 — the × button, i.e. what a user does.
+    toast("by button", { duration: DUR });
+    await ui.settle();
+    ui.DismissButton.click();
+    await ui.settle();
+    assert(!ui.html().includes("by button"), "the × must remove the toast");
+    balanced("the × button in ToastHost");
+
+    // 3 — the reset seam, with a toast still outstanding.
+    toast("by reset", { duration: DUR });
+    await ui.settle();
+    _resetToasts();
+    await ui.settle();
+    balanced("_resetToasts() with a toast still outstanding");
+
+    assertEquals(set, 3, "one timer per toast, three toasts");
+    await ui.dispose();
+  } finally {
+    globalThis.setTimeout = realSet;
+    globalThis.clearTimeout = realClear;
+    _resetToasts();
+  }
+});

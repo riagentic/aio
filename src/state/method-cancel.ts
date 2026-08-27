@@ -58,6 +58,44 @@ export function registerCancelOn(
   }
 }
 
+/** Forget every cancel trigger a cell registered — what releasing the cell
+ *  calls.
+ *
+ *  `registerCancelOn` runs on every compose and nothing ever undid it, so the
+ *  registry only grew: an app that closed left its triggers behind, and the
+ *  NEXT app in the same process (every sequential test, every dev restart, a
+ *  second `testServer()`) inherited them. A cell named the same as a dead one
+ *  had its methods aborted by an action it never listed, and a process that
+ *  composes many short-lived cells grew one entry per name for its lifetime.
+ *  Registration belongs to a binding, so it ends with the binding.
+ *
+ *  Scoped by cell PREFIX, with the same one-step-short caveat as `_pendingFor`
+ *  above: two apps in one process holding DIFFERENT defs with the SAME id
+ *  would clear each other's triggers. Same narrow case, same fix (key the
+ *  registry by app identity), same todo.md entry. */
+export function unregisterCancelOn(cellPrefix: string): void {
+  const prefix = `${cellPrefix}:`;
+  for (const [type, keys] of _triggers) {
+    for (const key of keys) {
+      if (key.startsWith(prefix)) keys.delete(key);
+    }
+    // A trigger whose last listener is gone is not a trigger any more; leaving
+    // the empty Set behind would be the same unbounded growth one level down.
+    if (keys.size === 0) _triggers.delete(type);
+  }
+  for (const key of [..._inflight.keys()]) {
+    if (key.startsWith(prefix)) _inflight.delete(key);
+  }
+}
+
+/** @internal How many trigger→method edges the registry holds. Exists so the
+ *  leak can be ASSERTED rather than argued about (tests/method-cancel). */
+export function _cancelTriggerCount(): number {
+  let n = 0;
+  for (const keys of _triggers.values()) n += keys.size;
+  return n;
+}
+
 /** Track an in-flight async method call. Returns an untrack fn. */
 export function trackCall(
   cellPrefix: string,
@@ -118,6 +156,20 @@ export function pendingCalls(): number {
  *  B's in-flight work. */
 export function pendingCallsFor(cells?: Set<string>): number {
   return _pendingFor(cells).length;
+}
+
+/** Framework-internal: the METHOD KEYS (`cell:method`) of every call still in
+ *  flight, with how many of each.
+ *
+ *  A harness whose settle loop gives up has to say WHAT it was waiting for —
+ *  "settle gave up" names no cause and no fix, and the pending PROMISES carry
+ *  no label. `_inflight` is keyed by exactly the name a human wrote. */
+export function _inflightMethodKeys(): string[] {
+  const out: string[] = [];
+  for (const [key, set] of _inflight) {
+    out.push(set.size > 1 ? `${key} (×${set.size})` : key);
+  }
+  return out.sort();
 }
 
 /** Framework-internal: the pending method-call promises themselves. The

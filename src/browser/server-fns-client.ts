@@ -6,6 +6,7 @@
 import { enc, type SfnrPayload } from "../protocol/envelope.ts";
 import { serializeArgs } from "../protocol/wire-value.ts";
 import type { Remote } from "../protocol/protocol-types.ts";
+import { getConnectedSignal } from "../state-core.ts";
 
 const SFN_TIMEOUT_MS = 30_000;
 
@@ -13,14 +14,55 @@ const _pending = new Map<string, {
   resolve: (v: unknown) => void;
   reject: (e: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+  what: string;
 }>();
 
 let _send: ((raw: string) => void) | null = null;
 let _cid = 0;
 
+/** Settle every in-flight call as failed. A serverFn call is NOT queued —
+ *  `_send` writes it straight to the socket or drops it — so once the
+ *  connection is gone the request is definitively lost and its caller can be
+ *  told immediately.
+ *
+ *  Without this, a disconnect (or a teardown, or a protocol mismatch — all of
+ *  which close the socket) left the caller waiting out the full 30s and then
+ *  blamed the wrong thing: "server unreachable or the function hung", for a
+ *  call the client itself had already given up on. */
+function _failAll(reason: string): number {
+  if (_pending.size === 0) return 0;
+  const entries = [..._pending.entries()];
+  _pending.clear();
+  for (const [, p] of entries) {
+    clearTimeout(p.timer);
+    p.reject(new Error(`${p.what} — ${reason}`));
+  }
+  return entries.length;
+}
+
+/** True when the transport reports a live connection. */
+function _connected(): boolean {
+  return getConnectedSignal().peek() === true;
+}
+
+let _watchingConnection = false;
+/** One subscription, installed with the transport: the connection dropping is
+ *  the event that kills every in-flight call. */
+function _watchConnection(): void {
+  if (_watchingConnection) return;
+  _watchingConnection = true;
+  const sig = getConnectedSignal();
+  sig.subscribe(() => {
+    if (sig.peek() !== true) {
+      _failAll("the connection to the server was lost before it replied");
+    }
+  });
+}
+
 /** Wire the transport's raw send (called by browser-air-transport at boot). */
 export function _registerSfnTransport(send: (raw: string) => void): void {
   _send = send;
+  _watchConnection();
 }
 
 /** Route a decoded "sfnr" payload. Returns true when consumed. */
@@ -76,18 +118,32 @@ export function serverFn<T extends FnMap>(ns: string): Remote<T> {
               ),
             );
           }
+          // OFFLINE IS AN ANSWER, NOT A WAIT. There is no offline queue for
+          // serverFn calls: the transport's raw send drops the frame when the
+          // socket is not open, so a call made while disconnected used to sit
+          // silently for 30s and then report "server unreachable". Say it now,
+          // and say which call it was.
+          if (!_connected()) {
+            return reject(
+              new Error(
+                `${what} — not connected to the server, so nothing was sent ` +
+                  `(serverFn calls are never queued). Wait for the connection ` +
+                  `(useAio().ready / client.subscribe) before calling.`,
+              ),
+            );
+          }
           const cid = `sfn-${++_cid}-${Date.now()}`;
           const timer = setTimeout(() => {
             _pending.delete(cid);
             reject(
               new Error(
-                `serverFn("${ns}").${prop} timed out after ${
+                `${what} timed out after ${
                   SFN_TIMEOUT_MS / 1000
-                }s — server unreachable or the function hung`,
+                }s — the server never replied (the function may still be running)`,
               ),
             );
           }, SFN_TIMEOUT_MS);
-          _pending.set(cid, { resolve, reject, timer });
+          _pending.set(cid, { resolve, reject, timer, what });
           _send(enc("sfn", { cid, ns, name: prop, args: safeArgs }));
         });
     },
@@ -106,8 +162,9 @@ export function serverFns(ns: string, _fns: FnMap): never {
 
 /** Test isolation. */
 export function _resetSfnClient(): void {
-  for (const p of _pending.values()) clearTimeout(p.timer);
-  _pending.clear();
+  // Settle rather than abandon: a cleared entry whose promise is never settled
+  // is the same hang this module exists to prevent.
+  _failAll("the client was reset");
   _send = null;
   _cid = 0;
 }

@@ -159,6 +159,44 @@ const cellFile = (name: string, body: string) =>
 type Case = { name: string; files: Record<string, string>; expect: string };
 
 const VIOLATIONS: Case[] = [
+  // The update data gate only protects cells that declare a `version` — an
+  // unversioned cell is never stamped, never in the contract, never compared.
+  // Reported only for an app that configures `updates`, which is why the
+  // fixture has to turn it on: BASE does not, and must not (see LEGAL).
+  {
+    name: "an updating app whose persisted cells declare no version",
+    files: app({
+      "src/app.ts":
+        `import { aio } from "aio";\nimport { counter } from "./cell.ts";\n` +
+        `await aio.run({ appId: "probe", cells: { counter }, ` +
+        `updates: { source: "https://r.example.com/probe" } });\n`,
+    }),
+    expect: "data gate cannot protect",
+  },
+  // scan coverage — "I found nothing" and "I looked at nothing" must not print
+  // the same thing. An audit laid a project out as `app/`, planted a credential
+  // field and a `Deno.env` leak in it, and got `Files: 0`, no findings, exit 0.
+  {
+    name: "a project whose code aiol never reads",
+    files: { "deno.json": denoJson() },
+    expect: "aiol read ZERO files",
+  },
+  {
+    name: "code outside the scanned roots",
+    files: app({
+      "lib/util.ts": `export const x = 1;\n`,
+    }),
+    expect: "that aiol does not read",
+  },
+  {
+    name: "a source file too large to read",
+    files: app({
+      // Over the 512 KB per-file limit — silently skipped, so every rule was
+      // silent about it, which reads exactly like a clean file.
+      "src/generated.ts": `export const BLOB = "${"x".repeat(600 * 1024)}";\n`,
+    }),
+    expect: "was NOT read",
+  },
   // config
   {
     name: "no deno.json",
@@ -183,6 +221,25 @@ const VIOLATIONS: Case[] = [
     name: 'obsolete unstable: ["kv"]',
     files: app({ "deno.json": denoJson({ unstable: ["kv"] }) }),
     expect: '"unstable": ["kv"] is no longer needed',
+  },
+  // The `build: {}` block was the last aio config object with no typo gate.
+  // Singular `target` built the DEFAULT target set and said nothing, which
+  // reads as `--targets` being broken rather than the key being misspelled.
+  {
+    name: "misspelled deno.json build key",
+    files: app({
+      "deno.json": denoJson({ build: { target: ["server"] } }),
+    }),
+    expect: 'build.target (did you mean "targets"?)',
+  },
+  {
+    name: "misspelled key inside an object-form build target",
+    files: app({
+      "deno.json": denoJson({
+        build: { targets: { server: { entery: "src/app.ts" } } },
+      }),
+    }),
+    expect: 'build.targets.server.entery (did you mean "entry"?)',
   },
   {
     name: "no aio import mapping",
@@ -397,21 +454,24 @@ const VIOLATIONS: Case[] = [
     expect: "empty state object",
   },
   {
-    name: "cell with neither methods nor actions",
+    name: "cell with no methods",
     files: app({
       "src/cell.ts": cellFile("counter", `{ state: { count: 0 } }`),
     }),
-    expect: "no methods and no actions",
+    // NOT "…and no actions": `actions:` was removed in alpha27, and the rule
+    // used to name it as half of an acceptable answer — advice whose result the
+    // linter's own next run reports as an error.
+    expect: "has no methods",
   },
   {
-    name: "cell mixing methods and actions",
+    name: "cell still carrying an `actions:` block",
     files: app({
       "src/cell.ts": cellFile(
         "counter",
         `{ state: { count: 0 }, methods: { go(s: { count: number }) { s.count++; } }, actions: { Go: 1 } }`,
       ),
     }),
-    expect: "both methods and actions",
+    expect: "'actions:' was removed in alpha27",
   },
   {
     name: "reserved state key",
@@ -654,6 +714,18 @@ const VIOLATIONS: Case[] = [
       ),
     }),
     expect: "Deno.pid is server-only",
+  },
+  {
+    // The rule exempted `.tsx` — the files that ARE the browser bundle. The
+    // loop it sat in reads import SPECIFIERS only, so `Deno.*` in a component
+    // produced zero output while the identical line in a `.ts` cell was a
+    // gate-failing ERROR.
+    name: "Deno.* in a component",
+    files: app({
+      "src/App.tsx":
+        `import { counter } from "./cell.ts";\nconst mode = Deno.env.get("MODE");\nexport default function App() { return <div>{mode}{counter.count}</div>; }\n`,
+    }),
+    expect: "is compiled into the browser bundle",
   },
   {
     name: "transitive server-only import from App.tsx",
@@ -1103,6 +1175,28 @@ await aio.run({ perfBudget: { methods: { "models:scan": { timeout: 0 } } } });
     }),
     expect: "was DELETED in",
   },
+  {
+    // Two self-calls in one method, with NO draft write in the caller — the
+    // shape `writesDraftBefore` cannot see. `addTwice()` reads like "add two"
+    // and adds one: the calls are queued, so the second runs against the state
+    // committed before the first.
+    name: "two same-cell method calls queued inside one method",
+    files: app({
+      "src/queue.ts":
+        `import { cell } from "aio";\nexport const queue = cell("queue", {\n  state: { items: [] as string[] },\n  methods: {\n    add(s: { items: string[] }, t = "x") { s.items.push(t); },\n    addTwice() { queue.add("a"); queue.add("b"); },\n  },\n});\n`,
+    }),
+    expect: "queued",
+  },
+  {
+    // `state: { items: [] }` infers never[], and every USE of it fails —
+    // errors that point at the methods and never at the declaration.
+    name: "empty array literal in cell state has no element type",
+    files: app({
+      "src/bare.ts":
+        `import { cell } from "aio";\nexport const bare = cell("bare", {\n  state: { items: [] },\n  methods: { touch(s: { items: unknown[] }) { s.items; } },\n});\n`,
+    }),
+    expect: "has no element type",
+  },
 ];
 
 Deno.test("aiol: every rule fires on a violation of itself", async () => {
@@ -1148,6 +1242,43 @@ Deno.test("aiol: every report() site in checks.ts has a fixture", () => {
 type Clean = { name: string; files: Record<string, string>; forbid: string };
 
 const LEGAL: Clean[] = [
+  {
+    // `\{[^}]*\}` stops at the FIRST `}` — the inner one — so the caller's own
+    // `retry.timeout` field was read as call()'s deprecated option, reported as
+    // an error AND rewritten to `timeoutMs` by --safe-fix.
+    name: "a nested timeout: in the caller's own data is not call()'s option",
+    forbid: "call({ timeout })",
+    files: app({
+      "src/w.ts":
+        `import { call } from "aio";\nexport const go = () => call({ retry: { timeout: 30 } }, () => 1);\n`,
+    }),
+  },
+  {
+    // A `*.server.tsx` is marked external by the build — it never enters the
+    // bundle, so `Deno.*` in one is correct code.
+    name: "Deno.* in a *.server.tsx is not a browser-bundle leak",
+    forbid: "is compiled into the browser bundle",
+    files: app({
+      "src/report.server.tsx":
+        `export const size = () => Deno.statSync("/tmp/x").size;\n`,
+    }),
+  },
+  {
+    name: "an aio import inside a template literal is not this app's import",
+    forbid: "server-only symbols moved",
+    files: app({
+      "src/gen.ts":
+        `export const TPL = \`\nimport { createDB } from "aio";\n\`;\n`,
+    }),
+  },
+  {
+    name: "a dynamic aio import inside a template literal is not an import",
+    forbid: 'dynamic `import("aio")`',
+    files: app({
+      "src/gen2.ts":
+        `export const TPL = \`\nconst { createDB } = await import("aio");\n\`;\n`,
+    }),
+  },
   {
     // The object form of `build.targets` used to CRASH the linter here
     // ("uiTargets.some is not a function") — the check read only the array

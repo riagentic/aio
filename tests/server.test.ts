@@ -1607,10 +1607,21 @@ Deno.test({
   sanitizeOps: false,
   fn: async () => {
     const dir = await Deno.makeTempDir();
-    // App that imports react — common case where npm: specifier could leak
+    // App that imports react — common case where npm: specifier could leak.
+    //
+    // The mapping is DECLARED, and the import is USED. Both matter now that
+    // the graph validator reads the SOURCE's imports rather than esbuild's
+    // output (which elides an import whose bindings are unused): an app whose
+    // `react` resolves nowhere is an app that blank-screens, and dev says so
+    // instead of serving it — the same answer `deno check` gives. This fixture
+    // is about where the specifier RESOLVES TO, not about a missing dep.
+    await Deno.writeTextFile(
+      join(dir, "deno.json"),
+      JSON.stringify({ imports: { react: "npm:react@^18" } }),
+    );
     await Deno.writeTextFile(
       join(dir, "App.tsx"),
-      `import { useState } from 'react'\nexport default function App() { return null }`,
+      `import { useState } from 'react'\nexport default function App() { return useState ? null : null }`,
     );
     const server = createServer({
       port: DEV_UI_PORT,

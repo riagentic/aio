@@ -333,21 +333,32 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
           // as a size estimate for the patch-vs-full decision it stays useful.
           meta.lastFullJsonStale = sentKind === "patch";
           meta.bpLastSentAt = Date.now();
-          vitalsSystem?.serverTransport.onClientStateSent(meta.id);
-          const _bytes = _encoder.encode(msgToSend).byteLength;
-          const _ps = payloadStats.get(meta.id);
-          if (_ps) {
-            _ps.lastPayloadBytes = _bytes;
-            _ps.totalBytes += _bytes;
-            _ps.count++;
-          } else {
-            payloadStats.set(meta.id, {
-              lastPayloadBytes: _bytes,
-              totalBytes: _bytes,
-              count: 1,
-            });
+          // Everything below is vitals bookkeeping, and it is gated as such.
+          // It used to run UNCONDITIONALLY while its cleanup (server-ws
+          // `_cleanupVitals`) deleted the entry only when a vitals system
+          // existed — so with `diagnostics: false` or `prod: { vitals: false }`
+          // every connection left one `payloadStats` entry behind forever, and
+          // `meta.id` is per CONNECTION, so a browser reloading grew the map
+          // without bound. The measuring cost was the same shape: a full
+          // TextEncoder pass over every payload, per client, per broadcast,
+          // for a diagnostic nobody was reading.
+          if (vitalsSystem) {
+            vitalsSystem.serverTransport.onClientStateSent(meta.id);
+            const _bytes = _encoder.encode(msgToSend).byteLength;
+            const _ps = payloadStats.get(meta.id);
+            if (_ps) {
+              _ps.lastPayloadBytes = _bytes;
+              _ps.totalBytes += _bytes;
+              _ps.count++;
+            } else {
+              payloadStats.set(meta.id, {
+                lastPayloadBytes: _bytes,
+                totalBytes: _bytes,
+                count: 1,
+              });
+            }
+            vitalsSystem.pressureMonitor?.onBroadcast(meta.id, _bytes);
           }
-          vitalsSystem?.pressureMonitor?.onBroadcast(meta.id, _bytes);
         } catch { /* client disconnecting */ }
       }
 

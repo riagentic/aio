@@ -33,6 +33,7 @@ import {
   unknownFleetFlags,
 } from "./build/build-flags.ts";
 import { resolveAppDir, resolveEntry } from "./build/build-config.ts";
+import { DIST_DIR } from "./server/app-files.ts";
 import { ansi } from "./diagnostics/color.ts";
 import {
   crossCompileBlocker,
@@ -296,17 +297,72 @@ export function isArtifactName(name: string, binaryName: string): boolean {
   return false;
 }
 
-/** Pick the flat-layout name for `file`, disambiguating a cross-target
- *  collision (e.g. browser + server both emit the bare binary) by appending the
- *  target before the extension. Does not mutate `used`. */
+/** Which targets must carry their label in the artifact name — computed from
+ *  the PROJECT, never from what one command line happened to build.
+ *
+ *  That distinction is the whole fix. Naming used to be decided by collision
+ *  order inside one run, so `--targets=cli` wrote `dist/notes` (on top of the
+ *  browser binary that had been there) while `--targets=browser,cli` wrote
+ *  `dist/notes` AND `dist/notes-cli` — the same target, two names, depending
+ *  on what else you happened to build in the same command. Anything
+ *  downstream (an installer, a ship manifest, a script) then pointed at a file
+ *  whose identity changed with the invocation.
+ *
+ *  The universe is every target the project DECLARES plus any this run adds,
+ *  in that order. Targets are grouped by the binary name they produce; a group
+ *  of one keeps the bare name (a repo whose two targets are two differently
+ *  named apps — `relay` and `two-apps` — needs no suffix at all), and inside a
+ *  group everything after the FIRST declared member is suffixed. Every
+ *  target's artifact name is therefore a property of the project: stable
+ *  across `--targets=` subsets, incremental builds and machines. */
+export function suffixedTargets(
+  raw: string[] | Record<string, TargetOverride> | undefined,
+  running: readonly ResolvedTarget[],
+  binaryNameOf: (t: ResolvedTarget) => string,
+): Set<string> {
+  const universe = [...normalizeTargets(raw, undefined)];
+  for (const t of running) {
+    if (!universe.some((u) => u.name === t.name)) universe.push(t);
+  }
+  const byName = new Map<string, string[]>();
+  for (const t of universe) {
+    const key = binaryNameOf(t);
+    (byName.get(key) ?? byName.set(key, []).get(key)!).push(t.name);
+  }
+  const suffixed = new Set<string>();
+  for (const group of byName.values()) {
+    for (const label of group.slice(1)) suffixed.add(label);
+  }
+  return suffixed;
+}
+
+/** The flat-layout name for `file` built by `target`: the bare name, unless
+ *  this target shares its binary name with an earlier-declared one.
+ *
+ *  Pure and composition-independent — see `suffixedTargets`. */
 export function placedName(
   file: string,
-  used: Set<string>,
   target: string,
+  suffixed: ReadonlySet<string>,
 ): string {
-  if (!used.has(file)) return file;
+  if (!suffixed.has(target)) return file;
   const ext = extname(file);
   return `${file.slice(0, file.length - ext.length)}-${target}${ext}`;
+}
+
+/** The target names a previous `dist/manifest.json` recorded, so a build can
+ *  say which of them this run is about to drop. Missing/unreadable → none. */
+async function manifestTargetNames(path: string): Promise<string[]> {
+  try {
+    const m = JSON.parse(await Deno.readTextFile(path)) as {
+      targets?: { target?: string; ok?: boolean }[];
+    };
+    return (m.targets ?? []).filter((t) => t.ok !== false).map((t) =>
+      String(t.target)
+    ).filter(Boolean);
+  } catch {
+    return [];
+  }
 }
 
 /** Strip a trailing separator so `/proj/apps/` and `/proj/apps` compare equal.
@@ -581,7 +637,7 @@ export async function buildAll(): Promise<number> {
     );
   }
 
-  const outDir = resolve(join(root, flag("out") ?? block.out ?? "dist"));
+  const outDir = resolve(join(root, flag("out") ?? block.out ?? DIST_DIR));
   // The app dirs come from THE decider — one per target, since each target may
   // compile its own entry — so `out` can never be pointed at the directory
   // holding ANY of the built apps' sources, whatever layout they use.
@@ -605,6 +661,12 @@ export async function buildAll(): Promise<number> {
   }
   const release = Deno.args.includes("--release");
   const force = Deno.args.includes("--force");
+  // Forwarded, not interpreted: only `--android` consults it (see
+  // build-bundle's standalone-APK gate). It has to travel through the fleet
+  // because the fleet IS the build path — `deno task build` and `deno task
+  // compile` are both this module, so a flag it does not forward is a flag no
+  // scaffolded app can reach.
+  const allowServerOnly = Deno.args.includes("--allow-server-only");
 
   // Resolve the single-target build entry. Prefer the caller-supplied
   // `--build-spec` (the generated task passes the framework's own build path /
@@ -716,6 +778,7 @@ export async function buildAll(): Promise<number> {
         ];
         if (release) args.push("--release");
         if (force) args.push("--force");
+        if (allowServerOnly) args.push("--allow-server-only");
         const { code } = await new Deno.Command("deno", {
           args,
           cwd: root,
@@ -833,26 +896,58 @@ export async function buildAll(): Promise<number> {
       }
       return 1;
     }
+    // Which targets the PREVIOUS release in this directory held. `dist/` is
+    // one release, assembled clean — so a narrower build legitimately replaces
+    // a wider one, but it must never do so silently: an artifact that was there
+    // a minute ago and is gone now is exactly the surprise this build reported
+    // as `✓ 1/1 build(s)`.
+    const previousTargets = preserved
+      ? await manifestTargetNames(join(preservedOut, "manifest.json"))
+      : [];
     await Deno.remove(outDir, { recursive: true }).catch(() => {});
     await Deno.mkdir(outDir, { recursive: true });
-    const used = new Set<string>();
+    // Same rule the build itself used for `targetBin` — a per-target `name`,
+    // else the project's title.
+    const suffixed = suffixedTargets(
+      block.targets,
+      targetList,
+      (t) => slugify(t.appName ?? title),
+    );
+    const used = new Map<string, string>(); // placed name → the target that owns it
     const manifestTargets = [];
     for (const r of results) {
       const placed: ArtifactRec[] = [];
       if (r.ok) {
         for (const a of r.artifacts) {
-          // Flat layout: on a cross-target name collision, disambiguate with the
-          // target so nothing silently overwrites (e.g. browser + server binary).
+          // Flat layout, named by TARGET — deterministic, and identical whether
+          // this target was built alone or alongside others (see placedName).
           // Cross-built artifacts already carry their platform (artifactName),
           // so the two axes never collide with each other.
-          const name = placedName(a.file, used, r.target);
-          used.add(name);
+          const name = placedName(a.file, r.target, suffixed);
+          const owner = used.get(name);
+          if (owner !== undefined) {
+            // Two targets claiming one file name: the second move would delete
+            // the first target's artifact and the summary would report both as
+            // built. Refuse, and name the way out (per-target `name:`).
+            throw new Error(
+              `[build] targets "${owner}" and "${r.target}" both produce ` +
+                `${
+                  outDir.replace(root + SEPARATOR, "")
+                }/${name} — the second ` +
+                `would overwrite the first. Give one of them its own name: ` +
+                `"build": { "targets": { "${r.target}": { "name": "…" } } }.`,
+            );
+          }
+          used.set(name, r.target);
           await moveFile(
             join(staging, `${r.target}__${r.platform}`, a.file),
             join(outDir, name),
           );
           placed.push({ file: name, bytes: a.bytes });
         }
+        // The summary prints what is ON DISK. It used to print the staged name
+        // (`✓ cli → notes`) while the file it had just written was `notes-cli`.
+        r.artifacts = placed;
       }
       manifestTargets.push({
         target: r.target,
@@ -888,6 +983,26 @@ export async function buildAll(): Promise<number> {
       join(outDir, "manifest.json"),
       JSON.stringify(manifest, null, 2) + "\n",
     );
+    // …and say what this release no longer holds. `dist/` is assembled clean,
+    // so building one target replaces a directory that held others — correct,
+    // and silent until now: the artifacts were simply gone, with a green
+    // summary above them.
+    const dropped = previousTargets.filter((t) =>
+      !results.some((r) => r.ok && r.target === t)
+    );
+    if (dropped.length > 0) {
+      console.log(
+        `\n  ${C.yellow}note:${C.r} ${
+          outDir.replace(root + SEPARATOR, "")
+        }/ is one release, rebuilt clean — it no longer holds ${C.blue}${
+          dropped.join(", ")
+        }${C.r} ${C.dim}(built into it earlier).${C.r}\n  ${C.dim}Build them ` +
+          `together to keep both: ${C.r}${C.blue}--targets=${
+            [...dropped, ...results.filter((r) => r.ok).map((r) => r.target)]
+              .join(",")
+          }${C.r}`,
+      );
+    }
   } finally {
     await Deno.remove(staging, { recursive: true }).catch(() => {});
   }

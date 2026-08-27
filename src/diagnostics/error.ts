@@ -20,6 +20,7 @@ export type AioErrorCode =
   | "QUEUE_OVERFLOW"
   | "DISPATCH_LOOP"
   | "DISPATCH_CLOSED"
+  | "DISPATCH_ABORTED"
   | "MEMORY_PRESSURE"
   | "MEMORY_CRITICAL"
   | "BUDGET_REDUCE"
@@ -92,6 +93,7 @@ const CODE_TO_SOURCE: Record<AioErrorCode, AioErrorSource> = {
   QUEUE_OVERFLOW: "dispatch",
   DISPATCH_LOOP: "dispatch",
   DISPATCH_CLOSED: "dispatch",
+  DISPATCH_ABORTED: "dispatch",
   MEMORY_PRESSURE: "memory",
   MEMORY_CRITICAL: "memory",
   BUDGET_REDUCE: "reduce",
@@ -248,12 +250,36 @@ export class AioError extends Error {
     this.stateSnapshot = stateSnapshot;
   }
 
+  /** The remedy for this error's code — the SAME text the error box and the
+   *  diagnostic bus's `hint` carry, read from the one generator.
+   *
+   *  It exists as a property because the fix used to be reachable only two
+   *  ways: `formatErrorBox()` (dev console) and `DiagnosticEvent.hint` (the
+   *  bus). An `AioError` that escaped into an app's own `catch` — rethrown,
+   *  awaited, printed with `console.error(err)` — carried the CAUSE and none
+   *  of the FIX, so the 21 tips in {@link generateTip} were invisible exactly
+   *  where a developer is already stuck. */
+  get tip(): string | undefined {
+    return generateTip(this);
+  }
+
+  /** `String(err)` — cause AND fix, because that is what a terminal shows.
+   *  `.message` is left alone on purpose: it is compared, logged and matched
+   *  in a dozen places, and a remedy is not part of what went wrong. */
+  override toString(): string {
+    const tip = this.tip;
+    return tip
+      ? `${this.name}: ${this.message}\n  → ${tip}`
+      : `${this.name}: ${this.message}`;
+  }
+
   /** Serialize to a plain object — suitable for JSON logging and diagnostic reports. */
   toJSON(): Record<string, unknown> {
     return {
       code: this.code,
       source: this.source,
       message: this.message,
+      tip: this.tip,
       context: this.context,
       timestamp: this.timestamp,
       correlationId: this.correlationId,
@@ -265,24 +291,33 @@ export class AioError extends Error {
 
 // ─── Teachable errors ────────────────────────────────────────────
 
-/** A framework error that TEACHES: what happened, the one-line fix, and
+/** A framework message that TEACHES: what happened, the one-line fix, and
  *  (optionally) a doc link — the shape the credential refusal proved out,
- *  generalized so every boot/compose/config error follows one format:
+ *  generalized so every boot/compose/config error follows ONE format:
  *
- *      [aio] <what>
+ *      <what>
  *        → fix: <fix>
  *        → docs: <doc>
  *
- *  Use for developer-facing framework errors (not user-facing app errors). */
+ *  Use for developer-facing framework messages (not user-facing app errors).
+ *  Exported from `aio/extras` so an app's own boot checks can speak the same
+ *  sentence shape as the framework's.
+ *
+ *  NO `[aio]` PREFIX. This string's home is `log.warn`/`log.error`, and the
+ *  logger already prints the category it INFERRED from the call site — a
+ *  hand-written prefix made every such line read `ERROR  aio  [aio] …`, the
+ *  same fact twice. {@linkcode teachableError} adds the prefix, because a
+ *  thrown Error lands on a bare stderr with no category column to carry it. */
 export function teachMessage(what: string, fix: string, doc?: string): string {
-  const lines = [`[aio] ${what}`, `  → fix: ${fix}`];
+  const lines = [what, `  → fix: ${fix}`];
   if (doc) lines.push(`  → docs: ${doc}`);
   return lines.join("\n");
 }
 
-/** {@link teachMessage} as a throwable Error. */
+/** {@linkcode teachMessage} as a throwable Error — prefixed `[aio]`, because
+ *  an Error's text is all a reader gets and it has to name its own source. */
 export function teachableError(what: string, fix: string, doc?: string): Error {
-  return new Error(teachMessage(what, fix, doc));
+  return new Error(`[aio] ${teachMessage(what, fix, doc)}`);
 }
 
 // ─── Factory ─────────────────────────────────────────────────────────────────
@@ -395,9 +430,11 @@ export function generateTip(err: AioError): string | undefined {
     case "QUEUE_OVERFLOW":
       return `Tip: Action queue exceeded ${10_000} entries. You may have a dispatch loop — check effects that dispatch synchronously.`;
     case "DISPATCH_LOOP":
-      return `Tip: 1000+ iterations detected. A reducer or effect is dispatching back to itself. Break the cycle.`;
+      return `Tip: the drain loop hit its iteration ceiling (the message names it — the same bound as the action queue). A reducer or effect is dispatching back to itself. Break the cycle.`;
     case "DISPATCH_CLOSED":
       return `Tip: Action dispatched after the app/cell was closed — it was not applied. Stop dispatching during/after shutdown, or guard awaited calls.`;
+    case "DISPATCH_ABORTED":
+      return `Tip: The drain loop threw outside every per-action guard, so these actions were never applied and dispatch was reset. The preceding error names the cause — a common one is a non-plain value (typed array, Map/Set) in cell state under freezeState. Retry the actions once the cause is fixed.`;
     case "MEMORY_PRESSURE":
       return `Tip: Heap usage rising. Check per-cell state sizes — prune unbounded arrays or move large data to SQLite.`;
     case "MEMORY_CRITICAL":
@@ -531,6 +568,13 @@ export function formatErrorCompact(err: AioError): string {
   if (err.context.cellName) parts.push(err.context.cellName);
   parts.push(err.message);
   if (err.correlationId !== "none") parts.push(`cid=${err.correlationId}`);
+  // The FIX travels with the cause on the prod path too. This is the line a
+  // production log keeps; dropping the remedy from it made the box-vs-compact
+  // split a difference in how much you are TOLD, which is the one dev/prod
+  // divergence class the project does allow — but in the wrong direction,
+  // since prod is where nobody can re-run it in dev to see the box.
+  const tip = generateTip(err);
+  if (tip) parts.push(`| ${tip.replace(/^Tip: /, "fix: ")}`);
   return parts.join(" ");
 }
 
@@ -575,7 +619,7 @@ export function reportError(err: AioError, opts: ReportErrorOpts = {}): void {
       try {
         onError(err);
       } catch (hookErr) {
-        log.error("[aio] onError hook threw:", { detail: String(hookErr) });
+        log.error("onError hook threw:", { detail: String(hookErr) });
       }
     }
 
@@ -608,6 +652,6 @@ export function reportError(err: AioError, opts: ReportErrorOpts = {}): void {
     }
   } catch {
     // Fallback — never throw from reportError
-    log.error("[AIO] reportError failed, raw error:", { detail: String(err) });
+    log.error("reportError failed, raw error:", { detail: String(err) });
   }
 }

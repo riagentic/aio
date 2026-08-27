@@ -25,6 +25,8 @@ import {
   readU64,
   securityAttributesBytes,
   u32,
+  WAIT_OBJECT_0,
+  waitFailed,
   winError,
   wstr,
 } from "../src/server/win-pipe.ts";
@@ -134,4 +136,19 @@ Deno.test("isPipePath: exactly the \\\\.\\pipe\\ namespace", () => {
   assert(!isPipePath("/tmp/aio/x.sock"));
   assert(!isPipePath("C:\\Users\\x\\x.sock"));
   assert(!isPipePath("//./pipe/x"));
+});
+
+// `WaitForSingleObject`'s return value used to be discarded, so a wait that
+// FAILED fell through to `GetOverlappedResult` on an operation that had never
+// completed — reporting whatever `GetLastError` held under the wrong call's
+// name. With `INFINITE` there is no timeout to tolerate: signalled or broken.
+Deno.test("win-pipe: only WAIT_OBJECT_0 means the wait completed", () => {
+  assertEquals(WAIT_OBJECT_0, 0);
+  assertEquals(waitFailed(WAIT_OBJECT_0), false);
+  // WAIT_ABANDONED (0x80), WAIT_TIMEOUT (0x102) and WAIT_FAILED (0xFFFFFFFF)
+  // are all "the wait did not complete normally" — none of them may be read as
+  // an operation that finished.
+  for (const rc of [0x80, 0x102, 0xFFFFFFFF, 1, 42]) {
+    assertEquals(waitFailed(rc), true, `rc=0x${rc.toString(16)}`);
+  }
 });

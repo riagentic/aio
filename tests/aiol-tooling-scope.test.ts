@@ -10,10 +10,15 @@
 // loudest where the stakes are lowest stops being read.
 //
 // So: scan tooling, and skip exactly the rules whose premise is false there.
-import { assert } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
-import { buildContext, isToolingPath, looksLikeApp } from "../aiol/context.ts";
-import { checkPerformance, checkTesting } from "../aiol/checks.ts";
+import {
+  buildContext,
+  isTestPath,
+  isToolingPath,
+  looksLikeApp,
+} from "../aiol/context.ts";
+import { checkPerformance, checkTesting, checkUI } from "../aiol/checks.ts";
 
 /** The same offending source, once as app code and once as tooling. */
 const CELL_WITH_SYNC_IO_AND_LOGS = `
@@ -177,4 +182,146 @@ Deno.test("aiol: the framework repo gets none of them", async () => {
       }`,
     );
   });
+});
+
+// The twin of the rule above, and the same failure it exists to prevent.
+//
+// `SCANNED_ROOTS` includes `test/` and `tests/` on purpose — a test that
+// misuses the API is worth reporting. What does not apply there is the premise
+// "this file is compiled into the browser bundle": a `*.test.tsx` is run by
+// `deno test`, and `Deno.test` is its first line. Without the predicate the
+// `Deno.*` rule reported every UI test file as shipped code — 55 ERRORs across
+// 16 files in one real app, all false, while `check:graph` walked the actual
+// module graph and found no blocking import at all.
+Deno.test("isTestPath: the rule, and what it deliberately excludes", () => {
+  assert(isTestPath("src/test/ui/flow.test.tsx"));
+  assert(isTestPath("tests/thing.test.ts"));
+  assert(
+    isTestPath("test/thing.ts"),
+    "a test/ segment, whatever the file name",
+  );
+  assert(isTestPath("src/cell_test.ts"));
+  assert(isTestPath("src\\test\\ui\\flow.tsx"), "windows separators");
+  // Not a prefix match on the bare word.
+  assert(!isTestPath("src/app.ts"));
+  assert(!isTestPath("src/testing/harness.ts"), "testing/ is shipped code");
+  assert(!isTestPath("src/latest/thing.ts"));
+});
+
+// …and the same thing through the REAL rule, in both directions. The predicate
+// test above proves the shape; this proves the rule uses it, which is the half
+// that actually regressed.
+Deno.test("aiol: the browser-bundle rule fires in a component and NOT in a UI test", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "aiol-testpath-" });
+  try {
+    await Deno.mkdir(join(dir, "src", "test", "ui"), { recursive: true });
+    await Deno.writeTextFile(
+      join(dir, "deno.json"),
+      JSON.stringify({
+        imports: { aio: "jsr:@riagentic/aio@1.0.0" },
+        compilerOptions: { jsx: "react-jsx", jsxImportSource: "aio" },
+      }),
+    );
+    // A UI test: `Deno.test` is its first line, and it is never bundled.
+    await Deno.writeTextFile(
+      join(dir, "src", "test", "ui", "flow.test.tsx"),
+      `Deno.test("renders", () => {\n  const _ = Deno.env.get("HOME");\n});\n`,
+    );
+    // A real component doing the thing that blank-pages a client.
+    await Deno.writeTextFile(
+      join(dir, "src", "App.tsx"),
+      `const home = Deno.env.get("HOME");\nexport default function App() {\n  return <div>{home}</div>;\n}\n`,
+    );
+    const { ctx, report } = await buildContext(dir);
+    checkUI(ctx);
+    const errs = report.issues.filter((i) => i.severity === "error");
+    const inTest = errs.filter((i) => (i.file ?? "").includes(".test.tsx"));
+    assertEquals(
+      inTest.map((i) => i.message),
+      [],
+      "a UI test file is run by `deno test`, never bundled",
+    );
+    assert(
+      errs.some((i) => (i.file ?? "").includes("App.tsx")),
+      `the rule must still fire on a component: ${
+        JSON.stringify(errs.map((i) => i.file))
+      }`,
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+// The SWEEP, not just the one rule that was reported.
+//
+// `isToolingPath`'s doc names three premises that do not hold outside shipped
+// code — "sync I/O blocks the event loop", "use schedule instead of setTimeout",
+// "this cell has no test file" — and every one of them holds no better in a
+// test than in a benchmark. Two of the rules skipped `.test.ts` by NAME, which
+// missed `.test.tsx`, `_test.ts`, and everything under a `test/` directory; the
+// rest did not skip tests at all. A cell written as a fixture inside a test was
+// told to use `schedule`, to stop blocking clients it does not have, and to go
+// and write itself a test file.
+Deno.test("aiol: premise-bound rules fire in a cell and NOT in a test fixture", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "aiol-testsweep-" });
+  const FIXTURE = `import { cell } from "aio";
+export const probe = cell("probe", {
+  state: { n: 0 },
+  methods: {
+    scan(s: { n: number }) {
+      const files = Deno.readDirSync(".");
+      console.log("scanning", files);
+      setTimeout(() => s.n++, 50);
+    },
+  },
+});
+`;
+  try {
+    await Deno.mkdir(join(dir, "src", "test", "ui"), { recursive: true });
+    await Deno.writeTextFile(
+      join(dir, "deno.json"),
+      JSON.stringify({
+        imports: { aio: "jsr:@riagentic/aio@1.0.0" },
+        compilerOptions: { jsx: "react-jsx", jsxImportSource: "aio" },
+      }),
+    );
+    await Deno.writeTextFile(
+      join(dir, "src", "app.ts"),
+      `import { aio } from "aio";
+import "./cell.ts";
+await aio.run({ appId: "fx" });
+`,
+    );
+    await Deno.writeTextFile(join(dir, "src", "cell.ts"), FIXTURE);
+    // The SAME source, as a UI test fixture.
+    await Deno.writeTextFile(
+      join(dir, "src", "test", "ui", "fixture.test.tsx"),
+      FIXTURE.replace('cell("probe"', 'cell("fixtureProbe"'),
+    );
+    const { ctx, report } = await buildContext(dir);
+    checkPerformance(ctx);
+    checkTesting(ctx);
+    const inTest = report.issues.filter((i) =>
+      (i.file ?? "").includes(".test.tsx")
+    );
+    assertEquals(
+      inTest.map((i) => `${i.severity} ${i.message}`),
+      [],
+      "a cell inside a test is a fixture — no clients, no observed timers, no " +
+        "test file of its own",
+    );
+    // …and the identical source in `src/cell.ts` is still reported, on all
+    // three premises. Without this half the sweep could be "skip everything".
+    const inSrc = report.issues.filter((i) =>
+      (i.file ?? "").includes("src/cell.ts")
+    ).map((i) => i.message).join(" | ");
+    for (const premise of ["sync I/O", "setTimeout", "no test file"]) {
+      assert(
+        inSrc.includes(premise),
+        `shipped code must still be told about "${premise}": ${inSrc}`,
+      );
+    }
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
 });

@@ -893,19 +893,30 @@ Deno.test({
 });
 
 // ════════════════════════════════════════════════════════════════════
-// 19. Form bind() returns live value (getter, not snapshot)
+// 19. Form bind() returns a snapshot, read at bind() time
 // ════════════════════════════════════════════════════════════════════
 
 Deno.test({
-  name: "useForm: bind() value tracks signal changes",
+  name: "useForm: bind() reads the field AT BIND TIME, per render",
   async fn() {
+    // This used to assert a live getter, which was the defect: `bind()`'s
+    // result is handed to `h()` as props, so a getter deferred the read past
+    // the render's tracking window (no subscription) and made
+    // `prev.value === next.value` unconditionally true (no DOM write — a
+    // rejected keystroke or a `reset()` stayed on screen). A render binds; the
+    // bind is the read.
     const form = useForm({
       name: { initial: "Alice" },
     });
     const bound = form.bind("name");
     assertEquals(bound.value, "Alice");
     form.fields.name.set("Bob");
-    assertEquals(bound.value, "Bob"); // Should be live, not stale
+    assertEquals(
+      bound.value,
+      "Alice",
+      "props describe the render that made them",
+    );
+    assertEquals(form.bind("name").value, "Bob", "the next render binds again");
   },
 });
 

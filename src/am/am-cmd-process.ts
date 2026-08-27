@@ -21,11 +21,13 @@ import {
   AppLock,
   type InstanceInfo,
   instances,
+  isLockOwnerAlive,
   isProcessAlive,
   isSocketAlive,
   killProcess,
   type LockData,
   lockDir,
+  processStartToken,
   readLaunchInfo,
   resolveAppId,
   STARTUP_GRACE_MS,
@@ -133,6 +135,11 @@ const SINGLETON_WAIT_MS = SHUTDOWN_BUDGET_MS + 1000;
 /** Default for `--wait` on stop/restart, in seconds — the same budget. */
 const STOP_WAIT_DEFAULT_S = Math.ceil(SINGLETON_WAIT_MS / 1000);
 const POLL_INTERVAL_MS = 200;
+/** How long `am start` waits before asking whether the child it just spawned
+ *  is still there. A failed exec is reaped in single-digit milliseconds; a
+ *  real boot takes far longer than this, so the check can only ever catch a
+ *  child that never started. */
+const SPAWN_LIVENESS_GRACE_MS = 150;
 const HEALTH_TIMEOUT_MS = 2000;
 const QUICK_TIMEOUT_MS = 1000;
 const STOP_CHECK_TIMEOUT_MS = 500;
@@ -157,8 +164,10 @@ export async function ensureSingleton(
   const pf = readPid(appId);
   if (!pf) return;
 
-  // Stale lock — process already dead
-  if (!isProcessAlive(pf.pid)) {
+  // Stale lock — the process that wrote it is gone. By OWNER, not by pid: a
+  // lock under /tmp outlives a reboot, and the pid it names may now be
+  // somebody else's program.
+  if (!isLockOwnerAlive(pf)) {
     removePid(appId);
     return;
   }
@@ -177,7 +186,7 @@ export async function ensureSingleton(
       await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
     }
     if (isProcessAlive(pf.pid)) {
-      await killProcess(pf.pid, 0); // already waited, go straight to SIGKILL
+      await killProcess(pf.pid, 0, pf); // already waited, go straight to SIGKILL
     }
     removePid(appId);
     return;
@@ -221,7 +230,7 @@ export async function ensureSingleton(
         : { killing: pf.pid, reason: "stuck-starting" },
       mode,
     );
-    await killProcess(pf.pid);
+    await killProcess(pf.pid, undefined, pf);
     removePid(appId);
     return;
   }
@@ -256,7 +265,7 @@ export async function ensureSingleton(
       : { killing: pf.pid, reason: "unresponsive" },
     mode,
   );
-  await killProcess(pf.pid);
+  await killProcess(pf.pid, undefined, pf);
   removePid(appId);
 }
 
@@ -275,10 +284,11 @@ export function detachedSpawnSpec(
   os: typeof Deno.build.os,
   denoArgs: string[],
   logFile: string,
+  denoBin: string = Deno.execPath(),
 ): { cmd: string; args: string[] } {
   if (os === "windows") {
     const q = (v: string) => "'" + v.replace(/'/g, "''") + "'";
-    const ps = `$p = Start-Process -FilePath 'deno' -ArgumentList @(${
+    const ps = `$p = Start-Process -FilePath ${q(denoBin)} -ArgumentList @(${
       denoArgs.map(q).join(",")
     }) -RedirectStandardOutput ${q(logFile)} -RedirectStandardError ${
       q(logFile + ".err")
@@ -293,7 +303,7 @@ export function detachedSpawnSpec(
     cmd: "sh",
     args: [
       "-c",
-      `nohup deno ${denoArgs.map(esc).join(" ")} >${
+      `nohup ${esc(denoBin)} ${denoArgs.map(esc).join(" ")} >${
         esc(logFile)
       } 2>&1 & echo $!`,
     ],
@@ -429,8 +439,42 @@ export async function cmdStart(
   // Clean up stuck/zombie instances before acquiring lock
   await ensureSingleton(appId, mode);
 
-  // Single-instance enforcement via AppLock
-  const lock = new AppLock(appId);
+  // `--home=<dir>` TARGETS an instance that is already running from that data
+  // home (docs/clients/app-manager.md: "Target the instance of the app running
+  // from data home DIR"). It cannot LAUNCH one: the runtime has no CLI flag for
+  // its data home — an app chooses it with `aio.run({ appDir })`, or the whole
+  // root moves with `AIO_APPS_DIR` — and `am` does not forward `--home` to the
+  // child. Combining it with `start` used to boot the app in the DEFAULT home
+  // while am filed the placeholder lock under the scoped key, leaving a
+  // "starting, port 0" lock that never resolves and never clears. Refuse, and
+  // name the two things that actually work.
+  if (flags.home !== undefined) {
+    outError(
+      `--home targets an instance that is already running; it cannot start ` +
+        `one. The runtime has no flag for its data home, so am cannot tell ` +
+        `the child to boot in ${flags.home}.\n` +
+        `  fix: AIO_APPS_DIR=${flags.home} am start   (moves the whole apps ` +
+        `root for the child)\n` +
+        `  or:  aio.run({ appDir: "${flags.home}" })  (the app decides, in ` +
+        `its own entry)\n` +
+        `  then: am --home=${flags.home} status|stop  targets it`,
+      mode,
+    );
+    Deno.exit(1);
+  }
+
+  // Single-instance enforcement via AppLock.
+  //
+  // THE home, from the app-dirs registry — which `--home=<dir>` has already
+  // written to (`targetHome`). Without it `AppLock` falls back to
+  // `appHome(appId)`, which does NOT consult the registry, so `am --home=X
+  // start` locked and stamped the DEFAULT instance's key (`demo`) while every
+  // read and remove in the same command used the scoped one (`demo@b43bebbd`).
+  // Measured: three keys, one command. The running default app could then no
+  // longer update or release its own lock, so a stale lock survived its clean
+  // shutdown and the next boot refused to start.
+  const home = appDirs(appId).home;
+  const lock = new AppLock(appId, home);
   const result = await lock.acquire(port);
   if (!result.ok) {
     const ex = result.existing;
@@ -567,10 +611,64 @@ export async function cmdStart(
   const childPid = parseInt(new TextDecoder().decode(output.stdout).trim(), 10);
   const pid = Number.isFinite(childPid) ? childPid : proc.pid;
 
-  // The app's _run() will create its own lock file. Release am's temporary lock.
+  // Release am's placeholder lock THE MOMENT the child exists — before the
+  // liveness grace below, not after it.
+  //
+  // The lock am holds carries AM's pid, and the child's own `acquire()` sees a
+  // lock owned by a live, different process and refuses to boot: "Already
+  // running: <app> (pid <am>)". A small app boots in ~10 ms, well inside the
+  // 150 ms grace, so `am start` could not start a fast app at all — it
+  // reported "the child exited immediately" and quoted the app refusing
+  // itself. The grace exists to notice a failed exec; it never needed the
+  // lock. `release()` only removes a lock that is still ours, so a child that
+  // has already written its own is untouched.
   lock.release();
 
-  // Write a lock for the child (will be overwritten by the child's _run() with full data)
+  // A pid is not a running app. `sh` forks BEFORE it execs, so a pid comes
+  // back even when the exec fails — and `am start` reported success, exited 0
+  // and left a lock for a process that had already died, with the only
+  // evidence in a log file nobody was told to read.
+  //
+  // The grace is short and one-sided: long enough for a failed exec to be
+  // reaped, far short of a boot. A child alive here may still fail later
+  // (that is what `--wait` and `am status` are for); a child DEAD here never
+  // started, and calling that "starting" is the lie.
+  await new Promise((r) => setTimeout(r, SPAWN_LIVENESS_GRACE_MS));
+  if (!isProcessAlive(pid)) {
+    const tail = (await Deno.readTextFile(logFile).catch(() => ""))
+      // deno-lint-ignore no-control-regex
+      .replace(/\x1b\[[0-9;]*m/g, "") // the child's colours are not ours
+      .trim();
+    // A fresh clone's failure is ALWAYS this one, and Deno states it as a bare
+    // `Module not found "file:///…/dep/aio/mod.ts"`. The link is gitignored on
+    // purpose (it is machine-specific), so a clone never has it and the repair
+    // has a name. Say the name — the error above is otherwise a dead end for
+    // anyone who has not read the README.
+    const missingLink = /Module not found[^\n]*dep[/\\]aio/.test(tail);
+    outError(
+      `${appId} did not start — the child (pid ${pid}) exited immediately.\n` +
+        (tail
+          ? `  it said:\n${
+            tail.split("\n").slice(-8).map((l) => `      ${l}`).join("\n")
+          }\n`
+          : `  it wrote nothing to ${logFile}\n`) +
+        (missingLink
+          ? `  this clone has no dep/aio link (it is gitignored — every clone ` +
+            `has to make its own).\n  fix: am fix\n`
+          : "") +
+        `  full log: ${logFile}`,
+      mode,
+    );
+    Deno.exit(1);
+  }
+
+  // A placeholder lock for the child, so `am status` between here and the
+  // child's own `_run()` says "starting" rather than "stopped" — but only if
+  // the child has not written its own already. It boots in milliseconds, and
+  // overwriting its real lock (the port it actually bound, its transport, its
+  // start token) with this half-filled record is how `am start` came to report
+  // `port: 0` for an app that was already listening.
+  const childLock = readPid(appId);
   const lockData: LockData = {
     appId,
     pid,
@@ -578,15 +676,32 @@ export async function cmdStart(
     startedAt: Date.now(),
     status: "starting",
     cwd: Deno.cwd(),
+    // `writeLock` keys by (appId, home) — omitting it filed this under the
+    // DEFAULT instance's name. See the note on `home` above.
+    home,
+    // The CHILD's kernel start stamp, so a later `am stop` can tell this
+    // process from a stranger that inherits its pid. The child overwrites this
+    // lock with its own (which records the same thing); this covers the window
+    // in between.
+    ...(processStartToken(pid) !== null
+      ? { startToken: processStartToken(pid)! }
+      : {}),
   };
-  writeLock(lockData);
+  if (!childLock || childLock.pid !== pid) writeLock(lockData);
 
-  // Without --wait: return immediately, user checks with `am status`.
-  // The port is only reported when the app DECLARED one — otherwise the child
-  // is still choosing it, and printing a number am made up is how "am start
-  // says 8000, the app is on 49208" happens. `am status` reads the real one
-  // from the lock the app writes.
-  if (flags.wait === undefined) {
+  // ── `am start` WAITS by default ──
+  //
+  // It used to return the instant the child was spawned, with
+  // `{"status":"starting","port":0}` — and the very next command in the
+  // obvious sequence (`am start && am state`) died on a leaked Deno internal,
+  // "Requests to port 0 are blocked", because port 0 is what "the app has not
+  // chosen yet" was reported as. `--wait` returned in ~0.6 s with the real
+  // port. Half a second is not worth a default sequence that does not work.
+  //
+  // `--no-wait` is the opt-out for a script that genuinely only wants the
+  // spawn; it keeps the old output verbatim, including the honest refusal to
+  // print a port the app has not picked.
+  if (flags.noWait) {
     out(
       mode === "pretty"
         ? declared !== undefined
@@ -604,7 +719,7 @@ export async function cmdStart(
     return;
   }
 
-  // With --wait: probe health until started or timeout
+  // Probe health until started or timeout (`--wait=<seconds>` overrides).
   const timeout = (flags.wait || 10) * 1000;
   let healthy = false;
   const deadline = Date.now() + timeout;
@@ -836,7 +951,7 @@ async function stopOne(
   // The SIGTERM fallback is for an app that has a lock ON THIS PORT and is not
   // answering. It must never fire on an identity refusal — killing our own pid
   // because someone ELSE holds the port is the same retargeting bug mirrored.
-  if (!result.ok && pf && pf.port === port && isProcessAlive(pf.pid)) {
+  if (!result.ok && pf && pf.port === port && isLockOwnerAlive(pf)) {
     try {
       Deno.kill(pf.pid, "SIGTERM");
     } catch { /* already dead */ }
@@ -871,7 +986,7 @@ async function stopOne(
 
   // Graceful timeout expired — escalate to SIGKILL
   if (pf && isProcessAlive(pf.pid)) {
-    await killProcess(pf.pid, 0); // already waited gracefully
+    await killProcess(pf.pid, 0, pf); // already waited gracefully
   }
   removePid(appId);
   return { ok: true, appId, pid: pf?.pid, port };
@@ -928,10 +1043,11 @@ export async function cmdStop(
     const results = [];
     for (const i of running) {
       results.push(
-        await stopOne(
-          { appId: i.appId, port: i.port, pf: readPid(i.appId) },
-          flags,
-        ),
+        // `i` IS the lock — re-reading it by appId used the DEFAULT-home key,
+        // so stopping a fleet that contained a `--home`-scoped instance sent
+        // the shutdown (and the SIGTERM fallback) to the DEFAULT instance's
+        // pid instead. The instance we already hold is the answer.
+        await stopOne({ appId: i.appId, port: i.port, pf: i }, flags),
       );
     }
     const failed = results.filter((r) => !r.ok);
@@ -1347,6 +1463,106 @@ export function cmdInstances(_args: string[], flags: GlobalFlags): void {
  *
  *  Nothing is killed silently — every kill is named, and with no orphans the
  *  command says so. */
+/** Every pid an aio lock names, anywhere on this machine — the default lock
+ *  dir AND every `AIO_APPS_DIR`-scoped sibling beside it (`aio-<scope>`).
+ *
+ *  `instances()` only ever reads OUR scope. An app started under a different
+ *  `AIO_APPS_DIR` was therefore invisible to it, so `am kill --stale`
+ *  classified a perfectly healthy app as an orphan and SIGTERMed it. The lock
+ *  files are right there; not reading them was the bug. */
+export function lockedPidsEverywhere(): Map<
+  number,
+  { appId: string; dir: string }
+> {
+  const found = new Map<number, { appId: string; dir: string }>();
+  const base = dirname(lockDir());
+  const dirs = new Set<string>([lockDir()]);
+  try {
+    for (const e of Deno.readDirSync(base)) {
+      if (e.isDirectory && /^aio(-|$)/.test(e.name)) {
+        dirs.add(join(base, e.name));
+      }
+    }
+  } catch { /* base unreadable — the default dir alone still applies */ }
+  for (const dir of dirs) {
+    try {
+      for (const e of Deno.readDirSync(dir)) {
+        if (!e.isFile || !e.name.endsWith(".lock")) continue;
+        try {
+          const d = JSON.parse(Deno.readTextFileSync(join(dir, e.name))) as {
+            pid?: number;
+            appId?: string;
+          };
+          if (typeof d.pid === "number" && d.pid > 0) {
+            found.set(d.pid, { appId: d.appId ?? "?", dir });
+          }
+        } catch { /* unreadable or half-written lock — skip it */ }
+      }
+    } catch { /* dir vanished */ }
+  }
+  return found;
+}
+
+/** The command line of `pid`, or null when this platform will not say. */
+function pidCommandLine(pid: number): string | null {
+  try {
+    if (Deno.build.os === "linux") {
+      return Deno.readTextFileSync(`/proc/${pid}/cmdline`)
+        .replaceAll("\0", " ").trim();
+    }
+    if (Deno.build.os === "darwin") {
+      const r = new Deno.Command("ps", {
+        args: ["-o", "command=", "-p", String(pid)],
+        stdout: "piped",
+        stderr: "null",
+      }).outputSync();
+      return r.success
+        ? new TextDecoder().decode(r.stdout).trim() || null
+        : null;
+    }
+  } catch { /* gone, or not ours to read */ }
+  return null;
+}
+
+/** Why `pid` must NOT be signalled as a stale aio app, or null when it may be.
+ *
+ *  `am kill --stale` used to SIGTERM whatever pid an unauthenticated loopback
+ *  `/__aio/health` response reported ABOUT ITSELF, unverified. Two things
+ *  follow, and both are real: a healthy app under a different `AIO_APPS_DIR`
+ *  is invisible to `instances()` and so gets killed as an orphan; and anything
+ *  listening on a candidate port can name ANY pid on the machine and have `am`
+ *  SIGTERM it. A number that arrives over a socket is a claim, not a fact — so
+ *  it is checked against the process table before any signal. */
+export function stalePidRefusal(
+  pid: number,
+  locked: Map<number, { appId: string; dir: string }>,
+): string | null {
+  if (!Number.isInteger(pid) || pid <= 0) return `"${pid}" is not a pid`;
+  if (pid === Deno.pid) return "that is am itself";
+  const known = locked.get(pid);
+  if (known) {
+    return `pid ${pid} is a LOCKED aio instance (${known.appId} in ` +
+      `${known.dir}) — running normally, just not in this scope ` +
+      `(AIO_APPS_DIR). Not an orphan.`;
+  }
+  if (!isProcessAlive(pid)) return `pid ${pid} is already gone`;
+  // Ours to signal at all? isProcessAlive counts EPERM as alive on purpose
+  // (another user's process IS running), which is exactly the case to refuse.
+  try {
+    Deno.kill(pid, 0);
+  } catch {
+    return `pid ${pid} belongs to another user — not ours to signal`;
+  }
+  const cmd = pidCommandLine(pid);
+  if (cmd === null) return null; // platform will not say; the pid is all there is
+  if (!/\bdeno\b|aio/i.test(cmd)) {
+    return `pid ${pid} is not an aio process — it is running: ${
+      cmd.slice(0, 120)
+    }`;
+  }
+  return null;
+}
+
 export async function cmdKill(
   _args: string[],
   flags: GlobalFlags,
@@ -1358,7 +1574,7 @@ export async function cmdKill(
     // The blunt form: end THIS app now. `am stop` is the polite one.
     const appId = resolveAmAppId(flags.app);
     const pf = readPid(appId);
-    if (!pf || !isProcessAlive(pf.pid)) {
+    if (!pf || !isLockOwnerAlive(pf)) {
       out(
         mode === "pretty" ? `${appId}: not running` : { appId, killed: false },
         mode,
@@ -1396,6 +1612,11 @@ export async function cmdKill(
   }
 
   const orphans: Array<{ appId: string; pid: number; port: number }> = [];
+  /** Ports that answered but whose pid this refuses to signal — reported, not
+   *  swallowed: "nothing happened" and "I would not do that" are different
+   *  answers, and only one of them is actionable. */
+  const spared: Array<{ port: number; pid: number; why: string }> = [];
+  const lockedPids = lockedPidsEverywhere();
   for (const port of candidates) {
     let health: { appId?: string; pid?: number } | null = null;
     try {
@@ -1408,6 +1629,12 @@ export async function cmdKill(
     const known = accounted.get(port);
     // Accounted for by a live lock, and the SAME process — this is the app.
     if (known && known.pid === health.pid) continue;
+    // The pid arrived over an unauthenticated loopback socket. Check it.
+    const refusal = stalePidRefusal(health.pid, lockedPids);
+    if (refusal) {
+      spared.push({ port, pid: health.pid, why: refusal });
+      continue;
+    }
     orphans.push({
       appId: health.appId ?? "unknown",
       pid: health.pid,
@@ -1421,9 +1648,12 @@ export async function cmdKill(
         ? `no stale aio processes (checked ports: ${
           [...candidates].sort((a, b) => a - b).join(", ") || "none"
         })` +
+          spared.map((sp) =>
+            `\n  left pid ${sp.pid} on port ${sp.port} alone — ${sp.why}`
+          ).join("") +
           `\n  an orphan on a port nothing records is invisible here — ` +
           `name it with --port=N`
-        : { killed: [], checked: [...candidates] },
+        : { killed: [], checked: [...candidates], spared },
       mode,
     );
     return;
@@ -1441,8 +1671,11 @@ export async function cmdKill(
           `killed stale ${o.appId} (pid ${o.pid}, port ${o.port}) — it was ` +
           `serving with no lock, so every am command was reading past it`
         )
-        .join("\n")
-      : { killed: orphans },
+        .join("\n") +
+        spared.map((sp) =>
+          `\nleft pid ${sp.pid} on port ${sp.port} alone — ${sp.why}`
+        ).join("")
+      : { killed: orphans, spared },
     mode,
   );
 }

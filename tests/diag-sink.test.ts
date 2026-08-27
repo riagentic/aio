@@ -1,15 +1,15 @@
 // A diagnostic event must never vanish.
 //
 // Client-side diagnostics exist to SURFACE silent failures, and they were the
-// silent failure. `window._aioDiag` is the optional dev overlay, defined by
-// `healthOverlayScript()` in `server-html-scripts.ts` — which nothing injects
-// into any shell. Every sink was written out by hand as
+// silent failure. `window._aioDiag` is an optional hook a page may define to
+// receive events; aio ships nothing that defines it, so it is absent on every
+// page. Every sink was written out by hand as
 // `if (typeof _w._aioDiag === "function") _w._aioDiag(ev)`, four times over
 // (`_diagEmit` plus the WS, IPC and AIR command routers), so with no overlay
 // present — which is every page — each one took the `else` branch and dropped
 // the event on the floor without a word.
 //
-// Contract now: ONE sink. Overlay when the page has one, console otherwise,
+// Contract now: ONE sink. The hook when the page defines one, console otherwise,
 // and `_diagEmit` keeps its 5s-per-type dedup so the fallback cannot turn a
 // repeating condition into a wall of identical lines.
 import { assert, assertEquals } from "@std/assert";

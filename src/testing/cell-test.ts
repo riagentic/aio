@@ -12,10 +12,16 @@ export {
 import type { ScheduleEffect } from "../state/schedule.ts";
 import type { OwnEffect } from "../state/own.ts";
 import { registerCall } from "../state/cell-impl.ts";
-import { _pendingCallPromises } from "../state/method-cancel.ts";
+import {
+  _inflightMethodKeys,
+  _pendingCallPromises,
+} from "../state/method-cancel.ts";
 import { _resetAioRuntime } from "../state/runtime-reset.ts";
-import { _resetRootSignals } from "../state/signal.ts";
-import { _armTestStrict } from "./test-strict.ts";
+import { assertionFailure, formatCellState } from "./test-format.ts";
+import { frozenWriteMessage, isFrozenWriteError } from "../state/immutable.ts";
+import { _armTestStrict, _watchUnobservedCalls } from "./test-strict.ts";
+// Server-touching, so NOT in test-strict.ts — see boot-refusals.ts.
+import { _refuseUnsafeCells } from "./boot-refusals.ts";
 import { attachMeta } from "../state/cell-catalog.ts";
 import { runWithUser } from "../server/auth-context.ts";
 import type { AioUser } from "../server/aio-types.ts";
@@ -117,6 +123,14 @@ export type TestContext<
    *  ```
    *  Omit `user` (or pass undefined) to assert the anonymous path. */
   as: <T>(user: AioUser | undefined, fn: () => T) => T;
+  /** The cell's current state.
+   *
+   *  An ALIAS for {@link getState}, and the spelling people reach for first:
+   *  a field walk-through hit `t.state` and got a six-line
+   *  `Omit<TestContext<…>>` type error that named nothing available, then had
+   *  to read framework source to find `t.getState()`. Two names for one fact
+   *  is a smaller cost than a type error that teaches nothing. */
+  readonly state: S;
   /** Get current cell state */
   getState: () => S;
   /** Get effects from last dispatched action */
@@ -443,8 +457,8 @@ export function testCell(
         state: (check, msg) => {
           const fs = state[f.__aio.id] as Record<string, unknown>;
           if (!check(fs)) {
-            throw new Error(
-              `${msg ?? "state assertion failed"}: ${JSON.stringify(fs)}`,
+            throw assertionFailure(
+              `${msg ?? "state assertion failed"}: ${formatCellState(fs)}`,
             );
           }
         },
@@ -452,30 +466,44 @@ export function testCell(
           const fs = state[f.__aio.id] as Record<string, unknown>;
           const actual = fs.__aio_status;
           if (actual !== expected) {
-            throw new Error(`expected status '${expected}', got '${actual}'`);
+            throw assertionFailure(
+              `expected status '${expected}', got '${actual}'`,
+            );
           }
         },
         effects: (types) => {
           const actual = lastEffects.map((e) => e.type as string).sort();
           const expected = [...types].sort();
           if (JSON.stringify(expected) !== JSON.stringify(actual)) {
-            throw new Error(`expected effects [${expected}], got [${actual}]`);
+            throw assertionFailure(
+              `expected effects [${expected}], got [${actual}]`,
+            );
           }
         },
         effectCount: (n) => {
           if (lastEffects.length !== n) {
-            throw new Error(`expected ${n} effects, got ${lastEffects.length}`);
+            throw assertionFailure(
+              `expected ${n} effects, got ${lastEffects.length}`,
+            );
           }
         },
         invariant: (check) => {
           const fs = state[f.__aio.id] as Record<string, unknown>;
           if (!check(fs)) {
-            throw new Error(`invariant violation: ${JSON.stringify(fs)}`);
+            throw assertionFailure(
+              `invariant violation: ${formatCellState(fs)}`,
+            );
           }
         },
       },
       as: <T>(user: AioUser | undefined, body: () => T): T =>
         runWithUser(user, body),
+      // `t.state` and `t.getState()` read the SAME live slice — a getter, not
+      // a snapshot taken at construction, so it tracks dispatches like the
+      // function does.
+      get state() {
+        return state[f.__aio.id] as Record<string, unknown>;
+      },
       getState: () => state[f.__aio.id] as Record<string, unknown>,
       getEffects: () => lastEffects,
       randomActions: (n) => {
@@ -529,7 +557,20 @@ export function testCell(
     };
 
     try {
-      await fn(ctx);
+      try {
+        await fn(ctx);
+      } catch (e) {
+        // A frozen-state write from OUTSIDE a method (`t.state.items.push(…)`,
+        // a callback holding a value it read) surfaces as raw engine text —
+        // `TypeError: Cannot add property 1, object is not extensible` — which
+        // names neither the cell nor the rule nor the fix. Inside a method the
+        // reducer already teaches this; everywhere else nobody did.
+        const raw = e instanceof Error ? e.message : String(e);
+        if (e instanceof Error && isFrozenWriteError(raw)) {
+          e.message = frozenWriteMessage(raw, f.__aio.id);
+        }
+        throw e;
+      }
       // A test may never call settle() at all — a method that failed with
       // nobody watching still must not pass for silence.
       raiseUnobserved();
@@ -571,6 +612,11 @@ export interface BootHandle {
  */
 export async function bootCells(cells: CellDef[]): Promise<BootHandle> {
   _armTestStrict();
+  // Every boot refusal a real `aio.run()` performs, BEFORE anything boots —
+  // bootCells composes on the standalone runtime, which is not the server's
+  // boot path, so a cell exposing a credential to the UI used to boot green
+  // here and be refused in dev AND prod.
+  _refuseUnsafeCells(cells);
   const standalone = await import("../standalone-air.ts");
   // Virtual time is opt-in: the same runtime ships in an Android APK, where a
   // clock nothing advances means no schedule ever fires. Tests want the
@@ -580,13 +626,27 @@ export async function bootCells(cells: CellDef[]): Promise<BootHandle> {
   // including module-level `signal()`s, which are state a test writes just as
   // easily as a cell and which nothing used to restore.
   standalone._resetState();
-  _resetRootSignals();
+  // The PROCESS-GLOBAL half of the runtime, which `_resetState()` does not own:
+  // `_pending` (in-flight calls), the degraded registry, the cancel registry,
+  // subscriptions, warn-dedup sets. `testCell` has always reset these; bootCells
+  // never did, so one hung method leaked into `_pending` for the rest of the
+  // process and every later `settle()` burned its whole budget on a promise that
+  // could not resolve — and then returned as if the app had quiesced. It
+  // subsumes `_resetRootSignals()`, which used to be the only piece reset here.
+  // AFTER `_resetState()`: that call destroys any previously booted cells, whose
+  // onDestroy hooks must still find their methods bound.
+  _resetAioRuntime();
   await standalone.aio.run({
     appId: "bootcells",
     // deno-lint-ignore no-explicit-any
     cells: cells as any,
     persist: false,
   });
+  // A failing async method NOBODY awaited must not pass for silence — the same
+  // ledger `testCell` keeps, so the same app code cannot pass one harness and
+  // fail the other (see test-strict.ts). Installed after the boot, because it
+  // wraps the bound methods the boot just installed.
+  const ledger = _watchUnobservedCalls(cells);
   /** Drain until nothing is in flight.
    *
    *  Microtask ticks alone were not enough, and `advance()` is where that
@@ -601,21 +661,92 @@ export async function bootCells(cells: CellDef[]): Promise<BootHandle> {
    *  settle drains), re-checking after each round because a settled method can
    *  start another. Bounded, so a method that genuinely never finishes fails
    *  the test's own timeout instead of hanging here forever. */
+  const ROUNDS = 50;
   const settle = async () => {
-    for (let round = 0; round < 50; round++) {
+    // What the last few rounds saw in flight. A set that keeps CHANGING means
+    // dispatch is still producing work; a set that has not moved means the
+    // remaining calls are parked on something the test holds.
+    let lastKeys = "";
+    let stableRounds = 0;
+    for (let round = 0; round < ROUNDS; round++) {
       for (let i = 0; i < 10; i++) await Promise.resolve();
       const pending = _pendingCallPromises();
-      if (pending.length === 0) return;
+      if (pending.length === 0) {
+        // Quiesced — and "everything has landed" includes "and here is what
+        // went wrong".
+        ledger.raise();
+        return;
+      }
+      const keys = _inflightMethodKeys().slice().sort().join(",");
+      stableRounds = keys === lastKeys ? stableRounds + 1 : 0;
+      lastKeys = keys;
       await Promise.race([
         Promise.allSettled(pending),
         new Promise((r) => setTimeout(r, 5)),
       ]);
     }
+    // Budget exhausted. Two very different things look the same here, and
+    // conflating them is what made the old silent `return` dangerous:
+    //
+    //   • DISPATCH never quiesced — the queue keeps producing work, so state
+    //     is still moving and any assertion after this point is unguarded.
+    //     That is a real failure and it throws.
+    //   • Dispatch IS quiet, and what remains is a method PARKED on something
+    //     the test holds — the `s.a = 5; await gate; s.b = s.a` shape that
+    //     every incremental-commit and every conflict test is built on. The
+    //     test is deliberately mid-flight and about to release the gate; the
+    //     committed state it is about to assert is settled. Throwing here
+    //     would make the harness refuse its own documented pattern.
+    //
+    // So: quiet dispatch + parked calls is a normal return (the ledger still
+    // raises, so a failure inside one of those calls is never swallowed), and
+    // only a still-churning queue is the error.
+    ledger.raise();
+    const stillRunning = _inflightMethodKeys();
+    // Unchanged for the whole budget ⇒ nothing is being produced. These calls
+    // are PARKED — the `s.a = 5; await gate; s.b = s.a` shape every
+    // incremental-commit and conflict test is built on, where the test holds
+    // the gate and is about to release it. Dispatch is quiet and the committed
+    // state the test is about to assert IS settled, so throwing here would
+    // make the harness refuse its own documented pattern.
+    //
+    // But it must not be SILENT either: "quiesced" and "gave up waiting" have
+    // to stay distinguishable. So it says so and returns, and the hard gate
+    // moves to `dispose()`, where a call still in flight is a genuine leak
+    // with nobody left to release it.
+    if (stableRounds >= ROUNDS - 2) {
+      if (stillRunning.length > 0) {
+        console.warn(
+          `[aio:test] settle() returned with ${stillRunning.length} call(s) ` +
+            `still in flight: ${stillRunning.join(", ")}. Dispatch is quiet, ` +
+            `so committed state is settled — but if you did not park these ` +
+            `deliberately, await the call itself instead of settle().`,
+        );
+      }
+      return;
+    }
+    throw new Error(
+      `bootCells: settle() gave up after ${ROUNDS} rounds — dispatch is still ` +
+        `producing work, so the app has NOT quiesced and any assertion after ` +
+        `this point is unguarded.\n` +
+        `  still running: ${stillRunning.join(", ") || "(unnamed calls)"}\n` +
+        `  fix: await the call itself instead of settle(); drive time with ` +
+        `\`await h.advance(ms)\` if it is waiting on a schedule; or give the ` +
+        `method an abort path (\`s.$signal\`) if it genuinely never finishes.`,
+    );
   };
-  const dispose = () => standalone._resetState();
+  const dispose = () => {
+    ledger.restore();
+    standalone._resetState();
+    // The process-global half — without this a hung call sits in `_pending`
+    // for the rest of the process and every later settle() burns its whole
+    // budget on it (see the boot note above).
+    _resetAioRuntime();
+    ledger.raise();
+  };
   return {
     async advance(ms: number) {
-      standalone._advanceSchedules(ms);
+      await standalone._advanceSchedules(ms);
       await settle();
     },
     settle,

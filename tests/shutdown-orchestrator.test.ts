@@ -226,7 +226,11 @@ for (
         `'${step}' must still run after ${label} threw — got ${done}`,
       );
     }
-    assert(errors.length > 0, "the failure must be reported, never swallowed");
+    assert(
+      errors.some((e) => e.includes("boom")),
+      `the failure must be reported by its own message, never swallowed — ` +
+        `got ${JSON.stringify(errors)}`,
+    );
   });
 }
 

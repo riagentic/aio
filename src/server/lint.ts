@@ -10,6 +10,43 @@ import {
 } from "./server-html-importmap.ts";
 import { log } from "../diagnostics/logger-api.ts";
 
+/** The framework's own SERVER entries — absent from the browser import map ON
+ *  PURPOSE (SQLite, workers, the filesystem). A generic "add the npm package"
+ *  hint sends the user after a package that does not exist, so this category
+ *  of mistake gets the real explanation. THE list also lives in
+ *  graph-validator.ts's SERVER_ONLY_SPECS. */
+const AIO_SERVER_SPECS = new Set(["aio/server"]);
+
+/** Does a path exist? (`Deno.stat` without the throw.) @internal */
+async function exists(path: string): Promise<boolean> {
+  try {
+    await Deno.stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The warning for a bare specifier a `.tsx` file imports that the browser
+ *  import map cannot resolve. Named so the two call sites (side-effect
+ *  imports and named imports) cannot drift apart. @internal */
+export function browserImportWarning(file: string, spec: string): string {
+  if (AIO_SERVER_SPECS.has(spec)) {
+    return `${file}: "${spec}" is aio's SERVER entry (SQLite, workers, the ` +
+      `filesystem) imported from a browser file — the browser import map ` +
+      `omits it deliberately, so the page dies at boot with "Failed to ` +
+      `resolve module specifier". This is a server-only module in a client ` +
+      `graph, NOT a missing dependency: there is no npm package to add. ` +
+      `Move the import into a cell METHOD ` +
+      `(\`const { createDB } = await import("${spec}")\` — methods run on ` +
+      `the server), or into a *.server.ts module imported lazily.`;
+  }
+  return `${file}: import "${spec}" won't work in browser — dev mode ` +
+    `transpiles but doesn't bundle. Map it for the browser ` +
+    `(\`"${spec}": "npm:${spec}"\` in deno.json imports), or move the ` +
+    `import to a server-side .ts file and reach it from a cell method.`;
+}
+
 /** Startup lint result — ok/warn/hint/fail arrays */
 export type Lint = {
   ok: string[];
@@ -74,9 +111,18 @@ export async function lint(
     r.fail.push("config.execute must be a function: (app, effect) => void");
   } else r.ok.push("execute");
 
-  // Prod mode or headless: App.tsx not needed
+  // Prod mode or headless: App.tsx not needed.
+  //
+  // Say what is TRUE, not what is usually true: `--client=server-only` on an
+  // app that HAS an App.tsx printed "✓ headless (no App.tsx)" next to the file
+  // sitting right there, which reads as "your component was not found".
   if (headless) {
-    r.ok.push(`headless (no ${uiEntry})`);
+    const hasUi = await exists(join(baseDir, uiEntry));
+    r.ok.push(
+      hasUi
+        ? `headless (${uiEntry} present, not served — --client=server-only)`
+        : `headless (no ${uiEntry})`,
+    );
   } else if (prod) {
     r.ok.push("prod");
   } else {
@@ -188,7 +234,7 @@ export async function lint(
             BROWSER_IMPORTS.has(spec)
           ) continue;
           r.warn.push(
-            `${entry.name}: import "${spec}" won't work in browser — dev mode transpiles but doesn't bundle. Move this import to a server-side .ts file, or use the npm package via an effect.`,
+            browserImportWarning(entry.name, spec),
           );
         }
         // Named/default imports and re-exports: import { x } from 'foo', export { x } from 'foo'
@@ -209,12 +255,15 @@ export async function lint(
             /^import\s*\{[^}]*\btype\b/.test(m[0]) // AIO-276: detect inline type import
           ) continue;
           r.warn.push(
-            `${entry.name}: import "${spec}" won't work in browser — dev mode transpiles but doesn't bundle. Move this import to a server-side .ts file, or use the npm package via an effect.`,
+            browserImportWarning(entry.name, spec),
           );
         }
       }
     }
-  } catch { /* baseDir doesn't exist — already caught above */ }
+  } catch {
+    // aio-ok: baseDir not existing is already reported as a hard failure above,
+    // and reporting it twice from one lint run reads as two problems.
+  }
 
   // Check esbuild — needed for dev mode TSX transpilation.
   // B-5: probe reality, not the filesystem. The transpiler loads esbuild via
@@ -252,7 +301,11 @@ export async function lint(
             "run `deno task install:electron`, " +
             "or `deno task dev:electron`/`compile:electron` (they auto-install)",
         );
-      } catch { /* electron not installed at all — handled by electron.ts */ }
+      } catch {
+        // aio-ok: this stat only distinguishes "installed but no binary" from
+        // "not installed"; the not-installed case is reported by electron.ts
+        // with the command that fixes it, so there is nothing to add here.
+      }
     }
   }
 
@@ -272,7 +325,16 @@ export function printLint(r: Lint): void {
   for (const h of r.hint) log.info(`  · ${h}`);
   for (const e of r.fail) log.error(e);
   if (r.fail.length) {
-    throw new Error(`${r.fail.length} error(s) — fix and restart`);
+    // The failures themselves, not just how many there were. They are printed
+    // above by `log.error`, but this Error is the only thing that survives into
+    // a test runner's report, `am logs --json`, or a supervisor's crash line —
+    // and "3 error(s) — fix and restart" tells that reader nothing about WHICH
+    // three. Carrying the text costs nothing and is the difference between a
+    // report you can act on and one you have to go and re-run to understand.
+    throw new Error(
+      `${r.fail.length} configuration error(s) — fix and restart:\n` +
+        r.fail.map((e) => `  • ${e}`).join("\n"),
+    );
   }
 }
 

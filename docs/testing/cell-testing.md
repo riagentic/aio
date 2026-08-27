@@ -137,6 +137,46 @@ testCell(door, "cannot open when already open", (t) => {
 });
 ```
 
+### What `testCell` will not run: schedules and `own()`
+
+`testCell` drives the composed reducer and executor directly. It owns no clock
+and no resource table, so a `schedule.after/every/at/cron` effect and an `own()`
+acquire/dispose have nowhere to go. They used to be dropped in silence —
+`s.$do(schedule.after(…))` never fired, `own()` never disposed, and the test was
+green. Now they **throw**, naming the harness that does run them:
+
+```ts
+testCell(poller, "arms the poll", async (t) => {
+  t.send.start();
+  await t.settle(); // Error: a schedule effect reached the root cell executor…
+});
+```
+
+Test the reduce/method logic that EMITS the effect with `testCell`
+(`t.expect.effects([...])` sees it without running it), and test the firing with
+`bootCells` — it boots the standalone runtime, so `await h.advance(ms)` fires
+what is due and `h.dispose()` disposes what was owned:
+
+```ts
+using h = await bootCells([poller]);
+await poller.start();
+await h.advance(30_000);
+assertEquals(poller.ticks, 3);
+```
+
+## `bootCells(cells)` — several cells, no DOM
+
+The multi-cell counterpart: methods dispatch for real, reactive reads work, and
+`h.advance(ms)` fires due schedules. It runs the same boot refusals `aio.run()`
+runs (see `docs/testing/prod-parity.md`), and shares `testCell`'s two rules
+about failures:
+
+- **`h.settle()` throws when it gives up**, naming the calls still in flight —
+  "the app quiesced" and "I stopped waiting" must not be the same answer.
+- **A failing method nobody awaited fails the test** at the next `settle()` or
+  `dispose()`. Awaiting it (or `await assertRejects(() => cell.go())`) counts as
+  observing it, and is not reported twice.
+
 ## TestContext API
 
 | Method                       | Description                                                                                                                                                                                                                                                     |

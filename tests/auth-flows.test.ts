@@ -182,7 +182,13 @@ Deno.test("auth e2e: shell public, signup→login→ws→logout lifecycle", asyn
     assertEquals((await ac.me(acLogin.token))?.id, "alice");
     await ac.login("alice", "wrong-wrong-1").then(
       () => assert(false, "must throw"),
-      (e) => assertEquals((e as Error).message, "invalid_credentials"),
+      (e) => {
+        // The MESSAGE is for a person, the CODE is for a branch. This used to
+        // assert the code as the message, which is exactly how apps ended up
+        // showing their users `invalid_credentials`.
+        assertEquals((e as Error).message, "Incorrect username or password.");
+        assertEquals((e as { code?: string }).code, "invalid_credentials");
+      },
     );
     await ac.logout(acLogin.token);
     assertEquals(await ac.me(acLogin.token), null, "client logout revokes");

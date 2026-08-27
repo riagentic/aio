@@ -134,3 +134,42 @@ Deno.test("envelope: UDS serves sync + serverFns + time travel, rejects vitals",
   assertEquals(unsupportedOnUds("sfn"), false);
   assertEquals(unsupportedOnUds("action"), false);
 });
+
+// The CRDT frames' shapes have exactly ONE home: `src/sync/types.ts`, next to
+// the code that builds and reads them. `envelope.ts` used to carry a second
+// copy — unread by anything (`enc` takes `unknown`), and already wrong about
+// the wire in three ways that each read as a fact:
+//
+//   • `SyncResPayload.lastServerTs: number`, when it is a PER-CELL
+//     `Record<string, number>` and always has been;
+//   • `SyncAckPayload` with no `serverTs` — the op's cursor position, which is
+//     what lets a client tell an ack for an op its snapshot already contains
+//     from one it does not (three fixes turn on that field);
+//   • `SyncReqPayload` with neither `reqId` nor `session` — the two fields
+//     that keep two overlapping catch-ups, and two clients sharing one
+//     persisted client id, apart.
+//
+// A dead type cannot break a program; it can only mislead the person reading
+// it, which is worse in a file whose whole job is to say what the wire is.
+// This gate keeps the copy from growing back.
+Deno.test("envelope: the CRDT frames are shaped in ONE place (src/sync/types.ts)", async () => {
+  const src = await Deno.readTextFile(
+    new URL("../src/protocol/envelope.ts", import.meta.url),
+  );
+  // Comments name these deliberately — look only at declarations.
+  const declared = [...src.matchAll(/^export type (\w+Payload)\b/gm)].map((m) =>
+    m[1]!
+  );
+  const crdt = declared.filter((n) =>
+    /^(Op|SyncReq|SyncRes|SyncAck|OpRejected|SyncErr)Payload$/.test(n)
+  );
+  assertEquals(
+    crdt,
+    [],
+    `envelope.ts re-declares the shape of a CRDT frame (${
+      crdt.join(", ")
+    }). Those shapes live in src/sync/types.ts — OpMessage, SyncRequest, ` +
+      `SyncResponse, AckMessage, OpRejectedMessage — and a second copy here ` +
+      `is documentation that nothing type-checks and that has drifted before.`,
+  );
+});

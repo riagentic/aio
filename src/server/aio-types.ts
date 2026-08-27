@@ -28,27 +28,60 @@ import type { AccessUser } from "../state/cell-types.ts";
  *  `resolveUser`/`users` config attaches (roles, profile fields). */
 export type AioUser = AccessUser;
 
-/** AUTH-2/3 options for `auth: {...}` (auth: true = all defaults). */
-export type AuthOptions = {
+/** Email transport for the verify/reset flows — SMTP, SES, a console stub,
+ *  whatever the app already has. */
+export type SendMail = (msg: {
+  to: string;
+  subject: string;
+  text: string;
+}) => Promise<void> | void;
+
+/** Everything `auth: {...}` accepts EXCEPT the verify pair, which is split out
+ *  below so the type can enforce their coupling. */
+type AuthOptionsBase = {
   /** Open self-signup (default true; false = admin-seeded users only). */
   signup?: boolean;
-  /** Session TTL in ms (default 30 days). */
+  /** Session TTL in ms (default 30 days).
+   *
+   *  Set it HERE, not on `sessions`, whenever the built-in login flows are in
+   *  use: the session store takes its default from `sessions.ttlMs`, but every
+   *  `/__aio/auth` login issues its token AND sets its cookie Max-Age from this
+   *  one. Both set is refused at boot (`configConflicts`). */
   ttlMs?: number;
   /** Set the HttpOnly session cookie on login (default true). */
   cookie?: boolean;
-  /** Email transport for verify/reset flows (SMTP/SES/console — yours). */
-  sendMail?: (msg: {
-    to: string;
-    subject: string;
-    text: string;
-  }) => Promise<void> | void;
-  /** Block login until the account's email is verified (needs sendMail). */
-  requireVerified?: boolean;
   /** Allow TOTP 2FA enrollment (default true). */
   totp?: boolean;
   /** OIDC provider (authorization code + PKCE) — social/enterprise login. */
   oidc?: import("./auth-oidc.ts").OidcConfig;
 };
+
+/** AUTH-2/3 options for `auth: {...}` (auth: true = all defaults).
+ *
+ *  `requireVerified: true` REQUIRES `sendMail`, and the type says so — because
+ *  the pair without a transport is not a degraded feature, it is a lockout:
+ *  signup answers `{ verificationSent: true }` having sent nothing, and every
+ *  later login is refused 403 forever with no way back from inside the app.
+ *
+ *  Dev is stricter than prod here, in the direction the project allows: this
+ *  is a COMPILE error, `configConflicts` refuses the same pair at boot for
+ *  configs that reached the runtime untyped (JSON, a spread, `as`), and prod
+ *  behaviour is unchanged. */
+export type AuthOptions =
+  & AuthOptionsBase
+  & (
+    | {
+      /** Block login until the account's email is verified. */
+      requireVerified: true;
+      /** REQUIRED by `requireVerified` — without it nothing can ever verify. */
+      sendMail: SendMail;
+    }
+    | {
+      requireVerified?: false | undefined;
+      /** Email transport for verify/reset flows (SMTP/SES/console — yours). */
+      sendMail?: SendMail;
+    }
+  );
 
 /** Dynamic user resolution hook — called with extracted token + current state.
  *  Return AioUser to authenticate, null to reject. Supports async (e.g. JWT verification). */
@@ -184,9 +217,12 @@ export type AioConfig<S, A, E> = {
   /** Override the SQLite file (":memory:" for hermetic tests, or an absolute
    *  path). Default: `<appDir>/data/state.db`. */
   dbPath?: string;
-  /** PRAGMAs for the app db (default: WAL + synchronous=NORMAL). Set
-   *  `["PRAGMA journal_mode = WAL", "PRAGMA synchronous = FULL", …]` when the
-   *  data is expensive to lose. */
+  /** PRAGMAs for the app db, MERGED over the defaults by pragma name (WAL,
+   *  synchronous=NORMAL, busy_timeout, cache_size, foreign_keys). Naming one
+   *  setting therefore keeps the rest — `["PRAGMA synchronous = FULL"]` when
+   *  the data is expensive to lose. Turning a default off is still possible by
+   *  saying so (`PRAGMA foreign_keys = OFF`).
+   *  See docs/persistence/how-it-works.md#the-durability-contract. */
   dbPragmas?: string[];
   /** Check the app database's integrity at boot (`PRAGMA quick_check`).
    *
@@ -228,7 +264,7 @@ export type AioConfig<S, A, E> = {
   syncIntervalMs?: number; // default: 50 — max 1 state push per N ms (0 = microtask coalescing only)
   maxConnections?: number; // max concurrent WebSocket clients (default: 100)
   wsLimits?: WsLimits; // per-client WS rate/size limits (advanced; defaults hardened)
-  allowedOrigins?: string[]; // extra allowed WS origins beyond localhost + own host (reverse proxy, custom domains)
+  allowedOrigins?: string[]; // extra hosts/origins this app may be reached as — read by BOTH the WS Origin check and the Host (DNS-rebinding) gate (reverse proxy, custom domains)
   strictOrigin?: boolean; // --expose hardening: require an Origin header on WS upgrade
   /** Behind a trusted reverse proxy, read the real client IP from this header's first hop for abuse/auth-fail/lockout bucketing (e.g. "x-forwarded-for"). Opt-in — only set it when a proxy actually fronts the app. */
   trustProxyHeader?: string;
@@ -276,7 +312,14 @@ export type AioConfig<S, A, E> = {
   /** Bind ONE address instead of the expose-derived default (0.0.0.0 when
    *  exposed, 127.0.0.1 when not) — a multi-homed machine (VPN + LAN) often
    *  wants the relay on the LAN interface only. Config twin of `--host=`;
-   *  the flag wins when both are set. */
+   *  the flag wins when both are set.
+   *
+   *  A NON-LOOPBACK value IS exposure, and is treated as `expose: true`
+   *  (`_exposeOf` in aio.ts is the one decider). It has to be: binding
+   *  0.0.0.0 while `expose` stayed false generated no app key, ran no
+   *  auto-TLS, ignored `strictOrigin` and printed none of the "this app is
+   *  OPEN" warnings — an app on the network with nothing in front of it and
+   *  nothing said about it. */
   host?: string;
   baseDir?: string; // default: ./src
   /** Extra READ-ONLY roots the DEV server may serve, mapped to a URL prefix:
@@ -366,6 +409,12 @@ export type AioConfig<S, A, E> = {
   _cellNames?: string[];
   /** Internal: cell defs flagged `worker: true` (see src/server/cell-worker.ts). */
   _workerCells?: import("../state/cell-types.ts").CellDef[];
+  /** Internal: the module a cell worker boots from. Unset means
+   *  `Deno.mainModule` — the app's own entry, which is the production answer.
+   *  `testServer({ workers: "real" })` sets it to a real app-entry fixture,
+   *  because under `libraryMode` the main module is the TEST file and spawning
+   *  a worker on it would re-run the test in another thread. */
+  _workerEntry?: string;
   /** Internal: health getter factory — passed from CellsConfig for diagnostics */
   _healthGetter?: (
     state: unknown,
@@ -523,8 +572,10 @@ export type CellsConfig = {
   appDir?: string;
   /** Override the SQLite file (":memory:" for hermetic tests). */
   dbPath?: string;
-  /** PRAGMAs for the app db (default: WAL + synchronous=NORMAL). A wallet or
-   *  ledger wants `PRAGMA synchronous = FULL`; a cache does not. */
+  /** PRAGMAs for the app db, MERGED over the defaults by pragma name (WAL,
+   *  synchronous=NORMAL, busy_timeout, cache_size, foreign_keys) — naming one
+   *  keeps the rest. A wallet or ledger wants `PRAGMA synchronous = FULL`; a
+   *  cache does not. */
   dbPragmas?: string[];
   /** Check the app database's integrity at boot (`PRAGMA quick_check`).
    *
@@ -636,6 +687,10 @@ export type CellsConfig = {
    *  unless it asked for it (maintainer decision, a field report openWindow thread). */
   childWindows?: boolean;
   libraryMode?: boolean; // no exit/signals/lock; app.close() leaves process alive
+  /** Internal (test harness): host `worker: true` cells from THIS module
+   *  instead of `Deno.mainModule`. Set by `testServer({ workers: "real" })`;
+   *  never set it by hand — an app's worker entry is its own entry. */
+  _workerEntry?: string;
   syncIntervalMs?: number;
   fullStateThreshold?: number;
   /** Custom HTTP routes — exact path or "/prefix/*" wildcard → handler. The

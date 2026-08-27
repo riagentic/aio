@@ -16,6 +16,9 @@ import type { QueryResult, WorkerRequest, WorkerResponse } from "./types.ts";
 const _p = (v: unknown[]): any[] => v;
 
 let db: DatabaseSync | null = null;
+/** Index of the transaction statement currently being run, so a refusal can
+ *  name it. Reset per request. */
+let failedIndex = -1;
 
 function respond(res: WorkerResponse): void {
   self.postMessage(res);
@@ -27,6 +30,7 @@ function empty(): QueryResult {
 
 self.onmessage = ({ data }: MessageEvent<WorkerRequest>) => {
   const { id, type } = data;
+  failedIndex = -1;
   try {
     switch (type) {
       case "open": {
@@ -84,6 +88,7 @@ self.onmessage = ({ data }: MessageEvent<WorkerRequest>) => {
         db.exec("BEGIN");
         try {
           for (const { sql, params } of data.stmts) {
+            failedIndex = results.length; // the one being run right now
             const r = db.prepare(sql).run(..._p(params ?? []));
             results.push({
               rows: [],
@@ -111,6 +116,44 @@ self.onmessage = ({ data }: MessageEvent<WorkerRequest>) => {
     }
   } catch (e) {
     const err = e instanceof Error ? e : new Error(String(e));
-    respond({ id, ok: false, error: err.message, stack: err.stack });
+    // WITH the statement that caused it. SQLite's messages describe a
+    // condition, not a call — `too many SQL variables` reached the operator as
+    // exactly those four words, from a worker, with no way to tell which of
+    // the window's statements produced it or how big it was. The main thread
+    // cannot add this: it only knows what it sent, and by then the error is
+    // already a bare string on the wire.
+    respond({
+      id,
+      ok: false,
+      error: `${err.message}${sqlContext(data)}`,
+      stack: err.stack,
+    });
   }
 };
+
+/** What was being run, appended to a worker error. One statement is quoted
+ *  (truncated); a transaction names its size and the statement that failed is
+ *  identified by index. */
+function sqlContext(data: WorkerRequest): string {
+  const clip = (sql: string) =>
+    sql.length > 300 ? `${sql.slice(0, 300)}…` : sql;
+  const one = (sql: string, params?: unknown[]) =>
+    ["", `  sql: ${clip(sql)}`, `  params: ${params?.length ?? 0}`].join("\n");
+  if (data.type === "query" || data.type === "execute") {
+    return one(data.sql, data.params);
+  }
+  if (data.type === "transaction") {
+    const at = failedIndex;
+    const st = at >= 0 ? data.stmts[at] : undefined;
+    return [
+      "",
+      `  in a transaction of ${data.stmts.length} statement(s)` +
+      (st ? `, at statement ${at + 1}` : ""),
+      ...(st
+        ? [`  sql: ${clip(st.sql)}`, `  params: ${st.params?.length ?? 0}`]
+        : []),
+      "  (the whole transaction was rolled back)",
+    ].join("\n");
+  }
+  return "";
+}

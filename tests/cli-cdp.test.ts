@@ -1,7 +1,7 @@
 // `--cdp` / AIO_CDP: opt-in DevTools Protocol for the Electron window.
 // (a) flag + env parsing, one decider; (b) the launch passes the Chromium
 // switch ONLY when asked — a bound debugging port is a port.
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 import {
   _resetParsedCli,
   cdpPort,
@@ -10,12 +10,14 @@ import {
 } from "../src/server/aio-cli.ts";
 import { cdpSwitches, launchElectron } from "../src/electron/electron-spawn.ts";
 
-Deno.test("parseCli: --cdp is true, --cdp=N is N, bad N ignored", () => {
+Deno.test("parseCli: --cdp is true, --cdp=N is N, a bad N is refused", () => {
   assertEquals(parseCli(["--cdp"]).cdp, true);
   assertEquals(parseCli(["--cdp=9222"]).cdp, 9222);
-  assertEquals(parseCli(["--cdp=abc"]).cdp, undefined);
-  assertEquals(parseCli(["--cdp=70000"]).cdp, undefined);
   assertEquals(parseCli([]).cdp, undefined);
+  // Not "ignored": an operator who typed a port meant to open one, and
+  // silently opening none is the behaviour they will debug for an hour.
+  assertThrows(() => parseCli(["--cdp=abc"]), Error, "--cdp=abc");
+  assertThrows(() => parseCli(["--cdp=70000"]), Error, "--cdp=70000");
 });
 
 Deno.test("parseCdp: flag beats env; AIO_CDP=1|port|0|garbage", () => {

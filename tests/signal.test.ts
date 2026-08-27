@@ -684,3 +684,165 @@ Deno.test("signal: force flag bypasses reference equality", () => {
   s.set(5, { force: true });
   assertEquals(calls, 2);
 });
+
+// ── A throw must not wedge an effect ────────────────────────────────
+//
+// All three of these used to leave the effect permanently dead or permanently
+// linked, with nothing but a log line to say so. An effect that stops running
+// is the quietest failure the renderer has: the DOM simply stops updating.
+
+Deno.test("signal: an effect that throws once still runs on the next change", () => {
+  const s = signal(0);
+  const seen: number[] = [];
+  let boom = true;
+  effect(() => {
+    const v = s.value;
+    seen.push(v);
+    if (boom && v === 1) {
+      boom = false;
+      throw new Error("effect body failed");
+    }
+  });
+  assertEquals(seen, [0]);
+  s.set(1); // throws inside the effect — reported by _flush
+  assertEquals(seen, [0, 1]);
+  s.set(2); // it used to have unsubscribed itself here, forever
+  assertEquals(seen, [0, 1, 2]);
+});
+
+Deno.test("signal: a cleanup that throws does not wedge the effect", () => {
+  const s = signal(0);
+  const runs: number[] = [];
+  effect(() => {
+    runs.push(s.value);
+    return () => {
+      throw new Error("cleanup failed");
+    };
+  });
+  assertEquals(runs, [0]);
+  s.set(1); // cleanup throws — the throwing cleanup must be cleared, not kept
+  s.set(2);
+  s.set(3);
+  // Without the fix, the same throwing cleanup ran every flush and the effect
+  // never executed again: runs stayed [0].
+  // Without the fix the same throwing cleanup ran on every flush and phase 2
+  // was skipped, so the effect saw every OTHER write at best: [0, 2].
+  assertEquals(runs, [0, 1, 2, 3]);
+});
+
+Deno.test("signal: a cleanup that throws on dispose still unlinks the effect", () => {
+  const s = signal(0);
+  let runs = 0;
+  const dispose = effect(() => {
+    s.value;
+    runs++;
+    return () => {
+      throw new Error("cleanup failed");
+    };
+  });
+  assertEquals(runs, 1);
+  try {
+    dispose();
+  } catch { /* the throw is loud — that part is correct */ }
+  assertEquals(
+    (s as unknown as { _subscribers: Set<unknown> })._subscribers.size,
+    0,
+    "disposed effect kept its dependency links",
+  );
+  s.set(1);
+  assertEquals(runs, 1, "disposed effect still ran");
+});
+
+Deno.test("signal: an effect that throws mid-body keeps the deps it read first", () => {
+  const a = signal(1);
+  const b = signal(1);
+  let runs = 0;
+  let boom = false;
+  effect(() => {
+    runs++;
+    a.value;
+    if (boom) {
+      boom = false;
+      throw new Error("thrown before reading b");
+    }
+    b.value;
+  });
+  assertEquals(runs, 1);
+  boom = true;
+  a.set(2); // throws after reading `a`, before reading `b`
+  assertEquals(runs, 2);
+  // `a` was read before the throw, so the effect is still linked to it — it
+  // used to have dropped every link and gone permanently dead here.
+  a.set(3);
+  assertEquals(runs, 3);
+  b.set(2);
+  assertEquals(runs, 4);
+});
+
+Deno.test("signal: unsubscribing during a flush cancels the queued notification", () => {
+  // A flush SNAPSHOTS the pending set before running it, so a subscriber that
+  // unsubscribed while an EARLIER subscriber was running was still called from
+  // that snapshot — an unmounted component's callback firing after teardown.
+  // "Unsubscribed" has to mean the notification already in the queue too.
+  const s = signal(0);
+  const calls: string[] = [];
+  let unsubB!: () => void;
+  s.subscribe(() => {
+    calls.push("a");
+    unsubB(); // tears down B while the flush that queued both is running
+  });
+  unsubB = s.subscribe(() => calls.push("b"));
+  s.set(1);
+  assertEquals(calls, ["a"]);
+});
+
+Deno.test("signal: disposing an effect during a flush cancels its queued run", () => {
+  const s = signal(0);
+  const runs: string[] = [];
+  let disposeB!: () => void;
+  effect(() => {
+    s.value;
+    runs.push("a");
+    if (runs.length > 1) disposeB();
+  });
+  disposeB = effect(() => {
+    s.value;
+    runs.push("b");
+  });
+  assertEquals(runs, ["a", "b"]);
+  s.set(1);
+  assertEquals(runs, ["a", "b", "a"]);
+});
+
+// The tracking stack is an INTERNAL invariant of the renderer: every
+// `_trackStart()` is popped by its own `_trackEnd()`. Nothing an app writes can
+// reach it, so the message must say so — the old text ("Signal tracking stack
+// mismatch") sent readers hunting through their own components for a mistake
+// that was never theirs.
+Deno.test("signal: the tracking-stack invariant blames aio, not the reader", () => {
+  const outer = _trackStart();
+  _trackStart(); // the frame `_trackEnd(outer)` will wrongly pop
+  let msg = "";
+  try {
+    _trackEnd(outer); // popped out of order — only aio can do this
+  } catch (e) {
+    msg = (e as Error).message;
+  } finally {
+    // The failed pop already removed `inner`; `outer` is what is left. Unwind
+    // it so the stack is clean for every later test.
+    _trackEnd(outer);
+  }
+  for (
+    const part of [
+      "internal invariant",
+      "This is an aio bug, not yours",
+      "report",
+      "github.com/riagentic/aio/issues",
+      "component or",
+    ]
+  ) {
+    if (!msg.includes(part)) {
+      throw new Error(`the refusal does not say "${part}": ${msg || "(none)"}`);
+    }
+  }
+});

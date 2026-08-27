@@ -8,7 +8,9 @@
       "deno.unstable",
       "dom",
       "dom.iterable"
-    ]
+    ],
+    "jsx": "react-jsx",
+    "jsxImportSource": "aio"
   },
   "imports": {
     "aio": "../../../mod.ts",
@@ -21,7 +23,16 @@
   },
   "tasks": {
     "dev": "deno run -A src/app.ts --connect",
-    "install:electron": "deno install --allow-scripts=npm:electron",
-    "compile": "deno run -A ../../../src/build.ts --client"
+    "build": "deno run -A ../../../src/build-all.ts --build-spec=../../../src/build.ts",
+    "compile": "deno run -A ../../../src/build-all.ts --build-spec=../../../src/build.ts --targets=electron-client",
+    "install:electron": "deno run -A ../../../src/electron-install.ts",
+    "check": "deno check src/",
+    "lint": "deno run -A ../../../aiol/mod.ts",
+    "am": "deno run -A ../../../src/am.ts"
+  },
+  "build": {
+    "targets": [
+      "electron-client"
+    ]
   }
 }

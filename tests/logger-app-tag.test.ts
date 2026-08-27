@@ -10,7 +10,7 @@ import {
   setLogger,
 } from "../src/diagnostics/logger-api.ts";
 import type { LogLevel, LogSink } from "../src/diagnostics/logger-types.ts";
-import { parseCli } from "../src/server/aio-cli.ts";
+import { parseCdp, parseCli } from "../src/server/aio-cli.ts";
 
 function capture(): { sink: LogSink; cats: string[] } {
   const cats: string[] = [];
@@ -42,7 +42,13 @@ Deno.test("logger tag: a call from src/server is `aio`", () => {
   const { sink, cats } = capture();
   setLogger(sink);
   try {
-    parseCli(["--port=abc"]); // src/server/aio-cli.ts warns, untagged
+    // src/server/aio-cli.ts warns, untagged. It used to be
+    // `parseCli(["--port=abc"])`; an unusable flag value is now REFUSED rather
+    // than warned about, so this reaches for the other untagged warn in the
+    // same file — `AIO_CDP` is an environment variable, and refusing a boot
+    // over a stale one in someone's shell profile is not the same bargain as
+    // refusing a flag they just typed.
+    parseCdp(undefined, "nope");
     assertEquals(cats, ["aio"]);
   } finally {
     setLogger(prev);

@@ -119,7 +119,8 @@ async function trojanOverUds(
   // preference, never a dead end.
   if ("error" in r) return null;
   if (r.status < 200 || r.status >= 300) {
-    const extra = credentialDiagnosis(r.status, creds, appId);
+    const extra = credentialDiagnosis(r.status, creds, appId) +
+      prodDiagnosis(r.status, r.body);
     try {
       return { ok: false, error: (JSON.parse(r.body).error ?? r.body) + extra };
     } catch {
@@ -153,48 +154,99 @@ const VERIFY_TTL_MS = 2000;
  *  presenting one would only burn the operator's own auth-fail budget. */
 type PortIdentity = { appId?: string; gated: boolean; at: number };
 const _verified = new Map<string, PortIdentity>();
+/** Probes in flight, keyed by port. amui's `fetchDiag` fires five control
+ *  reads at once with `Promise.all`; without this every one of them missed the
+ *  (not-yet-written) cache and opened its own health probe, so a single panel
+ *  refresh cost ten TCP connections instead of six. One probe per port at a
+ *  time — the others await the same answer. */
+const _inflight = new Map<string, Promise<PortIdentity>>();
 export function _resetInstanceVerify(): void {
   _verified.clear();
+  _inflight.clear();
 }
 
-async function probeIdentity(ctrl: number): Promise<PortIdentity | null> {
+/** One probe of "who answers on this port, and does it demand a credential".
+ *
+ *  ONE. This function used to be called TWICE per control call (the identity
+ *  gate, then the credential resolver asking `gated`), and an UNREACHABLE probe
+ *  was deliberately not cached, so neither call could reuse the other's answer.
+ *  Against a port that accepts and never replies, one `am` command opened THREE
+ *  TCP connections and waited three full timeouts: measured 24 005 ms with the
+ *  default 8 s budget, 19 008 ms with `--timeout=3000` — because the two probes
+ *  ignored the flag as well and always spent `FETCH_TIMEOUT`. Every `am`
+ *  command paid it, and amui paid it on every tick of every panel.
+ *
+ *  So: the timeout is the caller's, and a negative verdict is cached for the
+ *  same short TTL as a positive one. Caching it costs no honesty — the probe
+ *  only decides *which credentials to present*; the REAL request still runs and
+ *  still reports its own failure, which is the error the operator sees.
+ *
+ *  `gated` is what decides whether am presents the app's shared key: a keyed
+ *  app gates EVERY route (health included), so a 401 here is the positive
+ *  signal that the key is wanted — and its absence is the positive signal that
+ *  presenting one would only burn the operator's own auth-fail budget. */
+async function probeIdentity(
+  ctrl: number,
+  timeout = FETCH_TIMEOUT,
+): Promise<PortIdentity> {
   const key = String(ctrl);
   const cached = _verified.get(key);
   if (cached && Date.now() - cached.at < VERIFY_TTL_MS) return cached;
+  const pending = _inflight.get(key);
+  if (pending) return await pending;
+  const p = probeIdentityOnce(ctrl, timeout, key);
+  _inflight.set(key, p);
+  try {
+    return await p;
+  } finally {
+    _inflight.delete(key);
+  }
+}
+
+async function probeIdentityOnce(
+  ctrl: number,
+  timeout: number,
+  key: string,
+): Promise<PortIdentity> {
+  const remember = (probe: PortIdentity) => {
+    _verified.set(key, probe);
+    return probe;
+  };
   try {
     const r = await fetch(`http://127.0.0.1:${ctrl}/__aio/health`, {
-      signal: AbortSignal.timeout(FETCH_TIMEOUT),
+      signal: AbortSignal.timeout(timeout),
     });
     if (!r.ok) {
       await r.body?.cancel();
       // Gated or odd — no identity, but "it wants a credential" is itself
       // information the credential resolver needs.
-      const probe: PortIdentity = {
+      return remember({
         gated: r.status === 401 || r.status === 403,
         at: Date.now(),
-      };
-      _verified.set(key, probe);
-      return probe;
+      });
     }
     const h = await r.json() as { appId?: string };
-    const probe: PortIdentity = {
+    return remember({
       appId: typeof h.appId === "string" ? h.appId : undefined, // pre-alpha41
       gated: false,
       at: Date.now(),
-    };
-    _verified.set(key, probe);
-    return probe;
+    });
   } catch {
-    return null; // unreachable — never cached; the real call's error is honest
+    // UNREACHABLE — refused, hung, or timed out. CACHED, like every other
+    // verdict: it only decides which credentials to present, and the real
+    // request that follows still reports its own honest failure.
+    return remember({ gated: false, at: Date.now() });
   }
 }
 
-export async function verifyInstance(
+/** The mismatch verdict for an ALREADY-TAKEN probe — no I/O, so the gate and
+ *  the credential resolver share one round trip instead of racing for two. */
+function identityMismatch(
+  probe: PortIdentity,
   ctrl: number,
   expectedAppId: string,
-): Promise<{ ok: false; error: string } | null> {
-  const probe = await probeIdentity(ctrl);
-  const actual = probe?.appId;
+): { ok: false; error: string } | null {
+  const actual = probe.appId;
   if (actual === undefined) return null; // gated / unreachable / pre-alpha41
   if (actual === expectedAppId) return null;
   return {
@@ -205,7 +257,20 @@ export async function verifyInstance(
   };
 }
 
-/** The ONE identity gate every am→app call passes through.
+export async function verifyInstance(
+  ctrl: number,
+  expectedAppId: string,
+  timeout = FETCH_TIMEOUT,
+): Promise<{ ok: false; error: string } | null> {
+  return identityMismatch(
+    await probeIdentity(ctrl, timeout),
+    ctrl,
+    expectedAppId,
+  );
+}
+
+/** The ONE identity gate every am→app call passes through, and the ONE probe
+ *  its credentials are resolved from.
  *
  *  It used to sit in `trojanGet` only: every READ was checked while every
  *  MUTATION — `shutdown`, `dispatch`, `sql`, `snapshot`, `tt`, `trigger` — went
@@ -216,14 +281,30 @@ export async function verifyInstance(
  *  There is no opt-out and none is needed — every call site knows the app it
  *  means: `--app`, the cwd's deno.json/entry, amui's process registry, or (for
  *  `am stop --port=N`) the appId read from that port's own /__aio/health. When
- *  the identity genuinely cannot be established, `verifyInstance` itself
- *  returns null (unreachable / pre-alpha41 server) and the real call's own
- *  error is the honest one. */
-async function identityGate(
+ *  the identity genuinely cannot be established, the gate returns no mismatch
+ *  (unreachable / pre-alpha41 server) and the real call's own error is the
+ *  honest one.
+ *
+ *  Returns the refusal, or the credentials the real request must carry. */
+async function controlPreflight(
   ctrl: number,
-  appId?: string,
-): Promise<{ ok: false; error: string } | null> {
-  return appId ? await verifyInstance(ctrl, appId) : null;
+  appId: string | undefined,
+  opts: { control: boolean; timeout: number },
+): Promise<
+  { mismatch: { ok: false; error: string } } | {
+    mismatch: null;
+    creds: LocalCreds;
+  }
+> {
+  const probe = await probeIdentity(ctrl, opts.timeout);
+  if (appId) {
+    const mismatch = identityMismatch(probe, ctrl, appId);
+    if (mismatch) return { mismatch };
+  }
+  return {
+    mismatch: null,
+    creds: localCreds(appId, { control: opts.control, gated: probe.gated }),
+  };
 }
 
 // ── Credentials ──────────────────────────────────────────────────────────────
@@ -321,6 +402,29 @@ function credentialDiagnosis(
     );
   }
   return lines.length ? "\n\n" + lines.join("\n") : "";
+}
+
+/** The other half of `credentialDiagnosis`: a 404 from the control plane.
+ *
+ *  `/__aio/trojan/*` is DEV-ONLY — a production build does not mount it, so the
+ *  server's generic 404 handler answers and `am state` printed the whole
+ *  explanation as `{"error":"Not Found"}`. The operator surface simply vanished
+ *  against a compiled binary while `am status` kept working, with nothing
+ *  anywhere saying why. Names the reason AND what does work in prod. */
+function prodDiagnosis(status: number, body: string): string {
+  if (status !== 404) return "";
+  // The dev server answers 404 for a genuinely unknown trojan ROUTE too (an
+  // `am` newer than the app it is talking to). That one names the route; the
+  // prod case is the framework's bare "Not Found" / the trojan's own backstop.
+  if (!/not found|trojan is disabled/i.test(body)) return "";
+  return "\n\nThe control API (/__aio/trojan/*) is DEV-ONLY: a production " +
+    "build never mounts it, so state, dispatch, sql, surface, trigger, " +
+    "timeline and snapshot have nothing to talk to.\n" +
+    "Against a production app, these work: am status, am health, am logs, " +
+    "am errors, am metrics, am data, am installed, am pin.\n" +
+    "To inspect or drive state, run the app in dev (deno task dev) and point " +
+    "am at it — or, if this app IS a dev build, it was started with " +
+    "--prod/NODE_ENV=production.";
 }
 
 /** What is actually listening on a port — the honest answer for a message that
@@ -437,12 +541,12 @@ export async function trojanGet(
     if (r) return r;
   }
   const ctrl = resolveControlPort(port, appId);
-  const mismatch = await identityGate(ctrl, appId);
-  if (mismatch) return mismatch;
-  const creds = localCreds(appId, {
+  const pre = await controlPreflight(ctrl, appId, {
     control: true,
-    gated: (await probeIdentity(ctrl))?.gated ?? false,
+    timeout,
   });
+  if (pre.mismatch) return pre.mismatch;
+  const creds = pre.creds;
   try {
     const resp = await fetch(`http://127.0.0.1:${ctrl}/__aio/trojan/${route}`, {
       headers: creds.headers,
@@ -450,7 +554,8 @@ export async function trojanGet(
     });
     if (!resp.ok) {
       const body = await resp.text();
-      const extra = credentialDiagnosis(resp.status, creds, appId);
+      const extra = credentialDiagnosis(resp.status, creds, appId) +
+        prodDiagnosis(resp.status, body);
       try {
         return { ok: false, error: (JSON.parse(body).error ?? body) + extra };
       } catch {
@@ -492,12 +597,13 @@ export async function trojanPost(
     if (r) return r;
   }
   const ctrl = resolveControlPort(port, appId);
-  const mismatch = await identityGate(ctrl, appId);
-  if (mismatch) return mismatch; // a MUTATION is gated at least as hard as a read
-  const creds = localCreds(appId, {
+  // a MUTATION is gated at least as hard as a read
+  const pre = await controlPreflight(ctrl, appId, {
     control: true,
-    gated: (await probeIdentity(ctrl))?.gated ?? false,
+    timeout,
   });
+  if (pre.mismatch) return pre.mismatch;
+  const creds = pre.creds;
   try {
     const resp = await fetch(`http://127.0.0.1:${ctrl}/__aio/trojan/${route}`, {
       method: "POST",
@@ -511,7 +617,8 @@ export async function trojanPost(
     });
     if (!resp.ok) {
       const text = await resp.text();
-      const extra = credentialDiagnosis(resp.status, creds, appId);
+      const extra = credentialDiagnosis(resp.status, creds, appId) +
+        prodDiagnosis(resp.status, text);
       try {
         return { ok: false, error: (JSON.parse(text).error ?? text) + extra };
       } catch {
@@ -529,6 +636,7 @@ export async function httpGet(
   port: number,
   path: string,
   appId?: string,
+  timeout = FETCH_TIMEOUT,
 ): Promise<Result<string>> {
   // The app's own routes answer on the socket too — same handler. Without this
   // `am state` would work on a socket-only app while `am health` reported it
@@ -541,14 +649,14 @@ export async function httpGet(
     let r = await udsRequest(sock, path, {
       method: "GET",
       headers: creds.headers,
-    }, FETCH_TIMEOUT);
+    }, timeout);
     if (!("error" in r) && (r.status === 401 || r.status === 403)) {
       const keyed = localCreds(appId, { control: false, gated: true });
       if (keyed.headers["Authorization"]) {
         r = await udsRequest(sock, path, {
           method: "GET",
           headers: keyed.headers,
-        }, FETCH_TIMEOUT);
+        }, timeout);
       }
     }
     if (!("error" in r)) {
@@ -559,19 +667,20 @@ export async function httpGet(
     // transport failure — fall through to TCP
   }
   const ctrl = resolveControlPort(port, appId);
-  const mismatch = await identityGate(ctrl, appId);
-  if (mismatch) return mismatch; // `/__aio/snapshot` dumps a whole app's data
   // NO control credential here: it authorizes the control plane, not the app's
   // own routes. `/__aio/health|vitals|metrics|snapshot` are the app's front
   // door and keep the app's own gate — only the shared key belongs on them.
-  const creds = localCreds(appId, {
+  const pre = await controlPreflight(ctrl, appId, {
     control: false,
-    gated: (await probeIdentity(ctrl))?.gated ?? false,
+    timeout,
   });
+  // `/__aio/snapshot` dumps a whole app's data
+  if (pre.mismatch) return pre.mismatch;
+  const creds = pre.creds;
   try {
     const resp = await fetch(`http://127.0.0.1:${ctrl}${path}`, {
       headers: creds.headers,
-      signal: AbortSignal.timeout(FETCH_TIMEOUT),
+      signal: AbortSignal.timeout(timeout),
     });
     if (!resp.ok) {
       return { ok: false, error: `${resp.status} ${await resp.text()}` };

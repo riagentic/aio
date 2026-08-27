@@ -12,8 +12,15 @@ export let _devtoolsConnected = false;
 
 function _initDevTools(): void {
   if (_devtoolsConnected) return;
-  const ext =
-    (window as unknown as Record<string, unknown>).__REDUX_DEVTOOLS_EXTENSION__;
+  // The page's `window` when there is one, `globalThis` otherwise — in a
+  // browser they are the same object. This read used to be a BARE `window`,
+  // outside the try below, so calling connectDevTools() where no `window`
+  // binding exists (Deno, a CLI/service target sharing this module) threw a
+  // ReferenceError out of a function whose whole contract is "no-op when the
+  // extension is absent".
+  const g = globalThis as unknown as Record<string, unknown>;
+  const host = (g.window ?? g) as Record<string, unknown>;
+  const ext = host.__REDUX_DEVTOOLS_EXTENSION__;
   if (!ext) return;
 
   try {

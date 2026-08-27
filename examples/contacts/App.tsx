@@ -58,6 +58,25 @@ function Editor() {
 function Row({ c }: { c: Contact }) {
   const { local: editing, set: setEditing } = useLocal(false);
   const { local: draft, set: setDraft } = useLocal(c.email);
+  const { local: error, set: setError } = useLocal("");
+
+  // The SAME shape as `Editor.submit` above, and for the same reason: a method
+  // that refuses does so by throwing, so the caller has to await it to find
+  // out. Firing `contacts.update()` unawaited and closing edit mode anyway
+  // threw the user's typing away on every refusal — the row snapped back to
+  // its old value with no error anywhere, in the example whose subject is
+  // validation. Edit mode closes only when the write actually landed.
+  const save = async () => {
+    try {
+      await contacts.update(c.id, { email: draft });
+      setError("");
+      setEditing(false);
+    } catch (e) {
+      // Refused — the row is unchanged, the draft is kept, and this is why.
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
   return (
     <div style={row}>
       <span>{c.name}</span>
@@ -70,18 +89,15 @@ function Row({ c }: { c: Contact }) {
           />
         )
         : <span>{c.email}</span>}
-      <span style={{ color: "#667" }}>{c.note}</span>
+      <span style={{ color: "#667" }}>
+        {error
+          ? <span t="row-error" style={{ color: "#c00" }}>{error}</span>
+          : c.note}
+      </span>
       <span>
         {editing
           ? (
-            <button
-              type="button"
-              t={`save-${c.id}`}
-              onClick={() => {
-                contacts.update(c.id, { email: draft });
-                setEditing(false);
-              }}
-            >
+            <button type="button" t={`save-${c.id}`} onClick={save}>
               Save
             </button>
           )
@@ -89,7 +105,11 @@ function Row({ c }: { c: Contact }) {
             <button
               type="button"
               t={`edit-${c.id}`}
-              onClick={() => setEditing(true)}
+              onClick={() => {
+                setDraft(c.email); // start from what is on screen now
+                setError("");
+                setEditing(true);
+              }}
             >
               Edit
             </button>

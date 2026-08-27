@@ -64,7 +64,7 @@ export async function selfPaths(): Promise<Set<string>> {
   const paths = new Set<string>([selfDir()]);
   try {
     const { instances } = await import(
-      "../../../src/server/single-instance-lock.ts"
+      "./control.server.ts"
     );
     for (const i of instances()) {
       if (i.pid === Deno.pid && i.cwd) paths.add(i.cwd);
@@ -234,7 +234,7 @@ export async function discoverProjects(): Promise<
   { projects: DiscoveredProject[]; roots: string[] }
 > {
   const { instances } = await import(
-    "../../../src/server/single-instance-lock.ts"
+    "./control.server.ts"
   );
   // amui is itself an aio app — it stays in the list so it can monitor its own
   // cells, state, metrics and logs like any other app. Only its LIFECYCLE is

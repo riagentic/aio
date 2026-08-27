@@ -63,8 +63,35 @@ export type UpdatesConfig = {
   /** The trusted signing key. Omitted ⇒ trust-on-first-use: the first verified
    *  manifest's key is pinned, loudly, and every later release must match it. */
   key?: JsonWebKey;
+  /** Additional keys this install accepts, for a rotation: publish the next
+   *  release signed by the NEW key while the old one is still listed, then drop
+   *  the old one. Without a roster, losing a key bricks every install forever. */
+  keys?: JsonWebKey[];
+  /** May an update be applied RIGHT NOW? Consulted before every apply — the
+   *  manual one and the `auto` one — and a `false` refuses the install and says
+   *  so, leaving the offer standing for the next check.
+   *
+   *  This is the one hook that cannot be defaulted, because only the app knows
+   *  what it is in the middle of: a signature being collected, an unsaved
+   *  editor, a transaction that has not committed. Without it `auto: true` has
+   *  no guard of any kind.
+   *
+   *  WORK BELONGS HERE. It is `await`ed, it runs before a byte is downloaded,
+   *  and a throw fails CLOSED with the hook's own message in the refusal — so
+   *  something that must succeed before an install (archive the data, flush a
+   *  queue, close a device) can happen here, and "it failed" and "no update
+   *  happens" are one event rather than two facts that have to be kept in
+   *  step. This is the only seam that covers all three doors — the button,
+   *  `auto: true`, and the terminal prompt — so work done anywhere else is a
+   *  promise the other two paths break in silence. */
+  canApply?: () => boolean | Promise<boolean>;
   /** Install unsigned releases (a private LAN build). Says so at every step. */
   allowUnsigned?: boolean;
+  /** Follow prerelease versions (`2.1.0-rc.1`) on this channel. Default:
+   *  `true` on the `dev` channel — the one you are shipping into right now —
+   *  and `false` everywhere else, where a prerelease is reported as
+   *  "current" with the reason, never offered. */
+  prerelease?: boolean;
 };
 
 /** Config after defaults are applied — what the runtime actually uses. */
@@ -76,7 +103,10 @@ export type ResolvedUpdates = {
   intervalMs: number;
   auto: boolean;
   key?: JsonWebKey;
+  keys?: JsonWebKey[];
   allowUnsigned: boolean;
+  prerelease: boolean;
+  canApply?: () => boolean | Promise<boolean>;
 };
 
 /** Poll intervals by channel.
@@ -111,14 +141,22 @@ export function resolveChannel(src: {
   flag?: string;
   /** `AIO_UPDATE_CHANNEL` in this environment. */
   env?: string;
-  /** Pinned in `data/meta.json` — set at install, or by `am channel`. */
+  /** Pinned in this install's trust store (`data/update-trust.json`) — written
+   *  the first time a channel is settled, and by `updates.setChannel()`. */
   pinned?: string;
-  /** Stamped into the artifact at build time. */
+  /** Stamped into the artifact at build time (deno.json `build.channel`). */
   stamp?: string;
   /** Explicit `updates.channel` in the app's own config. */
   config?: string;
 }): string {
-  return src.flag || src.env || src.pinned || src.config || src.stamp || "prod";
+  // The STAMP outranks the config literal, and that is the whole point of the
+  // paragraph above: the stamp says what this ARTIFACT is, while the literal
+  // says what the source tree defaults to. A test build carries a test stamp
+  // and a prod config line, and letting the literal win is exactly the silent
+  // "the tester's build updated itself into prod" this mechanism exists to
+  // prevent. An operator who wants something else says so per run (--channel,
+  // AIO_UPDATE_CHANNEL) or per install (setChannel → pinned).
+  return src.flag || src.env || src.pinned || src.stamp || src.config || "prod";
 }
 
 /** Decide what kind of source a URL is.
@@ -159,6 +197,32 @@ export function classifySource(
   return "manifest";
 }
 
+/** Turn `check` into a poll interval, refusing what cannot be one.
+ *
+ *  Both of the values this rejects used to be accepted silently and both are
+ *  worse than a crash: a negative or sub-second number set `intervalMs` to
+ *  something the scheduler treats as "never" (an app that believes it polls and
+ *  does not), and `NaN` reached `setTimeout` as 0 — a tight loop hammering
+ *  somebody's release host from every install that shipped with it. A config
+ *  value that cannot mean anything is a boot-time error, at the site, naming
+ *  what was written. */
+function resolveInterval(check: boolean | number, channel: string): number {
+  if (check === true) return defaultInterval(channel);
+  if (check === false) return 0;
+  if (typeof check !== "number" || !Number.isFinite(check) || check < 1000) {
+    throw new Error(
+      `[updates] check: ${
+        typeof check === "number" ? check : JSON.stringify(check)
+      } is not a poll interval. ` +
+        `Use \`true\` (the channel's cadence — ${
+          defaultInterval(channel)
+        }ms on "${channel}"), \`false\` (never poll; \`updates.check()\` ` +
+        `only), or a number of milliseconds >= 1000.`,
+    );
+  }
+  return check;
+}
+
 /** Apply defaults to whatever the app declared. */
 export function resolveUpdates(
   input: UpdatesInput,
@@ -174,19 +238,20 @@ export function resolveUpdates(
   const channel = kind === "git"
     ? (ctx.flag || ctx.env || ctx.pinned || cfg.channel || "main")
     : resolveChannel({ ...ctx, config: cfg.channel });
-  const check = cfg.check ?? true;
   return {
     source: cfg.source.replace(/\/+$/, ""),
     kind,
     channel,
-    intervalMs: check === false
-      ? 0
-      : check === true
-      ? defaultInterval(channel)
-      : check,
+    intervalMs: resolveInterval(cfg.check ?? true, channel),
     auto: cfg.auto ?? false,
     key: cfg.key,
+    keys: cfg.keys,
+    canApply: cfg.canApply,
     allowUnsigned: cfg.allowUnsigned ?? false,
+    // The dev channel exists to be shipped into, and what gets shipped into it
+    // is alphas and rcs; every other channel is a release channel, where a
+    // prerelease is an accident until somebody says otherwise.
+    prerelease: cfg.prerelease ?? channel === "dev",
   };
 }
 
@@ -216,15 +281,53 @@ export function artifactUrl(manifestUrlStr: string, m: ShipManifest): string {
 
 type Parsed = { nums: number[]; pre: string[] };
 
+/** A string this comparator can actually order: an optional leading `v`, one to
+ *  three numeric components, an optional `-prerelease`, an optional `+build`.
+ *
+ *  Anything else is UNORDERABLE and must be refused rather than parsed. The old
+ *  parser ran everything through `Number.parseInt(n, 10) || 0`, so every string
+ *  it could not read became `0.0.0` — and a compiled binary whose version could
+ *  not be determined reports itself as `"unknown (compiled binary …)"`. That
+ *  compared as `0.0.0`, which is older than every release ever published, so an
+ *  app with `auto: true` downloaded, swapped, restarted, still could not read
+ *  its version, and did it again: an infinite update loop, caused entirely by a
+ *  fallback that looked harmless. */
+const ORDERABLE =
+  /^v?\d+(?:\.\d+){0,2}(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z][0-9A-Za-z.-]*)?$/;
+
+/** Can `compareVersions` order this string? Callers that must not throw — the
+ *  update decision, which turns it into a refusal the user can read — ask
+ *  first. */
+export function isComparableVersion(v: string): boolean {
+  return ORDERABLE.test(v.trim());
+}
+
+function requireComparable(v: string): void {
+  if (isComparableVersion(v)) return;
+  throw new Error(
+    `[updates] cannot order the version "${v}" — it is not a version number ` +
+      `(expected 1.2.3, optionally -rc.1 and +build). Nothing may be compared ` +
+      `against it: treating an unreadable version as 0.0.0 is how an app ` +
+      `updates itself in a loop. Fix: give the build a real \`version\` in ` +
+      `deno.json, or re-publish the release with \`aio ship\`.`,
+  );
+}
+
 function parseVersion(v: string): Parsed {
-  const [core = "", pre = ""] = v.replace(/^v/, "").split("-", 2);
-  const rest = v.replace(/^v/, "").slice(core.length + 1);
+  // Build metadata is stripped FIRST, before the prerelease split, because
+  // SemVer §10 says it takes no part in precedence — and splitting the other
+  // way round is what made `1.2.3+build-1` a "prerelease" of `1.2.3` (the `-`
+  // inside the build tag became the prerelease separator). It sorted BELOW the
+  // release it was a build of, and `isPrerelease` reported it as one, so a
+  // publisher stamping the commit into the version had their releases silently
+  // filtered out on every non-dev channel.
+  const noBuild = v.trim().replace(/^v/, "").split("+", 1)[0]!;
+  const dash = noBuild.indexOf("-");
+  const core = dash === -1 ? noBuild : noBuild.slice(0, dash);
+  const pre = dash === -1 ? "" : noBuild.slice(dash + 1);
   const nums = core.split(".").map((n) => Number.parseInt(n, 10) || 0);
   while (nums.length < 3) nums.push(0);
-  return {
-    nums,
-    pre: (pre ? rest : "").split(".").filter(Boolean),
-  };
+  return { nums, pre: pre.split(".").filter(Boolean) };
 }
 
 function comparePre(a: string[], b: string[]): number {
@@ -274,8 +377,15 @@ export function comparePieces(pa: string[], pb: string[]): number {
   return 0;
 }
 
-/** Semver comparison with prerelease ordering. -1 · 0 · 1. */
+/** Semver comparison with prerelease ordering. -1 · 0 · 1.
+ *
+ *  THROWS on a string it cannot order — see `isComparableVersion`. Build
+ *  metadata is ignored, so `1.2.3+a` and `1.2.3+b` compare equal (they are the
+ *  same version; whether they are the same BUILD is a digest question, and
+ *  `decide` asks it separately). */
 export function compareVersions(a: string, b: string): number {
+  requireComparable(a);
+  requireComparable(b);
   const pa = parseVersion(a), pb = parseVersion(b);
   for (let i = 0; i < 3; i++) {
     const d = (pa.nums[i] ?? 0) - (pb.nums[i] ?? 0);
@@ -284,7 +394,8 @@ export function compareVersions(a: string, b: string): number {
   return comparePre(pa.pre, pb.pre);
 }
 
-/** Is `candidate` a prerelease (`1.2.0-rc.1`)? */
+/** Is `candidate` a prerelease (`1.2.0-rc.1`)? Build metadata is not a
+ *  prerelease: `1.2.3+build-1` is the release `1.2.3`. */
 export function isPrerelease(v: string): boolean {
   return parseVersion(v).pre.length > 0;
 }
@@ -297,6 +408,18 @@ export type LocalData = {
   schema: number;
   /** cellId → the version currently persisted. */
   cells: Record<string, number>;
+  /** SHA-256 of the artifact this install is RUNNING, when it is known.
+   *
+   *  The whole reason "I republished 1.2.3 with new bytes" can be detected at
+   *  all. A version string cannot answer it — two different builds carry the
+   *  same one — so the digest is the only fact that separates them. Recorded by
+   *  the runtime (the digest that was verified at the last swap, or one
+   *  measured from the running artifact once), never guessed.
+   *
+   *  Absent means UNKNOWN, and unknown is never an offer: an install that
+   *  cannot say what it is running must not be told it is running the wrong
+   *  thing. */
+  installedSha256?: string;
 };
 
 /** The verdict on whether a release can be installed over this data. */
@@ -468,7 +591,16 @@ export function deriveDataContract(
 /** Why a fetched manifest is not something to offer. */
 export type UpdateDecision =
   | { kind: "current"; reason: string }
-  | { kind: "offer"; version: string; migrates: boolean; warnings: string[] }
+  | {
+    kind: "offer";
+    version: string;
+    /** Why this is being offered, in the words the user sees. Load-bearing for
+     *  the same-version case: "2.0.0 is available" while the app IS 2.0.0 reads
+     *  as a bug unless it says "same version, new build". */
+    reason: string;
+    migrates: boolean;
+    warnings: string[];
+  }
   | { kind: "incompatible"; version: string; blockers: string[] }
   | { kind: "refused"; reason: string };
 
@@ -507,14 +639,19 @@ export function decideGit(opts: {
   if (opts.currentSha === head.sha) {
     return { kind: "current", reason: `${head.ref} is at ${short(head.sha)}` };
   }
-  if (opts.dismissed === head.sha) {
+  // The label is what the cell stores in `available.version` — and therefore
+  // what `dismiss()` writes back. Comparing the dismissal against the full sha
+  // alone made a git-source dismissal unmatchable: the cell never holds it.
+  const version = head.version
+    ? `${head.version} (${short(head.sha)})`
+    : short(head.sha);
+  if (opts.dismissed === head.sha || opts.dismissed === version) {
     return { kind: "current", reason: `${short(head.sha)} was dismissed` };
   }
   return {
     kind: "offer",
-    version: head.version
-      ? `${head.version} (${short(head.sha)})`
-      : short(head.sha),
+    version,
+    reason: `${head.ref} moved to ${short(head.sha)}`,
     // Unknown until the commit is built and asked. The applier re-checks.
     migrates: false,
     warnings: [
@@ -530,8 +667,17 @@ function short(sha: string): string {
 
 /** Turn a verified manifest into what the user is told.
  *
- *  Ordering matters: a release is refused before it is compared, compared
- *  before its data is judged, and judged before it is ever called an update.
+ *  Ordering matters, and it is: can these two versions be ORDERED at all →
+ *  which is newer (or is it the same version rebuilt) → is it a prerelease this
+ *  install follows → can this install perform that kind of install → does the
+ *  release demand a stepping stone → does the user's data survive it → did the
+ *  user already say no.
+ *
+ *  The installability check moved BELOW the comparison deliberately. Asked
+ *  first, an Android manifest made every up-to-date Android app show a
+ *  permanent "cannot install" notice; asked here, it is only raised about a
+ *  release that would otherwise have been an offer.
+ *
  *  `"incompatible"` is a distinct outcome from `"refused"` on purpose — the
  *  user is told a newer version exists and why they cannot take it, rather
  *  than being shown nothing (which reads as "I am up to date"). */
@@ -541,24 +687,60 @@ export function decide(opts: {
   local: LocalData;
   /** Install targets this client can actually perform. */
   canInstall: UpdateTarget[];
-  /** Follow prerelease versions within the channel. */
+  /** Follow prerelease versions within the channel (`updates.prerelease`). */
   prerelease?: boolean;
   /** The version the user already said no to. */
   dismissed?: string | null;
+  /** Where releases for this app are published — named in the blockers that
+   *  ask the user to go and get something (a stepping stone, an APK). */
+  source?: string;
+  /** The resolved URL of THIS release's artifact, for the targets a running app
+   *  cannot install for itself. */
+  artifactUrl?: string;
 }): UpdateDecision {
   const { manifest: m, current } = opts;
 
-  if (!opts.canInstall.includes(m.target)) {
+  // Before anything is compared: both strings must be orderable. A refusal
+  // naming the string is the only honest answer — the alternative, which this
+  // replaced, was to read both as 0.0.0 and report "current".
+  if (!isComparableVersion(current)) {
     return {
       kind: "refused",
-      reason: m.target === "android"
-        ? `Android packages install through the OS — open the release page to update`
-        : `this install cannot apply a "${m.target}" release`,
+      reason:
+        `this install cannot tell what version it is running ("${current}"), ` +
+        `so it cannot tell whether ${m.version} is newer. Nothing is offered ` +
+        `until it can. Fix: rebuild it from a deno.json that has a ` +
+        `\`version\`, or reinstall from a published release.`,
+    };
+  }
+  if (!isComparableVersion(m.version)) {
+    return {
+      kind: "refused",
+      reason:
+        `the release on "${m.channel}" declares version "${m.version}", which ` +
+        `is not a version number — it cannot be ordered against ${current}. ` +
+        `Fix: re-publish it with \`aio ship\` from a build whose deno.json ` +
+        `\`version\` is a version (1.2.3, optionally -rc.1 and +build).`,
     };
   }
 
   const cmp = compareVersions(m.version, current);
-  if (cmp === 0) return { kind: "current", reason: `${current} is the latest` };
+
+  // ── the same version, rebuilt ──────────────────────────────────────────
+  //
+  // "I republished 1.2.3 with new bytes" is the update people actually ship
+  // most often, and until this it was undetectable: `cmp === 0` returned
+  // "you are the latest" and no digest of the INSTALLED artifact existed
+  // anywhere to contradict it.
+  //
+  // Both digests must be known. An install that never recorded one stays
+  // quiet — offering on ignorance would mean every install that predates this
+  // re-downloading its own bytes once, forever, on every channel that does not
+  // bump a version.
+  const localSha = opts.local.installedSha256;
+  const rebuild = cmp === 0 && !!m.sha256 && !!localSha &&
+    localSha !== m.sha256;
+
   if (cmp < 0) {
     // Not an error worth alarming anyone about: it is what a channel switch
     // looks like from the old side, and what a rolled-back release looks like.
@@ -567,24 +749,88 @@ export function decide(opts: {
       reason: `${current} is newer than ${m.channel}'s ${m.version}`,
     };
   }
-
-  if (!opts.prerelease && isPrerelease(m.version)) {
+  if (cmp === 0 && !rebuild) {
     return {
       kind: "current",
-      reason:
-        `${m.version} is a prerelease — set prerelease: true to follow it`,
+      reason: localSha || !m.sha256
+        ? `${current} is the latest`
+        // Say WHY a same-version rebuild cannot be seen, once the manifest
+        // carries a digest and this install does not. Silence here is the
+        // difference between "up to date" and "unable to tell".
+        : `${current} is the latest (this install has no recorded artifact ` +
+          `digest, so a re-published build of ${current} cannot be detected)`,
     };
   }
 
-  if (m.minFrom && compareVersions(current, m.minFrom) < 0) {
+  // A rebuild of the version already running is not a prerelease decision:
+  // whatever this app is, it is already that. Filtering it here would refuse
+  // to repair the very build the user is on.
+  if (!rebuild && !opts.prerelease && isPrerelease(m.version)) {
     return {
-      kind: "incompatible",
-      version: m.version,
-      blockers: [
-        `${m.version} can only be installed over ${m.minFrom} or newer — ` +
-        `update to ${m.minFrom} first`,
-      ],
+      kind: "current",
+      reason: `${m.version} is a prerelease — set ` +
+        `updates: { prerelease: true } to follow it`,
     };
+  }
+
+  if (!opts.canInstall.includes(m.target)) {
+    if (m.target === "android") {
+      // Information, not an error. An APK is installed by the OS package
+      // installer, and the one thing that makes that actionable is the LINK —
+      // which the old refusal did not carry, so the user was told to "open the
+      // release page" and never told which one.
+      const where = opts.artifactUrl ?? opts.source;
+      return {
+        kind: "incompatible",
+        version: m.version,
+        blockers: [
+          `${m.version} is available as an Android package, and Android ` +
+          `installs those through the system installer — an app cannot ` +
+          `replace its own APK. ` +
+          (where
+            ? `Open ${where} on the device and tap it to update.`
+            : `Open the release location for this app on the device to update.`),
+        ],
+      };
+    }
+    return {
+      kind: "refused",
+      reason: `this install cannot apply a "${m.target}" release (it can ` +
+        `apply: ${opts.canInstall.join(", ") || "nothing"}) — the release ` +
+        `location is serving a different kind of artifact than this install ` +
+        `was made from. Fix: publish a "${
+          opts.canInstall[0] ?? "matching"
+        }" artifact to "${m.channel}", or reinstall from the artifact this ` +
+        `channel actually serves.`,
+    };
+  }
+
+  if (m.minFrom) {
+    if (!isComparableVersion(m.minFrom)) {
+      return {
+        kind: "refused",
+        reason:
+          `the release declares minFrom: "${m.minFrom}", which is not a ` +
+          `version number, so it cannot be checked against ${current}. Fix: ` +
+          `re-publish with \`aio ship\`.`,
+      };
+    }
+    if (compareVersions(current, m.minFrom) < 0) {
+      return {
+        kind: "incompatible",
+        version: m.version,
+        blockers: [
+          `${m.version} can only be installed over ${m.minFrom} or newer, and ` +
+          `this install is ${current}. Install ${m.minFrom} first, from ` +
+          `${
+            opts.source
+              ? `${opts.source}/${m.channel}/`
+              : "the location this app publishes releases to"
+          } (the same channel this update came from — a stepping-stone release ` +
+          `is kept there for exactly this), then update again.`,
+        ],
+      };
+    }
   }
 
   const compat = dataCompatibility(opts.local, m.data);
@@ -596,13 +842,25 @@ export function decide(opts: {
     };
   }
 
-  if (opts.dismissed && compareVersions(m.version, opts.dismissed) <= 0) {
+  // A dismissal is by VERSION, so it covers a rebuild of that version too —
+  // the user said no to `2.0.0`, and a differently-built `2.0.0` is still
+  // `2.0.0`. `undismiss()` is the way back; there is no version string that
+  // could distinguish the two for a human anyway.
+  if (
+    opts.dismissed && isComparableVersion(opts.dismissed) &&
+    compareVersions(m.version, opts.dismissed) <= 0
+  ) {
     return { kind: "current", reason: `${m.version} was dismissed` };
   }
 
   return {
     kind: "offer",
     version: m.version,
+    reason: rebuild
+      ? `same version, new build — ${m.channel} is serving a different ` +
+        `${m.version} (${m.sha256.slice(0, 12)}…) than the one installed ` +
+        `(${localSha!.slice(0, 12)}…)`
+      : `${m.version} is newer than ${current}`,
     migrates: compat.migrates,
     warnings: compat.warnings,
   };

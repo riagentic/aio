@@ -61,6 +61,10 @@ const EXEMPT: Record<string, string> = {
   ensureAppDirs: "path resolution, no app code",
   registerAppDirs: "path resolution, no app code",
   _resetAppDirs: "path resolution, no app code",
+  installUpdatesRuntime:
+    "installs the updates cell's PLATFORM half (a stub, in a test) — it runs " +
+    "no app code and boots nothing; the harness that then drives the cell is " +
+    "the one that arms strictness",
   createCassette: "transport recording, no app code",
   openCassette: "transport recording, no app code",
   totpCode: "pure code generator (HMAC over a secret) — runs no app code",

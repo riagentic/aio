@@ -1,6 +1,6 @@
 // field-filter validation — a ui/persist filter key that matches no state
 // field silently leaks. These lock the loud-failure behavior.
-import { assertStringIncludes, assertThrows } from "@std/assert";
+import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { cell } from "../src/state/cell-create.ts";
 // deno-lint-ignore no-explicit-any
 const C = cell as any;
@@ -123,4 +123,65 @@ Deno.test("filter: valid ui.publicFields is accepted", () => {
 Deno.test("filter: 'all'/'none' and no filter are fine", () => {
   C("ff7", { state: { a: 1 }, methods: {}, ui: "all", persist: "none" });
   C("ff8", { state: { a: 1 }, methods: {} });
+});
+
+// ── `include` AND `exclude` together ────────────────────────────────────
+//
+// They are two different filters, and every reader answers `"include" in
+// filter` first and returns — so the `exclude` list is discarded without a
+// word. `visible: { include: [...], exclude: ["b.secret"] }` therefore SENDS
+// `b.secret` to every client while reading like it hides it. `normalizeUiFilter`
+// then drops the key entirely, so nothing downstream can even see it was
+// written: the refusal has to happen at `cell()`, while the evidence exists.
+Deno.test("filter: visible with BOTH include and exclude is refused", () => {
+  const e = assertThrows(
+    () =>
+      C("ffb1", {
+        state: { a: 1, b: { secret: "x" } },
+        methods: {},
+        visible: { include: ["a", "b"], exclude: ["b.secret"] },
+      }),
+    Error,
+    "BOTH",
+  );
+  const msg = (e as Error).message;
+  assertStringIncludes(msg, "b.secret"); // the list that would be discarded
+  assertStringIncludes(msg, "sent to clients anyway"); // the consequence
+  assertStringIncludes(msg, "pick one"); // the fix
+});
+
+Deno.test("filter: persist with BOTH include and exclude is refused", () => {
+  const e = assertThrows(
+    () =>
+      C("ffb2", {
+        state: { keep: 1, secret: "x" },
+        methods: {},
+        persist: { include: ["keep"], exclude: ["secret"] },
+      }),
+    Error,
+    "BOTH",
+  );
+  assertStringIncludes((e as Error).message, "written to the database anyway");
+});
+
+// One of them alone is untouched — this is a refusal of the ambiguous pair,
+// not a new restriction on the filters themselves.
+Deno.test("filter: one list alone still works", () => {
+  // The assertion IS that neither call throws: the refusal above fires only
+  // when BOTH lists are present, and a rule that also refused the ordinary
+  // one-list shapes would be worse than the bug it replaced.
+  const inc = C("ffb3", {
+    state: { a: 1, b: 2 },
+    methods: {},
+    visible: { include: ["a"] },
+  });
+  const exc = C("ffb4", {
+    state: { a: 1, b: 2 },
+    methods: {},
+    visible: { exclude: ["b"] },
+  });
+  // Not a bare "did not throw": both cells must have been ACCEPTED and be
+  // usable, which is what a rule that over-refused would break.
+  assertEquals(inc.__aio.id, "ffb3");
+  assertEquals(exc.__aio.id, "ffb4");
 });

@@ -5,10 +5,21 @@ Verifying cells and UIs work correctly.
 - [UI Testing](ui-testing.md) — testUI semantic surface, am surface/trigger,
   AI-agent loop
 - [Cell Testing](cell-testing.md) — testCell, assertions, async, fuzz
+- [Testing two apps at once](multi-app.md) — `testApps`: the service +
+  rich-client shape, where the client is itself an aio app
+- [Cassettes](cassettes.md) — `openCassette`: record a real device/network
+  session once, replay it in CI forever
+- [Proving the tests](proving-the-tests.md) — `check:mutations` breaks each
+  load-bearing invariant on purpose and requires a named test to go red;
+  `check:vacuous` catches tests that pass while asserting nothing;
+  `check:dead-wiring` catches exports that nothing in `src/` ever reaches
 - [Linter](linter.md) — aiol static analysis, CI integration
 - [Onboarding lab](onboarding-lab.md) — `deno task lab`: the real one-liners on
   a fresh Ubuntu container, plus "does MY repo build and run on a clean
   machine?" for any path or GitHub link
+- [VM labs](vm-labs.md) — `am lab windows|macos`: a REAL Windows or macOS
+  desktop in a container, driven by hand from a browser, with the app's `dist/`
+  mounted in. The manual tier next to `test:wine` and `deno task lab`
 
 ## Driving the app you are running
 

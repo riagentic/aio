@@ -19,6 +19,7 @@ import {
   DEFAULT_BACKUP_KEEP,
   DEFAULT_LOG_BUDGET,
   enforceBudget,
+  KINDS,
   type LogKind,
   rotateOnStart,
   wipeOnStart,
@@ -68,7 +69,10 @@ export class AioLogger {
 
   async init(): Promise<void> {
     try {
-      await Deno.mkdir(this.dir, { recursive: true });
+      // 0700, like the recovery path below and `ensureAppDirs`: 0600 files
+      // inside a world-readable directory still hand every local account the
+      // file names, sizes and write times of the app's whole diagnostic trail.
+      await Deno.mkdir(this.dir, { recursive: true, mode: 0o700 });
       const pathFn = this.path.bind(this);
       const rotated = this.cfg.backupLogs
         ? await rotateOnStart(pathFn, this.cfg.backupKeep)
@@ -306,6 +310,27 @@ export class AioLogger {
   private _lastLine = new Map<string, { key: string; count: number }>();
   private static readonly FLUSH_MS = 250;
   private static readonly MAX_BUFFERED = 512; // lines per file before forced flush
+  /** Characters one log line may occupy on disk.
+   *
+   *  `MAX_BUFFERED` caps the line COUNT, which bounds nothing: one line is as
+   *  large as whatever was handed to it. An app logging a serialized payload,
+   *  an HTML error body or a megabyte-long stack filled the disk inside a
+   *  single run while `logBudget` waited for the next boot. Untrusted client
+   *  lines were already capped (`client-log.ts`, 8192) — framework and app
+   *  lines were not, which is the wrong way round given app code is the one
+   *  that logs whole payloads. Generous enough for any real stack trace. */
+  private static readonly MAX_LINE = 16 * 1024;
+
+  /** Truncate loudly: the tail is gone either way, and a line that stops
+   *  mid-JSON with no marker reads as corruption rather than as a cap. */
+  private _capLine(line: string): string {
+    if (line.length <= AioLogger.MAX_LINE) return line;
+    const dropped = line.length - AioLogger.MAX_LINE;
+    return line.slice(0, AioLogger.MAX_LINE) +
+      ` … [truncated ${dropped} chars: one log line is capped at ` +
+      `${AioLogger.MAX_LINE}. Log an id or a summary and keep the payload ` +
+      `out of the message — a log line is not a data channel.]`;
+  }
 
   /** Lines emitted BEFORE `init()` finished, kept so they can be written when
    *  it does. Bounded: a logger that never initializes must not grow a queue
@@ -332,7 +357,7 @@ export class AioLogger {
       }
       return;
     }
-    const line = formatText(entry);
+    const line = this._capLine(formatText(entry));
     // Guarded like formatText's safeStringify: entry.data can carry live
     // state (REDUCE_ERROR's snapshot), and a BigInt/cycle in it would throw
     // HERE and lose the very line reporting the error.
@@ -371,6 +396,29 @@ export class AioLogger {
     }
   }
 
+  /** Log files this process has already tightened, so the chmod is one syscall
+   *  per file per boot rather than one per flush. */
+  private _modeFixed = new Set<string>();
+
+  /** Lock a log file to its owner.
+   *
+   *  `mode` on `writeTextFile` applies only when the file is CREATED, and an
+   *  app log outlives many boots — so a file created before this rule existed
+   *  (or under a loose umask) would stay world-readable forever. Both halves,
+   *  once each, exactly as `action-log.ts` does it.
+   *
+   *  This is not hygiene, it is a live secret: the boot banner writes the
+   *  share link — `share: https://host:port/?token=<the app key>` — through
+   *  this sink, and an app log at 0664 handed every local account the app's
+   *  credential. Best-effort: Windows and mode-less filesystems have nothing
+   *  to set, and losing the app's voice over a chmod would be worse. */
+  private _tighten(path: string): void {
+    if (this._modeFixed.has(path)) return;
+    this._modeFixed.add(path);
+    if (Deno.build.os === "windows") return;
+    Deno.chmod(path, 0o600).catch(() => {});
+  }
+
   private _flushBuffers(): void {
     if (this._flushTimer !== null) {
       clearTimeout(this._flushTimer);
@@ -379,10 +427,13 @@ export class AioLogger {
     for (const [path, lines] of this._buffers) {
       if (lines.length === 0) continue;
       this._buffers.set(path, []);
+      this._bytesSinceBudget += lines.reduce((n, l) => n + l.length + 1, 0);
       const p = Deno.writeTextFile(path, lines.join("\n") + "\n", {
         append: true,
+        mode: 0o600,
       }).then(
         () => {
+          this._tighten(path);
           this._noteWriteSuccess();
         },
         async (e) => {
@@ -394,10 +445,13 @@ export class AioLogger {
           // to lose the app's voice until restart. Recreate once, then retry.
           if (e instanceof Deno.errors.NotFound) {
             try {
-              await Deno.mkdir(dirname(path), { recursive: true });
+              await Deno.mkdir(dirname(path), { recursive: true, mode: 0o700 });
               await Deno.writeTextFile(path, lines.join("\n") + "\n", {
                 append: true,
+                mode: 0o600,
               });
+              this._modeFixed.delete(path); // recreated file — tighten it again
+              this._tighten(path);
               this._noteWriteSuccess();
               return;
             } catch { /* still unwritable — fall through and report */ }
@@ -409,6 +463,124 @@ export class AioLogger {
       });
       this._pending.add(p);
     }
+    this._maybeBudgetPass();
+  }
+
+  // ── logBudget, DURING the run ──────────────────────────────────────
+  //
+  // `enforceBudget` ran exactly once, inside `init()`. Nothing rotated
+  // mid-run, so the option documented as "the hard answer to how much disk
+  // logs may take" only ever answered it for the PREVIOUS run: an app logging
+  // steadily filled the disk inside one long-lived process and the ceiling
+  // applied at the next boot, which for a service is never. The bound is now
+  // re-checked on a byte counter, and when this run's own live logs are what
+  // blew it, they are rotated (or wiped, under `backupLogs: false`) so the
+  // eviction has something to evict. Announced, never silent.
+  private _bytesSinceBudget = 0;
+  private _budgetBusy = false;
+
+  /** How many bytes may be written between budget passes. Proportional to the
+   *  budget (so a small ceiling is checked often and a large one rarely), and
+   *  hard-capped at 8 MB — one `readDir` per 8 MB of logs is free. */
+  private budgetCheckEvery(): number {
+    return Math.min(
+      8 * 1024 * 1024,
+      Math.max(64 * 1024, Math.floor(this.cfg.logBudget / 4)),
+    );
+  }
+
+  private _maybeBudgetPass(): void {
+    if (this.cfg.logBudget <= 0 || this._budgetBusy || !this.ready) return;
+    if (this._bytesSinceBudget < this.budgetCheckEvery()) return;
+    this._bytesSinceBudget = 0;
+    this._budgetBusy = true;
+    const p = this._budgetPass()
+      .catch((e) => console.error(`[logger] budget pass failed: ${e}`))
+      .finally(() => {
+        this._budgetBusy = false;
+        this._pending.delete(p);
+      });
+    this._pending.add(p);
+  }
+
+  private async _budgetPass(): Promise<void> {
+    const budget = this.cfg.logBudget;
+    const first = await enforceBudget(this.dir, budget);
+    if (!first) return;
+    if (first.removed.length > 0) {
+      this.emit("info", "logger", "log budget: dropped oldest archives", {
+        removed: first.removed.join(", "),
+        freedKB: Math.round(first.freed / 1024),
+        budgetMB: Math.round(budget / 1024 / 1024),
+      });
+    }
+    if (!first.over) return;
+
+    // Over budget with no archive left to drop. Whose bytes are they?
+    const own = await this._ownLiveBytes();
+    if (own * 2 < budget) {
+      // Not the logger's: `stdout.log` (an fd `am`'s shell holds — unlinking
+      // it would not stop the writer), `checkpoint.json`, `actions.jsonl`.
+      // Rotating our own logs would free nothing and lose this run's record.
+      this.emit(
+        "warn",
+        "logger",
+        "log budget exceeded by files this logger does not own",
+        {
+          totalMB: Math.round(first.total / 1024 / 1024),
+          ownKB: Math.round(own / 1024),
+          budgetMB: Math.round(budget / 1024 / 1024),
+          dir: this.dir,
+          fix: "raise logging.logBudget, or clear the non-log files sharing " +
+            "this directory (stdout.log is rotated by `am`, not the logger)",
+        },
+      );
+      return;
+    }
+
+    const pathFn = this.path.bind(this);
+    if (this.cfg.backupLogs) {
+      await rotateOnStart(pathFn, this.cfg.backupKeep);
+    } else {
+      await wipeOnStart(pathFn);
+    }
+    // The live files are new files: their creation mode is right, but the
+    // "already tightened" memo now points at inodes that are gone, and the
+    // repeat-suppression memo describes lines that are no longer in the file.
+    this._modeFixed.clear();
+    this._lastLine.clear();
+    const after = await enforceBudget(this.dir, budget);
+    this.emit(
+      "warn",
+      "logger",
+      this.cfg.backupLogs
+        ? "log budget reached mid-run — this run's logs were rotated"
+        : "log budget reached mid-run — this run's logs were wiped",
+      {
+        budgetMB: Math.round(budget / 1024 / 1024),
+        beforeMB: Math.round(first.total / 1024 / 1024),
+        afterMB: Math.round((after?.total ?? 0) / 1024 / 1024),
+        ...(after?.removed.length ? { removed: after.removed.join(", ") } : {}),
+        why:
+          "a single run reached the whole-directory ceiling; earlier lines " +
+          "of THIS run are now in .1 archives (or gone, under " +
+          "--no-backup-logs)",
+        fix: "raise logging.logBudget, lower logging.level, or log less per " +
+          "line — logBudget is a hard ceiling, not a target",
+      },
+    );
+  }
+
+  /** Bytes in the live log files this policy governs — the ones a mid-run
+   *  rotation can actually turn into evictable archives. */
+  private async _ownLiveBytes(): Promise<number> {
+    let n = 0;
+    for (const kind of KINDS) {
+      try {
+        n += (await Deno.stat(this.path(kind))).size;
+      } catch { /* absent — nothing to weigh */ }
+    }
+    return n;
   }
 
   // Consecutive failed writes, and how many LINES they took with them. A

@@ -15,7 +15,16 @@ import type { DataContract } from "../build/ship.ts";
 import type { Log } from "../diagnostics/logger-api.ts";
 
 export type RebuildResult =
-  | { ok: true; artifact: string; contract?: DataContract; sha: string }
+  | {
+    ok: true;
+    artifact: string;
+    contract?: DataContract;
+    /** Why the contract is absent, when the build DID answer but the answer
+     *  could not be read. Absent when the build simply does not implement
+     *  `--aio-data-contract`. */
+    contractError?: string;
+    sha: string;
+  }
   | { ok: false; error: string };
 
 async function run(
@@ -175,12 +184,32 @@ export async function rebuildFromGit(opts: {
   // published manifest answers; here it is asked of the binary directly,
   // because there is no manifest to sign it into.
   let contract: DataContract | undefined;
+  let contractError: string | undefined;
   const probed = await run(artifact, ["--aio-data-contract"]);
   if (probed.ok) {
     try {
       contract = JSON.parse(probed.out) as DataContract;
-    } catch { /* left undefined — the gate treats that as "not declared" */ }
+    } catch (e) {
+      // Was swallowed. The gate then reported "not declared", whose standard
+      // advice is "re-publish with `aio ship`" — nonsense for a repository,
+      // where the answer comes from the binary that was just built. Say what
+      // actually happened, and what to run.
+      contractError = `\`${artifact} --aio-data-contract\` printed ` +
+        `${probed.out.length} bytes that are not JSON (${
+          e instanceof Error ? e.message : String(e)
+        }): ${JSON.stringify(probed.out.slice(0, 120))}. Run it by hand in a ` +
+        `clone of ${opts.source} @ ${opts.ref} — anything the app prints ` +
+        `before aio boots (a banner, a warning) lands on stdout and breaks it.`;
+      log.warn("updates", contractError);
+    }
+  } else if (probed.err || probed.out) {
+    contractError = `\`${artifact} --aio-data-contract\` exited non-zero — ` +
+      `this build cannot say what it does to data already on disk, so a ` +
+      `migrating change cannot be detected. ${
+        probed.err.split("\n").slice(-2).join(" ")
+      }`;
+    log.warn("updates", contractError);
   }
 
-  return { ok: true, artifact, contract, sha: head.out };
+  return { ok: true, artifact, contract, contractError, sha: head.out };
 }

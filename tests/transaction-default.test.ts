@@ -4,7 +4,7 @@
 // written; `transaction: true` buys snapshot reads + atomic commit + conflict
 // detection. The spinner idiom under the opt-in is `s.busy = true; s.$commit()`;
 // deliberate live reads are `s.$live` (`until(() => s.$live.flag)`).
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { cell } from "../src/state/cell-create.ts";
 import { bootCells } from "../src/testing/cell-test.ts";
 import { until } from "../src/state/async-helpers.ts";
@@ -275,5 +275,76 @@ Deno.test("transaction: false — the explicit spelling matches the default exac
     assertEquals((c as Any).b, 6, "live read saw the foreign bump");
   } finally {
     h.dispose();
+  }
+});
+
+// ── `{ serialize: false }` reads like "off" and means "ON" ───────────────
+//
+// The OBJECT is the opt-in, whatever is inside it, and `serialize: false` is
+// already the default for an enabled transaction. So an author writing
+// `transaction: { serialize: false }` to mean "no transactions" gets them —
+// pinned reads that make a stand-down guard inert, buffered writes that stop a
+// spinner ever reaching the client — with no error and no failing test.
+Deno.test("transaction: { serialize: false } is REFUSED, naming both real spellings", () => {
+  let err: Error | null = null;
+  try {
+    cell("txd_serialize_false", {
+      state: { a: 0 },
+      methods: { async noop(_s: { a: number }) {} },
+      transaction: { serialize: false },
+      // deno-lint-ignore no-explicit-any
+    } as any);
+  } catch (e) {
+    err = e as Error;
+  }
+  if (!err) throw new Error("expected cell() to refuse { serialize: false }");
+  const m = err.message;
+  for (
+    const part of [
+      "turns transactions ON",
+      "transaction: false",
+      "transaction: true",
+      "txd_serialize_false",
+    ]
+  ) {
+    if (!m.includes(part)) {
+      throw new Error(`refusal does not name ${part}: ${m}`);
+    }
+  }
+});
+
+Deno.test("transaction: the spellings that MEAN something are untouched", () => {
+  // deno-lint-ignore no-explicit-any
+  const C = cell as any;
+  // The assertion is acceptance: each of these four spellings means something
+  // real, and a refusal written to catch `{ serialize: false }` must not take
+  // any of them with it. Each returned def is checked below.
+  const off = C("txd_ok_off", {
+    state: { a: 0 },
+    methods: {},
+    transaction: false,
+  });
+  const on = C("txd_ok_on", {
+    state: { a: 0 },
+    methods: {},
+    transaction: true,
+  });
+  const ser = C("txd_ok_ser", {
+    state: { a: 0 },
+    methods: {},
+    transaction: { serialize: true },
+  });
+  const conflict = C("txd_ok_conflict", {
+    state: { a: 0 },
+    methods: {},
+    transaction: { conflict: "warn" },
+  });
+  for (
+    const [name, def] of [["off", off], ["on", on], ["ser", ser], [
+      "conflict",
+      conflict,
+    ]] as const
+  ) {
+    assert(def?.__aio?.id, `${name} was refused, but it is a real spelling`);
   }
 });
