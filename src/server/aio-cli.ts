@@ -1,3 +1,4 @@
+import { AIO_RUNTIME_FLAG_SPECS } from "../diagnostics/runtime-flags.ts";
 // CLI parsing — pure functions, no aio.ts internal dependencies
 import { log } from "../diagnostics/logger-api.ts";
 import { teachableError } from "../diagnostics/error.ts";
@@ -5,7 +6,7 @@ import { nearestOf } from "../state/cell-helpers.ts";
 import { findFreePort } from "./paths.ts";
 
 /** Framework version — printed by --version, checked in tests */
-export const VERSION = "1.0.0-alpha69";
+export const VERSION = "1.0.0-alpha70";
 
 /** What `--version` prints: what this artifact IS, and what it was built with.
  *
@@ -185,48 +186,7 @@ function badValue(
 
 function _parseCliUncached(args: readonly string[]): CliFlags {
   const r: CliFlags = { verbose: false };
-  const known = [
-    "--no-data-migrate",
-    "--port=",
-    "--no-persist",
-    "--client=",
-    "--keep-server",
-    "--title=",
-    "--verbose",
-    "--prod",
-    "--version",
-    "--expose",
-    "--channel=",
-    "--aio-data-contract",
-    "--no-tls",
-    "--help",
-    "--server-url",
-    "--connect",
-    "--width=",
-    "--height=",
-    "--tls-cert=",
-    "--tls-key=",
-    "--cert=",
-    "--key=",
-    "--isolate=",
-    "--transport=",
-    "--zero-port",
-    "--open",
-    "--kill-existing",
-    "--takeover",
-    "--backup-logs",
-    "--no-backup-logs",
-    "--log-budget=",
-    "--db-path=",
-    "--host=",
-    "--cdp",
-    "--cdp=",
-    // Internal: carried by a process the updater relaunched, so it can wait for
-    // its predecessor to release the app lock (see RELAUNCH_FLAG in
-    // updates-apply.ts). Listed here because it is aio's OWN flag — without it
-    // every self-update boot printed "unknown flag ignored" about it.
-    "--__aio-relaunch-after=",
-  ];
+  const known = [...AIO_RUNTIME_FLAG_SPECS];
   for (const arg of args) {
     if (arg === "--") break; // everything after `--` belongs to the app
     if (arg.startsWith("--port=")) {
@@ -425,11 +385,19 @@ function _parseCliUncached(args: readonly string[]): CliFlags {
   return r;
 }
 
-/** Prints CLI usage and exits */
-export function printHelp(): void {
+/** Prints CLI usage. The usage line and the client default are the CALLER's
+ *  facts: a compiled binary is invoked by its own name, not `deno run`, and
+ *  the default client is whatever boot will actually pick (deno.json's target
+ *  or the app's config) — a `--help` that said "default: electron" for a
+ *  browser-target app was wrong on the one line people read. */
+export function printHelp(
+  opts: { usage?: string; defaultClient?: string } = {},
+): void {
+  const usage = opts.usage ?? "deno run -A src/app.ts [flags]";
+  const defaultClient = opts.defaultClient ?? "electron";
   log.info(`aio ${VERSION} — all-in-one framework
 
-Usage: deno run -A src/app.ts [flags]
+Usage: ${usage}
 
 Flags:
   --port=N         Server port (default: a free one, or $AIO_PORT). Naming a
@@ -437,7 +405,7 @@ Flags:
                    electron app binds no port unless one is named here
                    (or via $AIO_PORT / aio.run({ port }))
   --no-persist     Disable persistence (SQLite <data>/state.db)
-  --client=X       Client mode: electron|browser|cli|server-only (default: electron)
+  --client=X       Client mode: electron|browser|cli|server-only (default: ${defaultClient})
   --keep-server    Server survives Electron close (electron only)
   --title=X        Override window/page title
   --verbose        Verbose logging (actions, state, effects, WS, HTTP)

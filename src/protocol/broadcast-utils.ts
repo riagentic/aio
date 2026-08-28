@@ -26,7 +26,10 @@ export const MAX_SUB_LEN = 256;
 export type SubClient = { subscriptions: Set<string> | null };
 
 /** Patch entry — cell name + Immer ops */
-export type PatchEntry = { cell: string; ops: import("immer").Patch[] };
+export type PatchEntry = {
+  cell: string;
+  ops: import("./patch-ops.ts").WirePatch[];
+};
 
 /** Filter a full state object by client subscriptions. Returns state as-is if subs is null. */
 export function filterStateBySubs(

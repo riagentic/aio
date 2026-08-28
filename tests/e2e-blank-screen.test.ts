@@ -170,8 +170,6 @@ Deno.test({
   name:
     "blank-screen guard: broken import → in-page diagnostic + terminal warning",
   ignore: BROWSER === null,
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const { dom, log } = await renderBroken(
       `import { nope } from "./does-not-exist.ts";
@@ -192,8 +190,6 @@ export default function App() { return <div>{String(nope)}</div>; }`,
 Deno.test({
   name: "blank-screen guard: missing default export → named, actionable error",
   ignore: BROWSER === null,
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const { dom, log } = await renderBroken(
       `export function App() { return <div>hi</div>; } // note: NOT default`,
@@ -206,8 +202,6 @@ Deno.test({
 Deno.test({
   name: "blank-screen guard: App renders nothing → empty-render diagnostic",
   ignore: BROWSER === null,
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     // Needs the real WS state round-trip (dump-dom can't await it) — live
     // chromium; the guard's report to the server is the assertion.
@@ -253,8 +247,6 @@ Deno.test({
 Deno.test({
   name: "blank-screen guard: a HEALTHY app mounts with no overlay, no warning",
   ignore: BROWSER === null,
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     // Live chromium (dump-dom can't await WS state) — the semantic surface
     // proves the app mounted; the server log proves no false positive.

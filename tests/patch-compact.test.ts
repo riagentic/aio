@@ -1,11 +1,18 @@
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { fuzzEnvInt } from "./fuzz-seed.ts";
 import type { Patch } from "immer";
-import { applyPatches, enablePatches } from "immer";
+import { applyPatches, enablePatches, produceWithPatches } from "immer";
 import {
   compactPatches,
   narrowArrayPatches,
+  narrowPatches,
+  narrowStringPatches,
 } from "../src/state/patch-compact.ts";
+import {
+  APPEND_MIN_LENGTH,
+  applyWirePatches,
+  type WirePatch,
+} from "../src/protocol/patch-ops.ts";
 
 // Helper to build a patch
 enablePatches();
@@ -492,4 +499,182 @@ Deno.test("narrowArrayPatches: NaN and -0 identities do not corrupt", () => {
       applyPatches(prev, ops),
     );
   }
+});
+
+// ── narrowStringPatches / narrowPatches ─────────────────────────────────────
+// A streamed reply is `s.reply += chunk`, which Immer can only describe as
+// "replace the whole string" — quadratic over the stream. A grown string
+// travels as `{ op: "append", value: <suffix> }` instead, decided at patch
+// generation (the only place the previous value is in hand) and applied by
+// every consumer through applyWirePatches (protocol/patch-ops.ts).
+
+const LONG = "x".repeat(APPEND_MIN_LENGTH + 100);
+
+Deno.test("narrowStringPatches: a suffix growth travels as its suffix", () => {
+  const prev = { reply: LONG, n: 1 };
+  const ops = narrowStringPatches(prev, [
+    replace(["reply"], LONG + " more tokens"),
+    replace(["n"], 2),
+  ]);
+  assertEquals(ops, [
+    { op: "append", path: ["reply"], value: " more tokens" },
+    replace(["n"], 2),
+  ]);
+  // …and it applies to exactly the new value.
+  assertEquals(applyWirePatches(prev, ops), {
+    reply: LONG + " more tokens",
+    n: 2,
+  });
+});
+
+Deno.test("narrowStringPatches: a non-suffix change stays a replace", () => {
+  const prev = { reply: LONG };
+  for (
+    const next of [
+      "y" + LONG.slice(1) + "tail", // edited prefix
+      LONG.slice(0, -1), // truncated
+      LONG, // unchanged (Immer would not emit it; the rewrite must not either)
+      "", // reset
+      LONG.slice(0, 10) + "z".repeat(400), // same length class, different body
+    ]
+  ) {
+    const ops = [replace(["reply"], next)];
+    assertEquals(
+      narrowStringPatches(prev, ops),
+      ops,
+      JSON.stringify(next.slice(0, 12)),
+    );
+  }
+});
+
+Deno.test("narrowStringPatches: below the floor a string stays a replace", () => {
+  const short = "s".repeat(APPEND_MIN_LENGTH - 1);
+  // Old below the floor, new above: still a replace (the old value proves
+  // nothing worth an op at that size).
+  const grow = [replace(["reply"], short + "!".repeat(50))];
+  assertEquals(narrowStringPatches({ reply: short }, grow), grow);
+  // Both tiny: a replace.
+  const tiny = [replace(["reply"], "ab")];
+  assertEquals(narrowStringPatches({ reply: "a" }, tiny), tiny);
+  // Exactly at the floor on the OLD side is the first size that appends.
+  const atFloor = "f".repeat(APPEND_MIN_LENGTH);
+  assertEquals(
+    narrowStringPatches({ reply: atFloor }, [
+      replace(["reply"], atFloor + "+"),
+    ]),
+    [{ op: "append", path: ["reply"], value: "+" }],
+  );
+});
+
+Deno.test("narrowStringPatches: a base touched earlier in the list is not trusted", () => {
+  const prev = { rows: [{ text: LONG }, { text: LONG + "B" }] };
+  // A removal at index 0 shifts the rows: `rows[0].text` in `prev` is NOT the
+  // row the later replace writes into. It must stay a replace.
+  const ops: Patch[] = [
+    remove(["rows", 0]),
+    replace(["rows", 0, "text"], LONG + "B!"),
+  ];
+  assertEquals(narrowStringPatches(prev, ops), ops);
+  // An ancestor replaced earlier: same rule.
+  const ops2: Patch[] = [
+    replace(["rows"], [{ text: LONG }]),
+    replace(["rows", 0, "text"], LONG + "!"),
+  ];
+  assertEquals(narrowStringPatches(prev, ops2), ops2);
+  // And a descendant/root written earlier.
+  const ops3: Patch[] = [
+    replace([], { reply: LONG }),
+    replace(["reply"], LONG + "!"),
+  ];
+  assertEquals(narrowStringPatches({ reply: LONG }, ops3), ops3);
+});
+
+Deno.test("compactPatches: an append followed by a replace at its path is dropped", () => {
+  const ops: WirePatch[] = [
+    { op: "append", path: ["c", "reply"], value: "abc" },
+    replace(["c", "reply"], "reset"),
+  ];
+  assertEquals(compactPatches(ops), [replace(["c", "reply"], "reset")]);
+  // …under a replaced ancestor too.
+  const ops2: WirePatch[] = [
+    { op: "append", path: ["c", "reply"], value: "abc" },
+    replace(["c"], { reply: "" }),
+  ];
+  assertEquals(compactPatches(ops2), [replace(["c"], { reply: "" })]);
+  // A replace THEN an append keeps both, in order — the append extends the
+  // replaced value; two appends keep both.
+  const ops3: WirePatch[] = [
+    replace(["c", "reply"], LONG),
+    { op: "append", path: ["c", "reply"], value: "1" },
+    { op: "append", path: ["c", "reply"], value: "2" },
+  ];
+  assertEquals(compactPatches(ops3), ops3);
+  assertEquals(
+    applyWirePatches({ c: { reply: "old" } }, compactPatches(ops3)),
+    { c: { reply: LONG + "12" } },
+  );
+  // An append is never a SUPERSEDER: an earlier replace at its path stands.
+  const ops4: WirePatch[] = [
+    replace(["c", "reply"], LONG),
+    { op: "append", path: ["c", "reply"], value: "!" },
+  ];
+  assertEquals(compactPatches(ops4).length, 2);
+});
+
+Deno.test("narrowPatches: randomized string programs apply to the same value", () => {
+  // Property, not cases: over random grow/edit/reset/truncate programs the
+  // narrowed list, applied with the wire applier, equals Immer applying the
+  // original — and the rewrite fires often enough to be tested at all.
+  const seed = fuzzEnvInt("AIO_STRNARROW_SEED", 4242);
+  let s = seed >>> 0 || 1;
+  const rnd = () => ((s = (s * 1664525 + 1013904223) >>> 0) / 0x1_0000_0000);
+  const int = (n: number) => Math.floor(rnd() * n);
+  let appends = 0;
+  let prev: Record<string, unknown> = {
+    a: LONG,
+    b: "b".repeat(300),
+    items: [{ t: LONG }],
+  };
+  for (let round = 0; round < 400; round++) {
+    const [next, ops] = produceWithPatches(prev, (d) => {
+      const n = 1 + int(3);
+      for (let i = 0; i < n; i++) {
+        const key = rnd() < 0.5 ? "a" : "b";
+        const cur = d[key] as string;
+        switch (int(5)) {
+          case 0:
+          case 1:
+            d[key] = cur + "c".repeat(1 + int(120));
+            break;
+          case 2:
+            d[key] = cur.slice(0, Math.max(0, cur.length - 1 - int(40)));
+            break;
+          case 3:
+            d[key] = int(2) ? "" : "r".repeat(APPEND_MIN_LENGTH + int(80));
+            break;
+          default: {
+            const items = d.items as { t: string }[];
+            if (int(3) === 0) items.push({ t: LONG + int(9) });
+            else if (items.length > 0) {
+              if (int(2)) items[0]!.t += "z".repeat(1 + int(30));
+              else items.shift();
+            }
+          }
+        }
+      }
+    });
+    const narrowed = narrowPatches(prev, ops as Patch[]);
+    for (const op of narrowed) if (op.op === "append") appends++;
+    assertEquals(
+      applyWirePatches(prev, narrowed),
+      applyPatches(prev, ops as Patch[]),
+      `seed=${seed} round=${round} ops=${JSON.stringify(ops)}`,
+    );
+    assertEquals(applyWirePatches(prev, narrowed), next);
+    prev = next as Record<string, unknown>;
+  }
+  assert(
+    appends > 50,
+    `only ${appends} appends in 400 rounds — the program is not reaching the rewrite`,
+  );
 });

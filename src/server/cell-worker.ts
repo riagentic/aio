@@ -12,7 +12,7 @@
 // cell's own actions keep their FIFO guarantee. Across cells there was never an
 // ordering guarantee for async methods, and there still isn't.
 
-import type { Patch } from "immer";
+import type { WirePatch as Patch } from "../protocol/patch-ops.ts";
 import type { CellDef, Msg } from "../state/cell-types.ts";
 import {
   type AmbientContext,
@@ -40,6 +40,9 @@ export type CellWorkerDeps = {
   /** Execute an effect the worker handed back (schedules, cross-cell actions). */
   runEffect: (effect: Msg) => void;
   prod: boolean;
+  /** The owner's resolved `freezeState` — forwarded to the worker so both
+   *  isolates freeze on one decision (see ToWorker["init"]). */
+  freezeState: boolean;
 };
 
 export type CellWorker = {
@@ -223,6 +226,7 @@ export function createCellWorker(
     t: "init",
     state: deps.initialState(),
     prod: deps.prod,
+    freezeState: deps.freezeState,
     dev: devFlag(),
   });
 
@@ -231,7 +235,13 @@ export function createCellWorker(
     ready: () => readyPromise,
     reseed(slice: Record<string, unknown>): void {
       if (closed) return;
-      send({ t: "init", state: slice, prod: deps.prod, dev: devFlag() });
+      send({
+        t: "init",
+        state: slice,
+        prod: deps.prod,
+        freezeState: deps.freezeState,
+        dev: devFlag(),
+      });
     },
     call(action: Msg): Promise<unknown> {
       if (closed) {

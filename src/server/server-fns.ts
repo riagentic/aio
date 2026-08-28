@@ -16,6 +16,7 @@
 // browser it resolves a WS proxy (cid-correlated request/response, 30s
 // fail-loud timeout). The hop is VISIBLE in code — the one seam.
 
+import { cellAccessAllowed } from "./server-auth.ts";
 import type { AioUser } from "./aio-types.ts";
 import type { Access } from "../state/cell-types.ts";
 import { serializeReturn } from "../protocol/return-value.ts";
@@ -24,14 +25,6 @@ import type { Remote } from "../protocol/protocol-types.ts";
 
 // deno-lint-ignore no-explicit-any
 type FnMap = Record<string, (...args: any[]) => any>;
-
-/** Who may call a serverFn over the network — the legacy spelling of
- *  {@linkcode Access}.
- *  @deprecated alpha52 — unified as {@linkcode Access} (one network-access
- *  vocabulary for cells and serverFns: true / role-string / predicate).
- *  Alias through beta. Direct server-side calls (via serverFn()/the returned
- *  map) never pass through this gate — the server trusts its own code. */
-export type ServerFnAccess = Access;
 
 const _registry = new Map<string, FnMap>();
 const _access = new Map<string, Access>();
@@ -69,10 +62,13 @@ export function serverFnAllowed(
 ): boolean {
   const rule = _access.get(ns);
   if (rule === undefined) return true; // no rule — connection auth only
-  if (rule === true) return user !== undefined;
-  if (typeof rule === "string") return user?.role === rule;
-  if (typeof rule === "function") return rule(user, fn, ...args);
-  return false; // rule === false: namespace is server-side only
+  // The RULE itself is evaluated by the one decider `cellAccessAllowed`. This
+  // spelled the same four branches for itself, which made it a second reader
+  // of a vocabulary the docs call unified — and it inherited the same
+  // fail-OPEN: a predicate returning a promise (or anything else truthy that
+  // is not a boolean) granted access to a whole serverFn namespace. Only the
+  // "no rule at all" case above is specific to serverFns.
+  return cellAccessAllowed(rule, user, fn, args);
 }
 
 /** Resolve a namespace to its typed callable map. Server-side impl: returns

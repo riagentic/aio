@@ -135,8 +135,3 @@ export async function testGen(
     ui.unmount();
   }
 }
-
-/** Generate a typed UI client — the legacy spelling of {@linkcode testGen}.
- *  @deprecated alpha52 — renamed {@linkcode testGen} (camelCase, matching
- *  testUI/testCell). Alias through beta. */
-export const testgen = testGen;

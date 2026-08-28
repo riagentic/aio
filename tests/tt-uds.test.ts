@@ -10,8 +10,6 @@ import { createBroadcaster } from "../src/server/server-broadcast.ts";
 
 Deno.test({
   name: "UDS: tt-state greets on connect, tt-cmd routes to the handler",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const sock = `${await Deno.makeTempDir()}/tt.sock`;
     const commands: [string, number | undefined][] = [];

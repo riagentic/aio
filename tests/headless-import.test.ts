@@ -26,7 +26,7 @@ Deno.test("headless: periphery moved to aio/extras (B4c) — off core, on extras
   const extras = await import("../src/extras/mod.ts");
   for (
     const name of [
-      "lint",
+      "checkCells",
       "parseCli",
       "deepFreeze",
       "markAsync",

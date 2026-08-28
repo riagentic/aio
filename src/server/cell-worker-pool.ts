@@ -8,9 +8,10 @@
 // internal WORKER_PATCH_ACTION), so persistence, broadcast and time-travel are
 // driven by the same path as a local cell.
 
-import type { Patch } from "immer";
+import type { WirePatch as Patch } from "../protocol/patch-ops.ts";
 import type { CellDef, Msg } from "../state/cell-types.ts";
 import { WORKER_PATCH_ACTION } from "../state/cell-compose-reduce.ts";
+import { markInflight } from "../state/dispatch.ts";
 import { type CellWorker, createCellWorker } from "./cell-worker.ts";
 import { log } from "../diagnostics/logger-api.ts";
 
@@ -89,6 +90,8 @@ export function createCellWorkerPool(opts: {
   cells: CellDef[];
   entry: string;
   prod: boolean;
+  /** The owner's resolved `freezeState`, forwarded to every worker. */
+  freezeState: boolean;
   /** Read a cell's authoritative slice (post-restore) to seed its worker. */
   getSlice: (cell: string) => Record<string, unknown>;
   /** The RAW dispatch — worker patches are applied through it. */
@@ -97,7 +100,8 @@ export function createCellWorkerPool(opts: {
    *  isolate's scheduler, cross-cell actions are dispatched. */
   runEffect: (effect: Msg) => void;
 }): CellWorkerPool {
-  const { cells, entry, prod, getSlice, dispatch, runEffect } = opts;
+  const { cells, entry, prod, freezeState, getSlice, dispatch, runEffect } =
+    opts;
   if (cells.length === 0) return EMPTY_POOL;
 
   validateWorkerCells(cells);
@@ -131,18 +135,20 @@ export function createCellWorkerPool(opts: {
       createCellWorker(f, {
         entry,
         prod,
+        freezeState,
         initialState: () => getSlice(name),
         applyPatches: (cell: string, ops: Patch[]) => {
-          // `_source: "Effect"`: these ARE a method's writes arriving from the
-          // worker isolate — if they land inside the shutdown drain window
-          // (dispatch closed, not yet sealed) they must be let through exactly
-          // like a local method's commits, not dropped as late client input.
-          // Server-constructed only; every network entry point strips _source.
-          void dispatch({
+          // In-flight (dispatch.ts INFLIGHT): these ARE a method's writes
+          // arriving from the worker isolate — if they land inside the
+          // shutdown drain window (dispatch draining, not yet sealed) they
+          // must be let through exactly like a local method's commits, not
+          // refused as new input. Server-constructed only; every network
+          // entry point strips the flag.
+          void dispatch(markInflight({
             type: WORKER_PATCH_ACTION,
             payload: { cell, ops },
             _source: "Effect",
-          } as unknown as Msg);
+          }) as unknown as Msg);
         },
         runEffect,
       }),

@@ -35,8 +35,6 @@ const job = cell("throttled", {
 
 Deno.test({
   name: "$commit(ms) publishes far less often than it is called",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     const h = await bootCells([job]);
     try {
@@ -65,8 +63,6 @@ Deno.test({
 
 Deno.test({
   name: "the first $commit(ms) always publishes",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     // A progress bar that waits one full interval before its first frame
     // looks like a hang, which is exactly what a progress bar is there to
@@ -87,8 +83,6 @@ Deno.test({
 
 Deno.test({
   name: "a bare $commit() is unchanged — publish, unconditionally",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     const h = await bootCells([job]);
     try {

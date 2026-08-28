@@ -198,6 +198,7 @@ Deno.test("cmdFix: plain fix leaves old tasks alone and points at --migrate-task
  *  project whose deno.json carries `keys`. Returns { client, stderr }. */
 async function probeClientKey(
   keys: Record<string, unknown>,
+  opts: { dev?: boolean } = {},
 ): Promise<{ client: string | null; output: string }> {
   const proj = await Deno.makeTempDir({ prefix: "aio-client-key-" });
   try {
@@ -208,22 +209,23 @@ async function probeClientKey(
     );
     await Deno.writeTextFile(
       join(proj, "src", "probe.ts"),
-      `import { _denoJsonTargetClient } from "${
-        join(AIO_ROOT, "src/server/aio.ts")
-      }";
+      `if (Deno.env.get("AIO_PROBE_DEV") === "1") globalThis.__aioDev = true;
+import { _denoJsonTargetClient } from "${join(AIO_ROOT, "src/server/aio.ts")}";
 console.log(JSON.stringify({ client: _denoJsonTargetClient() ?? null }));
 `,
     );
     const r = await new Deno.Command(Deno.execPath(), {
       args: ["run", "-A", join(proj, "src", "probe.ts")],
       cwd: proj,
+      env: { ...Deno.env.toObject(), AIO_PROBE_DEV: opts.dev ? "1" : "0" },
       stdout: "piped",
       stderr: "piped",
     }).output();
     const out = new TextDecoder().decode(r.stdout);
     const stderr = new TextDecoder().decode(r.stderr);
     const line = out.split("\n").find((l) => l.startsWith("{"));
-    if (!line) throw new Error(`probe printed nothing.\nstderr:\n${stderr}`);
+    // A refused boot prints no JSON — the refusal is the answer.
+    if (!line) return { client: null, output: out + stderr };
     // The hint flows through the framework logger (stdout) — search both.
     return { client: JSON.parse(line).client, output: out + stderr };
   } finally {
@@ -240,22 +242,21 @@ Deno.test("deno.json: `client` resolves the default shell, silently", async () =
   );
 });
 
-Deno.test("deno.json: deprecated `target` still resolves, with the rename hint", async () => {
-  const r = await probeClientKey({ target: "cli" });
-  assertEquals(r.client, "cli", "the old spelling must keep working");
-  assertStringIncludes(
-    r.output,
-    '"target" is now "client"',
-    "the deprecated spelling must fire the one-time hint",
-  );
+Deno.test("deno.json: the retired `target` key is refused in dev, by name, with the new spelling", async () => {
+  const r = await probeClientKey({ target: "cli" }, { dev: true });
+  assertEquals(r.client, null, "dev does not resolve a retired key");
+  assertStringIncludes(r.output, "`target`");
+  assertStringIncludes(r.output, "`client`");
 });
 
-Deno.test("deno.json: `client` wins when both spellings are present — and SAYS so", async () => {
-  const r = await probeClientKey({ client: "browser", target: "electron" });
-  assertEquals(r.client, "browser");
-  // Two spellings resolving silently is the two-decider trap — the warning
-  // must name the winner.
-  assertStringIncludes(r.output, '"client" wins');
+Deno.test("deno.json: in prod the retired `target` key is logged AND still honoured", async () => {
+  const r = await probeClientKey({ target: "cli" }, { dev: false });
+  assertEquals(
+    r.client,
+    "cli",
+    "an app that only ever said target keeps its shell",
+  );
+  assertStringIncludes(r.output, "`target`");
 });
 
 // ── am add cell: the generated cell compiles ────────────────────────────────

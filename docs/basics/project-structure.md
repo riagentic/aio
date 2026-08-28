@@ -69,6 +69,33 @@ A build refuses loudly rather than shipping the wrong thing: a missing `App.tsx`
 next to the entry, or a stray `src/style.css` in an app whose root is elsewhere,
 fails the build with the fix in the message.
 
+### Sharing code between apps in one repository: `share`
+
+Two apps in one repo want one `shared/`. A symlink out of the app root is
+refused by the dev server (correctly — the root is an HTTP root), so declare the
+directory instead:
+
+```jsonc
+// apps/a/deno.json
+"share": ["../../shared"]
+```
+
+```ts
+// apps/a/src/App.tsx — ONE spelling, both worlds
+import { money } from "/shared/money.ts";
+```
+
+The dev server serves the share at `/shared/…` and the bundler resolves the same
+import to the same directory, so what runs in dev is what ships. Each share is
+addressed by its directory name (`/shared/` for `../../shared`), and gets every
+guard the app root has: no traversal, no symlink out of it, no dotfiles, no
+`*.server.*` files. It is never reachable through the control plane.
+
+Refused, loudly, at boot and at build: a share that does not exist, one outside
+the repository root (the nearest `.git`), and two shares with the same name.
+Anything shared this way is browser-reachable, so it must be pure — the same
+rule as `lib/`.
+
 ---
 
 ## Zero-Thought Placement Rules
@@ -246,7 +273,8 @@ Everything comes from a single import. `"aio"` maps to `jsr:@riagentic/aio`
 
 ```ts
 // Server-side (Deno)
-import { aio, call, cell, schedule, testCell } from "aio";
+import { aio, call, cell, schedule } from "aio";
+import { testCell } from "aio/testing";
 
 // Browser-side (App.tsx)
 import { page, useAio, useLocal } from "aio/air";

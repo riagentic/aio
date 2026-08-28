@@ -18,6 +18,9 @@ const noop = {
 
 // ── Effect creators ─────────────────────────────────────────────────
 
+// deno-lint-ignore no-explicit-any
+type AnyFn = (...a: any[]) => any;
+
 Deno.test("schedule.after produces correct shape", () => {
   const e = schedule.after("save", 3000, { type: "Save" });
   assertEquals(e.type, "__schedule");
@@ -435,10 +438,10 @@ Deno.test("schedule #5: a fresh dynamic id does NOT warn", () => {
 
 Deno.test("schedule.backoff: exponential growth, capped at max", () => {
   const A = { type: "poll" };
-  const e0 = schedule.backoff("rpc", 0, { base: 1000, max: 60000 }, A);
-  const e1 = schedule.backoff("rpc", 1, { base: 1000, max: 60000 }, A);
-  const e2 = schedule.backoff("rpc", 2, { base: 1000, max: 60000 }, A);
-  const e9 = schedule.backoff("rpc", 9, { base: 1000, max: 60000 }, A);
+  const e0 = schedule.backoff("rpc", 0, A, { base: 1000, max: 60000 });
+  const e1 = schedule.backoff("rpc", 1, A, { base: 1000, max: 60000 });
+  const e2 = schedule.backoff("rpc", 2, A, { base: 1000, max: 60000 });
+  const e9 = schedule.backoff("rpc", 9, A, { base: 1000, max: 60000 });
   assertEquals((e0 as { ms: number }).ms, 1000); // base * 2^0
   assertEquals((e1 as { ms: number }).ms, 2000); // base * 2^1
   assertEquals((e2 as { ms: number }).ms, 4000); // base * 2^2
@@ -446,7 +449,7 @@ Deno.test("schedule.backoff: exponential growth, capped at max", () => {
   assertEquals((e0 as { kind: string }).kind, "after");
   assertEquals((e0 as { id: string }).id, "rpc");
   // custom factor
-  const t = schedule.backoff("x", 2, { base: 100, factor: 3 }, A);
+  const t = schedule.backoff("x", 2, A, { base: 100, factor: 3 });
   assertEquals((t as { ms: number }).ms, 900); // 100 * 3^2
 });
 
@@ -467,36 +470,36 @@ Deno.test("schedule.poll: constant while healthy, backs off on failure", () => {
   const A = { type: "tick" };
   // healthy (attempt 0) → the base interval
   assertEquals(
-    (schedule.poll("rpc", 0, { every: 5000, backoff: 2, max: 60000 }, A) as {
+    (schedule.poll("rpc", 0, A, { every: 5000, factor: 2, max: 60000 }) as {
       ms: number;
     }).ms,
     5000,
   );
   // failing → grows every * backoff^attempt, capped at max
   assertEquals(
-    (schedule.poll("rpc", 1, { every: 5000, backoff: 2, max: 60000 }, A) as {
+    (schedule.poll("rpc", 1, A, { every: 5000, factor: 2, max: 60000 }) as {
       ms: number;
     }).ms,
     10000,
   );
   assertEquals(
-    (schedule.poll("rpc", 3, { every: 5000, backoff: 2, max: 60000 }, A) as {
+    (schedule.poll("rpc", 3, A, { every: 5000, factor: 2, max: 60000 }) as {
       ms: number;
     }).ms,
     40000,
   );
   assertEquals(
-    (schedule.poll("rpc", 5, { every: 5000, backoff: 2, max: 60000 }, A) as {
+    (schedule.poll("rpc", 5, A, { every: 5000, factor: 2, max: 60000 }) as {
       ms: number;
     }).ms,
     60000,
   ); // capped
   // default backoff = 1 → constant polling regardless of attempt
   assertEquals(
-    (schedule.poll("rpc", 4, { every: 3000 }, A) as { ms: number }).ms,
+    (schedule.poll("rpc", 4, A, { every: 3000 }) as { ms: number }).ms,
     3000,
   );
-  const e = schedule.poll("rpc", 0, { every: 1000 }, A) as {
+  const e = schedule.poll("rpc", 0, A, { every: 1000 }) as {
     kind: string;
     id: string;
   };
@@ -540,23 +543,48 @@ Deno.test("schedule.poll NEW order + `factor` key: (id, attempt, action, opts)",
   );
 });
 
-Deno.test("schedule.backoff/poll OLD order still computes identically (deprecated)", () => {
+Deno.test("schedule.backoff/poll: the pre-alpha52 (opts, action) order is REFUSED by name (alpha70)", () => {
   const A = { type: "poll" };
-  // Old order (opts 3rd) — accepted by shape detection; identical arithmetic.
-  const oldB = schedule.backoff("legacy-b", 3, { base: 1000 }, A) as {
+  // Detected by shape, so the refusal names the old order and the fix —
+  // not `opts.base is undefined` three frames down.
+  const oldB = assertThrows(
+    () => (schedule.backoff as AnyFn)("legacy-b", 3, { base: 1000 }, A),
+    Error,
+  ) as Error;
+  assertStringIncludes(oldB.message, "schedule.backoff 'legacy-b'");
+  assertStringIncludes(oldB.message, "removed in alpha70");
+  assertStringIncludes(oldB.message, "am pin v1.0.0-alpha69");
+  const oldP = assertThrows(
+    () => (schedule.poll as AnyFn)("legacy-p", 2, { every: 100 }, A),
+    Error,
+  ) as Error;
+  assertStringIncludes(oldP.message, "schedule.poll 'legacy-p'");
+  assertStringIncludes(oldP.message, "action is 3rd");
+});
+
+Deno.test("schedule.poll: the `backoff` option key is REFUSED by name — `factor` is the spelling (alpha70)", () => {
+  const A = { type: "tick" };
+  const e = assertThrows(
+    () => (schedule.poll as AnyFn)("rpc-key", 2, A, { every: 100, backoff: 2 }),
+    Error,
+  ) as Error;
+  assertStringIncludes(e.message, "schedule.poll 'rpc-key'");
+  assertStringIncludes(e.message, "factor");
+  assertStringIncludes(e.message, "am pin v1.0.0-alpha69");
+  // The new key computes the same thing the old one did.
+  const ok = schedule.poll("rpc-key2", 2, A, { every: 100, factor: 2 }) as {
     ms: number;
   };
-  const newB = schedule.backoff("legacy-b2", 3, A, { base: 1000 }) as {
-    ms: number;
-  };
-  assertEquals(oldB.ms, newB.ms);
-  const oldP = schedule.poll("legacy-p", 2, { every: 100, backoff: 2 }, A) as {
-    ms: number;
-  };
-  const newP = schedule.poll("legacy-p2", 2, A, { every: 100, factor: 2 }) as {
-    ms: number;
-  };
-  assertEquals(oldP.ms, newP.ms, "old `backoff` key === new `factor` key");
+  assertEquals(ok.ms, 400);
+});
+
+Deno.test("schedule has NO `blocking` member — `blocking` is a top-level, server-only export (alpha70)", () => {
+  assertEquals(
+    "blocking" in schedule,
+    false,
+    "schedule ships to every runtime; a member that is server-only on two of " +
+      "three targets is a trap, not an API",
+  );
 });
 
 Deno.test("schedule.after accepts 0ms (alpha52) and still rejects negatives", () => {

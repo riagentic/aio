@@ -110,8 +110,6 @@ const COUNTER_UIS: [string, string][] = [
 for (const [label, path] of COUNTER_UIS) {
   Deno.test({
     name: `example UI ${label}: user clicks drive the rendered counter`,
-    sanitizeResources: false,
-    sanitizeOps: false,
     fn: () => smokeCounterUI(label, path),
   });
 }
@@ -120,8 +118,6 @@ for (const [label, path] of COUNTER_UIS) {
 
 Deno.test({
   name: "example UI todo: add via form, toggle via checkbox, footer counts",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: async () => {
     _reset();
     storage.clear();
@@ -184,8 +180,6 @@ Deno.test({
 
 Deno.test({
   name: "example UI android-remote: connect page navigates to typed server",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: async () => {
     _reset();
     const { default: App } = await import(

@@ -4,15 +4,16 @@
 // Its own file: importing `src/updates.ts` registers the cell, which
 // updates-optin.test.ts asserts does NOT happen from the server machinery.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { testCell } from "../src/cell-test.ts";
 import {
   type ApplyOptions,
   type CheckOptions,
   type CheckResult,
   installUpdatesRuntime,
-  testCell,
+  updates,
   type UpdatesRuntime,
-} from "../src/cell-test.ts";
-import { updates, type UpdatesState } from "../src/updates.ts";
+  type UpdatesState,
+} from "../src/updates.ts";
 
 // `UpdatesCell` is the app-facing shape (methods + readable state), not the
 // `CellDef` generic `testCell` is typed over — so the harness sees it through

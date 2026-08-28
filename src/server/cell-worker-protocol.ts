@@ -7,7 +7,7 @@
 //
 // Everything here must be structured-cloneable — it crosses a real thread.
 
-import type { Patch } from "immer";
+import type { WirePatch as Patch } from "../protocol/patch-ops.ts";
 import type { Msg } from "../state/cell-types.ts";
 
 /** Worker name prefix — how a spawned worker learns it is a cell host, and
@@ -53,6 +53,13 @@ export type ToWorker =
     t: "init";
     state: Record<string, unknown>;
     prod: boolean;
+    /** The owner's RESOLVED `freezeState` (`config.freezeState ?? !prod`),
+     *  sent rather than recomputed so both isolates deep-freeze on the same
+     *  decision. A worker builds its dispatch before this message arrives, so
+     *  without it a worker cell's committed state carried only Immer's
+     *  `autoFreeze` — a narrower tripwire inside a worker than outside it, in
+     *  dev AND prod, which is the asymmetry this boundary exists to close. */
+    freezeState: boolean;
     /** The owner's `__aioDev` flag, carried across the thread.
      *
      *  Every dev tripwire — frozen-state enforcement, the readonly hint, the

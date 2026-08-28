@@ -37,6 +37,9 @@ export const AIO_ENTRY_PATHS: Readonly<Record<string, string>> = {
   // re-exporting it from `mod.ts` would register it in every app ever written,
   // including the ones that never update themselves. Importing it IS opting in.
   "aio/updates": "src/updates.ts",
+  // The CLI toolkit (args/prompt/table/progress/spinner/watch) — a library
+  // entry: imported by a `cli` target, never `deno run`.
+  "aio/cli": "src/cli.ts",
   // Same opt-in rule as aio/updates: a self-registering cell behind its own
   // entry, so an app that never reports problems carries no feedback state.
   "aio/feedback": "src/feedback.ts",

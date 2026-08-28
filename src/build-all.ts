@@ -104,6 +104,14 @@ export const TARGETS: Record<string, TargetSpec> = {
     role: "client",
     desc: "CLI client binary that connects to a server",
   },
+  // No `ios` APP target exists and none can: an aio app is a Deno process and
+  // there is no Deno on iOS. The client is a WKWebView shell around the
+  // connect page — an Xcode project on any host, an .app where xcodebuild is.
+  "ios-client": {
+    flags: ["--ios", "--remote"],
+    role: "client",
+    desc: "iOS client (Xcode project; .app on macOS) that connects to a server",
+  },
 };
 
 /** What a target may override when `build.targets` is written in object form.
@@ -214,6 +222,8 @@ export function normalizeTargets(
   });
 }
 
+import { iosArtifactName } from "./build/build-ios.ts";
+
 interface ArtifactRec {
   file: string;
   bytes: number;
@@ -269,7 +279,10 @@ const ARTIFACT_EXTS = new Set([
 
 /** Is `name` a build artifact for `binaryName`? Per-target builds emit
  *  arch-suffixed names we can't fully predict, so we recognize by prefix+ext
- *  (the bare binary has no extension; the aio-client AppImage has its own). */
+ *  (the bare binary has no extension; the aio-client AppImage has its own).
+ *
+ *  @internal alpha70 — a build/tooling internal reachable for tests via
+ *  src/testing/internal.ts; not app-facing API. */
 export function isArtifactName(name: string, binaryName: string): boolean {
   const ext = extname(name);
   if (ARTIFACT_EXTS.has(ext)) {
@@ -314,7 +327,10 @@ export function isArtifactName(name: string, binaryName: string): boolean {
  *  named apps — `relay` and `two-apps` — needs no suffix at all), and inside a
  *  group everything after the FIRST declared member is suffixed. Every
  *  target's artifact name is therefore a property of the project: stable
- *  across `--targets=` subsets, incremental builds and machines. */
+ *  across `--targets=` subsets, incremental builds and machines.
+ *
+ *  @internal alpha70 — a build/tooling internal reachable for tests via
+ *  src/testing/internal.ts; not app-facing API. */
 export function suffixedTargets(
   raw: string[] | Record<string, TargetOverride> | undefined,
   running: readonly ResolvedTarget[],
@@ -339,7 +355,10 @@ export function suffixedTargets(
 /** The flat-layout name for `file` built by `target`: the bare name, unless
  *  this target shares its binary name with an earlier-declared one.
  *
- *  Pure and composition-independent — see `suffixedTargets`. */
+ *  Pure and composition-independent — see `suffixedTargets`.
+ *
+ *  @internal alpha70 — a build/tooling internal reachable for tests via
+ *  src/testing/internal.ts; not app-facing API. */
 export function placedName(
   file: string,
   target: string,
@@ -347,7 +366,11 @@ export function placedName(
 ): string {
   if (!suffixed.has(target)) return file;
   const ext = extname(file);
-  return `${file.slice(0, file.length - ext.length)}-${target}${ext}`;
+  const base = file.slice(0, file.length - ext.length);
+  // An artifact that already carries its label (the iOS project directory
+  // is written as `<name>-ios-client`) is not labelled twice.
+  if (base.endsWith(`-${target}`)) return file;
+  return `${base}-${target}${ext}`;
 }
 
 /** The target names a previous `dist/manifest.json` recorded, so a build can
@@ -403,7 +426,10 @@ function within(a: string, b: string): boolean {
  *  target's dir; duplicates are fine. An app dir that IS the root (a flat
  *  layout, entry `app.ts`) is dropped: the root is already refused above, and
  *  keeping it would make every possible out dir "inside a protected dir" and
- *  leave a flat-layout app with nowhere to build. */
+ *  leave a flat-layout app with nowhere to build.
+ *
+ *  @internal alpha70 — a build/tooling internal reachable for tests via
+ *  src/testing/internal.ts; not app-facing API. */
 export function unsafeOutDir(
   outDir: string,
   root: string,
@@ -427,6 +453,17 @@ export function unsafeOutDir(
 
 /** Move a file, falling back to copy+delete across filesystem boundaries — a
  *  dist/ or .aio on a tmpfs/overlay mount makes a bare rename throw EXDEV. */
+/** Bytes of a file, or of every file under a directory artifact. */
+async function sizeOf(path: string): Promise<number> {
+  const st = await Deno.stat(path);
+  if (!st.isDirectory) return st.size;
+  let total = 0;
+  for await (const e of Deno.readDir(path)) {
+    total += await sizeOf(join(path, e.name));
+  }
+  return total;
+}
+
 async function moveFile(from: string, to: string): Promise<void> {
   try {
     await Deno.rename(from, to);
@@ -687,7 +724,12 @@ export async function buildAll(): Promise<number> {
   const snapshot = async (bin: string): Promise<Map<string, string>> => {
     const m = new Map<string, string>();
     for await (const e of Deno.readDir(root)) {
-      if (!e.isFile || !isArtifactName(e.name, bin)) continue;
+      // Files by name; the one DIRECTORY artifact (an iOS Xcode project) by
+      // its exact name.
+      const isDirArtifact = e.isDirectory && e.name === iosArtifactName(bin);
+      if (!isDirArtifact && (!e.isFile || !isArtifactName(e.name, bin))) {
+        continue;
+      }
       try {
         const st = await Deno.stat(join(root, e.name));
         m.set(e.name, `${st.mtime?.getTime() ?? 0}:${st.size}`);
@@ -813,7 +855,7 @@ export async function buildAll(): Promise<number> {
           await moveFile(join(root, name), join(tdir, name));
           artifacts.push({
             file: name,
-            bytes: (await Deno.stat(join(tdir, name))).size,
+            bytes: await sizeOf(join(tdir, name)),
           });
         }
         // A target that emitted nothing is a FAILED target, not a warning.

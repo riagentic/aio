@@ -7,8 +7,7 @@
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { join } from "@std/path";
 import { cell } from "../src/state/cell.ts";
-import type { Access, CellAccess, ExtractState, StateOf } from "../mod.ts";
-import { _resetVisibleHints } from "../src/state/cell-helpers.ts";
+import type { Access, StateOf } from "../mod.ts";
 import { composeCellsWiring } from "../src/server/aio-composition.ts";
 import { defaultAppKeyConfig, resolveAppKey } from "../src/server/app-key.ts";
 import { call } from "../src/state/cell-impl.ts";
@@ -95,35 +94,8 @@ Deno.test("visible: forUser + publicFields flow exactly like the old ui shape", 
   assertEquals(anon[name]!.rows, []);
 });
 
-Deno.test("ui: stays a working alias through beta, with a ONE-TIME hint naming the rename", () => {
-  _resetVisibleHints();
-  const name = uname("ui-alias");
-  const { result: c, warns } = captureWarn(() =>
-    cell(name, {
-      state: { a: 1, b: 2 },
-      methods: {},
-      ui: { exclude: ["b"] },
-    })
-  );
-  assertEquals(c.__aio.ui, { exclude: ["b"] });
-  const hints = warns.filter((w) => w.includes("renamed `visible:`"));
-  assertEquals(hints.length, 1, "exactly one hint");
-  assert(hints[0]!.includes(name), "hint names the cell");
-  // Second cell with the same... a DIFFERENT cell hints again (per cell), but
-  // the same cell name never hints twice.
-  const { warns: again } = captureWarn(() =>
-    cell(uname("ui-alias"), {
-      state: { a: 1 },
-      methods: {},
-      ui: "none",
-    })
-  );
-  assertEquals(
-    again.filter((w) => w.includes("renamed `visible:`")).length,
-    1,
-    "per-cell one-time hint",
-  );
-});
+// `ui:` → `visible:` is REMOVED in alpha70 (dev refuses, prod logs and
+// honours): tests/alpha70-retirements.test.ts pins both halves.
 
 Deno.test("visible + ui both set is a HARD error at cell() — one decision, two spellings", () => {
   assertThrows(
@@ -132,7 +104,8 @@ Deno.test("visible + ui both set is a HARD error at cell() — one decision, two
         state: { a: 1 },
         methods: {},
         visible: "all",
-        ui: "none",
+        // deno-lint-ignore no-explicit-any
+        ...({ ui: "none" } as any),
       }),
     Error,
     "both `visible` and `ui`",
@@ -184,29 +157,14 @@ Deno.test("cellDefaults.visible takes forUser — previously unsettable as a def
   assertEquals(out[dName], undefined);
 });
 
-Deno.test("cellDefaults: `ui` alias still accepted (hint), both-set throws", () => {
-  _resetVisibleHints();
-  const a = cell(uname("dflt-alias"), { state: { x: 1, z: 2 }, methods: {} });
-  const { warns } = captureWarn(() => {
-    const { autoGetUIState } = composeCellsWiring({
-      cellEntries: [a],
-      cellDefaults: { ui: { exclude: ["z"] } },
-    });
-    const out = autoGetUIState!(
-      { [a.__aio.id]: { x: 1, z: 2 } },
-    ) as Record<string, unknown>;
-    assertEquals(out[a.__aio.id], { x: 1 });
-  });
-  assertEquals(
-    warns.filter((w) => w.includes("renamed `visible:`")).length,
-    1,
-  );
+Deno.test("cellDefaults: visible + ui both set throws (the `ui` spelling alone is alpha70's row)", () => {
   const b = cell(uname("dflt-both"), { state: { x: 1 }, methods: {} });
   assertThrows(
     () =>
       composeCellsWiring({
         cellEntries: [b],
-        cellDefaults: { visible: "all", ui: "all" },
+        // deno-lint-ignore no-explicit-any
+        cellDefaults: { visible: "all", ...({ ui: "all" } as any) },
       }),
     Error,
     "both `visible` and `ui`",
@@ -271,8 +229,6 @@ Deno.test("key default: the defaulted `true` resolves to a persisted, owner-only
 Deno.test({
   name:
     "access-no-visible: multi-user app REFUSES to boot, names the one-word fix",
-  sanitizeOps: false,
-  sanitizeResources: false,
   fn: async () => {
     const { aio } = await import("../mod.ts");
     const c = cell(uname("acc-multi"), {
@@ -303,8 +259,6 @@ Deno.test({
 Deno.test({
   name:
     "access-no-visible: exposed app REFUSES to boot (before any socket opens)",
-  sanitizeOps: false,
-  sanitizeResources: false,
   fn: async () => {
     const { aio } = await import("../mod.ts");
     const c = cell(uname("acc-exp"), {
@@ -334,8 +288,6 @@ Deno.test({
 Deno.test({
   name:
     "access-no-visible: loopback single-user stays a WARNING — the app boots",
-  sanitizeOps: false,
-  sanitizeResources: false,
   fn: async () => {
     const { aio } = await import("../mod.ts");
     const c = cell(uname("acc-loop"), {
@@ -362,8 +314,6 @@ Deno.test({
 
 Deno.test({
   name: 'access + visible: "all" (the acknowledgement) boots even multi-user',
-  sanitizeOps: false,
-  sanitizeResources: false,
   fn: async () => {
     const { aio } = await import("../mod.ts");
     const c = cell(uname("acc-ack"), {
@@ -423,18 +373,12 @@ Deno.test("entry diet: aio/extras carries isScheduleEffect + createSliceSelector
   assertEquals(typeof extras.isScheduleEffect, "function");
   assertEquals(typeof extras.createSliceSelector, "function");
   assertEquals(typeof extras.checkCells, "function");
-  // the deprecated alias still works through beta — and is the SAME function
-  assertEquals(extras.lint, extras.checkCells);
+  // the `lint` alias went out in alpha70 (tests/alpha70-surface.test.ts)
+  assertEquals((extras as Record<string, unknown>)["lint"], undefined);
 });
 
-Deno.test("entry diet: aio/db still re-exports the deprecated values through beta", async () => {
-  const db = await import("../src/db/mod.ts");
-  const server = await import("../src/server-entry.ts");
-  // Same function objects — a re-export, not a copy.
-  assertEquals(db.createDB, server.createDB);
-  assertEquals(db.reactiveDB, server.reactiveDB);
-  assertEquals(db.initSchema, server.initSchema);
-});
+// (aio/db's deprecated value re-exports went out in alpha70 — the entry is
+// types-only now; pinned in tests/alpha70-surface.test.ts.)
 
 Deno.test("call({ timeout }) is REMOVED — throws loud, names the rename", async () => {
   assertThrows(
@@ -460,13 +404,11 @@ Deno.test("useCell is gone from the public aio/air surface", async () => {
 // 5. Renames (type-level pins compile-checked here)
 // ═════════════════════════════════════════════════════════════════════
 
-Deno.test("renames: Access unifies CellAccess/ServerFnAccess; StateOf subsumes ExtractState", async () => {
+Deno.test("renames: Access is the one access type; StateOf the one state-extractor (aliases gone in alpha70)", async () => {
   // Type-level: assignability in BOTH directions (aliases, not lookalikes).
   const rule: Access = (user, method) =>
     user?.role === "admin" && method !== "nuke";
-  const legacy: CellAccess = rule;
-  const back: Access = legacy;
-  assert(typeof back === "function");
+  assert(typeof rule === "function");
   const { serverFns } = await import("../src/server/server-fns.ts");
   assert(typeof serverFns === "function"); // Access accepted in its opts type
 
@@ -476,11 +418,8 @@ Deno.test("renames: Access unifies CellAccess/ServerFnAccess; StateOf subsumes E
     scope: "server", // alpha52: the default, now statable
   });
   type S1 = StateOf<typeof c>;
-  type S2 = ExtractState<typeof c>;
   const s1: S1 = { count: 1 };
-  const s2: S2 = s1; // alias — mutually assignable
-  const s3: S1 = s2;
-  assertEquals(s3.count, 1);
+  assertEquals(s1.count, 1);
 
   // aio.run<S> typed overload (alpha52, additive): app.getState() is S.
   const { aio } = await import("../mod.ts");
@@ -490,19 +429,23 @@ Deno.test("renames: Access unifies CellAccess/ServerFnAccess; StateOf subsumes E
   assert(typeof _read === "function");
 });
 
-Deno.test("renames: testGen is the name, testgen the working alias", async () => {
+Deno.test("renames: testGen is the name (the testgen alias went out in alpha70)", async () => {
   const t = await import("../src/testing/ui-testgen.ts");
   assertEquals(typeof t.testGen, "function");
-  assertEquals(t.testgen, t.testGen);
+  assertEquals((t as Record<string, unknown>)["testgen"], undefined);
 });
 
-Deno.test("renames: air NodeAction (Action stays an alias)", async () => {
-  // Compile-time: both names exist and are the same shape.
+Deno.test("renames: air NodeAction is the one name (the bare `Action` alias went out in alpha70)", async () => {
   const mod = await import("../src/air/vdom-types.ts");
   assert(mod, "module loads");
   const na: import("../src/air/vdom-types.ts").NodeAction = () => {};
-  const a: import("../src/air/vdom-types.ts").Action = na;
-  assert(typeof a === "function");
+  assert(typeof na === "function");
+  // The alias is gone from the SOURCE, not just undocumented.
+  const src = await Deno.readTextFile("src/air/vdom-types.ts");
+  assert(
+    !/export type Action\b/.test(src),
+    "vdom-types still exports `Action`",
+  );
 });
 
 // ═════════════════════════════════════════════════════════════════════

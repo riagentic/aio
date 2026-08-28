@@ -36,6 +36,7 @@ async function phase(
   dir: string,
   appId: string,
   body: string,
+  args: string[] = [],
 ): Promise<{ code: number; out: string; err: string }> {
   const file = join(dir, `phase-${crypto.randomUUID().slice(0, 8)}.ts`);
   await Deno.writeTextFile(
@@ -48,7 +49,7 @@ ${body}
 `,
   );
   const p = new Deno.Command(Deno.execPath(), {
-    args: ["run", "-A", "--config", join(REPO, "deno.json"), file],
+    args: ["run", "-A", "--config", join(REPO, "deno.json"), file, ...args],
     env: { AIO_APPS_DIR: dir, NO_COLOR: "1" },
     stdout: "piped",
     stderr: "piped",
@@ -120,8 +121,6 @@ function storedState(dir: string): Record<string, unknown> {
 Deno.test({
   name:
     "migrate: a rollback never re-stamps versions downward, so rolling forward does not migrate twice",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: async () => {
     const dir = await Deno.makeTempDir({ prefix: "aio-rollback-" });
     const appId = "app"; // AIO_APPS_DIR/<appId> — appDir pins it anyway
@@ -170,7 +169,23 @@ Deno.test({
       );
 
       // Roll forward again: already-migrated data must NOT be migrated again.
-      const p4 = await phase(dir, appId, V2 + BOOT() + REPORT);
+      // The rollback's v1 write left `cents` on disk beside `dollars` — a
+      // stored field v2 does not declare and (stamp 2 == code 2) no onMigrate
+      // accounts for. Since alpha70 a DEV boot refuses that drift by name…
+      const p4dev = await phase(dir, appId, V2 + BOOT() + REPORT);
+      assert(p4dev.code !== 0, "dev refuses unmigrated shape drift");
+      assert(
+        /REFUSING to boot \(dev\)[\s\S]*wallet[\s\S]*cents/.test(p4dev.err),
+        `the refusal names the cell and the field: ${p4dev.err.slice(-800)}`,
+      );
+      assertEquals(
+        storedVersions(dir, appId).wallet,
+        2,
+        "a refusal writes nothing",
+      );
+      // …and a PROD boot (the machine that actually rolled back) warns, loads
+      // the stale field, and still does not migrate twice.
+      const p4 = await phase(dir, appId, V2 + BOOT() + REPORT, ["--prod"]);
       assertEquals(p4.code, 0, p4.err);
       assert(
         p4.out.includes(`"dollars":12.34`),
@@ -185,8 +200,6 @@ Deno.test({
 Deno.test({
   name:
     "migrate: a throwing onMigrate refuses to boot and leaves the data on disk",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: async () => {
     const dir = await Deno.makeTempDir({ prefix: "aio-migrate-throw-" });
     const appId = "app";

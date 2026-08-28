@@ -107,10 +107,13 @@ Deno.test("preflight: reads the app, never the framework or build output", async
   }
 });
 
-Deno.test("preflight: a file with no cell() call is not scanned", async () => {
-  // `machine:` in a plain object elsewhere is not a cell config key.
+Deno.test("preflight: a file with nothing retired in it produces no finding", async () => {
+  // alpha70: EVERY source file is scanned (a retired import or key can live
+  // anywhere, not only next to a cell() call — that gap shipped a broken
+  // pin), so the pin is what the scan reports, not which files it opens:
+  // a file free of retired spellings is silent.
   const dir = await app({
-    "src/config.ts": `export const opts = { machine: "x86_64" };\n`,
+    "src/config.ts": `export const opts = { arch: "x86_64" };\n`,
   });
   try {
     assertEquals(await preflight(dir, "main"), []);

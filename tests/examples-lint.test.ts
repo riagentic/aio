@@ -22,7 +22,7 @@
 // below because they are inherent to a build smoke fixture, not drift.
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
-import { lint } from "../aiol/mod.ts";
+import { lintProject } from "../aiol/mod.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 
@@ -136,7 +136,7 @@ async function lintExample(dir: string): Promise<string[]> {
     target = tmp;
   }
   try {
-    const report = await lint(target);
+    const report = await lintProject(target);
     return report.issues
       .filter((i) =>
         i.area !== "build" && (i.severity !== "hint" || i.area === "config") &&

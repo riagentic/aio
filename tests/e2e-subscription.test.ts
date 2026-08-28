@@ -26,8 +26,6 @@ export const b = cell("b", { state: { m: 0 }, methods: { inc(s) { s.m += 1; } } 
 Deno.test({
   name: "e2e sub: two directly-read cells both receive server deltas",
   ignore,
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     await withE2E({
       cells: TWO_CELLS,
@@ -65,8 +63,6 @@ export default function App() {
 Deno.test({
   name: "e2e sub: a cell read only after a conditional mount still subscribes",
   ignore,
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     // Mirrors the reporter's nav-heavy shape: `b` is read only inside a branch
     // that mounts after a click (post-connect, no popstate). It must subscribe

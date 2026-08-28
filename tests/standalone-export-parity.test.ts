@@ -20,56 +20,53 @@ Deno.test("standalone-air carries every browser-facing air export", async () => 
     "useConnected", // standalone has no transport to be connected to
     "useProjection", // browser-protocol sharing; standalone reads cells direct
     "testGen", // test-time codegen, never bundled
-    "testgen",
     "generateUITypes",
     "asyncSignal", // browser-transport async data; app code uses cells there
     "useServerSignal",
     "renderToStream", // SSR — a server concern by definition
-    "connectDevTools", // devtools attach to the browser transport
+    "connectReduxDevTools", // devtools attach to the browser transport
     "connectAioDevTools",
-    "disconnectDevTools",
+    "disconnectReduxDevTools",
     "isConnectionDegraded", // transport health; standalone has no transport
-    "setDocument", // browser mount plumbing; standalone owns its document
+    "testComponent", // test-only harness, never bundled; testUI IS the standalone harness
   ]);
   // KNOWN DRIFT (RIS-11) — the debt this gate was written against, enumerated
-  // rather than scattered. Each symbol type-checks in an android app today and
-  // dies at APK bundle time. The router pulls `ensureConnected` (the WS
-  // transport) so re-exporting it into standalone is a real port, not a
-  // re-export line; auth UI needs a story for a serverless WebView; islands
-  // are react interop. Shrink this list — never grow it: a NEW air export
-  // missing from standalone fails this test the day it ships.
-  const KNOWN_DRIFT = new Set([
-    "Link",
-    "NavLink",
-    "Outlet",
-    "Redirect",
-    "Route",
-    "navigate",
-    "routePath",
-    "routeSearch",
-    "useNavigate",
-    "useRoute",
-    "SignIn",
-    "signOut",
-    "useUser",
-    "island",
-    "reactIsland",
-    "useTimeTravel",
-    "testComponent",
-  ]);
+  // WITH the reason, so an entry is a decision and not a shrug. Each symbol
+  // type-checks in an android app today and dies at APK bundle time. Shrink
+  // this list — never grow it: a NEW air export missing from standalone fails
+  // this test the day it ships, and an entry that stops being true (the symbol
+  // appears on standalone) fails it too.
+  //
+  // Closed in alpha70: the router (src/air/router.ts — routing is state, the
+  // WS `ensureConnected` became an injected boot hook), the auth UI (resolved
+  // to the anonymous branch, see standalone-air.ts) and islands (client-side
+  // framework interop; never touched SSR or the transport).
+  const KNOWN_DRIFT: Record<string, string> = {
+    // Streams the SERVER's action log over the transport (`_sendTTCmd` sends
+    // `tt-cmd` frames; the entries arrive as `tt` frames). A standalone app has
+    // no action log outside its own process and no frame to send it on — a
+    // local time-travel would be a second implementation, not a port.
+    useTimeTravel: "time travel streams from the server's action log",
+  };
   const missing = Object.keys(air).filter((k) =>
-    !k.startsWith("_") && !EXEMPT.has(k) && !KNOWN_DRIFT.has(k) &&
+    !k.startsWith("_") && !EXEMPT.has(k) && !(k in KNOWN_DRIFT) &&
     !(k in (standalone as Record<string, unknown>))
   );
   // The ledger must stay honest in the other direction too: a symbol that
   // GETS ported must leave the drift list, or the list rots into an exemption.
-  const cured = [...KNOWN_DRIFT].filter((k) =>
+  const cured = Object.keys(KNOWN_DRIFT).filter((k) =>
     k in (standalone as Record<string, unknown>)
   );
   assert(
     cured.length === 0,
     `KNOWN_DRIFT entries now exported by standalone — remove them from the ` +
       `ledger: ${cured.join(", ")}`,
+  );
+  // …and an entry whose symbol left aio/air is equally stale.
+  const gone = Object.keys(KNOWN_DRIFT).filter((k) => !(k in air));
+  assert(
+    gone.length === 0,
+    `KNOWN_DRIFT entries no longer on aio/air: ${gone.join(", ")}`,
   );
   assert(
     missing.length === 0,

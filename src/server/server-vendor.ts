@@ -13,8 +13,8 @@ let _immerSource: string | null | undefined;
  *  FILESYSTEM PATHS, never URL strings.
  *
  *  This used to build `file://${Deno.cwd()}/…` by hand and read `.pathname`
- *  back off it. Both halves are lossy: a cwd of `/home/dev/My Apps/proj`
- *  produced `/home/dev/My%20Apps/…` (percent-encoded, so `statSync` throws),
+ *  back off it. Both halves are lossy: a cwd of `/home/me/My Apps/proj`
+ *  produced `/home/me/My%20Apps/…` (percent-encoded, so `statSync` throws),
  *  and on Windows `.pathname` yields `/C:/…`. Every candidate then failed, dev
  *  fell back to the esm.sh CDN WITHOUT a word, and the offline-dev guarantee
  *  this file exists for was gone on any machine whose path contains a space.

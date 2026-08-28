@@ -1,0 +1,28 @@
+{
+  "title": "ex-cli-tool",
+  "version": "0.1.0",
+  "nodeModulesDir": "auto",
+  "compilerOptions": {
+    "lib": ["deno.ns", "deno.unstable", "dom", "dom.iterable"]
+  },
+  "imports": {
+    "aio": "../../mod.ts",
+    "aio/cli": "../../src/cli.ts",
+    "aio/server": "../../src/server-entry.ts",
+    "aio/jsx-runtime": "../../src/jsx-runtime.ts",
+    "esbuild": "npm:esbuild@0.24.2",
+    "immer": "npm:immer@10.2.0",
+    "@std/path": "jsr:@std/path@1.1.3"
+  },
+  "tasks": {
+    "dev": "deno run -A src/app.ts serve",
+    "build": "deno run -A ../../src/build-all.ts --build-spec=../../src/build.ts",
+    "compile": "deno run -A ../../src/build-all.ts --build-spec=../../src/build.ts --targets=cli",
+    "check": "deno check src/",
+    "lint": "deno run -A ../../aiol/mod.ts",
+    "am": "deno run -A ../../src/am.ts"
+  },
+  "build": {
+    "targets": ["cli"]
+  }
+}

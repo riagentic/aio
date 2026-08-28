@@ -1,3 +1,5 @@
+import { validateMemoryConfig } from "../diagnostics/memory-monitor.ts";
+import { refuseRetired } from "../state/removals.ts";
 // Core runtime orchestrator — boots KV, server, electron, wires everything together.
 // Phase logic lives in aio-boot, aio-dispatch, aio-server, aio-lifecycle, aio-run-helpers.
 // Cell composition logic lives in aio-composition and aio-cells-bridge.
@@ -63,7 +65,12 @@ import { resolveDataDirLegacy } from "./paths.ts";
 import { describeMigration, migrateLegacyLayout } from "./app-dirs-migrate.ts";
 import { DEV_FRAME_BUDGET_MS } from "../state/dispatch.ts";
 import { setupTransport } from "./aio-server.ts";
-import { startLifecycle } from "./aio-lifecycle.ts";
+import {
+  requestRestart,
+  requestStop,
+  type RestartPlan,
+  startLifecycle,
+} from "./aio-lifecycle.ts";
 import {
   acquireSingletonLock,
   appDenoJson,
@@ -124,7 +131,7 @@ import { resolveAppId } from "./single-instance-lock.ts";
 import { appKeyPath, defaultAppKeyConfig, resolveAppKey } from "./app-key.ts";
 import { assertDenoVersion } from "./deno-version.ts";
 import { removalMessage, removalOf } from "../state/removals.ts";
-import { dirname, join, resolve } from "@std/path";
+import { basename, dirname, join, resolve } from "@std/path";
 import { lint, printLint } from "./lint.ts";
 
 // ── Re-exports: public API surface ────────────────────────────────────
@@ -167,6 +174,7 @@ export {
 } from "./config.ts";
 import {
   misplacedDenoJsonKeys,
+  retiredDenoJsonKeys,
   VALID_AIO_CONFIG_KEYS,
   VALID_FEATURES_CONFIG_KEYS,
   VALID_UI_KEYS,
@@ -307,29 +315,6 @@ export function _warnPinDrift(): void {
  *  wrong in every compiled binary for two releases because the stylesheet
  *  probe behind it looked in one directory. A line the framework promises is a
  *  line a test owes. */
-/** The line an app gets for declaring a `renderBudget` today: it is accepted,
- *  validated, bridged into the client config frame — and read by nothing.
- *
- *  alpha48's transport swap deleted `browser-transport-vitals.ts`, the only
- *  caller of `createRenderMeter()`, and the transport that replaced it never
- *  picked the meter back up. So client render vitals do not run, `vitals-ping`
- *  has no sender, and a budget an app tuned deliberately changes nothing.
- *
- *  "Config accepted, silently dropped" is the class this project treats as
- *  disqualifying, and the honest interim is to SAY SO rather than let the key
- *  keep looking honoured. Wiring the meter into the current transport needs a
- *  browser-path test and is tracked as its own pass; this line goes away with
- *  it. Silence was the only unacceptable option. */
-export function _renderBudgetBootNote(
-  renderBudget: unknown,
-): string | null {
-  if (!renderBudget || typeof renderBudget !== "object") return null;
-  return `renderBudget: declared, and NOT honoured yet — client render vitals ` +
-    `are not wired into the current browser transport, so nothing measures ` +
-    `staleness or pending patches and no threshold can fire. The key is kept ` +
-    `(its shape is stable and the meter is coming back); remove it if you ` +
-    `would rather not carry dead config. Server-side vitals are unaffected.`;
-}
 
 export function _themeBootNote(
   theme: UiConfig["theme"],
@@ -436,6 +421,26 @@ export function _resolveAppVersion(
       "appVersion to aio.run())";
 }
 
+/** THE default client when no `--client` flag is given: the app's config,
+ *  else deno.json's build target, else electron. Boot and `--help` both read
+ *  this one function, so what help prints is what boot does. */
+export function defaultClientFor(configClient?: string): string {
+  return configClient ?? _denoJsonTargetClient() ?? "electron";
+}
+
+/** What `--help` says about THIS invocation: a compiled binary is run by its
+ *  own name, a source app by `deno run`. */
+function _helpFacts(
+  configClient?: string,
+): { usage: string; defaultClient: string } {
+  return {
+    usage: isCompiled()
+      ? `${basename(Deno.execPath())} [flags]`
+      : "deno run -A src/app.ts [flags]",
+    defaultClient: defaultClientFor(configClient),
+  };
+}
+
 /** The app's `client` from ITS OWN deno.json (written by `am create
  *  --target=…`) as a client-mode default. Makes the scaffolded `deno task dev`
  *  (no --client flag) run the CHOSEN target instead of the framework's electron
@@ -445,16 +450,13 @@ export function _resolveAppVersion(
  *
  *  The key was called `target` before alpha52 (renamed: deno.json also carries
  *  `build.targets`, a DIFFERENT axis — two meanings of "target" in one file).
- *  The old spelling still works, with a one-time boot hint; `client` wins when
- *  both are present.
+ *  The old spelling was retired in alpha70 (src/state/removals.ts): dev
+ *  refuses by name, prod logs — `am fix` renames it.
  *
  *  Entry-relative via {@link appDenoJson}, like `version` and `title`: read
  *  from the launch cwd, a compiled `"client": "browser"` app started anywhere
  *  else fell back to ELECTRON and began downloading a ~100MB runtime on a
  *  headless server — or picked up an unrelated project's target. */
-/** @internal exported for its test — the mapping AND its entry-relative source
- *  are both load-bearing, and a compiled binary cannot be asked from inside. */
-let _hintedDenoJsonTargetKey = false;
 export function _denoJsonTargetClient():
   | "browser"
   | "electron"
@@ -462,19 +464,14 @@ export function _denoJsonTargetClient():
   | "server-only"
   | undefined {
   const dj = appDenoJson();
-  const raw = dj?.client ?? dj?.target;
-  if (dj?.target !== undefined && !_hintedDenoJsonTargetKey) {
-    _hintedDenoJsonTargetKey = true;
-    // Two spellings at once must not resolve SILENTLY — say which one won.
-    log.warn(
-      dj?.client !== undefined
-        ? `deno.json has BOTH "client" (${JSON.stringify(dj.client)}) and ` +
-          `the deprecated "target" (${JSON.stringify(dj.target)}) — ` +
-          `"client" wins; delete "target" (\`am fix\` does it)`
-        : 'deno.json "target" is now "client" (same value — renamed so it ' +
-          "can't be confused with build.targets) — `am fix` rewrites it",
-    );
+  // Retired keys (`target`, …) are refused in dev and logged in prod by ONE
+  // decider — never silently read as the new spelling.
+  if (dj) {
+    for (const r of retiredDenoJsonKeys(dj)) refuseRetired(r, "deno.json");
   }
+  // In prod the retired key was logged above and is still HONOURED — an app
+  // that only ever said `target` must not silently boot as another shell.
+  const raw = dj?.client ?? (dj as { target?: unknown } | undefined)?.target;
   switch (raw) {
     case "browser":
     case "android":
@@ -553,7 +550,7 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
   // is the safest thing anyone does with it; it must have no side effects at
   // all. Same reasoning as `--aio-data-contract` below, one step earlier.
   if (parseCli().help) {
-    printHelp();
+    printHelp(_helpFacts(typeof a === "object" && a ? a.client : undefined));
     Deno.exit(0);
   }
   // Fail fast on an unsupported Deno — aio uses ≥2.9 behavior directly.
@@ -587,6 +584,7 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
   );
   if (fc.ui) {
     validateConfig(fc.ui as Record<string, unknown>, VALID_UI_KEYS, "ui");
+    if (fc.memory) validateMemoryConfig(fc.memory as Record<string, unknown>);
   }
   // …and the OTHER file people put aio config in. `aio.run()` refuses an
   // unknown key loudly; deno.json accepted `ui: { width, height }` at the top
@@ -743,6 +741,7 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
       cellReportOpts,
       visibilityReport,
     } = composeCellsWiring({
+      appId: resolveAppId(fc.appId),
       cellEntries,
       cellDefaults: fc.cellDefaults,
       localFirst: fc.localFirst,
@@ -939,7 +938,7 @@ async function _run<S, A, E>(
   // --- Phase 1: resolve CLI, env, config validation, lint ---
   const cli = parseCli();
   if (cli.help) {
-    printHelp();
+    printHelp(_helpFacts(config.client));
     Deno.exit(0);
   }
   if (cli.version) {
@@ -1234,8 +1233,7 @@ async function _run<S, A, E>(
   // Client mode: CLI flag > aio.run config > app deno.json `target` >
   // electron. The deno.json step is what makes `am create --target=X` +
   // `deno task dev` (no --client flag) actually run target X.
-  const client = cli.client ?? config.client ?? _denoJsonTargetClient() ??
-    "electron";
+  const client = cli.client ?? defaultClientFor(config.client);
   // …and WHO decided, kept beside the decision so the two cannot drift. The
   // boot report says `client electron (deno.json)` instead of leaving someone
   // to grep three files for the one that won.
@@ -1267,6 +1265,9 @@ async function _run<S, A, E>(
   );
   if (config.ui) {
     validateConfig(config.ui as Record<string, unknown>, VALID_UI_KEYS, "ui");
+    if (config.memory) {
+      validateMemoryConfig(config.memory as Record<string, unknown>);
+    }
   }
   printLint(
     await lint(
@@ -1277,6 +1278,7 @@ async function _run<S, A, E>(
       isHeadless,
       useElectron,
       ui.entry ?? UI_ENTRY,
+      isHeadless ? client : undefined,
     ),
   );
 
@@ -1300,8 +1302,6 @@ async function _run<S, A, E>(
     appHasStylesheet(baseDir, distDir),
   );
   if (themeNote) log[themeNote.level](themeNote.message);
-  const rbNote = _renderBudgetBootNote(config.renderBudget);
-  if (rbNote) log.warn(rbNote);
 
   const title = await resolveTitle(cli.title, ui.title);
   log.debug(
@@ -1646,7 +1646,7 @@ async function _run<S, A, E>(
     }),
     scheduleManager,
     ownManager,
-    schedulePersist: () => schedulePersist(),
+    schedulePersist: (p) => schedulePersist(p),
     getTT: () => tt,
     setTT: (t) => {
       tt = t;
@@ -1673,7 +1673,6 @@ async function _run<S, A, E>(
     reduceBreakdown: config._reduceBreakdown,
     ttSkipActions,
     afterAction: afterActionHook,
-    cellNames: config._cellNames ? new Set(config._cellNames) : undefined,
     log,
     debug: VERBOSE,
   });
@@ -1784,6 +1783,10 @@ async function _run<S, A, E>(
   const _workerEntry = config._workerEntry ?? Deno.mainModule;
   const _hostWorkers = !config.libraryMode || config._workerEntry !== undefined;
   const workerPool = createCellWorkerPool({
+    // The SAME resolved value the main isolate uses and the boot line
+    // prints — one decider, so a worker cell is never freeze-checked more
+    // loosely than a local one.
+    freezeState: freezeEnabled,
     cells:
       (_hostWorkers ? config._workerCells ?? [] : []) as unknown as Parameters<
         typeof createCellWorkerPool
@@ -1921,6 +1924,7 @@ async function _run<S, A, E>(
     // Shutdown aborts + drains THIS app's cells only — another app sharing the
     // process (D2) keeps running its own in-flight methods.
     getCellNames: () => config._cellNames ?? [],
+    getAppId: () => resolveAppId(config.appId),
     getElectronProc: () => _electronProc,
     clearElectronProc: () => {
       _electronProc = null;
@@ -2155,6 +2159,7 @@ async function _run<S, A, E>(
     scheduleManager,
     // Cell id → method names — trojan `cells` route (amui run-method buttons).
     cellMethods: config._cellMethods ?? {},
+    cellAsyncMethods: config._cellAsyncMethods ?? {},
     cellFields: config._cellFields ?? {},
     asyncDb,
     // In-memory dispatch timeline — the trojan `timeline` route.
@@ -2168,6 +2173,12 @@ async function _run<S, A, E>(
   });
 
   server = transport.server;
+  // The port this process is REALLY on. `port` above may be the literal 0 of
+  // `port: 0` ("pick a free port"); the listener resolved it, and every place
+  // that NAMES a port — the boot report, the ws URL, the lock — has to say the
+  // resolved one. Printing 0 is the same confidently-wrong line as printing a
+  // number for an app that bound nothing.
+  const livePort = transport.server.boundPort ?? port;
   udsHandle = transport.udsHandle;
   udsRef.current = udsHandle;
 
@@ -2260,7 +2271,7 @@ async function _run<S, A, E>(
       // undefined value, and the socket is named on its own line instead.
       port: transport.httpSocketPath || transport.skipHttp
         ? { value: undefined as unknown as number, from: portFrom }
-        : { value: port, from: portFrom },
+        : { value: livePort, from: portFrom },
       entry: {
         // What is RUNNING, read from the process — not what a config said
         // should run. Those differ exactly when someone is confused.
@@ -2326,7 +2337,7 @@ async function _run<S, A, E>(
     transport: transport.transport,
     skipHttp: transport.skipHttp,
     httpSocketPath: transport.httpSocketPath,
-    port,
+    port: livePort,
     token,
     users,
     perUserAuth: _perUserAuth,
@@ -2395,5 +2406,17 @@ async function _run<S, A, E>(
   return app;
 }
 
-/** Main aio namespace — `aio.run(config)` starts the server. */
-export const aio = { run };
+/** Main aio namespace — `aio.run(config)` starts the server.
+ *
+ *  `aio.stop()` / `aio.restart()` are the handle-free spellings of "end this
+ *  process cleanly" and "come back", safe from inside a cell method (deferred
+ *  by a macrotask, so the method returns before the shutdown contract drains
+ *  the cells). Both run EVERY app in the process through its full shutdown
+ *  (finish writing, final snapshot). `restart()` is a promise per launcher —
+ *  the matrix, and the launchers where it REFUSES with the manual step, are
+ *  in aio-lifecycle.ts (`restartPlan`). */
+export const aio = {
+  run,
+  stop: (): Promise<void> => requestStop(),
+  restart: (): Promise<RestartPlan> => requestRestart(),
+};

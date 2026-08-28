@@ -101,8 +101,6 @@ function shuffled<T>(r: () => number, xs: T[]): T[] {
 
 Deno.test({
   name: "db differential: SQL table never disagrees with the bound array",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: async () => {
     const rounds = fuzzEnvInt("AIO_DB_FUZZ_ROUNDS", 12, 1);
     const steps = fuzzEnvInt("AIO_DB_FUZZ_STEPS", 40, 1);
@@ -355,8 +353,6 @@ Deno.test({
 // corruption the rest of this file exists to rule out.
 Deno.test({
   name: "db differential: a type the column rewrites is always reported",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: async () => {
     const dir = await Deno.makeTempDir({ prefix: "db-diff-affinity-" });
     const db = createDB(join(dir, "state.db"));

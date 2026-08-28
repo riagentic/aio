@@ -27,8 +27,9 @@ import { serializeReturn } from "../protocol/return-value.ts";
 import { writeClientLog } from "./client-log.ts";
 import { CLIENT_REPLY_TIMEOUT_MS, clientReplyTimeoutError } from "./uds.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { INFLIGHT } from "../state/dispatch.ts";
 import { parseTTCommand } from "../diagnostics/time-travel.ts";
-import { rawStateControlAllowed } from "./server-auth.ts";
+import { allowlistAdmits, rawStateControlAllowed } from "./server-auth.ts";
 import type { ClientLogEntry } from "../air/dom-inspector-types.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
 import { VERSION } from "./aio-cli.ts";
@@ -92,12 +93,17 @@ export function _isFrameworkInternalActionType(type: string): boolean {
  *    (beforeReduce/onAction/onEffect). In open/shared-token mode meta.user is
  *    undefined, so a spoofed `_user:{role:"admin"}` would become the trusted
  *    identity. The server sets the real `_user` downstream.
- *  - `_source` — dispatch lets `_source:"Effect"` through a CLOSED queue while
- *    it drains in-flight effects (a streaming method's write-set must land)
- *    and drops everything else. A forged value would have a `cell:method`
- *    action run during shutdown drain — new work started while the server is
- *    closing — and its write captured by the final persist. The server tags
- *    its own effect dispatches inside the cell machinery.
+ *  - `_source` — provenance for app hooks (beforeReduce/onAction/onEffect):
+ *    the server tags its own effect dispatches "Effect" inside the cell
+ *    machinery, "System" for lifecycle. A forged "System" would ride the
+ *    teardown exception of a closed queue.
+ *  - `_inflight` — dispatch lets a flagged action through a DRAINING queue
+ *    (a running method's write-set must land while the app closes) and
+ *    refuses everything else with DISPATCH_DRAINING. A forged flag would have
+ *    a `cell:method` action run during the shutdown drain — new work started
+ *    while the server is closing — and its write captured by the final
+ *    persist. Only the framework's own write paths set it (dispatch.ts
+ *    INFLIGHT).
  *  - `_syncOp` — only the sync handler sets it, on ops already persisted to
  *    the op-log, so afterAction skips the durability fold for sync cells. A
  *    forged value makes the server treat a write that is durable NOWHERE as
@@ -122,8 +128,10 @@ export function sanitizeClientAction(
     forged.push("_source");
   }
   if (action._syncOp !== undefined) forged.push("_syncOp");
+  if (action[INFLIGHT] !== undefined) forged.push(INFLIGHT);
   delete action._user;
   delete action._syncOp;
+  delete action[INFLIGHT];
   const pl = action.payload;
   if (pl && typeof pl === "object") {
     if ((pl as Record<string, unknown>)._origin !== undefined) {
@@ -162,6 +170,12 @@ export type ClientMeta = {
    *  `lastFullJson` while this is false; see the flush loop in
    *  server-broadcast.ts. */
   lastFullJsonStale?: boolean;
+  /** A round was SKIPPED for this client (backpressure pacing, a frozen
+   *  transport). Its patches are gone — the next round it is eligible for
+   *  must carry full state, or the client applies later patches on top of a
+   *  state that never received the earlier ones and diverges with health
+   *  green. Cleared by a full send. */
+  needsFull?: boolean;
   msgCount: number;
   bytesThisSec: number;
   msgResetTimer?: ReturnType<typeof setTimeout>;
@@ -445,10 +459,17 @@ export function createWsManager(deps: WsDeps): WsManager {
       try {
         const u = new URL(origin);
         const h = u.hostname;
-        const allowed = deps.allowedOrigins ?? [];
-        // Configured trust, by hostname or by full origin, plus the "*" opt-out.
-        const isAllowed = allowed.includes(h) || allowed.includes(origin) ||
-          allowed.includes("*");
+        // Configured trust — read by the SAME decider the Host check uses.
+        // This was `Array.includes()` on the raw entries, so an entry with a
+        // capital letter, a stray space, a `host:port` spelling or a full
+        // origin admitted the page over HTTP and refused its socket: the app
+        // loaded and then could not connect, which reads as a network fault
+        // rather than a config one.
+        const isAllowed = allowlistAdmits(deps.allowedOrigins, {
+          hostname: h,
+          hostPort: u.host,
+          origin,
+        });
         // a page this very server served has Origin === our Host header
         const hostHeader = req.headers.get("host");
         // Same host AND same scheme. `Host` carries no scheme, so the

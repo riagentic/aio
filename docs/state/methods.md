@@ -247,7 +247,7 @@ one action. Each `await` boundary starts a new batch.
 > | -------------------------------- | ----------------------------------------------------------------------------- |
 > | fast (a few ms of state shaping) | just write it — this is the common case                                       |
 > | I/O (fetch, file, DB)            | `async` + `await` — the runtime waits, your thread doesn't                    |
-> | CPU-bound or a sync-only API     | `await schedule.blocking(id, fn, arg)` — a real worker thread                 |
+> | CPU-bound or a sync-only API     | `await blocking(id, fn, arg)` — a real worker thread                          |
 > | every method here can be heavy   | `worker: true` on the cell — its own thread ([cell workers](cell-workers.md)) |
 >
 > Same idea for big arrays: `s.list.push(x)` emits one `add` patch, while
@@ -399,6 +399,28 @@ async respond(s, ok: boolean) {
   link.answerApproval(sid, ok)
 }
 ```
+
+### The view ends with the call
+
+An async method's `s` — and `s.$live` with it — is **live only until the
+method's promise settles**. The stale-capture ledger above is per invocation and
+dies with it, by design: nothing outlives the call to keep it consistent. So a
+write from a callback that outlived the method — a `setTimeout`, an event
+listener, a `.then` nobody awaited — is **refused, by name**, instead of
+committing on a view the framework no longer tracks:
+
+```
+[cell:respond] write after the method finished: s.status was assigned from a
+callback that outlived respond(). An async method's state view is live only
+until its promise settles — await the work inside respond(), or dispatch a
+method from the callback.
+```
+
+(A sync method's draft is revoked by Immer at the same moment; the async view
+used to refuse nothing and committed the write — persisted, broadcast,
+`ok: true`.) The fix is the one the message names: `await` the work inside the
+method, or have the callback call a method (`cell.finish(result)`), which gets a
+live view of its own.
 
 Fresh reads stay legal: `s.pending = {...}; s.pending.sid` re-fetches through
 `s` and sees the new object — only references **held across** the overwrite trip

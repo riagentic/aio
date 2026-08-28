@@ -8,8 +8,8 @@ code in this repository.
 All-in-one full-stack TypeScript framework on Deno ≥2.9 (`MIN_DENO` in
 `src/server/deno-version.ts`). One `cell({ state, methods })` drives server
 state, persistence (worker-thread SQLite, one `state.db`), CRDT sync, and the UI
-(AIR — an ~8 KB signals+JSX renderer). One codebase builds to browser, Electron,
-Android, CLI, and service targets. Elm-like core:
+(AIR — a signals+JSX renderer, ~20 KB gzipped). One codebase builds to browser,
+Electron, Android, CLI, and service targets. Elm-like core:
 `(state, action) → { state, effects[] }`. v1.0.0-alpha60, ~4300 test blocks in
 `tests/`.
 
@@ -135,10 +135,12 @@ without selectors:
   and surface failures). Names are LABEL+ROLE from the TSX
   (`<div class="button">Submit</div>` → `SubmitButton`). Handle form:
   `await using ui = await testUI(App)`.
-- On a live app: `am surface 0 --json` (components, elements, live
-  text/value/checked) and `am trigger 0 "<path>" <action> [text]` — the reply
-  includes the fresh post-action surface, and misses list available paths. Loop:
-  observe → act → observe, one call per step.
+- On a live app: `am surface --json` (components, elements, live
+  text/value/checked) and `am trigger "<path>" <action> [text]` — the reply
+  drives the newest UI client (an explicit index is a server counter, not a
+  position; index 0 is usually the dev reload socket). The reply includes the
+  fresh post-action surface, and misses list available paths. Loop: observe →
+  act → observe, one call per step.
 - Guide: `docs/testing/ui-testing.md`.
 
 Always dispatch-test cell methods (`testCell`, or a trojan POST) — SSR plus an

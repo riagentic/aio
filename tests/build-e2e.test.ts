@@ -912,3 +912,131 @@ Deno.test({
     }
   },
 });
+
+// ── aio.restart(): a compiled binary comes back, on the same port, with its
+// state intact. The dev-supervisor and refusal rows of the same matrix are
+// in-process tests (tests/lifecycle-restart.test.ts); this is the row that
+// only a real artifact can prove — a process re-executing ITSELF, waiting out
+// its predecessor's lock, and serving again.
+Deno.test({
+  name:
+    "artifact: aio.restart() from a cell method — the binary re-execs itself and serves again with state intact",
+  ignore: !GATE,
+  // aio-ok: the compiled binary re-execs ITSELF via aio.restart(); the successor is not a child the test can await
+  sanitizeResources: false,
+  sanitizeOps: false, // aio-ok: see above
+  fn: async () => {
+    const dir = await makeApp("counter", "build-e2e-restart-");
+    const keep = await Deno.makeTempDir({ prefix: "restart-install-" });
+    const home = await Deno.makeTempDir({ prefix: "restart-home-" });
+    const bin = join(keep, "app");
+    let proc: Deno.ChildProcess | null = null;
+    try {
+      // One method that asks the framework to restart the app. `aio.restart()`
+      // is deferred, so a sync method can call it and return normally.
+      const cell = await Deno.readTextFile(join(dir, "src", "cell.ts"));
+      assertStringIncludes(cell, "reset(s)", "the scaffold changed shape");
+      await Deno.writeTextFile(
+        join(dir, "src", "cell.ts"),
+        cell
+          .replace(
+            'import { cell } from "aio";',
+            'import { aio, cell } from "aio";',
+          )
+          .replace(
+            /(\s+)reset\(s\) \{/,
+            `$1restart() {$1  void aio.restart();$1},$1reset(s) {`,
+          ),
+      );
+      const built = await buildFlags(dir, "--compile");
+      assertEquals(built.code, 0, `build failed:\n${built.err}`);
+      await Deno.copyFile(findBinary(dir), bin);
+      await Deno.chmod(bin, 0o755);
+
+      const port = freePort();
+      const health = async () =>
+        (await (await fetch(`http://127.0.0.1:${port}/__aio/health`))
+          .json()) as Record<string, unknown>;
+      const send = async (type: string, settleMs: number) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+        let state: Record<string, Record<string, unknown>> = {};
+        ws.addEventListener("message", (e) => {
+          try {
+            const f = JSON.parse(String(e.data));
+            if (f?.t === "state" && f.d) state = f.d;
+          } catch { /* not a JSON frame */ }
+        });
+        await new Promise<void>((res, rej) => {
+          ws.addEventListener("open", () => res());
+          ws.addEventListener("error", () => rej(new Error("ws failed")));
+        });
+        await new Promise((r) => setTimeout(r, 300));
+        ws.send(JSON.stringify({ v: 2, t: "action", d: { type } }));
+        await new Promise((r) => setTimeout(r, settleMs));
+        ws.close();
+        return state;
+      };
+
+      // The profile lives in a throwaway home, and the successor inherits it.
+      Deno.env.set("AIO_APPS_DIR", home);
+      const s = spawn(bin, [`--port=${port}`], keep);
+      Deno.env.delete("AIO_APPS_DIR");
+      proc = s.proc;
+      await waitForHttp(`http://127.0.0.1:${port}/__aio/health`, 60_000)
+        .catch((e) => {
+          throw new Error(`never served: ${e}\n--- log ---\n${s.log()}`);
+        });
+      await send("counter:increment", 800);
+      const before = await send("counter:increment", 800);
+      assertEquals(before.counter?.count, 2, JSON.stringify(before));
+      const h1 = await health();
+      const cells1 = h1.cells as Record<string, Record<string, unknown>>;
+      assertEquals(cells1.counter?.lastAction, "counter:increment");
+
+      // Ask the RUNNING binary to restart. The original process exits; the
+      // successor is a different pid on the same port.
+      await send("counter:restart", 1500);
+      const exited = await Promise.race([
+        proc.status.then(() => true),
+        new Promise<boolean>((r) => setTimeout(() => r(false), 30_000)),
+      ]);
+      assert(
+        exited,
+        `the process never exited after aio.restart():\n${s.log()}`,
+      );
+      proc = null;
+
+      let h2: Record<string, unknown> | null = null;
+      for (let i = 0; i < 60 && !h2; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        try {
+          const h = await health();
+          // A NEW process: the cell has run nothing yet in this one.
+          const cells = h.cells as Record<string, Record<string, unknown>>;
+          if (h.appId && cells?.counter && !cells.counter.lastAction) h2 = h;
+        } catch { /* between processes */ }
+      }
+      assert(h2, `nothing served on :${port} after the restart\n${s.log()}`);
+      assertStringIncludes(s.log(), "aio.restart(): compiled");
+
+      // State intact: the two increments survived the restart.
+      const after = await send("counter:increment", 800);
+      assertEquals(
+        after.counter?.count,
+        3,
+        `state did not survive the restart: ${
+          JSON.stringify(after)
+        }\n${s.log()}`,
+      );
+    } finally {
+      if (proc) await kill(proc).catch(() => {});
+      // The successor is not `proc`: reap it by path so it cannot outlive
+      // the test (it would also die with this runner — AIO_PARENT_PID).
+      await new Deno.Command("pkill", { args: ["-f", bin] }).output()
+        .catch(() => {});
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+      await Deno.remove(keep, { recursive: true }).catch(() => {});
+      await Deno.remove(home, { recursive: true }).catch(() => {});
+    }
+  },
+});

@@ -163,6 +163,8 @@ export interface ServerSetupDeps<S, A> {
   scheduleManager: { active: () => string[] };
   /** Cell id → method names — for the trojan `cells` route (amui method buttons). */
   cellMethods?: Record<string, string[]>;
+  /** Cell id → async method names — which calls a `_callId` can correlate. */
+  cellAsyncMethods?: Record<string, string[]>;
   /** Cell id → per-field persist/ui flags — for the trojan `fields` route. */
   cellFields?: import("./aio-types.ts").CellFieldFlags;
   asyncDb: { query: (sql: string) => Promise<{ rows: unknown[] }> } | null;
@@ -719,6 +721,7 @@ export async function setupTransport<S, A>(
         getState: () => getState(),
         getSchedules: () => scheduleManager.active(),
         cellMethods: () => deps.cellMethods ?? {},
+        cellAsyncMethods: () => deps.cellAsyncMethods ?? {},
         cellFields: () => deps.cellFields ?? {},
         ...(deps.getTimeline ? { getTimeline: deps.getTimeline } : {}),
         ...(deps.migrations ? { getMigrations: () => deps.migrations } : {}),
@@ -833,8 +836,14 @@ export async function setupTransport<S, A>(
   // you hand to another machine (the bound address as-is); `localUrl` is what
   // THIS machine opens — `localhost` only when the bind really answers there.
   const _scheme = useHttps ? "https" : "http";
-  const shareUrl = `${_scheme}://${_advertiseHost}:${port}`;
-  const localUrl = `${_scheme}://${_selfHost}:${port}`;
+  // The port the listener REALLY bound. `port: 0` means "pick a free port",
+  // and until the listener answered, nobody knew which one — so these URLs
+  // said `:0`, which is not an address anyone can open. Same fact as the
+  // "no TCP port" case the boot report already refuses to print a number for:
+  // a URL is printed only when it is one.
+  const livePort = server.boundPort ?? port;
+  const shareUrl = `${_scheme}://${_advertiseHost}:${livePort}`;
+  const localUrl = `${_scheme}://${_selfHost}:${livePort}`;
 
   // Update lock file with runtime info
   if (appLock) {
@@ -845,7 +854,13 @@ export async function setupTransport<S, A>(
       // An app with no TCP listener must not leave a port number in the lock
       // that reads like one: 0 is the honest answer, and `am` follows the
       // socket instead (a port-0 lock is valid — see readLock).
-      ...(zeroPort ? { port: 0 } : {}),
+      //
+      // An app that DID bind, on the other hand, must leave the port it is
+      // actually on. The lock was written from the CONFIGURED port before the
+      // listener existed, so a `port: 0` app recorded 0 and stayed that way —
+      // and `am` reaches an app through this number, so `am state` on a
+      // perfectly healthy app answered "Requests to port 0 are blocked".
+      ...(zeroPort ? { port: 0 } : { port: livePort }),
     });
   }
 

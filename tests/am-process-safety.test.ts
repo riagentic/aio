@@ -54,8 +54,6 @@ Deno.test({
     "#4 lock: an UNWRITABLE lock dir throws, it does not say 'already running'",
   // The env var is read through lockDir()'s cache, so this test owns the
   // process's lock dir for its duration and restores it after.
-  sanitizeResources: false,
-  sanitizeOps: false,
   ignore: Deno.build.os === "windows" || Deno.uid?.() === 0,
   async fn() {
     const base = await Deno.makeTempDir({ prefix: "ro-runtime-" });
@@ -137,8 +135,6 @@ Deno.test("#5 am start: the child is the deno RUNNING am, by absolute path", () 
 Deno.test({
   name: "#5 am start: a child that never execs is DEAD, whatever pid came back",
   ignore: Deno.build.os === "windows",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     // The exact shape `am start` runs, pointed at a binary that is not there.
     // The pid is real; the process is not. This is what `am` used to report as
@@ -277,8 +273,6 @@ Deno.test({
   name:
     "#8 lock: a new lock records the start time of the process that wrote it",
   ignore: Deno.build.os === "windows",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const appId = `token-${crypto.randomUUID().slice(0, 8)}`;
     const home = await Deno.makeTempDir({ prefix: "token-home-" });
@@ -365,8 +359,6 @@ Deno.test({
   name:
     "#7 kill --stale: a live NON-aio process of ours is refused, not signalled",
   ignore: Deno.build.os === "windows",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     // Something innocent of the user's, on a pid `am` was told about. Before
     // the fix this was a SIGTERM primitive for arbitrary pids.
@@ -405,8 +397,6 @@ Deno.test("#7 kill --stale: every aio lock dir is read, not only this scope", ()
 Deno.test({
   name:
     "#6 am start --home: refused, because am cannot make the child boot there",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     // `--home` TARGETS a running instance (docs/clients/app-manager.md). It was
     // also accepted by `start`, where it did something else entirely: the child

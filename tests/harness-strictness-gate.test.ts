@@ -53,18 +53,11 @@ const EXEMPT: Record<string, string> = {
   freePort: "pure helper — allocates a port, runs no app code",
   findChromium: "pure helper — locates a binary",
   setDocument: "pure helper — swaps the document reference",
-  testgen: "codegen — emits types, never boots an app",
-  testGen:
-    "codegen (alpha52 name of testgen) — emits types, never boots an app",
+  testGen: "codegen — emits types, never boots an app",
   generateUITypes: "codegen — emits types, never boots an app",
-  appDirs: "path resolution, no app code",
   ensureAppDirs: "path resolution, no app code",
   registerAppDirs: "path resolution, no app code",
   _resetAppDirs: "path resolution, no app code",
-  installUpdatesRuntime:
-    "installs the updates cell's PLATFORM half (a stub, in a test) — it runs " +
-    "no app code and boots nothing; the harness that then drives the cell is " +
-    "the one that arms strictness",
   createCassette: "transport recording, no app code",
   openCassette: "transport recording, no app code",
   totpCode: "pure code generator (HMAC over a secret) — runs no app code",

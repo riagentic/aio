@@ -21,7 +21,69 @@ export type ColumnDef = {
 };
 
 /** Table schema produced by table() — passed to aio.run({ db: { schema } }) */
-export type TableDef = { columns: Record<string, ColumnDef> };
+export type TableDef = {
+  columns: Record<string, ColumnDef>;
+  /** How the bound state value holds its rows — stamped onto the resolved
+   *  schema by `resolveDbBindings` from the `db:` mapping's `shape`, and read
+   *  by the row diff. `"array"` (default) or `"map"` (a plain object keyed by
+   *  the row's pk). Not something `table()` takes: the shape belongs to the
+   *  BINDING, not to the table. */
+  shape?: DbBoundShape;
+};
+
+/** The shape of a state value a `db:` table is bound to. */
+export type DbBoundShape = "array" | "map";
+
+/** The object-shaped form of a `db:` entry — `db: { key: TableDef }` says
+ *  "this whole array field is this table"; this form says WHICH value and in
+ *  WHAT shape (docs/persistence/sqlite.md → "Object-shaped bindings"):
+ *
+ *  ```ts
+ *  db: {
+ *    // a map keyed by pk: state.wallet.byMint = { [mint]: Holding }
+ *    "wallet.byMint": { table: holdings, shape: "map" },
+ *    // a subset deeper than one field: state.ledger.book.entries
+ *    "ledger.entries": { table: entries, path: "book.entries" },
+ *  }
+ *  ```
+ *
+ *  Additive: a bare `TableDef` still means `{ table, shape: "array" }`. */
+export type DbMapping = {
+  table: TableDef;
+  /** `"array"` (default): the bound value is an array of rows.
+   *  `"map"`: the bound value is a plain object whose VALUES are the rows and
+   *  whose KEYS are their primary keys (`String(row[pk])`) — the table needs a
+   *  `pk()` column, and a key that disagrees with its row's pk is refused at
+   *  write time (the next boot would key the row by the pk). */
+  shape?: DbBoundShape;
+  /** Dotted path INSIDE the cell to bind (a subset of the slice deeper than
+   *  one field), e.g. `"book.entries"`. Default: the key's `<field>`. Only
+   *  meaningful with an explicit `"<cell>.<field>"` key — the SQL table is
+   *  still named `<cell>_<field>`. */
+  path?: string;
+};
+
+/** Normalize a `db:` entry to its object form. */
+export function dbMappingOf(v: TableDef | DbMapping):
+  & Required<
+    Pick<DbMapping, "table" | "shape">
+  >
+  & Pick<DbMapping, "path"> {
+  const m = "table" in v && v.table !== undefined && "columns" in v.table
+    ? v as DbMapping
+    : { table: v as TableDef };
+  const shape = m.shape ?? "array";
+  if (shape !== "array" && shape !== "map") {
+    throw new Error(
+      `db: mapping shape ${JSON.stringify(shape)} is not one of ` +
+        `"array" | "map".`,
+    );
+  }
+  if (m.path !== undefined && (typeof m.path !== "string" || !m.path)) {
+    throw new Error(`db: mapping path must be a non-empty dotted string.`);
+  }
+  return { table: m.table, shape, path: m.path };
+}
 
 /** Comparison operators for where() queries */
 export type WhereOp = {
@@ -306,6 +368,7 @@ export function buildWhere(
   };
 }
 
+// aio-ok: a query-builder surface exercised by tests/sql.test.ts that the framework itself composes SQL without — recorded, not deleted on one reader's judgment.
 export function buildWhereOr(
   filters: Record<string, unknown>[],
 ): { sql: string; params: unknown[] } {
@@ -321,6 +384,7 @@ export function buildWhereOr(
   return { sql: groups.length ? ` WHERE ${groups.join(" OR ")}` : "", params };
 }
 
+// aio-ok: same as buildWhereOr above — tested, internal, and not on the public surface; deleting it would cascade through buildOrderBy/buildLimit, which is a deliberate sweep and not a drive-by.
 export function buildQuerySuffix<T>(opts?: QueryOpts<T>): string {
   if (!opts) return "";
   let s = "";

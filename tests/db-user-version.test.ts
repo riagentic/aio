@@ -18,7 +18,7 @@ import {
   assertStringIncludes,
 } from "@std/assert";
 import { join } from "@std/path";
-import { createDB } from "../src/db/mod.ts";
+import { createDB } from "../src/server-entry.ts";
 import type { DB } from "../src/db/types.ts";
 import {
   AIO_SCHEMA_TABLE,

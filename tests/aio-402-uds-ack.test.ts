@@ -117,6 +117,7 @@ Deno.test("uds: forged trusted provenance is stripped and _source re-stamped", a
           _user: { id: "root", role: "admin" },
           _source: "Effect",
           _syncOp: true,
+          _inflight: true,
           cid: "spoof-1",
         },
       }) + "\n",
@@ -131,6 +132,9 @@ Deno.test("uds: forged trusted provenance is stripped and _source re-stamped", a
   assertEquals(action._user, undefined, "_user stripped");
   assertEquals(action._syncOp, undefined, "_syncOp stripped");
   assertEquals(action._source, "UI", "_source re-stamped as client input");
+  // alpha70: the drain-window flag. A forged one would run a `cell:method`
+  // during shutdown drain and have its write captured by the final persist.
+  assertEquals(action._inflight, undefined, "_inflight stripped");
   assertEquals(
     (action.payload as Record<string, unknown>)._origin,
     undefined,

@@ -1,5 +1,6 @@
 // Shared types, helpers, and CJS template fragments for Electron script generators
 
+import { slugify } from "../server/single-instance-lock.ts";
 import { generateHTML } from "../server/server-html-gen.ts";
 import type { UiTheme } from "../server/aio-types.ts";
 
@@ -35,10 +36,11 @@ export type AioMeta = {
   chrome?: "standard" | "themed" | "none";
 };
 
-/** Slugifies a title for use as Electron app name (stable userData path) */
+/** Slugifies a title for use as Electron app name (stable userData path).
+ *  THE transform, from `single-instance-lock.ts`: the userData path and the
+ *  app's lock id are the same identity and must reduce a title the same way. */
 export function toSlug(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") ||
-    "aio-app";
+  return slugify(s);
 }
 
 // ── Reusable CJS template fragments (embedded in generated Electron main.cjs) ──

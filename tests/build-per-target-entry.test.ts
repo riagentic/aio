@@ -13,7 +13,8 @@
  */
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
-import { buildAll, normalizeTargets, unsafeOutDir } from "../src/build-all.ts";
+import { buildAll, normalizeTargets } from "../src/build-all.ts";
+import { unsafeOutDir } from "../src/testing/internal.ts";
 import { slugify } from "../src/build/build-helpers.ts";
 
 // ── normalization: the array form is the object form with no overrides ──────

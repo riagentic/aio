@@ -175,8 +175,6 @@ Deno.test("db sync: a row field with no column is named before it is lost", asyn
 Deno.test({
   name:
     "db sync: an undeclared row field is reported through a real app restart",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: async () => {
     const dir = await Deno.makeTempDir({ prefix: "db-undeclared-" });
     const appId = `undeclared-${crypto.randomUUID().slice(0, 8)}`;
@@ -383,8 +381,6 @@ Deno.test("db sql: a ref() to a declared table with no primary key fails loud", 
 
 Deno.test({
   name: "db sql: a ref() to a non-`id` pk actually writes",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: async () => {
     const schema: Record<string, TableDef> = {
       users: table({ userId: pk(), name: text() }),
@@ -412,8 +408,6 @@ Deno.test({
 
 Deno.test({
   name: "db schema: a column added since the last run is migrated in",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: async () => {
     const dir = await Deno.makeTempDir({ prefix: "db-drift-add-" });
     const path = join(dir, "state.db");
@@ -455,8 +449,6 @@ Deno.test({
 Deno.test({
   name:
     "db schema: a NOT NULL column added to a non-empty table fails loud at boot",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: async () => {
     const dir = await Deno.makeTempDir({ prefix: "db-drift-notnull-" });
     const path = join(dir, "state.db");
@@ -492,8 +484,6 @@ Deno.test({
 
 Deno.test({
   name: "db schema: a NOT NULL column added to an EMPTY table just works",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: async () => {
     const dir = await Deno.makeTempDir({ prefix: "db-drift-empty-" });
     const path = join(dir, "state.db");
@@ -528,8 +518,6 @@ Deno.test({
 Deno.test({
   name:
     "db schema: a column the DB has and the app dropped is named, not left to break every write",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: async () => {
     const dir = await Deno.makeTempDir({ prefix: "db-drift-drop-" });
     const path = join(dir, "state.db");
@@ -595,8 +583,6 @@ Deno.test("db schema: a SQL keyword used as a column name is named", async () =>
 
 Deno.test({
   name: "db sync: the ordinary insert/update/delete path is untouched",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: async () => {
     await withDb(async (db, path) => {
       await syncTables(db, ITEMS, {
@@ -651,8 +637,6 @@ Deno.test("db sync: a statement SQLite rejects rolls the whole window back", asy
 
 Deno.test({
   name: "db sync: 10k rows insert, mutate and restore intact",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: async () => {
     const schema: Record<string, TableDef> = {
       big: table({ id: pk(), v: text() }),

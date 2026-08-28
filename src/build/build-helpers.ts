@@ -1,4 +1,8 @@
 // Build helpers — pure/extractable utilities used by build.ts
+import { slugify as slugifyName } from "../server/single-instance-lock.ts";
+// The digest that verifies a release verifies a downloaded tool too — one
+// implementation, so they cannot drift into disagreeing about the same bytes.
+import { sha256Hex } from "./ship.ts";
 import { dirname, join, resolve } from "@std/path";
 import { toolCacheDir } from "../electron/electron-runtime-fetch.ts";
 export { toolCacheDir };
@@ -49,10 +53,11 @@ export async function chmodIfSupported(
   await Deno.chmod(path, mode);
 }
 
-/** Slugify a string for use as binary/app name */
+/** Slugify a string for use as binary/app name. The transform is THE one in
+ *  `single-instance-lock.ts` — an app's binary name and its lock id must not be
+ *  able to disagree about what its name reduces to. Only the fallback differs. */
 export function slugify(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") ||
-    "myapp";
+  return slugifyName(s, "myapp");
 }
 
 /** Recursively copy a directory (preserves symlinks + executable bits) */
@@ -430,14 +435,6 @@ export function appimageEnv(arch: string): Record<string, string> {
  *  in the shipped binary — every build after the first shipped the build tool
  *  inside the app (measured: 29MB → 43MB of embedded files). A user-level cache
  *  is also shared across projects, so the tool downloads once per machine. */
-
-/** Lowercase hex SHA-256 of `bytes`. */
-async function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
 
 function isElf(bytes: Uint8Array<ArrayBuffer>): boolean {
   return bytes.length >= 4 && bytes[0] === 0x7f && bytes[1] === 0x45 &&

@@ -13,9 +13,9 @@
  */
 
 /** Validate cell defs without booting — `checkCells(cells)` returns findings
- *  (alpha52 name; `lint` — which collided with aiol's project linter — stays
- *  the deprecated alias through beta). */
-export { checkCells, lint, parseCli } from "../server/aio.ts";
+ *  (alpha52 name; its `lint` alias — which collided with aiol's project
+ *  linter — went out in alpha70, see src/state/removals.ts). */
+export { checkCells, parseCli } from "../server/aio.ts";
 export type { CliFlags, Lint } from "../server/aio.ts";
 
 // (`connectCliUDS` moved to `aio/server` and `DEFAULT_PRAGMAS` to `aio/db` in
@@ -90,7 +90,6 @@ export type { PerfCheck } from "../server/aio.ts";
  *  internally. App code uses methods; these exist for advanced tooling. */
 export type {
   ActionSource,
-  ActionUnion,
   CellExecuteFn,
   CellReduceFn,
   Creators,

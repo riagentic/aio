@@ -1,12 +1,13 @@
 /**
  * @module
  * `am create` — scaffold a new aio project (onboard kata). Non-interactive,
- * single command: `am create <name> [--template=counter|todo] [--target=…]`.
+ * single command: `am create <name> [--template=counter|todo|cli] [--target=…]`.
  * Produces a minimal, immediately runnable app pinned to this am's aio
  * version (JSR), so `am@X create` and the app's `aio@X` stay in lockstep.
  *
  *   am create my-app                          # counter, browser target
  *   am create my-app --template=todo          # todo list
+ *   am create my-tool --template=cli          # a scriptable CLI (server + commands)
  *   am create my-app --target=electron        # desktop app (electron auto-install)
  *   am create my-app --target=android         # android (needs SDK + Gradle)
  *   am create my-app --mirror                 # framework-dev: import aio from the repo
@@ -32,7 +33,7 @@ import {
 } from "./am-versions.ts";
 
 const PKG = "@riagentic/aio";
-const TEMPLATES = ["counter", "todo"] as const;
+const TEMPLATES = ["counter", "todo", "cli"] as const;
 export type Template = (typeof TEMPLATES)[number];
 
 /** Build target — what `deno task dev` / `deno task compile` produce by
@@ -89,6 +90,7 @@ export function parseCreateArgs(args: string[]): CreateOpts {
     target: DEFAULT_TARGET,
     force: false,
   };
+  let targetGiven = false;
   for (const a of args) {
     if (a === "--force") opts.force = true;
     else if (a === "--jsr") opts.jsr = true;
@@ -117,8 +119,13 @@ export function parseCreateArgs(args: string[]): CreateOpts {
         );
       }
       opts.target = v;
+      targetGiven = true;
     } else if (!a.startsWith("-") && opts.name === undefined) opts.name = a;
   }
+  // A CLI template is a CLI: with no `--target`, its default is `cli`, not
+  // the browser — a scaffold whose `deno task compile` built a browser shell
+  // for a tool with no UI would be the wrong default, silently.
+  if (opts.template === "cli" && !targetGiven) opts.target = "cli";
   return opts;
 }
 
@@ -442,6 +449,10 @@ node_modules/
 dep/
 *.sqlite
 
+# Secrets — "am fix" writes .env; .env.example is the committed template
+.env
+!.env.example
+
 # Release signing keys — NEVER commit these (see \`aio ship keygen\`)
 release-key.json
 *-release-key.json
@@ -460,6 +471,18 @@ export function scaffold(
   // `src/`-based layout: aio infers baseDir from the entry (so `dev` finds
   // src/App.tsx), and the compile pipeline (build.ts) expects src/App.tsx too —
   // one layout that satisfies both `deno task dev` and `deno task compile`.
+  // The `cli` template is ONE binary with two roles (serve / command) and no
+  // UI: no src/App.tsx, no separate src/client.ts — its app.ts IS the client.
+  if (template === "cli") {
+    return {
+      "deno.json": denoJson(name, source, target),
+      ".gitignore": GITIGNORE,
+      "src/app.ts": CLI_APP,
+      "src/cell.ts": CLI_CELL,
+      "tests/cell.test.ts": CLI_TEST,
+      "README.md": readme(name, template, target),
+    };
+  }
   const files: Record<string, string> = {
     "deno.json": denoJson(name, source, target),
     ".gitignore": GITIGNORE,
@@ -500,7 +523,7 @@ export async function cmdCreate(
 
   if (!opts.name) {
     fail(
-      "usage: am create <name> [--template=counter|todo] [--target=browser|electron|android|cli|server]",
+      "usage: am create <name> [--template=counter|todo|cli] [--target=browser|electron|android|cli|server]",
       mode,
     );
   }
@@ -626,7 +649,7 @@ export async function cmdCreate(
   }
 
   // Make it a real project from second one — best-effort, never fatal.
-  const gitInit = await tryGitInit(dir);
+  const git = await tryGitInit(dir);
 
   // `mode`, NOT `flags.json`: stdout that is not a tty IS json mode (that is
   // what `detectMode` decides), so `am create x | tee`, every CI log and every
@@ -636,11 +659,13 @@ export async function cmdCreate(
   if (mode === "json") {
     out({
       created: opts.name,
+      /** Absolute — the caller's cwd is not the reader's. */
+      dir,
       template: opts.template,
       target: opts.target,
       aioVersion: pinnedVersion ?? null,
       files: Object.keys(files),
-      git: gitInit,
+      git,
     }, mode);
     return;
   }
@@ -659,7 +684,9 @@ export async function cmdCreate(
       "",
       `  ${grn("✓")} ${b(opts.name)} ${
         dim(`— aio ${opts.template} app · target=${opts.target}`)
-      }${gitInit ? dim("  ·  git initialized") : ""}`,
+      }`,
+      `    ${dim(dir)}`,
+      `    ${dim(gitSentence(git))}`,
       "",
       `  ${dim("run it")}`,
       `    cd ${opts.name}`,
@@ -687,18 +714,43 @@ export async function cmdCreate(
   );
 }
 
+/** What `am create` did about git — never a bare `false` with no reason. */
+export type GitInit =
+  | "initialized"
+  | `skipped: inside ${string}`
+  | "skipped: git not found"
+  | "skipped: git init failed";
+
+/** The sentence the human report prints for each {@linkcode GitInit}. */
+export function gitSentence(git: GitInit): string {
+  if (git === "initialized") return "git initialized (first commit made)";
+  if (git.startsWith("skipped: inside ")) {
+    return `no git init — already inside ${
+      git.slice("skipped: inside ".length)
+    }`;
+  }
+  if (git === "skipped: git not found") {
+    return "no git init — git is not installed";
+  }
+  return "no git init — git init failed";
+}
+
 /** `git init` + first commit so the new project has history from minute one.
- *  Best-effort: no git, or an existing repo, is fine — never fails the create. */
-async function tryGitInit(dir: string): Promise<boolean> {
+ *  Best-effort: no git, or an existing repo, is fine — never fails the create,
+ *  but the REASON is always reported (a `"git": false` said nothing). */
+async function tryGitInit(dir: string): Promise<GitInit> {
   try {
-    // Already inside a repo? Don't nest one.
+    // Already inside a repo? Don't nest one — and name it.
     const inside = await new Deno.Command("git", {
-      args: ["rev-parse", "--is-inside-work-tree"],
+      args: ["rev-parse", "--show-toplevel"],
       cwd: dir,
-      stdout: "null",
+      stdout: "piped",
       stderr: "null",
     }).output();
-    if (inside.success) return false;
+    if (inside.success) {
+      const top = new TextDecoder().decode(inside.stdout).trim();
+      return `skipped: inside ${top}`;
+    }
     const run = (args: string[]) =>
       new Deno.Command("git", {
         args,
@@ -707,12 +759,12 @@ async function tryGitInit(dir: string): Promise<boolean> {
         stderr: "null",
       })
         .output();
-    if (!(await run(["init"])).success) return false;
+    if (!(await run(["init"])).success) return "skipped: git init failed";
     await run(["add", "-A"]);
     await run(["commit", "-m", "initial commit — scaffolded with am"]);
-    return true;
+    return "initialized";
   } catch {
-    return false; // git not installed — fine.
+    return "skipped: git not found";
   }
 }
 
@@ -762,7 +814,11 @@ deno task dev --expose              # reachable on the LAN (prints pair PIN)
 \`deno task build\` (or one-off: \`deno task build --targets=electron\`).
 Run \`deno task build --list\` for every target name.
 
-State lives in \`src/cell.ts\`, UI in \`src/App.tsx\`, entry in \`src/app.ts\`.
+${
+    template === "cli"
+      ? "State lives in `src/cell.ts`; `src/app.ts` is both the server (`serve`) and every command."
+      : "State lives in `src/cell.ts`, UI in `src/App.tsx`, entry in `src/app.ts`."
+  }
 Manage a running app with \`deno task am\` (status, state, logs, …).
 `;
 }
@@ -814,9 +870,20 @@ const CLIENT_TS =
 // (add "cli-client" to build.targets, then \`deno task build\`). No local server.
 import { connectCli } from "aio/server";
 
-const url = Deno.args[0] || "ws://localhost:8000/ws";
+// No default URL: dev picks a FREE port, so a hard-coded one connects to
+// nothing — or to a different app. The port is on the dev boot line
+// (\`open http://localhost:<port>\`) and in \`am instances\`.
+const url = Deno.args[0];
+if (!url) {
+  console.error(
+    "usage: client <ws://host:port/ws>\\n" +
+      "  the port is on the dev server's boot line, or: deno task am instances",
+  );
+  Deno.exit(2);
+}
 console.log(\`connecting to \${url} ...\`);
-const app = connectCli(url);
+// Bounded: a dead URL fails with a message instead of hanging forever.
+const app = connectCli(url, { readyTimeoutMs: 10_000 });
 await app.ready;
 console.log("state:", JSON.stringify(app.state, null, 2));
 app.subscribe(() => console.log("state:", JSON.stringify(app.state)));
@@ -841,9 +908,9 @@ export default function App(): JSX.Element {
       <div class="card stack" style={{ alignItems: "center" }}>
         <div style={{ fontSize: "3.5rem", fontWeight: 700 }}>{counter.count}</div>
         <div class="row">
-          <button type="button" onClick={() => counter.decrement()}>−</button>
+          <button type="button" t="minus" onClick={() => counter.decrement()}>−</button>
           <button type="button" class="ghost" onClick={() => counter.reset()}>Reset</button>
-          <button type="button" class="primary" onClick={() => counter.increment()}>+</button>
+          <button type="button" t="plus" class="primary" onClick={() => counter.increment()}>+</button>
         </div>
       </div>
       <p class="muted">
@@ -930,6 +997,155 @@ testCell(todo, "adds, toggles, and clears items", (t) => {
 testCell(view, "switches the filter", (t) => {
   t.send.setFilter("done");
   t.expect.state((s) => s.filter === "done");
+});
+`;
+
+// ── cli template — examples/cli-tool, with the cell beside the entry ─────
+// Kept byte-for-byte with the example (tests/am-create-journey.test.ts pins
+// it), so the scaffold and the documented example never drift apart.
+const CLI_CELL =
+  `// The list — one cell, shared by the server that owns it and the commands
+// that talk to it. Persists by default (restart the server, the list is back).
+import { cell } from "aio";
+
+/** One todo. */
+export type Todo = { id: number; text: string; done: boolean };
+
+export const todos = cell("todos", {
+  state: { items: [] as Todo[], next: 1 },
+  methods: {
+    add(s, text: string) {
+      const t = text.trim();
+      if (!t) throw new Error("a todo needs some text");
+      s.items.push({ id: s.next++, text: t, done: false });
+    },
+    done(s, id: number) {
+      const t = s.items.find((x) => x.id === id);
+      if (!t) throw new Error(\`no todo #\${id}\`);
+      t.done = true;
+    },
+    clear(s) {
+      s.items = s.items.filter((x) => !x.done);
+    },
+  },
+});
+`;
+
+const CLI_APP =
+  `// todo — one binary, two roles. \`todo serve\` runs the aio server that OWNS the
+// list (persisted, no UI: client "server-only"). Every other command connects
+// to it over WS, dispatches a cell method, and prints — with \`aio/cli\` doing
+// the flags, the table, the live view, and the exit codes.
+//
+//   todo serve [--port=8000]         # the server
+//   todo add buy milk                # a command
+//   todo list --watch                # a live view: redraws on every change
+//   todo list --json | jq            # a script
+//
+// Dev: deno task dev (= serve)   Build: deno task compile (a \`cli\` binary)
+import { aio } from "aio";
+import { connectCli } from "aio/server";
+import { args, EXIT, fail, style, table, watch } from "aio/cli";
+import { todos } from "./cell.ts";
+
+if (Deno.args[0] === "serve") {
+  // aio parses its own flags (--port, --expose, …) from Deno.args; the bare
+  // \`serve\` word is not a flag, so it passes through.
+  await aio.run({ client: "server-only" });
+} else {
+  const a = args({
+    name: "todo",
+    help: "A todo list you can script: a server owns it, commands talk to it.",
+    version: "0.1.0",
+    commands: {
+      serve: "run the server (takes aio's flags: --port, --expose, …)",
+      list: "show the list",
+      add: "add a todo: todo add <text...>",
+      done: "mark one done: todo done <id>",
+      clear: "drop every done todo",
+    },
+    rest: "arg",
+    flags: {
+      url: {
+        type: "string",
+        default: "ws://localhost:8000/ws",
+        help: "the server to talk to",
+      },
+      watch: { type: "boolean", short: "w", help: "list: redraw on change" },
+      json: { type: "boolean", help: "machine-readable output" },
+    },
+  });
+
+  const app = connectCli(a.flags.url, { readyTimeoutMs: 3000 });
+  app.bind(todos);
+  await app.ready.catch(() =>
+    fail(\`no server at \${a.flags.url} — start one: todo serve\`, {
+      json: a.json,
+    })
+  );
+
+  const render = () =>
+    a.json
+      ? JSON.stringify(todos.items)
+      : todos.items.length === 0
+      ? style.dim("(nothing to do)")
+      : table(
+        todos.items.map((t) => ({
+          id: t.id,
+          done: t.done ? style.green("x") : " ",
+          text: t.done ? style.dim(t.text) : t.text,
+        })),
+        { columns: [{ key: "id", align: "right" }, "done", "text"] },
+      );
+
+  try {
+    switch (a.command) {
+      case "add":
+        if (!a.rest.length) fail("todo add <text...>", { code: EXIT.usage });
+        await todos.add(a.rest.join(" "));
+        break;
+      case "done": {
+        const id = Number(a.rest[0]);
+        if (!Number.isInteger(id)) fail("todo done <id>", { code: EXIT.usage });
+        await todos.done(id);
+        break;
+      }
+      case "clear":
+        await todos.clear();
+        break;
+      case "list":
+        if (a.flags.watch) {
+          const w = watch(app, render);
+          Deno.addSignalListener("SIGINT", () => {
+            w.stop();
+            app.close();
+            Deno.exit(EXIT.ok);
+          });
+          await new Promise(() => {}); // until ^C
+        }
+        break;
+    }
+    console.log(render());
+  } catch (e) {
+    fail(e instanceof Error ? e.message : String(e), { json: a.json });
+  }
+  app.close();
+}
+`;
+
+const CLI_TEST =
+  `// A starter test — \`deno task test\`. Cells are pure, so they test in isolation
+// (no server, no DOM) with the testCell harness.
+import { testCell } from "aio/testing";
+import { todos } from "../src/cell.ts";
+
+testCell(todos, "adds, marks done, and clears", (t) => {
+  t.send.add("ship it");
+  t.expect.state((s) => s.items.length === 1);
+  t.send.done(1);
+  t.expect.state((s) => s.items[0].done === true);
+  t.send.clear();
+  t.expect.state((s) => s.items.length === 0);
 });
 `;
 

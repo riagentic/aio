@@ -82,7 +82,7 @@ Deno.test("1.3: visibilityReport — 3-cell mix (all/none/include), resolved val
 });
 
 Deno.test("1.3: visibilityReport — cellDefaults propagate when cell has none", () => {
-  const report = reportOf([counter], { ui: "none", persist: "none" });
+  const report = reportOf([counter], { visible: "none", persist: "none" });
   assertEquals(report, [
     {
       cell: "counter",
@@ -100,7 +100,7 @@ Deno.test("1.3: visibilityReport — cellDefaults propagate when cell has none",
 
 Deno.test("1.3: visibilityReport — explicit cell filter wins over cellDefaults", () => {
   const report = reportOf([counter, trading], {
-    ui: "none",
+    visible: "none",
     persist: "none",
   });
   assertEquals(report, [

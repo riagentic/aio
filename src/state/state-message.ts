@@ -6,7 +6,10 @@
  */
 
 import { batch } from "./signal.ts";
-import { applyPatches, type Patch } from "immer";
+import {
+  applyWirePatches,
+  type WirePatch as Patch,
+} from "../protocol/patch-ops.ts";
 import { enc } from "../protocol/envelope.ts";
 import { _BLOCKED_KEYS } from "./state-array-utils.ts";
 import {
@@ -105,7 +108,8 @@ export function handleMessage(data: any): HandleResult {
     }
 
     try {
-      const next = applyPatches(prev, patches);
+      // `append` and Immer's ops alike — the ONE applier (patch-ops.ts).
+      const next = applyWirePatches(prev, patches);
       if (next === prev) return "noop";
 
       // Determine which cells were affected

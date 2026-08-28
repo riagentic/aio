@@ -14,6 +14,7 @@ import type { ScheduleEffect } from "./schedule.ts";
 import type { OwnEffect } from "./own.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { markInflight } from "./dispatch.ts";
 
 // Internal method types — `any` at spread args/return is unavoidable when
 // mapping over heterogeneous method signatures at the type-system boundary.
@@ -127,6 +128,11 @@ const _pending = new Map<
     /** The deadline timer, kept so a human wait can cancel it (see
      *  `pauseCallDeadlines`). Undefined for an explicitly unbounded call. */
     timer?: ReturnType<typeof setTimeout>;
+    /** The half-way heartbeat timer (see `CEILING_HEARTBEAT_FRACTION`) —
+     *  paused and re-armed with `timer`, cleared with it on settle. */
+    heartbeat?: ReturnType<typeof setTimeout>;
+    /** Arms the heartbeat for a fresh window — kept so a resume can re-arm. */
+    armHeartbeat?: () => void;
     /** The ceiling this call was registered with — what a resume re-arms. */
     timeoutMs?: number;
     /** Fires the deadline rejection — kept so a resume can re-arm it. */
@@ -373,6 +379,17 @@ function callCeilingFix(method: string, timeoutMs: number): string {
     `and commit with a sync reducer (docs/state/methods.md).`;
 }
 
+/** Where in its ceiling a call says "still running (slow)" — once, at info.
+ *
+ *  A wallet app's field ask: a chain query that takes 20s of a 30s ceiling is
+ *  SLOW, and until the ceiling fires nothing distinguishes it from DEAD — the
+ *  caller stares at a spinner and the log says nothing. One line at the
+ *  half-way mark, naming cell:method and elapsed/deadline, is the difference
+ *  between "it is working" and "is it working?". Info, not warn: slow is a
+ *  fact, not a fault; the ceiling itself still warns or rejects as
+ *  configured. Unbounded (`long`) calls have no deadline to be half-way to. */
+export const CEILING_HEARTBEAT_FRACTION = 0.5;
+
 /** Register a pending call — returns a Promise that resolves when resolveCall()
  *  is called. `method` ("cell:name") picks up any per-method override. */
 export function registerCall(
@@ -419,21 +436,47 @@ export function registerCall(
       );
     };
     const timer = setTimeout(expire, timeoutMs);
+    // ONE heartbeat per call, however many times its window is re-armed
+    // (a pause/resume restarts the clock; the line must not repeat).
+    let beat = false;
+    const armHeartbeat = () => {
+      const entry = _pending.get(callId);
+      if (!entry || beat) return;
+      entry.heartbeat = setTimeout(() => {
+        const e = _pending.get(callId);
+        if (e) e.heartbeat = undefined;
+        if (!e || beat) return;
+        beat = true;
+        log.info(
+          "cell",
+          `${label}: still running (slow) — ${Date.now() - started}ms of ` +
+            `its ${timeoutMs}ms ceiling; not dead, still awaited` +
+            (mode === "warn" ? ' (timeout: "warn" keeps waiting past it)' : ""),
+        );
+      }, Math.ceil(timeoutMs * CEILING_HEARTBEAT_FRACTION));
+    };
+    const settle = () => {
+      clearTimeout(timer);
+      const e = _pending.get(callId);
+      if (e?.heartbeat !== undefined) clearTimeout(e.heartbeat);
+    };
     _pending.set(callId, {
       // The timer is kept so a HUMAN WAIT can cancel it — see
       // `pauseCallDeadlines`.
       timer,
       timeoutMs,
       expire,
+      armHeartbeat,
       resolve: (v) => {
-        clearTimeout(timer);
+        settle();
         resolve(v);
       },
       reject: (e) => {
-        clearTimeout(timer);
+        settle();
         reject(e);
       },
     });
+    armHeartbeat();
   });
 }
 
@@ -482,6 +525,8 @@ export function pauseCallDeadlines(): () => void {
     id: string;
     entry: {
       timer?: ReturnType<typeof setTimeout>;
+      heartbeat?: ReturnType<typeof setTimeout>;
+      armHeartbeat?: () => void;
       timeoutMs?: number;
       expire?: () => void;
     };
@@ -490,6 +535,12 @@ export function pauseCallDeadlines(): () => void {
     if (p.timer !== undefined && p.timeoutMs !== undefined && p.expire) {
       clearTimeout(p.timer);
       p.timer = undefined;
+      // The heartbeat pauses with the deadline it is half of: a person at a
+      // picker is not the method being slow.
+      if (p.heartbeat !== undefined) {
+        clearTimeout(p.heartbeat);
+        p.heartbeat = undefined;
+      }
       paused.push({ id, entry: p });
     }
   }
@@ -501,6 +552,7 @@ export function pauseCallDeadlines(): () => void {
       // wakeup that a test's op sanitizer rightly reports as a leak.
       if (_pending.get(id) !== entry || entry.timer !== undefined) continue;
       entry.timer = setTimeout(entry.expire!, entry.timeoutMs!);
+      entry.armHeartbeat?.();
     }
   };
 }
@@ -1020,8 +1072,24 @@ export function createBatcher(
   // the caller was told a change had been applied that never was.
   const inflight: Promise<unknown>[] = [];
   let firstError: unknown = null;
+  // Set once the call that owns this batcher has settled. A write after that
+  // point comes from a callback that outlived the method — `setTimeout`, an
+  // event listener, a `.then` nobody awaited — and used to COMMIT: persisted,
+  // broadcast, `ok: true`, not a line in any log. Immer revokes a sync
+  // method's draft at the same moment; the async view refused nothing.
+  let closed = false;
 
   function add(method: string, mutation: Mutation): void {
+    if (closed) {
+      const at = mutation.path.length ? `s.${mutation.path.join(".")}` : "s";
+      const msg =
+        `[${prefix}:${method}] write after the method finished: ${at} was ` +
+        `assigned from a callback that outlived ${method}(). An async ` +
+        `method's state view is live only until its promise settles — await ` +
+        `the work inside ${method}(), or dispatch a method from the callback.`;
+      log.error("cell", msg);
+      throw new Error(msg);
+    }
     // Different method → flush previous batch immediately so mutations
     // are never misattributed (AIO-77). Deferred: keep accumulating.
     if (!deferred && batch.mutations.length > 0 && batch.method !== method) {
@@ -1045,15 +1113,16 @@ export function createBatcher(
     batch.mutations = [];
     batch.scheduled = false;
     batch.method = "";
-    const r = dispatch({
+    const r = dispatch(markInflight({
       // Sourced, because a write-set IS an effect result: it is the only way an
-      // async method publishes anything. Shutdown's drain leans on this to tell
-      // a method finishing its work apart from a scheduled tick or a late
-      // client action, both of which it must still refuse.
+      // async method publishes anything. Flagged in-flight, because shutdown's
+      // drain admits exactly this — a running method finishing its work — and
+      // refuses a scheduled tick or a late client action (dispatch.ts
+      // INFLIGHT).
       _source: "Effect",
       type: `${prefix}:${setKey(method)}`,
       payload: { mutations, _origin: method },
-    } as Msg);
+    }) as Msg);
     if (r && typeof (r as Promise<unknown>).then === "function") {
       inflight.push(
         (r as Promise<unknown>).catch((e) => {
@@ -1072,6 +1141,10 @@ export function createBatcher(
 
   return {
     add,
+    /** The owning call has settled: every later write is refused by name. */
+    close: () => {
+      closed = true;
+    },
     /** Unflushed mutations of the current batch — the live proxy overlays
      *  these on reads (read-your-writes). */
     pending: () => batch.mutations,

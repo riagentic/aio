@@ -3,7 +3,7 @@
 // Only adds missing config, removes dead code, or normalizes formatting.
 
 import { basename, join, resolve } from "@std/path";
-import { codeMatches, codeText, topLevelKeyOffsets } from "./scan.ts";
+import { codeMask, codeMatches, codeText, topLevelKeyOffsets } from "./scan.ts";
 import { SERVER_ONLY_AIO_SYMBOLS } from "../src/entries.ts";
 
 // Derived from THE set (src/entries.ts, alpha52 one-decider) — never restated.
@@ -1357,22 +1357,59 @@ export function fixUseCellStateReads(filePath: string): () => Promise<boolean> {
   };
 }
 
-/** DB runtime VALUES that moved off `aio/db` to `aio/server` (alpha52 entry
- *  diet — `aio/db` is types + pure helpers; its value re-exports are
- *  deprecated through beta). Types (`DB`, `DBOpts`, …) stay on `aio/db`. */
-const DB_VALUE_SYMBOLS = new Set([
-  "createDB",
-  "DEFAULT_PRAGMAS",
-  "initSchema",
-  "loadTables",
-  "syncTables",
-  "reactiveDB",
-]);
+// ── alpha70: one import path per symbol ──────────────────────────────
 
-/** Split `import { createDB, type DB } from "aio/db"` — VALUE symbols move to
- *  `aio/server`, type-only names stay on `aio/db`. Whole-import `import type`
- *  statements are untouched (types are erased; they belong on aio/db). */
-export function fixDbEntryImports(filePath: string): () => Promise<boolean> {
+/** One "these names moved off `from` to `to`" fact. `valuesOnly`: the names
+ *  are RUNTIME values and the types stay on `from` (aio/db) — a `type X`
+ *  specifier and a whole `import type {}` statement are left alone. Without
+ *  it, listed names move whether they are values or types. */
+export type MovedImports = {
+  readonly from: string;
+  readonly to: string;
+  readonly names: ReadonlySet<string>;
+  readonly valuesOnly?: boolean;
+};
+
+const bareName = (n: string): string =>
+  n.replace(/^type\s+/, "").split(/\s+as\s+/)[0]!.trim();
+
+/** Split the specifiers of every `import {…} from "<from>"` in `src`: the
+ *  listed names move to a NEW line importing from `<to>`; the rest keep their
+ *  line. Returns null when nothing matched — ONE decider for the rule (does
+ *  this file need the fix?) and the fix (apply it), so they cannot disagree. */
+export function moveImports(src: string, mv: MovedImports): string | null {
+  const spec = mv.from.replace(/[/.]/g, "\\$&");
+  const re = new RegExp(
+    `import\\s*(type\\s+)?\\{([^}]*)\\}\\s*from\\s*["']${spec}["'];?`,
+    "g",
+  );
+  let changed = false;
+  const out = src.replace(
+    re,
+    (whole, typeKw: string | undefined, inner: string) => {
+      if (typeKw && mv.valuesOnly) return whole;
+      const names = inner.split(",").map((s) => s.trim()).filter(Boolean);
+      const moving = names.filter((n) =>
+        mv.names.has(bareName(n)) && !(mv.valuesOnly && /^type\s/.test(n))
+      );
+      if (moving.length === 0) return whole;
+      changed = true;
+      const rest = names.filter((n) => !moving.includes(n));
+      const kw = typeKw ? "type " : "";
+      const toLine = `import ${kw}{ ${moving.join(", ")} } from "${mv.to}";`;
+      return rest.length > 0
+        ? `import ${kw}{ ${rest.join(", ")} } from "${mv.from}";\n${toLine}`
+        : toLine;
+    },
+  );
+  return changed ? out : null;
+}
+
+/** `--safe-fix` half of {@linkcode moveImports}. */
+export function fixMovedImports(
+  filePath: string,
+  mv: MovedImports,
+): () => Promise<boolean> {
   return async () => {
     let src: string;
     try {
@@ -1380,26 +1417,161 @@ export function fixDbEntryImports(filePath: string): () => Promise<boolean> {
     } catch {
       return false;
     }
-    let changed = false;
-    const out = src.replace(
-      /import\s*\{([^}]*)\}\s*from\s*["']aio\/db["'];?/g,
-      (whole, inner: string) => {
-        const names = inner.split(",").map((s) => s.trim()).filter(Boolean);
-        const bare = (n: string) =>
-          n.replace(/^type\s+/, "").split(/\s+as\s+/)[0]!.trim();
-        const values = names.filter((n) =>
-          !/^type\s/.test(n) && DB_VALUE_SYMBOLS.has(bare(n))
-        );
-        if (values.length === 0) return whole;
-        changed = true;
-        const rest = names.filter((n) => !values.includes(n));
-        const serverLine = `import { ${values.join(", ")} } from "aio/server";`;
-        return rest.length > 0
-          ? `import { ${rest.join(", ")} } from "aio/db";\n${serverLine}`
-          : serverLine;
-      },
-    );
-    if (!changed) return false;
+    const out = moveImports(src, mv);
+    if (out === null) return false;
+    await Deno.writeTextFile(filePath, out);
+    return true;
+  };
+}
+
+/** Rewrite `import { old } from "spec"` to `import { new as old } from
+ *  "spec"` — the removed ALIAS keeps its local name, so every call site in the
+ *  file is untouched and behaviour is provably identical (the alias WAS the
+ *  same function). `old as x` is left as `new as x`. Null when absent. */
+export function aliasRename(
+  src: string,
+  spec: string,
+  oldName: string,
+  newName: string,
+): string | null {
+  const s = spec.replace(/[/.]/g, "\\$&");
+  const re = new RegExp(
+    `(import\\s*(?:type\\s+)?\\{)([^}]*)(\\}\\s*from\\s*["']${s}["'])`,
+    "g",
+  );
+  let changed = false;
+  const out = src.replace(re, (whole, head: string, inner: string, tail) => {
+    const names = inner.split(",").map((x) => x.trim()).filter(Boolean);
+    const next = names.map((n) => {
+      const m = /^(type\s+)?([$\w]+)(\s+as\s+([$\w]+))?$/.exec(n);
+      if (!m || m[2] !== oldName) return n;
+      changed = true;
+      return `${m[1] ?? ""}${newName} as ${m[4] ?? oldName}`;
+    });
+    return changed ? `${head} ${next.join(", ")} ${tail}` : whole;
+  });
+  return changed ? out : null;
+}
+
+/** `--safe-fix` half of {@linkcode aliasRename}. */
+export function fixAliasRename(
+  filePath: string,
+  spec: string,
+  oldName: string,
+  newName: string,
+): () => Promise<boolean> {
+  return async () => {
+    let src: string;
+    try {
+      src = await Deno.readTextFile(filePath);
+    } catch {
+      return false;
+    }
+    const out = aliasRename(src, spec, oldName, newName);
+    if (out === null) return false;
+    await Deno.writeTextFile(filePath, out);
+    return true;
+  };
+}
+
+/** Word-for-word renames applied to CODE only (strings/comments untouched —
+ *  `codeMask` decides what is code), then duplicate specifiers that the rename
+ *  produced inside one `import {…} from "aio…"` are collapsed
+ *  (`{ Access, Access }` → `{ Access }`). Null when nothing changed. */
+export function renameWords(
+  src: string,
+  renames: ReadonlyArray<readonly [from: string, to: string]>,
+): string | null {
+  const mask = codeMask(src);
+  let out = src;
+  let changed = false;
+  for (const [from, to] of renames) {
+    const re = new RegExp(`\\b${from}\\b`, "g");
+    let shift = 0;
+    out = out.replace(re, (whole, at: number) => {
+      // `at` is an offset into the CURRENT string; map back to the original
+      // via the running shift so the mask is read at the right place.
+      const orig = at - shift;
+      if (mask[orig] !== 1) return whole;
+      changed = true;
+      shift += to.length - whole.length;
+      return to;
+    });
+  }
+  if (!changed) return null;
+  return out.replace(
+    /(import\s*(?:type\s+)?\{)([^}]*)(\}\s*from\s*["']aio(?:\/[\w-]+)?["'])/g,
+    (_w, head: string, inner: string, tail: string) => {
+      const seen = new Set<string>();
+      const names = inner.split(",").map((n) => n.trim()).filter((n) =>
+        n && !seen.has(n) && seen.add(n)
+      );
+      return `${head} ${names.join(", ")} ${tail}`;
+    },
+  );
+}
+
+/** `--safe-fix` half of {@linkcode renameWords}. */
+export function fixRenameWords(
+  filePath: string,
+  renames: ReadonlyArray<readonly [string, string]>,
+): () => Promise<boolean> {
+  return async () => {
+    let src: string;
+    try {
+      src = await Deno.readTextFile(filePath);
+    } catch {
+      return false;
+    }
+    const out = renameWords(src, renames);
+    if (out === null) return false;
+    await Deno.writeTextFile(filePath, out);
+    return true;
+  };
+}
+
+/** `schedule.blocking(` → `blocking(` in code, and `blocking` added to the
+ *  file's `import {…} from "aio"` (or a new import line when there is none).
+ *  `schedule` itself is left imported — removing it needs a usage count, and
+ *  an unused import is harmless where a missing one is not. Null on no-op. */
+export function scheduleBlockingToTop(src: string): string | null {
+  const mask = codeMask(src);
+  let changed = false;
+  let out = src.replace(
+    /\bschedule\.blocking(?=\s*\()/g,
+    (whole, at: number) => {
+      if (mask[at] !== 1) return whole;
+      changed = true;
+      return "blocking";
+    },
+  );
+  if (!changed) return null;
+  if (!/import\s*\{[^}]*\bblocking\b[^}]*\}\s*from\s*["']aio["']/.test(out)) {
+    const re = /import\s*\{([^}]*)\}\s*from\s*(["']aio["'])/;
+    out = re.test(out)
+      ? out.replace(
+        re,
+        (_w, inner: string, spec: string) =>
+          `import { ${
+            inner.trim().replace(/,\s*$/, "")
+          }, blocking } from ${spec}`,
+      )
+      : `import { blocking } from "aio";\n${out}`;
+  }
+  return out;
+}
+
+/** `--safe-fix` half of {@linkcode scheduleBlockingToTop}. */
+export function fixScheduleBlocking(filePath: string): () => Promise<boolean> {
+  return async () => {
+    let src: string;
+    try {
+      src = await Deno.readTextFile(filePath);
+    } catch {
+      return false;
+    }
+    const out = scheduleBlockingToTop(src);
+    if (out === null) return false;
     await Deno.writeTextFile(filePath, out);
     return true;
   };

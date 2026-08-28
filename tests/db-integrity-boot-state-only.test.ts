@@ -22,8 +22,6 @@ type Snapshotter = { db: { snapshot(path: string): Promise<void> } };
 Deno.test({
   name:
     "boot: a state-only app (no db:, no sync) still integrity-checks and restores",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: async () => {
     const dir = await Deno.makeTempDir({ prefix: "aio-integrity-stateonly-" });
     const appId = `integ-${crypto.randomUUID().slice(0, 8)}`;

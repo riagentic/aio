@@ -65,6 +65,8 @@ export interface BuildConfig {
   // Flags
   doElectron: boolean;
   doAndroid: boolean;
+  /** `--ios`: the `ios-client` Xcode project (there is no iOS app target). */
+  doIos: boolean;
   doClient: boolean;
   doCli: boolean;
   doRemote: boolean;
@@ -177,6 +179,7 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
 
   const doElectron = Deno.args.includes("--electron");
   const doAndroid = Deno.args.includes("--android");
+  const doIos = Deno.args.includes("--ios");
   const doClient = Deno.args.includes("--client");
   const doCli = Deno.args.includes("--cli");
   const doRemote = Deno.args.includes("--remote");
@@ -190,6 +193,7 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
   const shellFlags = [
     doElectron && "--electron",
     doAndroid && "--android",
+    doIos && "--ios",
     doCli && "--cli",
     doClient && "--client",
   ].filter(Boolean);
@@ -304,7 +308,13 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
   // Asking it without the platform is what produced "cannot be combined with
   // --electron: null" — a refusal whose reason was the absence of one.
   if (!isHostPlatform(platform)) {
-    const shell = doElectron ? "electron" : doAndroid ? "android" : null;
+    const shell = doElectron
+      ? "electron"
+      : doAndroid
+      ? "android"
+      : doIos
+      ? "ios"
+      : null;
     const why = shell ? crossCompileBlocker(shell, platform) : null;
     if (shell && why) {
       console.error(
@@ -322,6 +332,7 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
     frameworkSrcDir,
     doElectron,
     doAndroid,
+    doIos,
     doClient,
     doCli,
     doRemote,

@@ -47,7 +47,7 @@ Deno.test("db binding: a bare key binds to the one cell array field of that name
     { contacts: t() },
     log,
   );
-  assertEquals(bindings, [{
+  assertEquals(bindings.map(({ table, path }) => ({ table, path })), [{
     table: "contacts",
     path: ["contacts", "contacts"],
   }]);
@@ -64,7 +64,10 @@ Deno.test("db binding: a bare key binds a cell array field with a different cell
     { history: t() },
     quietLog(),
   );
-  assertEquals(bindings, [{ table: "history", path: ["metrics", "history"] }]);
+  assertEquals(bindings.map(({ table, path }) => ({ table, path })), [{
+    table: "history",
+    path: ["metrics", "history"],
+  }]);
 });
 
 Deno.test("db binding: a root-level array still binds (engine-level config)", () => {
@@ -73,7 +76,10 @@ Deno.test("db binding: a root-level array still binds (engine-level config)", ()
     { rows: t() },
     quietLog(),
   );
-  assertEquals(bindings, [{ table: "rows", path: ["rows"] }]);
+  assertEquals(bindings.map(({ table, path }) => ({ table, path })), [{
+    table: "rows",
+    path: ["rows"],
+  }]);
 });
 
 Deno.test("db binding: an explicit cell.field key binds and names the table cell_field", () => {
@@ -82,7 +88,10 @@ Deno.test("db binding: an explicit cell.field key binds and names the table cell
     { "nfts.items": t() },
     quietLog(),
   );
-  assertEquals(bindings, [{ table: "nfts_items", path: ["nfts", "items"] }]);
+  assertEquals(bindings.map(({ table, path }) => ({ table, path })), [{
+    table: "nfts_items",
+    path: ["nfts", "items"],
+  }]);
   assertEquals(Object.keys(sqlSchema), ["nfts_items"]);
 });
 
@@ -141,7 +150,10 @@ Deno.test("db binding: an unbound table is SQL-only and warns — never silent, 
     { rows: t() },
     log,
   );
-  assertEquals(bindings, [{ table: "rows", path: [] }]);
+  assertEquals(bindings.map(({ table, path }) => ({ table, path })), [{
+    table: "rows",
+    path: [],
+  }]);
   assert(
     log.warns.some((m) => m.includes("SQL-only") && m.includes("notes.items")),
     `the no-op half is loud and names the alternative: ${
@@ -154,7 +166,10 @@ Deno.test("db binding: a table named after a cell does not touch that cell's sli
   const log = quietLog();
   const initial = { nfts: { items: [] as unknown[] } };
   const { bindings } = resolveDbBindings(initial, { nfts: t() }, log);
-  assertEquals(bindings, [{ table: "nfts", path: [] }]);
+  assertEquals(bindings.map(({ table, path }) => ({ table, path })), [{
+    table: "nfts",
+    path: [],
+  }]);
   assert(
     log.warns.some((m) => m.includes(`Cell "nfts" exists`)),
     `the near-miss is named: ${log.warns.join(" | ")}`,
@@ -188,8 +203,6 @@ Deno.test("db binding: omitPaths removes only the bound array", () => {
 Deno.test({
   name:
     "examples/contacts: boots, writes rows to its db: table, and restores them",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: async () => {
     const dir = await Deno.makeTempDir({ prefix: "aio-contacts-db-" });
     const appId = `contacts-${crypto.randomUUID().slice(0, 8)}`;
@@ -275,8 +288,6 @@ Deno.test({
 Deno.test({
   name:
     "db: an explicit cell.field binding auto-syncs a differently-named field",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: async () => {
     const dir = await Deno.makeTempDir({ prefix: "aio-db-explicit-" });
     const appId = `explicit-${crypto.randomUUID().slice(0, 8)}`;
@@ -372,8 +383,6 @@ Deno.test("db binding: an empty table never empties a non-empty bound array", ()
 
 Deno.test({
   name: "db: a seeded array survives its first boot and reaches the table",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: async () => {
     const dir = await Deno.makeTempDir({ prefix: "aio-db-seed-" });
     const appId = `seed-${crypto.randomUUID().slice(0, 8)}`;

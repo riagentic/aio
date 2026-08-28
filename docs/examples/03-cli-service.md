@@ -259,7 +259,7 @@ Monitor:
 deno task am schedules     # see process-queue timer
 deno task am metrics       # uptime, connections
 deno task am health        # exit 0 = ok
-deno task am log --follow  # stream logs
+deno task am logs --follow  # stream logs
 ```
 
 Stop:
@@ -320,7 +320,7 @@ Create `tests/queue.test.ts`:
 
 ```ts
 // tests/queue.test.ts
-import { testCell } from "aio";
+import { testCell } from "aio/testing";
 import { queue } from "../src/cell/queue/index.ts";
 
 testCell(queue, "enqueue adds a pending job", (t) => {

@@ -51,7 +51,8 @@ async function applyFix(issues: Issue[], needle: string, dir: string) {
 }
 
 // ═════════════════════════════════════════════════════════════════════
-// cell `ui:` → `visible:`
+// cell `ui:` → `visible:` — an alias through alpha69, a REFUSAL since alpha70
+// (src/state/removals.ts); aiol reports the registry's message + safe-fixes it.
 // ═════════════════════════════════════════════════════════════════════
 
 const UI_CELL = `import { cell } from "aio";
@@ -70,7 +71,7 @@ Deno.test("aiol alpha52: cell ui: key reported + safe-fix renames it (nested `ui
     {},
     async (dir) => {
       const issues = await surfaceIssues(dir);
-      await applyFix(issues, "renamed `visible:`", dir);
+      await applyFix(issues, "ui: → visible:", dir);
       const out = await Deno.readTextFile(join(dir, "src", "cell.ts"));
       assert(out.includes(`visible: { exclude: ["items"] }`), out);
       // the STATE field named ui (nested, depth 2) is untouched
@@ -78,7 +79,7 @@ Deno.test("aiol alpha52: cell ui: key reported + safe-fix renames it (nested `ui
       // fixed project is clean
       const after = await surfaceIssues(dir);
       assertEquals(
-        after.filter((i) => i.message.includes("renamed `visible:`")),
+        after.filter((i) => i.message.includes("ui: → visible:")),
         [],
       );
     },
@@ -375,48 +376,8 @@ export const p = call({ timeout: 5000 }, () => Promise.resolve(1));
 // aio/db went types-only: VALUE imports re-route to aio/server
 // ═════════════════════════════════════════════════════════════════════
 
-Deno.test("aiol alpha52: aio/db VALUE import reported + split (types stay on aio/db)", async () => {
-  const SRC = `import { createDB, type DB, reactiveDB } from "aio/db";
-export const open = (path: string): Promise<DB> => createDB(path);
-export const live = reactiveDB;
-`;
-  await withProject(
-    { "src/db.ts": SRC, "src/app.ts": "" },
-    {},
-    async (dir) => {
-      const issues = await surfaceIssues(dir);
-      const hit = issues.find((i) =>
-        i.message.includes("types + pure helpers")
-      );
-      assert(hit, "aio/db value import reported");
-      assert(hit!.safeFix, "carries the rewrite");
-      assert(await hit!.safeFix!(dir));
-      const out = await Deno.readTextFile(join(dir, "src", "db.ts"));
-      assert(
-        out.includes(`import { createDB, reactiveDB } from "aio/server";`),
-        out,
-      );
-      assert(out.includes(`import { type DB } from "aio/db";`), out);
-    },
-  );
-});
-
-Deno.test("aiol alpha52: a type-only aio/db import is NOT flagged", async () => {
-  const SRC = `import type { DB, Tx } from "aio/db";
-export const x = (db: DB, tx: Tx) => [db, tx];
-`;
-  await withProject(
-    { "src/types.ts": SRC, "src/app.ts": "" },
-    {},
-    async (dir) => {
-      const issues = await surfaceIssues(dir);
-      assertEquals(
-        issues.filter((i) => i.message.includes("types + pure helpers")),
-        [],
-      );
-    },
-  );
-});
+// (aio/db VALUE imports: the alpha52 deprecation became an alpha70 removal —
+// report + split are pinned in tests/aiol-alpha70.test.ts, incl. line 1.)
 
 // ═════════════════════════════════════════════════════════════════════
 // GROUND TRUTH under hostile syntax (field regression, alpha52)
@@ -485,7 +446,7 @@ Deno.test("aiol alpha52: hostile syntax — EVERY ui: cell is found, and the fix
     async (dir) => {
       const issues = await surfaceIssues(dir);
       const uiFindings = issues.filter((i) =>
-        i.message.includes("renamed `visible:`")
+        i.message.includes("ui: → visible:")
       );
       // Ground truth #1: the DETECTOR sees all 4 cells (the field bug was
       // 11-of-33 — a partial count that LOOKS plausible).
@@ -523,7 +484,7 @@ Deno.test("aiol alpha52: hostile syntax — EVERY ui: cell is found, and the fix
       // nothing left to fire on (no top-level ui key anywhere).
       const after = await surfaceIssues(dir);
       assertEquals(
-        after.filter((i) => i.message.includes("renamed `visible:`")),
+        after.filter((i) => i.message.includes("ui: → visible:")),
         [],
       );
     },
@@ -733,25 +694,6 @@ export const x = 1;
       // together, so they cannot disagree.
       assert(a.message.includes("src/a.ts:1"), a.message);
       assert(b.message.includes("src/b.ts:2"), b.message);
-    },
-  );
-});
-
-Deno.test("aiol alpha52: an aio/db VALUE import on line 1 is reported as line 1", async () => {
-  const FIRST = `import { createDB } from "aio/db";
-export const db = createDB;
-`;
-  await withProject(
-    { "src/a.ts": FIRST, "src/app.ts": "" },
-    {},
-    async (dir) => {
-      const issues = await surfaceIssues(dir);
-      const a = issues.find((i) =>
-        i.file === "src/a.ts" && i.message.includes("aio/db")
-      );
-      assert(a, "the aio/db value import is found");
-      assertEquals(a.line, 1);
-      assert(a.message.includes("src/a.ts:1"), a.message);
     },
   );
 });

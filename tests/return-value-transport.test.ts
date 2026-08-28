@@ -53,8 +53,6 @@ Deno.test({
   name:
     "e2e return-value: SYNC method resolves the browser await with its value",
   ignore,
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     await withE2E({ cells: CELLS, app: APP }, async ({ server, tab }) => {
       await waitFor("mount", () => tab.text("out"));
@@ -77,8 +75,6 @@ Deno.test({
   name:
     "e2e return-value: ASYNC method resolves the browser await with its value",
   ignore,
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     await withE2E({ cells: CELLS, app: APP }, async ({ tab }) => {
       await waitFor("mount", () => tab.text("out"));
@@ -94,8 +90,6 @@ Deno.test({
   name:
     "e2e return-value: non-serializable return resolves to undefined (no hang)",
   ignore,
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     await withE2E({ cells: CELLS, app: APP }, async ({ tab }) => {
       await waitFor("mount", () => tab.text("out"));

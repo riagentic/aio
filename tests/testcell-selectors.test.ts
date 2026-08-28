@@ -7,7 +7,8 @@
 // design: the same line worked in testUI, bootCells and production, and threw in
 // the tool that presents itself as the unit-level one.
 import { assert, assertEquals } from "@std/assert";
-import { cell, testCell } from "../mod.ts";
+import { cell } from "../mod.ts";
+import { testCell } from "../src/cell-test.ts";
 import { bootCells } from "../src/testing/cell-test.ts";
 
 type S = { items: { id: string; hidden: boolean }[]; filter: string };

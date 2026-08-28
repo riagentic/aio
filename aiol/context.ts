@@ -8,7 +8,7 @@ import type {
   DenoJsonConfig,
   Issue,
   LintContext,
-  Report,
+  LintReport,
   SourceFile,
 } from "./types.ts";
 
@@ -501,7 +501,7 @@ function parseCellConfig(source: string): {
 /** Build the full lint context for a project directory */
 export async function buildContext(
   projectDir: string,
-): Promise<{ ctx: LintContext; report: Report }> {
+): Promise<{ ctx: LintContext; report: LintReport }> {
   const issues: Issue[] = [];
   const passed: string[] = [];
   const sourceFiles: SourceFile[] = [];
@@ -711,7 +711,7 @@ export async function buildContext(
     },
   };
 
-  const report: Report = {
+  const report: LintReport = {
     issues,
     passed,
     stats: {

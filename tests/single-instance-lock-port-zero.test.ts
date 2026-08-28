@@ -106,8 +106,6 @@ Deno.test("lock: release() removes a port-0 lock", async () => {
 
 Deno.test({
   name: "lock: a port-0 app can be started, closed, and STARTED AGAIN",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     // The end-to-end consequence, through a real app and a real graceful
     // close. This is what a developer actually hits: it worked once, and then
@@ -171,8 +169,6 @@ Deno.test({
   name:
     "lock: SIGTERM marks EVERY lock in the process stopping, not just the first",
   ignore: Deno.build.os === "windows", // no POSIX signals
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     // The signal listeners are installed once per process — correct — but the
     // handler used to close over ONE instance. A second locked app in the same
@@ -264,8 +260,6 @@ setInterval(() => {}, 1000);
 Deno.test({
   name: "lock: one app closing must not un-protect the apps still running",
   ignore: Deno.build.os === "windows",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     // The mirror image of the bug above, reached from the other side. The
     // signal listeners belong to the PROCESS, but they were torn down by

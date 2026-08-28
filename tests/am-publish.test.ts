@@ -61,13 +61,53 @@ async function project(
   return dir;
 }
 
+/** Run with HOME pointed at a fresh dir: `am publish` signs with
+ *  `~/.aio/keys/<app>-release-key.json` when it exists, so a key on the
+ *  developer's machine must not decide what this test sees. */
+async function withHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
+  const home = await Deno.makeTempDir({ prefix: "aio-publish-home-" });
+  const prev = Deno.env.get("HOME");
+  Deno.env.set("HOME", home);
+  try {
+    return await fn(home);
+  } finally {
+    if (prev === undefined) Deno.env.delete("HOME");
+    else Deno.env.set("HOME", prev);
+    await Deno.remove(home, { recursive: true });
+  }
+}
+
+/** console.error lines, alongside capture()'s console.log ones. */
+async function captureErr(fn: () => Promise<void>): Promise<string[]> {
+  const lines: string[] = [];
+  const real = console.error;
+  console.error = (...a: unknown[]) => lines.push(a.map(String).join(" "));
+  try {
+    await fn();
+  } finally {
+    console.error = real;
+  }
+  return lines;
+}
+
 Deno.test("am publish: writes the channel layout a client actually fetches", async () => {
   const orig = Deno.cwd();
   const dir = await project([{ target: "browser", file: "notes" }]);
   try {
     Deno.chdir(dir);
-    const lines = await capture(() =>
-      cmdPublish(["--no-build", "--dir=release"], { json: true })
+    let errs: string[] = [];
+    const lines = await withHome(() =>
+      capture(async () => {
+        errs = await captureErr(() =>
+          cmdPublish(["--no-build", "--dir=release"], { json: true })
+        );
+      })
+    );
+    // The warning reaches a CI log too — json mode used to emit
+    // `"signed":false` and nothing else.
+    assert(
+      errs.some((l) => l.includes("warning: UNSIGNED")),
+      `json mode warns on stderr: ${errs.join("|")}`,
     );
     const doc = JSON.parse(lines.at(-1)!) as {
       channel: string;
@@ -298,5 +338,50 @@ Deno.test("am publish: one build's contract is stamped into every platform", asy
   } finally {
     Deno.chdir(orig);
     await Deno.remove(dir, { recursive: true }).catch(() => {});
+  }
+});
+
+// ── The key `ship keygen` wrote is the key publish uses ──────────────
+//
+// `defaultKeyPath(app)` is where keygen writes and what every hint names, yet
+// publish ignored it unless the same path was typed back as --key: a release
+// went out unsigned one command after the key was made.
+Deno.test("am publish: signs with the keygen default key when it exists, and says so", async () => {
+  const orig = Deno.cwd();
+  const dir = await project([{ target: "browser", file: "notes" }]);
+  try {
+    Deno.chdir(dir);
+    await withHome(async (home) => {
+      const { defaultKeyPath, generateSigningKey } = await import(
+        "../src/build/ship.ts"
+      );
+      const keyPath = defaultKeyPath("notes");
+      assert(keyPath.startsWith(home), "keyed on HOME");
+      await Deno.mkdir(join(home, ".aio", "keys"), { recursive: true });
+      await Deno.writeTextFile(
+        keyPath,
+        JSON.stringify(await generateSigningKey()),
+      );
+      let errs: string[] = [];
+      const lines = await capture(async () => {
+        errs = await captureErr(() =>
+          cmdPublish(["--no-build", "--dir=release"], { json: true })
+        );
+      });
+      const doc = JSON.parse(lines.at(-1)!) as {
+        signed: boolean;
+        key: { path: string; source: string } | null;
+      };
+      assertEquals(doc.signed, true, "the default key signs");
+      assertEquals(doc.key, { path: keyPath, source: "default" });
+      assert(
+        errs.some((l) => l.includes(`signed with ${keyPath}`)),
+        `says which key: ${errs.join("|")}`,
+      );
+      assert(!errs.some((l) => l.includes("UNSIGNED")));
+    });
+  } finally {
+    Deno.chdir(orig);
+    await Deno.remove(dir, { recursive: true });
   }
 });

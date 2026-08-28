@@ -89,6 +89,15 @@ Deno.test("aio-405: booted dev server serves /__aio/ modules as real JS (not thr
         "/__aio/ui.js", // browser-air entry
         "/__aio/state/signal.ts", // cross-folder transitive dep
         "/__aio/jsx-runtime.ts",
+        // Every entry in the browser import map that points at a framework
+        // module. `aio/ui` was added to that map after a field report hit a
+        // blank screen on the unmapped specifier; `aio/air/compat` and
+        // `aio/state-core` were still unmapped for the same reason and the
+        // same cost. A map entry nothing serves is the same blank page with a
+        // 404 behind it, so the map and this list are checked together.
+        "/__aio/ui/mod.ts",
+        "/__aio/air-compat.ts",
+        "/__aio/state-core.ts",
       ]
     ) {
       const resp = await fetch(`http://127.0.0.1:${PORT}${path}`);
@@ -106,6 +115,14 @@ Deno.test("aio-405: booted dev server serves /__aio/ modules as real JS (not thr
       `http://127.0.0.1:${PORT}/__aio/air/aio-renderer.ts`,
     )).text();
     assertStringIncludes(rend, "mount");
+    // The React shims are the point of `aio/air/compat` — a 200 carrying the
+    // wrong module would still blank the page at the named import.
+    const compat = await (await fetch(
+      `http://127.0.0.1:${PORT}/__aio/air-compat.ts`,
+    )).text();
+    for (const hook of ["useState", "useEffect", "useMemo", "useCallback"]) {
+      assertStringIncludes(compat, hook);
+    }
   } finally {
     await server.shutdown();
     await Deno.remove(dir, { recursive: true });

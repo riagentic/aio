@@ -29,7 +29,11 @@ The full posture, the known limitations, and the nginx/Caddy recipes are in
 - **Planet-scale public APIs** — the embedded model (SQLite, one process) is the
   point, not a limitation to engineer around. Multi-region distributed state,
   horizontal fleets → use a distributed stack.
-- **Native iOS** — Android ships via WebView; iOS is not targeted.
+- **Native iOS apps** — there is no Deno on iOS, so an aio app cannot RUN there.
+  A thin client can: `ios-client` is a WKWebView shell (an Xcode project on any
+  host, an `.app` on macOS) that connects to your server — the same shape as
+  `android-client`. Native APIs (push, biometrics) are out of a WebView's reach;
+  the camera is not.
 - **Other runtimes** — aio is Deno-native (compile, workers). No Node/Bun.
 - **Renderer pluralism** — AIR is the renderer. React compat exists as shims
   (`aio/air/compat`) for migration, not as a parallel first-class path.

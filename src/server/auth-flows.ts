@@ -23,9 +23,11 @@
 // Failed logins burn the AUTH-1 per-IP budget AND the per-account lockout.
 
 import type { UserStore } from "./auth-users.ts";
+import { declaresOverLimit, readBounded } from "./read-body.ts";
 import type { SessionStore } from "./sessions.ts";
 import {
   authFailBudgetExceeded,
+  bearerToken,
   recordAuthFail,
   SESSION_COOKIE,
   sessionTokenFromCookie,
@@ -124,40 +126,6 @@ const sameOrigin = (req: Request): boolean => {
 
 const MAIL_OFF = json.bind(null, 501, { error: "mail_not_configured" });
 
-/** Read a request body as text, or null once it passes MAX_AUTH_BODY.
- *  Streams and stops — an oversized body is never fully buffered, which is
- *  the entire point (a declared length can lie, or be absent). */
-async function _readBounded(req: Request): Promise<string | null> {
-  if (!req.body) return "";
-  const reader = req.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (!value) continue;
-      total += value.byteLength;
-      if (total > MAX_AUTH_BODY) {
-        await reader.cancel().catch(() => {});
-        return null;
-      }
-      chunks.push(value);
-    }
-  } finally {
-    try {
-      reader.releaseLock();
-    } catch { /* already released by cancel */ }
-  }
-  const buf = new Uint8Array(total);
-  let at = 0;
-  for (const c of chunks) {
-    buf.set(c, at);
-    at += c.byteLength;
-  }
-  return new TextDecoder().decode(buf);
-}
-
 /** Handle /__aio/auth/* — returns null for any other path. */
 export async function handleAuthFlow(
   req: Request,
@@ -178,11 +146,8 @@ export async function handleAuthFlow(
       cfg.cookie ? { "Set-Cookie": sessionCookie(token) } : undefined,
     );
   };
-  const bearer = (): string | null => {
-    const auth = req.headers.get("authorization");
-    if (auth?.startsWith("Bearer ")) return auth.slice(7);
-    return sessionTokenFromCookie(req);
-  };
+  const bearer = (): string | null =>
+    bearerToken(req) ?? sessionTokenFromCookie(req);
   /** Session-authed caller, or null. */
   const caller = (): AioUser | null => {
     const t = bearer();
@@ -246,10 +211,9 @@ export async function handleAuthFlow(
   // and a route that forgets to read the body cannot leave one unbounded.
   // The declared length is refused before a byte is read; a body that lies
   // about (or omits) its length is cut off by the bounded reader.
-  const declared = Number(req.headers.get("content-length") ?? NaN);
-  const tooBig = Number.isFinite(declared) && declared > MAX_AUTH_BODY;
+  const tooBig = declaresOverLimit(req, MAX_AUTH_BODY);
   if (tooBig) req.body?.cancel().catch(() => {});
-  raw = tooBig ? null : await _readBounded(req);
+  raw = tooBig ? null : await readBounded(req, MAX_AUTH_BODY);
   if (raw === null) {
     return json(413, {
       error: "body_too_large",

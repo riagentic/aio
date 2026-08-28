@@ -400,8 +400,6 @@ Deno.test("regression: a session token in the URL does not authenticate HTTP", a
 // door had not — the same shape as `am auth passwd` forgetting it.
 Deno.test({
   name: "regression: a deleted user's session stops authenticating at once",
-  sanitizeOps: false,
-  sanitizeResources: false,
 }, async () => {
   _resetAuthFails();
   const { cell, aio } = await import("../mod.ts");
@@ -499,8 +497,6 @@ Deno.test({
 // "user"`, with nothing in the way.
 Deno.test({
   name: "regression: a non-admin cannot rewind or freeze the app with tt-cmd",
-  sanitizeOps: false,
-  sanitizeResources: false,
 }, async () => {
   _resetAuthFails();
   const { cell, aio } = await import("../mod.ts");
@@ -639,8 +635,6 @@ async function login2(
 // and the time-travel panel (Ctrl+.) is the whole point of the frame there.
 Deno.test({
   name: "tt-cmd still works for an anonymous client on a public dev app",
-  sanitizeOps: false,
-  sanitizeResources: false,
 }, async () => {
   const { cell, aio } = await import("../mod.ts");
   const port = freePort();

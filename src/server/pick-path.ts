@@ -21,7 +21,6 @@
 // Server-only, like `openExternal`: it spawns a desktop binary and reads the
 // environment. Available from a cell method or a serverFn via `aio/server`.
 
-import { log } from "../diagnostics/logger-api.ts";
 import { pauseCallDeadlines } from "../state/cell-impl.ts";
 
 /** A named extension group for the dialog's filter dropdown.
@@ -344,16 +343,12 @@ const _asEscape = (s: string) =>
   `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 const _psEscape = (s: string) => `'${s.replace(/'/g, "''")}'`;
 
-/** Framework-internal: the pick a dev tool wants when a missing dialog should
- *  degrade rather than throw (amui's "browse" affordances). Apps get the
- *  throwing version — a silent null there is the bug this module exists for. */
-export async function pickPathBestEffort(
-  kind: "file" | "directory",
-): Promise<string | null> {
-  try {
-    return kind === "file" ? await pickFile() : await pickDirectory();
-  } catch (e) {
-    log.info(`no file dialog available: ${(e as Error).message}`);
-    return null;
-  }
-}
+// `pickPathBestEffort` lived here: a degrade-instead-of-throw wrapper whose
+// doc named amui's "browse" affordances as its caller. amui has no browse
+// feature and never had one — nothing in the repo called this, no test
+// exercised it, and it was not on the public surface. A wrapper whose only
+// justification is a consumer that does not exist is a claim, not code; the
+// throwing `pickFile`/`pickDirectory` are what everything actually uses. (It
+// was invisible to `check:dead-wiring` until that gate learned to skip regex
+// literals — a backtick inside one, two hundred lines up, was blanking this
+// region.)

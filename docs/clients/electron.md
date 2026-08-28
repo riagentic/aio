@@ -353,10 +353,10 @@ deno run -A jsr:@riagentic/aio/am discover
   corporate/guest networks, so manual entry is always the fallback.
 - **Many apps on one host all show up.** Each exposed app stamps its discovery
   info (`name, port, title, needsAuth, tls`) into its lock file — the same
-  per-host registry `am ls` uses. A probe is answered with _every_ exposed app
-  on the host, read live from that registry, so it doesn't matter which app's
-  socket the OS hands the broadcast to. (Apps also all bind the UDP port via
-  `SO_REUSEPORT`, so several can answer; the client dedups.)
+  per-host registry `am instances` uses. A probe is answered with _every_
+  exposed app on the host, read live from that registry, so it doesn't matter
+  which app's socket the OS hands the broadcast to. (Apps also all bind the UDP
+  port via `SO_REUSEPORT`, so several can answer; the client dedups.)
 - Discovery advertises _existence + address_ only; the **auth key is separate**.
   An app marked `needsAuth` is paired by **PIN**: click it, enter the code the
   app printed at startup, and the client pulls the profile (cert + key) from
@@ -369,6 +369,10 @@ deno run -A jsr:@riagentic/aio/am discover
   specific host it fetched and confirmed is an aio app, not the whole internet.
 - Only `--expose`'d apps advertise; a localhost-only app is invisible (it
   wouldn't be reachable off-box anyway).
+- A probe may carry an optional nonce (`AIO_DISCOVER? v1 <nonce>`); a responder
+  echoes it as `nonce` in each reply. A sweep that sends one keeps only echoing
+  replies — a test-time filter so a test measures its own responder on a busy
+  LAN. A production sweep sends none and accepts every responder.
 
 ### Window metadata
 

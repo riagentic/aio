@@ -300,7 +300,7 @@ Test note operations without booting the full app:
 ```ts
 // src/notes.test.ts
 import { assertEquals } from "@std/assert";
-import { testCell } from "aio";
+import { testCell } from "aio/testing";
 import { notes } from "./notes.ts";
 
 testCell(notes, "create and select note", (t) => {

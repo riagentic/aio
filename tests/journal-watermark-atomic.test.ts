@@ -16,7 +16,7 @@
 
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
-import { createDB } from "../src/db/mod.ts";
+import { createDB } from "../src/server-entry.ts";
 import { SKV_SCHEMA, sqliteKv } from "../src/server/skv-sqlite.ts";
 import { createPersistenceManager } from "../src/server/persistence.ts";
 import {
@@ -177,8 +177,11 @@ Deno.test("journal: a watermark that cannot be written is never swallowed", asyn
   const dir = await Deno.makeTempDir({ prefix: "journal-wm-loud-" });
   try {
     const path = join(dir, "app.journal");
-    await Deno.mkdir(path + ".wm"); // every write to it fails
     const j = createJournal(path);
+    // AFTER open: an unreadable watermark at open time is now its own loud
+    // refusal (tests/journal-honest-read.test.ts); this test is about the
+    // WRITE. Every write to a directory fails.
+    await Deno.mkdir(path + ".wm");
     j.append({ type: "acct:deposit", payload: 100 }, Date.now());
 
     const seen: string[] = [];

@@ -20,7 +20,7 @@ import {
 import { createPersistenceManager } from "../src/server/persistence.ts";
 import { type SkvInstance } from "../src/server/skv.ts";
 import { SKV_SCHEMA, sqliteKv } from "../src/server/skv-sqlite.ts";
-import { createDB } from "../src/db/mod.ts";
+import { createDB } from "../src/server-entry.ts";
 import type { DB } from "../src/db/types.ts";
 import type { Log } from "../src/diagnostics/logger.ts";
 

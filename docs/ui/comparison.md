@@ -11,7 +11,7 @@ Step-by-step migration guide for teams moving from React to AIR.
 | **Reactivity model** | React hooks (manual deps)                       | Signals (auto-tracked)                   |
 | **Memoization**      | Manual (`React.memo`, `useCallback`, `useMemo`) | Automatic                                |
 | **Dependencies**     | React 18+, ReactDOM                             | Zero                                     |
-| **Bundle size**      | ~40KB+ (React + ReactDOM)                       | ~8KB                                     |
+| **Bundle size**      | ~40KB+ (React + ReactDOM)                       | ~20KB (gz)                               |
 | **Events**           | React synthetic events                          | Native DOM events                        |
 | **Forms**            | Bring your own                                  | Built-in `useForm`                       |
 | **Animation**        | Bring your own                                  | Built-in `useSpring`, `<Transition>`     |

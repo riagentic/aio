@@ -126,19 +126,16 @@ export type MethodsCellConfig<
    *  selector-less cells carry no index signature — see cell-create.ts). */
   selectors?: Sel & Record<string, SelectorDef<S>>;
   /** React to FOREIGN actions (decoupled pub/sub — the source cell never
-   *  knows about this one).
-   *  Object form (the form): `{ myHandler: other.method }` — the named SYNC
+   *  knows about this one): `{ myHandler: other.method }` — the named SYNC
    *  method runs with the foreign action's payload when it dispatches. Values
    *  may be ARRAYS of sources (alpha52): `{ onChange: [a.set, b.set] }`.
-   *  Array form (@deprecated alpha52 — one-time hint, dies at beta): routes
-   *  the action through this cell WITHOUT running a handler.
-   *  Accepts bound methods (.type) or plain type strings. */
-  listensTo?:
-    | (string | { type: string })[]
-    | Record<
-      string,
-      string | { type: string } | (string | { type: string })[]
-    >;
+   *  Accepts bound methods (.type) or plain type strings. (The bare-array
+   *  form, which routed the action without running a handler, went out in
+   *  alpha70 — see src/state/removals.ts.) */
+  listensTo?: Record<
+    string,
+    string | { type: string } | (string | { type: string })[]
+  >;
   /** Optional state validator — called after every reduce. Return true to accept, or a string error message to reject. */
   validate?: (state: S) => true | string;
   /** Persistence filter — "all" (default) persists everything, "none" persists nothing.
@@ -159,11 +156,6 @@ export type MethodsCellConfig<
    *  filtering on the already-filtered state.
    *  `access` gates calls, `visible` gates reads. */
   visible?: CellVisibility<keyof NoInfer<S> & string, NoInfer<S>>;
-  /** @deprecated alpha52 — renamed `visible` (one-time hint at boot; alias
-   *  through beta; `aiol --safe-fix` renames it). App-level
-   *  `aio.run({ ui: {...} })` (window config) is a different key and is
-   *  unchanged. */
-  ui?: CellVisibility<keyof NoInfer<S> & string, NoInfer<S>>;
   /** CRDT sync — true for defaults, or partial config to override merge
    *  strategies, identity keys, retention.
    *

@@ -235,22 +235,18 @@ export function normalizeUiFilter(
   return undefined;
 }
 
-// ── `visible:` / deprecated `ui:` resolution (alpha52) ────────────────
+// ── `visible:` resolution (alpha52; the `ui:` alias retired in alpha70) ──
 
-/** One-time-per-cell hint for the deprecated `ui:` spelling.
- *  console.warn, not the diagnostics logger — same browser-graph constraint
- *  as `_selectorHinted` above (protocol-cell imports these helpers). */
-const _visibleHinted = new Set<string>();
-/** @internal test seam. */
-export function _resetVisibleHints(): void {
-  _visibleHinted.clear();
-}
-
-/** THE decider for a cell's declared visibility: `visible:` (alpha52), with
- *  `ui:` as the deprecated alias through beta (one-time hint per cell). Both
- *  set is a hard error — two spellings of one decision must never race.
- *  Used by the server cell factory AND the browser cell stub, so the alias
- *  can never mean different things per runtime. */
+/** THE decider for a cell's declared visibility: `visible:`. The pre-alpha52
+ *  spelling `ui:` is a REMOVED key that is still read from config, so it takes
+ *  the registry's dev/prod split (`refuseRetired`): a dev boot or a test
+ *  throws with the migration + the escape-hatch pin; a prod boot logs the
+ *  same line and HONOURS the old key — dropping a visibility filter at
+ *  runtime would leak state, which is worse than any stale spelling. Both
+ *  set is a hard error everywhere — two spellings of one decision must never
+ *  race. Used by the server cell factory AND the browser cell stub, so the
+ *  key can never mean different things per runtime. `name` is the cell, or
+ *  `"cellDefaults"` for the app-level default (its own registry row). */
 export function resolveVisibility(
   name: string,
   config: {
@@ -264,18 +260,14 @@ export function resolveVisibility(
   if (config.visible !== undefined && config.ui !== undefined) {
     throw new Error(
       `[cell:${name}] both \`visible\` and \`ui\` are set — \`ui\` is the ` +
-        `deprecated alias of \`visible\` (alpha52), so this is one decision ` +
-        `written twice. Keep \`visible\` and delete \`ui\`.`,
+        `removed spelling of \`visible\`, so this is one decision written ` +
+        `twice. Keep \`visible\` and delete \`ui\`.`,
     );
   }
-  if (config.ui !== undefined && !_visibleHinted.has(name)) {
-    _visibleHinted.add(name);
-    log.warn(
-      `[cell:${name}] config key \`ui:\` was renamed \`visible:\` (alpha52 — ` +
-        `access gates calls, visible gates reads). The alias works through ` +
-        `beta; rename it (aiol --safe-fix does it). App-level ` +
-        `aio.run({ ui: {...} }) window config is a different key and is ` +
-        `unchanged. (hinted once per cell)`,
+  if (config.ui !== undefined) {
+    refuseRetired(
+      removalOf(name === "cellDefaults" ? "cellDefaults.ui" : "cell({ ui })"),
+      name === "cellDefaults" ? "cellDefaults" : `cell:${name}`,
     );
   }
   return config.visible ?? config.ui;
@@ -285,6 +277,7 @@ export function resolveVisibility(
 
 import type { SelectorDef } from "./cell-config-types.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { refuseRetired, removalOf } from "./removals.ts";
 
 /** One-time-per-selector hints for the deprecated spread deps signature.
  *  console.warn, not the diagnostics logger: this module is in the BROWSER

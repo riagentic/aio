@@ -78,6 +78,42 @@ export const key = (o: Offender): string => `${o.rule}|${o.file}|${o.test}`;
 // original, and a `for (const x of xs)` written inside a doc comment or an
 // assertion message can never be mistaken for code.
 
+/** Is the `/` at `i` the start of a REGEX literal rather than division?
+ *
+ *  The classic ambiguity, resolved the classic way: look back at the previous
+ *  meaningful character. After a value (identifier, `)`, `]`, digit) a `/` is
+ *  division; after an operator, a comma, an opening bracket or a keyword it
+ *  begins a literal. Biased toward "regex" on a tie, because guessing regex on
+ *  a division blanks a short arithmetic span and costs nothing, while guessing
+ *  division on a regex is the bug this exists to fix. */
+function _regexStart(src: string, i: number): boolean {
+  let k = i - 1;
+  while (k >= 0 && /\s/.test(src[k]!)) k--;
+  if (k < 0) return true;
+  const p = src[k]!;
+  // No `<`: `</div>` in a .test.tsx file is a closing tag, not a regex.
+  if ("=(,:[!&|?{};+-*%~^>".includes(p)) return true;
+  // `return /re/`, `typeof /re/`, `case /re/` … — a keyword, not a value.
+  const word = /[A-Za-z_$][\w$]*$/.exec(src.slice(0, k + 1))?.[0];
+  return word !== undefined &&
+    [
+      "return",
+      "typeof",
+      "case",
+      "in",
+      "of",
+      "new",
+      "delete",
+      "void",
+      "throw",
+      "do",
+      "else",
+      "yield",
+      "await",
+    ]
+      .includes(word);
+}
+
 export function mask(src: string): string {
   const out = src.split("");
   let i = 0;
@@ -98,6 +134,31 @@ export function mask(src: string): string {
       const end = e === -1 ? n : e + 2;
       blank(i, end);
       i = end;
+    } else if (c === "/" && _regexStart(src, i)) {
+      // A REGEX LITERAL, blanked like a string — because its CONTENTS can hold
+      // a quote or a backtick, and treating one of those as a string opener
+      // swallows everything after it. `/["'`]/` did exactly that: the backtick
+      // opened a phantom template literal that ran to the next backtick in the
+      // file, hiding the assertion below it, and the test was reported as
+      // proving nothing. (The apostrophe half of this was fixed once already;
+      // this is the same hole one character wider.)
+      let k = i + 1;
+      let inClass = false;
+      while (k < n) {
+        const ch = src[k]!;
+        if (ch === "\\") {
+          k += 2;
+          continue;
+        }
+        if (ch === "\n") break; // unterminated — it was division after all
+        if (inClass) {
+          if (ch === "]") inClass = false;
+        } else if (ch === "[") inClass = true;
+        else if (ch === "/") break;
+        k++;
+      }
+      blank(i + 1, k);
+      i = Math.min(k + 1, n);
     } else if (c === '"' || c === "'" || c === "`") {
       let k = i + 1;
       while (k < n) {
@@ -568,7 +629,6 @@ export const LEDGER: readonly string[] = [
   "empty-loop|tests/android-version.test.ts|build-android substitutes both version placeholders",
   "no-assertions|tests/app-dirs.test.ts|writeAppMeta: a read-only home never fails a boot",
   "no-assertions|tests/app-dirs.test.ts|sweepAppPayloadDir: a never-unpacked app is not an error",
-  "no-assertions|tests/app-theme.test.ts|theme: no token appends an alpha suffix to a colour FUNCTION",
   "empty-loop|tests/app-theme.test.ts|theme: every shadow token is a value box-shadow can take",
   "no-assertions|tests/audit-regression/compact-boundary.test.ts|compact skips when op count below threshold",
   "no-assertions|tests/auth-client.test.ts|authClient: requestReset never throws / never enumerates",
@@ -615,7 +675,6 @@ export const LEDGER: readonly string[] = [
   "no-assertions|tests/db.test.ts|db: double close does not throw",
   "no-assertions|tests/db.test.ts|db: read replicas — close terminates all workers",
   "no-assertions|tests/ddl-fatal.test.ts|sync DDL: duplicate column stays tolerated (already-applied is the steady state)",
-  "no-assertions|tests/diag-sink-one-decider.test.ts|diag: every router that handles a diag frame uses the sink",
   "no-assertions|tests/direct-call-return.test.ts|fire-and-forget async method that throws does NOT leak an unhandled rejection",
   "empty-loop|tests/docs-snippets-check.test.ts|doc ts/tsx code blocks type-check against the real API",
   "empty-loop|tests/docs-snippets-check.test.ts|doc ts/tsx code blocks type-check against the real API",
@@ -627,12 +686,9 @@ export const LEDGER: readonly string[] = [
   "no-assertions|tests/electron.test.ts|electron: generated main.cjs is syntactically valid JS",
   "empty-loop|tests/entry-surface-parity.test.ts|entries: every entry",
   "empty-loop|tests/entry-surface-parity.test.ts|entries: the scaffold maps every importable entry (both modes)",
-  "empty-loop|tests/entry-surface-parity.test.ts|entries: the scaffold maps every importable entry (both modes)",
-  "no-assertions|tests/entry-surface-parity.test.ts|entries: every ",
   "no-assertions|tests/error-e2e.test.ts|e2e — reportError self-guard: formatter crash degrades gracefully",
   "no-assertions|tests/error-memory.test.ts|memory monitor — stop clears interval",
   "empty-loop|tests/esbuild-plugin.test.ts|plugin: does NOT intercept regular imports",
-  "no-assertions|tests/esbuild-version-pin.test.ts|B-6: esbuild imports pin the EXACT deno.json version (no range)",
   "empty-loop|tests/every-message-has-a-level.test.ts|output: the allowlist is real — every entry still exists and still prints",
   "no-assertions|tests/examples-boot.test.ts|example ${dir}: boots and serves",
   "no-assertions|tests/examples-ui.test.ts|example UI ${label}: user clicks drive the rendered counter",
@@ -652,7 +708,6 @@ export const LEDGER: readonly string[] = [
   "no-assertions|tests/logger.test.ts|logger: public log API falls back to console when no logger set",
   "empty-loop|tests/multi-client.test.ts|multi-client: both surfaces dispatching at once — no lost update",
   "empty-loop|tests/multi-client.test.ts|multi-client: concurrent appends from 3 surfaces all survive",
-  "no-assertions|tests/no-color.test.ts|no-color: the decision has ONE home",
   "empty-loop|tests/own-churn-fuzz.test.ts|fuzz: own survives acquire/replace/dispose churn",
   "empty-loop|tests/own-churn-fuzz.test.ts|fuzz: own survives acquire/replace/dispose churn",
   "empty-loop|tests/rejection-attribution-fuzz.test.ts|D11 property: acked ⟺ applied, op-rejected ⟺ refused",
@@ -684,7 +739,6 @@ export const LEDGER: readonly string[] = [
   "empty-loop|tests/transport-chaos-fuzz.test.ts|chaos: one intent, one outcome — under drop / kill / reconnect",
   "no-assertions|tests/transport-exactly-once.test.ts|uds: a patch that fails to apply asks the server to resync",
   "no-assertions|tests/uds-accept-resilience.test.ts|uds: an unserializable state does not throw out of broadcastState",
-  "no-assertions|tests/ui-components-extra.test.ts|ui/Avatar: same name → same color (deterministic)",
   "empty-loop|tests/ui-kit-semantic.test.tsx|fuzz: every interactive element is reachable and drivable by name",
   "empty-loop|tests/ui-kit-semantic.test.tsx|fuzz: every interactive element is reachable and drivable by name",
   "empty-loop|tests/ui-surface-text-cap.test.tsx|surface: text is always a string — empty, never undefined",
@@ -694,7 +748,6 @@ export const LEDGER: readonly string[] = [
   "empty-loop|tests/virtual-list.test.ts|virtualList: item offsets are correct multiples of itemHeight",
   "no-assertions|tests/visibility-warnings.test.ts|visibility (AIO-426): a credential that",
   "empty-loop|tests/wire-envelope.test.ts|envelope: every kind round-trips through enc/dec",
-  "no-assertions|tests/wire-envelope.test.ts|envelope: every kind the code speaks is catalogued",
   "empty-loop|tests/wire-serves.test.ts|SERVES only names catalogued kinds",
   "empty-loop|tests/wire-serves.test.ts|SERVES only names catalogued kinds",
   "empty-loop|tests/wire-serves.test.ts|ignorable kinds never appear in SERVES (skipped, not routed)",

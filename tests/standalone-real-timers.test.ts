@@ -18,8 +18,6 @@ import { schedule } from "../src/state/schedule.ts";
 Deno.test({
   name:
     "standalone: schedules fire on REAL time when nobody opted into virtual",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     _resetAioRuntime();
     // A fresh module instance: the timer host is fixed when the first

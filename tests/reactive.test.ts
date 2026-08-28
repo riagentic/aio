@@ -1155,8 +1155,6 @@ Deno.test("direct calling: await sync method from async method (cross-cell)", as
 
 Deno.test("direct calling: call(opts, fn) callback form with timeout", {
   // sanitizers disabled: call() with 20ms timeout intentionally leaves a 500ms dangling promise
-  sanitizeOps: false,
-  sanitizeResources: false,
 }, async () => {
   const slow = cell("slowf", {
     state: { done: false },

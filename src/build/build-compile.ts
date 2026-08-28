@@ -383,7 +383,15 @@ export async function assetIncludes(root: string): Promise<string[]> {
   try {
     const cfg = (await readDenoJson(root))?.config ?? {};
     decl = (cfg as { compile?: { include?: unknown } })?.compile?.include;
-  } catch { /* no deno.json / unparsable — nothing declared */ }
+  } catch (e) {
+    // "nothing declared" is only true when there is no deno.json. One that
+    // cannot be PARSED has to say so, or every asset it declares is dropped.
+    if (!(e instanceof Deno.errors.NotFound)) {
+      console.warn(
+        `[compile] ⚠ deno.json could not be read (${e}) — no compile.include applied`,
+      );
+    }
+  }
   if (Array.isArray(decl)) {
     for (const [i, p] of decl.entries()) {
       if (typeof p !== "string" || !p.trim()) {
@@ -467,7 +475,13 @@ export async function v8FlagsArg(root: string): Promise<string[]> {
     };
     decl = cfg?.build?.v8Flags;
     misplaced = decl === undefined && cfg?.compile?.v8Flags !== undefined;
-  } catch { /* no deno.json / unparsable — nothing declared */ }
+  } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) {
+      console.warn(
+        `[compile] ⚠ deno.json could not be read (${e}) — no build.v8Flags applied`,
+      );
+    }
+  }
   // `compile` is Deno's own block and it validates strictly, so this spelling
   // never reaches us as a working build — it makes `deno compile` abort with
   // "Failed to parse compile configuration", which names neither the key nor
@@ -715,6 +729,7 @@ ExecStart=/usr/local/bin/${binaryName} ${
 # DOWN — every successful auto-update took the app offline until someone
 # noticed.
 Restart=always
+RestartPreventExitStatus=143   # aio.stop() exits 143 to stay down
 RestartSec=5
 User=${user}
 # Tells the app it is supervised, so it EXITS after an update instead of

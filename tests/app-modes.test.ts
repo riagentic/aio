@@ -117,8 +117,6 @@ Deno.test("mode: browser local — serve HTML + WS state sync", async () => {
 Deno.test({
   name: "mode: electron local — UDS transport + state sync",
   // sanitizers disabled: UDS listener has async accept loop that outlives test
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: async () => {
     const dir = await makeTempBase();
     const socketPath = join(dir, "electron.sock");
@@ -551,8 +549,6 @@ Deno.test("mode: multi-user — different users see different state", async () =
 Deno.test({
   name: "mode: full aio.run with cell — boot + dispatch + shutdown",
   // sanitizers disabled: aio.run() starts server + internal timers that outlive test
-  sanitizeOps: false,
-  sanitizeResources: false,
   fn: async () => {
     const { cell, aio } = await import("../mod.ts");
 

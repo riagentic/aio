@@ -60,8 +60,6 @@ async function boot(name: string, dir: string, def: unknown) {
 
 Deno.test({
   name: "shutdown: closing app A neither cancels nor loses app B's work",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const dirA = await Deno.makeTempDir({ prefix: "aio-two-apps-a-" });
     const dirB = await Deno.makeTempDir({ prefix: "aio-two-apps-b-" });

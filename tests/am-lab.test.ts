@@ -1094,8 +1094,9 @@ Deno.test({
   name:
     "AIO_VM_LAB=1: a real Windows lab starts, serves its viewer and its share",
   ignore: Deno.env.get("AIO_VM_LAB") !== "1",
+  // aio-ok: a real Windows VM lab (docker + QEMU child) stays up past the test; its viewer/share sockets are the container's, not the test's
   sanitizeOps: false,
-  sanitizeResources: false,
+  sanitizeResources: false, // aio-ok: see above
   fn: async () => {
     // Costs tens of minutes and tens of GB on a cold cache — never in
     // `deno task test`.
@@ -1119,8 +1120,9 @@ Deno.test({
   // already there, recovery included.
   name: "AIO_VM_LAB=macos: the macOS lab's artifact share is serving",
   ignore: Deno.env.get("AIO_VM_LAB") !== "macos",
+  // aio-ok: a real macOS VM lab (docker + QEMU child) stays up past the test; its share socket is the container's, not the test's
   sanitizeOps: false,
-  sanitizeResources: false,
+  sanitizeResources: false, // aio-ok: see above
   fn: async () => {
     const start = await am(["lab", "macos", "--json"], {});
     assert(start.code === 0, start.err);

@@ -318,6 +318,12 @@ correctly without extra wrappers.
 Full state is sent on first connect or when >50% of keys changed (configurable
 via `fullStateThreshold`). Deltas are computed one level deep per cell slice.
 
-The **Render Meter** tracks staleness and adapts broadcast rate via
-backpressure. See [Delta](../persistence/delta.md) for compression details and
+The **Render Meter** tracks staleness against `renderBudget` and reports it to
+the server on a one-second heartbeat, which adapts the broadcast rate via
+backpressure and lists the client in `/__aio/vitals`. See
+[Delta](../persistence/delta.md) for compression details and
 [Vitals](../debugging/vitals.md) for diagnostics.
+
+The CRDT sync engine (`sync: true` cells) is loaded on demand: the runtime
+imports it the first time a booted cell declares `sync`, and an app without a
+sync cell never requests it.

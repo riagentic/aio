@@ -1,6 +1,6 @@
 // Testing an identity-dependent method without reaching into the framework.
 //
-// Field report (dm #9): every relay method reads its caller from the ambient
+// Field report (relay app, item 9): every relay method reads its caller from the ambient
 // (`serverUser()`), which is the right design — a username passed as an
 // argument is a forgery waiting to happen. But there was no supported way to
 // TEST one: the mechanism (`runWithUser`) is framework-internal, so all 35 of

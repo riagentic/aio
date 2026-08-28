@@ -297,7 +297,8 @@ them, and register them, all from `aio/testing`:
 ```ts
 import { assertEquals } from "@std/assert";
 import { join } from "@std/path";
-import { appDirs, ensureAppDirs, registerAppDirs } from "aio/testing";
+import { appDirs } from "aio/server";
+import { ensureAppDirs, registerAppDirs } from "aio/testing";
 
 Deno.test("the importer reads the fixture from the app's files dir", async () => {
   const dirs = appDirs("my-app", await Deno.makeTempDir());

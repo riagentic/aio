@@ -61,7 +61,10 @@ export type Device = {
 
 /** Parse `adb devices -l`. Pure, so the states that matter — `unauthorized`,
  *  `offline`, a phone still showing the RSA dialog — are a unit test rather
- *  than a thing we hope the code handles. */
+ *  than a thing we hope the code handles.
+ *
+ *  @internal alpha70 — a build/tooling internal reachable for tests via
+ *  src/testing/internal.ts; not app-facing API. */
 export function parseDevices(stdout: string): Device[] {
   const out: Device[] = [];
   for (const raw of stdout.split(/\r?\n/).slice(1)) {
@@ -132,15 +135,15 @@ export function pickDevice(
   if (devices.some((d) => d.emulator) && !opts.allowEmulator) {
     return {
       error: "only an emulator is attached, and this installs to a PHONE",
-      hint:
-        "`deno task dev:android` is the emulator flow; `--emulator` forces this one",
+      hint: "`deno task dev` is the emulator flow for an android app; " +
+        "`--emulator` forces this one",
     };
   }
   return {
     error: "no Android device is attached",
     hint: opts.allowEmulator
-      ? "start one first (`emulator -avd <name>`, or `deno task dev:android`, " +
-        "which boots an AVD for you)"
+      ? "start one first (`emulator -avd <name>`, or `deno task dev` in an " +
+        "android app, which boots an AVD for you)"
       : "enable Developer options → USB debugging, plug the phone in, and " +
         "check `adb devices` lists it",
   };
@@ -168,7 +171,7 @@ export function pickApk(
   if (apks.length === 0) {
     return {
       error: "no .apk in this directory",
-      hint: "`deno task compile:android` builds one (or pass --build)",
+      hint: "`deno task build --targets=android` builds one (or pass --build)",
     };
   }
   const newest = apks[0]!;
@@ -178,8 +181,9 @@ export function pickApk(
   if (newest.name.endsWith("-unsigned.apk")) {
     return {
       error: `${newest.name} is UNSIGNED — Android will not install it`,
-      hint: "sign it, or build the debug APK (`deno task compile:android`), " +
-        "which is signed with the debug key",
+      hint: "sign it, or build the debug APK " +
+        "(`deno task build --targets=android`), which is signed with the " +
+        "debug key",
     };
   }
   return { apk: newest.name };

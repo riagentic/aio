@@ -4,8 +4,12 @@
 // matched, silently no-op'd under a green "ok". Now: a method-form type is
 // validated against the booted cells, the separator is normalized, and the
 // dispatch is awaited — `ok` means EXECUTED, unknown methods are errors.
-import { assert, assertEquals } from "@std/assert";
-import { handleTrojan, type TrojanDeps } from "../src/server/server-trojan.ts";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import {
+  _nearestMethod,
+  handleTrojan,
+  type TrojanDeps,
+} from "../src/server/server-trojan.ts";
 
 function makeDeps() {
   const dispatched: { type: string }[] = [];
@@ -19,7 +23,11 @@ function makeDeps() {
     debug: () => {},
     prod: false,
     trojan: {
-      cellMethods: () => ({ nav: ["setStatusBarMessage"], counter: ["inc"] }),
+      cellMethods: () => ({
+        nav: ["setStatusBarMessage"],
+        counter: ["inc", "tick"],
+      }),
+      cellAsyncMethods: () => ({ counter: ["inc"] }),
       getState: () => ({}),
       startedAt: Date.now(),
     },
@@ -91,11 +99,43 @@ Deno.test("trojan dispatch: a rejecting method surfaces as an error", async () =
   );
 });
 
-Deno.test("trojan dispatch: a bare config action (no separator) still passes through", async () => {
+// Every action a cell handles is `<cell>:<method>`, so in an app made of cells
+// a bare type reaches nothing — and it used to do that under {"ok":true}.
+Deno.test("trojan dispatch: a bare type in a cells app is refused, with the nearest method named", async () => {
   const { deps, dispatched } = makeDeps();
+  const r = await dispatch(deps, { type: "inc", payload: { by: 1 } });
+  assertEquals(r.status, 404);
+  assertEquals(dispatched.length, 0, "nothing was dispatched into the void");
+  assertStringIncludes(String(r.body.error), "Did you mean counter:inc?");
+  assertStringIncludes(String(r.body.error), "nav:setStatusBarMessage");
+});
+
+Deno.test("trojan dispatch: a bare type is only refused when the server can list cells", async () => {
+  const { deps, dispatched } = makeDeps();
+  (deps.trojan as { cellMethods?: unknown }).cellMethods = () => ({});
   const r = await dispatch(deps, { type: "Increment", payload: { by: 1 } });
   assertEquals(r.body.ok, true);
   assertEquals(dispatched[0]!.type, "Increment");
+});
+
+// Without a correlation id `dispatch` resolves with the early reduce result,
+// so an async method that throws after its first `await` was logged as
+// EFFECT_ASYNC_ERROR while this route had already answered {"ok":true}.
+Deno.test("trojan dispatch: an ASYNC cell:method call carries a _callId, so the reply is the method's", async () => {
+  const { deps, dispatched } = makeDeps();
+  await dispatch(deps, { type: "counter:inc", payload: { args: [1] } });
+  const pl =
+    (dispatched[0] as { payload?: { _callId?: unknown; args?: unknown } })
+      .payload;
+  assertEquals(typeof pl?._callId, "string");
+  assertEquals(pl?.args, [1], "the caller's payload is kept");
+});
+
+Deno.test("trojan dispatch: the nearest method is judged on the method half, within two edits", () => {
+  const all = ["counter:increment", "nav:setStatusBarMessage"];
+  assertEquals(_nearestMethod("incremnt", all), "counter:increment");
+  assertEquals(_nearestMethod("Increment", all), "counter:increment");
+  assertEquals(_nearestMethod("frobnicate", all), null);
 });
 
 // A client INDEX where the action goes — the mistake `am`'s own vocabulary
@@ -129,4 +169,18 @@ Deno.test("trojan dispatch: the method's return value is in the reply (`result`)
   failNext(() => Promise.resolve(() => 1));
   const fn = await dispatch(deps, { type: "counter:inc" });
   assertEquals(fn.body, { ok: true, resultDropped: true });
+});
+
+// A sync method never reaches the async executor, and the reducer resolves a
+// stray id as "blocked" — so one must not be minted for it. (The lab caught
+// this: three `am dispatch` calls on a scaffold's sync methods answered 400.)
+Deno.test("trojan dispatch: a SYNC cell:method call carries no _callId", async () => {
+  const { deps, dispatched } = makeDeps();
+  const r = await dispatch(deps, {
+    type: "counter:tick",
+    payload: { args: [] },
+  });
+  assertEquals(r.body.ok, true);
+  const pl = (dispatched[0] as { payload?: { _callId?: unknown } }).payload;
+  assertEquals(pl?._callId, undefined);
 });

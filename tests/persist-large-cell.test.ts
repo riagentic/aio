@@ -6,7 +6,7 @@ import { assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { createPersistenceManager } from "../src/server/persistence.ts";
 import { SKV_SCHEMA, sqliteKv } from "../src/server/skv-sqlite.ts";
-import { createDB } from "../src/db/mod.ts";
+import { createDB } from "../src/server-entry.ts";
 import type { Log } from "../src/diagnostics/logger.ts";
 
 type LogEntry = { level: string; msg: string };

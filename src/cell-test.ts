@@ -42,6 +42,7 @@ export {
 // nothing can reach the user's real `~/.<appId>` by accident; these let a test
 // pin a directory it controls and assert against it:
 //
+//   import { appDirs } from "aio/server";     // the resolver's ONE home
 //   const dirs = appDirs("my-app", await Deno.makeTempDir());
 //   registerAppDirs("my-app", dirs);          // app code now resolves here
 //   await Deno.writeTextFile(join(dirs.files, "bin"), "…");
@@ -50,10 +51,10 @@ export {
 //
 // (a field report #6 — its server tests installed a fixture under `appDirs().files`
 // and, with no way to redirect, wrote into the developer's real install.)
+// `appDirs`/`AppDirs` themselves are `aio/server` exports — one import path per
+// symbol since alpha70 (src/state/removals.ts); only the test SEAMS live here.
 export {
   _resetAppDirs,
-  type AppDirs,
-  appDirs,
   ensureAppDirs,
   registerAppDirs,
 } from "./server/app-dirs.ts";
@@ -83,24 +84,12 @@ export {
 // in `aio` are that).
 export { totpCode } from "./server/auth-totp.ts";
 
-// The `updates` cell's platform half, for a test of an update banner. The
-// server installs the real runtime at boot; a test installs a stub that
-// answers `check()` with the offer it wants to see, then drives the UI:
+// The `updates` cell's platform half (`installUpdatesRuntime`, `UpdatesRuntime`,
+// `ApplyOptions`, `CheckOptions`, `CheckResult`) is an `aio/updates` export —
+// one import path per symbol since alpha70 (src/state/removals.ts). A test of
+// an update banner imports the stub seam from there:
 //
+//   import { installUpdatesRuntime } from "aio/updates";
 //   installUpdatesRuntime({ kind: "manifest", channel: "prod", current: "1.0.0",
 //     exposed: false, check: async () => ({ kind: "offer", update: { … } }),
 //     apply: async () => {}, setChannel: async () => {} });
-//
-// `update` is an `AvailableUpdate` — version, reason, notes, size, releasedAt,
-// migrates, signed, keyFingerprint, warnings. `apply(opts)` receives
-// `{ acceptDataLoss }` when the caller opened that door.
-//
-// Pass `null` to take it back out. A field report (a desktop app) reached it
-// through `dep/aio/src/state/…` — a seam a test needs is a seam we export.
-export {
-  type ApplyOptions,
-  type CheckOptions,
-  type CheckResult,
-  installUpdatesRuntime,
-  type UpdatesRuntime,
-} from "./state/updates-cell.ts";

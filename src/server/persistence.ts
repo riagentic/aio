@@ -3,7 +3,12 @@
 
 import type { SkvInstance, SkvStmt } from "./skv.ts";
 import type { DB } from "../db/mod.ts";
-import { planTables } from "../db/state-sync.ts";
+import {
+  type DirtyHint,
+  planTablesIncremental,
+  type TableIndex,
+} from "../db/state-sync.ts";
+import type { CellPatches } from "./aio-dispatch.ts";
 import type { TableDef } from "./sql.ts";
 import {
   createAioError,
@@ -70,6 +75,12 @@ export interface PersistenceConfig {
    *  a projection rather than raw state. Omitted (engine-level callers) ⇒ raw
    *  state, where a table name IS the root key. */
   getTableState?: (s: Record<string, unknown>) => Record<string, unknown>;
+  /** Which state path each SQL table mirrors (`resolveDbBindings`). With it,
+   *  the immer patches a window's commits produced (`schedulePersist(patches)`)
+   *  are translated into "which rows of which table moved", so a one-row
+   *  change is planned in O(change) instead of a full pass over the table.
+   *  Without it every changed table takes the (identity-first) full pass. */
+  tableBindings?: readonly { table: string; path: readonly string[] }[];
   /** What SQLite ACTUALLY holds at boot, keyed by SQL table name. The diff
    *  baseline is "what the database has", which is only the same thing as
    *  "what state has" when every row was already written — not when a binding
@@ -117,7 +128,12 @@ export interface PersistenceConfig {
 
 /** Persistence manager API — debounced state persistence to KV and/or SQLite. */
 export interface PersistenceManager {
-  schedulePersist(): void;
+  /** Schedule a debounced write. `patches` — the immer patches the commits
+   *  since the last call produced — is an OPTIMIZATION HINT: with it, a bound
+   *  table's diff is narrowed to the rows those patches touched; without it
+   *  (or with a patch the hint cannot express) the table takes the full
+   *  identity-first pass. Correctness never depends on the hint. */
+  schedulePersist(cellPatches?: CellPatches): void;
   flushPersist(): Promise<void>;
   setShuttingDown(): void;
   resetPrevState(): void;
@@ -167,6 +183,63 @@ export function createPersistenceManager(
   // cannot hide changed contents. A `getTableState` that rebuilds its arrays
   // each call simply sees every table as changed and gets today's behaviour.
   let prevLiveTables: Record<string, unknown> = {};
+  // Each pk table's last-committed rows by key — the diff's memory across
+  // windows (see planTablesIncremental). Cleared whenever the baseline is
+  // re-seeded, so it is rebuilt from the new baseline on the next window.
+  let _tableIndex: Record<string, TableIndex> = {};
+  // The rows each bound table's patches touched since the last plan, or
+  // `null` once a window saw a schedulePersist() that carried no patches —
+  // then nothing is known and every changed table takes the full pass.
+  let _dirty: Record<string, DirtyHint> | null = {};
+  const _bindingsByCell = new Map<
+    string,
+    { table: string; field: readonly string[] }[]
+  >();
+  for (const b of cfg.tableBindings ?? []) {
+    if (b.path.length < 2) continue; // root-level binding: no cell patches
+    const cell = b.path[0]!;
+    const list = _bindingsByCell.get(cell) ?? [];
+    list.push({ table: b.table, field: b.path.slice(1) });
+    _bindingsByCell.set(cell, list);
+  }
+  /** Fold one window's patches into the dirty picture. An op AT or ABOVE the
+   *  bound path (the array replaced, its length written, an element removed)
+   *  means rows may have moved or left — "all". An op strictly BELOW it at a
+   *  numeric index marks that row. Anything else this cell touched is not a
+   *  bound table's business. */
+  function _markDirty(patches: CellPatches): void {
+    if (_dirty === null) return;
+    for (const [cell, ops] of patches) {
+      const bound = _bindingsByCell.get(cell);
+      if (!bound) continue;
+      for (const op of ops) {
+        for (const b of bound) {
+          const path = op.path;
+          let k = 0;
+          while (
+            k < b.field.length && k < path.length && path[k] === b.field[k]
+          ) k++;
+          if (k < b.field.length) {
+            // Diverged inside the cell: only a prefix-replacement (an ancestor
+            // of the bound field rewritten) reaches the table.
+            if (k === path.length) _dirty[b.table] = "all";
+            continue;
+          }
+          const cur = _dirty[b.table];
+          if (cur === "all") continue;
+          const idx = path[b.field.length];
+          if (
+            path.length > b.field.length && typeof idx === "number" &&
+            op.op !== "remove"
+          ) {
+            (cur ?? (_dirty[b.table] = new Set())).add(idx);
+          } else {
+            _dirty[b.table] = "all";
+          }
+        }
+      }
+    }
+  }
   let _baselineOverride = cfg.dbBaselineOverride;
   const baseline = (): Record<string, unknown> => {
     const v = tableState();
@@ -430,18 +503,35 @@ export function createPersistenceManager(
     const stateSnapshot: Record<string, unknown> = {};
     const nextLive: Record<string, unknown> = {};
     for (const name of Object.keys(live)) {
-      nextLive[name] = live[name];
-      stateSnapshot[name] =
-        live[name] === prevLiveTables[name] && name in prevDbState
-          ? prevDbState[name]
-          : structuredClone(live[name]);
+      const v = live[name];
+      nextLive[name] = v;
+      // A FROZEN table (committed cell state — autoFreeze is never disabled)
+      // is held by reference: nothing can retro-change it, so a clone would
+      // buy no safety and cost O(rows) per window — the 3.3 ms per 10k rows
+      // this path used to pay for ONE changed row. An unfrozen value (an
+      // engine-level caller feeding mutable objects) is still cloned, because
+      // only a clone can tell a later in-place mutation from the baseline.
+      stateSnapshot[name] = v === prevLiveTables[name] && name in prevDbState
+        ? prevDbState[name]
+        : Object.isFrozen(v)
+        ? v
+        : structuredClone(v);
     }
-    const stmts = planTables(dbSchema, stateSnapshot, prevDbState);
+    const dirty = _dirty ?? undefined;
+    _dirty = {};
+    const plan = planTablesIncremental(
+      dbSchema,
+      stateSnapshot,
+      prevDbState,
+      _tableIndex,
+      dirty,
+    );
     return {
-      stmts,
+      stmts: plan.stmts,
       commit: () => {
         prevDbState = stateSnapshot;
         prevLiveTables = nextLive;
+        plan.commit();
         log.debug("persist: sqlite synced");
       },
     };
@@ -788,10 +878,12 @@ export function createPersistenceManager(
     }
   }
 
-  function schedulePersist(): void {
+  function schedulePersist(patches?: CellPatches): void {
     if ((!kvDb && !asyncDb) || shuttingDown) {
       return;
     }
+    if (patches) _markDirty(patches);
+    else _dirty = null; // an unhinted commit: this window takes the full pass
     if (inFlight) {
       persistNeeded = true;
       return;
@@ -875,6 +967,7 @@ export function createPersistenceManager(
   function resetPrevState(): void {
     if (!_baselineOverride) return;
     prevDbState = baseline();
+    _tableIndex = {}; // rebuilt from the new baseline on the next window
     _baselineOverride = undefined; // the boot picture is used exactly once
   }
 

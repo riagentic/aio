@@ -109,6 +109,8 @@ export interface ServerConfig {
     startedAt: number; // Date.now() at boot
     /** Cell id → method (action) names — powers "run a method" buttons. */
     cellMethods?: () => Record<string, string[]>;
+    /** Cell id → async method names — the calls a `_callId` can correlate. */
+    cellAsyncMethods?: () => Record<string, string[]>;
     cellFields?: () => import("./aio-types.ts").CellFieldFlags;
     /** UDS clients (Electron IPC) — for am client command */
     udsClients?: () => { index: number; id: string }[];
@@ -133,7 +135,9 @@ export interface ServerConfig {
 /** Returned to aio.run() so it can push state updates and shut down cleanly */
 export interface ServerHandle {
   broadcast: (
-    patches?: Array<{ cell: string; ops: import("immer").Patch[] }>,
+    patches?: Array<
+      { cell: string; ops: import("../protocol/patch-ops.ts").WirePatch[] }
+    >,
   ) => void;
   /** Send raw string message to all connected WS clients, optionally excluding one */
   broadcastRaw: (msg: string, exclude?: WebSocket) => void;
@@ -141,6 +145,11 @@ export interface ServerHandle {
   shutdown: () => Promise<void>;
   clientCount: () => number;
   trojanPort?: number; // set when TLS is active — HTTP-only trojan endpoint on 127.0.0.1
+  /** The port the TCP listener actually bound, once it is listening. Equal to
+   *  the configured port whenever one was named; it differs only for
+   *  `port: 0` ("pick a free port"). Undefined when this app binds no TCP
+   *  port — the boot report must print no number at all for that case. */
+  boundPort?: number;
   socketPath?: string; // set when UDS is active
   watcherActive?: boolean; // true if file watcher is running (dev mode only)
   /** Serve ONE control-plane request that arrived over a non-TCP wire (the

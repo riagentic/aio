@@ -74,8 +74,6 @@ async function withApp(
 
 Deno.test({
   name: "am dispatch --args: a one-string method receives a STRING",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     await withApp(async (dispatch, received) => {
       await dispatch([`${CELL}:setHost`], {
@@ -93,8 +91,6 @@ Deno.test({
 Deno.test({
   name:
     "am dispatch --args: JSON types survive, and every argument is positional",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     await withApp(async (dispatch, received) => {
       // A number stays a number (the shell would have made it a string).
@@ -115,8 +111,6 @@ Deno.test({
 
 Deno.test({
   name: "am dispatch: every pre-existing form behaves exactly as before",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     await withApp(async (dispatch, received) => {
       // 1. Bare positional value → positional arg (worked before, still does).

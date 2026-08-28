@@ -43,7 +43,7 @@ Deno.test("M9: a non-trailing wildcard is refused at boot", async () => {
 // ── M8: a subscriber's bug cannot un-commit a write ──────────────────────────
 
 Deno.test("M8: a throwing live-query subscriber does not fail the write", async () => {
-  const { createDB } = await import("../src/db/mod.ts");
+  const { createDB } = await import("../src/server-entry.ts");
   const { reactiveDB } = await import("../src/db/reactive.ts");
   const dir = await Deno.makeTempDir({ prefix: "aio-m8-" });
   const db = reactiveDB(await createDB(`${dir}/t.db`));
@@ -66,7 +66,7 @@ Deno.test("M8: a throwing live-query subscriber does not fail the write", async 
 });
 
 Deno.test("M8: one bad subscriber does not starve the others", async () => {
-  const { createDB } = await import("../src/db/mod.ts");
+  const { createDB } = await import("../src/server-entry.ts");
   const { reactiveDB } = await import("../src/db/reactive.ts");
   const dir = await Deno.makeTempDir({ prefix: "aio-m8b-" });
   const db = reactiveDB(await createDB(`${dir}/t.db`));
@@ -122,7 +122,7 @@ Deno.test("L20: an issuer publishing no kid at all still works", async () => {
 // committed. One rule for the whole path: after the commit, nothing a REFRESH
 // does can describe the write as undone. Stale rows are loud instead.
 Deno.test("M8: a live query that fails to REFRESH does not fail the write", async () => {
-  const { createDB } = await import("../src/db/mod.ts");
+  const { createDB } = await import("../src/server-entry.ts");
   const { reactiveDB } = await import("../src/db/reactive.ts");
   const dir = await Deno.makeTempDir({ prefix: "aio-m8c-" });
   const inner = await createDB(`${dir}/t.db`);
@@ -170,7 +170,7 @@ Deno.test("M8: a live query that fails to REFRESH does not fail the write", asyn
 // The initial fill is the one place a query failure MUST still throw: no write
 // has happened, and a select() that cannot run is the caller's own error.
 Deno.test("M8: select() itself still fails loudly when the query cannot run", async () => {
-  const { createDB } = await import("../src/db/mod.ts");
+  const { createDB } = await import("../src/server-entry.ts");
   const { reactiveDB } = await import("../src/db/reactive.ts");
   const dir = await Deno.makeTempDir({ prefix: "aio-m8d-" });
   const db = reactiveDB(await createDB(`${dir}/t.db`));

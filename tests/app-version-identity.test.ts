@@ -73,7 +73,7 @@ async function probeFrom(
 // version but the LAUNCH directory's title, and defaulted to the electron
 // client (auto-downloading ~100MB) despite its own `"target": "browser"` —
 // which is what systemd does, since ExecStart runs from $HOME.
-Deno.test("app identity: title AND target come from the app's own deno.json, not the cwd's", async () => {
+Deno.test("app identity: title AND client come from the app's own deno.json, not the cwd's", async () => {
   const proj = await Deno.makeTempDir({ prefix: "aio-ident-app-" });
   const other = await Deno.makeTempDir({ prefix: "aio-ident-other-" });
   const empty = await Deno.makeTempDir({ prefix: "aio-ident-empty-" });
@@ -85,7 +85,7 @@ Deno.test("app identity: title AND target come from the app's own deno.json, not
       JSON.stringify({
         title: "PROBE OWN TITLE",
         version: "4.5.6",
-        target: "browser",
+        client: "browser",
         imports: { aio: join(aioRoot, "mod.ts") },
       }),
     );
@@ -104,10 +104,10 @@ console.log(JSON.stringify({
 `,
     );
     // A DIFFERENT project as the launch directory: another title, another
-    // target. Neither may reach the app.
+    // client. Neither may reach the app.
     await Deno.writeTextFile(
       join(other, "deno.json"),
-      JSON.stringify({ title: "SOMEONE ELSES APP", target: "server" }),
+      JSON.stringify({ title: "SOMEONE ELSES APP", client: "server" }),
     );
 
     const module = join(proj, "src", "app.ts");

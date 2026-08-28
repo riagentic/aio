@@ -67,6 +67,15 @@ await aio.run({
 token modes) and `ip`. A `:param` route (`/x/:id`) matches like the existing
 `/prefix/*`; queued `setCookie()`s are applied to whatever Response you return.
 
+**A `:param` is URL-decoded**, which is what makes `/users/a%20b` give you
+`"a b"` — and it means the value can contain characters the path did not visibly
+have, including `/` (from `%2F`) and `..`. That is correct for a value and
+dangerous for a path: `readFile(join(dir, ctx.params.name))` on
+`/files/..%2F..%2Fetc%2Fpasswd` reads outside `dir`. Treat a param as untrusted
+input — check it against what you expect (an id, a known key) rather than
+handing it to the filesystem, a shell, or a query. The trailing `*` capture is
+NOT decoded, because it is a path rather than a value.
+
 Cell methods and serverFns the handler calls don't need those threaded down —
 they can read the same request from [`serverRequest()`](../auth/auth.md), which
 also answers for calls arriving over the WebSocket.

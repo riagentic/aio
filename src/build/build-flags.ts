@@ -21,6 +21,7 @@ export const BUILD_BOOL_FLAGS = [
   "--compile",
   "--electron",
   "--android",
+  "--ios",
   "--cli",
   "--client",
   "--remote",

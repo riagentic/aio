@@ -19,8 +19,6 @@ type Item = { id: number; v: string };
 
 Deno.test({
   name: "db: loadSnapshot writes the restored rows to SQLite, not just state",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: async () => {
     const dir = await Deno.makeTempDir({ prefix: "aio-db-snap-" });
     const appId = `snap-${crypto.randomUUID().slice(0, 8)}`;

@@ -122,26 +122,32 @@ warning, `>= 5x` = frozen. Default staleness threshold: 300ms.
 Frozen clients stop receiving deltas from server. Visibility pause: hidden tabs
 suppress false alarms.
 
-```ts
-aio.run({
-  renderBudget: { staleness: 500, pendingPatches: 20 },
-});
-```
+The key is `renderBudget: { staleness, pendingPatches }` on `aio.run`. It
+reaches the page through the shell (`__aioConfig`) and the `cfg` frame, and the
+browser runtime (`src/browser/browser-vitals.ts`) reads it when the WebSocket
+opens:
 
-> **Not wired today.** alpha48's transport swap removed the only caller of the
-> render meter, and the transport that replaced it has not picked it back up —
-> so the client-side numbers in this section are not being measured, no
-> threshold can fire, and `vitals-ping` has no sender (`/__aio/vitals` reports
-> `clients: []`). The key is still accepted and its shape is stable, and boot
-> now says so rather than letting it look honoured. **Server-side vitals — the
-> loop probe, dispatch and reduce timings, `am metrics`, `am top` — are
-> unaffected and real.**
+- every applied `state`/`patches` frame is recorded as an unpainted patch;
+- a `requestAnimationFrame` loop measures how long the newest one stays
+  unpainted (staleness), the frame gap, the pending count and the paint rate;
+- a threshold crossing is reported once per status change — a `console.warn`
+  with the hint engine's line (prod and dev), and a `vitals:render-stale` /
+  `vitals:render-frozen` / `vitals:render-recovered` event on the diagnostic bus
+  (dev overlay, `am errors`, client-log);
+- the heartbeat carries the staleness to the server (`vitals-ping {t1, ms}`,
+  every second), which is what drives per-client backpressure and the `clients`
+  rows of `/__aio/vitals`.
+
+The heartbeat rides the WebSocket only; an Electron window on the IPC/UDS
+transport has no ping (the envelope refuses `vitals-ping` there), so its render
+meter runs but the server's client rows stay empty for it.
 
 ### TransportProbe (client + server)
 
 Measures RTT via `vitals-ping`/`vitals-pong` frames over WebSocket. Client sends
-ping with `t1`, server responds with `t2` and loop vitals. Server-side watchdog
-tracks `lastPing` per client, detects frozen clients.
+ping with `t1` (and `ms`, its render staleness — see above), server responds
+with `t2` and loop vitals. Server-side watchdog tracks `lastPing` per client,
+detects frozen clients.
 
 IPC keepalive (UDS mode): lightweight `__ping` every 60s over IPC bridge. Full
 vitals protocol runs over WebSocket only.

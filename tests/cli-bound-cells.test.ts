@@ -34,8 +34,6 @@ async function waitFor<T>(
 
 Deno.test({
   name: "connectCli.bind: cell methods + state work over the socket",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const port = freePort();
     const proc = new Deno.Command(Deno.execPath(), {
@@ -96,8 +94,6 @@ Deno.test({
 Deno.test({
   name:
     "connectCli.bind: a call made while offline waits for the queue, then settles on close",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const port = freePort();
     const proc = new Deno.Command(Deno.execPath(), {

@@ -34,6 +34,8 @@ export function composeCells(
     onCellError?: (err: AioError) => void;
     circuitBreaker?: import("./cell-compose-types.ts").CircuitBreakerConfig;
     perfCheck?: boolean;
+    /** The app identity — scopes cancellation (see method-cancel.ts). */
+    appId?: string;
   },
 ): import("./cell-compose-types.ts").ComposedCells {
   if (entries.length === 0) {
@@ -104,6 +106,7 @@ export function composeCells(
 
   // ── Reduce context ──
   const reduceCtx = {
+    appId: opts?.appId ?? "",
     disabledCells,
     cellLastAction,
     reportError: _reportError,
@@ -114,7 +117,7 @@ export function composeCells(
   for (const f of cells) {
     if (f.__aio.cancelTriggers) {
       for (const [m, triggers] of Object.entries(f.__aio.cancelTriggers)) {
-        registerCancelOn(f.__aio.id, m, triggers);
+        registerCancelOn(f.__aio.id, m, triggers, opts?.appId ?? "");
       }
     }
   }
@@ -165,6 +168,7 @@ export function composeCells(
   };
 
   return {
+    appId: opts?.appId ?? "",
     initialState,
     reduce: rootReduce,
     execute: rootExecute,

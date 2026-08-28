@@ -16,8 +16,9 @@ Deno.test({
   name:
     "wine: the named-pipe local transport passes host + libuv client + connectLocal client",
   ignore: !GATED,
+  // aio-ok: a real Wine process hosting deno.exe/node.exe; Wine keeps its wineserver alive past the test
   sanitizeOps: false,
-  sanitizeResources: false,
+  sanitizeResources: false, // aio-ok: see above
   async fn() {
     const args = ["run", "-A", `${HERE}/scripts/wine-pipe.ts`];
     if (Deno.env.get("AIO_WINE_NO_BUILD") === "1") args.push("--no-build");

@@ -41,8 +41,6 @@ function freePort(): number {
 Deno.test({
   name: "e2e: --expose serves over the LAN interface — 0.0.0.0 + TLS + token",
   ignore: LAN_IP === null,
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const port = freePort();
     const dir = `${ROOT}examples/targets/browser-remote`;

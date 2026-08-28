@@ -256,8 +256,6 @@ Deno.test({
   name:
     "localFirst e2e: a cell with no sync: key runs in the browser and ships an op",
   ignore: BROWSER === null,
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     assertEquals(
       await opsAfterOneClick(true),
@@ -270,8 +268,6 @@ Deno.test({
 Deno.test({
   name: "localFirst e2e: without the switch, the same app ships no ops at all",
   ignore: BROWSER === null,
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     assertEquals(
       await opsAfterOneClick(false),

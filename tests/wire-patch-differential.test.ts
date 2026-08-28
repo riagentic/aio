@@ -1,6 +1,7 @@
 // Randomized DIFFERENTIAL for the client half of state delivery.
 //
-// The server produces Immer patches, narrows them (narrowArrayPatches),
+// The server produces Immer patches, narrows them (narrowPatches — arrays as
+// adds/removes, grown strings as `append`),
 // compacts them (compactPatches), filters them by the client's subscriptions,
 // decides patch-vs-full against the size threshold, and writes JSON. The client
 // (state-message.ts → state-signals.ts) applies whatever lands. Every one of
@@ -8,7 +9,7 @@
 // invisible: nothing on either side ever compares them.
 //
 // So this does. It drives the REAL production functions on both sides —
-// `produceWithPatches` + `narrowArrayPatches` + `compactPatches` +
+// `produceWithPatches` + `narrowPatches` + `compactPatches` +
 // `filterPatchesBySubs` + `filterStateBySubs` on the server, `handleMessage` on
 // the client — over randomized mutation programs, and asserts after EVERY frame
 // that the client's root state and every per-cell signal equal the server's
@@ -25,10 +26,8 @@ import {
   type Patch,
   produceWithPatches,
 } from "immer";
-import {
-  compactPatches,
-  narrowArrayPatches,
-} from "../src/state/patch-compact.ts";
+import { compactPatches, narrowPatches } from "../src/state/patch-compact.ts";
+import { applyWirePatches, type WirePatch } from "../src/protocol/patch-ops.ts";
 import {
   filterPatchesBySubs,
   filterStateBySubs,
@@ -74,6 +73,12 @@ function slice(label: string): Slice {
     // array), and deleting-then-re-adding within one broadcast window is the
     // object-side twin of the array shapes below.
     opt: 0 as unknown,
+    // A STREAMED string — the shape `narrowStringPatches` rewrites to
+    // `append`. Seeded above the append floor so growth is rewritten from the
+    // first round, and edited/truncated/reset often enough that the
+    // non-suffix cases (which must stay a `replace`) share every frame with
+    // the suffix ones.
+    text: "t".repeat(300),
   };
 }
 
@@ -105,7 +110,25 @@ function mutate(r: Rng, s: Slice): void {
       : r.chance(0.5)
       ? `s${r.int(3)}`
       : { id: r.int(1e6) };
-  switch (r.int(20)) {
+  switch (r.int(23)) {
+    case 20: // STREAM: the string grows by a chunk — an `append` on the wire.
+      s.text = (s.text as string) +
+        `c${r.int(1e6)}`.padEnd(1 + r.int(200), "x");
+      break;
+    case 21: // the string is EDITED, truncated or reset — never an append.
+      s.text = r.chance(0.5)
+        ? (s.text as string).slice(
+          0,
+          Math.max(0, (s.text as string).length - 1 - r.int(50)),
+        )
+        : r.chance(0.5)
+        ? `r${r.int(1e6)}`.padEnd(300 + r.int(100), "y")
+        : "";
+      break;
+    case 22: // grows TWICE in one method — one op, still one append.
+      s.text = (s.text as string) + "a".repeat(1 + r.int(50));
+      s.text = (s.text as string) + "b".repeat(1 + r.int(50));
+      break;
     case 13: { // WHOLE-ELEMENT assignment — `s.items[k] = x`.
       // The shape the alphabet was missing, and the only one that emits a
       // `replace` at an ARRAY-INDEX path. Every other op writes either the
@@ -215,14 +238,18 @@ function mutate(r: Rng, s: Slice): void {
   }
 }
 
+/** `append` ops the narrowing pass emitted across every program — asserted
+ *  non-zero so the alphabet provably reaches the op it was extended for. */
+let APPENDS = 0;
+
 /** Produce one broadcast round exactly as the server does. */
 function serverRound(
   r: Rng,
   state: State,
   hot: string | null,
-): { next: State; entries: { cell: string; ops: Patch[] }[] } {
+): { next: State; entries: { cell: string; ops: WirePatch[] }[] } {
   const next: State = { ...state };
-  const entries: { cell: string; ops: Patch[] }[] = [];
+  const entries: { cell: string; ops: WirePatch[] }[] = [];
   // 1..3 cells change per round — a real dispatch can touch several. `hot`
   // pins the whole frame to ONE cell, which is what an app under load actually
   // looks like and the only way several dispatches' ops for the same paths end
@@ -237,7 +264,8 @@ function serverRound(
     });
     // The exact call cell-compose-reduce.ts makes, at the same moment: the
     // PREVIOUS slice is the base.
-    const narrowed = narrowArrayPatches(before, ops as Patch[]);
+    const narrowed = narrowPatches(before, ops as Patch[]);
+    for (const op of narrowed) if (op.op === "append") APPENDS++;
     next[cell] = after as Slice;
     if (narrowed.length > 0) entries.push({ cell, ops: narrowed });
   }
@@ -262,16 +290,16 @@ function serverRound(
  *  fuzzing. Model what the code does, not what it should have done. */
 function encodeFrame(
   state: State,
-  entries: { cell: string; ops: Patch[] }[],
+  entries: { cell: string; ops: WirePatch[] }[],
   subs: Set<string> | null,
   threshold: number,
   meta: { lastFullJson?: string; stale?: boolean },
-): { kind: "patches" | "state" | "none"; json: string; rawOps: Patch[] } {
+): { kind: "patches" | "state" | "none"; json: string; rawOps: WirePatch[] } {
   const fullJson = JSON.stringify(filterStateBySubs(state, subs));
   const clientEntries = filterPatchesBySubs(entries, subs);
   const rawOps = clientEntries.flatMap((p) =>
     p.ops.map((op) => ({ ...op, path: [p.cell, ...op.path] }))
-  ) as Patch[];
+  ) as WirePatch[];
   const allOps = compactPatches(rawOps);
   const sendFull = (): { kind: "state" | "none"; json: string } => {
     // A STALE memo is not proof the client already holds this state.
@@ -303,7 +331,7 @@ function encodeFrame(
  *  state hides it completely. */
 function assertCompactionPreservesEffect(
   base: unknown,
-  rawOps: Patch[],
+  rawOps: WirePatch[],
   seed: number,
   round: number,
 ): void {
@@ -311,12 +339,12 @@ function assertCompactionPreservesEffect(
   let raw: unknown;
   let compacted: unknown;
   try {
-    raw = applyPatches(base as object, rawOps);
+    raw = applyWirePatches(base, rawOps);
   } catch {
     return; // the uncompacted list itself does not apply — not a compaction bug
   }
   try {
-    compacted = applyPatches(base as object, compactPatches(rawOps));
+    compacted = applyWirePatches(base, compactPatches(rawOps));
   } catch (e) {
     throw new Error(
       `compaction made the frame UNAPPLIABLE (seed=${seed} round=${round}): ` +
@@ -447,7 +475,7 @@ function runProgram(
     // throttled, so one frame routinely carries the patches of SEVERAL
     // dispatches — which is the only way two ops for the same path end up in
     // one list, and therefore the only way `compactPatches` matters at all.
-    const entries: { cell: string; ops: Patch[] }[] = [];
+    const entries: { cell: string; ops: WirePatch[] }[] = [];
     const hot = r.chance(0.6) ? r.pick(CELLS) : null;
     const dispatches = 1 + r.int(4);
     for (let d = 0; d < dispatches; d++) {
@@ -524,7 +552,7 @@ Deno.test("compactPatches: a collapsed replace never orphans an op under it", ()
   const expected = applyPatches(base, ops);
   const compacted = compactPatches(ops);
   assertEquals(
-    applyPatches(base, compacted),
+    applyWirePatches(base, compacted),
     expected,
     "compacting a patch list must never change — or invalidate — what it does",
   );
@@ -548,7 +576,7 @@ Deno.test("compactPatches: a later replace at the SAME index never cancels a shi
     { op: "replace", path: ["todo", "items", 0], value: { id: "Q2" } },
   ];
   assertEquals(
-    applyPatches(base, compactPatches(ops)),
+    applyWirePatches(base, compactPatches(ops)),
     applyPatches(base, ops),
     "compaction deleted the removal — the client keeps a row the server deleted",
   );
@@ -560,7 +588,7 @@ Deno.test("compactPatches: a later replace at the SAME index never cancels a shi
     { op: "replace", path: ["todo", "items", 0], value: { id: "B" } },
   ];
   assertEquals(
-    applyPatches(base2, compactPatches(ops2)),
+    applyWirePatches(base2, compactPatches(ops2)),
     applyPatches(base2, ops2),
     "compaction deleted the insert — the client is one row short",
   );
@@ -575,7 +603,7 @@ Deno.test("compactPatches: a later replace at the SAME index never cancels a shi
     { op: "replace", path: ["todo", "items", 1], value: { id: "X" } },
   ];
   assertEquals(
-    applyPatches(base3, compactPatches(ops3)),
+    applyWirePatches(base3, compactPatches(ops3)),
     applyPatches(base3, ops3),
     "an index-shifting op between the two made the supersede unsound",
   );
@@ -598,7 +626,7 @@ Deno.test("compactPatches: an op under a later whole-value replace is redundant"
   // …and an op AFTER the replace still stands (it is not redundant).
   const base = { c: { items: [] as unknown[] } };
   assertEquals(
-    applyPatches(base, compactPatches(ops)),
+    applyWirePatches(base, compactPatches(ops)),
     applyPatches(base, ops),
   );
 });
@@ -621,6 +649,11 @@ Deno.test("wire differential: client state equals server state after every patch
     patches > PROGRAMS * 5,
     `too few patch frames (${patches}) — the fuzzer stopped exercising the ` +
       `delta path, which would make it vacuously green`,
+  );
+  assert(
+    APPENDS > PROGRAMS,
+    `only ${APPENDS} append ops were emitted — the string-growth alphabet ` +
+      `is not reaching narrowStringPatches, so its every-frame equality is unproven`,
   );
 });
 

@@ -138,6 +138,11 @@ export function shasumFor(shasums: string, file: string): string | null {
 }
 
 /** Lowercase hex SHA-256 of `bytes`. */
+// A fourth spelling of the same four lines, and deliberately still here: the
+// canonical one is exported from `src/build/ship.ts`, and the folder matrix
+// does not allow `electron -> build`. Widening it for a hash is the wrong
+// trade — a red gate loosened to save four lines. If a third copy ever wants
+// this, move it somewhere both may reach instead of adding another.
 async function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return Array.from(new Uint8Array(digest))
@@ -444,11 +449,12 @@ export async function ensureElectronRuntime(
       const os = electronOsFromSlug(slug);
       try {
         await Deno.stat(electronBinIn(stage, os));
-      } catch {
+      } catch (e) {
         throw new Error(
           `${name} unpacked without ${
             electronBinIn("<runtime>", os)
           } in it — the archive is not an Electron runtime for ${slug}.`,
+          { cause: e },
         );
       }
       await Deno.writeTextFile(

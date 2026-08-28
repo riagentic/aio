@@ -5,7 +5,7 @@
 //    src/browser/, so a full state frame AND a patch produced 0 callbacks. The
 //    AIR renderer reads through signals, which is why only the
 //    framework-agnostic client was dead.
-//  • `connectDevTools()` sent one `init` and nothing else: `_sendDevTools` was
+//  • `connectReduxDevTools()` sent one `init` and nothing else: `_sendDevTools` was
 //    likewise never called, so the extension's action log stayed empty.
 //
 // Both are now driven from the ONE place a state is applied
@@ -17,8 +17,8 @@ import {
   _incStateVersion,
   _resetDevTools,
   client,
-  connectDevTools,
-  disconnectDevTools,
+  connectReduxDevTools,
+  disconnectReduxDevTools,
 } from "../src/browser/browser-protocol.ts";
 import { handleMessage } from "../src/state-core.ts";
 import { _resetSignals } from "../src/state/state-signals.ts";
@@ -89,14 +89,14 @@ Deno.test("client.subscribe returns a working unsubscribe", () => {
   assertEquals(calls, 1, "an unsubscribed listener must stop being called");
 });
 
-Deno.test("connectDevTools streams every state change, not just init", () => {
+Deno.test("connectReduxDevTools streams every state change, not just init", () => {
   _coreReset();
   _resetSignals();
   _resetDevTools();
   const fake = installFakeDevTools();
   try {
     handleMessage({ counter: { n: 1 } });
-    connectDevTools();
+    connectReduxDevTools();
     assertEquals(fake.inits.length >= 1, true, "init on connect");
     client.send({ type: "counter:inc" });
     handleMessage({
@@ -118,13 +118,13 @@ Deno.test("connectDevTools streams every state change, not just init", () => {
     assertEquals(fake.sent.length, 2);
     assertEquals(fake.sent[1]!.action.type, "@@aio/state");
   } finally {
-    disconnectDevTools();
+    disconnectReduxDevTools();
     _resetDevTools();
     fake.restore();
   }
 });
 
-Deno.test("connectDevTools off-browser is a no-op, never a ReferenceError", () => {
+Deno.test("connectReduxDevTools off-browser is a no-op, never a ReferenceError", () => {
   _resetDevTools();
   const g = globalThis as unknown as Record<string, unknown>;
   const hadWindow = "window" in g;
@@ -135,8 +135,8 @@ Deno.test("connectDevTools off-browser is a no-op, never a ReferenceError", () =
   if (hadWindow) delete g.window;
   try {
     assert(!("window" in g), "the guard is meaningless with a window present");
-    connectDevTools(); // no extension installed → must simply do nothing
-    disconnectDevTools();
+    connectReduxDevTools(); // no extension installed → must simply do nothing
+    disconnectReduxDevTools();
   } finally {
     if (hadWindow) g.window = prevWindow;
   }

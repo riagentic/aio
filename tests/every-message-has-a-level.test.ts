@@ -17,6 +17,7 @@
 // every message carries info / warn / error. Info = nothing to do. Warn =
 // should be fixed. Error = must be fixed. Nothing prints without one.
 import { assert, assertEquals } from "@std/assert";
+import { codeText } from "../src/diagnostics/code-mask.ts";
 
 const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
@@ -34,14 +35,6 @@ const RUNTIME_FOLDERS = [
 
 /** The only console writers left, each for a reason that survives review. */
 const ALLOWED = new Map<string, string>([
-  [
-    "src/server/server-html-gen.ts",
-    "generates BROWSER code as strings — that console call runs in the page",
-  ],
-  [
-    "src/server/server-html-scripts.ts",
-    "same: script templates served to the client",
-  ],
   [
     "src/diagnostics/logger-format.ts",
     "IS the console sink — the one place allowed to print directly",
@@ -64,18 +57,6 @@ const ALLOWED = new Map<string, string>([
   // rewrote them turned the reconnect path into a ReferenceError, so a backend
   // restart never reconnected and the window sat there empty. Generated code
   // uses the console it actually has.
-  [
-    "src/electron/electron-uds.ts",
-    "generates the Electron main-process script (UDS transport)",
-  ],
-  [
-    "src/electron/electron-shared.ts",
-    "shared main-process script fragments",
-  ],
-  [
-    "src/electron/electron-client-script.ts",
-    "generates the standalone Electron client script",
-  ],
 ]);
 
 async function* walk(dir: string): AsyncGenerator<string> {
@@ -92,8 +73,18 @@ Deno.test("output: runtime code never prints without a level", async () => {
     for await (const path of walk(`${REPO}/src/${folder}`)) {
       const rel = path.slice(REPO.length + 1);
       if (ALLOWED.has(rel)) continue;
-      const text = await Deno.readTextFile(path);
+      const raw = await Deno.readTextFile(path);
+      // Read CODE, not the strings inside it. These files GENERATE JavaScript
+      // as template literals — an Electron main.cjs, a browser script tag —
+      // and every `console.log` in those templates runs in the page or the
+      // renderer, not here. Matching raw text could not tell them apart, so
+      // five whole files were allowlisted to silence them: ~1,500 lines of
+      // real Deno-side code exempted to hide 20 prints that were never this
+      // process's. `codeText` preserves offsets, so line numbers still point
+      // where they did.
+      const text = codeText(raw);
       const lines = text.split("\n");
+      const rawLines = raw.split("\n");
       lines.forEach((line, i) => {
         // A mention inside a comment is documentation, not a print.
         const code = line.replace(/^\s*(\/\/|\*).*$/, "");
@@ -102,7 +93,7 @@ Deno.test("output: runtime code never prints without a level", async () => {
         // that legitimately owns one raw write among hundreds of levelled
         // ones — the stdout a machine-readable mode must not pollute, say.
         // The reason has to be written down, so the exemption is reviewable.
-        const near = lines.slice(Math.max(0, i - 6), i + 1).join("\n");
+        const near = rawLines.slice(Math.max(0, i - 6), i + 1).join("\n");
         if (/\/\/\s*aio-ok:/.test(near)) return;
         if (
           /(?<![\w.])console\.(log|info|warn|error|debug|group)\s*\(/.test(code)

@@ -150,7 +150,7 @@ Deno.test("async: read-your-writes survives a no-op write + flush (stale overlay
 
 // ── throw semantics: the ONE place sync and async methods differ ──────────
 //
-// A field report (dm #4) worked this out the hard way: it wrote the reason for
+// A field report (relay app, item 4) worked this out the hard way: it wrote the reason for
 // a refusal into state and threw, and the reason never persisted. A SYNC method
 // is one Immer recipe — a throw discards the whole draft, so a guard cannot
 // both record why it refused and reject. An ASYNC method commits incrementally,
@@ -216,7 +216,7 @@ Deno.test("throw: a SYNC method rolls back, an ASYNC method keeps its writes; tr
     [c.asyncNote, c.asyncPost],
     ["refused: too large", "written after the await"],
     "the default: an async method commits incrementally, so what it wrote " +
-      "before the throw is already state (the dm #4 contract)",
+      "before the throw is already state (the relay-app item-4 contract)",
   );
 
   // deno-lint-ignore no-explicit-any

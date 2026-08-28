@@ -22,7 +22,6 @@ const RELOAD_EXT = new Set([".ts", ".tsx", ".css", ".html", ".svg"]);
 export interface WatcherDeps {
   absBaseDir: string;
   uiEntry?: string; // AIO-8.1: UI entry file (default "App.tsx")
-  port: number;
   importMapObj: Record<string, string>;
   debug: (msg: string) => void;
   /** Broadcast a string message to all open WS connections */
@@ -97,7 +96,7 @@ function describeChanged(paths: string[]): string {
 
 /** Factory — creates a self-contained file watcher with debouncing and health monitoring */
 export function createFileWatcher(deps: WatcherDeps): FileWatcher {
-  const { absBaseDir, port, debug } = deps;
+  const { absBaseDir, debug } = deps;
 
   // --- Debounce state ---
   let reloadTimer: ReturnType<typeof setTimeout> | null = null;
@@ -125,7 +124,11 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
   // the world-writable /tmp root. Atomic createNew on first write refuses to
   // follow a pre-existing symlink — prevents local attacker clobbering files
   // readable to the dev's UID via a planted symlink (F-2).
-  const SENTINEL = join(lockDir(), `watch-${port}.tmp`);
+  // Keyed by PID, not port: a sentinel belongs to the process whose watcher
+  // it tests. A port is only known after the listener binds — which is after
+  // this watcher starts — and `port: 0` (the documented "pick a free port")
+  // gave every such app the same name, `watch-0.tmp`.
+  const SENTINEL = join(lockDir(), `watch-${Deno.pid}.tmp`);
   let lastWatcherEvent = Date.now();
   let watcherRestarts = 0;
   const MAX_WATCHER_RESTARTS = 3;

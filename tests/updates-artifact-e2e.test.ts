@@ -90,8 +90,9 @@ async function health(port: number): Promise<Record<string, unknown>> {
 Deno.test({
   name: "artifact: a compiled binary updates ITSELF and serves the new build",
   ignore: !GATE,
-  sanitizeResources: false,
+  // aio-ok: a compiled binary re-execs ITSELF to update; the successor process is not a child the test can await
   sanitizeOps: false,
+  sanitizeResources: false, // aio-ok: see above
   fn: async () => {
     const dir = await makeApp("counter", "build-e2e-update-");
     const channel = await Deno.makeTempDir({ prefix: "update-channel-" });

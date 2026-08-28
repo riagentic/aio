@@ -90,8 +90,6 @@ interface Acct {
 
 Deno.test({
   name: "auth fuzz: the account state machine, seeded, against a real server",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn(t) {
     const { cell, aio } = await import("../mod.ts");
     const port = freePort();

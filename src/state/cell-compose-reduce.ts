@@ -3,7 +3,6 @@
 import { notifyMethodCancel } from "./method-cancel.ts";
 import { recordRejection } from "./rejection-tracker.ts";
 import {
-  applyPatches,
   current,
   type Draft,
   isDraft,
@@ -11,7 +10,8 @@ import {
   produceWithPatches,
 } from "immer";
 import { log } from "../diagnostics/logger-api.ts";
-import { narrowArrayPatches } from "./patch-compact.ts";
+import { narrowPatches } from "./patch-compact.ts";
+import { applyWirePatches, type WirePatch } from "../protocol/patch-ops.ts";
 import type { ScheduleEffect } from "./schedule.ts";
 import type { OwnEffect } from "./own.ts";
 import { resolveCall } from "./cell-impl.ts";
@@ -27,7 +27,7 @@ import {
 } from "./cell-types.ts";
 import type { ReduceBreakdown } from "../diagnostics/time-travel.ts";
 
-type CellPatches = { cell: string; ops: Patch[] };
+type CellPatches = { cell: string; ops: WirePatch[] };
 
 /** Internal action carrying a worker cell's committed patches into the main
  *  isolate's state. See src/server/cell-worker.ts. */
@@ -46,6 +46,10 @@ export type ReduceResult = {
 
 /** Context needed by reduceCell and the root reducer */
 export type ReduceContext = {
+  /** The app this composition belongs to — scopes the cancel registry so
+   *  two apps in one process sharing a cell name never cancel each other.
+   *  `""` (unknown) matches all. */
+  appId?: string;
   disabledCells: Set<string>;
   cellLastAction: Map<string, { type: string; at: number }>;
   reportError: ((err: AioError) => void) | undefined;
@@ -135,7 +139,7 @@ export function reduceCell(
     let methodReturn: unknown; // AIO-427: transported return value (or undefined)
     const t0 = _perfCheck ? performance.now() : 0;
     let nextSlice: Record<string, unknown>;
-    let cellPatches: Patch[] = [];
+    let cellPatches: WirePatch[] = [];
     try {
       [nextSlice, cellPatches] = produceWithPatches(
         cellState,
@@ -203,10 +207,11 @@ export function reduceCell(
       );
     }
     // A list the method appended to travels as its appends, not as the whole
-    // list again (see narrowArrayPatches). Done HERE, at generation, because
-    // this is the last place the PREVIOUS slice is in hand — by broadcast time
-    // only the new state is left, and the prefix can no longer be proven.
-    cellPatches = narrowArrayPatches(cellState, cellPatches);
+    // list again, and a string that grew as its suffix (see narrowPatches).
+    // Done HERE, at generation, because this is the last place the PREVIOUS
+    // slice is in hand — by broadcast time only the new state is left, and
+    // the prefix can no longer be proven.
+    cellPatches = narrowPatches(cellState, cellPatches as Patch[]);
     const tProduce = _perfCheck ? performance.now() - t0 : 0;
 
     // Effects already cloned inside produceWithPatches (before draft revocation)
@@ -262,7 +267,7 @@ export function reduceCell(
   let methodReturn: unknown; // AIO-427: transported return value (or undefined)
   const st0 = _perfCheck ? performance.now() : 0;
   let nextSlice: Record<string, unknown>;
-  let cellPatches: Patch[] = [];
+  let cellPatches: WirePatch[] = [];
   try {
     [nextSlice, cellPatches] = produceWithPatches(
       cellState,
@@ -315,7 +320,7 @@ export function reduceCell(
   // Same narrowing as the guarded path above — both paths produce patches, so
   // both must, or the optimisation would apply only to cells that happen to
   // declare a state machine.
-  cellPatches = narrowArrayPatches(cellState, cellPatches);
+  cellPatches = narrowPatches(cellState, cellPatches as Patch[]);
   const stProduce = _perfCheck ? performance.now() - st0 : 0;
 
   // Effects already cloned inside produceWithPatches (before draft revocation)
@@ -439,7 +444,7 @@ export function buildRootReducer(
   ): ReduceResult => {
     let currentState = state;
     const allEffects: (Msg | ScheduleEffect | OwnEffect)[] = [];
-    const allPatches: Array<{ cell: string; ops: Patch[] }> = [];
+    const allPatches: Array<{ cell: string; ops: WirePatch[] }> = [];
     const { disabledCells, cellLastAction, perfCheck: _perfCheck } = ctx;
 
     // A `worker: true` cell's state lives in its worker; it streams the patches
@@ -450,7 +455,7 @@ export function buildRootReducer(
     if (action.type === WORKER_PATCH_ACTION) {
       const { cell, ops } = (action.payload ?? {}) as {
         cell?: string;
-        ops?: Patch[];
+        ops?: WirePatch[];
       };
       const owner = cell ? ownByPrefix.get(cell) : undefined;
       if (!owner || !ops || ops.length === 0) {
@@ -470,7 +475,10 @@ export function buildRootReducer(
         return { state: currentState, effects: [] };
       }
       const slice = (currentState[cell!] ?? {}) as Record<string, unknown>;
-      const next = applyPatches(slice, ops);
+      // The worker's reduce narrowed its patches like any other (a grown
+      // string arrives as `append`), so the host applies them through the
+      // same wire applier every client uses — never Immer directly.
+      const next = applyWirePatches(slice, ops);
       currentState = { ...currentState, [cell!]: next };
       return {
         state: currentState,
@@ -659,7 +667,7 @@ export function buildRootReducer(
     }
 
     // Abort in-flight async methods whose cancelOn lists this action (D1).
-    notifyMethodCancel(action.type);
+    notifyMethodCancel(action.type, ctx.appId ?? "");
 
     // Reject pending call() if action was blocked
     const callId = (action.payload as Record<string, unknown>)?._callId as

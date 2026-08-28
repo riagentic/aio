@@ -18,13 +18,19 @@
 // serveStatic — and this file — with no credential at all.
 // CSRF-protected (X-AIO header on POST), rate-limited.
 import { serializeReturn } from "../protocol/return-value.ts";
+import {
+  CONTROL_MAX_BODY,
+  declaresOverLimit,
+  readBounded,
+  SNAPSHOT_MAX_BODY,
+} from "./read-body.ts";
 import { enc } from "../protocol/envelope.ts";
 import type { AioUser } from "./aio.ts";
 import {
   _isFrameworkInternalActionType,
   sanitizeClientAction,
 } from "./server-ws.ts";
-import { disarmLocalControl } from "./server-auth.ts";
+import { disarmLocalControl, TROJAN_PREFIX } from "./server-auth.ts";
 import { generatePin, PIN_TTL_MS } from "./pairing.ts";
 
 /** Client info visible to trojan introspection endpoints */
@@ -80,6 +86,8 @@ export interface TrojanDeps {
     startedAt: number;
     /** Cell id → its method (action) names — powers `am`/amui method buttons. */
     cellMethods?: () => Record<string, string[]>;
+    /** Cell id → async method names — the calls a `_callId` can correlate. */
+    cellAsyncMethods?: () => Record<string, string[]>;
     cellFields?: () => import("./aio-types.ts").CellFieldFlags;
     udsClients?: () => { index: number; id: string }[];
     requestUdsClientState?: (index: number, msg?: string) => Promise<unknown>;
@@ -109,7 +117,6 @@ export interface TrojanDeps {
 }
 
 const TROJAN_RATE_LIMIT = 100;
-const SNAPSHOT_MAX_SIZE = 10_000_000;
 /** Auto-LIMIT applied to trojan SELECTs that don't set their own — bounds
  *  result size and SQLite worker time. Audit F-9. */
 const TROJAN_SQL_DEFAULT_LIMIT = 10_000;
@@ -170,9 +177,9 @@ export function handleTrojan(
   req: Request | undefined,
   deps: TrojanDeps,
 ): Response | Promise<Response> | null {
-  if (!pathname.startsWith("/__aio/trojan/")) return null;
+  if (!pathname.startsWith(TROJAN_PREFIX)) return null;
 
-  const route = pathname.slice("/__aio/trojan/".length);
+  const route = pathname.slice(TROJAN_PREFIX.length);
   const method = req?.method ?? "GET";
 
   const json = (data: unknown) =>
@@ -475,7 +482,8 @@ async function handlePost(
 
   if (route === "dispatch") {
     try {
-      const body = await req.text();
+      const body = await readBounded(req, CONTROL_MAX_BODY);
+      if (body === null) return err("action body too large", 413);
       const action = JSON.parse(body);
       if (!action || typeof action.type !== "string") {
         return err("missing type field");
@@ -550,6 +558,35 @@ async function handlePost(
           );
         }
         action.type = `${cell}:${method}`; // normalize dot → colon
+        // Correlate the call, so the answer below is the METHOD's answer.
+        // Without an id, `dispatch` resolves with the early reduce result and
+        // an async method that throws after its first `await` — a stale
+        // capture, a refused write-set — was logged as EFFECT_ASYNC_ERROR
+        // while this route had already answered {"ok":true}. The browser and
+        // the CLI client both carry an id; the operator's door did not.
+        // Only an ASYNC method settles an id — the reducer answers "blocked"
+        // for a sync one, which never forwards to the executor. A sync method
+        // already answers through the reduce result (its throw propagates).
+        const asyncOnes = trojan.cellAsyncMethods?.()[cell] ?? [];
+        const pl = (action.payload ?? {}) as Record<string, unknown>;
+        if (asyncOnes.includes(method) && typeof pl._callId !== "string") {
+          action.payload = { ...pl, _callId: `trojan-${crypto.randomUUID()}` };
+        }
+      } else if (sepIdx <= 0 && Object.keys(methods).length > 0) {
+        // No separator, and this app is cells: every action a cell handles is
+        // `<cell>:<method>`, so a bare type reaches nothing — and it used to
+        // do that under {"ok":true}. Name the nearest real one.
+        const all = Object.entries(methods)
+          .flatMap(([c, ms]) => ms.map((m) => `${c}:${m}`));
+        const guess = _nearestMethod(action.type, all);
+        return err(
+          `"${action.type}" is not an action — every action in this app ` +
+            `belongs to a cell, so dispatch takes <cell>:<method> and a bare ` +
+            `type would have done nothing.` +
+            (guess ? ` Did you mean ${guess}?` : "") +
+            (all.length ? ` Known: ${all.join(", ")}.` : ""),
+          404,
+        );
       }
       // Strip client-set trusted provenance and re-stamp `_source:"UI"` — ONE
       // decider for all three network entry points (sanitizeClientAction,
@@ -615,7 +652,9 @@ async function handlePost(
       return err("invalid client index", 400);
     }
     try {
-      const body = JSON.parse(await req.text());
+      const rawBody = await readBounded(req, CONTROL_MAX_BODY);
+      if (rawBody === null) return err("trigger body too large", 413);
+      const body = JSON.parse(rawBody);
       if (typeof body?.path !== "string" || typeof body?.action !== "string") {
         return err("body must be { path, action, text?, key? }", 400);
       }
@@ -628,16 +667,15 @@ async function handlePost(
   if (route === "snapshot") {
     if (!deps.loadSnapshot) return err("snapshots not available", 501);
     try {
-      const clHeader = req.headers.get("content-length");
-      if (clHeader !== null && Number(clHeader) > SNAPSHOT_MAX_SIZE) {
-        return err(`snapshot too large (max ${SNAPSHOT_MAX_SIZE} bytes)`, 413);
+      // Bounded by bytes received. The Content-Length requirement that used
+      // to stand here bought nothing: `Number("abc") > MAX` is false, so any
+      // unparseable value satisfied both the cap and the presence check.
+      if (declaresOverLimit(req, SNAPSHOT_MAX_BODY)) {
+        return err(`snapshot too large (max ${SNAPSHOT_MAX_BODY} bytes)`, 413);
       }
-      if (clHeader === null) {
-        return err("Content-Length header required for snapshot upload", 411);
-      }
-      const body = await req.text();
-      if (body.length > SNAPSHOT_MAX_SIZE) {
-        return err(`snapshot too large (max ${SNAPSHOT_MAX_SIZE} bytes)`, 413);
+      const body = await readBounded(req, SNAPSHOT_MAX_BODY);
+      if (body === null) {
+        return err(`snapshot too large (max ${SNAPSHOT_MAX_BODY} bytes)`, 413);
       }
       JSON.parse(body); // validate
       deps.loadSnapshot(body);
@@ -650,7 +688,8 @@ async function handlePost(
   if (route === "tt") {
     if (!deps.onTTCommand) return err("time-travel not active", 501);
     try {
-      const body = await req.text();
+      const body = await readBounded(req, CONTROL_MAX_BODY);
+      if (body === null) return err("time-travel body too large", 413);
       const { cmd, arg } = JSON.parse(body);
       if (!cmd || typeof cmd !== "string") return err("missing cmd field");
       if (cmd === "goto" && typeof arg === "number") {
@@ -665,7 +704,8 @@ async function handlePost(
   if (route === "sql") {
     if (!trojan.sqlQuery) return err("SQLite not configured", 501);
     try {
-      const body = await req.text();
+      const body = await readBounded(req, CONTROL_MAX_BODY);
+      if (body === null) return err("query body too large", 413);
       const { query } = JSON.parse(body);
       if (!query || typeof query !== "string") {
         return err("missing query field");
@@ -788,4 +828,36 @@ async function handlePost(
   }
 
   return err("not found", 404);
+}
+
+/** The `<cell>:<method>` whose METHOD half is closest to a bare type — a
+ *  typo'd or unprefixed name — within two edits; `null` when nothing is. */
+export function _nearestMethod(bare: string, all: string[]): string | null {
+  const want = bare.toLowerCase();
+  let best: { key: string; d: number } | null = null;
+  for (const key of all) {
+    const m = key.slice(key.indexOf(":") + 1).toLowerCase();
+    const d = _editDistance(want, m);
+    if (d <= 2 && (best === null || d < best.d)) best = { key, d };
+  }
+  return best?.key ?? null;
+}
+
+function _editDistance(a: string, b: string): number {
+  if (Math.abs(a.length - b.length) > 2) return 3;
+  const prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    let diag = prev[0]!;
+    prev[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const tmp = prev[j]!;
+      prev[j] = Math.min(
+        prev[j]! + 1,
+        prev[j - 1]! + 1,
+        diag + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+      diag = tmp;
+    }
+  }
+  return prev[b.length]!;
 }

@@ -274,8 +274,8 @@ Deno.test("surface is a full observation space (AI-natural: see + act in one)", 
   await win.happyDOM.close();
 });
 
-Deno.test("testgen: generated typed client compiles and matches the surface", async () => {
-  const { testgen } = await import("../src/testing/ui-testgen.ts");
+Deno.test("testGen: generated typed client compiles and matches the surface", async () => {
+  const { testGen } = await import("../src/testing/ui-testgen.ts");
   function Row({ id }: { id: number }) {
     return h("li", null, h("button", { onClick: () => void id }, "Remove"));
   }
@@ -291,7 +291,7 @@ Deno.test("testgen: generated typed client compiles and matches the surface", as
     );
   }
   const win = new Window();
-  const src = await testgen(App as ComponentFn, {
+  const src = await testGen(App as ComponentFn, {
     document: win.document,
     // point the generated import at the real repo path so deno check works
     importFrom: new URL("../src/cell-test.ts", import.meta.url).href,

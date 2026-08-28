@@ -2,7 +2,7 @@
 // aio's default (WAL + NORMAL) is right for a cache and wrong for seeds, and
 // there was no way to say so from aio.run().
 import { assertEquals } from "@std/assert";
-import { createDB, DEFAULT_PRAGMAS } from "../src/db/mod.ts";
+import { createDB, DEFAULT_PRAGMAS } from "../src/server-entry.ts";
 
 Deno.test("createDB honours custom pragmas", async () => {
   const dir = await Deno.makeTempDir();

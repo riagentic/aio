@@ -177,11 +177,25 @@ Deno.test("bundle refusal: no exit inside the rebuild window skips the discard",
   const src = await Deno.readTextFile(
     new URL("../src/build/build-bundle.ts", import.meta.url),
   );
-  const from = src.indexOf("const bundleFresh = await isBundleFresh(cfg);");
-  const to = src.indexOf("await writeBundleInputs(");
+  // The window opens where esbuild WRITES the artifact. Before that point
+  // dist/ has already been cleaned, so a refusal there (e.g. a bad `share`)
+  // leaves nothing behind — that half is pinned separately below.
+  const start = src.indexOf("const bundleFresh = await isBundleFresh(cfg);");
+  const from = src.indexOf("const result = await esbuild.build({", start);
+  const to = src.indexOf("await writeBundleInputs(", from);
   assert(
-    from > 0 && to > from,
+    start > 0 && from > start && to > from,
     "the rebuild window moved — re-anchor this gate",
+  );
+  const before = src.slice(start, from);
+  const cleaned = before.indexOf(
+    "await Deno.remove(dist, { recursive: true })",
+  );
+  const firstExit = before.search(/Deno\.exit\(/);
+  assert(
+    cleaned > 0 && (firstExit < 0 || firstExit > cleaned),
+    "a refusal before esbuild must come AFTER dist/ is cleaned, or a stale " +
+      "dist/app.js survives it",
   );
   const window = src.slice(from, to);
   assert(

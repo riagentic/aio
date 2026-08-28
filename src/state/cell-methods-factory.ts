@@ -37,29 +37,11 @@ import {
   buildMethodsReducer,
 } from "./cell-methods-internals.ts";
 import { resolveSelfAction } from "./self.ts";
-import { log } from "../diagnostics/logger-api.ts";
-
-/** One-time-per-cell hint for the deprecated listensTo ARRAY form. */
-const _listensToHinted = new Set<string>();
-/** @internal test seam. */
-export function _resetListensToHints(): void {
-  _listensToHinted.clear();
-}
+import { refuseRetired, removalOf } from "./removals.ts";
 
 /** @internal test seam. Retained as a no-op: the alpha52 transaction-default
  *  hint it reset is gone with the flip it announced (alpha57). */
 export function _resetTransactionHints(): void {}
-function hintListensToArray(name: string): void {
-  if (_listensToHinted.has(name)) return;
-  _listensToHinted.add(name);
-  log.warn(
-    "cell",
-    `[cell:${name}] listensTo array form is deprecated — it routes the ` +
-      `action without running any code. Use the object form, which names the ` +
-      `sync method that reacts: listensTo: { onThing: other.method } (values ` +
-      `may be arrays for multiple sources). (hinted once per cell)`,
-  );
-}
 
 export function createCellFromMethods<
   N extends string,
@@ -165,14 +147,15 @@ export function createCellFromMethods<
 
   // listensTo (D1): normalize both forms. Object form maps ONE OR MORE foreign
   // action types → a SYNC method that handles them (alpha52: values may be
-  // arrays — `{ onX: [a.m, b.m] }`). The array form is deprecated (it only
-  // routes, running no code — the thing people always expected it to do): it
-  // keeps working through beta with a one-time hint.
+  // arrays — `{ onX: [a.m, b.m] }`). The array form (route the action,
+  // run no code) was removed in alpha70: it is config, so it takes the
+  // registry's dev/prod split — dev throws, prod logs and still routes
+  // (src/state/removals.ts).
   const foreignHandlers = new Map<string, string>();
   const listensToTriggers: (string | { type: string })[] = [];
   if (config.listensTo) {
     if (Array.isArray(config.listensTo)) {
-      hintListensToArray(name);
+      refuseRetired(removalOf("listensTo: [...]"), `cell:${name}`);
       listensToTriggers.push(...config.listensTo);
     } else {
       for (const [methodKey, trigger] of Object.entries(config.listensTo)) {

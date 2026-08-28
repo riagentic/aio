@@ -1,5 +1,6 @@
 // Standalone AIR runtime — signal-based client-side dispatch loop for Android WebView builds
 // Replaces standalone.ts when building with --android + renderer: "aio". Same API, no React.
+import { applyCellDefaults, applyLocalFirst } from "./state/cell-defaults.ts";
 import { type Draft, produce } from "immer";
 import { msg } from "./state/msg.ts";
 import type { Msg } from "./state/cell-types.ts";
@@ -25,7 +26,6 @@ import { createOwnManager, type OwnEffect } from "./state/own.ts";
 import { routeEffect } from "./state/route-effect.ts";
 import { Listeners } from "./state/listeners.ts";
 import { signal } from "./state/signal.ts";
-import { type ComponentFn, h } from "./air/vdom.ts";
 import { bindCell, bindCellReactive, type CellDef } from "./state/cell.ts";
 import { composeCells } from "./state/cell-compose.ts";
 import {
@@ -44,6 +44,11 @@ import {
   endShutdownAbort,
   settlePending,
 } from "./state/method-cancel.ts";
+import { _setRouterBoot } from "./air/router.ts";
+import { _installRouterListeners } from "./air/router-core.ts";
+import { _setRouteBase } from "./air/router-core.ts";
+import type { SignInProps } from "./browser/browser-auth-ui.ts";
+import type { AioUser } from "./protocol/protocol-types.ts";
 
 // Re-exports for user code
 export { msg };
@@ -88,7 +93,6 @@ export {
   useSignal,
 } from "./air/aio-renderer.ts";
 export {
-  type Action,
   type ComponentFn,
   ErrorBoundary,
   Fragment,
@@ -192,6 +196,100 @@ export { memo } from "./air/memo.ts";
  *  target — `{ local, set, patch }` and the preferred tuple form
  *  `const [v, setV] = useLocal(init)`. */
 export { useLocal, type UseLocalResult } from "./adapters/air.ts";
+
+// ── Router — routing is state, not transport ──────────────────────────
+//
+// The SAME components the browser entry ships (src/air/router.ts): a signal
+// over `location` plus the history API, both of which a WebView has. The one
+// runtime-shaped step — boot before the first route renders — is installed
+// below (`_setRouterBoot(ensureConnected)`), and the packaged shell's
+// "/assets/index.html" is adopted as the app's "/" at boot (`_adoptShellPath`).
+export {
+  Link,
+  type LinkProps,
+  navigate,
+  NavLink,
+  Outlet,
+  page,
+  Redirect,
+  Route,
+  routePath,
+  type RouteProps,
+  routeSearch,
+  type RouteState,
+  useNavigate,
+  useRoute,
+} from "./air/router.ts";
+
+// ── Islands — client-side framework interop, no server involved ───────
+//
+// `island()` mounts an external framework's component into a DOM container
+// the AIR vdom leaves alone; `reactIsland()` is that with React's loaders.
+// The android ledger used to call these "a server-rendered-page concern" —
+// false: neither touches SSR or the transport (island.ts imports vdom, signal
+// and the renderer hooks, nothing else), so a chart or an editor written as an
+// island works in the WebView exactly as in the browser.
+export { island, type IslandConfig, type IslandHandle } from "./air/island.ts";
+export { reactIsland, type ReactIslandConfig } from "./air/react-island.ts";
+
+// ── Auth UI — resolved to the anonymous branch ────────────────────────
+//
+// A standalone app has no server session: nothing issues a cookie, nothing
+// answers /__aio/auth/*. The honest shape is NOT a `<SignIn/>` that refuses
+// ("this app has no server to sign in to" is a dead end drawn on the screen),
+// and NOT a missing export (an app shared between browser and android then
+// dies at APK bundle time) — it is the same three names, resolving to the
+// state every server-backed app also has for a signed-out visitor:
+//
+//   useUser()  → null   (resolved, anonymous — never `undefined`/loading)
+//   <SignIn/>  → renders nothing, and says so ONCE on the console
+//   signOut()  → resolves; there is no session to end
+//
+// so a component written as `user ? <App/> : <SignIn/>` renders the anonymous
+// branch and the author learns why from the log, not from a crash. An app
+// that needs real users on the phone builds with `--android --remote`.
+
+let _signInHinted = false;
+
+/** The current user — always `null` on a standalone build (no server session). */
+export function useUser(): AioUser | null | undefined {
+  return null;
+}
+
+/** Ends the session — there is none on a standalone build; resolves. */
+export function signOut(): Promise<void> {
+  return Promise.resolve();
+}
+
+/** Drop-in sign-in UI — renders nothing on a standalone build (no server
+ *  session to sign in to) and says so once. Same props as the browser one, so
+ *  a shared component type-checks on every target. */
+export function SignIn(_props: SignInProps = {}): null {
+  if (!_signInHinted) {
+    _signInHinted = true;
+    log.warn(
+      "<SignIn/> on a standalone build renders nothing: this app has no " +
+        "server session (useUser() is always null here). Build with " +
+        "`--android --remote` to sign in against a server.",
+    );
+  }
+  return null;
+}
+
+/** Makes the packaged shell's document the app's route root. The android
+ *  asset loader serves `…/assets/index.html`, so `location.pathname` starts
+ *  there and `<Route path="/">` would never match; adopt its directory as the
+ *  route base and rewrite the URL (no load) to `<dir>/`. A no-op wherever the
+ *  document is already served from a directory (dev server, browser, tests).
+ *  Exported for the test that pins it. */
+export function _adoptShellPath(): void {
+  if (typeof location === "undefined" || typeof history === "undefined") return;
+  const p = location.pathname;
+  if (!/\/index\.html$/.test(p)) return;
+  const base = p.slice(0, -"/index.html".length);
+  history.replaceState(null, "", base + "/" + location.search + location.hash);
+  _setRouteBase(base);
+}
 
 /** Extracts return types of all function members into a union */
 export type UnionOf<T> = {
@@ -464,13 +562,17 @@ export function initStandalone<S, A, E>(
     // returns has to be what the next launch reads.
     close: async () => {
       dispatch.close();
-      abortAllInflight(_standaloneCells);
+      abortAllInflight(_standaloneCells, _standaloneAppId);
       try {
         // ONE deadline for both waits — two budgets would double the time the
         // window takes to disappear.
         const deadline = Date.now() + DRAIN_TIMEOUT_MS;
         const left = () => Math.max(1, deadline - Date.now());
-        const stuck = await settlePending(left(), _standaloneCells);
+        const stuck = await settlePending(
+          left(),
+          _standaloneCells,
+          _standaloneAppId,
+        );
         if (stuck > 0) {
           standaloneLog.warn(
             `close: ${stuck} call(s) still running at the ` +
@@ -484,7 +586,7 @@ export function initStandalone<S, A, E>(
       } finally {
         // The drain is over: a later app in this process (every sequential
         // test) may legitimately reuse these cell names.
-        endShutdownAbort(_standaloneCells);
+        endShutdownAbort(_standaloneCells, _standaloneAppId);
       }
       flushPersist();
     },
@@ -549,15 +651,6 @@ export function useAio<S = unknown>(): {
 // was missing the documented tuple form and patch(), so android alone threw on
 // the spelling docs call preferred.
 
-/** Renders the component matching the current page key */
-export function page<K extends string>(
-  current: K,
-  routes: Record<K, ComponentFn>,
-): unknown {
-  const Component = routes[current];
-  return Component ? h(Component, null) : null;
-}
-
 /** Resets module state — for testing only */
 /**
  * Reset runtime STATE only (keeps the cell registry) — for hermetic testUI
@@ -567,6 +660,9 @@ export function page<K extends string>(
  * mount start clean without dropping the module-singleton cells themselves.
  */
 export function _resetState(): void {
+  // The one-time <SignIn/> hint belongs to a runtime instance, so a fresh
+  // mount (testUI resets before each) says it again.
+  _signInHinted = false;
   // Destroy the booted cells FIRST, while the app and its signals are still
   // alive — onDestroy hooks may read state or dispatch (dispatch is
   // synchronous here, so everything commits before the teardown below).
@@ -610,6 +706,7 @@ export function _reset(): void {
 // runtime boots from the cell registry — every `cell()` self-registers, and
 // ensureConnected()/aio.run() compose + bind whatever has been defined.
 
+let _standaloneAppId = "app";
 let _cellApp: AioApp<Record<string, unknown>, Msg> | null = null;
 
 // Set by the running standalone app (see `_seed` above); cleared on reset.
@@ -656,16 +753,24 @@ function bootStandalone(
     persist?: boolean | string;
     onRestore?: (s: Record<string, unknown>) => Record<string, unknown>;
     circuitBreaker?: import("./state/cell-compose.ts").CircuitBreakerConfig;
+    /** App-level defaults, applied exactly as `aio.run` applies them. */
+    cellDefaults?: import("./state/cell-defaults.ts").CellDefaults;
+    localFirst?: boolean;
   } = {},
 ): AioApp<Record<string, unknown>, Msg> {
   if (_cellApp) return _cellApp; // idempotent — first caller wins
   // `circuitBreaker` rides through exactly like the server composition
   // (aio-composition.ts) — an app that configures a breaker gets the SAME
   // auto-disable behaviour on Android and in the in-process harnesses.
-  const composed = composeCells(
-    cells,
-    opts.circuitBreaker ? { circuitBreaker: opts.circuitBreaker } : undefined,
-  );
+  _standaloneAppId = opts.appId ?? "app";
+  const composed = composeCells(cells, {
+    ...(opts.circuitBreaker ? { circuitBreaker: opts.circuitBreaker } : {}),
+    appId: _standaloneAppId,
+  });
+  // The same two passes the server boot makes (aio-composition.ts), so a
+  // cell's visibility and sync are decided identically on every runtime.
+  applyCellDefaults(composed, opts.cellDefaults);
+  applyLocalFirst(composed, opts.localFirst === true);
   // Client-scoped cells own their signal state locally (bindCellReactive runs
   // their methods against the signal directly, bypassing the dispatch loop).
   // The composed reducer never updates their slice, so a blanket
@@ -765,6 +870,10 @@ export function ensureConnected(): void {
   const cells = [...getRegisteredCells().values()];
   if (cells.length) bootStandalone(cells);
 }
+// The router's "boot before the first route renders" step, on this runtime.
+// Installed at load AND on every run (below): a process that has loaded the
+// browser entry too (the test suite) must route to whichever runtime is live.
+_setRouterBoot(ensureConnected);
 
 type StandaloneRunConfig = {
   appId: string;
@@ -773,6 +882,10 @@ type StandaloneRunConfig = {
   persist?: boolean | string;
   onRestore?: (state: Record<string, unknown>) => Record<string, unknown>;
   circuitBreaker?: import("./state/cell-compose.ts").CircuitBreakerConfig;
+  /** App-level defaults, applied exactly as the server's `aio.run` applies
+   *  them — the in-process harnesses pass these through. */
+  cellDefaults?: import("./state/cell-defaults.ts").CellDefaults;
+  localFirst?: boolean;
   /** `ui` is mostly server-only here, but two keys DO reach a standalone
    *  shell — `theme` and `lang` — because the packaged HTML could not be told
    *  them at build time. See {@linkcode applyShellUi}. */
@@ -820,6 +933,9 @@ function runStandalone(
   cfg: StandaloneRunConfig,
 ): Promise<AioApp<Record<string, unknown>, Msg>> {
   _applyShellUi(cfg.ui as Record<string, unknown> | undefined);
+  _adoptShellPath();
+  _setRouterBoot(ensureConnected);
+  _installRouterListeners();
   const cells = cfg.cells && cfg.cells.length
     ? cfg.cells
     : [...getRegisteredCells().values()];
@@ -829,6 +945,8 @@ function runStandalone(
       persist: cfg.persist,
       onRestore: cfg.onRestore,
       circuitBreaker: cfg.circuitBreaker,
+      cellDefaults: cfg.cellDefaults,
+      localFirst: cfg.localFirst,
     }),
   );
 }
@@ -839,3 +957,6 @@ export const aio: { run: typeof runStandalone } = { run: runStandalone };
 /** Define a cell — works identically in standalone builds; methods dispatch
  *  through the local loop instead of a server connection. */
 export { cell } from "./state/cell.ts";
+// `schedule` — Deno-free since alpha70 (the worker pool left it); `blocking`
+// stays server-only and refuses by name here.
+export { schedule } from "./state/schedule.ts";

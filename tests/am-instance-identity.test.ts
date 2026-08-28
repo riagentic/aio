@@ -13,8 +13,6 @@ import { lockDir } from "../src/server/single-instance-lock.ts";
 
 Deno.test({
   name: "am refuses a port that answers as a DIFFERENT app",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     _resetInstanceVerify();
     const c = cell("identity-app", { state: { n: 0 }, methods: {} });

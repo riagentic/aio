@@ -1,3 +1,9 @@
+/** How long the same diagnostic line stays quiet after it is printed.
+ *  One fact: `pressure-monitor.ts` and `diag-reporter.ts` both throttle
+ *  console emission of formatted diag events, and each used to spell this
+ *  2000 itself — so raising one window silently left the other where it was. */
+export const DIAG_THROTTLE_MS = 2000;
+
 import type { DiagEvent } from "./types.ts";
 
 /** Count non-undefined values in detail (excluding hint) */

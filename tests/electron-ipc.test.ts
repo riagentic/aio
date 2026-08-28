@@ -189,8 +189,6 @@ Deno.test({
     "electron: IPC ready handshake — state arrives in renderer after 300ms module load",
   // Sanitizers disabled: Electron child process, CDP WebSocket, UDS listener, and esbuild
   // dev server all have async teardown that outlives the test boundary
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: async () => {
     const skip = shouldSkip();
     if (skip) {

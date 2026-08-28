@@ -33,8 +33,6 @@ Deno.test({
   name:
     "lock lifetime: still held (status stopping) while onStop runs; gone at exit",
   ignore: Deno.build.os === "windows",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const dir = await Deno.makeTempDir({ prefix: "aio-lock-lifetime-" });
     const repo = new URL("../", import.meta.url).pathname;

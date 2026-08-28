@@ -15,7 +15,6 @@ import { cell } from "../src/state/cell-create.ts";
 import { bootCells } from "../src/testing/cell-test.ts";
 import { log } from "../src/diagnostics/logger.ts";
 import { RESERVED_KEYS } from "../src/state/cell-types.ts";
-import { _resetListensToHints } from "../src/state/cell-methods-factory.ts";
 import { _resetSelectorHints } from "../src/state/cell-helpers.ts";
 
 // deno-lint-ignore no-explicit-any
@@ -79,22 +78,8 @@ Deno.test("dead 'A'/'E' are no longer reserved — a method named A is legal now
 
 // ── listensTo forms ────────────────────────────────────────────────────
 
-Deno.test("listensTo ARRAY form: still works, hints ONCE per cell", async () => {
-  _resetListensToHints();
-  const warns = await captureWarnings(async () => {
-    cell("lt_array", {
-      state: { n: 0 },
-      listensTo: ["ltsrc:bump"],
-      methods: {},
-    });
-    await Promise.resolve();
-  });
-  const hints = warns.filter((w) =>
-    w.includes("listensTo array form is deprecated")
-  );
-  assertEquals(hints.length, 1, "one hint, at definition");
-  assertStringIncludes(hints[0]!, "lt_array");
-});
+// The array form is retired in alpha70 — its refusal is pinned in
+// alpha70-retirements.test.ts ("listensTo array form — dev refuses; prod logs").
 
 Deno.test("listensTo OBJECT form accepts an ARRAY of sources — one handler, many triggers", async () => {
   const src = cell("lt_src", {

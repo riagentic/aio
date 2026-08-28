@@ -1,7 +1,8 @@
 // `am fix` — analyze a cloned aio app and repair the common things that stop it
 // building/running. Most are gitignored/uncommitted bits a fresh clone lacks
 // (the framework symlink, .env, electron runtime, submodules) plus a few config
-// safety nets. `am doctor` diagnoses config; `am fix` repairs. `--dry-run`
+// safety nets. `deno task doctor` diagnoses config; `am fix` repairs;
+// `am doctor` checks running instances against the aio on disk. `--dry-run`
 // (alias `--check`) reports what it WOULD do without changing anything.
 import { UI_ENTRY } from "../server/app-files.ts";
 import {
@@ -96,6 +97,7 @@ const TARGET_TASKS: Record<string, readonly string[]> = {
   "electron-client": ["install:electron"],
   "android-client": ["install:android"],
   "cli-client": [],
+  "ios-client": [],
 };
 
 /** Read the fleet an app declares: `client` (the default shell; `target` is
@@ -424,8 +426,8 @@ export async function cmdFix(
   // deno.json `target` → `client` (alpha52 rename: the key names the default
   // client SHELL, and "target" collided with build.targets — a different
   // axis). Mechanical key rename, value untouched; `client` wins if both
-  // exist. The runtime still reads `target` with a boot hint, so a dry run or
-  // a jsonc app keeps working meanwhile.
+  // exist. Since alpha70 the runtime REFUSES `target` in dev and logs it in
+  // prod (src/state/removals.ts) — this is the fix it names.
   if (typeof cfg.target === "string") {
     if (jsonPath.endsWith(".jsonc")) {
       add(
@@ -454,7 +456,7 @@ export async function cmdFix(
             JSON.stringify(out, null, 2) + "\n",
           );
         },
-        `"target": "${cfg.target}" is the pre-alpha52 spelling of "client"`,
+        `"target": "${cfg.target}" is the removed spelling of "client"`,
       );
       if (!dry) {
         cfg.client ??= cfg.target;
@@ -1082,15 +1084,31 @@ export async function cmdFix(
     add("dependencies cached", "would-fix", `deno cache ${entry}`);
   }
 
-  // Advisory: appId present (source — never auto-edited).
+  // Advisory: the app's IDENTITY is pinned somewhere (source — never
+  // auto-edited).
+  //
+  // Not "appId is in aio.run()". `resolveAppId` infers from `deno.json`'s
+  // `appId > title > name` and only falls back to the entry's directory name
+  // when a project declares none of the three — so an app whose deno.json has
+  // a `name` is already stable, and renaming its directory moves nothing. The
+  // advisory used to ignore that and fired on EVERY app scaffolded by
+  // `am create`, which writes exactly such a deno.json: the framework's own
+  // repair tool telling you to change what the framework had just generated,
+  // one command earlier. An advisory that fires on its own output is noise,
+  // and noise is how the ones that matter get skipped.
   if (entry) {
     const src = await Deno.readTextFile(join(dir, entry)).catch(() => "");
+    const pinnedInConfig = ["appId", "title", "name"].some((k) =>
+      typeof cfg?.[k] === "string" && String(cfg[k]).trim() !== ""
+    );
     if (/aio\.run\s*\(/.test(src)) {
       cfgAdvise(
-        !/appId\s*:/.test(src),
-        "appId set in aio.run()",
-        "add appId to aio.run() — without it the identity is inferred from " +
-          "title/dirname, so renaming either orphans the app's stored state",
+        !/appId\s*:/.test(src) && !pinnedInConfig,
+        "app identity is pinned",
+        "nothing declares this app's identity — add `appId` to aio.run(), or " +
+          "a `name` to deno.json. Without either it is inferred from the " +
+          "entry's DIRECTORY name, so moving or renaming the folder orphans " +
+          "the app's stored state",
       );
     }
   }
