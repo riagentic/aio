@@ -64,7 +64,6 @@ await aio.run({
   cells: [counter, wallet, analytics],
   ui: { title: "My App", width: 1200, height: 800 },
   transport: "auto", // top-level: 'uds' | 'ws' | 'auto'
-  appVersion: "1.2.0",
 });
 ```
 
@@ -73,7 +72,6 @@ await aio.run({
 | Option                        | Type                                     | Description                                                                                                                                                                |
 | ----------------------------- | ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `cells`                       | `CellEntry[]`                            | Cells to run — default: every imported `cell()` (they self-register)                                                                                                       |
-| `appVersion`                  | `string`                                 | App version — default: deno.json `version`                                                                                                                                 |
 | `isolate`                     | `string[]`                               | Only activate these cells (dev convenience)                                                                                                                                |
 | `beforeReduce`                | `fn`                                     | Intercept actions before reduce — return null to drop                                                                                                                      |
 | `appId`                       | `string`                                 | App identity (locks, sockets, `state.db`) — default: deno.json `appId`/`title`/`name`, else the entry's directory name                                                     |

@@ -12,6 +12,11 @@ reason to keep one (gated by `deno task check:docs`).
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha70 → alpha71](from-alpha70-to-alpha71.md) — nothing breaks: every
+  artifact says which build it is (`1.2.<commit count>`, derived) and the
+  installed file keeps the app's own name under `versions/<version>/`; a
+  CommonJS dependency no longer fails a bundle that works; dev evaluates the
+  prod client graph; a packaged renderer's errors reach the log.
 - **[alpha69 → alpha70](from-alpha69-to-alpha70.md) — THE last compat break:**
   every alpha52-era alias and duplicate import path retired (`aiol --safe-fix`
   rewrites them all), `memory.gcStressRatio` removed, shape drift refuses in

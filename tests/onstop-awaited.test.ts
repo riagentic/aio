@@ -25,7 +25,6 @@ Deno.test({
       // deno-lint-ignore no-explicit-any
       cells: [c as any],
       appId: `onstop-${crypto.randomUUID().slice(0, 8)}`,
-      appVersion: "0.0.0",
       client: "server-only",
       persist: false,
       libraryMode: true,
@@ -74,7 +73,6 @@ Deno.test({
         // deno-lint-ignore no-explicit-any
         cells: [c as any],
         appId: `onstart-${crypto.randomUUID().slice(0, 8)}`,
-        appVersion: "0.0.0",
         client: "server-only",
         persist: false,
         libraryMode: true,

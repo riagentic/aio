@@ -24,7 +24,6 @@ Deno.test("trojan: a forged payload._origin cannot reach the access predicate", 
   const app = await aio.run({
     cells: [vault],
     appId: `test-trojan-origin-${Deno.pid}`,
-    appVersion: "0.0.0",
     client: "server-only",
     persist: false,
     libraryMode: true,

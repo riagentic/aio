@@ -278,6 +278,7 @@ const EVER_REMOVED: readonly string[] = [
   'lint() from "aio/extras"',
   "testgen()",
   "memory.gcStressRatio",
+  "aio.run({ appVersion })",
 ];
 
 Deno.test("removals: no row is ever deleted — the record is append-only", () => {

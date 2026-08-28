@@ -9,6 +9,7 @@
 // Skipped (visibly) when the box has no non-loopback IPv4 or AIO_E2E=0.
 import { assert, assertStringIncludes } from "@std/assert";
 import { childEnv } from "./e2e-app-harness.ts";
+import { stopChild } from "./stop-child.ts";
 
 // Coverage profiles from spawned deno processes go to a throwaway temp dir —
 // never into the repo (an empty DENO_COVERAGE_DIR means "cwd"), never into
@@ -137,10 +138,7 @@ Deno.test({
       assertStringIncludes(html, "importmap");
     } finally {
       client?.close();
-      try {
-        proc.kill();
-      } catch { /* already dead */ }
-      await proc.status;
+      await stopChild(proc, { quiet: true });
       await proc.stderr.cancel();
       await Deno.remove(home, { recursive: true }).catch(() => {});
     }

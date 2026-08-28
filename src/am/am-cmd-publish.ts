@@ -39,6 +39,12 @@ import { appIdFromConfig } from "../server/single-instance-lock.ts";
 /** What `dist/manifest.json` records — the fleet build's own report. */
 type BuildManifest = {
   app?: string;
+  /** THE build version the fleet resolved — what every artifact is named
+   *  with and reports; `am publish` publishes THAT, never a re-derivation. */
+  version?: string;
+  commit?: string | null;
+  dirty?: boolean;
+  buildNumber?: number;
   targets?: {
     target: string;
     ok?: boolean;
@@ -241,43 +247,57 @@ export async function cmdPublish(
   const stamped: string[] = [];
   for (const p of ordered) {
     const binaryPath = join(distDir, p.file);
-    const m = await shipApp({
-      binaryPath,
-      version: flag("version") ?? cfg.version,
-      keyPath: key.path,
-      channel,
-      notes: flag("notes"),
-      minFrom: flag("min-from"),
-      // The artifact sits beside its manifest, so its own file name resolves.
-      url: p.file,
-      channelDir: outDir,
-      // THE platform this artifact is for — from the fleet's own record, not
-      // from this machine. `shipApp` defaults it to `Deno.build.*`, so a
-      // cross-compiled artifact published here claimed the HOST's platform:
-      // every manifest of a multi-platform build was written to the same
-      // `<host-os>-<host-arch>.json`, each overwriting the last, and a Windows
-      // client asking for `windows-x86_64.json` got a 404. The client checks
-      // the platform inside the signature too, so the wrong one is refused
-      // even when the path happens to resolve.
-      ...(p.platform ? { platform: p.platform } : {}),
-      // A cross-compiled artifact cannot be asked what it does with data — it
-      // does not run here. It does not have to be asked: a host artifact of the
-      // SAME build already answered. Only when there is no host artifact at all
-      // does the release go out without a contract, and that is said out loud
-      // below rather than left to a message on the user's machine months later.
-      ...(p.host
-        ? {}
-        : hostContract
-        ? { data: hostContract }
-        : { noData: true }),
-    });
-    if (p.host && m.data && !hostContract) hostContract = m.data;
+    let m: ShipManifest;
+    try {
+      m = await shipApp({
+        binaryPath,
+        // The version the BUILD resolved (dist/manifest.json), so the manifest
+        // says what the artifact says. A pre-versioning dist/ has none; ship
+        // then derives it from the tree.
+        version: flag("version") ?? build!.version,
+        buildNumber: build!.buildNumber,
+        commit: build!.commit,
+        allowDirty: args.includes("--allow-dirty"),
+        keyPath: key.path,
+        channel,
+        notes: flag("notes"),
+        minFrom: flag("min-from"),
+        // The artifact sits beside its manifest, so its own file name resolves.
+        url: p.file,
+        channelDir: outDir,
+        // THE platform this artifact is for — from the fleet's own record, not
+        // from this machine. `shipApp` defaults it to `Deno.build.*`, so a
+        // cross-compiled artifact published here claimed the HOST's platform:
+        // every manifest of a multi-platform build was written to the same
+        // `<host-os>-<host-arch>.json`, each overwriting the last, and a Windows
+        // client asking for `windows-x86_64.json` got a 404. The client checks
+        // the platform inside the signature too, so the wrong one is refused
+        // even when the path happens to resolve.
+        ...(p.platform ? { platform: p.platform } : {}),
+        // A cross-compiled artifact cannot be asked what it does with data — it
+        // does not run here. It does not have to be asked: a host artifact of the
+        // SAME build already answered. Only when there is no host artifact at all
+        // does the release go out without a contract, and that is said out loud
+        // below rather than left to a message on the user's machine months later.
+        ...(p.host
+          ? {}
+          : hostContract
+          ? { data: hostContract }
+          : { noData: true }),
+      });
+    } catch (e) {
+      // A refusal (a dirty version, a non-program) is a written message with
+      // the fix in it — print it, never a stack.
+      fail(e instanceof Error ? e.message : String(e), mode);
+    }
+    if (p.host && m!.data && !hostContract) hostContract = m!.data;
     if (!p.host && hostContract) stamped.push(p.file);
+    const mm = m!;
     // …and the artifact itself. A channel directory with a manifest and no
     // binary is a 404 at download time, which is the half-publish the docs'
     // "copy these two files" step produced whenever someone copied one.
     await Deno.copyFile(binaryPath, join(outDir, channel, p.file));
-    shipped.push({ m, spec: p });
+    shipped.push({ m: mm, spec: p });
   }
   const manifests = shipped.map((x) => x.m);
 

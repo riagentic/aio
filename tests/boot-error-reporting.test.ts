@@ -38,7 +38,6 @@ Deno.test({
       const a = await aio.run({
         cells: [v1],
         appId: "boot-err-probe",
-        appVersion: "0.0.0",
         client: "server-only",
         libraryMode: true,
         port: freePort(),
@@ -74,7 +73,6 @@ Deno.test({
         const b = await aio.run({
           cells: [v2],
           appId: "boot-err-probe",
-          appVersion: "0.0.0",
           client: "server-only",
           libraryMode: true,
           port: freePort(),

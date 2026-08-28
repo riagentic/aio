@@ -71,7 +71,10 @@ Deno.test({
       // Every answer the nonce sweep kept is OURS — a stranger's app cannot
       // echo a nonce it never saw. So the count is exact, not a floor.
       assertEquals(
-        apps.map((a) => a.name).sort(),
+        // Only THIS run's apps: another app on this machine running the same
+        // aio checkout answers a nonce probe too (every current responder
+        // echoes whatever nonce it is sent) — the tag is what is ours.
+        apps.map((a) => a.name).filter((n) => n.startsWith(tag)).sort(),
         hostApps.map((a) => a.name).sort(),
         `this run's three apps were not exactly what the nonce sweep found`,
       );

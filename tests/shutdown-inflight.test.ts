@@ -38,7 +38,6 @@ async function boot(dir: string, cells: unknown[]) {
   return await aio.run({
     cells,
     appId: "shutdown-inflight-app",
-    appVersion: "0.0.0",
     client: "server-only",
     persist: true,
     libraryMode: true,

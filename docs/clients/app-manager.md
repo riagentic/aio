@@ -168,7 +168,7 @@ to `deno.json` as a dev convenience.
 | Flag           | Effect                                                                                                                                                     |
 | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--app=X`      | Target a specific app by ID (default: from `deno.json` `appId`)                                                                                            |
-| `--port=N`     | Target a specific port (default: from lock file or 8000)                                                                                                   |
+| `--port=N`     | Target a specific TCP port. Normally unneeded: `am` reads the port — or the socket — from the app's lock file (see "Which transport")                      |
 | `--wait[=N]`   | start/stop: block until complete (default 10s / 9s — stop waits out the runtime's whole graceful budget before SIGKILL). state: poll every Ns (default 2s) |
 | `--json`       | Force JSON output                                                                                                                                          |
 | `--quiet`      | Suppress output (exit code only)                                                                                                                           |
@@ -225,6 +225,35 @@ A keyed app prints a pairing PIN at boot, single-use and short-lived. Once it is
 used or expires, `am pair` issues another — previously the only way to get a new
 one was to restart the app, which the docs told you to do with a command that
 did not exist.
+
+## Build and run (`am build`, `am compile`, `am dev`)
+
+Each of these IS the app's own task, run for you — the same command line, in the
+same process tree, so `am build` and `deno task build` can never differ (the
+maintainer's rule: a difference between the two is a bug, not a feature).
+
+```sh
+deno task am build                  # = deno task build: every deno.json build.targets → dist/
+deno task am build server electron  # = deno task build --targets=server,electron
+deno task am build --list           # = deno task build --list  (the target table)
+deno task am compile                # = deno task compile: the default target (deno.json "client")
+deno task am compile cli            # = deno task build --targets=cli  (one target, named)
+deno task am dev                    # = deno task dev: foreground, your Ctrl-C
+deno task am dev --client=electron  # flags pass through (--expose, --port=N, …)
+```
+
+Fleet flags pass through unchanged (`--release`, `--force`, `--platforms=…`,
+`--all-platforms`, `--out=…`); an unknown one is refused by the build itself,
+exactly as it is under `deno task`. An app with no such task (hand-rolled,
+pre-scaffold) is refused with the repair — `am fix` adds the standard tasks —
+rather than built some other way.
+
+| you want                                | run          |
+| --------------------------------------- | ------------ |
+| the app in your terminal while you edit | `am dev`     |
+| the app in the background, supervised   | `am start`   |
+| every artifact you ship                 | `am build`   |
+| just the one you run here               | `am compile` |
 
 ## Process management
 
@@ -704,28 +733,34 @@ cell method that sets the view, drive it with `am dispatch`, then `am shot`.
 
 ## Manual VM labs (`am lab`)
 
-A real Windows or macOS desktop in a container, driven by hand from a browser,
-with the app's `dist/` mounted into the guest. This is the manual tier next to
-`deno task test:wine` (headless, a gate) and `deno task lab` (Ubuntu, a gate) —
-nothing here runs in `deno task test`.
+A real Windows, macOS or Linux desktop — or the Android emulator — in a
+container, driven by hand from a browser, with the app's `dist/` handed into the
+guest. This is the manual tier next to `deno task test:wine` (headless, a gate)
+and `deno task lab` (Ubuntu, a gate) — nothing here runs in `deno task test`.
 
 ```sh
-am lab windows              # boot it, mount dist/, print the viewer URL
+am lab windows              # a VM: boot it, mount dist/, print the viewer URL
 am lab windows --status     # up? which port? how big is the VM disk?
 am lab windows --stop       # clean guest shutdown, then remove the container
 am lab windows --reset      # DELETE the VM disk (tens of GB) and start over
-am lab macos                # the same, but setup is partly MANUAL
+am lab macos                # a VM, but setup is partly MANUAL
+am lab linux                # an Ubuntu XFCE desktop: a container, not a VM —
+                            #   no KVM, no disk, seconds; dist/ is /shared inside
+am lab android              # the Android 14 emulator: needs /dev/kvm and an APK;
+                            #   am waits for boot and adb-installs it (re-run = re-install)
 ```
 
-Flags: `--port=N` (default: a free one), `--ram=8G`, `--cpus=4`, `--disk=64G`,
-`--version=11`, `--dist=<dir>`, `--tunnel`.
+Flags: `--port=N` (default: a free one), `--dist=<dir>`, `--tunnel` for all
+four; `--ram=8G`, `--cpus=4`, `--disk=64G`, `--version=11` for the two VMs
+(refused on a container); `--apk=<file>` for android.
 
-The VM disk lives in `~/.cache/aio/labs/<os>/` and survives `--stop`, so the
-first start installs an OS (Windows: ~10-20 min unattended, tens of GB) and
-every later start is a boot. Both labs hand `dist/` to the guest at
-`http://host.lan:8007/`, and print the command to paste; Windows can also mount
-it as `\\host.lan\Data`, macOS cannot mount it at all. Full detail, costs,
-preflight fixes and licensing: [VM labs](../testing/vm-labs.md).
+A VM disk lives in `~/.cache/aio/labs/<os>/` and survives `--stop`, so the first
+start installs an OS (Windows: ~30 min unattended, tens of GB) and every later
+start is a boot; the two container labs keep nothing. Every lab hands `dist/` to
+the guest over the same share (`http://host.lan:8007/` in the VMs) and prints
+the line for it — a `curl` on Windows/macOS, a `cp /shared/…` on Linux, and on
+Android the `adb install -r` that `am` ran. Full detail, costs, preflight fixes
+and licensing: [VM labs](../testing/vm-labs.md).
 
 ## Monitoring
 
@@ -774,6 +809,23 @@ socket is the stricter door of the two: it lives in a `0700` directory, while a
 loopback port admits any local process.
 
 `curl` examples below assume the TCP case; for a socket-only app use `am`.
+
+**Which transport.** You never choose. Every `am` command that talks to a
+running app — `state`, `dispatch`, `surface`, `trigger`, `clients`, `timeline`,
+`errors`, `health`, `metrics`, `snapshot`, `sql`, `tt`, `persist`, `migrations`,
+`cost` — resolves ONE endpoint (`controlEndpoint` in `am-http.ts`) from the lock
+the app wrote: a socket path means UDS, otherwise the recorded TCP port. The
+lock is found wherever the instance keeps its data home, so a packaged desktop
+app running from its own `appDir` on zero TCP ports (the default for a local
+Electron app since alpha66) is reached exactly like a dev server on `:8000`. The
+only case that still needs `--port=N` is a listener **no lock describes** — an
+orphan whose lock was removed, or a foreign aio process you are pointing at
+deliberately — and `am` then verifies the port answers as the app you named. A
+UDS app whose socket stops answering is reported as exactly that
+(`running
+on a UDS socket with no TCP port … the socket did not answer`), never
+as "not running". Two instances of one id from two homes is a real ambiguity;
+`am` lists them and asks for `--home=<dir>` rather than picking one.
 
 ### Inspect (GET)
 

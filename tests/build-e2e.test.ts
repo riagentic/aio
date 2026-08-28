@@ -16,20 +16,28 @@
 // download, so its real build is a second opt-in (AIO_BUILD_ELECTRON=1);
 // without it the AppImage path is still asserted to be wired.
 
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertMatch,
+  assertStringIncludes,
+} from "@std/assert";
 import { join } from "@std/path";
 import {
   assertServesApp,
   buildFlags,
   freePort,
+  isPlacedBinary,
   kill,
   makeApp,
+  placedBinary,
   spawn,
   task,
   waitForHttp,
 } from "./e2e-app-harness.ts";
 import { versionStamp } from "../src/build/build-bundle.ts";
 import { VERSION } from "../src/server/aio-cli.ts";
+import { MOUNT_LINE } from "../src/electron/electron-renderer-log.ts";
 
 const GATE = Deno.env.get("AIO_BUILD_E2E") === "1";
 const ELECTRON = Deno.env.get("AIO_BUILD_ELECTRON") === "1";
@@ -435,7 +443,7 @@ Deno.test({
       // `compile` is the fleet pipeline narrowed to the default target: the
       // binary lands in dist/ (flat), beside manifest.json.
       const distFiles = [...Deno.readDirSync(join(dir, "dist"))]
-        .filter((e) => e.isFile && !e.name.includes("."))
+        .filter((e) => e.isFile && isPlacedBinary(e.name))
         .map((e) => e.name);
       assertEquals(
         distFiles.length,
@@ -558,8 +566,8 @@ Deno.test({
 // catches the failure that shipped (assets missing from the image).
 
 Deno.test({
-  name: "artifact: `electron` packages a complete AppImage " +
-    "(AIO_BUILD_ELECTRON=1)",
+  name: "artifact: `electron` packages a complete AppImage, and its window " +
+    "mounts the App over aio:// (AIO_BUILD_ELECTRON=1)",
   ignore: !GATE || !ELECTRON,
   fn: async () => {
     const dir = await makeApp("counter", "build-e2e-electron-");
@@ -607,11 +615,131 @@ Deno.test({
         "dist/app.js missing from the AppImage",
       );
       await Deno.remove(outDir, { recursive: true }).catch(() => {});
+
+      // ── and it PAINTS: the window over aio:// mounts the App ──────────────
+      // A complete AppImage that starts, serves, logs `errors=0` and shows a
+      // blank window is the field report this phase exists for. Nothing but
+      // running the artifact exercises `aio://` (the privileged scheme, the
+      // preload bridge as the only transport, dist/ served by the main
+      // process): `deno task dev` takes it only when zero-port, and no unit
+      // test can. The proof is the renderer's own mount line, forwarded
+      // through the shell to the framework log — so this also proves the
+      // renderer→log pipe, the one that carries a thrown `ReferenceError`.
+      const display = await displayFor();
+      if (!display) {
+        console.warn(
+          "\n  ⚠ electron AppImage RUN phase skipped: no DISPLAY/WAYLAND_DISPLAY " +
+            "and no xvfb-run on PATH — the aio:// window path was NOT exercised " +
+            "(install xvfb, or run on a desktop).\n",
+        );
+        return;
+      }
+      await runAppImageAndAssertMounted(imagePath, display);
     } finally {
       await Deno.remove(dir, { recursive: true }).catch(() => {});
     }
   },
 });
+
+/** How to put a window somewhere: the real display, or a virtual one. */
+async function displayFor(): Promise<
+  { wrap: string[]; env: Record<string, string> } | null
+> {
+  const real = Deno.env.get("DISPLAY") || Deno.env.get("WAYLAND_DISPLAY");
+  if (real) return { wrap: [], env: {} };
+  const which = await new Deno.Command("sh", {
+    args: ["-c", "command -v xvfb-run"],
+    stdout: "null",
+    stderr: "null",
+  }).output().catch(() => ({ code: 1 }));
+  return which.code === 0
+    ? { wrap: ["xvfb-run", "-a", "-s", "-screen 0 1280x800x24"], env: {} }
+    : null;
+}
+
+/** Launch the packaged app (electron client, NO port — the shipped shape), in
+ *  its own home, and wait for the renderer's mount line in the FRAMEWORK log:
+ *  on the process's stderr and in the app's log file on disk (what `am logs`
+ *  reads). Any renderer ERROR line fails the run, with the log attached. */
+async function runAppImageAndAssertMounted(
+  imagePath: string,
+  display: { wrap: string[]; env: Record<string, string> },
+): Promise<void> {
+  const home = await Deno.makeTempDir({ prefix: "appimage-home-" });
+  const runCwd = await Deno.makeTempDir({ prefix: "foreign-cwd-" });
+  const mountRe = new RegExp(
+    `INFO\\s+renderer\\s+${MOUNT_LINE[0]}(\\d+)${
+      MOUNT_LINE[1].replace(/[()]/g, "\\$&")
+    }`,
+  );
+  // The window needs a display: the real one, or xvfb-run wrapping the launch.
+  const cmd = display.wrap[0] ?? imagePath;
+  const args = display.wrap.length
+    ? [...display.wrap.slice(1), imagePath, "--client=electron"]
+    : ["--client=electron"];
+  const proc = new Deno.Command(cmd, {
+    args,
+    cwd: runCwd,
+    env: {
+      ...display.env,
+      AIO_APPS_DIR: home,
+      AIO_PARENT_PID: String(Deno.pid),
+      // Never mount FUSE in CI; the build sets the same for itself.
+      APPIMAGE_EXTRACT_AND_RUN: "1",
+      // Keep the sandbox helper question out of this test's verdict.
+      TMPDIR: home,
+    },
+    stdout: "piped",
+    stderr: "piped",
+  }).spawn();
+  let out = "";
+  const drain = async (s: ReadableStream<Uint8Array>) => {
+    for await (const c of s) out += new TextDecoder().decode(c);
+  };
+  drain(proc.stdout).catch(() => {});
+  drain(proc.stderr).catch(() => {});
+  try {
+    const m = await waitFor(() => mountRe.exec(out) ?? undefined, 90_000)
+      .catch(() => {
+        throw new Error(
+          "the packaged window never reported a mounted UI (aio:// path):\n" +
+            out.slice(-6000),
+        );
+      });
+    assert(Number(m[1]) > 0, `mount line reports ${m[1]} elements:\n${out}`);
+    const rendererErrors = out.split("\n").filter((l) =>
+      /ERROR\s+renderer\s/.test(l)
+    );
+    assertEquals(
+      rendererErrors,
+      [],
+      `the renderer reported errors:\n${rendererErrors.join("\n")}`,
+    );
+    // The same line in the app's log FILE — the pipe `am logs` reads.
+    const logFile = await waitFor(() => {
+      for (const e of Deno.readDirSync(home)) {
+        const f = join(home, e.name, "logs", "app.log");
+        try {
+          const t = Deno.readTextFileSync(f);
+          if (mountRe.test(t)) return f;
+        } catch { /* not yet */ }
+      }
+      return undefined;
+    }, 15_000).catch(() => {
+      throw new Error(
+        `mount line reached stderr but not the app log under ${home}`,
+      );
+    });
+    assert(logFile, "app.log with the mount line");
+  } finally {
+    try {
+      proc.kill("SIGTERM");
+    } catch { /* already gone */ }
+    await proc.status.catch(() => {});
+    await Deno.remove(home, { recursive: true }).catch(() => {});
+    await Deno.remove(runCwd, { recursive: true }).catch(() => {});
+  }
+}
 
 // Always-on guard so this file is never a silent no-op: the electron target
 // must stay wired to the AppImage packager.
@@ -1037,6 +1165,105 @@ Deno.test({
       await Deno.remove(dir, { recursive: true }).catch(() => {});
       await Deno.remove(keep, { recursive: true }).catch(() => {});
       await Deno.remove(home, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
+// ── THE build version, end to end ───────────────────────────────────────────
+//
+// `major.minor.<commit count>`: the same code builds to the same artifact
+// name twice, a commit bumps it by one, and the binary REPORTS the version it
+// was named with — from `--version` and from `/__aio/health`. Anything less
+// and "which build is this?" has two answers (docs/build/versioning.md).
+async function gitIn(dir: string, ...args: string[]): Promise<void> {
+  const r = await new Deno.Command("git", {
+    args: ["-C", dir, ...args],
+    stdout: "null",
+    stderr: "piped",
+  }).output();
+  if (r.code !== 0) throw new Error(new TextDecoder().decode(r.stderr));
+}
+
+Deno.test({
+  name:
+    "version: two builds of one commit name one artifact; a commit bumps it; the binary reports it",
+  ignore: !GATE,
+  fn: async () => {
+    const dir = await makeApp("counter", "build-e2e-version-");
+    try {
+      // The scaffold writes `"version": "0.1"`; make it a repository at one
+      // commit so the build number is DERIVED (the scaffold's .gitignore
+      // already keeps dep/, dist/ and .aio/ out of the dirty set).
+      await gitIn(dir, "init", "-q");
+      await gitIn(dir, "config", "user.email", "t@example.com");
+      await gitIn(dir, "config", "user.name", "t");
+      await gitIn(dir, "config", "commit.gpgsign", "false");
+      await gitIn(dir, "add", "-A");
+      await gitIn(dir, "commit", "-q", "-m", "one");
+
+      const built = async (): Promise<{ name: string; manifest: string }> => {
+        const r = await task(dir, "compile");
+        assertEquals(r.code, 0, `compile failed:\n${r.out}\n${r.err}`);
+        const bin = placedBinary(dir);
+        return {
+          name: bin.slice(bin.lastIndexOf("/") + 1),
+          manifest: await Deno.readTextFile(join(dir, "dist", "manifest.json")),
+        };
+      };
+
+      const first = await built();
+      assertMatch(
+        first.name,
+        /-0\.1\.1$/,
+        `clean build at commit 1: ${first.name}`,
+      );
+      const m1 = JSON.parse(first.manifest);
+      assertEquals(m1.version, "0.1.1");
+      assertEquals(m1.buildNumber, 1);
+      assertEquals(m1.dirty, false);
+      assertMatch(m1.commit, /^[0-9a-f]{8}$/);
+
+      // Same code, built again: the SAME name (the stamp and dist/ the first
+      // build wrote must not have dirtied the tree).
+      const again = await built();
+      assertEquals(
+        again.name,
+        first.name,
+        "a rebuild of one commit renamed the artifact",
+      );
+
+      // An edit → dirty, visibly; a commit → +1, clean.
+      await Deno.writeTextFile(join(dir, "NOTE.md"), "two\n");
+      const dirtyBuild = await built();
+      assertMatch(
+        dirtyBuild.name,
+        /-0\.1\.1-dirty\.[0-9a-f]{8}$/,
+        dirtyBuild.name,
+      );
+      await gitIn(dir, "add", "-A");
+      await gitIn(dir, "commit", "-q", "-m", "two");
+      const second = await built();
+      assertMatch(second.name, /-0\.1\.2$/, `after a commit: ${second.name}`);
+
+      // The binary REPORTS the version it is named with — from a foreign cwd,
+      // so it is the embedded stamp answering, not the project on disk.
+      const bin = placedBinary(dir);
+      await Deno.chmod(bin, 0o755);
+      const foreign = await Deno.makeTempDir({ prefix: "foreign-cwd-" });
+      const v = await new Deno.Command(bin, {
+        args: ["--version"],
+        cwd: foreign,
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+      const vOut = new TextDecoder().decode(v.stdout) +
+        new TextDecoder().decode(v.stderr);
+      assertStringIncludes(vOut, " 0.1.2 ", `--version:\n${vOut}`);
+
+      const { health } = await bootFromForeignCwd(bin, ["--client=browser"]);
+      assertEquals(JSON.parse(health).appVersion, "0.1.2");
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
     }
   },
 });

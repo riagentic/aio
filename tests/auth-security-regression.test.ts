@@ -28,7 +28,6 @@ async function bootApp() {
   const app = await aio.run({
     cells: [vault],
     appId: `test-sec-${Deno.pid}`,
-    appVersion: "0.0.0",
     client: "server-only",
     persist: false,
     libraryMode: true,
@@ -276,7 +275,6 @@ Deno.test("regression: TOTP cannot be re-enrolled while it is enabled", async ()
   const app = await aio.run({
     cells: [cell("t2fa", { state: { n: 0 }, methods: {} })],
     appId: `test-totp-rotate-${Deno.pid}`,
-    appVersion: "0.0.0",
     client: "server-only",
     persist: false,
     libraryMode: true,
@@ -344,7 +342,6 @@ Deno.test("regression: a session token in the URL does not authenticate HTTP", a
   const app = await aio.run({
     cells: [cell("vaultq", { state: { n: 0 }, methods: {} })],
     appId: `test-urltok-${Deno.pid}`,
-    appVersion: "0.0.0",
     client: "server-only",
     persist: false,
     libraryMode: true,
@@ -408,7 +405,6 @@ Deno.test({
   const app = await aio.run({
     cells: [cell("vaultrm", { state: { n: 0 }, methods: {} })],
     appId: `test-authrm-${Deno.pid}`,
-    appVersion: "0.0.0",
     client: "server-only",
     persist: false,
     libraryMode: true,
@@ -514,7 +510,6 @@ Deno.test({
       }),
     ],
     appId: `test-ttgate-${Deno.pid}`,
-    appVersion: "0.0.0",
     client: "server-only",
     persist: false,
     libraryMode: true,
@@ -650,7 +645,6 @@ Deno.test({
       }),
     ],
     appId: `test-ttpub-${Deno.pid}`,
-    appVersion: "0.0.0",
     client: "server-only",
     persist: false,
     libraryMode: true,

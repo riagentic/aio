@@ -1715,6 +1715,15 @@ export function detectShapeDrift(
     if (out.length >= MAX_DRIFT) return;
     const dk = kindOf(decl);
     const sk = kindOf(stor);
+    // `null` on either side carries NO shape, so there is nothing to compare
+    // and nothing to migrate. `T | null` is how every app spells "not yet":
+    // `user: null`, `vault: null`, `me: null` in `initialState`, holding an
+    // object the moment someone signs in. Reading the declared `null` as a
+    // schema made that ordinary case look like a type change, and dev REFUSED
+    // TO BOOT for every app that had ever been used once — the drift this
+    // check exists for is a field renamed or removed (declared `undefined`),
+    // which is still caught below.
+    if (dk === "null" || sk === "null") return;
     if (dk !== sk) {
       out.push({
         cell,

@@ -535,6 +535,12 @@ Deno.test("boot smoke", async () => {
 `baseDir` defaults to cwd and the entry to `ui.entry` (`App.tsx`); modules
 outside `baseDir` must be reachable through `serveDirs`, as in the dev server.
 
+What `smoke()` proves is that every eager module is _served_ — it does not
+evaluate them. A module that throws at load (`Buffer` at module scope in a Node
+SDK) passes `smoke()` and blank-screens the built app; that class is refused by
+the dev server's prod-graph evaluation and by `deno task build` — see
+[dev mode](../build/dev-mode.md#dev-evaluates-the-prod-graph).
+
 ## Two surfaces at once: `testMultiClient`
 
 aio's central promise is that an Electron window, a browser tab and `am` all

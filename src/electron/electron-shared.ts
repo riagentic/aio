@@ -3,6 +3,12 @@
 import { slugify } from "../server/single-instance-lock.ts";
 import { generateHTML } from "../server/server-html-gen.ts";
 import type { UiTheme } from "../server/aio-types.ts";
+import {
+  MOUNT_DEADLINE_MS,
+  MOUNT_LINE,
+  mountLine,
+  RENDERER_TAG,
+} from "./electron-renderer-log.ts";
 
 export type Log = { info: (msg: string) => void; error: (msg: string) => void };
 
@@ -459,8 +465,130 @@ contextBridge.exposeInMainWorld('__aioWindow', {
 ipcRenderer.on('__aio:navigate', (_e, url) => {
   window.dispatchEvent(new CustomEvent('aio:navigate', { detail: { url } }));
 });
+${udsPreloadDiagnostics()}
 `;
 }
+
+/** The renderer's side of "did the page paint, and what did it throw" — CJS
+ *  for the preload (isolated world, shares the page's DOM).
+ *
+ *  Mount: a MutationObserver on the document reports the moment `#root` has a
+ *  child — `ui mounted N element(s)` — once per document. The count is the
+ *  proof the artifact e2e and the onboarding lab assert on; before it existed,
+ *  "the window is mapped" was the strongest claim a test could make about a
+ *  packaged app, and a mapped window with a dead renderer passed it.
+ *
+ *  Errors are NOT collected here, on purpose: the preload's isolated world
+ *  does not receive the page world's `error`/`unhandledrejection` events
+ *  (measured — listeners here stayed silent while the page threw). Chromium
+ *  writes every uncaught throw and rejection to the console with its source
+ *  and line, and the main process reads that stream (`console-message` in
+ *  `tmplRendererDiagnostics`) — one channel, the one that actually fires. */
+export function udsPreloadDiagnostics(): string {
+  return `
+(function () {
+  let mounted = false;
+  const report = () => {
+    if (mounted) return true;
+    const r = document.getElementById('root');
+    if (!r || r.childElementCount === 0) return false;
+    mounted = true;
+    ipcRenderer.send('__aio:mounted', r.querySelectorAll('*').length);
+    return true;
+  };
+  const start = () => {
+    if (report()) return;
+    const mo = new MutationObserver(() => { if (report()) mo.disconnect(); });
+    mo.observe(document, { childList: true, subtree: true });
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
+  else start();
+})();
+`;
+}
+
+/** The main-process side: every way a renderer can fail, and its one success
+ *  signal, written to THIS process's stderr as `${RENDERER_TAG}<level>] …` —
+ *  the Deno parent reads that stream and routes each line to the framework
+ *  logger at that level (electron-spawn.ts, `classifyElectronLine`), so a
+ *  throw in the page lands in the app log, in `am logs`, and on the console
+ *  at ERROR, with the file:line Chromium gave it.
+ *
+ *  Why here and not `console.error` in the shell: the child's stdout is the
+ *  app's own inherited stream and never reaches the app LOG; stderr is the
+ *  stream the parent already reads (to drop GPU-probe noise). One tagged
+ *  stream, one classifier.
+ *
+ *  `hasMountSignal`: the UDS shell's preload reports `__aio:mounted`; the
+ *  WebSocket shell has no preload, so its watchdog would fire on every healthy
+ *  page — it gets the error hooks and no mount deadline.
+ *
+ *  Expects `win` and `ipcMain` in scope. */
+export function tmplRendererDiagnostics(hasMountSignal: boolean): string {
+  // The encoder half of `classifyElectronLine` — same tag, same fold.
+  return `
+  const _rlog = (level, msg) => {
+    try { process.stderr.write(${JSON.stringify(RENDERER_TAG)} + level + '] ' +
+      String(msg).replace(/\\r?\\n/g, ' \u23ce ') + '\\n'); } catch {}
+  };
+  // console-message: Electron ≥ 30 passes one details object ({level:
+  // 'info'|'warning'|'error'|'debug', message, lineNumber, sourceId}); older
+  // runtimes pass positionals (event, level 0-3, message, line, sourceId).
+  // Both are read, so the app's Electron pin cannot silence this.
+  // Rest args on purpose: Electron reads the listener's arity and nags
+  // "'console-message' arguments are deprecated" for any named positional.
+  win.webContents.on('console-message', (e, ...a) => {
+    let lv, msg, ln, src;
+    if (e && typeof e.level === 'string') { lv = e.level; msg = e.message; ln = e.lineNumber; src = e.sourceId; }
+    else { lv = ['debug', 'info', 'warning', 'error'][a[0]] || 'info'; msg = a[1]; ln = a[2]; src = a[3]; }
+    if (lv !== 'error' && lv !== 'warning') return;
+    _rlog(lv === 'error' ? 'error' : 'warn', String(msg) + (src ? ' (' + src + ':' + ln + ')' : ''));
+  });
+  win.webContents.on('render-process-gone', (_e, d) => {
+    _rlog('error', 'renderer process gone: ' + (d && d.reason) + ' (exit code ' + (d && d.exitCode) + ')');
+  });
+  win.webContents.on('preload-error', (_e, p, err) => {
+    _rlog('error', 'preload failed: ' + ((err && err.message) || err) + ' (' + p + ')');
+  });
+  win.webContents.on('unresponsive', () => _rlog('error', 'renderer unresponsive'));
+  win.webContents.on('responsive', () => _rlog('info', 'renderer responsive again'));
+  win.webContents.on('did-fail-load', (_e, code, desc, failedUrl, isMainFrame) => {
+    if (isMainFrame === false || code === -3) return; // -3: ERR_ABORTED (superseded)
+    _rlog('error', 'page failed to load: ' + failedUrl + ' (' + code + ' ' + desc + ')');
+  });
+  let _mounted = false;
+  ipcMain.on('__aio:mounted', (_e, n) => {
+    _mounted = true;
+    _rlog('info', ${JSON.stringify(MOUNT_LINE[0])} + n + ${
+    JSON.stringify(MOUNT_LINE[1])
+  });
+  });
+  // did-navigate fires for MAIN-FRAME navigations only (a <webview> guest or
+  // an in-page hash change never resets the verdict).
+  win.webContents.on('did-navigate', () => { _mounted = false; });
+${
+    hasMountSignal
+      ? `  // A loaded page whose #root stays empty is the blank window the field
+  // report described — say so, at error, with where to look.
+  // One verdict per LOAD: a reload arms a new timer and retires the old one,
+  // or every load in a dev reload burst would report on the newest page.
+  let _loadGen = 0;
+  win.webContents.on('did-finish-load', () => {
+    const gen = ++_loadGen;
+    setTimeout(() => {
+      if (gen !== _loadGen || _mounted || win.isDestroyed()) return;
+      _rlog('error', 'ui did not mount within ${MOUNT_DEADLINE_MS}ms of the page loading — #root is empty. ' +
+        'The renderer errors above say why (a throw at module scope in the bundle is the usual cause).');
+    }, ${MOUNT_DEADLINE_MS});
+  });`
+      : ""
+  }
+`;
+}
+
+// `mountLine` is the wire spelling the shell writes above; re-exported here so
+// the shell generators and the tests read one name.
+export { mountLine };
 
 /** Generates prod-mode index.html for the aio:// protocol.
  *

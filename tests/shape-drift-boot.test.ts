@@ -46,7 +46,6 @@ Deno.test("boot shape-drift: a stored field dropped from initialState surfaces o
     const app = await aio.run({
       cells: [wallet],
       appId: APP_ID,
-      appVersion: "0.0.0",
       client: "server-only",
       libraryMode: true,
       port: PORT,
@@ -77,7 +76,6 @@ Deno.test("boot shape-drift: a stored field dropped from initialState surfaces o
     const app = await aio.run({
       cells: [wallet],
       appId: APP_ID,
-      appVersion: "0.0.0",
       client: "server-only",
       libraryMode: true,
       port: PORT,

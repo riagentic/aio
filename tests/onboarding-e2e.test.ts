@@ -24,6 +24,7 @@ import {
   kill,
   killAnd,
   makeApp,
+  placedBinary,
   REPO_ROOT,
   spawn,
   task,
@@ -201,12 +202,15 @@ for (const via of ["task", "buildFlags"] as const) {
           : await buildFlags(dir, "--compile");
         assertEquals(r.code, 0, `${via} compile failed:\n${r.err}`);
 
-        const binDir = via === "task" ? join(dir, "dist") : dir;
-        const binEntry = [...Deno.readDirSync(binDir)].find((e) =>
-          e.isFile && !e.name.includes(".")
+        // The fleet places a VERSIONED name in dist/ (`app-0.1.<build>…`);
+        // the direct builder writes the bare name into the project root.
+        const binPath = via === "task" ? placedBinary(dir) : join(
+          dir,
+          [...Deno.readDirSync(dir)].find((e) =>
+            e.isFile && !e.name.includes(".")
+          )?.name ?? "",
         );
-        assert(binEntry, "no compiled binary produced");
-        const binPath = join(binDir, binEntry.name);
+        assert(binPath !== dir + "/", "no compiled binary produced");
         await Deno.chmod(binPath, 0o755);
 
         // Run the binary from a DIFFERENT directory — a compiled binary must be

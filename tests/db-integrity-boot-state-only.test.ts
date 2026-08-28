@@ -38,7 +38,6 @@ Deno.test({
       aio.run({
         cells: [c],
         appId,
-        appVersion: "0.0.0",
         client: "server-only",
         libraryMode: true,
         singleton: false,

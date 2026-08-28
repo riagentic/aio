@@ -9,7 +9,7 @@ import { join } from "@std/path";
 import { aio, cell } from "../mod.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { _resetParsedCli } from "../src/server/aio-cli.ts";
-import { shapeDriftRefusal } from "../src/server/aio-boot.ts";
+import { detectShapeDrift, shapeDriftRefusal } from "../src/server/aio-boot.ts";
 
 const _argsDesc = Object.getOwnPropertyDescriptor(Deno, "args")!;
 function setMode(mode: "dev" | "prod"): void {
@@ -24,6 +24,34 @@ function restoreArgs(): void {
   Object.defineProperty(Deno, "args", _argsDesc);
   _resetParsedCli();
 }
+
+Deno.test("shape-drift: a nullable field that now holds a value is not drift", () => {
+  // `T | null` is how every app spells "not yet". Reading the declared `null`
+  // as a schema made that ordinary case look like a type change, and DEV
+  // refused to boot for every app that had ever been used once.
+  assertEquals(
+    detectShapeDrift(
+      { app: { user: null, seen: 0 } },
+      { app: { user: { name: "ada" }, seen: 3 } },
+    ),
+    [],
+  );
+  assertEquals(
+    detectShapeDrift({ app: { user: { name: "" } } }, { app: { user: null } }),
+    [],
+  );
+  assertEquals(
+    detectShapeDrift({ app: { kept: 1 } }, { app: { kept: 1, dropped: "x" } })
+      .map((d) => d.issue),
+    ["unknown-field"],
+  );
+  assertEquals(
+    detectShapeDrift({ app: { n: 0 } }, { app: { n: "0" } }).map((d) =>
+      d.issue
+    ),
+    ["type-changed"],
+  );
+});
 
 Deno.test("shape-drift refusal: names the cell, the drifted keys and both fixes", () => {
   const msg = shapeDriftRefusal(
@@ -74,7 +102,6 @@ Deno.test("shape-drift strict: DEV refuses to boot on unmigrated drift; PROD boo
       app: aio.run({
         cells: [wallet],
         appId,
-        appVersion: "0.0.0",
         client: "server-only",
         libraryMode: true,
         port,

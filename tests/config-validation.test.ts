@@ -102,7 +102,7 @@ Deno.test("validateConfig: empty object passes", () => {
 Deno.test("validateConfig: valid config does not exit", () => {
   const f = fakeExit();
   validateConfig(
-    { appId: "test", appVersion: "1.0" },
+    { appId: "test", port: 8000 },
     VALID_AIO_CONFIG_KEYS,
     "AioConfig",
     f.exit,

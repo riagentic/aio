@@ -5,6 +5,7 @@
 // baseDir from the main module. This test scaffolds that minimal app in a
 // temp dir and boots it for real.
 import { assert, assertEquals } from "@std/assert";
+import { stopChild } from "./stop-child.ts";
 // Coverage profiles from spawned deno processes go to a throwaway temp dir —
 // never into the repo (an empty DENO_COVERAGE_DIR means "cwd"), never into
 // the parent's coverage profile.
@@ -96,10 +97,7 @@ await aio.run(); // everything inferred`,
       assertEquals(cfg.title, "Zero Test");
       assert(true);
     } finally {
-      try {
-        proc.kill();
-      } catch { /* exited */ }
-      await proc.status;
+      await stopChild(proc, { quiet: true });
       await proc.stdout.cancel();
       await Deno.remove(dir, { recursive: true }).catch(() => {});
     }

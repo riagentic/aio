@@ -323,7 +323,7 @@ Deno.test("the .server.* convention is decided in exactly ONE place", async () =
   // the same bug waiting, so a copy is the failure.
   const sites = [
     "src/build/esbuild-plugin.ts",
-    "src/build/build-bundle.ts",
+    "src/build/graph-audit.ts",
     "src/server/graph-validator.ts",
     "src/server/server-static.ts",
     "src/testing/smoke-test.ts",

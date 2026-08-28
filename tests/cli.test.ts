@@ -608,7 +608,9 @@ Deno.test("electronMainScriptUDS: one readiness decider, and a real backlog", ()
   // landed between the two were lost (tests/electron-main-relay.test.ts).
   assertEquals(script.includes("rendererReady"), true);
   assertEquals(script.includes("pageReady"), false);
-  assertEquals(script.includes("on('did-finish-load'"), false);
+  // did-finish-load appears ONCE now — the empty-#root watchdog (alpha70+),
+  // which reports; readiness is still rendererReady's alone.
+  assertEquals(script.split("on('did-finish-load'").length - 1, 1);
   // Undelivered frames wait in an ordered queue, not a single state slot.
   assertEquals(script.includes("_pending"), true);
   assertEquals(script.includes("lastFullState"), true);

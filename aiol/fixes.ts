@@ -1402,7 +1402,28 @@ export function moveImports(src: string, mv: MovedImports): string | null {
         : toLine;
     },
   );
-  return changed ? out : null;
+  // The dynamic form: `const { a, b } = await import("aio")` — rewritten only
+  // when EVERY destructured name moves (a split would need two awaits, which
+  // is the reader's decision, not a rewriter's). A field report hit exactly
+  // one of these after 20 static sites were rewritten cleanly.
+  const dyn = new RegExp(
+    `(\\{([^}]*)\\}\\s*=\\s*await\\s+import\\(\\s*)["']${spec}["'](\\s*\\))`,
+    "g",
+  );
+  const out2 = out.replace(
+    dyn,
+    (whole, head: string, inner: string, tail: string) => {
+      const names = inner.split(",").map((s) => s.trim()).filter(Boolean);
+      if (
+        names.length === 0 || !names.every((n) => mv.names.has(bareName(n)))
+      ) {
+        return whole;
+      }
+      changed = true;
+      return `${head}"${mv.to}"${tail}`;
+    },
+  );
+  return changed ? out2 : null;
 }
 
 /** `--safe-fix` half of {@linkcode moveImports}. */

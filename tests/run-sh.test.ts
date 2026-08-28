@@ -332,3 +332,69 @@ Deno.test("run.sh: a failed or empty installer download is DETECTED", async () =
     await Deno.remove(d, { recursive: true }).catch(() => {});
   }
 });
+
+// ── the installed file's NAME ──────────────────────────────────────────────
+//
+// Both installers put the artifact at `<root>/<app>/versions/<version>/<app><ext>`
+// — the version in the DIRECTORY, never in the file name. A compiled binary
+// derives its identity, and therefore its data directory, from its own file
+// name: `demo-1.2.345.AppImage` is an app that renames itself on every update
+// and comes up with empty state. Now that the build stamps the version INTO
+// artifact names, that outcome is one hand-rolled `basename` away, in two
+// scripts — so neither script derives the name: both ask the build
+// (`--print-install-name`), which owns the rule (`installArtifactName`).
+
+Deno.test("run.sh + run.ps1: the installed name is ASKED for, never derived", async () => {
+  for (const script of ["run.sh", "run.ps1"]) {
+    const src = await Deno.readTextFile(join(REPO_ROOT, script));
+    assert(
+      src.includes("--print-install-name="),
+      `${script} must ask the build what an artifact is installed as`,
+    );
+    // A version-number pattern in an installer is a naming rule being written
+    // a second time. The ONE allowed use is refusing an artifact whose name
+    // carries a version that this app's pinned aio cannot read — marked, so a
+    // new one has to be marked deliberately rather than blend in.
+    const unmarked = src.split("\n")
+      .filter((l) => /\[0-9\]|\\d\+/.test(l))
+      .filter((l) => !l.includes("aio-ok: refuse-versioned-name"))
+      .map((l) => l.trim());
+    assertEquals(
+      unmarked,
+      [],
+      `${script} parses a version out of a file name — ask the build ` +
+        `(--print-install-name) instead: two copies of that rule is an app ` +
+        `installed under two different names`,
+    );
+  }
+});
+
+Deno.test("run.sh + run.ps1: the VERSION goes in the directory, not the file name", async () => {
+  const sh = await Deno.readTextFile(join(REPO_ROOT, "run.sh"));
+  const ps = await Deno.readTextFile(join(REPO_ROOT, "run.ps1"));
+  // POSIX: versions/<version>/<base><ext>
+  assert(
+    /version_dir="\$target_dir\/versions\/\$app_ver"/.test(sh),
+    "run.sh must place the artifact under versions/<version>/",
+  );
+  assert(
+    /versioned="\$version_dir\/\$app_base\$app_ext"/.test(sh),
+    "run.sh must name the installed file <app><ext>, with no version in it",
+  );
+  // Windows: the same layout, or the updater cannot swap it and the pruner
+  // cannot see it (resolveInstallLayout / pruneVersions both read versions/).
+  assert(
+    /\$versionDir = Join-Path \(Join-Path \$targetDir "versions"\) \$ver/
+      .test(ps),
+    "run.ps1 must place the artifact under versions\\<version>\\",
+  );
+  assert(
+    /\$versioned = Join-Path \$versionDir "\$base\$ext"/.test(ps),
+    "run.ps1 must name the installed file <app><ext>, with no version in it",
+  );
+  assert(
+    !/"\$base-\$ver\$ext"/.test(ps),
+    "run.ps1 names the installed file with a version — the app renames " +
+      "itself, and its data directory, on every update",
+  );
+});

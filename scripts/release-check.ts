@@ -22,28 +22,112 @@
 //   deno task check:release          # everything (fast, then heavy)
 //   deno task check:release --fast   # static gates + surfaces only
 import { VERSION } from "../src/server/aio-cli.ts";
+import { descendantPids } from "../src/server/single-instance-lock.ts";
 
 const root = new URL("../", import.meta.url).pathname;
 const FAST_ONLY = Deno.args.includes("--fast");
 
 type Result = { name: string; ok: boolean; detail: string };
 
+/** No gate may run forever. `deno test` has no per-test timeout: one child that
+ *  ignores SIGTERM turns the suite into a process that prints "has been running
+ *  for over 16m0s" and never stops — measured, once, at 56 minutes, on a
+ *  release check nobody was watching. A gate that hangs is a gate that never
+ *  reports, so every one carries a ceiling and a hang FAILS, naming the last
+ *  line it printed (for `deno test`, that is the test that was running).
+ *
+ *  Generous on purpose: the ceiling catches a hang, never a slow machine. */
+const DEFAULT_CEILING_MIN = 20;
+const CEILING_MIN: Record<string, number> = {
+  test: 45,
+  "test:onboard": 45,
+  "test:build": 45,
+  "test:electron": 45,
+  "lab (fresh ubuntu)": 45,
+};
+
+/** The tail is all that is ever printed — keep that much, not 250 KB of green. */
+function keepTail(buf: string, add: string): string {
+  const s = buf + add;
+  return s.length > 64_000 ? s.slice(-64_000) : s;
+}
+
 async function run(name: string, cmd: string[]): Promise<Result> {
   const t0 = Date.now();
-  const p = await new Deno.Command(cmd[0]!, {
+  const child = new Deno.Command(cmd[0]!, {
     args: cmd.slice(1),
     cwd: root,
     stdout: "piped",
     stderr: "piped",
-  }).output();
+  }).spawn();
+  let out = "", err = "";
+  const dec = new TextDecoder();
+  const pump = async (
+    s: ReadableStream<Uint8Array>,
+    sink: (t: string) => void,
+  ) => {
+    for await (const c of s) sink(dec.decode(c));
+  };
+  const pumps = Promise.all([
+    pump(child.stdout, (t) => out = keepTail(out, t)).catch(() => {}),
+    pump(child.stderr, (t) => err = keepTail(err, t)).catch(() => {}),
+  ]);
+  const ceilingMs = (CEILING_MIN[name] ?? DEFAULT_CEILING_MIN) * 60_000;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const status = await Promise.race([
+    child.status,
+    new Promise<"timeout">((r) => {
+      timer = setTimeout(() => r("timeout"), ceilingMs);
+    }),
+  ]);
+  clearTimeout(timer);
   const secs = ((Date.now() - t0) / 1000).toFixed(0);
-  if (p.success) return { name, ok: true, detail: `${secs}s` };
+  // WHICH stream says why. `deno test` writes its type-check chatter to stderr
+  // and its FAILURES to stdout, so taking stderr's tail (the old rule) printed
+  // three identical "Check src/db/db-worker.ts" lines for a suite that had a
+  // real failing test in it — a gate that reports nothing is a gate you re-run
+  // by hand. Prefer the stream whose tail carries a verdict.
+  const VERDICT = /FAILED|failed \(|error:|✗|panicked/i;
+  const lastLines = (n: number) => {
+    const tail = (t: string) =>
+      t.trimEnd().split("\n").filter((l) => l.trim()).slice(-n);
+    const eTail = tail(err), oTail = tail(out);
+    const pick = eTail.some((l) => VERDICT.test(l))
+      ? eTail
+      : oTail.some((l) => VERDICT.test(l))
+      ? oTail
+      : (eTail.length ? eTail : oTail);
+    return pick.join("\n      ");
+  };
+  if (status === "timeout") {
+    // Kill the tree, not just the runner: `deno test` spawns real apps, and a
+    // survivor holds the ports (and the locks) the next gate needs.
+    let kids: number[] = [];
+    try {
+      kids = await descendantPids(child.pid);
+    } catch { /* pgrep missing — the direct child still goes */ }
+    try {
+      child.kill("SIGKILL");
+    } catch { /* raced */ }
+    for (const pid of kids.reverse()) {
+      try {
+        Deno.kill(pid, "SIGKILL");
+      } catch { /* already gone, or not ours */ }
+    }
+    await child.status.catch(() => {});
+    await pumps;
+    return {
+      name,
+      ok: false,
+      detail: `${secs}s — HUNG: no result within ${
+        ceilingMs / 60_000
+      }m, killed.\n      last output:\n      ${lastLines(3)}`,
+    };
+  }
+  await pumps;
+  if (status.success) return { name, ok: true, detail: `${secs}s` };
   // The last few lines of a failing gate are the part that says why.
-  const text = new TextDecoder().decode(
-    p.stderr.length > 0 ? p.stderr : p.stdout,
-  );
-  const tail = text.trimEnd().split("\n").slice(-4).join("\n      ");
-  return { name, ok: false, detail: `${secs}s\n      ${tail}` };
+  return { name, ok: false, detail: `${secs}s\n      ${lastLines(8)}` };
 }
 
 /** A release SURFACE — the checks no command covers, which is exactly why they

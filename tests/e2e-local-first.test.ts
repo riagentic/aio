@@ -9,6 +9,7 @@
 // server round-trip and prove nothing — the exact "documented limitation with
 // no test" decay the reporter paid for twice.
 import { assert, assertEquals } from "@std/assert";
+import { stopChild } from "./stop-child.ts";
 
 const _childCovDir = Deno.env.get("DENO_COVERAGE_DIR") ??
   Deno.makeTempDirSync({ prefix: "aio-child-cov-" });
@@ -243,10 +244,7 @@ export default function App() {
       tab?.kill();
     } catch { /* already gone */ }
     await tab?.status.catch(() => {});
-    try {
-      proc.kill();
-    } catch { /* already gone */ }
-    await proc.status.catch(() => {});
+    await stopChild(proc, { quiet: true });
     await Deno.remove(profile, { recursive: true }).catch(() => {});
     await Deno.remove(dir, { recursive: true }).catch(() => {});
   }

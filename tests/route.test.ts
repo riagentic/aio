@@ -150,7 +150,6 @@ Deno.test("route e2e: a :param route with a cookie is served by a real app", asy
   const app = await aio.run({
     cells: [counter],
     appId: "route-e2e",
-    appVersion: "0.0.0",
     client: "server-only",
     persist: false,
     libraryMode: true,
@@ -229,7 +228,6 @@ Deno.test("route e2e: a catch-all route cannot swallow /__aio or /ws", async () 
   const app = await aio.run({
     cells: [counter],
     appId: "route-reserved",
-    appVersion: "0.0.0",
     client: "server-only",
     persist: false,
     libraryMode: true,
@@ -274,7 +272,6 @@ Deno.test("route e2e: a broken handler fails ONE request, loudly — never the p
   const app = await aio.run({
     cells: [c],
     appId: "route-broken",
-    appVersion: "0.0.0",
     client: "server-only",
     persist: false,
     libraryMode: true,

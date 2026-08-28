@@ -4,24 +4,13 @@
  */
 import { APP_ICON, APP_STYLE, UI_ENTRY } from "../server/app-files.ts";
 import { DENO_JSON_NAMES } from "../server/deno-json.ts";
-import {
-  matchShare,
-  resolveShare,
-  type ShareRoot,
-} from "../server/app-dirs.ts";
+import { resolveShare, type ShareRoot } from "../server/app-dirs.ts";
 import { basename, dirname, join, relative, resolve } from "@std/path";
-import { bundleFrameworkEntries, ESBUILD_JSX } from "./esbuild-shared.ts";
-import {
-  _resetServerOnlyStatic,
-  aioBrowserPlugin,
-  serverOnlyDynamic,
-  serverOnlyStatic,
-} from "./esbuild-plugin.ts";
-import { makeHttpPlugin } from "./build-integrity.ts";
+import { serverOnlyDynamic } from "./esbuild-plugin.ts";
 import type { BuildConfig } from "./build-config.ts";
 import { VERSION } from "../server/aio-cli.ts";
 import { VERSION_STAMP } from "../protocol/protocol-version.ts";
-import { SERVER_FILE_RE } from "../entries.ts";
+import { bundleClient, judgeClientBundle } from "./client-bundle.ts";
 import { appIconPng, appIconSvg } from "./app-icon.ts";
 import { misplacedIconHint, resolveAppIcon } from "./build-helpers.ts";
 
@@ -261,40 +250,11 @@ function targetStamp(doAndroid: boolean, uiEntry: string): string {
  *  project root), derived from THE app-dir decider (`cfg.appDir`) — never a
  *  hardcoded './src/App.tsx': the app dir is wherever the entry lives, exactly
  *  as the dev server resolves it (WYSIDIWYSIP). */
-export function appImportSpecifier(
-  root: string,
-  appDir: string,
-  uiEntry = UI_ENTRY,
-): string {
-  const rel = relative(root, appDir).replaceAll("\\", "/");
-  return rel === "" || rel === "." ? `./${uiEntry}` : `./${rel}/${uiEntry}`;
-}
-
-/** Generate the esbuild entry point code.
- *  Android (standalone WebView) auto-mounts — the generated index.html loads
- *  the bundle as a classic script, so there is no importer to call mount(). */
-function makeEntryCode(doAndroid: boolean, appImport: string): string {
-  // The stamps are NOT part of the entry: they go in as esbuild's `banner`,
-  // which is prepended verbatim AFTER minification — so the text a reader
-  // matches (a stale-bundle check, the artifact e2e) survives, and the
-  // globals they set are still the first statements the bundle runs.
-  if (doAndroid) {
-    return `\
-import { mount as _mount } from 'aio/renderer'
-import { ensureConnected } from 'aio/air'
-import App from ${JSON.stringify(appImport)}
-function boot() { ensureConnected(); _mount(document.getElementById('root'), App) }
-if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot)
-else boot()
-`;
-  }
-  return `\
-import { mount as _mount } from 'aio/renderer'
-import { ensureConnected } from 'aio/air'
-import App from ${JSON.stringify(appImport)}
-export function mount(el) { ensureConnected(); _mount(el, App) }
-`;
-}
+export {
+  appImportSpecifier,
+  makeEntryCode,
+  sharePlugin,
+} from "./client-bundle.ts";
 
 /** What a `dist/app.js` on disk SAYS it is: the aio version that built it and
  *  the target shape it was built for. `null` when there is no bundle at all.
@@ -525,31 +485,6 @@ export async function runBundle(
     } catch { /* no dist — skip */ }
     await Deno.mkdir(dist, { recursive: true });
 
-    // Build import map for esbuild. THE `aio*` table (bundleFrameworkEntries)
-    // is package-root relative; frameworkSrcDir is `<pkg>/src`. A remote (JSR)
-    // framework has no local files at all — makeHttpPlugin applies the SAME
-    // table against the fetched package instead.
-    const aioImports = frameworkSrcDir
-      ? Object.fromEntries(
-        Object.entries(bundleFrameworkEntries(doAndroid)).map((
-          [spec, rel],
-        ) => [spec, join(dirname(frameworkSrcDir), rel)]),
-      )
-      : {};
-    // The import map this bundle resolves through: the app's own, plus THE
-    // `aio*` table. It is handed to esbuild as `alias` below — and only as
-    // `alias`. It used to be serialized to `<root>/_build.json` as well, a
-    // file esbuild was never told about and nothing else has ever read: a
-    // write and a delete in the user's project root, per build, for nobody.
-    // (The app's `compilerOptions` went into that file too. JSX is decided by
-    // ESBUILD_JSX — one config for the dev transpiler and the prod bundler, so
-    // dev and prod cannot compile differently — which is why there was nothing
-    // to pass on.)
-    const imports: Record<string, string> = {
-      ...(mainConfig.imports as Record<string, string>),
-      ...aioImports,
-    };
-
     // The workspace share — the SAME declaration the dev server serves from
     // (deno.json `share`, one resolver), so `/shared/x.ts` means one file in
     // both worlds. Refused here, before esbuild runs, with the entry named:
@@ -562,163 +497,64 @@ export async function runBundle(
       Deno.exit(1);
     }
 
-    // Generate temp entry
-    const buildEntryPath = join(root, "_build_entry.tsx");
-    const entryCode = makeEntryCode(
+    // THE bundle (client-bundle.ts) — the same invocation the dev server
+    // runs in memory at boot, written to disk here. Then THE judgement:
+    // graph-audit (server-only leaks, Node globals at module scope) and
+    // graph-eval (the bundle's module scope actually run, in a worker with
+    // no Node globals). A bundle that cannot load NEVER becomes an artifact.
+    // B-6: pin the EXACT version deno.json pins (esbuild@0.24.2) so dev
+    // transpile and prod bundle never resolve a different esbuild than tested.
+    // deno-lint-ignore no-import-prefix
+    const esbuild = await import("npm:esbuild@0.24.2");
+    const bundle = await bundleClient({
+      esbuild,
+      root,
+      appDir,
+      uiEntry: cfg.uiEntry ?? UI_ENTRY,
       doAndroid,
-      appImportSpecifier(root, appDir, cfg.uiEntry ?? UI_ENTRY),
-    );
-    await Deno.writeTextFile(buildEntryPath, entryCode);
-
-    // esbuild alias: skip npm:/jsr: specifiers (resolved via node_modules)
-    const esbuildAlias: Record<string, string> = {};
-    for (const [k, v] of Object.entries(imports)) {
-      if (!v.startsWith("npm:") && !v.startsWith("jsr:")) esbuildAlias[k] = v;
-    }
-
-    let bundleOk = false;
-    let metaInputs: Record<string, unknown> | undefined;
-    try {
-      // B-6: pin the EXACT version deno.json pins (esbuild@0.24.2) so dev
-      // transpile and prod bundle never resolve a different esbuild than tested.
-      // deno-lint-ignore no-import-prefix
-      const esbuild = await import("npm:esbuild@0.24.2");
-      const jsxConfig = ESBUILD_JSX; // shared dev==prod JSX config
-      _resetServerOnlyStatic();
-
-      const result = await esbuild.build({
-        entryPoints: [buildEntryPath],
-        bundle: true,
-        // classic <script> in the WebView HTML — ESM would throw on `export`
-        format: doAndroid ? "iife" : "esm",
-        platform: "browser",
-        target: "esnext",
-        // A built artifact is what ships: minified. Export names survive
-        // (`mount` is what the shell calls), stack traces keep the source map
-        // when the app asks for one — and the counter app measured 302 KB
-        // raw / 79 KB gzipped without this, 139 KB / 51 KB with.
-        minify: true,
+      imports: (mainConfig.imports as Record<string, string>) ?? {},
+      shares,
+      frameworkSrcDir: isRemote ? "" : frameworkSrcDir,
+      frameworkBase: cfg.frameworkBase,
+      write: {
+        outfile: out,
         // Prepended verbatim after minification: the version and shape stamps
         // keep their exact text (readers match it) and still run first.
-        banner: {
-          js: versionStamp(VERSION) +
-            targetStamp(doAndroid, cfg.uiEntry ?? UI_ENTRY),
-        },
-        outfile: out,
-        ...jsxConfig,
-        alias: esbuildAlias,
-        plugins: [
-          ...(isRemote
-            ? [aioBrowserPlugin(), makeHttpPlugin(cfg)]
-            : [aioBrowserPlugin()]),
-          sharePlugin(shares),
-        ],
-        nodePaths: [join(root, "node_modules")],
-        logLevel: "warning",
-        // The module graph esbuild actually read — the freshness cache stats
-        // THESE, instead of guessing extensions and roots (a guess shipped
-        // stale bundles for `.js`/`.json` imports and for every monorepo
-        // sibling package).
-        metafile: true,
-      });
-      bundleOk = (result.errors?.length ?? 0) === 0;
-      metaInputs = result.metafile?.inputs as
-        | Record<string, unknown>
-        | undefined;
-    } catch (e) {
-      console.error(`[build] \u2717 esbuild failed: ${e}`);
-    } finally {
-      await Deno.remove(buildEntryPath).catch(() => {});
-    }
-
-    if (!bundleOk) {
+        banner: versionStamp(VERSION) +
+          targetStamp(doAndroid, cfg.uiEntry ?? UI_ENTRY),
+      },
+    });
+    const metaInputs = bundle.inputs as Record<string, unknown>;
+    if (!bundle.ok) {
+      for (const e of bundle.errors) {
+        console.error(`[build] \u2717 esbuild: ${e}`);
+      }
       await refuseBundle(root, out, "[build] \u2717 bundle failed");
     }
 
-    // A STATIC server-only import inside the client graph is a broken bundle
-    // that esbuild is happy with.
-    //
-    // The stub the plugin substitutes is correct for the DYNAMIC form (`await
-    // import("node:sqlite")` inside a method body is dead code in the
-    // browser). Statically imported at the top of a module the client reaches,
-    // the same stub makes every use of it throw at first access — and the
-    // symptom is a blank page with "1 module error", nowhere near the import.
-    // A production consumer shipped that and could not see it: their whole
-    // test suite renders SERVER-side, where `node:sqlite` exists, so every
-    // test stayed green. Nothing but the bundler is positioned to notice, so
-    // the bundler says it — with the importing module named, because "which
-    // file?" is the entire question at that point.
-    const leaks = Object.entries(serverOnlyStatic);
-    if (leaks.length > 0) {
-      console.error(
-        "[build] \u2717 server-only module(s) statically imported by the " +
-          "BROWSER bundle:",
-      );
-      for (const [spec, importers] of leaks) {
-        for (const imp of importers) {
-          console.error(`         ${relative(root, imp) || imp} → ${spec}`);
-        }
+    // The judgement — one decider, shared with the dev server. A leak, a
+    // module-scope Node global or a bundle whose top level throws is refused
+    // here with the importing module named, because "which file?" is the
+    // entire question at that point — and because every test renders
+    // server-side, where `node:sqlite` and `Buffer` exist, nothing but the
+    // bundle itself is positioned to notice.
+    const verdict = await judgeClientBundle(bundle, root, {
+      shell: cfg.doElectron ? "electron" : "browser",
+    });
+    if (!verdict.ok) {
+      for (const line of verdict.lines) {
+        console.error(line.startsWith("\u2717") ? `[build] ${line}` : line);
       }
-      console.error(
-        "       These do not exist in a browser. The bundle would build and " +
-          "then throw at first use, showing a blank page.\n" +
-          (leaks.some(([spec]) => SERVER_FILE_RE.test(spec))
-            ? "       fix: a *.server.ts module is server-only BY CONVENTION " +
-              "— import it dynamically from the method that needs it " +
-              '(`const { x } = await import("./io.server.ts")`), never ' +
-              "statically from client-reachable code."
-            : "       fix: load it inside the method that needs it — `const " +
-              '{ x } = await import("node:…")` is server-side and stays out ' +
-              "of the client graph — or move the code into a `*.server.ts` " +
-              "module and import THAT dynamically."),
-      );
       await refuseBundle(root, out);
     }
-
-    // ── the RESOLVED graph, not the specifiers we happened to see ──
-    //
-    // Everything above reads the spelling of an import as WRITTEN. That is one
-    // hop short of the truth, and the audit walked through the gap four ways,
-    // each of them building clean and printing `✓ dist/app.js`:
-    //
-    //   ① `vault.server.tsx` — the plugin's filter was `/\.server\.ts$/`, so
-    //      the `.tsx` twin was never intercepted at all. Its contents were
-    //      grepped out of dist/app.js. (Meanwhile the DEV server refused to
-    //      serve the same file: prod strictly more permissive than dev.)
-    //   ② `"vault": "./x.server.ts"` in the import map — esbuild's `alias`
-    //      substitutes AFTER a plugin's filter runs, so the plugin only ever
-    //      saw the bare specifier `vault`.
-    //   ③ a template-literal `import(`./${name}.server.ts`)`.
-    //   ④ `await import("aio/server")` — the DOCUMENTED lazy pattern — which
-    //      returns external without recording anything.
-    //
-    // A specifier filter cannot close a gap that opens between the specifier
-    // and the file. esbuild already tells us which files it actually read:
-    // `metafile.inputs` is the resolved graph, so that is what gets checked.
-    // One check, all four defeats, and no new information to collect.
-    const graphLeaks = Object.keys(metaInputs ?? {}).filter((f) =>
-      SERVER_FILE_RE.test(f)
-    ).sort();
-    if (graphLeaks.length > 0) {
-      console.error(
-        "[build] \u2717 server-only file(s) are IN the browser bundle:",
-      );
-      for (const f of graphLeaks) console.error(`         ${f}`);
-      console.error(
-        "       A *.server.* module is server-only BY CONVENTION — the dev " +
-          "server refuses to serve one, and anything it holds (keys, tokens, " +
-          "queries, internal hosts) is readable by anyone who opens " +
-          "dist/app.js.\n" +
-          "       This is the RESOLVED graph, so it catches what a specifier " +
-          "check cannot: a .server.tsx twin, an import-map alias pointing at " +
-          "a server file, and a computed import().\n" +
-          "       fix: import it dynamically from the cell method that needs " +
-          'it (`const { x } = await import("./io.server.ts")`), never ' +
-          "statically from client-reachable code — and check your import map " +
-          "for an alias that resolves to one.",
-      );
-      await refuseBundle(root, out);
+    for (const note of verdict.notes) {
+      console.log(`[build]   note: ${note}`);
     }
+    console.log(
+      `[build] \u2713 bundle audited + evaluated (${
+        verdict.auditMs.toFixed(0)
+      }ms + ${verdict.evalMs.toFixed(0)}ms)`,
+    );
 
     // A STANDALONE Android build has no Deno runtime — the APK is a Kotlin
     // WebView plus this bundle, and nothing else. So the dynamic
@@ -837,48 +673,4 @@ export async function runBundle(
     await Deno.writeTextFile(join(dist, "icon.svg"), appIconSvg(label));
     console.log(`[build] \u2713 dist/icon.png (default, "${label}")`);
   }
-}
-
-/** Resolve `/<share>/…` imports to the declared share directory — the
- *  bundler's half of the ONE spelling the dev server also serves.
- *
- *  A root-absolute import that matches no share is refused with the fix named
- *  when nothing exists at that filesystem path: esbuild would otherwise say
- *  "could not resolve" about a path that is not a path. A real absolute
- *  filesystem path (an import map pointing at one) is left to esbuild. */
-export function sharePlugin(shares: readonly ShareRoot[]): {
-  name: string;
-  // deno-lint-ignore no-explicit-any
-  setup(build: any): void;
-} {
-  return {
-    name: "aio-share",
-    setup(build) {
-      build.onResolve(
-        { filter: /^\// },
-        (args: { path: string; importer: string }) => {
-          const hit = matchShare(shares, args.path);
-          if (hit) return { path: join(hit.share.dir, hit.rel) };
-          try {
-            Deno.statSync(args.path);
-            return undefined; // a real absolute path — esbuild's business
-          } catch {
-            const from = args.importer ? ` (imported by ${args.importer})` : "";
-            const name = args.path.split("/")[1] ?? "";
-            return {
-              errors: [{
-                text: `"${args.path}"${from} is a root-absolute import, and ` +
-                  `no share is declared for "/${name}". A directory outside ` +
-                  `the app root is imported as "/<dir>/…" once it is ` +
-                  `declared in deno.json: "share": ["../${name}"]` +
-                  (shares.length
-                    ? ` (declared: ${shares.map((s) => s.prefix).join(", ")})`
-                    : ""),
-              }],
-            };
-          }
-        },
-      );
-    },
-  };
 }

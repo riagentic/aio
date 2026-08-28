@@ -5,6 +5,7 @@
 // + the server must all agree.
 import { assert, assertEquals } from "@std/assert";
 import { testDisplayEnv } from "../src/testing/test-display.ts";
+import { stopChild } from "./stop-child.ts";
 
 // Coverage profiles from spawned deno processes go to a throwaway temp dir.
 const _childCovDir = Deno.env.get("DENO_COVERAGE_DIR") ??
@@ -276,18 +277,12 @@ export default function App() {
       assertEquals(await opCount(), 1, "and no duplicate arrives after it");
     } finally {
       for (const t of tabs) {
-        try {
-          t.kill();
-        } catch { /* exited */ }
-        await t.status;
+        await stopChild(t, { quiet: true });
       }
       for (const pr of profiles) {
         await Deno.remove(pr, { recursive: true }).catch(() => {});
       }
-      try {
-        proc.kill();
-      } catch { /* exited */ }
-      await proc.status;
+      await stopChild(proc, { quiet: true });
       // Takes the child's app home with it — it lives at `${dir}/home`.
       await Deno.remove(dir, { recursive: true }).catch(() => {});
     }

@@ -5,6 +5,7 @@
 // terminal says why. Proven against real chromium.
 import { assert, assertStringIncludes } from "@std/assert";
 import { testDisplayEnv } from "../src/testing/test-display.ts";
+import { stopChild } from "./stop-child.ts";
 
 // Coverage profiles from spawned deno processes go to a throwaway temp dir.
 const _childCovDir = Deno.env.get("DENO_COVERAGE_DIR") ??
@@ -158,10 +159,7 @@ async function renderBroken(appTsx: string): Promise<{
     await new Promise((r) => setTimeout(r, 500));
     return { dom: new TextDecoder().decode(chrome.stdout), log: logRef.buf };
   } finally {
-    try {
-      proc.kill();
-    } catch { /* exited */ }
-    await proc.status;
+    await stopChild(proc, { quiet: true });
     await Deno.remove(dir, { recursive: true }).catch(() => {});
   }
 }
@@ -194,8 +192,19 @@ Deno.test({
     const { dom, log } = await renderBroken(
       `export function App() { return <div>hi</div>; } // note: NOT default`,
     );
-    assertStringIncludes(dom, "data-aio-blank-screen");
-    assertStringIncludes(log, "no default export"); // actionable message
+    // Either the in-page overlay, or (alpha70+) the diagnostic page the
+    // prod-graph gate serves before anything renders.
+    assert(
+      dom.includes("data-aio-blank-screen") || dom.includes("Module Errors"),
+      "the page names the failure",
+    );
+    // The prod-graph gate (alpha70+) refuses this at boot, before any
+    // render: the diagnostic page and the log both name the missing export.
+    assert(
+      log.includes("no default export") ||
+        (log + dom).includes('for import "default"'),
+      "the missing default export is named",
+    );
   },
 });
 
@@ -230,15 +239,9 @@ Deno.test({
           logRef.buf.includes("BLANK SCREEN (empty render)") ? true : null,
       );
     } finally {
-      try {
-        chrome.kill();
-      } catch { /* exited */ }
-      await chrome.status;
+      await stopChild(chrome, { quiet: true });
       await Deno.remove(profile, { recursive: true }).catch(() => {});
-      try {
-        proc.kill();
-      } catch { /* exited */ }
-      await proc.status;
+      await stopChild(proc, { quiet: true });
       await Deno.remove(dir, { recursive: true }).catch(() => {});
     }
   },
@@ -289,15 +292,9 @@ Deno.test({
       });
       assert(!logRef.buf.includes("BLANK SCREEN"), "no warning when healthy");
     } finally {
-      try {
-        chrome.kill();
-      } catch { /* exited */ }
-      await chrome.status;
+      await stopChild(chrome, { quiet: true });
       await Deno.remove(profile, { recursive: true }).catch(() => {});
-      try {
-        proc.kill();
-      } catch { /* exited */ }
-      await proc.status;
+      await stopChild(proc, { quiet: true });
       await Deno.remove(dir, { recursive: true }).catch(() => {});
     }
   },

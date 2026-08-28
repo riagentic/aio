@@ -181,7 +181,7 @@ Deno.test("bundle refusal: no exit inside the rebuild window skips the discard",
   // dist/ has already been cleaned, so a refusal there (e.g. a bad `share`)
   // leaves nothing behind — that half is pinned separately below.
   const start = src.indexOf("const bundleFresh = await isBundleFresh(cfg);");
-  const from = src.indexOf("const result = await esbuild.build({", start);
+  const from = src.indexOf("const bundle = await bundleClient({", start);
   const to = src.indexOf("await writeBundleInputs(", from);
   assert(
     start > 0 && from > start && to > from,

@@ -12,8 +12,11 @@
 // Exits 1 on any BLOCKING error (client would blank-screen), 0 otherwise.
 // Warnings (conditional `Deno.*` usage, maybe-safe `@std/*`) print but pass.
 
-import { join, resolve } from "@std/path";
-import { validateGraph } from "../src/server/graph-validator.ts";
+import { basename, dirname, join, resolve } from "@std/path";
+import {
+  createProdGraphCheck,
+  validateGraph,
+} from "../src/server/graph-validator.ts";
 import { transpile } from "../src/server/server-transpile.ts";
 import { buildBrowserImportMap } from "../src/server/server-html-importmap.ts";
 import { hasVendorImmer } from "../src/server/server-vendor.ts";
@@ -59,7 +62,20 @@ if (!fileExists(entry)) {
   Deno.exit(0);
 }
 
-const result = await validateGraph(entry, importMap, (s, f) => transpile(s, f));
+// THE prod graph, too: the client bundle is built in memory with the build's
+// own esbuild invocation, audited (server-only leaks past a dynamic import,
+// Node globals at module scope) and evaluated. What `deno task build` would
+// refuse, this refuses — same decider, same words.
+const result = await validateGraph(
+  entry,
+  importMap,
+  (s, f) => transpile(s, f),
+  undefined,
+  createProdGraphCheck({
+    absBaseDir: dirname(entry),
+    uiEntry: basename(entry),
+  }),
+);
 
 // server-only-import is a guaranteed client break → blocking (non-zero exit).
 // server-only-api (conditional Deno.* / maybe-safe @std) + circular = warnings.

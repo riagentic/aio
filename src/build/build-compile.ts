@@ -10,6 +10,7 @@ import {
 import { isProcessAlive } from "../server/single-instance-lock.ts";
 import { dirname, fromFileUrl, isAbsolute, join, relative } from "@std/path";
 import { artifactName } from "./platforms.ts";
+import { BUILD_STAMP_FILE } from "./build-version.ts";
 import {
   compiledMaxHeapMB,
   physicalMemoryBytes,
@@ -581,6 +582,10 @@ export function compileArgs(opts: {
   v8Flags?: string[];
   assets: string[];
   excludes: string[];
+  /** The app-version stamp (`.aio/build-version.json`), root-relative — the
+   *  runtime reads it to report the version the build resolved. Absent only
+   *  when there is none to embed (a caller compiling without the pipeline). */
+  stamp?: string;
   out: string;
   entry: string;
   /** Cross-compilation triple; omitted when building for the host so deno
@@ -595,6 +600,7 @@ export function compileArgs(opts: {
     ...(opts.hasDist ? ["--include", "dist/"] : []),
     ...opts.workerInclude,
     ...opts.assets,
+    ...(opts.stamp ? ["--include", opts.stamp] : []),
     ...opts.excludes.flatMap((e) => ["--exclude", e]),
     "-o",
     opts.out,
@@ -659,6 +665,7 @@ export async function runDenoCompile(cfg: BuildConfig): Promise<boolean> {
         assets,
         v8Flags,
         excludes,
+        stamp: BUILD_STAMP_FILE,
         out: compileTarget,
         entry: configEntry,
         target: cfg.targetTriple,

@@ -35,12 +35,12 @@ const big = cell("big", {
 // Two apps, one process — supported (D2), and the default (non-library) mode,
 // so each installs its own signal handler.
 await aio.run({
-  cells: [small], appId: "sig-small", appVersion: "0.0.0",
+  cells: [small], appId: "sig-small",
   client: "server-only", persist: true, port: Number(Deno.env.get("PORT_A")),
   appDir: D + "/a", persistDebounceMs: 100000,
 });
 await aio.run({
-  cells: [big], appId: "sig-big", appVersion: "0.0.0",
+  cells: [big], appId: "sig-big",
   client: "server-only", persist: true, port: Number(Deno.env.get("PORT_B")),
   appDir: D + "/b", persistDebounceMs: 100000,
 });

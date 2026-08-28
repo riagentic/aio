@@ -195,6 +195,8 @@ export type ClientMeta = {
   /** Negotiated wire-protocol version (A3). Undefined until the client's
    *  "proto" hello arrives. */
   protocolVersion?: number;
+  /** The client's own hello: its aio version and app version, when it said. */
+  peer?: { aio?: string; app?: string };
   /** The SESSION token this socket authenticated with, when it authenticated
    *  with one. A socket outlives the credential that opened it, so the token
    *  is kept and re-checked — see `_revalidate`. Absent for anonymous sockets
@@ -204,6 +206,9 @@ export type ClientMeta = {
 
 /** Dependencies injected from server.ts closure */
 export interface WsDeps {
+  /** THE app version (`_appVersion`) — announced in the proto hello so a
+   *  client can say which build it talks to. */
+  appVersion?: string;
   /** Cost meter — sees every frame handed to a socket (`am cost`). */
   costMeter?: import("../vitals/cost-meter.ts").CostMeter;
   dispatch: (event: unknown, user?: AioUser) => Promise<unknown> | void;
@@ -637,7 +642,7 @@ export function createWsManager(deps: WsDeps): WsManager {
       }
       // A3: version handshake — server speaks first, before any state.
       try {
-        socket.send(enc("proto", protoHello(VERSION)));
+        socket.send(enc("proto", protoHello(VERSION, deps.appVersion)));
       } catch { /* socket closing during onopen (AIO-155) */ }
       try {
         const uiState = deps.getUIState(meta.user);
@@ -964,6 +969,9 @@ export function createWsManager(deps: WsDeps): WsManager {
           return;
         }
         meta.protocolVersion = result.effective;
+        // What the client SAID it is — shown by `am clients`, so an operator
+        // can see which aio / app build each connection runs.
+        meta.peer = { aio: theirs.ver, app: theirs.app };
         return;
       }
       case "tt-cmd":

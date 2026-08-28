@@ -12,14 +12,11 @@
 // twice — `cli.expose ?? false` for the transport, and `parseCli().expose` for
 // the `visible:"all"` privacy warning. Adding a config key to only the first would
 // have bound an app to 0.0.0.0 with the privacy warning silently switched off.
+import { resolveRuntimeVersion } from "../src/server/app-version.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
-import {
-  _exposeOf,
-  _resolveAppVersion,
-  exposeReason,
-} from "../src/server/aio.ts";
+import { _exposeOf, exposeReason } from "../src/server/aio.ts";
 import { parseCli } from "../src/server/aio-cli.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
@@ -209,23 +206,69 @@ Deno.test({
 // ── appVersion honesty ────────────────────────────────────────────────
 
 Deno.test("appVersion: an unknown version says unknown — never a confident 0.0.0", () => {
-  const compiled = _resolveAppVersion(undefined, undefined, true);
+  const compiled = resolveRuntimeVersion({
+    declared: undefined,
+    compiled: true,
+    stamp: null,
+    tree: null,
+  });
   assert(
     !compiled.includes("0.0.0"),
     `a compiled binary with no embedded version must not invent one: ${compiled}`,
   );
   assertStringIncludes(compiled, "unknown");
   assertStringIncludes(compiled, "compiled binary");
-  assertStringIncludes(compiled, "appVersion", "must say how to fix it");
+  assertStringIncludes(compiled, "deno task build", "must say how to fix it");
 
-  const script = _resolveAppVersion(undefined, undefined, false);
+  const script = resolveRuntimeVersion({
+    declared: undefined,
+    compiled: false,
+    stamp: null,
+    tree: null,
+  });
   assert(!script.includes("0.0.0"), script);
   assertStringIncludes(script, "unknown");
 
-  // A real version is passed through untouched, from either source.
-  assertEquals(_resolveAppVersion("1.2.3", "9.9.9", true), "1.2.3");
-  assertEquals(_resolveAppVersion(undefined, "9.9.9", true), "9.9.9");
-  assertEquals(_resolveAppVersion("  ", "9.9.9", false), "9.9.9");
+  // A compiled binary reports the stamp THE build embedded; a pinned
+  // deno.json version is the one fallback a stamp-less binary may use. There
+  // is no config override — `aio.run({ appVersion })` is retired.
+  const stamp = {
+    version: "1.2.345",
+    base: "1.2",
+    build: 345,
+    commit: "abcdef12",
+    dirty: false,
+    source: "derived" as const,
+    aio: "x",
+    builtAt: "",
+  };
+  const at = (o: Partial<Parameters<typeof resolveRuntimeVersion>[0]>) =>
+    resolveRuntimeVersion({
+      declared: undefined,
+      compiled: true,
+      stamp: null,
+      tree: null,
+      ...o,
+    });
+  assertEquals(at({ stamp }), "1.2.345");
+  assertEquals(at({ declared: "9.9.9" }), "9.9.9");
+  // A source run derives — the same rule as the build, dirty suffix included.
+  assertEquals(
+    at({
+      compiled: false,
+      declared: "1.2",
+      tree: { repo: true, count: 7, commit: "abc", hash: null },
+    }),
+    "1.2.7",
+  );
+  assertEquals(
+    at({
+      compiled: false,
+      declared: "1.2",
+      tree: { repo: true, count: 7, commit: "abc", hash: "9f3ac2b1" },
+    }),
+    "1.2.7-dirty.9f3ac2b1",
+  );
 });
 
 Deno.test({

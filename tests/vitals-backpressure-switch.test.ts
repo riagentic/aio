@@ -25,7 +25,6 @@ async function multiplierAfterStalePing(
   const app = await aio.run({
     cells: [probe],
     appId: `test-bp-${backpressure}`,
-    appVersion: "0.0.0",
     client: "server-only",
     persist: false,
     libraryMode: true,

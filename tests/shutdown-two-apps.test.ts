@@ -49,7 +49,6 @@ async function boot(name: string, dir: string, def: unknown) {
   return await aio.run({
     cells: [def],
     appId: name,
-    appVersion: "0.0.0",
     client: "server-only",
     persist: true,
     libraryMode: true,

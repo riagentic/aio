@@ -422,12 +422,27 @@ export const HELP_TEXT = `Onboard:
                           am on live files — your edits apply at once)
   uninstall               Remove am (your aio apps are untouched)
 
+Build & run (each IS the app's own task — the same command line, run for you,
+so \`am build\` and \`deno task build\` can never differ):
+  build [target…]         = deno task build — every target in deno.json
+                          build.targets → dist/ + manifest.json. Words narrow
+                          it (am build server electron = --targets=…); fleet
+                          flags pass through (--list --release --force
+                          --platforms=… --all-platforms)
+  compile [target]        = deno task compile — the DEFAULT target (deno.json
+                          "client") alone; \`am compile cli\` = build --targets=cli
+  dev [flags]             = deno task dev — in the FOREGROUND (your terminal,
+                          your Ctrl-C); flags pass through (--client=electron
+                          --expose --port=N). \`am start\` is the supervised
+                          background form: lock, health wait, am stop/status
+
 Release:
   publish [--key=K]       Build, sign and lay out the channel directory an
                           update client fetches (<dir>/<channel>/<os>-<arch>.json
                           beside its artifact). --dir=DIR --channel=C --notes=…
                           --targets=… --target=<one, when two build for one
                           platform> --no-build (publish what dist/ holds)
+                          --allow-dirty (publish a -dirty/-nogit build; logged)
 
 Visual manager:
   ui                      Open amui, the visual app manager (Electron;
@@ -495,13 +510,18 @@ Framework version:
   pin main                Follow the branch tip (a moving target)
   pin --latest            Pin the newest release
 
-Manual VM labs (a REAL desktop you click around in — not a gate):
+Manual labs (a REAL desktop or device you click around in — not a gate):
   lab windows             Boot Windows in a container, mount dist/, print the
-                          viewer URL (first run installs: ~10-20 min, tens of GB)
+                          viewer URL (first run installs: ~30 min, tens of GB)
   lab macos               The same for macOS (setup is partly MANUAL)
+  lab linux               An Ubuntu XFCE desktop — a container, not a VM: no
+                          KVM, no disk, up in seconds; dist/ is /shared inside
+  lab android             The Android 14 emulator + viewer — needs /dev/kvm and
+                          an APK in dist/; am waits for boot and adb-installs it
   lab <os> --status|--stop|--reset   up? / clean shutdown / delete the VM disk
-                          Flags: --port=N --ram=8G --cpus=4 --disk=64G
-                          --version=11 --dist=<dir> --tunnel
+                          Flags: --port=N --dist=<dir> --tunnel; VMs also
+                          --ram=8G --cpus=4 --disk=64G --version=11;
+                          android also --apk=<file>
                           See docs/testing/vm-labs.md — and note this is the
                           manual tier: \`deno task test:wine\` and
                           \`deno task lab\` are the automated ones.

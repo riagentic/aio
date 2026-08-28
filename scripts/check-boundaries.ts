@@ -102,6 +102,10 @@ const ALLOWED: Record<string, string[]> = {
     // into the browser bundle, so a client artifact can name the aio build it
     // came from and a stale bundle is detectable.
     "protocol",
+    // diagnostics: graph-audit.ts scans reached sources for Node globals at
+    // module scope through THE code mask (code-mask.ts) — the one "is this
+    // offset real code?" decider every regex scanner in the repo shares.
+    "diagnostics",
   ],
   am: [
     "server", // talks to running apps via the server's client/trojan APIs

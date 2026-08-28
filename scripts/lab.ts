@@ -581,6 +581,71 @@ if (args.shell) {
   Deno.exit(r.code);
 }
 
+/** The lab mounts this checkout read-only and clones it as an UNPRIVILEGED
+ *  user inside the container. A `umask 077` shell writes git objects and refs
+ *  as `0600`, so that clone fails — with git's words, not ours: "failed to copy
+ *  file … Permission denied", or the truly opaque "'refs/remotes/origin/main'
+ *  has a null OID" (an unreadable ref reads as empty). Every scenario then
+ *  fails at once, two seconds in, and nothing on screen mentions permissions.
+ *
+ *  So: say it here, before the first container, with the fix. Sampled, not
+ *  exhaustive — one unreadable object is enough to prove the whole tree was
+ *  written under the wrong umask. */
+async function assertRepoIsReadable(): Promise<void> {
+  const bad: string[] = [];
+  const walk = async (dir: string, depth: number): Promise<void> => {
+    if (bad.length >= 3 || depth > 4) return;
+    let it: AsyncIterable<Deno.DirEntry>;
+    try {
+      it = Deno.readDir(dir);
+    } catch {
+      return;
+    }
+    for await (const e of it) {
+      if (bad.length >= 3) return;
+      const abs = `${dir}/${e.name}`;
+      let mode: number | null = null;
+      try {
+        mode = (await Deno.lstat(abs)).mode;
+      } catch {
+        continue;
+      }
+      if (mode === null) return; // a filesystem without modes — nothing to check
+      const needed = e.isDirectory ? 0o005 : 0o004;
+      if ((mode & needed) !== needed) bad.push(abs);
+      else if (e.isDirectory) await walk(abs, depth + 1);
+    }
+  };
+  // Only what a CLONE reads: objects, refs, HEAD. `.git/index` is `0600` on a
+  // healthy repo (git writes it under the caller's umask and no clone reads
+  // it), so checking the whole directory would refuse a working lab.
+  for (const p of ["objects", "refs", "packed-refs", "HEAD"]) {
+    const abs = `${HERE}/.git/${p}`;
+    let st: Deno.FileInfo;
+    try {
+      st = await Deno.lstat(abs);
+    } catch {
+      continue; // packed-refs may not exist
+    }
+    if (
+      st.mode !== null && (st.mode & (st.isDirectory ? 0o005 : 0o004)) === 0
+    ) {
+      bad.push(abs);
+    } else if (st.isDirectory) await walk(abs, 0);
+  }
+  if (bad.length === 0) return;
+  console.error(
+    `\n\x1b[31m✗ this checkout is not readable by the lab\x1b[0m — the ` +
+      `container clones it as an unprivileged user, and git fails with ` +
+      `"Permission denied" or "has a null OID" instead of saying so.\n` +
+      bad.map((b) => `      ${b.replace(HERE + "/", "")}`).join("\n") +
+      `\n\n  Fix:  chmod -R a+rX ${HERE}/.git\n` +
+      `  Cause: a \`umask 077\` shell wrote them — \`umask 022\` before ` +
+      `committing keeps it from coming back.\n`,
+  );
+  Deno.exit(1);
+}
+
 console.log(
   `\naio onboarding lab\n` +
     `  runtime   ${RUNTIME}\n` +
@@ -604,6 +669,7 @@ console.log(
   browser   ${args.browser ? "yes (real Chrome)" : "no (--browser adds it)"}`,
 );
 
+await assertRepoIsReadable();
 await buildImage();
 
 const started = Date.now();

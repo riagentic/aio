@@ -93,7 +93,7 @@
         },
         "CellsConfig": {
           "kind": "typeAlias",
-          "sig": "c82163721aa19d1a"
+          "sig": "a8dfcc7f5cb111c9"
         },
         "CellStatus": {
           "kind": "typeAlias",
@@ -417,7 +417,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "12574c3efd90db18"
+          "sig": "a0ceeb77d8b5fa16"
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -964,7 +964,7 @@
         },
         "compileArgs": {
           "kind": "function",
-          "sig": "b0c0cc17e116bc32"
+          "sig": "fa24fcadfd1ca868"
         },
         "dbWorkerInclude": {
           "kind": "function",
@@ -1444,6 +1444,10 @@
           "kind": "typeAlias",
           "sig": "fa302fc2d813d586"
         },
+        "appVersion": {
+          "kind": "function",
+          "sig": "53b24c9e8245c9fa"
+        },
         "BlobInfo": {
           "kind": "typeAlias",
           "sig": "6bf65597d79be13c"
@@ -1491,6 +1495,10 @@
         "openExternal": {
           "kind": "function",
           "sig": "3b01332a3d226191"
+        },
+        "peerHello": {
+          "kind": "function",
+          "sig": "e9135d16f114bed7"
         },
         "pickDirectory": {
           "kind": "function",
@@ -1558,7 +1566,7 @@
         },
         "buildShipManifest": {
           "kind": "function",
-          "sig": "7747ea6601590c9e"
+          "sig": "627b9d15ea6cc111"
         },
         "CellContract": {
           "kind": "typeAlias",
@@ -1622,7 +1630,7 @@
         },
         "shipApp": {
           "kind": "function",
-          "sig": "c0e14937d57d0be0"
+          "sig": "b4af8dd50b06c2bc"
         },
         "ShipExpectations": {
           "kind": "typeAlias",
@@ -1630,7 +1638,7 @@
         },
         "ShipManifest": {
           "kind": "typeAlias",
-          "sig": "be405ff60ef870c7"
+          "sig": "10b11f020730bd62"
         },
         "UPDATE_TARGETS": {
           "kind": "variable",

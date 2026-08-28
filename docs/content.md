@@ -84,7 +84,7 @@
 - [Prod parity — what the harness reproduces, and what it fakes](testing/prod-parity.md) — A test that is more permissive than production manufactures a green suite and a
 - [Proving the tests — the mutation, vacuous-test and dead-wiring gates](testing/proving-the-tests.md) — A green suite means the tests passed.
 - [UI testing — semantic, selector-free, first-class](testing/ui-testing.md) — aio exposes every TSX component as an intuitive, deterministic API — tests and
-- [VM labs — a real Windows or macOS desktop, by hand](testing/vm-labs.md) — am lab windows and am lab macos boot a real guest OS in a container and give
+- [VM labs — a real Windows, macOS, Linux or Android guest, by hand](testing/vm-labs.md) — am lab windows, am lab macos, am lab linux and am lab android boot a
 - ↗ [App Manager](clients/app-manager.md) — `am surface` / `am trigger` — observe and drive a RUNNING app, no selectors, no driver: the same loop as `testUI`, against the real thing
 
 ## Clients — browser, electron, the am manager
@@ -108,8 +108,9 @@
 - [Run any aio app from source — one line](build/run-from-source.md) — Point one command at an aio app and it takes care of everything between a source
 - [Runtime differences](build/runtime-differences.md) — The same cell code runs in three places.
 - [Scaling](build/scaling.md) — aio runs as a single Deno process with SQLite and WebSocket broadcast.
-- [Build Targets](build/targets.md) — deno task build (the fleet build) is the one way to build them — locally
+- [Build Targets](build/targets.md) — build.targets; that is all there is to decide.
 - [Full-matrix validation runbook (perfect-aio D6/B5)](build/validation-runbook.md) — D6 promises FULL support: 5 local targets + 6 remote forms, on
+- [Versioning — `major.minor.build`, derived from the code](build/versioning.md) — An aio app's version is major.minor.build.
 
 ## Debugging & production — errors, vitals, monitoring
 
@@ -189,6 +190,7 @@
 - [Upgrading from alpha68 to alpha69](upgrade/from-alpha68-to-alpha69.md) — Nothing in your app code changes.
 - [Upgrading from alpha69 to alpha70](upgrade/from-alpha69-to-alpha70.md) — duplicate import path that had been "deprecated through beta" is retired, one
 - [Upgrade from v1.0.0-alpha7 to v1.0.0-alpha8](upgrade/from-alpha7-to-alpha8.md) — None.
+- [Upgrading from alpha70 to alpha71](upgrade/from-alpha70-to-alpha71.md) — this release is what alpha70's own promise looks like when it is checked: every
 - [Upgrade from v1.0.0-alpha8 to v1.0.0-alpha9](upgrade/from-alpha8-to-alpha9.md) — The internal machine state field is renamed.
 - [Upgrade from v1.0.0-alpha9 to v1.0.0-alpha10](upgrade/from-alpha9-to-alpha10.md) — Alpha10 is fully additive.
 - [Upgrade from v0.1 to v0.2](upgrade/from-v0.1-to-v0.2.md) — preserved)

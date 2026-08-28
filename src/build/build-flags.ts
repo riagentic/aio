@@ -52,6 +52,12 @@ export const BUILD_BOOL_FLAGS = [
 /** Every `--flag=value` the single-target build understands. */
 export const BUILD_VALUE_FLAGS = [
   "--entry",
+  // Builds nothing: prints what an artifact FILE is installed as — base name,
+  // extension, and the version its name carries — and exits. The one place
+  // that rule lives; `run.sh` / `run.ps1` ask instead of parsing names in
+  // shell (an installer and `am remove` disagreeing about an app's file name
+  // is the same app with two data directories).
+  "--print-install-name",
   "--name",
   "--platform",
   "--android-dev-url",
@@ -129,6 +135,7 @@ export const SHIP_BOOL_FLAGS = [
   "--no-data",
   "--stdout",
   "--force",
+  "--allow-dirty",
 ] as const;
 
 /** Every `--flag=value` `aio ship` understands. */
@@ -160,6 +167,25 @@ export const SHIP_VALUE_FLAGS = [
  *  impossible. */
 export function unknownShipFlags(args: readonly string[]): string[] {
   return unknown(args, SHIP_BOOL_FLAGS, SHIP_VALUE_FLAGS);
+}
+
+/** The `--print-*` flags: each answers ONE question, builds nothing, and exits.
+ *  Their stdout is an answer a script parses (`run.sh` reads it), so a build
+ *  asked a question prints nothing else there.
+ *
+ *  DERIVED from the vocabulary rather than spelled out a second time: a
+ *  hand-written `startsWith("--print-")` probe elsewhere is a flag literal no
+ *  table knows, which is exactly what the source-vs-table gate refuses. */
+export const PRINT_FLAGS: readonly string[] = [
+  ...BUILD_BOOL_FLAGS,
+  ...BUILD_VALUE_FLAGS,
+].filter((f) => f.startsWith("--print-"));
+
+/** Was this build asked a question instead of told to build? */
+export function isBuildQuestion(args: readonly string[]): boolean {
+  return args.some((a) =>
+    PRINT_FLAGS.some((f) => a === f || a.startsWith(`${f}=`))
+  );
 }
 
 /** Human list of a vocabulary, for the refusal message. */

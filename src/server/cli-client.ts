@@ -29,11 +29,24 @@ import {
 } from "../protocol/ack-registry.ts";
 import { ACK_TIMEOUT_MS } from "../protocol/protocol-types.ts";
 import { VERSION } from "./aio-cli.ts";
+import { readBuildStamp } from "./app-version.ts";
+import { appDenoJsonLocated } from "./aio-run-helpers.ts";
+import { isCompiled } from "./paths.ts";
+
+/** The app version a COMPILED client announces: the stamp its build embedded
+ *  (docs/build/versioning.md). A source run announces none — the server's
+ *  hello is the fact a client needs, not the other way round. */
+function stampedAppVersion(): string | undefined {
+  if (!isCompiled()) return undefined;
+  const located = appDenoJsonLocated();
+  return located ? readBuildStamp(located.dir)?.version : undefined;
+}
 import {
   negotiateProtocol,
   parseProtoHello,
   PROTOCOL_MISMATCH_CLOSE_CODE,
   protoHello,
+  rememberPeerHello,
 } from "../protocol/protocol-version.ts";
 
 import { log } from "../diagnostics/logger-api.ts";
@@ -278,7 +291,7 @@ export function connectCli<S>(
       retry = 0;
       wasConnected = true;
       // A3: announce our wire-protocol version before anything else.
-      socket.send(enc("proto", protoHello(VERSION)));
+      socket.send(enc("proto", protoHello(VERSION, stampedAppVersion())));
       // Drain queued actions. Each frame's ack clock starts HERE, when it is
       // actually written — not at dispatch time, or an action queued for
       // longer than the ceiling times out while still sitting in the queue and
@@ -341,6 +354,7 @@ export function connectCli<S>(
         // A3: wire-protocol version handshake — terminal on mismatch.
         case "proto": {
           const theirs = parseProtoHello(frame.d);
+          if (theirs) rememberPeerHello(theirs);
           if (!theirs) return;
           const result = negotiateProtocol(protoHello(VERSION), theirs);
           if (!result.ok) {

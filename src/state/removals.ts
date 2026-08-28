@@ -229,6 +229,15 @@ export const REMOVALS: readonly Removal[] = [
     ...ALPHA70,
   },
   {
+    key: "aio.run({ appVersion })",
+    kind: "api",
+    now: 'deno.json "version"',
+    hint:
+      'delete appVersion from aio.run() — the version lives in deno.json `version` ("major.minor"; aio numbers builds from commits, docs/build/versioning.md)',
+    pattern: /\bappVersion\s*:/,
+    ...ALPHA70,
+  },
+  {
     key: "target",
     kind: "deno-json",
     now: "client",

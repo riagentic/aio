@@ -36,7 +36,6 @@ const settle = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const baseDir = await Deno.makeTempDir({ prefix: "aio-bench-" });
 const bootOpts = {
-  appVersion: "0.0.0",
   client: "server-only",
   persist: false,
   libraryMode: true,

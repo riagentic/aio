@@ -559,7 +559,7 @@ Deno.test("aiol --safe-fix: fixing every error exits 0 (judged post-fix, not pre
 export const x = schedule;
 `;
   const APP = `import { aio } from "aio";
-await aio.run({ appId: "gate", appVersion: "0.1.0" });
+await aio.run({ appId: "gate" });
 `;
   await withProject(
     { "src/lib.ts": SRC, "src/app.ts": APP },
@@ -587,7 +587,7 @@ import { nothing } from "aio/nonexistent";
 export const x = [schedule, nothing];
 `;
   const APP = `import { aio } from "aio";
-await aio.run({ appId: "gate", appVersion: "0.1.0" });
+await aio.run({ appId: "gate" });
 `;
   await withProject(
     { "src/lib.ts": SRC, "src/app.ts": APP },

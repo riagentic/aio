@@ -457,6 +457,20 @@ export function _applyServerConfig(cfg: Record<string, unknown>): void {
   if (_ensured) _initSyncIfNeeded();
 }
 
+/** The cells the bundle registers that the server did NOT boot — the pure
+ *  decision behind the drift warning. A `scope: "client"` cell is DEFINED as
+ *  never booted by the server (never registered, synced or persisted), so it
+ *  is not drift: reporting it told a correct app to introduce a real defect
+ *  (per-frame client state over the wire to every window). */
+export function cellSetDrift(
+  registered: ReadonlyMap<string, { __aio: { scope: string } }>,
+  booted: ReadonlySet<string>,
+): string[] {
+  return [...registered.entries()]
+    .filter(([id, def]) => def.__aio.scope !== "client" && !booted.has(id))
+    .map(([id]) => id);
+}
+
 /** A cell in the BUNDLE that the running server never booted dispatches into
  *  nothing — the UI renders and its controls do nothing at all.
  *
@@ -474,9 +488,7 @@ export function _applyServerConfig(cfg: Record<string, unknown>): void {
 function _warnCellSetDrift(booted: unknown): void {
   if (!Array.isArray(booted)) return; // older server — nothing to compare
   const server = new Set(booted.map(String));
-  const missing = [...getRegisteredCells().keys()].filter((id) =>
-    !server.has(id)
-  );
+  const missing = cellSetDrift(getRegisteredCells(), server);
   if (missing.length === 0) return;
   const msg = `the client bundle registers cell(s) [${missing.join(", ")}] ` +
     `that this server process did NOT boot (it has: [${

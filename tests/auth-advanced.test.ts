@@ -132,7 +132,6 @@ Deno.test("auth e2e: email verify, reset, password rotation, totp, lockout", asy
   const app = await aio.run({
     cells: [c],
     appId: `test-auth3-${Deno.pid}`,
-    appVersion: "0.0.0",
     client: "server-only",
     persist: false,
     libraryMode: true,
@@ -407,7 +406,6 @@ Deno.test("auth e2e: OIDC login — discovery, PKCE, RS256 JWKS verify, session"
   const app = await aio.run({
     cells: [c],
     appId: `test-oidc-${Deno.pid}`,
-    appVersion: "0.0.0",
     client: "server-only",
     persist: false,
     libraryMode: true,
