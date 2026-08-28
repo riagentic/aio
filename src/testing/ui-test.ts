@@ -17,7 +17,10 @@ import {
   type CallFailureLedger,
 } from "./test-strict.ts";
 // Server-touching, so NOT in test-strict.ts — see boot-refusals.ts.
-import { _refuseUnsafeCells } from "./boot-refusals.ts";
+import {
+  _refuseUnsafeCells,
+  type HarnessBootOptions,
+} from "./boot-refusals.ts";
 import { formatCellState } from "./test-format.ts";
 import { frozenWriteMessage, isFrozenWriteError } from "../state/immutable.ts";
 import { _resetRootSignals } from "../state/signal.ts";
@@ -77,6 +80,12 @@ export interface TestUIOptions {
   persist?: boolean;
   /** Max settle iterations per action (each ≈ flush + 5ms). Default 20. */
   settleIterations?: number;
+  /** The app's `aio.run({ cellDefaults })` — applied here exactly as boot
+   *  applies it, so what a cell hides (and therefore what boot refuses) is
+   *  the same under test as in production. */
+  cellDefaults?: HarnessBootOptions["cellDefaults"];
+  /** The app's `aio.run({ localFirst })` — same reason. */
+  localFirst?: boolean;
   /** Starting state for booted cells, installed BEFORE the first render:
    *  `{ hw: { gpus: [...] } }`. Per cell it is a shallow merge over that cell's
    *  declared initial state, so you pin only the fields under test.
@@ -853,10 +862,11 @@ async function _buildTestUI(
         });
         _ownedGlobals.push(key);
       }
-    } catch {
+    } catch (e) {
       throw new Error(
         "testUI: no DOM available — add happy-dom to your deno.json imports " +
           '("happy-dom": "npm:happy-dom@^17"), or pass { document } yourself',
+        { cause: e },
       );
     }
   }
@@ -1030,7 +1040,10 @@ async function _buildTestUI(
   // testUI composes on the standalone runtime, which is not the server's boot
   // path — so an app whose cell exposes a credential to the UI passed here and
   // was refused the moment it started, in dev and in prod alike.
-  _refuseUnsafeCells(cells);
+  _refuseUnsafeCells(cells, {
+    cellDefaults: opts.cellDefaults,
+    localFirst: opts.localFirst,
+  });
   if (cells.length > 0) {
     const standalone = await import("../standalone-air.ts");
     // Opt into virtual time BEFORE anything registers a schedule — the same
@@ -1062,6 +1075,8 @@ async function _buildTestUI(
       // localStorage persist key. Opt in via { persist: true }.
       persist: opts.persist ?? false,
       persistKey: `testui:${crypto.randomUUID().slice(0, 8)}`,
+      cellDefaults: opts.cellDefaults,
+      localFirst: opts.localFirst,
     }) as unknown as { getState: () => Record<string, unknown> };
     // Seed BEFORE the first render, so the component's very first pass already
     // sees the fixture (a seed applied after mount would test the re-render path

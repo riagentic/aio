@@ -8,11 +8,20 @@ import {
 import { createJournal, type Journal, journalWatermarkKey } from "./journal.ts";
 import type { SkvInstance } from "./skv.ts";
 import { migrateLegacyKv, SKV_SCHEMA, sqliteKv } from "./skv-sqlite.ts";
-import { createDB, type DB, initSchema, loadTables } from "../db/mod.ts";
+import type { DB } from "../db/types.ts";
+import { createDB } from "../db/async-db.ts";
+import { initSchema, loadTables } from "../db/state-sync.ts";
 // The db module owns the "is this a missing worker?" verdict — importing the
 // predicate keeps ONE decider for a failure that surfaces in two places.
 import { dbWorkerMissingHint } from "../db/async-db.ts";
-import { assertIdent, type TableDef } from "./sql.ts";
+import {
+  assertIdent,
+  type DbBoundShape,
+  type DbMapping,
+  dbMappingOf,
+  pkColumn,
+  type TableDef,
+} from "./sql.ts";
 import { deepMerge } from "../state/deep-merge.ts";
 import { isCompiled, resolveKvPath } from "./paths.ts";
 import { parseCli } from "./aio-cli.ts";
@@ -461,8 +470,13 @@ export interface CellMigrationInfo {
 export type DbBinding = {
   /** The SQL table name (what `app.db` queries). */
   table: string;
-  /** Path to the state array this table mirrors; `[]` when unbound. */
+  /** Path to the state value this table mirrors; `[]` when unbound. */
   path: string[];
+  /** How that value holds its rows (see `DbMapping.shape`). */
+  shape: DbBoundShape;
+  /** The pk column a `"map"` binding keys by (null for an array binding
+   *  without one). */
+  pk: string | null;
 };
 
 const _isObj = (v: unknown): v is Record<string, unknown> =>
@@ -489,7 +503,7 @@ function _arrayFields(state: Record<string, unknown>): string[] {
  *  binding; never returns a binding that would overwrite a cell's slice. */
 export function resolveDbBindings(
   initialState: Record<string, unknown>,
-  dbSchema: Record<string, TableDef>,
+  dbSchema: Record<string, TableDef | DbMapping>,
   log: Pick<Log, "info" | "warn">,
 ): { bindings: DbBinding[]; sqlSchema: Record<string, TableDef> } {
   const bindings: DbBinding[] = [];
@@ -500,39 +514,81 @@ export function resolveDbBindings(
     return c.length ? c.join(", ") : "(no cell declares an array field)";
   };
 
-  for (const [key, def] of Object.entries(dbSchema)) {
+  for (const [key, entry] of Object.entries(dbSchema)) {
     let table: string;
     let path: string[];
+    const mapping = dbMappingOf(entry);
+    const { shape } = mapping;
+    const def: TableDef = { ...mapping.table, shape };
+    const pk = pkColumn(def);
+    // The value at the bound path must hold rows in the declared shape.
+    const fits = (v: unknown): boolean =>
+      shape === "map" ? _isObj(v) : Array.isArray(v);
+    const noun = shape === "map" ? "a pk-keyed object map" : "an ARRAY";
+    if (shape === "map" && !pk) {
+      throw new Error(
+        `db: mapping "${key}" has shape "map" but its table declares no ` +
+          `pk() column — a map is keyed by the row's primary key, so there ` +
+          `is nothing to key it by. Add \`id: pk()\` (or bind an array).`,
+      );
+    }
+    if (mapping.path !== undefined && !key.includes(".")) {
+      throw new Error(
+        `db: mapping "${key}" sets path "${mapping.path}" but its key does ` +
+          `not name a cell — a path is relative to a cell, so the key must ` +
+          `be "<cell>.<field>".`,
+      );
+    }
 
     if (key.includes(".")) {
       // Explicit `cell.field` — an intent that must resolve or fail loud.
       const parts = key.split(".");
       const [cellId, field] = parts;
       const slice = cellId === undefined ? undefined : initialState[cellId];
+      const inner = mapping.path?.split(".") ?? (field ? [field] : []);
+      const target = _isObj(slice) ? readPath(slice, inner) : undefined;
       if (
         parts.length !== 2 || !cellId || !field || !_isObj(slice) ||
-        !Array.isArray(slice[field])
+        inner.some((seg) => !seg) || !fits(target)
       ) {
         throw new Error(
-          `db: table key "${key}" must name an ARRAY field of a cell ` +
-            `("<cell>.<field>"), but ${
+          `db: table key "${key}" must name ${noun} ` +
+            (mapping.path
+              ? `at "${mapping.path}" inside a cell`
+              : `field of a cell ("<cell>.<field>")`) +
+            `, but ${
               !_isObj(slice)
                 ? `there is no cell "${cellId}"`
-                : `cell "${cellId}" has no array field "${field}"`
-            }. Available: ${candidates()}.`,
+                : `cell "${cellId}" has no ${
+                  shape === "map" ? "object" : "array"
+                } ${
+                  mapping.path ? `at "${inner.join(".")}"` : `field "${field}"`
+                }${
+                  target !== undefined
+                    ? ` (it is ${
+                      Array.isArray(target) ? "an array" : typeof target
+                    })`
+                    : ""
+                }`
+            }. Available array fields: ${candidates()}.`,
         );
       }
       table = `${cellId}_${field}`;
-      path = [cellId, field];
+      path = [cellId, ...inner];
+    } else if (shape === "map" && _isObj(initialState[key])) {
+      throw new Error(
+        `db: mapping "${key}" has shape "map" and names a top-level key — a ` +
+          `map binding must be explicit: db: { "<cell>.${key}": { table, ` +
+          `shape: "map" } }.`,
+      );
     } else if (Array.isArray(initialState[key])) {
       // Root-level array (engine-level `aio.run` config — no cells).
       table = key;
       path = [key];
     } else {
       const owners = Object.keys(initialState).filter((c) =>
-        _isObj(initialState[c]) && Array.isArray(
-          (initialState[c] as Record<string, unknown>)[key],
-        )
+        _isObj(initialState[c]) &&
+        fits((initialState[c] as Record<string, unknown>)[key])
       );
       if (owners.length > 1) {
         throw new Error(
@@ -557,10 +613,14 @@ export function resolveDbBindings(
     }
     declaredBy.set(table, key);
     sqlSchema[table] = def;
-    bindings.push({ table, path });
+    bindings.push({ table, path, shape, pk });
 
     if (path.length) {
-      log.info(`db: table "${table}" ↔ state.${path.join(".")} (auto-sync)`);
+      log.info(
+        `db: table "${table}" ↔ state.${path.join(".")} (auto-sync${
+          shape === "map" ? `, map keyed by "${pk}"` : ""
+        })`,
+      );
     } else {
       // Not an error — declaring a table you drive with raw SQL is a real
       // pattern — but it is the shape a typo produces, so it is never silent.
@@ -594,7 +654,7 @@ export function resolveDbBindings(
  *  restores as the declared default, not as stale data. */
 export function placeLoadedTables(
   state: Record<string, unknown>,
-  bindings: readonly DbBinding[],
+  bindings: readonly (Pick<DbBinding, "table" | "path"> & Partial<DbBinding>)[],
   loaded: Record<string, unknown[]>,
   log?: (msg: string) => void,
 ): Record<string, unknown> {
@@ -604,27 +664,51 @@ export function placeLoadedTables(
     const rows = loaded[b.table]!;
     if (rows.length === 0) {
       const current = readPath(next, b.path);
-      if (Array.isArray(current) && current.length > 0) {
+      const held = Array.isArray(current)
+        ? current.length
+        : _isObj(current)
+        ? Object.keys(current).length
+        : 0;
+      if (held > 0) {
         log?.(
           `db: table "${b.table}" is empty but state.${
             b.path.join(".")
-          } holds ${current.length} item(s) — keeping them and writing them to ` +
+          } holds ${held} item(s) — keeping them and writing them to ` +
             `the table on the next sync (a new binding or a seeded default; ` +
-            `an empty table never empties a non-empty array).`,
+            `an empty table never empties a non-empty ${
+              b.shape === "map" ? "map" : "array"
+            }).`,
         );
         continue;
       }
     }
-    if (b.path.length === 1) {
-      next = { ...next, [b.path[0]!]: rows };
-    } else {
-      const [cellId, field] = b.path as [string, string];
-      const slice = next[cellId];
-      if (!_isObj(slice)) continue; // cell vanished — never clobber a non-object
-      next = { ...next, [cellId]: { ...slice, [field]: rows } };
-    }
+    // A map binding is rebuilt from the rows' pk — the one fact the table
+    // holds; the key is derived, never stored twice.
+    const value: unknown = b.shape === "map" && b.pk
+      ? Object.fromEntries(
+        (rows as Record<string, unknown>[]).map((r) => [String(r[b.pk!]), r]),
+      )
+      : rows;
+    const placed = writePath(next, b.path, value);
+    if (placed !== undefined) next = placed;
   }
   return next;
+}
+
+/** `state` with `value` at `path`, copy-on-write along the path only; the
+ *  parents on the way must be plain objects (a vanished cell, or a non-object
+ *  parent, returns undefined — never clobbered). */
+function writePath(
+  state: Record<string, unknown>,
+  path: readonly string[],
+  value: unknown,
+): Record<string, unknown> | undefined {
+  const [head, ...rest] = path as [string, ...string[]];
+  if (rest.length === 0) return { ...state, [head]: value };
+  const child = state[head];
+  if (!_isObj(child)) return undefined;
+  const next = writePath(child, rest, value);
+  return next === undefined ? undefined : { ...state, [head]: next };
 }
 
 /** The value at `path`, or undefined. */
@@ -692,11 +776,11 @@ export interface BootConfig<S> {
   persistKey: string;
   persistMode: "single" | "multi";
   persistDebounceMs: number;
-  dbSchema: Record<string, TableDef> | undefined;
+  dbSchema: Record<string, TableDef | DbMapping> | undefined;
   syncCellIds: string[];
   /** Per-cell declarative access rules — enforced on the sync-op path (AUTH-1
    *  parity with the action-dispatch gate in aio-server.ts). */
-  cellAccess?: Map<string, import("../state/cell-types.ts").CellAccess>;
+  cellAccess?: Map<string, import("../state/cell-types.ts").Access>;
   /** Per-cell version + migration hooks — keyed by cell id */
   cellMigrations?: Map<string, CellMigrationInfo>;
   /** Every cell's declared `version`, migration or not — the complete map the
@@ -871,46 +955,83 @@ export async function bootStorage<S>(
       // app declared tables (or sync cells) that will never work. Fail loud
       // with the build fix instead of a warning nobody reads.
       const workerHint = dbWorkerMissingHint(e);
-      if (workerHint) throw new Error(workerHint);
+      if (workerHint) throw new Error(workerHint, { cause: e });
       log.warn(`sqlite: unavailable — ${e}`);
       if (asyncDb) {
         await asyncDb.close().catch(() => {});
         asyncDb = null;
       }
     }
-    // Versioned schema ladder (private `aio_schema` table, src/db/ddl.ts —
-    // deliberately NOT `PRAGMA user_version`, which belongs to the APP):
-    // apply any registered strictly-once move BEFORE the epoch reconcilers
-    // touch the file. Empty ladder today — this call is what makes a future
-    // registered step LIVE at boot instead of "registered in one surface,
-    // invoked in none" (the key-in-2-of-3 trap). Fatal on failure, like all
-    // DDL.
+    // ONE ordered, fatal schema runner (src/db/ddl.ts → runSchemaSetup):
+    //   1. "ladder"  — aio's own versioned moves (private `aio_schema` table,
+    //                  deliberately NOT `PRAGMA user_version`, which belongs to
+    //                  the APP); refuses a file written by a NEWER aio.
+    //   2. "tables"  — the DECLARED `db:` tables + drift reconciliation.
+    //   3. "sync"    — the CRDT op-log tables + their migrations (sync cells).
+    // Each step is idempotent; the first failure refuses the boot by step
+    // name, with its fix — never a `sqlite: unavailable` warning and an app
+    // serving traffic with none of the tables it declared (the boot used to
+    // do exactly that: initSchema's refusal was caught, `asyncDb` nulled, and
+    // the persistence block reopened the same file for the KV snapshot).
     if (asyncDb) {
-      const { runDdlSteps } = await import("../db/ddl.ts");
-      await runDdlSteps(asyncDb);
-    }
-    // Creating the DECLARED TABLES is not degradable, and never shared that
-    // catch again. A schema SQLite refuses (a keyword column, a bad ref, a
-    // migration that cannot apply) used to become one `sqlite: unavailable`
-    // warning and `asyncDb = null` — after which the persistence block below
-    // REOPENED the same file for the KV snapshot, so the app served traffic
-    // and persisted state with none of the `db:` tables it declared: every
-    // read empty, every write nowhere. initSchema's message already names the
-    // table, the column and the fix; it is the boot's job to let it through.
-    if (asyncDb && dbKeys.length > 0) {
+      const { runDdlSteps, runSchemaSetup, applyDdl } = await import(
+        "../db/ddl.ts"
+      );
+      const steps: import("../db/ddl.ts").SchemaStep[] = [
+        {
+          name: "ladder",
+          fix: "upgrade aio to the version that wrote this file (or later), " +
+            "or point the app at a backup taken by this version",
+          run: async (db) => {
+            await runDdlSteps(db);
+          },
+        },
+      ];
+      if (dbKeys.length > 0) {
+        steps.push({
+          name: "tables",
+          fix: "the message above names the table and column SQLite refused " +
+            "— rename the keyword, add the default, or drop the column it " +
+            "names (docs/persistence/sqlite.md → Changing a table's schema)",
+          run: (db) => initSchema(db, sqlSchema),
+        });
+      }
+      if (syncCellIds.length > 0) {
+        steps.push({
+          name: "sync",
+          fix: "the sync op-log tables could not be created or migrated — " +
+            "check the file is writable; a schema this build cannot evolve " +
+            "needs the aio version that wrote it",
+          run: async (db) => {
+            const { applySyncMigrations, SYNC_SCHEMA } = await import(
+              "../sync/compact.ts"
+            );
+            for (const sql of SYNC_SCHEMA) {
+              await applyDdl(db, sql, {
+                ns: "sync",
+                subject: "sync schema",
+                source: 'runSchemaSetup step "sync", src/server/aio-boot.ts',
+              });
+            }
+            // `CREATE TABLE IF NOT EXISTS` cannot add a column to a table an
+            // older aio already created, so schema changes need their own
+            // step.
+            await applySyncMigrations(db, {
+              debug: (m: string) => log.debug("sync", m),
+              warn: (m: string) => log.warn("sync", m),
+            });
+          },
+        });
+      }
       try {
-        await initSchema(asyncDb, sqlSchema);
+        const ran = await runSchemaSetup(asyncDb, steps);
+        log.debug(`db: schema setup ran ${ran.join(" → ")}`);
       } catch (e) {
         const workerHint = dbWorkerMissingHint(e);
         await asyncDb.close().catch(() => {});
         asyncDb = null;
-        if (workerHint) throw new Error(workerHint);
-        throw new Error(
-          `db: schema setup failed for ${dbKeys.length} declared table(s) — ${
-            e instanceof Error ? e.message : String(e)
-          }`,
-          { cause: e },
-        );
+        if (workerHint) throw new Error(workerHint, { cause: e });
+        throw e;
       }
     }
     if (asyncDb) log.info(`sqlite: ${dbKeys.length} table(s) at ${dbPath}`);
@@ -938,18 +1059,8 @@ export async function bootStorage<S>(
   // used to live here was reachable only through the combination now refused.
   if (syncCellIds.length > 0) {
     if (asyncDb) {
-      const { applySyncMigrations, SYNC_SCHEMA } = await import(
-        "../sync/compact.ts"
-      );
-      for (const sql of SYNC_SCHEMA) {
-        await asyncDb.execute(sql);
-      }
-      // `CREATE TABLE IF NOT EXISTS` cannot add a column to a table an older
-      // aio already created, so schema changes need their own step.
-      await applySyncMigrations(asyncDb, {
-        debug: (m: string) => log.debug("sync", m),
-        warn: (m: string) => log.warn("sync", m),
-      });
+      // The op-log tables were created by the "sync" step of runSchemaSetup
+      // above — one runner, one order, one failure mode.
       const { createServerSyncHandler } = await import(
         "../sync/server-handler.ts"
       );
@@ -1091,7 +1202,7 @@ export async function bootStorage<S>(
       // dir or turn persistence off, neither of which can fix a missing
       // module. Classified by the db module's own predicate (one decider).
       const workerHint = dbWorkerMissingHint(e);
-      if (workerHint) throw new Error(workerHint);
+      if (workerHint) throw new Error(workerHint, { cause: e });
       throw new Error(
         `persistence unavailable: ${e}\nFix permissions or set persist: false to disable persistence.`,
       );
@@ -1173,7 +1284,24 @@ export async function bootStorage<S>(
       persistedSnapshot,
       { skip: new Set(report.map((r) => r.cell)) },
     );
-    if (drift.length > 0) log.warn(shapeDriftSummary(drift));
+    if (drift.length > 0) {
+      const summary = shapeDriftSummary(drift);
+      // STRICT in dev (category b — dev stricter than prod): a persisted cell
+      // whose on-disk shape drifted from its declared shape with no
+      // `onMigrate` to account for it used to WARN forever, on every boot,
+      // and every boot loaded the stale shape. Dev refuses to boot, naming
+      // the cell, the drifted keys and the two fixes; prod keeps the warning
+      // — refusing to serve a working app over a stale key is the worse
+      // outcome there. Seed erasure and undeclared cells keep their own
+      // remedies (warn), so only STRUCTURAL drift of a declared cell refuses.
+      const structural = drift.filter((d) =>
+        d.issue === "unknown-field" || d.issue === "type-changed"
+      );
+      if (isDevBoot() && structural.length > 0) {
+        throw new Error(shapeDriftRefusal(structural, summary));
+      }
+      log.warn(summary);
+    }
     const declared: Record<string, number> = {};
     for (const [id, info] of cfg.cellMigrations ?? []) {
       declared[id] = info.version;
@@ -1378,6 +1506,8 @@ export async function bootStorage<S>(
       }
       return view;
     },
+    // Patch → row translation for the incremental diff (see persistence.ts).
+    tableBindings: dbBindings,
     // The diff baseline is what SQLite HOLDS, not what state shows: an
     // adopted seed (empty table, non-empty array) must be written, not
     // assumed already there.
@@ -1749,6 +1879,37 @@ export function shapeDriftSummary(drift: ShapeDriftEntry[]): string {
       `cell's version + add onMigrate to transform it, or clear the stored data.`,
   );
   return lines.join("\n");
+}
+
+/** The dev-mode refusal for unmigrated structural drift: per cell, the
+ *  drifted keys, then the two ways out. Pure — testable without a boot. */
+export function shapeDriftRefusal(
+  structural: ShapeDriftEntry[],
+  summary: string,
+): string {
+  const byCell = new Map<string, string[]>();
+  for (const d of structural) {
+    const keys = byCell.get(d.cell) ?? [];
+    keys.push(
+      d.issue === "type-changed"
+        ? `${d.path} (${d.storedType} stored, ${d.declaredType} declared)`
+        : `${d.path} (stored, not declared)`,
+    );
+    byCell.set(d.cell, keys);
+  }
+  const cells = [...byCell].map(([cell, keys]) =>
+    `  cell "${cell}": ${keys.join(", ")}`
+  );
+  return (
+    `persist: REFUSING to boot (dev) — ${structural.length} stored field(s) ` +
+    `no longer match the declared shape and no onMigrate accounts for ` +
+    `them:\n${cells.join("\n")}\n` +
+    `fix: bump the cell's \`version\` and add \`onMigrate\` to transform ` +
+    `the stored slice — or, if the field is not meant to persist at all, ` +
+    `exclude it (\`persist: { exclude: [...] }\`). In production this is a ` +
+    `warning and the stale shape is loaded; dev refuses so it is fixed ` +
+    `before it ships.\n(${summary})`
+  );
 }
 
 /** Stored values the declared shape dropped, put back — deep, depth-capped.

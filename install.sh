@@ -193,6 +193,17 @@ deno_target() {
 # "install this other thing first" is exactly the friction a one-liner exists
 # to remove.
 #
+# Did an install actually produce a working deno? THE answer, for every branch
+# of install_deno.
+#
+# The official installer is run as a PIPELINE, and a POSIX pipeline's status is
+# the LAST command's — `sh`'s — with no `pipefail` in /bin/sh. A 404, a dropped
+# connection or an empty body means `sh` reads nothing and exits 0, so the
+# `|| return 1` beside it never fires and the caller is told deno was installed.
+# The only trustworthy answer is whether deno RUNS afterwards, which is what the
+# no-unzip branch already did and the official-installer branch did not.
+deno_ok() { command -v deno >/dev/null 2>&1 && deno --version >/dev/null 2>&1; }
+
 # A bare ubuntu:24.04 does have perl, and perl can inflate a zip member. So
 # when there is no unzip we do the whole thing ourselves: download the release
 # asset, VERIFY ITS SHA256 (which the official installer does not do), extract
@@ -230,7 +241,7 @@ install_deno_no_unzip() {
   rm -rf "$_tmp"
   export PATH="$DENO_INSTALL/bin:$PATH"
   hash -r 2>/dev/null || :
-  [ -x "$DENO_INSTALL/bin/deno" ] && deno --version >/dev/null 2>&1
+  deno_ok
 }
 
 install_deno() {
@@ -242,7 +253,8 @@ install_deno() {
       curl -fsSL https://deno.land/install.sh | sh -s -- -y || return 1
     export PATH="$DENO_INSTALL/bin:$PATH"
     hash -r 2>/dev/null || :
-    return 0
+    deno_ok && return 0
+    return 1
   fi
   install_deno_no_unzip && return 0
   fail "cannot install deno on this machine: it has no unzip/7z (deno ships as a .zip) and no perl to stand in for one.

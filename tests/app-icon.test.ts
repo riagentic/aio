@@ -36,16 +36,9 @@ Deno.test("colour: deterministic per name, and spread across apps", () => {
   // colour IS its identity — it appears on the icon, the theme and the desktop
   // frame — so the value has to survive a refactor, not merely agree with
   // itself. (`iconColors(x) === iconColors(x)` held for any implementation.)
-  assertEquals(iconColors("atomic").hue, 312);
-  assertEquals(iconColors("atomic").bg0, "hsl(312 68% 82%)");
-  const names = [
-    "atomic",
-    "fixable",
-    "modelinfo",
-    "impactnews",
-    "quill",
-    "tally",
-  ];
+  assertEquals(iconColors("alpha").hue, 107);
+  assertEquals(iconColors("alpha").bg0, "hsl(107 68% 82%)");
+  const names = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"];
   const hues = new Set(names.map((n) => iconColors(n).hue));
   // The whole point is that N running apps look like N different icons.
   assertEquals(hues.size, names.length, "every app got its own hue");

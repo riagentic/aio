@@ -15,6 +15,10 @@
 // and carry load-bearing side effects, e.g. state-core's enablePatches).
 // Run: deno task check:boundaries
 
+import { parse } from "@std/jsonc";
+// The same "read code, not prose" mask aiol and `am pin` use.
+import { codeMask } from "../src/diagnostics/code-mask.ts";
+
 const ALLOWED: Record<string, string[]> = {
   // periphery entry (aio/extras) — re-exports deep types across the surface
   extras: [
@@ -122,6 +126,7 @@ const ALLOWED: Record<string, string[]> = {
   // the server import is safe here (it is the whole point of a server test
   // helper).
   testing: [
+    "build", // src/testing/internal.ts — test-only re-exports of build internals (alpha70)
     "state",
     "air",
     "protocol",
@@ -136,16 +141,35 @@ const ALLOWED: Record<string, string[]> = {
     "air", // hook/render integration
     "state", // signals + the state-core conduit
   ],
+  // ── aio/cli — the CLI toolkit (args/prompt/table/progress/spinner/watch) ──
+  // Runs inside a compiled `cli` binary and a `cli-client`, so it stays a
+  // LEAF: no server, no browser, no build. `watch()` takes anything with
+  // `subscribe()` structurally rather than importing the state layer to draw it.
+  cli: [
+    "diagnostics", // colorEnabled — the ONE NO_COLOR/FORCE_COLOR/TTY decider
+    "state", // nearestOf — the ONE spelling of "did you mean" (cell-helpers)
+  ],
 };
 
-// import contexts only: `from "..."`, `import "..."`, `import("...")`
+// import contexts only: `from "..."`, `import "..."`, `import("...")`.
+// Two spellings reach the same module, so both are scanned: a relative path,
+// and a bare `aio/...` specifier resolved through deno.json's import map.
+// That second one is not hypothetical — `aio/db`, `aio/sync` and `aio/ui`
+// name FOLDER files, so `import { createDB } from "aio/db"` inside src/air/
+// would be a matrix violation spelled in a way a relative-path-only scanner
+// cannot see. src/ uses none today; this is what keeps that true.
 const SPEC = /(?:from\s*|import\s*\(?\s*)["'](\.\.?\/[^"']+?\.tsx?)["']/g;
+const BARE = /(?:from\s*|import\s*\(?\s*)["'](aio(?:\/[^"']+)?)["']/g;
 
-function stripComments(code: string): string {
-  return code
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/^\s*\/\/.*$/gm, "");
-}
+const IMPORT_MAP: Record<string, string> = (() => {
+  const raw = Deno.readTextFileSync("deno.json");
+  const imports = (parse(raw) as { imports?: Record<string, string> }).imports;
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(imports ?? {})) {
+    if (v.startsWith("./")) out[k] = normalize(v.slice(2));
+  }
+  return out;
+})();
 
 function folderOf(path: string): string | null {
   const m = path.match(/^src\/([^/]+)\//);
@@ -153,9 +177,18 @@ function folderOf(path: string): string | null {
 }
 
 async function importsOf(file: string): Promise<string[]> {
-  const code = stripComments(await Deno.readTextFile(file));
+  // Match the ORIGINAL text — the specifier is a string literal, and a mask
+  // that blanks string bodies would blank the one thing worth reading. Ask the
+  // mask about the KEYWORD instead: real code, or prose? src/am/am-cmd-create.ts
+  // SCAFFOLDS whole apps as template literals, and half of src/ documents its
+  // public spelling in a docstring. Those are text about imports, not imports.
+  const code = await Deno.readTextFile(file);
+  const mask = codeMask(code);
+  const isCode = (m: RegExpExecArray | RegExpMatchArray) =>
+    mask[m.index!] === 1;
   const out: string[] = [];
   for (const m of code.matchAll(SPEC)) {
+    if (!isCode(m)) continue;
     const target = normalize(dirname(file) + "/" + m[1]!);
     if (!target.startsWith("src/")) continue;
     try {
@@ -164,6 +197,13 @@ async function importsOf(file: string): Promise<string[]> {
       continue; // template/example string, not a real module — typecheck owns those
     }
     out.push(target);
+  }
+  for (const m of code.matchAll(BARE)) {
+    if (!isCode(m)) continue;
+    const target = IMPORT_MAP[m[1]!];
+    // An `aio/...` specifier the map does not name is not a module at all;
+    // deno's own resolution owns that failure, and it cannot reach src/.
+    if (target?.startsWith("src/")) out.push(target);
   }
   return out;
 }
@@ -216,8 +256,9 @@ for (const [entry, imports] of fileImports) {
         if (reached === from) continue;
         if (!allowed.includes(reached)) {
           console.error(
-            `✗ ${entry} → ${target} reaches folder "${reached}" ` +
-              `(root-file conduit; ${from} may not import ${reached})`,
+            `✗ IMPORT LAUNDERING: ${entry} → ${target} reaches folder ` +
+              `"${reached}" through a root entry file (${from} may not ` +
+              `import ${reached}; going via src/*.ts does not change that)`,
           );
           errors++;
         } else {

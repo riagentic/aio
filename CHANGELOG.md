@@ -1,5 +1,693 @@
 # Changelog
 
+## v1.0.0-alpha70 — what it says is what it does (2026-08-28)
+
+> **The last release that breaks compatibility.** Every alias, duplicate home
+> and never-read option that had been "deprecated through beta" is gone, every
+> "deferred by design" item is done, and every open field ask is either built or
+> refused in writing. From here the surface is frozen — additive only. Every
+> retirement below has a removals-registry row (`am pin` refuses the move for an
+> unfixed app, with file:line and the escape hatch
+> `am pin v1.0.0-alpha69 && am fix`) and, where an app's code is touched, an
+> `aiol --safe-fix` rule that rewrites it. See
+> `docs/upgrade/from-alpha69-to-alpha70.md`.
+
+### Breaking
+
+- **The alpha52-era aliases are gone.** `CellAccess`/`ServerFnAccess`→`Access`,
+  `ExtractState`→`StateOf`, air `Action`→`NodeAction`,
+  `schedule.blocking`→top-level `blocking`,
+  `connectDevTools`→`connectReduxDevTools` (beside `connectAioDevTools`, which
+  is aio's own), `schedule.poll({ backoff })`→`{ factor }`, the pre-alpha52
+  `(id, attempt, opts, action)` argument order, cell `ui:`→`visible:`,
+  `cellDefaults.ui`→`visible`, `listensTo` array→object form, deno.json
+  `target`→`client`, `testgen`→`testGen`, `aio/extras` `lint`→`checkCells`, and
+  `am`'s duplicate verbs (`ls`/`log`/`tt`/`release`/`new`/`update` →
+  `instances`/`logs`/`timetravel`/`publish`/`add`/`upgrade`; a dropped verb
+  answers "spelled `x` now", exit 1). Config-read aliases (`ui:`,
+  `cellDefaults.ui`, `listensTo: […]`, `target`) REFUSE in dev and log at error
+  level in prod while still honouring the old key — never a silent divergence.
+- **One import path per symbol.** `aio/db` is types-only (runtime values live on
+  `aio/server`); the ship family only on `aio/ship`; `appDirs` only on
+  `aio/server`; the updates runtime only on `aio/updates`;
+  `testComponent`/`setDocument` and `testCell`/`TestContext` only on
+  `aio/testing`. Test-only seams (`publishInstructions`, `nearestFlag`,
+  `placedName`, …) moved to `src/testing/internal.ts`, off the public entries;
+  `SendOf`/`ActionUnion` (unused) deleted; `SYNC_DEFAULTS`/`compareHLC` tagged
+  `@internal`. Snapshot: 507 → 501 public symbols with `aio/cli`'s 39 new ones
+  included.
+- **`memory.gcStressRatio` removed** — accepted since alpha55, never read.
+  `memory: {}` is validated: a removed key is refused by name with the migration
+  and the pin; an unknown key gets a did-you-mean.
+- **aiol:** `lintProject()`/`LintReport` are the programmatic names (the old
+  ones collided with `feedback.Report` and `extras.lint`).
+- **Dispatch has three phases** — `open → draining → sealed`. During the drain
+  only the framework's own in-flight writes (`_inflight`, stripped from every
+  network frame) are admitted: `DISPATCH_DRAINING` for new input,
+  `DISPATCH_CLOSED` after the seal, and a write lost after the seal is said out
+  loud. A bound async call no longer starts new work during shutdown. Additive
+  within protocol v2.
+
+### Added
+
+- **`aio/cli`** — a compact toolkit for rich CLIs: `args()` with typed
+  flags/commands and `--help` generated from the spec (unknown flags refused
+  with did-you-mean, `--json` refusals on stdout),
+  `prompt/confirm/select/
+  password` that refuse loudly without a terminal,
+  `table/progress/spinner/
+  style` degrading to plain lines on a pipe or
+  `NO_COLOR` (one colour decider, shared with the framework), `watch()` for a
+  live view of server state, `fail()`/`EXIT`. Every function takes an injectable
+  `io` (`testIO`). New example `examples/cli-tool`, `am create --template=cli`,
+  docs at `docs/clients/cli-toolkit.md`.
+- **The router, islands and the auth UI ship on the standalone/android runtime**
+  — routing is state, not transport (one implementation, an injected boot hook);
+  the packaged shell's `/assets/index.html` is adopted as `/`; the auth UI
+  resolves to the anonymous branch and says why once. Fixed on the way: a
+  childless `<Route path="/">` written in TSX matched every path. The
+  `KNOWN_DRIFT` ledger is down to `useTimeTravel`, with the reason.
+- **`schedule` on android** — it no longer drags the Deno worker pool into any
+  bundle; `blocking` is server-only and refuses by name on the standalone
+  runtime. The hand-kept browser `schedule` stub is gone (one module).
+- **Client render vitals are wired** — `renderBudget` is measured (rAF render
+  meter), threshold crossings are reported, every browser tab sends
+  `vitals-ping`, and `/__aio/vitals` lists real clients again (it reported
+  `clients: []` from alpha48 to alpha69). A gate pins that every client config
+  key has a reader.
+- **`updates.apply({ retireData: true })`** — one-step start-fresh for a blocked
+  release: the profile is archived whole under `<home>/archive/`, a fresh
+  profile starts, rollback stays armed; every step logged, a failure names the
+  step and leaves the data in place.
+- **`aio.stop()` / `aio.restart()`** — graceful, deferred, with a per-launcher
+  plan (dev supervisor, systemd with `Restart=always` +
+  `RestartPreventExitStatus=143`, a compiled binary re-execs itself, Electron
+  follows); where a launcher cannot restart itself it REFUSES with the manual
+  step. Proven on a compiled binary in the artifact e2e.
+- **`deno.json "share": ["../shared"]`** — a sanctioned workspace share for
+  multi-app repos: one `/shared/…` spelling served in dev and resolved by the
+  bundler; refused outside the repo, missing, or colliding; undeclared symlink
+  escapes are still refused.
+- **Object-shaped `db:` bindings** — `{ table, shape: "map" }` binds a pk-keyed
+  map, `path` binds a nested subset; bare `TableDef` unchanged.
+- **Cancellation is scoped by app identity** — two apps in one process sharing a
+  cell name never cancel each other's calls.
+- **A "still running (slow)" heartbeat** at 50% of a call's ceiling, so slow is
+  never mistaken for dead.
+- **`am doctor`** reports a running instance older than the newest file under
+  `dep/aio` and names the fix (`am restart`).
+- **LAN discovery** takes an optional probe nonce, echoed by the responder — a
+  test-time filter, so `tests/discovery.test.ts` measures its own responder
+  instead of the neighbourhood; production sweeps are unchanged.
+
+### Performance
+
+- **A string that grows ships as its growth.** `s.reply += chunk` used to
+  re-send the whole string every window (quadratic, and past the 50% full-state
+  threshold it re-sent the WHOLE state); it now travels as
+  `{ op: "append", value: <suffix> }` — decided in one place, applied by the
+  browser, the CLI/UDS client and worker hosts. Protocol v3; a v2 peer is
+  refused with the reason named. 50 streamed chunks into a 10 KB reply: 642 KB →
+  11.7 KB on the wire.
+- **Persist windows are O(change)**: reference baselines, identity-first row
+  diff, a cross-window pk index, and patch-narrowed passes fed by the commit's
+  own patches — 10k rows / 1 changed row: 6.7 ms → 0.19 ms (0.008 ms hinted).
+- **Boot schema setup is ONE ordered, fatal runner** (ladder → tables → sync); a
+  failing step refuses boot by name with its fix; a file written by a newer aio
+  is refused with both exits. The version marker stays in aio's private table,
+  never `PRAGMA user_version` — stamping that was a documented field bug (it
+  defeated apps' own migrations).
+- Sync bundle splitting was measured and declined: −5.9 KB gzipped for one more
+  serial request before mount and three chunk-aware readers. The lazy import of
+  the engine is pinned by tests instead.
+
+### Stricter
+
+- **DEV refuses to boot on unmigrated structural shape drift** of a persisted
+  cell (prod keeps the warning) — the fix (`version` + `onMigrate`, or a
+  `persist` filter) is in the message.
+- **Every test keeps its sanitizers on**: 393 opt-outs → 0 unjustified (each of
+  the 7 that remain names the external process it cannot reach);
+  `check:sanitizers` ceiling is 0.
+- `check:dead-wiring` walks `aiol/` and `amui/` too; the boundary gate names
+  import laundering through `src/*.ts`; CI runs every `check:release` gate
+  (seven static gates added, a `mutations` job, a nightly/on-demand heavy job)
+  and a test keeps CI and `release-check.ts` in step.
+- aiol: three new rules — a live draft `s` escaping into a module-level binding
+  or a stored callback (error), `fetch`/`Deno.*` I/O in a sync method (error),
+  `own.set` keyed by a constant while the resource varies (warn) — and every
+  removal finding prints the registry's message.
+- Journal, legacy-KV and schema-version reads say why they found nothing; only
+  NotFound is "nothing yet".
+
+- **iPhone: `ios-client`.** There is no Deno on iOS, so an aio app cannot run
+  there — but a thin client can, and now does:
+  `deno task build
+  --targets=ios-client` writes a complete Xcode project (a
+  WKWebView shell around the connect page, the same shape as `android-client`)
+  on ANY host, and on a Mac with `xcodebuild` also builds the simulator `.app`.
+  Bundle id from `ios.bundleId` in deno.json or derived from the name; version
+  from the project's `version`; the app's `icon.png` or the generated monogram
+  at 1024×1024. Every platform now carries the most it can: Linux, Windows and
+  macOS run the app; Android runs it or connects; iOS connects.
+
+- **The in-process harnesses honour `cellDefaults` and `localFirst`.** `aio.run`
+  applies both BEFORE it refuses an unsafe composition, because both change what
+  a cell hides and whether it syncs. `testUI`/`bootCells` refused over the raw
+  definitions — an app whose only contradiction came from its app-level defaults
+  booted green under test and was refused the moment it started. Both harnesses
+  take the same two options now
+  (`testUI(App, name,
+  fn, { cellDefaults, localFirst })`,
+  `bootCells(cells, { … })`), apply them on the standalone runtime exactly as
+  boot does, and refuse what boot refuses. The two passes moved into the
+  isomorphic core (`src/state/cell-defaults.ts`) so every runtime that composes
+  cells applies them from one place.
+
+- **Gates that claimed and never checked.** `check:release` said the Electron
+  package builds; both e2e tests proving it sat behind an opt-in no task set —
+  `deno task test:electron` now runs in the heavy tier. The real-browser e2e was
+  `ignore`d in CI for want of a browser — a job installs Chrome and runs it.
+  CI's Deno floor job ran 2.6.0 against a 2.9.0 minimum. `cli-client` was
+  documented as buildable and never connected to anything — an artifact e2e
+  builds a `server` and a `cli-client` binary from one scaffold and proves the
+  round trip over a real socket. And `check:sanitizers` freezes the count of
+  tests that turn a leak sanitizer off without saying why (`// aio-ok:`).
+
+- **The developer's first hour, worked to zero.** From a hands-on walk of create
+  → dev → test → build → ship, by someone who had never seen aio: the docs
+  taught `am surface 0`/`am trigger 0` (index 0 is the dev server's reload
+  socket; the index-less form drives the newest UI client, and a gate keeps the
+  docs on it); the scaffold's `src/client.ts` hard-coded `ws://localhost:8000`
+  while dev picks a free port (it now takes the URL and fails in 10 s with the
+  reason); the quickstart named `am update` (it is `upgrade`) and promised port
+  8000; `am <cmd> --help` printed all 170 lines (it prints the command's block);
+  `am logs --level=error` was silently a text filter (unknown flags are refused,
+  naming the real ones); `am publish` under a pipe emitted `signed:false`
+  without a word and ignored the key `keygen` had written to its own default
+  path (it warns on stderr in every mode and uses that key);
+  `deno task ship --help` was an error; `am create` printed a relative path and
+  `"git": false` with no reason; the scaffold README said `.env` was gitignored
+  and it was not; the counter's `−`/`+` buttons surfaced as `Button`/`Button2`
+  (`t="minus"`/`t="plus"`); a path-pinned app printed its pin note twice per
+  command (two processes compared spellings, not files); a compiled binary's
+  `--help` said `deno run -A src/app.ts` and `default: electron` for a browser
+  app (help and boot read one decider).
+
+- **An async method's state view stayed writable after the method finished.** A
+  `setTimeout`, an event listener, a `.then` nobody awaited — any callback that
+  outlived the method could still assign through `s` (or `s.$live`), and the
+  write COMMITTED: persisted, broadcast, `ok: true`, and not a line in any log.
+  Immer revokes a sync method's draft the moment it returns; the async view
+  refused nothing. The view is now sealed when the call settles, and a late
+  write throws by cell, method and path
+  (`[counter:bump] write after the method
+  finished: s.count …`) — dev, prod
+  and every harness alike. Mutation-checked.
+
+- **A client throttled by backpressure lost the patches of every skipped
+  round.** Skipping a round dropped its patches for that client and the next
+  eligible round sent only the NEWER patch — a `replace items[1]` on a list that
+  never received `add items[1]`. The client diverged from the server with health
+  green. A skipped round now marks the client as owed a full state, and the next
+  eligible round sends one.
+
+- **`am dispatch` answered `ok` for a typo, and for a method that failed.** A
+  bare type (`incremnt`) reaches nothing in an app made of cells and was
+  dispatched into the void under `{"ok":true}`; it is now a 404 naming the
+  nearest real method (`Did you mean counter:increment?`). And a method that
+  threw after its first `await` was logged as `EFFECT_ASYNC_ERROR` while the
+  route had already answered `ok`: the operator's door now carries a call id
+  like the browser and the CLI client do, so the reply is the method's — proven
+  over a real server. The `EFFECT_ASYNC_ERROR` tip no longer sends a method
+  author looking for an "execute handler".
+
+- **Built bundles are minified.** `deno task build` never passed `minify` to
+  esbuild: the counter app shipped 309 KB raw / 79 KB gzipped; it is now 145 KB
+  / 52 KB. The "~8 KB renderer" claim was false on every surface that made it
+  (README, CLAUDE.md, five docs) — measured, AIR is ~20 KB gzipped (59 KB
+  minified), and that is what they say now.
+
+- **Full-state frames are serialized once per view per round**, not once per
+  client: 100 clients on a 213 KB state cost 20 ms a round and each held its own
+  copy (217 MB for 100 clients on 2.2 MB). Clients with the same (user,
+  subscriptions) pair now share the string. And `compactPatches` indexed its
+  add/remove shifts by parent with a binary search — a flush holding 20 000
+  pushes and one ancestor replace went from 257 ms to 6.5 ms per client.
+
+- **A comment in `deno.json` changed an app's identity.** Three sites parsed
+  `deno.json` with `JSON.parse`, threw on JSONC, and fell through to the
+  directory name — a different app id, so `am` addressed nothing and the lock
+  and data dir were keyed differently from what the app printed. All three use
+  the JSONC-aware reader the rest of the framework uses.
+
+- **Errors keep their cause, and "not found" is only said when it is true.**
+  Nine `throw new Error(…)` sites inside a `catch` dropped the original error;
+  they carry `{ cause }` now, and the ones that said "never put()" / "gone" /
+  "no mod.ts" for what may have been EACCES say the real reason. A static file
+  that exists but cannot be read is a 500 with a log line, not a 404; a refused
+  snapshot says why instead of "Invalid JSON"; a journal that cannot be read is
+  a thrown error, not an empty replay (NotFound stays the one honest "nothing
+  yet"); a torn journal line warns how much replays; an unparsable `deno.json`
+  at compile time warns that no `compile.include` was applied; an app key that
+  could not be recorded warns that `am` will not find it; a snapshot that could
+  not be restored names the reason before "starting EMPTY"; the Electron launch
+  failure names the URL and `--client=browser`.
+
+- **`am` announced it was using an app, then refused it for being that app.**
+  With nothing running under the id inferred from the cwd, `resolvePort` falls
+  back to the single live instance and says so on stderr — but only the PORT
+  travelled, so the identity gate went on comparing against the old expectation
+  and refused the very instance the note had just promised to use. `am health`,
+  which has no such gate, worked; `am state` did not. A port chosen BY DISCOVERY
+  is not a stale port, and is now trusted; a `--port` the user typed is still
+  refused when it answers as another app. Un-masking that turned a confusing
+  identity refusal into the real explanation underneath it (the control API is
+  dev-only).
+
+- **The "what works against a production app" list named two commands that do
+  not.** Measured against a real compiled binary: `am errors` reads
+  `/__aio/error`, which is gated on `!prod`, and `am metrics` goes through the
+  trojan — both answer 404 there, and `am errors` answered a bare "404 Not
+  Found" with no cause, immediately after being told it would work. The list
+  names only the six that were measured to work, `am errors` now explains the
+  gating and points at `am logs error` where a compiled app's errors actually
+  are, and a gate checks the claim against the implementations: a listed verb
+  may ASK a dev-only endpoint (`am status` does, for extra detail) but may not
+  END on its failure.
+
+- **`am fix` told every freshly scaffolded app to fix its identity.** Run
+  `am create` and `am fix` back to back and the repair tool advised changing
+  what the framework had generated one command earlier. It asked "is `appId` in
+  `aio.run()`", but `resolveAppId` infers from `deno.json`'s
+  `appId > title > name` and only falls back to the entry's DIRECTORY name when
+  a project declares none of the three — and a scaffold writes a `name`, so its
+  identity is already deterministic and renaming the folder moves nothing. The
+  advisory now fires only when nothing declares an identity, which is the case
+  it exists for, and says what to do about it. An advisory that fires on its own
+  tool's output is noise, and noise is how the ones that matter get skipped.
+
+- **A worker cell's committed state was never deep-frozen.** `createDispatch`
+  deep-freezes when `freezeState` is on (`config.freezeState ?? !prod`, so ON in
+  dev, and the boot line prints it) — but it captured the flag at construction,
+  and a cell WORKER builds its dispatch before the `init` message that tells it
+  whether this app is in dev. So a worker cell carried only Immer's
+  `autoFreeze`, a narrower tripwire inside the worker than outside it, in dev
+  AND prod alike — the harness-more-permissive-than-production class this
+  project calls disqualifying, with the isolates the wrong way round. The commit
+  path reads the live value off `deps` now (the same block already reads
+  `deps.debug`), the owner's RESOLVED value travels in `init`, and a worker is
+  strict until that message arrives. `todo.md` had recorded it as a deliberate
+  deferral; it is closed. The test is structural and says why: the freeze
+  protects an object no method can reach, so every attempt to observe it from
+  inside a method reports proxy revocation instead.
+
+- **A `--client=cli` app was told about `--client=server-only`.** The boot
+  report's composition line, for an app that is headless but HAS a component,
+  hardcoded one of the two reasons it can be headless
+  (`client === "server-only" || client === "cli"`), so a CLI app read "headless
+  (App.tsx present, not served — --client=server-only)" one line above the
+  report printing `cli: --client=cli` — a flag named back at someone who never
+  passed it. The comment directly above that line already states the rule it
+  broke ("Say what is TRUE, not what is usually true"), written when the same
+  line claimed "no App.tsx" next to the file sitting right there. It names the
+  real client now, and names none when a caller does not supply one —
+  `checkCells` is public surface, so the parameter is optional and trailing.
+
+- **`am log` could not find the app log.** Its help says "Tail app log"; it read
+  `logs/stdout.log`, which is a capture `am start` makes when it launches an app
+  detached. An app run the ordinary way — `deno task dev`, `deno run src/app.ts`
+  — prints to its terminal and never produces one, so for the DEFAULT developer
+  workflow the command answered "no log file at …/logs/stdout.log" about a
+  running, logging app, while `app.log` (written by the framework logger for
+  every app however it started) sat unread in the directory that message had
+  just named. It falls back to `app.log` now; `stdout.log` still wins when it
+  exists, because it is the richer capture, and `--client` is untouched. The
+  same shape is recorded one comment above the fix: `am log --client` once read
+  "a relative path no aio version has ever written".
+
+- **`port: 0` produced an app nothing could reach.** It is the documented "pick
+  a free port" setting — it has its own upgrade-guide section and its own lock
+  regression test — and the resolved port was thrown away at the moment it
+  became known: `Deno.serve({ port, onListen: () => {} })` discarded the address
+  it was handed, while the trojan listener ten lines below in the same file has
+  always captured its own. So the boot banner printed `web http://localhost:0`
+  and `ws://localhost:0/ws`, the lock recorded `"port":0` (written from the
+  CONFIGURED port before the listener existed, never corrected), and since `am`
+  addresses an app through that number, `am state` on a perfectly healthy app
+  answered `TypeError: Fetch failed: Requests to port 0 are blocked`. The
+  listener's own answer is now the one fact every surface reads. Not to be
+  confused with the zero-TCP-port decision, where an app binds nothing at all
+  and 0 in the lock is the honest answer — that behaviour is unchanged.
+
+- **aiol never checked a COMPONENT for server-only imports.** A `src/App.tsx`
+  importing `aio/server`, `@std/path` or `node:fs` — three ways to write the
+  anonymous blank screen this linter exists to prevent — was reported by nobody.
+  Two loops divide the files between them: the cell-file loop knows these are
+  server-only and skips `.tsx` by design, while the loop that sees every `.tsx`
+  waved them through — `@std/`/`node:` with "caught by Check 1" (the loop that
+  skips `.tsx`), and every `aio/*` via `isAioEntry` on the grounds that
+  `checkImports` owns them, which asks whether a specifier RESOLVES and never
+  whether it belongs in a browser. Two prefix lists, and the one this loop read
+  was missing `aio/server`. Half of this was found once before: the `Deno.*`
+  scan was moved out of the cell-file loop "precisely because this `continue`
+  was silently exempting components from it" — the import scan kept the defect.
+  One list now, and `.tsx` is checked where it is actually seen.
+
+- **…and aiol's own upgrade rule walked apps into it.** The `aio/db` deprecation
+  hint suggests `import { createDB } from "aio/server"`, with an auto-applicable
+  `--safe-fix`. In a component that swaps a deprecation warning for a hard
+  boundary error, so `--safe-fix` made the file worse. In a `.tsx` the advice is
+  now the real one — a database call belongs behind a cell method, which is
+  where it already ran — and no automatic rewrite is offered. Cell files are
+  unchanged: there the specifier swap IS the fix.
+
+- **The Windows pipe connection leaked handles when it failed to get one.**
+  `PipeConn`'s constructor takes ownership of the pipe handle and then makes two
+  events in a row. If the second `CreateEventW` threw, the first event and the
+  pipe handle were both orphaned — and that call fails for one reason worth
+  planning for, which is that handles are already exhausted, so leaking two more
+  on the way out is how a transient condition becomes permanent. `close()` is
+  meticulous about handle ownership (it will not close an event out from under a
+  waiter); the constructor was not. Verified by inspection and the type checker
+  rather than by running it: the FFI loads only on Windows, and the Wine e2e
+  does not exercise handle exhaustion.
+
+- **aiol's rules are now held to being wired.** `check:dead-wiring` — the gate
+  written for "declared and never connected", which found four such features in
+  alpha69 — walks `src/` only, so the project's own linter sat outside it. A
+  rule written, exported, and left out of `ALL_CHECKS` reports nothing forever,
+  which is a check that silently does not check. All 28 are wired today; a test
+  keeps it that way, which is cheaper than widening a gate across a new root.
+
+- **`install.sh` announced a deno it had not installed.** It installs deno two
+  ways and only one of them proved it worked. The official-installer branch runs
+  `curl … | sh` — a POSIX pipeline, whose exit status is the LAST command's, and
+  /bin/sh has no `pipefail` — so a 404, a dropped connection or an empty body
+  leaves `sh` reading nothing and exiting 0, the `|| return 1` beside it never
+  fires, and the branch did a bare `return 0` three lines above a sibling that
+  ended by checking `deno --version` actually runs. The caller then printed "+
+  deno installed", with an empty version because there was no deno. Both
+  branches share one proof now (`deno_ok`), and it runs deno rather than looking
+  for a file — a truncated download, a wrong-arch binary and a missing loader
+  all leave an executable sitting there.
+
+- **`init.sh` told you the install had succeeded when nothing was downloaded.**
+  It is the legacy entrypoint, kept on purpose so old `curl … | sh` URLs keep
+  working, and it was the one script of the four still written the way `run.sh`
+  explains at length that a script must not be: `exec sh -c "$(curl …)"`. A
+  command substitution's status is not the simple command's, so `set -e` never
+  sees the curl fail — a 404, a dropped connection or an empty body leaves the
+  substitution empty, `sh -c ""` runs nothing and exits 0. It downloads to a
+  file, refuses an empty one, runs it, and reports the installer's real exit
+  code now, exactly as `run.sh` does. It had no test at all; it has five,
+  offline, and they go red against the old one-liner.
+
+- **`am lab` printed `error: …` and told the shell it had succeeded.**
+  `am-output.ts` draws this line and explains why it exists: `fail()` reports
+  AND exits as one act "so the exit code cannot drift from the message", while
+  `outError()` alone is for the handful of places that genuinely carry on. The
+  rule was written after `am create`, `am new` and `am log` were caught printing
+  a refusal and returning 0 — `am create x && cd x` cd'd into a directory that
+  was never made. Nothing kept it, and `am lab` had drifted back: the branch
+  where the container's viewer never answers reported through `outError` and
+  returned, ending the command, three lines below a sibling branch that used
+  `fail`. `am lab && open …` proceeded to the open. A gate holds the narrow,
+  real rule now — an `outError` whose next statement is a bare `return`. It is
+  deliberately narrow: `outError(…); Deno.exit(1)` is the idiom throughout that
+  folder and is correct, and a `return` carrying a value hands a result to a
+  caller that decides, which is what `am state`'s poll loop needs.
+
+- **The lock directory was chmod'ed 0700 and hoped for the best.** It holds
+  every running app's CONTROL SOCKET, and whoever connects to one of those can
+  dispatch methods into that app — the code says so itself. `mintControlKey`
+  already applies the matching rule to the control KEY, refusing to write a
+  secret into a directory that cannot keep it; `lockDir()` had only half of it,
+  because chmod on a directory you do not own returns EPERM and the failure was
+  swallowed. On the one host where the base is `/tmp` — containers, no-systemd
+  boxes, plain ssh — `/tmp/aio` is a predictable path any local account can
+  pre-create at 0777, and every app then bound its control socket inside a
+  directory somebody else could unlink in. Create, narrow, and then LOOK: if the
+  directory is still world-traversable, or belongs to another uid, a uid-scoped
+  sibling is used instead and the move is logged. That also fixes a case that
+  was merely broken rather than unsafe — a second user on such a host could not
+  bind in the first user's 0700 directory and got an unexplained failure. If the
+  fallback is unusable too, boot refuses and names the directory: a control
+  socket is not something to place hopefully. The rule now lives in one file
+  (`dir-permissions.ts`) that both doors ask.
+
+- **The app key's own directory was left at the umask.** `ensureAppDirs` chmods
+  the app tree to 0700, and says why: the mode of a directory is decided by what
+  it can ever hold, not by what today's file happens to be. But `app-key.ts`
+  makes the key's home ITSELF — it runs before `aio.run` has built the tree when
+  `am` or a test calls it — and did so without that chmod, so the directory
+  holding an app's authentication key sat at 0755 on a stock Ubuntu. The
+  control-key path a hundred lines below already did it right. Three spellings
+  of "write a secret" lived in that one file: create then chmod (a window at the
+  umask), create-then-chmod inside the SAME `try` so a chmod failure was
+  swallowed together with the write and left 0644 saying nothing, and
+  create-with-`{ mode: 0o600 }` after removing any existing file — the only one
+  that is right. There is one now. Worth naming honestly: the tests can pin the
+  directory and the final mode, but not the creation window — a time-of-check
+  gap is not observable by checking, so that half is held by a structural
+  assertion on the single call site instead.
+
+- **`aio/air/compat` and `aio/state-core` blank-screened in dev.** Both are
+  documented for use from a component — the React migration shims are permanent
+  1.0 surface, and `docs/ui/air-advanced.md` tells adapter authors to build on
+  state-core — and neither was in the browser import map, so the page died on an
+  unmapped bare specifier while every gate stayed green. This is the `aio/ui`
+  field report exactly: the symbols exist, so nothing that checks symbols could
+  see it. They are mapped now, and a booted dev server proves both routes serve
+  real JS carrying the expected exports. The reason they had been left alone —
+  that serving them would create a second copy of AIR beside the bundle — was
+  measured and found false: these routes TRANSPILE rather than bundle, so
+  `src/air-compat.ts` reaches `./air/compat.ts` at the same `/__aio/air/` URL
+  `/__aio/air.js` already loads, and the browser instantiates it once.
+
+- **`aio/db` was missing from all three copies of the server-only list.** It is
+  the entry the docs tell every app to use for SQLite, it is absent from the
+  browser import map on purpose, and importing it from a component therefore
+  fell through to the generic advice — "add `npm:aio/db` to deno.json" — which
+  is the exact advice the comment beside each list calls actively harmful: the
+  package does not exist, so the user edits deno.json, restarts, and lands on
+  the same blank page. `aio/build`, `aio/ship`, `aio/testing` and the eight CLI
+  entrypoints had the same gap. The list was spelled three times
+  (`graph-validator.ts`, `lint.ts`, `server-html-classify.ts`), each copy with a
+  comment naming the other two; it is one file now. A new gate makes the class
+  unshippable: every `aio/*` export in `deno.json` must be browser-mapped,
+  server-only, or named with its reason. The existing doc-imports gate could not
+  catch this — it asks whether a SYMBOL exists, which was true here and true for
+  the `aio/ui` blank screen before it. Four entries are recorded as deliberate
+  gaps rather than fixed, and one is a real open bug: `aio/air/compat` is
+  permanent surface, taught in component examples, and unmapped — mapping it
+  naively would serve a second copy of AIR beside the bundle, which is worse
+  than the unmapped specifier.
+
+- **Three constants had two declarations each.** `WS_MAX_QUEUE = 100` in
+  `protocol-types.ts` and again in `cli-client.ts`; `KILL_POLL_MS = 100` in
+  `am`'s kill loop and again in the server's; `THROTTLE_MS = 2000` twice in
+  `vitals`, both governing the same console throttle. Every pair was one fact,
+  and each would have drifted the first time anyone tuned one side. The existing
+  one-fact-one-spelling gate counts LITERALS and so cannot see this shape, where
+  the duplicate is a NAME; a new gate flags any constant declared in two files
+  at the same value, and deliberately leaves same-name-different-value alone
+  (`MAX_DEPTH` is 12 for a timeline and 32 for a deep merge — two facts sharing
+  a noun).
+
+- **A request body was bounded by the length the sender declared.** Eight routes
+  read a body; one had a real bound. The rest checked `Content-Length` and then
+  called `req.text()`/`req.json()` unbounded — and a declared length bounds
+  nothing, because the sender picks it. Both ways past it were live:
+  `Number("abc") > MAX` is false, so an unparseable header satisfied the cap,
+  and declaring 10 while sending 10 GB satisfied it honestly. The snapshot route
+  also REQUIRED the header, a requirement any garbage value met. The one that
+  matters is `/__aio/pair`: it is reachable before any credential — that is what
+  pairing IS — so on an exposed app it was an anonymous memory pump, under a
+  comment claiming a bounded reader it did not have. `read-body.ts` is THE
+  reader now, counting bytes received; the declared length stays only as a cheap
+  early-out. One consequence worth naming: a body with no `Content-Length` at
+  all is now read and bounded rather than refused, which is what pairing should
+  always have done — the header's absence was never the risk, and it made every
+  chunked client a 413. The 10 MB snapshot cap, declared once per file at the
+  same value, is one fact.
+
+- **The module-boundary matrix could not see an import wearing its public
+  name.** `import { createDB } from "aio/db"` resolves, through `deno.json`'s
+  import map, to the same `src/db/mod.ts` that `../db/mod.ts` names — and
+  `aio/db`, `aio/sync` and `aio/ui` all point at folder files rather than root
+  entries, so no conduit rule would have caught it either. The gate matched only
+  the relative spelling, so the load-bearing structural rule had a hole in it
+  the size of the public API. `src/` uses no bare self-specifier today; the gate
+  is what keeps that true. Reading text as code twice over costs more, so the
+  scan now asks `codeMask` whether each match was code: `am-cmd-create.ts`
+  scaffolds whole apps as template literals, and most of `src/` shows its public
+  spelling in a docstring. A prose import is not an import.
+
+- **The "every message has a level" gate exempted five whole files to silence
+  strings.** It matched raw text, so a `console.log` inside a generated-script
+  template — an Electron `main.cjs`, a browser `<script>` — looked exactly like
+  a print from this process. Twenty such matches were quieted by allowlisting
+  the files that held them, which also stopped watching the ~1,500 lines of real
+  Deno-side code around them. The gate reads code now; all five exemptions are
+  gone, and the three that remain are the console sink itself.
+
+- **The Host allowlist could be bypassed by a malformed `Host`** — found by a
+  randomized hunt over the parser, not by a new report. `_hostnameOfHeader` took
+  everything before the LAST colon, so `Host: evil.com:80:80` became
+  `evil.com:80`, and `_isIpLiteral` read "contains a colon" as "is an IPv6
+  address, which cannot be the product of DNS". An attacker-controlled domain
+  therefore walked straight through the check that exists to stop DNS rebinding,
+  with a header any proxy or non-browser client can send. Root cause: the header
+  was sliced rather than parsed. It is normalized once now — a port is digits
+  and nothing else is a port, IPv6 is judged by the platform's own URL parser
+  rather than by a second spelling of the rule, and the same pass drops the root
+  label so `http://localhost.:3000` stops being refused as an attack.
+  `tests/host-allowlist-fuzz.test.ts` states the property a table of examples
+  could not: no decoration of a foreign domain is ever allowed, and no name the
+  app really is served as is ever refused.
+
+- **The control plane refused its own machine on a dual-stack bind.** The trojan
+  (raw state, arbitrary SQL, shutdown) is same-machine-only, and
+  `_isLocalRequest` was the whole gate — matching `127.0.0.1`, `::1` and
+  `localhost`. Measured: on `--host=::` an IPv4 loopback client arrives as
+  `::ffff:127.0.0.1`, the IPv4-mapped form, so `am` could not drive an app bound
+  to dual-stack from the machine it was running on. One `_isLoopbackAddr`
+  predicate now recognises every spelling the kernel can hand us — all of
+  `127.0.0.0/8`, `::1`, the bracketed and IPv4-mapped forms — which loosens
+  nothing, because a packet arriving on a real interface with a loopback source
+  is a martian and is dropped. Deliberately NOT merged with `_hostIsExposed`'s
+  loopback test: that answers a different question about a value an operator
+  typed.
+
+- **`allowedOrigins` had two readers and they disagreed.** The `Host` check
+  trimmed and lowercased each entry and understood the full-origin spelling; the
+  WebSocket `Origin` check did exact `Array.includes()` on the raw entries. So
+  an entry with a capital letter, a stray space, a `host:port` form or a full
+  origin admitted the page over HTTP and refused its socket — the app LOADED and
+  then could not connect, which reads as a network fault rather than a
+  configuration one. It mattered doubly because the Host refusal tells the
+  operator this is "the same list the WebSocket origin check reads".
+  `allowlistAdmits` is the one decider now, and the parity test drives a real
+  WebSocket handshake rather than the shared function — an earlier version of it
+  called the function on both sides and passed with the bug put back.
+
+- **`Authorization: Bearer` had three readers, and none of them followed the
+  spec.** The general extractor, the auth-flow resolver and the shared-key path
+  each spelled `auth?.startsWith("Bearer ")` for themselves — three chances to
+  drift on the one header where drifting means "authenticated here, anonymous
+  there". All three were exact-match, but RFC 7235 makes `auth-scheme` a token
+  and tokens are case-insensitive, so a client sending `bearer <token>` (some
+  HTTP libraries do) presented a good credential and was read as anonymous. It
+  fails CLOSED, which is why it went unnoticed: the symptom is "your token does
+  not work", not a breach. One `bearerToken()` reader now, case-insensitive,
+  tolerant of the whitespace the grammar allows, and still refusing a different
+  scheme's payload. **The consolidation itself missed a fourth reader** — the
+  trojan listener, whose own comment said "same rules as main server" while
+  spelling the rule for itself, so `bearer <token>` was accepted by the app and
+  refused by its control plane. A half-done consolidation leaves exactly the
+  drift it set out to remove, so the rule is a gate now: whoever reads the
+  `authorization` header parses it with `bearerToken`. (The first version of
+  that gate passed a file that had grown its own parse beside the import, and a
+  mutation test caught it.)
+- **The cell access gate failed OPEN on a rule that could not answer.**
+  `cellAccessAllowed` returned the predicate's value straight into
+  `if (!cellAccessAllowed(...))`, so any truthy non-boolean granted access — and
+  the one an app reaches for by accident is a promise:
+  `access: async (user) => await checkEntitlement(user)` is a pending promise,
+  which is truthy, which is YES to everybody including anonymous callers. The
+  `Access` type says `=> boolean` and TypeScript catches the direct spelling,
+  but not one returned through an `any` or an untyped helper, and this gate is
+  the last place the mistake can be caught. A non-boolean is denied now, and
+  said out loud — naming the promise case specifically, because the fix ("decide
+  before the call, return true or false") is not obvious from the symptom. A
+  predicate that THROWS is denied too, instead of surfacing as a 500 three
+  layers from its cause. The codebase already had the right answer elsewhere:
+  the update applier's `canApply` refuses on a throw "because a guard that
+  cannot answer is not a yes" — the two agree now. **The same bug had a second
+  home:** `serverFnAllowed` spelled the same four branches for itself, so it was
+  a second reader of a vocabulary the docs call unified AND it inherited the
+  same fail-open — a promise-returning predicate opened a whole serverFn
+  namespace. It delegates to the one decider now; only "no rule at all means
+  connection auth only" stays serverFns-specific.
+- **Five refusals named a task nobody has.** `deno task dev:android`,
+  `compile:android`, `dev:electron`, `compile:electron` — the per-target matrix
+  alpha52 deleted. A scaffolded app has none of them, so following the hint
+  produced `Task not found`, which reads as "aio is broken" rather than "that
+  hint is stale". Worse, three tests ASSERTED the retired names, notarizing the
+  drift. `tests/named-tasks-exist.test.ts` now gates the class: every
+  `deno task X` in a string in `src/` must name a task that exists, in this
+  repo's `deno.json` or in what `am create` scaffolds. Comments are exempt —
+  several deliberately name a retired spelling to explain why it is gone.
+- **`check:vacuous` was blind to any file containing a regex with a quote in
+  it.** Its `mask()` blanked comments and strings but did not know a REGEX
+  literal, so a backtick inside a character class — `/["'`]/`, an ordinary thing
+  to write — opened a phantom template that ran to the next backtick in the file
+  and hid everything between. The scanner then reported a perfectly good test as
+  proving nothing, and, far worse, could not see the code it was meant to be
+  reading. (The apostrophe half of this hole was closed once already; this is
+  the same one a character wider.) The mask parses regex literals now, resolving
+  the regex-vs-division ambiguity by looking back at the previous meaningful
+  character and biasing toward "regex", since guessing wrong that way costs a
+  blanked arithmetic span and guessing wrong the other way is this bug.
+  **Teaching it to see found three genuinely vacuous tests** it had been blind
+  to — loops over an entry set, the removals registry, and a generated import
+  map, any of which passing empty would have reported a clean result for
+  something never looked at. All three assert non-empty now, and seven ledger
+  entries turned out not to be vacuous at all.
+- **`check:silent-catch`'s ceiling was inflated by 27.** It matched `catch {}`
+  against raw source, so the pattern QUOTED inside a string or a comment counted
+  as a swallow — including a comment explaining why a bare `catch {}` had once
+  been a bug. A ratchet measured on the wrong thing rots upward: the budget had
+  been permitting 27 more real silent catches than anybody agreed to. It reads
+  through `codeText` now (the same mask `aiol` and `am pin` use), matching on
+  masked text while slicing the BODY from the original — because the
+  `// aio-ok:` justification lives in a comment the mask blanks, and both facts
+  have to survive. 372 → 345, and the justified count went UP by one, which is
+  how you can tell the marker detection still works.
+- **`check:dead-wiring` had the same blind spot, and it was hiding real dead
+  code.** Its mask stopped a quoted string at a newline (an apostrophe in a
+  regex class had blanked whole files once) but left BACKTICKS unbounded, so a
+  regex like
+  `/["'`]?/`— which`src/db/reactive.ts`actually contains —
+  blanked forward to the next backtick in the file. Two lines there, by luck;
+  the next such regex would have taken the rest of its file. Teaching it regex
+  literals surfaced **three exports nothing reaches**:`pickPathBestEffort`,
+  whose doc named amui's "browse" affordances as its caller when amui has no
+  browse feature and never had one (deleted — a wrapper justified only by a
+  consumer that does not exist is a claim, not code), and two internal query
+  builders that are tested but composed by nothing, recorded at the site rather
+  than deleted, since removing them cascades through their siblings and that is
+  a deliberate sweep, not a drive-by. The three masks in this repo stay
+  separate on purpose:`code-mask.ts`counts`${…}`holes as template content,
+  and`check-dead-wiring`
+  needs them as CODE.
+- **The slug transform had four copies, and it is an app's identity.** The same
+  expression reduced a name in `single-instance-lock` (the appId, which names
+  the lock file, the data directory and the UDS socket), `build-helpers` (binary
+  names), `electron-shared` (the userData path) and `server.ts` (the shared-key
+  cookie). They agreed — which is the dangerous state, not the safe one:
+  changing the appId rule alone would leave two apps whose ids differ only in
+  punctuation holding SEPARATE locks while SHARING a cookie, a credential
+  crossing between apps from an edit that looked local. Cookies ignore the port,
+  so two aio apps on one host already share a jar and the slug is the only thing
+  keeping their credentials apart. One transform now; the fallback stays a
+  caller's choice, because it genuinely is one.
+- **The control plane's prefix was spelled five times, in four files.** The GATE
+  that refuses a non-loopback caller and the DISPATCHER that runs the route each
+  tested `pathname.startsWith("/__aio/trojan/")` for themselves, so moving the
+  prefix would have moved the route and left the gate behind — dispatching raw
+  state, arbitrary SQL and shutdown with nothing in front of it. Not a live bug;
+  the latent one it would have become is the point. `TROJAN_PREFIX` is the only
+  spelling now, and `one-fact-one-spelling` holds it at ZERO. That gate also
+  grew a per-entry `home`, because it had assumed every shared constant lives in
+  `app-files.ts` — including in the advice it printed.
+- **A `:param` is URL-decoded** — documented at the source and where an app
+  author reads, because the decoded value can hold characters the path did not
+  visibly contain (`/` from `%2F`, `..`), which is correct for a value and
+  dangerous for a path. aio never joins one onto the filesystem itself; the
+  trailing `*` capture is deliberately not decoded.
+
 ## v1.0.0-alpha69 — wired, and proven end to end (2026-08-27)
 
 The release where updating stopped being a feature tested in pieces. A real
@@ -1136,12 +1824,12 @@ edits.
 
 ## 1.0.0-alpha61 — every write lands, and every app has a face (2026-08-18)
 
-Six field reports read together (`atomic`, `fixable`, `impactnews`, `modelinfo`,
-a trading tool and a video-generation app — 7.5–8.5/10, all locating the
-weakness at the boundary around the model, never in it), worked through to zero,
-and audited. Plus the thing none of them asked for and all of them needed: an
-app is two files of decisions now, and everything else has a default derived
-from the app's own identity.
+Six field reports read together (a desktop tool, a linter-bound app, a news
+reader, a model catalogue, a trading tool and a video-generation app —
+7.5–8.5/10, all locating the weakness at the boundary around the model, never in
+it), worked through to zero, and audited. Plus the thing none of them asked for
+and all of them needed: an app is two files of decisions now, and everything
+else has a default derived from the app's own identity.
 
 ### The write that vanished (the one that mattered)
 

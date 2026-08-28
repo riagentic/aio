@@ -266,6 +266,18 @@ const EVER_REMOVED: readonly string[] = [
   "execute",
   "machine",
   "generators",
+  "call({ timeout })",
+  "useCell()",
+  // alpha70 — the last breaking release: one import path per symbol.
+  'import { createDB } from "aio/db"',
+  'import { shipApp } from "aio/build"',
+  'import { appDirs } from "aio/testing"',
+  'import { installUpdatesRuntime } from "aio/testing"',
+  'import { testComponent } from "aio/air"',
+  'import { testCell } from "aio"',
+  'lint() from "aio/extras"',
+  "testgen()",
+  "memory.gcStressRatio",
 ];
 
 Deno.test("removals: no row is ever deleted — the record is append-only", () => {
@@ -283,6 +295,12 @@ Deno.test("removals: no row is ever deleted — the record is append-only", () =
 
 Deno.test("removals: every registry row is reachable from a real surface", () => {
   // A row nobody consumes is documentation pretending to be a gate.
+  // An empty registry would make "every row is reachable" trivially true —
+  // and the registry going empty is exactly the regression this guards.
+  assert(
+    REMOVALS.length > 0,
+    "the removals registry is empty — nothing was checked",
+  );
   for (const r of REMOVALS as readonly Removal[]) {
     assertEquals(
       removalOf(r.key),

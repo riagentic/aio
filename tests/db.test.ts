@@ -12,7 +12,12 @@ import {
   table,
   text,
 } from "../src/server/sql.ts";
-import { createDB, initSchema, loadTables, syncTables } from "../src/db/mod.ts";
+import {
+  createDB,
+  initSchema,
+  loadTables,
+  syncTables,
+} from "../src/server-entry.ts";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 

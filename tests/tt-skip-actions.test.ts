@@ -8,8 +8,6 @@ import { dec } from "../src/protocol/envelope.ts";
 
 Deno.test({
   name: "diagnostics.skipActions keeps an action type out of TT history",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const c = cell("loopy", {
       state: { n: 0, hits: 0 },

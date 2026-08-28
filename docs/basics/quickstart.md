@@ -23,11 +23,13 @@ cd my-app
 deno task dev                    # prints the app's URL (pass --open to open a browser)
 ```
 
-`dev` prints `open http://localhost:8000 in your browser (or pass --open)` and
-waits. A browser tab is not opened for you: a tab handed to a running browser
-belongs to that browser, so aio cannot close it when the app exits. Pass
-`--open` if you want one anyway. An Electron window is a child process aio owns,
-so `deno task dev --client=electron` does open by itself.
+`dev` picks a free port and prints the app's URL — a line like
+`open http://localhost:<port> in your browser (or pass --open)` — then waits
+(`am open` opens that URL later; `am instances` lists every running app's port).
+A browser tab is not opened for you: a tab handed to a running browser belongs
+to that browser, so aio cannot close it when the app exits. Pass `--open` if you
+want one anyway. An Electron window is a child process aio owns, so
+`deno task dev --client=electron` does open by itself.
 
 ## What you got
 
@@ -64,8 +66,8 @@ follows the branch tip. `am create --aio-version=…` picks the version up front
 See
 [app manager](../clients/app-manager.md#which-aio-version-an-app-builds-against).
 
-Keep `am` current with `am update`; remove it with `am uninstall` (your apps are
-left untouched).
+Keep `am` current with `am upgrade`; remove it with `am uninstall` (your apps
+are left untouched).
 
 Something wrong? `deno task doctor` first, then
 [Troubleshooting](#troubleshooting) below.
@@ -169,7 +171,8 @@ This is the file it writes for `am create my-app` (browser target):
 }
 ```
 
-- `"jsxImportSource": "aio"` — uses air, the built-in renderer (~8KB, zero deps)
+- `"jsxImportSource": "aio"` — uses air, the built-in renderer (~20 KB gzipped,
+  zero deps)
 - `"aio/jsx-runtime"` entry is required so the JSX compiler can resolve the
   runtime when it rewrites `<div/>` into `jsx()` calls
 - `"title"` — app name, used as window title and binary name

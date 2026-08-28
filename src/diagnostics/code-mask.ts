@@ -35,7 +35,10 @@ export function codeMask(src: string): Uint8Array {
       // A line start counts as "expression position" (ASI) — `/re/.test(x)` as
       // the first token of a line is a regex, never a division.
       if (c === "\n" || c === "\r") return true;
-      return "([{,;:=!&|?+-*%~^<>".includes(c);
+      // `<` is NOT in this set: in a .tsx file the `/` after it is the start
+      // of a closing tag (`</div>`), never a regex — and a `<` before a real
+      // regex (`x < /re/.source.length`) has no counterpart in this tree.
+      return "([{,;:=!&|?+-*%~^>".includes(c);
     }
     return true; // start of file
   };

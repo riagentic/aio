@@ -28,6 +28,11 @@
 //   can call a function the product never calls, and that is precisely how a
 //   dead helper stays green.
 //
+//   The same rule holds for the two peer apps in this repo (`ROOTS`): an
+//   export under `aiol/` must be reached from `aiol/` or `src/`, one under
+//   `amui/` from `amui/` or `src/`. Their entry points (`PEER_ENTRIES`) are
+//   exempt exactly as `src/*.ts` is. `node_modules/` and `.d.ts` are skipped.
+//
 // SCOPE — what is deliberately NOT an offence:
 //
 //   • Root entry files (`src/*.ts`) and the `src/` paths in `deno.json`'s
@@ -115,6 +120,31 @@ export function mask(src: string): string {
         }
         blank(i + 1, k);
         i = Math.min(k + 1, n);
+      } else if (c === "/" && _regexStart(src, i)) {
+        // A REGEX LITERAL, skipped whole. Its CONTENTS can hold a backtick —
+        // `/["'`]?/` in `src/db/reactive.ts` does — and the template branch
+        // below would then read that backtick as an opener and blank forward
+        // to the next one in the file, hiding every reference and declaration
+        // between. Harmless there only by luck (the next backtick is two lines
+        // away); the next such regex would take the rest of its file with it.
+        // Quotes already stop at a newline for the same reason one line up.
+        let k = i + 1;
+        let inClass = false;
+        while (k < n) {
+          const ch = src[k]!;
+          if (ch === "\\") {
+            k += 2;
+            continue;
+          }
+          if (ch === "\n") break; // unterminated — it was division after all
+          if (inClass) {
+            if (ch === "]") inClass = false;
+          } else if (ch === "[") inClass = true;
+          else if (ch === "/") break;
+          k++;
+        }
+        blank(i + 1, k);
+        i = Math.min(k + 1, n);
       } else if (c === "`") {
         let k = i + 1, text = i + 1;
         while (k < n) {
@@ -147,6 +177,24 @@ const lineOf = (src: string, idx: number): number =>
  *  `src/server/graph-validator.ts`). A bare `aio-ok` with nothing after it is
  *  not an acknowledgement, it is a mute button. */
 const JUSTIFIED = /\baio-ok\b\s*[:\-—]\s*\S/;
+
+/** Is the `/` at `i` a REGEX literal rather than division?
+ *
+ *  The same lookback `src/diagnostics/code-mask.ts` uses — this file keeps its
+ *  own mask on purpose (that one counts `${…}` holes as template content,
+ *  while this gate needs them as CODE, worth 23 false positives), so the
+ *  heuristic is mirrored rather than shared. */
+function _regexStart(src: string, i: number): boolean {
+  for (let j = i - 1; j >= 0; j--) {
+    const c = src[j]!;
+    if (c === " " || c === "\t") continue;
+    if (c === "\n" || c === "\r") return true; // line start = expression position
+    // No `<`: `</div>` in a .tsx file is a closing tag, not a regex — with it
+    // in the set, everything between two closing tags on one line vanished.
+    return "([{,;:=!&|?+-*%~^>".includes(c);
+  }
+  return true; // start of file
+}
 
 /** True when the declaring line, or the line above it, carries `aio-ok: …`. */
 function justified(src: string, idx: number): boolean {
@@ -248,12 +296,13 @@ export function declarations(f: File): Offender[] {
 
 // ─── the scan ──────────────────────────────────────────────────────────────
 
-const isSrc = (p: string) => /\.tsx?$/.test(p) && !/\.test\.tsx?$/.test(p);
+const isSrc = (p: string) => /\.tsx?$/.test(p) && !/\.(test|d)\.tsx?$/.test(p);
 
 async function* walk(dir: string): AsyncGenerator<string> {
   for await (const e of Deno.readDir(dir)) {
     const p = `${dir}/${e.name}`;
-    if (e.isDirectory) yield* walk(p);
+    // amui/ has a `nodeModulesDir: auto` tree — vendored code, not ours.
+    if (e.isDirectory && e.name !== "node_modules") yield* walk(p);
     else if (isSrc(e.name)) yield p;
   }
 }
@@ -263,11 +312,19 @@ async function* walk(dir: string): AsyncGenerator<string> {
  *  entry-surface-parity.test.ts` keeps in step), plus the root entry files
  *  `src/*.ts` — which `scripts/check-boundaries.ts` already treats as the
  *  surface every folder may import. */
+/** The peer apps' entry points — what `deno task lint:aio` and `deno task
+ *  amui` run (the ONE place each is named is `deno.json`'s task line, and
+ *  `tests/no-dead-wiring.test.ts` checks these two match it). */
+export const PEER_ENTRIES: readonly string[] = [
+  "aiol/mod.ts",
+  "amui/src/app.ts",
+];
+
 export async function entryFiles(root: string, files: string[]) {
   const dj = JSON.parse(await Deno.readTextFile(`${root}deno.json`)) as {
     exports: Record<string, string>;
   };
-  const out = new Set<string>(["mod.ts"]);
+  const out = new Set<string>(["mod.ts", ...PEER_ENTRIES]);
   for (const v of Object.values(dj.exports)) out.add(v.replace(/^\.\//, ""));
   for (const f of files) if (/^src\/[^/]+\.tsx?$/.test(f)) out.add(f);
   return out;
@@ -314,10 +371,28 @@ const resolve = (from: string, spec: string): string => {
   return parts.join("/");
 };
 
+/** The roots this gate walks, and the rule for each: an export from a file
+ *  under ROOT is wired when a file under ROOT — or under `src/` — reaches it.
+ *
+ *  `aiol/` (the project linter) and `amui/` (the visual app manager) are
+ *  peer apps with their own entry points, not part of the framework surface:
+ *  a helper exported from `aiol/checks.ts` that only a test calls is dead in
+ *  exactly the way `_noteDispatch` was. Each root is judged from ITSELF plus
+ *  `src/` — never from the other peer (amui reaching into aiol would be a
+ *  boundary question, not a wiring), and never from `tests/`. */
+export const ROOTS: readonly string[] = ["src", "aiol", "amui"];
+
+const rootOf = (p: string): string => p.split("/")[0]!;
+
 /** Every unreferenced export in the repo, sorted by file then line. */
-export async function scan(root: string): Promise<Offender[]> {
+export async function scan(
+  root: string,
+  roots: readonly string[] = ROOTS,
+): Promise<Offender[]> {
   const paths: string[] = [];
-  for await (const p of walk(`${root}src`)) paths.push(p.slice(root.length));
+  for (const r of roots) {
+    for await (const p of walk(`${root}${r}`)) paths.push(p.slice(root.length));
+  }
   paths.sort();
   // `mod.ts` is not under src/, but it IS the surface: what it names is wired.
   paths.push("mod.ts");
@@ -334,9 +409,12 @@ export async function scan(root: string): Promise<Offender[]> {
   const out: Offender[] = [];
   for (const p of paths) {
     if (exempt(p)) continue;
+    const home = rootOf(p);
     for (const d of declarations(by.get(p)!)) {
       let wired = false;
       for (const f of by.values()) {
+        const fr = rootOf(f.path);
+        if (fr !== home && fr !== "src" && f.path !== "mod.ts") continue;
         const at = f.idents.get(d.name);
         if (!at) continue;
         // Neither the declaration itself nor an import that binds the name is
@@ -385,7 +463,6 @@ export const LEDGER: readonly string[] = [
   "src/browser/browser-ack.ts|_pendingAckCount",
   "src/browser/browser-protocol.ts|_setSyncLoaderForTest",
   "src/browser/browser-protocol.ts|_resetEnsured",
-  "src/browser/browser-shared.ts|_resetBrowserScheduleHints",
   "src/browser/browser-sync.ts|syncCellNames",
   "src/browser/browser-sync.ts|getBrowserSyncEngine",
   "src/browser/browser-sync.ts|_resetBrowserSync",
@@ -409,7 +486,6 @@ export const LEDGER: readonly string[] = [
   "src/server/client-log.ts|_rateSlotCount",
   "src/server/config.ts|unknownBuildKeys",
   "src/server/config.ts|_resetConfigConflicts",
-  "src/server/dev-restart.ts|relaunchArgs",
   "src/server/graph-validator.ts|extractImports",
   "src/server/pairing.ts|currentPin",
   "src/server/pairing.ts|clearPairing",
@@ -467,7 +543,7 @@ export function report(v: Verdict): string {
     lines.push(
       `${v.added.length} symbol${
         v.added.length === 1 ? "" : "s"
-      } exported from src/ that nothing in src/ reaches:\n`,
+      } exported that nothing in the owning root (or src/) reaches:\n`,
     );
     for (const o of v.added) {
       lines.push(`  ${o.file}:${o.line}  ${o.kind} ${o.name}`);

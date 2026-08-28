@@ -129,8 +129,21 @@ export async function migrateLegacyKv(
         } from legacy Deno.Kv → SQLite (old store left untouched)`,
       );
     }
-  } catch {
-    // No legacy store / KV unavailable — nothing to migrate.
+  } catch (e) {
+    // No legacy store is the honest "nothing to migrate". A legacy store
+    // that EXISTS but could not be opened or read is data the user expects
+    // to see after the upgrade — say so, by name, instead of booting empty
+    // in silence.
+    if (!(e instanceof Deno.errors.NotFound)) {
+      log.warn(
+        `persist: a legacy Deno.Kv store at ${kvPath} could not be ` +
+          `migrated — ${
+            e instanceof Error ? e.message : String(e)
+          }. The old store was left untouched; the app starts from the ` +
+          `SQLite snapshot only. Fix the file's permissions and restart to ` +
+          `retry the migration.`,
+      );
+    }
   } finally {
     try {
       kv?.close();

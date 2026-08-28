@@ -18,8 +18,6 @@ import type { AioError } from "../src/diagnostics/error.ts";
 
 Deno.test({
   name: "boot: a migration that throws reaches the app's onError",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const dir = await Deno.makeTempDir({ prefix: "aio-boot-err-" });
     const prevApps = Deno.env.get("AIO_APPS_DIR");

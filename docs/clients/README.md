@@ -2,6 +2,9 @@
 
 How browsers, Electron, and CLI tools connect to AIO.
 
+- [CLI toolkit](cli-toolkit.md) — `aio/cli`: typed args + generated `--help`,
+  prompts that refuse without a TTY, table/progress/spinner/style, `watch()`
+  live view, exit codes
 - [Browser](browser.md) — WebSocket client, connection lifecycle
 - [Electron](electron.md) — desktop setup, UDS, packaging
 - [Transports](transports.md) — the matrix: what listens (TCP, UDS, none) per

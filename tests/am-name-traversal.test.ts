@@ -110,11 +110,14 @@ for (
 }
 
 Deno.test("am upgrade takes a name too, and refuses the same shapes", async () => {
+  // alpha70: `am upgrade <checkout>` absorbed `am update <path>`, so a
+  // path-shaped argument is read as a framework checkout — and `..` is not
+  // one (no mod.ts), so it is refused BEFORE anything is joined or touched.
   const home = await fakeHome();
   try {
     const r = await am(home, ["upgrade", ".."]);
     assert(r.code !== 0);
-    assertMatch(r.out, /not an app name/);
+    assertMatch(r.out, /not an aio checkout|not an app name/);
     assert(present(join(home, "PRECIOUS")), "$HOME was modified");
   } finally {
     await Deno.remove(home, { recursive: true }).catch(() => {});

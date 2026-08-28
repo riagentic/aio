@@ -69,8 +69,6 @@ Deno.test("testBrowser: throws a clear error when no browser is found", () => {
 Deno.test({
   name: "testBrowser: launches a real process and cleans it up on close",
   ignore: findChromium() === null,
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const c = cell("counter", { state: { n: 0 }, methods: {} });
     await using srv = await testServer({ cells: [c], client: "server-only" });

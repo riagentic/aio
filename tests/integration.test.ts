@@ -718,7 +718,12 @@ Deno.test("integration: schedule.after effect from reducer fires once", async ()
 
 // ── SQLite persistence integration ──────────────────────────────────
 
-import { createDB, initSchema, loadTables, syncTables } from "../src/db/mod.ts";
+import {
+  createDB,
+  initSchema,
+  loadTables,
+  syncTables,
+} from "../src/server-entry.ts";
 import { integer, pk, table, text } from "../src/server/sql.ts";
 import { freePort } from "../src/testing/server-test.ts";
 

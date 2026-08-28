@@ -7,7 +7,7 @@
 // time.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
-import { lint, printReport } from "../aiol/mod.ts";
+import { lintProject, printReport } from "../aiol/mod.ts";
 
 const PROJECT: Record<string, string> = {
   "deno.json": JSON.stringify(
@@ -54,14 +54,14 @@ async function write(dir: string, files: Record<string, string>) {
   }
 }
 
-const effectIssues = (r: Awaited<ReturnType<typeof lint>>) =>
+const effectIssues = (r: Awaited<ReturnType<typeof lintProject>>) =>
   r.issues.filter((i) => i.message.includes("returning effects from a method"));
 
 Deno.test("aiol: a declined-by-design site is [manual] with the reason; a fixable one converges to zero", async () => {
   const dir = await Deno.makeTempDir({ prefix: "aiol-manual-" });
   try {
     await write(dir, PROJECT);
-    const report = await lint(dir);
+    const report = await lintProject(dir);
     const sites = effectIssues(report);
     assertEquals(sites.length, 2, "both return-effect sites are reported");
 
@@ -105,7 +105,7 @@ Deno.test("aiol: a declined-by-design site is [manual] with the reason; a fixabl
     for (const i of report.issues.filter((i) => i.safeFix)) {
       await i.safeFix!(dir);
     }
-    const after = await lint(dir);
+    const after = await lintProject(dir);
     const sitesAfter = effectIssues(after);
     assertEquals(
       sitesAfter.length,

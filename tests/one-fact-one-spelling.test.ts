@@ -28,33 +28,48 @@ import { assertEquals } from "@std/assert";
  *  there. The number is the count of files still holding a raw literal —
  *  doc comments and help text included, because a stale doc is its own bug
  *  (the numbers are small enough that the difference is not worth a parser). */
-const LEDGER: Record<string, { pattern: RegExp; files: number; use: string }> =
-  {
-    "App.tsx": { pattern: /"App\.tsx"/g, files: 5, use: "UI_ENTRY" },
-    // 6 → 2: every build-side copy now reads APP_STYLE; what is left is the
-    // runtime's own two sites.
-    "style.css": { pattern: /"style\.css"/g, files: 2, use: "APP_STYLE" },
-    // 6 → 5 → 0. The four targets that each resolved `<appDir>/icon.png` for
-    // themselves ask `resolveAppIcon` (F-2), which is also what tells them an
-    // icon is sitting at the project root where the build cannot see it — and
-    // the remaining raw copies (the build's dist/ sweep, the AppImage payload
-    // list, the static server's asset table) now read the constants.
-    //
-    // Zero, not "a smaller number": APP_ICON and BUNDLE_JS were DECLARED as
-    // the one-fact-one-spelling home and had no importer in `src/` at all, so
-    // this ledger was capping the literals at whatever count they already had
-    // — the gate asleep, guarding a migration nobody had performed. A ceiling
-    // of 0 is the only one that cannot go back to sleep.
-    "icon.png": { pattern: /"icon\.png"/g, files: 0, use: "APP_ICON" },
-    "app.js": { pattern: /"app\.js"/g, files: 0, use: "BUNDLE_JS" },
-    "src/app.ts": {
-      pattern: /"src\/app\.ts"/g,
-      files: 6,
-      use: "DEFAULT_ENTRY",
-    },
-  };
+const LEDGER: Record<
+  string,
+  { pattern: RegExp; files: number; use: string; home?: string }
+> = {
+  "App.tsx": { pattern: /"App\.tsx"/g, files: 5, use: "UI_ENTRY" },
+  // 6 → 2: every build-side copy now reads APP_STYLE; what is left is the
+  // runtime's own two sites.
+  "style.css": { pattern: /"style\.css"/g, files: 2, use: "APP_STYLE" },
+  // 6 → 5 → 0. The four targets that each resolved `<appDir>/icon.png` for
+  // themselves ask `resolveAppIcon` (F-2), which is also what tells them an
+  // icon is sitting at the project root where the build cannot see it — and
+  // the remaining raw copies (the build's dist/ sweep, the AppImage payload
+  // list, the static server's asset table) now read the constants.
+  //
+  // Zero, not "a smaller number": APP_ICON and BUNDLE_JS were DECLARED as
+  // the one-fact-one-spelling home and had no importer in `src/` at all, so
+  // this ledger was capping the literals at whatever count they already had
+  // — the gate asleep, guarding a migration nobody had performed. A ceiling
+  // of 0 is the only one that cannot go back to sleep.
+  "icon.png": { pattern: /"icon\.png"/g, files: 0, use: "APP_ICON" },
+  "app.js": { pattern: /"app\.js"/g, files: 0, use: "BUNDLE_JS" },
+  // The control plane's own prefix. The GATE that refuses a non-loopback
+  // caller and the DISPATCHER that runs the route both tested for it, in
+  // four raw literals across four files — so moving the prefix would have
+  // moved the route and left the gate behind, dispatching raw state,
+  // arbitrary SQL and shutdown with nothing in front of it. Zero, because
+  // there is a constant and nothing else may spell it.
+  "/__aio/trojan/": {
+    pattern: /"\/__aio\/trojan\/"/g,
+    files: 0,
+    use: "TROJAN_PREFIX",
+    home: "src/server/server-auth.ts",
+  },
+  "src/app.ts": {
+    pattern: /"src\/app\.ts"/g,
+    files: 6,
+    use: "DEFAULT_ENTRY",
+  },
+};
 
-/** The module that OWNS these names is exempt — that is the whole point. */
+/** The module that OWNS these names is exempt — that is the whole point.
+ *  Most live in `app-files.ts`; an entry may name its own with `home`. */
 const HOME = "src/server/app-files.ts";
 
 async function* walk(dir: string): AsyncGenerator<string> {
@@ -101,9 +116,9 @@ Deno.test("one fact, one spelling: the hardcoded-literal ledger only shrinks", a
   const counts: Record<string, string[]> = {};
   for await (const f of walk(`${root}src`)) {
     const rel = f.slice(root.length);
-    if (rel === HOME) continue;
     const src = await Deno.readTextFile(f);
     for (const [name, spec] of Object.entries(LEDGER)) {
+      if (rel === (spec.home ?? HOME)) continue; // the module that owns it
       if (new RegExp(spec.pattern.source).test(src)) {
         (counts[name] ??= []).push(rel);
       }
@@ -116,7 +131,7 @@ Deno.test("one fact, one spelling: the hardcoded-literal ledger only shrinks", a
     if (files.length > spec.files) {
       over.push(
         `"${name}" is now hardcoded in ${files.length} files (ledger: ${spec.files}) — ` +
-          `import ${spec.use} from src/server/app-files.ts instead.\n     ${
+          `import ${spec.use} from ${spec.home ?? HOME} instead.\n     ${
             files.join("\n     ")
           }`,
       );

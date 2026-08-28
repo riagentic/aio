@@ -71,6 +71,7 @@ Deno.test("shutdown: Phase 7 retires the global pool's idle threads", async () =
     ownManager: { disposeAll: noop },
     dispatch: { close: noop, drain: () => Promise.resolve() },
     getCellNames: () => [],
+    getAppId: () => "blocking-dispose-idle",
     getElectronProc: () => null,
     clearElectronProc: noop,
     disposeUds: noop,

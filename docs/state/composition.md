@@ -69,9 +69,10 @@ The handler must be sync (it runs inside the reduce) and receives the foreign
 action's payload. Unknown method names and async handlers fail loudly at
 `cell()` time.
 
-**Array form** — `listensTo: [cart.addItem]` only routes the action through the
-cell (health/`lastAction` telemetry), running no handler. When the source
-naturally knows the target, direct calling (above) stays the simplest wiring.
+One form: the object, which names the method that reacts. (The bare array,
+`listensTo: [cart.addItem]` — retired in alpha70 — routed the action through the
+cell and ran nothing.) When the source naturally knows the target, direct
+calling (above) stays the simplest wiring.
 
 ---
 
@@ -218,7 +219,7 @@ Every bound method has a `.type` property. Use it everywhere:
 
 ```ts
 if (action.type === inventory.reserve.type) { ... }
-listensTo: [inventory.reserve, orders.place]
+listensTo: { onReserve: inventory.reserve, onOrder: orders.place }
 cancelOn: { start: [orders.cancel] }
 ```
 

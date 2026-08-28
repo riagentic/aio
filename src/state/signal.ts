@@ -238,9 +238,13 @@ function _flush(): void {
         try {
           sub.execute();
         } catch (e) {
-          log.error("signal", "effect execute error:", {
-            detail: String(e),
-          });
+          log.error(
+            "signal",
+            "an effect threw while re-running:",
+            {
+              detail: String(e),
+            },
+          );
         }
       }
     }

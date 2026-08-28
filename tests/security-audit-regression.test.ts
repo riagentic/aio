@@ -491,8 +491,12 @@ Deno.test("a gated cell listening to a cell that is not booted is refused", asyn
     state: { hit: 0 },
     access: "admin",
     visible: "none",
-    listensTo: ["ghost:bump"],
-    methods: {},
+    listensTo: { onBump: "ghost:bump" },
+    methods: {
+      onBump(s) {
+        s.hit++;
+      },
+    },
   });
   let threw: Error | null = null;
   try {

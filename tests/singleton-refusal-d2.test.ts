@@ -13,8 +13,6 @@ import { removeLock, writeLock } from "../src/server/single-instance-lock.ts";
 Deno.test({
   name:
     "singleton refusal: throws (does not exit) when another runtime shares the process",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const appId = `d2-refusal-${Deno.pid}`;
     // An owner that is alive (pid 1 — EPERM counts as alive) and whose port

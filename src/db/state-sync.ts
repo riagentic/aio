@@ -339,11 +339,203 @@ function pkKey(v: unknown, sqlType: string): unknown {
   return v;
 }
 
-/** The gate every bound array passes before a single statement is built.
- *
- *  Returns the rows, or throws an error that names the table, the row and the
- *  column. Reports (once) the two shapes that are not errors but do lose data:
- *  a field with no column, and a value the column's affinity will rewrite. */
+/** The bound value as rows. A `db:` table mirrors an ARRAY of rows, or — for
+ *  an object-shaped binding (`docs/persistence/sqlite.md` → "Object-shaped
+ *  bindings") — a plain-object MAP whose values are the rows and whose keys
+ *  are the rows' primary keys. Anything else is refused by name. */
+function rowsOf(
+  name: string,
+  raw: unknown,
+  pk: string | null,
+  shape: "array" | "map" = "array",
+): Record<string, unknown>[] {
+  if (shape === "array") {
+    if (Array.isArray(raw)) return raw as Record<string, unknown>[];
+    throw new Error(
+      `db: table "${name}" is bound to a state value that is not an array ` +
+        `(it is ${typeName(raw)}). A db: table mirrors an ARRAY of rows — ` +
+        `nothing was written. (A pk-keyed object map binds with ` +
+        `\`{ table, shape: "map" }\`.)`,
+    );
+  }
+  if (raw !== null && typeof raw === "object" && !Array.isArray(raw) && pk) {
+    const map = raw as Record<string, Record<string, unknown>>;
+    const rows: Record<string, unknown>[] = [];
+    for (const [k, row] of Object.entries(map)) {
+      // The map key and the row's pk are ONE fact spelled twice; a mismatch
+      // means one of them is a lie and the next boot would key the row by
+      // the other — refused before a statement is built.
+      if (row !== null && typeof row === "object" && !Array.isArray(row)) {
+        const key = row[pk];
+        if (key !== undefined && key !== null && String(key) !== k) {
+          throw new Error(
+            `db: table "${name}" is bound to a map whose key ${
+              show(k)
+            } holds a row with "${pk}" = ${
+              show(key)
+            } — the key and the row's primary key must agree (the next boot ` +
+              `rebuilds the map from "${pk}"). Key the map by the row's ` +
+              `"${pk}" (\`s.byId[row.${pk}] = row\`).`,
+          );
+        }
+      }
+      rows.push(row);
+    }
+    return rows;
+  }
+  throw new Error(
+    `db: table "${name}" is bound with shape "map" to a state value that ` +
+      (raw !== null && typeof raw === "object" && !Array.isArray(raw) && !pk
+        ? `is a map, but the table has no pk() column to key it by`
+        : `is not a plain object (it is ${typeName(raw)})`) +
+      ` — nothing was written.`,
+  );
+}
+
+/** Per-row gate: shape, bindable values, affinity, undeclared fields. Runs
+ *  ONLY on rows that changed since the last commit — a row whose reference is
+ *  unchanged (immer shares structure) already passed it once, and committed
+ *  state is frozen, so it cannot have changed underneath. */
+function checkShape(
+  name: string,
+  i: number,
+  row: unknown,
+): asserts row is Record<string, unknown> {
+  if (row === null || typeof row !== "object" || Array.isArray(row)) {
+    throw new Error(
+      `db: table "${name}" row #${i} is ${typeName(row)}, not an object.`,
+    );
+  }
+}
+
+function checkRow(
+  name: string,
+  i: number,
+  row: unknown,
+  def: TableDef,
+  cols: string[],
+  declared: Set<string>,
+): asserts row is Record<string, unknown> {
+  checkShape(name, i, row);
+  const r = row as Record<string, unknown>;
+  for (const col of cols) {
+    const v = r[col];
+    if (!_bindable(v)) {
+      throw new Error(
+        `db: table "${name}" row #${i} column "${col}" is ${
+          typeName(v)
+        }, which SQLite cannot store. Columns hold null, numbers, strings, ` +
+          `bigints or bytes — convert it first (a Date → \`.toISOString()\`, ` +
+          `an object → \`JSON.stringify\`), or use an explicit null.`,
+      );
+    }
+    const coerced = affinityMismatch(def.columns[col]!.sqlType, v);
+    if (coerced) {
+      reportOnce(
+        `affinity:${name}.${col}`,
+        `table "${name}" column "${col}" is declared ${coerced} but row #${i} ` +
+          `holds ${typeName(v)} (${
+            JSON.stringify(v)
+          }) — SQLite converts it on write, so state and the table hold ` +
+          `different values and the next boot adopts the converted one.`,
+      );
+    }
+  }
+  for (const field of Object.keys(r)) {
+    if (declared.has(field)) continue;
+    // The bound array is excluded from the KV snapshot — SQLite owns it. So
+    // a field with no column is stored NOWHERE and disappears on the next
+    // boot, with the app none the wiser.
+    reportOnce(
+      `undeclared:${name}.${field}`,
+      `table "${name}" has no column for row field "${field}" — SQLite owns ` +
+        `these rows, so that field is not persisted anywhere and is gone ` +
+        `after a restart. Add it to the table({…}), or keep it in a field ` +
+        `of the cell that is NOT bound to a table.`,
+    );
+  }
+}
+
+/** A pk that is not a value is the quietest data loss there was: the first
+ *  such row INSERTs (SQLite assigns a rowid state never learns), and every
+ *  later one is diffed against it, classified as an UPDATE, and written as
+ *  `WHERE <pk> = NULL` — which matches nothing. The row is gone and every
+ *  promise resolves. */
+function checkPk(name: string, i: number, pk: string, key: unknown): void {
+  if (key === undefined || key === null) {
+    throw new Error(
+      `db: table "${name}" row #${i} has no primary key — "${pk}" is ` +
+        `${key === undefined ? "missing" : "null"}. Give every row an id ` +
+        `before it reaches state (\`{ id: s.nextId++, … }\`); a row ` +
+        `without one cannot be updated or deleted, and would be silently ` +
+        `dropped on the next sync.`,
+    );
+  }
+}
+
+function duplicatePk(
+  name: string,
+  pk: string,
+  first: { i: number; raw: unknown },
+  i: number,
+  key: unknown,
+): Error {
+  const retyped = typeof first.raw !== typeof key;
+  return new Error(
+    `db: table "${name}" has duplicate primary key ${
+      show(first.raw)
+    } (rows #${first.i} and #${i}${
+      retyped
+        ? `, whose "${pk}" is ${
+          show(key)
+        } — a ${typeof key} and a ${typeof first
+          .raw} are different keys in JavaScript and the SAME key in an ` +
+          `INTEGER PRIMARY KEY, which is the rowid`
+        : ""
+    }). SQLite would reject the second INSERT ` +
+      `and roll back the ENTIRE persist window — every other table's ` +
+      `changes with it — and the same batch would be retried forever.`,
+  );
+}
+
+/** Rows not in ascending pk order come back REORDERED on the next boot — a
+ *  SQL table is a SET, and `loadTables` walks the rowid. Reported once. */
+function checkOrder(
+  name: string,
+  pk: string,
+  rows: Record<string, unknown>[],
+  at?: Iterable<number>,
+): void {
+  const before = (i: number): boolean => {
+    const a = rows[i - 1]![pk], b = rows[i]![pk];
+    return typeof a === "number" && typeof b === "number"
+      ? a < b
+      : String(a) < String(b);
+  };
+  let ascending = true;
+  if (at === undefined) {
+    for (let i = 1; i < rows.length && ascending; i++) ascending = before(i);
+  } else {
+    for (const i of at) {
+      if (!ascending) break;
+      if (i > 0 && i < rows.length) ascending = before(i);
+      if (ascending && i + 1 < rows.length) ascending = before(i + 1);
+    }
+  }
+  if (!ascending) {
+    reportOnce(
+      `order:${name}`,
+      `table "${name}" holds rows in an order that is not ascending "${pk}" ` +
+        `— SQL tables are unordered, so the next boot restores them sorted ` +
+        `by "${pk}" and the current order is lost. Sort in the cell (or in ` +
+        `the view) rather than relying on array position, or store the ` +
+        `position in a column of its own.`,
+    );
+  }
+}
+
+/** The gate every bound array passes before a single statement is built —
+ *  the whole-table form, kept for callers that diff without an index. */
 function checkRows(
   name: string,
   raw: unknown,
@@ -351,126 +543,24 @@ function checkRows(
   cols: string[],
   pk: string | null,
 ): Record<string, unknown>[] {
-  if (!Array.isArray(raw)) {
-    throw new Error(
-      `db: table "${name}" is bound to a state value that is not an array ` +
-        `(it is ${typeName(raw)}). A db: table mirrors an ARRAY of rows — ` +
-        `nothing was written.`,
-    );
-  }
-  const rows = raw as Record<string, unknown>[];
-  // Keyed as SQLite keys it (see pkKey), not as JS compares it — the two
-  // disagree, and the table is the one that decides.
+  const rows = rowsOf(name, raw, pk, def.shape);
   const seen = pk ? new Map<unknown, { i: number; raw: unknown }>() : null;
   const pkType = pk ? def.columns[pk]!.sqlType : "";
   const declared = new Set(cols);
-
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    if (row === null || typeof row !== "object" || Array.isArray(row)) {
-      throw new Error(
-        `db: table "${name}" row #${i} is ${typeName(row)}, not an object.`,
-      );
-    }
+    checkShape(name, i, row);
     if (pk && seen) {
       const key = row[pk];
-      // A pk that is not a value is the quietest data loss there was: the
-      // first such row INSERTs (SQLite assigns a rowid state never learns),
-      // and every later one is diffed against it, classified as an UPDATE, and
-      // written as `WHERE <pk> = NULL` — which matches nothing. The row is
-      // gone and every promise resolves.
-      if (key === undefined || key === null) {
-        throw new Error(
-          `db: table "${name}" row #${i} has no primary key — "${pk}" is ` +
-            `${key === undefined ? "missing" : "null"}. Give every row an id ` +
-            `before it reaches state (\`{ id: s.nextId++, … }\`); a row ` +
-            `without one cannot be updated or deleted, and would be silently ` +
-            `dropped on the next sync.`,
-        );
-      }
+      checkPk(name, i, pk, key);
       const norm = pkKey(key, pkType);
       const first = seen.get(norm);
-      if (first !== undefined) {
-        const retyped = typeof first.raw !== typeof key;
-        throw new Error(
-          `db: table "${name}" has duplicate primary key ${
-            show(first.raw)
-          } (rows #${first.i} and #${i}${
-            retyped
-              ? `, whose "${pk}" is ${
-                show(key)
-              } — a ${typeof key} and a ${typeof first
-                .raw} are different keys in JavaScript and the SAME key in an ` +
-                `INTEGER PRIMARY KEY, which is the rowid`
-              : ""
-          }). SQLite would reject the second INSERT ` +
-            `and roll back the ENTIRE persist window — every other table's ` +
-            `changes with it — and the same batch would be retried forever.`,
-        );
-      }
+      if (first !== undefined) throw duplicatePk(name, pk, first, i, key);
       seen.set(norm, { i, raw: key });
     }
-    for (const col of cols) {
-      const v = row[col];
-      if (!_bindable(v)) {
-        throw new Error(
-          `db: table "${name}" row #${i} column "${col}" is ${
-            typeName(v)
-          }, which SQLite cannot store. Columns hold null, numbers, strings, ` +
-            `bigints or bytes — convert it first (a Date → \`.toISOString()\`, ` +
-            `an object → \`JSON.stringify\`), or use an explicit null.`,
-        );
-      }
-      const coerced = affinityMismatch(def.columns[col]!.sqlType, v);
-      if (coerced) {
-        reportOnce(
-          `affinity:${name}.${col}`,
-          `table "${name}" column "${col}" is declared ${coerced} but row #${i} ` +
-            `holds ${typeName(v)} (${
-              JSON.stringify(v)
-            }) — SQLite converts it on write, so state and the table hold ` +
-            `different values and the next boot adopts the converted one.`,
-        );
-      }
-    }
-    for (const field of Object.keys(row)) {
-      if (declared.has(field)) continue;
-      // The bound array is excluded from the KV snapshot — SQLite owns it. So
-      // a field with no column is stored NOWHERE and disappears on the next
-      // boot, with the app none the wiser.
-      reportOnce(
-        `undeclared:${name}.${field}`,
-        `table "${name}" has no column for row field "${field}" — SQLite owns ` +
-          `these rows, so that field is not persisted anywhere and is gone ` +
-          `after a restart. Add it to the table({…}), or keep it in a field ` +
-          `of the cell that is NOT bound to a table.`,
-      );
-    }
+    checkRow(name, i, row, def, cols, declared);
   }
-
-  // A SQL table is a SET. `loadTables` reads it back with `SELECT *`, which for
-  // a `pk()` table walks the rowid — the pk itself — in ascending order. So an
-  // array whose rows are NOT in ascending pk order comes back REORDERED on the
-  // next boot, and nothing about the write said so. (Without a pk the diff
-  // rewrites the table wholesale, in array order, and the order does survive.)
-  if (pk && rows.length > 1) {
-    let ascending = true;
-    for (let i = 1; i < rows.length && ascending; i++) {
-      const a = rows[i - 1]![pk], b = rows[i]![pk];
-      if (typeof a === "number" && typeof b === "number") ascending = a < b;
-      else ascending = String(a) < String(b);
-    }
-    if (!ascending) {
-      reportOnce(
-        `order:${name}`,
-        `table "${name}" holds rows in an order that is not ascending "${pk}" ` +
-          `— SQL tables are unordered, so the next boot restores them sorted ` +
-          `by "${pk}" and the current order is lost. Sort in the cell (or in ` +
-          `the view) rather than relying on array position, or store the ` +
-          `position in a column of its own.`,
-      );
-    }
-  }
+  if (pk && rows.length > 1) checkOrder(name, pk, rows);
   return rows;
 }
 
@@ -485,7 +575,186 @@ function rowsEqual(
   return true;
 }
 
-/** The statements `syncTables` would run — built, not executed.
+/** What the last COMMITTED window held for one pk-keyed table: the row each
+ *  normalized pk mapped to, and the array index it sat at. Kept ACROSS windows
+ *  and advanced in place at commit, so a window costs the rows it touched —
+ *  not a fresh O(rows) map per window. */
+export type TableIndex = Map<
+  unknown,
+  { row: Record<string, unknown>; i: number }
+>;
+
+/** Which array indices a window's commits touched, per table — derived from
+ *  the reducer's immer patches by the persistence manager. `"all"` when a
+ *  patch replaced the array, shrank it or removed an element (the rows behind
+ *  it may have moved, and only a full pass can tell what left). */
+export type DirtyHint = Set<number> | "all";
+
+export type TablePlan = {
+  sql: string;
+  params?: unknown[];
+}[];
+
+/** Build the index a table's next incremental window diffs against. */
+function buildIndex(
+  rows: Record<string, unknown>[],
+  pk: string,
+  pkType: string,
+): TableIndex {
+  const idx: TableIndex = new Map();
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i]!;
+    idx.set(pkKey(row[pk], pkType), { row, i });
+  }
+  return idx;
+}
+
+type PkDiff = {
+  toDelete: unknown[];
+  toInsert: Record<string, unknown>[];
+  toUpdate: Record<string, unknown>[];
+  /** Index advances, applied at commit: deleted norms, then `set`s. */
+  nextIndex: () => TableIndex;
+};
+
+/** Every row, but by IDENTITY first: a row that is the SAME reference at the
+ *  SAME index as in the last committed window is unchanged (committed state
+ *  is frozen — an unchanged reference cannot hide changed contents) and costs
+ *  one comparison, no key work. Only rows whose reference or position moved
+ *  are keyed, validated and compared column by column. Deletions are found
+ *  by count — the scan of the index runs only when something actually left.
+ *
+ *  Duplicate keys are still caught completely: two rows with one key are
+ *  either both changed (the `seen` map of changed rows), or one changed and
+ *  one unchanged (the index still holds the unchanged one, live at its old
+ *  index) — two unchanged rows cannot collide, the committed window had no
+ *  duplicates. */
+function diffFull(
+  name: string,
+  rows: Record<string, unknown>[],
+  prevRows: readonly Record<string, unknown>[],
+  def: TableDef,
+  cols: string[],
+  pk: string,
+  idx: TableIndex,
+): PkDiff {
+  const pkType = def.columns[pk]!.sqlType;
+  const declared = new Set(cols);
+  const seen = new Map<unknown, { i: number; raw: unknown }>();
+  const toInsert: Record<string, unknown>[] = [];
+  const toUpdate: Record<string, unknown>[] = [];
+  const sets: [unknown, { row: Record<string, unknown>; i: number }][] = [];
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    if (row === prevRows[i]) continue; // same reference, same place
+    checkShape(name, i, row);
+    const key = row[pk];
+    checkPk(name, i, pk, key);
+    checkRow(name, i, row, def, cols, declared);
+    const norm = pkKey(key, pkType);
+    const first = seen.get(norm);
+    if (first !== undefined) throw duplicatePk(name, pk, first, i, key);
+    seen.set(norm, { i, raw: key });
+    const prev = idx.get(norm);
+    if (prev === undefined) toInsert.push(row);
+    else if (prev.i !== i && rows[prev.i] === prev.row) {
+      throw duplicatePk(name, pk, { i: prev.i, raw: prev.row[pk] }, i, key);
+    } else if (prev.row !== row && !rowsEqual(row, prev.row, cols)) {
+      toUpdate.push(row);
+    }
+    // A new reference (or position) is remembered even when its columns are
+    // equal, so the NEXT window recognizes it by identity.
+    sets.push([norm, { row, i }]);
+  }
+  const toDelete: unknown[] = [];
+  const deletedNorms: unknown[] = [];
+  if (idx.size !== rows.length - toInsert.length) {
+    for (const [norm, entry] of idx) {
+      // Live iff still at its old index unchanged, or among the changed rows.
+      if (rows[entry.i] === entry.row || seen.has(norm)) continue;
+      toDelete.push(entry.row[pk]);
+      deletedNorms.push(norm);
+    }
+  }
+  if (rows.length > 1) checkOrder(name, pk, rows);
+  return {
+    toDelete,
+    toInsert,
+    toUpdate,
+    nextIndex: () => {
+      for (const n of deletedNorms) idx.delete(n);
+      for (const [n, e] of sets) idx.set(n, e);
+      return idx;
+    },
+  };
+}
+
+/** Only the touched indices — O(change). Valid ONLY when no patch shrank or
+ *  replaced the array (then nothing left, and an untouched index still holds
+ *  the row it held). Returns null when the hint cannot be trusted for this
+ *  window (a pk moved between touched rows, a count that says something left
+ *  after all) — the caller falls back to {@linkcode diffFull}, which is
+ *  always right and merely slower. */
+function diffDirty(
+  name: string,
+  rows: Record<string, unknown>[],
+  def: TableDef,
+  cols: string[],
+  pk: string,
+  idx: TableIndex,
+  dirty: Set<number>,
+): PkDiff | null {
+  const pkType = def.columns[pk]!.sqlType;
+  const declared = new Set(cols);
+  const toInsert: Record<string, unknown>[] = [];
+  const toUpdate: Record<string, unknown>[] = [];
+  const sets: [unknown, { row: Record<string, unknown>; i: number }][] = [];
+  const seen = new Map<unknown, { i: number; raw: unknown }>();
+  for (const i of dirty) {
+    if (i >= rows.length) return null; // shrank after all — not our case
+    const row = rows[i];
+    checkShape(name, i, row);
+    const key = row[pk];
+    checkPk(name, i, pk, key);
+    checkRow(name, i, row, def, cols, declared);
+    const norm = pkKey(key, pkType);
+    const first = seen.get(norm);
+    if (first !== undefined) throw duplicatePk(name, pk, first, i, key);
+    seen.set(norm, { i, raw: key });
+    const prev = idx.get(norm);
+    if (prev === undefined) {
+      toInsert.push(row);
+      sets.push([norm, { row, i }]);
+      continue;
+    }
+    if (prev.i !== i) {
+      // The pk used to live at another index. If that index is untouched and
+      // still holds the same row, these are TWO live rows with one key.
+      if (!dirty.has(prev.i) && rows[prev.i] === prev.row) {
+        throw duplicatePk(name, pk, { i: prev.i, raw: prev.row[pk] }, i, key);
+      }
+      return null; // moved — let the full pass sort it out
+    }
+    if (prev.row === row) continue;
+    if (!rowsEqual(row, prev.row, cols)) toUpdate.push(row);
+    sets.push([norm, { row, i }]);
+  }
+  // Nothing may have left: every untouched index still holds its row.
+  if (idx.size + toInsert.length !== rows.length) return null;
+  if (rows.length > 1) checkOrder(name, pk, rows, dirty);
+  return {
+    toDelete: [],
+    toInsert,
+    toUpdate,
+    nextIndex: () => {
+      for (const [n, e] of sets) idx.set(n, e);
+      return idx;
+    },
+  };
+}
+
+/** The statements `syncTables` would run — built, not executed — plus the
+ *  bookkeeping that makes the NEXT window cheap.
  *
  *  Split out so the persistence manager can commit the `db:` tables and the
  *  `aio_kv` state snapshot in ONE transaction. They are two halves of one
@@ -493,18 +762,27 @@ function rowsEqual(
  *  died between them came back with the table and the snapshot describing
  *  different moments — silently.
  *
- *  Pure apart from the row checks, which throw exactly as before. */
-export function planTables(
+ *  `index` holds each pk table's last-committed rows by key; it is read here
+ *  and advanced ONLY by `commit()` — a window whose transaction is refused
+ *  leaves it describing the last committed state, so the retry sees the same
+ *  changes. `dirty` (from the window's immer patches) narrows a table's pass
+ *  to the touched rows when it can be trusted, and is ignored when it cannot.
+ *
+ *  Pure apart from the row checks, which throw by name. */
+export function planTablesIncremental(
   schema: Record<string, TableDef>,
   state: Record<string, unknown>,
   prev: Record<string, unknown>,
-): { sql: string; params?: unknown[] }[] {
+  index: Record<string, TableIndex>,
+  dirty?: Record<string, DirtyHint>,
+): { stmts: TablePlan; commit: () => void } {
   const changed = Object.keys(schema).filter((name) =>
     state[name] !== prev[name]
   );
-  if (!changed.length) return [];
+  if (!changed.length) return { stmts: [], commit: () => {} };
 
-  const stmts: { sql: string; params?: unknown[] }[] = [];
+  const stmts: TablePlan = [];
+  const advances: (() => void)[] = [];
 
   // A window writes every changed table in ONE transaction, table by table in
   // the order the `db:` object happens to declare them — and aio opens the app
@@ -532,80 +810,103 @@ export function planTables(
     const cols = Object.keys(def.columns);
     for (const col of cols) assertIdent(col, "column name");
     const pk = pkColumn(def);
-    // Every row is checked BEFORE any statement is built, so a bad row can
-    // never take a good table's writes down with it inside the transaction.
-    const rows = checkRows(name, state[name], def, cols, pk);
+    const insert = (row: Record<string, unknown>) =>
+      stmts.push({
+        sql: `INSERT INTO ${name} (${cols.join(", ")}) VALUES (${
+          cols.map(() => "?").join(", ")
+        })`,
+        params: cols.map((c) => row[c]),
+      });
 
-    if (pk && rows.length > 0) {
-      const prevRows = (prev[name] as Record<string, unknown>[]) ?? [];
-      const prevMap = new Map(prevRows.map((r) => [r[pk], r]));
-      const stateIds = new Set(rows.map((r) => r[pk]));
+    if (pk) {
+      const rows = rowsOf(name, state[name], pk, def.shape);
+      if (rows.length > 0) {
+        const pkType = def.columns[pk]!.sqlType;
+        const prevRows = rowsOf(
+          name,
+          prev[name] ?? (def.shape === "map" ? {} : []),
+          pk,
+          def.shape,
+        );
+        const idx = index[name] ?? buildIndex(prevRows, pk, pkType);
+        const hint = dirty?.[name];
+        // Every row is checked BEFORE any statement is built, so a bad row can
+        // never take a good table's writes down with it inside the
+        // transaction.
+        const d = (hint instanceof Set
+          ? diffDirty(name, rows, def, cols, pk, idx, hint)
+          : null) ?? diffFull(name, rows, prevRows, def, cols, pk, idx);
 
-      const toDelete = prevRows.filter((r) => !stateIds.has(r[pk])).map((r) =>
-        r[pk]
-      );
-      const toInsert: Record<string, unknown>[] = [];
-      const toUpdate: Record<string, unknown>[] = [];
-
-      for (const row of rows) {
-        const existing = prevMap.get(row[pk]);
-        if (!existing) toInsert.push(row);
-        else if (!rowsEqual(row, existing, cols)) toUpdate.push(row);
-      }
-
-      // Chunked, always — the parameter count here is a function of how many
-      // rows the USER removed, and SQLite refuses a statement with more than
-      // SQLITE_MAX_VARS host parameters with a bare `too many SQL variables`.
-      // One unbounded DELETE meant that pruning a big table rolled the whole
-      // shared transaction back, the `db:` baseline (deliberately) did not
-      // advance, and the identical batch was rebuilt and refused on EVERY
-      // debounce window from then on — while the state snapshot kept
-      // committing alone, so the app looked healthy and the rows came back on
-      // the next boot. A confirmed deletion, silently undone by a restart.
-      // The chunks share this transaction, so the delete is still all-or-none.
-      for (const batch of chunkParams(toDelete)) {
-        stmts.push({
-          sql: `DELETE FROM ${name} WHERE ${pk} IN (${
-            batch.map(() => "?").join(", ")
-          })`,
-          params: batch,
+        // Chunked, always — the parameter count here is a function of how
+        // many rows the USER removed, and SQLite refuses a statement with more
+        // than SQLITE_MAX_VARS host parameters with a bare `too many SQL
+        // variables`. One unbounded DELETE meant that pruning a big table
+        // rolled the whole shared transaction back, the `db:` baseline
+        // (deliberately) did not advance, and the identical batch was rebuilt
+        // and refused on EVERY debounce window from then on — while the state
+        // snapshot kept committing alone, so the app looked healthy and the
+        // rows came back on the next boot. A confirmed deletion, silently
+        // undone by a restart. The chunks share this transaction, so the
+        // delete is still all-or-none.
+        for (const batch of chunkParams(d.toDelete)) {
+          stmts.push({
+            sql: `DELETE FROM ${name} WHERE ${pk} IN (${
+              batch.map(() =>
+                "?"
+              ).join(", ")
+            })`,
+            params: batch,
+          });
+        }
+        for (const row of d.toInsert) insert(row);
+        const setCols = cols.filter((c) => c !== pk);
+        for (const row of d.toUpdate) {
+          stmts.push({
+            sql: `UPDATE ${name} SET ${
+              setCols.map((c) => `${c} = ?`).join(", ")
+            } WHERE ${pk} = ?`,
+            params: [...setCols.map((c) => row[c]), row[pk]],
+          });
+        }
+        advances.push(() => {
+          index[name] = d.nextIndex();
         });
+        continue;
       }
-      for (const row of toInsert) {
-        stmts.push({
-          sql: `INSERT INTO ${name} (${cols.join(", ")}) VALUES (${
-            cols.map(() => "?").join(", ")
-          })`,
-          params: cols.map((c) => row[c]),
-        });
-      }
-      const setCols = cols.filter((c) => c !== pk);
-      for (const row of toUpdate) {
-        stmts.push({
-          sql: `UPDATE ${name} SET ${
-            setCols.map((c) => `${c} = ?`).join(", ")
-          } WHERE ${pk} = ?`,
-          params: [...setCols.map((c) => row[c]), row[pk]],
-        });
-      }
-    } else {
-      // No PK or empty array — full table replacement
+      // Empty array — full table replacement; the index empties with it.
       stmts.push({ sql: `DELETE FROM ${name}` });
-      for (const row of rows) {
-        stmts.push({
-          sql: `INSERT INTO ${name} (${cols.join(", ")}) VALUES (${
-            cols.map(() => "?").join(", ")
-          })`,
-          params: cols.map((c) => row[c]),
-        });
-      }
+      advances.push(() => {
+        index[name] = new Map();
+      });
+      continue;
     }
+    // No PK — full table replacement, in array order.
+    const rows = checkRows(name, state[name], def, cols, pk);
+    stmts.push({ sql: `DELETE FROM ${name}` });
+    for (const row of rows) insert(row);
   }
 
   if (hasRefs && stmts.length) {
     stmts.unshift({ sql: `PRAGMA defer_foreign_keys = ON` });
   }
-  return stmts;
+  return {
+    stmts,
+    commit: () => {
+      for (const a of advances) a();
+    },
+  };
+}
+
+/** The statements `syncTables` would run — built, not executed. The
+ *  index-free form: each call rebuilds its baseline from `prev`, which is what
+ *  a one-shot caller wants and what the persistence manager no longer pays
+ *  (see {@linkcode planTablesIncremental}). */
+export function planTables(
+  schema: Record<string, TableDef>,
+  state: Record<string, unknown>,
+  prev: Record<string, unknown>,
+): TablePlan {
+  return planTablesIncremental(schema, state, prev, {}).stmts;
 }
 
 /** Incremental sync — diffs state vs prev, flushes all changes in one transaction.

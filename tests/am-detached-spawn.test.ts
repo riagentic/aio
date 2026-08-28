@@ -45,8 +45,6 @@ Deno.test("posix spec: sh -c nohup … & echo $! (detached, log-merged)", () => 
 Deno.test({
   name: "posix spec EXECUTES: detached child, real PID on stdout, log written",
   ignore: Deno.build.os === "windows",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const dir = await Deno.makeTempDir();
     const log = join(dir, "out.log");

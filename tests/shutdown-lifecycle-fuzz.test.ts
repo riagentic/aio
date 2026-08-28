@@ -215,8 +215,6 @@ async function round(seed: number): Promise<{ ops: number; resolved: number }> {
 
 Deno.test({
   name: "shutdown fuzz: a resolved call's write is always on disk afterwards",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const rounds = fuzzEnvInt("AIO_FUZZ_ROUNDS", 12, 1);
     const seed0 = fuzzEnvInt("AIO_FUZZ_SEED", 20260805, 0);

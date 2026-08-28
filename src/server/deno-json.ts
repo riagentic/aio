@@ -115,12 +115,13 @@ export function readLocalPinSync(dir: string): string | null {
   const target = line.startsWith(PATH_PIN) ? line.slice(PATH_PIN.length) : line;
   try {
     Deno.statSync(join(target, "mod.ts"));
-  } catch {
+  } catch (e) {
     throw new Error(
       `[aio] ${file} pins this app to ${target}, which is not an aio ` +
         `checkout on this machine (no mod.ts). The file is a per-machine ` +
         `override: fix the path, or delete it to build against the ` +
         `committed aioVersion.`,
+      { cause: e },
     );
   }
   return target;

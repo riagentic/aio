@@ -54,8 +54,6 @@ Deno.test("lockKey: default home is the plain appId, any other home is tagged", 
 Deno.test({
   name:
     "same appId, two homes: both locks acquire; same home refuses with ITS OWN coordinates",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const id = `two-homes-${uid()}`;
     const homeA = join(await Deno.makeTempDir({ prefix: "aio-homeA-" }));
@@ -115,8 +113,6 @@ Deno.test({
 Deno.test({
   name:
     "acquireSingletonLock beside a foreign-home sibling: continues, and the info line names no port/pid",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const id = `foreign-home-${uid()}`;
     const foreignHome = await Deno.makeTempDir({ prefix: "aio-foreign-" });
@@ -238,8 +234,6 @@ Deno.test("am --home: targetHome makes readPid read the tagged lock, not the def
 
 Deno.test({
   name: "am dispatch: the method's return value rides back in the reply",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const c = cell("calc", {
       state: { n: 1 },

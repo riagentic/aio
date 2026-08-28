@@ -81,8 +81,6 @@ async function withStub(
 
 Deno.test({
   name: "am trigger setValue: clears, THEN types — testUI's exact definition",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     await withStub(async (trigger, seen, logs) => {
       await trigger(["0", "App:HostInput", "setValue", "192.168.1.9"]);
@@ -109,8 +107,6 @@ Deno.test({
 
 Deno.test({
   name: "am trigger type: still ONE append, byte-for-byte as before",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     await withStub(async (trigger, seen) => {
       await trigger(["0", "App:HostInput", "type", "abc"]);

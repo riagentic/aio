@@ -136,10 +136,13 @@ vendored `dep/aio` copy** (a committed directory, not a symlink) is **never
 touched** — `am fix` only ever creates or repairs a symlink, it will not delete
 deliberately-vendored framework code.
 
-**Related:** `deno task doctor` diagnoses deno.json config only (read-only,
-PASS/FAIL); `am link` is the narrow primitive that only (re)creates the
-`dep/aio` symlink (`--aio=<path>` / `$AIO_HOME` to point it elsewhere). `am fix`
-includes both.
+**Related:** `am doctor` asks the other half of the question — is the process
+answering `am state` running the framework that is on disk right now? A newer
+`dep/aio` (a pull, an `am fix`) than the instance's start time is a finding, and
+the finding names its fix: `am restart`. `deno task doctor` diagnoses deno.json
+config only (read-only, PASS/FAIL); `am link` is the narrow primitive that only
+(re)creates the `dep/aio` symlink (`--aio=<path>` / `$AIO_HOME` to point it
+elsewhere). `am fix` includes both.
 
 ## App identity
 
@@ -200,6 +203,18 @@ rotation story and a stolen copy is worthless.
 > thing — the failure mode (`app not running on port 8000`) otherwise reads like
 > the app is down when you are simply pointed at the other one.
 
+## Accounts and trust (`am auth`, `am trust`)
+
+```sh
+am auth users             # list accounts (apps running with auth: true)
+am auth create <id>       # add one (prints a generated password if none given)
+am auth passwd <id>       # set a password (also clears the lockout + sessions)
+am auth unlock <id>       # clear a lockout
+am auth totp <id> off     # clear the second factor (lost device)
+am auth revoke <id>       # revoke every session of a user
+am trust                  # show this machine's aio root + how to install it (browsers stop warning); `am trust path` prints just the file
+```
+
 ## Pairing a client (`am pair`)
 
 ```sh
@@ -227,6 +242,7 @@ deno task am kill --stale         # reap ORPHANS — processes still serving wit
                                   # --port=N for an orphan on an unrecorded port
 deno task am restart              # stop + start
 deno task am status               # stopped|starting|started|stopping
+deno task am open                 # open THIS app in a browser (--print writes the URL)
 ```
 
 In a repo that declares COMPONENTS (below), `start`, `stop`, `restart` and
@@ -321,8 +337,8 @@ instance's `home`.
 
 ```sh
 deno task am instances            # list all running aio apps on this machine
-deno task am ls                   # alias
 deno task am instances --json     # JSON output
+deno task am discover             # find exposed aio apps on the LAN (UDP broadcast; --timeout=ms)
 ```
 
 Each row names the aio version the instance booted with (`aio=1.0.0-alpha68`;
@@ -367,6 +383,7 @@ deno task am state {counter,page}           # pick from root
 deno task am state counter --wait=5         # poll every 5s
 deno task am state --ui                     # UI state (cell-level ui filtered)
 deno task am state --ui alice               # UI state for specific user
+deno task am expect counter.count gt 3      # assert on state (eq/ne/gt/lt/contains/exists…); e2e; --wait=N
 ```
 
 Path syntax: `fleet[0].stats.pnl` for traversal, `{id,name}` for field picking,
@@ -433,6 +450,9 @@ triggered it, and what it changed:
 deno task am timeline                       # recent dispatches + payload + state diff (live)
 deno task am timeline --lines=50            # last 50
 deno task am timeline --from=<data>/journal  # offline, from a durable journal file
+deno task am timetravel undo|redo           # step back/forward
+deno task am timetravel goto <N>            # jump to index
+deno task am timetravel pause|resume        # freeze/unfreeze state
 deno task am replay 5..12                   # re-dispatch journal seq 5..12 for repro
 deno task am replay 5..12 --dry             # show what would replay, dispatch nothing
 deno task am record flow.test.ts --from=J   # turn a journal into a bootCells test
@@ -497,6 +517,18 @@ am pin --latest           # newest release
 am pin /path/to/aio       # LOCAL-DEV pin: follow a framework checkout on this machine
 ```
 
+The framework CLI itself, and apps `run.sh` installed into `~/app/`:
+
+```sh
+am upgrade                # update am itself to the latest release
+am uninstall              # remove am (your aio apps are untouched)
+am installed              # list installed apps, with version + where each came from
+am upgrade <app>          # rebuild and reinstall an installed APP from its recorded source
+am remove <app> [--data]  # uninstall one — the PROGRAM; --data also deletes ~/.<app>/
+am theme adopt            # take aio's stylesheet INTO this app (src/aio-theme.css) — yours from then on
+am publish [--key=K]      # build, sign and lay out the channel directory an update client fetches
+```
+
 A **path pin** is **per-machine**: `am pin /abs/checkout` writes the path to the
 git-ignored `.aio/pin.local` (one line; `.aio/` is added to `.gitignore` if
 missing) and leaves the committed `aioVersion` untouched — a clone still builds
@@ -514,11 +546,11 @@ Inside a path-pinned app, the installed `am` **delegates** to the pinned
 checkout's own am (announced on stderr; `AIO_AM_NO_DELEGATE=1` opts out) — so am
 behavior always matches the framework the app is built against, unpushed
 commands included. To use a checkout's am **everywhere** (even before any app
-exists), switch the global install: `am update /path/to/aio` — a dev am on live
-files, so your edits apply immediately. Plain `am update` returns to the
+exists), switch the global install: `am upgrade /path/to/aio` — a dev am on live
+files, so your edits apply immediately. Plain `am upgrade` returns to the
 released am; it never git-mutates a dev checkout it happens to be running from.
 First switch, when the installed am is a release that predates this verb: run
-the checkout's own am once — `cd <checkout> && deno task am update .`.
+the checkout's own am once — `cd <checkout> && deno task am upgrade .`
 
 `am create` pins the **newest release** by default;
 `am create app --aio-version=main` opts into the tip. The clone → build path is
@@ -598,15 +630,22 @@ identically. Elements are addressed by component/name, not CSS selectors.
 
 ```sh
 deno task am state --ui                      # server-side UI state
-deno task am surface                         # semantic surface (client 0): every component + triggerable element
-deno task am surface 1                       # surface for a specific client
-deno task am trigger 0 App:SubmitButton click        # click by component:name path
-deno task am trigger 0 App:Email type "a@b"          # type into an input — APPENDS
-deno task am trigger 0 App:Email setValue "a@b"      # REPLACE the field's value
-deno task am trigger 0 App:Search focus               # focus / blur / hover / scroll / press
-deno task am trigger 0 App:Stage keyDown ArrowLeft    # HOLD a key (games, drag) …
-deno task am trigger 0 App:Stage keyUp ArrowLeft      # … then release it — press is a tap
+deno task am surface                         # semantic surface of the newest UI client: every component + triggerable element
+deno task am surface 3                       # …of ONE client, by its `am clients` index
+deno task am trigger App:SubmitButton click        # click by component:name path
+deno task am trigger App:Email type "a@b"          # type into an input — APPENDS
+deno task am trigger App:Email setValue "a@b"      # REPLACE the field's value
+deno task am trigger App:Search focus               # focus / blur / hover / scroll / press
+deno task am trigger App:Stage keyDown ArrowLeft    # HOLD a key (games, drag) …
+deno task am trigger App:Stage keyUp ArrowLeft      # … then release it — press is a tap
 ```
+
+**Which client?** With no index, `surface` and `trigger` drive the **newest UI
+client** — the page in front of you. An explicit index is the server's
+per-connection **counter**, not a position: it starts wherever the server's
+count is (in dev, index 0 is usually the reload socket, which has no UI), and
+one page reload moves it. Pass one only to pick among several open clients, and
+read the current numbers from `am clients` first.
 
 `type` APPENDS to the field's current value (a user typing into a field that
 already has one); `setValue` clears first, then types — use it to drive a form,
@@ -692,19 +731,24 @@ preflight fixes and licensing: [VM labs](../testing/vm-labs.md).
 
 ```sh
 deno task am clients              # connected clients (type, transport)
+deno task am client 0             # request component tree from client 0 (dev mode)
+deno task am top                  # live runtime view (per-cell state sizes); --json = one shot
 deno task am schedules            # active timers/cron
 deno task am metrics              # uptime, connections, schedule count
 deno task am health               # health check (exit 0 = ok)
+deno task am doctor               # is the RUNNING process on the aio that is on disk? (fix: am restart)
 deno task am config               # server config
 deno task am sql "SELECT ..."     # read-only SQL query
 deno task am tables               # list SQLite tables
-deno task am log                  # tail last 50 lines
-deno task am log --filter=ERROR   # filter log lines
-deno task am log --follow         # stream (like tail -f), also: -f
-deno task am log --client         # tail client log (~/.<appId>/logs/client.log)
+deno task am logs                  # tail last 50 lines
+deno task am logs --filter=ERROR   # filter log lines
+deno task am logs --follow         # stream (like tail -f), also: -f
+deno task am logs --client         # tail client log (~/.<appId>/logs/client.log)
 deno task am errors               # last transpile error (dev mode)
 deno task am watch                # hot-restart on file change in src/
-deno task am add cell payments    # scaffold src/cell/payments.ts (was: am new)
+deno task am add cell payments    # scaffold src/cell/payments.ts
+deno task am report               # collect a problem report (logs + versions + state shape) for an app with feedback: true
+deno task am version              # print version
 ```
 
 ## Trojan — Control REST API
@@ -799,8 +843,8 @@ deno task am health && echo "up" || echo "down"
 deno task am state | jq '.fleet[0].stats'
 deno task am dispatch portfolio:buy symbol=AAPL qty=10
 deno task am surface --json | jq '.[].elements[] | select(.text == "Login")'
-deno task am trigger 0 App:LoginButton click
-deno task am log --client --json | jq -r '.lines[]' | grep ERROR
+deno task am trigger App:LoginButton click
+deno task am logs --client --json | jq -r '.lines[]' | grep ERROR
 ```
 
 ## Troubleshooting

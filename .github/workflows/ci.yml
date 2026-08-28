@@ -3,12 +3,22 @@ name: CI
 # Makes the project's own gates binding: fmt, lint, check, and the full test
 # suite must pass before merge. Mirrors the local `deno task` gates so "green
 # locally" and "green in CI" mean the same thing.
+#
+# THE CONTRACT: every gate `scripts/release-check.ts` runs (its FAST and HEAVY
+# lists) is a step or job here — `tests/ci-mirrors-release-check.test.ts`
+# reads both and goes red when one is missing. The heavy real-execution gates
+# (onboard, build, electron, lab) are too slow for every push; they run in the
+# `heavy` job below on a nightly schedule and on demand, and say so.
 
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+  # The heavy tier (below) — nightly, so a slow gate still runs every day.
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -42,6 +52,18 @@ jobs:
         run: deno task check:api
       - name: Module boundaries (src/ folder dependency matrix)
         run: deno task check:boundaries
+      - name: aiol (the project's own linter)
+        run: deno task lint:aio
+      - name: Silent catch (no swallowed errors)
+        run: deno task check:silent-catch
+      - name: Vacuous tests (a green test must prove something)
+        run: deno task check:vacuous
+      - name: Dead wiring (an export nothing reaches — src/, aiol/, amui/)
+        run: deno task check:dead-wiring
+      - name: Log prefix (every framework line carries its level)
+        run: deno task check:log-prefix
+      - name: Sanitizer opt-outs (each one justified)
+        run: deno task check:sanitizers
       - name: Benchmarks (regression floors — roadmap B4)
         run: deno task bench
       - name: Coverage ratchet (src/ line coverage floor)
@@ -57,9 +79,10 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         deno: [v2.x] # latest stable
         include:
-          # Supported floor (README claims "Deno 2.6+") — proven, not assumed.
+          # Supported floor — MIN_DENO in src/server/deno-version.ts, proven
+          # here rather than assumed. A guard test pins the two to each other.
           - os: ubuntu-latest
-            deno: "2.6.0"
+            deno: "2.9.0"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -68,6 +91,31 @@ jobs:
           deno-version: ${{ matrix.deno }}
       - name: Test
         run: deno task test
+      # `deno task test` ends with check:orphans; named here so the mirror
+      # test can see it, and so a left-behind process is a red step by name.
+      - name: Orphans (nothing the suite started is still serving)
+        run: deno task check:orphans
+
+  # The real-browser e2e (`tests/e2e-ui-chromium.test.ts` and friends) is
+  # `ignore`d when no Chromium is on the machine — so without this job it was
+  # skipped in CI silently, and the browser half of the contract was never
+  # proven off this machine. Chrome is installed explicitly and named to the
+  # test, so a missing browser is a red job rather than a green skip.
+  e2e-browser:
+    needs: gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - uses: browser-actions/setup-chrome@v1
+        id: chrome
+      - name: Browser e2e
+        env:
+          AIO_E2E_BROWSER: ${{ steps.chrome.outputs.chrome-path }}
+          CHROMIUM_BIN: ${{ steps.chrome.outputs.chrome-path }}
+        run: deno task test:e2e
 
   # Catch JSR manifest / slow-types / export breakage before release day.
   publish-dry-run:
@@ -80,3 +128,41 @@ jobs:
           deno-version: v2.x
       - name: Publish dry-run
         run: deno publish --dry-run --allow-dirty
+
+  # Mutation gate: breaks each load-bearing invariant on purpose and requires
+  # its named test to go red (~30 s on top of the suite).
+  mutations:
+    needs: gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Mutations (every invariant has a test that bites)
+        run: deno task check:mutations
+
+  # The HEAVY tier of `check:release`: real-execution suites that build
+  # artifacts for every target, package an Electron image, install through the
+  # published one-liner, and run the onboarding lab in a fresh container.
+  # Honestly: ~12+ minutes and a runtime fetch, too slow for every push — so
+  # this runs NIGHTLY (schedule above) and on demand (workflow_dispatch), not
+  # on pull requests. A release still runs `deno task check:release` locally,
+  # where these are mandatory; here they catch what drifted between releases.
+  heavy:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Onboard e2e (install → create → dev → compile)
+        run: deno task test:onboard
+      - name: Build e2e (every target's binary boots from a foreign cwd)
+        run: deno task test:build
+      - name: Electron e2e (a real AppImage is packaged and booted)
+        run: deno task test:electron
+      - name: Lab (fresh ubuntu container — docker is on the runner)
+        run: deno task lab --scenario=install,create-dev,run-sh

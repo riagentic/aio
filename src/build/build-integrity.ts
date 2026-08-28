@@ -4,6 +4,7 @@
  * Protects against CDN compromise, MITM, DNS hijack during build.
  */
 import { join } from "@std/path";
+import { sha256Hex } from "./ship.ts";
 import { bundleFrameworkEntries } from "./esbuild-shared.ts";
 import type { BuildConfig } from "./build-config.ts";
 
@@ -14,12 +15,7 @@ let _integrityMap: Record<string, string> | null = null;
 let _integrityPromise: Promise<Record<string, string>> | null = null;
 
 async function _sha256(text: string): Promise<string> {
-  const buf = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(text),
-  );
-  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+  return await sha256Hex(new TextEncoder().encode(text));
 }
 
 function _loadIntegrityMap(): Promise<Record<string, string>> {

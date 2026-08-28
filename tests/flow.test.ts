@@ -249,8 +249,6 @@ const racer = cell("racer", {
 Deno.test({
   name: "flow: race() picks first to resolve",
   // sanitizers disabled: race has intentional fire-and-forget losers (dangling timers)
-  sanitizeOps: false,
-  sanitizeResources: false,
 }, async () => {
   const app = createTestApp([racer]);
   app.dispatch((racer.__aio.actions as Cat).start!());
@@ -430,8 +428,6 @@ const race3 = cell("race3", {
 
 Deno.test({
   name: "flow edge: race() with 3 near-simultaneous entries picks exactly one",
-  sanitizeOps: false,
-  sanitizeResources: false,
 }, async () => {
   const app = createTestApp([race3]);
   app.dispatch((race3.__aio.actions as Cat).start!());
@@ -458,8 +454,6 @@ const raceSyncAsync = cell("raceSyncAsync", {
 
 Deno.test({
   name: "flow edge: race() — already-resolved branch beats async",
-  sanitizeOps: false,
-  sanitizeResources: false,
 }, async () => {
   const app = createTestApp([raceSyncAsync]);
   app.dispatch((raceSyncAsync.__aio.actions as Cat).start!());
@@ -509,8 +503,6 @@ const callTimeout = cell("callTimeout", {
 
 Deno.test({
   name: "flow edge: race() timeout sugar bounds slow work",
-  sanitizeOps: false,
-  sanitizeResources: false,
 }, async () => {
   const app = createTestApp([callTimeout]);
   app.dispatch((callTimeout.__aio.actions as Cat).start!());
@@ -594,8 +586,6 @@ const cancelMidAll = cell("cancelMidAll", {
 
 Deno.test({
   name: "flow edge: cancel mid-Promise.all prevents done",
-  sanitizeOps: false,
-  sanitizeResources: false,
 }, async () => {
   const app = createTestApp([cancelMidAll]);
   app.dispatch((cancelMidAll.__aio.actions as Cat).start!());
@@ -783,8 +773,6 @@ const whenCancelled = cell("whenCancelled", {
 
 Deno.test({
   name: "flow: cancelling a workflow waiting on until() stops the wait",
-  sanitizeOps: false,
-  sanitizeResources: false,
 }, async () => {
   const app = createTestApp([whenCancelled]);
   app.dispatch((whenCancelled.__aio.actions as Cat).start!());
@@ -937,8 +925,6 @@ Deno.test("flow: workflow with two sequential waits (condition then signal)", as
 
 Deno.test({
   name: "flow: until() inside race() resolves when condition met",
-  sanitizeOps: false,
-  sanitizeResources: false,
 }, async () => {
   const whenRaceTrigger = cell("whenRaceTrigger", {
     state: { flag: false },

@@ -169,6 +169,7 @@ export function replayJournal<S, A>(
 /** Parse a journal file's lines into entries, skipping any corrupt tail line
  *  (a torn last write from a crash) — durability over strictness. */
 export function parseJournal(text: string): JournalEntry[] {
+  let torn = false;
   const out: JournalEntry[] = [];
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
@@ -177,8 +178,17 @@ export function parseJournal(text: string): JournalEntry[] {
       if (typeof e.seq === "number" && typeof e.type === "string") out.push(e);
     } catch {
       // torn/partial line (crash mid-write) — stop; nothing after it is trusted.
+      torn = true;
       break;
     }
+  }
+  if (torn) {
+    log.warn(
+      "journal",
+      `journal: a torn line was found (a crash mid-write) — ${out.length} ` +
+        `entr${out.length === 1 ? "y" : "ies"} before it replay; anything ` +
+        `after it is discarded`,
+    );
   }
   return out;
 }
@@ -217,13 +227,30 @@ export function createJournal(
   // the HIGHER of the two: replaying what is already in the snapshot is the
   // failure this whole file is about.
   if (storeOwnsWatermark) wm = opts.storedWatermark!;
-  try {
-    wm = Math.max(wm, parseInt(Deno.readTextFileSync(wmPath), 10) || 0);
-  } catch { /* no watermark yet */ }
-  try {
-    const existing = parseJournal(Deno.readTextFileSync(path));
-    for (const e of existing) if (e.seq > seq) seq = e.seq;
-  } catch { /* no journal yet */ }
+  // NotFound is the one honest "nothing yet". Any other refusal (EACCES on
+  // a file another user created, an I/O error) used to read as "no journal"
+  // — and a journal that exists but cannot be read is exactly the state this
+  // file is meant to recover from, so it throws by name instead.
+  const readOr = (file: string, what: string): string | null => {
+    try {
+      return Deno.readTextFileSync(file);
+    } catch (e) {
+      if (e instanceof Deno.errors.NotFound) return null;
+      throw new Error(
+        `journal: could not read the ${what} at ${file} — ${
+          e instanceof Error ? e.message : String(e)
+        }. It exists, so recovery cannot be skipped: fix its permissions ` +
+          `(owner-only, like the data dir) or move it aside deliberately.`,
+        { cause: e },
+      );
+    }
+  };
+  const wmText = readOr(wmPath, "watermark");
+  if (wmText !== null) wm = Math.max(wm, parseInt(wmText, 10) || 0);
+  const journalText = readOr(path, "journal");
+  if (journalText !== null) {
+    for (const e of parseJournal(journalText)) if (e.seq > seq) seq = e.seq;
+  }
   if (wm > seq) seq = wm;
 
   const enc = new TextEncoder();
@@ -286,8 +313,12 @@ export function createJournal(
         return parseJournal(Deno.readTextFileSync(path)).filter((e) =>
           e.seq > after
         );
-      } catch {
-        return [];
+      } catch (e) {
+        // A journal that cannot be READ is not an empty journal: replaying
+        // nothing over a store that has entries is the silent data loss this
+        // file exists to prevent. NotFound is the one honest "nothing yet".
+        if (e instanceof Deno.errors.NotFound) return [];
+        throw new Error(`journal: cannot read ${path} — ${e}`, { cause: e });
       }
     },
     watermark: () => wm,
@@ -330,7 +361,11 @@ export function createJournal(
         // permissions; `mode` only applies at CREATE time, so remove it first.
         try {
           Deno.removeSync(tmp);
-        } catch { /* nothing to clear */ }
+        } catch (e) {
+          // NotFound: nothing to clear. Anything else means the leftover —
+          // and its looser mode — would be REUSED by the write below.
+          if (!(e instanceof Deno.errors.NotFound)) throw e;
+        }
         Deno.writeTextFileSync(
           tmp,
           keep.map((e) => JSON.stringify(e)).join("\n") +

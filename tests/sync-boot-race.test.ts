@@ -49,8 +49,6 @@ const tick = () => new Promise((r) => setTimeout(r, 30));
 Deno.test({
   name:
     "sync boot race: a sync-cell method before engine boot is buffered, never plain-sent",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     shimLocalStorage();
     _setAckTimeoutMs(0);
@@ -154,8 +152,6 @@ Deno.test({
 
 Deno.test({
   name: "sync boot race: with NO sync cells, nothing is buffered",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     shimLocalStorage();
     _setAckTimeoutMs(0);

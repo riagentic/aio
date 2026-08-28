@@ -15,6 +15,10 @@ import type {
  *  the discriminator; no type field on the wire). */
 export type VitalsPing = {
   t1: number;
+  /** The sender's render staleness (ms behind, from its render meter) — the
+   *  server's per-client backpressure input. Absent from a probe that has no
+   *  meter. */
+  ms?: number;
 };
 
 /** "vitals-pong" payload — timestamps and optional loop health. */

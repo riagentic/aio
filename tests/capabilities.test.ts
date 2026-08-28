@@ -5,10 +5,9 @@ import { assert, assertEquals } from "@std/assert";
 import {
   _SCANNED_FS_APIS,
   type Capabilities,
-  manifestReport,
-  permissionFlags,
   scanCapabilities,
 } from "../src/build/capabilities.ts";
+import { manifestReport, permissionFlags } from "../src/testing/internal.ts";
 
 Deno.test("scanCapabilities: detects each category from real API usage", () => {
   const caps = scanCapabilities([

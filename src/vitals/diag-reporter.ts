@@ -4,9 +4,7 @@ import { log } from "../diagnostics/logger-api.ts";
  *  be said twice. */
 const stripTag = (s: string) => s.replace(/^\[aio:vitals\]\s*/, "");
 import type { DiagEvent, VitalAlert } from "./types.ts";
-import { formatDiagEvent } from "./diag-formatter.ts";
-
-const THROTTLE_MS = 2000;
+import { DIAG_THROTTLE_MS, formatDiagEvent } from "./diag-formatter.ts";
 
 /** Point-in-time snapshot of the dispatch loop for diagnostic reporting. */
 export type LoopSnapshot = {
@@ -186,7 +184,7 @@ export function createServerDiagReporter(config: ServerDiagReporterConfig) {
       const throttleKey = `${kind}:${event.detail.trigger ?? ""}`;
       const now = Date.now();
       const lastEmit = lastConsoleEmit.get(throttleKey) ?? 0;
-      if (now - lastEmit >= THROTTLE_MS) {
+      if (now - lastEmit >= DIAG_THROTTLE_MS) {
         lastConsoleEmit.set(throttleKey, now);
         emitLines(formatDiagEvent(event));
       }

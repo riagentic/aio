@@ -8,7 +8,7 @@
  *   am pin main             follow the branch tip (explicitly a moving target)
  *   am pin --latest         pin the newest release
  *   am pin <path>           LOCAL-DEV pin: follow a framework checkout on this
- *                           machine (`am pin /home/dev/code/gen/aio`) — for
+ *                           machine (`am pin /opt/aio-checkout`) — for
  *                           developing an app against a WIP framework
  *
  * The pin is one string in the app's `deno.json` (`"aioVersion"`), committed with
@@ -49,6 +49,7 @@ import {
   isFixturePath,
   type RemovalHit,
   removalMessage,
+  removalsInDenoJson,
   removalsInSource,
 } from "../state/removals.ts";
 
@@ -205,6 +206,30 @@ export async function preflight(
   ref: string,
 ): Promise<Blocker[]> {
   const blocking: Blocker[] = [];
+  // deno.json first: a removed top-level key (`target`) is a config fact the
+  // source walk below cannot see.
+  try {
+    const djPath = join(appDir, "deno.json");
+    const raw = await Deno.readTextFile(djPath);
+    const dj = JSON.parse(raw) as Record<string, unknown>;
+    for (const removal of removalsInDenoJson(dj)) {
+      if (stillAccepts(ref, removal.lastGood)) continue;
+      const line = raw.split("\n").findIndex((l) =>
+        new RegExp(`"${removal.key}"\\s*:`).test(l)
+      );
+      blocking.push({
+        where: `deno.json:${line + 1}`,
+        hit: {
+          removal,
+          line: line + 1,
+          text: (raw.split("\n")[line] ?? "").trim(),
+        },
+        fixture: false,
+      });
+    }
+  } catch {
+    // no deno.json, or not JSON — the normal flow reports that properly
+  }
   for await (const file of appSources(appDir)) {
     let text: string;
     try {
@@ -212,7 +237,8 @@ export async function preflight(
     } catch {
       continue;
     }
-    if (!text.includes("cell(")) continue; // config keys live in cell() calls
+    // Every source file: a removed API shape (a type alias, an argument
+    // order) lives anywhere, not only beside a `cell(` call.
     for (const hit of removalsInSource(text)) {
       if (stillAccepts(ref, hit.removal.lastGood)) continue;
       const rel = relative(appDir, file);
@@ -276,7 +302,7 @@ export async function cmdPin(
   }
 
   let ref = explicit ?? "";
-  // A PATH argument is a LOCAL-DEV pin: `am pin /home/dev/code/gen/aio` (or a
+  // A PATH argument is a LOCAL-DEV pin: `am pin /opt/aio-checkout` (or a
   // relative path) records `path:<abs>` in aioVersion, so every later `am fix`
   // keeps linking THIS checkout — the recorded form of `am link --aio=<path>`,
   // for developing an app against a work-in-progress framework. It is

@@ -23,7 +23,7 @@ framework stays free of test-only deps; `setDocument` points the renderer at it.
 ```ts
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
-import { testComponent } from "aio/air";
+import { testComponent } from "aio/testing";
 import App from "./App.tsx";
 
 const win = new Window();
@@ -214,6 +214,29 @@ h("ul", null, items.map((i) => h("li", { key: i.id }, i.name)));
 | `Link`        | `<Link to="...">`                  | Navigation link         |
 | `NavLink`     | `<NavLink to="...">`               | Link with active class  |
 | `Redirect`    | `<Redirect to="...">`              | Navigate on mount       |
+
+### Standalone (Android) builds
+
+Every function above is exported by the standalone runtime too — the
+`ensureConnected` the browser build calls before the first route is a boot hook
+each runtime installs, not a transport dependency. See
+[Routing → Standalone builds](./air-routing.md#standalone-android-builds) for
+the one packaged-app difference (the shell's directory becomes `/`).
+
+The auth UI (`<SignIn/>`, `useUser()`, `signOut()`) is exported there as well,
+resolved to the **anonymous branch**: a standalone app has no server session, so
+`useUser()` is always `null` (resolved, never loading), `<SignIn/>` renders
+nothing and logs one warning naming the reason, and `signOut()` resolves. A
+component written as `user ? <App/> : <SignIn/>` therefore renders what a
+signed-out visitor of the server build sees. An app that needs real users on the
+phone builds with `--android --remote` (the WebView then talks to your server,
+sessions included).
+
+What is **not** on the standalone runtime, by decision: `useTimeTravel` (it
+streams the server's action log over the transport), `renderToStream` (SSR), the
+devtools bridge, and the transport hooks (`useConnected`,
+`isConnectionDegraded`, `useProjection`). The ledger is
+`tests/standalone-export-parity.test.ts`.
 
 ## Animation
 

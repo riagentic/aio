@@ -36,9 +36,7 @@ const OWNERS: Record<string, [Owner, string]> = {
   _resetMethodCancel: ["RUNTIME", "cancellation registry"],
   _resetSubs: ["RUNTIME", "subscription registry"],
   _resetRootSignals: ["RUNTIME", "module-scope signal state"],
-  _resetVisibleHints: ["RUNTIME", "warn dedup — order-dependent unreset"],
   _resetSelectorHints: ["RUNTIME", "warn dedup — order-dependent unreset"],
-  _resetListensToHints: ["RUNTIME", "warn dedup — order-dependent unreset"],
   _resetTransactionHints: ["RUNTIME", "warn dedup — order-dependent unreset"],
   _resetReturnEffectHints: ["RUNTIME", "warn dedup — order-dependent unreset"],
   _resetArrayRefStats: ["RUNTIME", "diagnostic counters"],
@@ -55,6 +53,10 @@ const OWNERS: Record<string, [Owner, string]> = {
 
   // ── owned by a harness ──────────────────────────────────────────
   _resetAuthUi: ["HARNESS", "testUI installs and restores the ambient user"],
+  _resetLifecycleFacts: [
+    "MANUAL",
+    "tests/lifecycle-restart.test.ts resets the process facts between cases",
+  ],
   _resetSurfaceWarnings: [
     "HARNESS",
     "duplicate-`t` report dedup; testUI clears it at mount so every test " +
@@ -136,7 +138,6 @@ const OWNERS: Record<string, [Owner, string]> = {
   _resetSecurityWarnings: ["MANUAL", "boot security warn dedup"],
   _resetImportMapWarnings: ["MANUAL", "import-map warn dedup"],
   _resetEventWarnings: ["MANUAL", "event warn dedup"],
-  _resetBrowserScheduleHints: ["MANUAL", "browser schedule hint dedup"],
   _resetBrowserSync: ["MANUAL", "browser sync client"],
   _resetVendorCache: ["MANUAL", "build vendor cache"],
   _resetHints: ["MANUAL", "aiol hint dedup"],

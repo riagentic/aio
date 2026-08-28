@@ -43,16 +43,6 @@ export type MethodsToCreators<M> = {
     : never;
 };
 
-/** Discriminated union of all actions — enables auto-narrowing in reduce switch/case.
- *  Foreign/internal actions (init, destroy, cross-cell): cast to Msg for raw access. */
-export type ActionUnion<Prefix extends string, A extends Creators> = {
-  [K in keyof A & string]: {
-    type: `${Prefix}:${K}`;
-    payload: ReturnType<A[K]>;
-    _source?: ActionSource;
-  };
-}[keyof A & string];
-
 /** Transition target — a state name, or a function deciding the target from
  *  state + action args (AIO-380). The function runs after the reducer applied
  *  (sync methods see post-method state; async method triggers run before the
@@ -129,6 +119,10 @@ export type Msg<P = unknown> = {
   type: string;
   payload: P;
   _source?: ActionSource;
+  /** Set only by the framework's own write paths (async batcher, `$do`,
+   *  worker patches): admitted through the dispatch drain window. Stripped
+   *  from every network frame by `sanitizeClientAction`. */
+  _inflight?: true;
 };
 
 /** Scoped app handle passed to execute() — dispatch actions or read state from within a cell */
@@ -363,11 +357,6 @@ export type Access =
     ...args: unknown[]
   ) => boolean);
 
-/** Who may call a cell method — the legacy spelling of {@linkcode Access}.
- *  @deprecated alpha52 — unified as {@linkcode Access} (one rule vocabulary
- *  for cells and serverFns). Alias through beta. */
-export type CellAccess = Access;
-
 /** What `cell()` returns: the callable cell handle — its typed method proxy,
  *  effect creators (`fx`), selectors, and the framework plumbing under
  *  `__aio`. Pass it to `aio.run({ cells: [...] })` and import it anywhere. */
@@ -452,25 +441,6 @@ export type MethodMeta<
 // deno-lint-ignore no-explicit-any
 export type StateOf<F> = F extends CellDef<any, any, any, infer S> ? S
   : Record<string, unknown>;
-
-/** A cell definition's state type — the legacy spelling of {@linkcode StateOf}.
- *  @deprecated alpha52 — renamed {@linkcode StateOf}. Alias through beta. */
-export type ExtractState<F> = StateOf<F>;
-
-/**
- * Build a typed send proxy from raw methods M (before DirectCalling transform).
- * Re-strips the state param and returns void (send dispatches, doesn't return).
- */
-// deno-lint-ignore no-explicit-any
-export type SendOf<F> = F extends DirectCalling<any, infer M> ? {
-    [K in keyof M]: // deno-lint-ignore no-explicit-any
-      M[K] extends (s: any, ...args: infer P) => Promise<any>
-        ? (...args: P) => void
-        // deno-lint-ignore no-explicit-any
-        : M[K] extends (s: any, ...args: infer P) => any ? (...args: P) => void
-        : never;
-  }
-  : Record<string, (...args: unknown[]) => void>;
 
 /** Cell entry in aio.run() — a bare CellDef or an object with dependency declarations. */
 export type CellEntry = CellDef | {

@@ -15,15 +15,45 @@
 //
 // The framework aborts the in-flight call's AbortController when a trigger
 // action dispatches; the method observes it via `s.$signal` (and until()
-// accepts it). Registry is per (cellPrefix, method) — module-scoped like the
-// other runtime registries, reset via _resetMethodCancel for test isolation.
+// accepts it). Registry is per (app, cellPrefix, method) — module-scoped like
+// the other runtime registries, reset via _resetMethodCancel for test
+// isolation.
+//
+// APP IDENTITY (alpha70). Two apps in one process cannot share a cell DEF
+// (bindCell refuses it), but they can each hold a different def with the SAME
+// id — a factory returning `cell("ledger", …)`, which is exactly what a client
+// binding a remote cell does. Keyed by cell name alone, app A's `cart.clear`
+// aborted app B's `checkout.place`, and A's shutdown counted, waited on and
+// aborted B's calls. Every entry point therefore takes the owning app's
+// identity. `""` is the WILDCARD — "app unknown" — and matches every app: a
+// caller that has not been threaded an identity yet behaves exactly as the
+// name-keyed registry did, and a caller that has is precise. Mixing the two is
+// monotone (a wildcard side never hides a scoped one), so the threading can
+// land one runtime at a time without a window where cancelOn is silently
+// inert.
 
-type Key = string; // `${cellPrefix}:${method}`
+/** The owning app's identity. `""` = unknown, matches every app. */
+export type AppScope = string;
 
-/** trigger action type → set of method keys it cancels */
-const _triggers = new Map<string, Set<Key>>();
-/** method key → in-flight AbortControllers */
-const _inflight = new Map<Key, Set<AbortController>>();
+/** True when two scopes name the same app — or either does not know. */
+function sameApp(a: AppScope, b: AppScope): boolean {
+  return a === "" || b === "" || a === b;
+}
+
+type MethodKey = string; // `${cellPrefix}:${method}` — what a human wrote
+
+type Trigger = { app: AppScope; key: MethodKey };
+type Inflight = {
+  app: AppScope;
+  prefix: string;
+  key: MethodKey;
+  set: Set<AbortController>;
+};
+
+/** trigger action type → the (app, method) pairs it cancels */
+const _triggers = new Map<string, Set<Trigger>>();
+/** in-flight AbortControllers, one entry per (app, method) */
+const _inflight = new Set<Inflight>();
 /** Cells whose app is shutting down. `abortAllInflight` can only abort
  *  controllers that exist at sweep time — a `serialize: true` call queued
  *  behind the aborted one starts a moment LATER with a fresh controller and
@@ -33,8 +63,24 @@ const _inflight = new Map<Key, Set<AbortController>>();
  *  writing, queued ones take their cancellation path on the first check.
  *  `endShutdownAbort` clears it, so a later app booting the same cell names
  *  in this process (every sequential test does) starts clean. */
-const _shutdownCells = new Set<string>();
-let _shutdownAll = false;
+const _shutdownCells: { app: AppScope; prefix: string }[] = [];
+
+/** `prefix === ""` is "every cell of that app" (the unscoped sweep). */
+function shuttingDown(prefix: string, app: AppScope): boolean {
+  return _shutdownCells.some((s) =>
+    (s.prefix === "" || s.prefix === prefix) && sameApp(s.app, app)
+  );
+}
+
+function inflightEntry(
+  prefix: string,
+  method: string,
+  app: AppScope,
+): Inflight | undefined {
+  const key = `${prefix}:${method}`;
+  for (const e of _inflight) if (e.key === key && e.app === app) return e;
+  return undefined;
+}
 
 /** Register cancel triggers for a method (called at cell creation).
  *
@@ -46,6 +92,7 @@ export function registerCancelOn(
   cellPrefix: string,
   method: string,
   triggers: "self" | (string | { type: string })[],
+  app: AppScope = "",
 ): void {
   const key = `${cellPrefix}:${method}`;
   const list = triggers === "self" ? ["self"] : triggers;
@@ -54,7 +101,10 @@ export function registerCancelOn(
     const type = raw === "self" ? key : raw;
     let set = _triggers.get(type);
     if (!set) _triggers.set(type, set = new Set());
-    set.add(key);
+    // One edge per (app, method) — re-registering is idempotent.
+    let dup = false;
+    for (const e of set) if (e.key === key && e.app === app) dup = true;
+    if (!dup) set.add({ app, key });
   }
 }
 
@@ -69,22 +119,23 @@ export function registerCancelOn(
  *  composes many short-lived cells grew one entry per name for its lifetime.
  *  Registration belongs to a binding, so it ends with the binding.
  *
- *  Scoped by cell PREFIX, with the same one-step-short caveat as `_pendingFor`
- *  above: two apps in one process holding DIFFERENT defs with the SAME id
- *  would clear each other's triggers. Same narrow case, same fix (key the
- *  registry by app identity), same todo.md entry. */
-export function unregisterCancelOn(cellPrefix: string): void {
+ *  Scoped by cell prefix AND app: two apps in one process holding different
+ *  defs with the same id release only their own. */
+export function unregisterCancelOn(
+  cellPrefix: string,
+  app: AppScope = "",
+): void {
   const prefix = `${cellPrefix}:`;
-  for (const [type, keys] of _triggers) {
-    for (const key of keys) {
-      if (key.startsWith(prefix)) keys.delete(key);
+  for (const [type, set] of _triggers) {
+    for (const t of set) {
+      if (t.key.startsWith(prefix) && sameApp(t.app, app)) set.delete(t);
     }
     // A trigger whose last listener is gone is not a trigger any more; leaving
     // the empty Set behind would be the same unbounded growth one level down.
-    if (keys.size === 0) _triggers.delete(type);
+    if (set.size === 0) _triggers.delete(type);
   }
-  for (const key of [..._inflight.keys()]) {
-    if (key.startsWith(prefix)) _inflight.delete(key);
+  for (const e of _inflight) {
+    if (e.prefix === cellPrefix && sameApp(e.app, app)) _inflight.delete(e);
   }
 }
 
@@ -92,7 +143,7 @@ export function unregisterCancelOn(cellPrefix: string): void {
  *  leak can be ASSERTED rather than argued about (tests/method-cancel). */
 export function _cancelTriggerCount(): number {
   let n = 0;
-  for (const keys of _triggers.values()) n += keys.size;
+  for (const set of _triggers.values()) n += set.size;
   return n;
 }
 
@@ -101,32 +152,54 @@ export function trackCall(
   cellPrefix: string,
   method: string,
   controller: AbortController,
+  app: AppScope = "",
 ): () => void {
-  const key = `${cellPrefix}:${method}`;
-  if (_shutdownAll || _shutdownCells.has(cellPrefix)) controller.abort();
-  let set = _inflight.get(key);
-  if (!set) _inflight.set(key, set = new Set());
-  set.add(controller);
+  if (shuttingDown(cellPrefix, app)) controller.abort();
+  let entry = inflightEntry(cellPrefix, method, app);
+  if (!entry) {
+    entry = {
+      app,
+      prefix: cellPrefix,
+      key: `${cellPrefix}:${method}`,
+      set: new Set(),
+    };
+    _inflight.add(entry);
+  }
+  entry.set.add(controller);
+  const mine = entry;
   return () => {
-    set!.delete(controller);
-    // Identity check: notifyMethodCancel DELETES the map entry, so a later call
-    // installs a NEW set under the same key. Without `=== set`, the older call
-    // settling afterwards deleted that newer set — and the newer call silently
-    // stopped being cancellable (cancelOn quietly stopped working).
-    if (set!.size === 0 && _inflight.get(key) === set) _inflight.delete(key);
+    mine.set.delete(controller);
+    // Identity check: notifyMethodCancel DELETES the entry, so a later call
+    // installs a NEW one under the same key. Without `_inflight.has(mine)`,
+    // the older call settling afterwards deleted that newer entry — and the
+    // newer call silently stopped being cancellable (cancelOn quietly stopped
+    // working).
+    if (mine.set.size === 0 && _inflight.has(mine)) _inflight.delete(mine);
   };
 }
 
 /** Abort every in-flight call whose method lists this action as a trigger.
- *  Called from the composed reduce for every dispatched action. */
-export function notifyMethodCancel(actionType: string): void {
-  const keys = _triggers.get(actionType);
-  if (!keys) return;
-  for (const key of keys) {
-    const set = _inflight.get(key);
-    if (!set) continue;
-    for (const c of set) c.abort();
-    _inflight.delete(key);
+ *  Called from the composed reduce for every dispatched action — with the
+ *  dispatching app's identity, so app A's `cart.clear` never reaches app B's
+ *  `checkout.place`. */
+export function notifyMethodCancel(
+  actionType: string,
+  app: AppScope = "",
+): void {
+  const triggers = _triggers.get(actionType);
+  if (!triggers) return;
+  for (const t of triggers) {
+    for (const e of _inflight) {
+      if (e.key !== t.key) continue;
+      // The trigger, the call and the dispatching action must all belong to
+      // one app (or not know which) — app A's action never fires app B's
+      // trigger, and never aborts app B's call through its own.
+      const fires = sameApp(t.app, app) && sameApp(e.app, t.app) &&
+        sameApp(e.app, app);
+      if (!fires) continue;
+      for (const c of e.set) c.abort();
+      _inflight.delete(e);
+    }
   }
 }
 
@@ -135,12 +208,19 @@ export function notifyMethodCancel(actionType: string): void {
  *  dispatch loop cannot see these: a cell's `execute` runs the method and
  *  returns nothing, so `dispatch.drain()` has never had anything to wait for.
  *  Shutdown does, which is why the registry is here. */
-const _pending = new Map<Promise<unknown>, string>();
+const _pending = new Map<
+  Promise<unknown>,
+  { prefix: string; app: AppScope }
+>();
 
-/** Track a whole async call — body, commit and all — under its cell's prefix,
- *  so a shutting-down app can wait for ITS calls and no one else's. */
-export function trackPending(p: Promise<unknown>, cellPrefix = ""): void {
-  _pending.set(p, cellPrefix);
+/** Track a whole async call — body, commit and all — under its cell's prefix
+ *  and app, so a shutting-down app can wait for ITS calls and no one else's. */
+export function trackPending(
+  p: Promise<unknown>,
+  cellPrefix = "",
+  app: AppScope = "",
+): void {
+  _pending.set(p, { prefix: cellPrefix, app });
   const drop = () => _pending.delete(p);
   p.then(drop, drop);
 }
@@ -148,14 +228,6 @@ export function trackPending(p: Promise<unknown>, cellPrefix = ""): void {
 /** How many async calls are still finishing. */
 export function pendingCalls(): number {
   return _pending.size;
-}
-
-/** How many of `cells`' async calls are still finishing (all when omitted).
- *  The drain gate must count ITS app's calls, not the process's: with two
- *  apps in one process (D2), app A's closed queue must not stay open on app
- *  B's in-flight work. */
-export function pendingCallsFor(cells?: Set<string>): number {
-  return _pendingFor(cells).length;
 }
 
 /** Framework-internal: the METHOD KEYS (`cell:method`) of every call still in
@@ -166,8 +238,8 @@ export function pendingCallsFor(cells?: Set<string>): number {
  *  no label. `_inflight` is keyed by exactly the name a human wrote. */
 export function _inflightMethodKeys(): string[] {
   const out: string[] = [];
-  for (const [key, set] of _inflight) {
-    out.push(set.size > 1 ? `${key} (×${set.size})` : key);
+  for (const e of _inflight) {
+    out.push(e.set.size > 1 ? `${e.key} (×${e.set.size})` : e.key);
   }
   return out.sort();
 }
@@ -180,25 +252,18 @@ export function _pendingCallPromises(): Promise<unknown>[] {
   return _pendingFor();
 }
 
-/** The pending calls belonging to `cells` (every call when `cells` is
- *  undefined — the process-wide view).
- *
- *  Scoped by cell NAME, which is one step short of right. Two apps in one
- *  process cannot share a cell DEF (bindCell refuses it), but they can each
- *  hold a different def with the same id — a factory returning `cell("ledger",
- *  …)`, which is exactly what a client binding a remote cell does. App A's
- *  shutdown then counts, and aborts, app B's `ledger:` calls.
- *
- *  Narrow in practice (it needs two apps in one process AND a shared name) and
- *  not fixed here on purpose: the honest fix keys the registry by app identity
- *  rather than by name, which means threading an app id through `registerCall`
- *  and every dispatch that reaches it — a hot-path change to cancellation
- *  semantics, deserving its own release and its own gate run. Tracked in
- *  todo.md. */
-function _pendingFor(cells?: Set<string>): Promise<unknown>[] {
-  if (!cells) return [..._pending.keys()];
+/** The pending calls belonging to `cells` of `app` (every call when `cells`
+ *  is undefined and `app` is the wildcard — the process-wide view). */
+function _pendingFor(
+  cells?: Set<string>,
+  app: AppScope = "",
+): Promise<unknown>[] {
   const out: Promise<unknown>[] = [];
-  for (const [p, prefix] of _pending) if (cells.has(prefix)) out.push(p);
+  for (const [p, { prefix, app: owner }] of _pending) {
+    if (cells && !cells.has(prefix)) continue;
+    if (!sameApp(owner, app)) continue;
+    out.push(p);
+  }
   return out;
 }
 
@@ -217,16 +282,17 @@ export const DRAIN_TIMEOUT_MS = 3000;
 /** Wait for every in-flight call to finish writing, up to `timeoutMs`.
  *  Returns how many were still running when the wait ended.
  *
- *  `cells` scopes the wait to one app's cells. Two apps in one process are
- *  supported by design (D2: an instance-scoped runtime), and one of them
- *  shutting down must not sit on the other's work — or wait out its deadline
- *  for a call it does not own. */
+ *  `cells` scopes the wait to one app's cells, `app` to one app's identity.
+ *  Two apps in one process are supported by design (D2: an instance-scoped
+ *  runtime), and one of them shutting down must not sit on the other's work —
+ *  or wait out its deadline for a call it does not own. */
 export async function settlePending(
   timeoutMs: number,
   cells?: Set<string>,
+  app: AppScope = "",
 ): Promise<number> {
   const deadline = Date.now() + timeoutMs;
-  let mine = _pendingFor(cells);
+  let mine = _pendingFor(cells, app);
   while (mine.length > 0) {
     const left = deadline - Date.now();
     if (left <= 0) break;
@@ -238,7 +304,7 @@ export async function settlePending(
       new Promise((r) => t = setTimeout(r, left)),
     ]);
     if (t !== undefined) clearTimeout(t);
-    mine = _pendingFor(cells);
+    mine = _pendingFor(cells, app);
   }
   return mine.length;
 }
@@ -261,28 +327,30 @@ export async function settlePending(
  *  ends the wait instead of holding the drain open for a reply that is not
  *  coming.
  *
- *  `cells` scopes it to one app's cells — omitting it aborts the whole
- *  process. Two apps can share a process (D2: an instance-scoped runtime, and
- *  every `testServer()` pair does it), so an unscoped abort would have one
- *  app's shutdown cancel another app's running methods mid-write. Cell
- *  bindings are already released this way (`_releaseCells`); cancellation is
- *  the same claim.
+ *  `cells` scopes it to one app's cells and `app` to one app's identity —
+ *  omitting both aborts the whole process. Two apps can share a process (D2:
+ *  an instance-scoped runtime, and every `testServer()` pair does it), so an
+ *  unscoped abort would have one app's shutdown cancel another app's running
+ *  methods mid-write. Cell bindings are already released this way
+ *  (`_releaseCells`); cancellation is the same claim.
  *
  *  Returns how many calls were aborted, so the caller can say so in the log. */
-export function abortAllInflight(cells?: Set<string>): number {
-  if (cells) { for (const c of cells) _shutdownCells.add(c); }
-  else _shutdownAll = true;
+export function abortAllInflight(
+  cells?: Set<string>,
+  app: AppScope = "",
+): number {
+  for (const c of cells ?? [""]) _shutdownCells.push({ app, prefix: c });
   let n = 0;
-  for (const [key, set] of _inflight) {
-    // key is `${cellPrefix}:${method}`, and a cell name carries no colon.
-    if (cells && !cells.has(key.slice(0, key.indexOf(":")))) continue;
-    for (const c of set) {
+  for (const e of _inflight) {
+    if (cells && !cells.has(e.prefix)) continue;
+    if (!sameApp(e.app, app)) continue;
+    for (const c of e.set) {
       if (!c.signal.aborted) {
         c.abort();
         n++;
       }
     }
-    _inflight.delete(key);
+    _inflight.delete(e);
   }
   return n;
 }
@@ -292,17 +360,20 @@ export function _resetMethodCancel(): void {
   _triggers.clear();
   _inflight.clear();
   _pending.clear();
-  _shutdownCells.clear();
-  _shutdownAll = false;
+  _shutdownCells.length = 0;
 }
 
 /** End the shutdown window opened by `abortAllInflight`: stop pre-aborting
  *  new calls for these cells. Called when the app's drain is over — a later
  *  app in the same process may legitimately reuse the names. */
-export function endShutdownAbort(cells?: Set<string>): void {
-  if (cells) { for (const c of cells) _shutdownCells.delete(c); }
-  else {
-    _shutdownCells.clear();
-    _shutdownAll = false;
+export function endShutdownAbort(
+  cells?: Set<string>,
+  app: AppScope = "",
+): void {
+  for (let i = _shutdownCells.length - 1; i >= 0; i--) {
+    const s = _shutdownCells[i]!;
+    if (cells && s.prefix !== "" && !cells.has(s.prefix)) continue;
+    if (!sameApp(s.app, app)) continue;
+    _shutdownCells.splice(i, 1);
   }
 }

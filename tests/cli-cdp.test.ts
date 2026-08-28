@@ -64,8 +64,6 @@ Deno.test({
   name:
     "launchElectron passes --remote-debugging-port only when cdpPort is set",
   ignore: Deno.build.os === "windows",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: async () => {
     const dir = await Deno.makeTempDir();
     const argv = `${dir}/argv.txt`;

@@ -4,7 +4,7 @@
 // `terminate()` killed the worker under it, and its promise never settled. On
 // a dirty shutdown that is the most recent state change, lost silently.
 import { assert, assertEquals } from "@std/assert";
-import { createDB } from "../src/db/mod.ts";
+import { createDB } from "../src/server-entry.ts";
 
 Deno.test("db.close(): writes queued behind the writer lock still land", async () => {
   const dir = await Deno.makeTempDir({ prefix: "aio-db-close-" });

@@ -20,6 +20,7 @@
 // Under the ceiling is a failure too, with the new number to paste in. A
 // ratchet that is allowed to sit above the real count is just a ceiling, and a
 // ceiling rots.
+import { codeText } from "../src/diagnostics/code-mask.ts";
 
 /** The number of UNJUSTIFIED silent catches allowed in `src/`.
  *
@@ -31,7 +32,11 @@
  *      }
  *
  *  …or make the failure loud (log it with a level, or let it propagate). */
-const CEILING = 372;
+// 372 → 345 when the scan learned to read CODE only: 27 of the counted
+// "silent catches" were the pattern quoted inside a string or a comment, so
+// the ratchet had been permitting 27 more real ones than anybody agreed to. A
+// ceiling measured on the wrong thing is a ceiling that rots upward.
+const CEILING = 342;
 
 const ROOT = new URL("../src/", import.meta.url).pathname;
 
@@ -60,11 +65,26 @@ const unjustified: Hit[] = [];
 let justified = 0;
 
 for (const file of files) {
-  const src = await Deno.readTextFile(file);
+  const raw = await Deno.readTextFile(file);
+  // MATCH on code only. Four of the counted "silent catches" were prose — one
+  // of them a comment explaining why a bare `catch {}` had been a bug — so the
+  // ceiling permitted four more real ones than anybody had agreed to. `aiol`
+  // and `am pin` already read source through this mask; a ratchet that cannot
+  // tell code from a sentence about code is measuring the wrong thing.
+  //
+  // `codeText` preserves length and newlines, so offsets (and therefore line
+  // numbers) are unchanged — and the BODY is sliced from `raw`, because the
+  // `// aio-ok:` justification lives in a comment the mask blanks. Matching on
+  // masked text while reading the original is what keeps both true.
+  const src = codeText(raw);
   SILENT_CATCH.lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = SILENT_CATCH.exec(src))) {
-    const body = m[1]!;
+    // The body is the capture group; locate it by its own length from the
+    // match's end rather than by the first `{` — a destructured binding
+    // (`catch ({ message })`) puts a `{` before the body.
+    const end = m.index + m[0].length - 1;
+    const body = raw.slice(end - m[1]!.length, end);
     const code = body
       .replace(/\/\*[\s\S]*?\*\//g, "")
       .replace(/\/\/[^\n]*/g, "")

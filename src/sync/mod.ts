@@ -17,9 +17,13 @@ export type {
   SyncStats,
   SyncStatus,
 } from "./types.ts";
-export { SYNC_DEFAULTS } from "./types.ts";
-export { compareHLC } from "./hlc.ts";
 export type { HLC } from "./types.ts";
+/** @internal alpha70 sweep — no docs page or example names it; engine wiring,
+ *  stripped from the snapshot. */
+export { SYNC_DEFAULTS } from "./types.ts";
+/** @internal alpha70 sweep — no docs page or example names it; engine wiring,
+ *  stripped from the snapshot. */
+export { compareHLC } from "./hlc.ts";
 
 // ── Engine surface (framework wiring) ────────────────────────────────
 

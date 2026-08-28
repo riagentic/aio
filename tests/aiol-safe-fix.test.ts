@@ -14,7 +14,7 @@
 //     every JSX element in the app at React's runtime.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
-import { lint } from "../aiol/mod.ts";
+import { lintProject } from "../aiol/mod.ts";
 
 const IMPORTS = { "aio": "jsr:@riagentic/aio@1.0.0" };
 
@@ -49,7 +49,7 @@ async function safeFixed(
       await Deno.mkdir(p.replace(/[^/\\]+$/, ""), { recursive: true });
       await Deno.writeTextFile(p, src);
     }
-    const report = await lint(dir);
+    const report = await lintProject(dir);
     const applied: string[] = [];
     for (const issue of report.issues.filter((i) => i.safeFix)) {
       if (await issue.safeFix!(dir)) applied.push(issue.message);
@@ -315,7 +315,7 @@ Deno.test("safe-fix: `aiol .` does not brand the app `my-app`", async () => {
       await Deno.writeTextFile(p, src);
     }
     Deno.chdir(dir);
-    const report = await lint(".");
+    const report = await lintProject(".");
     for (const issue of report.issues.filter((i) => i.safeFix)) {
       await issue.safeFix!(".");
     }
@@ -369,10 +369,10 @@ export const one = cell("one", {
     }
     // Apply every offered fix, twice — a converging tool has nothing left.
     for (let round = 0; round < 2; round++) {
-      const r = await lint(dir);
+      const r = await lintProject(dir);
       for (const i of r.issues.filter((i) => i.safeFix)) await i.safeFix!(dir);
     }
-    const final = await lint(dir);
+    const final = await lintProject(dir);
     const stuck = final.issues.filter((i) =>
       i.safeFix && i.area === "alpha52" && i.message.includes("returning")
     );

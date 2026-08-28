@@ -57,30 +57,31 @@ In prod mode, errors are compact one-liners:
 
 ### Error codes reference
 
-| Code                 | Source      | What happened                                                  |
-| -------------------- | ----------- | -------------------------------------------------------------- |
-| `REDUCE_ERROR`       | Reducer     | Reducer threw or returned invalid shape                        |
-| `EFFECT_ERROR`       | Effect      | Sync effect (executor) threw                                   |
-| `EFFECT_TIMEOUT`     | Effect      | Async effect exceeded timeout (default 30s)                    |
-| `EFFECT_ASYNC_ERROR` | Effect      | Async effect promise rejected                                  |
-| `HOOK_ERROR`         | Hook        | `beforeReduce`, `onAction`, or `onEffect` hook threw           |
-| `INIT_ERROR`         | Lifecycle   | Cell `onInit` callback threw                                   |
-| `DESTROY_ERROR`      | Lifecycle   | Cell `onDestroy` callback threw                                |
-| `MACHINE_BLOCKED`    | Routing     | Action blocked by internal routing guard (warn-level)          |
-| `QUEUE_OVERFLOW`     | Dispatch    | Dispatch queue exceeded 10,000 entries                         |
-| `DISPATCH_LOOP`      | Dispatch    | 1,000 iterations detected -- dispatch recovers after draining  |
-| `DISPATCH_CLOSED`    | Dispatch    | Action dispatched after close() -- dropped, not applied        |
-| `DISPATCH_ABORTED`   | Dispatch    | Drain loop threw outside every guard -- queued actions dropped |
-| `MEMORY_PRESSURE`    | Memory      | Heap above warning threshold (default 75%)                     |
-| `MEMORY_CRITICAL`    | Memory      | Heap above critical threshold (default 90%)                    |
-| `BUDGET_REDUCE`      | Performance | Reducer exceeded time budget (default 100ms)                   |
-| `BUDGET_EFFECT`      | Performance | Effect exceeded time budget (default 5ms)                      |
-| `PERSIST_ERROR`      | Persistence | State persist to SQLite failed -- in memory, lost on exit      |
-| `PERSIST_SCHEMA`     | Persistence | Stored state's persistence-schema version is incompatible      |
-| `TX_CONFLICT`        | Effect      | Transactional method's reads went stale -- commit refused      |
-| `UI_FREEZE`          | Vitals      | UI/main thread stalled past the freeze threshold (warn)        |
-| `TRANSPORT_STALL`    | Vitals      | WS transport made no progress under backpressure (warn)        |
-| `LOOP_SATURATED`     | Vitals      | Event loop saturated -- work queued faster than it drains      |
+| Code                 | Source      | What happened                                                                                |
+| -------------------- | ----------- | -------------------------------------------------------------------------------------------- |
+| `REDUCE_ERROR`       | Reducer     | Reducer threw or returned invalid shape                                                      |
+| `EFFECT_ERROR`       | Effect      | Sync effect (executor) threw                                                                 |
+| `EFFECT_TIMEOUT`     | Effect      | Async effect exceeded timeout (default 30s)                                                  |
+| `EFFECT_ASYNC_ERROR` | Effect      | Async effect promise rejected                                                                |
+| `HOOK_ERROR`         | Hook        | `beforeReduce`, `onAction`, or `onEffect` hook threw                                         |
+| `INIT_ERROR`         | Lifecycle   | Cell `onInit` callback threw                                                                 |
+| `DESTROY_ERROR`      | Lifecycle   | Cell `onDestroy` callback threw                                                              |
+| `MACHINE_BLOCKED`    | Routing     | Action blocked by internal routing guard (warn-level)                                        |
+| `QUEUE_OVERFLOW`     | Dispatch    | Dispatch queue exceeded 10,000 entries                                                       |
+| `DISPATCH_LOOP`      | Dispatch    | 1,000 iterations detected -- dispatch recovers after draining                                |
+| `DISPATCH_CLOSED`    | Dispatch    | Action dispatched after close() -- dropped, not applied                                      |
+| `DISPATCH_DRAINING`  | Dispatch    | Action dispatched while the app is closing -- new input refused; in-flight writes still land |
+| `DISPATCH_ABORTED`   | Dispatch    | Drain loop threw outside every guard -- queued actions dropped                               |
+| `MEMORY_PRESSURE`    | Memory      | Heap above warning threshold (default 75%)                                                   |
+| `MEMORY_CRITICAL`    | Memory      | Heap above critical threshold (default 90%)                                                  |
+| `BUDGET_REDUCE`      | Performance | Reducer exceeded time budget (default 100ms)                                                 |
+| `BUDGET_EFFECT`      | Performance | Effect exceeded time budget (default 5ms)                                                    |
+| `PERSIST_ERROR`      | Persistence | State persist to SQLite failed -- in memory, lost on exit                                    |
+| `PERSIST_SCHEMA`     | Persistence | Stored state's persistence-schema version is incompatible                                    |
+| `TX_CONFLICT`        | Effect      | Transactional method's reads went stale -- commit refused                                    |
+| `UI_FREEZE`          | Vitals      | UI/main thread stalled past the freeze threshold (warn)                                      |
+| `TRANSPORT_STALL`    | Vitals      | WS transport made no progress under backpressure (warn)                                      |
+| `LOOP_SATURATED`     | Vitals      | Event loop saturated -- work queued faster than it drains                                    |
 
 ### Error layer identification
 
@@ -266,7 +267,7 @@ rejections are also captured.
 ```
 
 Forwarding is automatic in dev mode. Rate limited to 100 messages/sec per
-client. Tail client logs: `deno task am log --client` or `--client -f` for live
+client. Tail client logs: `deno task am logs --client` or `--client -f` for live
 stream.
 
 ### Forensics workflow

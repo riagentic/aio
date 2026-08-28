@@ -2,7 +2,8 @@
 // wired as `deno task doctor`. Exercises every check branch against temp
 // deno.json fixtures.
 import { assert, assertEquals } from "@std/assert";
-import { extractAioVersion, runDoctor } from "../src/server/doctor.ts";
+import { runDoctor } from "../src/server/doctor.ts";
+import { extractAioVersion } from "../src/testing/internal.ts";
 import { VERSION } from "../src/server/aio-cli.ts";
 
 async function withConfig<T>(

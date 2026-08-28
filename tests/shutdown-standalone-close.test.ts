@@ -50,8 +50,6 @@ type Doc = { chunks: string[]; status: string };
 Deno.test({
   name:
     "standalone close: an in-flight method is aborted and its last write is in the flush",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     storage.clear();
     const sa = await import("../src/standalone-air.ts");
@@ -129,8 +127,6 @@ Deno.test({
 Deno.test({
   name:
     "standalone close: a method that ignores its abort signal cannot hold the app open",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     storage.clear();
     const sa = await import("../src/standalone-air.ts");

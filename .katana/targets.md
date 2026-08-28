@@ -10,7 +10,8 @@ through) and ONE build pipeline (`build` = every target in deno.json
 `build.targets`; `compile` = the same pipeline narrowed to the default target,
 recorded in deno.json `"client"`). There is no per-target task matrix — a target
 name (`server`, `server-app`, `browser`, `electron`, `android`, `cli`,
-`electron-client`, `android-client`, `cli-client`) is the one spelling, shared
+`electron-client`, `android-client`, `ios-client`, `cli-client`) is the one
+spelling, shared
 by `build.targets`, `--targets=`, and the manifest. The headless role is spelled
 `server` (never `service`); `server-app` is its twin that also serves its own
 page (both emit a systemd unit beside the binary).

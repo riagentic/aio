@@ -4,10 +4,12 @@
 // Prevents multiple instances from corrupting shared resources
 
 import { dirname, join, resolve } from "@std/path";
+import { privateDirRefusal, selfUid } from "./dir-permissions.ts";
 import { connectLocal } from "./local-listen.ts";
 import { appDirs, appHome } from "./app-dirs.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { SHUTDOWN_BUDGET_MS } from "./shutdown-budget.ts";
+import { readDenoJsonSync } from "./deno-json.ts";
 
 /** How long a lock may sit at `status:"starting"` before anyone — the next
  *  launch's zombie probe, `am start` — may treat "its listener does not answer"
@@ -75,10 +77,22 @@ export type SingletonMode = boolean;
 
 // ── App ID Resolution ────────────────────────────────────────
 
-/** Slugify a string for filesystem use */
-export function slugify(s: string): string {
+/** Slugify a string for filesystem use — THE transform.
+ *
+ *  One fact with four copies before this: the appId slug names the lock file,
+ *  the data directory, the UDS socket AND the shared-key cookie, and the same
+ *  expression was written out in `build-helpers` (binary names),
+ *  `electron-shared` (the userData path) and `server.ts` (the cookie). They
+ *  agreed, which is the dangerous state: changing the appId rule in one place
+ *  would leave two apps whose ids differ only in punctuation sharing a cookie
+ *  while holding separate locks — a credential crossing between apps, from an
+ *  edit that looked local.
+ *
+ *  The FALLBACK stays a caller's choice, because it genuinely is one: a lock
+ *  with no id is `aio-app`, a nameless binary is `myapp`, a cookie is `app`. */
+export function slugify(s: string, fallback = "aio-app"): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") ||
-    "aio-app";
+    fallback;
 }
 
 /** The identity fields of a project's `deno.json`, in the ONE order that decides
@@ -157,10 +171,14 @@ export function resolveAppId(appId?: string): string {
   // then the main module's directory name (its parent when the entry sits in
   // src/). Deterministic per project, so locks/KV/socket identity is stable.
   try {
-    const cfg = JSON.parse(
-      Deno.readTextFileSync(join(Deno.cwd(), "deno.json")),
-    ) as { appId?: string; title?: string; name?: string };
-    const fromCfg = appIdFromConfig(cfg);
+    // THE reader — JSONC-aware. `JSON.parse` here threw on a deno.json with a
+    // comment in it, and the catch below inferred the app id from the
+    // directory name instead: a different id, a different data dir, an
+    // app that "lost" its data by adding a comment to its config.
+    const cfg = readDenoJsonSync(Deno.cwd())?.config as
+      | { appId?: string; title?: string; name?: string }
+      | undefined;
+    const fromCfg = cfg ? appIdFromConfig(cfg) : undefined;
     if (fromCfg) return fromCfg;
   } catch { /* no deno.json — fall through */ }
   try {
@@ -201,20 +219,96 @@ export function lockDir(): string {
       .slice(-48)
     : "";
   _lockDirKey = appsRoot;
-  _lockDir = join(base, "aio" + scope);
-  try {
-    Deno.mkdirSync(_lockDir, { recursive: true });
-  } catch { /* already exists */ }
-  try {
-    // 0700, and NOT only for tidiness: the base is `$XDG_RUNTIME_DIR` (already
-    // 0700, so this is a no-op) OR `/tmp` when that is unset — containers,
-    // no-systemd hosts, plain ssh. There the default 0755 left every app's
-    // control socket at a predictable path any local user could traverse to and
-    // connect to, i.e. dispatch methods into someone else's app. The mode has to
-    // assume the /tmp case, because that is the one where it matters.
-    if (Deno.build.os !== "windows") Deno.chmodSync(_lockDir, 0o700);
-  } catch { /* best-effort — not ours to chmod (shared dir, odd FS) */ }
+  _lockDir = _chooseLockDir(base, scope);
   return _lockDir;
+}
+
+/** Create `dir` 0700 and say why it still cannot hold a control socket.
+ *
+ *  The 0700 is NOT tidiness: the base is `$XDG_RUNTIME_DIR` (already 0700, so
+ *  the chmod is a no-op) OR `/tmp` when that is unset — containers,
+ *  no-systemd hosts, plain ssh. There the default 0755 left every app's
+ *  control socket at a predictable path any local user could traverse to and
+ *  connect to, i.e. dispatch methods into someone else's app.
+ *
+ *  It used to stop at the chmod and swallow the failure, which is the half
+ *  that does not hold: chmod on a directory you do not own returns EPERM, so
+ *  a `/tmp/aio` somebody else created — at 0777, or at 0700 as themselves —
+ *  was then used exactly as if the chmod had worked. Create, narrow, and then
+ *  LOOK. */
+export function _prepareLockDir(
+  dir: string,
+  // A seam, because the case that matters cannot be built in a test: chmod
+  // fails with EPERM only on a directory owned by ANOTHER account, and a test
+  // has exactly one uid. Injecting the chmod reproduces it exactly — the same
+  // branch, for the same reason — instead of leaving the wiring unproven and
+  // the pure rule tested in isolation. @internal
+  ops: {
+    chmod?: (path: string, mode: number) => void;
+    stat?: (path: string) => Deno.FileInfo;
+  } = {},
+): string | null {
+  const chmod = ops.chmod ?? Deno.chmodSync;
+  const stat = ops.stat ?? Deno.statSync;
+  try {
+    Deno.mkdirSync(dir, { recursive: true });
+  } catch { /* already exists — the stat below is the real check */ }
+  try {
+    if (Deno.build.os !== "windows") chmod(dir, 0o700);
+  } catch { /* not ours to chmod — precisely what the stat is for */ }
+  if (Deno.build.os === "windows") return null; // no POSIX mode to read
+  let st: Deno.FileInfo;
+  try {
+    st = stat(dir);
+  } catch (e) {
+    return `${dir} cannot be created or read (${
+      e instanceof Error ? e.message : e
+    })`;
+  }
+  if (!st.isDirectory) return `${dir} exists and is not a directory`;
+  return privateDirRefusal(dir, st.mode, st.uid);
+}
+
+/** The lock/socket directory this process may actually use.
+ *
+ *  Shared `<base>/aio` first — one directory per machine keeps `am` able to
+ *  see every app of THIS user. When that one belongs to somebody else, a
+ *  uid-scoped sibling is used instead: it is the same isolation the shared
+ *  directory was supposed to provide, and it also fixes the case that was
+ *  merely broken rather than unsafe — a second user on a host with no
+ *  `$XDG_RUNTIME_DIR` could not bind in the first user's 0700 directory and
+ *  got an unexplained bind failure.
+ *
+ *  If the fallback is unusable too, that is not a configuration this can paper
+ *  over, and a control socket is not something to place hopefully. */
+function _chooseLockDir(base: string, scope: string): string {
+  const preferred = join(base, "aio" + scope);
+  const first = _prepareLockDir(preferred);
+  if (first === null) return preferred;
+  const uid = selfUid();
+  if (uid === null) {
+    throw new Error(
+      `aio: ${first}, and this process cannot read its own uid to pick a ` +
+        `private directory instead. Set XDG_RUNTIME_DIR to a directory you ` +
+        `own, or grant --allow-sys.`,
+    );
+  }
+  const scoped = join(base, `aio-u${uid}${scope}`);
+  const second = _prepareLockDir(scoped);
+  if (second === null) {
+    log.warn(
+      `${first} — using ${scoped} for this app's lock and control socket ` +
+        `instead. Other users' aio apps are not visible to \`am\` from here.`,
+    );
+    return scoped;
+  }
+  throw new Error(
+    `aio: refusing to place a control socket where another local user can ` +
+      `reach it. ${first}; the private fallback failed too: ${second}. ` +
+      `A control socket lets whoever connects dispatch methods into this app. ` +
+      `Fix: remove or chmod 700 the directory named above, or set ` +
+      `XDG_RUNTIME_DIR to a directory you own.`,
+  );
 }
 
 /** Remove the per-`AIO_APPS_DIR` lock dir when it is empty — called at the
@@ -851,7 +945,10 @@ function delay(ms: number): Promise<void> {
 }
 
 const KILL_GRACE_MS = 2000;
-const KILL_POLL_MS = 100;
+/** How often to re-check whether a signalled process has actually exited.
+ *  Exported because `am`'s own kill loop polls the same fact — it had its own
+ *  100 until they were found side by side. */
+export const KILL_POLL_MS = 100;
 const KILL_REAP_MS = 300;
 
 /** Kill a process: SIGTERM first, SIGKILL after grace period */

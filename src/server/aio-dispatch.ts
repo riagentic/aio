@@ -25,7 +25,48 @@ import { runWithUser } from "./auth-context.ts";
 type User = { id: string; role: string };
 
 /** Patch entry — cell name + immer ops from a single reduce call */
-export type PatchEntry = { cell: string; ops: import("immer").Patch[] };
+export type PatchEntry = {
+  cell: string;
+  ops: import("../protocol/patch-ops.ts").WirePatch[];
+};
+
+/** Row-level change information for ONE dispatch batch, in the shape
+ *  persistence consumes (perf audit P8): every cell that was written in the
+ *  batch → its Immer ops, in commit order, UNFILTERED (the client-facing
+ *  `patch` strategy filter is a broadcast concern, not a durability one).
+ *
+ *  What a consumer may rely on:
+ *  - a cell absent from the map was not written in this batch;
+ *  - each op's `path` is relative to the CELL's state: for a `db:` table the
+ *    row is `path[1]` under `path[0] === <table>` (`["users", "u1", "name"]`
+ *    → row `u1` of `users`), so a one-row write no longer needs a whole-table
+ *    clone-and-diff;
+ *  - a `path` of length `< 2` under a table (`["users"]`, `[]`) means the
+ *    table — or the cell — was replaced wholesale: fall back to the full diff
+ *    for that table;
+ *  - the map is a fresh object per batch and is never mutated after `onDone`
+ *    hands it over; a consumer that debounces accumulates across batches
+ *    itself.
+ *
+ *  Passed to `schedulePersist(cellPatches)`. `undefined` there means "no
+ *  patch information for this write" — restore, time-travel and the boot
+ *  persist assign state directly — and MUST be treated as "diff everything". */
+export type CellPatches = ReadonlyMap<
+  string,
+  readonly import("../protocol/patch-ops.ts").WirePatch[]
+>;
+
+/** Group a batch's patch entries per cell, in commit order. Pure. */
+export function groupCellPatches(entries: readonly PatchEntry[]): CellPatches {
+  const out = new Map<string, import("../protocol/patch-ops.ts").WirePatch[]>();
+  for (const { cell, ops } of entries) {
+    if (ops.length === 0) continue;
+    const list = out.get(cell);
+    if (list) list.push(...ops);
+    else out.set(cell, [...ops]);
+  }
+  return out;
+}
 
 /** Everything the dispatch wiring needs from the host runtime */
 // App default must be `any` for function parameter contravariance
@@ -50,7 +91,10 @@ export type DispatchSetupDeps<S, A, E, App = any> = {
   };
   scheduleManager: { handle: (e: ScheduleEffect) => void };
   ownManager: { handle: (e: OwnEffect) => void };
-  schedulePersist: () => void;
+  /** Persist after a batch. Receives the batch's row-level patch information
+   *  ({@link CellPatches}); a consumer that ignores the argument diffs whole
+   *  tables exactly as before. */
+  schedulePersist: (cellPatches?: CellPatches) => void;
   getTT: () => TTState<S, { type: string }> | null;
   setTT: (tt: TTState<S, { type: string }>) => void;
   reportOpts: ReportErrorOpts;
@@ -88,8 +132,11 @@ export type DispatchSetupDeps<S, A, E, App = any> = {
   /** Exact action types omitted from time-travel history (diagnostics
    *  `skipActions`) — framework-internal suffixes are always skipped. */
   ttSkipActions?: Set<string>;
-  /** THIS app's cell names — scopes the drain gate's pending-call count. */
-  cellNames?: Set<string>;
+  /** Accepted and unused since alpha70: the drain gate no longer counts
+   *  pending calls (it reads the `_inflight` flag on the action instead —
+   *  dispatch.ts INFLIGHT), so there is nothing left to scope.
+   *  ASK(alpha70): drop the `cellNames:` line from aio.ts's setupDispatch
+   *  call, then this field. */
 };
 
 // Internal action types to hide from time-travel history (framework noise).
@@ -305,7 +352,10 @@ export function setupDispatch<S, A, E, App = any>(
       _pendingPatches = [];
       if (!processed) return;
       const tt = getTT();
-      if (!tt?.paused) schedulePersist();
+      // Row-level information rides along with the persist request: the
+      // patches already name the rows a batch touched (perf audit P8), so
+      // persistence need not clone-and-diff a whole `db:` table to find them.
+      if (!tt?.paused) schedulePersist(groupCellPatches(patches));
       // NOTHING CHANGED → NOTHING TO SEND. A dispatch that produces no patches
       // (an idempotent reducer: "the device is still absent", "the poll found
       // the same value") used to fall through to the full-state branch, which
@@ -343,7 +393,6 @@ export function setupDispatch<S, A, E, App = any>(
     afterAction: deps.afterAction as
       | ((prev: S, next: S, action: A) => void)
       | undefined,
-    cellNames: deps.cellNames,
     // Read per dispatch, never captured: `record()` returns a NEW TTState
     // object for every action, so a value captured here would be a stale
     // snapshot that never reports a pause.

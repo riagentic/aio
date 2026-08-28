@@ -69,8 +69,6 @@ Deno.test({
   name:
     "e2e: server-initiated change to a directly-read cell reaches a partially-subscribed client",
   ignore: BROWSER === null,
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const dir = await Deno.makeTempDir({ prefix: "aio-directsub-" });
     await Deno.mkdir(`${dir}/src`);

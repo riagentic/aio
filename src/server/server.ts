@@ -1,10 +1,14 @@
 // HTTP + WebSocket server with live TSX transpilation (dev) or static serving (prod)
 // Thin orchestrator — delegates to server-*.ts modules
 import { APP_STYLE, appHasStylesheet, UI_ENTRY } from "./app-files.ts";
+import { declaresOverLimit, readBounded } from "./read-body.ts";
+import { slugify } from "./single-instance-lock.ts";
 import { isPipePath, listenLocal } from "./local-listen.ts";
 import { serveHttpOverLocal } from "./http-over-conn.ts";
 import { enc } from "../protocol/envelope.ts";
-import { join, resolve } from "@std/path";
+import { dirname, join, resolve } from "@std/path";
+import { resolveShare } from "./app-dirs.ts";
+import { readDenoJsonSync } from "./deno-json.ts";
 import { DEFAULT_SYNC_INTERVAL_MS } from "./aio.ts";
 import {
   diagEmit,
@@ -53,10 +57,12 @@ import {
   _timingSafeEqual,
   armLocalControl,
   authFailBudgetExceeded,
+  bearerToken,
   clearSessionCookie,
   hostRefusal,
   localControlAuthorized,
   recordAuthFail,
+  TROJAN_PREFIX,
   trojanDenialForUserMode,
 } from "./server-auth.ts";
 import { handleAuthFlow } from "./auth-flows.ts";
@@ -139,6 +145,36 @@ const _ANON_DENIED_DIAGNOSTICS = [
   "/__aio/error",
 ] as const;
 
+/** Is this peer address the loopback interface, in any spelling the kernel can
+ *  hand us?
+ *
+ *  Every form here is one a REMOTE host cannot present: a packet arriving on a
+ *  real interface with a loopback source is a martian and is dropped, so
+ *  "loopback source" means "same machine" and accepting more spellings of it
+ *  loosens nothing.
+ *
+ *  The spelling that mattered: on a dual-stack listener (`--host=::`) an IPv4
+ *  loopback client arrives as `::ffff:127.0.0.1`, the IPv4-mapped form.
+ *  Matching only `127.0.0.1` refused it, so `am` could not drive an app bound
+ *  to `::` from the machine it was running on — a control plane that is
+ *  same-machine-only, refusing the same machine.
+ *
+ *  All of `127.0.0.0/8` is loopback, not just `.1` (a per-service alias on
+ *  `127.0.0.2` is an ordinary Linux setup). Deliberately NOT merged with
+ *  `_hostIsExposed`'s loopback test: that one answers "is this BIND address
+ *  private", a different question about a value an operator typed, where a
+ *  mapped address cannot occur. */
+export function _isLoopbackAddr(hostname: string): boolean {
+  const h = hostname.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  if (h === "::1" || h === "localhost") return true;
+  // IPv4-mapped IPv6 (`::ffff:127.0.0.1`), and the deprecated `::127.0.0.1`.
+  const mapped = /^::(?:ffff:)?(\d{1,3}(?:\.\d{1,3}){3})$/.exec(h);
+  const v4 = mapped ? mapped[1]! : h;
+  if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(v4)) return false;
+  const parts = v4.split(".").map(Number);
+  return parts.every((n) => n <= 255) && parts[0] === 127;
+}
+
 /** True when a request originates from the SAME MACHINE — loopback TCP or a
  *  Unix socket. The trojan control plane uses this to stay off the network
  *  entirely: it is never reachable remotely, even under `--expose`. Unknown or
@@ -146,11 +182,7 @@ const _ANON_DENIED_DIAGNOSTICS = [
 export function _isLocalRequest(addr: Deno.Addr | undefined): boolean {
   if (!addr) return false;
   if (addr.transport === "unix") return true; // same-machine by construction
-  if ("hostname" in addr) {
-    const h = addr.hostname;
-    return h === "127.0.0.1" || h === "::1" || h === "localhost" ||
-      h === "[::1]";
-  }
+  if ("hostname" in addr) return _isLoopbackAddr(addr.hostname);
   return false;
 }
 
@@ -166,8 +198,10 @@ const UDS_PEER: Deno.Addr = { transport: "unix", path: "" };
  *  single `aio_key` would have them overwriting each other's credential all day
  *  (and each 401-ing on the other's). The appId keeps them apart. */
 export function keyCookieNameFor(appId: string | undefined): string {
-  const slug = (appId ?? "app").toLowerCase().replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "") || "app";
+  // THE transform — the same one that produced the appId this is named for.
+  // A cookie whose slug rule differs from the lock's is how two apps end up
+  // sharing a credential while believing they are separate.
+  const slug = slugify(appId ?? "app", "app");
   return `aio_key_${slug}`;
 }
 
@@ -196,6 +230,15 @@ export function createServer(config: ServerConfig): ServerHandle {
   const { port, title, getUIState, dispatch, debug, prod = false, distDir } =
     config;
   _cookieAppId = config.appId;
+  /** The port the TCP listener ACTUALLY bound. Equal to `config.port` whenever
+   *  one was named; it differs only for `port: 0`, the documented "pick a free
+   *  port" setting, whose resolved value nothing used to learn. Undefined when
+   *  this app binds no TCP port at all (a unix socket / named pipe). */
+  let boundPort: number | undefined;
+  /** What to TELL a client about the port — the bound one, once known. Every
+   *  number that leaves this process (pairing reply, trojan `config`/`profile`)
+   *  goes through here, so a `port: 0` app never advertises port 0. */
+  const livePort = (): number => boundPort ?? port;
   const keyCookieName = keyCookieNameFor(config.appId);
 
   // Diagnostic bus — dev-only event system for surfacing silent failures
@@ -521,6 +564,8 @@ export function createServer(config: ServerConfig): ServerHandle {
     // at build time. Gating it here means a production server cannot be made
     // to read outside its own root by a config key at all.
     serveDirs: prod ? undefined : config.serveDirs,
+    // A declared workspace share (deno.json "share"): dev only, like serveDirs.
+    share: prod ? undefined : _shareRoots(absBaseDir),
     absDistDir,
     hasCSS,
     importMap: IMPORT_MAP,
@@ -567,7 +612,6 @@ export function createServer(config: ServerConfig): ServerHandle {
     watcher = createFileWatcher({
       absBaseDir,
       uiEntry,
-      port,
       importMapObj,
       debug,
       broadcastWs: (msg) => broadcaster.broadcastRaw(msg),
@@ -586,7 +630,7 @@ export function createServer(config: ServerConfig): ServerHandle {
       getUIState,
       debug,
       prod,
-      port,
+      port: livePort(),
       title,
       appId: config.appId,
       token: config.token,
@@ -700,7 +744,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     // in server-static: the trojan answers only when the request is BOTH local
     // AND the build is dev.
     if (
-      pathname.startsWith("/__aio/trojan/") && !_isLocalRequest(addr)
+      pathname.startsWith(TROJAN_PREFIX) && !_isLocalRequest(addr)
     ) {
       return new Response("Not Found", { status: 404 });
     }
@@ -714,7 +758,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     // one refactor away from a hole. The credential authorizes this prefix and
     // nothing else.
     if (
-      pathname.startsWith("/__aio/trojan/") && localControlAuthorized(req)
+      pathname.startsWith(TROJAN_PREFIX) && localControlAuthorized(req)
     ) {
       const resp = await staticHandler.serveStatic(pathname, req);
       resp.headers.set("X-Content-Type-Options", "nosniff");
@@ -742,9 +786,17 @@ export function createServer(config: ServerConfig): ServerHandle {
       // credential (that is the point of it), and a `{ pin }` payload is a few
       // dozen bytes. An unbounded `req.json()` here was an anonymous memory
       // pump on every exposed app.
-      const declared = Number(req.headers.get("content-length") ?? NaN);
-      if (!Number.isFinite(declared) || declared > 4096) {
-        req.body?.cancel().catch(() => {});
+      //
+      // The cap is on bytes RECEIVED, not on the length the client declared —
+      // a declared length is a number the sender chose. That also means a body
+      // arriving with no Content-Length at all (chunked) is now read and
+      // bounded rather than refused outright, which is what the guard should
+      // always have done: the header's absence was never the risk.
+      const PAIR_MAX_BODY = 4096;
+      const tooBig = declaresOverLimit(req, PAIR_MAX_BODY);
+      if (tooBig) req.body?.cancel().catch(() => {});
+      const raw = tooBig ? null : await readBounded(req, PAIR_MAX_BODY);
+      if (raw === null) {
         return new Response(
           JSON.stringify({
             error: "pairing body must be a small { pin } JSON",
@@ -753,7 +805,7 @@ export function createServer(config: ServerConfig): ServerHandle {
         );
       }
       try {
-        const body = await req.json() as { pin?: unknown };
+        const body = JSON.parse(raw) as { pin?: unknown };
         if (!verifyPin(body?.pin, clientKey)) {
           return new Response(
             JSON.stringify({
@@ -781,7 +833,7 @@ export function createServer(config: ServerConfig): ServerHandle {
             aio: 1,
             name: config.appId ?? title,
             title,
-            port,
+            port: livePort(),
             tls: !!config.cert,
             cert: config.cert ?? null,
             key: config.token,
@@ -965,8 +1017,7 @@ export function createServer(config: ServerConfig): ServerHandle {
       // holder of the correct key is served even while someone else on the
       // same bucket is being throttled. Only a wrong key meets the budget.
       const qToken = url.searchParams.get("token");
-      const auth = req.headers.get("authorization");
-      const hToken = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
+      const hToken = bearerToken(req);
       // …and the cookie this mode sets on the shell load. Without it, shared-key
       // mode could not serve a BROWSER at all: the page loads with `?token=`,
       // then requests `/App.tsx` and `/bundle.js` with no query and no header —
@@ -1130,7 +1181,15 @@ export function createServer(config: ServerConfig): ServerHandle {
       httpServer = Deno.serve({
         port,
         hostname,
-        onListen: () => {},
+        // `port: 0` is the documented "pick a free port" setting, and the
+        // resolved number was thrown away here — so the boot banner printed
+        // `http://localhost:0`, the lock recorded 0, and `am` answered
+        // "Requests to port 0 are blocked" for a perfectly healthy app. The
+        // trojan listener ten lines below has always captured its address the
+        // same way; this one discarded it.
+        onListen: (addr) => {
+          boundPort = addr.port;
+        },
         ...tlsOpts,
       }, handleRequest);
     } catch (e) {
@@ -1174,8 +1233,11 @@ export function createServer(config: ServerConfig): ServerHandle {
         if (config.token) {
           const url = new URL(req.url);
           const qToken = url.searchParams.get("token");
-          const auth = req.headers.get("authorization");
-          const hToken = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
+          // THE reader — "same rules as main server" has to mean the same
+          // code, or this listener quietly grows its own. It did: this spelled
+          // the Bearer rule for itself, so a client sending `bearer <token>`
+          // was accepted by the app and refused by its control plane.
+          const hToken = bearerToken(req);
           const validQ = qToken !== null &&
             _timingSafeEqual(qToken, config.token);
           const validH = hToken !== null &&
@@ -1267,6 +1329,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     broadcastTT: () => broadcaster.broadcastTT(),
     clientCount: () => wsMgr.connections.size,
     trojanPort,
+    boundPort,
     socketPath: udsPath,
     watcherActive: watcher?.active,
     // The control plane over a non-TCP wire. Not a second implementation —
@@ -1296,4 +1359,16 @@ export function createServer(config: ServerConfig): ServerHandle {
       disposeClientLog();
     },
   };
+}
+
+/** The share roots deno.json declares for the app whose UI lives under
+ *  `absBaseDir` — resolved by THE decider (`resolveShare`), which throws on a
+ *  path outside the repo, a missing dir or a basename collision. */
+function _shareRoots(absBaseDir: string) {
+  const dj = readDenoJsonSync(absBaseDir) ??
+    readDenoJsonSync(resolve(absBaseDir, ".."));
+  if (!dj) return undefined;
+  const raw = (dj.config as { share?: unknown }).share;
+  if (raw === undefined) return undefined;
+  return resolveShare(dirname(dj.path), raw);
 }

@@ -20,7 +20,7 @@
 //   - schedule effects and cross-cell dispatches are forwarded to main, where
 //     the scheduler and the other cells live
 
-import type { Patch } from "immer";
+import type { WirePatch as Patch } from "../protocol/patch-ops.ts";
 import { nameIsTaken } from "../state/cell-helpers.ts";
 import { composeCells } from "../state/cell-compose.ts";
 import { getRegisteredCells } from "../state/cell-reactive.ts";
@@ -179,7 +179,12 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
     pending = [];
   };
 
-  const dispatch = createDispatch<Record<string, unknown>, Msg, Msg>({
+  // Named, not inline, because `init` fills in what this isolate cannot know
+  // yet. `createDispatch` reads `freezeState` off this object at commit time
+  // for exactly that reason — see the comment at its use site.
+  const dispatchDeps: Parameters<
+    typeof createDispatch<Record<string, unknown>, Msg, Msg>
+  >[0] = {
     reduce: (s, action) => {
       const r = composed.reduce(s, action);
       // ComposedCells types `reduce` without the patch side-channel (the main
@@ -237,7 +242,13 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
     },
     debug: false,
     perfCheck: "off", // the main isolate measures; don't double-report
-  });
+    // Filled in by `init`. Until then the safe answer is the strict one: a
+    // worker must never be MORE permissive than the isolate that spawned it.
+    freezeState: true,
+  };
+  const dispatch = createDispatch<Record<string, unknown>, Msg, Msg>(
+    dispatchDeps,
+  );
 
   composed.initAll({
     dispatch: (a: Msg) => void dispatch(a),
@@ -253,6 +264,12 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
       // permissive than the one that spawned it — the exact asymmetry
       // `testServer({ workers: "real" })` exists to close.
       if (msg.dev) (globalThis as Record<string, unknown>).__aioDev = true;
+      // Deep-freeze on the OWNER's decision. This dispatch was built before
+      // this message could arrive, so a value captured at construction was
+      // permanently the default — a worker cell's committed state was frozen
+      // only by Immer's `autoFreeze`, never deep-frozen, which is a narrower
+      // tripwire inside a worker than outside it in dev AND prod.
+      dispatchDeps.freezeState = msg.freezeState;
       // The authoritative slice — persistence and migrations already ran on the
       // main isolate, so this is the state of record, not our defaults.
       state = { [name]: { ...msg.state } };

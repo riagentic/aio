@@ -23,6 +23,7 @@ behind it in the first place.
 | `contacts/` | End-to-end CRUD — cell state ↔ `db:` table, validation, selectors         |
 | `disk/`     | Folder-size scanner — the filesystem, subprocesses, and long-running work |
 | `updates/`  | Shipping to users — an update banner, a blocked release, problem reports  |
+| `cli-tool/` | A rich CLI on `aio/cli` — one binary is the server and its commands       |
 
 `contacts/` is the one to read first: it is the whole integration in ~120 lines
 — one array in cell state, one `db:` table of the same name kept in step with
@@ -51,6 +52,14 @@ shown with the reason and deliberately no button), download progress, and a
 transport, no polling, no version comparison, no dialog framework. See
 [updates](../docs/deploy/updates.md) and
 [problem reports](../docs/debugging/feedback.md).
+
+`cli-tool/` is the one to read when the product is a command line. One entry,
+two roles: `todo serve` runs the aio server that owns the list (headless,
+persisted), and `todo add|done|list [--watch|--json]` connect to it. Flags with
+generated `--help` and refused typos, a table, a live `--watch` view that
+degrades to plain lines on a pipe, `--json` for scripts, and exit codes a shell
+can trust — all from [`aio/cli`](../docs/clients/cli-toolkit.md). Tested from
+source and as a compiled `cli` binary in `tests/cli-toolkit-build.test.ts`.
 
 ## Target build smoke fixtures
 

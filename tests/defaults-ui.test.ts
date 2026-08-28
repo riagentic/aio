@@ -53,7 +53,7 @@ Deno.test(
   () => {
     const counterWithUi = cell("counter", {
       state: { count: 0, label: "" },
-      ui: { include: ["count"] },
+      visible: { include: ["count"] },
       methods: {
         increment(s, by = 1) {
           s.count += by;
@@ -77,7 +77,7 @@ Deno.test(
 Deno.test("1.2 C: ui: 'none' on a cell — absent from UI state, strategy 'skip'", () => {
   const hiddenCounter = cell("counter", {
     state: { count: 0, label: "" },
-    ui: "none",
+    visible: "none",
     methods: {
       increment(s, by = 1) {
         s.count += by;
@@ -98,7 +98,7 @@ Deno.test("1.2 C: ui: 'none' on a cell — absent from UI state, strategy 'skip'
 Deno.test(
   "1.2 D: cellDefaults.ui = 'none' + one cell ui = 'all' — only that cell visible",
   () => {
-    const wiring = wiringOf([counter, flags], { ui: "none" });
+    const wiring = wiringOf([counter, flags], { visible: "none" });
     // No explicit cell ui → cellDefaults "none" applies, both hidden
     assertEquals(wiring.autoGetUIState!(sampleState), {});
     assertEquals(wiring.cellPatchStrategies.get("counter"), "skip");
@@ -111,14 +111,14 @@ Deno.test(
   () => {
     const visibleCounter = cell("counter", {
       state: { count: 0, label: "" },
-      ui: "all",
+      visible: "all",
       methods: {
         increment(s, by = 1) {
           s.count += by;
         },
       },
     });
-    const wiring = wiringOf([visibleCounter, flags], { ui: "none" });
+    const wiring = wiringOf([visibleCounter, flags], { visible: "none" });
     const ui = wiring.autoGetUIState!(sampleState) as Record<
       string,
       Record<string, unknown>
@@ -161,7 +161,7 @@ Deno.test("forUser: a per-user filter is never bypassed by the patch strategy", 
     const c = cell("counter", {
       state: { count: 0, label: "" },
       // deno-lint-ignore no-explicit-any
-      ui: ui as any,
+      visible: ui as any,
       methods: {
         increment(s, by = 1) {
           s.count += by;
@@ -181,7 +181,7 @@ Deno.test("forUser: ui 'none' still wins — an invisible cell stays invisible",
   const hidden = cell("counter", {
     state: { count: 0, label: "" },
     // deno-lint-ignore no-explicit-any
-    ui: "none" as any,
+    visible: "none" as any,
     methods: {
       increment(s, by = 1) {
         s.count += by;
@@ -237,7 +237,7 @@ function cellWith(id: string, ui: unknown, sync?: boolean) {
   return cell(id, {
     state: { count: 0, label: "" },
     // deno-lint-ignore no-explicit-any
-    ...(ui !== undefined ? { ui: ui as any } : {}),
+    ...(ui !== undefined ? { visible: ui as any } : {}),
     ...(sync ? { sync: true } : {}),
     methods: {
       increment(s: { count: number }, by = 1) {

@@ -107,7 +107,7 @@ export function gitMutationRefusal(
   return `refusing to git-update ${st.root}: ${why}\n` +
     `  \`git checkout --force <tag>\` here would DELETE that work. ` +
     `(This is the bug that wiped aio's own tree twice.)\n` +
-    `  fix: commit or stash it, then re-run — or \`am update --force\` to ` +
+    `  fix: commit or stash it, then re-run — or \`am upgrade --force\` to ` +
     `move this checkout anyway (your changes are gone).`;
 }
 
@@ -140,7 +140,7 @@ export async function cmdUpdate(
       } catch {
         outError(
           `${checkout} is not an aio checkout (${probe} missing) — ` +
-            `point at a framework clone, e.g. am update ~/code/aio`,
+            `point at a framework clone, e.g. am upgrade ~/code/aio`,
           mode,
         );
         Deno.exit(1);
@@ -153,7 +153,7 @@ export async function cmdUpdate(
     }
     console.error(
       `⚠ global am now runs from ${checkout} — a DEV am on live files ` +
-        `(your edits apply immediately). Plain "am update" returns to the ` +
+        `(your edits apply immediately). Plain "am upgrade" returns to the ` +
         `released am.`,
     );
     out(
@@ -367,21 +367,27 @@ export const ${symbol} = cell("${name}", {
   }
 }
 
-/** Deprecated alias — `am new` became `am add` (alpha52). Kept working
- *  through beta, with a loud line naming the new spelling. */
-export function cmdNew(
-  args: string[],
-  flags: GlobalFlags,
-): Promise<void> {
-  console.error(
-    "am: warning: `am new` is now `am add` — the old name still works",
-  );
-  return cmdAdd(args, flags);
+/** Show help text. Accepts command keys to list available commands. */
+/** The block of the help text that documents ONE command: the entries whose
+ *  first word is `cmd` (two-space indent), each with its continuation lines
+ *  (indented further). Pure; null when the text has no such entry.
+ *  `am log --help` used to print all 170 lines — every `--help` routed to the
+ *  full text, whatever came before it. */
+export function helpBlock(text: string, cmd: string): string | null {
+  const lines = text.split("\n");
+  const picked: string[] = [];
+  let inBlock = false;
+  for (const line of lines) {
+    const entry = /^ {2}(\S+)/.exec(line);
+    if (entry) inBlock = entry[1] === cmd;
+    else if (!/^ {3,}\S/.test(line)) inBlock = false; // heading / blank
+    if (inBlock) picked.push(line);
+  }
+  return picked.length > 0 ? picked.join("\n") : null;
 }
 
-/** Show help text. Accepts command keys to list available commands. */
 export function cmdHelp(
-  _args: string[],
+  args: string[],
   flags: GlobalFlags,
   commandKeys: string[],
 ): void {
@@ -389,13 +395,31 @@ export function cmdHelp(
     out({ commands: commandKeys }, "json");
     return;
   }
-  console.log(`am ${VERSION} — aio manager
+  const cmd = args.find((a) => !a.startsWith("-"));
+  if (cmd) {
+    const block = helpBlock(HELP_TEXT, cmd);
+    if (block) {
+      console.log(`am ${cmd} — usage:\n\n${block}`);
+      return;
+    }
+    // A mapped command with no entry of its own (`help`) or an unknown word:
+    // say so, then the whole text — never a silent fall-through.
+    console.error(
+      commandKeys.includes(cmd)
+        ? `am: "${cmd}" has no help entry of its own — see the full list:`
+        : `am: unknown command "${cmd}" — the full list:`,
+    );
+  }
+  console.log(`am ${VERSION} — aio manager\n\n${HELP_TEXT}`);
+}
 
-Onboard:
+export const HELP_TEXT = `Onboard:
   create <name> [--template=counter|todo]  Scaffold a new aio app (runnable + buildable)
-  upgrade                 Update am itself to the latest release
-                          ("am upgrade <app>" upgrades an installed APP —
-                          one verb, the object says which)
+  upgrade [<app>|<dir>]   Update am itself to the latest release. One verb,
+                          the object says which: "am upgrade <app>" upgrades
+                          an installed APP; "am upgrade <checkout-dir>"
+                          switches the GLOBAL am to that checkout's am (a dev
+                          am on live files — your edits apply at once)
   uninstall               Remove am (your aio apps are untouched)
 
 Release:
@@ -454,7 +478,7 @@ State:
 Time-travel:
   timeline [--from=J]     Recent dispatches + payload + state diff (--lines=N)
   replay [N..M] [--dry]   Re-dispatch a journal range for repro (--from=J)
-  timetravel undo|redo    Step back/forward (short spelling: am tt)
+  timetravel undo|redo    Step back/forward
   timetravel goto <N>     Jump to index
   timetravel pause|resume Freeze/unfreeze state
 
@@ -508,7 +532,9 @@ Inspect:
   sql <query>             Execute read-only SQL
   sql --tables            List SQLite tables
   schedules               Active scheduled effects
-  log [filter]            Tail app log (--client for client.log) (--filter --lines --follow)
+  logs [filter]           Tail app log (--client for client.log) (--filter --lines --follow)
+                          A filter is a substring, e.g. "am logs error"
+                          keeps error events
   errors                  What went wrong: the build error (if any) first,
                           then the tail of error.log (--lines=N)
   metrics                 Uptime, connections, schedules
@@ -518,6 +544,7 @@ Inspect:
   cost --window=5m        …over a different window (default 60s)
   top [secs]              Live runtime view (per-cell state sizes); --json = one shot
   health                  HTTP health check
+  doctor                  running instances vs dep/aio on disk (fix: am restart)
   open [--print]          Open THIS app in a browser (--print writes the URL)
   discover [--timeout=ms] Find exposed aio apps on the LAN (UDP broadcast)
   profile [--out=file]    Export this app's .aioapp profile (cert + key) for the client
@@ -574,5 +601,4 @@ Flags: --app=X  --port=N  --entry=<path>  --wait[=N]  --no-wait  --json  --quiet
 --entry: override entry point (default: deno.json "entry" > src/app.ts)
 --wait: start/stop block until complete (default 10s/5s) — start does this by
         default; --no-wait returns the moment the child is spawned.
-        state polls every Ns.`);
-}
+        state polls every Ns.`;

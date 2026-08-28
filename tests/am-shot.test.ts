@@ -106,8 +106,6 @@ Deno.test("shotOutPath: --out wins, else <appId>-<stamp>.png", () => {
 Deno.test({
   name:
     "am shot: fake CDP → PNG written (bytes>0), --json {file,bytes,url}; no cdpPort → refusal names --cdp",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: async () => {
     const appsDir = await Deno.makeTempDir({ prefix: "am-shot-" });
     const env = { AIO_APPS_DIR: appsDir };

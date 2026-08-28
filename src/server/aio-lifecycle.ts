@@ -18,10 +18,18 @@ import { instances, isProcessAlive } from "./single-instance-lock.ts";
 import { shutdownAllRuntimes } from "./shutdown.ts";
 import { generatePin } from "./pairing.ts";
 import { appKeyPath } from "./app-key.ts";
-import type { Log } from "../diagnostics/logger-api.ts";
+import { type Log, log as globalLog } from "../diagnostics/logger-api.ts";
 import type { DB } from "../db/mod.ts";
 import type { ScheduleDef } from "../state/schedule.ts";
 import { appIconPngBase64 } from "../build/app-icon.ts";
+import { artifactPath, relaunch } from "./updates-apply.ts";
+import { isCompiled } from "./paths.ts";
+import {
+  isSupervisedChild,
+  relaunchArgs,
+  RESTART_EXIT_CODE,
+  restartBlockedReason,
+} from "./dev-restart.ts";
 
 /** One SIGHUP guard per process — see the headless branch in startLifecycle. */
 let _sighupGuarded = false;
@@ -187,6 +195,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     setElectronProc,
     log,
   } = deps;
+  noteLifecycle({ libraryMode: !!libraryMode });
 
   // Set __aio global variables
   (globalThis as Record<string, unknown>).__aioStartedAt = Date.now();
@@ -632,7 +641,13 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
           })
           .catch((e) => log.error(`electron status: ${e}`));
       })
-      .catch((e) => log.error(`electron: ${e}`));
+      .catch((e) =>
+        log.error(
+          `electron: the desktop window could not be started — ${e}. The ` +
+            `server is still running at ${url}; open it in a browser, or run ` +
+            `with --client=browser. \`am fix\` installs a missing Electron.`,
+        )
+      );
   } else {
     // A browser client is a URL, printed. It is NOT a tab opened for you.
     //
@@ -660,4 +675,290 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
       }, 1500);
     }
   }
+}
+
+// ── aio.stop() / aio.restart() ─────────────────────────────────────────────
+//
+// A handle-free spelling of "end this process cleanly" and "come back", safe to
+// call from inside a dispatch: both defer by one macrotask so the method that
+// asked can return before the shutdown contract drains the cells (a shutdown
+// awaited from inside a method waits on its own caller — see `deferHandOver`
+// in updates-runtime.ts, which learned this the hard way).
+//
+// "Restart yourself" is a promise per LAUNCHER, not a function:
+//
+//   deno task dev (supervised child) → exit 75, the supervisor relaunches
+//   a service (systemd, AIO_SUPERVISED) → exit 0, `Restart=always` relaunches
+//   a compiled binary / AppImage / local Electron → re-exec the artifact with
+//                                       the same args (the window follows the
+//                                       process: AIO_PARENT_PID)
+//   `deno run -A app.ts`, unsupervised → re-exec `deno run …` with the real
+//                                       argv when it can be read back
+//   running from source without -A, or libraryMode → REFUSED, with the reason
+//                                       and the manual step. Never a no-op.
+//
+// The plan is a pure function of facts (`restartPlan`), so every row of that
+// matrix is a unit test, and the two heavy rows (a compiled binary, the dev
+// supervisor) are proven end to end in tests/build-e2e.test.ts and
+// tests/lifecycle-restart.test.ts.
+
+/** The exit code `aio.stop()` uses under a SERVICE manager. Distinct from 0 on
+ *  purpose: the generated unit carries `Restart=always` so an update's clean
+ *  exit brings the new build up — which would bring a STOPPED app up too. The
+ *  unit lists this code in `RestartPreventExitStatus=` (build-compile.ts), and
+ *  a unit that does not is told so in the log before the exit. 143 is the
+ *  conventional "asked to terminate" status (128 + SIGTERM). */
+export const STOP_EXIT_CODE = 143;
+
+type LifecycleFacts = { libraryMode: boolean };
+let _lifecycle: LifecycleFacts | null = null;
+
+/** Recorded by every `startLifecycle`: the process is "ours" (may exit) as soon
+ *  as ONE non-library app has started in it. */
+function noteLifecycle(f: LifecycleFacts): void {
+  _lifecycle = _lifecycle
+    ? { libraryMode: _lifecycle.libraryMode && f.libraryMode }
+    : f;
+}
+
+/** Test seam: forget that any app started. */
+// aio-ok: test seam — tests/lifecycle-restart.test.ts resets the process facts between cases
+export function _resetLifecycleFacts(): void {
+  _lifecycle = null;
+}
+
+/** True under a service manager — THE decider, shared with the update
+ *  handover (which exits rather than spawning a successor for the same
+ *  reason). `INVOCATION_ID` is set by systemd, `SUPERVISOR_PROCESS_NAME` by
+ *  supervisord; `AIO_SUPERVISED=1` is the explicit spelling the generated unit
+ *  carries for any other supervisor. */
+export function isServiceSupervised(
+  env: (name: string) => string | undefined = envGet,
+): boolean {
+  return !!env("INVOCATION_ID") || !!env("SUPERVISOR_PROCESS_NAME") ||
+    env("AIO_SUPERVISED") === "1";
+}
+
+function envGet(name: string): string | undefined {
+  try {
+    return Deno.env.get(name);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Everything the restart decision depends on, gathered once. */
+export type ProcessFacts = {
+  /** An app has started its lifecycle in this process. */
+  running: boolean;
+  /** EVERY app in the process is libraryMode — a test or host owns it. */
+  libraryMode: boolean;
+  /** `deno task dev`: the child of the dev supervisor (AIO_DEV_SUPERVISED). */
+  devSupervised: boolean;
+  /** systemd / supervisord / AIO_SUPERVISED=1. */
+  serviceSupervised: boolean;
+  /** A compiled binary, AppImage or Electron install — and where it is. */
+  compiled: boolean;
+  artifact: string;
+  /** Running from source: why `deno run` cannot be replayed (null = it can),
+   *  and the argv that replays it. */
+  sourceBlocked: string | null;
+  sourceArgs: string[];
+  args: string[];
+};
+
+export async function processFacts(): Promise<ProcessFacts> {
+  const compiled = isCompiled();
+  return {
+    running: _lifecycle !== null,
+    libraryMode: _lifecycle?.libraryMode ?? false,
+    devSupervised: isSupervisedChild(),
+    serviceSupervised: isServiceSupervised(),
+    compiled,
+    artifact: compiled ? artifactPath() : Deno.execPath(),
+    sourceBlocked: compiled ? null : await restartBlockedReason(),
+    sourceArgs: compiled ? [] : await relaunchArgs(),
+    args: Deno.args,
+  };
+}
+
+export type RestartPlan =
+  | { kind: "exit"; code: number; why: string }
+  | { kind: "reexec"; artifact: string; args: string[]; why: string }
+  | { kind: "refused"; reason: string; manual: string };
+
+/** THE restart matrix, as a pure function. Every row is a unit test. */
+export function restartPlan(f: ProcessFacts): RestartPlan {
+  if (!f.running) {
+    return {
+      kind: "refused",
+      reason: "no app is running in this process (aio.run() has not started)",
+      manual: "start the app first",
+    };
+  }
+  if (f.libraryMode) { // the host owns the process — never exit it
+    return {
+      kind: "refused",
+      reason: "libraryMode — a test or host process owns this lifecycle",
+      manual: "await app.close() and call aio.run() again",
+    };
+  }
+  if (f.devSupervised) {
+    return {
+      kind: "exit",
+      code: RESTART_EXIT_CODE,
+      why: "under the dev supervisor (deno task dev) — it relaunches the app",
+    };
+  }
+  if (f.serviceSupervised) {
+    return {
+      kind: "exit",
+      code: 0,
+      why: "under a service manager — the unit's Restart=always brings it back",
+    };
+  }
+  if (f.compiled) {
+    return {
+      kind: "reexec",
+      artifact: f.artifact,
+      args: f.args,
+      why: `compiled — re-executing ${f.artifact} with the same arguments`,
+    };
+  }
+  if (f.sourceBlocked !== null) {
+    return {
+      kind: "refused",
+      reason:
+        `running from source and cannot re-exec itself (${f.sourceBlocked})`,
+      manual: "stop it and run `deno task dev` again (a dev session " +
+        "supervises itself), build a binary (which re-execs), or run it as a " +
+        "service with Restart=always",
+    };
+  }
+  return {
+    kind: "reexec",
+    artifact: f.artifact,
+    args: f.sourceArgs,
+    why: `running from source — re-executing \`deno ${
+      f.sourceArgs.join(" ")
+    }\``,
+  };
+}
+
+/** The code `aio.stop()` exits with. Under the dev supervisor a clean 0 ends
+ *  the session (any other code within its 15 s window reads as a failed
+ *  relaunch); under a service manager it must NOT be a code the unit
+ *  restarts. */
+export function stopExitCode(
+  f: Pick<ProcessFacts, "serviceSupervised" | "devSupervised">,
+): number {
+  return f.serviceSupervised && !f.devSupervised ? STOP_EXIT_CODE : 0;
+}
+
+/** Injected by tests so a plan can be asserted without ending the runner. */
+export type LifecycleHooks = {
+  exit?: (code: number) => void;
+  relaunch?: typeof relaunch;
+  facts?: () => Promise<ProcessFacts>;
+  log?: Pick<Log, "info" | "warn" | "error">;
+};
+
+let _ending: Promise<void> | null = null;
+
+/** Deferred by a macrotask, run once: the shutdown contract for EVERY app in
+ *  the process, then `act`, then exit. A second call while one is in flight
+ *  joins it — two restarts are one restart. */
+function endProcess(
+  act: () => void,
+  code: number,
+  hooks: LifecycleHooks,
+): Promise<void> {
+  if (_ending) return _ending;
+  const exit = hooks.exit ?? Deno.exit;
+  const log = hooks.log ?? globalLog;
+  _ending = new Promise<void>((resolve) => {
+    setTimeout(() => {
+      void (async () => {
+        try {
+          await shutdownAllRuntimes();
+          act();
+        } catch (e) {
+          log.error(
+            `aio.restart(): handover FAILED after shutdown (${e}) — the app ` +
+              `is stopped; start it by hand`,
+          );
+        } finally {
+          _ending = null;
+          exit(code);
+          resolve();
+        }
+      })();
+    }, 0);
+  });
+  return _ending;
+}
+
+/** Stop the app cleanly: every app in this process runs its full shutdown
+ *  contract (finish writing, final snapshot), then the process exits.
+ *
+ *  Resolves once the exit has been SCHEDULED — from a cell method this is the
+ *  right thing to await, the method returns and the shutdown sees a quiet
+ *  cell. In libraryMode nothing exits: the apps are closed and the host keeps
+ *  its process (a test runner calling `aio.stop()` must not end `deno test`). */
+export async function requestStop(hooks: LifecycleHooks = {}): Promise<void> {
+  const f = await (hooks.facts ?? processFacts)();
+  const log = hooks.log ?? globalLog;
+  if (!f.running) {
+    throw new Error(
+      "aio.stop(): no app is running in this process (aio.run() has not started)",
+    );
+  }
+  if (f.libraryMode) {
+    log.info(
+      "lifecycle",
+      "aio.stop(): libraryMode — closing apps, keeping the process",
+    );
+    await shutdownAllRuntimes();
+    return;
+  }
+  const code = stopExitCode(f);
+  if (code === STOP_EXIT_CODE) {
+    log.warn(
+      "lifecycle",
+      `aio.stop(): under a service manager — exiting with ${code}. The unit ` +
+        `must list it in RestartPreventExitStatus=${code} (the generated ` +
+        `unit does), or Restart=always starts the app again.`,
+    );
+  } else {
+    log.info("lifecycle", "aio.stop(): shutting down");
+  }
+  void endProcess(() => {}, code, hooks);
+}
+
+/** Restart the app: the plan for THIS launcher (see the matrix above), or a
+ *  refusal that names the reason and the manual step. Resolves with the plan
+ *  once the restart has been scheduled; throws when it is refused. */
+export async function requestRestart(
+  hooks: LifecycleHooks = {},
+): Promise<RestartPlan> {
+  const f = await (hooks.facts ?? processFacts)();
+  const plan = restartPlan(f);
+  const log = hooks.log ?? globalLog;
+  if (plan.kind === "refused") {
+    throw new Error(
+      `aio.restart() refused: ${plan.reason}. To restart: ${plan.manual}.`,
+    );
+  }
+  log.info("lifecycle", `aio.restart(): ${plan.why}`);
+  if (plan.kind === "exit") {
+    void endProcess(() => {}, plan.code, hooks);
+  } else {
+    const { artifact, args } = plan;
+    void endProcess(
+      () => (hooks.relaunch ?? relaunch)({ artifact, args }),
+      0,
+      hooks,
+    );
+  }
+  return plan;
 }

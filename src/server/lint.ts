@@ -1,6 +1,7 @@
 // Startup linter — validates config and src/ before running
 // Extracted from aio.ts. Checks state, config, App.tsx, imports, dependencies.
 import { UI_ENTRY } from "./app-files.ts";
+import { SERVER_ONLY_SPECS } from "./server-only-specs.ts";
 import { ESBUILD_SPEC } from "../build/esbuild-shared.ts";
 
 import { join } from "@std/path";
@@ -9,13 +10,6 @@ import {
   readAppDenoImports,
 } from "./server-html-importmap.ts";
 import { log } from "../diagnostics/logger-api.ts";
-
-/** The framework's own SERVER entries — absent from the browser import map ON
- *  PURPOSE (SQLite, workers, the filesystem). A generic "add the npm package"
- *  hint sends the user after a package that does not exist, so this category
- *  of mistake gets the real explanation. THE list also lives in
- *  graph-validator.ts's SERVER_ONLY_SPECS. */
-const AIO_SERVER_SPECS = new Set(["aio/server"]);
 
 /** Does a path exist? (`Deno.stat` without the throw.) @internal */
 async function exists(path: string): Promise<boolean> {
@@ -31,7 +25,7 @@ async function exists(path: string): Promise<boolean> {
  *  import map cannot resolve. Named so the two call sites (side-effect
  *  imports and named imports) cannot drift apart. @internal */
 export function browserImportWarning(file: string, spec: string): string {
-  if (AIO_SERVER_SPECS.has(spec)) {
+  if (SERVER_ONLY_SPECS.has(spec)) {
     return `${file}: "${spec}" is aio's SERVER entry (SQLite, workers, the ` +
       `filesystem) imported from a browser file — the browser import map ` +
       `omits it deliberately, so the page dies at boot with "Failed to ` +
@@ -70,6 +64,13 @@ export async function lint(
   // failed its OWN boot lint — the framework's second decider for a fact the
   // server already knows.
   uiEntry = UI_ENTRY,
+  // WHY this app is headless, so the line can name it. `isHeadless` is
+  // `client === "server-only" || client === "cli"` — two reasons — and the
+  // message below hardcoded the first, so an app launched with `--client=cli`
+  // was told `--client=server-only`, one line above the boot report printing
+  // `cli: --client=cli`. A flag the user did not pass, named back at them.
+  // Optional and trailing: `checkCells` is public surface.
+  headlessClient?: string,
 ): Promise<Lint> {
   const r: Lint = { ok: [], warn: [], hint: [], fail: [] };
 
@@ -116,11 +117,16 @@ export async function lint(
   // Say what is TRUE, not what is usually true: `--client=server-only` on an
   // app that HAS an App.tsx printed "✓ headless (no App.tsx)" next to the file
   // sitting right there, which reads as "your component was not found".
+  //
+  // The same rule applies to the REASON. It was written as
+  // `--client=server-only` whatever the client actually was, so a `cli` app
+  // read its own boot report being told about a flag it had not passed.
   if (headless) {
     const hasUi = await exists(join(baseDir, uiEntry));
+    const why = headlessClient ? ` — --client=${headlessClient}` : "";
     r.ok.push(
       hasUi
-        ? `headless (${uiEntry} present, not served — --client=server-only)`
+        ? `headless (${uiEntry} present, not served${why})`
         : `headless (no ${uiEntry})`,
     );
   } else if (prod) {
@@ -298,8 +304,9 @@ export async function lint(
         await Deno.stat(join(Deno.cwd(), "node_modules", "electron"));
         r.hint.push(
           "electron installed but its binary is missing (postinstall skipped) — " +
-            "run `deno task install:electron`, " +
-            "or `deno task dev:electron`/`compile:electron` (they auto-install)",
+            "run `deno task install:electron`, or " +
+            "`deno task dev --client=electron` / " +
+            "`deno task build --targets=electron` (they auto-install)",
         );
       } catch {
         // aio-ok: this stat only distinguishes "installed but no binary" from

@@ -8,10 +8,10 @@ gets recorded, and the blessed patterns for handling secrets.**
 
 ## The two channels a value can escape through
 
-| Channel              | What flows                                                                  | Reaches                                                  |
-| -------------------- | --------------------------------------------------------------------------- | -------------------------------------------------------- |
-| **Sync (`visible`)** | Each cell's state slice, filtered by `visible: { include/exclude/forUser }` | **Every connected client**                               |
-| **Action log**       | Every method call's **arguments** + the resulting state patches             | Time-travel, dev tools, `am tt`, and any `onAction` hook |
+| Channel              | What flows                                                                  | Reaches                                                          |
+| -------------------- | --------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| **Sync (`visible`)** | Each cell's state slice, filtered by `visible: { include/exclude/forUser }` | **Every connected client**                                       |
+| **Action log**       | Every method call's **arguments** + the resulting state patches             | Time-travel, dev tools, `am timetravel`, and any `onAction` hook |
 
 A field is safe only when it's out of **both**. They're independent:
 

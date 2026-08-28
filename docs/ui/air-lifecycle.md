@@ -295,16 +295,23 @@ component rejection. Event handler errors are **not** caught (same as React).
 
 ## Redux DevTools Integration
 
-Connect to the Redux DevTools browser extension for state inspection.
+Connect to the Redux DevTools browser extension for state inspection. Two
+bridges, named for what they drive — both from `aio/air`:
+
+- `connectReduxDevTools()` / `disconnectReduxDevTools()` — the **Redux
+  DevTools** browser extension: every state change, paired with the action that
+  caused it. A no-op when the extension is absent.
+- `connectAioDevTools()` — **aio's own** component-tree devtools (the AIR
+  inspector), unrelated to Redux.
 
 ```tsx
-import { connectDevTools, useAio } from "aio/air";
+import { connectReduxDevTools, useAio } from "aio/air";
 
 export default function App() {
   const { state, send } = useAio<AppState>();
 
   onMount(() => {
-    if (import.meta.env.DEV) connectDevTools();
+    if (import.meta.env.DEV) connectReduxDevTools();
   });
   // ...
 }

@@ -166,8 +166,6 @@ Deno.test({
   name: "browser-air: ensureConnected is idempotent",
   // Sanitizers disabled: ensureConnected() creates a WebSocket stub internally
   // that cannot be fully torn down without a real browser environment
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn() {
     stubLocation();
     try {

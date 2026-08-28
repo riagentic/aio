@@ -14,7 +14,7 @@ function _initDevTools(): void {
   if (_devtoolsConnected) return;
   // The page's `window` when there is one, `globalThis` otherwise — in a
   // browser they are the same object. This read used to be a BARE `window`,
-  // outside the try below, so calling connectDevTools() where no `window`
+  // outside the try below, so calling connectReduxDevTools() where no `window`
   // binding exists (Deno, a CLI/service target sharing this module) threw a
   // ReferenceError out of a function whose whole contract is "no-op when the
   // extension is absent".
@@ -66,7 +66,7 @@ export function _sendDevTools(
  * Connect state changes to the Redux DevTools browser extension (state tree,
  * action history, diffs). No-op when the extension is not installed.
  */
-export function connectDevTools(): void {
+export function connectReduxDevTools(): void {
   _initDevTools();
   if (_devtools && _coreHasState()) {
     try {
@@ -76,7 +76,7 @@ export function connectDevTools(): void {
 }
 
 /** Disconnect from the Redux DevTools extension. */
-export function disconnectDevTools(): void {
+export function disconnectReduxDevTools(): void {
   if (_devtools) {
     try {
       _devtools.disconnect();

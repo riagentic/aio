@@ -40,7 +40,16 @@ import {
  *
  *  The pre-alpha38 path is still read so `am log` works against an app that is
  *  still running from before the move. Returns the CURRENT path when neither
- *  exists, so the error names where a running app would have put it. */
+ *  exists, so the error names where a running app would have put it.
+ *
+ *  `app.log` is read when there is no `stdout.log`, and that is the common
+ *  case, not a corner: `stdout.log` is a capture `am start` makes, while an app
+ *  run the ordinary way (`deno task dev`) prints to its terminal and never
+ *  produces one. The framework logger writes `app.log` for EVERY app however
+ *  it was launched — so `am log`, whose help promises "tail app log", used to
+ *  answer "no log file at …/stdout.log" for a running, logging app while
+ *  `app.log` sat unread in the directory it had just named. Same shape as the
+ *  `--client` bug above: a path no one had written, reported as an absence. */
 export function logPathFor(flags: GlobalFlags): string {
   // BOTH spellings mean "the client's log": the index (`-i 2`, `--client`) and
   // the runtime kind (`--client=browser`, which is forwarded to the app as a
@@ -48,12 +57,14 @@ export function logPathFor(flags: GlobalFlags): string {
   // first tailed stdout.log for the second — the flag accepted, its documented
   // purpose silently ignored.
   const client = flags.client !== undefined || flags.clientKind !== undefined;
-  const current = join(
-    appDirs(resolveAmAppId(flags.app)).logs,
-    client ? "client.log" : "stdout.log",
-  );
+  const logs = appDirs(resolveAmAppId(flags.app)).logs;
+  const current = join(logs, client ? "client.log" : "stdout.log");
   const legacy = client ? join(".aio", "log", "client.log") : ".aio.log";
-  for (const p of [current, legacy]) {
+  // stdout.log first when it exists — it is the richer capture (raw stdout AND
+  // stderr, so anything the app printed itself is in it). app.log is the
+  // framework logger's own file and is always there.
+  const framework = client ? [] : [join(logs, "app.log")];
+  for (const p of [current, ...framework, legacy]) {
     try {
       Deno.statSync(p);
       return p;
@@ -167,7 +178,9 @@ export async function cmdClient(
 ): Promise<void> {
   const mode = detectMode(flags);
   const appId = resolveAmAppId(flags.app);
-  const port = resolvePort(flags.port, appId);
+  const port = resolvePort(flags.port, appId, {
+    explicit: flags.app !== undefined,
+  });
   const idx = args[0];
   if (idx === undefined) {
     outError(
@@ -196,7 +209,9 @@ export async function cmdSql(
 ): Promise<void> {
   const mode = detectMode(flags);
   const appId = resolveAmAppId(flags.app);
-  const port = resolvePort(flags.port, appId);
+  const port = resolvePort(flags.port, appId, {
+    explicit: flags.app !== undefined,
+  });
   const query = args.includes("--tables") || flags.tables
     ? "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
     : args.filter((a) => !a.startsWith("--")).join(" ");
@@ -218,7 +233,9 @@ export async function cmdTables(
 ): Promise<void> {
   const mode = detectMode(flags);
   const appId = resolveAmAppId(flags.app);
-  const port = resolvePort(flags.port, appId);
+  const port = resolvePort(flags.port, appId, {
+    explicit: flags.app !== undefined,
+  });
   const result = await trojanPost(port, "sql", {
     query: "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
   }, appId);
@@ -274,6 +291,30 @@ export function groupLogEvents(lines: readonly string[]): string[][] {
   return events;
 }
 
+/** Flags `am log` / `am logs` accept — the refusal names them. */
+export const LOG_FLAGS = [
+  "--client",
+  "--filter=X",
+  "--lines=N",
+  "--follow/-f",
+  "--json",
+] as const;
+
+/** Pure: the refusal for an unrecognised `--flag` among `am log`'s
+ *  positionals, or null. (`--client` is consumed by parseGlobalFlags as the
+ *  bare client index AND read by logPathFor — it never reaches args.) */
+export function logFlagError(args: readonly string[]): string | null {
+  // `--client=<kind>` is the runtime spelling parseGlobalFlags forwards on
+  // purpose (logPathFor reads it as "the client's log").
+  const stray = args.filter((a) =>
+    a.startsWith("-") && a !== "-" && !a.startsWith("--client=")
+  );
+  if (stray.length === 0) return null;
+  return `am logs: unknown flag ${stray.join(", ")} — accepted: ${
+    LOG_FLAGS.join(" ")
+  }. A level is a filter word: \`am logs error\`.`;
+}
+
 export async function cmdLog(
   args: string[],
   flags: GlobalFlags,
@@ -288,6 +329,14 @@ export async function cmdLog(
   // flag now only picks the file.
   const LOG_FILE = logPathFor(flags);
 
+  // An unknown `--flag` reaches here as a POSITIONAL (parseGlobalFlags keeps
+  // what it does not know), so `am logs --level=error` was silently the text
+  // filter "--level=error" — zero matches, read as "no errors".
+  const stray = logFlagError(args);
+  if (stray) {
+    outError(stray, mode);
+    Deno.exit(1);
+  }
   const filter = args[0] ?? flags.filter;
   const n = flags.lines ?? 50;
   const follow = flags.follow ?? false;
@@ -387,11 +436,26 @@ export async function cmdErrors(
 ): Promise<void> {
   const mode = detectMode(flags);
   const appId = resolveAmAppId(flags.app);
-  const port = resolvePort(flags.port, appId);
+  const port = resolvePort(flags.port, appId, {
+    explicit: flags.app !== undefined,
+  });
   const result = await httpGet(port, "/__aio/error", appId);
   if (!result.ok) {
-    outError(result.error, mode);
-    Deno.exit(1);
+    // `/__aio/error` is dev-only (server-static.ts gates it on `!prod`), and a
+    // production app therefore answers a bare "404 Not Found" — a status with
+    // no cause, for a command that had just been told it would work. The
+    // trojan commands get this explanation from `prodDiagnosis`; this one does
+    // not go through the trojan, so it says it here.
+    fail(
+      /404|not found/i.test(result.error)
+        ? `${result.error}\n\nThe recorded-errors endpoint (/__aio/error) is ` +
+          `DEV-ONLY: a production build never mounts it. A compiled app's ` +
+          `errors are in its log — read them with \`am logs error\` (or ` +
+          `\`am logs --follow\`). To use \`am errors\`, run the app in dev ` +
+          `(deno task dev) and point am at it.`
+        : result.error,
+      mode,
+    );
   }
   const text = (result.data as string).trim();
   // Server returns JSON { errors: [...] } or null/empty when no errors
@@ -455,7 +519,9 @@ export async function cmdMetrics(
 ): Promise<void> {
   const mode = detectMode(flags);
   const appId = resolveAmAppId(flags.app);
-  const port = resolvePort(flags.port, appId);
+  const port = resolvePort(flags.port, appId, {
+    explicit: flags.app !== undefined,
+  });
   const result = await trojanGet(port, "metrics", appId);
   if (!result.ok) {
     outError(result.error, mode);
@@ -522,7 +588,9 @@ export async function cmdTop(
 ): Promise<void> {
   const mode = detectMode(flags);
   const appId = resolveAmAppId(flags.app);
-  const port = resolvePort(flags.port, appId);
+  const port = resolvePort(flags.port, appId, {
+    explicit: flags.app !== undefined,
+  });
   const fetchOnce = async (): Promise<TopMetrics | null> => {
     const r = await trojanGet(port, "metrics", appId);
     return r.ok ? (r.data as TopMetrics) : null;
@@ -575,7 +643,9 @@ export async function cmdHealth(
 ): Promise<void> {
   const mode = detectMode(flags);
   const appId = resolveAmAppId(flags.app);
-  const port = resolvePort(flags.port, appId);
+  const port = resolvePort(flags.port, appId, {
+    explicit: flags.app !== undefined,
+  });
   const ctrlPort = resolveControlPort(port, appId);
   try {
     const resp = await fetch(`http://127.0.0.1:${ctrlPort}/`, {
@@ -818,7 +888,9 @@ export async function cmdSurface(
 ): Promise<void> {
   const mode = detectMode(flags);
   const appId = resolveAmAppId(flags.app);
-  const port = resolvePort(flags.port, appId);
+  const port = resolvePort(flags.port, appId, {
+    explicit: flags.app !== undefined,
+  });
   // `am surface server` renders headlessly ON the server (no client needed).
   const explicit = args.find((a) => !a.startsWith("--")) ?? flags.client;
   // "server", a client index, or nothing. Anything else is a typo, and
@@ -1002,7 +1074,9 @@ export async function cmdTrigger(
 ): Promise<void> {
   const mode = detectMode(flags);
   const appId = resolveAmAppId(flags.app);
-  const port = resolvePort(flags.port, appId);
+  const port = resolvePort(flags.port, appId, {
+    explicit: flags.app !== undefined,
+  });
   // ── the index is OPTIONAL, and it is not the first thing anyone types ──
   //
   // `am surface` needs no index (it drives the newest UI client); `am trigger`
@@ -1153,7 +1227,9 @@ export async function cmdOpen(
 ): Promise<void> {
   const mode = detectMode(flags);
   const appId = resolveAmAppId(flags.app);
-  const port = resolvePort(flags.port, appId);
+  const port = resolvePort(flags.port, appId, {
+    explicit: flags.app !== undefined,
+  });
   const url = `http://localhost:${port}`;
 
   // Refuse to open a URL that answers nothing: a browser tab showing

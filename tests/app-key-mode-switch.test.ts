@@ -51,8 +51,6 @@ async function boot(
 
 Deno.test({
   name: "app.key: per-user auth clears a stale shared key",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const appId = `keyswitch-${crypto.randomUUID().slice(0, 8)}`;
     const baseDir = await Deno.makeTempDir();
@@ -82,8 +80,6 @@ Deno.test({
 
 Deno.test({
   name: "app.key: an unexposed boot KEEPS the key (one key, use forever)",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const appId = `keykeep-${crypto.randomUUID().slice(0, 8)}`;
     const baseDir = await Deno.makeTempDir();

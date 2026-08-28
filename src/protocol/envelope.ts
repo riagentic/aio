@@ -231,7 +231,11 @@ export const SERVES: Record<
   am: new Set<Kind>(["ctlr"]),
 };
 
-/** One decoded wire frame. `d` is kind-specific (see payload types below). */
+/** One decoded wire frame. `d` is kind-specific (see payload types below).
+ *  `v: 2` is the ENVELOPE shape (one JSON object per frame) and is not the
+ *  negotiated contract version — that is `PROTOCOL_VERSION` in
+ *  protocol-version.ts (v3 since the `append` patch op), announced in the
+ *  "proto" hello. The shape has not changed since v2; the vocabulary has. */
 export type Frame = { v: 2; t: Kind; d?: unknown };
 
 /** Encode a frame for the wire (WS message body / one NDJSON line). */

@@ -37,7 +37,7 @@
 
 ## UI — AIR renderer — components, signals, routing, forms
 
-- [Rendering & UI](ui/README.md) — AIO uses AIR — a built-in signal-based renderer (~8KB, zero dependencies).
+- [Rendering & UI](ui/README.md) — AIO uses AIR — a built-in signal-based renderer (~20 KB gzipped, zero
 - [AIR Advanced Patterns](ui/air-advanced.md) — SSR, portals, islands, code splitting, virtual scrolling, dimensions, deferred
 - [AIR Animation](ui/air-animation.md) — CSS-first declarative transitions for enter/exit animations, imperative spring
 - [AIR vs React vs Best-in-Class — Full Comparison](ui/air-comparison.md) — Reference frameworks: React 19, Solid.js 1.9 (signal pioneer), Svelte
@@ -94,6 +94,7 @@
 - [App Manager](clients/app-manager.md) — Manage your aio app without ps, kill, or curl.
 - [Binary side channels](clients/binary-streams.md) — A sustained binary stream — screen frames, audio, telemetry, remote input — does
 - [Browser](clients/browser.md) — WebSocket client API, connection lifecycle, and UI state management for browser
+- [CLI toolkit (`aio/cli`)](clients/cli-toolkit.md) — A compact toolkit for command-line apps — typed flags with generated --help,
 - [Desktop apps that drive a CLI](clients/desktop-jobs.md) — The shape: a window, a Browse… button, a long-running external process, a
 - [Electron](clients/electron.md) — Desktop app packaging, thin client, and window management.
 - [Transports — what listens, where](clients/transports.md) — One matrix answering "which sockets does this app open?" per mode and target.
@@ -186,6 +187,7 @@
 - [Upgrading from alpha66 to alpha67](upgrade/from-alpha66-to-alpha67.md) — Nothing in your app code changes.
 - [Upgrading from alpha67 to alpha68](upgrade/from-alpha67-to-alpha68.md) — Nothing in your app code changes.
 - [Upgrading from alpha68 to alpha69](upgrade/from-alpha68-to-alpha69.md) — Nothing in your app code changes.
+- [Upgrading from alpha69 to alpha70](upgrade/from-alpha69-to-alpha70.md) — duplicate import path that had been "deprecated through beta" is retired, one
 - [Upgrade from v1.0.0-alpha7 to v1.0.0-alpha8](upgrade/from-alpha7-to-alpha8.md) — None.
 - [Upgrade from v1.0.0-alpha8 to v1.0.0-alpha9](upgrade/from-alpha8-to-alpha9.md) — The internal machine state field is renamed.
 - [Upgrade from v1.0.0-alpha9 to v1.0.0-alpha10](upgrade/from-alpha9-to-alpha10.md) — Alpha10 is fully additive.

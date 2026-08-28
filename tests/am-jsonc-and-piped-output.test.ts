@@ -97,7 +97,6 @@ Deno.test("am add cell: piped stdout gets the JSON document, not a stringified s
 // in-process test cannot tell you what a pipe does.
 Deno.test({
   name: "am create: a PIPED stdout is a JSON document, not a quoted sentence",
-  sanitizeResources: false,
   fn: async () => {
     const dir = await Deno.makeTempDir({ prefix: "am-create-pipe-" });
     try {

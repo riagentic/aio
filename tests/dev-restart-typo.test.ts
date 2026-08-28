@@ -68,8 +68,6 @@ Deno.test({
   name:
     "dev-restart e2e: a typo in the cell file keeps the dev session up; fixing it relaunches",
   ignore: Deno.build.os === "windows",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     assert(FAILED_RESTART_WINDOW_MS >= 5_000, "window must cover a slow boot");
     const dir = await Deno.makeTempDir({ prefix: "aio-dev-restart-typo-" });

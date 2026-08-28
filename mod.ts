@@ -41,7 +41,7 @@
  * await checkout.place('widget')
  * ```
  */
-/** Framework core — `aio.run()` starts the app (see aio/extras for `lint`, `parseCli`) */
+/** Framework core — `aio.run()` starts the app (see aio/extras for `checkCells`, `parseCli`) */
 export { aio, VERSION } from "./src/server/aio.ts";
 import type { AioApp } from "./src/server/aio.ts";
 /** The running app instance returned by `aio.run()` — provides state access, dispatch, db, and lifecycle */
@@ -79,9 +79,9 @@ export type { Degraded } from "./src/diagnostics/degraded.ts";
 export type { AioMeta } from "./src/electron/electron.ts";
 // slugify — internal (used by build.ts, not app code)
 
-/** Bind a cell to an app instance; test a cell in isolation with testCell. */
+/** Bind a cell to an app instance. (`testCell` lives on `aio/testing` — the
+ *  ONE home of every harness since alpha70; see src/state/removals.ts.) */
 export { bindCell } from "./src/state/cell.ts";
-export { testCell } from "./src/cell-test.ts";
 /** True inside a `worker: true` cell's worker (the app entry is re-imported
  *  there) — guard boot-time work in the entry with it. */
 export { isCellWorker } from "./src/server/cell-worker-protocol.ts";
@@ -99,14 +99,11 @@ export type {
   CircuitBreakerConfig,
   ComposedCells,
   DirectCalling,
-  ExtractState,
   MethodsCellConfig,
   Msg,
   ScopedApp,
-  SendOf,
   StateOf,
 } from "./src/state/cell.ts";
-export type { TestContext } from "./src/cell-test.ts";
 
 /**
  * Inter-cell coordination — async methods return Promises with the correct type.
@@ -148,6 +145,8 @@ export type { MethodDraftServed } from "./src/state/cell-impl.ts";
  * @param opts - Optional { token?: string } for auth
  */
 // `connectCli` moved to `aio/server` (alpha37) — see the note on createDB below.
+// aio/cli (src/cli.ts) is its own entry: it touches Deno.stdin/stdout, so it
+// must never reach the browser bundle via mod.ts.
 /** CLI client connection type — state, send, subscribe, close, ready */
 export type { CliApp } from "./src/server/cli-client.ts";
 
@@ -161,7 +160,6 @@ export type { CliApp } from "./src/server/cli-client.ts";
  *  a *.server.ts module with serverFns(ns, fns); resolve them anywhere with
  *  serverFn<typeof def>(ns) (browser gets a typed WS proxy). */
 export { serverFn, serverFns } from "./src/server/server-fns.ts";
-export type { ServerFnAccess } from "./src/server/server-fns.ts";
 /** Ergonomic HTTP routes: `:id` params, a method guard, cookies, and a JSON
  *  helper on top of the `routes: {}` config. `route((ctx) => ctx.json(...))`. */
 export { route } from "./src/server/route.ts";
@@ -171,9 +169,9 @@ export type {
   RouteOptions,
 } from "./src/server/route.ts";
 /** ONE network-access vocabulary (alpha52) for cells (`access:`) and
- *  serverFns (`{ access }`): true / role-string / predicate. `CellAccess`
- *  and `ServerFnAccess` are its deprecated aliases (through beta). */
-export type { Access, CellAccess } from "./src/state/cell-types.ts";
+ *  serverFns (`{ access }`): true / role-string / predicate. (Its aliases
+ *  `CellAccess`/`ServerFnAccess` went out in alpha70 — src/state/removals.ts.) */
+export type { Access } from "./src/state/cell-types.ts";
 export type { SessionInfo, SessionStore } from "./src/server/sessions.ts";
 export type { AuthUserRecord, UserStore } from "./src/server/auth-users.ts";
 /** The `features` object `/__aio/auth/me` returns — the shape a test's
@@ -214,7 +212,7 @@ export { schedule } from "./src/state/schedule.ts";
 export type { ScheduleDef, ScheduleEffect } from "./src/state/schedule.ts";
 /** Run a self-contained function OFF the main isolate (named, cancellable,
  *  backpressured worker pool) — the honest top-level home of
- *  `schedule.blocking` (alpha52; both spellings work). */
+ *  `schedule.blocking` (alpha52; the dotted spelling went out in alpha70). */
 export { blocking } from "./src/state/blocking.ts";
 /** Self-referencing action descriptor — `self("tick")` resolves to THIS cell's
  *  `tick` action when the effect it rides is captured (alpha52). Kills the

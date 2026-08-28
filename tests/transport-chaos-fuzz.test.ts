@@ -43,8 +43,6 @@ type Call = { cid: string; t: Tracked };
 
 Deno.test({
   name: "chaos: one intent, one outcome — under drop / kill / reconnect",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     let seed = SEED;
     const rnd = () =>

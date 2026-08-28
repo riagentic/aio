@@ -17,7 +17,7 @@ import { assert, assertEquals, assertRejects } from "@std/assert";
 import { cell } from "../src/state/cell-create.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { log } from "../src/diagnostics/logger-api.ts";
-import { createDB } from "../src/db/mod.ts";
+import { createDB } from "../src/server-entry.ts";
 import { appDirs } from "../src/server/app-dirs.ts";
 import { _resetParsedCli } from "../src/server/aio-cli.ts";
 import { getSyncReplayContext } from "../src/server/aio-boot.ts";
@@ -240,8 +240,6 @@ const navV3 = () =>
 Deno.test({
   name:
     "sync shape migration e2e: v1 ops → v2 onMigrate (prod) → v3 hookless (dev refuses / prod quarantines) → v1 downgrade",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const dir = await Deno.makeTempDir({ prefix: "aio-sync-mig-e2e-" });
     const prevApps = Deno.env.get("AIO_APPS_DIR");

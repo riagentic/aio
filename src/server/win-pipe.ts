@@ -324,8 +324,23 @@ class PipeConn implements LocalConn {
 
   constructor(h: Handle, readonly path: string, readonly server: boolean) {
     this.#h = h;
-    this.#rev = createEvent(path);
-    this.#wev = createEvent(path);
+    // Two allocations in a row, and this object has just taken ownership of
+    // `h`. If the SECOND one throws, the first event and the pipe handle are
+    // orphaned — and `CreateEventW` fails for exactly one reason worth
+    // planning for, which is that handles are already exhausted. Leaking two
+    // more on the way out is how that becomes permanent. `close()` is careful
+    // about handle ownership for the same reason; the constructor was not.
+    const rev = createEvent(path);
+    let wev: { h: Handle; ovl: Uint8Array };
+    try {
+      wev = createEvent(path);
+    } catch (e) {
+      closeHandle(rev.h);
+      closeHandle(h);
+      throw e;
+    }
+    this.#rev = rev;
+    this.#wev = wev;
     this.remoteAddr = { transport: "unix", path };
     this.readable = new ReadableStream<Uint8Array>({
       pull: async (ctrl) => {

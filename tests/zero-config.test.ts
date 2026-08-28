@@ -32,8 +32,6 @@ async function waitFor<T>(fn: () => Promise<T | null>): Promise<T> {
 
 Deno.test({
   name: "zero-config: import cell + aio.run() boots a full app",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const dir = await Deno.makeTempDir({ prefix: "aio-zero-" });
     await Deno.mkdir(`${dir}/src`);

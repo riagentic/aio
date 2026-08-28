@@ -21,7 +21,7 @@
 //
 // See docs/specs/2026-07-26-data-dir-and-updates.md.
 
-import { join, resolve } from "@std/path";
+import { basename, join, resolve } from "@std/path";
 import { homedir } from "./paths.ts";
 
 /** Two ways to answer "where does this app live", and one rule each:
@@ -395,4 +395,138 @@ export function writeAppMeta(
     const meta: AppMeta = { ...info, createdAt, updatedAt: now };
     Deno.writeTextFileSync(dirs.meta, JSON.stringify(meta, null, 2) + "\n");
   } catch { /* best-effort by design */ }
+}
+
+// ── The workspace share ──────────────────────────────────────────────────────
+//
+// Two apps in one repository want one `shared/` — pure modules, a type
+// package, a stylesheet. Browser-reachable imports may not leave the app root
+// (it is an HTTP root, and a symlink out of it is refused — correctly), so a
+// field app generated `client/src/shared/` by copy and policed it with a test.
+//
+// `"share": ["../shared"]` in deno.json is the sanctioned spelling. ONE fact,
+// read by both worlds: the DEV server serves each share at `/<basename>/…`
+// and the BUNDLER resolves the same `/<basename>/…` import to the directory,
+// so a single import spelling works everywhere. The declaration is validated
+// ONCE, here, and refused loudly: a share that does not exist, or that leaves
+// the repository, is a config error, not a 404 at the first import.
+//
+// What it is NOT: a way to serve arbitrary directories. Never the control
+// plane (the trojan and `/__aio/*` never touch a static root), never a
+// symlink escape (every containment guard baseDir has applies to a share
+// unchanged), never outside the repository root.
+
+export type ShareRoot = {
+  /** The URL prefix both worlds use — `/<basename of dir>`. */
+  prefix: string;
+  /** The absolute, real directory. */
+  dir: string;
+  /** As written in deno.json, for messages. */
+  declared: string;
+};
+
+/** The repository root `root` belongs to: the nearest ancestor holding
+ *  `.git`, else `root` itself (a project that is not a checkout has no wider
+ *  boundary than its own directory). */
+export function repoRootOf(
+  root: string,
+  exists: (p: string) => boolean = existsSyncSafe,
+): string {
+  let dir = resolve(root);
+  for (let i = 0; i < 64; i++) {
+    if (exists(join(dir, ".git"))) return dir;
+    const up = resolve(dir, "..");
+    if (up === dir) break;
+    dir = up;
+  }
+  return resolve(root);
+}
+
+function existsSyncSafe(p: string): boolean {
+  try {
+    Deno.lstatSync(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Resolve and validate deno.json `share`. Pure given its probes; throws an
+ *  Error whose message names the entry, the resolved path and the fix.
+ *
+ *  `root` is the directory of the deno.json the entries are written in. */
+export function resolveShare(
+  root: string,
+  raw: unknown,
+  probe: {
+    isDirectory?: (p: string) => boolean;
+    realPath?: (p: string) => string;
+    repoRoot?: string;
+  } = {},
+): ShareRoot[] {
+  if (raw === undefined || raw === null) return [];
+  if (
+    !Array.isArray(raw) || raw.some((e) => typeof e !== "string" || !e.trim())
+  ) {
+    throw new Error(
+      `deno.json "share" must be an array of directory paths, relative to ` +
+        `deno.json — e.g. "share": ["../shared"] (got ${JSON.stringify(raw)})`,
+    );
+  }
+  const isDirectory = probe.isDirectory ?? ((p: string) => {
+    try {
+      return Deno.statSync(p).isDirectory;
+    } catch {
+      return false;
+    }
+  });
+  const realPath = probe.realPath ?? ((p: string) => Deno.realPathSync(p));
+  const repo = realPath(probe.repoRoot ?? repoRootOf(root));
+  const repoPfx = repo.endsWith("/") ? repo : repo + "/";
+  const out: ShareRoot[] = [];
+  for (const declared of raw as string[]) {
+    const abs = resolve(root, declared);
+    if (!isDirectory(abs)) {
+      throw new Error(
+        `deno.json "share": "${declared}" is not a directory (resolved to ` +
+          `${abs}). A share is a directory the app imports from as ` +
+          `"/${basename(abs)}/…"; fix the path, or remove the entry.`,
+      );
+    }
+    const real = realPath(abs);
+    if (real !== repo && !real.startsWith(repoPfx)) {
+      throw new Error(
+        `deno.json "share": "${declared}" resolves to ${real}, OUTSIDE the ` +
+          `repository root ${repo}. A share may only point inside the ` +
+          `repository (through a symlink or not); move the directory in, or ` +
+          `vendor it.`,
+      );
+    }
+    const prefix = "/" + basename(abs);
+    const dup = out.find((s) => s.prefix === prefix);
+    if (dup) {
+      throw new Error(
+        `deno.json "share": "${declared}" and "${dup.declared}" would both ` +
+          `be served as "${prefix}/…" — a share is addressed by its ` +
+          `directory name, so two shares need two names.`,
+      );
+    }
+    out.push({ prefix, dir: real, declared });
+  }
+  return out;
+}
+
+/** Which share, if any, an import or URL path belongs to, and the path
+ *  inside it. Pure. `/shared/x.ts` → `{ share, rel: "x.ts" }`. */
+export function matchShare(
+  shares: readonly ShareRoot[],
+  path: string,
+): { share: ShareRoot; rel: string } | null {
+  for (const share of shares) {
+    if (path === share.prefix) return { share, rel: "" };
+    if (path.startsWith(share.prefix + "/")) {
+      return { share, rel: path.slice(share.prefix.length + 1) };
+    }
+  }
+  return null;
 }

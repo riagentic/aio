@@ -272,6 +272,20 @@ export async function cmdInstalled(
  *  remember the repo URL and re-run the one-liner by hand. The install record
  *  knows the source, so this re-runs exactly that — same script, same install
  *  path, same pruning — and reports the version it moved between. */
+/** Is this `am upgrade` argument a framework checkout DIRECTORY rather than
+ *  an installed app's name? A path (has a separator, or starts with `.`/`~`)
+ *  or an existing directory holding `mod.ts` — an app name is neither. */
+export function isCheckoutArg(arg: string): boolean {
+  if (/[\/\\]/.test(arg) || arg.startsWith(".") || arg.startsWith("~")) {
+    return true;
+  }
+  try {
+    return Deno.statSync(`${arg}/mod.ts`).isFile;
+  } catch {
+    return false;
+  }
+}
+
 export async function cmdUpgrade(
   args: string[],
   flags: GlobalFlags,
@@ -280,13 +294,15 @@ export async function cmdUpgrade(
   const name = args[0] ?? flags.app;
   // ONE verb for "make it newer", and the OBJECT says what:
   //
-  //   am upgrade          am itself
-  //   am upgrade <app>    that installed app
+  //   am upgrade              am itself
+  //   am upgrade <app>        that installed app
+  //   am upgrade <checkout>   the GLOBAL am → that checkout's (dev) am
   //
   // It used to be two words — `update` for am, `upgrade` for an app — which is
   // a distinction no one can guess from the words, only from having been told.
-  // `am update` still works and says this.
+  // `am update` is gone (alpha70); the CLI names this verb when it is typed.
   if (!name) return await cmdUpdate([], flags);
+  if (isCheckoutArg(name)) return await cmdUpdate([name], flags);
   // Same reason as `am remove`: this name reaches installedAppPaths/appDirs
   // and, through run.sh, an install path.
   const upNameErr = appNameError(name, "am upgrade");

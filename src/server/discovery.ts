@@ -6,8 +6,18 @@
  * consumer) broadcasts one probe and collects every app on the subnet.
  *
  * Wire protocol (deliberately trivial, versioned):
- *   probe: "AIO_DISCOVER? v1"   (broadcast → AIO_DISCOVERY_PORT)
+ *   probe: "AIO_DISCOVER? v1"            (broadcast → AIO_DISCOVERY_PORT)
+ *          "AIO_DISCOVER? v1 <nonce>"    (optional — see `probeNonce`)
  *   reply: "AIO1 " + JSON.stringify(AioAppAd)   (unicast → prober)
+ *          — carrying `nonce` when the probe had one.
+ *
+ * THE NONCE is an optional query field, not a handshake. A production sweep
+ * sends none and accepts every responder on the segment (that IS discovery).
+ * A sweep that sends one keeps only the answers echoing it — which is how a
+ * test measures ITS responder on a LAN where the developer's own apps, another
+ * checkout, or another machine also answer. A responder that predates the
+ * field ignores it and is simply filtered by a nonce sweep; a prober that
+ * predates it never sends one, so nothing on the wire changed for either.
  *
  * Uses `node:dgram` (stable in Deno — no `--unstable-net` needed), the same
  * UDP API the Electron client already speaks. Best-effort: on a bind/network
@@ -27,6 +37,33 @@ export const AIO_DISCOVERY_PORT = (() => {
 
 const PROBE = "AIO_DISCOVER? v1";
 const REPLY_PREFIX = "AIO1 ";
+
+/** A nonce is a short token of URL-safe characters — anything else in the
+ *  probe's third word is not one (and a probe with only two words has none).
+ *  Bounded so a probe cannot make the responder echo a kilobyte per app. */
+const NONCE = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** The nonce a probe carries, or null. Pure.
+ *
+ *  "AIO_DISCOVER? v1"        → null
+ *  "AIO_DISCOVER? v1 abc12"  → "abc12"
+ *  "AIO_DISCOVER? v1 ???"    → null (not a nonce; answered as a plain probe) */
+export function probeNonce(probe: string): string | null {
+  if (!probe.startsWith(PROBE)) return null;
+  const rest = probe.slice(PROBE.length).trim();
+  return NONCE.test(rest) ? rest : null;
+}
+
+/** The probe text for a sweep, with or without a nonce. Pure. */
+export function encodeProbe(nonce?: string): string {
+  if (nonce === undefined) return PROBE;
+  if (!NONCE.test(nonce)) {
+    throw new Error(
+      `discovery: nonce must match ${NONCE} — got ${JSON.stringify(nonce)}`,
+    );
+  }
+  return `${PROBE} ${nonce}`;
+}
 
 function safeEnv(k: string): string | undefined {
   try {
@@ -48,6 +85,8 @@ export interface AioAppAd {
   needsAuth: boolean;
   /** True when the app serves over HTTPS (`--expose` auto-TLS). */
   tls: boolean;
+  /** Echo of the probe's nonce, present only when the probe carried one. */
+  nonce?: string;
 }
 
 /** A discovered app, resolved to a reachable URL (host from the datagram). */
@@ -147,7 +186,9 @@ export function startDiscoveryResponder(
   });
   const allow = makeReplyBudget();
   socket.on("message", (msg: Buffer, rinfo: RInfo) => {
-    if (!msg.toString("utf8").startsWith("AIO_DISCOVER?")) return;
+    const probe = msg.toString("utf8");
+    if (!probe.startsWith("AIO_DISCOVER?")) return;
+    const nonce = probeNonce(probe);
     // LAN only, and rate-limited per source. See `isPrivateSource`: the reply
     // is an inventory of this host, and an unguarded responder is both a free
     // scan target and a spoofable reflector.
@@ -156,7 +197,8 @@ export function startDiscoveryResponder(
     // One datagram per app — the client collects and dedups by host:port.
     for (const ad of listApps()) {
       try {
-        const reply = Buffer.from(REPLY_PREFIX + JSON.stringify(ad));
+        const body = nonce === null ? ad : { ...ad, nonce };
+        const reply = Buffer.from(REPLY_PREFIX + JSON.stringify(body));
         socket.send(reply, rinfo.port, rinfo.address);
       } catch { /* client vanished */ }
     }
@@ -181,12 +223,17 @@ export function startDiscoveryResponder(
  * Returns every distinct app found (deduped by host:port). Empty array when
  * UDP is unavailable or nothing answered — callers should always keep a
  * manual "type an address" path (UDP is blocked on many networks).
+ *
+ * `nonce` — when given, the probe carries it and ONLY replies echoing it are
+ * kept (the echo is stripped from the result). Without one, every responder
+ * counts. See the module doc: a test-time filter, never a production gate.
  */
 export function discoverAioApps(
-  opts: { timeoutMs?: number; port?: number } = {},
+  opts: { timeoutMs?: number; port?: number; nonce?: string } = {},
 ): Promise<DiscoveredApp[]> {
   const timeoutMs = opts.timeoutMs ?? 1200;
   const port = opts.port ?? AIO_DISCOVERY_PORT;
+  const probe = encodeProbe(opts.nonce); // throws on a malformed nonce — loud
   const found = new Map<string, DiscoveredApp>();
 
   return new Promise<DiscoveredApp[]>((resolve) => {
@@ -218,11 +265,13 @@ export function discoverAioApps(
         return;
       }
       if (typeof ad?.name !== "string" || typeof ad?.port !== "number") return;
+      if (opts.nonce !== undefined && ad.nonce !== opts.nonce) return;
+      const { nonce: _echo, ...bare } = ad;
       const host = rinfo.address;
       const key = `${host}:${ad.port}`;
       if (found.has(key)) return;
       found.set(key, {
-        ...ad,
+        ...bare,
         host,
         url: `${ad.tls ? "https" : "http"}://${host}:${ad.port}`,
       });
@@ -232,7 +281,7 @@ export function discoverAioApps(
         socket.setBroadcast(true);
       } catch { /* broadcast not permitted on this iface */ }
       try {
-        socket.send(Buffer.from(PROBE), port, "255.255.255.255");
+        socket.send(Buffer.from(probe), port, "255.255.255.255");
       } catch { /* broadcast blocked */ }
     });
     setTimeout(done, timeoutMs);

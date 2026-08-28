@@ -51,8 +51,6 @@ function counterCell() {
 Deno.test({
   name:
     "exactly-once (WS): a disconnect does NOT reject an action still in the queue",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const restoreWS = installFakeWS();
     const restoreT = fastBackoff();
@@ -97,8 +95,6 @@ Deno.test({
 
 Deno.test({
   name: "exactly-once (WS): the ack clock starts at the WRITE, not at dispatch",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const restoreWS = installFakeWS();
     const restoreT = fastBackoff();
@@ -140,8 +136,6 @@ Deno.test({
 
 Deno.test({
   name: "exactly-once (WS): an IN-FLIGHT call still rejects on disconnect",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const restoreWS = installFakeWS();
     const restoreT = fastBackoff();
@@ -179,8 +173,6 @@ Deno.test({
 Deno.test({
   name:
     "exactly-once (WS): close() rejects queued calls — their frames are gone",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const restoreWS = installFakeWS();
     const restoreT = fastBackoff();
@@ -208,8 +200,6 @@ Deno.test({
 
 Deno.test({
   name: "uds: destructured bind() works — no `this`, no synchronous throw",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     // A socket path that will never exist: the client stays offline and every
     // action queues, which is exactly the path `this.send` used to explode on.
@@ -231,8 +221,6 @@ Deno.test({
 
 Deno.test({
   name: "uds: an over-cap action is rejected IMMEDIATELY with the real reason",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const cli = connectCliUDS<{ n: number }>(
       `/tmp/aio-nonexistent-${crypto.randomUUID()}.sock`,
@@ -267,8 +255,6 @@ Deno.test({
 
 Deno.test({
   name: "uds: a patch that fails to apply asks the server to resync",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     // A bare UDS server: send a snapshot, then a patch that cannot apply.
     // Pre-fix the client swallowed the failure and froze at its last good

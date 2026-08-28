@@ -114,6 +114,9 @@ export type CheckOptions = {
 
 /** What the caller of `apply()` decided. */
 export type ApplyOptions = {
+  /** Install a BLOCKED release and start on an EMPTY profile: the current one
+   *  is moved whole to `<home>/archive/…` at handover, never deleted. */
+  retireData?: boolean;
   /** Install a release the DATA GATE blocked.
    *
    *  The gate is right almost always, and when it is wrong it is wrong

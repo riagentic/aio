@@ -500,8 +500,6 @@ Deno.test({
   name: "devMode: excessive re-render warning fires at limit",
   // sanitizers disabled: dev-mode uses a 1s debounce timer (_devRenderResetTimer)
   // that intentionally outlives the test — cannot be drained without breaking the API
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     const { root, cleanup, mount: m } = setupMount();
     setDevModeRenderer(true);

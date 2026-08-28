@@ -258,6 +258,14 @@ export function buildLegacyConfig(
         c,
       ) => [c.__aio.id, c.__aio.actionKeys.filter((k) => !k.startsWith("__"))]),
     ),
+    // Cell id → the ASYNC subset. A correlation id (`_callId`) is settled by
+    // the async executor; on a sync method the reducer resolves it as
+    // "blocked". The trojan needs the split to correlate only what can answer.
+    _cellAsyncMethods: Object.fromEntries(
+      composed.cells.map((
+        c,
+      ) => [c.__aio.id, [...(c.__aio.asyncMethods ?? [])]]),
+    ),
     // Cell id → per-field { persisted, ui } flags — trojan `fields` route (amui
     // State overview). Answers "what survives a restart" (persist) and "what
     // ships to the browser" (ui) for every top-level state key.
@@ -407,7 +415,6 @@ export async function wrapAppWithCells(
     interval: fc.memory?.interval ?? 10_000,
     warnThreshold: fc.memory?.warnThreshold ?? 0.75,
     criticalThreshold: fc.memory?.criticalThreshold ?? 0.90,
-    gcStressRatio: fc.memory?.gcStressRatio ?? 0.05,
     onReport: (report) => {
       const code = report.level === "critical"
         ? "MEMORY_CRITICAL"
@@ -484,7 +491,7 @@ export async function wrapAppWithCells(
   //. Shutdown calls this; scoped to OUR cells, so a second app in
   // the same process keeps its own bindings.
   (app as Record<string, unknown>)._releaseCells = () =>
-    _releaseCellBindings(composed.cells);
+    _releaseCellBindings(composed.cells, composed.appId);
 }
 
 /** Filter cell entries by --isolate flag */

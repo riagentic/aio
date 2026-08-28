@@ -107,8 +107,8 @@ testUI(App, "add a todo end-to-end", async (ui) => {
 - Keyed list instances: `ui.find("TodoRow", key)`.
 - Cells run on the real local dispatch loop (the android runtime). Hermetic by
   default (`persist: false`, unique key — no state leaks between tests).
-- **Registered cells reset to their `state:` defaults on each mount** — you do
-  **not** need to hand-roll a `resetCells()`.
+- **Registered cells reset to their `state:` defaults on each mount** — no
+  hand-rolled reset helper is needed.
 - **Module-level `signal()`s reset too**, to the value they were created with —
   they are state a test writes exactly as easily as a cell, and from inside a
   test the two are indistinguishable. (They used to survive, so a test that set
@@ -429,9 +429,9 @@ live client's `am surface --json`.
 ## On a live app: `am surface` / `am trigger`
 
 ```sh
-am surface 0                                   # the client's semantic surface
-am trigger 0 "App/TodoAdd:AddButton" click     # simulate a user on the live UI
-am trigger 0 "App/TodoAdd:TitleInput" type "buy milk"
+am surface                                     # the newest UI client's semantic surface
+am trigger "App/TodoAdd:AddButton" click       # simulate a user on the live UI
+am trigger "App/TodoAdd:TitleInput" type "buy milk"
 ```
 
 Works against any connected client — browser tab, Electron window, **Android
@@ -454,10 +454,10 @@ the app you already have open — no driver, no selectors, no screenshot diffing
 The surface is a complete **perception + action space**, for a person at a
 terminal and an AI agent alike — neither needs the DOM:
 
-1. **Observe** — `am surface 0 --json` returns every component with its visible
+1. **Observe** — `am surface --json` returns every component with its visible
    `text`, and every element with its `name`, `path`, `events`, live
    `value`/`checked`/`disabled`.
-2. **Act** — `am trigger 0 "<path>" <action> [text]`. The reply includes the
+2. **Act** — `am trigger "<path>" <action> [text]`. The reply includes the
    **fresh surface after the action settled**, so observe→act→observe is one
    call per step.
 3. **Self-correct** — a missed path replies with `available: [...paths]`; pick

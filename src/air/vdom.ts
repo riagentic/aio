@@ -2,7 +2,6 @@
 
 // ── Types & constants (vdom-types.ts) ────────────────────────────────
 export type {
-  Action,
   ComponentFn,
   NodeAction,
   Ref,

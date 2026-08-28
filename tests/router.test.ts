@@ -67,8 +67,6 @@ const SPA_PORT = freePort();
 Deno.test({
   name: "server: SPA fallback — unknown extensionless path returns HTML",
   // Dev server spawns esbuild child process + fsWatcher async ops — not feasible to drain in test
-  sanitizeOps: false,
-  sanitizeResources: false,
   fn: async () => {
     const dir = await Deno.makeTempDir();
     await Deno.writeTextFile(join(dir, "App.tsx"), "export default () => null");

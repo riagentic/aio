@@ -106,7 +106,8 @@ export function scanCapabilities(sources: { content: string }[]): Capabilities {
 
 /** The minimal `--allow-*` flags for a capability set — `[]` (no perms) up to the
  *  full least-privilege list. Never returns `-A`. Read/write can be path-scoped
- *  by the caller; net can be host-scoped — kept coarse here (the safe superset). */
+ *  by the caller; net can be host-scoped — kept coarse here (the safe superset).
+ *  @internal alpha70 — test seam via src/testing/internal.ts */
 export function permissionFlags(caps: Capabilities): string[] {
   const flags: string[] = [];
   if (caps.net) flags.push("--allow-net");
@@ -119,7 +120,8 @@ export function permissionFlags(caps: Capabilities): string[] {
   return flags;
 }
 
-/** A human-readable manifest: the flags + why each was included. */
+/** A human-readable manifest: the flags + why each was included.
+ *  @internal alpha70 — test seam via src/testing/internal.ts */
 export function manifestReport(caps: Capabilities): string {
   const flags = permissionFlags(caps);
   const why: Record<keyof Capabilities, string> = {

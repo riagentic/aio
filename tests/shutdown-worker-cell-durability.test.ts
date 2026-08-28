@@ -76,8 +76,6 @@ console.log("PROBE_CLOSED");
 
 Deno.test({
   name: "shutdown: a WORKER cell's in-flight method finishes writing to disk",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const dir = await Deno.makeTempDir({ prefix: "aio-worker-durability-" });
     const entry = join(dir, "app.ts");

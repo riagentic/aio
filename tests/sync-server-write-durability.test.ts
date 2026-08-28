@@ -44,8 +44,6 @@ async function bootApp(dir: string) {
 
 Deno.test({
   name: "sync cells: server-origin writes survive a restart (shutdown flush)",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const dir = await Deno.makeTempDir();
 

@@ -14,7 +14,7 @@
 
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
-import { createDB, DEFAULT_PRAGMAS } from "../src/db/mod.ts";
+import { createDB, DEFAULT_PRAGMAS } from "../src/server-entry.ts";
 import { mergePragmas, pragmaName, pragmasFor } from "../src/db/async-db.ts";
 
 Deno.test("db.snapshot: rolling snapshots on a schedule keep working", async () => {

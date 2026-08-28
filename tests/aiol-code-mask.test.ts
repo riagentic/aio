@@ -153,3 +153,15 @@ export const b = cell("widget", { state: { other: 1 } });
     "two declared cells with one name must still error",
   );
 });
+
+// A closing JSX tag starts with `</`. Read as "regex after an expression
+// position", the `/` opened a phantom literal that ran to the next `/` on the
+// line — so `{fn(y)}` between two closing tags was blanked, and the gates that
+// share this heuristic (`check:dead-wiring`, `check:vacuous`) could not see a
+// reference or an assertion that sat there.
+Deno.test("codeMask: `</tag>` is a closing tag, not a regex", () => {
+  const src = "return <div>a</div><span>{fn(y)}</span>;";
+  const i = src.indexOf("fn(y)");
+  const m = codeMask(src);
+  for (let k = i; k < i + 5; k++) assertEquals(m[k], 1, `offset ${k}`);
+});

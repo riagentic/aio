@@ -9,11 +9,8 @@ import { _resetDegraded } from "../diagnostics/degraded.ts";
 import { _resetMethodCancel } from "./method-cancel.ts";
 import { _resetSubs } from "./state-subs.ts";
 import { _resetRootSignals } from "./signal.ts";
-import { _resetSelectorHints, _resetVisibleHints } from "./cell-helpers.ts";
-import {
-  _resetListensToHints,
-  _resetTransactionHints,
-} from "./cell-methods-factory.ts";
+import { _resetSelectorHints } from "./cell-helpers.ts";
+import { _resetTransactionHints } from "./cell-methods-factory.ts";
 import { _resetReturnEffectHints } from "./cell-methods-internals.ts";
 import { _resetArrayRefStats } from "./state-array-utils.ts";
 import { _resetPerfThrottle } from "../diagnostics/error.ts";
@@ -54,9 +51,7 @@ export function _resetAioRuntime(): void {
   // order-dependent: the SECOND test to trigger the same hint sees silence, so
   // "it warns about X" passes alone and fails in a suite (or the reverse). Same
   // class as the signal leak above — state a test writes that nothing restored.
-  _resetVisibleHints();
   _resetSelectorHints();
-  _resetListensToHints();
   _resetTransactionHints();
   _resetReturnEffectHints();
   _resetArrayRefStats();

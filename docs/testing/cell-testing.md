@@ -12,7 +12,7 @@ never the client-replay slice. A hidden field is readable here and would throw
 in a sync selector; see `docs/state/cell-contexts.md` for the full table.
 
 ```ts
-import { testCell } from "aio/testing"; // or from "aio"
+import { testCell } from "aio/testing";
 import { counter } from "./cell/counter/index.ts";
 
 testCell(counter, "increment from idle", (t) => {

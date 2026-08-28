@@ -93,7 +93,7 @@ Deno.test("fail-loud: registered and internal actions never warn", () => {
 Deno.test("fail-loud: foreign-action listeners do not warn", () => {
   const listener = cell("flc-listener", {
     state: { seen: 0 },
-    listensTo: ["external:event"],
+    listensTo: { bump: "external:event" },
     methods: {
       bump(s) {
         s.seen += 1;

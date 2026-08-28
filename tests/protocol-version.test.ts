@@ -9,6 +9,7 @@ import { dec, enc } from "../src/protocol/envelope.ts";
 import {
   negotiateProtocol,
   parseProtoHello,
+  PROTOCOL_CHANGES,
   PROTOCOL_MISMATCH_CLOSE_CODE,
   PROTOCOL_VERSION,
   protoHello,
@@ -65,6 +66,28 @@ Deno.test("proto: our version below peer minimum is rejected", () => {
 Deno.test("proto: current build hello is self-compatible", () => {
   const r = negotiateProtocol(protoHello(), protoHello());
   assertEquals(r, { ok: true, effective: PROTOCOL_VERSION });
+});
+
+Deno.test("proto: a refusal names WHAT the older build cannot do (v3: append)", () => {
+  // A stale bundle is told why it is stale, not just that it is. A v2 client
+  // would hand `append` to Immer and resync on every streamed frame — the
+  // reason has to name the op so the operator knows which artifact to rebuild
+  // and what breaks if they do not.
+  const r = negotiateProtocol(protoHello("1.0.0-alpha70"), { v: 2, min: 2 });
+  assertEquals(r.ok, false);
+  if (r.ok) return;
+  assertStringIncludes(r.reason, "the PEER is the older build");
+  assertStringIncludes(r.reason, 'v3 added the "append" patch op');
+  // The other direction names it too.
+  const r2 = negotiateProtocol({ v: 2, min: 2 }, protoHello());
+  assertEquals(r2.ok, false);
+  if (r2.ok) return;
+  assertStringIncludes(r2.reason, 'v3 added the "append" patch op');
+  // Every version this build speaks has a row — a bump without a reason is
+  // a refusal that cannot explain itself.
+  for (let v = 3; v <= PROTOCOL_VERSION; v++) {
+    assertExists(PROTOCOL_CHANGES[v], `PROTOCOL_CHANGES has no row for v${v}`);
+  }
 });
 
 // ── Integration: WS handshake ────────────────────────────────────────

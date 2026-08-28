@@ -281,23 +281,24 @@ methods: {
 ### `blocking(id, fn, arg?)` — run it off the main thread
 
 The odd one out: imperative (returns a Promise) because it moves **work**, not
-an action — which is why it is ALSO exported top-level from `"aio"` as
-`blocking` (alpha52; `schedule.blocking` remains the same function). The
-function runs on a worker pool — a real thread — so CPU-bound or FFI work can't
-freeze rendering, the dispatch loop, or anyone else's actions.
+an action — which is why it is a top-level export of `"aio"`, not a `schedule`
+member (`schedule` ships to every runtime; `blocking` is server-only and
+refuses, by name, on a browser/WebView runtime). The function runs on a worker
+pool — a real thread — so CPU-bound or FFI work can't freeze rendering, the
+dispatch loop, or anyone else's actions.
 
 ```ts
 methods: {
   async build(s, raw: number[]) {
     s.status = "building"; // instant
-    s.rows = await schedule.blocking("report:build", (input) => {
+    s.rows = await blocking("report:build", (input) => {
       // Self-contained: no closures — everything arrives as `arg`.
       return (input as number[]).map((n) => ({ id: n, score: Math.sqrt(n) * n }));
     }, raw); // seconds of CPU, off-thread
     s.status = "done";
   },
   stop() {
-    schedule.blocking.cancel("report:build"); // terminates the worker
+    blocking.cancel("report:build"); // terminates the worker
   },
 }
 ```

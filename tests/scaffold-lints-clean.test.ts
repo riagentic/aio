@@ -16,7 +16,7 @@ import {
   type Target,
   type Template,
 } from "../src/am/am-cmd-create.ts";
-import { lint } from "../aiol/mod.ts";
+import { lintProject } from "../aiol/mod.ts";
 
 async function lintScaffold(template: Template, target: Target) {
   const dir = await Deno.makeTempDir({ prefix: `aiol-scaffold-${template}-` });
@@ -30,7 +30,7 @@ async function lintScaffold(template: Template, target: Target) {
       await Deno.mkdir(join(path, ".."), { recursive: true });
       await Deno.writeTextFile(path, content);
     }
-    const report = await lint(dir);
+    const report = await lintProject(dir);
     return report.issues.filter((i) => i.area !== "build");
   } finally {
     await Deno.remove(dir, { recursive: true });
@@ -43,6 +43,7 @@ const CASES: [Template, Target][] = [
   ["counter", "electron"],
   ["todo", "browser"],
   ["todo", "server"],
+  ["cli", "cli"],
 ];
 
 for (const [template, target] of CASES) {

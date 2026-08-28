@@ -28,8 +28,6 @@ const news = cell("as-server-news", {
 
 Deno.test({
   name: "the network is refused, and the refusal names the escape hatch",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     const port = freePort();
     const app = await aio.run({

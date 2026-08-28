@@ -20,6 +20,7 @@ export type AioErrorCode =
   | "QUEUE_OVERFLOW"
   | "DISPATCH_LOOP"
   | "DISPATCH_CLOSED"
+  | "DISPATCH_DRAINING"
   | "DISPATCH_ABORTED"
   | "MEMORY_PRESSURE"
   | "MEMORY_CRITICAL"
@@ -93,6 +94,7 @@ const CODE_TO_SOURCE: Record<AioErrorCode, AioErrorSource> = {
   QUEUE_OVERFLOW: "dispatch",
   DISPATCH_LOOP: "dispatch",
   DISPATCH_CLOSED: "dispatch",
+  DISPATCH_DRAINING: "dispatch",
   DISPATCH_ABORTED: "dispatch",
   MEMORY_PRESSURE: "memory",
   MEMORY_CRITICAL: "memory",
@@ -407,10 +409,21 @@ export function generateTip(err: AioError): string | undefined {
       return `Tip: Effect "${err.context.effectType ?? "?"}" timed out after ${
         err.context.duration ?? "?"
       }ms. Check for network issues or increase effectTimeoutMs.`;
-    case "EFFECT_ASYNC_ERROR":
+    case "EFFECT_ASYNC_ERROR": {
+      // An async METHOD that threw is the common case here; "execute handler"
+      // and `call({ retries })` are the actions-form vocabulary and sent
+      // method authors looking for a handler they do not have.
+      const at = err.context.actionType;
+      if (typeof at === "string" && at.includes(":")) {
+        return `Tip: async method ${at}() threw after it started. The caller ` +
+          `that awaited it was rejected with this error, and writes it made ` +
+          `before the throw are already state — catch inside the method to ` +
+          `record a failure the UI can show, or catch at the call site.`;
+      }
       return `Tip: Async effect "${
         err.context.effectType ?? "?"
       }" rejected. Add error handling in your execute handler or use call({ retries }).`;
+    }
     case "HOOK_ERROR":
       return `Tip: Hook "${
         err.context.hookName ?? "?"
@@ -431,6 +444,8 @@ export function generateTip(err: AioError): string | undefined {
       return `Tip: Action queue exceeded ${10_000} entries. You may have a dispatch loop — check effects that dispatch synchronously.`;
     case "DISPATCH_LOOP":
       return `Tip: the drain loop hit its iteration ceiling (the message names it — the same bound as the action queue). A reducer or effect is dispatching back to itself. Break the cycle.`;
+    case "DISPATCH_DRAINING":
+      return "Tip: the app is closing — running methods are finishing their writes; this action was new input. Stop dispatching once shutdown starts.";
     case "DISPATCH_CLOSED":
       return `Tip: Action dispatched after the app/cell was closed — it was not applied. Stop dispatching during/after shutdown, or guard awaited calls.`;
     case "DISPATCH_ABORTED":
@@ -447,7 +462,7 @@ export function generateTip(err: AioError): string | undefined {
       }ms) — every client's actions waited that long. If it's I/O, make the ` +
         `method async so it suspends at the await; if it's COMPUTE, an await ` +
         `doesn't help (the isolate is still blocked) — move it off-thread with ` +
-        `schedule.blocking("id", fn, arg). See docs/debugging/performance.md.`;
+        `blocking("id", fn, arg). See docs/debugging/performance.md.`;
     case "BUDGET_EFFECT":
       // THE remedy for this code. The dispatcher states the facts and the
       // per-method escape hatch (it is the only thing that knows the method
@@ -457,7 +472,7 @@ export function generateTip(err: AioError): string | undefined {
       }ms (budget: ${
         err.context.budget ?? 5
       }ms). An effect must return immediately: kick off async I/O without ` +
-        `awaiting it here, or hand CPU work to schedule.blocking("id", fn, ` +
+        `awaiting it here, or hand CPU work to blocking("id", fn, ` +
         `arg). See docs/debugging/performance.md.`;
     case "PERSIST_ERROR":
       return "Tip: State persist failed — changes are in memory but will be lost on restart. Check disk space and file permissions.";

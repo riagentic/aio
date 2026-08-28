@@ -1,6 +1,13 @@
 // Static file serving & virtual route handler — extracted from server.ts
 // Handles all HTTP requests (non-WS): HTML pages, transpilation, __aio/* endpoints, static files
 import { APP_ICON, BUNDLE_JS, UI_ENTRY } from "./app-files.ts";
+import {
+  CONTROL_MAX_BODY,
+  declaresOverLimit,
+  readBounded,
+  SNAPSHOT_MAX_BODY,
+} from "./read-body.ts";
+import { TROJAN_PREFIX } from "./server-auth.ts";
 import { SERVER_FILE_RE } from "../entries.ts";
 import type { CallTimeouts } from "../protocol/protocol-types.ts";
 import { extname, join, resolve, SEPARATOR } from "@std/path";
@@ -15,6 +22,7 @@ import {
   MIME,
   TEXT_EXTENSIONS,
 } from "./server-html.ts";
+import type { ShareRoot } from "./app-dirs.ts";
 import type { GraphResult } from "./graph-validator.ts";
 import type { UiTheme } from "./aio-types.ts";
 import {
@@ -90,7 +98,6 @@ export function aioModuleUrl(
 }
 
 /** Safety limits — prevent resource exhaustion */
-const SNAPSHOT_MAX_SIZE = 10_000_000; // 10MB — reject oversized snapshot uploads
 
 /** Parse a single-range `Range` header against a resource of `size` bytes.
  *
@@ -139,6 +146,11 @@ export interface StaticDeps {
    *  libraries). Every containment guard that protects baseDir applies to each
    *  root unchanged. */
   serveDirs?: Record<string, string>;
+  /** The declared workspace share (deno.json `share`, resolved and validated
+   *  by `resolveShare`) — served at `/<basename>/…` with EVERY guard baseDir
+   *  has. One fact for both worlds: the bundler resolves the same prefix. Dev
+   *  only, like `serveDirs`: a prod server never reads outside its root. */
+  share?: readonly ShareRoot[];
   absDistDir: string | null;
   hasCSS: boolean;
   importMap: string; // JSON stringified import map
@@ -231,12 +243,24 @@ export function createStaticHandler(deps: StaticDeps): {
   // Absolute-vs-absolute keeps every guard exactly as strong.
   const _roots: Array<
     { prefix: string; withSlash: string; dir: string; checked: boolean }
-  > = Object.entries(deps.serveDirs ?? {}).map(([prefix, dir]) => ({
-    prefix,
-    withSlash: prefix.endsWith("/") ? prefix : prefix + "/",
-    dir: resolve(dir),
-    checked: false,
-  }));
+  > = [
+    ...Object.entries(deps.serveDirs ?? {}).map(([prefix, dir]) => ({
+      prefix,
+      withSlash: prefix.endsWith("/") ? prefix : prefix + "/",
+      dir: resolve(dir),
+      checked: false,
+    })),
+    // A share was validated at resolve time (exists, inside the repo), so it
+    // enters `checked` — nothing to warn about lazily. It is a ROOT like any
+    // other from here on: traversal, symlink-escape, dotfile and server-only
+    // guards all apply to it unchanged.
+    ...(deps.share ?? []).map((sh) => ({
+      prefix: sh.prefix,
+      withSlash: sh.prefix + "/",
+      dir: sh.dir,
+      checked: true,
+    })),
+  ];
 
   /** Fail loud, once per root, the first time anything asks for it: a root
    *  that is not a directory serves nothing but 404s, and the symptom the
@@ -409,7 +433,13 @@ export function createStaticHandler(deps: StaticDeps): {
 
     if (!prod && pathname === "/__aio/client-error" && req?.method === "POST") {
       try {
-        const body = await req.json() as {
+        // A browser error report is a message and a stack. It arrives from the
+        // page, so it is as bounded as the page chooses to be.
+        const rawBody = await readBounded(req, CONTROL_MAX_BODY);
+        if (rawBody === null) {
+          return new Response("Error report too large", { status: 413 });
+        }
+        const body = JSON.parse(rawBody) as {
           message?: string;
           stack?: string;
           blankScreen?: string;
@@ -481,7 +511,7 @@ export function createStaticHandler(deps: StaticDeps): {
     // The trojan reads full state, runs SQL, triggers UI, and loads snapshots.
     // It exists to make development productive; a release build has no business
     // exposing it, so it is gated off entirely here (single source of truth).
-    if (!prod && deps.trojan && pathname.startsWith("/__aio/trojan/")) {
+    if (!prod && deps.trojan && pathname.startsWith(TROJAN_PREFIX)) {
       const trojanResp = await _handleTrojanRoute(
         pathname,
         req,
@@ -655,27 +685,35 @@ export function createStaticHandler(deps: StaticDeps): {
       return new Response("Missing X-AIO header", { status: 403 });
     }
     if (req.method === "POST") {
-      const clHeader = req.headers.get("content-length");
-      if (clHeader !== null && Number(clHeader) > SNAPSHOT_MAX_SIZE) {
+      // Bounded by bytes received — a declared Content-Length is a number the
+      // sender chose, and `Number("abc") > MAX` is false, so garbage passed.
+      if (declaresOverLimit(req, SNAPSHOT_MAX_BODY)) {
         return new Response(
-          `Snapshot too large (max ${SNAPSHOT_MAX_SIZE} bytes)`,
+          `Snapshot too large (max ${SNAPSHOT_MAX_BODY} bytes)`,
           { status: 413 },
         );
       }
       return (async () => {
         try {
-          const json = await req.text();
-          if (json.length > SNAPSHOT_MAX_SIZE) {
+          const json = await readBounded(req, SNAPSHOT_MAX_BODY);
+          if (json === null) {
             return new Response(
-              `Snapshot too large (max ${SNAPSHOT_MAX_SIZE} bytes)`,
+              `Snapshot too large (max ${SNAPSHOT_MAX_BODY} bytes)`,
               { status: 413 },
             );
           }
           JSON.parse(json); // validate
           deps.loadSnapshot!(json);
           return new Response("OK", { status: 200 });
-        } catch {
-          return new Response("Invalid JSON", { status: 400 });
+        } catch (e) {
+          // `loadSnapshot` itself can throw (a refused shape, a migration);
+          // that is not "Invalid JSON", and the reason was being dropped.
+          return new Response(
+            e instanceof SyntaxError
+              ? "Invalid JSON"
+              : `snapshot refused: ${e}`,
+            { status: 400 },
+          );
         }
       })();
     }
@@ -947,8 +985,15 @@ export function createStaticHandler(deps: StaticDeps): {
     let body: string;
     try {
       body = await Deno.readTextFile(filepath);
-    } catch {
-      return new Response("Not Found", { status: 404 });
+    } catch (e) {
+      // 404 is the answer for a file that is not there. A file that IS there
+      // and cannot be read (EACCES, EISDIR) is a server problem, and saying
+      // "Not Found" for it sent people checking their paths.
+      if (e instanceof Deno.errors.NotFound) {
+        return new Response("Not Found", { status: 404 });
+      }
+      log.error("server", `static: cannot read ${filepath} — ${e}`);
+      return new Response("Internal Server Error", { status: 500 });
     }
 
     let contentType = MIME[ext] ?? "text/plain";

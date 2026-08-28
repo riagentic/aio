@@ -346,7 +346,7 @@ Test the sync method in isolation. No server, no browser, no mocking.
 
 ```ts
 // src/cell/metrics/metrics.test.ts
-import { testCell } from "aio";
+import { testCell } from "aio/testing";
 import { metrics } from "./index.ts";
 
 testCell(metrics, "update records snapshot", (t) => {

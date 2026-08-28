@@ -64,8 +64,6 @@ const ledger = () =>
 Deno.test({
   name:
     "am: a MUTATING trojanPost against a port owned by a DIFFERENT app is refused",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     await withAppsDir(async () => {
       _resetAioRuntime();
@@ -121,8 +119,6 @@ Deno.test({
 Deno.test({
   name:
     "am: the identity verdict expires — a port outlives the app that had it",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     await withAppsDir(async () => {
       _resetInstanceVerify();
@@ -161,8 +157,6 @@ Deno.test({
 
 Deno.test({
   name: "am stop --port=N IDENTIFIES the app on that port (not the cwd's app)",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     await withAppsDir(async () => {
       _resetAioRuntime();
@@ -219,8 +213,6 @@ Deno.test({
       return false;
     }
   })(),
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     await withAppsDir(async (root) => {
       const { loadOrCreateCert } = await import("../src/server/tls.ts");

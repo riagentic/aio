@@ -4,6 +4,11 @@
 // half is correctness, not thrift — without it the emitted list could fail to
 // apply on the client at all).
 import type { Patch } from "immer";
+import {
+  APPEND_MIN_LENGTH,
+  type AppendPatch,
+  type WirePatch,
+} from "../protocol/patch-ops.ts";
 
 /** Resolve `path` in `root`, or undefined if any hop is missing. */
 function valueAt(root: unknown, path: readonly (string | number)[]): unknown {
@@ -218,6 +223,78 @@ function diffArray(
   return outOps;
 }
 
+/**
+ * Rewrite a string that GREW as the suffix it grew by.
+ *
+ * A streamed reply is `s.reply += chunk`, which Immer can only describe as
+ * "replace the whole string" — so every broadcast window re-sent the entire
+ * reply, quadratic in its length (measured: 33 broadcasts/sec against the
+ * 30/sec pressure threshold, in three production apps). When the previous
+ * value is a prefix of the new one, the op becomes
+ * `{ op: "append", path, value: <suffix> }` (see protocol/patch-ops.ts).
+ *
+ * Decided HERE, at generation, because this is the last place the previous
+ * slice is in hand. Conservative by construction:
+ *   • only a `replace` whose base is PROVABLY the previous value is rewritten —
+ *     any earlier op in the same list at the path, an ancestor or a descendant
+ *     leaves the base unknown and the replace stands;
+ *   • strings below `APPEND_MIN_LENGTH` stay a replace (the op overhead is
+ *     the whole cost at that size);
+ *   • a non-suffix change (edit, truncation, unrelated value) stays a replace.
+ *
+ * Pure; returns the input array itself when nothing changed.
+ */
+export function narrowStringPatches(
+  prev: unknown,
+  ops: readonly WirePatch[],
+): WirePatch[] {
+  let out: WirePatch[] | null = null;
+  // Paths an earlier op in this list has touched, as keys. A later op whose
+  // path is equal to, under, or above any of them has an unknown base.
+  const touched: string[] = [];
+  const related = (a: string, b: string): boolean =>
+    a === b || a.length === 0 || b.length === 0 || a.startsWith(b + "\0") ||
+    b.startsWith(a + "\0");
+  for (let i = 0; i < ops.length; i++) {
+    const p = ops[i]!;
+    const key = pathKey(p.path);
+    let rewritten: AppendPatch | null = null;
+    if (
+      p.op === "replace" && typeof p.value === "string" &&
+      p.value.length > APPEND_MIN_LENGTH &&
+      !touched.some((t) => related(t, key))
+    ) {
+      const base = valueAt(prev, p.path);
+      if (
+        typeof base === "string" && base.length >= APPEND_MIN_LENGTH &&
+        base.length < p.value.length && p.value.startsWith(base)
+      ) {
+        rewritten = {
+          op: "append",
+          path: p.path as (string | number)[],
+          value: p.value.slice(base.length),
+        };
+      }
+    }
+    touched.push(key);
+    if (rewritten === null) {
+      out?.push(p);
+      continue;
+    }
+    out ??= ops.slice(0, i);
+    out.push(rewritten);
+  }
+  return out ?? (ops as WirePatch[]);
+}
+
+/** The ONE narrowing pass patch generation runs: arrays first (a grown list
+ *  travels as its adds), then strings (a grown string as its suffix). Both
+ *  callers in cell-compose-reduce.ts go through this, so neither rewrite can
+ *  apply to one code path and not the other. */
+export function narrowPatches(prev: unknown, ops: Patch[]): WirePatch[] {
+  return narrowStringPatches(prev, narrowArrayPatches(prev, ops));
+}
+
 /** Key for path identity — joined with NUL to avoid ambiguity */
 function pathKey(path: (string | number)[]): string {
   return path.join("\0");
@@ -269,7 +346,7 @@ function pathKey(path: (string | number)[]): string {
  *
  * Returns a new array (never mutates input).
  */
-export function compactPatches(ops: Patch[]): Patch[] {
+export function compactPatches(ops: WirePatch[]): WirePatch[] {
   if (ops.length <= 1) return ops;
 
   // Last index at which each path is replaced wholesale — O(n).
@@ -284,17 +361,31 @@ export function compactPatches(ops: Patch[]): Patch[] {
 
   // Index-shifting ops, ascending. Each renumbers the SIBLINGS of its own path,
   // i.e. the children of `parent`, from `parentLen` deep.
-  const shifts: { at: number; parent: string; parentLen: number }[] = [];
+  // Indexed by PARENT, each list ascending in `at`, so "is there a shift of
+  // THIS parent strictly between i and j" is a binary search rather than a
+  // walk over every shift in the batch. A flush holding 20 000 pushes and one
+  // ancestor replace asked that question 20 000 × 20 000 times — 257 ms per
+  // client per flush, and it runs per client.
+  const shiftsByParent = new Map<string, number[]>();
   for (let i = 0; i < ops.length; i++) {
     const p = ops[i]!;
     if (p.op === "add" || p.op === "remove") {
-      shifts.push({
-        at: i,
-        parent: pathKey(p.path.slice(0, -1) as (string | number)[]),
-        parentLen: p.path.length - 1,
-      });
+      const parent = pathKey(p.path.slice(0, -1) as (string | number)[]);
+      let list = shiftsByParent.get(parent);
+      if (!list) shiftsByParent.set(parent, list = []);
+      list.push(i);
     }
   }
+  /** First index in ascending `list` whose value is > `x`. */
+  const firstAbove = (list: number[], x: number): number => {
+    let lo = 0, hi = list.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (list[mid]! <= x) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
 
   /** Is `path` renumbered by anything strictly between ops `i` and `j`, so the
    *  replace at `j` no longer lands where the op at `i` wrote? A shift INSIDE
@@ -305,26 +396,29 @@ export function compactPatches(ops: Patch[]): Patch[] {
     j: number,
     path: readonly (string | number)[],
   ): boolean => {
-    for (const s of shifts) {
-      if (s.at <= i) continue;
-      if (s.at >= j) break;
-      if (s.parentLen >= path.length) continue;
-      if (typeof path[s.parentLen] !== "number") continue;
-      if (
-        pathKey(path.slice(0, s.parentLen) as (string | number)[]) === s.parent
-      ) {
-        return true;
-      }
+    // Only an array index inside `path` can be renumbered: for each such
+    // position, ask whether its parent saw an add/remove in (i, j).
+    for (let n = 0; n < path.length; n++) {
+      if (typeof path[n] !== "number") continue;
+      const list = shiftsByParent.get(
+        pathKey(path.slice(0, n) as (string | number)[]),
+      );
+      if (!list) continue;
+      const k = firstAbove(list, i);
+      if (k < list.length && list[k]! < j) return true;
     }
     return false;
   };
 
   /** Is op `i` overwritten by a later replace at its path or an ancestor? */
-  const superseded = (i: number, p: Patch): boolean => {
+  const superseded = (i: number, p: WirePatch): boolean => {
     const path = p.path as (string | number)[];
     // Same path — last-write-wins, but only between POSITIONAL ops. An
-    // `add`/`remove` here is a shift the later replace does not undo.
-    if (p.op === "replace") {
+    // `add`/`remove` here is a shift the later replace does not undo. An
+    // `append` is a value write like `replace`: a later whole-value replace
+    // at its path overwrites it, and it can never be the superseding op
+    // itself (it extends, it does not re-establish).
+    if (p.op === "replace" || p.op === "append") {
       const at = lastReplace.get(pathKey(path));
       if (at !== undefined && at > i && !movedBetween(i, at, path)) return true;
     }
@@ -337,7 +431,7 @@ export function compactPatches(ops: Patch[]): Patch[] {
     return false;
   };
 
-  const result: Patch[] = [];
+  const result: WirePatch[] = [];
   for (let i = 0; i < ops.length; i++) {
     const p = ops[i]!;
     if (!superseded(i, p)) result.push(p);

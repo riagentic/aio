@@ -83,8 +83,6 @@ await app.close();
 
 Deno.test({
   name: "boot: top-level await aio.run() completes — plain app",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const r = await bootTopLevel(`{ persist: false }`);
     assert(r.out.includes("BOOTED"), `did not boot:\n${r.out.slice(-1500)}`);
@@ -94,8 +92,6 @@ Deno.test({
 
 Deno.test({
   name: "boot: top-level await aio.run() completes — with feedback",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     // `feedback: true` is what pulled in the dynamic import.
     const r = await bootTopLevel(`{ persist: false, feedback: true }`);

@@ -252,4 +252,14 @@ export const aio: Record<string, any> = {
   run() {
     return Promise.resolve();
   },
+  stop() {
+    throw new Error(
+      "aio.stop() runs on the server — dispatch a method that calls it",
+    );
+  },
+  restart() {
+    throw new Error(
+      "aio.restart() runs on the server — dispatch a method that calls it",
+    );
+  },
 };

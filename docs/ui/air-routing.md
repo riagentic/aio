@@ -253,6 +253,29 @@ export default function App() {
 
 ---
 
+## Standalone (Android) builds
+
+The router is the same on every target — routing is state (a signal over
+`location`) plus the history API, and a WebView has both. `<Route>`, `<Link>`,
+`<NavLink>`, `<Outlet>`, `<Redirect>`, `useRoute()`, `useNavigate()` and
+`navigate()` import from `aio/air` exactly as in the browser build; the
+standalone runtime boots the cells before the first route renders.
+
+Two things are specific to a packaged app:
+
+- **The shell's document is `/`.** The APK's asset loader serves
+  `…/assets/index.html`, so `location.pathname` does not start at `/`. The
+  runtime adopts the shell's directory as the route base at boot:
+  `<Route
+  path="/">` matches the first screen, `navigate("/settings")` writes
+  `/assets/settings` to history, and `routePath.value` reads `/settings`. No app
+  code changes.
+- **Back is the hardware button.** The Android shell maps it to
+  `history.back()`, so every `navigate()` is a real history entry and back
+  behaves as in a browser. A recreated activity (rotation, process death)
+  reloads the shell and starts at `/` again — keep screen identity in cell state
+  if it must survive that, exactly as you would for a browser reload.
+
 ## page() — State-Based Routing
 
 For Electron, kiosk, or single-tab apps where URL doesn't matter:

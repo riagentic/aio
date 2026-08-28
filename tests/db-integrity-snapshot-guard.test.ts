@@ -9,7 +9,7 @@
 
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
-import { createDB } from "../src/db/mod.ts";
+import { createDB } from "../src/server-entry.ts";
 import {
   checkAndRecover,
   QUARANTINE_KEEP,

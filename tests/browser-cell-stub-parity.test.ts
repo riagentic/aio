@@ -93,7 +93,7 @@ function makeConfig() {
         fn: (s: { n: number }, d: { rate: number }) => s.n * d.rate,
       },
     },
-    ui: { exclude: ["secret"] },
+    visible: { exclude: ["secret"] },
     sync: true,
     // `long` has to be exercised here or the stub's key is never produced —
     // and the browser resolves the same call ceiling the server does, so a

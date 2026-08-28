@@ -323,8 +323,8 @@ Deno.test("am fix seals a local-checkout link with a path: pin, and the pin deci
     );
 
     // aiol's own pin check passes on the app am fix just repaired.
-    const { lint } = await import("../aiol/mod.ts");
-    const report = await lint(s.app);
+    const { lintProject } = await import("../aiol/mod.ts");
+    const report = await lintProject(s.app);
     const mismatch = report.issues.filter((i) =>
       i.message.includes("does not match dep/aio")
     );
@@ -353,9 +353,9 @@ Deno.test("am fix seals a local-checkout link with a path: pin, and the pin deci
 // sentence. One link, two tools, two answers, and the only visible exit was the
 // destructive one. `pinDisagreementHint` is now THE decider both read.
 Deno.test("pin hint: a version pin over a checkout offers BOTH ways out", () => {
-  const hint = pinDisagreementHint("1.0.0-alpha56", "/home/dev/code/gen/aio");
+  const hint = pinDisagreementHint("1.0.0-alpha56", "/opt/aio-checkout");
   assert(hint, "a checkout link must produce a hint");
-  assertStringIncludes(hint, "am pin path:/home/dev/code/gen/aio");
+  assertStringIncludes(hint, "am pin path:/opt/aio-checkout");
   assertStringIncludes(hint, "am fix");
   assert(
     hint.indexOf("am pin path:") < hint.indexOf("am fix"),
@@ -371,7 +371,7 @@ Deno.test("pin hint: a link inside the version store gets no special hint", () =
 });
 
 Deno.test("pin hint: a path pin never disagrees with the link it names", () => {
-  const checkout = "/home/dev/code/gen/aio";
+  const checkout = "/opt/aio-checkout";
   assertEquals(
     pinDisagreementHint(`path:${checkout}`, checkout),
     null,

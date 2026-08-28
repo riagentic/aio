@@ -8,7 +8,7 @@ import type {
 import type { ScheduleDef, ScheduleEffect } from "../state/schedule.ts";
 import type { OwnEffect } from "../state/own.ts";
 import type { DB } from "../db/mod.ts";
-import type { TableDef } from "./sql.ts";
+import type { DbMapping, TableDef } from "./sql.ts";
 import type { CellStatus, CircuitBreakerConfig } from "../state/cell.ts";
 import type { MemoryConfig } from "../diagnostics/memory-monitor.ts";
 import type { LogConfig } from "../diagnostics/logger.ts";
@@ -341,7 +341,7 @@ export type AioConfig<S, A, E> = {
   /** App version — default: deno.json `version`. */
   appVersion?: string; // app version string — logged on startup, available at __aio.appVersion
   schedules?: ScheduleDef[]; // static scheduled effects — started on boot
-  db?: Record<string, TableDef>; // SQLite table definitions — arrays auto-sync
+  db?: Record<string, TableDef | DbMapping>; // SQLite table definitions — arrays auto-sync
   perfCheck?: "on" | "off"; // default: 'on' — enable/disable performance violation reporting
   perfBudget?: PerfBudget; // override default budgets (reduce: 100, effect: 5)
   renderBudget?: RenderBudget; // override render staleness/patch thresholds (sent to browser)
@@ -455,8 +455,10 @@ export type AioConfig<S, A, E> = {
   /** Internal: field sets for "filter" strategy cells */
   _cellFilterFields?: Map<string, PatchFilterFields>;
   /** Internal: per-cell declarative network-access rules (AUTH-1) */
-  _cellAccess?: Map<string, import("../state/cell-types.ts").CellAccess>;
+  _cellAccess?: Map<string, import("../state/cell-types.ts").Access>;
   _cellMethods?: Record<string, string[]>;
+  /** @internal Cell id → async method names (the `_callId`-settling ones). */
+  _cellAsyncMethods?: Record<string, string[]>;
   /** Internal: per-cell, per-field { persisted, ui } flags — trojan `fields`. */
   _cellFields?: CellFieldFlags;
 };
@@ -630,7 +632,7 @@ export type CellsConfig = {
   sessions?: boolean | { ttlMs?: number };
   /** AUTH-2/3: built-in password auth (see AioConfig.auth). */
   auth?: boolean | AuthOptions;
-  db?: Record<string, TableDef>;
+  db?: Record<string, TableDef | DbMapping>;
   perfCheck?: "on" | "off";
   perfBudget?: PerfBudget;
   /** Client render-staleness / pending-patch thresholds — sent to the browser

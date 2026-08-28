@@ -34,8 +34,6 @@ function kvKeys(dir: string): string[] {
 Deno.test({
   name:
     "persist: switching persistMode migrates the stored document instead of booting empty",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: async () => {
     const dir = await Deno.makeTempDir({ prefix: "aio-mode-switch-" });
     const appId = `mode-${crypto.randomUUID().slice(0, 8)}`;

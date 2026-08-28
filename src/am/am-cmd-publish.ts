@@ -30,9 +30,11 @@ import {
   type DataContract,
   defaultKeyPath,
   manifestFileName,
+  resolveSigningKey,
   shipApp,
   type ShipManifest,
 } from "../build/ship.ts";
+import { appIdFromConfig } from "../server/single-instance-lock.ts";
 
 /** What `dist/manifest.json` records — the fleet build's own report. */
 type BuildManifest = {
@@ -91,6 +93,9 @@ export async function cmdPublish(
   const cfg = ((await readDenoJson(root))?.config ?? {}) as {
     build?: { out?: string; channel?: string };
     version?: string;
+    appId?: string;
+    title?: string;
+    name?: string;
   };
   const distDir = resolve(root, cfg.build?.out ?? "dist");
   const channel = flag("channel") ?? cfg.build?.channel ?? "prod";
@@ -127,6 +132,12 @@ export async function cmdPublish(
       mode,
     );
   }
+  // The key: `--key`, else the file `ship keygen` writes for THIS app when it
+  // exists, else unsigned — and which one it was is said in every mode.
+  const key = await resolveSigningKey(
+    flag("key"),
+    build!.app ?? appIdFromConfig(cfg) ?? "app",
+  );
   const built = (build!.targets ?? []).filter((t) =>
     t.ok !== false && (t.artifacts?.length ?? 0) > 0
   );
@@ -233,7 +244,7 @@ export async function cmdPublish(
     const m = await shipApp({
       binaryPath,
       version: flag("version") ?? cfg.version,
-      keyPath: flag("key"),
+      keyPath: key.path,
       channel,
       notes: flag("notes"),
       minFrom: flag("min-from"),
@@ -272,11 +283,21 @@ export async function cmdPublish(
 
   const rel = (p: string) => p.replace(root + "/", "");
   const unsigned = manifests.some((m) => !m.signature);
+  // The warning is the same fact in both modes — a CI log used to get
+  // `"signed":false` and nothing else, and an unsigned release is the one a
+  // client refuses on someone else's machine.
+  if (unsigned) console.error(unsignedWarning(manifests[0]!.name));
+  else if (key.source === "default") {
+    console.error(
+      `am publish: ✓ signed with ${key.path} (the ship keygen default; --key=<path> picks another)`,
+    );
+  }
   if (mode === "json") {
     out({
       channel,
       dir: outDir,
       signed: !unsigned,
+      key: unsigned ? null : { path: key.path, source: key.source },
       /** Manifests given the host artifact's contract (same build, same cells). */
       contractStampedInto: stamped,
       /** Manifests published with NO data contract — refused by any install
@@ -312,18 +333,10 @@ export async function cmdPublish(
     ]),
     ``,
     unsigned
-      ? `  UNSIGNED — clients refuse this unless the app sets ` +
-        `updates: { allowUnsigned: true }. Sign with --key=<path>.\n` +
-        // Name the command AND where its output lands. "keygen makes one" sent
-        // readers looking for a file that keygen deliberately writes OUTSIDE
-        // the repo, and the shape they reach for — `keygen > key.json` —
-        // captures the printed SUMMARY (a public key and no private half),
-        // which signs nothing and fails later with a WebCrypto error.
-        `           No key yet: \`deno task ship keygen\` writes one to ` +
-        `${defaultKeyPath(manifests[0]!.name)} and prints that path — pass ` +
-        `it to --key. Do NOT redirect keygen's output: that captures the ` +
-        `printed summary (a public key, no private half), which signs nothing.`
-      : `  signed`,
+      ? `  UNSIGNED (see the warning above)`
+      : `  signed (${
+        key.source === "default" ? "keygen default: " : ""
+      }${key.path})`,
     ``,
     // No silent caps: a file the publisher built and this command chose not
     // to publish is said out loud, or "published" reads as "published
@@ -360,4 +373,19 @@ export async function cmdPublish(
     ``,
   ];
   out(lines.join("\n"), mode);
+}
+
+/** The unsigned warning, one text for both output modes. */
+export function unsignedWarning(appName: string): string {
+  // Name the command AND where its output lands. "keygen makes one" sent
+  // readers looking for a file that keygen deliberately writes OUTSIDE the
+  // repo, and the shape they reach for — `keygen > key.json` — captures the
+  // printed SUMMARY (a public key and no private half), which signs nothing
+  // and fails later with a WebCrypto error.
+  return `am publish: warning: UNSIGNED — clients refuse this unless the app sets ` +
+    `updates: { allowUnsigned: true }. Sign with --key=<path>.\n` +
+    `           No key yet: \`deno task ship keygen\` writes one to ` +
+    `${defaultKeyPath(appName)} — am publish uses that file automatically ` +
+    `once it exists. Do NOT redirect keygen's output: that captures the ` +
+    `printed summary (a public key, no private half), which signs nothing.`;
 }

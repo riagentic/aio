@@ -97,6 +97,11 @@ const EXTRA_ON_BROWSER: Record<string, string> = {
   matchPath: "router primitive used by generated code and tests",
   authUser: "reactive identity signal behind useUser",
   setSyncMessageHandler: "sync-engine transport seam",
+  // The component test harness left `aio/air` in alpha70 (it lives on
+  // `aio/testing`, next to testCell/testUI) — but it renders through THIS
+  // module's DOM-side renderer, so aio/testing re-exports it from here.
+  setDocument: "test harness DOM injection — re-exported by aio/testing",
+  testComponent: "component test harness — re-exported by aio/testing",
 };
 
 Deno.test("browser aio/air: every extra export is a listed decision", () => {

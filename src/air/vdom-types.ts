@@ -203,13 +203,9 @@ export interface RenderCtx {
 export type Ref<T = Node> = ((value: T | null) => void) | { current: T | null };
 
 /** Node-action function signature for the `use` prop (alpha52 name — the bare
- *  `Action` collided with the state-layer's action vocabulary). */
+ *  `Action` collided with the state-layer's action vocabulary; the alias went
+ *  out in alpha70, see src/state/removals.ts). */
 export type NodeAction = (node: HTMLElement) => { cleanup?(): void } | void;
-
-/** An action a surface node can be driven with — the legacy spelling of
- *  {@linkcode NodeAction}.
- *  @deprecated alpha52 — renamed {@linkcode NodeAction}. Alias through beta. */
-export type Action = NodeAction;
 
 // ── Dev mode ───────────────────────────────────────────────────────
 

@@ -115,7 +115,9 @@ export async function cmdExpect(
 ): Promise<void> {
   const mode = detectMode(flags);
   const appId = resolveAmAppId(flags.app);
-  const port = resolvePort(flags.port, appId);
+  const port = resolvePort(flags.port, appId, {
+    explicit: flags.app !== undefined,
+  });
   const [path, op, rawValue] = args;
   if (!path || !op) {
     outError(
@@ -181,7 +183,9 @@ export async function cmdState(
   if (flags.ui) return uiProjection(args, flags);
   const mode = detectMode(flags);
   const appId = resolveAmAppId(flags.app);
-  const port = resolvePort(flags.port, appId);
+  const port = resolvePort(flags.port, appId, {
+    explicit: flags.app !== undefined,
+  });
   const path = args[0];
 
   const fetchAndResolve = async (
@@ -243,7 +247,9 @@ async function uiProjection(
 ): Promise<void> {
   const mode = detectMode(flags);
   const appId = resolveAmAppId(flags.app);
-  const port = resolvePort(flags.port, appId);
+  const port = resolvePort(flags.port, appId, {
+    explicit: flags.app !== undefined,
+  });
   const user = args[0];
   const route = user ? `ui?user=${encodeURIComponent(user)}` : "ui";
   const result = await trojanGet(port, route, appId);
@@ -330,7 +336,9 @@ export async function cmdDispatch(
 ): Promise<void> {
   const mode = detectMode(flags);
   const appId = resolveAmAppId(flags.app);
-  const port = resolvePort(flags.port, appId);
+  const port = resolvePort(flags.port, appId, {
+    explicit: flags.app !== undefined,
+  });
 
   let action: unknown;
   if (flags.jsonArgs !== undefined) {
@@ -454,10 +462,12 @@ export async function cmdActions(
 export async function cmdTT(args: string[], flags: GlobalFlags): Promise<void> {
   const mode = detectMode(flags);
   const appId = resolveAmAppId(flags.app);
-  const port = resolvePort(flags.port, appId);
+  const port = resolvePort(flags.port, appId, {
+    explicit: flags.app !== undefined,
+  });
   const cmd = args[0];
   if (!cmd) {
-    outError("usage: am tt <undo|redo|goto N|pause|resume>", mode);
+    outError("usage: am timetravel <undo|redo|goto N|pause|resume>", mode);
     Deno.exit(1);
   }
   const arg = cmd === "goto" ? Number(args[1]) : undefined;
@@ -544,7 +554,9 @@ export async function cmdPersist(
 ): Promise<void> {
   const mode = detectMode(flags);
   const appId = resolveAmAppId(flags.app);
-  const port = resolvePort(flags.port, appId);
+  const port = resolvePort(flags.port, appId, {
+    explicit: flags.app !== undefined,
+  });
   const result = await trojanPost(port, "persist", undefined, appId);
   if (!result.ok) {
     outError(result.error, mode);
@@ -559,7 +571,9 @@ export async function cmdSnapshot(
 ): Promise<void> {
   const mode = detectMode(flags);
   const appId = resolveAmAppId(flags.app);
-  const port = resolvePort(flags.port, appId);
+  const port = resolvePort(flags.port, appId, {
+    explicit: flags.app !== undefined,
+  });
   const sub = args[0];
 
   if (!sub) {

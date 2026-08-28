@@ -14,6 +14,11 @@
 // `check:boundaries` cannot enforce that (root files have unrestricted reach),
 // so it is stated here and in `test-strict.ts`, beside both import lists.
 
+import {
+  applyCellDefaults,
+  applyLocalFirst,
+  type CellDefaults,
+} from "../state/cell-defaults.ts";
 import { composeCells } from "../state/cell-compose.ts";
 import { refuseUnsafeComposition } from "../server/aio-composition.ts";
 import type { CellDef, CellEntry } from "../state/cell-types.ts";
@@ -31,7 +36,10 @@ import type { CellDef, CellEntry } from "../state/cell-types.ts";
  *  harness-only failure for code production accepts — strictness must mirror a
  *  real boot, not invent a rule of its own.
  *  @internal */
-export function _refuseUnsafeCells(cells: readonly CellEntry[]): void {
+export function _refuseUnsafeCells(
+  cells: readonly CellEntry[],
+  opts: HarnessBootOptions = {},
+): void {
   const serverScoped = cells.filter((entry) => {
     const def =
       ("__aio" in entry ? entry : (entry as { cell: CellDef }).cell) as
@@ -40,5 +48,19 @@ export function _refuseUnsafeCells(cells: readonly CellEntry[]): void {
     return def?.__aio?.scope !== "client";
   });
   if (serverScoped.length === 0) return; // nothing to refuse; composeCells would warn
-  refuseUnsafeComposition(composeCells(serverScoped, { perfCheck: false }));
+  const composed = composeCells(serverScoped, { perfCheck: false });
+  // The SAME two passes `aio.run` makes before it refuses: both change what a
+  // cell hides and whether it syncs, and the contradiction is only decidable
+  // once they have run. Without them an app whose only contradiction came
+  // from its app-level defaults was green here and refused at boot.
+  applyCellDefaults(composed, opts.cellDefaults);
+  applyLocalFirst(composed, opts.localFirst === true);
+  refuseUnsafeComposition(composed);
 }
+
+/** The app-level composition options a harness has to honour to boot the
+ *  cells the way `aio.run({ cellDefaults, localFirst })` does. */
+export type HarnessBootOptions = {
+  cellDefaults?: CellDefaults;
+  localFirst?: boolean;
+};

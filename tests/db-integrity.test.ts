@@ -7,7 +7,7 @@
 // a step that loses data is worse than the corruption it answers — so these
 // tests pin what happens to the USER'S BYTES in each branch.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { createDB } from "../src/db/mod.ts";
+import { createDB } from "../src/server-entry.ts";
 import {
   checkAndRecover,
   quarantinePathFor,

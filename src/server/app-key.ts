@@ -3,7 +3,9 @@
 // or disabled explicitly. This is the sugar over the `users` map for the
 // common "one shared key" case.
 import { appDirs } from "./app-dirs.ts";
+import { octal, privateDirRefusal, sharedBits } from "./dir-permissions.ts";
 import { dirname, join } from "@std/path";
+import { log } from "../diagnostics/logger-api.ts";
 
 /** Outcome of resolving the app key. */
 export interface KeyResolution {
@@ -44,6 +46,44 @@ export function defaultAppKeyConfig(opts: {
   return { key: opts.key, defaulted: false };
 }
 
+/** Make a credential's directory, owner-only. THE spelling.
+ *
+ *  0700 for the same reason `ensureAppDirs` gives for the tree above it: the
+ *  mode of a directory is decided by what it can EVER hold, not by what
+ *  today's file happens to be. `resolveAppKey` used to make this directory
+ *  itself, at the umask — 0755 on a stock Ubuntu — because it runs before
+ *  `aio.run` has built the tree when a test or `am` calls it directly. */
+function ensureKeyHome(path: string): void {
+  Deno.mkdirSync(dirname(path), { recursive: true });
+  if (Deno.build.os === "windows") return; // no POSIX mode; chmod throws
+  try {
+    Deno.chmodSync(dirname(path), 0o700);
+  } catch { /* a restrictive umask or FS may refuse — best effort */ }
+}
+
+/** Write a credential so it is never, at any instant, readable by anyone else.
+ *  THE spelling — three lived in this file, and only one of them was right.
+ *
+ *  `mode` applies at CREATE time only, which is why the remove comes first:
+ *  rewriting a file some older version left at 0644 would otherwise keep the
+ *  0644. And creating at 0600 rather than chmod-ing afterwards closes the
+ *  window in which the file exists at the umask — narrow, but a credential
+ *  read during it is read for good.
+ *
+ *  Throws on failure. A silent one leaves the caller believing a secret is on
+ *  disk at 0600 when it may be at 0644 or absent. */
+function writeSecretFileSync(path: string, contents: string): void {
+  ensureKeyHome(path);
+  try {
+    Deno.removeSync(path);
+  } catch { /* not present */ }
+  Deno.writeTextFileSync(path, contents, { mode: 0o600 });
+  if (Deno.build.os === "windows") return;
+  try {
+    Deno.chmodSync(path, 0o600); // belt and braces where `mode` was ignored
+  } catch { /* chmod unsupported */ }
+}
+
 export function resolveAppKey(
   appId: string,
   configKey: string | boolean | undefined,
@@ -52,7 +92,7 @@ export function resolveAppKey(
   // A direct caller (a test, `am`) may reach this before aio.run() created the
   // tree — the key is tier ① data, so make its home rather than fail.
   try {
-    Deno.mkdirSync(dirname(path), { recursive: true });
+    ensureKeyHome(path);
   } catch { /* exists, or unwritable — the write below reports it */ }
   // Default (undefined) and explicit `false` → no framework auth (open).
   if (configKey === undefined || configKey === false) {
@@ -66,9 +106,16 @@ export function resolveAppKey(
     // Mirror the fixed key to disk too, so `am profile` and other local
     // tooling read the ACTIVE key regardless of where it was set.
     try {
-      Deno.writeTextFileSync(path, configKey);
-      Deno.chmodSync(path, 0o600);
-    } catch { /* data dir not writable — fixed key still works in-process */ }
+      writeSecretFileSync(path, configKey);
+    } catch (e) {
+      // The fixed key still works in-process; what does NOT work is `am`
+      // reading it from the data dir — and that used to fail silently.
+      log.warn(
+        "auth",
+        `could not record the app key at ${path} (${e}) — the key works, ` +
+          `but tooling reading it from the data dir will not find it`,
+      );
+    }
     return { key: configKey, persisted: false, explicit: true };
   }
   // `key: true` → a persisted, stable auto-generated key.
@@ -78,10 +125,7 @@ export function resolveAppKey(
       if (existing) return { key: existing, persisted: true, explicit: true };
     } catch { /* not created yet */ }
     const key = crypto.randomUUID();
-    Deno.writeTextFileSync(path, key);
-    try {
-      Deno.chmodSync(path, 0o600); // owner-only (best-effort; no-op on Windows)
-    } catch { /* chmod unsupported */ }
+    writeSecretFileSync(path, key);
     return { key, persisted: true, explicit: true };
   } catch {
     // Data dir not writable — fall back to an ephemeral key (still auth-on).
@@ -132,15 +176,6 @@ export function controlKeyPath(appId: string): string {
   return join(appDirs(appId).data, "control.key");
 }
 
-/** Group+other permission bits, or null when the platform has no POSIX mode
- *  (Windows). `null` means "unknown", never "fine". */
-function sharedBits(mode: number | null | undefined): number | null {
-  return typeof mode === "number" ? mode & 0o077 : null;
-}
-
-const octal = (mode: number | null | undefined): string =>
-  typeof mode === "number" ? (mode & 0o777).toString(8).padStart(3, "0") : "?";
-
 /** Either the credential, or the reason there isn't one — never a silent miss. */
 export type ControlKeyResult =
   | { key: string; path: string; error?: undefined }
@@ -157,8 +192,8 @@ export function _controlDirRefusal(
   dir: string,
   mode: number | null,
 ): string | null {
-  const shared = sharedBits(mode);
-  if (shared === null || shared === 0) return null;
+  // The generic rule lives in dir-permissions.ts; this adds what to DO.
+  if (privateDirRefusal(dir, mode) === null) return null;
   return `app data dir ${dir} is mode ${
     octal(mode)
   } (not owner-only) — refusing to write a control-plane credential where ` +
@@ -200,15 +235,7 @@ export function mintControlKey(appId: string): ControlKeyResult {
     (b) => b.toString(16).padStart(2, "0"),
   ).join("");
   try {
-    // Remove first: writeTextFileSync's `mode` applies at CREATE time only, so
-    // overwriting an existing 0644 file would keep the 0644.
-    try {
-      Deno.removeSync(path);
-    } catch { /* not present */ }
-    Deno.writeTextFileSync(path, key + "\n", { mode: 0o600 });
-    try {
-      if (Deno.build.os !== "windows") Deno.chmodSync(path, 0o600);
-    } catch { /* chmod unsupported */ }
+    writeSecretFileSync(path, key + "\n");
   } catch (e) {
     return {
       error: `cannot write ${path} (${

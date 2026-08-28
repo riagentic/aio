@@ -212,8 +212,6 @@ const mode = async (p: string) => (await Deno.stat(p)).mode! & 0o777;
 Deno.test({
   name: "seam: an app writes under its two homes and nowhere else",
   ignore: Deno.build.os === "windows", // POSIX modes + $XDG_RUNTIME_DIR
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const sb = await sandbox();
     const port = freePort();
@@ -310,8 +308,6 @@ Deno.test({
 Deno.test({
   name: "seam: the secrets --expose creates are unreachable by other users",
   ignore: Deno.build.os === "windows",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     // `app.key` and the TLS private key only exist on the exposed path — which
     // is precisely the path where the mode matters, because it is the one that

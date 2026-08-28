@@ -80,31 +80,17 @@ const ABSENT_ON_ANDROID: Record<string, string> = {
   isConnectionDegraded: "no server transport in a standalone app",
   useConnected: "no server transport in a standalone app",
   useProjection: "built on the transport's reference-sharing projector",
-  // Auth UI talks to /__aio/auth/* on a server.
-  SignIn: "server auth endpoints",
-  signOut: "server auth endpoints",
-  useUser: "server auth endpoints",
-  // Browser-history router.
-  Link: "browser-history router",
-  NavLink: "browser-history router",
-  Outlet: "browser-history router",
-  Redirect: "browser-history router",
-  Route: "browser-history router",
-  navigate: "browser-history router",
-  routePath: "browser-history router",
-  routeSearch: "browser-history router",
-  useNavigate: "browser-history router",
-  useRoute: "browser-history router",
-  // Server-side rendering / islands — there is no HTML shell to hydrate into.
-  island: "SSR/islands are a server-rendered-page concern",
-  reactIsland: "SSR/islands are a server-rendered-page concern",
-  renderToStream: "SSR/islands are a server-rendered-page concern",
+  // Server-side rendering — there is no HTML shell to hydrate into. (Islands
+  // and the router SHIP on android since alpha70: client-side interop and
+  // history-API routing need no server; the auth UI ships resolved to the
+  // anonymous branch — see standalone-air.ts.)
+  renderToStream: "SSR is a server-rendered-page concern",
   // Devtools + test harness connect over the dev server / a DOM shim.
   connectAioDevTools: "devtools bridge is a dev-server concern",
-  connectDevTools: "devtools bridge is a dev-server concern",
-  disconnectDevTools: "devtools bridge is a dev-server concern",
-  setDocument: "test-only DOM injection",
-  testComponent: "test-only component harness",
+  connectReduxDevTools: "devtools bridge is a dev-server concern",
+  disconnectReduxDevTools: "devtools bridge is a dev-server concern",
+  // (`setDocument`/`testComponent` moved to `aio/testing` in alpha70 — no
+  // longer an `aio/air` export, so no longer an android gap to record.)
   useTimeTravel: "time travel streams from the server's action log",
 };
 
@@ -196,7 +182,7 @@ const SERVER_ONLY: Record<string, string> = {
   real: "SQLite schema builder",
   isCellWorker: "Deno worker-thread cells",
   blocking: "Deno worker pool (see tests/bundle-load-time-throw.test.ts)",
-  testCell: "test harness — runs in a Deno test process",
+  // (`testCell` moved to `aio/testing` in alpha70 — off `aio`, off this ledger.)
 };
 
 /** On `aio`, missing here, and NOT deliberate — the R-14 class, enumerated so
@@ -206,9 +192,8 @@ const SERVER_ONLY: Record<string, string> = {
  *  example, so the documented spelling of an async method did not bundle for a
  *  shipped target) and they now ship. What is left needs work, not a line. */
 const KNOWN_GAPS: Record<string, string> = {
-  schedule:
-    "pulls the Deno worker pool through blocking.ts — needs the standalone " +
-    "half separated from the pool, not a re-export",
+  // alpha70 closed the last one: `schedule` no longer pulls the Deno worker
+  // pool (blocking.ts), so the standalone entry re-exports it.
 };
 
 Deno.test("android `aio`: every missing export is a listed decision or a listed gap", () => {

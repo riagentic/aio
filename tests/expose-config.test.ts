@@ -99,8 +99,6 @@ Deno.test("expose: ONE decider — CLI wins, config carries, default false", () 
 Deno.test({
   name:
     'expose: aio.run({ expose: true }) boots (not config-fatal), binds 0.0.0.0 over TLS, AND still warns about ui="all"',
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const appId = `expose-cfg-${crypto.randomUUID().slice(0, 8)}`;
     const dir = await scaffold({
@@ -133,8 +131,6 @@ Deno.test({
 
 Deno.test({
   name: 'expose: an unexposed app is not warned about ui="all"',
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const appId = `expose-off-${crypto.randomUUID().slice(0, 8)}`;
     const dir = await scaffold({ appId, runOpts: `port: ${freePort()}` });
@@ -169,8 +165,6 @@ Deno.test("cli: --no-tls parses, and is off unless asked for", () => {
 
 Deno.test({
   name: "expose: --expose --no-tls serves plain HTTP and says so loudly",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const appId = `expose-plain-${crypto.randomUUID().slice(0, 8)}`;
     const dir = await scaffold({ appId, runOpts: `port: ${freePort()}` });
@@ -192,8 +186,6 @@ Deno.test({
 
 Deno.test({
   name: "expose: --expose alone still forces TLS (no silent downgrade)",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const appId = `expose-tls-${crypto.randomUUID().slice(0, 8)}`;
     const dir = await scaffold({ appId, runOpts: `port: ${freePort()}` });
@@ -238,8 +230,6 @@ Deno.test("appVersion: an unknown version says unknown — never a confident 0.0
 
 Deno.test({
   name: "appVersion: a NESTED entry module still finds the app's deno.json",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const appId = `ver-nested-${crypto.randomUUID().slice(0, 8)}`;
     const dir = await scaffold({
@@ -264,8 +254,6 @@ Deno.test({
 Deno.test({
   name:
     "expose: key: false is the explicit opt-out — app stays OPEN, with a loud warning",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const appId = `expose-open-${crypto.randomUUID().slice(0, 8)}`;
     const dir = await scaffold({
@@ -305,8 +293,6 @@ Deno.test({
 
 Deno.test({
   name: "host: a config-set bind address reaches the boot report and the URLs",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const appId = `host-cfg-${crypto.randomUUID().slice(0, 8)}`;
     const port = freePort();
@@ -336,8 +322,6 @@ Deno.test({
 
 Deno.test({
   name: "host: the CLI flag wins over config, and the report follows the flag",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const appId = `host-flag-${crypto.randomUUID().slice(0, 8)}`;
     const port = freePort();

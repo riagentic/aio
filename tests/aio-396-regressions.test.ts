@@ -1,4 +1,4 @@
-// Regression tests for four bugs found porting FJSSM (July 2026):
+// Regression tests for four bugs found porting a scheduling app (July 2026):
 //   AIO-395 — Fragment keyed children re-anchored at parent start (see
 //             aio-395-fragment-region.test.ts for the DOM-order repro)
 //   AIO-396 — _registerAck double-registration orphaned the caller's promise

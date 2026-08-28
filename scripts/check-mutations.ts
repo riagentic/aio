@@ -69,6 +69,36 @@ export type Mutation = {
 export const LEDGER: readonly Mutation[] = [
   {
     what:
+      "retireData stops moving the profile and the new build boots on the OLD data it was blocked for \u2014 the operator asked for a fresh start and got a migration nobody vetted, on the code path where being wrong costs a user their data",
+    file: "src/server/updates-retire.ts",
+    find: "    await Deno.rename(dataDir, archive);",
+    replace: "    await Deno.mkdir(archive);",
+    test: "tests/updates-retire.test.ts",
+    filter:
+      "retireData: a blocked release installs, and the profile is retired at handover \u2014 moved whole, never deleted",
+  },
+  {
+    what:
+      "aio.restart() stops refusing in libraryMode and a cell method under test ends the TEST RUNNER \u2014 a refusal with the manual step becomes a silent process exit in whoever hosts the app",
+    file: "src/server/aio-lifecycle.ts",
+    find: "  if (f.libraryMode) { // the host owns the process — never exit it",
+    replace: "  if (f.libraryMode && !f.running) { // mutated",
+    test: "tests/lifecycle-restart.test.ts",
+    filter:
+      "restart matrix: every launcher has a row, and no row is a silent no-op",
+  },
+  {
+    what:
+      'a declared share stops being held inside the repository \u2014 deno.json "share": ["/"] (or a symlink that leaves the checkout) turns the dev server into a file server for the whole machine',
+    file: "src/server/app-dirs.ts",
+    find: "    if (real !== repo && !real.startsWith(repoPfx)) {",
+    replace: "    if (real !== repo && real.startsWith(repoPfx)) {",
+    test: "tests/share.test.ts",
+    filter:
+      "share: resolves to /<basename> inside the repo; refuses missing, escaping and colliding entries",
+  },
+  {
+    what:
       "an update installs code signed by ANY key, including the attacker's own \u2014 a forged manifest is internally consistent by construction, so verifying against the key it carries proves nothing, and the app replaces its own binary with whatever the source served",
     file: "src/build/ship.ts",
     find:
@@ -172,11 +202,23 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "the trojan control-plane credential (raw state, arbitrary SQL, shutdown) is written into a directory other local users can read",
-    file: "src/server/app-key.ts",
-    find: "  if (shared === null || shared === 0) return null;",
-    replace: "  if (shared !== undefined) return null;",
+    // The rule moved to dir-permissions.ts when the lock directory started
+    // asking the same question. Mutating the MASK disables detection for both
+    // doors at once, which is the point: they are one rule now.
+    file: "src/server/dir-permissions.ts",
+    find: '  return typeof mode === "number" ? mode & 0o077 : null;',
+    replace: '  return typeof mode === "number" ? mode & 0o000 : null;',
     test: "tests/local-control.test.ts",
     filter: "control key: refuses a data dir other users can read",
+  },
+  {
+    what:
+      "a control SOCKET is bound in a directory another local user owns \u2014 chmod on someone else's directory fails with EPERM, and whoever can reach the socket can dispatch methods into the app",
+    file: "src/server/single-instance-lock.ts",
+    find: "  return privateDirRefusal(dir, st.mode, st.uid);",
+    replace: "  return null;",
+    test: "tests/lock-dir-private.test.ts",
+    filter: "a directory we cannot narrow is refused, not used",
   },
   {
     what:
@@ -283,8 +325,8 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "a mass delete exceeds SQLITE_MAX_VARIABLE_NUMBER, the shared transaction rolls back forever and a confirmed deletion is silently undone by the next restart",
     file: "src/db/state-sync.ts",
-    find: "      for (const batch of chunkParams(toDelete)) {",
-    replace: "      for (const batch of [toDelete]) {",
+    find: "        for (const batch of chunkParams(d.toDelete)) {",
+    replace: "        for (const batch of [d.toDelete]) {",
     test: "tests/db-mass-delete.test.ts",
     filter:
       "db: a mass delete is chunked \u2014 no statement exceeds the param cap",
@@ -392,16 +434,6 @@ export const LEDGER: readonly Mutation[] = [
   },
   {
     what:
-      "the hand-kept browser twin of `schedule` drops an option, so the same method produces a DIFFERENT effect in the browser than on the server",
-    file: "src/browser/browser-shared.ts",
-    find: "      ...(opts?.skipIfRunning ? { skipIfRunning: true } : {}),",
-    replace: "      ...(false ? { skipIfRunning: true } : {}),",
-    test: "tests/browser-shared-inline-parity.test.ts",
-    filter:
-      "browser-shared: schedule effect creators are output-identical (randomized)",
-  },
-  {
-    what:
       "an async onStop (a flush, a child to wait for) is abandoned the moment it starts and the process exits milliseconds later",
     file: "src/server/shutdown.ts",
     find: '      await phase(log, "hook onStop", tLeft, () => refs.onStop!());',
@@ -434,10 +466,214 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "a row with a null primary key is silently dropped instead of refused \u2014 the write is acknowledged and the data is simply not there",
     file: "src/db/state-sync.ts",
-    find: "      if (key === undefined || key === null) {",
-    replace: "      if (key === undefined) {",
+    find: "  if (key === undefined || key === null) {",
+    replace: "  if (key === undefined) {",
     test: "tests/db-sync-integrity.test.ts",
     filter: "db sync: a null primary key is refused, not silently dropped",
+  },
+  {
+    what:
+      "a write through an async method's `s` from a callback that outlived the method COMMITS \u2014 persisted, broadcast, ok:true, no log line",
+    file: "src/state/cell-impl.ts",
+    find: "    if (closed) {",
+    replace: "    if (closed && mutation.path.length < 0) {",
+    test: "tests/async-view-sealed-after-settle.test.ts",
+    filter: "a write after the method settled throws by name and lands nowhere",
+  },
+  {
+    what:
+      "a client whose broadcast round was skipped under backpressure receives the NEXT patch on top of a state that never got the skipped one \u2014 diverges with health green",
+    file: "src/server/server-broadcast.ts",
+    find:
+      "        if (!force && !meta.needsFull && patchesToSend.length > 0) {",
+    replace: "        if (!force && patchesToSend.length > 0) {",
+    test: "tests/broadcast-skipped-round-sends-full.test.ts",
+    filter:
+      "broadcast: a round skipped under backpressure makes the next one a full state",
+  },
+  {
+    what:
+      "a bare action type (`incremnt`) in a cells app is dispatched into the void and answered {ok:true}",
+    file: "src/server/server-trojan.ts",
+    find: "      } else if (sepIdx <= 0 && Object.keys(methods).length > 0) {",
+    replace:
+      "      } else if (sepIdx <= 0 && Object.keys(methods).length < 0) {",
+    test: "tests/trojan-dispatch-validate.test.ts",
+    filter:
+      "trojan dispatch: a bare type in a cells app is refused, with the nearest method named",
+  },
+  {
+    what:
+      "an async method that throws after its first await is logged while `am dispatch` has already answered {ok:true}",
+    file: "src/server/server-trojan.ts",
+    find:
+      '        if (asyncOnes.includes(method) && typeof pl._callId !== "string") {',
+    replace:
+      '        if (asyncOnes.includes(method) && typeof pl._callId === "number") {',
+    test: "tests/trojan-async-rejection-reaches-caller.test.ts",
+    filter:
+      "trojan dispatch: a post-await throw is the route's answer, not a log line",
+  },
+  {
+    what:
+      "a scheduled tick or a client action dispatched while the app is closing is APPLIED — new work started during shutdown, captured by the final persist",
+    file: "src/state/dispatch.ts",
+    find:
+      '      const admitted = isTeardown || (phase === "draining" && isInflight);',
+    replace: '      const admitted = isTeardown || phase === "draining";',
+    test: "tests/dispatch.test.ts",
+    filter: "dispatch: open → draining → sealed — each refusal names its phase",
+  },
+  {
+    what:
+      "an in-flight write after the seal moves state the final persist has already read — disk and memory diverge silently",
+    file: "src/state/dispatch.ts",
+    find: '    phase = "sealed";',
+    replace: '    phase = "draining";',
+    test: "tests/dispatch.test.ts",
+    filter: "dispatch: open → draining → sealed — each refusal names its phase",
+  },
+  {
+    what:
+      "a client forges `_inflight` and rides the shutdown drain window — a cell:method runs while the server closes and its write is persisted",
+    file: "src/server/server-ws.ts",
+    find: "  delete action[INFLIGHT];",
+    replace: '  delete action["_inflight_never"];',
+    test: "tests/aio-402-uds-ack.test.ts",
+    filter: "uds: forged trusted provenance is stripped and _source re-stamped",
+  },
+  {
+    what:
+      "one app's cancel trigger aborts ANOTHER app's same-named cell method mid-write (two apps in one process)",
+    file: "src/state/method-cancel.ts",
+    find: "      const fires = sameApp(t.app, app) && sameApp(e.app, t.app) &&",
+    replace: "      const fires = true || sameApp(t.app, app) &&",
+    test: "tests/method-cancel-app-scope.test.ts",
+    filter:
+      "method-cancel: two apps, one cell name — cancelling in one never cancels the other",
+  },
+  {
+    what:
+      "a call half-way to its ceiling says nothing — slow is indistinguishable from dead until the ceiling fires",
+    file: "src/state/cell-impl.ts",
+    find: "    armHeartbeat();",
+    replace: "    void armHeartbeat;",
+    test: "tests/call-ceiling-heartbeat.test.ts",
+    filter:
+      "call ceiling: a call past half its ceiling logs 'still running (slow)' once, at info",
+  },
+  {
+    what:
+      "persistence is handed no row information — every one-row write clones and diffs the whole db: table again",
+    file: "src/server/aio-dispatch.ts",
+    find: "      if (!tt?.paused) schedulePersist(groupCellPatches(patches));",
+    replace: "      if (!tt?.paused) schedulePersist();",
+    test: "tests/dispatch-cell-patches.test.ts",
+    filter:
+      "dispatch: onDone hands persistence the batch's per-cell patches, grouped by cell",
+  },
+  {
+    what:
+      "a row deleted from a bound table is never DELETEd from SQLite \u2014 the incremental diff finds deletions by count, and without that check a confirmed removal comes back on the next boot",
+    file: "src/db/state-sync.ts",
+    find: "  if (idx.size !== rows.length - toInsert.length) {",
+    replace: "  if (idx.size !== idx.size) {",
+    test: "tests/db-dirty-tracking.test.ts",
+    filter:
+      "dirty tracking: a hint that cannot be trusted falls back to the full pass (shrink, move)",
+  },
+  {
+    what:
+      "a refused schema step no longer refuses the boot \u2014 the app serves traffic against tables it does not have, and every query on them fails at a random later moment",
+    file: "src/db/ddl.ts",
+    find: "      await step.run(db);",
+    replace: "      await step.run(db).catch(() => {});",
+    test: "tests/db-schema-runner.test.ts",
+    filter:
+      "schema runner: the first failing step refuses by name, with its fix, and nothing after it runs",
+  },
+  {
+    what:
+      "a schema version that could not be READ reads as 0 \u2014 the ladder stamps the epoch over a file whose real version was never seen",
+    file: "src/db/ddl.ts",
+    find: "    if (/no such table/i.test(msg)) return 0;",
+    replace: "    if (msg) return 0;",
+    test: "tests/db-schema-runner.test.ts",
+    filter:
+      "schema version read: 'no such table' is the one honest 0 \u2014 any other failure throws by name",
+  },
+  {
+    what:
+      "dev boots on unmigrated shape drift and warns forever \u2014 the stale shape is loaded on every boot and nothing forces the onMigrate before it ships",
+    file: "src/server/aio-boot.ts",
+    find: "      if (isDevBoot() && structural.length > 0) {",
+    replace: "      if (isDevBoot() && structural.length < 0) {",
+    test: "tests/shape-drift-strict.test.ts",
+    filter:
+      "shape-drift strict: DEV refuses to boot on unmigrated drift; PROD boots and warns",
+  },
+  {
+    what:
+      "a journal that exists but cannot be read counts as no journal \u2014 the actions it holds are never replayed and the boot says nothing",
+    file: "src/server/journal.ts",
+    find: "      if (e instanceof Deno.errors.NotFound) return null;",
+    replace: "      if (e instanceof Error) return null;",
+    test: "tests/journal-honest-read.test.ts",
+    filter:
+      "journal: a missing journal is 'nothing yet' \u2014 an unreadable one throws by name",
+  },
+  {
+    what:
+      "a discovery sweep carrying a nonce accepts answers that do not echo it \u2014 the test measures the neighbourhood, not its own responder",
+    file: "src/server/discovery.ts",
+    find:
+      "      if (opts.nonce !== undefined && ad.nonce !== opts.nonce) return;",
+    replace:
+      "      if (opts.nonce !== undefined && ad.nonce === opts.nonce) return;",
+    test: "tests/discovery.test.ts",
+    filter:
+      "discovery: a nonce sweep drops answers that do not echo it; a plain sweep keeps them",
+  },
+  {
+    what:
+      "a grown string goes back to shipping WHOLE on every broadcast window \u2014 a streamed reply costs its own length squared and pushes the app over the pressure threshold, exactly the field report the append op closed",
+    file: "src/state/patch-compact.ts",
+    find: "  return narrowStringPatches(prev, narrowArrayPatches(prev, ops));",
+    replace: "  return narrowArrayPatches(prev, ops);",
+    test: "tests/append-patches-wire.test.ts",
+    filter:
+      "append: streaming 50 chunks into a 10 KB string costs the chunks, not the string",
+  },
+  {
+    what:
+      "an append in a coalesced frame is resolved against the frame's BASE instead of the state the earlier ops left \u2014 after a row removal it extends the deleted row's text: a plausible string, silently wrong, on every client",
+    file: "src/protocol/patch-ops.ts",
+    find: "    if (applied < i) {",
+    replace: "    if (applied < i && i < 0) {",
+    test: "tests/patch-ops.test.ts",
+    filter:
+      "applyWirePatches: an append resolves against the state AS THE OPS APPLY",
+  },
+  {
+    what:
+      "an append survives a later whole-value replace at its path \u2014 the frame applies the append AFTER the reset the client should have ended on, and every client shows a reset reply with the old suffix glued back on",
+    file: "src/state/patch-compact.ts",
+    find: '    if (p.op === "replace" || p.op === "append") {',
+    replace: '    if (p.op === "replace") {',
+    test: "tests/patch-compact.test.ts",
+    filter:
+      "compactPatches: an append followed by a replace at its path is dropped",
+  },
+  {
+    what:
+      "the browser applies deltas through Immer directly again and an append frame throws \u2014 every streamed token forces a full resync, the exact quadratic cost the op exists to remove, invisible because the state still ends up right",
+    file: "src/state/state-message.ts",
+    find: "      const next = applyWirePatches(prev, patches);",
+    replace:
+      '      const next = applyWirePatches(prev, patches.filter((p) => p.op !== "append"));',
+    test: "tests/patch-ops.test.ts",
+    filter:
+      "browser applier: handleMessage applies an append frame to the client state",
   },
 ];
 

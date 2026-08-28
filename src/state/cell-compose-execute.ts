@@ -101,9 +101,11 @@ export function buildRootExecutor(
     const scopedApp: ScopedApp & {
       _isDisabled?: () => boolean;
       _onError?: (err: AioError) => void;
+      _appId?: string;
     } = {
       _isDisabled: () => ctx.disabledCells.has(cellName),
       _onError: reportError,
+      _appId: ctx.appId ?? "",
       dispatch: (a: Msg) => {
         if (typeof a?.type !== "string") return;
         // Hand the store's promise back: an async method's batcher awaits it to

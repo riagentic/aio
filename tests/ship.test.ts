@@ -16,7 +16,6 @@ import {
   keyFingerprint,
   manifestCore,
   manifestFileName,
-  notRunnableExit,
   parseSigningKey,
   SAFE_TOKEN,
   safeTokenReason,
@@ -26,6 +25,7 @@ import {
   verifyManifestClaims,
   verifyShipManifest,
 } from "../src/build/ship.ts";
+import { notRunnableExit } from "../src/testing/internal.ts";
 import type { DataContract, ShipManifest } from "../src/build/ship.ts";
 import { manifestUrl } from "../src/server/updates-core.ts";
 
@@ -894,7 +894,7 @@ Deno.test("shipApp: writes the manifest under the name the CLIENT fetches", asyn
 });
 
 Deno.test("publishInstructions: the copy lines name the file the client asks for", async () => {
-  const { publishInstructions } = await import("../src/build/ship.ts");
+  const { publishInstructions } = await import("../src/testing/internal.ts");
   const m = await buildShipManifest({
     name: "app",
     version: "1.0.0",
@@ -952,7 +952,6 @@ async function contractFixture(): Promise<
 
 Deno.test({
   name: "--aio-data-contract: stdout is the JSON and NOTHING else",
-  sanitizeResources: false,
   fn: async () => {
     const { dir, entry } = await contractFixture();
     try {
@@ -991,7 +990,6 @@ Deno.test({
 
 Deno.test({
   name: "shipApp: probes a real binary and publishes what it promises",
-  sanitizeResources: false,
   fn: async () => {
     const { dir, script } = await contractFixture();
     try {
@@ -1157,7 +1155,6 @@ async function runShip(
 
 Deno.test({
   name: "ship keygen: never writes a private key inside a git work tree",
-  sanitizeResources: false,
   fn: async () => {
     const dir = await Deno.makeTempDir({ prefix: "aio-keygen-" });
     const home = join(dir, "home");
@@ -1217,7 +1214,7 @@ Deno.test({
 });
 
 Deno.test("gitWorkTreeOf: finds the tree from a nested path, .git file or dir", async () => {
-  const { gitWorkTreeOf } = await import("../src/build/ship.ts");
+  const { gitWorkTreeOf } = await import("../src/testing/internal.ts");
   const dir = await Deno.makeTempDir({ prefix: "aio-worktree-" });
   try {
     const repo = join(dir, "repo");

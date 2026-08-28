@@ -39,8 +39,6 @@ async function withDb(fn: (db: ReturnType<typeof createDB>) => Promise<void>) {
 
 Deno.test({
   name: "db ref: a child table declared before its parent still persists",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: () =>
     withDb(async (db) => {
       await syncTables(
@@ -69,8 +67,6 @@ Deno.test({
 
 Deno.test({
   name: "db ref: deleting a parent and its children in one window works",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: () =>
     withDb(async (db) => {
       const full = {
@@ -87,8 +83,6 @@ Deno.test({
 
 Deno.test({
   name: "db ref: a reference that is still dangling at COMMIT is refused",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: () =>
     withDb(async (db) => {
       let threw: unknown = null;

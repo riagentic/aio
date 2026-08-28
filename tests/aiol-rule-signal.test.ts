@@ -689,6 +689,27 @@ const VIOLATIONS: Case[] = [
     }),
     expect: "imports React",
   },
+  // A COMPONENT importing a server-only module. The cell-file rule below skips
+  // `.tsx` by design, and the loop that does see `.tsx` used to wave these
+  // through — so this shape, the anonymous blank screen the rules exist to
+  // prevent, was reported by nobody.
+  {
+    name: "a component importing aio/server",
+    files: app({
+      "src/App.tsx":
+        `import { createDB } from "aio/server";\nexport default function App() { return <div>{String(!!createDB)}</div>; }\n`,
+    }),
+    expect: "is server-only and this file is compiled into the browser bundle",
+  },
+  {
+    name: "a component with a server-only SIDE-EFFECT import",
+    files: app({
+      "src/App.tsx":
+        `import "node:fs";\nexport default function App() { return <div/>; }\n`,
+    }),
+    expect:
+      'side-effect import "node:fs" is server-only and this file is compiled into the browser bundle',
+  },
   {
     name: "@std import in a cell file",
     files: app({
@@ -1064,7 +1085,7 @@ await aio.run({ perfBudget: { methods: { "models:scan": { timeout: 0 } } } });
 }`,
       ),
     }),
-    expect: "listensTo array form is deprecated",
+    expect: "listensTo: [...] was removed in alpha70",
   },
   {
     name: "alpha52: selector deps spread signature",
@@ -1100,7 +1121,7 @@ await aio.run({ perfBudget: { methods: { "models:scan": { timeout: 0 } } } });
         'import { cell, schedule } from "aio";',
       ),
     }),
-    expect: "is the deprecated order",
+    expect: "swap the last two arguments",
   },
   {
     name: "alpha52: poll `backoff` option key",
@@ -1120,7 +1141,7 @@ await aio.run({ perfBudget: { methods: { "models:scan": { timeout: 0 } } } });
         'import { cell, schedule } from "aio";',
       ),
     }),
-    expect: "`backoff` option key",
+    expect: "schedule.poll({ backoff }) was removed in alpha70",
   },
   // alpha52 — the surface diet (Package 4)
   {
@@ -1129,7 +1150,7 @@ await aio.run({ perfBudget: { methods: { "models:scan": { timeout: 0 } } } });
       "src/v.ts":
         `import { cell } from "aio";\nexport const v = cell("v", {\n  state: { a: 1, b: 2 },\n  methods: {},\n  ui: { exclude: ["b"] },\n});\n`,
     }),
-    expect: "was renamed `visible:`",
+    expect: "cell({ ui }) was removed in alpha70",
   },
   {
     name: "access without visible on an exposed app",
@@ -1142,12 +1163,12 @@ await aio.run({ perfBudget: { methods: { "models:scan": { timeout: 0 } } } });
     expect: "REFUSES to boot",
   },
   {
-    name: "aio/db VALUE import (types-only entry since alpha52)",
+    name: "aio/db VALUE import (types-only entry; the values went in alpha70)",
     files: app({
       "src/d.ts":
         `import { createDB } from "aio/db";\nexport const open = createDB;\n`,
     }),
-    expect: "types + pure helpers since",
+    expect: 'import { createDB } from "aio/db" was removed in alpha70',
   },
   // field report §3.3 / §3.5 — the client-read tripwire and the credential-name
   // boot refusal, static.
@@ -1196,6 +1217,87 @@ await aio.run({ perfBudget: { methods: { "models:scan": { timeout: 0 } } } });
         `import { cell } from "aio";\nexport const bare = cell("bare", {\n  state: { items: [] },\n  methods: { touch(s: { items: unknown[] }) { s.items; } },\n});\n`,
     }),
     expect: "has no element type",
+  },
+  // ── alpha70 (tests/aiol-alpha70.test.ts holds the full fixtures) ──
+  {
+    name: "an import from a duplicate home removed in alpha70",
+    files: app({
+      "src/x.ts": `import { createDB } from "aio/db";\nexport { createDB };\n`,
+    }),
+    expect: "was removed in alpha70",
+  },
+  {
+    name: "a removed alias (extras lint / testgen)",
+    files: app({
+      "src/x.ts": `import { lint } from "aio/extras";\nexport { lint };\n`,
+    }),
+    expect: 'lint() from "aio/extras" was removed in alpha70',
+  },
+  {
+    name: "memory.gcStressRatio in the entry",
+    files: app({
+      "src/app.ts":
+        `import { aio } from "aio";\nimport { counter } from "./cell.ts";\n` +
+        `await aio.run({ appId: "probe", cells: { counter }, memory: { gcStressRatio: 0.05 } });\n`,
+    }),
+    expect: "memory.gcStressRatio was removed in alpha70",
+  },
+  {
+    name: "an alpha70-renamed word (CellAccess) and the air Action alias",
+    files: app({
+      "src/x.ts":
+        `import type { CellAccess } from "aio";\nexport type A = CellAccess;\n`,
+    }),
+    expect: "CellAccess was removed in alpha70",
+  },
+  {
+    name: "type Action imported from aio/air",
+    files: app({
+      "src/x.ts":
+        `import { type Action } from "aio/air";\nexport type A = Action;\n`,
+    }),
+    expect: "Action (aio/air) was removed in alpha70",
+  },
+  {
+    name: "schedule.blocking(…)",
+    files: app({
+      "src/x.ts":
+        `import { schedule } from "aio";\nexport const e = schedule.blocking("id", () => 1, 0);\n`,
+    }),
+    expect: "schedule.blocking was removed in alpha70",
+  },
+  {
+    name: "a method that parks its live draft in a module-level binding",
+    files: app({
+      "src/cell.ts":
+        `import { cell } from "aio";\nlet last: unknown = null;\n` +
+        cellFile(
+          "counter",
+          `{ state: { count: 0 }, methods: { keep(s) { last = s; } } }`,
+        )
+          .replace('import { cell } from "aio";\n', "") +
+        "export { last };\n",
+    }),
+    expect: "stores `s` itself in a module-level binding",
+  },
+  {
+    name: "fetch in a sync method",
+    files: app({
+      "src/cell.ts": cellFile(
+        "counter",
+        `{ state: { count: 0 }, methods: { load(s) { fetch("/x"); s.count++; } } }`,
+      ),
+    }),
+    expect: "is a SYNC method (the reducer) and calls `fetch()`",
+  },
+  {
+    name: "own.set keyed by a constant while the resource varies by id",
+    files: app({
+      "src/cell.ts": `import { cell, own } from "aio";\n` +
+        `export const counter = cell("counter", { state: { count: 0 }, methods: { ` +
+        `watch(s, path: string) { return own.set("watcher", () => Deno.watchFs(path)); } } });\n`,
+    }),
+    expect: 'own.set("watcher", …)',
   },
 ];
 

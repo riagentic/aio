@@ -129,6 +129,55 @@ const orders = cell("orders", {
 Immer guarantees new array references on mutation. Framework detects via `!==`
 and syncs only affected tables.
 
+### Object-shaped bindings
+
+A `db:` entry may be an object instead of a bare table — the same table, plus
+_which_ value it mirrors and in _what shape_. Additive: a bare `TableDef` still
+means `{ table, shape: "array" }`.
+
+```ts
+db: {
+  // a pk-keyed MAP: state.wallet.byMint = { [mint]: Holding }
+  "wallet.byMint": { table: holdings, shape: "map" },
+  // a SUBSET deeper than one field: state.ledger.book.entries
+  "ledger.entries": { table: entries, path: "book.entries" },
+}
+```
+
+| Option  | Meaning                                                                                                                                                                                                                  |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `table` | the `table({…})` — required                                                                                                                                                                                              |
+| `shape` | `"array"` (default) or `"map"`: the bound value is a plain object whose **values are the rows** and whose **keys are their primary keys** (`String(row[pk])`). Needs a `pk()` column; rebuilt from the pk on every boot. |
+| `path`  | dotted path _inside_ the cell (default: the key's `<field>`). Only with an explicit `"<cell>.<field>"` key; the SQL table is still `<cell>_<field>`.                                                                     |
+
+Every misuse is refused at boot by name: a `"map"` without a `pk()`, a `path` on
+a bare key, a key whose value is not the declared shape, a bare-key map
+(ambiguous by construction — say `"<cell>.<field>"`). At write time, a map key
+that disagrees with its row's pk is refused too — the key and the pk are one
+fact, and the next boot would key the row by the pk.
+
+### What a persist window costs
+
+A window writes only what moved, and finds it without walking the table:
+
+- a bound table whose reference is unchanged is skipped outright (Immer shares
+  structure, so an untouched array keeps its reference)
+- inside a changed table, a row that is the **same reference at the same index**
+  as in the last committed window is unchanged — one comparison, no key work
+  (committed state is frozen; an unchanged reference cannot hide changed
+  contents). Only rows whose reference moved are keyed, validated and compared
+  column by column
+- the pk index survives across windows and advances **only when the transaction
+  commits** — a refused window is retried whole
+- the window's own Immer patches narrow the pass to the touched rows when they
+  can be trusted (`push`, an edit at an index). A patch they cannot express — a
+  shrink, a `remove`, the array replaced — takes the full identity pass, which
+  is always right and merely slower
+
+Measured (`tests/db-dirty-tracking.test.ts`, 10k rows, one changed row): the old
+path cost ~3.3 ms to clone the table plus ~3.4 ms to diff it, every window; the
+full identity pass costs ~0.2 ms and the patch-narrowed pass ~0.01 ms.
+
 ### What a bound row must look like
 
 A bound array is the table, so the table's rules are the array's rules. Each is
@@ -255,7 +304,7 @@ re-runs and notifies whenever a write _through the same wrapper_ touches one of
 the tables it reads.
 
 ```ts
-import { createDB, reactiveDB } from "aio/db";
+import { createDB, reactiveDB } from "aio/server";
 
 const db = reactiveDB(createDB("./inbox.db"));
 await db.execute(
@@ -500,6 +549,31 @@ TEXT, or to read that column with an explicit `CAST(col AS TEXT)`.
 4. Tables **without `pk()`** — full table replacement
 5. Flush all in a **single transaction**
 
+## Boot schema setup — one runner
+
+Every DDL seam runs through ONE ordered, fatal runner (`runSchemaSetup`,
+`src/db/ddl.ts`), in this order:
+
+1. **ladder** — aio's own versioned schema moves, tracked in its private
+   `aio_schema` table (deliberately _not_ `PRAGMA user_version`, which is the
+   app's — see below). A file written by a **newer** aio is refused here with
+   both exits: upgrade aio, or restore a backup taken by this version.
+2. **tables** — the declared `db:` tables, then drift reconciliation.
+3. **sync** — the CRDT op-log tables and their migrations (sync cells only).
+
+Every step is idempotent, so a re-boot on the same file is a no-op walk. The
+first failure **refuses the boot** — naming the step, what ran before it, and
+the fix — and nothing after it runs; the app never serves traffic against a
+schema it does not have (it used to: a refused `CREATE TABLE` became one
+`sqlite: unavailable` warning and an app with none of its tables).
+
+```
+db: schema setup REFUSED at step "tables" (after ladder) — db: could not create
+table "orders" — near "order": syntax error …
+  fix: the message above names the table and column SQLite refused — …
+  Nothing after this step ran; the app did not start, …
+```
+
 ## Startup flow
 
 ```
@@ -605,7 +679,7 @@ size flags that go with it.
 For scripts, CLI tools, tests outside `aio.run()`:
 
 ```ts
-import { createDB, DEFAULT_PRAGMAS } from "aio/db";
+import { createDB, DEFAULT_PRAGMAS } from "aio/server";
 
 const db = createDB("./myapp.db"); // zero-config
 const tuned = createDB("./myapp.db", {

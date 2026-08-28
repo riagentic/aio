@@ -51,8 +51,8 @@ export {
   aio,
   cell,
   client,
-  connectDevTools,
-  disconnectDevTools,
+  connectReduxDevTools,
+  disconnectReduxDevTools,
   ensureConnected,
   type LinkProps,
   log,
@@ -87,7 +87,6 @@ export {
   useSignal,
 } from "./air/aio-renderer.ts";
 export {
-  type Action,
   type ComponentFn,
   h,
   type NodeAction,

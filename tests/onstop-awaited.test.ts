@@ -10,8 +10,6 @@ import { freePort } from "../src/testing/server-test.ts";
 
 Deno.test({
   name: "onStop: an async hook finishes before app.close() resolves",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const name = `onstop-${crypto.randomUUID().slice(0, 8)}`;
     const c = cell(name, {
@@ -55,8 +53,6 @@ Deno.test({
 Deno.test({
   name:
     "onStart: an async hook that rejects is reported, not an unhandled rejection",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const name = `onstart-${crypto.randomUUID().slice(0, 8)}`;
     const c = cell(name, {

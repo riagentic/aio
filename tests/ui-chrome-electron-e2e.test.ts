@@ -76,8 +76,9 @@ async function cdp(port: number) {
 Deno.test({
   name: "electron: a themed window is frameless AND still operable",
   ignore: shouldSkip() !== null,
+  // aio-ok: a real Electron binary driven over CDP; the Chromium child and its CDP socket outlive the test
   sanitizeOps: false,
-  sanitizeResources: false,
+  sanitizeResources: false, // aio-ok: see above
   fn: async () => {
     const dir = await Deno.makeTempDir();
     // A standalone page — no server needed. What is under test is the WINDOW

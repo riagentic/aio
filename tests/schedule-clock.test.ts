@@ -91,7 +91,7 @@ Deno.test("backoff: an uncapped attempt cannot collapse into a hot loop", async 
   // aimed at a rate-limited RPC. At attempt 40 that is 1.1e15 ms, which an
   // int32 truncates to ~1ms: the backoff became a retry storm against exactly
   // the API it was backing off from.
-  const e = schedule.backoff("rpc", 40, { base: 1000 }, { type: "Poll" });
+  const e = schedule.backoff("rpc", 40, { type: "Poll" }, { base: 1000 });
   assertEquals(e.kind, "after");
   assertEquals(
     (e as { ms: number }).ms,
@@ -116,8 +116,9 @@ Deno.test("backoff: an uncapped attempt cannot collapse into a hot loop", async 
 });
 
 Deno.test("poll: an uncapped attempt is capped too", () => {
-  const e = schedule.poll("rpc", 40, { every: 5000, backoff: 2 }, {
-    type: "Tick",
+  const e = schedule.poll("rpc", 40, { type: "Tick" }, {
+    every: 5000,
+    factor: 2,
   });
   assertEquals((e as { ms: number }).ms, MAX_TIMER_DELAY);
 });

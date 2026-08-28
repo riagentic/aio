@@ -77,7 +77,7 @@ Deno.test("perf: an async method's violation names perfBudget.methods for ITSELF
   );
   const tip = generateTip(err) ?? "";
   assertStringIncludes(tip, "return immediately");
-  assertStringIncludes(tip, "schedule.blocking");
+  assertStringIncludes(tip, "blocking(");
   // …and the self-service fix is spelled out, keyed to THIS method
   assertStringIncludes(
     err.message,

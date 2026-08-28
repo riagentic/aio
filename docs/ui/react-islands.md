@@ -70,3 +70,11 @@ islands add a bundle and a second renderer, so use them where they earn it.
 > Migrating React _code_ (hooks like `useState`/`useEffect`) rather than
 > mounting React _components_? Those compat shims live at `aio/air/compat` — see
 > [AIR setup](air-setup.md).
+
+## Targets
+
+Islands are client-side interop — no server, no SSR, no transport — so they work
+on every target that renders in a browser engine, including standalone (Android)
+builds, where `island()` and `reactIsland()` import from `aio/air` unchanged.
+Your React loaders resolve in your app's bundle, so React ships in the APK the
+same way it ships to the browser.

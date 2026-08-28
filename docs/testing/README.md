@@ -21,6 +21,19 @@ Verifying cells and UIs work correctly.
   desktop in a container, driven by hand from a browser, with the app's `dist/`
   mounted in. The manual tier next to `test:wine` and `deno task lab`
 
+## Sanitizers stay on
+
+Deno's leak sanitizers (`sanitizeOps`, `sanitizeResources`, `sanitizeExit`) are
+the one thing that tells a test it left a timer, a socket, a file or a child
+process behind, and tests are the strictest environment aio runs in — so a test
+never turns one off without saying why. `deno task check:sanitizers` holds the
+count of unexplained opt-outs at zero: an opt-out must carry
+`// aio-ok: <the specific reason>` on its line or the line above, and the reason
+names the resource the test cannot reach (a real browser driven over CDP, a
+compiled binary that re-execs itself, a Wine or VM child). Everything else
+cleans up — await what you started, close what you opened, `await using` what
+has a disposer — and proves it by running green with the sanitizers on.
+
 ## Driving the app you are running
 
 `am surface` and `am trigger` ([App Manager](../clients/app-manager.md)) are the
@@ -29,8 +42,8 @@ semantic surface, and you observe it and act on it from the shell — no driver,
 no selectors, no screenshot diffing.
 
 ```sh
-am surface 0 --json          # components, elements, live text/value/checked
-am trigger 0 "App/Trail:up" click   # reply includes the fresh surface
+am surface --json            # components, elements, live text/value/checked
+am trigger "App/Trail:up" click     # reply includes the fresh surface
 ```
 
 Filed under Clients because that is where `am` is documented, but it belongs in

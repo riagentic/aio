@@ -114,7 +114,16 @@ function decodeSafe(s: string): string {
 
 /** Match a route pattern (with `:param` segments and a trailing `*`) against a
  *  pathname. Returns the captured params, or null when it doesn't match. Pure
- *  + exported for tests. */
+ *  + exported for tests.
+ *
+ *  A `:param` is URL-DECODED — that is what makes `/users/a%20b` yield `"a b"`
+ *  — so its value can hold characters the path did not visibly contain,
+ *  including `/` (from `%2F`) and `..`. Correct for a value, dangerous for a
+ *  path: a handler that joins one onto the filesystem escapes its directory.
+ *  aio never does that itself (params go straight to the app's handler), and
+ *  docs/examples/05-integrations.md says so where an app author will read it.
+ *  The trailing `*` capture is deliberately NOT decoded: it is a path, not a
+ *  value, and decoding it would invent segment boundaries. */
 export function matchRoute(
   pattern: string,
   pathname: string,

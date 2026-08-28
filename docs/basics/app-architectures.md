@@ -122,7 +122,7 @@ the relay binary, and `--platforms=` applies per target.
 // src/relay/app.ts
 await aio.run({
   cells: [relay],
-  appId: "dm-relay", // its OWN id — data dirs and locks are per-app
+  appId: "relay-hub", // its OWN id — data dirs and locks are per-app
   client: "server-only",
   expose: true, // config key — a compiled binary needs no argv
 });
@@ -131,8 +131,8 @@ await aio.run({
 - `expose: true` in config replaces baking `--expose` into compiled argv.
 - Lifecycle without `am`: `readLock(appId)` from `aio/extras` reads the live
   lock (pid, port, status) — `--status`/`--stop` flags are ~10 lines.
-- `am` targets one app per invocation — set `"am": "… --app=dm-relay"` in tasks,
-  or pass `--app=` per call.
+- `am` targets one app per invocation — set `"am": "… --app=relay-hub"` in
+  tasks, or pass `--app=` per call.
 
 ### The client ↔ service link
 

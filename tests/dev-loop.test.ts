@@ -3,7 +3,7 @@
  *
  * 1. `server-vendor.ts` built `file://${Deno.cwd()}/…` by hand and read
  *    `.pathname` back off it. A cwd with a SPACE in it came back
- *    percent-encoded (`/home/dev/My%20Apps/…`), every candidate failed, and dev
+ *    percent-encoded (`/home/me/My%20Apps/…`), every candidate failed, and dev
  *    silently fell back to the esm.sh CDN — defeating the offline-dev
  *    guarantee that file's own header promises. Not Windows-only.
  * 2. `dev-restart.ts` spawned the supervised child with no `AIO_PARENT_PID`, so
@@ -41,11 +41,11 @@ const AIO_ROOT = join(import.meta.dirname ?? ".", "..");
 // ── 1. offline dev survives a space in the path ─────────────────────────────
 
 Deno.test("vendor immer: candidates are PATHS, so a space stays a space", () => {
-  const cands = _immerCandidates("/home/dev/My Apps/proj");
+  const cands = _immerCandidates("/home/me/My Apps/proj");
   assertEquals(
     cands[0],
     join(
-      "/home/dev/My Apps/proj",
+      "/home/me/My Apps/proj",
       "node_modules",
       "immer",
       "dist",
@@ -184,7 +184,6 @@ Deno.test("watcher: a graph validation that times out still reloads, and SAYS SO
     try {
       watcher = createFileWatcher({
         absBaseDir: tmp,
-        port: 0,
         importMapObj: {},
         debug: () => {},
         broadcastWs: (m) => sent.push(m),
@@ -225,7 +224,6 @@ Deno.test("watcher: a deno.json edit warns once and never fakes a browser reload
     const sent: string[] = [];
     const watcher = createFileWatcher({
       absBaseDir: tmp,
-      port: 0,
       importMapObj: {},
       debug: () => {},
       broadcastWs: (m) => sent.push(m),

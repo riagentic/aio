@@ -65,7 +65,8 @@ Deno.test("air entry: protocol plumbing is NOT on the public surface", async () 
   // Documented user-facing survivors of the devtools/router groups.
   assertExists(air.navigate);
   assertExists(air.routePath);
-  assertExists(air.connectDevTools);
+  // alpha70 rename: connectDevTools → connectReduxDevTools (the Redux bridge).
+  assertExists(air.connectReduxDevTools);
 });
 
 Deno.test("air entry: exports VDOM extras", async () => {
