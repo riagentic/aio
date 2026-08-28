@@ -264,8 +264,18 @@ Deno.test("electron: UDS script — buffers frames until the renderer is ready",
     false,
     "a second readiness flag must not come back",
   );
+  // did-finish-load appears exactly once — the empty-#root watchdog
+  // (tmplRendererDiagnostics), which observes and never gates: the only code
+  // after it is a timer that logs. A second listener would be the gate again.
+  const finishes = s.split("on('did-finish-load'");
   assertEquals(
-    s.includes("on('did-finish-load'"),
+    finishes.length,
+    2,
+    "did-finish-load must appear once (the watchdog)",
+  );
+  assertStringIncludes(finishes[1]!.slice(0, 200), "++_loadGen");
+  assertEquals(
+    finishes[1]!.slice(0, 600).includes("rendererReady"),
     false,
     "did-finish-load must not gate frame delivery — only __aio:ready does",
   );

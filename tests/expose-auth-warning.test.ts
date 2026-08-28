@@ -34,7 +34,6 @@ async function bootExposedCapture(
     const app = await aio.run({
       cells: [c],
       appId: `warnexp-${crypto.randomUUID().slice(0, 8)}`,
-      appVersion: "0.0.0",
       client: "server-only",
       persist: false,
       libraryMode: true,

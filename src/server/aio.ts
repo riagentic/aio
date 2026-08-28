@@ -84,6 +84,13 @@ import {
   resolveTitle,
   startVitalsCheck,
 } from "./aio-run-helpers.ts";
+import { appDenoJsonLocated } from "./aio-run-helpers.ts";
+import {
+  outDirExclude,
+  readBuildStamp,
+  readTreeFacts,
+  resolveRuntimeVersion,
+} from "./app-version.ts";
 
 // Cells-based API modules
 import { composeCellsWiring } from "./aio-composition.ts";
@@ -131,7 +138,7 @@ import { resolveAppId } from "./single-instance-lock.ts";
 import { appKeyPath, defaultAppKeyConfig, resolveAppKey } from "./app-key.ts";
 import { assertDenoVersion } from "./deno-version.ts";
 import { removalMessage, removalOf } from "../state/removals.ts";
-import { basename, dirname, join, resolve } from "@std/path";
+import { basename, dirname, fromFileUrl, join, resolve } from "@std/path";
 import { lint, printLint } from "./lint.ts";
 
 // ── Re-exports: public API surface ────────────────────────────────────
@@ -392,33 +399,42 @@ function _warnMisplacedDenoJson(): void {
   );
 }
 
-function _denoJsonVersion(): string | undefined {
-  const v = appDenoJson()?.version;
-  return typeof v === "string" ? v : undefined;
-}
-
-/** The version string the boot report prints and `__aio.appVersion` carries.
+let _appVersionCache: Promise<string> | undefined;
+/** THE version this process reports — `major.minor.<commit count>`, the same
+ *  string the build stamps into an artifact. Resolved ONCE per process
+ *  (`resolveRuntimeVersion` is the pure rule; see app-version.ts): a compiled
+ *  binary reads the stamp the build embedded, a source run derives it from
+ *  the app's own repository — with
+ *  `-dirty.<hash8>` when the tree is dirty, exactly as a build would name it.
  *
  *  It used to fall back to `"0.0.0"` — a CONFIDENT WRONG NUMBER, printed
- *  exactly when "which build is this?" matters most: a hand-compiled binary
- *  embeds no deno.json at all, so every one of them claimed 0.0.0 and looked
- *  like a real answer. An unknown version must SAY unknown and say what to do
- *  about it. Same string in dev and prod; only the hint differs, because the
- *  fix differs (a binary has to be rebuilt). Pure — tested directly. */
-export function _resolveAppVersion(
-  configured: string | undefined,
-  fromDenoJson: string | undefined,
-  compiled: boolean,
-): string {
-  // A blank/whitespace value is ABSENT, not a version — otherwise
-  // `appVersion: ""` would print an empty field that reads as a real answer.
-  const v = (configured ?? "").trim() || (fromDenoJson ?? "").trim();
-  if (v) return v;
-  return compiled
-    ? 'unknown (compiled binary — set appVersion in aio.run(), or "version" ' +
-      "in deno.json, and rebuild with aio's builder)"
-    : 'unknown (no "version" in the app\'s deno.json — set it, or pass ' +
-      "appVersion to aio.run())";
+ *  exactly when "which build is this?" matters most. An unknown version now
+ *  SAYS unknown, and the update check refuses the string by name. */
+export function _appVersion(): Promise<string> {
+  _appVersionCache ??= (async () => {
+    const located = appDenoJsonLocated();
+    const compiled = isCompiled();
+    const stamp = located ? readBuildStamp(located.dir) : null;
+    let tree = null;
+    if (!compiled && located && located.dir.protocol === "file:") {
+      const root = fromFileUrl(located.dir);
+      tree = await readTreeFacts(root, {
+        excludes: [
+          outDirExclude(
+            root,
+            (located.config.build as { out?: string } | undefined)?.out,
+          ),
+        ],
+      });
+    }
+    return resolveRuntimeVersion({
+      declared: located?.config.version,
+      compiled,
+      stamp,
+      tree,
+    });
+  })();
+  return _appVersionCache;
 }
 
 /** THE default client when no `--client` flag is given: the app's config,
@@ -577,6 +593,14 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
   // Observe-only, and identical in dev and prod.
   const _contractMode = parseCli().dataContract;
   if (_contractMode) setLogger(stderrOnlyLogSink());
+  // `appVersion` is retired (alpha70): deno.json `version` is the ONE place
+  // an app's version is decided (docs/build/versioning.md). Dev refuses;
+  // prod logs the registry line and IGNORES the key — the derived version is
+  // what every surface reports either way.
+  if ("appVersion" in fc) {
+    refuseRetired(removalOf("aio.run({ appVersion })"), "aio.run");
+    delete (fc as Record<string, unknown>).appVersion;
+  }
   validateConfig(
     fc as unknown as Record<string, unknown>,
     VALID_FEATURES_CONFIG_KEYS,
@@ -951,7 +975,7 @@ async function _run<S, A, E>(
     log.info(
       versionLine(
         resolveAppId(config.appId),
-        config.appVersion ?? _denoJsonVersion(),
+        await _appVersion(),
       ),
       { detail: String() },
     );
@@ -1066,7 +1090,7 @@ async function _run<S, A, E>(
     writeAppMeta(_dirs, {
       appId,
       aio: VERSION,
-      app: (config as { appVersion?: string }).appVersion,
+      app: await _appVersion(),
     });
   }
   // THE port chain, in one place, with `am` reading the same three rungs
@@ -2089,11 +2113,16 @@ async function _run<S, A, E>(
   const _tls = _tlsOf(config as { tls?: AioConfig<S, A, E>["tls"] });
   const transport = await setupTransport<S, A>({
     appId,
+    appVersion: await _appVersion(),
     port,
     portRequested: portFrom !== "default",
     prod,
     distDir,
     electronDistDir,
+    // The shell the app runs in: the dev graph evaluation presents its UA.
+    shell: defaultClientFor(config.client) === "electron"
+      ? "electron"
+      : "browser",
     baseDir,
     expose,
     token,
@@ -2194,11 +2223,7 @@ async function _run<S, A, E>(
       updates: config.updates,
       dataDir: _dirs.data,
       appName: appId,
-      appVersion: _resolveAppVersion(
-        config.appVersion,
-        _denoJsonVersion(),
-        isCompiled(),
-      ),
+      appVersion: await _appVersion(),
       stamp: (appDenoJson()?.build as { channel?: string } | undefined)
         ?.channel,
       flag: cli.channel,
@@ -2224,11 +2249,7 @@ async function _run<S, A, E>(
       redact,
       sources: {
         appId,
-        appVersion: _resolveAppVersion(
-          config.appVersion,
-          _denoJsonVersion(),
-          isCompiled(),
-        ),
+        appVersion: await _appVersion(),
         aioVersion: VERSION,
         dataDir: _dirs.data,
         logsDir: _dirs.logs,
@@ -2317,11 +2338,7 @@ async function _run<S, A, E>(
         : undefined,
     },
     appId,
-    appVersion: _resolveAppVersion(
-      config.appVersion,
-      _denoJsonVersion(),
-      isCompiled(),
-    ),
+    appVersion: await _appVersion(),
     title,
     prod,
     electronDistDir,

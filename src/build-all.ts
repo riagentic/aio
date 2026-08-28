@@ -223,6 +223,15 @@ export function normalizeTargets(
 }
 
 import { iosArtifactName } from "./build/build-ios.ts";
+import {
+  artifactVersion,
+  BUILD_VERSION_ENV,
+  type BuildVersion,
+  buildVersionFor,
+  buildVersionNotes,
+  unpublishableReason,
+  versionedArtifactName,
+} from "./build/build-version.ts";
 
 interface ArtifactRec {
   file: string;
@@ -284,6 +293,13 @@ const ARTIFACT_EXTS = new Set([
  *  @internal alpha70 — a build/tooling internal reachable for tests via
  *  src/testing/internal.ts; not app-facing API. */
 export function isArtifactName(name: string, binaryName: string): boolean {
+  // A placed artifact carries THE version after its base name
+  // (`myapp-1.2.345-client.apk`); the builders write it without. Both are this
+  // app's — one rule, applied to the unversioned form. `artifactVersion` is the
+  // other half of the same decider (what version a placed file carries).
+  const split = artifactVersion(name, binaryName);
+  if (split === null) return false;
+  if (split.version !== null) name = split.unversioned;
   const ext = extname(name);
   if (ARTIFACT_EXTS.has(ext)) {
     return name.startsWith(binaryName) || name.startsWith("aio-client-");
@@ -291,6 +307,7 @@ export function isArtifactName(name: string, binaryName: string): boolean {
   if (ext === "") {
     if (
       name === binaryName || name === `${binaryName}-client` ||
+      name === iosArtifactName(binaryName) ||
       name.startsWith("aio-client-")
     ) return true;
     // Cross-compiled artifacts carry their platform and, on every OS but
@@ -363,14 +380,23 @@ export function placedName(
   file: string,
   target: string,
   suffixed: ReadonlySet<string>,
+  /** THE build version — every placed artifact carries it right after the
+   *  binary name (`<name>-<version>…`), dirty/nogit suffix included, so a
+   *  dirty artifact is visibly dirty. `binaryName` says where the name ends. */
+  version?: { version: string; binaryName: string },
 ): string {
-  if (!suffixed.has(target)) return file;
-  const ext = extname(file);
-  const base = file.slice(0, file.length - ext.length);
-  // An artifact that already carries its label (the iOS project directory
-  // is written as `<name>-ios-client`) is not labelled twice.
-  if (base.endsWith(`-${target}`)) return file;
-  return `${base}-${target}${ext}`;
+  const labelled = ((): string => {
+    if (!suffixed.has(target)) return file;
+    const ext = extname(file);
+    const base = file.slice(0, file.length - ext.length);
+    // An artifact that already carries its label (the iOS project directory
+    // is written as `<name>-ios-client`) is not labelled twice.
+    if (base.endsWith(`-${target}`)) return file;
+    return `${base}-${target}${ext}`;
+  })();
+  return version
+    ? versionedArtifactName(labelled, version.binaryName, version.version)
+    : labelled;
 }
 
 /** The target names a previous `dist/manifest.json` recorded, so a build can
@@ -544,7 +570,11 @@ export async function buildAll(): Promise<number> {
   try {
     denoJson = (await readDenoJson(root))?.config ?? {};
   } catch {
-    console.error(`${C.red}✗ no readable deno.json in ${root}${C.r}`);
+    console.error(
+      `${C.red}✗ no readable deno.json in ${root}${C.r}\n` +
+        `  ${C.dim}fix: run from the app directory (the one holding deno.json), ` +
+        `or scaffold one: am create <name>${C.r}`,
+    );
     return 1;
   }
   const block: BuildBlock = denoJson.build ?? {};
@@ -584,6 +614,8 @@ export async function buildAll(): Promise<number> {
     console.error(
       `${C.red}✗ duplicate target label(s): ${
         [...new Set(dupLabels)].join(", ")
+      }${C.r}\n  ${C.dim}fix: name each target once — --targets=${
+        [...new Set(targetList.map((t) => t.name))].join(",")
       }${C.r}\n`,
     );
     return 1;
@@ -692,12 +724,37 @@ export async function buildAll(): Promise<number> {
         `of the project that neither contains nor sits inside the project ` +
         `root, an app dir (${
           appDirs.join(", ") || "none"
-        }), src, .git or .aio.`,
+        }), src, .git or .aio.\n  ${C.dim}fix: "build": { "out": "dist" } in ` +
+        `deno.json (or --out=dist), then delete the "out" that pointed here.${C.r}`,
     );
     return 1;
   }
   const release = Deno.args.includes("--release");
   const force = Deno.args.includes("--force");
+  // THE app version, resolved ONCE for the whole fleet and handed to every
+  // per-target build (AIO_BUILD_VERSION) — so every artifact of one run
+  // carries one version, and the notes print once.
+  let version: BuildVersion;
+  try {
+    version = (await buildVersionFor(
+      root,
+      (denoJson as { version?: unknown }).version,
+      { out: block.out },
+    )).bv;
+  } catch (e) {
+    console.error(`${C.red}${e instanceof Error ? e.message : e}${C.r}`);
+    return 1;
+  }
+  for (const n of buildVersionNotes(version)) {
+    console.log(`  ${C.yellow}note:${C.r} ${n}`);
+  }
+  if (release && unpublishableReason(version.version)) {
+    console.log(
+      `  ${C.yellow}note:${C.r} ${
+        unpublishableReason(version.version)
+      } — this --release build cannot be published as is`,
+    );
+  }
   // Forwarded, not interpreted: only `--android` consults it (see
   // build-bundle's standalone-APK gate). It has to travel through the fleet
   // because the fleet IS the build path — `deno task build` and `deno task
@@ -758,7 +815,7 @@ export async function buildAll(): Promise<number> {
   } catch { /* nothing there yet, or not movable — nothing to protect */ }
 
   console.log(
-    `${C.b}Building ${targetList.length} target(s) for ${C.blue}${title}${C.r}${C.b} → ${
+    `${C.b}Building ${targetList.length} target(s) for ${C.blue}${title}${C.r}${C.b} ${version.version} → ${
       outDir.replace(root + "/", "")
     }/${C.r}${release ? ` ${C.dim}(release)${C.r}` : ""}`,
   );
@@ -824,6 +881,7 @@ export async function buildAll(): Promise<number> {
         const { code } = await new Deno.Command("deno", {
           args,
           cwd: root,
+          env: { [BUILD_VERSION_ENV]: JSON.stringify(version) },
           stdout: "inherit",
           stderr: "inherit",
         }).output();
@@ -839,7 +897,12 @@ export async function buildAll(): Promise<number> {
             error: `build exited ${code}`,
             artifacts: [],
           });
-          console.error(`${C.red}✗ ${label} failed (exit ${code})${C.r}`);
+          console.error(
+            `${C.red}✗ ${label} failed (exit ${code})${C.r} ${C.dim}— the ` +
+              `builder's own refusal is above this line; nothing from this ` +
+              `target reaches ${outDir.replace(root + SEPARATOR, "")}/. ` +
+              `Reproduce it alone: --targets=${target}${C.r}`,
+          );
           continue;
         }
 
@@ -869,7 +932,16 @@ export async function buildAll(): Promise<number> {
         if (artifacts.length === 0) {
           const why = `built but produced no recognized artifact for ` +
             `"${targetBin}" in ${root}`;
-          console.error(`${C.red}✗ ${label} — ${why}${C.r}`);
+          console.error(
+            `${C.red}✗ ${label} — ${why}${C.r}\n  ${C.dim}looked for: ` +
+              `${targetBin}, ${targetBin}-client, ${targetBin}-<platform>, ` +
+              `${targetBin}*.{AppImage,apk,zip,exe,service}, aio-client-*, ` +
+              `the ${iosArtifactName(targetBin)}/ directory — new since the ` +
+              `build began.\n  fix: the single-target build wrote elsewhere ` +
+              `or under another name. A per-target "name" in build.targets ` +
+              `must match what the builder printed above; an --out on the ` +
+              `builder side is not supported under the fleet.${C.r}`,
+          );
           results.push({
             target,
             role: spec.role,
@@ -965,7 +1037,10 @@ export async function buildAll(): Promise<number> {
           // this target was built alone or alongside others (see placedName).
           // Cross-built artifacts already carry their platform (artifactName),
           // so the two axes never collide with each other.
-          const name = placedName(a.file, r.target, suffixed);
+          const name = placedName(a.file, r.target, suffixed, {
+            version: version.version,
+            binaryName: r.binary,
+          });
           const owner = used.get(name);
           if (owner !== undefined) {
             // Two targets claiming one file name: the second move would delete
@@ -1010,6 +1085,12 @@ export async function buildAll(): Promise<number> {
     const manifest = {
       app: binaryName,
       title,
+      /** THE app version every artifact below is named with and reports. */
+      version: version.version,
+      /** Short sha of the commit it was built from — null without a repo. */
+      commit: version.commit,
+      dirty: version.dirty,
+      buildNumber: version.build,
       builtAt: new Date().toISOString(),
       release,
       /** The machine this was built on. Only these artifacts were runnable

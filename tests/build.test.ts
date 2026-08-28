@@ -217,7 +217,14 @@ Deno.test("build: --service + --compile does not conflict", async () => {
 // never exist — a successful-looking command that did a fraction of what its
 // flag says. The pipeline refuses it now, naming the combination that works.
 Deno.test("build: bare --service is refused, not half-done", async () => {
-  const { code, stderr, stdout } = await runBuild(["--service"]);
+  // A real (if empty) app: the framework's own deno.json is a JSR package
+  // whose prerelease version the STRICT app-version rule refuses first.
+  const tmp = await Deno.makeTempDir();
+  await Deno.writeTextFile(
+    join(tmp, "deno.json"),
+    JSON.stringify({ title: "svc", version: "0.1" }),
+  );
+  const { code, stderr, stdout } = await runBuild(["--service"], tmp);
   assertEquals(code, 1, `must refuse:\n${stdout}${stderr}`);
   const out = stderr + stdout;
   assert(out.includes("--service"), out);

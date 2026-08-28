@@ -10,6 +10,7 @@ import {
   slugify,
   writeLock,
 } from "../src/server/single-instance-lock.ts";
+import { stopChild } from "./stop-child.ts";
 
 const TEST_APP = "aio-test-lock-" + Deno.pid; // unique per test run to avoid collisions
 
@@ -252,10 +253,7 @@ Deno.test("zombie reclaim: pid alive but port dead → lock reclaimed (notes #5)
     );
     lock.release();
   } finally {
-    try {
-      sleeper.kill();
-    } catch { /* already gone */ }
-    await sleeper.status;
+    await stopChild(sleeper, { quiet: true });
   }
 });
 
@@ -287,10 +285,7 @@ Deno.test("zombie reclaim: UDS instance with dead socket is reclaimed", async ()
     );
     removeLock(appId);
   } finally {
-    try {
-      sleeper.kill();
-    } catch { /* already gone */ }
-    await sleeper.status;
+    await stopChild(sleeper, { quiet: true });
   }
 });
 
@@ -320,10 +315,7 @@ Deno.test("zombie reclaim: skipped during startup grace", async () => {
     );
     removeLock(appId);
   } finally {
-    try {
-      sleeper.kill();
-    } catch { /* already gone */ }
-    await sleeper.status;
+    await stopChild(sleeper, { quiet: true });
   }
 });
 

@@ -44,7 +44,6 @@ Deno.test("db: a restart with existing rows flushes cleanly (no duplicate INSERT
     const app = await aio.run({
       cells: [ticker],
       appId: "db-restart-baseline",
-      appVersion: "0.0.0",
       client: "server-only",
       libraryMode: true,
       port: PORT,

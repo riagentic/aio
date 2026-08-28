@@ -221,12 +221,16 @@ export async function cmdInstalled(
   try {
     for await (const e of Deno.readDir(root)) {
       if (!e.isDirectory) continue;
+      // The kept rollbacks are DIRECTORIES: `<app>/versions/<version>/<app><ext>`
+      // (install-record.ts `pruneVersions`, updates-apply.ts). Counting flat
+      // `<app>-<version>` files was the layout before that, so this quietly
+      // reported "1 version" for every app however many it was keeping.
       let versions = 0;
       try {
-        for await (const f of Deno.readDir(join(root, e.name))) {
-          if (f.isFile && f.name.startsWith(`${e.name}-`)) versions++;
+        for await (const f of Deno.readDir(join(root, e.name, "versions"))) {
+          if (f.isDirectory) versions++;
         }
-      } catch { /* unreadable — still list the app */ }
+      } catch { /* no versions/ (an older install) — still list the app */ }
       const rec = await readRecord(e.name);
       apps.push({
         name: e.name,

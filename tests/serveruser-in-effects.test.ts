@@ -60,7 +60,6 @@ async function boot() {
   return await aio.run({
     cells: [audited],
     appId: "test-effect-identity",
-    appVersion: "0.0.0",
     client: "server-only",
     persist: false,
     libraryMode: true,

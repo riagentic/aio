@@ -12,6 +12,7 @@ import { basename, dirname, join, resolve as resolvePath } from "@std/path";
 // the session and user stores already use.
 import { createHash } from "node:crypto";
 import { resolveAppDir, resolveEntry } from "./build-config.ts";
+import { buildVersionFor, unpublishableReason } from "./build-version.ts";
 import {
   flagVocabulary,
   SHIP_BOOL_FLAGS,
@@ -63,6 +64,11 @@ export type ShipManifest = {
   manifestVersion: 3;
   name: string;
   version: string;
+  /** The derived build number (`major.minor.<buildNumber>`) and the short
+   *  commit it was built from — INSIDE the signed core (`manifestCore`), like
+   *  everything a client shows or decides on. */
+  buildNumber?: number;
+  commit?: string | null;
   /** SHA-256 of the binary, hex. */
   sha256: string;
   size: number;
@@ -177,6 +183,12 @@ export function manifestCore(m: ShipManifest): string {
     data: canonicalData(m.data),
     notes: m.notes ?? "",
     releasedAt: m.releasedAt ?? "",
+    // Where the build came from — a client can show it, so it is signed.
+    // Absent on a manifest that predates it: `null` / "" keep such a
+    // manifest's core stable, but a manifest SIGNED before these two joined
+    // the core no longer verifies (alpha70 is the last breaking release).
+    buildNumber: m.buildNumber ?? null,
+    commit: m.commit ?? "",
   });
 }
 
@@ -315,6 +327,8 @@ export function manifestFileName(
 export async function buildShipManifest(opts: {
   name: string;
   version: string;
+  buildNumber?: number;
+  commit?: string | null;
   binary: Uint8Array;
   sources: { content: string }[];
   sign?: { privateKey: JsonWebKey; publicKey: JsonWebKey };
@@ -339,6 +353,10 @@ export async function buildShipManifest(opts: {
     manifestVersion: 3,
     name: opts.name,
     version: opts.version,
+    ...(opts.buildNumber !== undefined
+      ? { buildNumber: opts.buildNumber }
+      : {}),
+    ...(opts.commit !== undefined ? { commit: opts.commit } : {}),
     sha256,
     size: opts.binary.length,
     capabilities,
@@ -946,7 +964,13 @@ export async function shipApp(opts: {
   binaryPath: string;
   sourceDir?: string;
   name?: string;
+  /** The version to publish. Default: THE build version resolved from this
+   *  tree (`major.minor.<commit count>`, see build-version.ts). */
   version?: string;
+  buildNumber?: number;
+  commit?: string | null;
+  /** Publish a `-dirty.*` / `-nogit.*` version anyway — logged, never silent. */
+  allowDirty?: boolean;
   /** Path to a JSON `{ privateKey, publicKey }` (JWKs) — generateSigningKey(). */
   keyPath?: string;
   /** Manifest output path (default: `<binaryPath>.ship.json`). */
@@ -1048,15 +1072,25 @@ export async function shipApp(opts: {
   }
   // The version is part of the artifact's IDENTITY. Defaulting to "0.0.0" made
   // every unlabelled release claim the same confident wrong number.
-  const version = opts.version ??
-    (typeof cfg.version === "string" && cfg.version.trim()
-      ? cfg.version.trim()
-      : undefined);
+  // THE build version — derived from the tree exactly as the build named the
+  // artifact. A `-dirty.*` / `-nogit.*` version is not reproducible from a
+  // commit, so it is refused here, at the publisher, unless said otherwise.
+  let version = opts.version;
+  let buildNumber = opts.buildNumber;
+  let commit = opts.commit;
   if (!version) {
-    throw new Error(
-      `[ship] no version to publish — set "version" in ${
-        join(root, "deno.json")
-      } or pass --version=X.Y.Z. A manifest that says 0.0.0 identifies nothing.`,
+    const { bv } = await buildVersionFor(root, cfg.version, {
+      out: (cfg.build as { out?: string } | undefined)?.out,
+    });
+    version = bv.version;
+    buildNumber ??= bv.build;
+    commit ??= bv.commit;
+  }
+  const unpublishable = unpublishableReason(version);
+  if (unpublishable) {
+    if (!opts.allowDirty) throw new Error(`[ship] ✗ ${unpublishable}`);
+    console.warn(
+      `[ship] ⚠ --allow-dirty: publishing ${version} — ${unpublishable}`,
     );
   }
   const fileName = opts.binaryPath.replace(/.*[\\/]/, "");
@@ -1128,6 +1162,8 @@ export async function shipApp(opts: {
     platform: opts.platform,
     name,
     version,
+    buildNumber,
+    commit,
     binary,
     sources,
     sign,
@@ -1502,7 +1538,7 @@ export const SHIP_USAGE: string =
   "usage: ship <binary> [--src=DIR] [--name=N] [--version=V] [--key=key.json]\n" +
   "            [--channel=dev|test|prod] [--target=T] [--url=U] [--notes=…]\n" +
   "            [--min-from=X.Y.Z] [--data=contract.json] [--no-data]\n" +
-  "            [--out=ship.json]\n" +
+  "            [--out=ship.json] [--allow-dirty]\n" +
   "            [--channel-dir=DIR]   # also write DIR/<channel>/<os>-<arch>.json\n" +
   `       --target: ${UPDATE_TARGETS.join(" | ")}\n` +
   "       --key defaults to ~/.aio/keys/<name>-release-key.json when that file exists\n" +
@@ -1615,6 +1651,7 @@ if (import.meta.main) {
       minFrom: flag("min-from"),
       dataPath: flag("data"),
       noData: args.includes("--no-data"),
+      allowDirty: args.includes("--allow-dirty"),
       channelDir: flag("channel-dir"),
     });
   } catch (e) {

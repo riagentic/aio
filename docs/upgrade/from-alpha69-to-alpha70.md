@@ -112,11 +112,12 @@ fixed.
 
 ## Retire
 
-| workaround you may have                                                              | fixed in    | what to do now                                                              |
-| ------------------------------------------------------------------------------------ | ----------- | --------------------------------------------------------------------------- |
-| A script that greps `am dispatch` output because the exit code lied on a typo        | **alpha70** | trust the exit code — a bare type is a 404, a failed method is an error     |
-| `--key=~/.aio/keys/<app>-release-key.json` typed back into every `am publish`        | **alpha70** | drop it — `publish` finds the key `keygen` wrote; it says which key it used |
-| an index typed after `am surface` / `am trigger`, with a retry when 0 was the reload | **alpha70** | drop the index — the newest UI client is the default                        |
-| A hard-coded `ws://localhost:8000` in a CLI client because the scaffold had one      | **alpha70** | pass the URL (`deno run -A src/client.ts ws://host:port/ws`)                |
-| Comments stripped from `deno.json` so `am` would find the app                        | **alpha70** | put them back — every reader is JSONC-aware                                 |
-| `am <cmd> --help \| head -40` to find one command's flags                            | **alpha70** | `am <cmd> --help` prints that command's block                               |
+| workaround you may have                                                              | fixed in    | what to do now                                                                                                                    |
+| ------------------------------------------------------------------------------------ | ----------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| A script that greps `am dispatch` output because the exit code lied on a typo        | **alpha70** | trust the exit code — a bare type is a 404, a failed method is an error                                                           |
+| `--key=~/.aio/keys/<app>-release-key.json` typed back into every `am publish`        | **alpha70** | drop it — `publish` finds the key `keygen` wrote; it says which key it used                                                       |
+| an index typed after `am surface` / `am trigger`, with a retry when 0 was the reload | **alpha70** | drop the index — the newest UI client is the default                                                                              |
+| A hard-coded `ws://localhost:8000` in a CLI client because the scaffold had one      | **alpha70** | pass the URL (`deno run -A src/client.ts ws://host:port/ws`)                                                                      |
+| `appVersion: "1.2.3"` in `aio.run()`                                                 | **alpha70** | delete it — deno.json `"version": "1.2"` is the one place; builds are `1.2.<commit count>` ([versioning](../build/versioning.md)) |
+| Comments stripped from `deno.json` so `am` would find the app                        | **alpha70** | put them back — every reader is JSONC-aware                                                                                       |
+| `am <cmd> --help \| head -40` to find one command's flags                            | **alpha70** | `am <cmd> --help` prints that command's block                                                                                     |

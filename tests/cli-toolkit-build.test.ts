@@ -8,6 +8,7 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join, resolve } from "@std/path";
 import { childEnv, freePort, kill, waitForHttp } from "./e2e-app-harness.ts";
+import { stopChild } from "./stop-child.ts";
 
 const ROOT = resolve(import.meta.dirname!, "..");
 const EXAMPLE = join(ROOT, "examples", "cli-tool");
@@ -166,8 +167,12 @@ Deno.test("cli-tool: serve + add/list/done/--json/--watch against the real serve
     assertEquals(add2.code, 0, add2.err);
     await until(() => frames.includes("walk dog"), "redraw after a change");
     assert(!frames.includes("\x1b"), `no escapes on a pipe:\n${frames}`);
-    watcher.kill("SIGINT");
-    await watcher.status;
+    // SIGINT is the interactive stop this watcher exists to honour — bounded,
+    // so a watcher that ignores it fails the test instead of hanging the suite.
+    await stopChild(watcher, {
+      label: "the `todo watch` client",
+      graceMs: 10_000,
+    });
     await reader.catch(() => {});
   } finally {
     await kill(server);

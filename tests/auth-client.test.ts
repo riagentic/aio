@@ -17,7 +17,6 @@ Deno.test("authClient: signup → me → changePassword → login lifecycle", as
   const app = await aio.run({
     cells: [c],
     appId: `test-authclient-${Deno.pid}`,
-    appVersion: "0.0.0",
     client: "server-only",
     persist: false,
     libraryMode: true,
@@ -82,7 +81,6 @@ Deno.test("authClient: requestReset never throws / never enumerates", async () =
   const app = await aio.run({
     cells: [c],
     appId: `test-authclient-reset-${Deno.pid}`,
-    appVersion: "0.0.0",
     client: "server-only",
     persist: false,
     libraryMode: true,

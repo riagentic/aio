@@ -14,7 +14,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { buildAll, normalizeTargets } from "../src/build-all.ts";
-import { unsafeOutDir } from "../src/testing/internal.ts";
+import { placedName, unsafeOutDir } from "../src/testing/internal.ts";
 import { slugify } from "../src/build/build-helpers.ts";
 
 // ── normalization: the array form is the object form with no overrides ──────
@@ -278,10 +278,19 @@ Deno.test("build-all: object-form targets build their OWN entry and name", async
   assertEquals(argOf(server!, "--name="), "relay");
   assertEquals(argOf(browser!, "--name="), "Two Apps");
 
-  // Both artifacts survive into dist/ under their own names.
+  // Both artifacts survive into dist/ under their own names — each carrying
+  // THE build version (alpha70: `<name>-<version>…`, one string for the run),
+  // via the same placement rule the fleet build uses, not a literal.
+  const version = run.manifest.version as string;
+  const placed = (binary: string, target: string) =>
+    placedName(binary, target, new Set(), { version, binaryName: binary });
   assertEquals(
     run.dist,
-    ["manifest.json", slugify("relay"), slugify("Two Apps")].sort(),
+    [
+      "manifest.json",
+      placed(slugify("relay"), "server"),
+      placed(slugify("Two Apps"), "browser"),
+    ].sort(),
   );
   const targets = run.manifest.targets as Array<Record<string, unknown>>;
   assertEquals(targets.map((t) => t.binary), ["relay", "two-apps"]);
@@ -306,11 +315,20 @@ Deno.test("build-all: array-form targets are byte-identical to before (compat)",
     assertEquals(argv.filter((a) => a.startsWith("--entry=")), []);
     assertEquals(argOf(argv, "--name="), "My App");
   }
-  // one app, one name → the collision suffix still disambiguates
+  // one app, one name → the collision suffix still disambiguates, and both
+  // artifacts carry the ONE version the run resolved (`<name>-<version>-cli`).
+  const version = run.manifest.version as string;
+  const binary = slugify("My App");
+  const placed = (target: string) =>
+    placedName(binary, target, new Set(["cli"]), {
+      version,
+      binaryName: binary,
+    });
   assertEquals(
     run.dist,
-    ["manifest.json", slugify("My App"), `${slugify("My App")}-cli`].sort(),
+    ["manifest.json", placed("server"), placed("cli")].sort(),
   );
+  assertEquals(placed("cli"), `${binary}-${version}-cli`);
 });
 
 Deno.test("build-all: --targets selects a target and keeps its entry", async () => {

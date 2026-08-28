@@ -84,6 +84,8 @@ export interface ServerSetupDeps<S, A> {
   costMeter?: import("../vitals/cost-meter.ts").CostMeter;
   // Identity & network
   appId: string;
+  /** THE app version (`_appVersion`) — reported by `/__aio/health`. */
+  appVersion: string;
   port: number;
   /** Whether `port` was NAMED (`--port`, `AIO_PORT`, `aio.run({ port })`)
    *  rather than picked free by the runtime — the zero-port opt-out. */
@@ -93,6 +95,8 @@ export interface ServerSetupDeps<S, A> {
   /** Real-filesystem `dist/` Electron can read from its own process, if any —
    *  the precondition for running with zero TCP ports. See skipHttp below. */
   electronDistDir: string | undefined;
+  /** The shell the app runs in (electron | browser) — for the graph evaluation. */
+  shell?: "browser" | "electron";
   baseDir: string;
   expose: boolean;
   token: string | undefined;
@@ -280,6 +284,7 @@ export async function setupTransport<S, A>(
 ): Promise<ServerSetupResult> {
   const {
     appId,
+    appVersion,
     port,
     prod,
     distDir,
@@ -570,7 +575,9 @@ export async function setupTransport<S, A>(
       clientCount: () => 0,
     }
     : createServer({
+      appVersion,
       port,
+      shell: deps.shell,
       // The zero-port route: the handler listens on a SOCKET instead of a
       // TCP port (`Deno.serve({ path })`). `port` above is then unused — the
       // boot report says so rather than printing a number nothing bound.
@@ -683,6 +690,7 @@ export async function setupTransport<S, A>(
               ? "degraded"
               : "healthy",
             version: VERSION,
+            appVersion,
             appId,
             // WHICH process answered. Without it, an orphan holding the port —
             // a run whose lock is gone but whose process kept serving — is
@@ -703,6 +711,7 @@ export async function setupTransport<S, A>(
             ? "degraded"
             : "healthy",
           version: VERSION,
+          appVersion,
           appId,
           pid: Deno.pid,
           uptime,

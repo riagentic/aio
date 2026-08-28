@@ -71,7 +71,6 @@ async function bootAuthApp(port: number, appId: string) {
   const app = await aio.run({
     cells: [vault],
     appId,
-    appVersion: "0.0.0",
     client: "server-only",
     persist: false,
     libraryMode: true,
@@ -328,7 +327,6 @@ Deno.test("cookie clamp: the session cookie carries a session and nothing else",
     const app = await aio.run({
       cells: [c],
       appId: `test-clamp-${Deno.pid}`,
-      appVersion: "0.0.0",
       client: "server-only",
       persist: false,
       libraryMode: true,
@@ -426,7 +424,6 @@ Deno.test("expose: a shared key and the login flows refuse to coexist", async ()
       await aio.run({
         cells: [c],
         appId: `test-key-auth-${Deno.pid}`,
-        appVersion: "0.0.0",
         client: "server-only",
         persist: false,
         libraryMode: true,
@@ -460,7 +457,6 @@ Deno.test("sessions: the sweep disarms an IDLE socket when its session expires",
     const app = await aio.run({
       cells: [c],
       appId: `test-expiry-${Deno.pid}`,
-      appVersion: "0.0.0",
       client: "server-only",
       persist: false,
       libraryMode: true,

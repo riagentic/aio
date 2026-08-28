@@ -1,5 +1,6 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { resolve } from "@std/path";
+import { isPlacedBinary } from "./e2e-app-harness.ts";
 import {
   denoJson,
   frameworkSpecs,
@@ -280,7 +281,7 @@ Deno.test({
       // `compile` is the fleet pipeline narrowed to the default target, so the
       // binary (a file with no extension) + manifest.json land in dist/.
       const dist = [...Deno.readDirSync(resolve(dir, "dist"))];
-      const bin = dist.some((e) => e.isFile && !e.name.includes("."));
+      const bin = dist.some((e) => e.isFile && isPlacedBinary(e.name));
       assert(bin, "no compiled binary produced in dist/");
       assert(
         dist.some((e) => e.name === "manifest.json"),

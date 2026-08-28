@@ -114,6 +114,31 @@ done
 note "$(printf '%s' "$WIN" | head -2)"
 ok "a window is mapped on :99"
 
+step "…and the page in it MOUNTED the app (aio://, the shipped path)"
+# A mapped window is not a painted one. A field report had exactly this: the
+# packaged app started, served, logged errors=0, and the window stayed blank —
+# the renderer had thrown before it painted and nothing said so. run.sh runs
+# the BUILT artifact, whose window loads over aio://; the renderer reports its
+# mount through the shell into the framework log, and that line is the proof.
+mdeadline=$(( $(date +%s) + 120 ))
+MOUNTED=""
+while [ "$(date +%s)" -lt "$mdeadline" ]; do
+  MOUNTED=$(grep -E 'INFO +renderer +ui mounted [1-9][0-9]* element' "$LAB_LOG" | head -1)
+  [ -n "$MOUNTED" ] && break
+  if grep -qE 'ERROR +renderer +' "$LAB_LOG"; then
+    grep -E 'ERROR +renderer +' "$LAB_LOG" | head -5 >&2
+    die "the renderer reported an error before mounting — the window is blank"
+  fi
+  sleep 3
+done
+[ -n "$MOUNTED" ] || die "the window never mounted the app over aio:// (no 'ui mounted' line in 120s) — a blank window"
+ok "$(printf '%s' "$MOUNTED" | sed -E 's/.*renderer +//')"
+if grep -qE 'ERROR +renderer +' "$LAB_LOG"; then
+  grep -E 'ERROR +renderer +' "$LAB_LOG" | head -5 >&2
+  die "the renderer logged errors after mounting"
+fi
+ok "no renderer errors"
+
 step "did it INSTALL itself somewhere that outlives the checkout?"
 # The one-liner used to run the build in place, out of the repo's dist/ — so
 # deleting the clone deleted the app, and everyone who used it seriously copied

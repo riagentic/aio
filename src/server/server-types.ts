@@ -10,6 +10,11 @@ export type GetUIStateFn = (user?: AioUser) => unknown;
 
 /** Internal config — passed by aio.run(), not user-facing */
 export interface ServerConfig {
+  /** THE app version — announced to every client in the proto hello. */
+  appVersion?: string;
+  /** The shell the client will really run in — the dev graph evaluation
+   *  presents its user agent, so a renderer-only throw is caught in dev. */
+  shell?: "browser" | "electron";
   port: number;
   /** Server-origin dispatch for the trojan's `?as=server` — bypasses the cell
    *  `access` gate, because server code always has. Dev-only + loopback-only,

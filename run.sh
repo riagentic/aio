@@ -317,32 +317,53 @@ ok "built $artifact"
 INSTALL_ROOT=$(deno run -A "$builder" --print-install-root 2>/dev/null || true)
 [ -n "$INSTALL_ROOT" ] || INSTALL_ROOT="${AIO_INSTALL_ROOT:-$HOME/app}"
 app_name=$(basename "$artifact")
-case "$app_name" in
-  *.AppImage)
-    app_ext=".AppImage"
-    # Strip the ARCH suffix the build appends, not "everything after the first
-    # hyphen" — that turned `demo-electron-x86_64.AppImage` into `demo`, and
-    # would have installed `chat-app` as `chat`. App names contain hyphens
-    # far more often than they contain arch strings.
-    app_base="${app_name%.AppImage}"
-    for _arch_suffix in x86_64 aarch64 arm64 armhf i686 amd64; do
-      app_base="${app_base%-$_arch_suffix}"
-    done
-    ;;
-  *) app_base="$app_name"; app_ext="" ;;
-esac
+# WHAT this artifact is installed as — base name, extension, and the version
+# its file name carries. The build owns that rule (`installArtifactName`), and
+# it is asked, never re-derived here: since artifacts carry the derived version
+# in their names (`demo-1.2.345-x86_64.AppImage`), a shell copy of the rule
+# installs `demo-1.2.345.AppImage` — an app that renames itself, and its data
+# directory, on every single update.
+app_base=""; app_ext=""; art_ver=""
+_names=$(deno run -A "$builder" --print-install-name="$app_name" 2>/dev/null || true)
+if [ -n "$_names" ]; then
+  app_base=$(printf '%s\n' "$_names" | sed -n 1p)
+  app_ext=$(printf '%s\n' "$_names" | sed -n 2p)
+  art_ver=$(printf '%s\n' "$_names" | sed -n 3p)
+fi
+if [ -z "$app_base" ]; then
+  # An aio pinned before this flag existed. Such a build stamps no version into
+  # the name, so the pre-versioning rule — strip the arch suffix the packager
+  # appends, never "everything after the first hyphen" (that turned
+  # `demo-electron-x86_64.AppImage` into `demo`, and `chat-app` into `chat`) —
+  # is the whole rule for the names it produces. A name that DOES carry a
+  # version with no builder able to read it is refused rather than guessed at.
+  case "$app_name" in
+    *-[0-9]*.[0-9]*.[0-9]*) # aio-ok: refuse-versioned-name
+      fail "this app's pinned aio cannot name the artifact it just built ($app_name).
+  Update the pin (am pin --latest) and re-run." ;;
+  esac
+  case "$app_name" in
+    *.AppImage)
+      app_ext=".AppImage"
+      app_base="${app_name%.AppImage}"
+      for _arch_suffix in x86_64 aarch64 arm64 armhf i686 amd64 x64; do
+        app_base="${app_base%-$_arch_suffix}"
+      done
+      ;;
+    *) app_base="$app_name"; app_ext="" ;;
+  esac
+fi
 [ -n "$app_base" ] || app_base="$app_name"
 
 if [ "$NO_INSTALL" = 1 ]; then
   installed="$artifact"
 else
-  app_ver=$(deno eval "
-    try {
-      const t = Deno.readTextFileSync('$CFG');
-      const c = JSON.parse(t.replace(/^\\s*\\/\\/.*\$/gm, ''));
-      console.log(c.version ?? '');
-    } catch { console.log(''); }
-  " 2>/dev/null || echo "")
+  # The version this build IS — `major.minor.<commit count>`, derived by the
+  # build and stamped into the artifact's name. deno.json's `version` is only
+  # its `major.minor` half now, so reading it here put every build of 0.1.x
+  # into the same `versions/0.1/` directory: each install overwrote the one
+  # before it and there was nothing left to roll back to.
+  app_ver="$art_ver"
   target_dir="$INSTALL_ROOT/$app_base"
 
   # Is something ELSE already installed under this name? Two projects called

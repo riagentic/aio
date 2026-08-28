@@ -1,5 +1,125 @@
 # Changelog
 
+## v1.0.0-alpha71 — the build it is, installed under its own name (2026-08-28)
+
+> Every artifact now says which build it is, in its name and at runtime — and
+> the installer takes that version back OFF the file it installs, because a
+> compiled binary's identity (and its data directory) is its own file name. The
+> shipped artifact is run the way a user meets it, the client graph has one
+> decider that dev evaluates, and a field report against alpha70 is worked to
+> zero. No breaking changes: `docs/upgrade/from-alpha70-to-alpha71.md`.
+
+- **Strict, derived build versions — every artifact says which build it is.**
+  deno.json `"version": "1.2"` is the one place a version lives; the build
+  number is DERIVED from the codebase (`git rev-list --count HEAD`), so the same
+  commit always builds `1.2.345` and a new commit bumps it; a dirty tree builds
+  `1.2.345-dirty.<hash8>` (same dirty content twice → same name, a different
+  edit never collides), no git → `-nogit.<hash8>` with a loud note. Every
+  artifact carries it: `notes-1.2.345.AppImage`, `notes-1.2.345.apk`,
+  `notes-1.2.345-windows-x64.exe`, `notes-1.2.345-ios-client/`; the running
+  binary reports it from `--version`, the boot line, `/__aio/health`, the WS
+  hello (`app`, additive in protocol v3 — `am clients` shows it) and the update
+  manifests, whose `buildNumber`/`commit` are inside the signature. A three-part
+  `"1.0.0"` is a pinned version and the build says so (`am fix` rewrites it);
+  `aio.run({ appVersion })` is retired (the registry names the fix);
+  `am publish`/`ship` refuse a dirty or no-git build (`--allow-dirty` is the
+  logged override); the update check compares derived versions first and the
+  installed digest only as the tie-breaker. Docs: `docs/build/versioning.md`.
+- **Fixed:** the alpha70 strict shape-drift refusal read a declared `null`
+  (`user: null`, held an object after sign-in) as a type change and refused to
+  boot every app that had ever been used once. A `null` on either side carries
+  no shape; a field renamed or removed is still refused.
+
+- **The shipped artifact is now tested the way a user meets it.** A field report
+  (a desktop wallet, 35 cells) built a 203 MB AppImage that started, served,
+  logged `errors=0` and showed no UI. Reproduced on a real display: the
+  `aio://app/` window path was fine — the renderer had thrown before painting
+  (`Buffer is not defined`, from a dependency that takes a Node path under an
+  Electron user agent) and nothing said so, while `am surface` on the production
+  build printed "no UI client connected" for a window that was rendering. Now:
+  the packaged Electron artifact is RUN in `test:electron` and the onboarding
+  lab (real display or xvfb), which assert the renderer's "ui mounted N
+  element(s)" line; every renderer `console.error`, `render-process-gone`,
+  `preload-error`, `unresponsive`, `did-fail-load` and a 15 s empty-`#root`
+  watchdog reach the framework log at error level (only the four exact GPU-probe
+  lines are dropped); `AIO_ELECTRON_PROTOCOL=1` runs dev through the packaged
+  `aio://` shell ("test what you ship"); and `am surface`/`trigger` on a
+  production build say the control API is dev-only instead of lying about the
+  window.
+- **One decider for the browser bundle, evaluated in dev.** `deno task check`
+  said "no blocking imports" for two weeks while `deno task build` refused the
+  same source: the validator treated ANY dynamic import as the escape hatch; the
+  builder follows every dynamic import except `*.server.ts`. Both now call
+  `auditClientGraph` (`src/build/graph-audit.ts`), which also names Node globals
+  (`Buffer`, `process`, `global`, …) referenced at module scope with the
+  importing module and the fix. Dev boot (and every graph-changing reload)
+  bundles the prod graph in memory (~80 ms, 0 ms cached), audits it, and
+  EVALUATES its module scope in a worker with the shell's user agent — a bundle
+  that throws at load is a dev-time boot refusal naming the module, and
+  `deno task build` never writes it. `// aio-ok: node-global` silences the
+  static scan only; the evaluation cannot be silenced.
+- **`am build` / `am compile` / `am dev` = `deno task build` / `compile` /
+  `dev`.** They run the app's own tasks (so the app's pinned aio builds it),
+  proven byte-equal on `dist/manifest.json` and `--list` output. Every build
+  refusal names what, where and the fix; no path exits 0 without an artifact.
+- **`am` reaches a packaged, zero-port app.** Every command read one lock keyed
+  by the home `am` computed; an app booted from its own `appDir` writes
+  `<id>@<hash>.lock`, so `am surface --app=<id>` said "not running" in the same
+  sentence that listed it running. `liveLock` + one `controlEndpoint` decider
+  (TCP or UDS) route every trojan-backed command;
+  `start/stop/status/
+  restart/shot/data` follow. Proven against a real
+  zero-port app driven end to end from a foreign cwd.
+
+- **A field report against alpha70 (a desktop wallet, 35 cells), worked to
+  zero.** `aiol`'s `.tsx` server-only rule scanned test files again (51 false
+  ERRORs — the same class alpha69 closed for the other loop; now the same
+  guard); `cell-set-drift` reported a `scope: "client"` cell as missing from the
+  server and told a correct app to boot it there (a client cell is DEFINED as
+  never booted; the decision is a pure, tested function now);
+  `state-shape-drift` fired on every load for a slice a later FULL frame
+  legitimately omitted (subscriptions narrow it) — a full frame now re-baselines
+  the shape and only a patch that drops a key reports; `aiol --safe-fix`
+  rewrites the dynamic `const { x } = await import("aio")` form too when every
+  name moves.
+- **`am lab linux` and `am lab android`** join `windows`/`macos` with the same
+  grammar (`--status|--stop|--reset`, `--port`, `--dist`, `--tunnel`): a real
+  Ubuntu XFCE desktop as a container (no KVM, no disk, `dist/` is `/shared`
+  inside, FUSE for AppImages) and the Android 14 emulator (KVM, noVNC viewer)
+  where `am` waits for `sys.boot_completed` and `adb install -r`s the APK —
+  re-running after a rebuild re-installs; `--apk=<file>` picks among several.
+  `LabSpec` is now a table (`kind`, `viewerPort`, `needsKvm`, `needsTun`,
+  `runExtra`, `env`), so an OS is a row, not a branch. Additive only.
+- **What an artifact is called is not what it installs as.** The version in
+  `notes-1.2.345-x86_64.AppImage` is taken back off by the installer:
+  `~/app/notes/versions/1.2.345/notes.AppImage`, with the stable
+  `~/app/notes/notes.AppImage` symlink beside it. A deno-compiled binary derives
+  its identity — and therefore `~/.notes/` — from its own file name, so an
+  installed `notes-1.2.345` renames the app on every update and comes up with
+  empty state. `installArtifactName` is the one rule (version off, arch off, a
+  cross build's platform token only behind an arch, `chat-app` never `chat`);
+  `deno task build --print-install-name=<file>` answers it and `run.sh` /
+  `run.ps1` ask instead of parsing names in shell — a version pattern in either
+  installer is a red gate now. `run.ps1` also moves to the same
+  `versions/<version>/` layout the updater and the pruner read (it wrote a flat
+  `<app>-<version>.exe`), `run.sh` takes the version directory from the artifact
+  rather than deno.json's `major.minor` half (every 0.1.x build had been landing
+  in `versions/0.1/`, overwriting the rollback), and `am installed` counts the
+  kept versions where they actually live.
+- **A CommonJS dependency no longer fails a bundle that works.** The client
+  bundle is refused on the EVALUATION, explained by the scan: `require`/`module`
+  in a `"cjs"` input are supplied by esbuild's own wrapper, and a module-scope
+  Node global that a shim defines first is a note, not a refusal — while a
+  bundle that does throw is refused with the scan's `file:line` for the name
+  that threw. A server-only leak is still judged on the audit alone: a key in
+  `dist/app.js` is shipped whether or not the page paints.
+- **The onboarding lab says when the checkout is the problem.** A repo written
+  under `umask 077` cannot be cloned by the container's unprivileged user, and
+  every scenario failed two seconds in with git's words ("has a null OID"). A
+  preflight names the files and the fix. And in the suite, a child that ignores
+  SIGTERM is now a bounded, named failure instead of a test that hangs the whole
+  run (it hung for 56 minutes once, reporting only "running for over 16m").
+
 ## v1.0.0-alpha70 — what it says is what it does (2026-08-28)
 
 > **The last release that breaks compatibility.** Every alias, duplicate home

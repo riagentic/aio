@@ -10,6 +10,7 @@
 // the server, so there is no subscription-filtering boundary. This is a
 // transport-faithful e2e — real server + real Chromium + a server scheduler.
 import { assert } from "@std/assert";
+import { stopChild } from "./stop-child.ts";
 
 const _childCovDir = Deno.env.get("DENO_COVERAGE_DIR") ??
   Deno.makeTempDirSync({ prefix: "aio-child-cov-" });
@@ -204,10 +205,7 @@ await aio.run({ persist: false, schedules: [{ id: "tick", every: 600, action: da
         browser?.kill();
       } catch { /* exited */ }
       if (browser) await browser.status;
-      try {
-        proc.kill();
-      } catch { /* exited */ }
-      await proc.status;
+      await stopChild(proc, { quiet: true });
       await Deno.remove(profile, { recursive: true }).catch(() => {});
       await Deno.remove(dir, { recursive: true }).catch(() => {});
     }

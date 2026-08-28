@@ -41,6 +41,7 @@ import { detectMode, formatUptime, out, outError } from "./am-output.ts";
 import { repoRoot } from "./am-cmd-create.ts";
 import {
   declaredPort,
+  liveLock,
   readEntryConfig,
   readPid,
   removePid,
@@ -161,14 +162,16 @@ export async function ensureSingleton(
   appId: string,
   mode: import("./am-types.ts").OutputMode,
 ): Promise<void> {
-  const pf = readPid(appId);
+  // Wherever the instance's home is: an app `am instances` lists must never
+  // be started a second time because its lock sits under `<id>@<hash>`.
+  const pf = liveLock(appId);
   if (!pf) return;
 
   // Stale lock — the process that wrote it is gone. By OWNER, not by pid: a
   // lock under /tmp outlives a reboot, and the pid it names may now be
   // somebody else's program.
   if (!isLockOwnerAlive(pf)) {
-    removePid(appId);
+    removePid(appId, pf);
     return;
   }
 
@@ -188,7 +191,7 @@ export async function ensureSingleton(
     if (isProcessAlive(pf.pid)) {
       await killProcess(pf.pid, 0, pf); // already waited, go straight to SIGKILL
     }
-    removePid(appId);
+    removePid(appId, pf);
     return;
   }
 
@@ -231,7 +234,7 @@ export async function ensureSingleton(
       mode,
     );
     await killProcess(pf.pid, undefined, pf);
-    removePid(appId);
+    removePid(appId, pf);
     return;
   }
 
@@ -266,7 +269,7 @@ export async function ensureSingleton(
     mode,
   );
   await killProcess(pf.pid, undefined, pf);
-  removePid(appId);
+  removePid(appId, pf);
 }
 
 // ── Process management commands ─────────────────────────────
@@ -668,6 +671,10 @@ export async function cmdStart(
   // overwriting its real lock (the port it actually bound, its transport, its
   // start token) with this half-filled record is how `am start` came to report
   // `port: 0` for an app that was already listening.
+  // `readPid`, not `liveLock`, on purpose: this is the lock of the child `am`
+  // itself just spawned, under the home `am` launched it with — an instance
+  // of the same id from ANOTHER home is a different app and must not be
+  // mistaken for it.
   const childLock = readPid(appId);
   const lockData: LockData = {
     appId,
@@ -730,7 +737,7 @@ export async function cmdStart(
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
     if (!isProcessAlive(pid)) break; // died early
     if (livePort === undefined) {
-      const written = readPid(appId);
+      const written = readPid(appId); // our own child's lock — see above
       if (written?.port) livePort = written.port;
       else continue; // not far enough into boot to have chosen one
     }
@@ -749,7 +756,7 @@ export async function cmdStart(
 
   if (healthy) {
     // Child's _run() should have updated the lock by now
-    const updated = readPid(appId);
+    const updated = readPid(appId); // our own child's lock — see above
     if (updated && updated.status !== "started") {
       writeLock({ ...updated, status: "started" });
     }
@@ -764,7 +771,7 @@ export async function cmdStart(
       mode,
     );
   } else if (!isProcessAlive(pid)) {
-    removePid(appId);
+    removePid(appId); // our own child's placeholder, under our own home
     let reason = "";
     try {
       const log = Deno.readTextFileSync(stdoutLogPath(appId));
@@ -822,7 +829,9 @@ export async function resolveStopTarget(
   flags: GlobalFlags,
 ): Promise<{ ok: true; target: StopTarget } | { ok: false; error: string }> {
   const cwdAppId = resolveAmAppId(flags.app);
-  const pf = readPid(cwdAppId);
+  // Wherever the instance's home is — `am stop` must stop the app
+  // `am instances` lists, including one booted from its own `appDir`.
+  const pf = liveLock(cwdAppId);
 
   // No --port: the lock file is the only decider.
   if (flags.port === undefined) {
@@ -857,7 +866,7 @@ export async function resolveStopTarget(
         target: {
           appId: probe.appId,
           port: flags.port,
-          pf: readPid(probe.appId),
+          pf: liveLock(probe.appId),
         },
       };
     }
@@ -988,7 +997,7 @@ async function stopOne(
   if (pf && isProcessAlive(pf.pid)) {
     await killProcess(pf.pid, 0, pf); // already waited gracefully
   }
-  removePid(appId);
+  removePid(appId, pf);
   return { ok: true, appId, pid: pf?.pid, port };
 }
 
@@ -1142,7 +1151,7 @@ export async function cmdRestart(
     Deno.exit(1);
   }
   const appId = resolveAmAppId(flags.app);
-  const pf = readPid(appId);
+  const pf = liveLock(appId); // wherever the instance's home is
 
   // Preserve the original launch across restart (a field report:
   // restart dropped --env-file → the vault stopped auto-unlocking). Explicit
@@ -1213,7 +1222,7 @@ export async function cmdWatch(
   );
 
   // Start initially if not already running
-  if (!readPid(appId)) await cmdStart([], flags);
+  if (!liveLock(appId)) await cmdStart([], flags); // never a double start
 
   // Auto-restart disabled — server.ts handles UI live reload (.tsx/.css/.html/.svg)
   // via WebSocket without killing the process. Backend .ts changes require manual restart.
@@ -1239,7 +1248,7 @@ export async function cmdStatus(
       flags = { ...flags, app: plan.component.appId };
     } else if (plan.kind === "all") {
       const rows = plan.components.map((c) => {
-        const pf = readPid(c.appId);
+        const pf = liveLock(c.appId);
         const up = pf !== null && isProcessAlive(pf.pid);
         return {
           component: c.label,
@@ -1266,7 +1275,9 @@ export async function cmdStatus(
   }
 
   const appId = resolveAmAppId(flags.app);
-  const pf = readPid(appId);
+  // Wherever the instance's home is: `am status` and `am instances` read the
+  // same fact, so they can never disagree about an `appDir`-homed app again.
+  const pf = liveLock(appId);
 
   // No lock file → stopped. But "stopped" is only half an answer when OTHER
   // aio apps are up: `am status` said `stopped` while `am instances` listed
@@ -1282,7 +1293,9 @@ export async function cmdStatus(
         ? `${appId}: stopped` +
           (others.length > 0
             ? `\n  (running: ${
-              others.map((i) => `${i.appId} @ :${i.port}`).join(", ")
+              others.map((i) =>
+                `${i.appId} @ ${i.socketPath ? "uds" : `:${i.port}`}`
+              ).join(", ")
             } — this directory resolves to "${appId}"; use --app=<id>)`
             : "")
         : { appId, status: "stopped", running: others.map((i) => i.appId) },
@@ -1295,7 +1308,7 @@ export async function cmdStatus(
 
   // Lock file exists but process dead → stale, clean up
   if (!alive) {
-    removePid(appId);
+    removePid(appId, pf);
     out(
       mode === "pretty" ? `${appId}: stopped` : { appId, status: "stopped" },
       mode,
@@ -1573,7 +1586,7 @@ export async function cmdKill(
   if (!flags.stale) {
     // The blunt form: end THIS app now. `am stop` is the polite one.
     const appId = resolveAmAppId(flags.app);
-    const pf = readPid(appId);
+    const pf = liveLock(appId); // wherever the instance's home is
     if (!pf || !isLockOwnerAlive(pf)) {
       out(
         mode === "pretty" ? `${appId}: not running` : { appId, killed: false },
@@ -1584,7 +1597,7 @@ export async function cmdKill(
     try {
       Deno.kill(pf.pid, "SIGTERM");
     } catch { /* raced us to the exit */ }
-    removePid(appId);
+    removePid(appId, pf);
     out(
       mode === "pretty"
         ? `killed ${appId} (pid ${pf.pid})`

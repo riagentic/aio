@@ -34,7 +34,6 @@ const counter = cell("soak", {
 
 const app = await aio.run({
   appId: "aio-soak",
-  appVersion: "0.0.0",
   cells: [counter],
   client: "server-only",
   transport: "ws",

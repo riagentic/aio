@@ -111,7 +111,7 @@ export async function buildIos(cfg: BuildConfig): Promise<void> {
     Deno.exit(1);
   }
   const mainConfig = (await readDenoJson(root))?.config ?? {};
-  const version = androidVersion(mainConfig.version as string | undefined);
+  const version = androidVersion(cfg.version);
   const explicitId = (mainConfig.ios as { bundleId?: string } | undefined)
     ?.bundleId;
   const bundleId = iosBundleId(binaryName, explicitId);

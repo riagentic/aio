@@ -27,7 +27,6 @@ Deno.test("libraryMode: boot + dispatch + close cleanly inside a test", async ()
   const app = await aio.run({
     cells: [counter],
     appId: "test-library-mode",
-    appVersion: "0.0.0",
     client: "server-only",
     persist: false,
     libraryMode: true,
@@ -62,7 +61,6 @@ Deno.test("libraryMode: same appId boots twice (no singleton lock)", async () =>
     return await aio.run({
       cells: [c],
       appId: "test-library-mode-2",
-      appVersion: "0.0.0",
       client: "server-only",
       persist: false,
       libraryMode: true,
@@ -96,7 +94,6 @@ Deno.test("onStart can call a cell method (B6) — seeding works", async () => {
   const app = await aio.run({
     cells: [members],
     appId: "test-onstart-seed",
-    appVersion: "0.0.0",
     client: "server-only",
     persist: false,
     libraryMode: true,

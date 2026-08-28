@@ -81,7 +81,6 @@ Deno.test("internal actions: a WS client cannot dispatch one (real app, real soc
   const app = await aio.run({
     cells: [guard],
     appId: "test-internal-action-ws",
-    appVersion: "0.0.0",
     client: "server-only",
     persist: false,
     libraryMode: true,

@@ -442,10 +442,23 @@ Deno.test("detectShapeDrift: skip set suppresses a migrated cell", () => {
   assertEquals(drift.map((d) => d.cell), ["b"]);
 });
 
-Deno.test("detectShapeDrift: null vs object is a type change, not a recurse", () => {
-  const drift = detectShapeDrift({ c: { v: { a: 1 } } }, { c: { v: null } });
-  assertEquals(drift[0]!.issue, "type-changed");
-  assertEquals(drift[0]!.storedType, "null");
+// `T | null` is how every app spells "not yet" (`user: null` holding an object
+// after sign-in). A `null` on either side carries no shape, so it is NOT
+// drift — reading it as a type change made dev refuse to boot every app that
+// had ever been used once (alpha70). A field renamed or removed still is.
+Deno.test("detectShapeDrift: null on either side is no shape — not drift, not a recurse", () => {
+  assertEquals(
+    detectShapeDrift({ c: { v: { a: 1 } } }, { c: { v: null } }),
+    [],
+  );
+  assertEquals(
+    detectShapeDrift({ c: { v: null } }, { c: { v: { a: 1 } } }),
+    [],
+  );
+  const renamed = detectShapeDrift({ c: { v: { a: 1 } } }, {
+    c: { w: { a: 1 } },
+  });
+  assert(renamed.length > 0, "a renamed field is still drift");
 });
 
 Deno.test("detectShapeDrift: capped at 100 entries, never unbounded", () => {

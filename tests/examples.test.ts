@@ -3,6 +3,7 @@
 // Kept out of test:core (spawns real servers); runs in `deno task test` + CI.
 import { assert, assertEquals } from "@std/assert";
 import { connectCli } from "aio/server";
+import { stopChild } from "./stop-child.ts";
 
 // Coverage profiles from spawned deno processes go to a throwaway temp dir —
 // never into the repo (an empty DENO_COVERAGE_DIR means "cwd"), never into
@@ -62,10 +63,7 @@ function spawnExample(
 }
 
 async function kill(proc: Deno.ChildProcess): Promise<void> {
-  try {
-    proc.kill();
-  } catch { /* already exited */ }
-  await proc.status;
+  await stopChild(proc, { quiet: true });
 }
 
 // Boot the example headless, dispatch counter:increment over WS, observe state.

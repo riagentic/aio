@@ -9,6 +9,7 @@
 // (visibly) otherwise. Opt out with AIO_E2E=0.
 import { assert, assertEquals } from "@std/assert";
 import { testDisplayEnv } from "../src/testing/test-display.ts";
+import { stopChild } from "./stop-child.ts";
 
 // Coverage profiles from spawned deno processes go to a throwaway temp dir —
 // never into the repo (an empty DENO_COVERAGE_DIR means "cwd"), never into
@@ -60,10 +61,7 @@ async function waitFor<T>(
 }
 
 async function kill(proc: Deno.ChildProcess): Promise<void> {
-  try {
-    proc.kill();
-  } catch { /* already exited */ }
-  await proc.status;
+  await stopChild(proc, { quiet: true });
 }
 
 type SurfaceEl = { name: string; path: string; text?: string };

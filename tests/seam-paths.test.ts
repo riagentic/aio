@@ -20,6 +20,7 @@
 // runner's.
 import { assert, assertEquals } from "@std/assert";
 import { join, relative } from "@std/path";
+import { stopChild } from "./stop-child.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const dec = new TextDecoder();
@@ -240,8 +241,10 @@ Deno.test({
 
       // SIGTERM, not kill: the graceful path is the one that flushes, and a
       // flush that lands in the wrong directory is exactly what this catches.
-      proc.kill("SIGTERM");
-      await proc.status;
+      await stopChild(proc, {
+        label: "the app under test (persist + journal)",
+        log: () => log,
+      });
 
       // ① durable: the app's home exists and holds the state
       assert(
@@ -296,10 +299,12 @@ Deno.test({
       // `app.key` and `data/tls` only exist under --expose; the second test
       // covers those.
     } finally {
-      try {
-        proc.kill();
-      } catch { /* already gone */ }
-      await proc.status.catch(() => {});
+      // Belt and braces: the stop above already ran on the happy path; this
+      // is the one that runs when an assertion threw first. Bounded too — a
+      // cleanup that hangs hides the assertion that failed.
+      await stopChild(proc, { label: "cleanup", graceMs: 5_000 }).catch(
+        () => {},
+      );
       await Deno.remove(sb.root, { recursive: true }).catch(() => {});
     }
   },
@@ -332,8 +337,10 @@ Deno.test({
         const t = await Deno.stat(tlsDir).catch(() => null);
         return a && t ? true : null;
       });
-      proc.kill("SIGTERM");
-      await proc.status;
+      await stopChild(proc, {
+        label: "the app under test (--expose)",
+        log: () => log,
+      });
 
       assertEquals(
         await mode(appKey),
@@ -382,10 +389,12 @@ Deno.test({
       const t = tmpStrays(sb);
       assertEquals(t.ours, [], `ours in /tmp: ${t.all.join(", ")}`);
     } finally {
-      try {
-        proc.kill();
-      } catch { /* already gone */ }
-      await proc.status.catch(() => {});
+      // Belt and braces: the stop above already ran on the happy path; this
+      // is the one that runs when an assertion threw first. Bounded too — a
+      // cleanup that hangs hides the assertion that failed.
+      await stopChild(proc, { label: "cleanup", graceMs: 5_000 }).catch(
+        () => {},
+      );
       await Deno.remove(sb.root, { recursive: true }).catch(() => {});
     }
   },

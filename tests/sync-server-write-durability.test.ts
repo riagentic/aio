@@ -32,7 +32,6 @@ async function bootApp(dir: string) {
   const app = await aio.run({
     cells: [notes],
     appId: "swd-app",
-    appVersion: "0.0.0",
     client: "server-only",
     persist: true,
     libraryMode: true,

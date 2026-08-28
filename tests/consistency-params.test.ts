@@ -48,7 +48,6 @@ Deno.test("boot smoke: diagnostics:true + dispatchStorm:true + onEffect(e,state,
   const app = await aio.run({
     cells: [c],
     appId: `test-consistency-${Deno.pid}`,
-    appVersion: "0.0.0",
     client: "server-only",
     persist: false,
     libraryMode: true,

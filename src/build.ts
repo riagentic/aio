@@ -27,6 +27,12 @@ import { runDenoCompile, writeServiceFile } from "./build/build-compile.ts";
 import { buildElectron } from "./build/build-electron.ts";
 import { resolveElectronVersion } from "./build/electron-runtime.ts";
 import { ELECTRON_VERSION_FILE } from "./electron/electron-runtime-fetch.ts";
+import {
+  BUILD_STAMP_FILE,
+  installArtifactName,
+  writeBuildStamp,
+} from "./build/build-version.ts";
+import { VERSION } from "./server/aio-cli.ts";
 
 /**
  * Run the build pipeline. Without `cfg`, configuration is loaded from CLI
@@ -84,6 +90,16 @@ export async function build(cfg?: BuildConfig): Promise<void> {
   }
 
   if (!doCompile && !doAndroid && !doIos && !doClient && !doCli) return;
+
+  // ── Stamp THE app version into the artifact ─────────────────────────────
+  // `.aio/build-version.json` is embedded by `deno compile` (build-compile's
+  // include) and read by the runtime when compiled, so `<bin> --version`, the
+  // boot line and `/__aio/health` print the version this build resolved —
+  // `-dirty.<hash8>` included. The APK / Xcode project carry it as their
+  // versionName instead (build-android.ts). Written for every packaging path,
+  // never for a bundle-only build.
+  await writeBuildStamp(root, cfg.version, VERSION);
+  console.log(`[build] \u2713 ${BUILD_STAMP_FILE} (${cfg.version.version})`);
 
   // ── Bake the Electron version into dist/ ────────────────────────────────
   // A plain compiled binary (`--compile`, not the AppImage) whose client is
@@ -147,7 +163,12 @@ export async function build(cfg?: BuildConfig): Promise<void> {
   // ── Step 2: Compile deno binary ──────────────────────────────────────────
   const compileOk = await runDenoCompile(cfg);
   if (!compileOk) {
-    console.error("[compile] ✗ deno compile failed");
+    console.error(
+      "[compile] ✗ deno compile failed — its own message is above this line.\n" +
+        "       fix: resolve what it names (a module it cannot find is usually " +
+        "a server-only import reachable from the entry, or an asset missing " +
+        "from deno.json `compile.include`), then re-run `deno task build`.",
+    );
     Deno.exit(1);
   }
 
@@ -223,6 +244,27 @@ if (import.meta.main) {
   // app lives.
   if (Deno.args.includes("--print-install-root")) {
     console.log(installRoot());
+    Deno.exit(0);
+  }
+  // Third question of the same family: what is a built artifact INSTALLED as?
+  // The answer is a naming rule (strip the version token, strip the arch
+  // suffix, keep the app's own name) that `run.sh` and `run.ps1` used to spell
+  // out in shell — and the moment the build started stamping versions INTO
+  // artifact names, both copies installed `demo-1.2.345.AppImage`, which is an
+  // app that renames itself (and its data directory) on every update. Asked
+  // here, there is one rule.
+  const installNameArg = Deno.args.find((a) =>
+    a.startsWith("--print-install-name=")
+  );
+  if (installNameArg) {
+    const n = installArtifactName(installNameArg.slice(
+      "--print-install-name=".length,
+    ));
+    // Three lines, in this order: base, ext, version ("" when the name carries
+    // none). A shell reads it with three `read`s and no parsing of its own.
+    console.log(n.base);
+    console.log(n.ext);
+    console.log(n.version ?? "");
     Deno.exit(0);
   }
   if (Deno.args.includes("--print-app-tmpdir")) {

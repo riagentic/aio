@@ -493,7 +493,6 @@ Deno.test("am: reaches the control plane of a key-gated app", async () => {
     const app = await aio.run({
       cells: [c],
       appId,
-      appVersion: "0.0.0",
       client: "server-only",
       persist: false,
       key: true,

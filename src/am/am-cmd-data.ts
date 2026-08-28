@@ -21,7 +21,7 @@
 import { basename, isAbsolute, join, relative, resolve } from "@std/path";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
-import { readPid, resolveAmAppId } from "./am-utils.ts";
+import { liveLock, resolveAmAppId } from "./am-utils.ts";
 import { type AppDirs, appDirs, ensureAppDirs } from "../server/app-dirs.ts";
 import type { AppMeta } from "../server/app-dirs.ts";
 import { isProcessAlive, lockDir } from "../server/single-instance-lock.ts";
@@ -30,7 +30,7 @@ import { isProcessAlive, lockDir } from "../server/single-instance-lock.ts";
 
 /** The running pid, or null when the app isn't up. */
 function livePid(appId: string): number | null {
-  const lock = readPid(appId); // honours --home
+  const lock = liveLock(appId); // honours --home; else the one live instance
   return lock && isProcessAlive(lock.pid) ? lock.pid : null;
 }
 

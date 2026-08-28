@@ -139,6 +139,48 @@ When `aio.run()` starts, it checks your app and reports issues:
 - Hints (suggestions): leftover `createRoot`, `import React`, old
   `'../dep/aio/'` imports, electron not installed
 
+## Dev evaluates the prod graph
+
+Dev serves the client one module at a time, and a browser never _evaluates_ a
+statically imported module nothing calls; prod links the whole graph and
+evaluates every module's top level at load. An app can pass its whole suite, a
+real-browser boot and a manual pass, and have the first evaluation of half its
+client graph happen on a user's machine. So at dev boot — and on every hot
+reload that changes the graph — the dev server does what the build does:
+
+1. **bundles** the client graph in memory with the build's own esbuild call
+   (same plugins, same import map, same generated entry; `write: false` is the
+   only difference);
+2. **audits** the resolved graph with the one decider the build uses
+   (`src/build/graph-audit.ts`): a `*.server.*` module the bundle reached, a
+   static `@std/*` / `node:*` import anywhere in it — including one hop past a
+   dynamic import of a plain module — and a Node global referenced at module
+   scope;
+3. **evaluates** the bundle: its module scope is run, once, in a Deno worker
+   whose `Deno`, `process`, `Buffer`, `global`, `setImmediate` are deleted first
+   (a browser has none of them) and where `window` / `document` / `navigator` /
+   `location` / `localStorage` are permissive stubs. A `ReferenceError` there is
+   the `ReferenceError` a user would have seen.
+
+What it refuses, it refuses with the build's words (`bundle-refused`, a blocking
+category: the diagnostic page in the browser, `✖ file:line` in the terminal),
+and the fix hot-reloads.
+
+**What runs, honestly:** every static import and every top-level statement of
+the bundle. **What does not run:** the app is never mounted — `mount()` is
+exported and not called, the Android entry's `boot()` waits for a
+`DOMContentLoaded` that never fires — no WebSocket is opened, no component
+renders. A render-time error is `testUI`'s job (aio/testing, under happy-dom); a
+load-time error is this one's. Module-scope side effects (a top-level `fetch`, a
+timer) do run inside the worker, which is terminated afterwards.
+
+**Cost:** measured on the counter example, 128 bundle inputs: ~20 ms to bundle,
+~40 ms to audit, ~20 ms to evaluate — ~80 ms at boot. A 100-module app (227
+inputs): ~120 ms. The result is cached by the graph hash (every module's content
+hash plus the import map), so a reload that changes no module costs 0 ms, and
+the watcher's reload budget is unaffected. `--verbose` prints the numbers:
+`graph: prod bundle built in memory (18ms, 128 inputs)`.
+
 ## Live reload
 
 AIO watches `baseDir` (default: `src/`) for file changes. When any `.ts`,

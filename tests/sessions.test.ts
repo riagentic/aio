@@ -92,7 +92,6 @@ Deno.test("sessions e2e: issued token authenticates; revoked token does not", as
   const app = await aio.run({
     cells: [c],
     appId: `test-sessions-${Deno.pid}`,
-    appVersion: "0.0.0",
     client: "server-only",
     persist: false,
     libraryMode: true,

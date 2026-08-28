@@ -21,8 +21,9 @@ Ten consecutive alpha releases with **no major/critical/blocker bug and no
 compat break**. A corruption-class bug found during an alpha resets the count —
 that is the gate working, not a setback.
 
-- **Streak: 0** — reset 2026-08-28 by alpha70 itself, which is the deliberate
-  last compat break. The count starts at alpha71.
+- **Streak: 1** — alpha71 (2026-08-28), the first release after the deliberate
+  last compat break. Additive only; no major/critical/blocker bug reported
+  against it.
 
 ## Decided in alpha70, so it is not re-litigated
 
@@ -62,5 +63,7 @@ that is the gate working, not a setback.
   writes loose objects with the process umask, so `umask 077` commits are
   unreadable to another user (the onboarding lab). Not fixable on the
   installer's side; `install.sh` names the cause and the fix
-  (`chmod -R o+rX <repo>/.git`, `umask 022` before committing). Diagnosed in
+  (`chmod -R o+rX <repo>/.git`, `umask 022` before committing), and since
+  alpha71 `deno task lab` refuses BEFORE the first container with the same words
+  — it hit this three times, each time reading as a git error. Diagnosed in
   alpha69, closed.

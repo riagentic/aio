@@ -7,6 +7,7 @@ import {
   tmplCrashGuard,
   tmplKeyboardShortcuts,
   tmplParentWatch,
+  tmplRendererDiagnostics,
   tmplWillNavigate,
   tmplWindowShape,
   toSlug,
@@ -18,7 +19,7 @@ export function electronMainScript(url: string, meta?: AioMeta): string {
   const h = meta?.height ?? 600;
   const slug = toSlug(meta?.title ?? "aio-app");
   return `
-const { app, BrowserWindow, Menu } = require('electron');
+const { app, BrowserWindow, Menu, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
 Menu.setApplicationMenu(null);
@@ -35,6 +36,7 @@ ${tmplWindowShape(meta)}
   const win = new BrowserWindow(b);
   if (b.x == null) win.center();
 ${tmplBoundsTracking()}
+${tmplRendererDiagnostics(false)}
   win.loadURL(${JSON.stringify(url)});
   const _appOrigin = new URL(${JSON.stringify(url)}).origin;
 ${tmplWillNavigate("_appOrigin")}

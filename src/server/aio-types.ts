@@ -338,8 +338,6 @@ export type AioConfig<S, A, E> = {
   transport?: "uds" | "ws" | "auto"; // default: 'auto' — UDS on linux/mac+electron, WS otherwise (moved from ui.transport)
   killExisting?: boolean; // default: false
   serverUrl?: string;
-  /** App version — default: deno.json `version`. */
-  appVersion?: string; // app version string — logged on startup, available at __aio.appVersion
   schedules?: ScheduleDef[]; // static scheduled effects — started on boot
   db?: Record<string, TableDef | DbMapping>; // SQLite table definitions — arrays auto-sync
   perfCheck?: "on" | "off"; // default: 'on' — enable/disable performance violation reporting
@@ -708,9 +706,6 @@ export type CellsConfig = {
   strictOrigin?: boolean;
   trustProxyHeader?: string;
   schedules?: ScheduleDef[];
-  /** Application version string — logged on startup, available at __aio.appVersion */
-  /** App version — default: deno.json `version`. */
-  appVersion?: string;
   /** Isolate cells — only these cells are active (dev mode convenience) */
   isolate?: string[];
   beforeReduce?: (

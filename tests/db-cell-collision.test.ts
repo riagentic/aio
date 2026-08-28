@@ -30,7 +30,6 @@ Deno.test("db: a table named after a cell never overwrites that cell's slice", a
   const app = await aio.run({
     cells: [nfts],
     appId: "test-db-collision",
-    appVersion: "0.0.0",
     client: "server-only",
     persist: false,
     libraryMode: true,
@@ -81,7 +80,6 @@ Deno.test("db: a table with a non-colliding name boots fine", async () => {
   const app = await aio.run({
     cells: [nfts],
     appId: "test-db-nocollision",
-    appVersion: "0.0.0",
     client: "server-only",
     persist: false,
     libraryMode: true,

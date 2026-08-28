@@ -200,7 +200,12 @@ Deno.test("browser tests: own process, own profile, killed afterwards", async ()
       continue;
     }
     const ownProfile = /--user-data-dir=/.test(src);
-    const kills = /\.kill\(/.test(src);
+    // `stopChild()` IS the kill — the shared bounded stop (SIGTERM with a
+    // deadline, then SIGKILL). It replaced the hand-written
+    // `kill(); await status` pairs, which were unbounded: a browser that
+    // ignored SIGTERM hung the suite instead of failing. A gate that only
+    // knows the old spelling turns adopting the safer one into a red.
+    const kills = /\.kill\(|stopChild\(/.test(src);
     const headless = /headless/.test(src);
     if (!ownProfile || !kills || !headless) {
       bad.push(

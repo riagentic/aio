@@ -233,6 +233,18 @@ export function resolveEntry(flagEntry?: string): string | null {
  *  needs to know the flag exists. */
 export function targetHome(appId: string, home: string): void {
   registerAppDirs(appId, appDirs(appId, home));
+  _homePinned = true;
+}
+
+/** Whether `--home` named an instance. When it did, {@linkcode liveLock} must
+ *  NOT widen to "any instance of this id": `am --home=X state` means X's
+ *  instance, and answering with the default home's would be a silent
+ *  retarget — the failure `--home` exists to prevent. */
+let _homePinned = false;
+/** @internal — tests only: forget a `--home` pin between cases. */
+// aio-ok: test seam — tests/am-uds-only-app.test.ts resets the pinned home between cases
+export function _resetHomePin(): void {
+  _homePinned = false;
 }
 
 /** The lock key `am` targets for `appId`: the plain id for the default home,
@@ -254,14 +266,50 @@ export function readPid(appId?: string): LockData | null {
   return lock;
 }
 
+/** THE lock of the instance an `am` command targets, wherever that instance
+ *  keeps its home — or null when nothing is running under `appId`.
+ *
+ *  {@linkcode readPid} reads ONE lock: the one keyed by the home `am` computes
+ *  for the id (the default home, or `--home`). An app booted with `appDir`
+ *  — the packaged-Electron shape, and any isolated second boot — writes its
+ *  lock as `<id>@<hash8(home)>`, which that key never matches. `am instances`
+ *  scans the directory and listed such an app as running while, in the same
+ *  breath, `am surface --app=<id>` refused with "no app named <id> is
+ *  running" (a field report). Two readers of one fact disagreed; this is the
+ *  one reader every target resolution goes through.
+ *
+ *  The widening is deliberately narrow: only when no home was pinned, and
+ *  only when exactly ONE instance of the id is up. Two homes of one id is a
+ *  real ambiguity, named with the `--home=` that resolves it — never picked. */
+export function liveLock(appId?: string): LockData | null {
+  const id = appId ?? resolveAmAppId();
+  const own = readPid(id);
+  if (own || _homePinned) return own;
+  const running = instances(id);
+  if (running.length === 0) return null;
+  if (running.length === 1) return running[0]!;
+  throw new Error(
+    `app "${id}" is running from ${running.length} data homes — say which ` +
+      `one: ${
+        running.map((i) => `--home=${i.home} (pid ${i.pid})`).join(", ")
+      }`,
+  );
+}
+
 /** Write lock data — replaces old writePid() */
 export function writePid(pf: LockData): void {
   writeLock(pf);
 }
 
-/** Remove lock — replaces old removePid() */
-export function removePid(appId?: string): void {
-  removeLock(amLockKey(appId ?? resolveAmAppId()));
+/** Remove a lock. With `pf` — the lock a command actually READ (via
+ *  {@linkcode liveLock}) — the removal targets that instance's key, wherever
+ *  its home is; without it, the home-keyed key `am` computes. Removing by id
+ *  alone after reading by `liveLock` would miss an `<id>@<hash>` lock and
+ *  leave the stale record `am status` just called stale. */
+export function removePid(appId?: string, pf?: LockData | null): void {
+  removeLock(
+    pf ? lockKey(pf.appId, pf.home) : amLockKey(appId ?? resolveAmAppId()),
+  );
 }
 
 /** Names already reported by {@linkcode resolvePort}, so one `am` invocation
@@ -315,7 +363,10 @@ export function resolvePort(
 ): number {
   if (flag !== undefined) return flag;
   const id = appId ?? resolveAmAppId();
-  const pf = readPid(id);
+  // The lock wherever the instance's home is — so a UDS-only app booted with
+  // `appDir` resolves here (its lock says `port: 0`, honestly: the transport
+  // decider in am-http then reaches it over the socket, never over :0).
+  const pf = liveLock(id);
   if (pf) return pf.port;
 
   const live = instances();
@@ -337,7 +388,9 @@ export function resolvePort(
       console.error(
         `[am] note: no app named "${id}" is running — using the one that ` +
           `is: ` +
-          `${only.appId} @ :${only.port} (pid ${only.pid}). ` +
+          `${only.appId} @ ${
+            only.socketPath ? "uds" : `:${only.port}`
+          } (pid ${only.pid}). ` +
           `Pin it with --app=${only.appId}, or run am from its directory.`,
       );
     }
@@ -350,6 +403,26 @@ export function resolvePort(
 
   // Out of rungs. Say which question failed, and list what IS running so the
   // next command can name it.
+  //
+  // A message must be TRUE: `liveLock` above already found any instance of
+  // `id`, so reaching here means the registry holds none — but that is a
+  // property of the code above, not of this sentence. If the two ever
+  // disagree again (a new lock-key shape, a filter in one reader and not the
+  // other), the sentence still must not say "no app named X is running" in
+  // the breath that lists X as running. Name the real constraint instead.
+  const same = live.filter((i) => i.appId === id);
+  if (same.length) {
+    const i = same[0]!;
+    throw new Error(
+      i.socketPath
+        ? `"${id}" is running on a UDS socket (pid ${i.pid}, ${i.socketPath}) ` +
+          `but am could not resolve its lock for this command (home ` +
+          `${i.home}). Target that instance with --home=${i.home}.`
+        : `"${id}" is running on :${i.port} (pid ${i.pid}) but am could not ` +
+          `resolve its lock for this command (home ${i.home}). Target that ` +
+          `instance with --home=${i.home}, or --port=${i.port}.`,
+    );
+  }
   const list = live.length
     ? ` ${live.length} app${live.length === 1 ? " is" : "s are"} running: ${
       live.map((i) => `${i.appId} @ ${i.socketPath ? "uds" : `:${i.port}`}`)

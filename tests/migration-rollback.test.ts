@@ -66,7 +66,6 @@ const BOOT = (extra = "") =>
   `const app = await aio.run({
   cells: [wallet],
   appId: APP_ID,
-  appVersion: "0.0.0",
   client: "server-only",
   libraryMode: true,
   singleton: false,

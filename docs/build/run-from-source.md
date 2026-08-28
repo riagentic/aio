@@ -41,8 +41,9 @@ irm https://raw.githubusercontent.com/riagentic/aio/main/run.ps1 | iex
    `aioVersion` pin in `deno.json`); anything else fails loud with the fix.
 4. **Repair** — `am fix` runs: import-path, env, electron and config repairs,
    the same repair loop you'd run by hand on a fresh clone.
-5. **Build** — `deno task compile`: the app's DEFAULT target, production build.
-   (An app without the scaffolded task gets the builder invoked directly.)
+5. **Build** — `deno task compile` (what `am compile` runs too): the app's
+   DEFAULT target, production build. (An app without the scaffolded task gets
+   the builder invoked directly.)
 6. **Run** — the artifact the build produced is found **by timestamp, never by
    name** (so this script can't drift from the framework's naming rules) and
    executed. AppImages run with `APPIMAGE_EXTRACT_AND_RUN=1`, so no FUSE is

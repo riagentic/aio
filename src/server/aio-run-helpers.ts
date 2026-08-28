@@ -503,6 +503,14 @@ export function initDiagAndVitals(
  *  Not memoized: it is read a handful of times at boot, and a cache would
  *  freeze a value the dev server can otherwise pick up on restart. */
 export function appDenoJson(): Record<string, unknown> | undefined {
+  return appDenoJsonLocated()?.config;
+}
+
+/** {@link appDenoJson} plus WHERE it was found — the directory URL the app's
+ *  identity lives in (its build stamp sits beside it). Same walk, one place. */
+export function appDenoJsonLocated():
+  | { config: Record<string, unknown>; dir: URL }
+  | undefined {
   try {
     const main = new URL(Deno.mainModule);
     for (const up of ["./", "../", "../../", "../../../", "../../../../"]) {
@@ -523,7 +531,10 @@ export function appDenoJson(): Record<string, unknown> | undefined {
         // walk continues, because an unrelated malformed file in some ancestor
         // directory is not this app's problem to die on.
         try {
-          return parseDenoJson(text, url.pathname);
+          return {
+            config: parseDenoJson(text, url.pathname),
+            dir: new URL(up, main),
+          };
         } catch (e) {
           log.warn(
             `config: ignoring ${url.pathname} — ${

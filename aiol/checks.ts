@@ -492,19 +492,30 @@ export const checkStructure: Checker = async (ctx) => {
         },
       );}
 
-    if (setsInRun("appVersion")) pass("appVersion set in aio.run()");
-    else if (dj2.version) {
-      pass(`appVersion inferred from deno.json (${dj2.version})`);
-    } else {report(
+    // `appVersion` in aio.run() is RETIRED (alpha70): deno.json `version` is
+    // the one decider (docs/build/versioning.md). The registry row says so.
+    if (setsInRun("appVersion")) {
+      report(
         "error",
         "config",
-        'no app version anywhere — add "version" to deno.json, or ' +
-          'appVersion: "0.1.0" to aio.run()',
+        removalMessage(removalOf("aio.run({ appVersion })"), "aio.run"),
+        { file: appEntry.relative },
+      );
+    }
+    if (dj2.version) {
+      pass(`app version from deno.json (${dj2.version})`);
+    } else {
+      report(
+        "warn",
+        "config",
+        'no "version" in deno.json — builds are 0.1.<commit count> until one is set',
         {
           file: appEntry.relative,
-          fix: 'Add "version": "0.1.0" to deno.json',
+          fix:
+            'Add "version": "0.1" to deno.json (major.minor — aio numbers builds from commits)',
         },
-      );}
+      );
+    }
   }
 };
 
@@ -1170,6 +1181,10 @@ export const checkUI: Checker = (ctx) => {
   // erase the very thing being read. The start offset (the `import` keyword)
   // is the honest test of "is this a real statement?".
   for (const file of browserCheckedFiles) {
+    // A test or tooling file is never compiled into the browser bundle — the
+    // guard its neighbours use (alpha69 closed this gap once for the OTHER
+    // loop; a field report found 51 false ERRORs from this one on alpha70).
+    if (isToolingPath(file.relative) || isTestPath(file.relative)) continue;
     // Named/default imports
     for (
       const m of codeMatches(

@@ -15,6 +15,7 @@
 const _childCovDir = Deno.env.get("DENO_COVERAGE_DIR") ??
   Deno.makeTempDirSync({ prefix: "aio-e2e-cov-" });
 import { testDisplayEnv } from "../src/testing/test-display.ts";
+import { stopChild } from "./stop-child.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 
@@ -227,10 +228,7 @@ export async function boot(spec: E2eApp): Promise<Server> {
     proc,
     dir,
     async stop() {
-      try {
-        proc.kill();
-      } catch { /* exited */ }
-      await proc.status;
+      await stopChild(proc, { quiet: true });
     },
     async state() {
       return await (await guardedFetch("/__aio/trojan/state")).json();
@@ -385,10 +383,7 @@ export async function openTab(server: Server): Promise<Tab> {
     index,
     proc,
     async close() {
-      try {
-        proc.kill();
-      } catch { /* exited */ }
-      await proc.status;
+      await stopChild(proc, { quiet: true });
       await Deno.remove(profile, { recursive: true }).catch(() => {});
     },
     surface,

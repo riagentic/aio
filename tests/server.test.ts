@@ -1617,6 +1617,20 @@ Deno.test({
       join(dir, "deno.json"),
       JSON.stringify({ imports: { react: "npm:react@^18" } }),
     );
+    // The prod graph is bundled at dev boot now (dev refuses what the build
+    // would refuse), so `react` must RESOLVE for esbuild the way it does in a
+    // real app — a stub package in node_modules stands in for `deno install`.
+    // The browser side is still what this test measures: the import map maps
+    // `react` to esm.sh, and /__aio/ui.js carries no npm: specifier.
+    await Deno.mkdir(join(dir, "node_modules", "react"), { recursive: true });
+    await Deno.writeTextFile(
+      join(dir, "node_modules", "react", "package.json"),
+      JSON.stringify({ name: "react", version: "18.0.0", main: "index.js" }),
+    );
+    await Deno.writeTextFile(
+      join(dir, "node_modules", "react", "index.js"),
+      "export const useState = () => [undefined, () => {}];\n",
+    );
     await Deno.writeTextFile(
       join(dir, "App.tsx"),
       `import { useState } from 'react'\nexport default function App() { return useState ? null : null }`,

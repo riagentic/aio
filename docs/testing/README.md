@@ -21,6 +21,23 @@ Verifying cells and UIs work correctly.
   desktop in a container, driven by hand from a browser, with the app's `dist/`
   mounted in. The manual tier next to `test:wine` and `deno task lab`
 
+## What each boot gate proves
+
+Four gates say "the client boots", and they prove different things. Read the
+claim, not the name:
+
+| Gate                                   | Proves                                                                                                                                                                                             | Does not prove                                                |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| `testUI(App, …)`                       | the component renders and its methods dispatch, under happy-dom, module by module as Deno loads them                                                                                               | that the _bundled_ graph loads in a browser                   |
+| `smoke()`                              | every eagerly-linked client module is served (200) by a real boot, with the static chain that loads it                                                                                             | that any of them _evaluates_ without throwing                 |
+| graph validation (dev / `check:graph`) | the walk (missing files, static server-only imports) **and** the prod graph: bundled, audited and its module scope _evaluated_ — see [dev mode](../build/dev-mode.md#dev-evaluates-the-prod-graph) | render-time errors; the app is not mounted                    |
+| `deno task build`                      | the same audit and evaluation on the artifact's own `dist/app.js`, before it can compile                                                                                                           | anything after `mount()` — that is `testUI` and `testBrowser` |
+
+None of them is a real browser. `testBrowser` (`deno task test:e2e`) is, and the
+onboarding lab drives the built app over CDP. If a project's own task promises
+more than its gate proves — a "browser check" that is a static walk — the doc
+lies; fix the wording or add the gate.
+
 ## Sanitizers stay on
 
 Deno's leak sanitizers (`sanitizeOps`, `sanitizeResources`, `sanitizeExit`) are

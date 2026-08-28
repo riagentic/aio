@@ -440,7 +440,10 @@ export const c = cell("probe", {
       );
       const first = await runBundleProc(dir, /* android */ false);
       assertEquals(first.code, 1);
-      assertStringIncludes(first.stderr, "server-only module(s) statically");
+      assertStringIncludes(
+        first.stderr,
+        "server-only module(s) reached by the BROWSER bundle",
+      );
       await assertRejects(
         () => Deno.stat(`${dir}/dist/app.js`),
         Deno.errors.NotFound,
@@ -452,7 +455,10 @@ export const c = cell("probe", {
         1,
         `the leak must be re-reported, not cached past\n${second.stdout}`,
       );
-      assertStringIncludes(second.stderr, "server-only module(s) statically");
+      assertStringIncludes(
+        second.stderr,
+        "server-only module(s) reached by the BROWSER bundle",
+      );
     } finally {
       await Deno.remove(dir, { recursive: true }).catch(() => {});
     }

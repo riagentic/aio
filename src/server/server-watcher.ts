@@ -6,7 +6,7 @@ import { enc } from "../protocol/envelope.ts";
 import { basename, dirname, join } from "@std/path";
 import { DENO_JSON_NAMES } from "./deno-json.ts";
 import type { GraphResult } from "./graph-validator.ts";
-import { validateGraph } from "./graph-validator.ts";
+import { type ProdGraphCheck, validateGraph } from "./graph-validator.ts";
 import {
   clearTranspileCaches,
   normPath,
@@ -30,6 +30,10 @@ export interface WatcherDeps {
   onReload?: (signal: "reload" | "css") => void;
   /** Called when graph validation produces a new result — server uses this for diagnostic HTML */
   onGraphResult?: (result: GraphResult) => void;
+  /** The boot's in-memory prod-bundle judge (cached by graph hash) — a
+   *  reload re-validates through the SAME one, so dev refuses on reload
+   *  exactly what it refused at boot, and an unchanged graph costs nothing. */
+  prodGraph?: ProdGraphCheck;
   /** Called when an edited file declares a cell. Cells run in the server
    *  process and cannot hot-reload, so dev restarts the process; without a
    *  handler the watcher falls back to warning once per file. */
@@ -222,6 +226,8 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
             join(absBaseDir, deps.uiEntry ?? UI_ENTRY),
             deps.importMapObj,
             revalTranspile,
+            undefined,
+            deps.prodGraph,
           );
           const result = await Promise.race([validation, timeout]);
           // Stale validation — a newer file change already started a new validation

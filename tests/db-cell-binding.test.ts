@@ -210,7 +210,6 @@ Deno.test({
       aio.run({
         cells: [contacts],
         appId,
-        appVersion: "0.0.0",
         client: "server-only",
         libraryMode: true,
         singleton: false,
@@ -303,7 +302,6 @@ Deno.test({
       aio.run({
         cells: [notes],
         appId,
-        appVersion: "0.0.0",
         client: "server-only",
         libraryMode: true,
         singleton: false,
@@ -400,7 +398,6 @@ Deno.test({
       aio.run({
         cells: [catalog],
         appId,
-        appVersion: "0.0.0",
         client: "server-only",
         libraryMode: true,
         singleton: false,

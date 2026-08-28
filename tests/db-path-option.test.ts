@@ -20,7 +20,6 @@ Deno.test("dbPath: ':memory:' persists in-session without touching cwd/data.db",
     });
     const app = await aio.run({
       appId: "dbp-test",
-      appVersion: "0.0.1",
       cells: [c],
       libraryMode: true,
       client: "server-only",

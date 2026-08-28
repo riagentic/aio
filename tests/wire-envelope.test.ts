@@ -103,6 +103,9 @@ Deno.test("envelope: no v1 wire prefixes outside the one proto shim", async () =
       const lit = m[1]!;
       if (NOT_WIRE.some((n) => lit.startsWith(n))) continue;
       if (shim.some((p) => lit === p || p.startsWith(lit))) continue;
+      // graph-audit.ts NAMES the Node globals it refuses (`__dirname`,
+      // `__filename`) — those are identifiers in someone's source, not frames.
+      if (f.path.endsWith("src/build/graph-audit.ts")) continue;
       misses.push(`${f.path}: ${lit}`);
     }
   }

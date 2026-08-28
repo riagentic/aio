@@ -55,16 +55,38 @@ function Test-DenoAtLeast([string]$have, [string]$want) {
   return $true
 }
 
-# The app name an artifact belongs to. Windows builds produce `<name>.exe`, but
-# a packaged one may carry the arch the way the AppImage does — splitting at the
-# first hyphen would turn `chat-app` into `chat`, which is a bug the POSIX
-# side shipped for exactly one afternoon.
-function Get-AppBaseName([string]$fileName) {
+# WHAT an artifact is installed as - base name, extension, and the version its
+# file name carries. The BUILD owns that rule (`installArtifactName`); this
+# asks for it rather than keeping a Windows copy. A second copy is how the
+# POSIX and Windows installers came to disagree, and once artifacts carried the
+# derived version in their names a hand-rolled copy installed
+# `demo-1.2.345.exe` - an app that renames itself, and its data directory, on
+# every update.
+function Get-InstallName([string]$builder, [string]$fileName) {
+  $out = @()
+  # try/catch as well as the exit code: a machine with no deno on PATH throws
+  # here rather than returning one, and an installer that dies on that has
+  # forgotten it is the thing that installs deno.
+  try { $out = @(deno run -A $builder "--print-install-name=$fileName" 2>$null) } catch { $out = @() }
+  if ($LASTEXITCODE -eq 0 -and $out.Count -ge 1 -and $out[0]) {
+    return @{
+      Base    = $out[0]
+      Ext     = if ($out.Count -ge 2) { $out[1] } else { '' }
+      Version = if ($out.Count -ge 3) { $out[2] } else { '' }
+    }
+  }
+  # An aio pinned before that flag existed: such a build stamps no version into
+  # the name, so the pre-versioning rule is the whole rule for what it makes.
+  # A name that DOES carry one, with no builder able to read it, is refused
+  # rather than guessed at.
+  if ($fileName -match '-\d+\.\d+\.\d+') { # aio-ok: refuse-versioned-name
+    Fail "this app's pinned aio cannot name the artifact it just built ($fileName). Update the pin (am pin --latest) and re-run."
+  }
   $base = [IO.Path]::GetFileNameWithoutExtension($fileName)
-  foreach ($arch in @('x86_64', 'aarch64', 'arm64', 'amd64', 'x64')) {
+  foreach ($arch in @('x86_64', 'aarch64', 'arm64', 'armhf', 'i686', 'amd64', 'x64')) {
     if ($base.EndsWith("-$arch")) { $base = $base.Substring(0, $base.Length - $arch.Length - 1) }
   }
-  return $base
+  return @{ Base = $base; Ext = [IO.Path]::GetExtension($fileName); Version = '' }
 }
 
 function Invoke-AioRun {
@@ -169,8 +191,9 @@ function Invoke-AioRun {
   if (-not $NoInstall) {
     $root = (deno run -A (Join-Path $AioHome "src\build.ts") --print-install-root 2>$null)
     if (-not $root) { $root = Join-Path $env:LOCALAPPDATA "Programs" }
-    $base = Get-AppBaseName $artifact.Name
-    $ext = $artifact.Extension
+    $names = Get-InstallName (Join-Path $AioHome "src\build.ts") $artifact.Name
+    $base = $names.Base
+    $ext = $names.Ext
     $targetDir = Join-Path $root $base
 
     $src = if ($Git) { $Git } else { (git config --get remote.origin.url 2>$null) }
@@ -188,8 +211,18 @@ function Invoke-AioRun {
     }
 
     New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
-    $ver = if ($conf.version) { $conf.version } else { (Get-Date -Format 'yyyyMMddHHmmss') }
-    $versioned = Join-Path $targetDir "$base-$ver$ext"
+    # The VERSION goes in the DIRECTORY, never in the file name - the same
+    # layout run.sh writes and the only one the updater and the pruner know
+    # (`versions/<version>/<base><ext>`, resolveInstallLayout /
+    # pruneVersions). A compiled binary takes its identity, and its data
+    # directory, from its own file name, so `<base>-<ver>.exe` renamed the app
+    # on every update and started it from empty state; and a flat file under
+    # no `versions/` directory is a rollback the pruner cannot see and the
+    # updater cannot swap.
+    $ver = if ($names.Version) { $names.Version } elseif ($conf.version) { $conf.version } else { (Get-Date -Format 'yyyyMMddHHmmss') }
+    $versionDir = Join-Path (Join-Path $targetDir "versions") $ver
+    New-Item -ItemType Directory -Force -Path $versionDir | Out-Null
+    $versioned = Join-Path $versionDir "$base$ext"
     Copy-Item -Force $artifact.FullName "$versioned.part"
     Move-Item -Force "$versioned.part" $versioned
     $stable = Join-Path $targetDir "$base$ext"
@@ -220,7 +253,7 @@ function Invoke-AioRun {
 
     $pruned = (deno run -A (Join-Path $AioHome "src\server\install-record.ts") prune `
       --name=$base --ext=$ext --keep=$(if ($env:AIO_KEEP_VERSIONS) { $env:AIO_KEEP_VERSIONS } else { 3 }) `
-      --current=$versioned 2>$null)
+      --current=$versionDir 2>$null)
     if ($pruned) { Info "pruned older version(s): $($pruned -join ' ')" }
 
     # A launcher, so the app is where a Windows user looks for one.

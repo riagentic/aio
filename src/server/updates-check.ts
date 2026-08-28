@@ -297,6 +297,20 @@ function manifestProblem(m: unknown): string | null {
   if (o.data !== undefined && (typeof o.data !== "object" || o.data === null)) {
     return `\`data\` is ${typeof o.data}, not a data contract`;
   }
+  if (
+    o.buildNumber !== undefined &&
+    (typeof o.buildNumber !== "number" || !Number.isInteger(o.buildNumber) ||
+      o.buildNumber < 0)
+  ) {
+    return `\`buildNumber\` is ${
+      JSON.stringify(o.buildNumber)
+    }, not a build number`;
+  }
+  if (
+    o.commit !== undefined && o.commit !== null && typeof o.commit !== "string"
+  ) {
+    return `\`commit\` is ${typeof o.commit}, not a commit sha`;
+  }
   return null;
 }
 

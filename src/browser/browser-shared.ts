@@ -6,6 +6,7 @@ import {
   negotiateProtocol,
   parseProtoHello,
   protoHello,
+  rememberPeerHello,
   stampedVersion,
 } from "../protocol/protocol-version.ts";
 
@@ -144,6 +145,7 @@ export function handleControlFrame(
     case "proto": {
       const theirs = parseProtoHello(f.d);
       if (theirs) {
+        rememberPeerHello(theirs);
         const result = negotiateProtocol(protoHello(stampedVersion()), theirs);
         if (!result.ok) {
           console.error(`[aio] protocol version mismatch: ${result.reason}`);

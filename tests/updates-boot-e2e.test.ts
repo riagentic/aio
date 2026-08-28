@@ -20,6 +20,11 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { buildShipManifest, generateSigningKey } from "../src/build/ship.ts";
+import {
+  type BuildVersion,
+  readTreeFacts,
+  resolveBuildVersion,
+} from "../src/build/build-version.ts";
 import { freePort } from "../src/testing/server-test.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
@@ -27,7 +32,11 @@ const platform = { os: Deno.build.os, arch: Deno.build.arch };
 
 /** An app that is a real aio app: one cell, updates configured, nothing else.
  *  `auto: false` — this test observes the OFFER, and an app that installed a
- *  new binary mid-test would be a different (and much worse) test. */
+ *  new binary mid-test would be a different (and much worse) test.
+ *
+ *  No `appVersion` (retired in alpha70): the version is deno.json `version`
+ *  (`major.minor`) plus the commit count, derived by the boot exactly as a
+ *  build would derive it — see {@link project}. */
 function appSource(releases: string, withUpdates: boolean): string {
   return `
 import { aio } from "${ROOT}mod.ts";
@@ -40,7 +49,6 @@ cell("notes", {
 
 await aio.run({
   appId: "updates-boot-e2e",
-  appVersion: "1.0.0",
   client: "server-only",
 ${
     withUpdates
@@ -51,14 +59,66 @@ ${
 `;
 }
 
+const APP_BASE = "1.0";
+
+/** Make `dir` the app's PROJECT the way a user's is: a deno.json declaring
+ *  `version: "major.minor"` and a git history to count — the two facts the
+ *  runtime derives its version from (`major.minor.<commit count>`). The app
+ *  entry is committed too, so the tree is CLEAN and the version is a release,
+ *  not a `-dirty.*` prerelease. Returns what the boot must report, resolved by
+ *  the same rule the boot uses. */
+async function project(dir: string, src: string): Promise<BuildVersion> {
+  await Deno.writeTextFile(
+    join(dir, "deno.json"),
+    JSON.stringify({ title: "updates-boot-e2e", version: APP_BASE }),
+  );
+  // The data dir and the release channel live inside the temp root; neither
+  // is part of the tree a version is derived from.
+  await Deno.writeTextFile(
+    join(dir, ".gitignore"),
+    "apps/\nreleases/\n.aio/\n",
+  );
+  await Deno.writeTextFile(join(dir, "app.ts"), src);
+  const git = async (...args: string[]) => {
+    const r = await new Deno.Command("git", {
+      args: ["-C", dir, ...args],
+      env: {
+        GIT_AUTHOR_NAME: "t",
+        GIT_AUTHOR_EMAIL: "t@t",
+        GIT_COMMITTER_NAME: "t",
+        GIT_COMMITTER_EMAIL: "t@t",
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_CONFIG_SYSTEM: "/dev/null",
+      },
+      stdout: "null",
+      stderr: "piped",
+    }).output();
+    if (r.code !== 0) {
+      throw new Error(
+        `git ${args.join(" ")}: ${new TextDecoder().decode(r.stderr)}`,
+      );
+    }
+  };
+  await git("init", "-q");
+  await git("add", ".");
+  await git("commit", "-q", "-m", "one");
+  await git("commit", "-q", "--allow-empty", "-m", "two");
+  await git("commit", "-q", "--allow-empty", "-m", "three");
+  const installed = resolveBuildVersion(APP_BASE, await readTreeFacts(dir));
+  assertEquals(installed.version, `${APP_BASE}.3`, "a clean tree, 3 commits");
+  return installed;
+}
+
 /** Publish a signed release the way a CI job would: artifact and manifest side
- *  by side under `<channel>/`. */
+ *  by side under `<channel>/`. `version` is a DERIVED build version
+ *  (`major.minor.<build>`), and the manifest carries its build number. */
 async function publish(
   releases: string,
-  version: string,
+  bv: Pick<BuildVersion, "version" | "build">,
   keys: { publicKey: JsonWebKey; privateKey: JsonWebKey },
   notes?: string,
 ): Promise<void> {
+  const version = bv.version;
   const dir = join(releases, "prod");
   await Deno.mkdir(dir, { recursive: true });
   const fileName = `app-${version}`;
@@ -68,6 +128,7 @@ async function publish(
   const manifest = await buildShipManifest({
     name: "updates-boot-e2e",
     version,
+    buildNumber: bv.build,
     binary: bytes,
     sources: [],
     sign: keys,
@@ -189,11 +250,21 @@ Deno.test({
     const root = await Deno.makeTempDir({ prefix: "aio-upd-boot-" });
     const releases = join(root, "releases");
     const keys = await generateSigningKey();
-    // 1.0.0 is what this app IS; 2.0.0 is what it must find.
-    await publish(releases, "1.0.0", keys);
-    await publish(releases, "2.0.0", keys, "faster");
+    // `installed` is what this app IS — 1.0.<commit count>, derived from its
+    // own tree; `newer` is the next commit's build, what it must find.
+    const src = appSource(releases, true);
+    const installed = await project(root, src);
+    const newer = resolveBuildVersion(APP_BASE, {
+      repo: true,
+      count: installed.build + 1,
+      commit: "0badc0de",
+      hash: null,
+    });
+    assertEquals(newer.version, `${APP_BASE}.${installed.build + 1}`);
+    await publish(releases, installed, keys);
+    await publish(releases, newer, keys, "faster");
 
-    const app = await boot(root, appSource(releases, true));
+    const app = await boot(root, src);
     try {
       // The cell exists because `updates:` was configured — the registration
       // that happens BEFORE the registry is read, and that a dynamic import
@@ -211,9 +282,11 @@ Deno.test({
           `was never installed: ${JSON.stringify(before.updates)}`,
       );
       // The runtime knows the app's own identity — not a default, not the
-      // file name. A manifest for another app must not install here, and that
+      // file name, not an `appVersion:` literal (retired): the version the
+      // boot DERIVED from deno.json + the commit count, one string with the
+      // build's. A manifest for another app must not install here, and that
       // check is only as good as the name the boot handed it.
-      assertEquals(before.updates.current, "1.0.0");
+      assertEquals(before.updates.current, installed.version);
       assertEquals(before.updates.channel, "prod");
 
       const r = await app.dispatch("updates:check");
@@ -237,11 +310,14 @@ Deno.test({
       assertEquals(
         u.status,
         "available",
-        `a signed 2.0.0 sitting in the channel was not offered: ` +
+        `a signed ${newer.version} sitting in the channel was not offered: ` +
           `${JSON.stringify(u)}\n${app.output()}`,
       );
       const available = u.available as Record<string, unknown>;
-      assertEquals(available.version, "2.0.0");
+      // The offer is the derived `major.minor.build` of the NEXT build — one
+      // build number above the installed one, same base.
+      assertEquals(available.version, newer.version);
+      assertEquals(available.version, `${APP_BASE}.${installed.build + 1}`);
       assertEquals(available.notes, "faster");
       // Transparency travels with the offer, through the real boot too.
       assertEquals(available.signed, true);

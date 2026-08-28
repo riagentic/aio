@@ -215,7 +215,6 @@ const box = cell("box", {
 const app = await aio.run({
   cells: [box],
   appId: "kill-atomicity-probe",
-  appVersion: "0.0.0",
   client: "server-only",
   persist: true,
   persistDebounceMs: 15,

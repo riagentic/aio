@@ -398,7 +398,17 @@ const VIOLATIONS: Case[] = [
       "src/app.ts":
         `import { aio } from "aio";\nimport { counter } from "./cell.ts";\nawait aio.run({ cells: { counter } });\n`,
     }),
-    expect: "no app version anywhere",
+    expect: 'no "version" in deno.json',
+  },
+  {
+    // alpha70: `appVersion` in aio.run() is RETIRED — deno.json `version` is
+    // the one decider (docs/build/versioning.md).
+    name: "appVersion still passed to aio.run()",
+    files: app({
+      "src/app.ts":
+        `import { aio } from "aio";\nimport { counter } from "./cell.ts";\nawait aio.run({ appId: "p", appVersion: "1.2.3", cells: { counter } });\n`,
+    }),
+    expect: "aio.run({ appVersion }) was removed",
   },
   // cells
   {

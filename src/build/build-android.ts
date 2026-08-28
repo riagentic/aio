@@ -16,85 +16,44 @@ import {
 import { ANDROID_TEMPLATE } from "./android-template.ts";
 import { androidLocalHTML, htmlOpen } from "../server/server-html-gen.ts";
 import type { BuildConfig } from "./build-config.ts";
-import { readDenoJson } from "../server/deno-json.ts";
+import type { BuildVersion } from "./build-version.ts";
 import { appIconPng } from "./app-icon.ts";
 import { APP_STYLE, BUNDLE_JS } from "../server/app-files.ts";
 
-/** The app version an APK declares, from the project's semver.
+/** The app version an APK declares, from THE resolved build version.
  *
  *  Android has two of these and they are not interchangeable. `versionName` is
- *  the string a human reads; `versionCode` is an INTEGER, and it is the only
- *  thing Play, an MDM, or `adb install -r` compares — an install whose code is
- *  not greater than the installed one is refused
- *  (`INSTALL_FAILED_VERSION_DOWNGRADE`). The template hardcoded 1 / "1.0" and
- *  nothing ever propagated deno.json's version, so every APK aio has built is
- *  version 1.0 forever and no update to any of them can be accepted.
+ *  the string a human reads — the full build version, `-dirty.<hash8>`
+ *  included; `versionCode` is an INTEGER, and it is the only value Play, an
+ *  MDM and `adb install -r` compare: an install whose code is not greater is
+ *  refused (`INSTALL_FAILED_VERSION_DOWNGRADE`).
  *
- *  The encoding keeps semver order, prereleases included:
- *
- *      major·100 000 000 + minor·1 000 000 + patch·1 000 + prerelease slot
- *
- *  The prerelease slot is `tier·250 + n`, where the tier is alpha(0) <
- *  beta(1) < rc(2) < anything else(3) and `n` is the prerelease's trailing
- *  number — so `1.0.0-alpha65 < 1.0.0-beta1 < 1.0.0-rc1 < 1.0.0`, which is
- *  what semver says and what an installer has to agree with. A FINAL release
- *  takes 999, above every prerelease of itself.
+ *  The code is `major·100 000 000 + minor·1 000 000 + build`, so the order of
+ *  build numbers IS the order of installs: `1.2.345 < 1.2.346 < 1.3.1`.
+ *  A dirty build carries the SAME code as the clean build of its count —
+ *  Android accepts a same-code reinstall, and a dirty build is not a release.
  *
  *  Out-of-range refuses rather than wrapping: a silently truncated code is an
- *  APK that installs over a NEWER one.
- *
- *  Pure. */
+ *  APK that installs over a NEWER one. Pure. */
 export function androidVersion(
-  version: string | undefined,
+  version: Pick<BuildVersion, "version" | "base" | "build">,
 ): { code: number; name: string } {
-  const raw = (version ?? "").trim();
-  if (!raw) {
+  const [major, minor] = version.base.split(".").map(Number) as [
+    number,
+    number,
+  ];
+  const build = version.build;
+  if (major > 20 || minor > 99 || build > 999_999) {
     throw new Error(
-      `[android] \u2717 this project declares no "version" in deno.json, and ` +
-        `an APK has to carry one: Android compares an integer versionCode and ` +
-        `refuses an install that is not newer. Add e.g. "version": "1.0.0".`,
+      `[android] \u2717 version ${version.version} does not fit an Android ` +
+        `versionCode (max 2147483647): major must be \u2264 20, minor ` +
+        `\u2264 99, build \u2264 999999. Android's integer is the whole ` +
+        `budget — say so now rather than ship an APK that installs over a ` +
+        `newer one.`,
     );
   }
-  const m = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/
-    .exec(raw);
-  if (!m) {
-    throw new Error(
-      `[android] \u2717 deno.json "version" is ${
-        JSON.stringify(raw)
-      }, which is not a semver. An APK's versionCode is derived from it, so it ` +
-        `must look like 1.2.3 or 1.2.3-alpha4.`,
-    );
-  }
-  const [major, minor, patch] = [+m[1]!, +m[2]!, +m[3]!];
-  const pre = m[4];
-  /** alpha < beta < rc < anything else < the release itself. */
-  const TIER: Record<string, number> = { alpha: 0, beta: 1, rc: 2 };
-  let preSlot = 999; // a final release outranks every prerelease of it
-  if (pre !== undefined) {
-    const tier = TIER[/^[A-Za-z]+/.exec(pre)?.[0]?.toLowerCase() ?? ""] ?? 3;
-    const n = Number(/(\d+)\s*$/.exec(pre)?.[1] ?? 0);
-    const max = tier === 3 ? 248 : 249;
-    if (n > max) {
-      throw new Error(
-        `[android] \u2717 prerelease "${pre}" in version ${raw} numbers past ` +
-          `${max}, which does not fit an Android versionCode alongside the ` +
-          `release itself. Bump the patch version and start the prerelease ` +
-          `count again.`,
-      );
-    }
-    preSlot = tier * 250 + n;
-  }
-  if (major > 20 || minor > 99 || patch > 999) {
-    throw new Error(
-      `[android] \u2717 version ${raw} does not fit an Android versionCode ` +
-        `(max 2147483647): major must be \u2264 20, minor \u2264 99, patch ` +
-        `\u2264 999. Android's integer is the whole budget — say so now ` +
-        `rather than ship an APK that installs over a newer one.`,
-    );
-  }
-  const code = major * 100_000_000 + minor * 1_000_000 + patch * 1_000 +
-    preSlot;
-  return { code, name: raw };
+  const code = major * 100_000_000 + minor * 1_000_000 + build;
+  return { code, name: version.version };
 }
 
 /** Build the Android APK. Exits process on completion or error. */
@@ -202,9 +161,7 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
 
   // Replace placeholders in template files
   // The APK's declared version — from deno.json, the app's ONE identity file.
-  const appVersion = androidVersion(
-    ((await readDenoJson(cfg.root))?.config?.version) as string | undefined,
-  );
+  const appVersion = androidVersion(cfg.version);
   console.log(
     `[android] version ${appVersion.name} (versionCode ${appVersion.code})`,
   );

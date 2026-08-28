@@ -58,17 +58,41 @@ export const PROTOCOL_MISMATCH_CLOSE_CODE = 4505;
  *  carried so a mismatch can name which artifact is stale instead of leaving
  *  the user to guess which of server/client/AppImage to rebuild. Optional: a
  *  peer built before it existed simply omits it. */
-export type ProtoHello = { v: number; min: number; ver?: string };
+export type ProtoHello = {
+  v: number;
+  min: number;
+  ver?: string;
+  /** The peer's APP version (`major.minor.build`, docs/build/versioning.md)
+   *  — diagnostic, never negotiated. A server sends its own so a client can
+   *  say which build it talks to; a compiled client sends the stamp it
+   *  carries. Additive within protocol v3: a peer without it omits it. */
+  app?: string;
+};
 
 /** This build's announcement. Pass the build's aio version when known (the
  *  server reads it from its CLI module; the browser bundle gets it stamped in
  *  at build time) — it only ever appears in diagnostics. */
-export function protoHello(ver?: string): ProtoHello {
+export function protoHello(ver?: string, app?: string): ProtoHello {
   return {
     v: PROTOCOL_VERSION,
     min: PROTOCOL_MIN_SUPPORTED,
     ...(ver ? { ver } : {}),
+    ...(app ? { app } : {}),
   };
+}
+
+/** Global the peer's hello is remembered in, so a client can say which build
+ *  it talks to (`peerHello().app`) — set by every transport's proto handler. */
+const PEER_HELLO = "__aioPeerHello";
+
+export function rememberPeerHello(h: ProtoHello): void {
+  (globalThis as Record<string, unknown>)[PEER_HELLO] = h;
+}
+
+/** The hello the other side sent on this connection, or null before one. */
+export function peerHello(): ProtoHello | null {
+  const h = (globalThis as Record<string, unknown>)[PEER_HELLO];
+  return h && typeof h === "object" ? h as ProtoHello : null;
 }
 
 /** Validate a hello payload — a decoded envelope `d`, or a JSON string for
@@ -88,7 +112,15 @@ export function parseProtoHello(input: unknown): ProtoHello | null {
       const ver = typeof p.ver === "string" && p.ver.length <= 64
         ? p.ver
         : undefined;
-      return { v: p.v, min: p.min, ...(ver ? { ver } : {}) };
+      const app = typeof p.app === "string" && p.app.length <= 64
+        ? p.app
+        : undefined;
+      return {
+        v: p.v,
+        min: p.min,
+        ...(ver ? { ver } : {}),
+        ...(app ? { app } : {}),
+      };
     }
     return null;
   } catch {

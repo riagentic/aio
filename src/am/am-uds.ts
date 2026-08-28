@@ -82,7 +82,10 @@ export async function udsRequest(
   } catch (e) {
     return {
       error: e instanceof Deno.errors.NotFound
-        ? `no socket at ${socketPath} — the app is not running (or binds a TCP port instead)`
+        // Only the FACT: whether the app is running is the caller's to say —
+        // it holds the lock and the pid, and a live app whose socket file is
+        // gone is "the socket did not answer", never "not running".
+        ? `no socket file at ${socketPath}`
         : `cannot open ${socketPath}: ${e}`,
     };
   }

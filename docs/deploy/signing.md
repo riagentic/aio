@@ -160,7 +160,8 @@ deterministic JSON serialization of the fields a human or a client **decides
 on**:
 
 format version · name · version · sha256 · size · channel · target · os · arch ·
-url · minFrom · data contract (cell ids sorted) · notes · releasedAt
+url · minFrom · data contract (cell ids sorted) · notes · releasedAt ·
+buildNumber · commit
 
 Everything a client is allowed to refuse on is inside it, and that is the point:
 
@@ -175,6 +176,12 @@ Everything a client is allowed to refuse on is inside it, and that is the point:
 The data contract's cell ids are **sorted** before serialization, so two builds
 that promise the same thing sign identically regardless of the order their cells
 were registered.
+
+`buildNumber` and `commit` (the derived build number and the short sha the build
+came from — see [versioning](../build/versioning.md)) joined the core after
+alpha70. A manifest signed before they did no longer verifies: `null` / `""`
+stand in for the absent fields, so re-sign it (`aio ship`) rather than edit it.
+A client shows them, so they are signed like everything else it shows.
 
 Manifest formats 1 and 2 are refused rather than downgraded to: only
 `manifestVersion: 3` binds all of the above.

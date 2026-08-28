@@ -149,7 +149,6 @@ async function boot(dir: string, cells: any[]) {
     cells,
     appId: APP,
     appDir: dir,
-    appVersion: "0.0.0",
     client: "server-only",
     libraryMode: true,
     port: freePort(),

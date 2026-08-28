@@ -80,7 +80,6 @@ Deno.test("access does NOT hide state — ui does (wire truth, both directions)"
   const app = await aio.run({
     cells: [gated, hidden],
     appId: "test-access-vs-ui",
-    appVersion: "0.0.0",
     client: "server-only",
     persist: false,
     libraryMode: true,
@@ -125,7 +124,6 @@ Deno.test("boot warns when a cell restricts access but never decides ui", async 
     const app = await aio.run({
       cells: [secrets],
       appId: "test-access-undecided",
-      appVersion: "0.0.0",
       client: "server-only",
       persist: false,
       libraryMode: true,
@@ -182,7 +180,6 @@ Deno.test("an explicit visible is an answer — no warning, including visible: '
       const app = await aio.run({
         cells: [c],
         appId: `test-access-decided-${label}`,
-        appVersion: "0.0.0",
         client: "server-only",
         persist: false,
         libraryMode: true,
@@ -216,7 +213,6 @@ Deno.test("no access rule → no warning (the guard is scoped to restricted cell
     const app = await aio.run({
       cells: [plain],
       appId: "test-access-none",
-      appVersion: "0.0.0",
       client: "server-only",
       persist: false,
       libraryMode: true,
@@ -253,7 +249,6 @@ Deno.test("a sync cell is told the truth: its reads CANNOT be narrowed", async (
     const app = await aio.run({
       cells: [shared],
       appId: "test-access-sync",
-      appVersion: "0.0.0",
       client: "server-only",
       persist: false,
       libraryMode: true,

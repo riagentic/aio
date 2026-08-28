@@ -35,6 +35,8 @@ import { generatePin, PIN_TTL_MS } from "./pairing.ts";
 
 /** Client info visible to trojan introspection endpoints */
 export interface TrojanClientInfo {
+  /** The client's own proto hello (its aio / app version), when it said. */
+  peer?: { aio?: string; app?: string };
   index: number;
   id: string;
   clientType: string;
@@ -293,6 +295,9 @@ function handleGet(
       transport: "ws" as const,
       user: c.meta.user,
       readyState: c.ws.readyState,
+      // The build each client SAID it runs (its proto hello).
+      ...(c.meta.peer?.aio ? { aio: c.meta.peer.aio } : {}),
+      ...(c.meta.peer?.app ? { app: c.meta.peer.app } : {}),
     }));
     const udsClients = (trojan.udsClients?.() ?? []).map((c) => ({
       index: c.index,

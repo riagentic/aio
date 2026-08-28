@@ -168,11 +168,16 @@ deno task publish --key=~/.aio/keys/myapp-release-key.json
 ```
 
 `publish` is build → sign → **lay out the channel directory a client actually
-fetches**, in one step. That last part is the one worth naming: a client asks
-for `<source>/<channel>/<os>-<arch>.json`, and a release whose manifest is not
-at exactly that path is invisible. Not an error — invisible. The app reports "no
-updates available" forever, on the users' machines, and nothing anywhere says
-why.
+fetches**, in one step. It publishes the version the build recorded in
+`dist/manifest.json` — `major.minor.<commit count>`, see
+[Versioning](../build/versioning.md) — and **refuses** a `-dirty.*` / `-nogit.*`
+build ("commit first — a published build must be reproducible from a commit");
+`--allow-dirty` is the explicit, logged override. The manifest carries
+`version`, `buildNumber` and `commit`. That last part is the one worth naming: a
+client asks for `<source>/<channel>/<os>-<arch>.json`, and a release whose
+manifest is not at exactly that path is invisible. Not an error — invisible. The
+app reports "no updates available" forever, on the users' machines, and nothing
+anywhere says why.
 
 Useful flags: `--dir=/srv/releases` (where to stage), `--channel=test`,
 `--notes="fixes the sync bug"`, `--no-build` (publish what `dist/` already
@@ -617,3 +622,5 @@ test that only cares how the banner renders.
 - [Release signing](signing.md) — the `aio/ship` API: keys, fingerprints,
   rotation, `manifestCore`, `verifyShipManifest`, `SAFE_TOKEN`
 - [Build targets](../build/targets.md) — what `deno task build` produces
+- [Versioning](../build/versioning.md) — how `major.minor.build` is derived, and
+  how the update check orders it

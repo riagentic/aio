@@ -3,7 +3,9 @@ import { UI_ENTRY } from "./app-files.ts";
 import { join } from "@std/path";
 import {
   BLOCKING_CATEGORIES,
+  createProdGraphCheck,
   type GraphResult,
+  type ProdGraphCheck,
   validateGraph,
 } from "./graph-validator.ts";
 import { transpile } from "./server-transpile.ts";
@@ -74,6 +76,10 @@ export interface GraphValidationHandle {
   done: Promise<void>;
   getResult: () => GraphResult | null;
   setResult: (r: GraphResult) => void;
+  /** The in-memory prod-bundle judge, cached by graph hash — the watcher
+   *  re-runs validation through the SAME one so an unchanged graph costs
+   *  nothing on reload. */
+  prodGraph?: ProdGraphCheck;
 }
 
 /** Start async graph validation. Returns handle to await completion and read result. */
@@ -82,6 +88,7 @@ export function startGraphValidation(
   importMapObj: Record<string, string>,
   debug: (msg: string) => void,
   uiEntry = UI_ENTRY,
+  shell: "browser" | "electron" = "browser",
 ): GraphValidationHandle {
   let graphResult: GraphResult | null = null;
   const entrypoint = join(absBaseDir, uiEntry);
@@ -98,7 +105,14 @@ export function startGraphValidation(
   }
 
   const graphTranspile = (s: string, f: string) => transpile(s, f);
-  const done = validateGraph(entrypoint, importMapObj, graphTranspile)
+  const prodGraph = createProdGraphCheck({ absBaseDir, uiEntry, shell, debug });
+  const done = validateGraph(
+    entrypoint,
+    importMapObj,
+    graphTranspile,
+    undefined,
+    prodGraph,
+  )
     .then((result) => {
       graphResult = result;
       // server-only-import is a GUARANTEED client break (sandboxed renderer
@@ -120,7 +134,11 @@ export function startGraphValidation(
         debug(
           `graph: ✓ ${result.modules.size} modules validated (${
             result.durationMs.toFixed(0)
-          }ms)${warnings.length ? ` (${warnings.length} warnings)` : ""}`,
+          }ms${
+            result.bundleMs !== undefined
+              ? `, prod bundle judged in ${result.bundleMs.toFixed(0)}ms`
+              : ""
+          })${warnings.length ? ` (${warnings.length} warnings)` : ""}`,
         );
       } else {
         // Blocking = guaranteed client break. The diagnostic page covers the
@@ -199,5 +217,5 @@ export function startGraphValidation(
   const setResult = (r: GraphResult) => {
     graphResult = r;
   };
-  return { done, getResult: () => graphResult, setResult };
+  return { done, getResult: () => graphResult, setResult, prodGraph };
 }

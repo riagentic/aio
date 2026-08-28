@@ -2,10 +2,16 @@
  * @module
  * Build configuration — parses CLI flags, reads deno.json, derives all shared build state.
  */
+import { isArtifactName } from "../build-all.ts";
 import { readDenoJson } from "../server/deno-json.ts";
 import { BUNDLE_JS, DIST_DIR, UI_ENTRY } from "../server/app-files.ts";
 import { basename, dirname, join, resolve, SEPARATOR } from "@std/path";
 import { slugify } from "./build-helpers.ts";
+import {
+  type BuildVersion,
+  buildVersionFor,
+  buildVersionNotes,
+} from "./build-version.ts";
 import { appIdFromConfig } from "../server/single-instance-lock.ts";
 import { bakedServerUrl, resolveEntryPath } from "../server/paths.ts";
 import {
@@ -13,6 +19,7 @@ import {
   BUILD_VALUE_FLAGS,
   flagHint,
   flagVocabulary,
+  isBuildQuestion,
   unknownBuildFlags,
 } from "./build-flags.ts";
 import {
@@ -94,6 +101,10 @@ export interface BuildConfig {
   // App identity
   binaryName: string;
   appTitle: string | undefined;
+  /** THE app version this build carries — `major.minor.<commit count>`,
+   *  resolved once (by the fleet when it runs this build, else here) and
+   *  stamped into every artifact. See build-version.ts. */
+  version: BuildVersion;
   configEntry: string;
   /** THE app-dir decider (WYSIDIWYSIP). Absolute directory of the app's UI
    *  files — App.tsx, style.css, icon.png. Derived as dirname(entry), the same
@@ -222,6 +233,45 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
     "--out=".length,
   );
   const configEntry = resolveEntry(mainConfig, entryArg);
+  const defaultName = appIdFromConfig(mainConfig) ?? slugify(basename(root));
+  const rawName = Deno.args.find((a) => a.startsWith("--name="))?.slice(7);
+  const binaryName = rawName ? slugify(rawName) : defaultName;
+  // THE app version. The fleet resolves it once and hands it down
+  // (AIO_BUILD_VERSION); a direct single-target build resolves it here and
+  // prints the notes itself — exactly once per build either way.
+  let versionResolved: Awaited<ReturnType<typeof buildVersionFor>>;
+  try {
+    versionResolved = await buildVersionFor(
+      root,
+      mainConfig.version,
+      {
+        out: (mainConfig.build as { out?: string } | undefined)?.out,
+        // A previous build's artifact left in the project root (the
+        // single-target build writes there) is an OUTPUT, not a change: the
+        // onboarding lab built the same scaffold twice and got two dirty
+        // hashes for one codebase.
+        isOutput: (rel) =>
+          !rel.includes("/") && isArtifactName(rel, binaryName),
+      },
+    );
+  } catch (e) {
+    // A refused version is a written message with the fix in it — print it,
+    // never a stack.
+    console.error(e instanceof Error ? e.message : String(e));
+    Deno.exit(1);
+  }
+  const { bv: version, fromFleet } = versionResolved;
+  // Notes are for a person: stderr. The version line is progress, stdout —
+  // except when the build was asked a QUESTION (`--print-*`), whose stdout is
+  // an answer a script parses (the onboarding one-liner read
+  // "[build] version …" as a path once).
+  const asked = isBuildQuestion(Deno.args);
+  if (!fromFleet && !asked) {
+    for (const n of buildVersionNotes(version)) {
+      console.error(`[build] note: ${n}`);
+    }
+    console.log(`[build] version ${version.version}`);
+  }
   const appDir = resolveAppDir(root, configEntry);
   // UI entry: --ui= (per-target, from build-all) else deno.json build.ui,
   // else the App.tsx convention — validated NOW, at the build, not as a
@@ -269,9 +319,6 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
   // resolving the id are one decision. Reading `title` while ignoring `appId`
   // made them two, and an app that set `appId` changed data directories the
   // moment it was compiled.
-  const defaultName = appIdFromConfig(mainConfig) ?? slugify(basename(root));
-  const rawName = Deno.args.find((a) => a.startsWith("--name="))?.slice(7);
-  const binaryName = rawName ? slugify(rawName) : defaultName;
 
   const androidApplicationId =
     (mainConfig.android as { applicationId?: string } | undefined)
@@ -350,6 +397,7 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
     ),
     binaryName,
     appTitle,
+    version,
     configEntry,
     appDir,
     uiEntry,

@@ -202,7 +202,6 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "transport",
   "killExisting",
   "serverUrl",
-  "appVersion",
   "schedules",
   "db",
   "perfCheck",
@@ -310,7 +309,6 @@ export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
   "trustProxyHeader",
   "fatalOnStart",
   "dispatchStorm",
-  "appVersion",
   "isolate",
   "beforeReduce",
   "onAction",
@@ -340,7 +338,6 @@ export const CONFIG_DOCS: Record<string, [string, string]> = {
     'release source URL ("https://…" / "file://…" / a git repo) — or { source, kind, auto, check, channel, key, keys, canApply, allowUnsigned, prerelease }',
   ],
   appId: ["", "unique app identity — lock file, UDS socket, KV/SQLite paths"],
-  appVersion: ["", "app version string — logged on startup"],
   cells: ["", "cell definitions array"],
   serveDirs: [
     "",
@@ -542,7 +539,7 @@ export const UI_DOCS: Record<string, [string, string]> = {
 };
 
 /** Keys printed in the IDENTITY table (see formatValidConfig). */
-export const IDENTITY_KEYS = ["appId", "appVersion", "cells"] as const;
+export const IDENTITY_KEYS = ["appId", "cells"] as const;
 
 /** The printed help-table groups. Exported for the docs-completeness gate:
  *  IDENTITY_KEYS + these groups + the UI table are exactly what
