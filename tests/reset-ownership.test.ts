@@ -53,6 +53,10 @@ const OWNERS: Record<string, [Owner, string]> = {
 
   // ── owned by a harness ──────────────────────────────────────────
   _resetAuthUi: ["HARNESS", "testUI installs and restores the ambient user"],
+  _resetHomePin: [
+    "MANUAL",
+    "tests/am-uds-only-app.test.ts un-pins the --home lock between cases",
+  ],
   _resetLifecycleFacts: [
     "MANUAL",
     "tests/lifecycle-restart.test.ts resets the process facts between cases",

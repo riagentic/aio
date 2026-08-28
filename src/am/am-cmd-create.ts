@@ -381,7 +381,10 @@ export function denoJson(
   if (target !== "android") delete tasks["install:android"];
   const obj = {
     title: name,
-    version: "0.1.0",
+    // `major.minor` only — aio numbers builds from commits: every artifact
+    // is `<name>-0.1.<commit count>…` and reports that version. Bump this by
+    // hand; never write a third part (that pins it). docs/build/versioning.md
+    version: "0.1",
     // `client` is read by aio.run() to pick the default client shell when no
     // --client flag is passed (it was called `target` before alpha52 — same
     // meaning, renamed because deno.json also has build.targets, a DIFFERENT
@@ -761,7 +764,19 @@ async function tryGitInit(dir: string): Promise<GitInit> {
         .output();
     if (!(await run(["init"])).success) return "skipped: git init failed";
     await run(["add", "-A"]);
-    await run(["commit", "-m", "initial commit — scaffolded with am"]);
+    // An identity of its own: a machine with no git user (a container, CI, a
+    // fresh laptop) used to fail this commit silently, leaving every file
+    // untracked — and every build of the scaffold "-dirty". The app's first
+    // commit is aio's; the developer's own identity takes over from there.
+    await run([
+      "-c",
+      "user.name=aio",
+      "-c",
+      "user.email=aio@localhost",
+      "commit",
+      "-m",
+      "initial commit — scaffolded with am",
+    ]);
     return "initialized";
   } catch {
     return "skipped: git not found";
@@ -799,6 +814,11 @@ deno task compile          # build the default target (${target})
 deno task build            # build every target in deno.json build.targets → dist/
 deno task check            # type-check src/
 \`\`\`
+
+The app's version is \`major.minor\` in deno.json (\`"version": "0.1"\`) — the
+build number is derived from the commit count, so every artifact is named
+\`${name}-0.1.<build>…\` and reports that version (\`-dirty.<hash>\` when
+built from uncommitted changes).
 
 **\`dev\` flags pass through** — one task, any shell:
 

@@ -18,6 +18,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { childEnv } from "./e2e-app-harness.ts";
+import { stopChild } from "./stop-child.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const dec = new TextDecoder();
@@ -206,10 +207,7 @@ Deno.test({
         `client did not observe its own write over TLS: ${out}\n${err}`,
       );
     } finally {
-      try {
-        server.kill();
-      } catch { /* already gone */ }
-      await server.status;
+      await stopChild(server, { quiet: true });
       await Deno.remove(root, { recursive: true }).catch(() => {});
     }
   },

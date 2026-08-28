@@ -12,8 +12,7 @@
  */
 
 import type { Result } from "./am-types.ts";
-import { _discoveredAppTarget } from "./am-utils.ts";
-import { readPid } from "./am-utils.ts";
+import { _discoveredAppTarget, liveLock } from "./am-utils.ts";
 import { isProcessAlive } from "../server/single-instance-lock.ts";
 import { CLIENT_REPLY_TIMEOUT_MS } from "../server/uds.ts";
 import {
@@ -51,23 +50,60 @@ export function clientTimeout(flag?: number): number {
   return flag;
 }
 
-/** The socket this app answers control requests on, or undefined when it has
- *  none (a WS-transport app, or nothing running under that id).
+/** Where an `am` command talks to its app — THE transport decision, made once
+ *  and made here. Every control-plane call (`trojanGet`, `trojanPost`,
+ *  `httpGet`, and so every `am` command that inspects or drives a running
+ *  app) resolves its endpoint through this function; nothing else in `am`
+ *  decides "port or socket".
  *
- *  THE transport decision for `am`, made once. It is read from the lock the
- *  app itself wrote — never guessed — so `am` follows the app onto whichever
- *  wire the app chose rather than assuming a port exists. A live pid is part
- *  of the answer: a leftover socket file from a crashed app must not silently
- *  become the target.
+ *  It is read from the lock the app itself wrote — never guessed — so `am`
+ *  follows the app onto whichever wire the app chose. The lock is found
+ *  wherever the instance's home is (`liveLock`): a packaged Electron app runs
+ *  UDS-only from its own `appDir`, and that is the SHIPPED shape, not a
+ *  corner. A live pid is part of the answer: a leftover socket path from a
+ *  crashed app must not silently become the target.
  *
- *  Order matters and is deliberate: the socket is tried FIRST when present,
- *  because an app on UDS may have no TCP port at all, and the port path's
+ *  The socket wins whenever the lock names one, even when a `--port` was
+ *  typed: an app on UDS may have no TCP port at all, and the port path's
  *  failure mode there is a connection-refused that reads like "your app is
- *  broken". */
-function controlSocket(appId?: string): string | undefined {
-  const pf = readPid(appId);
-  if (!pf?.socketPath) return undefined;
-  return isProcessAlive(pf.pid) ? pf.socketPath : undefined;
+ *  broken". `port` in the UDS branch is the lock's — `0` for a zero-port app,
+ *  a real listener when the app has both wires — and it decides whether a
+ *  failed socket call may fall through to TCP (see `overUds`). */
+export type ControlEndpoint =
+  | { kind: "tcp"; port: number }
+  | { kind: "uds"; socketPath: string; pid: number; port: number };
+
+export function controlEndpoint(
+  appId: string | undefined,
+  port: number,
+): ControlEndpoint {
+  const pf = liveLock(appId);
+  if (pf?.socketPath && isProcessAlive(pf.pid)) {
+    return {
+      kind: "uds",
+      socketPath: pf.socketPath,
+      pid: pf.pid,
+      port: pf.port,
+    };
+  }
+  return { kind: "tcp", port: resolveControlPort(port, appId) };
+}
+
+/** The message for a socket that did not answer on an app that has NO other
+ *  wire. Naming the constraint is the whole point: this used to surface as
+ *  "app not running on port 0", and one field reporter went looking for a
+ *  crash that had not happened. */
+function udsUnreachable(
+  ep: Extract<ControlEndpoint, { kind: "uds" }>,
+  appId: string | undefined,
+  reason: string,
+): Result {
+  return {
+    ok: false,
+    error: `"${appId ?? "this app"}" is running on a UDS socket with no TCP ` +
+      `port (pid ${ep.pid}, ${ep.socketPath}), but the socket did not ` +
+      `answer: ${reason}`,
+  };
 }
 
 /** Run one trojan call over the socket and shape it like a `fetch` outcome, so
@@ -93,7 +129,7 @@ async function trojanOverUds(
   },
   timeout: number,
   appId?: string,
-): Promise<Result | null> {
+): Promise<Result | { transportError: string }> {
   const path = `/__aio/trojan/${route}`;
   const send = (c: LocalCreds) =>
     udsRequest(
@@ -114,11 +150,11 @@ async function trojanOverUds(
     }
   }
 
-  // A transport failure is NOT an answer. The caller falls back to TCP on
-  // null, so an app that has both wires keeps working if the socket is
-  // unusable (a stale path, a permission change) — the socket is the
-  // preference, never a dead end.
-  if ("error" in r) return null;
+  // A transport failure is NOT an answer. It is handed back BY NAME so the
+  // caller can fall through to TCP when the app has both wires (a stale
+  // path, a permission change — the socket is a preference, not a dead end),
+  // and say exactly what failed when it has no other wire.
+  if ("error" in r) return { transportError: r.error };
   if (r.status < 200 || r.status >= 300) {
     const extra = credentialDiagnosis(r.status, creds, appId) +
       prodDiagnosis(r.status, r.body);
@@ -501,7 +537,7 @@ export function fetchError(e: unknown, port: number, appId?: string): Result {
     // anyway means the socket was rejected — the app is a PROD build, where
     // the trojan does not exist on any wire by design.
     if (appId) {
-      const pf = readPid(appId);
+      const pf = liveLock(appId);
       if (pf?.socketPath && isProcessAlive(pf.pid)) {
         return {
           ok: false,
@@ -526,7 +562,7 @@ export function resolveControlPort(
   mainPort: number,
   appId?: string,
 ): number {
-  const pf = readPid(appId);
+  const pf = liveLock(appId);
   return (pf?.port === mainPort && pf.trojanPort) ? pf.trojanPort : mainPort;
 }
 
@@ -540,18 +576,19 @@ export async function trojanGet(
   // The app's own wire first. An app on UDS may bind no TCP port at all, and
   // the identity gate below is a PORT concern — a socket is named by the app's
   // own lock, so there is no "who answers on this number" question to ask.
-  const sock = controlSocket(appId);
-  if (sock) {
+  const ep = controlEndpoint(appId, port);
+  if (ep.kind === "uds") {
     const r = await trojanOverUds(
-      sock,
+      ep.socketPath,
       route,
       { method: "GET" },
       timeout,
       appId,
     );
-    if (r) return r;
+    if (!("transportError" in r)) return r;
+    if (ep.port <= 0) return udsUnreachable(ep, appId, r.transportError);
   }
-  const ctrl = resolveControlPort(port, appId);
+  const ctrl = ep.port;
   const pre = await controlPreflight(ctrl, appId, {
     control: true,
     timeout,
@@ -587,10 +624,10 @@ export async function trojanPost(
   appId?: string,
   timeout = FETCH_TIMEOUT,
 ): Promise<Result> {
-  const sock = controlSocket(appId);
-  if (sock) {
+  const ep = controlEndpoint(appId, port);
+  if (ep.kind === "uds") {
     const r = await trojanOverUds(
-      sock,
+      ep.socketPath,
       route,
       {
         method: "POST",
@@ -605,9 +642,10 @@ export async function trojanPost(
       timeout,
       appId,
     );
-    if (r) return r;
+    if (!("transportError" in r)) return r;
+    if (ep.port <= 0) return udsUnreachable(ep, appId, r.transportError);
   }
-  const ctrl = resolveControlPort(port, appId);
+  const ctrl = ep.port;
   // a MUTATION is gated at least as hard as a read
   const pre = await controlPreflight(ctrl, appId, {
     control: true,
@@ -652,8 +690,9 @@ export async function httpGet(
   // The app's own routes answer on the socket too — same handler. Without this
   // `am state` would work on a socket-only app while `am health` reported it
   // unreachable: one app, two verdicts, which is worse than either.
-  const sock = controlSocket(appId);
-  if (sock) {
+  const ep = controlEndpoint(appId, port);
+  if (ep.kind === "uds") {
+    const sock = ep.socketPath;
     // NO control credential, exactly as below: it authorizes the control
     // plane, not the app's front door.
     const creds = localCreds(appId, { control: false, gated: false });
@@ -675,9 +714,12 @@ export async function httpGet(
         ? { ok: true, data: r.body }
         : { ok: false, error: `${r.status} ${r.body}` };
     }
-    // transport failure — fall through to TCP
+    // transport failure — fall through to TCP only when there IS one
+    if (ep.port <= 0) {
+      return udsUnreachable(ep, appId, r.error) as Result<string>;
+    }
   }
-  const ctrl = resolveControlPort(port, appId);
+  const ctrl = ep.port;
   // NO control credential here: it authorizes the control plane, not the app's
   // own routes. `/__aio/health|vitals|metrics|snapshot` are the app's front
   // door and keep the app's own gate — only the shared key belongs on them.

@@ -157,7 +157,7 @@ function _handleState(data: Record<string, unknown>) {
   if (r === "dropped" || r === "noop") return;
   // Applied, not yet painted — the render meter's staleness clock starts.
   _noteClientPatch();
-  _checkStateIntegrity(_coreGetState());
+  _checkStateIntegrity(_coreGetState(), { full: !("$patches" in data) });
   _incStateVersion();
   if (_coreHasState()) _resolveStateReady();
 }

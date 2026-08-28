@@ -206,6 +206,22 @@ tests/
 
 ## Root Files
 
+### `deno.json` -- identity and build
+
+```jsonc
+{
+  "title": "notes", // the app's name (appId is its slug)
+  "version": "1.2", // major.minor — the build number is derived from commits
+  "client": "electron",
+  "build": { "targets": ["electron", "android"] }
+}
+```
+
+`version` is `major.minor` only: every build becomes `1.2.<commit count>`
+(`-dirty.<hash8>` from uncommitted changes), every artifact is named with it and
+reports it. A three-part version is accepted as a pin, and the build says so.
+See [Versioning](../build/versioning.md).
+
 ### `app.ts` -- wiring only
 
 ```ts

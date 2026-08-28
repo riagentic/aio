@@ -167,7 +167,6 @@ Deno.test("boot: checkIntegrityOnBoot recovers a corrupt app database", async ()
     aio.run({
       cells: [cell("notes", { state: { n: 0 }, methods: {} })],
       appId,
-      appVersion: "0.0.0",
       client: "server-only",
       libraryMode: true,
       singleton: false,

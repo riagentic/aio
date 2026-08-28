@@ -1,7 +1,8 @@
 /**
  * @module
- * `am lab windows` / `am lab macos` — a real Windows or macOS desktop, in a
- * container, that a HUMAN drives from a browser.
+ * `am lab windows|macos|linux|android` — a real Windows, macOS or Linux
+ * desktop, or the Android emulator, in a container, that a HUMAN drives from
+ * a browser.
  *
  * This is the manual counterpart to the two automated Windows/Linux gates:
  *
@@ -9,16 +10,18 @@
  * | ----------------------- | --------------------------------- | --------- |
  * | `deno task test:wine`   | the .exe executed under Wine      | CI        |
  * | `deno task lab`         | install→create→dev in Ubuntu      | CI        |
- * | `am lab windows|macos`  | a REAL OS you click around in      | a person  |
+ * | `am lab <os>`           | a REAL OS you click around in      | a person  |
  *
  * Nothing here is a gate and nothing here runs in `deno task test`: it boots a
  * VM, which takes tens of minutes and tens of gigabytes the first time. It
  * exists for the one question the automated tiers cannot answer — "does the
  * thing we ship actually look and behave right on that OS?"
  *
- * Mechanically it is a thin, honest wrapper over the `dockurr/windows` and
- * `dockurr/macos` images (QEMU + KVM + a browser viewer on container port
- * 8006). Everything shaped like a decision — the argv, where the disk lives,
+ * Mechanically it is a thin, honest wrapper over four images — `dockurr/windows`
+ * and `dockurr/macos` (QEMU + KVM + a viewer on 8006, a VM with a disk),
+ * `linuxserver/webtop` (an XFCE desktop on 3000 — a container, no VM) and
+ * `budtmo/docker-android` (the emulator + noVNC on 6080, KVM-accelerated).
+ * Every difference is a ROW of `LAB_SPECS`. Everything shaped like a decision — the argv, where the disk lives,
  * what the preflight refuses — is a pure function below, so it is testable
  * without a VM (`tests/am-lab.test.ts`).
  *
@@ -44,27 +47,59 @@
  */
 
 import { join, resolve } from "@std/path";
+import { stripVersionToken } from "../server/app-version.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, fail, out, outError } from "./am-output.ts";
 
-// ── The two labs ───────────────────────────────────────────
+// ── The four labs ──────────────────────────────────────────
 
-/** Which guest OS a lab runs. */
-export type LabOs = "windows" | "macos";
+/** Which guest a lab runs. */
+export type LabOs = "windows" | "macos" | "linux" | "android";
 
-/** Everything that differs between the two images, in one place. */
+/** A VM has a disk (NEED_GB/MIN_GB preflight, `--reset` frees tens of GB) and
+ *  a KVM+tun QEMU guest; a container IS the guest — no disk, no install, and
+ *  the bind-mounted `/shared` is a local directory in there. */
+export type LabKind = "vm" | "container";
+
+/** Everything that differs between the images, in one place. An OS is a ROW
+ *  here, never a branch elsewhere: every `runArgv`/`preflight`/hand-off
+ *  decision reads a field, so adding a lab is adding a row. */
 export type LabSpec = {
   readonly os: LabOs;
+  readonly kind: LabKind;
   readonly image: string;
   readonly container: string;
+  /** The viewer's port INSIDE the container (dockurr: 8006, webtop: 3000,
+   *  docker-android's noVNC: 6080). Published to 127.0.0.1 or tunnelled. */
+  readonly viewerPort: number;
+  /** Needs `/dev/kvm` — a QEMU guest, or the KVM-accelerated Android emulator. */
+  readonly needsKvm: boolean;
+  /** Needs `/dev/net/tun` + NET_ADMIN — the dockurr images build the guest's
+   *  network themselves; a plain container has docker's. */
+  readonly needsTun: boolean;
+  /** Extra `docker run` arguments the image needs (shm, FUSE, apparmor…). */
+  readonly runExtra: readonly string[];
+  /** Per-image `-e` environment, verbatim. */
+  readonly env: Readonly<Record<string, string>>;
+  /** Pass the host's uid/gid as `PUID`/`PGID` — the linuxserver.io convention,
+   *  so the files the guest writes into `/shared` are the operator's own. */
+  readonly ownerEnv: boolean;
+  /** Does `am` put the artifact into the guest ITSELF (Android: `adb install`)
+   *  rather than print a line for the operator to paste? */
+  readonly installs: boolean;
+  /** The VM knobs, meaningless for a container (where the flags are refused). */
   readonly defaultVersion: string;
   readonly defaultRam: string;
   readonly defaultCpus: number;
   readonly defaultDisk: string;
+  /** The name the GUEST reaches the artifact share by — the dockurr images'
+   *  own dnsmasq record for a VM, the container's own loopback for a webtop,
+   *  the emulator's alias for its host for Android. */
+  readonly shareHost: string;
   /** Where the host share turns up as a MOUNT inside the guest, in the guest's
    *  own vocabulary — or null when the guest cannot mount it at all. This is
-   *  the extra, per-OS convenience; the hand-off that works in both guests is
-   *  `SHARE_URL`, which needs no mount. */
+   *  the extra, per-OS convenience; the hand-off that works in every guest is
+   *  `shareUrl(spec)`, which needs no mount. */
   readonly guestShare: string | null;
   /** One line for the operator about that mount — including, for macOS, why
    *  there is none. */
@@ -76,19 +111,40 @@ export type LabSpec = {
   /** Does the image keep one VM disk per VERSION under `/storage`? The macOS
    *  image does (`$STORAGE/<version>/data.img`, so `--version=15` next to an
    *  installed 14 is a second 40 GB install, not a boot); the Windows image
-   *  keeps a single disk at the top level. */
+   *  keeps a single disk at the top level. Always false for a container. */
   readonly versionedStorage: boolean;
+  /** The build command that produces an artifact THIS guest can run. */
+  readonly buildHint: string;
 };
+
+/** What `docker run --stop-timeout` and `docker stop --time` wait for a VM. A
+ *  container has no disk to dirty, so it gets the default. */
+const NO_VM = {
+  defaultVersion: "",
+  defaultRam: "",
+  defaultCpus: 0,
+  defaultDisk: "",
+  versionedStorage: false,
+} as const;
 
 export const LAB_SPECS: Readonly<Record<LabOs, LabSpec>> = {
   windows: {
     os: "windows",
+    kind: "vm",
     image: "dockurr/windows:latest",
     container: "aio-lab-windows",
+    viewerPort: 8006,
+    needsKvm: true,
+    needsTun: true,
+    runExtra: [],
+    env: {},
+    ownerEnv: false,
+    installs: false,
     defaultVersion: "11",
     defaultRam: "8G",
     defaultCpus: 4,
     defaultDisk: "64G",
+    shareHost: "host.lan",
     guestShare: "\\\\host.lan\\Data",
     shareNote:
       'Windows can ALSO mount it: \\\\host.lan\\Data (the image runs Samba), live — rebuild on the host and press F5 in Explorer. If the name does not resolve, open "\\\\host.lan" first, or map it: net use Z: \\\\host.lan\\Data. Copy the .exe out of the share before running it: running off a network share is a more restricted Windows code path than your users are on.',
@@ -96,19 +152,29 @@ export const LAB_SPECS: Readonly<Record<LabOs, LabSpec>> = {
       "Windows downloads an ~8.5 GB installer and then installs UNATTENDED, no clicking. Measured end to end on a fast link: 21 min download, 30 min total from `am lab windows` to a usable desktop. On a slower link the download is the whole story.",
     guestShell: "PowerShell",
     versionedStorage: false,
+    buildHint: "deno task build --platforms=windows",
   },
   macos: {
     os: "macos",
+    kind: "vm",
     image: "dockurr/macos:latest",
     container: "aio-lab-macos",
+    viewerPort: 8006,
+    needsKvm: true,
+    needsTun: true,
+    runExtra: [],
+    env: {},
+    ownerEnv: false,
+    installs: false,
     defaultVersion: "14",
     defaultRam: "8G",
     defaultCpus: 4,
     defaultDisk: "64G",
+    shareHost: "host.lan",
     // The image exports /shared over virtio-9p (mount_tag "shared") and ships
     // no smbd. macOS has a client for neither, so unlike Windows there is no
     // MOUNT path to name here — naming one would be a lie the operator only
-    // discovers inside the VM. The hand-off is SHARE_URL, which needs none.
+    // discovers inside the VM. The hand-off is the share URL, which needs none.
     guestShare: null,
     shareNote:
       "macOS cannot mount the host directory (no 9p client in macOS, no smbd in this image) — the http://host.lan share above is the hand-off, and it is the whole of it.",
@@ -116,6 +182,73 @@ export const LAB_SPECS: Readonly<Record<LabOs, LabSpec>> = {
       "macOS is NOT unattended: it downloads Apple's recovery image, and then YOU drive the installer in the viewer — Disk Utility → erase the QEMU HARDDISK as APFS → quit → Reinstall macOS → wait. Budget 60+ min, most of it watching.",
     guestShell: "Terminal",
     versionedStorage: true,
+    buildHint: "deno task build --platforms=macos",
+  },
+  linux: {
+    os: "linux",
+    kind: "container",
+    // A real Ubuntu XFCE desktop served to the browser by KasmVNC. Not a VM:
+    // the container IS the guest, so no KVM, no disk, no install — it is up
+    // in seconds and `/shared` is a plain local directory inside it.
+    image: "lscr.io/linuxserver/webtop:ubuntu-xfce",
+    container: "aio-lab-linux",
+    viewerPort: 3000,
+    needsKvm: false,
+    needsTun: false,
+    // AppImages mount themselves through FUSE, which a default container
+    // cannot do: the device, SYS_ADMIN and an unconfined AppArmor profile are
+    // the three things `fusermount` needs. The shm is for the browser in there.
+    runExtra: [
+      "--shm-size=1g",
+      "--device=/dev/fuse",
+      "--cap-add=SYS_ADMIN",
+      "--security-opt=apparmor:unconfined",
+      // Measured: without it the XFCE session aborts once at start on a
+      // current Ubuntu host (the image's own docs ask for it).
+      "--security-opt=seccomp=unconfined",
+    ],
+    env: { TITLE: "aio lab" },
+    ownerEnv: true,
+    installs: false,
+    ...NO_VM,
+    shareHost: "localhost",
+    guestShare: "/shared",
+    shareNote:
+      "/shared IS the host's dist/ inside this desktop — a local directory, live: rebuild on the host and it is already there. Copy the file out before running it (an AppImage needs +x, and a bind mount owned by the host is not the place to write next to).",
+    firstRun:
+      "nothing to install — this is a container, not a VM. The desktop is up as soon as the viewer answers (seconds; the image pull, if you have not done it, is ~1.5 GB).",
+    guestShell: "Terminal",
+    buildHint:
+      "deno task build --platforms=linux (or --electron for an AppImage)",
+  },
+  android: {
+    os: "android",
+    kind: "container",
+    // Google's emulator, KVM-accelerated, with a noVNC viewer of its screen.
+    // The container is the emulator's host: `adb` inside it sees the device,
+    // which is how `am` installs the APK itself instead of printing a line.
+    image: "budtmo/docker-android:emulator_14.0",
+    container: "aio-lab-android",
+    viewerPort: 6080,
+    needsKvm: true,
+    needsTun: false,
+    runExtra: ["--shm-size=2g", "--device=/dev/kvm"],
+    env: { EMULATOR_DEVICE: "Samsung Galaxy S10", WEB_VNC: "true" },
+    ownerEnv: false,
+    installs: true,
+    ...NO_VM,
+    // 10.0.2.2 is the emulator's fixed alias for its host's loopback — the
+    // container's, here — so the share is one URL the emulator's own browser
+    // can open, with nothing to configure.
+    shareHost: "10.0.2.2",
+    guestShare: null,
+    shareNote:
+      "the emulator cannot mount /shared; `am` installs the APK over adb, and the http share is there for the emulator's browser.",
+    firstRun:
+      "the emulator boots a fresh Android 14 image — measured on a KVM host: the viewer answers in ~20 s, `sys.boot_completed` in 1-3 min. `am` waits for that, then installs.",
+    guestShell: "adb (run by am)",
+    buildHint:
+      "deno task build --targets=android-client (or android, for the standalone app)",
   },
 } as const;
 
@@ -123,8 +256,13 @@ export const LAB_SPECS: Readonly<Record<LabOs, LabSpec>> = {
 export function parseLabOs(arg: string | undefined): LabOs | null {
   if (arg === "windows" || arg === "win") return "windows";
   if (arg === "macos" || arg === "mac" || arg === "osx") return "macos";
+  if (arg === "linux" || arg === "ubuntu") return "linux";
+  if (arg === "android" || arg === "apk") return "android";
   return null;
 }
+
+/** The OS names, for messages and usage — from the spec table, never retyped. */
+export const LAB_OS_LIST = Object.keys(LAB_SPECS) as LabOs[];
 
 // ── Where the disk lives ───────────────────────────────────
 
@@ -167,6 +305,9 @@ export type LabOpts = {
    *  reach the host at all (see `UNREACHABLE_FIX`). Nothing is published, and
    *  `am` owns the port itself. */
   readonly tunnel: boolean;
+  /** The host user, for `ownerEnv` images (`PUID`/`PGID`). Null where the
+   *  platform has no uid (Windows hosts) — the image then runs as its default. */
+  readonly owner?: { readonly uid: number; readonly gid: number } | null;
 };
 
 /** How long docker waits for the guest to shut down cleanly. A VM killed
@@ -174,67 +315,76 @@ export type LabOpts = {
  *  cycle the operator gets to watch instead of the app they were testing. */
 export const STOP_TIMEOUT_SEC = 120;
 
-/** The full `docker run` argv. Pure — this is the function the tests pin. */
+/** The full `docker run` argv. Pure — this is the function the tests pin.
+ *  Every per-OS difference is a FIELD of the spec; nothing here asks `os`. */
 export function runArgv(o: LabOpts): string[] {
-  const a = [
-    "run",
-    "--detach",
-    "--name",
-    o.spec.container,
-    "--device=/dev/kvm",
-    "--device=/dev/net/tun",
-    "--cap-add",
-    "NET_ADMIN",
-    "--stop-timeout",
-    String(STOP_TIMEOUT_SEC),
-    "-e",
-    `VERSION=${o.version}`,
-    "-e",
-    `RAM_SIZE=${o.ram}`,
-    "-e",
-    `CPU_CORES=${o.cpus}`,
-    "-e",
-    `DISK_SIZE=${o.disk}`,
-  ];
-  // Loopback only. A manual-testing VM with no password on its viewer is not
-  // something to hand the LAN. Under `--tunnel` nothing is published at all —
-  // `am` binds that port itself and forwards through `docker exec`.
-  if (!o.tunnel) a.push("-p", `127.0.0.1:${o.port}:8006`);
-  a.push(
-    "-v",
-    `${o.storage}:/storage`,
-    "-v",
-    `${o.share}:/shared`,
-    o.spec.image,
-  );
+  const s = o.spec;
+  const a = ["run", "--detach", "--name", s.container];
+  if (s.needsKvm) a.push("--device=/dev/kvm");
+  if (s.needsTun) a.push("--device=/dev/net/tun", "--cap-add", "NET_ADMIN");
+  a.push("--stop-timeout", String(STOP_TIMEOUT_SEC));
+  // `runExtra` may name /dev/kvm again (Android does, as its own line): docker
+  // tolerates the duplicate but the argv should not carry one.
+  for (const x of s.runExtra) if (!a.includes(x)) a.push(x);
+  if (s.kind === "vm") {
+    a.push(
+      "-e",
+      `VERSION=${o.version}`,
+      "-e",
+      `RAM_SIZE=${o.ram}`,
+      "-e",
+      `CPU_CORES=${o.cpus}`,
+      "-e",
+      `DISK_SIZE=${o.disk}`,
+    );
+  }
+  for (const [k, v] of Object.entries(s.env)) a.push("-e", `${k}=${v}`);
+  if (s.ownerEnv && o.owner) {
+    a.push("-e", `PUID=${o.owner.uid}`, "-e", `PGID=${o.owner.gid}`);
+  }
+  // Loopback only. A manual-testing guest with no password on its viewer is
+  // not something to hand the LAN. Under `--tunnel` nothing is published at
+  // all — `am` binds that port itself and forwards through `docker exec`.
+  if (!o.tunnel) a.push("-p", `127.0.0.1:${o.port}:${s.viewerPort}`);
+  if (s.kind === "vm") a.push("-v", `${o.storage}:/storage`);
+  a.push("-v", `${o.share}:/shared`, s.image);
   return a;
 }
 
 /** The tunnel's other end: one `nc` inside the container per connection.
- *  `nc` and `python3` are both in the image, so this needs no second image, no
+ *  `nc` ships in every one of these images, so this needs no second image, no
  *  extra capability and nothing installed on the host. Pure. */
-export function tunnelArgv(container: string): string[] {
-  return ["exec", "-i", container, "nc", "127.0.0.1", "8006"];
+export function tunnelArgv(container: string, viewerPort: number): string[] {
+  return ["exec", "-i", container, "nc", "127.0.0.1", String(viewerPort)];
 }
 
 // ── The artifact hand-off ──────────────────────────────────
 //
-// One mechanism, both guests: a read-only file server inside the container,
-// on the guest-facing bridge, serving the same host directory the lab already
-// bind-mounts. See the module header for why neither 9p nor SMB can be it.
+// One mechanism, every guest: a read-only file server inside the container,
+// serving the same host directory the lab already bind-mounts. See the module
+// header for why neither 9p nor SMB can be it for the VMs. For a container
+// lab the guest is the container, so `/shared` is ALSO a local directory in
+// there — the share stays up regardless (one grammar), and the hand-off line
+// uses whichever is shorter for that guest.
 
 /** The share's port INSIDE the container. Never published to the host — the
  *  host already HAS the directory; the only client is the guest. The same
- *  number in both labs, on purpose: one grammar, one URL to remember. */
+ *  number in every lab, on purpose: one grammar, one URL to remember. */
 export const SHARE_PORT = 8007;
 
-/** The name the guest resolves the container by. Not ours: the image's own
- *  dnsmasq answers `host.lan` with the gateway it hands the guest by DHCP,
- *  which is why this needs no setup inside either guest. */
+/** The name the VM guests resolve the container by. Not ours: the dockurr
+ *  images' own dnsmasq answers `host.lan` with the gateway it hands the guest
+ *  by DHCP, which is why this needs no setup inside either VM guest. */
 export const SHARE_HOST = "host.lan";
 
-/** The one URL both labs print, and the only one an operator has to remember. */
+/** The URL both VM labs print. Container labs have their own host name
+ *  (`shareUrl`), because their guest reaches the container differently. */
 export const SHARE_URL = `http://${SHARE_HOST}:${SHARE_PORT}/`;
+
+/** The share URL as THIS guest reaches it. Pure. */
+export function shareUrl(spec: LabSpec): string {
+  return `http://${spec.shareHost}:${SHARE_PORT}/`;
+}
 
 /** Where the share server's request log lives inside the container. Kept
  *  because "did the guest actually fetch it?" is otherwise unanswerable — a
@@ -249,6 +399,12 @@ export const SHARE_LOG = "/run/shm/aio-share.log";
 export function gatewayArgv(container: string): string[] {
   return ["exec", container, "cat", "/run/shm/qemu.gw"];
 }
+
+/** The address the share binds to for a CONTAINER lab: the guest is the
+ *  container, so its own loopback is exactly "reachable from the guest and
+ *  from nowhere else" — the same property `gatewayArgv` buys a VM. The
+ *  Android emulator reaches that loopback as 10.0.2.2. Pure. */
+export const CONTAINER_SHARE_IP = "127.0.0.1";
 
 /** An IPv4 address out of a one-line file, or null. Pure. */
 export function parseIpv4(stdout: string): string | null {
@@ -315,84 +471,193 @@ export function lastGuestFetch(log: string, gatewayIp: string): string | null {
 
 /** What `dist/` holds for THIS guest.
  *
- *  The point of the distinction is the macOS one: both lab guests are QEMU
- *  x86_64, so an `-macos-arm64` artifact cannot run in the macOS lab at all.
- *  Handing someone a fetch command for a binary that dies with "Bad CPU type
- *  in executable" — 40 minutes after they started installing an OS to try it —
- *  is the failure this exists to name up front. Pure. */
+ *  The point of the distinction is the architecture one: every lab guest is
+ *  x86_64, so a `-macos-arm64` or `-arm64.AppImage` artifact cannot run in it
+ *  at all. Handing someone a fetch command for a binary that dies with "Bad
+ *  CPU type in executable" — 40 minutes after they started installing an OS
+ *  to try it — is the failure this exists to name up front. Pure. */
 export type GuestArtifact =
-  | { readonly kind: "one"; readonly file: string }
+  | {
+    readonly kind: "one";
+    readonly file: string;
+    /** Runnable siblings NOT chosen (Android: the app APK beside the client
+     *  one) — named so the choice is visible and the other is one flag away. */
+    readonly others?: string[];
+  }
   | { readonly kind: "many"; readonly files: string[] }
   | { readonly kind: "wrong-arch"; readonly files: string[] }
+  /** `--apk=<file>` named something that is not in the directory. */
+  | { readonly kind: "absent"; readonly file: string; readonly files: string[] }
   | { readonly kind: "none" };
 
-export function pickArtifact(os: LabOs, names: string[]): GuestArtifact {
+/** The one place that knows what each guest can run. `prefer` is an explicit
+ *  operator pick (`--apk=`), honoured only if the file is actually there. */
+export function pickArtifact(
+  os: LabOs,
+  names: string[],
+  prefer: string | null = null,
+): GuestArtifact {
   const sorted = [...names].sort();
-  if (os === "windows") {
-    const hits = sorted.filter((n) => n.toLowerCase().endsWith(".exe"));
-    if (hits.length === 1) return { kind: "one", file: hits[0]! };
-    return hits.length ? { kind: "many", files: hits } : { kind: "none" };
+  const oneOrMany = (hits: string[]): GuestArtifact =>
+    hits.length === 1
+      ? { kind: "one", file: hits[0]! }
+      : hits.length
+      ? { kind: "many", files: hits }
+      : { kind: "none" };
+  switch (os) {
+    case "windows":
+      return oneOrMany(sorted.filter((n) => n.toLowerCase().endsWith(".exe")));
+    case "macos": {
+      // `artifactName()` (src/build/platforms.ts) writes `<name>-macos` for the
+      // Intel target and `<name>-macos-arm64` for Apple Silicon; a macOS
+      // Electron target lands as a .dmg/.pkg/.zip next to them.
+      const arm = sorted.filter((n) => /-macos-arm64$/.test(n));
+      const hits = sorted.filter((n) =>
+        /-macos$/.test(n) || /\.(dmg|pkg)$/i.test(n)
+      );
+      if (hits.length === 0 && arm.length) {
+        return { kind: "wrong-arch", files: arm };
+      }
+      return oneOrMany(hits);
+    }
+    case "linux": {
+      // An AppImage (`<name>-<arch>.AppImage`, build-electron.ts) is the whole
+      // desktop app and wins over the bare server binary — which is `<name>`
+      // on a Linux host (the host platform keeps the bare name) or
+      // `<name>-linux` cross-built. Anything `-arm64` cannot run in this
+      // x86_64 desktop.
+      const arm = sorted.filter((n) => /-arm64(\.AppImage)?$/i.test(n));
+      const appImages = sorted.filter((n) =>
+        /\.AppImage$/i.test(n) && !arm.includes(n)
+      );
+      if (appImages.length) return oneOrMany(appImages);
+      // A placed binary carries THE build version (`<name>-1.2.345`) — the
+      // dots in it are not an extension.
+      const bare = sorted.filter((n) =>
+        !arm.includes(n) && !/\./.test(stripVersionToken(n)) &&
+        !/-(windows|macos)/.test(n)
+      );
+      if (bare.length === 0 && arm.length) {
+        return { kind: "wrong-arch", files: arm };
+      }
+      return oneOrMany(bare);
+    }
+    case "android": {
+      // `<label>.apk` is the app, `<label>-client.apk` the remote client,
+      // `<label>-dev.apk` the hot-loading dev build; `-unsigned.apk` cannot be
+      // installed at all (build-android.ts), so it is not a candidate.
+      const apks = sorted.filter((n) =>
+        /\.apk$/i.test(n) && !/-unsigned\.apk$/i.test(n)
+      );
+      if (prefer !== null) {
+        return apks.includes(prefer)
+          ? { kind: "one", file: prefer }
+          : { kind: "absent", file: prefer, files: apks };
+      }
+      const clients = apks.filter((n) => /-client\.apk$/i.test(n));
+      if (clients.length === 1 && apks.length > 1) {
+        return {
+          kind: "one",
+          file: clients[0]!,
+          others: apks.filter((n) => n !== clients[0]),
+        };
+      }
+      return oneOrMany(apks);
+    }
   }
-  // `artifactName()` (src/build/platforms.ts) writes `<name>-macos` for the
-  // Intel target and `<name>-macos-arm64` for Apple Silicon; a macOS Electron
-  // target lands as a .dmg/.pkg/.zip next to them.
-  const arm = sorted.filter((n) => /-macos-arm64$/.test(n));
-  const hits = sorted.filter((n) =>
-    /-macos$/.test(n) || /\.(dmg|pkg)$/i.test(n)
-  );
-  if (hits.length === 1) return { kind: "one", file: hits[0]! };
-  if (hits.length > 1) return { kind: "many", files: hits };
-  if (arm.length) return { kind: "wrong-arch", files: arm };
-  return { kind: "none" };
 }
 
-/** The line an operator PASTES into the guest, naming the actual file.
+/** The line an operator PASTES into the guest, naming the actual file — or,
+ *  for Android, the line `am` runs for them.
  *
  *  Prose ("download it from the share and run it") is what makes a lab feel
  *  like homework. This is the command, with the file in it. Pure. */
 export function fetchCommand(os: LabOs, file: string): string {
-  return os === "windows"
-    // PowerShell aliases `curl` to Invoke-WebRequest, which does NOT take -O;
-    // curl.exe is the real one and has shipped in Windows since 10 1803.
-    ? `cd $HOME\\Downloads; curl.exe -fLO ${SHARE_URL}${file}; .\\${file}`
-    : `cd ~/Downloads && curl -fLO ${SHARE_URL}${file} && chmod +x ${file} && ./${file}`;
+  switch (os) {
+    case "windows":
+      // PowerShell aliases `curl` to Invoke-WebRequest, which does NOT take -O;
+      // curl.exe is the real one and has shipped in Windows since 10 1803.
+      return `cd $HOME\\Downloads; curl.exe -fLO ${SHARE_URL}${file}; .\\${file}`;
+    case "macos":
+      return `cd ~/Downloads && curl -fLO ${SHARE_URL}${file} && chmod +x ${file} && ./${file}`;
+    case "linux":
+      // /shared is a local directory in this guest: a copy, not a download.
+      return `cp /shared/${file} ~/ && chmod +x ~/${file} && ~/${file}`;
+    case "android":
+      return `adb install -r /shared/${file}`;
+  }
+}
+
+/** The wrong-architecture line, per guest: what the files ARE and the build
+ *  that fixes it. Pure. */
+function wrongArchLine(spec: LabSpec, files: string[]): string {
+  const what = spec.os === "macos" ? "Apple Silicon" : "arm64";
+  return `NOTHING THIS GUEST CAN RUN: ${files.join(", ")} is ${what} and ` +
+    `this lab is x86_64. Build the x86_64 one: \`${spec.buildHint}\`, ` +
+    `then re-run \`am lab ${spec.os}\`.`;
 }
 
 /** Everything the operator is told about the hand-off, as lines. Pure, because
- *  this is the part they act on and it must be identical in both labs. */
+ *  this is the part they act on and it must be the same shape in every lab. */
 export function handoffLines(
   spec: LabSpec,
   share: string,
   artifact: GuestArtifact,
 ): string[] {
-  const lines = [`share: ${share} → ${SHARE_URL} (in the guest)`];
+  const url = shareUrl(spec);
+  const lines = [`share: ${share} → ${url} (in the guest)`];
+  const paste = (file: string) =>
+    spec.installs
+      ? [
+        `am installs it for you: docker exec ${spec.container} ${
+          fetchCommand(spec.os, file)
+        }`,
+      ]
+      : [
+        `paste into the guest's ${spec.guestShell}:`,
+        `  ${fetchCommand(spec.os, file)}`,
+      ];
   switch (artifact.kind) {
     case "one":
-      lines.push(
-        `paste into the guest's ${spec.guestShell}:`,
-        `  ${fetchCommand(spec.os, artifact.file)}`,
-      );
+      lines.push(...paste(artifact.file));
+      if (artifact.others?.length) {
+        lines.push(
+          `chose ${artifact.file} (the client) over ${
+            artifact.others.join(", ")
+          } — pick the other with --apk=${artifact.others[0]}`,
+        );
+      }
       break;
     case "many":
       lines.push(
         `${artifact.files.length} candidates in that directory (${
           artifact.files.join(", ")
-        }) — pick one in the guest's browser at ${SHARE_URL}, or:`,
-        `  ${fetchCommand(spec.os, artifact.files[0]!)}`,
+        }) — ${
+          spec.installs
+            ? `pick one with --apk=${artifact.files[0]}; am does not guess`
+            : `pick one in the guest's browser at ${url}, or:`
+        }`,
       );
+      if (!spec.installs) {
+        lines.push(`  ${fetchCommand(spec.os, artifact.files[0]!)}`);
+      }
       break;
     case "wrong-arch":
+      lines.push(wrongArchLine(spec, artifact.files));
+      break;
+    case "absent":
       lines.push(
-        `NOTHING THIS GUEST CAN RUN: ${
-          artifact.files.join(", ")
-        } is Apple Silicon and this lab is QEMU x86_64. Build the Intel one: ` +
-          `\`deno task build --platforms=macos\`, then re-run \`am lab macos\`.`,
+        `--apk=${artifact.file} is not in that directory` +
+          (artifact.files.length
+            ? ` — it holds ${artifact.files.join(", ")}`
+            : " — it holds no APK at all") +
+          `; the share is live, so a rebuild lands there without a restart.`,
       );
       break;
     case "none":
       lines.push(
         `that directory has no ${spec.os} artifact yet — build one ` +
-          `(\`deno task build --platforms=${spec.os}\`) and it appears in the ` +
+          `(\`${spec.buildHint}\`) and it appears in the ` +
           `guest immediately; the share is live, not a copy.`,
       );
       break;
@@ -401,11 +666,86 @@ export function handoffLines(
     // Worth one line: it changes what is being tested, not just how.
     lines.push(
       "curl does NOT set the Gatekeeper quarantine flag — to see what a user " +
-        `actually sees, download it in Safari from ${SHARE_URL} instead.`,
+        `actually sees, download it in Safari from ${url} instead.`,
     );
   }
   if (spec.guestShare) lines.push(spec.shareNote);
   return lines;
+}
+
+// ── Android: boot, then install ────────────────────────────
+//
+// The emulator's hand-off is not a line to paste: the container is the
+// emulator's host, `adb` in there sees the device, and `am` drives both. The
+// decisions — what to run, when the guest counts as booted, what an install
+// result means — are pure; the loop that asks is `installApk()` below.
+
+/** `adb shell getprop sys.boot_completed` — prints `1` once Android has
+ *  finished booting, nothing (or an adb error) before the device is even
+ *  attached. Pure. */
+export function adbBootArgv(container: string): string[] {
+  return ["exec", container, "adb", "shell", "getprop", "sys.boot_completed"];
+}
+
+/** Booted? Only an exact `1` counts — an adb "device offline" or "no devices"
+ *  line on stderr shares the exit code with success early in the boot. Pure. */
+export function bootCompleted(stdout: string): boolean {
+  return stdout.trim() === "1";
+}
+
+/** `adb install -r` — `-r` replaces an installed copy, which is what makes
+ *  re-running `am lab android` after a rebuild the dev loop. Pure. */
+export function adbInstallArgv(container: string, file: string): string[] {
+  return ["exec", container, "adb", "install", "-r", `/shared/${file}`];
+}
+
+/** How long to wait for `sys.boot_completed`, and how often to say so. A cold
+ *  Android 14 emulator on KVM boots in 1-3 min; five is the point past which
+ *  the fix is not "wait more". */
+export const BOOT_DEADLINE_MS = 300_000;
+export const BOOT_POLL_MS = 5_000;
+export const BOOT_PROGRESS_MS = 15_000;
+
+/** What one `adb install` outcome means for the operator. `adb` exits 0 and
+ *  prints `Success` on success; on failure it prints the `INSTALL_FAILED_*`
+ *  reason, and the two that this lab makes likely get their fix named. Pure. */
+export function installVerdict(
+  r: { code: number; out: string; err: string },
+  file: string,
+): { ok: boolean; message: string } {
+  const text = (r.out + "\n" + r.err).trim();
+  if (r.code === 0 && /Success/.test(text)) {
+    return { ok: true, message: `installed ${file} (adb install -r)` };
+  }
+  let fix = "";
+  if (/NO_MATCHING_ABIS/.test(text)) {
+    fix = " — the emulator is x86_64 and this APK ships no x86_64 native " +
+      "libraries; build one that does (or a universal APK).";
+  } else if (
+    /INSTALL_PARSE_FAILED|not signed|INSTALL_FAILED_INVALID_APK/i.test(text)
+  ) {
+    fix = " — an unsigned or truncated APK; `deno task build --android` " +
+      "signs the shippable one, `<name>-unsigned.apk` is not it.";
+  } else if (/no devices|device offline|not found/i.test(text)) {
+    fix = " — adb inside the container does not see the emulator yet; " +
+      "`am lab android --status` says whether it has booted.";
+  }
+  return {
+    ok: false,
+    message: `adb install -r /shared/${file} failed: ${text || "(no output)"}` +
+      fix,
+  };
+}
+
+/** What a boot that never completed tells the operator. Pure. */
+export function bootTimeoutMessage(spec: LabSpec, lastSeen: string): string {
+  return `the Android emulator has not reported sys.boot_completed=1 within ` +
+    `${BOOT_DEADLINE_MS / 60_000} min (last answer: ${lastSeen || "none"}). ` +
+    `On a KVM host it takes 1-3 min; without KVM it never gets there in a ` +
+    `usable time. Check it: \`am lab android --status\` (booted: yes/no), ` +
+    `watch it: \`docker logs -f ${spec.container}\`, and once it is up ` +
+    `\`am lab android\` installs the APK. If the viewer shows a black screen ` +
+    `for more than 5 min: \`am lab android --stop\`, then start it again.`;
 }
 
 // ── macOS licensing ────────────────────────────────────────
@@ -426,8 +766,8 @@ export function noticeStamp(root: string): string {
 
 // ── Where THIS lab's disk lives ────────────────────────────
 
-/** The storage directories that could hold the installed disk, in the order
- *  the image itself looks: the top level first (the Windows layout, and a
+/** The storage directories that could hold the installed disk (none for a
+ *  container lab — nothing is installed), in the order the image itself looks: the top level first (the Windows layout, and a
  *  legacy macOS one), then `<version>/` (what the macOS image writes for a
  *  fresh install, so each version keeps its own disk). Pure. */
 export function diskDirs(
@@ -435,6 +775,7 @@ export function diskDirs(
   storage: string,
   version: string,
 ): string[] {
+  if (spec.kind === "container") return [];
   return spec.versionedStorage
     ? [storage, join(storage, version.toLowerCase())]
     : [storage];
@@ -513,15 +854,16 @@ export function preflight(spec: LabSpec, f: LabFacts): Verdict {
     );
   }
 
-  if (f.kvm === "missing") {
+  if (spec.needsKvm && f.kvm === "missing") {
     errors.push(
-      "/dev/kvm does not exist — without hardware virtualisation this VM would " +
-        "emulate at roughly 1/20th speed, which is not a lab. Fix: enable " +
+      "/dev/kvm does not exist — without hardware virtualisation this " +
+        (spec.kind === "vm" ? "VM" : "emulator") +
+        " would run at roughly 1/20th speed, which is not a lab. Fix: enable " +
         "AMD-V/VT-x in the BIOS/UEFI, and `sudo modprobe kvm_amd` (Intel: " +
         "`kvm_intel`). Inside a VM already? Enable nested virtualisation on the " +
         "host.",
     );
-  } else if (f.kvm === "denied") {
+  } else if (spec.needsKvm && f.kvm === "denied") {
     errors.push(
       "/dev/kvm exists but this user cannot read+write it. Fix: " +
         "`sudo setfacl -m u:$USER:rw /dev/kvm` (per-user, immediate), or " +
@@ -529,7 +871,7 @@ export function preflight(spec: LabSpec, f: LabFacts): Verdict {
     );
   }
 
-  if (!f.tun) {
+  if (spec.needsTun && !f.tun) {
     errors.push(
       "/dev/net/tun does not exist — the guest gets no network without it. " +
         "Fix: `sudo modprobe tun` (and add `tun` to /etc/modules to keep it " +
@@ -540,12 +882,15 @@ export function preflight(spec: LabSpec, f: LabFacts): Verdict {
   if (!f.image) {
     errors.push(
       `the image ${spec.image} is not pulled, and pulling it during a lab ` +
-        `start would look like a hang. Fix: \`docker pull ${spec.image}\` ` +
-        `(note the double r in "dockurr" — "dockur/${spec.os}" does not exist).`,
+        `start would look like a hang. Fix: \`docker pull ${spec.image}\`` +
+        (spec.image.startsWith("dockurr/")
+          ? ` (note the double r in "dockurr" — "dockur/${spec.os}" does not exist).`
+          : "."),
     );
   }
 
-  if (f.freeGb !== null) {
+  // A container lab installs nothing: no disk floor. Only a VM has one.
+  if (spec.kind === "vm" && f.freeGb !== null) {
     if (f.freeGb < MIN_GB) {
       errors.push(
         `only ${f.freeGb} GB free where the VM disk goes, and a first ` +
@@ -712,8 +1057,8 @@ async function containerState(container: string): Promise<State> {
 
 /** Published host port, read back from docker rather than remembered — the
  *  container outlives this process, and a remembered port would go stale. */
-async function publishedPort(container: string): Promise<number | null> {
-  const r = await docker(["port", container, "8006/tcp"]);
+async function publishedPort(spec: LabSpec): Promise<number | null> {
+  const r = await docker(["port", spec.container, `${spec.viewerPort}/tcp`]);
   if (r.code !== 0) return null;
   const m = r.out.trim().split("\n")[0]?.match(/:(\d+)\s*$/);
   return m ? Number(m[1]) : null;
@@ -736,10 +1081,10 @@ async function reachable(port: number, ms: number): Promise<boolean> {
 /** Does the viewer answer INSIDE the container? The one question that tells
  *  "still booting" apart from "this host cannot reach a published port" —
  *  they look identical from a browser and have opposite fixes. */
-async function insideOk(container: string): Promise<boolean> {
+async function insideOk(spec: LabSpec): Promise<boolean> {
   const r = await docker([
     "exec",
-    container,
+    spec.container,
     "curl",
     "-s",
     "-o",
@@ -748,7 +1093,7 @@ async function insideOk(container: string): Promise<boolean> {
     "5",
     "-w",
     "%{http_code}",
-    "http://127.0.0.1:8006/",
+    `http://127.0.0.1:${spec.viewerPort}/`,
   ]);
   return r.out.trim() === "200";
 }
@@ -765,8 +1110,14 @@ type ShareState = {
 /** Look, do not touch — what `--status` needs. */
 async function shareLook(spec: LabSpec): Promise<ShareState> {
   const container = spec.container;
-  const g = await docker(gatewayArgv(container));
-  const ip = g.code === 0 ? parseIpv4(g.out) : null;
+  // A VM's guest reaches us at the image's gateway; a container's guest IS
+  // the container, whose loopback the emulator sees as 10.0.2.2.
+  const ip = spec.kind === "container"
+    ? CONTAINER_SHARE_IP
+    : await (async () => {
+      const g = await docker(gatewayArgv(container));
+      return g.code === 0 ? parseIpv4(g.out) : null;
+    })();
   if (!ip) {
     return {
       ip: null,
@@ -849,14 +1200,14 @@ async function ensureShare(spec: LabSpec): Promise<ShareState> {
  *  directly, so it works wherever docker itself does — no second image, no
  *  capability, nothing installed on the host, and the guest's own networking
  *  untouched. */
-async function serveTunnel(container: string, port: number): Promise<void> {
+async function serveTunnel(spec: LabSpec, port: number): Promise<void> {
   const l = Deno.listen({ hostname: "127.0.0.1", port });
   for await (const conn of l) {
     (async () => {
       let child: Deno.ChildProcess | undefined;
       try {
         child = new Deno.Command("docker", {
-          args: tunnelArgv(container),
+          args: tunnelArgv(spec.container, spec.viewerPort),
           stdin: "piped",
           stdout: "piped",
           stderr: "null",
@@ -891,6 +1242,8 @@ export type LabArgs = {
   readonly version: string;
   readonly dist: string | null;
   readonly tunnel: boolean;
+  /** `--apk=<file>`: which APK to install when dist/ holds several. */
+  readonly apk: string | null;
 };
 
 /** Parse the lab-specific flags. Unknown flags are an ERROR, never ignored —
@@ -907,8 +1260,25 @@ export function parseLabArgs(
   let version = spec.defaultVersion;
   let dist: string | null = null;
   let tunnel = false;
+  let apk: string | null = null;
+  // The flags a VM has and a container does not — refused, not ignored: a
+  // `--ram=16G` that silently did nothing to a webtop is the shape of bug
+  // this parser exists to remove.
+  const vmOnly = ["--ram=", "--disk=", "--version=", "--cpus="];
+  const accepted = spec.kind === "vm"
+    ? `--stop, --status, --reset, --port=N, --ram=8G, --cpus=4, --disk=64G, ` +
+      `--version=${spec.defaultVersion}, --dist=<dir>, --tunnel`
+    : `--stop, --status, --reset, --port=N, --dist=<dir>, --tunnel` +
+      (spec.installs ? ", --apk=<file>" : "");
 
   for (const a of args) {
+    if (spec.kind === "container" && vmOnly.some((f) => a.startsWith(f))) {
+      return {
+        ok: false,
+        error: `${a} is a VM knob and the ${spec.os} lab is a container, not ` +
+          `a VM — it has no guest RAM, disk or version. Accepted: ${accepted}`,
+      };
+    }
     if (a === "--stop") action = "stop";
     else if (a === "--status") action = "status";
     else if (a === "--reset") action = "reset";
@@ -917,7 +1287,16 @@ export function parseLabArgs(
     else if (a.startsWith("--disk=")) disk = a.slice(7);
     else if (a.startsWith("--version=")) version = a.slice(10);
     else if (a.startsWith("--dist=")) dist = a.slice(7);
-    else if (a.startsWith("--cpus=")) {
+    else if (a.startsWith("--apk=") && spec.installs) {
+      apk = a.slice(6);
+      if (!apk || apk.includes("/")) {
+        return {
+          ok: false,
+          error: `--apk names a FILE in the shared directory, not a path: ` +
+            `--apk=<name>.apk (got ${a})`,
+        };
+      }
+    } else if (a.startsWith("--cpus=")) {
       const n = Number(a.slice(7));
       if (!Number.isInteger(n) || n < 1) {
         return { ok: false, error: `--cpus needs a whole number ≥ 1: ${a}` };
@@ -926,14 +1305,12 @@ export function parseLabArgs(
     } else {
       return {
         ok: false,
-        error: `unknown flag for \`am lab\`: ${a} — accepted: --stop, ` +
-          `--status, --reset, --port=N, --ram=8G, --cpus=4, --disk=64G, ` +
-          `--version=${spec.defaultVersion}, --dist=<dir>, --tunnel`,
+        error: `unknown flag for \`am lab\`: ${a} — accepted: ${accepted}`,
       };
     }
   }
   for (const [flag, v] of [["--ram", ram], ["--disk", disk]] as const) {
-    if (!/^\d+[MG]$/.test(v)) {
+    if (spec.kind === "vm" && !/^\d+[MG]$/.test(v)) {
       return {
         ok: false,
         error: `${flag}=${v} is not a size the image understands — use e.g. ` +
@@ -943,35 +1320,45 @@ export function parseLabArgs(
   }
   return {
     ok: true,
-    value: { action, ram, cpus, disk, version, dist, tunnel },
+    value: { action, ram, cpus, disk, version, dist, tunnel, apk },
   };
 }
 
-export const LAB_USAGE = `am lab <windows|macos> [options]
+export const LAB_USAGE = `am lab <windows|macos|linux|android> [options]
 
-  A REAL Windows or macOS desktop in a container, driven by a human from a
+  A REAL desktop (or device) in a container, driven by a human from a
   browser. Not a gate: nothing here runs in \`deno task test\`.
 
-  am lab windows              start it, mount dist/, print the viewer URL
-  am lab windows --status     is it up, on which port, how big is the disk
-  am lab windows --stop       shut the guest down cleanly, then remove it
-  am lab windows --reset      DELETE the VM disk (tens of GB) and start over
+  am lab windows     Windows 11 in QEMU+KVM — installs itself (~30 min, tens of GB)
+  am lab macos       macOS in QEMU+KVM — YOU drive the installer once (60+ min)
+  am lab linux       an Ubuntu XFCE desktop — a container, not a VM: up in
+                     seconds, no KVM, no disk; dist/ is /shared in there
+  am lab android     the Android 14 emulator + a viewer — needs /dev/kvm and an
+                     APK in dist/; am waits for boot and adb-installs it
+                     (re-run after a rebuild = re-install)
+
+  am lab <os>                start it, hand dist/ in, print the viewer URL
+  am lab <os> --status       is it up, on which port, how big is the disk
+  am lab <os> --stop         shut the guest down cleanly, then remove it
+  am lab <os> --reset        DELETE the VM disk (tens of GB) and start over
 
   --port=N        viewer port on 127.0.0.1 (default: a free one)
-  --ram=8G        guest RAM            --cpus=4     guest cores
-  --disk=64G      virtual disk size    --version=11 guest OS version
   --dist=<dir>    host dir shared into the guest (default: <app>/dist)
   --tunnel        publish nothing; forward the viewer through \`docker exec\`
                   and hold it open — for hosts where docker's published ports
                   do not reach the host at all
+  VM labs only:   --ram=8G  --cpus=4  --disk=64G  --version=11
+  android only:   --apk=<file>   which APK, when dist/ holds several
 
-  The VM disk lives in ~/.cache/aio/labs/<os>/ and SURVIVES --stop, so the
+  A VM disk lives in ~/.cache/aio/labs/<os>/ and SURVIVES --stop, so the
   second start is a boot, not an install.
 
-  Both labs hand the build over the same way: the shared directory is served
-  to the guest at ${SHARE_URL} (Windows can also mount \\\\host.lan\\Data).
-  Re-running \`am lab <os>\` on a live lab re-prints the fetch command and
-  brings the share back if it went away. See docs/testing/vm-labs.md.`;
+  Every lab hands the build over the same way: the shared directory is served
+  to the guest at http://<guest-name>:${SHARE_PORT}/ (host.lan in the VMs,
+  localhost in the Linux desktop, 10.0.2.2 in the emulator; Windows can also
+  mount \\\\host.lan\\Data, Linux sees it at /shared). Re-running
+  \`am lab <os>\` on a live lab re-prints the hand-off and brings the share
+  back if it went away. See docs/testing/vm-labs.md.`;
 
 // ── The command ────────────────────────────────────────────
 
@@ -986,7 +1373,9 @@ export async function cmdLab(
     // is intercepted upstream into the global help would send them nowhere.
     console.error(LAB_USAGE + "\n"); // stderr — never pollutes --json stdout
     fail(
-      `am lab needs an OS: \`am lab windows\` or \`am lab macos\`` +
+      `am lab needs an OS: ${
+        LAB_OS_LIST.map((o) => `\`am lab ${o}\``).join(", ")
+      }` +
         (args[0] ? ` (got "${args[0]}")` : ""),
       mode,
     );
@@ -1009,7 +1398,7 @@ async function labStatus(
   mode: ReturnType<typeof detectMode>,
 ): Promise<void> {
   const st = await containerState(spec.container);
-  const port = st?.running ? await publishedPort(spec.container) : null;
+  const port = st?.running ? await publishedPort(spec) : null;
   const size = await diskSize(dirs.storage);
   // Look, never start: `--status` reporting a share into existence would make
   // "is it up?" and "make it up" the same command.
@@ -1025,33 +1414,49 @@ async function labStatus(
   const versions = spec.versionedStorage
     ? await installedVersions(dirs.storage)
     : [];
+  // Android: "running" is not "usable" — the emulator boots for minutes after
+  // the viewer answers, and this is the one place to ask without waiting.
+  const booted = spec.installs && st?.running
+    ? bootCompleted((await docker(adbBootArgv(spec.container))).out)
+    : null;
   const data = {
     os: spec.os,
+    kind: spec.kind,
     running: st?.running ?? false,
     status: st?.status ?? "absent",
     startedAt: st?.startedAt ?? null,
     viewer: port ? `http://127.0.0.1:${port}/` : null,
-    storage: dirs.storage,
+    booted,
+    storage: spec.kind === "vm" ? dirs.storage : null,
     diskBytes: size,
     installedVersions: versions,
     share: {
-      url: SHARE_URL,
+      url: shareUrl(spec),
       serving: share.serving,
       lastGuestFetch: fetched,
       reason: share.reason,
     },
   };
   if (mode === "json") return out(data, mode);
-  const disk = `\n  disk ${human(size)} at ${dirs.storage}` +
-    (versions.length ? ` (installed: ${versions.join(", ")})` : "");
+  const disk = spec.kind === "vm"
+    ? `\n  disk ${human(size)} at ${dirs.storage}` +
+      (versions.length ? ` (installed: ${versions.join(", ")})` : "")
+    : `\n  no VM disk — a container; --stop discards it, nothing to --reset`;
+  const boot = booted === null
+    ? ""
+    : `\n  booted: ${
+      booted
+        ? "yes — am lab android installs the APK"
+        : "not yet (sys.boot_completed != 1)"
+    }`;
   out(
     st?.running
       ? `● ${spec.os} lab running${
         port ? ` — http://127.0.0.1:${port}/` : ""
-      }` + disk +
+      }` + disk + boot +
         `\n  share ${
           share.serving
-            ? `${SHARE_URL} serving${
+            ? `${shareUrl(spec)} serving${
               fetched
                 ? ` — last guest fetch: ${fetched}`
                 : " — no guest fetch yet"
@@ -1091,8 +1496,10 @@ async function labStop(
   }
   if (st.running) {
     console.error(
-      `▸ asking ${spec.os} to shut down (up to ${STOP_TIMEOUT_SEC}s) — killing ` +
-        `a guest mid-write leaves a dirty disk and a repair cycle on next boot`,
+      `▸ asking ${spec.os} to shut down (up to ${STOP_TIMEOUT_SEC}s)` +
+        (spec.kind === "vm"
+          ? ` — killing a guest mid-write leaves a dirty disk and a repair cycle on next boot`
+          : ""),
     );
     const r = await docker(stopArgv(spec.container));
     if (r.code !== 0) {
@@ -1115,7 +1522,9 @@ async function labStop(
   out(
     mode === "json"
       ? { stopped: true, os: spec.os }
-      : `✓ ${spec.os} lab stopped — the VM disk is kept; \`am lab ${spec.os}\` boots it back`,
+      : spec.kind === "vm"
+      ? `✓ ${spec.os} lab stopped — the VM disk is kept; \`am lab ${spec.os}\` boots it back`
+      : `✓ ${spec.os} lab stopped and removed — \`am lab ${spec.os}\` starts a fresh one`,
     mode,
   );
 }
@@ -1128,8 +1537,8 @@ async function labReset(
   const st = await containerState(spec.container);
   if (st?.running) {
     fail(
-      `the ${spec.os} lab is still running — deleting the disk under a live ` +
-        `VM corrupts it. Fix: \`am lab ${spec.os} --stop\` first, then --reset.`,
+      `the ${spec.os} lab is still running — deleting its state under a live ` +
+        `guest corrupts it. Fix: \`am lab ${spec.os} --stop\` first, then --reset.`,
       mode,
     );
   }
@@ -1149,9 +1558,11 @@ async function labReset(
   out(
     mode === "json"
       ? { reset: true, os: spec.os, freedBytes: size }
-      : `✓ ${spec.os} lab reset — freed ${
+      : spec.kind === "vm"
+      ? `✓ ${spec.os} lab reset — freed ${
         human(size)
-      }; the next start reinstalls the OS`,
+      }; the next start reinstalls the OS`
+      : `✓ ${spec.os} lab reset — a container keeps no disk, so this only removed the container and ${dirs.root}`,
     mode,
   );
 }
@@ -1184,7 +1595,7 @@ async function labStart(
           `swap: am lab ${spec.os} --stop && am lab ${spec.os} --dist=${wanted}`,
       );
     }
-    const hand = await handoff(spec, mounted);
+    const hand = await handoff(spec, mounted, opt.apk);
     if (opt.tunnel) {
       const p = flags.port ?? freePort();
       const u = `http://127.0.0.1:${p}/`;
@@ -1202,10 +1613,10 @@ async function labStart(
             `\n  this process IS the tunnel: leave it running, Ctrl-C when done`,
         mode,
       );
-      await serveTunnel(spec.container, p);
+      await serveTunnel(spec, p);
       return;
     }
-    const p = await publishedPort(spec.container);
+    const p = await publishedPort(spec);
     out(
       mode === "json"
         ? {
@@ -1241,7 +1652,7 @@ async function labStart(
   // sees it without restarting the lab.
   const share = wanted;
   await Deno.mkdir(share, { recursive: true });
-  await Deno.mkdir(dirs.storage, { recursive: true });
+  if (spec.kind === "vm") await Deno.mkdir(dirs.storage, { recursive: true });
 
   const port = flags.port ?? freePort();
   const argv = runArgv({
@@ -1254,6 +1665,7 @@ async function labStart(
     storage: dirs.storage,
     share,
     tunnel: opt.tunnel,
+    owner: hostOwner(),
   });
   // Asked BEFORE the run: once QEMU is up it creates the disk image, and a
   // first run would then report itself as a returning one.
@@ -1284,7 +1696,7 @@ async function labStart(
   const url = `http://127.0.0.1:${port}/`;
   console.error(
     `▸ ${spec.os} lab starting — viewer will be ${url}\n` +
-      `  share: ${share}  →  ${SHARE_URL} in the guest`,
+      `  share: ${share}  →  ${shareUrl(spec)} in the guest`,
   );
   if (fresh) console.error(`▸ first run: ${spec.firstRun}`);
 
@@ -1299,7 +1711,7 @@ async function labStart(
   let lastPhase = "";
   while (Date.now() < deadline) {
     if (
-      opt.tunnel ? await insideOk(spec.container) : await reachable(port, 2000)
+      opt.tunnel ? await insideOk(spec) : await reachable(port, 2000)
     ) {
       up = true;
       break;
@@ -1324,7 +1736,7 @@ async function labStart(
 
   if (!up) {
     // Distinguish "still booting" from "the host cannot reach it at all".
-    if (!opt.tunnel && await insideOk(spec.container)) {
+    if (!opt.tunnel && await insideOk(spec)) {
       fail(UNREACHABLE_FIX, mode);
     }
     // `fail`, not `outError` + `return`: this ENDS the command, and
@@ -1344,7 +1756,7 @@ async function labStart(
   // The viewer answering is not the same as the lab being usable: the share
   // lives on the guest's network, which the image builds AFTER the installer
   // download. So this is asked last, and its failure is reported, never hidden.
-  const hand = await handoff(spec, share);
+  const hand = await handoff(spec, share, opt.apk);
 
   out(
     mode === "json"
@@ -1367,10 +1779,10 @@ async function labStart(
   if (opt.tunnel) {
     console.error(
       `▸ tunnel open on ${url} — THIS PROCESS IS THE TUNNEL: leave it running, ` +
-        `Ctrl-C when you are done. The VM keeps running either way; stop it ` +
+        `Ctrl-C when you are done. The lab keeps running either way; stop it ` +
         `with \`am lab ${spec.os} --stop\`.`,
     );
-    await serveTunnel(spec.container, port);
+    await serveTunnel(spec, port);
   }
 }
 
@@ -1397,26 +1809,95 @@ async function mountedShare(container: string): Promise<string | null> {
 async function handoff(
   spec: LabSpec,
   shareDir: string,
+  prefer: string | null,
 ): Promise<{ lines: string[]; data: Record<string, unknown> }> {
   const state = await ensureShare(spec);
-  const artifact = pickArtifact(spec.os, await listNames(shareDir));
-  const lines = state.serving ? handoffLines(spec, shareDir, artifact) : [
-    `share: ${shareDir} → ${SHARE_URL} — NOT SERVING: ${
-      state.reason ?? "unknown"
-    }`,
-  ];
+  const artifact = pickArtifact(spec.os, await listNames(shareDir), prefer);
+  // A container guest sees /shared as a local directory, so its hand-off does
+  // not depend on the http share; a VM's does. Either way a share that is not
+  // serving is SAID, never hidden behind a URL that answers nothing.
+  const local = spec.guestShare === "/shared" || spec.installs;
+  const lines = state.serving || local
+    ? handoffLines(spec, shareDir, artifact)
+    : [];
+  if (!state.serving) {
+    lines.push(
+      `share: ${shareDir} → ${shareUrl(spec)} — NOT SERVING: ${
+        state.reason ?? "unknown"
+      }`,
+    );
+  }
+  const usable = artifact.kind === "one" && (state.serving || local);
+  const install = spec.installs && artifact.kind === "one"
+    ? await installApk(spec, artifact.file)
+    : null;
+  if (install) {
+    lines.push(install.ok ? `✓ ${install.message}` : `✗ ${install.message}`);
+  }
   return {
     lines,
     data: {
-      shareUrl: SHARE_URL,
+      shareUrl: shareUrl(spec),
       shareServing: state.serving,
       shareReason: state.reason,
       artifact,
-      fetchCommand: artifact.kind === "one" && state.serving
-        ? fetchCommand(spec.os, artifact.file)
-        : null,
+      fetchCommand: usable ? fetchCommand(spec.os, artifact.file) : null,
+      ...(install
+        ? { installed: install.ok, installResult: install.message }
+        : {}),
     },
   };
+}
+
+/** The host user for `PUID`/`PGID`; null where the platform has none. */
+function hostOwner(): { uid: number; gid: number } | null {
+  const uid = Deno.uid();
+  const gid = Deno.gid();
+  return uid === null || gid === null ? null : { uid, gid };
+}
+
+/** Wait for the emulator to finish booting (bounded, with a progress line
+ *  every `BOOT_PROGRESS_MS`), then `adb install -r` the APK. The result is
+ *  RETURNED and printed — never thrown past the viewer URL, which is still
+ *  useful with a failed install, and never swallowed. */
+async function installApk(
+  spec: LabSpec,
+  file: string,
+): Promise<{ ok: boolean; message: string }> {
+  const deadline = Date.now() + BOOT_DEADLINE_MS;
+  const started = Date.now();
+  let lastProgress = started;
+  let lastSeen = "";
+  let booted = false;
+  while (Date.now() < deadline) {
+    const r = await docker(adbBootArgv(spec.container));
+    lastSeen = (r.out + r.err).trim().split("\n")[0] ?? "";
+    if (bootCompleted(r.out)) {
+      booted = true;
+      break;
+    }
+    if (Date.now() - lastProgress >= BOOT_PROGRESS_MS) {
+      lastProgress = Date.now();
+      console.error(
+        `  … waiting for Android to boot (${
+          Math.round((Date.now() - started) / 1000)
+        }s; sys.boot_completed=${lastSeen || "no answer yet"})`,
+      );
+    }
+    await new Promise((r) => setTimeout(r, BOOT_POLL_MS));
+  }
+  if (!booted) {
+    return { ok: false, message: bootTimeoutMessage(spec, lastSeen) };
+  }
+  console.error(
+    `▸ Android booted — docker exec ${spec.container} ${
+      fetchCommand(spec.os, file)
+    }`,
+  );
+  return installVerdict(
+    await docker(adbInstallArgv(spec.container, file)),
+    file,
+  );
 }
 
 async function listNames(dir: string): Promise<string[]> {

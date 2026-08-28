@@ -14,6 +14,7 @@ import {
 } from "../src/build/build-ios.ts";
 import { IOS_TEMPLATE } from "../src/build/ios-template.ts";
 import { TARGETS } from "../src/build-all.ts";
+import { resolveBuildVersion } from "../src/server/app-version.ts";
 
 Deno.test("ios: bundle id — declared wins when valid, else derived, else null", () => {
   assertEquals(iosBundleId("wallet", undefined), "app.aio.wallet");
@@ -92,12 +93,22 @@ Deno.test("ios: the build writes a complete project on this host", async () => {
       join(root, "deno.json"),
       JSON.stringify({
         title: "Probe",
-        version: "0.3.1",
+        version: "0.3",
         ios: { bundleId: "com.example.probe" },
       }),
     );
+    // THE build version (alpha70): `0.3` from deno.json + the commit count,
+    // resolved by the one resolver over injected tree facts — no git needed.
+    const version = resolveBuildVersion("0.3", {
+      repo: true,
+      count: 17,
+      commit: "abcdef0",
+      hash: null,
+    });
+    assertEquals(version.version, "0.3.17");
     const cfg = {
       root,
+      version,
       binaryName: "probe",
       appTitle: "Probe",
       appDir: root,
@@ -126,7 +137,8 @@ Deno.test("ios: the build writes a complete project on this host", async () => {
       pbx,
       'PRODUCT_BUNDLE_IDENTIFIER = "com.example.probe"',
     );
-    assertStringIncludes(pbx, 'MARKETING_VERSION = "0.3.1"');
+    assertStringIncludes(pbx, `MARKETING_VERSION = "0.3.${version.build}"`);
+    assertStringIncludes(pbx, 'MARKETING_VERSION = "0.3.17"');
     const www = await Deno.readTextFile(join(dir, "App/www/index.html"));
     assertStringIncludes(www, "aio_server");
   } finally {

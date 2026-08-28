@@ -22,7 +22,6 @@ async function boot(
   return await aio.run({
     cells,
     appId: "orphan-app",
-    appVersion: "0.0.0",
     client: "server-only",
     persist: true,
     libraryMode: true,

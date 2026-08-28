@@ -31,6 +31,8 @@ import {
   writePin,
 } from "./am-versions.ts";
 import { meetsMinDeno, MIN_DENO } from "../server/deno-version.ts";
+import { parseDeclaredVersion } from "../server/app-version.ts";
+import { removalMessage, removalsInSource } from "../state/removals.ts";
 
 // fixed/would-fix/ok = safe auto-repairs; advise = a suggestion we DON'T apply
 // (it touches committed source or app logic); manual = a hard blocker am fix
@@ -1101,6 +1103,16 @@ export async function cmdFix(
     const pinnedInConfig = ["appId", "title", "name"].some((k) =>
       typeof cfg?.[k] === "string" && String(cfg[k]).trim() !== ""
     );
+    // Retired `appVersion` in aio.run() — the runtime refuses it in dev and
+    // ignores it in prod (src/state/removals.ts); say so where the fix is.
+    for (const hit of removalsInSource(src)) {
+      if (hit.removal.key !== "aio.run({ appVersion })") continue;
+      add(
+        "app version in aio.run()",
+        "advise",
+        `${entry}:${hit.line} — ${removalMessage(hit.removal, "aio.run")}`,
+      );
+    }
     if (/aio\.run\s*\(/.test(src)) {
       cfgAdvise(
         !/appId\s*:/.test(src) && !pinnedInConfig,
@@ -1109,6 +1121,52 @@ export async function cmdFix(
           "a `name` to deno.json. Without either it is inferred from the " +
           "entry's DIRECTORY name, so moving or renaming the folder orphans " +
           "the app's stored state",
+      );
+    }
+  }
+
+  // ── app version: "major.minor", numbered from commits ──
+  // A three-part `"version": "1.0.0"` is a PINNED version — accepted, used
+  // verbatim, and every build says so. The repair writes the `major.minor`
+  // that lets aio number builds from commits (docs/build/versioning.md).
+  {
+    let declared: unknown;
+    let raw = "";
+    try {
+      raw = await Deno.readTextFile(join(dir, "deno.json"));
+      declared = (parseJsonc(raw) as { version?: unknown } | null)?.version;
+    } catch {
+      /* aio-ok: no deno.json — the checks above already reported it */
+    }
+    let pinnedBase: string | null = null;
+    let refusal: string | null = null;
+    try {
+      const d = parseDeclaredVersion(declared);
+      if (d.kind === "pinned") pinnedBase = d.base;
+    } catch (e) {
+      refusal = e instanceof Error ? e.message : String(e);
+    }
+    if (refusal) add("app version", "manual", refusal);
+    else {
+      await repair(
+        "app version",
+        pinnedBase !== null,
+        async () => {
+          const line = /^(\s*"version"\s*:\s*)"[^"]*"/m;
+          if (!line.test(raw)) {
+            throw new Error(`no "version" line in deno.json`);
+          }
+          await Deno.writeTextFile(
+            join(dir, "deno.json"),
+            raw.replace(line, `$1${JSON.stringify(pinnedBase)}`),
+          );
+        },
+        pinnedBase !== null
+          ? `version ${
+            String(declared)
+          } is pinned by deno.json — the build number is not derived; ` +
+            `writing "${pinnedBase}" lets aio number builds from commits`
+          : "",
       );
     }
   }

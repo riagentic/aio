@@ -116,13 +116,19 @@ export async function resolveUiClient(
 ): Promise<number | null> {
   const roster = await trojanGet(port, "clients", appId, 10_000);
   if (!roster.ok || !Array.isArray(roster.data)) {
-    // The roster is how this command knows anything; without it, an index the
-    // caller typed is the ONLY information available, and refusing on the
-    // strength of a failed probe would make `am` less capable than it was.
-    // (An `am` newer than the app it is talking to lands here.) No index and
-    // no roster leaves nothing to pick — the caller falls back (a headless
-    // render) or says so.
-    return explicit ?? null;
+    // An index the caller typed is still usable without a roster (an `am`
+    // newer than the app it talks to). Without one, the roster's failure IS
+    // the answer — a production build has no control API, and this used to
+    // fall through to "no UI client connected", which a field report took
+    // for a blank window that was in fact rendering fine.
+    if (explicit !== undefined) return explicit;
+    outError(
+      `cannot list this app's UI clients: ${
+        roster.ok ? "the roster was not a list" : roster.error
+      }`,
+      mode,
+    );
+    Deno.exit(1);
   }
   const choice = chooseUiClient(roster.data as ClientRow[], explicit);
   if (choice.error) {
@@ -969,6 +975,14 @@ export async function cmdSurface(
       }
       result = headless;
       headlessRender = true;
+    } else {
+      // Both failed. Say BOTH: the headless reason used to be dropped here,
+      // so "no UI client connected" hid an App.tsx with no default export.
+      result = {
+        ok: false,
+        error:
+          `${result.error}; the server-side render failed too — ${headless.error}`,
+      };
     }
   }
   if (!result.ok) {

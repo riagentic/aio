@@ -91,15 +91,27 @@ export function _diagEmit(ev: {
 
 let _initialShapeKeys: Set<string> | null = null;
 
-export function _checkStateIntegrity(state: unknown): void {
-  if (!state || typeof state !== "object" || Array.isArray(state)) return;
+/** `full` — the frame that produced `state` was a FULL state, which DEFINES
+ *  the shape: the server legitimately sends fewer top-level keys after the
+ *  client narrows its subscriptions or a per-user filter applies, so a full
+ *  frame re-baselines rather than reports. Only a PATCH can drop a key by
+ *  mistake, and that is the bug this detector exists for. (A field report:
+ *  an app with a subscription-narrowed client got "key missing" on every
+ *  load, at warning level, for a slice the server had correctly omitted.) */
+export function _checkStateIntegrity(
+  state: unknown,
+  opts: { full: boolean } = { full: false },
+): string[] {
+  if (!state || typeof state !== "object" || Array.isArray(state)) return [];
   const obj = state as Record<string, unknown>;
-  if (_initialShapeKeys === null) {
+  if (_initialShapeKeys === null || opts.full) {
     _initialShapeKeys = new Set(Object.keys(obj));
-    return;
+    return [];
   }
+  const missing: string[] = [];
   for (const k of _initialShapeKeys) {
     if (!(k in obj)) {
+      missing.push(k);
       _diagEmit({
         type: "state-shape-drift",
         severity: "warning",
@@ -107,10 +119,11 @@ export function _checkStateIntegrity(state: unknown): void {
         message: `State key "${k}" from initial shape is now missing`,
         detail: { missingKey: k, currentKeys: Object.keys(obj) },
         hint:
-          "A key from the initial full state has disappeared. This may indicate a delta patch or merge bug.",
+          "A patch removed a top-level key the last full state carried — a delta or merge bug (a full state that omits a key re-baselines instead).",
       });
     }
   }
+  return missing;
 }
 
 /** Reset _initialShapeKeys — for _reset() */

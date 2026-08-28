@@ -2,8 +2,11 @@
 //
 // `run.sh` installs a built app as:
 //
-//     ~/app/<name>/<name>-<version>.AppImage    the artifact
-//     ~/app/<name>/<name>.AppImage → that       the stable name
+//     ~/app/<name>/versions/<version>/<name>.AppImage   the artifact
+//     ~/app/<name>/<name>.AppImage → that                the stable name
+//
+// The VERSION is the directory and the file keeps the app's name: a compiled
+// binary takes its identity, and its data directory, from its own file name.
 //
 // The stable name is what the menu entry, a shell alias and muscle memory
 // point at. Two operations have to respect that and neither did:
@@ -23,7 +26,7 @@ import {
   versionedInstall,
 } from "../src/server/updates-apply.ts";
 import { installedAppPaths, installRoot } from "../src/server/app-dirs.ts";
-import { installedFootprint } from "../src/am/am-cmd-remove.ts";
+import { cmdInstalled, installedFootprint } from "../src/am/am-cmd-remove.ts";
 
 /** A believable install: versioned artifact + stable symlink. */
 async function install(
@@ -234,6 +237,35 @@ Deno.test("versions: the install directory does not grow forever", async () => {
     assert(left.includes("1.4.0"), "the CURRENT version is never pruned");
     assertEquals(removed.sort(), ["1.0.0", "1.1.0"], "oldest first");
   } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+Deno.test("am installed: the kept versions are counted where they LIVE", async () => {
+  // `versions kept` was counted as flat `<name>-<version>` files in the app
+  // directory — the layout before `versions/<version>/`. Nothing failed: the
+  // count was simply always 0, so an app keeping three rollbacks reported
+  // none, and the one command that can tell you they exist said nothing.
+  const root = await Deno.makeTempDir({ prefix: "aio-installed-" });
+  const prev = Deno.env.get("AIO_INSTALL_ROOT");
+  Deno.env.set("AIO_INSTALL_ROOT", root);
+  const lines: string[] = [];
+  const log = console.log;
+  console.log = (...a: unknown[]) => void lines.push(a.join(" "));
+  try {
+    for (const v of ["1.0.0", "1.1.0", "1.2.0"]) {
+      await Deno.remove(join(root, "demo", "demo.AppImage")).catch(() => {});
+      await install(root, "demo", v);
+    }
+    await cmdInstalled([], { json: true } as never);
+    const parsed = JSON.parse(lines.join("\n")) as {
+      apps: { name: string; versions: number }[];
+    };
+    assertEquals(parsed.apps.find((a) => a.name === "demo")?.versions, 3);
+  } finally {
+    console.log = log;
+    if (prev === undefined) Deno.env.delete("AIO_INSTALL_ROOT");
+    else Deno.env.set("AIO_INSTALL_ROOT", prev);
     await Deno.remove(root, { recursive: true });
   }
 });

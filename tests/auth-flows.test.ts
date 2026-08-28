@@ -88,7 +88,6 @@ Deno.test("auth e2e: shell public, signup→login→ws→logout lifecycle", asyn
   const app = await aio.run({
     cells: [c],
     appId: `test-auth-${Deno.pid}`,
-    appVersion: "0.0.0",
     client: "server-only",
     persist: false,
     libraryMode: true,
@@ -215,7 +214,6 @@ Deno.test("auth e2e: signup:false → admin-seeded users only", async () => {
   const app = await aio.run({
     cells: [c],
     appId: `test-auth-closed-${Deno.pid}`,
-    appVersion: "0.0.0",
     client: "server-only",
     persist: false,
     libraryMode: true,

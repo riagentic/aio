@@ -63,10 +63,25 @@ Check 'MIN_DENO is read from the framework, not copied into the script' {
   Assert ((Get-MinDenoFrom $root) -eq $min) 'both scripts must read the same MIN_DENO'
 }
 
-Check 'app name: an arch suffix is stripped, a hyphenated NAME is not' {
-  Assert ((Get-AppBaseName 'chat-app.exe') -eq 'chat-app') 'chat-app survives'
-  Assert ((Get-AppBaseName 'demo-electron-x86_64.exe') -eq 'demo-electron') 'arch is stripped'
-  Assert ((Get-AppBaseName 'demo.exe') -eq 'demo') 'plain name'
+Check 'install name: the BUILD is asked what an artifact is installed as' {
+  # The rule lives in the framework (installArtifactName): the version comes
+  # off the file name, because a compiled binary takes its identity — and its
+  # data directory — from the name it runs under. This image is PowerShell
+  # with no deno, so what is provable here is that the script ASKS; the
+  # answer itself is pinned in tests/build-version.test.ts.
+  $src = Get-Content (Join-Path $root 'run.ps1') -Raw
+  Assert ($src -match '--print-install-name=') 'run.ps1 must ask the build for the installed name'
+}
+
+Check 'install name: no deno / an aio too old to answer falls back, and never truncates' {
+  # A builder that cannot answer (a pin from before the flag) leaves the
+  # pre-versioning rule — which strips the ARCH the packager appends and
+  # nothing else: `chat-app` is a name, not `chat` plus a suffix.
+  $none = Join-Path $root 'no/such/build.ts'
+  Assert ((Get-InstallName $none 'chat-app.exe').Base -eq 'chat-app') 'chat-app survives'
+  Assert ((Get-InstallName $none 'demo-electron-x86_64.exe').Base -eq 'demo-electron') 'arch is stripped'
+  Assert ((Get-InstallName $none 'demo.exe').Base -eq 'demo') 'plain name'
+  Assert ((Get-InstallName $none 'demo.exe').Ext -eq '.exe') 'the extension comes with it'
 }
 
 Check 'install.ps1 verifies am with a spelling every RELEASE understands' {
@@ -90,6 +105,13 @@ Check 'run.ps1 installs the artifact instead of running it from dist\' {
   Assert ($src -match 'install-record\.ts') 'an install must record what it installed'
   Assert ($src -match 'prune') 'old versions must be bounded'
   Assert ($src -match 'CreateShortcut') 'a GUI app needs a launcher'
+  # The same layout the POSIX installer and the updater use: the version is the
+  # DIRECTORY, the file keeps the app's name. A versioned FILE renames the app,
+  # and its data directory, on every update; a flat file under no `versions/`
+  # is a rollback the pruner cannot see and the updater cannot swap.
+  Assert ($src -match 'Join-Path \$targetDir "versions"') 'the version must be a directory'
+  Assert ($src -match '\$versioned = Join-Path \$versionDir "\$base\$ext"') 'the installed file must keep the app name'
+  Assert ($src -notmatch '"\$base-\$ver\$ext"') 'the installed file must not carry a version'
 }
 
 # ── 3. syntax that only PowerShell 7 understands ────────────────────────

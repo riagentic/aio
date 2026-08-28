@@ -58,7 +58,6 @@ export const stream = cell("stream", {
 const app = await aio.run({
   cells: [stream],
   appId: "worker-durability-probe",
-  appVersion: "0.0.0",
   client: "server-only",
   persist: true,
   port: ${port},

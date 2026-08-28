@@ -72,7 +72,6 @@ Deno.test({
     const app = await aio.run({
       cells: [cell("probe", { state: { n: 0 }, methods: {} })],
       appId: `origins-parity-${Deno.pid}`,
-      appVersion: "0.0.0",
       client: "server-only",
       persist: false,
       libraryMode: true,

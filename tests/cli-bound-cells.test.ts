@@ -5,6 +5,7 @@ import { assertEquals } from "@std/assert";
 import { cell } from "../src/state/cell-create.ts";
 import { connectCli } from "../src/server/cli-client.ts";
 import type { CellDef } from "../src/state/cell-types.ts";
+import { stopChild } from "./stop-child.ts";
 
 // Coverage profiles from spawned deno processes go to a throwaway temp dir —
 // never into the repo (an empty DENO_COVERAGE_DIR means "cwd"), never into
@@ -83,10 +84,7 @@ Deno.test({
       assertEquals(counter.count, 5);
     } finally {
       cli.close();
-      try {
-        proc.kill();
-      } catch { /* exited */ }
-      await proc.status;
+      await stopChild(proc, { quiet: true });
     }
   },
 });
@@ -146,8 +144,7 @@ Deno.test({
       //     intent, one rejection AND one application;
       //   • it must settle the moment the frame's fate IS known. close()
       //     discards the queue, so there it becomes a truthful rejection.
-      proc.kill();
-      await proc.status;
+      await stopChild(proc, { quiet: true });
       // HOLD the port. Killing the server frees it, and the client retries
       // forever — so under a loaded suite another test's server can bind this
       // port, the client connects to IT, the frame is written and the call

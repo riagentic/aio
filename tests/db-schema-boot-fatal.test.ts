@@ -32,7 +32,6 @@ Deno.test("boot: a table SQLite refuses is fatal, and says exactly what is wrong
       aio.run({
         cells: [notes],
         appId: "test-db-schema-fatal",
-        appVersion: "0.0.0",
         client: "server-only",
         persist: false,
         libraryMode: true,

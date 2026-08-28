@@ -570,7 +570,6 @@ Deno.test({
     const app = await aio.run({
       cells: [counter],
       appId: "test-app-modes",
-      appVersion: "0.0.0",
       client: "server-only",
       persist: false,
       singleton: false,

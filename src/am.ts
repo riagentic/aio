@@ -55,6 +55,7 @@ import {
 
 import { cmdAdd, cmdHelp, cmdUninstall, cmdVersion } from "./am/am-cmd-meta.ts";
 import { cmdCreate } from "./am/am-cmd-create.ts";
+import { cmdBuild, cmdCompile, cmdDev } from "./am/am-cmd-build.ts";
 import { cmdPublish } from "./am/am-cmd-publish.ts";
 import { cmdTrust } from "./am/am-cmd-trust.ts";
 import { cmdLink } from "./am/am-cmd-link.ts";
@@ -144,6 +145,12 @@ const COMMANDS: Record<string, CmdHandler> = {
   auth: cmdAuth,
   // Meta
   create: cmdCreate,
+  // Build & run — the app's OWN `deno task build` / `compile` / `dev`, run
+  // for you (am-cmd-build.ts). One command line, two spellings: `am build`
+  // and `deno task build` cannot drift because they are the same process.
+  build: cmdBuild,
+  compile: cmdCompile,
+  dev: cmdDev, // foreground; `start` is the supervised background form
   // build → ship → the channel directory a client actually fetches. The one
   // step of the release that lived only in prose (see am-cmd-publish.ts).
   publish: cmdPublish,

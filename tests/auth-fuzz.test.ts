@@ -99,7 +99,6 @@ Deno.test({
     const app = await aio.run({
       cells: [cell("fuzzcell", { state: { n: 0 }, methods: {} })],
       appId: `test-authfuzz-${Deno.pid}`,
-      appVersion: "0.0.0",
       client: "server-only",
       persist: false,
       libraryMode: true,

@@ -553,6 +553,11 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
         // Undefined whenever a TCP port exists — the window then loads over
         // http:// exactly as before.
         httpSocketPath: deps.httpSocketPath,
+        // Test what you ship: the packaged app is the only thing that loads
+        // over aio:// — with this the dev window does too, against the dev
+        // server (docs/clients/electron.md). Observe-only for the app; the
+        // window's loader is the one thing that changes.
+        forceProtocol: Deno.env.get("AIO_ELECTRON_PROTOCOL") === "1",
         title,
         hasCSS: udsHasCSS,
         // Dev window icon comes from the SAME dir the prod build packages it

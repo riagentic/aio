@@ -6,6 +6,7 @@ import { electronMainScript } from "./electron-scripts.ts";
 import { electronClientScript } from "./electron-client-script.ts";
 import { electronMainScriptUDS } from "./electron-uds.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { classifyElectronLine } from "./electron-renderer-log.ts";
 import { isCompiled } from "../server/paths.ts";
 import {
   bakedElectronVersion,
@@ -312,59 +313,53 @@ export async function autoInstallElectron(
   }
 }
 
-/** Lines Electron's graphics stack emits while ENUMERATING devices, which say
- *  nothing about the app.
- *
- *  On a multi-GPU Linux box Mesa walks every DRM device it can see. A GPU
- *  driven by a proprietary module (NVIDIA) exposes no Mesa/DRI driver, so the
- *  probe reports `driver (null)` and then falls back to allocating a KMS dumb
- *  buffer on that card node — an ioctl reserved for the DRM master, which is
- *  the X server, never us. The kernel answers EACCES, Chromium moves on to a
- *  GPU that works, and the app renders normally. What the user is left with is
- *  dozens of "Permission denied" lines in a WALLET's log, which reads like
- *  something is wrong with the wallet.
- *
- *  Only these exact probe shapes are dropped, and the count is reported once,
- *  so nothing is hidden — a real Electron error still reaches the log. */
-const GPU_PROBE_NOISE = [
-  /^KMS: DRM_IOCTL_MODE_CREATE_DUMB failed/,
-  /^pci id for fd \d+:/,
-  /^MESA-LOADER: failed to (open|retrieve)/,
-  /^failed to load driver: \w+$/,
-];
-
-/** Pipe Electron's stderr through, minus the device-probe noise. */
+/** Route the Electron child's stderr: renderer lines the shell tagged go to
+ *  the framework logger at their level (so a page that throws lands in the
+ *  app log and `am logs`, not only on a terminal nobody is watching); GPU
+ *  device-probe noise is dropped and counted; everything else passes through
+ *  untouched. The sorting is `classifyElectronLine` — pure, unit-tested. */
 function forwardStderr(proc: Deno.ChildProcess): void {
   let dropped = 0;
   let reported = false;
   void (async () => {
     const enc = new TextEncoder();
     let carry = "";
+    const route = async (line: string) => {
+      const r = classifyElectronLine(line);
+      switch (r.route) {
+        case "drop":
+          dropped++;
+          // Say it once, so the lines are accounted for rather than vanished.
+          if (!reported) {
+            reported = true;
+            await Deno.stderr.write(enc.encode(
+              "[aio] suppressing GPU device-probe messages from Electron " +
+                "(harmless: a GPU with no Mesa driver, probed and skipped)\n",
+            )).catch(() => {});
+          }
+          return;
+        case "error":
+          log.error("renderer", r.text);
+          return;
+        case "warn":
+          log.warn("renderer", r.text);
+          return;
+        case "info":
+          log.info("renderer", r.text);
+          return;
+        case "raw":
+          await Deno.stderr.write(enc.encode(r.text + "\n")).catch(() => {});
+      }
+    };
     try {
       for await (
         const chunk of proc.stderr.pipeThrough(new TextDecoderStream())
       ) {
         const lines = (carry + chunk).split("\n");
         carry = lines.pop() ?? "";
-        for (const line of lines) {
-          if (GPU_PROBE_NOISE.some((re) => re.test(line.trim()))) {
-            dropped++;
-            // Say it once, so the lines are accounted for rather than vanished.
-            if (!reported) {
-              reported = true;
-              await Deno.stderr.write(enc.encode(
-                "[aio] suppressing GPU device-probe messages from Electron " +
-                  "(harmless: a GPU with no Mesa driver, probed and skipped)\n",
-              )).catch(() => {});
-            }
-            continue;
-          }
-          await Deno.stderr.write(enc.encode(line + "\n")).catch(() => {});
-        }
+        for (const line of lines) await route(line);
       }
-      if (carry !== "") {
-        await Deno.stderr.write(enc.encode(carry)).catch(() => {});
-      }
+      if (carry !== "") await route(carry);
     } catch { /* child gone — nothing left to forward */ }
     if (dropped > 0) {
       await Deno.stderr.write(enc.encode(
@@ -498,6 +493,8 @@ export async function launchElectron(
     shell?: ShellConfig;
     /** The app's HTTP handler on a socket — set when it binds no TCP port. */
     httpSocketPath?: string;
+    /** `AIO_ELECTRON_PROTOCOL=1`: dev window over aio:// (test what you ship). */
+    forceProtocol?: boolean;
   },
   /** The dist/ carrying the baked Electron version (compiled binaries). */
   distDir?: string,

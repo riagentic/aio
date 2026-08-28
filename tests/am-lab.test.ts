@@ -12,6 +12,13 @@
 // command exists to prevent, so the fix text is asserted, not just the error.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import {
+  adbBootArgv,
+  adbInstallArgv,
+  BOOT_DEADLINE_MS,
+  BOOT_PROGRESS_MS,
+  bootCompleted,
+  bootTimeoutMessage,
+  CONTAINER_SHARE_IP,
   diskDirs,
   fetchCommand,
   fileCost,
@@ -21,6 +28,7 @@ import {
   human,
   imagePresentArgv,
   INSTALLED_MIN_BYTES,
+  installVerdict,
   isInstalledDisk,
   isVmDisk,
   LAB_SPECS,
@@ -48,6 +56,7 @@ import {
   shareLogArgv,
   shareProbeArgv,
   shareServeArgv,
+  shareUrl,
   STOP_TIMEOUT_SEC,
   stopArgv,
   tunnelArgv,
@@ -57,6 +66,8 @@ import {
 const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 const WIN = LAB_SPECS.windows;
 const MAC = LAB_SPECS.macos;
+const LIN = LAB_SPECS.linux;
+const AND = LAB_SPECS.android;
 
 const OK = {
   docker: "ok",
@@ -138,7 +149,7 @@ Deno.test("runArgv --tunnel: publishes nothing — am owns the port", () => {
 Deno.test("tunnelArgv: one nc inside the image, per connection", () => {
   // `nc` ships in the image, so the tunnel needs no second image, no extra
   // capability, and nothing installed on the host.
-  assertEquals(tunnelArgv("aio-lab-windows"), [
+  assertEquals(tunnelArgv("aio-lab-windows", WIN.viewerPort), [
     "exec",
     "-i",
     "aio-lab-windows",
@@ -291,7 +302,11 @@ Deno.test("parseLabOs: the spellings people actually type", () => {
   assertEquals(parseLabOs("macos"), "macos");
   assertEquals(parseLabOs("mac"), "macos");
   assertEquals(parseLabOs("osx"), "macos");
-  assertEquals(parseLabOs("linux"), null);
+  assertEquals(parseLabOs("linux"), "linux");
+  assertEquals(parseLabOs("ubuntu"), "linux");
+  assertEquals(parseLabOs("android"), "android");
+  assertEquals(parseLabOs("apk"), "android");
+  assertEquals(parseLabOs("bsd"), null);
   assertEquals(parseLabOs(undefined), null);
 });
 
@@ -421,6 +436,8 @@ Deno.test("am lab is discoverable in `am help`", async () => {
   const help = new TextDecoder().decode(p.stdout);
   assertStringIncludes(help, "lab windows");
   assertStringIncludes(help, "lab macos");
+  assertStringIncludes(help, "lab linux");
+  assertStringIncludes(help, "lab android");
   assertStringIncludes(help, "docs/testing/vm-labs.md");
 });
 
@@ -669,6 +686,417 @@ Deno.test("isInstalledDisk: a 64 GB hole in the filesystem is not an OS", () => 
   assert(isVmDisk("data.img"));
 });
 
+// ── linux + android: an OS is a ROW, not a branch ──────────
+//
+// The two container labs share every mechanism with the two VMs — the same
+// flags, the same viewer/share/status grammar — and differ only in fields of
+// LAB_SPECS. These pin the fields that matter and the two hand-offs.
+
+Deno.test("LAB_SPECS: every lab is a row with the same shape, and the kinds are honest", () => {
+  assertEquals(
+    Object.keys(LAB_SPECS).length,
+    4,
+    "four labs: windows, macos, linux, android",
+  );
+  for (const spec of Object.values(LAB_SPECS)) {
+    assertEquals(spec.container, `aio-lab-${spec.os}`);
+    assert(spec.viewerPort > 0);
+    // aio-ok: the hint is prose; what matters is that it names a `deno task build` a person can run
+    assert(
+      spec.buildHint.includes("deno task build"),
+      `${spec.os}: the build hint names the command`,
+    );
+    // A container installs nothing, so it can neither keep a disk per version
+    // nor need a 9p/DHCP guest network.
+    if (spec.kind === "container") {
+      assertEquals(spec.versionedStorage, false);
+      assertEquals(spec.needsTun, false);
+    }
+  }
+  assertEquals(WIN.kind, "vm");
+  assertEquals(MAC.kind, "vm");
+  assertEquals(LIN.kind, "container");
+  assertEquals(AND.kind, "container");
+  // The emulator is KVM-accelerated; a desktop in a container is not a VM.
+  assertEquals(LIN.needsKvm, false);
+  assertEquals(AND.needsKvm, true);
+  assertEquals(WIN.viewerPort, 8006);
+  assertEquals(MAC.viewerPort, 8006);
+  assertEquals(LIN.viewerPort, 3000);
+  assertEquals(AND.viewerPort, 6080);
+});
+
+Deno.test("runArgv linux: no KVM, no tun — FUSE, shm, the desktop port, the host user", () => {
+  const a = runArgv(
+    opts({ spec: LIN, port: 45123, owner: { uid: 1000, gid: 1000 } }),
+  );
+  assert(!a.includes("--device=/dev/kvm"), "a webtop is not a VM");
+  assert(!a.includes("--device=/dev/net/tun") && !a.includes("NET_ADMIN"));
+  // AppImages mount themselves through FUSE: the device, SYS_ADMIN and an
+  // unconfined AppArmor profile are what fusermount needs in a container.
+  for (
+    const x of [
+      "--shm-size=1g",
+      "--device=/dev/fuse",
+      "--cap-add=SYS_ADMIN",
+      "--security-opt=apparmor:unconfined",
+    ]
+  ) assert(a.includes(x), `missing ${x} in: ${a.join(" ")}`);
+  assertEquals(a[a.indexOf("-p") + 1], "127.0.0.1:45123:3000");
+  // PUID/PGID: what the desktop writes into /shared is the operator's own.
+  assert(a.includes("PUID=1000") && a.includes("PGID=1000"), a.join(" "));
+  assert(a.includes("TITLE=aio lab"));
+  // No VM knobs and no VM disk reach a container.
+  assert(!a.some((x) => /^(VERSION|RAM_SIZE|CPU_CORES|DISK_SIZE)=/.test(x)));
+  assert(!a.includes("/labs/windows/storage:/storage"));
+  assert(a.includes("/app/dist:/shared"), "dist/ not mounted");
+  assertEquals(a[a.length - 1], LIN.image);
+});
+
+Deno.test("runArgv linux: no host uid (a Windows host) → the image's default user, no lie", () => {
+  const a = runArgv(opts({ spec: LIN, owner: null }));
+  assert(!a.some((x) => x.startsWith("PUID=")), a.join(" "));
+});
+
+Deno.test("runArgv android: KVM (once), 2g shm, the noVNC port, the emulator env", () => {
+  const a = runArgv(opts({ spec: AND, port: 45123 }));
+  assertEquals(
+    a.filter((x) => x === "--device=/dev/kvm").length,
+    1,
+    "KVM once — the spec's runExtra names it and needsKvm does too",
+  );
+  assert(!a.includes("--device=/dev/net/tun"));
+  assert(a.includes("--shm-size=2g"));
+  assertEquals(a[a.indexOf("-p") + 1], "127.0.0.1:45123:6080");
+  assert(a.includes("EMULATOR_DEVICE=Samsung Galaxy S10"), a.join(" "));
+  assert(a.includes("WEB_VNC=true"));
+  assert(!a.some((x) => x.startsWith("PUID=")));
+  assert(!a.includes("/storage") && !a.some((x) => x.endsWith(":/storage")));
+  assertEquals(a[a.length - 1], AND.image);
+});
+
+Deno.test("runArgv: windows/macos are byte-identical to before the table grew", () => {
+  // The refactor moved every branch onto a field; the VM argv must not move.
+  assertEquals(runArgv(opts()), [
+    "run",
+    "--detach",
+    "--name",
+    "aio-lab-windows",
+    "--device=/dev/kvm",
+    "--device=/dev/net/tun",
+    "--cap-add",
+    "NET_ADMIN",
+    "--stop-timeout",
+    String(STOP_TIMEOUT_SEC),
+    "-e",
+    "VERSION=11",
+    "-e",
+    "RAM_SIZE=8G",
+    "-e",
+    "CPU_CORES=4",
+    "-e",
+    "DISK_SIZE=64G",
+    "-p",
+    "127.0.0.1:45123:8006",
+    "-v",
+    "/labs/windows/storage:/storage",
+    "-v",
+    "/app/dist:/shared",
+    WIN.image,
+  ]);
+});
+
+Deno.test("tunnelArgv follows the spec's viewer port", () => {
+  assertEquals(tunnelArgv("c", LIN.viewerPort).at(-1), "3000");
+  assertEquals(tunnelArgv("c", AND.viewerPort).at(-1), "6080");
+});
+
+Deno.test("preflight linux: a container needs docker and the image, nothing else", () => {
+  // No KVM, no tun, 3 GB free: a VM would refuse three times; a webtop runs.
+  const v = preflight(LIN, { ...OK, kvm: "missing", tun: false, freeGb: 3 });
+  assertEquals(v.errors, []);
+  assertEquals(v.warnings, []);
+  const [e] = preflight(LIN, { ...OK, image: false }).errors;
+  assertStringIncludes(e!, `docker pull ${LIN.image}`);
+  // The dockurr typo note is for dockurr images only.
+  assert(!e!.includes("dockurr"), e);
+  assertStringIncludes(
+    preflight(LIN, { ...OK, docker: "missing" }).errors[0]!,
+    "Fix:",
+  );
+});
+
+Deno.test("preflight android: refuses without KVM — the emulator is KVM-accelerated", () => {
+  const [e] = preflight(AND, { ...OK, kvm: "missing", tun: false }).errors;
+  assertStringIncludes(e!, "/dev/kvm does not exist");
+  assertStringIncludes(e!, "emulator");
+  assertStringIncludes(e!, "modprobe kvm_amd");
+  assertEquals(
+    preflight(AND, { ...OK, kvm: "missing", tun: false }).errors.length,
+    1,
+  );
+  assertStringIncludes(
+    preflight(AND, { ...OK, kvm: "denied" }).errors[0]!,
+    "setfacl",
+  );
+  // No tun, no disk floor for the emulator either.
+  assertEquals(preflight(AND, { ...OK, tun: false, freeGb: 1 }).errors, []);
+});
+
+Deno.test("diskDirs: a container has no disk to look for", () => {
+  assertEquals(diskDirs(LIN, "/s", ""), []);
+  assertEquals(diskDirs(AND, "/s", ""), []);
+});
+
+Deno.test("parseLabArgs: VM knobs on a container lab are REFUSED, not ignored", () => {
+  for (const bad of ["--ram=16G", "--cpus=8", "--disk=1G", "--version=22.04"]) {
+    const r = parseLabArgs(LIN, [bad]);
+    assert(!r.ok, `${bad} was silently accepted by a container lab`);
+    assertStringIncludes(r.error, "container, not a VM");
+    assertStringIncludes(r.error, bad);
+  }
+  // …while the shared flags work the same.
+  const r = parseLabArgs(LIN, ["--dist=out", "--tunnel", "--status"]);
+  assert(r.ok);
+  assertEquals(r.value.dist, "out");
+  assertEquals(r.value.tunnel, true);
+  assertEquals(r.value.action, "status");
+});
+
+Deno.test("parseLabArgs: --apk is android's, and names a file not a path", () => {
+  const r = parseLabArgs(AND, ["--apk=app-client.apk"]);
+  assert(r.ok);
+  assertEquals(r.value.apk, "app-client.apk");
+  assert(!parseLabArgs(AND, ["--apk=dist/app.apk"]).ok);
+  assert(!parseLabArgs(AND, ["--apk="]).ok);
+  const lin = parseLabArgs(LIN, ["--apk=x.apk"]);
+  assert(!lin.ok, "--apk on a lab that installs nothing must be refused");
+  assert(!parseLabArgs(WIN, ["--apk=x.apk"]).ok);
+  const win = parseLabArgs(WIN, []);
+  assert(win.ok);
+  assertEquals(win.value.apk, null);
+});
+
+Deno.test("pickArtifact linux: an AppImage over the bare binary, arm64 is wrong-arch", () => {
+  assertEquals(pickArtifact("linux", ["app-x64.AppImage", "app", "app.txt"]), {
+    kind: "one",
+    file: "app-x64.AppImage",
+  });
+  // The bare host-platform name (`artifactName` keeps it bare on the host)…
+  assertEquals(pickArtifact("linux", ["app", "app-windows.exe", "app-macos"]), {
+    kind: "one",
+    file: "app",
+  });
+  // …and the cross-built one.
+  assertEquals(pickArtifact("linux", ["app-linux"]), {
+    kind: "one",
+    file: "app-linux",
+  });
+  assertEquals(
+    pickArtifact("linux", ["app-linux-arm64", "app-arm64.AppImage"]),
+    {
+      kind: "wrong-arch",
+      files: ["app-arm64.AppImage", "app-linux-arm64"],
+    },
+  );
+  assertEquals(pickArtifact("linux", ["app-linux-arm64", "app-linux"]), {
+    kind: "one",
+    file: "app-linux",
+  });
+  assertEquals(pickArtifact("linux", ["app-windows.exe", "notes.md"]), {
+    kind: "none",
+  });
+});
+
+Deno.test("pickArtifact android: the client APK is preferred and the choice is VISIBLE", () => {
+  assertEquals(pickArtifact("android", ["app.apk", "app-windows.exe"]), {
+    kind: "one",
+    file: "app.apk",
+  });
+  // App + client: the client wins, the app is named as the other option.
+  assertEquals(pickArtifact("android", ["app.apk", "app-client.apk"]), {
+    kind: "one",
+    file: "app-client.apk",
+    others: ["app.apk"],
+  });
+  // --apk picks; a name that is not there is 'absent', never a silent fallback.
+  assertEquals(
+    pickArtifact("android", ["app.apk", "app-client.apk"], "app.apk"),
+    {
+      kind: "one",
+      file: "app.apk",
+    },
+  );
+  assertEquals(pickArtifact("android", ["app.apk"], "nope.apk"), {
+    kind: "absent",
+    file: "nope.apk",
+    files: ["app.apk"],
+  });
+  // An unsigned APK cannot be installed: not a candidate.
+  assertEquals(pickArtifact("android", ["app-unsigned.apk"]), { kind: "none" });
+  assertEquals(pickArtifact("android", ["a.apk", "b.apk"]).kind, "many");
+});
+
+Deno.test("fetchCommand linux: a COPY out of /shared, +x, run — no download", () => {
+  const c = fetchCommand("linux", "app-x64.AppImage");
+  assertEquals(
+    c,
+    "cp /shared/app-x64.AppImage ~/ && chmod +x ~/app-x64.AppImage && ~/app-x64.AppImage",
+  );
+  assert(!c.includes("curl"), "the directory is local in this guest");
+});
+
+Deno.test("shareUrl: one port, the name THIS guest resolves", () => {
+  assertEquals(shareUrl(WIN), SHARE_URL);
+  assertEquals(shareUrl(MAC), SHARE_URL);
+  assertEquals(shareUrl(LIN), `http://localhost:${SHARE_PORT}/`);
+  // 10.0.2.2 is the emulator's fixed alias for its host's loopback.
+  assertEquals(shareUrl(AND), `http://10.0.2.2:${SHARE_PORT}/`);
+  assertEquals(CONTAINER_SHARE_IP, "127.0.0.1");
+});
+
+Deno.test("handoffLines linux: the cp line, where to paste it, and the /shared note", () => {
+  const lines = handoffLines(LIN, "/app/dist", {
+    kind: "one",
+    file: "app-x64.AppImage",
+  });
+  assertStringIncludes(lines[0]!, shareUrl(LIN));
+  assert(
+    lines.some((l) => l.includes(fetchCommand("linux", "app-x64.AppImage"))),
+  );
+  assert(lines.some((l) => l.includes(LIN.guestShell)));
+  const all = lines.join(" ");
+  assertStringIncludes(all, "/shared");
+  assert(!all.includes("quarantine"), "the Gatekeeper line is macOS's");
+  // arm64 → the build that fixes it, and no cp line.
+  const wrong = handoffLines(LIN, "/d", {
+    kind: "wrong-arch",
+    files: ["app-linux-arm64"],
+  }).join(" ");
+  assertStringIncludes(wrong, "x86_64");
+  assertStringIncludes(wrong, "--platforms=linux");
+  assert(!wrong.includes("cp /shared"), wrong);
+  assertStringIncludes(
+    handoffLines(LIN, "/d", { kind: "none" }).join(" "),
+    "--platforms=linux",
+  );
+});
+
+Deno.test("handoffLines android: am INSTALLS — the adb line is what it ran, not homework", () => {
+  const lines = handoffLines(AND, "/app/dist", {
+    kind: "one",
+    file: "app-client.apk",
+    others: ["app.apk"],
+  });
+  const all = lines.join(" ");
+  assertStringIncludes(all, "am installs it for you");
+  assertStringIncludes(
+    all,
+    `docker exec ${AND.container} adb install -r /shared/app-client.apk`,
+  );
+  // Which was chosen and how to get the other.
+  assertStringIncludes(all, "chose app-client.apk");
+  assertStringIncludes(all, "--apk=app.apk");
+  assert(!all.includes("paste"), all);
+  // Several: no guess, a flag.
+  const many = handoffLines(AND, "/d", {
+    kind: "many",
+    files: ["a.apk", "b.apk"],
+  }).join(" ");
+  assertStringIncludes(many, "--apk=a.apk");
+  assert(!many.includes("adb install"), many);
+  // A --apk that is not there says what IS.
+  const absent = handoffLines(AND, "/d", {
+    kind: "absent",
+    file: "x.apk",
+    files: ["a.apk"],
+  }).join(" ");
+  assertStringIncludes(absent, "--apk=x.apk is not in that directory");
+  assertStringIncludes(absent, "a.apk");
+  assertStringIncludes(
+    handoffLines(AND, "/d", { kind: "none" }).join(" "),
+    "--targets=android-client",
+  );
+});
+
+Deno.test("adb: the boot poll, the install, and what their answers mean", () => {
+  assertEquals(adbBootArgv("aio-lab-android"), [
+    "exec",
+    "aio-lab-android",
+    "adb",
+    "shell",
+    "getprop",
+    "sys.boot_completed",
+  ]);
+  assertEquals(bootCompleted("1\n"), true);
+  assertEquals(bootCompleted("1\r\n"), true);
+  // Early in the boot getprop answers nothing; adb may print an error with
+  // the same exit code. Neither is 'booted'.
+  assertEquals(bootCompleted(""), false);
+  assertEquals(bootCompleted("0"), false);
+  assertEquals(bootCompleted("error: device offline"), false);
+  assertEquals(bootCompleted("11"), false);
+  // -r: replace — re-running `am lab android` after a rebuild IS the dev loop.
+  assertEquals(adbInstallArgv("c", "app.apk"), [
+    "exec",
+    "c",
+    "adb",
+    "install",
+    "-r",
+    "/shared/app.apk",
+  ]);
+  // Bounded, with progress: ~5 min, a line every 15 s.
+  assertEquals(BOOT_DEADLINE_MS, 300_000);
+  assertEquals(BOOT_PROGRESS_MS, 15_000);
+});
+
+Deno.test("installVerdict: Success is success; every failure names its fix", () => {
+  const ok = installVerdict({
+    code: 0,
+    out: "Performing Streamed Install\nSuccess\n",
+    err: "",
+  }, "a.apk");
+  assertEquals(ok.ok, true);
+  assertStringIncludes(ok.message, "a.apk");
+  // Exit 0 without Success is NOT success (adb has done that).
+  assertEquals(
+    installVerdict({ code: 0, out: "", err: "" }, "a.apk").ok,
+    false,
+  );
+  const abi = installVerdict(
+    {
+      code: 1,
+      out: "",
+      err:
+        "adb: failed to install /shared/a.apk: Failure [INSTALL_FAILED_NO_MATCHING_ABIS]",
+    },
+    "a.apk",
+  );
+  assertEquals(abi.ok, false);
+  assertStringIncludes(abi.message, "x86_64");
+  assertStringIncludes(abi.message, "INSTALL_FAILED_NO_MATCHING_ABIS");
+  const unsigned = installVerdict(
+    { code: 1, out: "", err: "Failure [INSTALL_PARSE_FAILED_NO_CERTIFICATES]" },
+    "a-unsigned.apk",
+  );
+  assertStringIncludes(unsigned.message, "unsigned");
+  const gone = installVerdict({
+    code: 1,
+    out: "",
+    err: "adb: no devices/emulators found",
+  }, "a.apk");
+  assertStringIncludes(gone.message, "--status");
+});
+
+Deno.test("bootTimeoutMessage: names how to check, how to watch, and the restart", () => {
+  const m = bootTimeoutMessage(AND, "");
+  assertStringIncludes(m, "5 min");
+  assertStringIncludes(m, "am lab android --status");
+  assertStringIncludes(m, `docker logs -f ${AND.container}`);
+  assertStringIncludes(m, "--stop");
+  assertStringIncludes(bootTimeoutMessage(AND, "0"), "last answer: 0");
+});
+
 // ── The CLI, against a FAKE docker on PATH ─────────────────
 
 /** A `docker` shim that answers from a script the test writes. */
@@ -704,7 +1132,7 @@ Deno.test("am lab (no OS) prints the usage and fails", async () => {
   assertEquals(r.code, 1);
   // The usage goes to stderr so it never pollutes --json stdout; the error
   // itself follows am's rule and lands on stdout in machine-readable mode.
-  assertStringIncludes(r.err, "am lab <windows|macos>");
+  assertStringIncludes(r.err, "am lab <windows|macos|linux|android>");
   assertStringIncludes(r.out + r.err, "needs an OS");
 });
 
@@ -713,6 +1141,7 @@ Deno.test("am lab bsd: an unknown OS names the two that exist", async () => {
   assertEquals(r.code, 1);
   assertStringIncludes(r.out + r.err, "bsd"); // quoted in the message
   assertStringIncludes(r.out + r.err, "am lab windows");
+  assertStringIncludes(r.out + r.err, "am lab android");
 });
 
 Deno.test("am lab --status: absent container, against a fake docker", async () => {
@@ -1075,6 +1504,172 @@ esac`);
   assertEquals(j.shareServing, false);
   assertEquals(j.fetchCommand, null);
   assertStringIncludes(j.shareReason, "am lab macos");
+  await Deno.remove(dir, { recursive: true });
+  await Deno.remove(home, { recursive: true });
+});
+
+Deno.test("am lab linux: starts a CONTAINER — fuse+shm, no kvm, port 3000, no storage", async () => {
+  // Through the CLI and the fake docker: the whole chain from parseLabOs to
+  // the `docker run` line, for the lab that is not a VM. `/dev/kvm` may not
+  // exist on this host — for a webtop that must not matter.
+  const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
+  const log = `${home}/calls`;
+  const dist = `${home}/dist`;
+  await Deno.mkdir(dist, { recursive: true });
+  await Deno.writeTextFile(`${dist}/app-x64.AppImage`, "elf");
+  const dir = await fakeDocker(`
+echo "$@" >> ${log}
+case "$1" in
+  info) echo "29.1.3";;
+  images) echo "sha256:abc";;
+  inspect)
+    case "$*" in
+      *Mounts*) echo "${dist}";;
+      *) if [ -f ${home}/ran ]; then echo "true|2026-08-28T00:00:00Z|running"; else exit 1; fi;;
+    esac;;
+  run) touch ${home}/ran; echo "cid";;
+  port) echo "127.0.0.1:45123";;
+  exec) echo -n "200";;
+  logs) echo "starting";;
+  *) exit 0;;
+esac`);
+  // The lab polls the published viewer port until it answers; stand in for
+  // the desktop with a 200 on a port of our choosing.
+  const port = freePort();
+  const viewer = Deno.serve(
+    { hostname: "127.0.0.1", port, onListen() {} },
+    () => new Response("ok"),
+  );
+  const r = await am(
+    ["lab", "linux", `--dist=${dist}`, `--port=${port}`, "--json"],
+    { PATH: `${dir}:${Deno.env.get("PATH")}`, XDG_CACHE_HOME: home },
+  );
+  await viewer.shutdown();
+  assertEquals(r.code, 0, r.err);
+  const calls = (await Deno.readTextFile(log)).trim().split("\n");
+  const run = calls.find((c) => c.startsWith("run "))!;
+  assert(run, `no docker run in: ${calls.join(" / ")}`);
+  assertStringIncludes(run, "--device=/dev/fuse");
+  assertStringIncludes(run, "--shm-size=1g");
+  assertStringIncludes(run, ":3000");
+  assertStringIncludes(run, `PUID=${Deno.uid()}`);
+  assert(!run.includes("/dev/kvm"), run);
+  assert(!run.includes(":/storage"), run);
+  assert(!run.includes("RAM_SIZE"), run);
+  assertEquals(await exists(`${home}/aio/labs/linux/storage`), false);
+  const j = JSON.parse(r.out);
+  assertEquals(j.artifact.file, "app-x64.AppImage");
+  assertEquals(j.fetchCommand, fetchCommand("linux", "app-x64.AppImage"));
+  assertEquals(j.shareUrl, shareUrl(LIN));
+  await Deno.remove(dir, { recursive: true });
+  await Deno.remove(home, { recursive: true });
+});
+
+Deno.test("am lab linux --ram=16G: refused at the CLI, before docker is asked", async () => {
+  const dir = await fakeDocker(`exit 1`);
+  const r = await am(["lab", "linux", "--ram=16G"], {
+    PATH: `${dir}:${Deno.env.get("PATH")}`,
+  });
+  assertEquals(r.code, 1);
+  assertStringIncludes(r.out + r.err, "container, not a VM");
+  await Deno.remove(dir, { recursive: true });
+});
+
+Deno.test("am lab android: on a booted emulator, am INSTALLS and reports it", async () => {
+  // The lab is already up (so no preflight against this host's /dev/kvm):
+  // re-running `am lab android` is the dev loop — poll boot, adb install -r,
+  // print the result in the machine output too.
+  const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
+  const log = `${home}/calls`;
+  const dist = `${home}/dist`;
+  await Deno.mkdir(dist, { recursive: true });
+  await Deno.writeTextFile(`${dist}/app.apk`, "zip");
+  await Deno.writeTextFile(`${dist}/app-client.apk`, "zip");
+  const dir = await fakeDocker(`
+echo "$@" >> ${log}
+case "$1" in
+  inspect)
+    case "$*" in
+      *Mounts*) echo "${dist}";;
+      *) echo "true|2026-08-28T00:00:00Z|running";;
+    esac;;
+  port) echo "127.0.0.1:45123";;
+  exec)
+    case "$*" in
+      *getprop*) echo "1";;
+      *"adb install"*) echo "Success";;
+      *curl*) echo -n "200";;
+      *) exit 0;;
+    esac;;
+  *) exit 0;;
+esac`);
+  const env = { PATH: `${dir}:${Deno.env.get("PATH")}`, XDG_CACHE_HOME: home };
+  const r = await am(["lab", "android", `--dist=${dist}`, "--json"], env);
+  assertEquals(r.code, 0, r.err);
+  const j = JSON.parse(r.out);
+  assertEquals(
+    j.artifact.file,
+    "app-client.apk",
+    "the client APK is preferred",
+  );
+  assertEquals(j.installed, true);
+  assertStringIncludes(j.installResult, "app-client.apk");
+  const calls = await Deno.readTextFile(log);
+  assertStringIncludes(calls, "adb shell getprop sys.boot_completed");
+  assertStringIncludes(calls, "adb install -r /shared/app-client.apk");
+  // --apk picks the other one.
+  await Deno.writeTextFile(log, "");
+  const r2 = await am([
+    "lab",
+    "android",
+    `--dist=${dist}`,
+    "--apk=app.apk",
+    "--json",
+  ], env);
+  assertEquals(JSON.parse(r2.out).artifact.file, "app.apk");
+  assertStringIncludes(
+    await Deno.readTextFile(log),
+    "adb install -r /shared/app.apk",
+  );
+  // --status says booted, and does not install.
+  await Deno.writeTextFile(log, "");
+  const st = await am(["lab", "android", "--status", "--json"], env);
+  assertEquals(JSON.parse(st.out).booted, true);
+  assert(!(await Deno.readTextFile(log)).includes("adb install"));
+  await Deno.remove(dir, { recursive: true });
+  await Deno.remove(home, { recursive: true });
+});
+
+Deno.test("am lab android: a failed install is SAID in the output, exit stays usable", async () => {
+  const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
+  const dist = `${home}/dist`;
+  await Deno.mkdir(dist, { recursive: true });
+  await Deno.writeTextFile(`${dist}/app.apk`, "zip");
+  const dir = await fakeDocker(`
+case "$1" in
+  inspect)
+    case "$*" in
+      *Mounts*) echo "${dist}";;
+      *) echo "true|2026-08-28T00:00:00Z|running";;
+    esac;;
+  port) echo "127.0.0.1:45123";;
+  exec)
+    case "$*" in
+      *getprop*) echo "1";;
+      *"adb install"*) echo "Failure [INSTALL_FAILED_NO_MATCHING_ABIS]" >&2; exit 1;;
+      *curl*) echo -n "200";;
+      *) exit 0;;
+    esac;;
+  *) exit 0;;
+esac`);
+  const r = await am(["lab", "android", `--dist=${dist}`, "--json"], {
+    PATH: `${dir}:${Deno.env.get("PATH")}`,
+    XDG_CACHE_HOME: home,
+  });
+  const j = JSON.parse(r.out);
+  assertEquals(j.installed, false);
+  assertStringIncludes(j.installResult, "NO_MATCHING_ABIS");
+  assertStringIncludes(j.installResult, "x86_64");
   await Deno.remove(dir, { recursive: true });
   await Deno.remove(home, { recursive: true });
 });

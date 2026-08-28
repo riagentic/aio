@@ -1,5 +1,13 @@
 // src/graph-validator.ts
-import { resolve } from "@std/path";
+import { dirname, fromFileUrl, join, resolve } from "@std/path";
+import { readDenoJsonSync } from "./deno-json.ts";
+import { resolveShare, type ShareRoot } from "./app-dirs.ts";
+import { ESBUILD_SPEC } from "../build/esbuild-shared.ts";
+import {
+  bundleClient,
+  type EsbuildModule,
+  judgeClientBundle,
+} from "../build/client-bundle.ts";
 import { SERVER_ONLY_SPECS } from "./server-only-specs.ts";
 import { SERVER_FILE_RE } from "../entries.ts";
 
@@ -15,6 +23,11 @@ export type ErrorCategory =
   | "import-map-mismatch"
   | "permission-denied"
   | "electron-env"
+  /** THE bundle's verdict (src/build/graph-audit.ts + graph-eval.ts): a
+   *  server-only leak the resolved graph reaches, a Node global touched at
+   *  module scope, or a bundle whose top level throws. Blocking — the build
+   *  refuses the same finding with the same words. */
+  | "bundle-refused"
   | "unknown";
 
 /** A single validation error with actionable fix instruction */
@@ -55,6 +68,9 @@ export type GraphResult = {
    *  `smoke()` in `aio/testing` fetches every member from a real boot. */
   eager: Set<string>;
   durationMs: number;
+  /** Time the in-memory prod bundle + audit + evaluation took (0 when the
+   *  graph hash was cached; undefined when no {@link ProdGraphCheck} ran). */
+  bundleMs?: number;
 };
 
 export type Resolution =
@@ -346,13 +362,118 @@ export const BLOCKING_CATEGORIES: ReadonlySet<ErrorCategory> = new Set([
   "transpile-error",
   "missing-import-map",
   "server-only-import",
+  "bundle-refused",
 ]);
+
+/** The dev server's twin of `deno task build`: bundle the client graph in
+ *  memory with the SAME esbuild invocation, audit it and evaluate it. Keyed
+ *  by the graph hash so a reload that changes no module costs nothing. */
+export type ProdGraphCheck = (
+  graphHash: string,
+) => Promise<{ errors: GraphError[]; ms: number; cached: boolean }>;
+
+/** Build a {@link ProdGraphCheck} for the app whose UI lives under
+ *  `absBaseDir`. Resolution mirrors the build's: deno.json is the app's own
+ *  (or its parent's), the framework is wherever THIS module runs from. */
+export function createProdGraphCheck(opts: {
+  absBaseDir: string;
+  /** The shell the app will really run in — the evaluation presents its UA. */
+  shell?: "browser" | "electron";
+  uiEntry: string;
+  debug?: (msg: string) => void;
+}): ProdGraphCheck {
+  let last: { hash: string; errors: GraphError[] } | null = null;
+  return async (graphHash) => {
+    if (last && last.hash === graphHash) {
+      return { errors: last.errors, ms: 0, cached: true };
+    }
+    const t0 = performance.now();
+    const errors = await prodGraphErrors(opts);
+    last = { hash: graphHash, errors };
+    return { errors, ms: performance.now() - t0, cached: false };
+  };
+}
+
+async function prodGraphErrors(opts: {
+  absBaseDir: string;
+  uiEntry: string;
+  shell?: "browser" | "electron";
+  debug?: (msg: string) => void;
+}): Promise<GraphError[]> {
+  const { absBaseDir, uiEntry } = opts;
+  const dj = readDenoJsonSync(absBaseDir) ??
+    readDenoJsonSync(resolve(absBaseDir, ".."));
+  const root = dj ? dirname(dj.path) : absBaseDir;
+  const config = dj?.config ?? {};
+  const frameworkBase = new URL("..", import.meta.url);
+  const isRemote = frameworkBase.protocol !== "file:";
+  const frameworkSrcDir = isRemote ? "" : fromFileUrl(frameworkBase);
+  const refusal = (message: string, fix: string): GraphError[] => [{
+    file: join(absBaseDir, uiEntry),
+    category: "bundle-refused",
+    message,
+    fix,
+  }];
+  let shares: ShareRoot[];
+  try {
+    shares = resolveShare(root, (config as { share?: unknown }).share);
+  } catch (e) {
+    return refusal(
+      `deno.json "share" cannot be resolved: ${
+        e instanceof Error ? e.message : e
+      }`,
+      "the build refuses the same declaration — fix it in deno.json.",
+    );
+  }
+  const esbuild = await import(ESBUILD_SPEC) as EsbuildModule;
+  const bundle = await bundleClient({
+    esbuild,
+    root,
+    appDir: absBaseDir,
+    uiEntry,
+    doAndroid: false,
+    imports: (config as { imports?: Record<string, string> }).imports ?? {},
+    shares,
+    frameworkSrcDir,
+    frameworkBase,
+  });
+  opts.debug?.(
+    `graph: prod bundle ${bundle.ok ? "built" : "FAILED"} in memory (${
+      bundle.ms.toFixed(0)
+    }ms, ${Object.keys(bundle.inputs).length} inputs)`,
+  );
+  if (!bundle.ok) {
+    return refusal(
+      `\`deno task build\` would fail on this graph — esbuild: ${
+        bundle.errors.join("; ")
+      }`,
+      "the prod bundle is built from the same files dev serves; whatever " +
+        "esbuild cannot resolve here, the build cannot either.",
+    );
+  }
+  const verdict = await judgeClientBundle(bundle, root, { shell: opts.shell });
+  opts.debug?.(
+    `graph: prod bundle audited (${verdict.auditMs.toFixed(0)}ms) + ` +
+      `evaluated (${verdict.evalMs.toFixed(0)}ms) — ${
+        verdict.ok ? "ok" : `${verdict.findings.length} refusal(s)`
+      }`,
+  );
+  return verdict.findings.map((f) => ({
+    file: resolve(root, f.file),
+    line: f.line,
+    category: "bundle-refused" as const,
+    message: f.message +
+      (f.chain.length > 1 ? ` (via ${f.chain.join(" → ")})` : ""),
+    fix: f.fix,
+  }));
+}
 
 export async function validateGraph(
   entrypoint: string,
   importMap: Record<string, string>,
   transpile: TranspileFn,
   fileExists?: (path: string) => boolean,
+  prodGraph?: ProdGraphCheck,
 ): Promise<GraphResult> {
   const start = performance.now();
   const modules = new Map<string, ModuleNode>();
@@ -640,8 +761,6 @@ export async function validateGraph(
     node.valid = moduleErrors.length === 0;
   }
 
-  const durationMs = performance.now() - start;
-
   // Only blocking categories prevent the app from loading (→ diagnostic page).
   // `server-only-import` (a static `node:` builtin or omitted `aio` server
   // symbol reachable from the UI entry) is a GUARANTEED client break: aio's
@@ -654,15 +773,49 @@ export async function validateGraph(
   const BLOCKING = BLOCKING_CATEGORIES;
   // @std/* and node:* missing-map + deferred server-only imports were already
   // downgraded to warnings above, so this is the single source of truth.
-  const blockingErrors = errors.filter((e) => BLOCKING.has(e.category));
+  let blockingErrors = errors.filter((e) => BLOCKING.has(e.category));
+
+  // THE prod graph. The walk above is the fast, attributed half (a missing
+  // file, a typo, a static `*.server.ts`); it cannot know what esbuild will
+  // FOLLOW — a dynamic import of a plain module is followed, and its static
+  // `@std/path` one hop further is in the bundle — nor what the bundle does
+  // when it is evaluated. So, when the walk finds nothing blocking, the
+  // bundle is built in memory and judged by the same decider the build uses.
+  // Skipped when the walk already blocks: one cause, one report.
+  let bundleMs: number | undefined;
+  if (prodGraph && blockingErrors.length === 0) {
+    const graphHash = await sha16(
+      [...modules.keys()].sort().map((p) => `${p}:${modules.get(p)!.hash}`)
+        .join("\n") + "\n" + JSON.stringify(importMap),
+    );
+    const prod = await prodGraph(graphHash);
+    bundleMs = prod.ms;
+    errors.push(...prod.errors);
+    blockingErrors = errors.filter((e) => BLOCKING.has(e.category));
+    for (const [path, node] of modules) {
+      const moduleErrors = errors.filter((e) => e.file === path);
+      node.errors = moduleErrors;
+      node.valid = moduleErrors.length === 0;
+    }
+  }
 
   return {
     valid: blockingErrors.length === 0,
     errors,
     modules,
     eager,
-    durationMs,
+    durationMs: performance.now() - start,
+    bundleMs,
   };
+}
+
+async function sha16(text: string): Promise<string> {
+  const buf = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(text),
+  );
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0"))
+    .join("").slice(0, 16);
 }
 
 /** Extract import specifiers from transpiled JS, split by kind. STATIC imports

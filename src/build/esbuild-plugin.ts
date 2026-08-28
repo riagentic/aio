@@ -2,12 +2,13 @@
 // Intercepts server-only imports (@std/*, node:*) and returns safe stub modules.
 // Also marks *.server.ts dynamic imports as external (convention for server-only helpers).
 //
-// Note: This plugin is used in esbuild.build() (prod bundle) only.
-// Dev mode uses esbuild.transform() which doesn't support plugins.
-// Dev-mode protection comes from: dynamic import map (Layer 1b),
-// aiol lint checks (Layer 2), and error overlay (Layer 3).
+// Used by every esbuild.build() of the client graph — the prod bundle AND the
+// dev server's in-memory twin of it (client-bundle.ts), so the graph judged at
+// dev boot is the graph that ships. The metafile it leaves behind is what
+// graph-audit.ts reads: a static edge into the stub namespace is a leak.
 
 import { SERVER_FILE_RE } from "../entries.ts";
+import { SERVER_ONLY_STUB_NS } from "./graph-audit.ts";
 
 /** Static server-only imports seen in the last client build:
  *  `specifier → the modules that statically import it`.
@@ -79,7 +80,7 @@ export function aioBrowserPlugin(): {
         if (args.kind === "dynamic-import") {
           recordDynamic(args.importer, args.path);
         } else record(args.importer, args.path);
-        return { path: args.path, namespace: "aio-server-only" };
+        return { path: args.path, namespace: SERVER_ONLY_STUB_NS };
       };
       build.onResolve({ filter: /^@std\// }, intercept);
       build.onResolve({ filter: /^node:/ }, intercept);
@@ -144,7 +145,7 @@ export function aioBrowserPlugin(): {
       // At runtime, accessing any export throws a clear error — but since these
       // imports are inside server-only method bodies, they're dead code in browser.
       build.onLoad(
-        { filter: /.*/, namespace: "aio-server-only" },
+        { filter: /.*/, namespace: SERVER_ONLY_STUB_NS },
         (args: { path: string }) => ({
           contents: serverOnlyStub(args.path),
           loader: "js",

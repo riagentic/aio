@@ -188,6 +188,55 @@ such a page as well; the bridge already delivers `reload`/`css`/`boot`.
 
 **CLI apps** can use `connectCliUDS(socketPath)` for headless UDS transport.
 
+### Test what you ship — `AIO_ELECTRON_PROTOCOL=1`
+
+A packaged app's window loads `aio://app/`: a privileged custom scheme served by
+the Electron main process (dist/ from disk, the app's routes proxied to its
+socket), with the IPC preload bridge as the page's ONLY transport and the
+`<head>` config delivered by the server's `cfg` frame instead of the shell. In
+dev, the window takes that same path only when the app binds no TCP port; an app
+with a port (`--port`, `--expose`, `routes` you reach from a browser) loads
+`http://localhost:PORT` — so the shipped path was exercised by the artifact and
+by nothing else, and a renderer that died on it died in the field first.
+
+```sh
+AIO_ELECTRON_PROTOCOL=1 deno task dev --client=electron --port=8000
+# → [aio:electron] AIO_ELECTRON_PROTOCOL=1 — the window loads aio://app/ (the packaged path) proxied to http://localhost:8000
+```
+
+The window then loads over `aio://` exactly as the AppImage does — same handler,
+same scheme privileges, same bridge — proxied to the dev server instead of a
+socket or `dist/`. Everything else (hot reload, `am surface`, the trojan) keeps
+working. Use it before a release for any app that has a port.
+
+### The renderer's errors reach the log
+
+The Electron main process forwards every way a page can fail into the framework
+log at ERROR — `console.error`, uncaught throws and unhandled rejections (with
+Chromium's file:line), `render-process-gone`, `preload-error`, `unresponsive`, a
+main-frame load failure — and `console.warn` at WARN. They appear on the
+console, in `logs/app.log`, and in `am logs`, tagged `renderer`:
+
+```
+ERROR  renderer    Uncaught ReferenceError: Buffer is not defined (aio://app/app.js:1:22073)
+ERROR  renderer    ui did not mount within 15000ms of the page loading — #root is empty. The renderer errors above say why …
+INFO   renderer    ui mounted 42 element(s)
+```
+
+The `ui mounted` line is the renderer's own positive signal (the preload watches
+`#root`); the artifact e2e (`deno task test:electron`) and the onboarding lab
+assert on it, so "the AppImage started" now means "the AppImage painted". Only
+Electron's GPU device-probe chatter (`KMS: DRM_IOCTL_MODE_CREATE_DUMB`,
+`MESA-LOADER`, `pci id for fd`, `failed to load driver`) is dropped — counted
+and announced once — nothing else.
+
+A caveat the pipe made visible: `deno task dev` evaluates the browser bundle in
+a Deno worker and REFUSES a module that throws at load, so a throw that happens
+only inside an Electron renderer (a dependency that branches on the `Electron`
+user-agent into a Node code path, say) passes dev and passes a browser tab
+pointed at the packaged app's `--port`, and kills the packaged window. The
+renderer log is where it shows.
+
 ### Connection lifecycle
 
 UDS connections have no idle timeout — local sockets are kept alive indefinitely

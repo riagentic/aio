@@ -67,3 +67,22 @@ export {
   type BlobStore,
   openBlobStore,
 } from "./server/blobs.ts";
+
+/** What the server this client talks to announced in its hello — its aio
+ *  version and its app's derived build (`peerHello().app`), so a CLI client can
+ *  say which build it is connected to. */
+export { peerHello } from "./protocol/protocol-version.ts";
+
+/** THE version this app is running — `major.minor.build`, resolved exactly as
+ *  the build resolves it (docs/build/versioning.md): a compiled binary reports
+ *  the stamp its build embedded, a source run derives it from the app's own
+ *  repository, and a dirty tree carries `-dirty.<hash8>`. `"unknown (…)"` when
+ *  it genuinely cannot be told, never a confident `0.0.0`.
+ *
+ *  Already what `--version`, the boot line, `/__aio/health` and the update
+ *  check report. Exported so an app can SHOW its own version — a status bar,
+ *  an About box, a bug report — without a second, hand-stamped constant to
+ *  keep in step with deno.json. Server-side (it reads the app's deno.json and
+ *  build stamp): call it in the entry or a cell method and put the string in
+ *  cell state, the way any other server fact reaches the browser. */
+export { _appVersion as appVersion } from "./server/aio.ts";

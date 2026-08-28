@@ -33,7 +33,6 @@ Deno.test("serverAuth: throws without auth, is the live store with it, released 
   const app = await aio.run({
     cells: [c],
     appId: "test-server-auth",
-    appVersion: "0.0.0",
     client: "server-only",
     persist: false,
     libraryMode: true,

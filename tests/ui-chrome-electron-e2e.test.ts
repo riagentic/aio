@@ -10,6 +10,7 @@ import { join } from "@std/path";
 import { electronMainScriptUDS } from "../src/electron/electron.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { testDisplayEnv } from "../src/testing/test-display.ts";
+import { stopChild } from "./stop-child.ts";
 
 const ELECTRON_BIN = "node_modules/.bin/electron";
 const CDP_PORT = freePort();
@@ -198,10 +199,7 @@ Deno.test({
       assert(status !== null, "clicking close did not close the window");
     } finally {
       session?.close();
-      try {
-        proc.kill();
-      } catch { /* already gone */ }
-      await proc.status.catch(() => {});
+      await stopChild(proc, { quiet: true });
       await Deno.remove(dir, { recursive: true }).catch(() => {});
     }
   },

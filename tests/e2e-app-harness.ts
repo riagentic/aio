@@ -9,6 +9,7 @@
 import { assert } from "@std/assert";
 import { resolve } from "@std/path";
 import { scaffold } from "../src/am/am-cmd-create.ts";
+import { stripVersionToken } from "../src/build/build-version.ts";
 import { descendantPids } from "../src/server/single-instance-lock.ts";
 
 export const REPO_ROOT = resolve(import.meta.dirname!, "..");
@@ -34,6 +35,29 @@ export async function makeApp(
   await Deno.mkdir(resolve(dir, "dep"), { recursive: true });
   await Deno.symlink(REPO_ROOT, resolve(dir, "dep/aio"));
   return dir;
+}
+
+/** Is this the compiled binary a FLEET build placed in dist/? Placed names
+ *  carry THE build version (`app-0.1.7`, `app-0.1.0-nogit.9f3ac2b1`), so
+ *  "has no dot" — the rule for a builder's unversioned output in the project
+ *  root — is wrong there: strip the version token, then ask for no extension. */
+export function isPlacedBinary(name: string): boolean {
+  if (name === "manifest.json") return false;
+  const stripped = stripVersionToken(name);
+  return stripped === name ? false : !stripped.includes(".");
+}
+
+/** The one compiled binary a fleet build placed in `<dir>/dist/`. */
+export function placedBinary(dir: string): string {
+  const bins = [...Deno.readDirSync(resolve(dir, "dist"))]
+    .filter((e) => e.isFile && isPlacedBinary(e.name)).map((e) => e.name);
+  assert(
+    bins.length === 1,
+    `expected exactly one placed binary in dist/, got: ${
+      bins.join(", ") || "none"
+    }`,
+  );
+  return resolve(dir, "dist", bins[0]!);
 }
 
 /** Run the single-target build pipeline (`dep/aio/src/build.ts`) with raw

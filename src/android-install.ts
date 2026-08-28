@@ -25,6 +25,7 @@
 import { join } from "@std/path";
 import { resolveSdk } from "./build/build-helpers.ts";
 import { androidApplicationId } from "./build/build-android.ts";
+import { stripVersionToken } from "./build/build-version.ts";
 
 const dec = new TextDecoder();
 
@@ -279,7 +280,12 @@ async function main(): Promise<void> {
     );
   }
 
-  const appId = androidApplicationId(apk.replace(/\.apk$/, ""));
+  // The label the build derived the application id from — the file name
+  // minus `.apk` and minus THE build version the fleet placed in it
+  // (`myapp-1.2.345-client.apk` was built as `myapp-client`).
+  const appId = androidApplicationId(
+    stripVersionToken(apk.replace(/\.apk$/, "")),
+  );
   if (!has("no-launch") && appId) {
     const start = await run(adb, [
       "-s",

@@ -97,7 +97,6 @@ Deno.test("cell access: network callers gated, server code bypasses (e2e)", asyn
   const app = await aio.run({
     cells: [vault],
     appId: "test-cell-access",
-    appVersion: "0.0.0",
     client: "server-only",
     persist: false,
     libraryMode: true,
@@ -181,7 +180,6 @@ Deno.test("cell access: row-level predicate sees method args over the wire (e2e)
   const app = await aio.run({
     cells: [docs],
     appId: "test-cell-access-row",
-    appVersion: "0.0.0",
     client: "server-only",
     persist: false,
     libraryMode: true,

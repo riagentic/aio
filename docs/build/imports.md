@@ -49,9 +49,24 @@ methods: {
 ```
 
 Cell methods run server-side, so the import only ever executes on the server.
-The linter (`aiol`) recognizes the suffix and stays quiet; `@std/*` and `node:*`
-imports reached any other way are stubbed by the build with a clear "is
-server-only" runtime error instead of a cryptic bundling failure.
+The linter (`aiol`) recognizes the suffix and stays quiet.
+
+**The escape hatch is exactly this: a dynamic import of a `*.server.ts` module**
+(or of `aio/server` / `aio/build`). Those are the only imports the bundler marks
+external. A dynamic import of any _other_ module is **followed** by esbuild —
+`await import("./helpers.ts")` puts `helpers.ts` in the bundle, and a static
+`import { join } from "@std/path"` inside it is in the bundle too, one hop past
+the `import()` that looked like a boundary. That is a refused build, and — since
+alpha70 — a refused dev boot, with the chain named:
+
+```
+✗ server-only module(s) reached by the BROWSER bundle:
+       helpers.ts — "@std/path" is server-only and statically imported by the BROWSER bundle
+         via App.tsx → helpers.ts
+```
+
+A _dynamic_ `await import("node:fs")` / `import("@std/path")` written directly
+inside a method body is fine: it is stubbed, and dead code in the browser.
 
 **2b. Server-only _symbols_ live on `"aio/server"`.**
 
@@ -224,18 +239,22 @@ AIO checks for common import mistakes at four levels:
 1. **Lint time** (`aiol`): Flags `@std/*`, `node:*`, `Deno.*` in cell files and
    `.tsx` files. Flags bare specifiers not in `deno.json`. Flags plain dynamic
    imports of server-only files — and recognizes `*.server.ts` as safe.
-2. **Graph validation** (dev server + `deno task check:graph`): walks the module
-   graph from your UI entry, severity split by certainty of breakage:
-   - **Blocking** (diagnostic page in dev, non-zero exit in `check:graph`) — a
-     _guaranteed_ client break: a static `node:` builtin or an omitted `aio`
-     server symbol (`createDB`, `connectCli`, …) reachable from the UI entry.
-     aio's Electron renderer is a sandboxed browser (`nodeIntegration:false`),
-     so these can't resolve → a blank screen every boot. Fail loud + attributed
-     (`file:line` + fix) beats a silent white void, and `deno task compile`
-     fails the same imports (dev==prod). Fix: move the module behind
-     `await import(...)` in a server-only path, or a `*.server.ts` file.
-   - **Warning** — a _conditional_ break: `Deno.*` usage (only fails if that
-     path runs client-side) or a maybe-safe `@std/*` module.
+2. **Graph validation** (dev server + `deno task check:graph`) — two halves,
+   both blocking (diagnostic page in dev, non-zero exit in `check:graph`):
+   - **The walk**: the module graph from your UI entry, as written. A missing
+     file, a typo'd path, a static `*.server.ts` import, a static `node:`
+     builtin or an omitted `aio` server symbol (`createDB`, `connectCli`, …) in
+     an eagerly-linked module — attributed `file:line` + fix. `Deno.*` usage and
+     maybe-safe `@std/*` stay warnings (a _conditional_ break).
+   - **The prod graph**: the browser bundle is then built **in memory with the
+     build's own esbuild invocation**, audited and evaluated — see
+     [Dev mode → Dev evaluates the prod graph](dev-mode.md#dev-evaluates-the-prod-graph).
+     Whatever `deno task build` refuses, this refuses, from the same decider
+     (`src/build/graph-audit.ts`), with the same words: a server-only module the
+     _resolved_ graph reaches (including past a dynamic import of a plain
+     module), a Node global (`Buffer`, `process`, `global`, `__dirname`,
+     `__filename`, `require`, `module`) referenced at module scope, or a bundle
+     whose top level throws when it is actually run.
 
    `check:graph` is the CI-friendly one-shot — add it to your test gate so a
    boundary break can't reach a running server:
@@ -244,11 +263,60 @@ AIO checks for common import mistakes at four levels:
    // deno.json → tasks
    "check:graph": "deno run -A jsr:@ria/aio/scripts/check-graph.ts"
    ```
-3. **Build time**: esbuild plugin marks `*.server.ts` dynamic imports external
-   and intercepts `@std/*` and `node:*` — clear error messages instead of
-   cryptic failures.
+3. **Build time**: the same bundle, written to disk, judged by the same decider,
+   then **evaluated** before it can become an artifact
+   (`[build] ✓ bundle audited + evaluated`). A bundle that cannot load never
+   reaches `deno compile`, an APK or an installer.
 4. **Runtime**: Error overlay shows fix suggestions (e.g., "Add X to deno.json
    imports").
+
+### Node globals — aio does not polyfill
+
+esbuild's `platform: "browser"` supplies no `Buffer`, `process`, `global`,
+`__dirname`, `__filename`, `require` or `module` (the one exception is
+`process.env.NODE_ENV`, which esbuild defines to a string). An npm dependency
+that touches one at module scope — a crypto or wallet SDK built for Node is the
+usual case — blank-screens the whole app at load with
+`ReferenceError: Buffer is not defined`, and every test stays green because
+tests render server-side where `Buffer` exists. Fix: keep that dependency
+server-side (a `*.server.ts` module, dynamic-imported from a cell method), or
+provide the global from a module imported _before_ it if it truly must run in
+the browser. There is no `build.polyfills` option — say what you mean in the
+code.
+
+**The evaluation decides; the scan explains.** The bundle is run with the Node
+globals deleted:
+
+- it **loads** → not refused, and each module-scope touch is printed as a note
+  (`… touches \`Buffer\` at module scope and the bundle still loads — something
+  defines it first`). That is the "provide the global before it" fix working:
+  the scan cannot see a shim two imports earlier, so the scan alone must not
+  refuse.
+- it **throws** → refused, with the scan's `file:line` and the import chain as
+  the attribution for `ReferenceError: Buffer is not defined` (and the
+  evaluation catches what the scan misses — a static class field, a top-level
+  call).
+
+`require` and `module` in a CommonJS input are the exception the scan skips
+outright: esbuild wraps every CJS file as `__commonJS((exports, module) => …)`
+and rewrites bare `require` to its own `__require`, so the bundle supplies both.
+`module.exports = x` is how the file is spelled, not a browser break.
+
+A server-only leak is judged differently, on the audit alone: a key in
+`dist/app.js` is shipped whether or not the page paints, and no evaluation can
+see it.
+
+The static scan is a heuristic about _scope_ (brace depth, arrow bodies), and a
+heuristic can be wrong. Acknowledge one line with
+`// aio-ok: node-global <reason>` on the line or the line above:
+
+```ts
+const toHex = (b) => Buffer.from(b).toString("hex"); // aio-ok: node-global — arrow body, runs server-side
+```
+
+That silences the **static scan only**. The evaluation still runs the bundle, so
+a line that really does execute at load is still refused — a wrong
+acknowledgement cannot ship a blank page.
 
 ## CSS in builds
 

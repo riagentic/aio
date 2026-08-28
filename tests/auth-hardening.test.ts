@@ -57,7 +57,6 @@ async function boot(
   const app = await aio.run({
     cells: [cell(`c_${name}`, { state: { n: 0 }, methods: {} })],
     appId: `test-${name}-${Deno.pid}`,
-    appVersion: "0.0.0",
     client: "server-only",
     persist: false,
     libraryMode: true,
@@ -744,7 +743,6 @@ Deno.test("totp: `totp: false` disables enrollment, never verification", async (
   const app = await aio.run({
     cells: [cell("t9", { state: { n: 0 }, methods: {} })],
     appId: `test-totpoff-${Deno.pid}`,
-    appVersion: "0.0.0",
     client: "server-only",
     persist: false,
     libraryMode: true,

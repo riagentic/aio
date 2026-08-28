@@ -34,7 +34,7 @@ Deno.test({
       `import { aio, cell } from "${REPO}/mod.ts";
 const c = cell("p", { state: { n: 1 }, visible: "all", methods: {} });
 await aio.run({
-  cells: [c], appId: ${JSON.stringify(appId)}, appVersion: "0.0.0",
+  cells: [c], appId: ${JSON.stringify(appId)},
   client: "server-only", persist: false, port: 0,
   appDir: ${JSON.stringify(dir)},
 });

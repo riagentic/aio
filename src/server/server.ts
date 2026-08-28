@@ -472,7 +472,13 @@ export function createServer(config: ServerConfig): ServerHandle {
     }
   }
   const graphValidation = !prod
-    ? startGraphValidation(absBaseDir, importMapObj, debug, uiEntry)
+    ? startGraphValidation(
+      absBaseDir,
+      importMapObj,
+      debug,
+      uiEntry,
+      config.shell,
+    )
     : null;
   if (!prod) scanServerOnlyImports(absBaseDir, debug);
 
@@ -482,6 +488,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     getUIState,
     debug,
     prod,
+    appVersion: config.appVersion,
     maxConnections: config.maxConnections,
     wsLimits: config.wsLimits,
     expose: config.expose,
@@ -618,6 +625,7 @@ export function createServer(config: ServerConfig): ServerHandle {
       onReload: config.onReload,
       onCellChange: config.onCellChange,
       onGraphResult: (result) => graphValidation?.setResult(result),
+      prodGraph: graphValidation?.prodGraph,
     });
     watcher.start();
   }

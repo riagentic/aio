@@ -6,7 +6,7 @@
 
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
-import { readPid, resolveAmAppId } from "./am-utils.ts";
+import { liveLock, resolveAmAppId } from "./am-utils.ts";
 import { appPageTargets, cdpConnect, cdpTargets } from "./am-cdp.ts";
 
 /** Pure: the output path — `--out`, or `<appId>-<stamp>.png` in the cwd. */
@@ -45,7 +45,7 @@ export async function cmdShot(
     );
     Deno.exit(1);
   }
-  const pf = readPid(appId);
+  const pf = liveLock(appId); // wherever the instance's home is
   if (!pf) {
     outError(`${appId} is not running (no lock) — am start first`, mode);
     Deno.exit(1);

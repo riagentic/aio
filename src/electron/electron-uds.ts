@@ -15,6 +15,7 @@ import {
   tmplCrashGuard,
   tmplKeyboardShortcuts,
   tmplParentWatch,
+  tmplRendererDiagnostics,
   tmplWillNavigate,
   tmplWindowShape,
   toSlug,
@@ -46,6 +47,15 @@ export function electronMainScriptUDS(url: string, socketPath: string, opts: {
    *  (page from dist/): only what dist/ does not hold — the app's custom
    *  `routes` and /__aio/* — falls through to it, streamed. */
   httpSocketPath?: string;
+  /** TEST WHAT YOU SHIP — `AIO_ELECTRON_PROTOCOL=1`. Load the window over
+   *  `aio://app/` in dev too, proxying to the HTTP server instead of a socket
+   *  or dist/. The packaged artifact is the ONLY thing that took the scheme
+   *  path (a privileged custom scheme, the preload bridge as the sole
+   *  transport, no `__aioConfig` in the shell, the `cfg` frame filling it), and
+   *  `deno task dev` never did — so a renderer that died on that path died in
+   *  the field first. With this, the shipped path runs on a developer's
+   *  machine against the dev server. */
+  forceProtocol?: boolean;
 }): string {
   const w = opts.meta?.width ?? 800;
   const h = opts.meta?.height ?? 600;
@@ -81,13 +91,24 @@ ${tmplParentWatch()}
 //    port), or the HTTP server (everything else) ──
 const BASE_DIR = ${JSON.stringify(opts.baseDir ?? "")};
 const HTTP_SOCK = ${JSON.stringify(opts.httpSocketPath ?? "")};
+// The HTTP server's URL — where a forced aio:// window (AIO_ELECTRON_PROTOCOL=1)
+// proxies to when this app has no socket and no dist/. Same handler, same
+// bytes, over TCP instead of a socket path.
+const HTTP_URL = ${JSON.stringify(url)};
+const FORCE_PROTOCOL = ${JSON.stringify(!!opts.forceProtocol)};
 const FROM_DISK = !!(BASE_DIR && fs.existsSync(path.join(BASE_DIR, 'app.js')));
 // Disk wins when a bundle is there: the page needs no server at all (the
 // app's routes still fall through to HTTP_SOCK when it is set — see the
 // handler). Otherwise the socket, when this app has one — that is the dev
 // app that binds no port, and http:// would have nothing to answer it.
 const FROM_SOCKET = !FROM_DISK && !!HTTP_SOCK;
-const USE_PROTOCOL = FROM_DISK || FROM_SOCKET;
+// …or the developer asked for the shipped path explicitly: the page comes
+// through the same aio:// handler, proxied to http://. Nothing else changes.
+const FROM_HTTP = !FROM_DISK && !FROM_SOCKET && FORCE_PROTOCOL;
+const USE_PROTOCOL = FROM_DISK || FROM_SOCKET || FROM_HTTP;
+if (FROM_HTTP) {
+  console.warn('[aio:electron] AIO_ELECTRON_PROTOCOL=1 — the window loads aio://app/ (the packaged path) proxied to ' + HTTP_URL);
+}
 // machine U11 — never silent: when a dist dir was given but its app.js is
 // missing, the window silently falls back from disk (aio://) to HTTP. Say so.
 if (BASE_DIR && !FROM_DISK) {
@@ -118,10 +139,19 @@ if (USE_PROTOCOL) {
 // chunk. A request body (POST/PUT) is piped in the same way.
 function socketFetch(reqPath, method, headers, body) {
   return new Promise((resolve) => {
-    const http = require('http');
     const { Readable } = require('stream');
+    // The socket when this app has one; otherwise the HTTP server (forced
+    // aio:// in dev). A self-signed --expose cert is this app's own — the
+    // http:// branch trusts it the way certificate-error does below.
+    let target, http;
+    if (HTTP_SOCK) { http = require('http'); target = { socketPath: HTTP_SOCK }; }
+    else {
+      const u = new URL(HTTP_URL);
+      http = require(u.protocol === 'https:' ? 'https' : 'http');
+      target = { host: u.hostname, port: u.port, rejectUnauthorized: false };
+    }
     const r = http.request(
-      { socketPath: HTTP_SOCK, path: reqPath, method: method || 'GET', headers: headers || {} },
+      { ...target, path: reqPath, method: method || 'GET', headers: headers || {} },
       (res) => {
         const h = {};
         for (const [k, v] of Object.entries(res.headers)) {
@@ -138,7 +168,7 @@ function socketFetch(reqPath, method, headers, body) {
     // A dead socket must not hang the window forever on a blank page. Say what
     // failed, in the window, where the developer is already looking.
     r.on('error', (e) => resolve(new Response(
-      'aio: cannot reach the app over its socket (' + HTTP_SOCK + '): ' + e.message,
+      'aio: cannot reach the app over its ' + (HTTP_SOCK ? 'socket (' + HTTP_SOCK + ')' : 'HTTP server (' + HTTP_URL + ')') + ': ' + e.message,
       { status: 502, headers: { 'Content-Type': 'text/plain' } },
     )));
     if (body && typeof body.getReader === 'function') Readable.fromWeb(body).pipe(r);
@@ -182,7 +212,7 @@ app.on('ready', () => {
         const body = (req.method === 'GET' || req.method === 'HEAD') ? undefined : req.body;
         return socketFetch(url.pathname + url.search, req.method, hdrs, body);
       };
-      if (FROM_SOCKET) return await viaSocket();
+      if (FROM_SOCKET || FROM_HTTP) return await viaSocket();
       let pathname;
       try { pathname = decodeURIComponent(url.pathname); } catch { pathname = url.pathname; }
       if (pathname === '/' || pathname === '') {
@@ -216,7 +246,7 @@ app.on('ready', () => {
         // (<img src="/nft-image/x"> resolves to aio://app/nft-image/x on this
         // origin) and /__aio/*. Proxied unchanged, streamed. Without a socket
         // there is nothing behind this path: 404, as before.
-        if (HTTP_SOCK) return await viaSocket();
+        if (HTTP_SOCK || FROM_HTTP) return await viaSocket();
         return new Response('Not Found', { status: 404 });
       }
     });
@@ -246,6 +276,7 @@ ${tmplWindowShape(opts.meta, { preload: "preloadFile" })}
   } catch {}
 
 ${tmplBoundsTracking()}
+${tmplRendererDiagnostics(true)}
 
   // ── UDS connection — NDJSON over Unix socket ──
   //
