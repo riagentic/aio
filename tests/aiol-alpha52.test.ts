@@ -167,7 +167,7 @@ export const t = cell('t', {
     );
     const issues = await run(dir);
     assertEquals(issues.length, 1);
-    assertStringIncludes(issues[0]!.message, "object form");
+    assertStringIncludes(issues[0]!.message, "use the object form");
     assertEquals(issues[0]!.safeFix, undefined);
   });
 });
@@ -210,8 +210,12 @@ export const t = cell('t', {
 `,
     );
     const { issues, fixed } = await runAndFix(dir);
-    const order = issues.filter((i) => i.message.includes("deprecated order"));
-    const key = issues.filter((i) => i.message.includes("`backoff` option"));
+    const order = issues.filter((i) =>
+      i.message.includes("swap the last two arguments")
+    );
+    const key = issues.filter((i) =>
+      i.message.includes("schedule.poll({ backoff }) was removed")
+    );
     assertEquals(order.length, 1);
     assertEquals(key.length, 1);
     assertStringIncludes(fixed, "factor: 2");

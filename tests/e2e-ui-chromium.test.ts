@@ -91,8 +91,6 @@ Deno.test({
   ignore: BROWSER === null,
   // The browser and app are external processes — Deno's sanitizers can't see
   // their lifecycles; both are killed in finally blocks below.
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const port = freePort();
     const base = `http://localhost:${port}`;

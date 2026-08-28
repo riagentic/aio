@@ -25,7 +25,7 @@ export type Issue = {
 };
 
 /** Lint report — issues found, checks passed, and scan statistics. */
-export type Report = {
+export type LintReport = {
   issues: Issue[];
   passed: string[];
   stats: {

@@ -14,7 +14,7 @@ behave right over there?_
 
 |                         | what it runs                                          | who drives it              | cost                                 |
 | ----------------------- | ----------------------------------------------------- | -------------------------- | ------------------------------------ |
-| `deno task test:wine`   | the Windows `.exe` under Wine, headless               | CI                         | seconds; part of `test:build`        |
+| `deno task test:wine`   | the Windows `.exe` under Wine, headless               | CI, opt-in                 | seconds; not in `check:release`      |
 | `deno task lab`         | install → create → dev → compile in Ubuntu containers | CI                         | minutes                              |
 | `am lab windows\|macos` | a **real** Windows/macOS desktop in QEMU+KVM          | **a person, in a browser** | tens of minutes and tens of GB, once |
 

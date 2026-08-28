@@ -80,8 +80,6 @@ app.close();
 Deno.test({
   name: "e2e: connectCli over wss to a LAN address, pinning the app's own cert",
   ignore: LAN_IP === null,
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const root = await Deno.makeTempDir({ prefix: "aio-lan-client-" });
     const home = join(root, "home");

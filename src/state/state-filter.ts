@@ -1,6 +1,6 @@
 // Pure state filtering — cell field filters + patch strategy filtering
 import type { CellFieldFilter } from "./cell-types.ts";
-import type { Patch } from "immer";
+import type { WirePatch as Patch } from "../protocol/patch-ops.ts";
 
 /** Per-cell patch delivery strategy */
 export type CellPatchStrategy = "raw" | "skip" | "filter" | "full";
@@ -269,6 +269,10 @@ export function filterPatchesByStrategy(
           kept.push(op);
           continue;
         }
+        // An `append` extends a STRING at an ancestor of the included path —
+        // a string has no sub-branch to include, so (exactly like a `replace`
+        // whose value lacks the included path) nothing survives projection.
+        if (op.op === "append") continue;
         let projected: unknown = MISSING;
         for (const rest of ancestorRests) {
           const picked = pickPath((op as { value: unknown }).value, rest);
@@ -292,7 +296,10 @@ export function filterPatchesByStrategy(
           dropped = true;
           break;
         }
-        if (m.kind === "ancestor" && "value" in out) {
+        // An `append` carries a string suffix: nothing excluded can be
+        // inside it, so it passes as-is (a `replace` of the same ancestor
+        // would carry an object and be stripped below).
+        if (m.kind === "ancestor" && "value" in out && out.op !== "append") {
           // The op replaces an ancestor — its value carries the excluded
           // field. Strip it from the payload before sending.
           out = { ...out, value: deepExclude(out.value, m.rest) };

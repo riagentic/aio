@@ -64,7 +64,10 @@ export type UDSClient = {
   lastFullJson?: string;
 };
 
-type PatchEntry = { cell: string; ops: import("immer").Patch[] };
+type PatchEntry = {
+  cell: string;
+  ops: import("../protocol/patch-ops.ts").WirePatch[];
+};
 
 export type UDSHandle = {
   broadcast: (msg: string) => void;

@@ -35,8 +35,6 @@ type TimelineResp = {
 Deno.test({
   name: "e2e timeline: a dispatch surfaces on the trojan route with its diff",
   ignore,
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     await withE2E({ cells: CELLS, app: APP }, async ({ server, tab }) => {
       await waitFor("mount", () => tab.text("n"));

@@ -20,10 +20,10 @@ export const reports = cell("reports", {
 ```
 
 `crunch` is a normal import. Unlike
-[`schedule.blocking`](../debugging/performance.md#move-it-off-thread) — which
-moves a single self-contained function by serializing it — a worker cell loads
-your app's real module graph, so closures, imports and helpers work exactly as
-they do on the main isolate.
+[`blocking`](../debugging/performance.md#move-it-off-thread) — which moves a
+single self-contained function by serializing it — a worker cell loads your
+app's real module graph, so closures, imports and helpers work exactly as they
+do on the main isolate.
 
 ## What it changes, and what it doesn't
 

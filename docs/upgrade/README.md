@@ -12,6 +12,12 @@ reason to keep one (gated by `deno task check:docs`).
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- **[alpha69 → alpha70](from-alpha69-to-alpha70.md) — THE last compat break:**
+  every alpha52-era alias and duplicate import path retired (`aiol --safe-fix`
+  rewrites them all), `memory.gcStressRatio` removed, shape drift refuses in
+  dev, sanitizers on in every test; plus `aio/cli`, `ios-client`, the router on
+  android, `aio.stop()/restart()`, `retireData`, a workspace `share`, and
+  O(change) persist windows.
 - [alpha68 → alpha69](from-alpha68-to-alpha69.md) — no app-code break, but
   **five stricter security defaults** a reverse-proxied or `host: "0.0.0.0"`
   deployment must read; publishing becomes one command (`deno task publish`), a

@@ -281,12 +281,28 @@ function pool(): BlockingPool {
   return (_pool ??= createBlockingPool());
 }
 
+/** Why `blocking` cannot run here, or null when it can. It needs a Deno
+ *  worker pool; a browser bundle or the android/standalone WebView runtime
+ *  has none. Named so the refusal reads as a platform fact with a fix, not as
+ *  `Worker is not defined` three frames down. */
+export function blockingUnavailableReason(id: string): string | null {
+  if (typeof Deno !== "undefined" && typeof Deno.execPath === "function") {
+    return null;
+  }
+  return `[aio] blocking('${id}') is server-only — it runs a Deno worker ` +
+    `pool, which does not exist in a browser/WebView (standalone) runtime. ` +
+    `Call it from a server-side method and let the client read the result ` +
+    `from state.`;
+}
+
 /** Run a self-contained fn off the main thread. See BlockingPool.run. */
 export function blocking<T = unknown>(
   id: string,
   fn: (arg?: unknown) => T | Promise<T>,
   arg?: unknown,
 ): Promise<T> {
+  const why = blockingUnavailableReason(id);
+  if (why) return Promise.reject(new Error(why));
   return pool().run(id, fn, arg);
 }
 /** Cancel a running/queued blocking task by id. */

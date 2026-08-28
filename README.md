@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <code>v1.0.0-alpha69</code> · <a href="LICENSE">MIT</a> ·
+  <code>v1.0.0-alpha70</code> · <a href="LICENSE">MIT</a> ·
   <a href="docs/content.md">Docs</a> ·
   <a href="docs/basics/quickstart.md">Quickstart</a> ·
   <a href="CHANGELOG.md">Changelog</a>
@@ -74,11 +74,11 @@ and aio's whole job is state.
 
 ## What you get
 
-Persistence (worker-thread SQLite) · CRDT sync + offline queue · an ~8 KB
-signals renderer · async methods with cancellation · scheduling · HTTP routes ·
-full auth with 2FA and OIDC · time-travel · `testCell`/`testUI` · single-binary
-builds for browser, Electron, Android, CLI and service — and `am`, a CLI that
-inspects and drives any running app.
+Persistence (worker-thread SQLite) · CRDT sync + offline queue · a ~20 KB
+(gzipped) signals renderer · async methods with cancellation · scheduling · HTTP
+routes · full auth with 2FA and OIDC · time-travel · `testCell`/`testUI` ·
+single-binary builds for browser, Electron, Android, CLI and service — and `am`,
+a CLI that inspects and drives any running app.
 
 And one line runs _any_ aio app straight from its repo — installing whatever is
 missing, building, and starting it:

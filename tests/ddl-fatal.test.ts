@@ -11,7 +11,7 @@ import { assert, assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
 import { applySyncMigrations, SYNC_SCHEMA } from "../src/sync/compact.ts";
 import { initSchema } from "../src/db/state-sync.ts";
-import { createDB } from "../src/db/mod.ts";
+import { createDB } from "../src/server-entry.ts";
 import type { DB } from "../src/db/types.ts";
 import { pk, table, text } from "../src/server/sql.ts";
 

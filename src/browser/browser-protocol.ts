@@ -116,8 +116,8 @@ export {
   _devtoolsConnected,
   _resetDevTools,
   _sendDevTools,
-  connectDevTools,
-  disconnectDevTools,
+  connectReduxDevTools,
+  disconnectReduxDevTools,
 } from "./protocol-devtools.ts";
 
 export {

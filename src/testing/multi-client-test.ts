@@ -87,10 +87,11 @@ export interface TestClient {
   readonly cli: CliApp<Record<string, unknown>>;
 }
 
-/** One received patch — immer's shape on the wire. A full-state resend is
- *  recorded as a single `replace` at the empty path. */
+/** One received patch — immer's shape on the wire, plus aio's `append` (a
+ *  grown string ships as its suffix; `value` is the suffix). A full-state
+ *  resend is recorded as a single `replace` at the empty path. */
 export type Patch = {
-  op: "add" | "replace" | "remove";
+  op: "add" | "replace" | "remove" | "append";
   path: (string | number)[];
   value?: unknown;
 };

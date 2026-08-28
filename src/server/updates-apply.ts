@@ -641,10 +641,13 @@ export async function restoreArtifact(
 ): Promise<void> {
   try {
     await Deno.lstat(previous);
-  } catch {
+  } catch (e) {
     throw new Error(
-      `the artifact to roll back to is gone (${previous}) — nothing was ` +
+      `the artifact to roll back to is ${
+        e instanceof Deno.errors.NotFound ? "gone" : `unreadable (${e})`
+      } (${previous}) — nothing was ` +
         `changed. Re-install the version you want, or run \`am upgrade\`.`,
+      { cause: e },
     );
   }
   const layout = await versionedInstall(current);

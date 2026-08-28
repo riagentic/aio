@@ -4,7 +4,7 @@
 // keeps every issue. (User request: make a 0-noise `lint:aio` run possible.)
 import { assert, assertEquals } from "@std/assert";
 import { nearestFlag, printReport } from "../aiol/mod.ts";
-import type { Report } from "../aiol/types.ts";
+import type { LintReport } from "../aiol/types.ts";
 
 function capture(fn: () => void): string {
   const orig = console.log;
@@ -19,7 +19,7 @@ function capture(fn: () => void): string {
   return lines.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
 }
 
-const reportWith = (issues: Report["issues"]): Report => ({
+const reportWith = (issues: LintReport["issues"]): LintReport => ({
   issues,
   passed: [],
   stats: { filesScanned: 1, cellsFound: 1, testsFound: 0 },

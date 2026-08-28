@@ -289,6 +289,26 @@ Deno.test("am: resolvePort — refuses rather than inventing 8000", () => {
   );
 });
 
+// `--app=X` is a statement, not a guess. When X is not running, falling back
+// to "the one that is" would aim `am dispatch --app=X` at Y — after a note.
+Deno.test("am: resolvePort — an explicit --app never falls back to another app", () => {
+  const other = TEST_APP + "-other";
+  writePid(makePf({ appId: other, pid: Deno.pid, port: 3456, startedAt: 0 }));
+  try {
+    assertThrows(
+      () => resolvePort(undefined, TEST_APP, { explicit: true }),
+      Error,
+      "does not know which app to target",
+    );
+    // The guessed form still finds the sole instance — that rung is for it.
+    if (instances().length === 1) {
+      assertEquals(resolvePort(undefined, TEST_APP), 3456);
+    }
+  } finally {
+    removePid(other);
+  }
+});
+
 // ── Unit: isProcessAlive ─────────────────────────────────────
 
 Deno.test("am: isProcessAlive — current process is alive", () => {
@@ -676,13 +696,13 @@ Deno.test("am-cli: help — lists commands", async () => {
   assertEquals(data.commands.includes("dispatch"), true);
 });
 
-Deno.test("am-cli: log — reads .aio.log", async () => {
+Deno.test("am-cli: logs — reads .aio.log", async () => {
   // Write a temporary log file
   const logContent = "line1 hello\nline2 world\nline3 error found\n";
   await Deno.writeTextFile(".aio.log", logContent);
   try {
     const result = await new Deno.Command("deno", {
-      args: ["run", "-A", "--unstable-kv", amScript, "--json", "log"],
+      args: ["run", "-A", "--unstable-kv", amScript, "--json", "logs"],
       stdout: "piped",
       stderr: "piped",
     }).output();
@@ -696,11 +716,11 @@ Deno.test("am-cli: log — reads .aio.log", async () => {
   }
 });
 
-Deno.test("am-cli: log — filter works", async () => {
+Deno.test("am-cli: logs — filter works", async () => {
   await Deno.writeTextFile(".aio.log", "info: ok\nerror: bad\ninfo: fine\n");
   try {
     const result = await new Deno.Command("deno", {
-      args: ["run", "-A", "--unstable-kv", amScript, "--json", "log", "error"],
+      args: ["run", "-A", "--unstable-kv", amScript, "--json", "logs", "error"],
       stdout: "piped",
       stderr: "piped",
     }).output();
@@ -917,39 +937,39 @@ function runAmOnPort(port: number, args: string[]) {
   });
 }
 
-Deno.test("am-cli: tt undo — sends command to server", async () => {
+Deno.test("am-cli: timetravel undo — sends command to server", async () => {
   await withTTServer(async () => {
-    const r = await runAmOnPort(AM_TT_PORT, ["tt", "undo"]);
+    const r = await runAmOnPort(AM_TT_PORT, ["timetravel", "undo"]);
     assertEquals(r.code, 0);
   });
 });
 
-Deno.test("am-cli: tt goto N — sends goto with index", async () => {
+Deno.test("am-cli: timetravel goto N — sends goto with index", async () => {
   await withTTServer(async () => {
-    const r = await runAmOnPort(AM_TT_PORT, ["tt", "goto", "2"]);
+    const r = await runAmOnPort(AM_TT_PORT, ["timetravel", "goto", "2"]);
     assertEquals(r.code, 0);
   });
 });
 
-Deno.test("am-cli: tt pause/resume — sends toggle", async () => {
+Deno.test("am-cli: timetravel pause/resume — sends toggle", async () => {
   await withTTServer(async () => {
-    const r1 = await runAmOnPort(AM_TT_PORT, ["tt", "pause"]);
+    const r1 = await runAmOnPort(AM_TT_PORT, ["timetravel", "pause"]);
     assertEquals(r1.code, 0);
-    const r2 = await runAmOnPort(AM_TT_PORT, ["tt", "resume"]);
+    const r2 = await runAmOnPort(AM_TT_PORT, ["timetravel", "resume"]);
     assertEquals(r2.code, 0);
   });
 });
 
-Deno.test("am-cli: tt — no subcommand exits with error", async () => {
+Deno.test("am-cli: timetravel — no subcommand exits with error", async () => {
   await withTTServer(async () => {
-    const r = await runAmOnPort(AM_TT_PORT, ["tt"]);
+    const r = await runAmOnPort(AM_TT_PORT, ["timetravel"]);
     assertEquals(r.code, 1);
   });
 });
 
-Deno.test("am-cli: tt goto — missing N exits with error", async () => {
+Deno.test("am-cli: timetravel goto — missing N exits with error", async () => {
   await withTTServer(async () => {
-    const r = await runAmOnPort(AM_TT_PORT, ["tt", "goto"]);
+    const r = await runAmOnPort(AM_TT_PORT, ["timetravel", "goto"]);
     assertEquals(r.code, 1);
   });
 });

@@ -20,7 +20,7 @@ import {
 } from "../src/server/persistence.ts";
 import { SKV_SCHEMA, sqliteKv } from "../src/server/skv-sqlite.ts";
 import type { SkvInstance } from "../src/server/skv.ts";
-import { createDB } from "../src/db/mod.ts";
+import { createDB } from "../src/server-entry.ts";
 import type { DB } from "../src/db/types.ts";
 import {
   BROADCAST_FULL_WARN_BYTES,

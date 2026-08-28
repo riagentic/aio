@@ -63,6 +63,8 @@ import {
 } from "./updates-apply.ts";
 import { dataCompatibility } from "./updates-core.ts";
 import { rebuildFromGit } from "./updates-rebuild.ts";
+import { retireProfile } from "./updates-retire.ts";
+import { isServiceSupervised } from "./aio-lifecycle.ts";
 
 /** How many superseded artifacts to keep so a manual rollback is a rename. */
 const KEEP_OLD = 3;
@@ -104,6 +106,10 @@ export type UpdatesRuntimeDeps = {
   /** Where a git rebuild works. Injected in tests; defaults to a temp dir. */
   makeWorkDir?: () => Promise<string>;
 };
+
+/** `retireData` — see `retireProfile`. Read here through the public
+ *  `ApplyOptions`; the field is declared on the cell's type. */
+type ApplyOpts = ApplyOptions & { retireData?: boolean };
 
 export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
   const { config, log } = deps;
@@ -380,9 +386,11 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
     return path;
   }
 
-  async function applyManifest(opts: ApplyOptions): Promise<void> {
+  async function applyManifest(opts: ApplyOpts): Promise<void> {
     const accepted = opts.acceptDataLoss === true;
-    const m = offered ?? (accepted ? blocked?.manifest ?? null : null);
+    const retire = opts.retireData === true;
+    const m = offered ??
+      (accepted || retire ? blocked?.manifest ?? null : null);
     if (!m) {
       throw new Error(
         "no verified update is staged to apply — run updates.check() first, " +
@@ -392,7 +400,21 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
     // The one-way door, opened. Everything about it is loud on purpose: this
     // is an operator overriding the gate that exists to protect their data.
     let forcedBackup: string | undefined;
-    if (accepted && !offered && blocked) {
+    if (retire && !offered && blocked) {
+      // The OTHER door: the data is not migrated, so it needs no snapshot —
+      // the whole profile is moved aside, intact, at handover. Loud all the
+      // same: this is an operator choosing to start over.
+      for (const b of blocked.blockers) {
+        log.error(
+          `retireData: installing ${m.version} OVER a blocker — ${b}`,
+        );
+      }
+      log.error(
+        `retireData: proceeding with ${m.version}. The current profile will ` +
+          `be RETIRED (moved, never deleted) to <home>/archive/ when the app ` +
+          `restarts, and ${m.version} starts on an empty one.`,
+      );
+    } else if (accepted && !offered && blocked) {
       for (const b of blocked.blockers) {
         log.error(
           `acceptDataLoss: installing ${m.version} OVER a blocker — ${b}`,
@@ -499,14 +521,16 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
         `installed ${deps.appVersion} → ${m.version}; restarting`,
       );
       recordInstalledSha256(deps.dataDir, m.sha256);
-      deferHandOver(() =>
-        void (deps.swapDirectory ?? swapDirectoryDetached)({
-          current,
-          staged,
-          fromVersion: deps.appVersion,
-          args: deps.argv,
-          pending,
-        })
+      deferHandOver(
+        () =>
+          void (deps.swapDirectory ?? swapDirectoryDetached)({
+            current,
+            staged,
+            fromVersion: deps.appVersion,
+            args: deps.argv,
+            pending,
+          }),
+        retire,
       );
       return;
     }
@@ -533,7 +557,7 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       "updates",
       `installed ${deps.appVersion} → ${m.version}; restarting`,
     );
-    startHandOver(current);
+    startHandOver(current, retire);
   }
 
   /** Take an update from a repository: clone, build, gate, swap.
@@ -543,7 +567,7 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
    *  been BUILT, so the data gate runs after the build instead of before the
    *  download. Everything the gate protects is still protected — nothing has
    *  been swapped at that point, and a blocked build is thrown away. */
-  async function applyGit(): Promise<void> {
+  async function applyGit(opts: ApplyOpts): Promise<void> {
     const workDir = await (deps.makeWorkDir ??
       (() => Deno.makeTempDir({ prefix: "aio-rebuild-" })))();
     try {
@@ -610,7 +634,7 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
         "updates",
         `rebuilt ${config.source} @ ${built.sha.slice(0, 8)}; restarting`,
       );
-      startHandOver(current);
+      startHandOver(current, opts.retireData === true);
     } finally {
       await Deno.remove(workDir, { recursive: true }).catch(() => {});
     }
@@ -656,10 +680,9 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
    *  disappear before booting, because aio refuses to start while another
    *  instance holds the app lock. Under a supervisor there is nothing to
    *  launch — exiting IS the restart, and launching would fight the unit. */
-  function startHandOver(artifact: string): void {
-    const supervised = !!Deno.env.get("INVOCATION_ID") || // systemd
-      !!Deno.env.get("SUPERVISOR_PROCESS_NAME") ||
-      Deno.env.get("AIO_SUPERVISED") === "1";
+  function startHandOver(artifact: string, retire = false): void {
+    // ONE decider for "under a service manager", shared with aio.restart().
+    const supervised = isServiceSupervised();
     deferHandOver(() => {
       if (supervised) {
         log.info(
@@ -669,7 +692,7 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       } else {
         (deps.relaunch ?? relaunch)({ artifact, args: deps.argv });
       }
-    });
+    }, retire);
   }
 
   /** Run the shutdown + restart OUTSIDE the cell method that asked for it.
@@ -684,12 +707,34 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
    *  The promise is kept so a test (and anything else that cares) can await the
    *  restart it scheduled; nothing in production awaits it, because by then
    *  this process is gone. */
-  function deferHandOver(run: () => void): void {
+  function deferHandOver(run: () => void, retire = false): void {
     handover = new Promise<void>((resolve) => {
       setTimeout(() => {
         void (async () => {
           try {
             await deps.shutdown?.();
+            // `retireData`: persistence is closed NOW and the successor has
+            // not started — the one moment a profile can be moved whole. A
+            // failed step is named, the previous data stays put, and the
+            // handover still happens: the new build is already installed, so
+            // it starts against the previous profile under the ordinary
+            // rollback net (two boots to serve, or the old build comes back).
+            if (retire) {
+              try {
+                await retireProfile({
+                  dataDir: deps.dataDir,
+                  appName: deps.appName,
+                  appVersion: deps.appVersion,
+                  log,
+                });
+              } catch (e) {
+                log.error(
+                  `${e instanceof Error ? e.message : e}. The app restarts ` +
+                    `against the previous data; retire it by hand (stop the ` +
+                    `app, move <data> aside) or try again.`,
+                );
+              }
+            }
             run();
           } catch (e) {
             // Nothing is left to catch this: the method that started the
@@ -762,7 +807,7 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
     },
     check: (opts) =>
       config.kind === "git" ? checkGit(opts) : checkManifest(opts),
-    apply: async (opts: ApplyOptions = {}) => {
+    apply: async (opts: ApplyOpts = {}) => {
       if (!deps.canInstall && detectTarget() === "source") {
         // Dev and prod run the SAME detect path — this is the only divergence,
         // and it is a refusal rather than a silent no-op so the update UI can
@@ -777,7 +822,7 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       const veto = await vetoed();
       if (veto) throw new Error(veto);
       if (config.kind === "git") {
-        await applyGit();
+        await applyGit(opts);
         return;
       }
       await applyManifest(opts);

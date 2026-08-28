@@ -13,8 +13,6 @@ type Entry = { text: string };
 Deno.test({
   name:
     "boot: a sync cell's snapshot carries its version; the next build migrates it through onMigrate",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const dir = await Deno.makeTempDir({ prefix: "aio-sync-ver-" });
     const prevApps = Deno.env.get("AIO_APPS_DIR");
@@ -132,8 +130,6 @@ Deno.test({
 Deno.test({
   name:
     "boot: a cellDefaults.persist filter that would land on a sync cell REFUSES aio.run(), naming the source",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const dir = await Deno.makeTempDir({ prefix: "aio-sync-cd-" });
     try {

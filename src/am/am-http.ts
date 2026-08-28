@@ -12,6 +12,7 @@
  */
 
 import type { Result } from "./am-types.ts";
+import { _discoveredAppTarget } from "./am-utils.ts";
 import { readPid } from "./am-utils.ts";
 import { isProcessAlive } from "../server/single-instance-lock.ts";
 import { CLIENT_REPLY_TIMEOUT_MS } from "../server/uds.ts";
@@ -297,7 +298,13 @@ async function controlPreflight(
   }
 > {
   const probe = await probeIdentity(ctrl, opts.timeout);
-  if (appId) {
+  // A port `resolvePort` picked BY DISCOVERY is not a stale port — it is the
+  // one instance running, chosen deliberately and announced on stderr. Judging
+  // it against the cwd-derived id made `am` refuse the app it had just said it
+  // was using. A `--port` the user typed never reaches here through that path,
+  // so a genuinely stale one is still refused.
+  const discovered = _discoveredAppTarget();
+  if (appId && !(discovered && probe.appId === discovered)) {
     const mismatch = identityMismatch(probe, ctrl, appId);
     if (mismatch) return { mismatch };
   }
@@ -420,8 +427,12 @@ function prodDiagnosis(status: number, body: string): string {
   return "\n\nThe control API (/__aio/trojan/*) is DEV-ONLY: a production " +
     "build never mounts it, so state, dispatch, sql, surface, trigger, " +
     "timeline and snapshot have nothing to talk to.\n" +
+    // MEASURED against a compiled binary, not assumed: `am errors` reads
+    // `/__aio/error`, which is `!prod`-gated, and `am metrics` goes through the
+    // trojan too — both were listed here as working in production and both
+    // answer 404 there. A list of what works has to be a list of what works.
     "Against a production app, these work: am status, am health, am logs, " +
-    "am errors, am metrics, am data, am installed, am pin.\n" +
+    "am data, am installed, am pin.\n" +
     "To inspect or drive state, run the app in dev (deno task dev) and point " +
     "am at it — or, if this app IS a dev build, it was started with " +
     "--prod/NODE_ENV=production.";

@@ -182,9 +182,8 @@ Deno.test("build (JSR framework): the remote path bundles a real browser app", a
       `globalThis.__aioVersion = ${JSON.stringify(VERSION)}`,
     );
     assertStringIncludes(js, `globalThis.__aioBundleTarget = "browser"`);
-    assertStringIncludes(
-      js,
-      "mount2 as mount",
+    assert(
+      /export\s*\{[^}]*\bas mount\b/.test(js),
       "the ESM shell must export mount()",
     );
     // The browser substitution has to hold over HTTP too: `aio` resolves to the

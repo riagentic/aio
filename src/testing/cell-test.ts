@@ -21,7 +21,10 @@ import { assertionFailure, formatCellState } from "./test-format.ts";
 import { frozenWriteMessage, isFrozenWriteError } from "../state/immutable.ts";
 import { _armTestStrict, _watchUnobservedCalls } from "./test-strict.ts";
 // Server-touching, so NOT in test-strict.ts — see boot-refusals.ts.
-import { _refuseUnsafeCells } from "./boot-refusals.ts";
+import {
+  _refuseUnsafeCells,
+  type HarnessBootOptions,
+} from "./boot-refusals.ts";
 import { attachMeta } from "../state/cell-catalog.ts";
 import { runWithUser } from "../server/auth-context.ts";
 import type { AioUser } from "../server/aio-types.ts";
@@ -610,13 +613,18 @@ export interface BootHandle {
  * h.dispose();
  * ```
  */
-export async function bootCells(cells: CellDef[]): Promise<BootHandle> {
+export async function bootCells(
+  cells: CellDef[],
+  /** The app-level options `aio.run` takes that change how cells compose —
+   *  pass the same ones the app passes, or the harness boots a different app. */
+  opts: HarnessBootOptions = {},
+): Promise<BootHandle> {
   _armTestStrict();
   // Every boot refusal a real `aio.run()` performs, BEFORE anything boots —
   // bootCells composes on the standalone runtime, which is not the server's
   // boot path, so a cell exposing a credential to the UI used to boot green
   // here and be refused in dev AND prod.
-  _refuseUnsafeCells(cells);
+  _refuseUnsafeCells(cells, opts);
   const standalone = await import("../standalone-air.ts");
   // Virtual time is opt-in: the same runtime ships in an Android APK, where a
   // clock nothing advances means no schedule ever fires. Tests want the
@@ -641,6 +649,8 @@ export async function bootCells(cells: CellDef[]): Promise<BootHandle> {
     // deno-lint-ignore no-explicit-any
     cells: cells as any,
     persist: false,
+    cellDefaults: opts.cellDefaults,
+    localFirst: opts.localFirst,
   });
   // A failing async method NOBODY awaited must not pass for silence — the same
   // ledger `testCell` keeps, so the same app code cannot pass one harness and
@@ -764,7 +774,7 @@ export {
   type UIComponentHandle,
   type UIElementHandle,
 } from "./ui-test.ts";
-export { generateUITypes, testGen, testgen } from "./ui-testgen.ts";
+export { generateUITypes, testGen } from "./ui-testgen.ts";
 export {
   findChromium,
   freePort,

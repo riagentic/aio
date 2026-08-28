@@ -105,8 +105,6 @@ async function withSyncApp(
 
 Deno.test({
   name: "sync cell: an awaited method call settles (it is a local-first op)",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: () =>
     withSyncApp(async (board) => {
       assertEquals(
@@ -120,8 +118,6 @@ Deno.test({
 
 Deno.test({
   name: "sync cell: repeated calls leak no pending acks",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: () =>
     withSyncApp(async (board) => {
       const before = _pendingAckCount();
@@ -142,8 +138,6 @@ Deno.test({
 
 Deno.test({
   name: "sync cell: a call made during the engine boot window still settles",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     shimLocalStorage();
     _setAckTimeoutMs(0);
@@ -193,8 +187,6 @@ Deno.test({
 
 Deno.test({
   name: "sync cell: the method's promise settles AFTER the op is on the wire",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: () =>
     withSyncApp(async (board) => {
       await board.add("ordered");

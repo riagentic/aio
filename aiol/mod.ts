@@ -14,8 +14,10 @@
 
 import { buildContext } from "./context.ts";
 import { ALL_CHECKS } from "./checks.ts";
-import type { Issue, Report, Severity } from "./types.ts";
-export type { Issue, Report, SafeFixFn, Severity } from "./types.ts";
+import type { Issue, LintReport, Severity } from "./types.ts";
+/** The programmatic surface (alpha70 names): `lintProject(dir)` returns a
+ *  `LintReport`. */
+export type { Issue, LintReport, SafeFixFn, Severity } from "./types.ts";
 import denoJson from "../deno.json" with { type: "json" };
 
 // Single source of truth — aiol shares the framework version (deno.json).
@@ -90,7 +92,7 @@ function formatIssue(issue: Issue, showFixable = false): string {
  *  `json` (which always keeps every issue, including hints). `hideHints`
  *  silences hint-severity lines in the human report only. */
 export function printReport(
-  report: Report,
+  report: LintReport,
   json: boolean,
   showFixable = false,
   hideHints = false,
@@ -204,7 +206,7 @@ export function printReport(
 // ── Safe fix execution ──────────────────────────────────────────────
 
 async function applySafeFixes(
-  report: Report,
+  report: LintReport,
   projectDir: string,
   /** Where narration goes — stderr under --json, so stdout stays parseable. */
   say: (msg: string) => void = console.log,
@@ -235,8 +237,11 @@ async function applySafeFixes(
 
 // ── CLI ─────────────────────────────────────────────────────────────
 
-/** Run all aiol checks against a project directory and return a structured report */
-export async function lint(projectDir: string): Promise<Report> {
+/** Run all aiol checks against a project directory and return a structured
+ *  report. (alpha70: `lint` → `lintProject`, `Report` → `LintReport` — the
+ *  bare names collided with `aio/extras` `checkCells` (ex-`lint`) and with
+ *  every app's own `Report` type.) */
+export async function lintProject(projectDir: string): Promise<LintReport> {
   const { ctx, report } = await buildContext(projectDir);
   for (const check of ALL_CHECKS) {
     await check(ctx);
@@ -263,7 +268,8 @@ const FLAGS = [
 
 /** The accepted flag closest to `given`, or null. Levenshtein ≤ 3 over a
  *  ten-word vocabulary — cheap, and it catches the real misses (`--safefix`,
- *  `--safe_fix`, `--fix`). */
+ *  `--safe_fix`, `--fix`).
+ *  @internal CLI plumbing pinned by tests/aiol-no-hints.test.ts — not API. */
 export function nearestFlag(given: string): string | null {
   const dist = (a: string, b: string): number => {
     let prev = [...Array(b.length + 1).keys()];
@@ -362,7 +368,7 @@ Only harmless changes: missing config, unused imports. Never changes behavior.
     Deno.exit(1);
   }
 
-  const report = await lint(projectDir);
+  const report = await lintProject(projectDir);
 
   // The report the EXIT CODE and the final printout are computed from. With
   // --safe-fix this is a RE-LINT of the now-fixed tree: the pre-fix report
@@ -394,7 +400,7 @@ Only harmless changes: missing config, unused imports. Never changes behavior.
       );
       // What REMAINS is the truth the caller acts on — print it (report-only
       // findings must stay visible) and judge the exit from it.
-      finalReport = await lint(projectDir);
+      finalReport = await lintProject(projectDir);
       printReport(finalReport, json, true, hideHints);
     }
   } else {

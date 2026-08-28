@@ -2,6 +2,7 @@
 
 import { isScheduleEffect, type ScheduleEffect } from "./schedule.ts";
 import { trackCall, trackPending } from "./method-cancel.ts";
+import { markInflight } from "./dispatch.ts";
 import { isOwnEffect, type OwnEffect } from "./own.ts";
 import type { AsyncMethod, Method, Mutation, SyncMethod } from "./cell-impl.ts";
 import {
@@ -472,6 +473,13 @@ export function buildMethodsReducer(
 // ── Executor builder ───────────────────────────────────────────────────
 
 /** Build the CellExecuteFn for a methods-based cell (async method dispatch + effect handlers). */
+/** The app identity a scoped app carries (`_appId`, set by the runtime that
+ *  composed the cells) — `""` when it has none, the wildcard scope. */
+function appIdOf(app: unknown): string {
+  const id = (app as { _appId?: unknown } | null)?._appId;
+  return typeof id === "string" ? id : "";
+}
+
 export function buildMethodsExecutor(
   name: string,
   prefix: string,
@@ -576,7 +584,12 @@ export function buildMethodsExecutor(
       // trigger is gone (never aborted). That is also exactly why
       // `cancelOn: "self"` can abort its elders but never the incoming call.
       const controller = new AbortController();
-      const untrack = trackCall(prefix, _method, controller);
+      // The owning app's identity (method-cancel.ts AppScope): two apps in one
+      // process may each hold a `cell("ledger", …)`, and a cancel in one must
+      // never reach the other. The scoped app carries it as `_appId`; a
+      // runtime that has not been threaded one yet is the wildcard ("").
+      const appScope = appIdOf(app);
+      const untrack = trackCall(prefix, _method, controller, appScope);
       // Run the method once. For serialize, this is deferred until the previous
       // transactional call has committed (so its snapshot is fresh); otherwise
       // it runs now, concurrently, exactly as before.
@@ -753,11 +766,11 @@ export function buildMethodsExecutor(
               () => Object.keys(methods),
             ))
           );
-          app.dispatch({
+          app.dispatch(markInflight({
             type: `${prefix}:__effects`,
             payload: { effects: resolved },
             _source: "Effect",
-          } as Msg);
+          }) as Msg);
         };
         // `s.$live` — the sanctioned way out of snapshot isolation: same
         // batcher (so writes still commit atomically), unwatched reads (they
@@ -902,11 +915,11 @@ export function buildMethodsExecutor(
                   () => Object.keys(methods),
                 ))
               );
-              app.dispatch({
+              app.dispatch(markInflight({
                 type: `${prefix}:__effects`,
                 payload: { effects: resolved },
                 _source: "Effect",
-              } as Msg);
+              }) as Msg);
             }
             if (
               (app as Record<string, unknown>)._isDisabled &&
@@ -954,11 +967,11 @@ export function buildMethodsExecutor(
             } else {
               log.error("cell", `${name} ${_method}() threw: ${e}`);
             }
-            app.dispatch({
+            app.dispatch(markInflight({
               type: `${prefix}:__error`,
               payload: { _method, error: String(e) },
               _source: "Effect",
-            } as Msg);
+            }) as Msg);
           })
           // Untrack LAST, not on a `.finally` in front of the commit.
           //
@@ -970,7 +983,15 @@ export function buildMethodsExecutor(
           // own trigger had fired: the documented supersession pattern
           // (`cancelOn: { run: "self" }`) silently lost the race it exists to
           // win. The call is cancellable until its writes are actually in.
-          .finally(() => untrack());
+          //
+          // And SEAL the state view here, in the same breath: once this call
+          // has settled, a write through `s` (or `s.$live`) can only come from
+          // a callback that outlived the method, and it must refuse loudly
+          // rather than commit — see `createBatcher().close`.
+          .finally(() => {
+            untrack();
+            batcher.close();
+          });
       };
       // serialize: chain behind the previous transactional call (runs on both
       // fulfil + reject so one failure doesn't wedge the queue). Else run now.
@@ -980,9 +1001,9 @@ export function buildMethodsExecutor(
       // queue under it.
       if (transactional && serialize) {
         serializeTail = serializeTail.then(runOnce, runOnce);
-        trackPending(serializeTail, prefix);
+        trackPending(serializeTail, prefix, appScope);
       } else {
-        trackPending(runOnce(), prefix);
+        trackPending(runOnce(), prefix, appScope);
       }
       return;
     }

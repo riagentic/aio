@@ -4,7 +4,7 @@ import { SYNC_DEFAULTS } from "./types.ts";
 
 /**
  * Compare two HLCs. Returns <0, 0, or >0.
- */
+ *  @internal alpha70 — test seam via src/testing/internal.ts */
 export function compareHLC(a: HLC, b: HLC): number {
   if (a[0] !== b[0]) return a[0] - b[0];
   if (a[1] !== b[1]) return a[1] - b[1];

@@ -1,9 +1,12 @@
 // schedule.ts — declarative timers/delays/cron as effects
 // Two use cases: config-level always-on schedules, dynamic effects from reducer
 
-import { blocking } from "./blocking.ts";
+// No `blocking.ts` import: that module is the Deno worker pool, and this one
+// is ISOMORPHIC — the browser bundle and the android/standalone runtime carry
+// it verbatim (`schedule.blocking` went out in alpha70; `blocking` is its own
+// top-level export, server-only — see src/state/removals.ts).
 import { selfMethodOf } from "./self.ts";
-import { log } from "../diagnostics/logger-api.ts";
+import { removalOf, retiredSpellingLine } from "./removals.ts";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -103,32 +106,33 @@ export type BackoffOpts = {
   factor?: number;
 };
 /** Options for {@linkcode schedule.poll}. `factor` is the backoff multiplier
- *  (the old `backoff` key still works, with a one-time hint). */
+ *  (its pre-alpha70 spelling `backoff` is refused by name). */
 export type PollOpts = {
   every: number;
   factor?: number;
   max?: number;
-  /** @deprecated renamed to `factor` (alpha52) — same meaning. */
-  backoff?: number;
 };
 
-// One-time deprecation hints (per id) for the old backoff/poll spellings.
-// console.warn, not the diagnostics logger: the effect creators are
-// isomorphic (inlined browser twin in browser-shared.ts), and the logger's
-// rotation pulls @std/path into the browser graph (browser-deps gate).
-const _schedHinted = new Set<string>();
-function _hintOnce(key: string, msg: string): void {
-  if (_schedHinted.has(key)) return;
-  _schedHinted.add(key);
-  log.warn("schedule", `${msg} (hinted once)`);
-}
-
 /** Is this positional arg the ACTION (has a string `.type`) rather than an
- *  options object? The old order put opts third; the new order puts the action
- *  third — an opts object never carries `.type`, an action always does. */
+ *  options object? The alpha52 order puts the action third; the order it
+ *  replaced put the options there — an opts object never carries `.type`, an
+ *  action always does. Still checked so the refusal can NAME the old order
+ *  instead of failing on `opts.base` being undefined. */
 function _isAction(v: unknown): v is ScheduleAction {
   return !!v && typeof v === "object" &&
     typeof (v as { type?: unknown }).type === "string";
+}
+
+/** The refusal for the pre-alpha52 argument order — same words on the server
+ *  and in the browser, both read from the registry. Throws in dev AND prod:
+ *  this is code, not config, and the type-checker refuses it first. */
+function _refuseOldOrder(fn: "backoff" | "poll", id: string): never {
+  throw new Error(
+    retiredSpellingLine(
+      removalOf("schedule.backoff/poll(id, attempt, opts, action)"),
+      `schedule.${fn} '${id}'`,
+    ),
+  );
 }
 
 function _backoffEffect(
@@ -158,14 +162,15 @@ function _pollEffect(
   opts: PollOpts,
   action: ScheduleAction,
 ): ScheduleEffect {
-  if (opts.backoff !== undefined && opts.factor === undefined) {
-    _hintOnce(
-      `poll-backoff:${id}`,
-      `schedule.poll '${id}': the \`backoff\` option key is deprecated — ` +
-        `use \`factor\` (same meaning). aiol --safe-fix rewrites this.`,
+  if ((opts as { backoff?: unknown }).backoff !== undefined) {
+    throw new Error(
+      retiredSpellingLine(
+        removalOf("schedule.poll({ backoff })"),
+        `schedule.poll '${id}'`,
+      ),
     );
   }
-  const factor = opts.factor ?? opts.backoff ?? 1;
+  const factor = opts.factor ?? 1;
   const max = opts.max ?? MAX_TIMER_DELAY;
   const ms = attempt <= 0
     ? opts.every
@@ -179,7 +184,7 @@ function _pollEffect(
   };
 }
 
-/** backoff — both argument orders (see {@linkcode schedule.backoff}). */
+/** backoff — `(id, attempt, action, opts)` (see {@linkcode schedule.backoff}). */
 export interface BackoffFn {
   <A>(
     id: string,
@@ -187,31 +192,15 @@ export interface BackoffFn {
     action: ScheduleAction & SA<A> | A & SA<A>,
     opts: BackoffOpts,
   ): ScheduleEffect;
-  /** @deprecated the action moved to the 3rd position (alpha52):
-   *  `schedule.backoff(id, attempt, action, opts)`. */
-  (
-    id: string,
-    attempt: number,
-    opts: BackoffOpts,
-    action: ScheduleAction,
-  ): ScheduleEffect;
 }
 
-/** poll — both argument orders (see {@linkcode schedule.poll}). */
+/** poll — `(id, attempt, action, opts)` (see {@linkcode schedule.poll}). */
 export interface PollFn {
   <A>(
     id: string,
     attempt: number,
     action: ScheduleAction & SA<A> | A & SA<A>,
     opts: PollOpts,
-  ): ScheduleEffect;
-  /** @deprecated the action moved to the 3rd position (alpha52):
-   *  `schedule.poll(id, attempt, action, opts)`. */
-  (
-    id: string,
-    attempt: number,
-    opts: PollOpts,
-    action: ScheduleAction,
   ): ScheduleEffect;
 }
 
@@ -221,16 +210,8 @@ const _backoff: BackoffFn = ((
   a3: unknown,
   a4: unknown,
 ): ScheduleEffect => {
-  if (_isAction(a3)) {
-    return _backoffEffect(id, attempt, a4 as BackoffOpts, a3);
-  }
-  _hintOnce(
-    `backoff-order:${id}`,
-    `schedule.backoff '${id}': the (id, attempt, opts, action) order is ` +
-      `deprecated — the action is now the 3rd argument, like after/every: ` +
-      `schedule.backoff(id, attempt, action, opts). aiol reports every site.`,
-  );
-  return _backoffEffect(id, attempt, a3 as BackoffOpts, a4 as ScheduleAction);
+  if (!_isAction(a3)) _refuseOldOrder("backoff", id);
+  return _backoffEffect(id, attempt, a4 as BackoffOpts, a3);
 }) as BackoffFn;
 
 const _poll: PollFn = ((
@@ -239,16 +220,8 @@ const _poll: PollFn = ((
   a3: unknown,
   a4: unknown,
 ): ScheduleEffect => {
-  if (_isAction(a3)) {
-    return _pollEffect(id, attempt, a4 as PollOpts, a3);
-  }
-  _hintOnce(
-    `poll-order:${id}`,
-    `schedule.poll '${id}': the (id, attempt, opts, action) order is ` +
-      `deprecated — the action is now the 3rd argument, like after/every: ` +
-      `schedule.poll(id, attempt, action, opts). aiol reports every site.`,
-  );
-  return _pollEffect(id, attempt, a3 as PollOpts, a4 as ScheduleAction);
+  if (!_isAction(a3)) _refuseOldOrder("poll", id);
+  return _pollEffect(id, attempt, a4 as PollOpts, a3);
 }) as PollFn;
 
 /** Effect creators for declarative scheduling — use in reducers to schedule/cancel timers.
@@ -323,9 +296,8 @@ export const schedule = {
    *  cycle. Owns the retry arithmetic so pollers stop re-deriving the backoff
    *  dance by hand.
    *
-   *  The action is the 3rd argument, same as after/every/at/cron (alpha52 —
-   *  the old `(id, attempt, opts, action)` order is detected by shape and
-   *  still accepted, with a one-time hint).
+   *  The action is the 3rd argument, same as after/every/at/cron (alpha52;
+   *  the order it replaced is refused by name since alpha70).
    *
    *  `max` is optional and defaults to the timer ceiling (`MAX_TIMER_DELAY`,
    *  ~24.85 days) — an unbounded `base * factor^attempt` reaches 10^15 ms by
@@ -342,13 +314,12 @@ export const schedule = {
    *  and on repeated failures backs off by `factor`^attempt up to `max`. A
    *  first-class replacement for the hand-rolled after-chain that RPC
    *  rate-limit foot-guns come from. `factor` defaults to 1 (constant polling;
-   *  the old `backoff` key is a deprecated alias), and `max` to the timer
-   *  ceiling (`MAX_TIMER_DELAY`, ~24.85 days) so a runaway `attempt` cannot
-   *  compute a delay no timer can hold.
+   *  its pre-alpha70 spelling `backoff` is refused by name), and `max` to the
+   *  timer ceiling (`MAX_TIMER_DELAY`, ~24.85 days) so a runaway `attempt`
+   *  cannot compute a delay no timer can hold.
    *
-   *  The action is the 3rd argument, same as after/every/at/cron (alpha52 —
-   *  the old `(id, attempt, opts, action)` order is detected by shape and
-   *  still accepted, with a one-time hint).
+   *  The action is the 3rd argument, same as after/every/at/cron (alpha52;
+   *  the order it replaced is refused by name since alpha70).
    * @example
    * ```ts
    * // on tick: do the poll; on success set attempt=0, on failure attempt+1,
@@ -375,14 +346,10 @@ export const schedule = {
     kind: "cancel",
     id,
   }),
-  /** Run a SELF-CONTAINED function OFF the main isolate on a named, cancellable,
-   *  backpressured worker pool — for FFI/CPU/sync work that would otherwise
-   *  freeze rendering. Imperative (returns a Promise), unlike the
-   *  effect creators above. The fn is serialized to source: no closures; `arg`
-   *  and the result must be structured-cloneable; do `Deno.dlopen` inside it.
-   *  `schedule.blocking.cancel(id)` stops it; `schedule.blocking.dispose()`
-   *  tears the pool down. See src/state/blocking.ts. */
-  blocking,
+  // Off-thread work is `blocking(id, fn, arg)` — a top-level export of `aio`
+  // and server-only. It is deliberately NOT a member here: `schedule` ships to
+  // every runtime (browser bundle, android), and a member that throws
+  // "server-only" on two of three targets is a trap, not an API.
 };
 
 /** Type guard — returns true if the value is a ScheduleEffect (type === "__schedule"). */
@@ -824,7 +791,8 @@ export function createScheduleManager(
       // measured at seven lines in a real app, immediately above its own
       // `stopped … errors=0` summary, for a condition the next three lines
       // exist to handle.
-      const closed = (e as { code?: string })?.code === "DISPATCH_CLOSED";
+      const code = (e as { code?: string })?.code;
+      const closed = code === "DISPATCH_CLOSED" || code === "DISPATCH_DRAINING";
       if (closed) {
         // There is nothing to retry into, and re-arming a timer here would
         // resurrect one `cancelAll()` just cleared.

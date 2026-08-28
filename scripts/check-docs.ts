@@ -244,6 +244,22 @@ const RETIRED_SPELLINGS: Array<[RegExp, string]> = [
   [/\b(?:dev|compile):service\b/, "`service` is spelled `server` (alpha52)"],
   [/\bcall\(\s*\{\s*timeout\s*[,:}?]/, "call()'s `timeout` → `timeoutMs`"],
   [/\{\s*timeout\?,\s*retries\?/, "call()'s `timeout` → `timeoutMs`"],
+  // alpha70 — the last compat break. Each has a removals-registry row.
+  [
+    /\bCellAccess\b|\bServerFnAccess\b/,
+    "`CellAccess`/`ServerFnAccess` → `Access` (alpha70)",
+  ],
+  [/\bExtractState\b/, "`ExtractState` → `StateOf` (alpha70)"],
+  [/schedule\.blocking\b/, "`schedule.blocking` → `blocking` (alpha70)"],
+  [
+    /\b(?:dis)?connectDevTools\b/,
+    "`connectDevTools` → `connectReduxDevTools` (alpha70)",
+  ],
+  [
+    /\bam (?:new|update|ls|log|tt|release)\b/,
+    "one `am` spelling per verb (alpha70): add/upgrade/instances/logs/timetravel/publish",
+  ],
+  [/\blistensTo:\s*\[/, "`listensTo` takes the object form (alpha70)"],
 ];
 
 /** Historical dirs may show old APIs on purpose; everything else is live. */
@@ -266,7 +282,7 @@ async function checkRetiredSpellings(): Promise<string[]> {
         // A line that also carries the NEW spelling (or explicitly talks
         // about migrating off the old one) is a migration note, not teaching.
         if (
-          /timeoutMs|--migrate-tasks|deprecated|retired|alpha52|migration/
+          /timeoutMs|--migrate-tasks|deprecated|retired|alpha52|alpha70|migration/
             .test(line)
         ) {
           continue;

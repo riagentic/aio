@@ -387,7 +387,7 @@ Deno.test("deepMerge: staying under the cap says nothing", () => {
 // ── Full stack: the keys survive a real persist → restart → restore ─────────
 
 Deno.test("restore: a dictionary with Object.prototype-named keys survives a real restart", async () => {
-  const dir = await Deno.makeTempDir({ prefix: "dm-protokeys-" });
+  const dir = await Deno.makeTempDir({ prefix: "proto-keys-" });
   const dbPath = `${dir}/data.db`;
   const stored = {
     hello: 1,
@@ -415,7 +415,7 @@ Deno.test("restore: a dictionary with Object.prototype-named keys survives a rea
   const boot = (c: ReturnType<typeof makeCell>) =>
     aio.run({
       cells: [c],
-      appId: "dm-protokeys",
+      appId: "proto-keys",
       dbPath,
       baseDir: dir,
       libraryMode: true,

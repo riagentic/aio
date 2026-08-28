@@ -456,15 +456,13 @@ Deno.test("android --release: the artifact is the file gradle really wrote", () 
 
 // ── build-all (multi-target orchestrator) ─────────────────────────
 
+import { buildAll, normalizeTargets, TARGETS } from "../src/build-all.ts";
 import {
-  buildAll,
   isArtifactName,
-  normalizeTargets,
   placedName,
   suffixedTargets,
-  TARGETS,
   unsafeOutDir,
-} from "../src/build-all.ts";
+} from "../src/testing/internal.ts";
 import { assert } from "@std/assert";
 
 Deno.test("build-all: unsafeOutDir rejects root/ancestor/.aio/src, allows a subdir", () => {

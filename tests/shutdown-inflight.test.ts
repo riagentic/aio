@@ -49,8 +49,6 @@ async function boot(dir: string, cells: unknown[]) {
 
 Deno.test({
   name: "shutdown: a streaming method is aborted, and its last write persists",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const { cell } = await import("../mod.ts");
     const dir = await Deno.makeTempDir({ prefix: "aio-shutdown-inflight-" });

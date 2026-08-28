@@ -249,7 +249,8 @@ Deno.test("uninstallArgv: removes only the global am", () => {
 
 // Heavy build smoke — proves `am create` → `deno task compile` yields a binary
 // (locks the flat-vs-src/ layout regression). Opt-in: it runs esbuild + deno
-// compile (~40s), so CI sets AIO_BUILD_SMOKE=1; the default suite skips it.
+// compile (~40s), so `deno task check:matrix` sets AIO_BUILD_SMOKE=1; the
+// default suite skips it.
 Deno.test({
   name: "build smoke: generated counter compiles to a binary",
   ignore: Deno.env.get("AIO_BUILD_SMOKE") !== "1",
@@ -425,8 +426,6 @@ for (const tpl of ["counter", "todo"] as const) {
 // cmdCreate. Nothing below the CLI can prove this.
 Deno.test({
   name: "am create --force: the flag survives the global parser and lands",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const cwd = await Deno.makeTempDir({ prefix: "am-create-force-" });
     try {

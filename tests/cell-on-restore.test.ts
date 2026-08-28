@@ -38,8 +38,6 @@ async function boot(
 
 Deno.test({
   name: "onRestore repairs the restored slice, on every boot",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     const dir = await Deno.makeTempDir();
     const dbPath = join(dir, "state.db");
@@ -90,8 +88,6 @@ Deno.test({
 
 Deno.test({
   name: "onRestore may RETURN a replacement slice",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     const dir = await Deno.makeTempDir();
     const dbPath = join(dir, "state.db");
@@ -119,8 +115,6 @@ Deno.test({
 
 Deno.test({
   name: "a throwing onRestore is contained — the app still boots",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     const dir = await Deno.makeTempDir();
     const dbPath = join(dir, "state.db");

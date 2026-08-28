@@ -723,7 +723,8 @@ async function probeDataContract(binaryPath: string): Promise<DataContract> {
  *  Pure, so the whole table is a unit test. Conservative on purpose: a real
  *  program is free to exit 127 for its own reasons, so the code alone is not
  *  enough — stderr has to agree, and a program that exits 127 with output of
- *  its own keeps the data-contract message (and its escape hatches). */
+ *  its own keeps the data-contract message (and its escape hatches).
+ *  @internal alpha70 — test seam via src/testing/internal.ts */
 export function notRunnableExit(code: number, stderr: string): boolean {
   if (code !== 126 && code !== 127) return false;
   return /not found|cannot execute|exec format error|permission denied|no such file/i
@@ -1058,21 +1059,6 @@ export async function shipApp(opts: {
       } or pass --version=X.Y.Z. A manifest that says 0.0.0 identifies nothing.`,
     );
   }
-  let sign: { privateKey: JsonWebKey; publicKey: JsonWebKey } | undefined;
-  if (opts.keyPath) {
-    let keyText: string;
-    try {
-      keyText = await Deno.readTextFile(opts.keyPath);
-    } catch (e) {
-      throw new Error(
-        `[ship] cannot read the signing key at ${opts.keyPath}: ${
-          e instanceof Error ? e.message : e
-        }\n       \`aio ship keygen\` writes one (outside any git work tree) ` +
-          `and prints where it put it.`,
-      );
-    }
-    sign = parseSigningKey(keyText, opts.keyPath);
-  }
   const fileName = opts.binaryPath.replace(/.*[\\/]/, "");
   const buildCfg = (cfg.build ?? {}) as Record<string, unknown>;
   // The app's OWN id, not the artifact's file name. The client half
@@ -1097,6 +1083,22 @@ export async function shipApp(opts: {
         `else ("${fileName}") ships updates no install will take. ` +
         `Fix: add "appId" to deno.json, or pass --name=<appId>.`,
     );
+  }
+  let sign: { privateKey: JsonWebKey; publicKey: JsonWebKey } | undefined;
+  const key = await resolveSigningKey(opts.keyPath, name);
+  if (key.path) {
+    let keyText: string;
+    try {
+      keyText = await Deno.readTextFile(key.path);
+    } catch (e) {
+      throw new Error(
+        `[ship] cannot read the signing key at ${key.path}: ${
+          e instanceof Error ? e.message : e
+        }\n       \`aio ship keygen\` writes one (outside any git work tree) ` +
+          `and prints where it put it.`,
+      );
+    }
+    sign = parseSigningKey(keyText, key.path);
   }
   const channel = opts.channel ??
     (typeof buildCfg.channel === "string" ? buildCfg.channel : "prod");
@@ -1182,7 +1184,8 @@ export async function shipApp(opts: {
  *  Printed rather than performed: where the channel directory lives is the one
  *  thing aio genuinely does not know. What it does know is the layout, and an
  *  instruction the publisher can paste is the difference between that layout
- *  being right and being "no updates available" for the life of the app. */
+ *  being right and being "no updates available" for the life of the app.
+ *  @internal alpha70 — test seam via src/testing/internal.ts */
 export function publishInstructions(
   m: ShipManifest,
   artifactFile: string,
@@ -1360,7 +1363,8 @@ jobs:
 
 /** The nearest enclosing git work tree of `dir`, or null. Walks up looking for
  *  `.git` (a directory in a normal clone, a FILE in a worktree/submodule) —
- *  no subprocess, so it works with git absent. */
+ *  no subprocess, so it works with git absent.
+ *  @internal alpha70 — test seam via src/testing/internal.ts */
 export function gitWorkTreeOf(dir: string): string | null {
   let cur = resolvePath(dir);
   for (;;) {
@@ -1385,6 +1389,31 @@ export function gitWorkTreeOf(dir: string): string | null {
 export function defaultKeyPath(project: string): string {
   const home = Deno.env.get("HOME") ?? Deno.env.get("USERPROFILE") ?? ".";
   return join(home, ".aio", "keys", `${project}-release-key.json`);
+}
+
+/** Which key signs a release: `--key`, else the file `ship keygen` wrote for
+ *  THIS app (`defaultKeyPath(name)`) when it exists, else none. One decider for
+ *  the `ship` CLI and `am publish` — a key that keygen wrote to the documented
+ *  default used to be ignored unless the same path was typed back as --key,
+ *  and the release went out unsigned.
+ *  @internal */
+export async function resolveSigningKey(
+  explicit: string | undefined,
+  appName: string,
+): Promise<
+  | { path: string; source: "flag" | "default" }
+  | { path: undefined; source: "none" }
+> {
+  if (explicit) return { path: explicit, source: "flag" };
+  const dflt = defaultKeyPath(appName);
+  try {
+    if ((await Deno.stat(dflt)).isFile) {
+      return { path: dflt, source: "default" };
+    }
+  } catch {
+    // no default key — unsigned; the caller says so out loud
+  }
+  return { path: undefined, source: "none" };
 }
 
 /** `aio ship keygen` — a fresh Ed25519 release key, written somewhere it will
@@ -1467,8 +1496,33 @@ async function keygenCli(args: string[]): Promise<void> {
   );
 }
 
+/** The usage text — one string, so `--help` and "no argument" agree.
+ *  @internal */
+export const SHIP_USAGE: string =
+  "usage: ship <binary> [--src=DIR] [--name=N] [--version=V] [--key=key.json]\n" +
+  "            [--channel=dev|test|prod] [--target=T] [--url=U] [--notes=…]\n" +
+  "            [--min-from=X.Y.Z] [--data=contract.json] [--no-data]\n" +
+  "            [--out=ship.json]\n" +
+  "            [--channel-dir=DIR]   # also write DIR/<channel>/<os>-<arch>.json\n" +
+  `       --target: ${UPDATE_TARGETS.join(" | ")}\n` +
+  "       --key defaults to ~/.aio/keys/<name>-release-key.json when that file exists\n" +
+  "       ship keygen [--out=PATH] [--stdout]   # a fresh Ed25519 " +
+  "signing key, written OUTSIDE the repo\n" +
+  "       ship github [--channel=prod]   # write a release workflow";
+
+/** `--help`/`-h` anywhere on the line is a QUESTION — answered on stdout,
+ *  exit 0. It used to fall into the unknown-flag refusal (exit 1).
+ *  @internal */
+export function isHelpRequest(args: readonly string[]): boolean {
+  return args.some((a) => a === "--help" || a === "-h");
+}
+
 if (import.meta.main) {
   const args = Deno.args;
+  if (isHelpRequest(args)) {
+    console.log(SHIP_USAGE);
+    Deno.exit(0);
+  }
   // An unrecognized flag is not an error to `args.find(…startsWith("--k="))`:
   // it is ABSENT, and the default silently takes over. `--keys=` publishes an
   // UNSIGNED manifest; `--no-dta` runs the data probe it meant to skip. Both
@@ -1522,17 +1576,7 @@ if (import.meta.main) {
     Deno.exit(0);
   }
   if (!bin) {
-    console.error(
-      "usage: ship <binary> [--src=DIR] [--name=N] [--version=V] [--key=key.json]\n" +
-        "            [--channel=dev|test|prod] [--target=T] [--url=U] [--notes=…]\n" +
-        "            [--min-from=X.Y.Z] [--data=contract.json] [--no-data]\n" +
-        "            [--out=ship.json]\n" +
-        "            [--channel-dir=DIR]   # also write DIR/<channel>/<os>-<arch>.json\n" +
-        `       --target: ${UPDATE_TARGETS.join(" | ")}\n` +
-        "       ship keygen [--out=PATH] [--stdout]   # a fresh Ed25519 " +
-        "signing key, written OUTSIDE the repo\n" +
-        "       ship github [--channel=prod]   # write a release workflow",
-    );
+    console.error(SHIP_USAGE);
     Deno.exit(1);
   }
   const flag = (k: string) =>

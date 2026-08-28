@@ -8,6 +8,23 @@ import { assert } from "@std/assert";
 import { join } from "@std/path";
 import { aio, cell } from "../mod.ts";
 import { freePort } from "../src/testing/server-test.ts";
+import { _resetParsedCli } from "../src/server/aio-cli.ts";
+
+// Boot B runs as PROD: since alpha70 a DEV boot REFUSES unmigrated structural
+// drift (tests/shape-drift-strict.test.ts); prod warns and surfaces it here.
+const _argsDesc = Object.getOwnPropertyDescriptor(Deno, "args")!;
+function setProd(): void {
+  Object.defineProperty(Deno, "args", {
+    value: ["--prod"],
+    configurable: true,
+    enumerable: true,
+  });
+  _resetParsedCli();
+}
+function restoreArgs(): void {
+  Object.defineProperty(Deno, "args", _argsDesc);
+  _resetParsedCli();
+}
 
 const PORT = freePort();
 const APP_ID = "shape-drift-boot";
@@ -44,6 +61,10 @@ Deno.test("boot shape-drift: a stored field dropped from initialState surfaces o
   }
 
   // ── Boot B: a newer build that DROPPED `seedPhrase` from the declared shape. ─
+  setProd();
+  const warned: string[] = [];
+  const origWarn = console.warn;
+  console.warn = (...a: unknown[]) => warned.push(a.map(String).join(" "));
   try {
     const wallet = cell("wallet", {
       state: { balance: 0 }, // seedPhrase removed — no version bump
@@ -65,23 +86,20 @@ Deno.test("boot shape-drift: a stored field dropped from initialState surfaces o
       persistDebounceMs: 10,
     });
     try {
-      const res = await fetch(
-        `http://localhost:${PORT}/__aio/trojan/migrations`,
-      );
-      const m = await res.json() as {
-        drift: { cell: string; path: string; issue: string }[];
-      };
+      // The trojan does not exist in prod; the boot WARNING is the surface
+      // (`am migrations` reads the same picture in dev, where structural
+      // drift is now a refusal — tests/shape-drift-strict.test.ts).
+      const w = warned.join("\n");
       assert(
-        m.drift.some((d) =>
-          d.cell === "wallet" && d.path === "seedPhrase" &&
-          d.issue === "unknown-field"
-        ),
-        `expected wallet.seedPhrase drift, got ${JSON.stringify(m.drift)}`,
+        w.includes("shape drift") && w.includes("wallet.seedPhrase"),
+        `expected wallet.seedPhrase drift in the boot warning, got:\n${w}`,
       );
     } finally {
       await app.close();
     }
   } finally {
+    console.warn = origWarn;
+    restoreArgs();
     await Deno.remove(dir, { recursive: true }).catch(() => {});
   }
 });

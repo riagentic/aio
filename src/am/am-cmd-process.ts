@@ -4,6 +4,7 @@
  */
 
 import { readDenoJson } from "../server/deno-json.ts";
+import { KILL_POLL_MS } from "../server/single-instance-lock.ts";
 import { dirname, join, resolve, SEPARATOR as sep } from "@std/path";
 import { appDirs } from "../server/app-dirs.ts";
 import {
@@ -127,7 +128,6 @@ export async function prepareStdoutLog(
     else await wipeFile(base);
   }
 }
-const KILL_POLL_MS = 100;
 // How long `am` waits for a STOPPING instance before it SIGKILLs — the
 // runtime's own worst-case graceful stop plus a margin, imported rather than
 // retyped: a 3 s wait against an 8 s budget killed legitimate final flushes.
@@ -559,10 +559,10 @@ export async function cmdStart(
     if (!effective) {
       try {
         const dj = ((await readDenoJson(Deno.cwd()))?.config ?? {}) as {
-          target?: string;
+          client?: string;
         };
-        effective = dj.target;
-      } catch { /* no deno.json target — framework default applies */ }
+        effective = dj.client;
+      } catch { /* no deno.json client — framework default applies */ }
     }
     const gui = effective === "electron" || effective === "client";
     const headless = Deno.build.os === "linux" &&

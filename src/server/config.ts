@@ -2,6 +2,7 @@ import { log } from "../diagnostics/logger-api.ts";
 import { teachMessage } from "../diagnostics/error.ts";
 import { hasBothFilterModes, nearestOf } from "../state/cell-helpers.ts";
 import { classifySource } from "./updates-core.ts";
+import { type Removal, removalsInDenoJson } from "../state/removals.ts";
 
 // Runtime config validation & documentation — extracted from aio.ts (AIO-52)
 // Types are erased at runtime. These sets are the runtime source of truth.
@@ -29,11 +30,12 @@ export const VALID_UI_KEYS = new Set<string>([
  *  got no error and no effect, and lost time to it: "silently ignoring input
  *  is the worst available behaviour". See {@link misplacedDenoJsonKeys}. */
 export const DENO_JSON_READ_KEYS = new Set<string>([
+  "share", // a declared workspace share (see app-dirs.ts resolveShare)
   // aio's
   "appId",
   "title",
-  "client",
-  "target", // deprecated alias — still read, still warned about
+  "client", // (its pre-alpha52 spelling `target` is a removals.ts row —
+  //           read only to refuse/log it, see `retiredDenoJsonKeys`)
   "entry",
   "build",
   "version",
@@ -60,6 +62,15 @@ export const DENO_JSON_READ_KEYS = new Set<string>([
   "lock",
   "$schema",
 ]);
+
+/** Top-level deno.json keys the framework REMOVED and this file still
+ *  carries (`target`, alpha70). Pure — the caller applies the registry's
+ *  dev/prod split (`refuseRetired`): dev throws, prod logs and honours. */
+export function retiredDenoJsonKeys(
+  denoJson: Record<string, unknown> | undefined,
+): readonly Removal[] {
+  return removalsInDenoJson(denoJson);
+}
 
 /** aio-shaped keys sitting at the TOP LEVEL of deno.json, where they do
  *  nothing. Pure — the caller warns.
@@ -233,6 +244,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "_cellFilterFields",
   "_cellAccess",
   "_cellMethods",
+  "_cellAsyncMethods",
   "_cellFields",
   "_cellMigrations",
   "_cellRestores",

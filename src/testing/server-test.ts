@@ -102,10 +102,11 @@ function resolveWorkerMode(config: TestServerConfig): string | undefined {
   }
   try {
     Deno.statSync(new URL(url));
-  } catch {
+  } catch (e) {
     throw new Error(
       `testServer: workerEntry "${url}" does not exist. Without this check ` +
         `the failure is a 30s "did not become ready" timeout at boot.`,
+      { cause: e },
     );
   }
   const workerCells = (config.cells ?? [])

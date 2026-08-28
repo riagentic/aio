@@ -115,20 +115,23 @@ export function resolveAmAppId(flag?: string): string {
   const cs = components();
   if (cs.length > 0) refuseAmbiguousApp(cs.map((c) => c.label));
   try {
-    const cfg = JSON.parse(
-      Deno.readTextFileSync(join(Deno.cwd(), "deno.json")),
-    ) as { appId?: string };
-    if (cfg.appId) return resolveAppId(cfg.appId);
+    // JSONC-aware, like the server: a comment in deno.json made this throw
+    // and `am` fell through to the directory name — a different app id from
+    // the one the running app derived, so `am` addressed nothing.
+    const cfg = readDenoJsonSync(Deno.cwd())?.config as
+      | { appId?: string }
+      | undefined;
+    if (cfg?.appId) return resolveAppId(cfg.appId);
   } catch { /* no deno.json */ }
   const ec = readEntryConfig();
   if (ec.appId) return resolveAppId(ec.appId);
   // Zero-config apps (aio.run() with no appId) — mirror the server's
   // inference chain: deno.json title/name, then the project directory name.
   try {
-    const cfg = JSON.parse(
-      Deno.readTextFileSync(join(Deno.cwd(), "deno.json")),
-    ) as { title?: string; name?: string };
-    const fromCfg = cfg.title ?? cfg.name?.split("/").pop();
+    const cfg = readDenoJsonSync(Deno.cwd())?.config as
+      | { title?: string; name?: string }
+      | undefined;
+    const fromCfg = cfg?.title ?? cfg?.name?.split("/").pop();
     if (fromCfg) return resolveAppId(fromCfg);
   } catch { /* no deno.json */ }
   // `basename`, not `split("/")`: the server infers the same last rung from a
@@ -294,15 +297,41 @@ const _targetNoted = new Set<string>();
  *  so `--json` output stays machine-clean — the first time it matters.
  *  Ambiguity is never resolved silently: with several instances up and no
  *  match, it says so and lists them rather than picking one. */
-export function resolvePort(flag?: number, appId?: string): number {
+/** The app id `resolvePort` fell back to when the caller's own id matched
+ *  nothing running. `undefined` unless that fallback actually fired — a
+ *  user-supplied `--port` returns before it, so a genuinely stale port is
+ *  still refused. */
+let _discoveredTarget: string | undefined;
+
+/** @internal — read by the identity gate in am-http.ts. */
+export function _discoveredAppTarget(): string | undefined {
+  return _discoveredTarget;
+}
+
+export function resolvePort(
+  flag?: number,
+  appId?: string,
+  opts: { explicit?: boolean } = {},
+): number {
   if (flag !== undefined) return flag;
   const id = appId ?? resolveAmAppId();
   const pf = readPid(id);
   if (pf) return pf.port;
 
   const live = instances();
-  if (live.length === 1) {
+  // The "one running instance" rung exists for a GUESSED id — the cwd's. An
+  // id the user typed (`--app=X`) is not a guess: when X is not running, the
+  // answer is "X is not running", never "so here is Y" — `am dispatch --app=X`
+  // must not mutate Y after a note on stderr.
+  if (live.length === 1 && !opts.explicit) {
     const only = live[0]!;
+    // Remember WHICH app this port was chosen for. The caller already resolved
+    // an app id (from the cwd) before asking for a port, and it does not learn
+    // that the fallback aimed somewhere else — so the identity gate went on
+    // comparing against the old expectation and refused the very instance this
+    // note promises to use, one line after promising it. `am health` had no
+    // such gate and worked, which is the same command pair disagreeing.
+    _discoveredTarget = only.appId;
     if (!_targetNoted.has(only.appId)) {
       _targetNoted.add(only.appId);
       console.error(

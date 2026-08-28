@@ -1,4 +1,7 @@
 // Memory Pressure Monitor — threshold alerts + trend detection
+import { teachableError } from "./error.ts";
+import { removalFor, removalMessage } from "../state/removals.ts";
+import { nearestOf } from "../state/cell-helpers.ts";
 
 /** Heap usage report — per-cell breakdown, trend, and WHY it fired. */
 export type MemoryReport = {
@@ -34,13 +37,15 @@ export type CellStateSize = {
   largestField?: { key: string; entries?: number };
 };
 
-/** Configuration for the memory pressure monitor — thresholds, polling interval, and callback. */
+/** Configuration for the memory pressure monitor — thresholds, polling
+ *  interval, and callback. Every key here is READ by the monitor: a key it
+ *  accepted and never consumed (`gcStressRatio`, alpha70) is refused by name
+ *  at boot — see {@linkcode validateMemoryConfig}. */
 export type MemoryConfig = {
   enabled?: boolean;
   interval?: number;
   warnThreshold?: number;
   criticalThreshold?: number;
-  gcStressRatio?: number;
   trendWindow?: number; // number of samples for trend detection (default: 10)
   /** Report when the heap passes this fraction of PHYSICAL RAM, whatever the
    *  V8 ceiling says. Default 0.5. The ceiling protects the app; this protects
@@ -53,6 +58,46 @@ export type MemoryConfig = {
   growthReportRatio?: number;
   onMemoryPressure?: (report: MemoryReport) => void;
 };
+
+/** The keys `memory: {}` accepts — ONE list, read by the boot gate. A key the
+ *  monitor does not consume is not on it, so it cannot be accepted quietly. */
+export const MEMORY_CONFIG_KEYS: ReadonlySet<string> = new Set<
+  keyof MemoryConfig
+>([
+  "enabled",
+  "interval",
+  "warnThreshold",
+  "criticalThreshold",
+  "trendWindow",
+  "machineWarnFraction",
+  "growthReportRatio",
+  "onMemoryPressure",
+]);
+
+/** Refuse a `memory: {}` the monitor would not honour.
+ *
+ *  A REMOVED key (src/state/removals.ts — `memory.gcStressRatio`) is named
+ *  with the registry's message: what happened, the migration, and the pin
+ *  that still runs it. Any other unknown key is refused with a did-you-mean,
+ *  the same sentence `cell()` and `aio.run()` use. Throws (fail loud, dev and
+ *  prod alike) — a heap threshold that is silently ignored is a monitor that
+ *  reports nothing on the day it matters. */
+export function validateMemoryConfig(memory: Record<string, unknown>): void {
+  for (const key of Object.keys(memory)) {
+    if (MEMORY_CONFIG_KEYS.has(key)) continue;
+    const removed = removalFor(`memory.${key}`);
+    if (removed) {
+      throw new Error(`[aio] ${removalMessage(removed, "memory config")}`);
+    }
+    const near = nearestOf(key, MEMORY_CONFIG_KEYS);
+    throw teachableError(
+      `unknown memory config key: ${key}` +
+        (near ? ` (did you mean "${near}"?)` : ""),
+      `remove it, or use one of ${[...MEMORY_CONFIG_KEYS].join(", ")}`,
+      "docs/basics/api-reference.md",
+    );
+  }
+}
 
 type MemoryUsage = {
   heapUsed: number;
@@ -67,7 +112,6 @@ type MonitorDeps = {
   interval: number;
   warnThreshold: number;
   criticalThreshold: number;
-  gcStressRatio?: number;
   trendWindow?: number;
   machineWarnFraction?: number;
   growthReportRatio?: number;

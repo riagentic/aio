@@ -122,7 +122,7 @@ Deno.test("reduce: a MACHINE GUARD block records the refusal", () => {
   });
   const listener = cell("uoc-lis", {
     state: { seen: 0 },
-    listensTo: ["uoc-src:fire"],
+    listensTo: { onFire: "uoc-src:fire" },
     methods: {
       onFire: (s: { seen: number }) => {
         s.seen++;

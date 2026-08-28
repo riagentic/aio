@@ -66,6 +66,12 @@ Deno.test("entries: every entry's path is the module deno.json publishes", async
 Deno.test("entries: the scaffold maps every importable entry (both modes)", () => {
   for (const source of [true, false]) {
     const fw = frameworkSpecs(source);
+    // The entry set must be NON-EMPTY, or every check below it is skipped and
+    // this test reports a clean surface for a scaffold it never looked at.
+    assert(
+      Object.keys(AIO_LIBRARY_ENTRIES).length > 1,
+      "no library entries to check — the parity claim would be vacuous",
+    );
     for (const spec of Object.keys(AIO_LIBRARY_ENTRIES)) {
       assert(
         fw.imports[spec],
@@ -173,6 +179,12 @@ Deno.test("aiol: a published entry is never reported as 'not an aio entry point'
     "aio/jsx-runtime": "./dep/aio/src/jsx-runtime.ts",
     "aio/testing": "./dep/aio/src/cell-test.ts",
   } as Record<string, string>;
+  // Non-empty, or every check below is skipped and this reports a clean
+  // surface for a set it never looked at.
+  assert(
+    Object.keys(AIO_LIBRARY_ENTRIES).length > 1,
+    "no library entries to check — the claim would be vacuous",
+  );
   for (const spec of Object.keys(AIO_LIBRARY_ENTRIES)) {
     if (spec === "aio") continue; // bare specifier — not an `aio/…` subpath
     const issues = await importIssues(

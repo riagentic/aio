@@ -13,7 +13,7 @@
 //
 // This file is the mechanism: key-set equality plus a randomized output
 // differential over the pure effect creators.
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { msg as serverMsg } from "../src/state/msg.ts";
 import { own as serverOwn } from "../src/state/own.ts";
 import { schedule as serverSchedule } from "../src/state/schedule.ts";
@@ -81,33 +81,11 @@ Deno.test("browser-shared: schedule exposes exactly the server's creators", () =
       "browser ONLY — client-scoped methods and CRDT replay run method " +
       "bodies there",
   );
-  // `blocking` is the ONE creator that cannot be shared (it runs a Deno worker
-  // pool). It must still exist and carry the same sub-surface, so the failure
-  // is a named refusal rather than "undefined is not a function".
-  assertEquals(
-    Object.keys(browserSchedule.blocking).sort(),
-    Object.keys(serverSchedule.blocking).sort(),
-  );
-  for (
-    const call of [
-      () => (browserSchedule.blocking as AnyFn)("x", () => 1),
-      () => browserSchedule.blocking.cancel("x"),
-      () => browserSchedule.blocking.disposeIdle(),
-      () => browserSchedule.blocking.dispose(),
-    ]
-  ) {
-    let msgText = "";
-    try {
-      call();
-    } catch (e) {
-      msgText = (e as Error).message;
-    }
-    assertEquals(
-      msgText.includes("server-only"),
-      true,
-      `schedule.blocking must refuse LOUDLY in the browser — got "${msgText}"`,
-    );
-  }
+  // alpha70: `blocking` is NOT a schedule member on either side — it is the
+  // top-level, server-only export. A browser twin that still carried it
+  // would be a surface the server does not have.
+  assertEquals("blocking" in browserSchedule, false);
+  assertEquals("blocking" in serverSchedule, false);
 });
 
 Deno.test("browser-shared: schedule effect creators are output-identical (randomized)", () => {
@@ -208,48 +186,55 @@ Deno.test("browser-shared: schedule effect creators are output-identical (random
   assertEquals(checked, rounds, "every round must compare one creator");
 });
 
-Deno.test("alpha52 hint parity: the browser twin hints ONCE on old backoff/poll spellings, like the server", async () => {
-  const { _resetBrowserScheduleHints } = await import(
-    "../src/browser/browser-shared.ts"
-  );
-  _resetBrowserScheduleHints();
-  const warns: string[] = [];
-  const orig = console.warn;
-  console.warn = (...args: unknown[]) => {
-    warns.push(args.map(String).join(" "));
+Deno.test("alpha70 refusal parity: the browser twin REFUSES the old backoff/poll spellings with the server's words", () => {
+  const A = { type: "t:tick" };
+  const refusal = (fn: () => unknown): string => {
+    try {
+      fn();
+      return "";
+    } catch (e) {
+      return (e as Error).message;
+    }
   };
-  try {
-    const A = { type: "t:tick" };
-    // Old order, twice per id — hint once each.
-    browserSchedule.backoff("bh", 1, { base: 100 }, A);
-    browserSchedule.backoff("bh", 2, { base: 100 }, A);
-    browserSchedule.poll("ph", 1, { every: 100, backoff: 2 }, A);
-    browserSchedule.poll("ph", 2, { every: 100, backoff: 2 }, A);
-    // New order — silent.
-    browserSchedule.backoff("bnew", 1, A, { base: 100 });
-    browserSchedule.poll("pnew", 1, A, { every: 100, factor: 2 });
-  } finally {
-    console.warn = orig;
+  const cases: Array<[string, AnyFn, AnyFn]> = [
+    [
+      "old backoff order",
+      () => (browserSchedule.backoff as AnyFn)("bh", 1, { base: 100 }, A),
+      () => (serverSchedule.backoff as AnyFn)("bh", 1, { base: 100 }, A),
+    ],
+    [
+      "old poll order",
+      () => (browserSchedule.poll as AnyFn)("ph", 1, { every: 100 }, A),
+      () => (serverSchedule.poll as AnyFn)("ph", 1, { every: 100 }, A),
+    ],
+    [
+      "poll backoff key",
+      () =>
+        (browserSchedule.poll as AnyFn)("pk", 1, A, { every: 100, backoff: 2 }),
+      () =>
+        (serverSchedule.poll as AnyFn)("pk", 1, A, { every: 100, backoff: 2 }),
+    ],
+  ];
+  for (const [what, b, s] of cases) {
+    const bm = refusal(b);
+    const sm = refusal(s);
+    assert(
+      sm.includes("removed in alpha70"),
+      `${what}: server refuses by name`,
+    );
+    assertEquals(
+      bm,
+      sm,
+      `${what}: the browser twin must refuse with the SAME line`,
+    );
   }
+  // The current spelling is silent on both sides and output-identical.
   assertEquals(
-    warns.filter((w) => w.includes("backoff 'bh'")).length,
-    1,
-    "old backoff order: one hint per id",
+    browserSchedule.backoff("bnew", 1, A, { base: 100 }),
+    serverSchedule.backoff("bnew", 1, A, { base: 100 }),
   );
   assertEquals(
-    warns.filter((w) => w.includes("poll 'ph'") && w.includes("3rd argument"))
-      .length,
-    1,
-    "old poll order: one hint per id",
-  );
-  assertEquals(
-    warns.filter((w) => w.includes("`backoff` option key")).length,
-    1,
-    "backoff→factor key: one hint per id",
-  );
-  assertEquals(
-    warns.filter((w) => w.includes("'bnew'") || w.includes("'pnew'")).length,
-    0,
-    "the new spelling is silent",
+    browserSchedule.poll("pnew", 1, A, { every: 100, factor: 2 }),
+    serverSchedule.poll("pnew", 1, A, { every: 100, factor: 2 }),
   );
 });

@@ -102,7 +102,8 @@ interface DenoJson {
 
 /** Pull the pinned aio version out of an import-map spec, or null. Handles
  *  `jsr:@riagentic/aio@^1.0.0-alpha33`, `npm:…@1.2.3`, bare `…/aio@1.2.3`.
- *  A vendored path (`./`, `../`) or an unpinned spec has no version → null. */
+ *  A vendored path (`./`, `../`) or an unpinned spec has no version → null.
+ *  @internal alpha70 — test seam via src/testing/internal.ts */
 export function extractAioVersion(spec: string): string | null {
   const m = spec.match(/\baio@[~^>=<]*([0-9][^\s"'/]*)/);
   return m ? m[1]! : null;

@@ -226,8 +226,6 @@ const flowCounter = cell("flowCounter", {
 Deno.test({
   name: "stress: 100 concurrent async methods complete without corruption",
   // sanitizers disabled: 100 fire-and-forget async methods with internal async ops
-  sanitizeOps: false,
-  sanitizeResources: false,
 }, async () => {
   const app = createTestApp([flowCounter]);
   const N = 100;

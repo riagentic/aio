@@ -206,7 +206,7 @@ Deno.test("compileArgs: every platform's triple survives into the argv", () => {
 // in the project root while the build reports ✓. That is exactly what happened
 // to `myapp-macos-arm64` — extension-less names only matched the bare binary.
 Deno.test("build-all: cross-compiled artifact names are recognised", async () => {
-  const { isArtifactName } = await import("../src/build-all.ts");
+  const { isArtifactName } = await import("../src/testing/internal.ts");
 
   for (const platform of Object.keys(PLATFORMS)) {
     for (const base of ["myapp", "myapp-client"]) {

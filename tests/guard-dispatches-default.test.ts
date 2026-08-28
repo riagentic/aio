@@ -13,8 +13,6 @@ import { aio } from "aio";
 
 Deno.test({
   name: "default: an unhandled rejection inside the app does not kill it",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     const c = cell("guard-default", {
       state: { n: 0 },
@@ -56,8 +54,6 @@ Deno.test({
 Deno.test({
   name:
     "the guard NEVER swallows a boot failure — refusing to start stays fatal",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     // Supervision is for RUNTIME strays. A rejection during boot is the app
     // refusing to start (a throwing onMigrate, a failed bind), and swallowing

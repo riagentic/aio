@@ -34,8 +34,6 @@ async function boot(
 
 Deno.test({
   name: "cell rename: undeclared stored cell survives, warns, and round-trips",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const { cell } = await import("../mod.ts");
     const dir = await Deno.makeTempDir();
@@ -110,8 +108,6 @@ Deno.test({
 
 Deno.test({
   name: "cell rename: onRestore migrates the old slice and consumes it",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const { cell } = await import("../mod.ts");
     const dir = await Deno.makeTempDir();

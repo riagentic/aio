@@ -41,8 +41,6 @@ const monitor = cell("advmon", {
 
 Deno.test({
   name: "advance() settles the async work the timer dispatched",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     const h = await bootCells([monitor]);
     try {
@@ -63,8 +61,6 @@ Deno.test({
 
 Deno.test({
   name: "settle() alone drains an async method already in flight",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     const h = await bootCells([monitor]);
     try {

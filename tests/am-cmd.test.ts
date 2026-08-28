@@ -1297,7 +1297,7 @@ Deno.test("am update <path>: installs the checkout's am globally (sandboxed)", a
     // The switch is loud, with the way back.
     assert(logs.some((l) => l.includes("DEV am")), logs.join("\n"));
     assert(
-      logs.some((l) => l.includes('"am update" returns')),
+      logs.some((l) => l.includes('"am upgrade" returns')),
       logs.join("\n"),
     );
   } finally {
@@ -1361,7 +1361,7 @@ Deno.test("installFromArgv: the one dev-install recipe", () => {
 // name containing `}` closed the generated `cell(` literal so everything after
 // it became executable code in the developer's own project.
 Deno.test("am add: a name that is not an identifier is refused", async () => {
-  const { cmdAdd, cmdNew } = await import("../src/am/am-cmd-meta.ts");
+  const { cmdAdd } = await import("../src/am/am-cmd-meta.ts");
   const dir = await Deno.makeTempDir({ prefix: "am-add-" });
   const cwd = Deno.cwd();
   const errors: string[] = [];
@@ -1406,14 +1406,8 @@ Deno.test("am add: a name that is not an identifier is refused", async () => {
     await cmdAdd(["cell", "my-widget"], { json: false } as never);
     const src = await Deno.readTextFile(`${dir}/src/cell/my-widget.ts`);
     assertStringIncludes(src, 'export const myWidget = cell("my-widget"');
-    // The deprecated `am new` alias still works, and names the rename.
-    errors.length = 0;
-    await cmdNew(["cell", "other"], { json: false } as never);
-    await Deno.stat(`${dir}/src/cell/other.ts`);
-    assert(
-      errors.some((e) => e.includes("am add")),
-      "`am new` must name the new spelling",
-    );
+    // (`am new` is retired in alpha70 — its refusal line is pinned in
+    // alpha70-retirements.test.ts.)
     // `am add page` was removed — refused with guidance, nothing written.
     errors.length = 0;
     const pageCode = await withExitStub(() =>

@@ -73,7 +73,7 @@ methods: { analyze(s) { s.results = heavyComputation(s.data) } }
 methods: {
   async analyze(s) {
     s.analyzing = true                      // commits immediately, UI updates now
-    s.results = await schedule.blocking("analyze", heavyComputation, s.data)
+    s.results = await blocking("analyze", heavyComputation, s.data)
     s.analyzing = false
   },
 },
@@ -109,13 +109,13 @@ async load(s) {
 
 ## Move it off-thread
 
-`schedule.blocking(id, fn, arg)` runs a function on a **worker pool** — a real
-OS thread, not a promise — so it cannot block rendering, the dispatch loop, or
-anyone else's actions. It is the answer whenever the work is CPU-bound, FFI, or
-a sync API you can't avoid.
+`blocking(id, fn, arg)` runs a function on a **worker pool** — a real OS thread,
+not a promise — so it cannot block rendering, the dispatch loop, or anyone
+else's actions. It is the answer whenever the work is CPU-bound, FFI, or a sync
+API you can't avoid.
 
 ```ts
-import { cell, schedule } from "aio";
+import { blocking, cell } from "aio";
 
 type Row = { id: number; score: number };
 
@@ -128,7 +128,7 @@ export const report = cell("report", {
       // Off-thread: the isolate stays free, other clients keep dispatching.
       // The function is SELF-CONTAINED — everything it needs is inside it or
       // arrives as `arg`. It cannot see `raw`, `s`, or any import up here.
-      s.rows = await schedule.blocking("report:build", (input) => {
+      s.rows = await blocking("report:build", (input) => {
         const nums = input as number[];
         const out: { id: number; score: number }[] = [];
         for (const n of nums) out.push({ id: n, score: Math.sqrt(n) * n }); // seconds of CPU
@@ -138,7 +138,7 @@ export const report = cell("report", {
       s.status = "done";
     },
     cancel() {
-      schedule.blocking.cancel("report:build"); // terminates the worker
+      blocking.cancel("report:build"); // terminates the worker
     },
   },
 });
@@ -158,8 +158,8 @@ crosses the thread boundary.
 - do FFI setup (`Deno.dlopen`) **inside** the function
 - the pool is sized to `hardwareConcurrency - 1` and queues beyond that, so a
   burst backpressures instead of spawning unbounded threads
-- `schedule.blocking.cancel(id)` drops a queued task or terminates a running one
-  — the only way to stop a busy thread; `dispose()` tears the pool down
+- `blocking.cancel(id)` drops a queued task or terminates a running one — the
+  only way to stop a busy thread; `dispose()` tears the pool down
 
 ### In the browser
 
@@ -191,8 +191,8 @@ and at `/__aio/vitals`.
 | Work                                   | Do this                                                               |
 | -------------------------------------- | --------------------------------------------------------------------- |
 | I/O (fetch, file, DB)                  | `async` method + `await` — the runtime waits, not you                 |
-| CPU (parse, crunch, encode, hash loop) | `schedule.blocking(...)`                                              |
-| Blocking FFI / sync-only API           | `schedule.blocking(...)`                                              |
+| CPU (parse, crunch, encode, hash loop) | `blocking(...)`                                                       |
+| Blocking FFI / sync-only API           | `blocking(...)`                                                       |
 | A whole CELL that does dangerous work  | `worker: true` on the cell ([cell workers](../state/cell-workers.md)) |
 | Slow work on a timer                   | `schedule.every(...)` whose action does the above                     |
 | Big state clients don't need           | `visible: { exclude: [...] }` — don't ship it at all                  |
@@ -289,6 +289,29 @@ It is always on (bounded rings on a path that already serializes), reports and
 does not advise, and keeps no history — the journal and time-travel own "what
 happened then".
 
+### Growing values travel as their growth
+
+Two shapes that Immer can only describe as "replace the whole value" are
+rewritten at patch generation, where the previous value is still in hand
+(`narrowPatches` in `src/state/patch-compact.ts`):
+
+- **a list that grew** — `s.items = [...s.items, ...batch]` ships as `add` ops
+  for the new elements (and `filter`/`slice` as `remove`s), decided by element
+  identity, never equality;
+- **a string that grew** — `s.reply += chunk` ships as
+  `{ op: "append", path, value: <suffix> }`, an aio extension to the JSON-Patch
+  vocabulary (`src/protocol/patch-ops.ts`, protocol v3). Only when the old value
+  is a prefix of the new one and at least 256 characters long; an edit,
+  truncation, reset or short string stays a `replace`.
+
+Measured on a real socket: 50 chunks of 100 B streamed into a 10 KB reply cost
+**642 KB** before (every window exceeded the patch/full threshold and re-sent
+the whole state) and **11.7 KB** after — proportional to the chunks, not to the
+reply (`tests/append-patches-wire.test.ts`). Every consumer of a `patches` frame
+— the browser, the CLI/UDS client, the worker-cell host — applies `append`
+through the one `applyWirePatches`; a peer that predates it is refused at the
+protocol handshake with the op named.
+
 ### Per-method budgets — for the method that is MEANT to be slow
 
 A budget is a claim about what should be fast. Some methods aren't: spawning
@@ -318,8 +341,8 @@ report names the method (`builds:compile`), not the shared `builds:__exec`
 effect type, so the log says which one to look at.
 
 Reach for this when a method awaits I/O by design. If a method is slow because
-it computes, the budget is telling you the truth — move the work with
-`schedule.blocking` instead (see above).
+it computes, the budget is telling you the truth — move the work with `blocking`
+instead (see above).
 
 ### Catching performance errors
 
@@ -341,7 +364,7 @@ await aio.run({
 ## Best practices
 
 1. **Keep reduce fast** -- state updates should be instant. Heavy computation
-   goes off-thread (`schedule.blocking`), not into an effect on the same thread.
+   goes off-thread (`blocking`), not into an effect on the same thread.
 2. **Effects should return immediately** -- kick off async work, don't block.
 3. **Use `perfCheck: 'on'` (default)** -- logs violations to `perf.log`
    automatically.

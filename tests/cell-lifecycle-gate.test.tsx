@@ -27,7 +27,7 @@ function lifecycleCell(): {
   const events: string[] = [];
   const c = cell(`lc-${crypto.randomUUID().slice(0, 8)}`, {
     state: { n: 0 },
-    ui: "all",
+    visible: "all",
     methods: {
       bump(s: { n: number }) {
         s.n++;
@@ -92,8 +92,6 @@ Deno.test("standalone via testUI: onInit at mount, onDestroy at dispose, dev-str
 Deno.test({
   name:
     "server via libraryMode aio.run: onInit at boot, onDestroy on app.close()",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const { aio } = await import("../mod.ts");
     const { c, events } = lifecycleCell();

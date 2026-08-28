@@ -218,9 +218,14 @@ function makeStore(dir: string): BlobStore {
     let file: Deno.FsFile;
     try {
       file = await Deno.open(join(dir, id), { read: true });
-    } catch {
+    } catch (e) {
+      // "never put()" is only true for NotFound. An EACCES said the same
+      // sentence and sent the reader looking for a write that had happened.
       throw new Error(
-        `blobs: no blob ${id} in ${dir} — it was never put(), or was deleted`,
+        e instanceof Deno.errors.NotFound
+          ? `blobs: no blob ${id} in ${dir} — it was never put(), or was deleted`
+          : `blobs: cannot open blob ${id} in ${dir} — ${e}`,
+        { cause: e },
       );
     }
     const start = opts?.start ?? 0;

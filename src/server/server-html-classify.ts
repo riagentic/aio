@@ -1,8 +1,6 @@
 // Browser error classification — actionable fix suggestions for common dev errors.
 
-/** aio's own server-side entries. THE list also lives in graph-validator.ts
- *  (`SERVER_ONLY_SPECS`) and lint.ts; all three name the same fact. */
-const AIO_SERVER_SPECS = new Set(["aio/server"]);
+import { SERVER_ONLY_SPECS } from "./server-only-specs.ts";
 
 /** Classifies browser errors and returns actionable fix suggestions */
 export function classifyBrowserError(
@@ -34,7 +32,7 @@ export function classifyBrowserError(
     // framework can name exactly, and the generic advice below is actively
     // harmful for it: `npm:aio/server` is not a package that exists, so the
     // user edits deno.json, restarts, and lands on the same blank page.
-    if (AIO_SERVER_SPECS.has(pkg)) {
+    if (SERVER_ONLY_SPECS.has(pkg)) {
       return {
         classification: "server-only-import",
         label: "Server-Only Import",

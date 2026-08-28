@@ -451,7 +451,7 @@ Deno.test("sync + a hiding ui filter is refused at compose, by name", () => {
     const c = cell(id, {
       state: { a: 1, b: "secret" },
       // deno-lint-ignore no-explicit-any
-      ui: ui as any,
+      visible: ui as any,
       sync: true,
       methods: {
         bump(s: { a: number }) {

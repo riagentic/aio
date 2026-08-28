@@ -8,13 +8,47 @@
 // mismatch reason is still sent in v1's `__proto-err:` string form so the
 // old peer can read it).
 //
+// v3 (alpha70): a `patches` frame may carry `{ op: "append", path, value }`
+// — a string that grew ships as its suffix (protocol/patch-ops.ts). A v2 peer
+// hands the op to Immer, which throws, and would resync on EVERY streamed
+// frame; so v3 is the floor and a v2 peer is refused at the handshake with
+// the reason naming the op (PROTOCOL_CHANGES). Last contract change before
+// beta.
+//
+// v2 was ADDITIVE as of alpha70, no bump: an `ack` may now carry the error
+// code `DISPATCH_DRAINING` (the loop is closing — running methods are still
+// finishing their writes; the action was new input and was refused) next to
+// the existing `DISPATCH_CLOSED` (sealed — nothing lands). A v2 peer that does
+// not know the new code treats it as any other refusal, which is correct. The
+// inbound half of the same change is not on the wire at all: the `_inflight`
+// action flag that rides the drain window is server-constructed only and is
+// stripped from every network entry point (server-ws.ts sanitizeClientAction).
+//
 // Browser-safe: pure constants + a pure function, zero imports.
 
 /** Highest wire-protocol version this build speaks. */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 /** Lowest wire-protocol version this build still accepts. */
-export const PROTOCOL_MIN_SUPPORTED = 2;
+export const PROTOCOL_MIN_SUPPORTED = 3;
+
+/** What each version added, keyed by the version that introduced it — so a
+ *  refusal can say WHY the older build cannot be talked to, not just that it
+ *  is older. Every bump adds a row; a version-mismatch reason names every
+ *  row above the effective version. */
+export const PROTOCOL_CHANGES: Readonly<Record<number, string>> = {
+  2: "one JSON envelope per frame",
+  3: 'the "append" patch op (a grown string ships as its suffix)',
+};
+
+/** "v3 added the "append" patch op …" — the rows of PROTOCOL_CHANGES above
+ *  `effective`, or "" when none are known. */
+function changesSince(effective: number): string {
+  const rows = Object.entries(PROTOCOL_CHANGES)
+    .filter(([v]) => Number(v) > effective)
+    .map(([v, what]) => `v${v} added ${what}`);
+  return rows.length ? `; ${rows.join("; ")}` : "";
+}
 
 /** WebSocket close code used for protocol-version mismatches. */
 export const PROTOCOL_MISMATCH_CLOSE_CODE = 4505;
@@ -94,7 +128,7 @@ export function negotiateProtocol(
         `peer speaks protocol v${theirs.v} but this side requires ≥ v${ours.min} — ` +
         `the PEER is the older build (peer: ${build(theirs)}, here: ${
           build(ours)
-        }); rebuild it against this aio version`,
+        }); rebuild it against this aio version${changesSince(effective)}`,
     };
   }
   if (effective < theirs.min) {
@@ -104,7 +138,7 @@ export function negotiateProtocol(
         `this side speaks protocol v${ours.v} but the peer requires ≥ v${theirs.min} — ` +
         `THIS side is the older build (here: ${build(ours)}, peer: ${
           build(theirs)
-        }); rebuild it against the newer aio version`,
+        }); rebuild it against the newer aio version${changesSince(effective)}`,
     };
   }
   return { ok: true, effective };

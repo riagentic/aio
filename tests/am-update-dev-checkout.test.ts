@@ -1,9 +1,9 @@
-// `am update` could destroy a dev checkout.
+// `am upgrade` could destroy a dev checkout.
 //
 // THE historical data-loss bug in this project is `git checkout --force <tag>`
 // run inside a repo someone works in: it deletes uncommitted work, and it wiped
 // aio's own tree twice. `install.sh` was fixed (its AIO_DEV_CHECKOUT block) —
-// and `am update`, which re-implements the same fetch+checkout in TypeScript,
+// and `am upgrade`, which re-implements the same fetch+checkout in TypeScript,
 // was not. It guarded on LOCATION instead ("is this the canonical install?"),
 // and `canonicalRoot()` reads `AIO_HOME`, so the guard answers "yes, canonical"
 // for a developer's own repo the moment AIO_HOME points at it.
@@ -11,7 +11,7 @@
 // Reproduced before the fix, on a clone of this repo:
 //
 //   $ echo WIP-PRECIOUS >> README.md
-//   $ AIO_HOME=/tmp/aio-clone am update
+//   $ AIO_HOME=/tmp/aio-clone am upgrade
 //   HEAD is now at dae2ee9 release: v1.0.0-alpha68
 //   {"updated":true,"via":"git","tag":"v1.0.0-alpha68"}     ← exit 0
 //   $ tail -1 README.md
@@ -26,20 +26,20 @@ const ROOT = new URL("../", import.meta.url).pathname;
 
 // ── the rule ─────────────────────────────────────────────────
 
-Deno.test("am update: a checkout with uncommitted work is never git-mutated", () => {
+Deno.test("am upgrade: a checkout with uncommitted work is never git-mutated", () => {
   const r = gitMutationRefusal({
-    root: "/home/dev/code/aio",
+    root: "/opt/aio-checkout",
     dirty: ["M src/server/aio.ts", "M todo.md"],
     onBranch: null,
     force: false,
   });
   assert(r, "a dirty checkout must be refused");
-  assertStringIncludes(r, "/home/dev/code/aio");
+  assertStringIncludes(r, "/opt/aio-checkout");
   assertStringIncludes(r, "M src/server/aio.ts"); // names the work at risk
-  assertStringIncludes(r, "am update --force"); // and the way past
+  assertStringIncludes(r, "am upgrade --force"); // and the way past
 });
 
-Deno.test("am update: a checkout ON A BRANCH is a checkout someone works in", () => {
+Deno.test("am upgrade: a checkout ON A BRANCH is a checkout someone works in", () => {
   // install.sh's second half of the rule: the canonical install is always
   // detached at a tag, so a branch means a human put it there.
   const r = gitMutationRefusal({
@@ -52,7 +52,7 @@ Deno.test("am update: a checkout ON A BRANCH is a checkout someone works in", ()
   assertStringIncludes(r, "main");
 });
 
-Deno.test("am update: the canonical install (clean, detached) still updates", () => {
+Deno.test("am upgrade: the canonical install (clean, detached) still updates", () => {
   assertEquals(
     gitMutationRefusal({
       root: "/home/u/.local/lib/aio",
@@ -64,7 +64,7 @@ Deno.test("am update: the canonical install (clean, detached) still updates", ()
   );
 });
 
-Deno.test("am update --force: the override is explicit, and only that", () => {
+Deno.test("am upgrade --force: the override is explicit, and only that", () => {
   assertEquals(
     gitMutationRefusal({
       root: "/x",
@@ -76,7 +76,7 @@ Deno.test("am update --force: the override is explicit, and only that", () => {
   );
 });
 
-Deno.test("am update: deno.lock alone is not 'worked in'", () => {
+Deno.test("am upgrade: deno.lock alone is not 'worked in'", () => {
   // install.sh's measured reason: `deno install` from the checkout rewrites
   // deno.lock, so counting it would make every canonical install look worked
   // in after its first run and freeze it forever.
@@ -88,7 +88,7 @@ Deno.test("am update: deno.lock alone is not 'worked in'", () => {
 
 // ── grounded in what git actually prints ─────────────────────
 
-Deno.test("am update: the porcelain parse matches a real git repo", async () => {
+Deno.test("am upgrade: the porcelain parse matches a real git repo", async () => {
   const dir = await Deno.makeTempDir({ prefix: "aio-dirty-" });
   const git = async (...args: string[]) => {
     const o = await new Deno.Command("git", {
@@ -144,11 +144,11 @@ Deno.test("am update: the porcelain parse matches a real git repo", async () => 
 
 // ── one fact, two deciders — they must agree ─────────────────
 
-Deno.test("the dev-checkout rule is the SAME rule in install.sh and in am update", async () => {
+Deno.test("the dev-checkout rule is the SAME rule in install.sh and in am upgrade", async () => {
   const sh = await Deno.readTextFile(`${ROOT}install.sh`);
   // install.sh's three ingredients. If any of these is reworded, this test
   // fails and the TypeScript half has to be looked at in the same change —
-  // which is the whole point: the last time only one half moved, `am update`
+  // which is the whole point: the last time only one half moved, `am upgrade`
   // kept the bug for months.
   assertStringIncludes(sh, "status --porcelain --untracked-files=no");
   assertStringIncludes(sh, "deno.lock"); // excluded, for the measured reason
@@ -163,7 +163,7 @@ Deno.test("the dev-checkout rule is the SAME rule in install.sh and in am update
   assert(idxCheckout > 0, "this test is watching the wrong call");
   assert(
     idxGuard < idxCheckout,
-    "am update runs `git checkout --force` before checking whether the " +
+    "am upgrade runs `git checkout --force` before checking whether the " +
       "checkout is one someone works in — that is the wipe, restored",
   );
 });

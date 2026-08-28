@@ -28,6 +28,9 @@ function declares(src: string, filter: string): boolean {
   const decls = [
     ...src.matchAll(/Deno\.test\(\s*(["'`])((?:[^\\]|\\.)*?)\1/g),
     ...src.matchAll(/\bname:\s*(["'`])((?:[^\\]|\\.)*?)\1/g),
+    // `testCell(cell, "name", …)` — the runtime name is `[cellId] name`, and
+    // `--filter` matches substrings, so the literal is what a row names.
+    ...src.matchAll(/\btestCell\([^,]+,\s*(["'`])((?:[^\\]|\\.)*?)\1/g),
   ];
   return decls.some(([, , name]) => {
     const re = "^" + (name ?? "").split(/\$\{[^}]*\}/)

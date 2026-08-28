@@ -96,6 +96,19 @@ export function buildBrowserImportMap(
     // suite stayed green: a field report hit exactly this. Anything the docs
     // tell an app to import from a PAGE has to be in this map.
     "aio/ui": "/__aio/ui/mod.ts",
+    // React migration shims — PERMANENT surface (2026-07-06), and
+    // docs/basics/migration.md shows them imported from a COMPONENT. Missing
+    // here, that import was the `aio/ui` blank screen again: the symbols all
+    // exist, so every gate stayed green while the page died on an unmapped
+    // bare specifier. Safe to serve because these routes TRANSPILE rather than
+    // bundle — `src/air-compat.ts` reaches `./air/compat.ts` at
+    // `/__aio/air/compat.ts`, the same URL `/__aio/air.js` already loads, so
+    // the browser instantiates AIR once, not twice.
+    "aio/air/compat": "/__aio/air-compat.ts",
+    // Adapter authors: docs/ui/air-advanced.md tells them to build on this.
+    // Its module-level `enablePatches()` runs once for the same reason —
+    // src/browser/* already reaches it at exactly this URL.
+    "aio/state-core": "/__aio/state-core.ts",
   };
   for (const [name, specifier] of Object.entries(denoImports)) {
     if (!specifier.startsWith("npm:")) continue;

@@ -65,14 +65,28 @@ Issues that can be auto-fixed are marked `[fixable]` in the output.
 | --------------------- | ---------------------------------------------------------------------------- |
 | Remove `import React` | Unnecessary with `jsx: "react-jsx"` — the transform injects it automatically |
 
-**Upgrade rewrites** (renamed options — the old spellings still work, see
+**Upgrade rewrites** (spellings aio removed — every row is a fact in
+`src/state/removals.ts`, and the finding prints that row's message: the
+migration AND the `am pin` escape hatch; see
 [semver policy](../basics/semver-policy.md)):
 
-| Fix                                                 | What it does                                                               |
-| --------------------------------------------------- | -------------------------------------------------------------------------- |
-| `call({ timeout })` → `timeoutMs`                   | Only inside a `call(...)` options object; your own fields untouched        |
-| `--cert=` / `--key=` → `--tls-cert=` / `--tls-key=` | In `deno.json` tasks — the bare names collided with the auth `key` concept |
-| `--headless` → `--client=server-only`               | Only on a task that RUNS the app; a build task keeps `--headless`          |
+| Fix                                                                                                                | What it does                                                                                                                                          |
+| ------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `call({ timeout })` → `timeoutMs`                                                                                  | Only inside a `call(...)` options object; your own fields untouched                                                                                   |
+| `--cert=` / `--key=` → `--tls-cert=` / `--tls-key=`                                                                | In `deno.json` tasks — the bare names collided with the auth `key` concept                                                                            |
+| `--headless` → `--client=server-only`                                                                              | Only on a task that RUNS the app; a build task keeps `--headless`                                                                                     |
+| `import { createDB } from "aio/db"` → `"aio/server"`                                                               | alpha70: the statement is SPLIT — runtime values move, `type DB` stays on `aio/db`; declined (`[manual]`) in a `.tsx`, where the fix is a cell method |
+| `aio/build` ship family → `aio/ship`                                                                               | alpha70: `shipApp`, `buildShipManifest`, `verifyShipManifest`, `generateSigningKey`, `ShipManifest`                                                   |
+| `aio/testing` `appDirs`/`AppDirs` → `aio/server`                                                                   | alpha70: the resolver's one home (`ensureAppDirs`/`registerAppDirs` stay)                                                                             |
+| `aio/testing` updates runtime → `aio/updates`                                                                      | alpha70: `installUpdatesRuntime`, `UpdatesRuntime`, `ApplyOptions`, `CheckOptions`, `CheckResult`                                                     |
+| `aio/air` `testComponent`/`setDocument` → `aio/testing`                                                            | alpha70: next to `testCell` and `testUI`                                                                                                              |
+| `import { testCell } from "aio"` → `"aio/testing"`                                                                 | alpha70: `testCell`, `TestContext`                                                                                                                    |
+| `import { lint } from "aio/extras"` → `checkCells as lint`                                                         | alpha70: the alias is gone; the LOCAL name survives, so no call site changes                                                                          |
+| `import { testgen }` → `testGen as testgen`                                                                        | alpha70: same trick — behaviour-identical by construction                                                                                             |
+| `CellAccess` / `ServerFnAccess` → `Access`, `ExtractState` → `StateOf`, `connectDevTools` → `connectReduxDevTools` | alpha70: a word-for-word rewrite of CODE only (strings and comments untouched); duplicate import specifiers it creates are collapsed                  |
+| `import { type Action } from "aio/air"` → `type NodeAction as Action`                                              | alpha70: `Action` is a word apps use for their own types, so only the import changes                                                                  |
+| `schedule.blocking(` → `blocking(`                                                                                 | alpha70: `blocking` is added to the file's `aio` import (`schedule` is left — an unused import is harmless where a missing one is not)                |
+| cell `ui:` → `visible:`, `{ every, backoff }` → `factor`                                                           | alpha52 spellings, removed in alpha70 — reported at the exact line, once                                                                              |
 
 Run `--safe-fix`, then re-run without it to see remaining issues that need
 manual attention.
@@ -171,6 +185,31 @@ Static analysis of `cell()` calls:
 - Thrown exceptions in cell code (prefer error states)
 - Legacy `../dep/aio/` import paths
 - Node.js APIs (`require`, `process.env`, `__dirname`)
+- **The live draft escapes the method** (error). `s` is a live proxy, valid only
+  while the method runs; the runtime cannot see it leave, so the linter is the
+  guard. Exact criterion: inside a cell method with draft parameter `P`, (a) `P`
+  itself is assigned or pushed into a MODULE-LEVEL binding of the file
+  (`let`/`var`/`const` at column 0, or `globalThis`) — `X = P`, `X.y = P`,
+  `X.push(P)`, `X.set(k, P)`, `X.add(P)`; or (b) a function literal whose text
+  references `P` is assigned to, or `push`/`set`/`add`/`on`/`once`/
+  `subscribe`/`addEventListener`/`addListener`-ed on, such a binding. Not a hit:
+  a local `const`, `own.set`, `s.$do`, `schedule.*`, or a callback that copies
+  plain data (`{ ...P }`, `P.items.slice()`).
+- **I/O in a sync method** (error). A sync method IS the reducer. Exact
+  criterion: a non-`async` member of `methods:` whose body — with every nested
+  function literal blanked, so a callback handed to `own.set`/`s.$do` is not the
+  method's own body — calls `fetch(` or `Deno.<io>(` (file, process, network, KV
+  operations and their `Sync` twins; `Deno.env`/`cwd`/`build`/ `inspect` are not
+  I/O). Fix: make it `async`, or hand the I/O to `s.$do`.
+- **`own.set` keyed by a constant while the resource varies** (warn). `own`
+  REPLACES on re-set, so a family keyed by one string keeps one member. Exact
+  criterion: `own.set(KEY, …)` where KEY is a plain string literal (no `${}`),
+  lexically inside a function/method with a parameter whose name is resource-id
+  shaped (ends in `id`/`key`/`name`/`path`/`url`/`uri`/`host`/
+  `port`/`file`/`dir`/`handle`/`addr`/`address`, case-insensitive), AND that
+  parameter appears in the call's remaining arguments (the factory). Fix:
+  ``own.set(`KEY:${id}`, …)`` — or `// aiol-ok: one KEY at a time` when
+  replacing is the intent.
 
 ### 10. Build Readiness
 
@@ -193,7 +232,20 @@ Static analysis of `cell()` calls:
 - `.map()` rendering `memo()` components without `useProjection()` — derived
   arrays create new refs every render, defeating memo. Wrap in `useProjection()`
 
-### 14. Upgrade (deprecated spellings)
+### 14. Upgrade (removed spellings)
+
+Every finding here reads its text from `src/state/removals.ts`, the one record
+of what aio removed and when. The line names the release, the migration and the
+version that still runs the code unchanged (`am pin <tag> && am fix`).
+
+- alpha70 — one import path per symbol (`aio/db` values, the `aio/build` ship
+  family, `aio/testing`'s `appDirs`/updates runtime, `aio/air`'s
+  `testComponent`, `aio`'s `testCell`); the retired aliases `lint`/`testgen`;
+  the retired `CellAccess`/`ServerFnAccess`/`ExtractState`/`Action` (alpha70);
+  the retired `connectDevTools`/`schedule.blocking` (alpha70); and
+  `memory.gcStressRatio` (accepted, never read — boot refuses it by name too).
+  All `[fixable]` except the config key and a `.tsx` importing a database (both
+  `[manual]`, with the reason).
 
 - `call({ timeout })` — renamed to `timeoutMs`
 - `--cert` / `--key` in a task — renamed to `--tls-cert` / `--tls-key`

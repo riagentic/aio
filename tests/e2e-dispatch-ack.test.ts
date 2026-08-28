@@ -37,8 +37,6 @@ Deno.test({
   name:
     "e2e ack: an awaited browser method resolves on server ack + state converges",
   ignore,
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     await withE2E({ cells: COUNTER, app: APP }, async ({ server, tab }) => {
       await waitFor("mount", () => tab.text("acks"));
@@ -64,8 +62,6 @@ Deno.test({
   name:
     "e2e ack: a burst of awaited methods each resolve independently (no cid crossing)",
   ignore,
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     await withE2E({ cells: COUNTER, app: APP }, async ({ server, tab }) => {
       await waitFor("mount", () => tab.text("acks"));

@@ -11,13 +11,13 @@
 // and a test that WANTS a fixture directory can pin one explicitly.
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
+import { _armTestStrict } from "../src/cell-test.ts";
 import {
-  _armTestStrict,
   _resetAppDirs,
   appDirs,
   ensureAppDirs,
   registerAppDirs,
-} from "../src/cell-test.ts";
+} from "../src/server/app-dirs.ts";
 import { homedir } from "../src/server/paths.ts";
 
 Deno.test("harness: app dirs never resolve into the real home", () => {

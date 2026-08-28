@@ -1603,8 +1603,6 @@ async function withDevServer(
 // sanitizeResources/Ops disabled because esbuild and the FS watcher outlive each test.
 Deno.test({
   name: "dev: UI endpoints — ui.js, import map, App.tsx, error, client-error",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: async () => {
     const dir = await Deno.makeTempDir();
     // App that imports react — common case where npm: specifier could leak.
@@ -1684,6 +1682,13 @@ Deno.test({
         const map = JSON.parse(match![1]!) as {
           imports: Record<string, string>;
         };
+        // An import map that failed to generate is EMPTY, and an empty map
+        // passes every assertion below without running one — which is the
+        // failure this block exists to catch.
+        assert(
+          Object.keys(map.imports).length > 0,
+          "the import map is empty — nothing was checked",
+        );
         for (const [key, val] of Object.entries(map.imports)) {
           assertEquals(
             val.startsWith("npm:"),

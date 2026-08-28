@@ -340,7 +340,7 @@ await aio.run({ appId: "checkout", cells: [cart, inventory, payment] });
 
 ```ts
 // cell/payment/payment.test.ts
-import { testCell } from "aio";
+import { testCell } from "aio/testing";
 import { payment } from "./index.ts";
 
 const ITEMS = [{ id: "widget", name: "Widget", price: 25, qty: 1 }];

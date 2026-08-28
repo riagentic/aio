@@ -16,7 +16,7 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { cmdLog, cmdTrigger } from "../src/am/am-cmd-inspect.ts";
-import { cmdNew } from "../src/am/am-cmd-meta.ts";
+import { cmdAdd } from "../src/am/am-cmd-meta.ts";
 import { cmdCreate } from "../src/am/am-cmd-create.ts";
 import { appDirs, registerAppDirs } from "../src/server/app-dirs.ts";
 import type { GlobalFlags } from "../src/am/am-types.ts";
@@ -273,15 +273,15 @@ Deno.test("am new: every refusal exits 1", async () => {
     ];
     for (const [name, args] of cases) {
       await capture(async () => {
-        const code = await exitCodeOf(() => cmdNew(args, flags));
-        assertEquals(code, 1, `am new ${name} must exit 1`);
+        const code = await exitCodeOf(() => cmdAdd(args, flags));
+        assertEquals(code, 1, `am add ${name} must exit 1`);
       });
     }
     // Scaffolding twice: the second run created nothing, and said so with a 0.
-    await capture(() => cmdNew(["cell", "widget"], flags));
+    await capture(() => cmdAdd(["cell", "widget"], flags));
     await capture(async () => {
-      const code = await exitCodeOf(() => cmdNew(["cell", "widget"], flags));
-      assertEquals(code, 1, "am new over an existing file must exit 1");
+      const code = await exitCodeOf(() => cmdAdd(["cell", "widget"], flags));
+      assertEquals(code, 1, "am add over an existing file must exit 1");
     });
   } finally {
     Deno.chdir(cwd);

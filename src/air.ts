@@ -31,11 +31,10 @@ export {
 } from "./browser-air.ts";
 
 // ── Rendering primitives + lifecycle ─────────────────────────────────
-// `NodeAction` is the `use`-prop signature (alpha52 rename; `Action` is its
-// deprecated alias through beta — the bare name collided with the state
-// layer's action vocabulary).
+// `NodeAction` is the `use`-prop signature (alpha52 rename; its `Action` alias
+// went out in alpha70 — the bare name collided with the state layer's action
+// vocabulary).
 export {
-  type Action,
   afterRender,
   type ComponentFn,
   type Context,
@@ -179,15 +178,15 @@ export type {
   DevToolsHandle,
   RenderEvent,
 } from "./diagnostics/devtools.ts";
-export { connectDevTools, disconnectDevTools } from "./browser-air.ts";
-
-// ── Component test harness (symmetric with testCell) ─────────────────
 export {
-  setDocument,
-  testComponent,
-  type TestComponentHandle,
-  type TestComponentOptions,
+  connectReduxDevTools,
+  disconnectReduxDevTools,
 } from "./browser-air.ts";
+
+// ── Component test harness ───────────────────────────────────────────
+// `testComponent`/`setDocument` (+ their types) live on `aio/testing`, next to
+// `testCell` and `testUI` — one import path per symbol since alpha70
+// (src/state/removals.ts); `aiol --safe-fix` rewrites the old `aio/air` import.
 
 // React migration compat hooks (useState/useEffect/useMemo/useCallback) live
 // at "aio/air/compat" only — off the main surface. `useRef` is a native AIR

@@ -300,15 +300,15 @@ This is a known bug (resolved).
 | -------------------- | --------------- | ----- |
 | **Svelte 5**         | ~5KB (compiled) |       |
 | **Solid**            | ~7KB            |       |
-| **AIR**              | ~8KB            |       |
+| **AIR**              | ~20KB (gz)      |       |
 | **Vue 3**            | ~16KB           |       |
 | **React + ReactDOM** | ~40KB           |       |
 
 ### Verdict: ✅ Competitive
 
-~8KB is excellent. Slightly larger than Solid (~7KB) due to VDOM overhead, but
-5x smaller than React. Svelte wins by compiling the framework away, but AIR is
-in the same tier as Solid.
+~20KB gzipped (59KB minified) — larger than Solid (~7KB) because of the VDOM and
+the reactive runtime, but 5x smaller than React. Svelte wins by compiling the
+framework away, but AIR is in the same tier as Solid.
 
 ---
 
@@ -399,7 +399,7 @@ The compat layer covers all common patterns. `onChange` is auto-mapped to
 | Routing                          | ✅    | Built-in, server-integrated                |
 | SSR — hydration cost             | ❌    | Full hydration (Qwik has resumability)     |
 | SSR — mismatch safety            | ✅    | Safe fallback vs React's patch-in-place    |
-| Bundle size                      | ✅    | ~8KB, competitive with Solid               |
+| Bundle size                      | ✅    | ~20KB gzipped                              |
 | React compat layer               | ✅    | Full coverage incl. useId, onChange compat |
 | Batteries included               | ✅    | Forms, animation, virtual list, async data |
 | Concurrent rendering             | ❌    | No priority scheduling                     |

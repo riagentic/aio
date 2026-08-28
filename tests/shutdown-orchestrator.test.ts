@@ -72,6 +72,7 @@ function stubRefs(over: Partial<ShutdownRefs> = {}): Trace {
       },
     },
     getCellNames: () => [],
+    getAppId: () => "shutdown-orchestrator",
     getElectronProc: () => null,
     clearElectronProc: () => {},
     disposeUds: mark("uds"),

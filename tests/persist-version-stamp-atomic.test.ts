@@ -16,7 +16,7 @@
 // The window between line 1 and line 2 is the bug. There is now one line.
 
 import { assert, assertEquals } from "@std/assert";
-import { createDB } from "../src/db/mod.ts";
+import { createDB } from "../src/server-entry.ts";
 import type { DB } from "../src/db/mod.ts";
 import { SKV_SCHEMA, sqliteKv } from "../src/server/skv-sqlite.ts";
 import { createPersistenceManager } from "../src/server/persistence.ts";

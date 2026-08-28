@@ -18,7 +18,8 @@ const App = () => (
 mount(document.getElementById("root")!, App);
 ```
 
-Zero dependencies. ~8KB total.
+Zero dependencies. ~20 KB gzipped (59 KB minified) for the renderer; a small app
+bundles to ~50 KB gzipped.
 
 ---
 

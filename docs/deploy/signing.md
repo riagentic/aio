@@ -10,10 +10,9 @@ sources, the update banner, `canApply`. This page is the **publishing and
 verification API**: what `deno task ship` calls, and what you call if you build
 or check a release yourself.
 
-Everything here is exported from `aio/ship`. The five most-used symbols are also
-re-exported from `aio/build` (`buildShipManifest`, `generateSigningKey`,
-`shipApp`, `verifyShipManifest`, and the `ShipManifest` type), so a build script
-that already imports `aio/build` needs no second import.
+Everything here is exported from `aio/ship` — and only from there (alpha70: one
+import path per symbol; the `aio/build` re-exports are gone, and
+`aiol --safe-fix` rewrites an old `import { shipApp } from "aio/build"`).
 
 ## The short version
 
@@ -34,7 +33,7 @@ The long way, one artifact at a time:
 
 ```sh
 deno task compile
-deno task ship dist/wallet --channel=prod --key=~/.aio/keys/<app>-release-key.json
+deno task ship dist/wallet --channel=prod   # --key defaults to ~/.aio/keys/<app>-release-key.json (what `ship keygen` wrote)
 ```
 
 That writes the manifest twice next to the artifact: `<binary>.ship.json` (the
@@ -293,12 +292,11 @@ rule somewhere else is how the two spellings drift apart.
 
 ## Publishing helpers
 
-| API                                       | Returns                                          |
-| ----------------------------------------- | ------------------------------------------------ |
-| `manifestFileName({ os, arch })`          | `"<os>-<arch>.json"` — the name a client FETCHES |
-| `publishInstructions(manifest, artifact)` | the exact copy commands for the channel layout   |
-| `githubWorkflow({ name, channel? })`      | a GitHub Actions release workflow, as a string   |
-| `sha256Hex(bytes)`                        | `Promise<string>` — lowercase hex SHA-256        |
+| API                                  | Returns                                          |
+| ------------------------------------ | ------------------------------------------------ |
+| `manifestFileName({ os, arch })`     | `"<os>-<arch>.json"` — the name a client FETCHES |
+| `githubWorkflow({ name, channel? })` | a GitHub Actions release workflow, as a string   |
+| `sha256Hex(bytes)`                   | `Promise<string>` — lowercase hex SHA-256        |
 
 `manifestFileName` is not a convention, it is the request: a client asks for
 `<base>/<channel>/<os>-<arch>.json`. Publishing only `<binary>.ship.json`

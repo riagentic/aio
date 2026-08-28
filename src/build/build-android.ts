@@ -370,6 +370,8 @@ export async function _writeConnectPage(
    *  asking its user to type a server the build already recorded is the gap
    *  `build.server` was supposed to close. */
   bakedServer?: string | null,
+  /** Whose build is writing it — the log line names the target. */
+  tag = "android",
 ): Promise<void> {
   const connectHtml = `<!DOCTYPE html>
 ${htmlOpen()}
@@ -425,7 +427,7 @@ ${htmlOpen()}
 </body>
 </html>`;
   await Deno.writeTextFile(join(assetsDir, "index.html"), connectHtml);
-  console.log("[android] \u2713 connect page");
+  console.log(`[${tag}] \u2713 connect page`);
 }
 
 async function _writeLocalAssets(

@@ -1,10 +1,10 @@
 // tests/devtools-disconnect.test.ts
-// Behavior tests for disconnectDevTools (src/browser/protocol-devtools.ts,
-// public via src/air.ts `connectDevTools, disconnectDevTools`).
+// Behavior tests for disconnectReduxDevTools (src/browser/protocol-devtools.ts,
+// public via src/air.ts `connectReduxDevTools, disconnectReduxDevTools`).
 //
 // Strategy: stub window.__REDUX_DEVTOOLS_EXTENSION__ with a fake extension
-// that records calls. connectDevTools() must wire connect + subscribe;
-// disconnectDevTools() must call connection.disconnect(), null the module
+// that records calls. connectReduxDevTools() must wire connect + subscribe;
+// disconnectReduxDevTools() must call connection.disconnect(), null the module
 // connection, and make _sendDevTools inert. _resetDevTools() isolates tests
 // (same reset used by tests/browser-air.test.ts); _coreReset() keeps
 // state-core's "initial state received" flag out of the picture.
@@ -15,8 +15,8 @@ import {
   _devtoolsConnected,
   _resetDevTools,
   _sendDevTools,
-  connectDevTools,
-  disconnectDevTools,
+  connectReduxDevTools,
+  disconnectReduxDevTools,
 } from "../src/browser/protocol-devtools.ts";
 import type { DevToolsConnection } from "../src/protocol/protocol-types.ts";
 import { _reset as _coreReset } from "../src/state-core.ts";
@@ -92,10 +92,10 @@ function withWindow(ext: unknown, fn: () => void): void {
 
 // ── connect → disconnect lifecycle ──────────────────────────────────
 
-Deno.test("devtools: connectDevTools wires the extension (connect + subscribe, forwards sends)", () => {
+Deno.test("devtools: connectReduxDevTools wires the extension (connect + subscribe, forwards sends)", () => {
   const fake = fakeExtension();
   withWindow(fake.ext, () => {
-    connectDevTools();
+    connectReduxDevTools();
 
     assertEquals(fake.calls.connect, 1, "must connect to the extension");
     assertEquals(fake.calls.subscribe, 1, "must register a message listener");
@@ -109,13 +109,13 @@ Deno.test("devtools: connectDevTools wires the extension (connect + subscribe, f
   });
 });
 
-Deno.test("devtools: disconnectDevTools calls connection.disconnect and resets module state", () => {
+Deno.test("devtools: disconnectReduxDevTools calls connection.disconnect and resets module state", () => {
   const fake = fakeExtension();
   withWindow(fake.ext, () => {
-    connectDevTools();
+    connectReduxDevTools();
     assertEquals(_devtoolsConnected, true);
 
-    disconnectDevTools();
+    disconnectReduxDevTools();
 
     assertEquals(
       fake.calls.disconnect,
@@ -135,30 +135,30 @@ Deno.test("devtools: disconnectDevTools calls connection.disconnect and resets m
 Deno.test("devtools: after disconnect, _sendDevTools no longer reaches the extension", () => {
   const fake = fakeExtension();
   withWindow(fake.ext, () => {
-    connectDevTools();
+    connectReduxDevTools();
     _sendDevTools({ type: "a" }, {});
     assertEquals(fake.calls.send, 1);
 
-    disconnectDevTools();
+    disconnectReduxDevTools();
     _sendDevTools({ type: "b" }, {});
 
     assertEquals(fake.calls.send, 1, "post-disconnect sends must be dropped");
   });
 });
 
-Deno.test("devtools: disconnectDevTools without a prior connect is a safe no-op", () => {
+Deno.test("devtools: disconnectReduxDevTools without a prior connect is a safe no-op", () => {
   _resetDevTools();
   // No window stub at all — disconnect must not touch globals or throw.
-  disconnectDevTools();
+  disconnectReduxDevTools();
   assertEquals(_devtools, null);
   assertEquals(_devtoolsConnected, false);
 });
 
-Deno.test("devtools: connectDevTools is idempotent while connected (single extension connection)", () => {
+Deno.test("devtools: connectReduxDevTools is idempotent while connected (single extension connection)", () => {
   const fake = fakeExtension();
   withWindow(fake.ext, () => {
-    connectDevTools();
-    connectDevTools();
+    connectReduxDevTools();
+    connectReduxDevTools();
 
     assertEquals(
       fake.calls.connect,
@@ -172,22 +172,22 @@ Deno.test("devtools: connectDevTools is idempotent while connected (single exten
 Deno.test("devtools: reconnect after disconnect opens a fresh extension connection", () => {
   const fake = fakeExtension();
   withWindow(fake.ext, () => {
-    connectDevTools();
-    disconnectDevTools();
-    connectDevTools();
+    connectReduxDevTools();
+    disconnectReduxDevTools();
+    connectReduxDevTools();
 
     assertEquals(fake.calls.connect, 2, "must reconnect after a disconnect");
     assertEquals(_devtoolsConnected, true);
   });
 });
 
-Deno.test("devtools: disconnectDevTools swallows a throwing extension and still resets state", () => {
+Deno.test("devtools: disconnectReduxDevTools swallows a throwing extension and still resets state", () => {
   const fake = fakeExtension();
   withWindow(fake.ext, () => {
-    connectDevTools();
+    connectReduxDevTools();
     fake.makeDisconnectThrow();
 
-    disconnectDevTools(); // must not throw
+    disconnectReduxDevTools(); // must not throw
 
     assertEquals(fake.calls.disconnect, 1);
     assertEquals(

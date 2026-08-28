@@ -33,6 +33,17 @@ import {
 // 1. PROJECT CONFIG (deno.json)
 // ══════════════════════════════════════════════════════════════════════
 
+/** Registry rows that `checkAlpha52` reports at their exact site with a
+ *  `--safe-fix`; the per-cell removed-key loop in `checkCells` leaves these to
+ *  it so one fact is one line. */
+const SITE_RULED_REMOVALS: ReadonlySet<string> = new Set([
+  "listensTo: [...]",
+  "schedule.poll({ backoff })",
+  "schedule.backoff/poll(id, attempt, opts, action)",
+  "cell({ ui })",
+  "cellDefaults.ui",
+]);
+
 /** Is this finding suppressed?
  *
  *  `// aiol-ok` counts on the flagged line OR on the comment line immediately
@@ -522,6 +533,9 @@ export const checkCells: Checker = (ctx) => {
   // learns the fix from `deno task lint` before it even boots.
   for (const f of cells) {
     for (const key of f.removedKeys) {
+      // A removal with a SITE rule of its own (exact line + --safe-fix, in
+      // checkAlpha52) is reported there, once — not here as a second line.
+      if (SITE_RULED_REMOVALS.has(key)) continue;
       // An ERROR that fails the gate has to say WHERE. This one named the cell
       // and nothing else, so in a repo with several cell files the reader's
       // first move was a grep — and the linter knows the answer.
@@ -773,7 +787,7 @@ export const checkPerformance: Checker = (ctx) => {
           `${file.relative}: sync I/O (${api}) blocks the event loop — every ` +
             `client's next action waits behind it. Use the async version; if ` +
             `the work is CPU-bound or a sync-only API, move it off-thread with ` +
-            `schedule.blocking("id", fn, arg)`,
+            `blocking("id", fn, arg)`,
           { file: file.relative, line: lineIdx + 1 },
         );
       }
@@ -1119,7 +1133,25 @@ export const checkUI: Checker = (ctx) => {
     "react/jsx-runtime",
   ]);
   const denoImports = new Set(Object.keys(ctx.denoJson?.imports ?? {}));
-  const SERVER_ONLY_PREFIXES_CHECK2 = ["@std/", "node:"];
+  // Server-only module prefixes — ONE list, read by both loops below.
+  //
+  // There were two, and the second was missing `aio/server`. That alone would
+  // be a drift; what made it a hole is that the two loops divide the files
+  // between them: the cell-file loop KNOWS these are server-only and skips
+  // `.tsx`, while this loop sees every `.tsx` and waved them through —
+  // `@std/`/`node:` with "caught by Check 1" (the loop that skips .tsx), and
+  // every `aio/*` via `isAioEntry` on the grounds that `checkImports` owns
+  // them (it asks whether a specifier RESOLVES, never whether it belongs in a
+  // browser). So a component importing `aio/server`, `@std/path` or `node:fs`
+  // was checked by nobody, and each one is the anonymous blank screen these
+  // rules exist to prevent. aiol's own [upgrade] rule suggests
+  // `import { createDB } from "aio/server"` as the fix for `aio/db`, which
+  // walked an app straight into it.
+  //
+  // Half of this was already found once: the `Deno.*` scan was moved OUT of
+  // the cell-file loop "precisely because this `continue` was silently
+  // exempting components from it". The import scan kept the defect.
+  const SERVER_ONLY_PREFIXES = ["@std/", "node:", "aio/server"];
 
   const cellFiles = ctx.cells.map((f) => f.file).filter((f, i, arr) =>
     arr.indexOf(f) === i
@@ -1150,10 +1182,30 @@ export const checkUI: Checker = (ctx) => {
       if (
         m[0]!.startsWith("import type ") || m[0]!.startsWith("import type{")
       ) continue;
+      const lineIdx = file.content.slice(0, m.index).split("\n").length;
+      // A `.tsx` reaches the browser bundle, and no other loop sees it: the
+      // cell-file loop below skips `.tsx` by design. Non-`.tsx` files ARE in
+      // that loop, so they defer to it and are not reported twice.
+      if (
+        file.ext === ".tsx" &&
+        SERVER_ONLY_PREFIXES.some((p) => spec.startsWith(p))
+      ) {
+        report(
+          "error",
+          "ui",
+          `${file.relative}:${lineIdx} — import "${spec}" is server-only and this file is compiled into the browser bundle`,
+          {
+            file: file.relative,
+            line: lineIdx,
+            fix:
+              "Move it behind a cell method (`await import(...)` runs on the server), put it in a *.server.ts module, or use `import type`",
+          },
+        );
+        continue;
+      }
       if (BROWSER_IMPORTS.has(spec) || isAioEntry(spec)) continue;
       if (denoImports.has(spec)) continue; // in deno.json → auto-aliased
-      if (SERVER_ONLY_PREFIXES_CHECK2.some((p) => spec.startsWith(p))) continue; // caught by Check 1
-      const lineIdx = file.content.slice(0, m.index).split("\n").length;
+      if (SERVER_ONLY_PREFIXES.some((p) => spec.startsWith(p))) continue; // the cell-file loop owns non-.tsx
       report(
         "error",
         "ui",
@@ -1176,9 +1228,24 @@ export const checkUI: Checker = (ctx) => {
       const spec = m[1]!;
       if (spec.startsWith(".") || spec.startsWith("/")) continue;
       if (
+        file.ext === ".tsx" &&
+        SERVER_ONLY_PREFIXES.some((p) => spec.startsWith(p))
+      ) {
+        report(
+          "error",
+          "ui",
+          `${file.relative}: side-effect import "${spec}" is server-only and this file is compiled into the browser bundle`,
+          {
+            file: file.relative,
+            fix: "Move it behind a cell method or into a *.server.ts module",
+          },
+        );
+        continue;
+      }
+      if (
         BROWSER_IMPORTS.has(spec) || isAioEntry(spec) || denoImports.has(spec)
       ) continue;
-      if (SERVER_ONLY_PREFIXES_CHECK2.some((p) => spec.startsWith(p))) continue;
+      if (SERVER_ONLY_PREFIXES.some((p) => spec.startsWith(p))) continue;
       report(
         "error",
         "ui",
@@ -1218,7 +1285,7 @@ export const checkUI: Checker = (ctx) => {
   // "aio/server" is the explicit server-only entry: the whole module
   // is server-only, so a STATIC import into a cell-shared file is the boundary
   // violation — flag it like @std/ / node:.
-  const SERVER_ONLY_PREFIXES = ["@std/", "node:", "aio/server"];
+  // (SERVER_ONLY_PREFIXES is declared once, above both loops.)
   // AIO-424: server-only SYMBOLS that live in the isomorphic "aio"/"aio/db"
   // entries — the browser build omits them, so a STATIC import into a
   // cell (shared with the browser bundle) link-fails at boot with an anonymous
@@ -3066,11 +3133,12 @@ export const checkAlpha52: Checker = (ctx) => {
       if (isSuppressed(file.lines, line - 1)) continue;
       found++;
       report(
-        "warn",
+        "error",
         "alpha52",
-        `${file.relative}:${line} — listensTo array form is deprecated ` +
-          `(routes without running code): use the object form, ` +
-          `\`listensTo: { onThing: other.method }\` (values may be arrays)`,
+        removalMessage(
+          removalOf("listensTo: [...]"),
+          `${file.relative}:${line}`,
+        ),
         {
           file: file.relative,
           line,
@@ -3160,13 +3228,12 @@ export const checkAlpha52: Checker = (ctx) => {
       if (isSuppressed(file.lines, line - 1)) continue;
       found++;
       report(
-        "warn",
+        "error",
         "alpha52",
-        `${file.relative}:${line} — schedule.${m[1]}(id, attempt, opts, ` +
-          `action) is the deprecated order: the action moved to the 3rd ` +
-          `position, like after/every — schedule.${
-            m[1]
-          }(id, attempt, action, opts)`,
+        removalMessage(
+          removalOf("schedule.backoff/poll(id, attempt, opts, action)"),
+          `${file.relative}:${line}`,
+        ),
         {
           file: file.relative,
           line,
@@ -3188,10 +3255,12 @@ export const checkAlpha52: Checker = (ctx) => {
       if (isSuppressed(file.lines, line - 1)) continue;
       found++;
       report(
-        "warn",
+        "error",
         "alpha52",
-        `${file.relative}:${line} — schedule.poll's \`backoff\` option key ` +
-          `is deprecated: renamed \`factor\` (same meaning)`,
+        removalMessage(
+          removalOf("schedule.poll({ backoff })"),
+          `${file.relative}:${line}`,
+        ),
         {
           file: file.relative,
           line,
@@ -3329,13 +3398,12 @@ export const checkAlpha52Surface: Checker = (ctx) => {
       if (isSuppressed(file.lines, line - 1)) continue;
       found++;
       report(
-        "warn",
+        "error",
         "alpha52",
-        `${file.relative}:${line} — ${
-          isCell ? "cell config" : "cellDefaults"
-        } key \`ui:\` was renamed \`visible:\` (access gates calls, ` +
-          `visible gates reads; the alias works through beta with a one-time ` +
-          `hint). App-level aio.run({ ui: {...} }) window config is unchanged.`,
+        removalMessage(
+          removalOf(isCell ? "cell({ ui })" : "cellDefaults.ui"),
+          `${file.relative}:${line}`,
+        ),
         {
           file: file.relative,
           line,
@@ -3385,48 +3453,8 @@ export const checkAlpha52Surface: Checker = (ctx) => {
     );
   }
 
-  // aio/db went types-only (alpha52): VALUE imports move to aio/server (the
-  // aio/db re-exports are deprecated through beta — rewrite now).
-  for (const file of sourceFiles) {
-    const m = /(?:^|\n)\s*import\s*\{([^}]*)\}\s*from\s*["']aio\/db["']/.exec(
-      file.content,
-    );
-    if (!m) continue;
-    const hasValue = m[1]!.split(",").some((raw) => {
-      const t = raw.trim();
-      if (!t || /^type\s/.test(t)) return false;
-      const bare = t.split(/\s+as\s+/)[0]!.trim();
-      return [
-        "createDB",
-        "DEFAULT_PRAGMAS",
-        "initSchema",
-        "loadTables",
-        "syncTables",
-        "reactiveDB",
-      ].includes(bare);
-    });
-    if (!hasValue) continue;
-    found++;
-    // `+1` is only right when the match started at the `\n` the pattern
-    // allows; a FIRST-LINE import matches at index 0 and was reported as
-    // line 2 — an error-severity finding pointing at the wrong line.
-    const line = file.content.slice(0, m.index).split("\n").length +
-      (m.index === 0 ? 0 : 1);
-    report(
-      "warn",
-      "upgrade",
-      `${file.relative}:${line} — \`aio/db\` is types + pure helpers since ` +
-        `alpha52: its runtime values (createDB, initSchema, reactiveDB, …) ` +
-        `live on \`aio/server\`; the aio/db re-exports are deprecated and ` +
-        `die at beta`,
-      {
-        file: file.relative,
-        line,
-        fix: 'import { createDB } from "aio/server"',
-        safeFix: fix.fixDbEntryImports(file.path),
-      },
-    );
-  }
+  // (aio/db value imports: see checkAlpha70Removals — the deprecation became
+  // a removal in alpha70.)
 
   // MIGRATION: exposed + no per-user auth + no `key` → alpha52 generates a
   // shared key by default. Insert `key: false` to pin the old OPEN behavior.
@@ -4334,6 +4362,630 @@ export const checkScanCoverage: Checker = (ctx) => {
   );
 };
 
+// ══════════════════════════════════════════════════════════════════════
+// 28. ALPHA70 — ONE IMPORT PATH PER SYMBOL (and three removed spellings)
+// ══════════════════════════════════════════════════════════════════════
+//
+// The last compatibility-breaking release. Every fact here is a row in
+// src/state/removals.ts — this rule reads the row and prints its message, so
+// the linter, the runtime and the upgrade guide cannot drift. `--safe-fix`
+// moves the import (split the statement: moved names to the new entry, the
+// rest stay) or keeps a removed alias behaviour-identical
+// (`import { checkCells as lint }`), so a project lints clean in one run.
+
+/** Where each duplicate home's names went. `key` is the registry row. */
+const ALPHA70_MOVES: ReadonlyArray<fix.MovedImports & { key: string }> = [
+  {
+    key: 'import { createDB } from "aio/db"',
+    from: "aio/db",
+    to: "aio/server",
+    valuesOnly: true,
+    names: new Set([
+      "createDB",
+      "DEFAULT_PRAGMAS",
+      "initSchema",
+      "loadTables",
+      "syncTables",
+      "reactiveDB",
+    ]),
+  },
+  {
+    key: 'import { shipApp } from "aio/build"',
+    from: "aio/build",
+    to: "aio/ship",
+    names: new Set([
+      "buildShipManifest",
+      "generateSigningKey",
+      "shipApp",
+      "verifyShipManifest",
+      "ShipManifest",
+    ]),
+  },
+  {
+    key: 'import { appDirs } from "aio/testing"',
+    from: "aio/testing",
+    to: "aio/server",
+    names: new Set(["appDirs", "AppDirs"]),
+  },
+  {
+    key: 'import { installUpdatesRuntime } from "aio/testing"',
+    from: "aio/testing",
+    to: "aio/updates",
+    names: new Set([
+      "installUpdatesRuntime",
+      "UpdatesRuntime",
+      "ApplyOptions",
+      "CheckOptions",
+      "CheckResult",
+    ]),
+  },
+  {
+    key: 'import { testComponent } from "aio/air"',
+    from: "aio/air",
+    to: "aio/testing",
+    names: new Set([
+      "testComponent",
+      "setDocument",
+      "TestComponentHandle",
+      "TestComponentOptions",
+    ]),
+  },
+  {
+    key: 'import { testCell } from "aio"',
+    from: "aio",
+    to: "aio/testing",
+    names: new Set(["testCell", "TestContext"]),
+  },
+];
+
+/** Removed aliases: the old local name stays, bound to the surviving symbol. */
+const ALPHA70_ALIASES: ReadonlyArray<
+  { key: string; spec: string; old: string; now: string }
+> = [
+  {
+    key: 'lint() from "aio/extras"',
+    spec: "aio/extras",
+    old: "lint",
+    now: "checkCells",
+  },
+  { key: "testgen()", spec: "aio/testing", old: "testgen", now: "testGen" },
+];
+
+const IMPORT_RE = /import\s*(?:type\s+)?\{[^}]*\}\s*from\s*["'][^"']+["'];?/g;
+
+export const checkAlpha70Removals: Checker = (ctx) => {
+  const { tsFiles, tsxFiles, appEntry, report, pass } = ctx;
+  let found = 0;
+  for (const file of [...tsFiles, ...tsxFiles]) {
+    const lineOf = (idx: number) =>
+      file.content.slice(0, idx).split("\n").length;
+    for (const m of codeMatches(file.content, IMPORT_RE)) {
+      const stmt = m[0];
+      const line = lineOf(m.index!);
+      if (isSuppressed(file.lines, line - 1)) continue;
+      for (const mv of ALPHA70_MOVES) {
+        if (fix.moveImports(stmt, mv) === null) continue;
+        found++;
+        // A component cannot open a database: swapping the specifier there
+        // turns a removal into a server-only boundary error, so the fix is
+        // declined and the real move (into a cell method) is named.
+        const componentDb = mv.from === "aio/db" && file.ext === ".tsx";
+        report(
+          "error",
+          "upgrade",
+          removalMessage(removalOf(mv.key), `${file.relative}:${line}`),
+          {
+            file: file.relative,
+            line,
+            fix: componentDb
+              ? "a component cannot open a database — move the call into a " +
+                "cell method, which runs on the server"
+              : `import { … } from "${mv.to}"`,
+            safeFix: componentDb
+              ? undefined
+              : fix.fixMovedImports(file.path, mv),
+            manual: componentDb
+              ? "move the database call into a cell method"
+              : undefined,
+          },
+        );
+      }
+      for (const al of ALPHA70_ALIASES) {
+        if (fix.aliasRename(stmt, al.spec, al.old, al.now) === null) continue;
+        found++;
+        report(
+          "error",
+          "upgrade",
+          removalMessage(removalOf(al.key), `${file.relative}:${line}`),
+          {
+            file: file.relative,
+            line,
+            fix: `import { ${al.now} as ${al.old} } from "${al.spec}"`,
+            safeFix: fix.fixAliasRename(file.path, al.spec, al.old, al.now),
+          },
+        );
+      }
+    }
+  }
+  // `memory.gcStressRatio` — accepted and never read; boot refuses it now.
+  if (appEntry) {
+    const code = codeText(appEntry.content);
+    const m = /\bgcStressRatio\s*:/.exec(code);
+    if (m) {
+      const line = code.slice(0, m.index).split("\n").length;
+      if (!isSuppressed(appEntry.lines, line - 1)) {
+        found++;
+        report(
+          "error",
+          "upgrade",
+          removalMessage(
+            removalOf("memory.gcStressRatio"),
+            `${appEntry.relative}:${line}`,
+          ),
+          {
+            file: appEntry.relative,
+            line,
+            fix: "delete the key",
+            manual: "delete `gcStressRatio:` from `memory: { … }`",
+          },
+        );
+      }
+    }
+  }
+  if (found === 0) pass("no alpha70-removed import path or alias in use");
+};
+
+/** alpha70 word renames — the old name has ONE meaning, so a masked-code word
+ *  replace is the whole migration. `Action` is not here: it is an app's own
+ *  word too, so its import specifier is aliased instead (below). */
+const ALPHA70_WORDS: ReadonlyArray<
+  { key: string; from: string; to: string; pattern: RegExp }
+> = [
+  {
+    key: "CellAccess",
+    from: "CellAccess",
+    to: "Access",
+    pattern: /\bCellAccess\b/,
+  },
+  {
+    key: "ServerFnAccess",
+    from: "ServerFnAccess",
+    to: "Access",
+    pattern: /\bServerFnAccess\b/,
+  },
+  {
+    key: "ExtractState",
+    from: "ExtractState",
+    to: "StateOf",
+    pattern: /\bExtractState\b/,
+  },
+  {
+    key: "connectDevTools()",
+    from: "connectDevTools",
+    to: "connectReduxDevTools",
+    pattern: /\bconnectDevTools\b/,
+  },
+  {
+    key: "connectDevTools()",
+    from: "disconnectDevTools",
+    to: "disconnectReduxDevTools",
+    pattern: /\bdisconnectDevTools\b/,
+  },
+];
+
+export const checkAlpha70Renames: Checker = (ctx) => {
+  const { tsFiles, tsxFiles, report, pass } = ctx;
+  let found = 0;
+  for (const file of [...tsFiles, ...tsxFiles]) {
+    const code = codeText(file.content);
+    const lineOf = (idx: number) => code.slice(0, idx).split("\n").length;
+    const seen = new Set<string>();
+    for (const w of ALPHA70_WORDS) {
+      const m = w.pattern.exec(code);
+      if (!m || seen.has(w.key)) continue;
+      const line = lineOf(m.index);
+      if (isSuppressed(file.lines, line - 1)) continue;
+      seen.add(w.key);
+      found++;
+      report(
+        "error",
+        "upgrade",
+        removalMessage(removalOf(w.key), `${file.relative}:${line}`),
+        {
+          file: file.relative,
+          line,
+          fix: `${w.from} → ${w.to}`,
+          safeFix: fix.fixRenameWords(
+            file.path,
+            ALPHA70_WORDS.filter((x) => x.key === w.key).map((
+              x,
+            ) => [x.from, x.to] as const),
+          ),
+        },
+      );
+    }
+    // `type Action` from aio/air → `type NodeAction as Action`: the local name
+    // survives (an app may use `Action` for its own things), the import is
+    // the one line that changes.
+    for (const m of codeMatches(file.content, IMPORT_RE)) {
+      if (!/from\s*["']aio\/air["']/.test(m[0])) continue;
+      if (!/\btype\s+Action\s*[,}]/.test(m[0])) continue;
+      const line = lineOf(m.index!);
+      if (isSuppressed(file.lines, line - 1)) continue;
+      found++;
+      report(
+        "error",
+        "upgrade",
+        removalMessage(
+          removalOf("Action (aio/air)"),
+          `${file.relative}:${line}`,
+        ),
+        {
+          file: file.relative,
+          line,
+          fix: 'import { type NodeAction as Action } from "aio/air"',
+          safeFix: fix.fixAliasRename(
+            file.path,
+            "aio/air",
+            "Action",
+            "NodeAction",
+          ),
+        },
+      );
+    }
+    // `schedule.blocking(` → `blocking(` (+ the import).
+    const b = /\bschedule\.blocking\s*\(/.exec(code);
+    if (b) {
+      const line = lineOf(b.index);
+      if (!isSuppressed(file.lines, line - 1)) {
+        found++;
+        report(
+          "error",
+          "upgrade",
+          removalMessage(
+            removalOf("schedule.blocking"),
+            `${file.relative}:${line}`,
+          ),
+          {
+            file: file.relative,
+            line,
+            fix: 'import { blocking } from "aio"; blocking("id", fn, arg)',
+            safeFix: fix.fixScheduleBlocking(file.path),
+          },
+        );
+      }
+    }
+  }
+  if (found === 0) pass("no alpha70-renamed symbol in use");
+};
+
+// ══════════════════════════════════════════════════════════════════════
+// 29. THE LIVE DRAFT ESCAPES THE METHOD
+// ══════════════════════════════════════════════════════════════════════
+//
+// `s` is a live proxy over the cell's draft. It is valid for exactly the span
+// of the method (an async method: until it settles). Parked in a module-level
+// variable, or captured by a callback that is stored outside the method, it
+// outlives that span — and the runtime cannot track it: a later read serves
+// stale data, a later write throws (a finalized draft) or lands on nothing the
+// store sees. The shape is lexical, so the linter is the guard.
+//
+// EXACT CRITERION (error): inside a cell method whose draft parameter is `P`,
+//   (a) `P` itself is assigned or pushed into a MODULE-LEVEL binding of this
+//       file (`let`/`var`/`const` declared at column 0, or `globalThis`):
+//       `X = P`, `X.y = P`, `X.push(P)`, `X.set(k, P)`, `X.add(P)`; or
+//   (b) a function literal whose text references `P` is assigned to, or
+//       pushed/set/added/registered (`push|set|add|on|once|subscribe|
+//       addEventListener|addListener`) on, such a binding.
+// Not a hit: `P` handed to `own.set`, `s.$do`, `schedule.*`, a local `const`,
+// or a callback that copies plain data (`{ ...P }`, `P.items.slice()`) —
+// those do not reference `P` after the copy.
+
+/** Offsets of a cell's CONFIG literal (`{` … `}` — the second argument), or
+ *  null. `cellLiteralSpan` returns the CALL's parentheses; a rule that walks
+ *  `methods:` needs the object one level in. */
+function _cellConfigSpan(
+  code: string,
+  declLine: number,
+): [number, number] | null {
+  const call = cellLiteralSpan(code, declLine);
+  if (!call) return null;
+  const open = code.indexOf("{", call[0]);
+  if (open < 0 || open > call[1]) return null;
+  const close = _balancedClose(code, open);
+  return close === -1 ? null : [open, close];
+}
+
+/** Column-0 `let|var|const` names (+ `globalThis`) — the module's own scope. */
+function _moduleBindings(code: string): string[] {
+  const out = new Set<string>(["globalThis"]);
+  for (
+    const m of code.matchAll(/^(?:export\s+)?(?:let|var|const)\s+([$\w]+)/gm)
+  ) out.add(m[1]!);
+  return [...out];
+}
+
+/** The extent of a function literal starting at `at` (its `=>` or `function`
+ *  keyword): block body → balanced `}`; expression body → the depth-0 `,`,
+ *  `;` or closing bracket. Returns the body text. */
+function _fnLiteralBody(code: string, at: number): string {
+  const rest = code.slice(at);
+  const brace = /^(?:=>|function\b[^{]*)\s*\{/.exec(rest);
+  if (brace) {
+    const open = at + brace[0].length - 1;
+    const close = _balancedClose(code, open);
+    return close === -1 ? rest : code.slice(open, close + 1);
+  }
+  let d = 0;
+  for (let i = at + 2; i < code.length; i++) {
+    const ch = code[i]!;
+    if ("({[".includes(ch)) d++;
+    else if (")}]".includes(ch)) {
+      if (d === 0) return code.slice(at, i);
+      d--;
+    } else if ((ch === "," || ch === ";") && d === 0) return code.slice(at, i);
+  }
+  return rest;
+}
+
+export const checkProxyEscape: Checker = (ctx) => {
+  const { cells, report, pass } = ctx;
+  let found = 0, checked = 0;
+  for (const cell of cells) {
+    const raw = cell.file.content;
+    const code = codeText(raw);
+    const bindings = _moduleBindings(code);
+    if (bindings.length === 0) continue;
+    const span = _cellConfigSpan(code, cell.line);
+    if (!span) continue;
+    const meth = _blockOf(code, span[0], span[1], "methods");
+    if (!meth) continue;
+    const X = `(?:${bindings.map((b) => b.replace(/\$/g, "\\$")).join("|")})`;
+    for (const fn of _members(code, meth[0], meth[1])) {
+      const P = fn.param;
+      if (!P) continue;
+      checked++;
+      const p = P.replace(/\$/g, "\\$");
+      const sink = `\\b${X}(?:\\.[$\\w]+|\\[[^\\]]*\\])*\\s*`;
+      const hits: Array<{ at: number; how: string }> = [];
+      // (a) the proxy itself, stored.
+      const direct = new RegExp(
+        `${sink}(?:=(?!=)\\s*${p}\\b(?![$\\w.(\\[])|\\.(?:push|add|set)\\s*\\((?:[^()]*,\\s*)?${p}\\s*\\))`,
+        "g",
+      );
+      for (const m of fn.body.matchAll(direct)) {
+        hits.push({ at: m.index!, how: `stores \`${P}\` itself` });
+      }
+      // (b) a callback that closes over the proxy, stored.
+      const cb = new RegExp(
+        `${sink}(?:=(?!=)|\\.(?:push|set|add|on|once|subscribe|addEventListener|addListener)\\s*\\()`,
+        "g",
+      );
+      for (const m of fn.body.matchAll(cb)) {
+        const from = m.index! + m[0].length;
+        const lit =
+          /^[^;{}]*?((?:async\s*)?(?:\([^)]*\)|[$\w]+)\s*=>|\bfunction\b)/
+            .exec(fn.body.slice(from, from + 400));
+        if (!lit) continue;
+        const kw = lit[1]!;
+        const litAt = from + lit.index + lit[0].length -
+          (kw.endsWith("=>") ? 2 : "function".length);
+        const body = _fnLiteralBody(fn.body, litAt);
+        if (!new RegExp(`\\b${p}\\b`).test(body)) continue;
+        hits.push({
+          at: m.index!,
+          how: `stores a callback that reads \`${P}\``,
+        });
+      }
+      for (const h of hits) {
+        const line = code.slice(0, fn.start + h.at).split("\n").length;
+        if (isSuppressed(cell.file.lines, line - 1)) continue;
+        found++;
+        report(
+          "error",
+          "cells",
+          `${cell.file.relative}:${line} — \`${cell.name}.${fn.name}()\` ${h.how} ` +
+            `in a module-level binding. \`${P}\` is a LIVE draft, valid only ` +
+            `while the method runs; outside it a read is stale and a write ` +
+            `throws (dev and prod alike) — and the runtime cannot see the ` +
+            `escape, so nothing warns until it fires.\n` +
+            `      fix: keep \`${P}\` inside the method — store plain data ` +
+            `(\`{ ...${P} }\`, \`${P}.items.slice()\`), call the cell from ` +
+            `the callback instead (\`${cell.name}.${fn.name}()\` re-enters ` +
+            `with a fresh draft), or hold the resource with \`own.set()\`.`,
+          { file: cell.file.relative, line },
+        );
+      }
+    }
+  }
+  if (checked > 0 && found === 0) pass("no method lets its live draft escape");
+};
+
+// ══════════════════════════════════════════════════════════════════════
+// 30. I/O IN A SYNC METHOD (a reducer)
+// ══════════════════════════════════════════════════════════════════════
+//
+// A sync method IS the reducer: it runs inside the dispatch loop, and its
+// mutations of `s` are the next state. `fetch()` there returns a Promise the
+// state never sees; `Deno.readTextFileSync()` there blocks every other method
+// of the app for the duration. Both are one keyword away from correct.
+//
+// EXACT CRITERION (error): a non-async member of a cell's `methods:` whose
+// body — with every NESTED function literal blanked, so a callback handed to
+// `own.set` / `s.$do` / `schedule` is not the method's own body — calls
+// `fetch(` or `Deno.<io>(` where <io> is a file/process/network/KV operation
+// (the list below). `Deno.env`, `Deno.cwd`, `Deno.build`, `Deno.inspect` are
+// not I/O and never fire.
+
+const DENO_IO =
+  "(?:readTextFile|readFile|writeTextFile|writeFile|open|create|" +
+  "stat|lstat|readDir|mkdir|remove|rename|copyFile|readLink|realPath|truncate|" +
+  "utime|chmod|chown|symlink|link|makeTempDir|makeTempFile|watchFs|Command|run|" +
+  "connect|connectTls|listen|listenTls|listenDatagram|serve|serveHttp|" +
+  "upgradeWebSocket|openKv|resolveDns|startTls)(?:Sync)?";
+const SYNC_IO_RE = new RegExp(`\\b(fetch|Deno\\.${DENO_IO})\\s*\\(`);
+
+/** `body` with every nested function literal's body blanked (offsets kept). */
+function _blankNestedFns(body: string): string {
+  let out = body;
+  const re = /=>|\bfunction\b/g;
+  for (const m of body.matchAll(re)) {
+    const lit = _fnLiteralBody(body, m.index!);
+    const from = m.index! + (m[0] === "=>" ? 2 : 0);
+    const to = m.index! + lit.length;
+    out = out.slice(0, from) + out.slice(from, to).replace(/[^\n]/g, " ") +
+      out.slice(to);
+  }
+  return out;
+}
+
+export const checkSyncMethodIO: Checker = (ctx) => {
+  const { cells, report, pass } = ctx;
+  let found = 0, checked = 0;
+  for (const cell of cells) {
+    const code = codeText(cell.file.content);
+    const span = _cellConfigSpan(code, cell.line);
+    if (!span) continue;
+    const meth = _blockOf(code, span[0], span[1], "methods");
+    if (!meth) continue;
+    for (const fn of _members(code, meth[0], meth[1])) {
+      if (fn.async) continue;
+      checked++;
+      const m = SYNC_IO_RE.exec(_blankNestedFns(fn.body));
+      if (!m) continue;
+      const line = code.slice(0, fn.start + m.index).split("\n").length;
+      if (isSuppressed(cell.file.lines, line - 1)) continue;
+      found++;
+      report(
+        "error",
+        "cells",
+        `${cell.file.relative}:${line} — \`${cell.name}.${fn.name}()\` is a ` +
+          `SYNC method (the reducer) and calls \`${m[1]}()\`. A reducer runs ` +
+          `inside the dispatch loop: a Promise it returns is not state, and ` +
+          `sync I/O there blocks every other method of the app.\n` +
+          `      fix: make it \`async ${fn.name}(${fn.param || "s"}, …)\` — ` +
+          `await the I/O, then write \`${fn.param || "s"}\`; or keep the ` +
+          `method sync and hand the I/O to \`${fn.param || "s"}.$do(…)\`.`,
+        {
+          file: cell.file.relative,
+          line,
+          fix: `async ${fn.name}(${fn.param || "s"}) { const r = await ${
+            m[1]
+          }(…); ${fn.param || "s"}.x = r }`,
+        },
+      );
+    }
+  }
+  if (checked > 0 && found === 0) pass("no sync method performs I/O");
+};
+
+// ══════════════════════════════════════════════════════════════════════
+// 31. `own.set` KEYED BY A CONSTANT WHILE THE RESOURCE VARIES
+// ══════════════════════════════════════════════════════════════════════
+//
+// `own.set(key, factory)` has REPLACE semantics: setting a key again disposes
+// what it held. That is the point when the key names one thing ("the watcher")
+// and a trap when it names a family: `watch(s, path) { own.set("watcher", () =>
+// Deno.watchFs(path)) }` silently closes the first path's watcher the moment a
+// second path is watched — and nothing reports it, because replacing IS the
+// contract.
+//
+// EXACT CRITERION (warn): an `own.set(KEY, …)` where KEY is a plain string
+// literal (no `${}`), lexically inside a function or method with a parameter
+// whose name is resource-id shaped (ends in id/key/name/path/url/uri/host/
+// port/file/dir/handle/addr/address, case-insensitive; the draft `s` is never
+// one), AND that parameter appears in the call's REMAINING arguments (the
+// factory) — the resource depends on the id, the key does not. A literal key
+// in a function without such a parameter, a template key, or a factory that
+// does not use the id are not hits.
+
+const ID_PARAM_RE =
+  /(?:^|[a-z_])(?:id|key|name|path|url|uri|host|port|file|dir|handle|addr|address)$/i;
+
+/** `_balancedClose` for a call's parentheses. */
+function _balancedParen(stripped: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < stripped.length; i++) {
+    const ch = stripped[i]!;
+    if (ch === "(") depth++;
+    else if (ch === ")") {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/** Innermost function (header params + body span) enclosing `at`. */
+function _enclosingFn(
+  code: string,
+  at: number,
+): { params: string[]; open: number } | null {
+  const re =
+    /(?:\bfunction\b\s*[$\w]*\s*\(([^(){}]*)\)|(?:\b[$\w]+\s*(?::\s*)?(?:async\s+)?)?\(([^(){}]*)\)\s*(?::[^{=]*)?(?:=>)?)\s*\{/g;
+  let best: { params: string[]; open: number } | null = null;
+  for (const m of code.matchAll(re)) {
+    const open = m.index! + m[0].length - 1;
+    if (open >= at) break;
+    const close = _balancedClose(code, open);
+    if (close < at) continue;
+    const list = (m[1] ?? m[2] ?? "").split(",").map((p) =>
+      p.trim().replace(/[:=?].*$/s, "").replace(/^\.\.\./, "").trim()
+    ).filter(Boolean);
+    best = { params: list, open };
+  }
+  return best;
+}
+
+export const checkOwnKeyIdentity: Checker = (ctx) => {
+  const { tsFiles, tsxFiles, report, pass } = ctx;
+  let found = 0, checked = 0;
+  for (const file of [...tsFiles, ...tsxFiles]) {
+    if (/\.test\.tsx?$/.test(file.name)) continue;
+    const raw = file.content;
+    const code = codeText(raw);
+    for (const m of codeMatches(raw, /\bown\.set\s*\(/g)) {
+      const open = m.index! + m[0].length - 1;
+      const close = _balancedParen(code, open);
+      if (close === -1) continue;
+      checked++;
+      const argsRaw = raw.slice(open + 1, close).trim();
+      const key = /^(["'])((?:(?!\1).)*)\1\s*,/.exec(argsRaw);
+      if (!key) continue; // template / variable key: identity is the author's
+      const rest = code.slice(open + 1 + key[0].length, close);
+      const fn = _enclosingFn(code, open);
+      if (!fn) continue;
+      const id = fn.params.find((p) =>
+        ID_PARAM_RE.test(p) &&
+        new RegExp(`\\b${p.replace(/\$/g, "\\$")}\\b`).test(rest)
+      );
+      if (!id) continue;
+      const line = code.slice(0, open).split("\n").length;
+      if (isSuppressed(file.lines, line - 1)) continue;
+      found++;
+      report(
+        "warn",
+        "patterns",
+        `${file.relative}:${line} — \`own.set("${
+          key[2]
+        }", …)\` keys a resource ` +
+          `built from \`${id}\` by a constant. \`own\` REPLACES on re-set, so ` +
+          `the second \`${id}\` disposes the first's resource — silently, ` +
+          `because replacing is the contract.\n` +
+          `      fix: key by the resource's identity — ` +
+          `own.set(\`${key[2]}:\${${id}}\`, …) — or, if one-at-a-time is the ` +
+          `intent, say so: // aiol-ok: one ${key[2]} at a time`,
+        {
+          file: file.relative,
+          line,
+          fix: `own.set(\`${key[2]}:\${${id}}\`, …)`,
+        },
+      );
+    }
+  }
+  if (checked > 0 && found === 0) pass("every own.set key names its resource");
+};
+
 export const ALL_CHECKS: Checker[] = [
   checkScanCoverage,
   checkConfig,
@@ -4363,4 +5015,9 @@ export const ALL_CHECKS: Checker[] = [
   checkSyncMethodHiddenReads,
   checkCredentialFieldName,
   checkEmptyStateCollection,
+  checkAlpha70Removals,
+  checkAlpha70Renames,
+  checkProxyEscape,
+  checkSyncMethodIO,
+  checkOwnKeyIdentity,
 ];

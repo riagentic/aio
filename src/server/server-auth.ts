@@ -15,6 +15,27 @@ export function _timingSafeEqual(a: string, b: string): boolean {
   return result === 0;
 }
 
+/** The token from an `Authorization: Bearer` header, or null.
+ *
+ *  THE reader. Three call sites spelled `auth?.startsWith("Bearer ")` for
+ *  themselves — the general extractor, the auth-flow resolver and the
+ *  shared-key path — which is three chances for the credential rule to drift,
+ *  on the one header where drifting means "authenticated here, anonymous
+ *  there".
+ *
+ *  The scheme is matched case-INSENSITIVELY, which is what RFC 7235 says it is
+ *  (`auth-scheme` is a token, and tokens are case-insensitive). Every spelling
+ *  here was exact-match, so a client sending `bearer <token>` — which some HTTP
+ *  libraries do — presented a perfectly good credential and was treated as
+ *  anonymous. Accepting the other casings loosens nothing: the token still has
+ *  to match. */
+export function bearerToken(req: Request): string | null {
+  const auth = req.headers.get("authorization");
+  if (!auth) return null;
+  const m = /^bearer[ \t]+(.+)$/i.exec(auth.trim());
+  return m ? m[1]!.trim() || null : null;
+}
+
 /** Session cookie name (AUTH-2 browser flow). */
 export const SESSION_COOKIE = "aio_session";
 
@@ -52,10 +73,8 @@ export function _extractTokenWithSource(
 ): { token: string | null; fromUrl: boolean; source: TokenSource | null } {
   const qToken = url.searchParams.get("token");
   if (qToken) return { token: qToken, fromUrl: true, source: "url" };
-  const auth = req.headers.get("authorization");
-  if (auth?.startsWith("Bearer ")) {
-    return { token: auth.slice(7), fromUrl: false, source: "header" };
-  }
+  const bearer = bearerToken(req);
+  if (bearer) return { token: bearer, fromUrl: false, source: "header" };
   const cookie = sessionTokenFromCookie(req);
   return {
     token: cookie,
@@ -366,8 +385,48 @@ export function cellAccessAllowed(
 ): boolean {
   if (rule === true) return user !== undefined;
   if (typeof rule === "string") return user?.role === rule;
-  if (typeof rule === "function") return rule(user, method, ...args);
+  if (typeof rule === "function") {
+    let answer: unknown;
+    try {
+      answer = rule(user, method, ...args);
+    } catch (e) {
+      // A guard that cannot answer is not a yes — the same rule the update
+      // applier's `canApply` follows. The alternative is a 500 whose cause is
+      // three layers away from the sentence that would have explained it.
+      log.error(
+        "auth",
+        `access predicate for "${method}" threw (${e}) — DENIED. A rule that ` +
+          `cannot answer is a refusal, never permission.`,
+      );
+      return false;
+    }
+    if (typeof answer === "boolean") return answer;
+    // NOT a boolean. This used to be returned as-is into `if (!allowed)`, so
+    // any truthy non-boolean granted access — and the one an app reaches for
+    // by accident is a PROMISE: `access: async (u) => await check(u)` is a
+    // pending promise, which is truthy, which is "yes" to everybody. The
+    // `Access` type says `=> boolean` and TypeScript catches the direct form,
+    // but not one returned through an `any`, and this gate is the last place
+    // that mistake can still be caught. Denied and said out loud, because a
+    // silent grant is the one outcome an access rule must never produce.
+    log.error(
+      "auth",
+      `access predicate for "${method}" returned ${
+        isThenable(answer)
+          ? "a PROMISE — the dispatch gate is synchronous and cannot await it"
+          : `a ${typeof answer}, not a boolean`
+      } — DENIED. Return true or false; do the async work before the call ` +
+        `(resolveUser, a serverFn) and decide on its result here.`,
+    );
+    return false;
+  }
   return false; // rule === false
+}
+
+/** Promise-shaped, without assuming it is a real `Promise`. */
+function isThenable(v: unknown): boolean {
+  return typeof v === "object" && v !== null &&
+    typeof (v as { then?: unknown }).then === "function";
 }
 
 // ── Failed-auth budget (AUTH-1) ──────────────────────────────────────────────
@@ -484,27 +543,63 @@ export function _resetAuthFails(): void {
 // what keeps `--expose` (LAN IPs, and the share link) working untouched while
 // every attacker-controlled DOMAIN is refused.
 
+/** A single trailing dot is the ROOT LABEL, not part of the name: `localhost.`
+ *  and `localhost` are the same host, and a browser sends the dotted form when
+ *  the user types one. Without this, `http://localhost.:3000` was refused with
+ *  a DNS-rebinding message — a security control turning away the developer who
+ *  owns the machine. */
+function _dropRootDot(name: string): string {
+  return name.length > 1 && name.endsWith(".") ? name.slice(0, -1) : name;
+}
+
 /** Bare hostname of a `Host` header value: port stripped, IPv6 brackets
- *  removed, lowercased. `""` when there is nothing to check. */
+ *  removed, root dot dropped, lowercased. `""` when there is nothing to check.
+ *
+ *  Parses rather than slices. Taking everything before the LAST colon meant a
+ *  `Host` with two of them (`evil.com:80:80`) yielded `evil.com:80`, which the
+ *  old "contains a colon ⇒ IP literal" rule then read as an IPv6 address — so
+ *  an attacker-controlled domain walked straight through the allowlist with a
+ *  header a proxy or a non-browser client can send at will. A port is digits;
+ *  anything else is not a `host:port`, and a fragment of a malformed header is
+ *  never a name this server answers to. */
 export function _hostnameOfHeader(hostHeader: string): string {
   const h = hostHeader.trim().toLowerCase();
   if (h.startsWith("[")) {
     const close = h.indexOf("]");
-    return close === -1 ? h.slice(1) : h.slice(1, close);
+    return _dropRootDot(close === -1 ? h.slice(1) : h.slice(1, close));
   }
+  // A bare IPv6 is not legal in `Host` (RFC 7230 wants brackets), but one that
+  // really IS an address is recognised rather than mangled into a fragment.
+  if (_isIpv6(h)) return h;
   const i = h.lastIndexOf(":");
-  return i === -1 ? h : h.slice(0, i);
+  if (i === -1) return _dropRootDot(h);
+  if (!/^\d+$/.test(h.slice(i + 1))) return h; // not host:port — matches nothing
+  return _dropRootDot(h.slice(0, i));
 }
 
 const _IPV4_RE = /^\d{1,3}(?:\.\d{1,3}){3}$/;
 
-/** An IP literal — v4 dotted quad, or anything with a `:` in it (v6, already
- *  de-bracketed by `_hostnameOfHeader`). Cannot be the product of DNS. */
+/** A real IPv6 literal, judged by the platform's own URL parser rather than by
+ *  a second spelling of the rule here. `evil.com:80` contains a colon and is
+ *  not an address; that difference is the whole point. */
+function _isIpv6(hostname: string): boolean {
+  if (!hostname.includes(":")) return false;
+  try {
+    new URL(`http://[${hostname}]/`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** An IP literal — v4 dotted quad or v6. Cannot be the product of DNS, which
+ *  is what makes it safe to allow: a browser only sends `Host: 10.0.0.5` for a
+ *  page whose origin IS that address, so no name was ever resolved. */
 function _isIpLiteral(hostname: string): boolean {
   if (_IPV4_RE.test(hostname)) {
     return hostname.split(".").every((o) => Number(o) <= 255);
   }
-  return hostname.includes(":");
+  return _isIpv6(hostname);
 }
 
 /** This machine's own name, once. `Deno.hostname()` needs `--allow-sys`; an app
@@ -546,17 +641,44 @@ export function hostAllowed(
   const bind = opts.bindHost?.trim().toLowerCase();
   if (bind && bind !== "0.0.0.0" && bind !== "::" && bind === name) return true;
   if (name === _machineHostname()) return true;
-  for (const entry of opts.allowedOrigins ?? []) {
-    if (entry === "*") return true;
+  return allowlistAdmits(opts.allowedOrigins, {
+    hostname: name,
+    hostPort: raw,
+  });
+}
+
+/** Does `allowedOrigins` admit this caller? THE reader of that config key.
+ *
+ *  One decider because the key has two consumers — the `Host` check above and
+ *  the WebSocket `Origin` check (`server-ws.ts`) — and they had drifted. The
+ *  WS side did exact `Array.includes()` on the raw entries, so an entry with a
+ *  capital letter, a stray space, a `host:port` spelling, or a full origin
+ *  matched over HTTP and not over the socket. The app loaded and then could
+ *  not connect, which reads as a network fault rather than a config one — and
+ *  the Host refusal tells operators this is "the same list the WebSocket
+ *  origin check reads", which has to be true.
+ *
+ *  Every documented spelling, in one place: `"*"`, a bare hostname, a
+ *  `host:port`, or a full origin. */
+export function allowlistAdmits(
+  entries: readonly string[] | undefined,
+  what: { hostname: string; hostPort?: string; origin?: string },
+): boolean {
+  for (const entry of entries ?? []) {
+    if (entry.trim() === "*") return true;
     const e = entry.trim().toLowerCase();
-    if (e === name || e === raw) return true;
-    // A full origin (`https://app.example.com`) is the documented spelling for
-    // the WS check, so it must mean the same thing here — otherwise the same
-    // deployment needs the same fact written twice, in two spellings.
+    if (e === "") continue;
+    if (e === what.hostname) return true;
+    if (what.hostPort && e === what.hostPort) return true;
+    if (what.origin && e === what.origin.trim().toLowerCase()) return true;
+    // A full origin entry is matched by what it MEANS, not by its text: an
+    // `https://app.example.com` entry admits that host whether the request
+    // carried a port or not.
     if (e.includes("://")) {
       try {
         const u = new URL(e);
-        if (u.hostname === name || u.host === raw) return true;
+        if (u.hostname === what.hostname) return true;
+        if (what.hostPort && u.host === what.hostPort) return true;
       } catch { /* not a URL — the literal compares above already ran */ }
     }
   }

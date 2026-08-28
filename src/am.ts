@@ -53,19 +53,13 @@ import {
   cmdTrigger,
 } from "./am/am-cmd-inspect.ts";
 
-import {
-  cmdAdd,
-  cmdHelp,
-  cmdNew,
-  cmdUninstall,
-  cmdUpdate,
-  cmdVersion,
-} from "./am/am-cmd-meta.ts";
+import { cmdAdd, cmdHelp, cmdUninstall, cmdVersion } from "./am/am-cmd-meta.ts";
 import { cmdCreate } from "./am/am-cmd-create.ts";
 import { cmdPublish } from "./am/am-cmd-publish.ts";
 import { cmdTrust } from "./am/am-cmd-trust.ts";
 import { cmdLink } from "./am/am-cmd-link.ts";
 import { cmdFix } from "./am/am-cmd-fix.ts";
+import { cmdDoctor } from "./am/am-cmd-doctor.ts";
 import { cmdAuth } from "./am/am-cmd-auth.ts";
 
 import { cmdRecord } from "./am/record.ts";
@@ -92,6 +86,9 @@ import { cmdCost } from "./am/am-cmd-cost.ts";
 import { cmdShot } from "./am/am-cmd-shot.ts";
 import { cmdLab } from "./am/am-cmd-lab.ts";
 import { parseGlobalFlags, resolveAmAppId, targetHome } from "./am/am-utils.ts";
+import { PATH_PIN_PREFIX } from "./am/am-versions.ts";
+import { removedAmVerb, retiredSpellingLine } from "./state/removals.ts";
+import { readDenoJsonSync, readLocalPinSync } from "./server/deno-json.ts";
 
 // ── Command map ────────────────────────────────────────────
 
@@ -104,7 +101,6 @@ const COMMANDS: Record<string, CmdHandler> = {
   status: cmdStatus,
   watch: cmdWatch,
   instances: cmdInstances,
-  ls: cmdInstances,
   // State
   state: cmdState,
   expect: cmdExpect,
@@ -116,7 +112,6 @@ const COMMANDS: Record<string, CmdHandler> = {
   dispatch: cmdDispatch,
   actions: cmdActions,
   timetravel: cmdTT,
-  tt: cmdTT, // the short spelling, kept — the long one is what help shows
   persist: cmdPersist,
   snapshot: cmdSnapshot,
   // Data — the files, not the state (see am-cmd-data.ts)
@@ -134,13 +129,13 @@ const COMMANDS: Record<string, CmdHandler> = {
   sql: cmdSql,
   tables: cmdTables,
   schedules: cmdSchedules,
-  log: cmdLog,
   logs: cmdLog,
   errors: cmdErrors,
   metrics: cmdMetrics,
   cost: cmdCost, // what aio moves on your behalf, and where it comes from
   top: cmdTop,
   health: cmdHealth,
+  doctor: cmdDoctor, // is the RUNNING app on the aio that is on disk?
   discover: cmdDiscover,
   profile: cmdProfile,
   pair: cmdPair, // a fresh single-use pairing PIN, without restarting the app
@@ -152,23 +147,33 @@ const COMMANDS: Record<string, CmdHandler> = {
   // build → ship → the channel directory a client actually fetches. The one
   // step of the release that lived only in prose (see am-cmd-publish.ts).
   publish: cmdPublish,
-  release: cmdPublish, // the other word people reach for
   add: cmdAdd,
-  new: cmdNew, // deprecated alias of `add` — prints the rename, still works
   pin: cmdPin, // which aio version this app builds against
   lab: cmdLab, // a REAL Windows/macOS desktop in a container, driven by hand
   theme: cmdTheme, // adopt aio's stylesheet INTO the app, as a file it owns
   link: cmdLink, // just the dep/aio symlink
   fix: cmdFix, // full clone repair (symlink + env + electron + config + …)
-  update: cmdUpdate, // alias of a bare `am upgrade` (am itself)
   uninstall: cmdUninstall,
   remove: cmdRemove, // an installed APP; `uninstall` is am itself
   installed: cmdInstalled,
-  upgrade: cmdUpgrade, // rebuild+reinstall an installed app from its source
+  upgrade: cmdUpgrade, // am itself / an installed app / a dev checkout
   version: cmdVersion,
   trust: cmdTrust,
   help: (args, flags) => cmdHelp(args, flags, Object.keys(COMMANDS)),
 };
+
+/** What `am <verb>` says for a verb it does not have. A verb that USED to
+ *  exist (alpha70 kept one spelling per command: `instances` not `ls`,
+ *  `logs` not `log`, `timetravel` not `tt`, `publish` not `release`,
+ *  `upgrade` not `update`, `add` not `new`) answers with the new spelling in
+ *  one line — read from the removals registry, never forwarded silently.
+ *  Pure. @internal */
+export function unknownCommandLine(command: string): string {
+  const r = removedAmVerb(command);
+  return r
+    ? retiredSpellingLine(r)
+    : `unknown command: ${command} — run "am help" for usage`;
+}
 
 // ── Main entry ─────────────────────────────────────────────
 
@@ -180,10 +185,13 @@ const COMMANDS: Record<string, CmdHandler> = {
  *  installed am (least surprise — old checkouts may lack current commands). */
 async function delegateToPathPin(): Promise<boolean> {
   if (Deno.env.get("AIO_AM_NO_DELEGATE")) return false;
-  const { readPin, isPathPin, pathPinTarget } = await import(
-    "./am/am-versions.ts"
-  );
-  const pin = await readPin(Deno.cwd());
+  const { isPathPin, pathPinTarget } = await import("./am/am-versions.ts");
+  // QUIET read. `readPin` goes through the framework's pin reader, which
+  // announces "local path pin → …" once per PROCESS — and delegation is a
+  // second process, so a delegated command printed the line twice (parent,
+  // then child). The decision to hand off needs the value, not the
+  // announcement; the am that does the work says it, once.
+  const pin = readPinQuiet(Deno.cwd());
   if (!pin || !isPathPin(pin)) return false;
   const target = pathPinTarget(pin);
   const entry = `${target}/src/am.ts`;
@@ -192,9 +200,12 @@ async function delegateToPathPin(): Promise<boolean> {
   } catch {
     return false; // dangling pin — the normal flow reports it properly
   }
-  // Already running from that checkout? (deno task am, or a re-exec.)
-  const self = new URL(import.meta.url).pathname;
-  if (self === entry) return false;
+  // Already running from that checkout? (deno task am, or a re-exec.) By REAL
+  // path: `deno task am` runs `./dep/aio/src/am.ts`, and in a repaired app
+  // dep/aio is a symlink to the pinned checkout — the same file under two
+  // spellings. Comparing the spellings re-exec'd the identical am on every
+  // invocation, with the hand-off note (and the pin line) printed each time.
+  if (sameFile(new URL(import.meta.url).pathname, entry)) return false;
   // A checkout from before the per-machine override (`.aio/pin.local`)
   // cannot read the pin that just selected it — its am would see an unpinned
   // app and re-seal it. Stay on the installed am and say so, rather than
@@ -226,6 +237,35 @@ async function delegateToPathPin(): Promise<boolean> {
   Deno.exit((await p.status).code);
 }
 
+/** The pin as {@linkcode readFrameworkPinSync} resolves it, without its
+ *  one-line announcement: `.aio/pin.local` first, then deno.json's
+ *  `aioVersion`. Same precedence, no side effect — pure over the two files.
+ *  @internal */
+export function readPinQuiet(dir: string): string | null {
+  const local = readLocalPinSync(dir);
+  if (local !== null) return `${PATH_PIN_PREFIX}${local}`;
+  try {
+    const v = readDenoJsonSync(dir)?.config.aioVersion;
+    return typeof v === "string" && v !== "" ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Two paths name one file — through symlinks. A path that does not exist
+ *  is compared as spelled.
+ *  @internal */
+export function sameFile(a: string, b: string): boolean {
+  const real = (p: string) => {
+    try {
+      return Deno.realPathSync(p);
+    } catch {
+      return p;
+    }
+  };
+  return a === b || real(a) === real(b);
+}
+
 async function main(): Promise<void> {
   await delegateToPathPin();
   const { command, args, flags } = parseGlobalFlags(Deno.args);
@@ -255,10 +295,7 @@ async function main(): Promise<void> {
   const cmd = /^--?(version|V)$/i.test(command) ? "version" : command;
   const handler = COMMANDS[cmd];
   if (!handler) {
-    outError(
-      `unknown command: ${command} — run "am help" for usage`,
-      detectMode(flags),
-    );
+    outError(unknownCommandLine(command), detectMode(flags));
     Deno.exit(1);
   }
   try {

@@ -99,8 +99,6 @@ async function broadcastReachesClientWithSkew(
 
 Deno.test({
   name: "skew: a client 10s BEHIND still receives every broadcast",
-  sanitizeOps: false,
-  sanitizeResources: false,
   fn: async () => {
     const base = await broadcastReachesClientWithSkew(0);
     assert(base.got, "control: an unskewed client must receive the update");
@@ -115,8 +113,6 @@ Deno.test({
 
 Deno.test({
   name: "skew: a client 10s AHEAD does not disable the freeze watchdog",
-  sanitizeOps: false,
-  sanitizeResources: false,
   fn: async () => {
     // A negative gap used to evaluate as "healthy" unconditionally. With one
     // clock the ahead case is indistinguishable from any other client — which

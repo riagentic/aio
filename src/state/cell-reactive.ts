@@ -72,7 +72,10 @@ export function _resetCellRegistry(): void {
  *  a file of its own for no reason a reader could see. A closed app
  *  owns nothing, so its claim ends with it. Scoped to the given cells, so a
  *  second app running in the same process keeps its own bindings. */
-export function _releaseCellBindings(defs: Iterable<CellDef>): void {
+export function _releaseCellBindings(
+  defs: Iterable<CellDef>,
+  appId = "",
+): void {
   for (const def of defs) {
     (def.__aio as Record<string, unknown>).bound = false;
     _reactivelyBound.delete(def);
@@ -81,7 +84,7 @@ export function _releaseCellBindings(defs: Iterable<CellDef>): void {
     // grew, and the next app to use the same cell name inherited a dead app's
     // triggers. `cell-compose` re-registers on every compose, so a re-bind
     // gets them all back.
-    unregisterCancelOn(def.__aio.id);
+    unregisterCancelOn(def.__aio.id, appId);
   }
 }
 
@@ -89,7 +92,7 @@ export function _resetCellBindings(): void {
   for (const def of _cellRegistry.values()) {
     (def.__aio as Record<string, unknown>).bound = false;
     _reactivelyBound.delete(def);
-    unregisterCancelOn(def.__aio.id); // the claim ends with the binding
+    unregisterCancelOn(def.__aio.id); // a full reset: every app, the claim ends with the binding
   }
 }
 

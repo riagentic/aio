@@ -12,7 +12,7 @@ import type { ReduceResult } from "../src/state/cell-compose-reduce.ts";
 import type { DB, QueryResult, Tx } from "../src/db/types.ts";
 // @ts-ignore node:sqlite types unavailable when an old @types/node shadows them
 import { DatabaseSync } from "node:sqlite";
-import type { Patch } from "immer";
+import type { WirePatch } from "../src/protocol/patch-ops.ts";
 
 // ── stats ─────────────────────────────────────────────────────────────
 type Metric = { unit: string; median: number; p95: number; n: number };
@@ -214,7 +214,7 @@ const bootOpts = {
     const groups = r.patches
       ? (Array.isArray(r.patches) ? r.patches : [r.patches])
       : [];
-    const ops: Patch[] = groups.flatMap((g) => g.ops);
+    const ops: WirePatch[] = groups.flatMap((g) => g.ops);
     compactPatches(ops);
     if (i >= 3) samples.push(performance.now() - t0);
   }

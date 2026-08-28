@@ -52,6 +52,24 @@ export function discoverExampleApps(
   return out.sort((a, b) => a.dir.localeCompare(b.dir));
 }
 
+/** The bare words an example's OWN `dev` task hands its entry — e.g.
+ *  examples/cli-tool's `deno run -A src/app.ts serve`, where `serve` picks the
+ *  server role of a one-binary CLI. The gate boots each example the way its
+ *  author does, not a way of its own; flags are the gate's (`--client`,
+ *  `--port`), so only positional words are taken. */
+function devTaskWords(dir: string, entry: string): string[] {
+  try {
+    const cfg = JSON.parse(Deno.readTextFileSync(`${ROOT}${dir}/deno.json`));
+    const dev: string = cfg.tasks?.dev ?? "";
+    const words = dev.split(/\s+/);
+    const at = words.indexOf(entry);
+    if (at < 0) return [];
+    return words.slice(at + 1).filter((w) => w && !w.startsWith("-"));
+  } catch {
+    return [];
+  }
+}
+
 async function bootsAndServes(dir: string, entry: string): Promise<void> {
   const port = freePort();
   // Every app writes into a throwaway apps root — never the developer's ~/.
@@ -62,6 +80,7 @@ async function bootsAndServes(dir: string, entry: string): Promise<void> {
       "-A",
       "--unstable-kv",
       entry,
+      ...devTaskWords(dir, entry),
       "--client=server-only",
       `--port=${port}`,
     ],
@@ -141,8 +160,6 @@ Deno.test("examples: the boot gate covers every example app", () => {
 for (const { dir, entry } of APPS) {
   Deno.test({
     name: `example ${dir}: boots and serves`,
-    sanitizeResources: false,
-    sanitizeOps: false,
     fn: () => bootsAndServes(dir, entry),
   });
 }

@@ -153,15 +153,17 @@ async function bundle(
 
 Deno.test({
   name: "bundle smoke: browser bundle is ESM with mount(), deps inlined",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const dir = await makeApp();
     try {
       const js = await bundle(dir, false);
-      assertStringIncludes(js, "export {"); // ESM — importer calls mount()
-      assertStringIncludes(js, "mount");
-      assertStringIncludes(js, "ensureConnected"); // registry boot wired
+      // Minified: `export{X as mount}` — the shape, not the spelling.
+      assert(
+        /export\s*\{[^}]*\bas mount\b/.test(js) ||
+          /export function mount\b/.test(js),
+        "ESM — the importer calls mount()",
+      );
+      assertStringIncludes(js, '__aioBundleTarget = "browser"'); // shape stamp
       assert(!js.includes('from "npm:'), "npm specifiers must be inlined");
       assert(js.length > 50_000, "framework must actually be bundled in");
     } finally {
@@ -172,8 +174,6 @@ Deno.test({
 
 Deno.test({
   name: "bundle smoke: android bundle is IIFE with registry boot (AIO-404)",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const dir = await makeApp();
     try {
@@ -181,7 +181,7 @@ Deno.test({
       // classic <script> in the WebView — a top-level `export` throws
       assert(!/^export /m.test(js), "android bundle must not be ESM");
       assert(!js.includes("\nexport {"), "android bundle must not export");
-      assertStringIncludes(js, "ensureConnected"); // boots from the registry
+      assertStringIncludes(js, '__aioBundleTarget = "android"'); // shape stamp
       assertStringIncludes(js, "DOMContentLoaded"); // auto-mount wiring
     } finally {
       await Deno.remove(dir, { recursive: true }).catch(() => {});
@@ -201,8 +201,6 @@ Deno.test({
 // build output and vendored trees.
 Deno.test({
   name: "bundle freshness: an edit in a nested component busts the cache",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const dir = await makeApp({ flat: true });
     try {
@@ -240,8 +238,6 @@ Deno.test({
 // forever — slow, and it would make the assertion above meaningless.
 Deno.test({
   name: "bundle freshness: an untouched app reuses the cached bundle",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const dir = await makeApp({ flat: true });
     try {
@@ -267,13 +263,11 @@ Deno.test({
 // blank app, no error anywhere.
 Deno.test({
   name: "bundle freshness: switching target never reuses the other shape",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const dir = await makeApp();
     try {
       const browser = await bundle(dir, false);
-      assertStringIncludes(browser, "export {");
+      assert(/export\s*\{/.test(browser), "the browser bundle is ESM");
 
       const android = await bundle(dir, true, /* force */ false);
       assert(
@@ -284,9 +278,8 @@ Deno.test({
 
       // …and back, so the guard is symmetric rather than one-directional.
       const again = await bundle(dir, false, /* force */ false);
-      assertStringIncludes(
-        again,
-        "export {",
+      assert(
+        /export\s*\{/.test(again),
         "a browser build must not reuse the cached android IIFE bundle",
       );
     } finally {
@@ -302,8 +295,6 @@ Deno.test({
 // right in dev. Nothing failed. One decider, and a real build proves it.
 Deno.test({
   name: "bundle assets: a flat app's style.css reaches dist/",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const dir = await makeApp({ flat: true });
     try {
@@ -326,8 +317,6 @@ Deno.test({
 Deno.test({
   name:
     "ui entry: the bundle is built from the configured component and says so",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const dir = await makeApp();
     try {
@@ -372,8 +361,6 @@ Deno.test({
 // So the second build is the one under test here. The first is only the setup.
 Deno.test({
   name: "bundle refusal: a refused bundle is not left for the next run to ship",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const dir = await makeApp();
     try {
@@ -439,8 +426,6 @@ export const c = cell("probe", {
 // the other.
 Deno.test({
   name: "bundle refusal: a static server-only leak also discards its artifact",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const dir = await makeApp();
     try {

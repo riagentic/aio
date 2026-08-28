@@ -102,10 +102,10 @@ state channel is for state — heavy I/O happens outside it.
 
 ### Why only AIR — what about Vue / Svelte / Solid?
 
-aio ships **AIR** — a built-in, signal-based renderer (~8KB). Zero dependencies,
-automatic memoization, built-in forms/animation/SSR. AIR provides React-style
-compat hooks (`useState`, `useEffect`, `useMemo`, `useCallback`) for easy
-migration from React codebases.
+aio ships **AIR** — a built-in, signal-based renderer (~20 KB gzipped). Zero
+dependencies, automatic memoization, built-in forms/animation/SSR. AIR provides
+React-style compat hooks (`useState`, `useEffect`, `useMemo`, `useCallback`) for
+easy migration from React codebases.
 
 The core is framework-agnostic. `client` gives you direct access to state,
 actions, and routing — wire it into Svelte, Vue, Solid, or anything else in ~20

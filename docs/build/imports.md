@@ -131,7 +131,7 @@ Type imports are erased at compile time — they cross both worlds freely.
 
 ```ts
 // Fine everywhere — erased at compile time
-import type { MdviewState } from "./helpers.ts";
+import type { AppState } from "./helpers.ts";
 ```
 
 ## Browser-reachable imports may not leave `baseDir`
@@ -186,7 +186,10 @@ field report lost a session to this):
    Deno and Electron alike. Its API needs one `await init()` before the first
    call. (Deno tests pass either way — Deno's own loader resolves `.wasm`
    imports — so the blank screen is a dev-server-only surprise.)
-2. **Map the wasm directory with `serveDirs`** when it lives outside `baseDir`:
+2. **Map the wasm directory with `serveDirs`** when it lives outside `baseDir`
+   (for code shared between apps in one repo, declare it once as
+   `"share": ["../shared"]` in deno.json instead — dev serving and the bundler
+   resolve the same `/shared/…` prefix; see project-structure.md):
    `serveDirs: { "/crypto": "./crypto" }` — otherwise even the JS bindings 404
    in dev. Prod bundling follows the relative import and needs no mapping;
    compiled binaries embed `.wasm` files as data assets automatically.

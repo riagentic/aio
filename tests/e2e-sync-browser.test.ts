@@ -55,8 +55,6 @@ async function waitFor<T>(
 Deno.test({
   name: "sync e2e: browser op → server state converges + peer tab receives it",
   ignore: BROWSER === null,
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const dir = await Deno.makeTempDir({ prefix: "aio-sync-e2e-" });
     await Deno.mkdir(`${dir}/src`);

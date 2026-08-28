@@ -116,17 +116,10 @@ for (const root of lockRoots()) {
           Deno.removeSync(path);
         }
       } else if (f.name.startsWith("watch-") && f.name.endsWith(".tmp")) {
-        // A watcher sentinel with no listener behind it is a hard-killed app.
-        const port = Number(f.name.slice(6, -4));
-        let listening = false;
-        if (port > 0) {
-          try {
-            const c = await Deno.connect({ hostname: "127.0.0.1", port });
-            c.close();
-            listening = true;
-          } catch { /* nothing there */ }
-        }
-        if (listening) live++;
+        // A watcher sentinel whose process is gone is a hard-killed app. The
+        // name carries the PID of the process that wrote it.
+        const pid = Number(f.name.slice(6, -4));
+        if (pid > 0 && alive(pid)) live++;
         else if (clean) Deno.removeSync(path);
       }
     }

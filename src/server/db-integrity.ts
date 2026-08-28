@@ -174,7 +174,14 @@ export async function checkAndRecover(opts: {
         };
       }
     }
-  } catch { /* no snapshot — fall through to the empty-start branch */ }
+  } catch (e) {
+    // Fall through to the empty start — but SAY why the snapshot was unusable.
+    // "no usable snapshot" covered a missing file and an unreadable one with
+    // the same sentence, and only one of those is the operator's fault.
+    if (!(e instanceof Deno.errors.NotFound)) {
+      opts.log.error(`db: snapshot ${snapshot} could not be restored — ${e}`);
+    }
+  }
 
   opts.log.error(
     `db: no usable snapshot at ${snapshot} — starting EMPTY. Take rolling ` +

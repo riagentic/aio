@@ -192,6 +192,23 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
       // wrong, and people act on those. Decided per client (subscriptions
       // differ), so it is observed in the loop and attributed once after it.
       let anyFullSend = false;
+      // ONE serialization per distinct VIEW per round. A view is the pair
+      // (user, subscriptions): two clients with the same pair receive the
+      // same bytes, and used to pay for them twice — 100 clients on a 213 KB
+      // state cost 20 ms a round, and each `meta.lastFullJson` held its own
+      // copy (217 MB for 100 clients on 2.2 MB). Sharing the string shares
+      // the memory too.
+      const fullByView = new Map<string, string | undefined>();
+      const fullFor = (meta: ClientMeta): string | undefined => {
+        const subs = meta.subscriptions
+          ? [...meta.subscriptions].sort().join(",")
+          : "*";
+        const key = `${JSON.stringify(meta.user ?? null)}|${subs}`;
+        if (fullByView.has(key)) return fullByView.get(key);
+        const json = _getFilteredFullJson(meta);
+        fullByView.set(key, json);
+        return json;
+      };
       let anyPatchSend = false;
       // One ROUND regardless of client count — the per-client sends below feed
       // payload/bandwidth, but the broadcasts/sec rate diagnoses dispatch
@@ -202,11 +219,20 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
       }
       for (const [ws, meta] of connections) {
         if (ws.readyState !== WebSocket.OPEN) continue;
-        if (vitalsSystem?.serverTransport.isFrozen(meta.id)) continue;
+        // A skipped round is a LOST round for this client: the patches in it
+        // are not queued anywhere. Remember that, so the next eligible round
+        // sends the whole state instead of a patch that assumes the skipped
+        // ones landed. (Clearing `lastFullJson` alone did not do that — the
+        // next round still took the patch branch first.)
+        if (vitalsSystem?.serverTransport.isFrozen(meta.id)) {
+          if (patchesToSend.length > 0 || force) meta.needsFull = true;
+          continue;
+        }
         if (meta.bpMultiplier > 1) {
           const elapsed = Date.now() - meta.bpLastSentAt;
           if (elapsed < syncIntervalMs * meta.bpMultiplier) {
             meta.lastFullJson = undefined;
+            if (patchesToSend.length > 0 || force) meta.needsFull = true;
             continue;
           }
         }
@@ -217,7 +243,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
         // is tracked where it is DECIDED rather than sniffed off the wire later.
         let sentKind: "patch" | "full" = "full";
 
-        if (!force && patchesToSend.length > 0) {
+        if (!force && !meta.needsFull && patchesToSend.length > 0) {
           const clientPatches = filterPatchesBySubs(
             patchesToSend,
             meta.subscriptions,
@@ -249,7 +275,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
               knownLen === undefined ||
               patchJson.length > knownLen * fullStateThreshold
             ) {
-              fullJsonForTracking = _getFilteredFullJson(meta);
+              fullJsonForTracking = fullFor(meta);
             }
             // Send full state when the patch payload exceeds the configured
             // fraction of the full-state size (default 0.5 → patch > 50%).
@@ -292,7 +318,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
           // Reuse the full-json computed above when available instead of
           // re-serializing per-client (N clients → N full serializations
           // per broadcast otherwise).
-          fullJsonForTracking ??= _getFilteredFullJson(meta);
+          fullJsonForTracking ??= fullFor(meta);
           if (!fullJsonForTracking) continue;
           // Same freshness rule as the threshold path above: a stale memo is
           // not proof the client has this state.
@@ -308,6 +334,8 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
             `broadcast: sending full state (${fullJsonForTracking.length}B) — ${
               force
                 ? 'a "full"-strategy cell changed (not expressible as a patch)'
+                : meta.needsFull
+                ? "a round was skipped for this client (backpressure), so its patches were lost"
                 : patchesToSend.length === 0
                 ? "the round produced no patches"
                 : "no patch matched this client's subscriptions"
@@ -332,6 +360,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
           // a full send makes it exact again. The string is kept either way —
           // as a size estimate for the patch-vs-full decision it stays useful.
           meta.lastFullJsonStale = sentKind === "patch";
+          if (sentKind === "full") meta.needsFull = false;
           meta.bpLastSentAt = Date.now();
           // Everything below is vitals bookkeeping, and it is gated as such.
           // It used to run UNCONDITIONALLY while its cleanup (server-ws

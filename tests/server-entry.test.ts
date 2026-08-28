@@ -3,13 +3,13 @@
 // `aio/server` import in a cell-shared file (the boundary violation).
 import { assert, assertEquals } from "@std/assert";
 import { connectCli, createDB } from "../src/server-entry.ts";
-// Ship signing moved to its natural home, aio/build (surface de-dup) — pinned
-// here so the server entry can't quietly re-grow the duplicate.
+// Ship signing lives on aio/ship ONLY (alpha70: one import path per symbol) —
+// pinned here so neither the server entry nor aio/build re-grows a duplicate.
 import {
   buildShipManifest,
   generateSigningKey,
   verifyShipManifest,
-} from "../src/build.ts";
+} from "../src/build/ship.ts";
 import { buildContext } from "../aiol/context.ts";
 import { checkUI } from "../aiol/checks.ts";
 import { join } from "@std/path";
@@ -18,7 +18,7 @@ Deno.test("aio/server: re-exports the server-only symbols", async () => {
   for (const fn of [createDB, connectCli]) {
     assertEquals(typeof fn, "function");
   }
-  // Ship signing lives on aio/build ONLY (one home per symbol).
+  // Ship signing lives on aio/ship ONLY (one home per symbol).
   for (
     const fn of [buildShipManifest, verifyShipManifest, generateSigningKey]
   ) {
@@ -27,6 +27,13 @@ Deno.test("aio/server: re-exports the server-only symbols", async () => {
   // deno-lint-ignore no-explicit-any
   const m: any = await import("../src/server-entry.ts");
   assertEquals(m.shipApp, undefined, "ship family must not re-grow here");
+  // deno-lint-ignore no-explicit-any
+  const b: any = await import("../src/build.ts");
+  assertEquals(
+    b.shipApp,
+    undefined,
+    "ship family must not re-grow on aio/build",
+  );
 });
 
 Deno.test("aiol: a static aio/server import in a cell file is a boundary error", async () => {

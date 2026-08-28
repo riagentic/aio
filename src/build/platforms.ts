@@ -172,6 +172,10 @@ export function crossCompileBlocker(
     return "Android builds drive Gradle and produce a platform-independent " +
       "APK — build it once, on any host";
   }
+  if (target.startsWith("ios")) {
+    return "an iOS client is an Xcode project, written the same on every " +
+      "host; xcodebuild (macOS) turns it into an .app — build it once";
+  }
   return `no cross-compilation path for target "${target}"`;
 }
 

@@ -22,6 +22,7 @@ import { ensureEmbeddedBundle, runBundle } from "./build/build-bundle.ts";
 import { buildClient } from "./build/build-client.ts";
 import { buildCli } from "./build/build-cli.ts";
 import { buildAndroid } from "./build/build-android.ts";
+import { buildIos } from "./build/build-ios.ts";
 import { runDenoCompile, writeServiceFile } from "./build/build-compile.ts";
 import { buildElectron } from "./build/build-electron.ts";
 import { resolveElectronVersion } from "./build/electron-runtime.ts";
@@ -42,6 +43,7 @@ export async function build(cfg?: BuildConfig): Promise<void> {
     dist,
     doElectron,
     doAndroid,
+    doIos,
     doClient,
     doCli,
     doCompile,
@@ -66,12 +68,12 @@ export async function build(cfg?: BuildConfig): Promise<void> {
 
   // ── Step 1: Bundle dist/app.js ───────────────────────────────────────────
   // Skip for targets that don't need browser bundles
-  const skipsBundle = doCli || cfg.doHeadless || doClient ||
+  const skipsBundle = doCli || cfg.doHeadless || doClient || doIos ||
     (doAndroid && cfg.doRemote);
   if (!skipsBundle) {
     const mainConfig = (await readDenoJson(root))?.config ?? {};
     await runBundle(cfg, mainConfig);
-  } else if (doCompile && !doCli && !doClient && !doAndroid) {
+  } else if (doCompile && !doCli && !doClient && !doAndroid && !doIos) {
     // This target BUILT no bundle but still packages one: `runDenoCompile`
     // passes `--include dist/` whenever dist/ exists, so the binary serves
     // whatever is in there. Verify it is the shape and the version this build
@@ -81,7 +83,7 @@ export async function build(cfg?: BuildConfig): Promise<void> {
     await ensureEmbeddedBundle(cfg, mainConfig);
   }
 
-  if (!doCompile && !doAndroid && !doClient && !doCli) return;
+  if (!doCompile && !doAndroid && !doIos && !doClient && !doCli) return;
 
   // ── Bake the Electron version into dist/ ────────────────────────────────
   // A plain compiled binary (`--compile`, not the AppImage) whose client is
@@ -91,7 +93,7 @@ export async function build(cfg?: BuildConfig): Promise<void> {
   // by the launcher from the embedded dist/. Without this file the binary and
   // the checkout could run two different Electrons, and a desktop app has no
   // business asking its user to `deno task install:electron`.
-  if (doCompile && !doCli && !doClient && !doAndroid) {
+  if (doCompile && !doCli && !doClient && !doAndroid && !doIos) {
     const version = await resolveElectronVersion(root);
     await Deno.mkdir(dist, { recursive: true });
     await Deno.writeTextFile(
@@ -119,6 +121,10 @@ export async function build(cfg?: BuildConfig): Promise<void> {
   if (doAndroid) {
     await buildAndroid(cfg);
     // buildAndroid calls Deno.exit(0)
+  }
+  if (doIos) {
+    await buildIos(cfg);
+    return; // the project under dist/ios IS the artifact — nothing to compile
   }
 
   // ── Clean dist/ before compile ───────────────────────────────────────────
@@ -194,22 +200,14 @@ export {
   v8FlagsArg,
 } from "./build/build-compile.ts";
 
-// `aio ship` core: verifiable release manifest — SHA-256 +
-// least-privilege capabilities + optional Ed25519 signature over the digest.
-export {
-  buildShipManifest,
-  generateSigningKey,
-  shipApp,
-  type ShipManifest,
-  verifyShipManifest,
-} from "./build/ship.ts";
+// The `aio ship` family (buildShipManifest, generateSigningKey, shipApp,
+// verifyShipManifest, ShipManifest) lives on `aio/ship` ONLY — one import path
+// per symbol since alpha70 (src/state/removals.ts); `aiol --safe-fix` rewrites
+// the old `aio/build` import.
 // Least-privilege capability scanner (also used by `aio doctor`).
-export {
-  type Capabilities,
-  manifestReport,
-  permissionFlags,
-  scanCapabilities,
-} from "./build/capabilities.ts";
+// `permissionFlags`/`manifestReport` are its internals — reachable for tests
+// through src/testing/internal.ts, not from here.
+export { type Capabilities, scanCapabilities } from "./build/capabilities.ts";
 
 if (import.meta.main) {
   // `--print-app-tmpdir` answers ONE question and builds nothing: "what TMPDIR

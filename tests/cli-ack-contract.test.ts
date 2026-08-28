@@ -1,6 +1,6 @@
 // The CLI client's ack contract — what a bound call over connectCli means.
 //
-// Field report (dm #3): `connectCli().bind(cell)` resolved a call even when
+// Field report (relay app, item 3): `connectCli().bind(cell)` resolved a call even when
 // the server-side method THREW. The ack frame carries `ok` and `error`, and
 // the handler read only `cid`. So an app could not tell "applied" from
 // "refused" — the reporter built a parallel error channel (a `problems` array
@@ -127,8 +127,6 @@ async function withServer(
 
 Deno.test({
   name: "cli ack: a refused SYNC method rejects with the server's reason",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: () =>
     withServer(async (_cli, box) => {
       const err = await assertRejects(
@@ -144,8 +142,6 @@ Deno.test({
 
 Deno.test({
   name: "cli ack: a SYNC method's return value reaches the caller",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: () =>
     withServer(async (_cli, box) => {
       const ret = await box["ok"]!(4);
@@ -160,8 +156,6 @@ Deno.test({
 Deno.test({
   name:
     "cli ack: an ASYNC method resolves promptly with its value (not a 30s hang)",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: () =>
     withServer(async (_cli, box) => {
       const t0 = Date.now();
@@ -183,8 +177,6 @@ Deno.test({
 Deno.test({
   name:
     "cli ack: a refused ASYNC method rejects (and does not wait out the ceiling)",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: () =>
     withServer(async (_cli, box) => {
       const t0 = Date.now();
@@ -198,8 +190,6 @@ Deno.test({
 
 Deno.test({
   name: "cli ack: close() rejects outstanding calls — it never reports success",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: () =>
     withServer(async (cli, box) => {
       // Fire without awaiting, then close before the ack can land. The call

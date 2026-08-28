@@ -191,7 +191,8 @@ export type SyncResponse =
  *  and by the server-write debounce) and nothing retried on that interval (a
  *  catch-up is driven by reconnect, and the `sync-err` backoff lives at its own
  *  call site in browser-sync). A default nobody reads is a setting that
- *  silently does not exist — removed rather than left looking configurable. */
+ *  silently does not exist — removed rather than left looking configurable.
+ *  @internal alpha70 — test seam via src/testing/internal.ts */
 export const SYNC_DEFAULTS = {
   maxDrift: 60_000,
   pendingCap: 500,

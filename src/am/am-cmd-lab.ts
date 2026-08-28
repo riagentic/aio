@@ -1327,13 +1327,18 @@ async function labStart(
     if (!opt.tunnel && await insideOk(spec.container)) {
       fail(UNREACHABLE_FIX, mode);
     }
-    outError(
+    // `fail`, not `outError` + `return`: this ENDS the command, and
+    // am-output.ts is explicit that `outError` alone is for the places that
+    // genuinely carry on. Printing `error: …` and then handing the shell a
+    // SUCCESS is the shape `fail` was introduced to remove — the lab is not
+    // usable yet, so `am lab && open …` must not proceed to the open. The
+    // sibling branch three lines above already used `fail`.
+    fail(
       `the viewer has not answered yet (${lastPhase || "no output yet"}). ` +
         `It usually does within a minute. Watch it with ` +
         `\`docker logs -f ${spec.container}\`, then open ${url}.`,
       mode,
     );
-    return;
   }
 
   // The viewer answering is not the same as the lab being usable: the share

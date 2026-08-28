@@ -149,6 +149,8 @@ export interface ShutdownRefs {
    *  compose. Shutdown aborts and waits for its OWN cells only: a second app
    *  in the same process (D2, and every `testServer()` pair) keeps running. */
   getCellNames: () => string[];
+  /** The app's identity — scopes the cancel registry to THIS app's calls. */
+  getAppId: () => string;
   getElectronProc: () => { kill: () => void } | null;
   clearElectronProc: () => void;
   disposeUds: () => void;
@@ -200,7 +202,7 @@ export function createShutdownOrchestrator(
     // one down its own `s.$signal.aborted` path, and the writes it makes on
     // the way out are exactly what the persist below should capture.
     const ourCells = new Set(refs.getCellNames());
-    const aborted = abortAllInflight(ourCells);
+    const aborted = abortAllInflight(ourCells, refs.getAppId());
     if (aborted > 0) {
       log.debug(`shutdown: aborted ${aborted} in-flight call(s)`);
     }
@@ -213,7 +215,7 @@ export function createShutdownOrchestrator(
       // Async cell methods first: a cell's `execute` runs the method and
       // returns nothing, so the dispatch loop has never known they exist and
       // `drain()` alone sails straight past a streaming reply.
-      const stuck = await settlePending(left(), ourCells);
+      const stuck = await settlePending(left(), ourCells, refs.getAppId());
       if (stuck > 0) {
         log.warn(
           `shutdown: ${stuck} call(s) still running at the ` +
@@ -227,7 +229,7 @@ export function createShutdownOrchestrator(
     } finally {
       // The drain is over — stop pre-aborting new calls for these cell names.
       // A later app in this process (every sequential test) may reuse them.
-      endShutdownAbort(ourCells);
+      endShutdownAbort(ourCells, refs.getAppId());
     }
 
     // Phases 2-7 share ONE deadline, for the same reason Phase 1's two waits

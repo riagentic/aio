@@ -60,8 +60,6 @@ const SOURCE_ROUTES = [
 
 Deno.test({
   name: "prod: the framework-source namespace is not mounted",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     await withServer(true, async (url) => {
       for (const route of SOURCE_ROUTES) {
@@ -86,8 +84,6 @@ Deno.test({
 
 Deno.test({
   name: "prod: the shell that WOULD need those routes is never generated",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     // The reason the routes may be removed: nothing in prod references them.
     // If a future change puts an import map back into the prod shell, this
@@ -116,8 +112,6 @@ Deno.test({
 
 Deno.test({
   name: "dev: the framework-source namespace still serves (dev needs it)",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     // The complement. Removing these in dev would break every dev page, so the
     // gate must be exactly `prod` and nothing broader.

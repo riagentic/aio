@@ -130,10 +130,7 @@ function assertRefused(
   assertStringIncludes(r.stderr, "server-only");
 }
 
-const T = { sanitizeResources: false, sanitizeOps: false };
-
 Deno.test({
-  ...T,
   name: "leak ①: a .server.TSX module never reaches the browser bundle",
   async fn() {
     const dir = await makeApp();
@@ -161,7 +158,6 @@ export default function App() { return <b>{SECRET}</b>; }`,
 });
 
 Deno.test({
-  ...T,
   name: "leak ②: an import-map ALIAS that resolves to a server file is refused",
   async fn() {
     // The plugin's filter runs on the specifier `vault`; esbuild substitutes
@@ -192,7 +188,6 @@ export default function App() { return <b>{SECRET}</b>; }`,
 });
 
 Deno.test({
-  ...T,
   name: "leak ③: a computed import() of a server file is refused",
   async fn() {
     const dir = await makeApp();
@@ -217,7 +212,6 @@ Deno.test({
 });
 
 Deno.test({
-  ...T,
   name: 'leak ④: `await import("aio/server")` is on the standalone-APK ledger',
   async fn() {
     // Not a browser leak — it stays external, correctly. The bug is that it
@@ -251,7 +245,6 @@ export const c = cell("probe", {
 });
 
 Deno.test({
-  ...T,
   name: "the sanctioned dynamic pattern still builds, and still ships nothing",
   async fn() {
     // The gate is only correct if it leaves the documented escape hatch alone:

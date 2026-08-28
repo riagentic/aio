@@ -57,8 +57,6 @@ async function bootExposedCapture(
 
 Deno.test({
   name: "expose warning: silent for auth: true (per-user auth IS configured)",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const out = await bootExposedCapture({ auth: true });
     assert(
@@ -71,8 +69,6 @@ Deno.test({
 
 Deno.test({
   name: "expose warning: silent for resolveUser (per-user auth IS configured)",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const out = await bootExposedCapture({
       resolveUser: (tok: string) =>
@@ -89,8 +85,6 @@ Deno.test({
 Deno.test({
   name:
     "expose warning: exposed + nothing is NO LONGER open — a key is generated (alpha52), so no no-auth warning",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const out = await bootExposedCapture({});
     assert(
@@ -108,8 +102,6 @@ Deno.test({
 Deno.test({
   name:
     "expose warning: still fires for a genuinely open exposed app (key: false)",
-  sanitizeResources: false,
-  sanitizeOps: false,
   async fn() {
     const out = await bootExposedCapture({ key: false });
     assert(

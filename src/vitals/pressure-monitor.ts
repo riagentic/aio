@@ -3,10 +3,9 @@
 // Server-side only: payload size + broadcast rate.
 
 import type { DiagEvent } from "./types.ts";
-import { formatDiagEvent } from "./diag-formatter.ts";
+import { DIAG_THROTTLE_MS, formatDiagEvent } from "./diag-formatter.ts";
 import { log } from "../diagnostics/logger-api.ts";
 
-const THROTTLE_MS = 2000;
 /** Above this many live throttle keys, sweep the expired ones (they are
  *  keyed per client, so the set grows with connections, not with code). */
 const THROTTLE_KEYS_MAX = 256;
@@ -77,7 +76,7 @@ export function createPressureMonitor(
 
     const now = Date.now();
     const lastEmit = lastConsoleEmit.get(throttleKey) ?? 0;
-    if (now - lastEmit >= THROTTLE_MS) {
+    if (now - lastEmit >= DIAG_THROTTLE_MS) {
       lastConsoleEmit.set(throttleKey, now);
       // Throttle keys are per-CLIENT (`payload:<uuid>`), so on a long-running
       // server this map would otherwise keep one entry per client that ever
@@ -86,7 +85,7 @@ export function createPressureMonitor(
       // common case costs nothing.
       if (lastConsoleEmit.size > THROTTLE_KEYS_MAX) {
         for (const [k, at] of lastConsoleEmit) {
-          if (now - at >= THROTTLE_MS) lastConsoleEmit.delete(k);
+          if (now - at >= DIAG_THROTTLE_MS) lastConsoleEmit.delete(k);
         }
       }
       emitLines(formatDiagEvent(event));

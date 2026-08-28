@@ -41,7 +41,11 @@ Deno.test("the gate's three sources of truth all parse", async () => {
   assert(surface.has("."), "api-snapshot must carry the root entry");
   assert(surface.has("./air"), "api-snapshot must carry ./air");
   assert(verbs.has("surface") && verbs.has("trigger") && verbs.has("create"));
-  assert(!verbs.has("doctor"), "`am doctor` does not exist — see src/am.ts");
+  assert(
+    verbs.has("doctor"),
+    "`am doctor` exists since alpha70 — see src/am.ts",
+  );
+  assert(!verbs.has("interact"), "`am interact` was retired — see src/am.ts");
   assert(tasks.has("check:docs"), "repo tasks come from deno.json");
   assert(
     tasks.has("publish"),
@@ -82,12 +86,12 @@ Deno.test("gate catches a command with no binary behind it", async () => {
 Deno.test("gate catches an am verb that is not in the COMMANDS map", async () => {
   const [verbs, tasks] = [await loadAmVerbs(), await loadTaskNames()];
   const found = commandIssues(
-    doc("fixture.md", "Diagnose with `am doctor`."),
+    doc("fixture.md", "Diagnose with `am frobnicate`."),
     verbs,
     tasks,
   );
   assertEquals(found.length, 1);
-  assertStringIncludes(found[0]!, "`am doctor` is not an am verb");
+  assertStringIncludes(found[0]!, "`am frobnicate` is not an am verb");
 });
 
 Deno.test("gate catches a deno task that neither the repo nor a scaffold has", async () => {

@@ -111,9 +111,75 @@ export async function getAioSchemaVersion(db: DB): Promise<number> {
       `SELECT version FROM ${AIO_SCHEMA_TABLE} WHERE id = 1`,
     );
     return Number(rows[0]?.version ?? 0);
-  } catch {
-    return 0; // no aio_schema table — a fresh or pre-versioned file
+  } catch (e) {
+    // The ONE honest "nothing yet": no aio_schema table — a fresh or
+    // pre-versioned file. Anything else (a locked or damaged file, a closed
+    // handle) reading as 0 would stamp the epoch over a file whose real
+    // version we could not read — so it is the caller's failure, by name.
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such table/i.test(msg)) return 0;
+    throw new Error(
+      `db: could not read aio's schema version (${AIO_SCHEMA_TABLE}) — ${msg}`,
+      { cause: e },
+    );
   }
+}
+
+/** One named, ordered step of the boot schema setup. */
+export type SchemaStep = {
+  /** Stable name, printed on failure: "ladder", "tables", "sync", … */
+  name: string;
+  /** What to do when THIS step fails — appended to the boot refusal. */
+  fix: string;
+  run: (db: DB) => Promise<void>;
+};
+
+/** THE boot schema runner: every DDL seam, in ONE order, each named.
+ *
+ *  Schema setup used to be spread across the boot — the version ladder, the
+ *  declared `db:` tables, the sync op-log tables, its migrations — each with
+ *  its own try/catch and its own idea of what a failure meant (one of them
+ *  degraded to "sqlite: unavailable" and booted the app with none of its
+ *  tables). This runs the steps strictly in the given order, stops at the
+ *  FIRST failure, and refuses to boot with the step's name and its fix —
+ *  the app never runs against a schema it does not have. Idempotent by
+ *  construction: every step is (`CREATE … IF NOT EXISTS`, a ladder that runs
+ *  each move once, reconcilers that tolerate "already applied"), so a re-boot
+ *  on the same file is a no-op walk.
+ *
+ *  Returns the names it ran, in order — what a boot log and a test read. */
+export async function runSchemaSetup(
+  db: DB,
+  steps: readonly SchemaStep[],
+): Promise<string[]> {
+  const ran: string[] = [];
+  const names = new Set<string>();
+  for (const step of steps) {
+    if (names.has(step.name)) {
+      throw new Error(
+        `db: schema step "${step.name}" is listed twice — a step runs once, ` +
+          `in order; merge or rename`,
+      );
+    }
+    names.add(step.name);
+  }
+  for (const step of steps) {
+    try {
+      await step.run(db);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new Error(
+        `db: schema setup REFUSED at step "${step.name}"` +
+          (ran.length ? ` (after ${ran.join(" → ")})` : "") +
+          ` — ${msg}\n  fix: ${step.fix}\n  Nothing after this step ran; ` +
+          `the app did not start, so no query can hit a table it does not ` +
+          `have.`,
+        { cause: e },
+      );
+    }
+    ran.push(step.name);
+  }
+  return ran;
 }
 
 /** Stamp aio's schema version (creates the private table on first stamp).

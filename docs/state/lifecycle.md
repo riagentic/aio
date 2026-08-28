@@ -174,7 +174,7 @@ await aio.run({
 ```
 
 The middleware chain of v1 is gone — its real uses are framework features now:
-logging → the structured logger + `am log`; perf budgets → vitals; storm
+logging → the structured logger + `am logs`; perf budgets → vitals; storm
 protection → the `dispatchStorm` guard (on by default); validation → cell
 definition-time checks + `validate` on the cell.
 

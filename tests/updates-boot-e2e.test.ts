@@ -185,8 +185,6 @@ async function boot(dir: string, src: string): Promise<App> {
 
 Deno.test({
   name: "updates boot e2e: a real `aio.run` offers a real published release",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: async () => {
     const root = await Deno.makeTempDir({ prefix: "aio-upd-boot-" });
     const releases = join(root, "releases");
@@ -256,8 +254,6 @@ Deno.test({
 
 Deno.test({
   name: "updates boot e2e: no `updates:` key means no updates cell at all",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: async () => {
     // The opt-in has to be real in BOTH directions. A framework that registers
     // its own cell into every app is exactly the "nothing you did not ask for"

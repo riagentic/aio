@@ -122,8 +122,6 @@ Deno.test("memory: 10k dispatches — heap growth < 20MB", async () => {
 Deno.test({
   name: "memory: 100 async method cycles — no listener leak",
   // sanitizers disabled: fire-and-forget async methods with internal timers that outlive test
-  sanitizeOps: false,
-  sanitizeResources: false,
 }, async () => {
   const app = createTestApp([flowCell]);
   const cat = flowCell.__aio.actions as Cat;
@@ -147,8 +145,6 @@ Deno.test({
 Deno.test({
   name: "memory: until() waits cleaned up after signal",
   // sanitizers disabled: until() poll timers + dispatch cycle leave pending async ops
-  sanitizeOps: false,
-  sanitizeResources: false,
 }, async () => {
   const app = createTestApp([waitCell]);
   const cat = waitCell.__aio.actions as Cat;
@@ -168,8 +164,6 @@ Deno.test({
 Deno.test({
   name: "memory: until() waits cleaned up on timeout",
   // sanitizers disabled: 50 async methods with 20ms timeouts — some timers outlive test
-  sanitizeOps: false,
-  sanitizeResources: false,
 }, async () => {
   const shortWait = cell("shortWait", {
     state: { timedOut: 0 },

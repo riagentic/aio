@@ -1,5 +1,6 @@
 // src/graph-validator.ts
 import { resolve } from "@std/path";
+import { SERVER_ONLY_SPECS } from "./server-only-specs.ts";
 import { SERVER_FILE_RE } from "../entries.ts";
 
 /** Error categories for module validation failures */
@@ -62,7 +63,6 @@ export type Resolution =
   | { kind: "error"; error: GraphError };
 
 /** aio entries that exist only on the server side — see resolveSpecifier. */
-const SERVER_ONLY_SPECS = new Set(["aio/server"]);
 
 const EXTENSIONS = [".ts", ".tsx", ".js", ".jsx"];
 const INDEX_FILES = ["index.ts", "index.tsx"];

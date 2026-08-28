@@ -11,7 +11,7 @@
 import { assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { createServer } from "../../../src/server/server.ts";
-import { createDB } from "../../../src/db/mod.ts";
+import { createDB } from "../../../src/server-entry.ts";
 import { SYNC_SCHEMA } from "../../../src/sync/compact.ts";
 import { createServerSyncHandler } from "../../../src/sync/server-handler.ts";
 import { createSyncEngine } from "../../../src/sync/sync-engine.ts";

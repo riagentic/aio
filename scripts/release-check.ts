@@ -133,6 +133,7 @@ const FAST: [string, string[]][] = [
   ["check:docs", ["deno", "task", "check:docs"]],
   ["update:docs (no diff)", ["deno", "task", "update:docs", "--", "--check"]],
   ["check:doc-coverage", ["deno", "task", "check:doc-coverage"]],
+  ["check:sanitizers", ["deno", "task", "check:sanitizers"]],
   ["publish --dry-run", ["deno", "publish", "--dry-run", "--allow-dirty"]],
 ];
 
@@ -153,6 +154,12 @@ const HEAVY: [string, string[]][] = [
   ["check:mutations", ["deno", "task", "check:mutations"]],
   ["test:onboard", ["deno", "task", "test:onboard"]],
   ["test:build", ["deno", "task", "test:build"]],
+  // The Electron package is a release surface (`docs/build/targets.md` says
+  // it builds), and both e2e tests that prove it are behind a second opt-in
+  // that no task set — so `check:release` claimed the AppImage and never built
+  // one. It fetches the runtime once (~/.cache/aio/tools) and packages a real
+  // image; the cost is minutes on the first run and seconds after.
+  ["test:electron", ["deno", "task", "test:electron"]],
 ];
 
 /** Is there a container runtime for the onboarding lab?

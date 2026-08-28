@@ -1,6 +1,7 @@
 // deno-lint-ignore-file
 // browser-air-transport: WS/IPC transport layer for AIR renderer.
-// Minimal WS transport (no React, no vitals) — just WS <-> state-core bridge.
+// Minimal WS transport — WS/IPC <-> state-core bridge, plus the client vitals
+// heartbeat on WS (browser-vitals.ts: render meter + `vitals-ping`).
 
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { _registerSfnTransport, handleSfnResult } from "./server-fns-client.ts";
@@ -56,6 +57,12 @@ import { backoffDelay } from "../protocol/transport-shared.ts";
 import { _showStatus } from "../protocol/protocol-status.ts";
 import { _setDegradedRelay, degradedReport } from "../diagnostics/degraded.ts";
 import { offlineQueue, type QueuedEntry } from "../state/offline-queue.ts";
+import {
+  _noteClientPatch,
+  _pauseClientVitals,
+  _startClientVitals,
+  _stopClientVitals,
+} from "./browser-vitals.ts";
 import { _takeOfflineQueue as _coreTakeOfflineQueue } from "../state/state-transport.ts";
 
 let _ws: WebSocket | null = null;
@@ -148,6 +155,8 @@ function _status(text: string, color = "#e25", autohide?: number) {
 function _handleState(data: Record<string, unknown>) {
   const r: _HandleResult = _coreHandleMessage(data);
   if (r === "dropped" || r === "noop") return;
+  // Applied, not yet painted — the render meter's staleness clock starts.
+  _noteClientPatch();
   _checkStateIntegrity(_coreGetState());
   _incStateVersion();
   if (_coreHasState()) _resolveStateReady();
@@ -246,7 +255,7 @@ function _route(line: string): void {
       }
       return;
     case "get-state":
-      // `am inspect <idx>` asks a CLIENT for its view of state. The orphaned
+      // `am client <idx>` asks a CLIENT for its view of state. The orphaned
       // WS and IPC transports answer it; this one had no case, so the frame
       // fell through to "unexpected … dropped" and the tooling just waited —
       // a silent failure of the inspect path against any AIR client.
@@ -557,6 +566,12 @@ function _connect() {
     _coreResendSubs();
     _flushPending(pending, (d) => ws.send(d));
     _wireDegradedRelay();
+    // Client vitals ride the WS only (envelope.ts: `vitals-ping` is refused
+    // on UDS/IPC). The heartbeat is per connection; the meter is per page.
+    _startClientVitals(
+      _sendRaw,
+      () => _ws === ws && ws.readyState === WebSocket.OPEN,
+    );
   };
   ws.onmessage = (e) => {
     if (typeof e.data !== "string") return;
@@ -564,6 +579,7 @@ function _connect() {
   };
   ws.onclose = () => {
     _ws = null;
+    _pauseClientVitals();
     // In-flight only — the queue survives and flushes on reconnect (see the
     // IPC close above for the full reasoning).
     _rejectInFlight(new Error("connection lost"));
@@ -651,6 +667,7 @@ _setTeardownFn(() => {
   _ipcConnected = false;
   _connecting = false;
   _setDegradedRelay(null);
+  _stopClientVitals();
   if (_ipcPingTimer) {
     clearInterval(_ipcPingTimer);
     _ipcPingTimer = null;

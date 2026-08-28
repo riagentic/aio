@@ -10,7 +10,7 @@ import { assert, assertEquals, assertRejects } from "@std/assert";
 // `await db.query()` unresolved FOREVER, on the shutdown path, where a hang is
 // indistinguishable from "shutdown is taking a while".
 Deno.test("L6: a query still in flight at close() is rejected, not abandoned", async () => {
-  const { createDB } = await import("../src/db/mod.ts");
+  const { createDB } = await import("../src/server-entry.ts");
   const dir = await Deno.makeTempDir({ prefix: "aio-l6-" });
   try {
     const db = await createDB(`${dir}/t.db`);

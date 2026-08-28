@@ -190,8 +190,6 @@ const SERVER_TARGETS = [
 for (const target of SERVER_TARGETS) {
   Deno.test({
     name: `example targets/${target}: boots + counter increments over WS`,
-    sanitizeResources: false,
-    sanitizeOps: false,
     fn: () => smokeServerExample(`targets/${target}`),
   });
 }
@@ -199,15 +197,11 @@ for (const target of SERVER_TARGETS) {
 // Top-level app examples (entry at the dir root, not src/)
 Deno.test({
   name: "example counter: boots + counter increments over WS",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: () => smokeServerExample("counter", "app.ts"),
 });
 
 Deno.test({
   name: "example todo: boots + serves UI",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: async () => {
     const port = freePort();
     const proc = spawnExample("todo", "app.ts", [
@@ -229,16 +223,12 @@ Deno.test({
 for (const target of ["electron-remote", "android-remote"]) {
   Deno.test({
     name: `example ${target}: boots + serves connect page`,
-    sanitizeResources: false,
-    sanitizeOps: false,
     fn: () => smokeConnectPageExample(`targets/${target}`),
   });
 }
 
 Deno.test({
   name: "example cli-remote: client drives the cli example server via stdin",
-  sanitizeResources: false,
-  sanitizeOps: false,
   fn: async () => {
     const port = freePort();
     const server = spawnExample("targets/cli", "src/app.ts", [

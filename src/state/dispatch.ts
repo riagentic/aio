@@ -2,7 +2,6 @@
 // Re-entrant-safe: effects can call dispatch(), actions are queued and drained in order
 import type { ScheduleEffect } from "./schedule.ts";
 import type { OwnEffect } from "./own.ts";
-import { pendingCallsFor } from "./method-cancel.ts";
 import { isFrameworkCell } from "./framework-cells.ts";
 import type { ReduceBreakdown } from "../diagnostics/time-travel.ts";
 import {
@@ -20,6 +19,37 @@ export type { AioError } from "../diagnostics/error.ts";
 
 /** Performance check — on: warn on violations, off: silent */
 export type PerfCheck = "on" | "off";
+
+/** Where the dispatch loop is in its life:
+ *
+ *  - `open` — every action lands.
+ *  - `draining` — `close()` was called; the app is shutting down. Only the
+ *    writes of methods that were ALREADY running land (actions flagged
+ *    {@link INFLIGHT}), so the final persist captures what they had. New
+ *    input — a client action, a scheduled tick, a bound `cell.method()` call —
+ *    is refused with `DISPATCH_DRAINING`.
+ *  - `sealed` — `drain()` finished; the final persist has read the state.
+ *    Nothing lands. Everything is refused with `DISPATCH_CLOSED`, and an
+ *    in-flight write arriving now is reported as LOST rather than shrugged.
+ *
+ *  Framework teardown (`_source: "System"` + `:__destroy`) is lifecycle, not
+ *  input, and passes in every phase. */
+export type DispatchPhase = "open" | "draining" | "sealed";
+
+/** The action flag that names the framework's own draining work: a write from
+ *  a method that was already running when the loop closed. Set ONLY by the
+ *  framework's write paths (the async batcher's `__set*`, a method's `$do`
+ *  effects and `__error`, a worker cell's streamed patches) and STRIPPED from
+ *  every network entry point (`sanitizeClientAction`) — a client can never
+ *  ride the drain window. Its value is always `true`. */
+export const INFLIGHT = "_inflight" as const;
+
+/** Stamp an action as in-flight work (see {@link INFLIGHT}). */
+export function markInflight<T extends object>(
+  action: T,
+): T & { [INFLIGHT]: true } {
+  return { ...action, [INFLIGHT]: true };
+}
 
 /** Performance budgets in milliseconds */
 
@@ -183,10 +213,6 @@ export type DispatchDeps<S, A, E> = {
   effectTimeout?: number; // ms before warning on a slow async effect (default: 30000, 0 = disabled)
   /** Optional getter for reduce phase breakdown — provided by composeCells when perfCheck is on */
   reduceBreakdown?: () => ReduceBreakdown | undefined;
-  /** THIS app's cell names. Scopes the drain gate's pending-call count to the
-   *  owning app — with two apps in one process (D2), a closed queue must not
-   *  stay open on the other app's in-flight calls. */
-  cellNames?: Set<string>;
   /** True while time travel is PAUSED (undo/redo/goto all pause). An action
    *  dispatched then is not applied, so it must be refused HERE — at the queue
    *  door, where a refusal can reject the caller's promise — rather than
@@ -198,7 +224,14 @@ export type DispatchDeps<S, A, E> = {
  *  Resolves after the action is fully processed (reduce + sync effects) with
  *  the method's transported return value, or undefined (AIO-427). */
 type DispatchFn<A> = ((action: A) => Promise<unknown>) & {
+  /** Shut the door on NEW input: the loop goes `open → draining`. Work that
+   *  was already running keeps committing (see {@link INFLIGHT}) until
+   *  `drain()` seals it. */
   close: () => void;
+  /** Where the loop is: `open` (everything lands), `draining` (only in-flight
+   *  writes land — new input is refused with `DISPATCH_DRAINING`), `sealed`
+   *  (nothing lands — `DISPATCH_CLOSED`). */
+  phase: () => DispatchPhase;
   /** Await in-flight effects, then SEAL the queue. `timeoutMs` bounds the
    *  wait — an effect that ignores its abort signal must not hold shutdown
    *  open (0 = wait forever, the pre-alpha44 behaviour). */
@@ -223,7 +256,6 @@ export function createDispatch<S, A, E>(
     perfLog,
     perfCheck,
     perfBudget,
-    freezeState,
   } = deps;
   const getBreakdown = deps.reduceBreakdown;
   const effectTimeout = deps.effectTimeout ?? 30_000; // 0 = disabled
@@ -231,10 +263,8 @@ export function createDispatch<S, A, E>(
   const reduceBudget = perfBudget?.reduce ?? DEFAULT_REDUCE_BUDGET;
   const effectBudget = perfBudget?.effect ?? DEFAULT_EFFECT_BUDGET;
   let dispatching = false;
-  let closed = false;
-  // Sealed = closed AND done draining: after this nothing lands, effect or
-  // not. `close()` alone only shuts the door on new input (see below).
-  let sealed = false;
+  // open → draining (close()) → sealed (drain() done). See DispatchPhase.
+  let phase: DispatchPhase = "open";
   // a field report: warn once per action TYPE after close — a shutdown
   // used to emit one identical warn line per queued tick (hundreds/ms).
   const closedWarnedTypes = new Set<string>();
@@ -428,59 +458,81 @@ export function createDispatch<S, A, E>(
         { actionType: (action as Record<string, unknown>)?.type as string },
       ));
     }
-    if (closed) {
+    if (phase !== "open") {
       const t = String(
         (action as Record<string, unknown>)?.type ?? "(unknown)",
       );
+      const a = action as Record<string, unknown>;
       // Framework teardown must still run after close(). Shutdown closes
       // dispatch up front (to reject late CLIENT input before the final
       // persist), but cell destroy is dispatched later, from onStop's
       // destroyAll(). Dropping it left cell state un-reset AND logged a warning
       // on every shutdown. A System-sourced ':__destroy' is lifecycle, not
       // client input — let it through; everything else still drops.
-      const isTeardown =
-        (action as Record<string, unknown>)?._source === "System" &&
-        t.endsWith(":__destroy");
+      const isTeardown = a?._source === "System" && t.endsWith(":__destroy");
       // An in-flight async method's ONLY way to publish anything — its
       // draft writes, its return value, its error — is dispatch. Shutdown
       // closes dispatch and THEN drains those effects (shutdown.ts Phase 1),
-      // so every commit they made while draining hit a closed queue: the
-      // method died mid-write with EFFECT_ASYNC_ERROR, and the state it was
-      // about to write never reached the final persist that ran next. A user
-      // chatting with a streaming model when the window closed got a stack
-      // trace instead of their reply. Late CLIENT input is what close() is
-      // for, and that still drops; the framework's own drain does not.
+      // so every commit they made while draining used to hit a closed queue:
+      // the method died mid-write with EFFECT_ASYNC_ERROR, and the state it
+      // was about to write never reached the final persist that ran next. A
+      // user chatting with a streaming model when the window closed got a
+      // stack trace instead of their reply. Late CLIENT input is what close()
+      // is for, and that still drops; the framework's own drain does not.
       //
-      // KNOWN ASYMMETRY, stated rather than left to be rediscovered: this reads
-      // `_source: "Effect"`, which cell-catalog sets on every BOUND ASYNC call
-      // for a different reason (the ack/callId path). So a serverFn that calls
-      // `await cell.asyncMethod()` DURING the drain is admitted as if it were
-      // in-flight work, while its sync twin — which carries no `_source` — is
-      // refused. One tag, two meanings: "a bound async call" and "the
-      // framework's own draining work", and the gate wants only the second.
-      //
-      // Left alone deliberately. The data outcome is safe either way (the write
-      // is captured by the final persist or loudly dropped), and separating the
-      // meanings means a new dispatch-level flag — a wire-contract change that
-      // deserves its own release and its own gate run, not a quiet widening
-      // here. See todo.md.
-      const isDraining = !sealed &&
-        (effectPromises.size > 0 || pendingCallsFor(deps.cellNames) > 0) &&
-        (action as Record<string, unknown>)?._source === "Effect";
-      if (!isTeardown && !isDraining) {
+      // The framework's draining work is named by ONE flag, `_inflight`
+      // (see INFLIGHT) — set only by the write paths of a method that is
+      // already running: its batcher's `__set*`, its `$do` effects, its
+      // `__error`, and a worker cell's streamed patches. It used to be read
+      // off `_source: "Effect"`, which cell-catalog also stamps on every BOUND
+      // async call (the ack/callId path), so a serverFn calling
+      // `await cell.asyncMethod()` DURING the drain started new work as if it
+      // were in-flight, while its sync twin was refused. One tag, two
+      // meanings; the flag has one.
+      const isInflight = a?.[INFLIGHT] === true;
+      const admitted = isTeardown || (phase === "draining" && isInflight);
+      if (!admitted) {
         closedDropCount++;
+        // Sealed: nothing may move the state — persist has read it. An
+        // in-flight write arriving now is LOST, and that is said, not shrugged.
+        const lostWrite = isInflight;
         if (!closedWarnedTypes.has(t)) {
           closedWarnedTypes.add(t);
           log.warn(
-            `dispatch after close() — '${t}' ignored (further drops of this ` +
-              `type suppressed; ${closedDropCount} dropped so far)`,
+            phase === "draining"
+              ? `dispatch is draining — '${t}' is new input and was refused ` +
+                `(further drops of this type suppressed; ${closedDropCount} ` +
+                `dropped so far)`
+              : lostWrite
+              ? `dispatch is sealed — '${t}' is an in-flight write that ` +
+                `arrived after the final persist read the state; it is LOST ` +
+                `(the method ignored its abort signal past the drain deadline)`
+              : `dispatch after close() — '${t}' ignored (further drops of ` +
+                `this type suppressed; ${closedDropCount} dropped so far)`,
           );
         }
-        return rejectDropped(createAioError(
-          "DISPATCH_CLOSED",
-          "dispatch after close() — action dropped, not applied",
-          { actionType: (action as Record<string, unknown>)?.type as string },
-        ));
+        return rejectDropped(
+          phase === "draining"
+            ? createAioError(
+              // ASK(alpha70): add "DISPATCH_DRAINING" to AioErrorCode +
+              // CODE_TO_SOURCE ("dispatch") in diagnostics/error.ts; the cast
+              // goes with it.
+              "DISPATCH_DRAINING",
+              "dispatch is draining — the app is closing: methods already " +
+                "running are finishing their writes and the final persist " +
+                "captures them; this action is NEW input and was refused, " +
+                "not applied",
+              { actionType: a?.type as string },
+            )
+            : createAioError(
+              "DISPATCH_CLOSED",
+              lostWrite
+                ? "dispatch is sealed — this in-flight write arrived after " +
+                  "the final persist and is lost"
+                : "dispatch after close() — action dropped, not applied",
+              { actionType: a?.type as string },
+            ),
+        );
       }
     }
     if (queue.length >= QUEUE_MAX) {
@@ -661,7 +713,12 @@ export function createDispatch<S, A, E>(
           }
 
           const prev = getState();
-          const nextState = freezeState
+          // Read from `deps` rather than a value captured at construction: a
+          // cell WORKER builds its dispatch before the `init` message that
+          // tells it whether this app is in dev, so a captured flag was
+          // permanently the default. The block already reads `deps.debug` the
+          // same way; the cost is a property load per commit.
+          const nextState = deps.freezeState
             ? deepFreeze(reduced.state)
             : reduced.state;
           setState(nextState);
@@ -949,8 +1006,9 @@ export function createDispatch<S, A, E>(
   }
 
   dispatch.close = () => {
-    closed = true;
+    if (phase === "open") phase = "draining";
   };
+  dispatch.phase = () => phase;
   dispatch.drain = async (timeoutMs = 0) => {
     const deadline = timeoutMs > 0 ? Date.now() + timeoutMs : 0;
     while (effectPromises.size > 0) {
@@ -975,7 +1033,7 @@ export function createDispatch<S, A, E>(
     }
     // Draining is over: from here a late effect commit is as unwelcome as
     // late client input, because persist has read the state it would change.
-    sealed = true;
+    phase = "sealed";
   };
   dispatch.errorCount = () => errors;
   dispatch.getQueueDepth = () => queue.length;

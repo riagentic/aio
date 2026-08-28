@@ -17,6 +17,9 @@ export type CellStatus = {
 
 /** Resolved + sorted cells with dependency info */
 export type ComposedCells = {
+  /** The app identity this composition was made for (`""` = unknown);
+   *  scopes cancellation. */
+  appId: string;
   initialState: Record<string, unknown>;
   reduce: (
     state: Record<string, unknown>,

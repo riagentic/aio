@@ -184,7 +184,7 @@ The long way is the same three steps by hand, if you want to see them:
 
 ```sh
 deno task compile
-deno task ship ./dist/wallet --channel=prod --key=release-key.json
+deno task ship ./dist/wallet --channel=prod   # signs with ~/.aio/keys/wallet-release-key.json (the `ship keygen` default) when it exists; --key=<path> picks another
 # → wallet.ship.json, next to the artifact. Copy BOTH into <source>/prod/,
 #   with the manifest named <os>-<arch>.json.
 ```
@@ -259,6 +259,49 @@ migrated data.
 Under systemd (or any supervisor), aio exits and lets the unit restart it rather
 than launching a competing process. On a plain CLI launch it starts the
 successor itself.
+
+**The unit's contract.** The generated unit (`deno task build --service`)
+carries two lines the app relies on, and a hand-written unit must carry them
+too:
+
+```ini
+Restart=always                 # an update or aio.restart() exits 0 to come back
+RestartPreventExitStatus=143   # aio.stop() exits 143 to STAY down
+Environment=AIO_SUPERVISED=1   # "exit; do not spawn your own successor"
+```
+
+`Restart=on-failure` is the classic mistake: a successful update exits cleanly
+and the service stays down until somebody notices.
+
+## Stopping and restarting from inside the app
+
+```ts
+import { aio } from "aio";
+
+await aio.stop(); // finish writing, final snapshot, exit
+await aio.restart(); // the same, then come back
+```
+
+Both are safe to call from inside a cell method: they defer by one macrotask, so
+the method returns and the shutdown sees a quiet cell — the same finish-writing
+contract a signal or `am stop` runs. Every app in the process is shut down (a
+process is stopped, not a cell).
+
+"Come back" is a promise per launcher, and aio keeps it where it can and
+**refuses, with the reason and the manual step, where it cannot** — never a
+silent no-op:
+
+| Launcher                                       | `aio.restart()`                                                | `aio.stop()`                                     |
+| ---------------------------------------------- | -------------------------------------------------------------- | ------------------------------------------------ |
+| `deno task dev` (the dev supervisor)           | exits 75 — the supervisor relaunches                           | exits 0 — the session ends                       |
+| a service (`systemd`, `AIO_SUPERVISED=1`)      | exits 0 — `Restart=always` brings it back                      | exits 143 — `RestartPreventExitStatus=143` holds |
+| a compiled binary, AppImage, or local Electron | re-executes itself with the same arguments; the window follows | exits 0                                          |
+| `deno run -A app.ts`, unsupervised             | re-executes `deno run …` with the real command line            | exits 0                                          |
+| running from source without `-A`               | **refused** — restart by hand                                  | exits 0                                          |
+| `libraryMode` (a test, a host process)         | **refused** — `await app.close()` and run again                | closes the apps, keeps the process               |
+
+`am restart` and the update handover use the same plan. A refusal is an ordinary
+thrown error, so a method can show it.
 
 ## Desktop and CLI
 
@@ -433,6 +476,29 @@ it takes that backup before the download starts, logs every blocker at error
 level, and names the file it wrote. Nothing else changes: the default is still
 "never offered, and `apply()` refuses".
 
+### Starting fresh: retiring the data
+
+The other door for a blocked release. Where `acceptDataLoss` keeps the data and
+lets the new build try to read it, `retireData` keeps the data **out of the
+way**:
+
+```ts
+await updates.apply({ retireData: true });
+```
+
+At handover — after the shutdown contract has closed persistence, before the
+successor starts — the whole profile is moved, in one atomic rename, to
+`<home>/archive/<app>-<version>-<timestamp>/`, an empty profile takes its place,
+and the new build boots clean. Nothing is deleted, ever. The update trust store
+(the pinned signing key) is carried over so the next check does not re-pin, and
+the rollback marker is re-armed with the archived store named as its backup, so
+the new build still gets two boots to prove itself.
+
+Every step is logged (`retireData ① … ⑤`), and a failure at any step names the
+step and leaves the previous data exactly where it was — the app then restarts
+against it, under the ordinary rollback net. To put an archive back: stop the
+app, move the archive directory over `<home>/data`.
+
 ## When your delivery is not a shape aio can verify
 
 `updates: { source }` covers a directory of signed manifests and a git ref — the
@@ -487,8 +553,8 @@ The cell's platform half is injected, so a test installs a stub in its place and
 drives the UI it renders — no source, no network:
 
 ```tsx
-import { installUpdatesRuntime, testUI } from "aio/testing";
-import { updates } from "aio/updates";
+import { testUI } from "aio/testing";
+import { installUpdatesRuntime, updates } from "aio/updates";
 import { App } from "./App.tsx";
 
 installUpdatesRuntime({

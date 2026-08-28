@@ -2,7 +2,14 @@
 // Connects to an aio server via WebSocket or UDS, receives state updates, sends actions.
 // Same delta protocol as browser.ts but no DOM, no React — pure Deno runtime.
 
-import { applyPatches, enablePatches, type Patch } from "immer";
+import { enablePatches } from "immer";
+import {
+  applyWirePatches,
+  type WirePatch as Patch,
+} from "../protocol/patch-ops.ts";
+// The offline-queue depth is one fact — the browser client reads the same
+// constant. This file had its own 100 beside it.
+import { WS_MAX_QUEUE } from "../protocol/protocol-types.ts";
 import { connectLocal, type LocalConn } from "./local-listen.ts";
 import { backoffDelay } from "../protocol/transport-shared.ts";
 import {
@@ -33,8 +40,6 @@ import { log } from "../diagnostics/logger-api.ts";
 
 enablePatches();
 
-const WS_MAX_QUEUE = 100;
-
 /** Apply one decoded state frame ("state" snapshot or "patches" delta) to
  *  the current state. Returns the new state. On a patch that fails to apply
  *  (desync), returns the prior state unchanged and calls `onResync` so the
@@ -48,7 +53,8 @@ function applyServerFrame<S>(
   if (frame.t === "patches") {
     if (prev != null && Array.isArray(frame.d)) {
       try {
-        return applyPatches(
+        // `append` and Immer's ops alike — the ONE applier (patch-ops.ts).
+        return applyWirePatches(
           prev as unknown as Record<string, unknown>,
           frame.d as Patch[],
         ) as unknown as S;

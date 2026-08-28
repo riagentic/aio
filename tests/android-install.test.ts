@@ -1,13 +1,14 @@
 // `install:android` — the half of the Android flow that was missing.
 //
-// `dev:android` boots an emulator, builds a DEV apk against a dev server and
+// `deno task dev` (in an android app) boots an emulator, builds a DEV apk
 // holds that server open. None of that is "my phone is plugged in, put the
 // build on it". This pins the decisions, because every one of them is a message
 // someone reads while confused: a phone showing the USB-debugging dialog, two
 // devices attached, an unsigned artifact that adb would reject with
 // INSTALL_PARSE_FAILED_NO_CERTIFICATES.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { parseDevices, pickApk, pickDevice } from "../src/android-install.ts";
+import { pickApk, pickDevice } from "../src/android-install.ts";
+import { parseDevices } from "../src/testing/internal.ts";
 
 const LIST = `List of devices attached
 R5CT12ABCDE            device usb:1-3 product:a52qxx model:SM_A525F device:a52q
@@ -37,7 +38,11 @@ Deno.test("install:android: an emulator alone is REFUSED, and says why", () => {
   const r = pickDevice(only, {});
   assert("error" in r);
   assertStringIncludes(r.error, "emulator");
-  assertStringIncludes(r.hint ?? "", "dev:android");
+  // The task the hint names must be one a scaffolded app HAS. This asserted
+  // `dev:android`, a per-target name alpha52 retired — so the test was
+  // notarizing a hint that fails with "Task not found" on every app it was
+  // written for. `tests/named-tasks-exist.test.ts` now gates the whole class.
+  assertStringIncludes(r.hint ?? "", "deno task dev");
   // …unless asked.
   assert("device" in pickDevice(only, { allowEmulator: true }));
 });
@@ -96,13 +101,13 @@ Deno.test("install:android: an UNSIGNED apk is refused by name", () => {
   const r = pickApk([{ name: "wallet-unsigned.apk", mtime: 5 }]);
   assert("error" in r);
   assertStringIncludes(r.error, "UNSIGNED");
-  assertStringIncludes(r.hint ?? "", "compile:android");
+  assertStringIncludes(r.hint ?? "", "build --targets=android");
 });
 
 Deno.test("install:android: no apk at all points at the build command", () => {
   const r = pickApk([{ name: "readme.md", mtime: 5 }]);
   assert("error" in r);
-  assertStringIncludes(r.hint ?? "", "compile:android");
+  assertStringIncludes(r.hint ?? "", "build --targets=android");
 });
 
 Deno.test("install:android: --emulator with nothing attached says how to START one", () => {

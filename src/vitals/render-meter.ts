@@ -10,6 +10,10 @@ import type { Gauge, VitalStatus } from "./types.ts";
 /** Configuration for the rAF-based render meter — thresholds, status change, and notification hooks. */
 export type RenderMeterConfig = {
   manualTick?: boolean;
+  /** The meter's clock (ms). Defaults to `performance.now`; a `manualTick`
+   *  caller that drives the meter from timers hands it the timers' clock so
+   *  "since the last tick" and "since the last patch" agree. */
+  now?: () => number;
   thresholds?: { staleness?: number; pendingPatches?: number };
   onStatusChange?: (status: VitalStatus, gauges: RenderGauges) => void;
   onNotify?: () => void; // called when coalesced dirty flag flushes
@@ -81,6 +85,7 @@ export function createRenderMeter(config: RenderMeterConfig): RenderMeterAPI {
     DEFAULT_PENDING_THRESHOLD;
   const onStatusChange = config.onStatusChange;
   const onNotify = config.onNotify;
+  const now = config.now ?? (() => performance.now());
 
   // ── Metric state ────────────────────────────────────────────────────────
   let staleness = 0;
@@ -263,7 +268,7 @@ export function createRenderMeter(config: RenderMeterConfig): RenderMeterAPI {
     rafId = requestAnimationFrame(() => {
       if (destroyed) return;
       try {
-        tick(performance.now());
+        tick(now());
       } catch (e) {
         log.error("vitals", `tick error: ${e}`); // AIO-151
       }
@@ -278,8 +283,8 @@ export function createRenderMeter(config: RenderMeterConfig): RenderMeterAPI {
   // ── API ────────────────────────────────────────────────────────────────
 
   return {
-    recordPatch(now?: number) {
-      lastPatchAt = now ?? performance.now();
+    recordPatch(at?: number) {
+      lastPatchAt = at ?? now();
       pendingPatches++;
     },
 
@@ -305,7 +310,7 @@ export function createRenderMeter(config: RenderMeterConfig): RenderMeterAPI {
       paused = p;
       if (!p) {
         // Reset baselines to avoid false spike on resume
-        lastFrameAt = config.manualTick ? lastFrameAt : performance.now();
+        lastFrameAt = config.manualTick ? lastFrameAt : now();
         lastPatchAt = 0;
         staleness = 0;
       }

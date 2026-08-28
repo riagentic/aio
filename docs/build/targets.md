@@ -9,8 +9,10 @@ names themselves:
   self-contained artifacts. `server` is the headless role (it was spelled
   `service` before alpha52); it builds the exposed `--remote` binary + systemd
   unit.
-- **Client targets** (`electron-client`, `android-client`, `cli-client`) — thin
-  clients that connect to a separately-running aio server.
+- **Client targets** (`electron-client`, `android-client`, `ios-client`,
+  `cli-client`) — thin clients that connect to a separately-running aio server.
+  iOS has no Deno, so it has ONLY a client target: an Xcode project on any host,
+  an `.app` where `xcodebuild` is (macOS).
 
 ```
 ┌──────────────────┬─────────────────────────────────────────────┐
@@ -23,6 +25,7 @@ names themselves:
 ├──────────────────┼─────────────────────────────────────────────┤
 │ electron-client  │ connect-page AppImage (no app code)         │
 │ android-client   │ client APK — connects to a server           │
+│ ios-client       │ client Xcode project (.app on macOS)        │
 │ cli-client       │ client binary — connects to a server        │
 └──────────────────┴─────────────────────────────────────────────┘
 ```
@@ -219,12 +222,14 @@ artifact its `platform`, `triple`, and whether it is the `host` one.
 
 **What cross-compiles**
 
-|                                       | from any host                                                                                        |
-| ------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `server` `browser` `cli` `cli-client` | ✅ — `deno compile` emits the target's binary                                                        |
-| `electron*` → **Windows, macOS**      | ✅ — the runtime is a published zip we fetch and cache; the package is a directory + launcher + zip  |
-| `electron*` → **Linux**               | ❌ needs a Linux host **of that arch** — an AppImage is assembled by `appimagetool`, a native binary |
-| `android*`                            | ❌ by design — the APK is platform-independent, so it is built **once**, on any host                 |
+|                                        | from any host                                                                                        |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `server` `browser` `cli` `cli-client`  | ✅ — `deno compile` emits the target's binary                                                        |
+| `electron` → **Windows, macOS**        | ✅ — the runtime is a published zip we fetch and cache; the package is a directory + launcher + zip  |
+| `electron*` → **Linux**                | ❌ needs a Linux host **of that arch** — an AppImage is assembled by `appimagetool`, a native binary |
+| `electron-client` → **Windows, macOS** | ❌ by design — the connect-page client is an AppImage, Linux only; build `electron` or `cli-client`  |
+| `android*`                             | ❌ by design — the APK is platform-independent, so it is built **once**, on any host                 |
+| `ios-client`                           | ❌ by design — the Xcode project is the same on every host; `xcodebuild` (macOS) makes the `.app`    |
 
 So on a Linux x86_64 box, `--targets=electron --all-platforms` gives you the
 Linux `.AppImage`, the Windows `.zip` and both macOS `.zip`s, and skips
@@ -262,6 +267,7 @@ host binary under a foreign name.
 | `cli`             | app    | headless CLI binary                           |
 | `electron-client` | client | standalone Electron connect-page AppImage     |
 | `android-client`  | client | Android client APK (connects to a server)     |
+| `ios-client`      | client | iOS client Xcode project; `.app` on macOS     |
 | `cli-client`      | client | CLI client binary (connects to a server)      |
 
 > Known limitation (android with bundled assets): the packaged shell HTML is
@@ -301,22 +307,51 @@ page).
 directly only for a one-off artifact outside the fleet. `--service` here means
 "emit a systemd `.service` unit", not a target name.
 
-| Flag                                      | Effect                                                                                |
-| ----------------------------------------- | ------------------------------------------------------------------------------------- |
-| `--compile`                               | Compile standalone Deno binary                                                        |
-| `--electron`                              | Build Electron package: AppImage (Linux), zip (macOS/Windows) — implies `--compile`   |
-| `--client`                                | Build client-only AppImage — no Deno runtime, Linux only (target `electron-client`)   |
-| `--cli`                                   | Build CLI binary — no browser bundle, headless server (target `cli`)                  |
-| `--cli --remote`                          | Build client-only CLI binary — no server (target `cli-client`)                        |
-| `--android`                               | Build APK via Gradle                                                                  |
-| `--android --remote`                      | Build client-only APK — connect page, no local dispatch (target `android-client`)     |
-| `--compile --service`                     | Compile binary + generate systemd unit file                                           |
-| `--compile --service --remote`            | Same, with `--expose` in systemd ExecStart                                            |
-| `--compile --service --headless`          | Same, with `--headless` in systemd ExecStart                                          |
-| `--compile --service --headless --remote` | Same, with `--expose --headless` (target `server`)                                    |
-| `--name=X`                                | Override binary name (default: from deno.json `"title"`)                              |
-| `--force`                                 | Skip bundle cache — always rebuild `dist/app.js`                                      |
-| `--release`                               | Android release build (default: debug) — emits `myapp-unsigned.apk`; sign it yourself |
+| Flag                                      | Effect                                                                                                           |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `--compile`                               | Compile standalone Deno binary                                                                                   |
+| `--electron`                              | Build Electron package: AppImage (Linux), zip (macOS/Windows) — implies `--compile`                              |
+| `--client`                                | Build client-only AppImage — no Deno runtime, Linux only (target `electron-client`)                              |
+| `--cli`                                   | Build CLI binary — no browser bundle, headless server (target `cli`)                                             |
+| `--cli --remote`                          | Build client-only CLI binary — no server (target `cli-client`)                                                   |
+| `--android`                               | Build APK via Gradle                                                                                             |
+| `--ios`                                   | Write the `ios-client` Xcode project (with `--remote`); `.app` on macOS                                          |
+| `--android --remote`                      | Build client-only APK — connect page, no local dispatch (target `android-client`)                                |
+| `--compile --service`                     | Compile binary + generate systemd unit file                                                                      |
+| `--compile --service --remote`            | Same, with `--expose` in systemd ExecStart                                                                       |
+| `--compile --service --headless`          | Same, with `--headless` in systemd ExecStart                                                                     |
+| `--compile --service --headless --remote` | Same, with `--expose --headless` (target `server`)                                                               |
+| `--name=X`                                | Override binary name (default: from deno.json `"title"`)                                                         |
+| `--force`                                 | Skip bundle cache — always rebuild `dist/app.js`                                                                 |
+| `--release`                               | Android release build (default: debug) — emits `myapp-unsigned.apk`; sign it yourself                            |
+| `--entry=PATH`                            | Entry point for this build (default: `deno.json` `entry` › `src/app.ts`)                                         |
+| `--ui=PATH`                               | UI component this build bundles, overriding the `App.tsx` convention (recorded in the bundle; dev==prod checked) |
+| `--platform=X`                            | Which OS/arch this binary is FOR (default: the host) — see `--platforms` below                                   |
+| `--android-dev-url=URL`                   | Android dev APK: hot-load the app from a running dev server at this URL (validated; must be a URL)               |
+| `--allow-server-only`                     | Android: assert the server-only paths the graph reaches are guarded and never taken (else the build is refused)  |
+| `--print-app-tmpdir`                      | Build nothing: print the TMPDIR a launcher must hand this project's packaged artifact                            |
+| `--print-install-root`                    | Build nothing: print where a built artifact gets installed (`run.sh` asks instead of hardcoding `~/app`)         |
+| `--list` / `--help` (fleet)               | Show target names / usage and exit                                                                               |
+| `--build-spec=X` (fleet)                  | The single-target build path/specifier the fleet delegates to (the generated task passes it)                     |
+
+`deno task ship` (sign + publish a built artifact — see
+[updates](../deploy/updates.md)):
+
+| Flag                       | Effect                                                                               |
+| -------------------------- | ------------------------------------------------------------------------------------ |
+| `--src=DIR`                | Source directory of the build (default: the artifact's)                              |
+| `--name=N` / `--version=V` | Override the app name / version recorded in the manifest                             |
+| `--key=key.json`           | Signing key (default `~/.aio/keys/<name>-release-key.json` when it exists)           |
+| `--channel=X`              | `dev` \| `test` \| `prod`                                                            |
+| `--target=T`               | Which target the artifact is (when two build for one platform)                       |
+| `--url=U` / `--notes=…`    | Artifact download URL / release notes in the manifest                                |
+| `--min-from=X.Y.Z`         | Refuse to update FROM anything older than this (a forced-step release)               |
+| `--data=contract.json`     | Data contract to publish with the release; `--no-data` skips the data probe          |
+| `--out=ship.json`          | Manifest path                                                                        |
+| `--channel-dir=DIR`        | Also write `DIR/<channel>/<os>-<arch>.json` — the layout an update client fetches    |
+| `--github`                 | `ship github`: write a GitHub release workflow                                       |
+| `--stdout`                 | `ship keygen --stdout`: print the key pair for a CI secret instead of writing a file |
+| `--force`                  | `ship keygen`: overwrite an existing key / write one inside a git tree anyway        |
 
 ### Which "title" names what
 

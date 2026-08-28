@@ -1,5 +1,9 @@
 import { assertEquals, assertRejects } from "@std/assert";
-import { createDispatch, deepFreeze } from "../src/state/dispatch.ts";
+import {
+  createDispatch,
+  deepFreeze,
+  markInflight,
+} from "../src/state/dispatch.ts";
 import type { AioError } from "../src/diagnostics/error.ts";
 import { initDiagnostics } from "../src/diagnostics/mod.ts";
 import { computeDiffs, formatDiff } from "../src/diagnostics/state-diff.ts";
@@ -132,10 +136,18 @@ Deno.test("dispatch: close() prevents further dispatching", () => {
   });
   assertEquals(state.n, 1); // unchanged
   assertEquals(warned, true);
-  // Allow the microtask to settle, then assert the rejection.
-  return Promise.resolve().then(() => {
+  // Allow the microtask to settle, then assert the rejection. alpha70: after
+  // close() alone the loop is DRAINING (the final persist is still to come),
+  // and the code says so; CLOSED is what the seal after drain() answers.
+  return Promise.resolve().then(async () => {
     assertEquals(rejected !== null, true);
-    assertEquals((rejected as unknown as AioError).code, "DISPATCH_CLOSED");
+    assertEquals((rejected as unknown as AioError).code, "DISPATCH_DRAINING");
+    await dispatch.drain();
+    const sealed = await assertRejects(() =>
+      dispatch({ type: "C" })
+    ) as AioError;
+    assertEquals(sealed.code, "DISPATCH_CLOSED");
+    assertEquals(state.n, 1);
   });
 });
 
@@ -183,8 +195,15 @@ Deno.test("dispatch: System ':__destroy' teardown still runs after close()", () 
   dispatch({ type: "doc:tick", _source: "System" }).catch(() => {});
   assertEquals(state.n, 1); // unchanged by the dropped actions
   assertEquals(warned, true);
-  return Promise.resolve().then(() => {
-    assertEquals((rejected as unknown as AioError)?.code, "DISPATCH_CLOSED");
+  return Promise.resolve().then(async () => {
+    assertEquals((rejected as unknown as AioError)?.code, "DISPATCH_DRAINING");
+    // Teardown passes in EVERY phase — sealed included: destroyAll() runs
+    // from onStop, after the drain.
+    await dispatch.drain();
+    warned = false;
+    dispatch({ type: "doc:__destroy", _source: "System" });
+    assertEquals(state.n, 2);
+    assertEquals(warned, false);
   });
 });
 
@@ -1043,8 +1062,9 @@ Deno.test("dispatch: an in-flight effect can still commit while draining", async
     }),
     execute: async () => {
       await gate; // the "stream", still open when shutdown starts
-      // What a cell method's write-set looks like on the wire.
-      commit = dispatchRef({ type: "COMMIT", _source: "Effect" });
+      // What a cell method's write-set looks like on the wire (alpha70: the
+      // `_inflight` flag, not `_source`, is what the drain admits).
+      commit = dispatchRef(markInflight({ type: "COMMIT", _source: "Effect" }));
       await commit;
     },
     getState: () => state,
@@ -1075,6 +1095,91 @@ Deno.test("dispatch: an in-flight effect can still commit while draining", async
 
   // Sealed after the drain: persist has read the state, nothing may move it.
   await assertRejects(() => dispatch({ type: "LATE" }));
+});
+
+Deno.test("dispatch: open → draining → sealed — each refusal names its phase", async () => {
+  // alpha70. `close()` used to leave one boolean behind, so an action refused
+  // "after close()" could not tell a caller whether the loop was CLOSING (the
+  // final persist is still to come — running methods are finishing their
+  // writes) or CLOSED (nothing will be captured any more). Now: DRAINING vs
+  // CLOSED, and the drain admits ONE flag (`_inflight`) rather than
+  // `_source:"Effect"`, which a bound async call also carries.
+  let state = { n: 0 };
+  let release!: () => void;
+  const gate = new Promise<void>((r) => release = r);
+  type A = { type: string; _source?: string; _inflight?: true };
+  let dispatchRef!: (a: A) => Promise<unknown>;
+  let commit: Promise<unknown> | null = null;
+  const warned: string[] = [];
+  const dispatch = createDispatch<typeof state, A, { type: string }>({
+    reduce: (s, a) => ({
+      state: { n: a.type === "COMMIT" ? s.n + 1 : s.n },
+      effects: a.type === "START" ? [{ type: "STREAM" }] : [],
+    }),
+    execute: async () => {
+      await gate;
+      commit = dispatchRef(markInflight({ type: "COMMIT", _source: "Effect" }));
+      await commit;
+    },
+    getState: () => state,
+    setState: (s) => {
+      state = s;
+    },
+    onDone: () => {},
+    log: { ...noop, warn: (m) => warned.push(m) },
+    debug: false,
+  });
+  dispatchRef = dispatch;
+  assertEquals(dispatch.phase(), "open");
+
+  dispatch({ type: "START" });
+  dispatch.close();
+  assertEquals(dispatch.phase(), "draining");
+
+  const code = async (p: Promise<unknown>) =>
+    (await assertRejects(() => p) as AioError).code;
+  // New input while draining: the PRECISE refusal — the loop is closing, the
+  // running method's writes are still being captured, THIS one is refused.
+  assertEquals(
+    await code(dispatch({ type: "TYPED", _source: "UI" })),
+    "DISPATCH_DRAINING",
+  );
+  assertEquals(await code(dispatch({ type: "POLL" })), "DISPATCH_DRAINING");
+  // The asymmetry the flag closes: a BOUND async call is `_source:"Effect"`
+  // too (cell-catalog's ack path). It is new work, not a write in flight —
+  // refused exactly like its sync twin.
+  assertEquals(
+    await code(dispatch({ type: "ledger:place", _source: "Effect" })),
+    "DISPATCH_DRAINING",
+  );
+  const draining = warned.find((w) => w.includes("draining"));
+  assertEquals(
+    typeof draining,
+    "string",
+    `draining refusal is logged: ${warned}`,
+  );
+
+  const drained = dispatch.drain(1000);
+  release();
+  await drained;
+  await commit;
+  assertEquals(state.n, 1, "the in-flight write landed while draining");
+  assertEquals(dispatch.phase(), "sealed");
+
+  // Sealed: everything is CLOSED — and a late in-flight write is reported LOST,
+  // never silently dropped (the method ignored its abort past the deadline).
+  assertEquals(await code(dispatch({ type: "LATE" })), "DISPATCH_CLOSED");
+  const late = await assertRejects(() =>
+    dispatch(markInflight({ type: "COMMIT", _source: "Effect" }))
+  ) as AioError;
+  assertEquals(late.code, "DISPATCH_CLOSED");
+  assertEquals(late.message.includes("lost"), true, late.message);
+  assertEquals(
+    warned.some((w) => w.includes("LOST")),
+    true,
+    `a lost in-flight write is said out loud: ${warned}`,
+  );
+  assertEquals(state.n, 1, "nothing moved the sealed state");
 });
 
 Deno.test("dispatch: drain(timeout) seals rather than waiting forever", async () => {
