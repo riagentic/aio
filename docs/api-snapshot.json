@@ -93,7 +93,7 @@
         },
         "CellsConfig": {
           "kind": "typeAlias",
-          "sig": "68b4b361c220e734"
+          "sig": "21cdd0d7d641f588"
         },
         "CellStatus": {
           "kind": "typeAlias",
