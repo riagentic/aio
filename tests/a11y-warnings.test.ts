@@ -203,3 +203,109 @@ function useSignalLocal() {
     },
   };
 }
+
+// ── alpha72: the five a linter would catch and this one did not ──
+//
+// Each renders perfectly and fails only for someone using a keyboard, a screen
+// reader or a zoomed page — the class of defect nobody finds by looking at the
+// app. Warn-once and dev-only, like every check above: an a11y warning is an
+// observation, never a behaviour.
+
+/** Mount `vnode` in dev and return what was warned. */
+async function warnsFor(
+  make: () => ReturnType<typeof h>,
+): Promise<string[]> {
+  const { root, cleanup } = setup();
+  const warnings = captureWarnings(() => mount(root, make));
+  await cleanup();
+  return warnings;
+}
+
+Deno.test("a11y: <button> with no type submits the form it is inside", async () => {
+  const w = await warnsFor(() => h("button", {}, "Open menu"));
+  assertEquals(
+    w.some((m) => m.includes("<button> without type")),
+    true,
+    `expected the submit-by-default warning, got: ${JSON.stringify(w)}`,
+  );
+  assertEquals(
+    (await warnsFor(() => h("button", { type: "button" }, "ok")))
+      .some((m) => m.includes("without type")),
+    false,
+  );
+});
+
+Deno.test("a11y: <a onClick> with no href is not reachable by keyboard", async () => {
+  const w = await warnsFor(() => h("a", { onClick: () => {} }, "Delete"));
+  assertEquals(
+    w.some((m) => m.includes("not focusable")),
+    true,
+    `got: ${JSON.stringify(w)}`,
+  );
+  assertEquals(
+    (await warnsFor(() => h("a", { href: "/x", onClick: () => {} }, "go")))
+      .some((m) => m.includes("not focusable")),
+    false,
+  );
+});
+
+Deno.test("a11y: a positive tabIndex re-orders the whole page", async () => {
+  const w = await warnsFor(() => h("div", { tabIndex: 3 }, "x"));
+  assertEquals(
+    w.some((m) => m.includes("ENTIRE page")),
+    true,
+    `got: ${JSON.stringify(w)}`,
+  );
+  for (const ok of [0, -1]) {
+    assertEquals(
+      (await warnsFor(() => h("div", { tabIndex: ok }, "x")))
+        .some((m) => m.includes("ENTIRE page")),
+      false,
+      `tabIndex={${ok}} is correct and must not warn`,
+    );
+  }
+});
+
+Deno.test("a11y: aria-hidden on something still focusable", async () => {
+  const w = await warnsFor(() =>
+    h("button", { type: "button", "aria-hidden": true }, "x")
+  );
+  assertEquals(
+    w.some((m) => m.includes("still focusable")),
+    true,
+    `got: ${JSON.stringify(w)}`,
+  );
+  // Hiding a non-focusable decoration is the CORRECT use and must be silent.
+  assertEquals(
+    (await warnsFor(() => h("span", { "aria-hidden": true }, "★")))
+      .some((m) => m.includes("still focusable")),
+    false,
+  );
+});
+
+Deno.test("a11y: aria-disabled describes a control, it does not disable it", async () => {
+  const w = await warnsFor(() =>
+    h(
+      "button",
+      { type: "button", "aria-disabled": true, onClick: () => {} },
+      "x",
+    )
+  );
+  assertEquals(
+    w.some((m) => m.includes("does not disable")),
+    true,
+    `got: ${JSON.stringify(w)}`,
+  );
+  // With the real attribute alongside it, the author has said both things.
+  assertEquals(
+    (await warnsFor(() =>
+      h("button", {
+        type: "button",
+        "aria-disabled": true,
+        disabled: true,
+        onClick: () => {},
+      }, "x")
+    )).some((m) => m.includes("does not disable")),
+    false,
+  );
+});

@@ -119,6 +119,26 @@ const OWNERS: Record<string, [Owner, string]> = {
   _resetSchedules: ["MANUAL", "schedule registry; harness uses virtual time"],
   _resetSsrIdCounter: ["MANUAL", "SSR id counter; per-render test"],
   _resetStateVersion: ["MANUAL", "wire version pin"],
+  // The process-exit memo (`stopProcess`). MANUAL because clearing it is only
+  // ever right for the test that captured the exit: in a real process there is
+  // exactly one exit, and forgetting it would let a second signal start a
+  // second shutdown over the first one's half-released locks.
+  _resetStopProcess: ["MANUAL", "process-exit memo; a second exit is the bug"],
+  // `aio/ui` control ids (aria-controls / aria-labelledby pairs). MANUAL
+  // because the counter is deliberately monotonic within a page — resetting it
+  // per test is what makes an ASSERTION on an id readable, and resetting it in
+  // product code would hand two live components the same id.
+  _resetControlIds: ["MANUAL", "aria id counter; a collision is the bug"],
+  // The once-per-process frozen-write explanation. MANUAL because the whole
+  // point is that it is said ONCE: resetting it per test is what lets a test
+  // assert the paragraph, and resetting it in product code would repeat it on
+  // every tick of a hot path.
+  _resetFrozenWriteHint: ["MANUAL", "warn dedup; repeating it is the bug"],
+  // The process-wide SIGINT/SIGTERM install. MANUAL because a SECOND install
+  // in one process is the bug it guards: the handlers are added once, at the
+  // top of the first app's boot, and adding them again would stack a listener
+  // per app on a signal that already stops all of them.
+  _resetProcessSignals: ["MANUAL", "signal install; a second one is the bug"],
   _resetStateReady: ["MANUAL", "client readiness latch"],
   _resetStatus: ["MANUAL", "client status"],
   _resetTracking: ["MANUAL", "telemetry opt-in"],

@@ -26,6 +26,7 @@ import {
   type MetaInputs,
 } from "./graph-audit.ts";
 import { EVAL_USER_AGENT, evaluateBundle } from "./graph-eval.ts";
+import { explainServerOnlyImport } from "../server/server-only-specs.ts";
 
 /** The generated entry's name — esbuild's `stdin.sourcefile`, and therefore
  *  its key in the metafile (the audit walks the graph from it). */
@@ -233,11 +234,17 @@ export async function bundleClient(o: ClientBundleOpts): Promise<ClientBundle> {
       ms: performance.now() - t0,
     };
   }
-  const errors = (result.errors ?? []).map((e) =>
-    typeof e === "object" && e && "text" in e
+  const errors = (result.errors ?? []).map((e) => {
+    const text = typeof e === "object" && e && "text" in e
       ? String((e as { text: unknown }).text)
-      : String(e)
-  );
+      : String(e);
+    const where = typeof e === "object" && e && "location" in e
+      ? (e as { location?: { file?: string; line?: number } }).location
+      : undefined;
+    // The most likely build error a new author hits, said in aio's words
+    // rather than the bundler's — see `explainServerOnlyImport`.
+    return explainServerOnlyImport(text, where?.file, where?.line) ?? text;
+  });
   const code = o.write
     ? await Deno.readTextFile(o.write.outfile).catch(() => "")
     : result.outputFiles?.[0]?.text ?? "";

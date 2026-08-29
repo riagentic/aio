@@ -8,7 +8,7 @@ import { privateDirRefusal, selfUid } from "./dir-permissions.ts";
 import { connectLocal } from "./local-listen.ts";
 import { appDirs, appHome } from "./app-dirs.ts";
 import { log } from "../diagnostics/logger-api.ts";
-import { SHUTDOWN_BUDGET_MS } from "./shutdown-budget.ts";
+import { EXIT_WAIT_MS } from "./shutdown-budget.ts";
 import { readDenoJsonSync } from "./deno-json.ts";
 
 /** How long a lock may sit at `status:"starting"` before anyone — the next
@@ -841,7 +841,10 @@ export class AppLock {
         // Kill the old instance — SIGTERM, then wait out the WHOLE graceful
         // budget before SIGKILL: a takeover is not a reason to truncate the
         // previous instance's final snapshot.
-        await killProcess(existing.pid, SHUTDOWN_BUDGET_MS + 1000, existing);
+        // Wait out the app's OWN self-kill deadline too (`stopProcess`'s
+        // watchdog), not just the phase budget: a takeover that SIGKILLs at
+        // 9 s cuts off an app that was about to end itself cleanly at 10 s.
+        await killProcess(existing.pid, EXIT_WAIT_MS, existing);
         removeLock(this.key);
         await delay(100);
         continue;

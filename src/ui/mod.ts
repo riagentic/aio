@@ -941,6 +941,39 @@ export function _resetToasts(): void {
   _toastSeq = 0;
 }
 
+// ── Controls ─────────────────────────────────────────────────────────
+//
+// The ten a dashboard needs that the first kit did not have. Each implements
+// the WAI-ARIA keyboard interaction for its role — see `controls.ts`.
+
+export {
+  _resetControlIds,
+  Alert,
+  type AlertProps,
+  Breadcrumb,
+  type BreadcrumbProps,
+  type Crumb,
+  EmptyState,
+  type EmptyStateProps,
+  Menu,
+  type MenuItem,
+  type MenuProps,
+  Progress,
+  type ProgressProps,
+  RadioGroup,
+  type RadioGroupProps,
+  type RadioOption,
+  Skeleton,
+  type SkeletonProps,
+  Switch,
+  type SwitchProps,
+  type TabItem,
+  Tabs,
+  type TabsProps,
+  Tooltip,
+  type TooltipProps,
+} from "./controls.ts";
+
 // ── Markdown ─────────────────────────────────────────────────────────
 
 export { Markdown, type MarkdownProps } from "./markdown.ts";

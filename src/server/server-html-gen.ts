@@ -8,6 +8,8 @@ import { appThemeCss, appThemeTokensCss } from "../build/app-theme.ts";
 
 /** `ui.chrome` — how much of the desktop window the OS draws. */
 export type UiChrome = NonNullable<UiConfig["chrome"]>;
+/** `<html dir>` — see {@linkcode UiConfig.dir}. */
+export type UiDir = NonNullable<UiConfig["dir"]>;
 /** `ui.theme` — how much of the default look the shell emits. Defined in
  *  aio-types (ONE spelling), re-exported here where the shells reach for it. */
 export type { UiTheme };
@@ -60,9 +62,22 @@ const DEFAULT_VIEWPORT =
  *  misfires, and hyphenation falls back to the UA locale. The framework already
  *  ships an icon, a viewport, a stylesheet and a title bar by default; this is
  *  the one `<html>`-level default it was missing. `ui.lang` overrides it. */
-export function htmlOpen(lang?: string): string {
+export function htmlOpen(lang?: string, dir?: UiDir): string {
   const tag = (lang ?? DEFAULT_LANG).trim() || DEFAULT_LANG;
-  return `<html lang="${escHtml(tag)}">`;
+  // `dir` is the RTL half of the same sentence. It is NOT derived from `lang`:
+  // a guess ("ar" ⇒ rtl) is right often enough to be trusted and wrong often
+  // enough to break an app that ships Arabic content in an LTR chrome. The
+  // browser's own `dir="auto"` reads the FIRST strong character of the page
+  // and is the honest default for an app that has not decided, so that is what
+  // `ui.dir` accepts alongside the two explicit answers.
+  //
+  // Everything the framework's own stylesheets do is written with logical
+  // properties (`margin-inline`, `inset-inline-end`, `text-align:start`), so
+  // one attribute flips the whole default UI — that is the entire point of
+  // having spent the CSS that way, and `tests/rtl-logical-css.test.ts` keeps
+  // it true.
+  const d = dir && dir !== "ltr" ? ` dir="${escHtml(dir)}"` : "";
+  return `<html lang="${escHtml(tag)}"${d}>`;
 }
 
 function chromeShell(chrome: UiChrome | undefined): string {
@@ -312,6 +327,8 @@ export interface HtmlShellOptions {
   themeName?: string;
   /** ui.lang — the document language (default: "en"). */
   lang?: string;
+  /** ui.dir — `<html dir>`. See `UiConfig.dir`. */
+  dir?: import("./aio-types.ts").UiConfig["dir"];
 }
 
 export function generateHTML(o: HtmlShellOptions): string {
@@ -359,6 +376,7 @@ export function androidLocalHTML(
     theme?: UiTheme;
     themeName?: string;
     lang?: string;
+    dir?: UiDir;
   },
 ): string {
   const head = headContent(
@@ -382,7 +400,7 @@ export function androidLocalHTML(
     shell?.theme === undefined,
   );
   return `<!DOCTYPE html>
-${htmlOpen(shell?.lang)}
+${htmlOpen(shell?.lang, shell?.dir)}
 <head>
 ${head}
 </head>

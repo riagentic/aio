@@ -11,7 +11,12 @@ export type MergeStrategy =
   | "counter"
   | "lww-per-key"
   | "set-add"
-  | "set-remove";
+  | "set-remove"
+  /** Three-way text merge against the agreed base — see `merge-text.ts`.
+   *  Two peers editing different parts of a note both keep their edit; two
+   *  editing the same part is a real conflict, resolved by HLC exactly as
+   *  `lww` would and REPORTED through `onConflict`. */
+  | "text";
 
 /** Per-cell sync configuration (normalized from sync: true | {...}) */
 export interface SyncConfig {

@@ -2,7 +2,7 @@
 // Extracted from aio.ts _run() to keep the orchestrator lean.
 
 import { enc } from "../protocol/envelope.ts";
-import { shutdownAllRuntimes } from "./shutdown.ts";
+import { installProcessSignals, stopProcess } from "./shutdown.ts";
 import { restartForCellChange } from "./dev-restart.ts";
 import { loadOrCreateCert, type TlsCert } from "./tls.ts";
 import { createServer } from "./server.ts";
@@ -58,6 +58,8 @@ export interface TransportConfig {
   maxConnections?: number;
   wsLimits?: import("./aio-types.ts").WsLimits;
   allowedOrigins?: string[];
+  /** Response hardening + transfer encoding — see `AioConfig.security`. */
+  security?: import("./security-config.ts").SecurityConfig;
   strictOrigin?: boolean;
   trustProxyHeader?: string;
   syncIntervalMs?: number;
@@ -135,6 +137,8 @@ export interface ServerSetupDeps<S, A> {
     chrome?: "standard" | "themed" | "none"; // desktop window frame
     theme?: UiTheme; // how much of the default look the shell emits
     lang?: string; // <html lang> — WCAG 3.1.1, default "en"
+    /** ui.dir — `<html dir>`; mirrors the whole default UI. */
+    dir?: import("./aio-types.ts").UiConfig["dir"];
   };
   title: string;
   config: TransportConfig;
@@ -624,6 +628,7 @@ export async function setupTransport<S, A>(
       chrome: ui.chrome,
       theme: ui.theme,
       lang: ui.lang,
+      dir: ui.dir,
       // The accent follows the app's IDENTITY, not its window title: a title
       // that changes with the route must not recolour the app mid-session.
       themeName: appId || title,
@@ -637,6 +642,11 @@ export async function setupTransport<S, A>(
       maxConnections: config.maxConnections,
       wsLimits: config.wsLimits,
       allowedOrigins: config.allowedOrigins,
+      security: config.security,
+      // Only an operator-supplied certificate earns HSTS: aio's own --expose
+      // cert is a self-signed local CA, and pinning HTTPS for a name on the
+      // strength of it would outlive the app.
+      operatorCert: !!tlsCert && !tlsCert.selfSigned,
       strictOrigin: config.strictOrigin,
       trustProxyHeader: config.trustProxyHeader,
       syncIntervalMs: config.syncIntervalMs,
@@ -749,10 +759,7 @@ export async function setupTransport<S, A>(
         // down — including one that is still writing. Stop them all first
         // (shutdownAllRuntimes), or `am stop app-a` silently truncates app-b's
         // final snapshot.
-        shutdown: () =>
-          config.libraryMode
-            ? shutdown()
-            : shutdownAllRuntimes().then(() => Deno.exit(0)),
+        shutdown: () => config.libraryMode ? shutdown() : stopProcess(0),
         startedAt: Date.now(),
         udsClients: () =>
           udsRef.current
@@ -784,20 +791,12 @@ export async function setupTransport<S, A>(
   // Deno.exit (killing an embedding host / test runner) and, unremoved, leak
   // resources that fail Deno's test sanitizer — the reason a server couldn't be
   // booted inside Deno.test before. app.close() drives shutdown instead.
-  if (!config.libraryMode) {
-    for (const sig of ["SIGINT", "SIGTERM"] as const) {
-      try {
-        Deno.addSignalListener(sig, () => {
-          // EVERY app in the process, not just this one — see
-          // `shutdownAllRuntimes`. One handler per app all calling it is fine:
-          // each app's shutdown is memoised.
-          shutdownAllRuntimes().then(() => Deno.exit(0)).catch(() =>
-            Deno.exit(1)
-          );
-        });
-      } catch { /* signal not supported on this platform */ }
-    }
-  }
+  //
+  // `aio.run()` already installed these at the TOP of boot (a signal arriving
+  // before the handler exists is lost, and the app then never stops), so this
+  // is the idempotent belt-and-braces for any path that reaches the transport
+  // without going through it.
+  if (!config.libraryMode) installProcessSignals();
 
   // UDS listener
   let uds: UDSHandle | null = null;

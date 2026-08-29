@@ -60,13 +60,14 @@ gap waiting on a patch.
   `--tls-key`, or terminate at Caddy/nginx. No Dockerfile, image, or
   orchestration either: a compiled binary plus a data directory is the unit of
   deployment.
-- **CORS and security headers** — the server sends
-  `X-Content-Type-Options:
-  nosniff` and nothing else. No `Access-Control-*`,
-  no `Content-Security-Policy`, `Strict-Transport-Security`, or
-  `X-Frame-Options`. Cross-origin is _refused_ by the `Origin` and `Host` checks
-  rather than negotiated; a proxy in front is where a public deployment adds the
-  rest.
+- **CORS** — there are no `Access-Control-*` headers. Cross-origin is _refused_
+  by the `Origin` and `Host` checks rather than negotiated; an embedder or a
+  cross-origin caller is named in `allowedOrigins` or it is a 403. (Security
+  headers are NOT a non-goal since alpha72 — every response carries
+  `X-Content-Type-Options`, `Referrer-Policy`, `X-Frame-Options` and a
+  Content-Security-Policy, with `Strict-Transport-Security` behind an operator's
+  own certificate. See
+  [Response security headers](../auth/auth.md#response-security-headers).)
 - **End-user password recovery** — the framework mints and burns the reset
   tokens, but it cannot deliver them without a `sendMail` transport you write.
   Until then, recovery is an operator action (`am auth passwd <id>`). See
@@ -88,3 +89,24 @@ All ten targets (five local + five `remote`/thin-client) are exercised by CI
 end-to-end. The API surface is snapshot-locked in CI; breaking changes ship only
 in alphas. See [semver policy](semver-policy.md) and the
 [changelog](../../CHANGELOG.md).
+
+**What is checked rather than claimed.** Every gate `check:release` runs is a CI
+step, and a test reads both lists so one cannot drift from the other. Beyond the
+usual (types, lint, the suite, the module boundary matrix), the ones worth
+knowing about because they catch what review does not:
+
+| gate                    | what it refuses                                                                                                                                                                              |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `check:audit`           | 30 randomized adversarial rounds, seeded so a finding replays. Every other gate asks whether the code matches a decision someone wrote down; these ask what happens on an input nobody chose |
+| `check:mutations`       | breaks 59 load-bearing invariants on purpose and requires the named test to go red — a green suite that would stay green is not a suite                                                      |
+| `check:vacuous`         | a test that passes while proving nothing (an assertion inside a loop that may not run, both sides of a comparison the same expression)                                                       |
+| `check:dead-wiring`     | an export nothing reaches — a feature that was declared and never connected                                                                                                                  |
+| `check:silent-catch`    | a `catch` that swallows without saying why it may                                                                                                                                            |
+| `check:bundle-size`     | the bytes a page downloads, AND whether the docs still quote the measured number                                                                                                             |
+| `check:orphans`         | processes and directories a test run left behind                                                                                                                                             |
+| `check:docs` + snippets | every fenced `ts` example type-checks against the real repo; every `am` verb and config key the docs name exists                                                                             |
+
+**What is NOT checked here, and needs hardware this side does not have**: a real
+Windows pass (the named-pipe transport is proven under Wine and by inspection),
+a real macOS pass, a real Android device pass, and a 72-hour soak. Those are
+named in `todo.md` rather than assumed.

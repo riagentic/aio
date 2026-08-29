@@ -77,6 +77,8 @@ import {
 } from "./server-dev-checks.ts";
 import type { TrojanDeps } from "./server-trojan.ts";
 import { resetTrojanRateLimit } from "./server-trojan.ts";
+import { encodeResponse } from "./http-encoding.ts";
+import { securityHeaders } from "./security-headers.ts";
 
 // B-11: tokens in the URL query string leak via browser history, proxy logs,
 // and Referer headers. The timing-safe `?token=` path stays as an opt-in
@@ -584,6 +586,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     chrome: config.chrome,
     theme: config.theme,
     lang: config.lang,
+    dir: config.dir,
     themeName: config.themeName,
     width: config.width,
     height: config.height,
@@ -687,7 +690,39 @@ export function createServer(config: ServerConfig): ServerHandle {
   }
 
   // ── HTTP request handler (with auth gates) ──
+  // THE response finisher — one decider for every header that belongs on
+  // every response, and for the transfer encoding.
+  //
+  // It wraps `handleRequestInner` rather than living at its dozen return
+  // points, because "every response" is the actual requirement: a route an app
+  // added tomorrow gets the same treatment as `/app.js` did today, with no
+  // chance of a path being forgotten. `encodeResponse` is deliberately
+  // conservative — anything that is not a buffered, compressible 200 comes
+  // back untouched (see its header comment for the full list).
+  const _securityHeaders = securityHeaders(config.security, {
+    allowedOrigins: config.allowedOrigins,
+    secure: !!config.cert,
+    operatorCert: config.operatorCert,
+  });
   const handleRequest = async (
+    req: Request,
+    info?: Deno.ServeHandlerInfo,
+  ): Promise<Response> => {
+    const resp = await handleRequestInner(req, info);
+    // A 101 is a protocol switch: its headers are the handshake, and adding to
+    // them is at best ignored and at worst a failed upgrade.
+    if (resp.status === 101) return resp;
+    for (const [k, v] of Object.entries(_securityHeaders)) {
+      // An explicit header from a route or the auth flows always wins — the
+      // app said something specific and the default must not overwrite it.
+      if (!resp.headers.has(k)) resp.headers.set(k, v);
+    }
+    return await encodeResponse(req, resp, {
+      compress: config.security?.compress,
+    });
+  };
+
+  const handleRequestInner = async (
     req: Request,
     info?: Deno.ServeHandlerInfo,
   ): Promise<Response> => {

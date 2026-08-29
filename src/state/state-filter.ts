@@ -66,10 +66,22 @@ function pickPath(src: unknown, segs: string[]): unknown {
   if (segs.length === 0) return src;
   if (src === null || typeof src !== "object") return MISSING;
   if (Array.isArray(src)) {
+    // AN ARRAY ALWAYS PROJECTS TO AN ARRAY OF THE SAME LENGTH — including an
+    // empty one, and including one whose elements all lack the path.
+    //
+    // Returning MISSING there dropped the key entirely, and the array's
+    // LENGTH is load-bearing twice over: a component reads `state.rows.map`
+    // (undefined, not `[]`, on a cell whose list starts empty), and the delta
+    // path keeps sending index ops for it — so the first `add rows[0]` after
+    // an empty start could not resolve against a projection with no `rows`,
+    // and the client had to fall back to a full resync to recover. The mixed
+    // case already produced `{}` per element for exactly this reason; this is
+    // the all-or-nothing case reading the same way.
+    //
+    // Found by `scripts/audit-round.ts 28`, which patches the projected
+    // previous state and compares it with the projected next state.
     const out = src.map((el) => pickPath(el, segs));
-    return out.every((v) => v === MISSING)
-      ? MISSING
-      : out.map((v) => (v === MISSING ? {} : v));
+    return out.map((v) => (v === MISSING ? {} : v));
   }
   const [head, ...rest] = segs;
   const from = src as Record<string, unknown>;

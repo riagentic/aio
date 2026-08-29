@@ -24,6 +24,26 @@ that is the gate working, not a setback.
 - **Streak: 1** — alpha71 (2026-08-28), the first release after the deliberate
   last compat break. Additive only; no major/critical/blocker bug reported
   against it.
+- **alpha72 (2026-08-29) — the streak call is YOURS, and here are the facts.**
+  Additive only, no compat break. But a randomized audit of alpha71 found
+  defects that were IN alpha71, and the rule says a corruption-class bug found
+  during an alpha resets the count. None of these is corruption-class — no data
+  is lost or wrongly written — so by the letter of the rule the streak advances
+  to 2. Two of them are availability-class, which is the closest call:
+  - a boot that REFUSED (corrupt `state.db`) never exited: the caller got a
+    clean error and a process that hangs forever
+  - every `libraryMode` app lingered 5,054 ms after `app.close()` returned
+  - `logging: false` silently stopped writing the action log and the crash
+    checkpoint — the two artifacts that exist to explain a crash
+  - nothing was ever compressed and `no-cache` could not revalidate (a 3x wire
+    cost on every page load)
+  - `visible: { include: ["rows.field"] }` dropped an EMPTY list from the
+    client's view entirely — `state.rows.map(…)` on `undefined` in the one state
+    every app starts in, and a delta the client then could not apply (it
+    recovered by resyncing, so no data was wrong: correctness-of-view, not
+    corruption)
+
+  Say the word either way and the line above gets the number you decide.
 
 ## Decided in alpha70, so it is not re-litigated
 

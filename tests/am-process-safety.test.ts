@@ -430,3 +430,37 @@ Deno.test({
     }
   },
 });
+
+Deno.test({
+  name:
+    "#7 kill --stale: the refusal always NAMES the process, never trails off",
+  ignore: Deno.build.os === "windows",
+  async fn() {
+    // `/proc/<pid>/cmdline` is EMPTY for a kernel thread, for a zombie, and
+    // for the instant between fork and execve. It used to be returned as-is,
+    // so the message read "…it is running: " and stopped mid-sentence — on the
+    // exact path that decides whether to signal a stranger's process. Read the
+    // pid the moment it exists, which is when the window is open.
+    for (let i = 0; i < 25; i++) {
+      const p = new Deno.Command("sleep", { args: ["5"], stdout: "null" })
+        .spawn();
+      try {
+        const why = stalePidRefusal(p.pid, new Map()) ?? "";
+        assert(
+          !/: *$/.test(why),
+          `refusal trailed off with nothing after the colon: ${
+            JSON.stringify(why)
+          }`,
+        );
+        if (why.includes("not an aio process")) {
+          assertStringIncludes(why, "sleep");
+        }
+      } finally {
+        try {
+          p.kill("SIGKILL");
+        } catch { /* gone */ }
+        await p.status;
+      }
+    }
+  },
+});

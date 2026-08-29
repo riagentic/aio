@@ -52,6 +52,8 @@ export interface ServerConfig {
   viewport?: string | false; // AIO-423: <meta viewport> override (false = omit)
   headExtra?: string; // AIO-423: verbatim extra <head> content
   lang?: string; // ui.lang — <html lang>, default "en"
+  /** ui.dir — `<html dir>`; mirrors the whole default UI. See `UiConfig.dir`. */
+  dir?: import("./aio-types.ts").UiConfig["dir"];
   chrome?: "standard" | "themed" | "none"; // ui.chrome — desktop window frame
   theme?: UiTheme; // ui.theme — how much of the default look is emitted
   themeName?: string; // identity the theme accent is derived from (appId)
@@ -75,6 +77,12 @@ export interface ServerConfig {
   wsLimits?: import("./aio-types.ts").WsLimits; // per-client WS rate/size limits (W6.6)
   syncIntervalMs?: number; // throttle state broadcasts: max 1 push per N ms (default: 50)
   allowedOrigins?: string[]; // extra allowed origins beyond localhost (e.g. Docker, reverse proxy)
+  /** Response hardening + transfer encoding (`security-config.ts`). Every
+   *  field is optional; the defaults cannot break an app that works today. */
+  security?: import("./security-config.ts").SecurityConfig;
+  /** True when `cert` came from the operator (`--tls-cert`) rather than aio's
+   *  own local CA. Only an operator certificate earns an HSTS header. */
+  operatorCert?: boolean;
   strictOrigin?: boolean; // require Origin header on WS upgrade when expose=true (defense-in-depth vs CSWSH from origin-stripping intermediaries)
   trustProxyHeader?: string; // take client IP from this header's RIGHTMOST hop (behind a trusted reverse proxy) for abuse/auth-fail bucketing — the leftmost is client-settable
   clientCounter?: { value: number }; // shared index counter — WS and UDS get unique indices

@@ -10,8 +10,21 @@
 //
 // It is also the stricter test of the product: aio's contract is that an app
 // stops when asked ("what it opens, it closes" — alpha65), so a child that
-// needs SIGKILL is a defect, not a slow machine. The default grace is generous
-// enough that only a real refusal to exit trips it.
+// needs SIGKILL is a defect, not a slow machine.
+//
+// HOW GENEROUS the grace should be is a question this helper is the wrong
+// place to answer. It was 15 s, and a full suite running beside a `--expose`
+// app exceeded it twice during the alpha72 audit — a red that says "your app
+// ignored SIGTERM" when the truth was "this machine had 764 test files on it".
+// A confusing red costs more than a slow one.
+//
+// So the promptness of a stop is measured EXACTLY ONCE, precisely, on its own:
+// `tests/exit-promptly.test.ts` times a real process from `app.close()` to
+// unload (49 ms) and from a refused boot to exit (103 ms), against a ceiling
+// that a loaded machine cannot plausibly cross. That is the gate. This grace
+// is only a backstop against a suite that would otherwise hang forever, so it
+// can afford to be patient — raising it weakens nothing, because it is not
+// what proves the property.
 
 import { descendantPids } from "../src/server/single-instance-lock.ts";
 
@@ -33,7 +46,7 @@ export async function stopChild(
     quiet?: boolean;
   } = {},
 ): Promise<Deno.CommandStatus | null> {
-  const grace = opts.graceMs ?? 15_000;
+  const grace = opts.graceMs ?? 45_000;
   const label = opts.label ?? "the spawned app";
   try {
     proc.kill("SIGTERM");
@@ -75,7 +88,10 @@ export async function stopChild(
   throw new Error(
     `${label} (pid ${proc.pid}) ignored SIGTERM for ${grace}ms and had to be ` +
       `SIGKILLed — an app that does not stop when asked is a defect, and an ` +
-      `unbounded wait here hangs the whole suite.${
+      `unbounded wait here hangs the whole suite.\n` +
+      `  At ${grace}ms this is very unlikely to be a slow machine, but read ` +
+      `tests/exit-promptly.test.ts first: it measures the same property in ` +
+      `milliseconds and will say so plainly if the app really does not stop.${
         tail ? `\n── the child's last output ──\n${tail}` : ""
       }`,
   );

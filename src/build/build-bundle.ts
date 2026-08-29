@@ -13,6 +13,7 @@ import { VERSION_STAMP } from "../protocol/protocol-version.ts";
 import { bundleClient, judgeClientBundle } from "./client-bundle.ts";
 import { appIconPng, appIconSvg } from "./app-icon.ts";
 import { misplacedIconHint, resolveAppIcon } from "./build-helpers.ts";
+import { explainServerOnlyImport } from "../server/server-only-specs.ts";
 
 /** Where the bundle's REAL input list is recorded — esbuild's own metafile,
  *  reduced to the local files it actually read.
@@ -527,7 +528,16 @@ export async function runBundle(
     const metaInputs = bundle.inputs as Record<string, unknown>;
     if (!bundle.ok) {
       for (const e of bundle.errors) {
-        console.error(`[build] \u2717 esbuild: ${e}`);
+        // The most likely build error a new author hits — a server API
+        // imported into a component — said in aio's words rather than the
+        // bundler's seven-`../` path. Null for anything else, which keeps its
+        // own message.
+        const explained = explainServerOnlyImport(String(e));
+        console.error(
+          explained
+            ? `[build] \u2717 ${explained}`
+            : `[build] \u2717 esbuild: ${e}`,
+        );
       }
       await refuseBundle(root, out, "[build] \u2717 bundle failed");
     }

@@ -182,6 +182,10 @@ const SERVER_ONLY: Record<string, string> = {
   real: "SQLite schema builder",
   isCellWorker: "Deno worker-thread cells",
   blocking: "Deno worker pool (see tests/bundle-load-time-throw.test.ts)",
+  definePlugin:
+    "plugins are resolved by aio.run() at boot — a WebView bundle has no " +
+    "`plugins:` to resolve, and the module lives under src/server/ where a " +
+    "browser entry may not reach it (tests/browser-entry-server-reach)",
   // (`testCell` moved to `aio/testing` in alpha70 — off `aio`, off this ledger.)
 };
 

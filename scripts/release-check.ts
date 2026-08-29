@@ -218,6 +218,16 @@ const FAST: [string, string[]][] = [
   ["update:docs (no diff)", ["deno", "task", "update:docs", "--", "--check"]],
   ["check:doc-coverage", ["deno", "task", "check:doc-coverage"]],
   ["check:sanitizers", ["deno", "task", "check:sanitizers"]],
+  // The randomized rounds. FAST because they are seconds, not minutes, and
+  // because what they catch is a class the other gates cannot see: every gate
+  // above asks whether the code matches a decision someone wrote down. These
+  // ask what happens on an input nobody chose. Nine defects in their first run
+  // — a duplicated Accept-Encoding token that got a body the client had said
+  // it could not read, an `allowedOrigins` entry that made every response a
+  // 500, `aria-controls` naming an element that is not there.
+  ["check:audit", ["deno", "task", "check:audit"]],
+  // The size a page actually downloads, and whether the docs still say it.
+  ["check:bundle-size", ["deno", "task", "check:bundle-size"]],
   ["publish --dry-run", ["deno", "publish", "--dry-run", "--allow-dirty"]],
 ];
 
