@@ -14,7 +14,11 @@
  */
 import { readDenoJson } from "./server/deno-json.ts";
 import { fromFileUrl, join } from "@std/path";
-import { type BuildConfig, loadBuildConfig } from "./build/build-config.ts";
+import {
+  type BuildConfig,
+  loadBuildConfig,
+  refuseBadBuildArgs,
+} from "./build/build-config.ts";
 import { appDirs, installRoot } from "./server/app-dirs.ts";
 import { BUILD_VERSION_ENV } from "./server/app-version.ts";
 import { targetForFlags, TARGETS } from "./build-all.ts";
@@ -64,15 +68,6 @@ export async function build(cfg?: BuildConfig): Promise<void> {
   // return below (`doCompile` is false), and exited 0 — a successful-looking
   // command that did a fraction of what its flag implies, which is the shape
   // this project refuses everywhere else.
-  if (doService && !doCompile) {
-    console.error(
-      "[build] \u2717 --service writes a systemd unit for a compiled binary, " +
-        "and this build compiles nothing.\n" +
-        "       fix: `--compile --service` (the combination the unit file " +
-        "describes), or drop --service to build only the bundle.",
-    );
-    Deno.exit(1);
-  }
 
   // ── Step 1: Bundle dist/app.js ───────────────────────────────────────────
   // Skip for targets that don't need browser bundles
@@ -296,6 +291,11 @@ if (import.meta.main) {
   // version down, which is the same contract. Nothing new to remember.
   const _fleetChild = Deno.env.get(BUILD_VERSION_ENV) !== undefined;
   if (!_fleetChild) {
+    // EVERY argv refusal first. The delegation below answers "which target is
+    // this?", and a generic "that is not a build target" must never stand in
+    // for "you passed --electron and --cli", "--nope is not a flag" or
+    // "--service compiles nothing" — those name the actual mistake.
+    refuseBadBuildArgs(Deno.args);
     const target = targetForFlags(Deno.args);
     // A build flag combination that names no target is REFUSED, not built.
     //
@@ -325,7 +325,14 @@ if (import.meta.main) {
       Deno.exit(1);
     }
     if (target) {
-      const buildAll = new URL("./build-all.ts", import.meta.url);
+      // `import.meta.resolve`, NOT `new URL(…, import.meta.url)`. Both would
+      // work; only one of them is unambiguous to a reader and to the worker
+      // include gate, which treats every `new URL(…, import.meta.url)` in a
+      // file that mentions `new Worker(` as a worker module that must be
+      // embedded — and this file mentions one in a comment. The value here is
+      // a script path for `deno run`, never a module to embed.
+      const asPath = (spec: string) =>
+        spec.startsWith("file:") ? fromFileUrl(spec) : spec;
       const passthrough = Deno.args.filter((a) =>
         a.startsWith("--entry=") || a.startsWith("--name=") ||
         a.startsWith("--ui=") || a === "--release" || a === "--force" ||
@@ -335,13 +342,11 @@ if (import.meta.main) {
         args: [
           "run",
           "-A",
-          buildAll.protocol === "file:" ? fromFileUrl(buildAll) : buildAll.href,
+          asPath(import.meta.resolve("./build-all.ts")),
           `--targets=${target}`,
-          `--build-spec=${
-            import.meta.url.startsWith("file:")
-              ? fromFileUrl(new URL(import.meta.url))
-              : import.meta.url
-          }`,
+          // The fleet spawns THIS module back as its per-target builder, so it
+          // must be told where "this module" is — a JSR specifier included.
+          `--build-spec=${asPath(import.meta.url)}`,
           ...passthrough,
         ],
         stdout: "inherit",

@@ -174,9 +174,49 @@ function assertKnownFlags(args: readonly string[]): void {
   Deno.exit(1);
 }
 
+/** Every refusal a build makes about its ARGV, before anything is read from
+ *  disk or built — one decider, so the two callers cannot disagree.
+ *
+ *  It has two callers because there are two moments: `loadBuildConfig` (the
+ *  build itself) and the delegation in `build.ts` that hands a target to the
+ *  fleet. The delegation runs FIRST, so without this the generic "that is not
+ *  a build target" would have shadowed every specific message here — an
+ *  unknown flag, two shell targets at once, a `--service` with nothing to
+ *  serve. A worse message for the same mistake is a regression even when the
+ *  exit code is identical. */
+export function refuseBadBuildArgs(args: readonly string[]): void {
+  assertKnownFlags(args);
+  // Two shell targets in one build: the second would silently win.
+  const shells = ["--electron", "--android", "--ios", "--cli", "--client"]
+    .filter((f) => args.includes(f));
+  if (shells.length > 1) {
+    console.error(
+      `[build] \u2717 conflicting flags: ${
+        shells.join(" + ")
+      } — pick one shell target`,
+    );
+    Deno.exit(1);
+  }
+  // `--service` writes a systemd unit for the BINARY this build produces, so
+  // on its own it describes a file that will not exist. The pipeline used to
+  // accept it: it bundled `dist/app.js`, reached "nothing left to do", and
+  // exited 0 — a successful-looking command that did a fraction of what its
+  // flag implies.
+  const compiles = args.includes("--compile") || args.includes("--electron");
+  if (args.includes("--service") && !compiles) {
+    console.error(
+      "[build] \u2717 --service writes a systemd unit for a compiled binary, " +
+        "and this build compiles nothing.\n" +
+        "       fix: `--compile --service` (the combination the unit file " +
+        "describes), or drop --service to build only the bundle.",
+    );
+    Deno.exit(1);
+  }
+}
+
 /** Load and validate build configuration from CLI flags + deno.json */
 export async function loadBuildConfig(): Promise<BuildConfig> {
-  assertKnownFlags(Deno.args);
+  refuseBadBuildArgs(Deno.args);
   const root = Deno.cwd();
   const dist = resolve(join(root, DIST_DIR));
   const out = join(dist, BUNDLE_JS);
@@ -199,23 +239,6 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
   const doRelease = Deno.args.includes("--release");
   const doService = Deno.args.includes("--service");
   const doHeadless = Deno.args.includes("--headless");
-
-  // Reject conflicting shell flags
-  const shellFlags = [
-    doElectron && "--electron",
-    doAndroid && "--android",
-    doIos && "--ios",
-    doCli && "--cli",
-    doClient && "--client",
-  ].filter(Boolean);
-  if (shellFlags.length > 1) {
-    console.error(
-      `[build] \u2717 conflicting flags: ${
-        shellFlags.join(" + ")
-      } — pick one shell target`,
-    );
-    Deno.exit(1);
-  }
 
   const mainConfig = (await readDenoJson(root))?.config ?? {};
   const rendererMode = "aio" as const;
