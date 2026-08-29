@@ -12,7 +12,7 @@
 // …recommending the override the app applied months ago. The cost is not the
 // line: a suite that prints known-false warnings on every run teaches everyone
 // to skim past the real ones.
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { cell } from "../mod.ts";
 import { bootCells } from "../src/testing/cell-test.ts";
 import { setLogger } from "../src/diagnostics/logger-api.ts";
@@ -61,12 +61,17 @@ async function budgetWarnings(
 }
 
 Deno.test("harness: without the app's budget, the default fires (the old behaviour)", async () => {
-  const warns = await budgetWarnings(undefined);
+  const [warn] = await budgetWarnings(undefined);
   assert(
-    warns.length > 0,
-    "a 25 ms effect must exceed the 5 ms default — otherwise this test " +
-      "proves nothing about the case below",
+    warn,
+    "a 25 ms effect must exceed the 5 ms default — otherwise the test below " +
+      "proves nothing",
   );
+  // WHAT it says, not just that it said something: the default budget is the
+  // number under test, and the old behaviour is this exact line.
+  assertStringIncludes(warn, "exceeded budget");
+  assertStringIncludes(warn, "> 5ms");
+  assertStringIncludes(warn, "harness-budget");
 });
 
 Deno.test("harness: the app's perfBudget is honoured, so the warning does not fire", async () => {
