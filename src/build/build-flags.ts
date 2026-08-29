@@ -212,3 +212,32 @@ export function flagHint(flag: string): string {
     `app reads (aio.run picks the client from it). The BUILD spelling of ` +
     `that target is \`${build[mode] ?? "--compile"}\`.`;
 }
+
+/** The value of `--name=` in `args`, LAST OCCURRENCE WINS, with the repeat
+ *  reported through `onRepeat`.
+ *
+ *  THE ONE RULE FOR ARGV IN AIO, and it used to be two: `parseCli` (the
+ *  runtime's reader) assigns on every match, so the last flag wins there —
+ *  while the fleet builder took the FIRST. The difference was reachable from
+ *  a command line the scaffolder itself writes: `deno task compile` bakes
+ *  `--targets=<default>`, so `deno task compile --targets=cli` built the
+ *  default target and named its artifact accordingly, with nothing said.
+ *
+ *  Last-wins is also the reading that matches intent — the task line is the
+ *  app author's default, the command line is the operator's override, and
+ *  they arrive in that order on one line.
+ *
+ *  Pure: `onRepeat` is the caller's, so the same rule is testable without a
+ *  console. */
+export function lastFlag(
+  args: readonly string[],
+  name: string,
+  onRepeat?: (values: string[]) => void,
+): string | undefined {
+  const values: string[] = [];
+  for (const a of args) {
+    if (a.startsWith(`--${name}=`)) values.push(a.slice(name.length + 3));
+  }
+  if (values.length > 1) onRepeat?.(values);
+  return values.at(-1);
+}
