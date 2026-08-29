@@ -329,9 +329,26 @@ page).
 
 ## Build flags (single-target `build.ts`)
 
-`deno task build` invokes these for you (one set per target). Call `build.ts`
-directly only for a one-off artifact outside the fleet. `--service` here means
-"emit a systemd `.service` unit", not a target name.
+**There is one build path.** `build.ts` invoked with these flags resolves the
+target they name and runs the fleet for it, so every route — `am build`,
+`deno task build`, `deno task compile`, a direct `build.ts --compile --electron`
+— produces the same artifact, in `dist/`, with the version in its name, recorded
+in the same `manifest.json`, covered by the same artifact E2E.
+
+A flag combination that names **no** target is refused, with the list. It used
+to fall back to a second code path that wrote an unversioned artifact into the
+project root — invisible to `dist/manifest.json`, and therefore to `am publish`
+and to every updater. "It built something" was the worst available answer, since
+the something was unshippable and looked fine.
+
+`--service` here means "emit a systemd `.service` unit", not a target name.
+
+### What lands in `dist/`
+
+`dist/` is **one release, assembled clean**: the artifacts, their `.service`
+units, and `manifest.json`. Flat — no nested directories. The build's own
+scaffolding (the AppImage `AppDir`, the generated Gradle project) lives in
+`.aio/build/`, where it is kept between runs so Gradle stays incremental.
 
 | Flag                                      | Effect                                                                                                                                               |
 | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -762,10 +779,11 @@ deno task install:android --device=SERIAL  # when several are attached
 deno task install:android --no-launch      # install without starting it
 ```
 
-`--build` builds the **debug** APK, the same flags as `compile:android`: it is
-signed with the debug key, so it installs. A `--release` build with no signing
-config produces `<app>-unsigned.apk`, which Android refuses — use it once you
-have signing set up.
+`--build` builds the **debug** APK, the same build as
+`deno task build --targets=android`: it is signed with the debug key, so it
+installs. A `--release` build with no signing config produces
+`<app>-unsigned.apk`, which Android refuses — use it once you have signing set
+up.
 
 Enable **Developer options → USB debugging** on the phone and accept the
 authorization dialog; `adb devices` should list it as `device`. An attached

@@ -1010,6 +1010,10 @@
           "kind": "interface",
           "sig": "f6dbbad07731f24d"
         },
+        "targetForFlags": {
+          "kind": "function",
+          "sig": "5648430de3dd2fd9"
+        },
         "TargetOverride": {
           "kind": "interface",
           "sig": "f6307e16f1ec0583"

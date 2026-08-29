@@ -52,6 +52,39 @@ interface TargetSpec {
   role: "server" | "client" | "app";
   desc: string;
 }
+/** The fleet target a set of single-target build flags names — derived from
+ *  {@link TARGETS} itself, so there is no second table to drift.
+ *
+ *  THIS IS WHAT MAKES ONE BUILD PATH POSSIBLE. `src/build.ts` used to be a
+ *  second entry point: `deno task compile:electron` (the pre-alpha52 scaffold
+ *  emitted a whole `compile:*` matrix) ran it directly, which writes
+ *  `<name>-<arch>.AppImage` into the project root — while `deno task build`
+ *  ran the fleet, which places `dist/<name>-<version>-<arch>.AppImage`. Two
+ *  code paths, two names for one artifact, and only one of them tested by
+ *  `test:build`. A direct invocation now resolves its target here and runs the
+ *  fleet, so every route ends in the same placement, the same version stamp
+ *  and the same 61-case artifact E2E.
+ *
+ *  Exact set equality, not a subset: `--compile --cli` is `cli` and
+ *  `--compile --cli --remote` is `cli-client`, and a subset match would call
+ *  the second one the first. Pure. */
+export function targetForFlags(flags: readonly string[]): string | null {
+  // Only the flags that BUILD something take part. `--name=`, `--platform=`,
+  // `--entry=`, `--release` and friends qualify a build; they do not choose a
+  // target, and letting them into the comparison would make every real
+  // invocation match nothing. The vocabulary is derived from TARGETS itself.
+  const vocabulary = new Set(
+    Object.values(TARGETS).flatMap((s) => s.flags),
+  );
+  const want = new Set(flags.filter((f) => vocabulary.has(f)));
+  for (const [name, spec] of Object.entries(TARGETS)) {
+    const have = new Set(spec.flags);
+    if (have.size !== want.size) continue;
+    if ([...have].every((f) => want.has(f))) return name;
+  }
+  return null;
+}
+
 /** Every buildable target of the fleet, keyed by the name you pass to
  *  `deno task build` — its build flags, role, and one-line description. */
 export const TARGETS: Record<string, TargetSpec> = {

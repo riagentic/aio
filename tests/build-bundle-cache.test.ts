@@ -301,7 +301,17 @@ Deno.test("build --compile --headless: refuses to package an android bundle as a
       "build.ts",
     );
     const r = await new Deno.Command(Deno.execPath(), {
-      args: ["run", "-A", buildScript, "--compile", "--service", "--headless"],
+      // The fleet's `server` target — its own flag set, exactly as the
+      // fleet passes it. A set that names no target is refused, by design.
+      args: [
+        "run",
+        "-A",
+        buildScript,
+        "--compile",
+        "--service",
+        "--headless",
+        "--remote",
+      ],
       cwd: dir,
       stdout: "piped",
       stderr: "piped",
