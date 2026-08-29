@@ -109,6 +109,7 @@ import { createCostMeter } from "../vitals/cost-meter.ts";
 // CLI + path resolution
 import {
   cdpPort,
+  declareAppFlags,
   parseCli,
   printHelp,
   VERSION,
@@ -666,6 +667,10 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
     VALID_FEATURES_CONFIG_KEYS,
     "CellsConfig",
   );
+  // BEFORE anything reads argv. The app's own verbs join aio's vocabulary
+  // here, so a declared flag is passed through rather than refused — and a
+  // typo in one gets the same did-you-mean as a typo in aio's own.
+  declareAppFlags(fc.appFlags);
   if (fc.ui) {
     validateConfig(fc.ui as Record<string, unknown>, VALID_UI_KEYS, "ui");
     if (fc.memory) validateMemoryConfig(fc.memory as Record<string, unknown>);

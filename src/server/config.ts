@@ -170,6 +170,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "routes",
   "syncIntervalMs",
   "maxConnections",
+  "appFlags",
   "allowedOrigins",
   "security",
   "plugins",
@@ -307,6 +308,7 @@ export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
   "fullStateThreshold",
   "routes",
   "maxConnections",
+  "appFlags",
   "schedules",
   "wsLimits",
   "allowedOrigins",
@@ -413,6 +415,11 @@ export const CONFIG_DOCS: Record<string, [string, string]> = {
     'custom HTTP routes — "/path" or "/prefix/*" → handler (uploads, webhooks)',
   ],
   maxConnections: ["100", "max concurrent WebSocket clients"],
+  appFlags: [
+    "",
+    "flags THIS app answers itself — declared so aio passes them through " +
+    'instead of refusing them as unknown (e.g. ["--sync", "--user="])',
+  ],
   allowedOrigins: [
     "",
     "extra hosts/origins this app may be reached as — the WS Origin check AND the Host (DNS-rebinding) gate read this one list",
