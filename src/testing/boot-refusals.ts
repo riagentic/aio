@@ -63,4 +63,20 @@ export function _refuseUnsafeCells(
 export type HarnessBootOptions = {
   cellDefaults?: CellDefaults;
   localFirst?: boolean;
+  /** The app's `aio.run({ perfBudget })`.
+   *
+   *  The harness boots the cells directly and never sees `aio.run()`'s config,
+   *  so every budget was the DEFAULT — and a method the app had already
+   *  budgeted at 60 ms tripped the 5 ms default on every run, with a warning
+   *  recommending the exact override the app applied months ago:
+   *
+   *      WARN [BUDGET_EFFECT] dm effect exceeded budget: 15.2ms > 5ms …
+   *      Raise the budget for THIS method only:
+   *      perfBudget: { methods: { "dm:createIdentity": { effect: 40 } } }
+   *
+   *  The cost is not the line. It is that a suite printing known-false
+   *  warnings on every run teaches everyone to skim past the real ones. Pass
+   *  the same object the app passes, and the harness measures what production
+   *  measures. */
+  perfBudget?: import("../state/dispatch.ts").PerfBudget;
 };
