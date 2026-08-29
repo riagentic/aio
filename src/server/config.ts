@@ -593,6 +593,7 @@ export const CONFIG_GROUPS: [string, string[]][] = [
     "fullStateThreshold",
     "routes",
     "maxConnections",
+    "appFlags",
     "wsLimits",
     "allowedOrigins",
     "security",
