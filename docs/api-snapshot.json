@@ -1646,7 +1646,7 @@
         },
         "shipApp": {
           "kind": "function",
-          "sig": "b4af8dd50b06c2bc"
+          "sig": "7f9b6137433cedbf"
         },
         "ShipExpectations": {
           "kind": "typeAlias",

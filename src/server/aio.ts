@@ -1115,6 +1115,23 @@ async function _run<S, A, E>(
       null,
       2,
     ));
+    // …and ONE fact about what the contract could not say, on stderr, where
+    // this mode already routes every framework line.
+    //
+    // A contract with no cells has two opposite meanings — "this app persists
+    // nothing" and "this app persists and promised nothing about it" — and on
+    // the wire they are the same `cells: {}`. The second is the dangerous one:
+    // the data gate the updater leads with has nothing to weigh, so a release
+    // that cannot read a user's existing store installs without a word. A
+    // field report published every one of its releases that way.
+    //
+    // Deliberately NOT in the contract: the contract is inside the signature,
+    // and this is a build-time diagnostic, not a promise to a client. `ship`
+    // runs this binary already, so the two numbers meet where the decision is.
+    // aio-ok: a marker `aio ship` parses off stderr, beside the JSON on stdout.
+    console.error(
+      `[aio] persisting-cells: ${(config._persistingCellIds ?? []).length}`,
+    );
     Deno.exit(0);
   }
 

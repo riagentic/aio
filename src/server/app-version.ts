@@ -176,13 +176,24 @@ export function buildVersionNotes(bv: BuildVersion): string[] {
 /** Is this a version a release may carry? `-dirty.*` and `-nogit.*` are not
  *  reproducible from a commit, so `ship` / `am publish` refuse them unless
  *  told otherwise. Pure. */
-export function unpublishableReason(version: string): string | null {
+export function unpublishableReason(
+  version: string,
+  /** How THIS caller is told to publish anyway. A CLI names its flag; a
+   *  programmatic caller names the option it actually accepts.
+   *
+   *  It used to hardcode `--allow-dirty`, which is a flag on the `ship` CLI —
+   *  so a `shipApp({...})` caller (a two-app repo must call it directly: aio's
+   *  fleet builder reads one `entry`) was told to type a flag its own wrapper
+   *  did not expose, and the refusal read as a dead end. A message names a
+   *  remedy its READER can perform, or it is not a remedy. */
+  escape: string = "--allow-dirty",
+): string | null {
   const m = /-(dirty|nogit)\.[0-9a-f]{8}$/.exec(version);
   if (!m) return null;
   return `version ${version} is a ${
     m[1] === "dirty" ? "dirty-tree" : "no-repository"
   } build — commit first: a published build must be reproducible from a ` +
-    `commit (--allow-dirty publishes it anyway, and says so)`;
+    `commit (${escape} publishes it anyway, and says so)`;
 }
 
 // ── hashing ─────────────────────────────────────────────────────────────────

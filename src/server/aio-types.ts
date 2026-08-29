@@ -449,6 +449,13 @@ export type AioConfig<S, A, E> = {
    *  the list the page shell hands the browser (which cannot derive a
    *  compose-time decision from the cell definitions). */
   _syncCellIds?: string[];
+  /** Ids of the cells that actually WRITE to the store (`persist` is not
+   *  `"none"`). Not part of the data contract — the contract holds only the
+   *  cells that made a version promise — but `aio ship` needs both numbers to
+   *  tell "this app persists nothing" apart from "this app persists and
+   *  promised nothing about it", which are the same empty `cells: {}` on the
+   *  wire and mean opposite things. @internal */
+  _persistingCellIds?: string[];
   /** Internal: per-cell version + migration hooks — for state migration on KV restore */
   _cellMigrations?: Map<
     string,
