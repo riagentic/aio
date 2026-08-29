@@ -21,7 +21,6 @@
 import { assert, assertStringIncludes, assertThrows } from "@std/assert";
 import {
   _resetParsedCli,
-  appFlagSpecs,
   declareAppFlags,
   parseCli,
 } from "../src/server/aio-cli.ts";
@@ -79,8 +78,8 @@ Deno.test("appFlags: a value that is not a flag is refused with the spelling", (
 Deno.test("appFlags: declaring resets a parse made under the old vocabulary", () => {
   reset();
   declareAppFlags(["--sync"]);
-  assert(appFlagSpecs().includes("--sync"));
-  declareAppFlags([]);
+  parseCli(["--sync"]); // accepted under the declaration
+  declareAppFlags([]); // …and withdrawn by the next one
   assertThrows(() => parseCli(["--sync"]), Error, "unknown flag");
   reset();
 });

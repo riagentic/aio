@@ -168,12 +168,6 @@ export function declareAppFlags(names: readonly string[] | undefined): void {
   _parsedDefault = null;
 }
 
-/** What the app declared. Pure read — used by `aio/cli`'s own parser so one
- *  binary answers both vocabularies. @internal */
-export function appFlagSpecs(): readonly string[] {
-  return _appFlags;
-}
-
 /** Test seam: forget the memoized default parse. @internal */
 export function _resetParsedCli(): void {
   _parsedDefault = null;
