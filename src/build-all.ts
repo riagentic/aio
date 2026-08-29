@@ -30,6 +30,7 @@ import {
   flagVocabulary,
   FLEET_BOOL_FLAGS,
   FLEET_VALUE_FLAGS,
+  lastFlag,
   unknownFleetFlags,
 } from "./build/build-flags.ts";
 import { resolveAppDir, resolveEntry } from "./build/build-config.ts";
@@ -266,8 +267,28 @@ const C = {
   r: ansi("\x1b[0m"),
 };
 
+/** A `--name=value` from argv. THE LAST OCCURRENCE WINS, and a repeat is
+ *  said out loud.
+ *
+ *  It used to take the FIRST, which made `deno task compile --targets=cli`
+ *  build the default target instead: the `compile` task line already carries
+ *  `--targets=<default>`, so the operator's word was silently outranked by
+ *  the task's. Nothing reported it — the build succeeded, on the wrong
+ *  target, and named its artifact accordingly.
+ *
+ *  Last-wins is also what `parseCli` has always done for the runtime's own
+ *  flags (its loop assigns on every match), so this is one rule for argv in
+ *  aio rather than two readers disagreeing. It is the reading that matches
+ *  intent, too: the task line is the app author's default and the command
+ *  line is the operator's override, in that order, on one line. */
 const flag = (name: string): string | undefined =>
-  Deno.args.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3);
+  lastFlag(Deno.args, name, (values) => {
+    console.warn(
+      `${C.yellow}⚠ --${name} was given ${values.length} times${C.r} (${
+        values.join(", ")
+      }) — using the last: ${C.b}${values.at(-1)}${C.r}`,
+    );
+  });
 
 /** Human byte size. */
 function human(n: number): string {

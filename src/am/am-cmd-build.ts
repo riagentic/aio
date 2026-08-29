@@ -99,9 +99,20 @@ export function planTask(verb: BuildVerb, argv: readonly string[]): TaskPlan {
       }) — for several: am build ${words.join(" ")}`,
     };
   }
+  // `am compile <t>` runs the app's own `compile` task with the target as an
+  // override — NOT the `build` task wearing a `--targets=`.
+  //
+  // It used to re-route, because the `compile` task line already carries a
+  // `--targets=<default>` and the fleet read the FIRST one, so appending a
+  // second silently built the default. That workaround was correct about the
+  // hazard and wrong about the cure: it meant `am compile cli` and
+  // `deno task compile --targets=cli` ran DIFFERENT tasks — precisely the
+  // drift this module exists to make impossible. The fleet now takes the LAST
+  // occurrence and says so, which is what `parseCli` has always done for the
+  // runtime's flags, so the override works and one verb is one task.
   return {
     ok: true,
-    task: "build",
+    task: "compile",
     args: [`--targets=${words[0]}`, ...flags],
   };
 }
