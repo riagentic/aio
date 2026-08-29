@@ -98,6 +98,15 @@ export const FLEET_VALUE_FLAGS = [
   "--platforms",
   "--out",
   "--build-spec",
+  // Per-target overrides the fleet already PASSES to its children — it derives
+  // them from deno.json (`title`, `entry`, `ui`) and hands each child its own.
+  // Accepting them here lets a caller override for this run, which is what the
+  // single-target entry point always allowed: `build.ts --cli --name="My App"`.
+  // Now that every build goes through the fleet, refusing them would have
+  // silently dropped a rename the caller asked for.
+  "--name",
+  "--entry",
+  "--ui",
 ] as const;
 
 /** The `--flags` in `args` that are not in `bools`/`values`. A bare value flag

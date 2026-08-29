@@ -38,6 +38,12 @@ Deno.test("one path: matching is exact, never a subset", () => {
     "cli-client",
   );
   assertEquals(targetForFlags(["--android"]), "android");
+  // The short spellings name the same targets as the fleet's full ones:
+  // `--cli` and `--electron` imply `--compile`, exactly as the single-target
+  // builder has always read them (`doCompile = --compile || --electron`).
+  assertEquals(targetForFlags(["--cli"]), "cli");
+  assertEquals(targetForFlags(["--electron"]), "electron");
+  assertEquals(targetForFlags(["--cli", "--remote"]), "cli-client");
   assertEquals(targetForFlags(["--android", "--remote"]), "android-client");
   assertEquals(targetForFlags(["--compile"]), "browser");
   assertEquals(targetForFlags(["--compile", "--electron"]), "electron");
@@ -50,7 +56,6 @@ Deno.test("one path: a flag set that names no target is not a build", () => {
   // artifact in the project root that no manifest, no `am publish` and no
   // updater could see.
   assertEquals(targetForFlags(["--compile", "--service", "--headless"]), null);
-  assertEquals(targetForFlags(["--electron"]), null); // needs --compile
   assertEquals(targetForFlags([]), null);
   // Non-build flags never participate in the match.
   assertEquals(

@@ -77,6 +77,14 @@ export function targetForFlags(flags: readonly string[]): string | null {
     Object.values(TARGETS).flatMap((s) => s.flags),
   );
   const want = new Set(flags.filter((f) => vocabulary.has(f)));
+  // `--cli` and `--electron` IMPLY `--compile` — they always have: the single
+  // target builder reads `doCompile = --compile || --electron` and `--cli`
+  // compiles a binary of its own. The fleet spells those targets out in full
+  // (`--compile --cli`), so a user who types the short form is naming the same
+  // build and must reach the same target. Written here rather than in the
+  // caller because it is part of "which target do these flags name", which is
+  // this function's whole question.
+  if (want.has("--cli") || want.has("--electron")) want.add("--compile");
   for (const [name, spec] of Object.entries(TARGETS)) {
     const have = new Set(spec.flags);
     if (have.size !== want.size) continue;
@@ -884,7 +892,12 @@ export async function buildAll(): Promise<number> {
       // A target's own app title/binary name, else the project's — the one
       // place a per-target name is turned into the name everything downstream
       // (argv, artifact detection, the manifest) uses.
-      const targetTitle = t.appName ?? title;
+      // `--name=` on the fleet's own command line overrides the title for this
+      // run — the same override the single-target entry point has always
+      // accepted, now that it is the same entry point. A per-target `name:` in
+      // deno.json still wins, because it names ONE target and the flag names
+      // the run.
+      const targetTitle = t.appName ?? flag("name") ?? title;
       const targetBin = slugify(targetTitle);
       const platforms = targetPlatforms.get(target) ?? platformList;
       for (const platform of platforms) {
@@ -928,8 +941,10 @@ export async function buildAll(): Promise<number> {
           `--platform=${platform}`,
           // Per-target entry: the single-target build resolves configEntry —
           // and therefore appDir and every app asset — from this.
-          ...(t.entry ? [`--entry=${t.entry}`] : []),
-          ...(t.ui ? [`--ui=${t.ui}`] : []),
+          ...((t.entry ?? flag("entry"))
+            ? [`--entry=${t.entry ?? flag("entry")}`]
+            : []),
+          ...((t.ui ?? flag("ui")) ? [`--ui=${t.ui ?? flag("ui")}`] : []),
         ];
         if (release) args.push("--release");
         if (force) args.push("--force");
