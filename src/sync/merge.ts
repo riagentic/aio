@@ -1,6 +1,7 @@
 // src/sync/merge.ts — CRDT merge strategies
 import type { HLC, MergeStrategy } from "./types.ts";
 import { compareHLC } from "./hlc.ts";
+import { mergeText3 } from "./merge-text.ts";
 
 /**
  * Outcome of merging a single field: resolved value and whether a conflict occurred.
@@ -31,6 +32,8 @@ export function mergeField(
       return mergeLWW(local, localHlc, remote, remoteHlc);
     case "counter":
       return mergeCounter(local, remote, base);
+    case "text":
+      return mergeTextField(local, localHlc, remote, remoteHlc, base);
     case "lww-per-key":
       return mergeLWWPerKey(
         local as Record<string, unknown>,
@@ -146,6 +149,42 @@ function mergeLWW(
   }
   const winner = compareHLC(localHlc, remoteHlc) >= 0 ? local : remote;
   return { value: winner, conflict: true };
+}
+
+/** `text` — a three-way merge against the agreed base.
+ *
+ *  Refuses non-strings the way every sibling strategy refuses its own wrong
+ *  shape: a `text` merge on a number would stringify it and write the string
+ *  back into cell state, which is exactly the silent coercion this framework
+ *  does not do. The base may legitimately be absent (a field that did not
+ *  exist when the peers diverged) — an empty base is the honest reading, and
+ *  the diff3 then treats both sides as pure insertions.
+ *
+ *  `null`/`undefined` on either side means the field was cleared or never set,
+ *  which is not a text edit at all — that is LWW's question, and it answers it
+ *  correctly, so it is delegated rather than guessed at. */
+function mergeTextField(
+  local: unknown,
+  localHlc: HLC,
+  remote: unknown,
+  remoteHlc: HLC,
+  base: unknown,
+): MergeResult {
+  if (local == null || remote == null) {
+    return mergeLWW(local, localHlc, remote, remoteHlc);
+  }
+  if (typeof local !== "string") refuse("text", "a string", "local", local);
+  if (typeof remote !== "string") refuse("text", "a string", "remote", remote);
+  if (base != null && typeof base !== "string") {
+    refuse("text", "a string", "base", base);
+  }
+  return mergeText3(
+    (base as string | undefined) ?? "",
+    local,
+    localHlc,
+    remote,
+    remoteHlc,
+  );
 }
 
 function mergeCounter(

@@ -181,6 +181,23 @@ export function createCheckpoint(
       }
       timer = null;
     }, debounceMs);
+    // A DEBOUNCE MUST NEVER BE WHY A PROCESS IS STILL RUNNING.
+    //
+    // `flush()` clears this on the shutdown path, but an `observe()` after
+    // that — a last dispatch, a teardown hook — re-arms it, and a pending
+    // timer holds the event loop. Measured on a clean embedded boot:
+    // `app.close()` returned in 53 ms and the process did not unload until
+    // 5,054 ms, every time, for every `libraryMode` app. The checkpoint is
+    // best-effort diagnostics; the shutdown flush is what guarantees it is
+    // written. Unref'd, it still fires while the app is alive and stops being
+    // a reason for the app to stay that way.
+    // Found by the persistence audit round.
+    try {
+      (Deno as { unrefTimer?: (id: unknown) => void }).unrefTimer?.(timer);
+    } catch {
+      // aio-ok: a runtime without unrefTimer keeps the old behaviour — the
+      // timer fires, which is correct, just less polite about exiting.
+    }
   }
 
   /** Flush any pending write immediately.

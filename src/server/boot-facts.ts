@@ -59,6 +59,8 @@ export function sourced(s: Sourced<unknown> | undefined): string | undefined {
 
 /** The optional extras the boot sequence knows and this module cannot derive. */
 export type BootExtras = {
+  /** Plugin names, in the order they were applied. */
+  plugins?: string[];
   /** Which client shell this app runs — and who decided. The question that
    *  started this: "default target… where is it defined?" */
   client?: Sourced<string>;
@@ -170,6 +172,15 @@ export function bootLines(
     lines.push([
       "cells",
       `${extra.cells.length} (${extra.cells.join(", ")})`,
+    ]);
+  }
+  // WHICH plugins, by name. A plugin contributes cells, routes, schedules and
+  // hooks, so an unexplained cell or an unexpected route is otherwise a hunt
+  // through node_modules. Named here, next to what they contributed.
+  if (extra.plugins?.length) {
+    lines.push([
+      "plugins",
+      `${extra.plugins.length} (${extra.plugins.join(", ")})`,
     ]);
   }
   // Which cells are NOT ordinary: a worker cell runs on its own thread and a

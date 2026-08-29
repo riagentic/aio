@@ -64,6 +64,10 @@ jobs:
         run: deno task check:log-prefix
       - name: Sanitizer opt-outs (each one justified)
         run: deno task check:sanitizers
+      - name: Randomized audit (adversarial rounds — alpha72)
+        run: deno task check:audit
+      - name: Bundle size (the number, and the docs that quote it)
+        run: deno task check:bundle-size
       - name: Benchmarks (regression floors — roadmap B4)
         run: deno task bench
       - name: Coverage ratchet (src/ line coverage floor)

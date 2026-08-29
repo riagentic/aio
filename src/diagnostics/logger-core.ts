@@ -139,6 +139,23 @@ export class AioLogger {
           () => this.heartbeat(),
           this.cfg.heartbeat * 1000,
         );
+        // A HEARTBEAT MUST NEVER BE WHY A PROCESS IS STILL RUNNING.
+        //
+        // It is torn down on the shutdown path — and a boot that REFUSES never
+        // reaches one. Measured: a corrupt `state.db` produced a clean
+        // "persistence unavailable" refusal and then a process that never
+        // exited, because this interval (and the vitals sampler) were still
+        // armed. The caller sees a correct error and a hang, which is the
+        // worst of both. Unref'd, it still ticks for as long as the app is
+        // alive and stops being a reason for the app to stay that way.
+        // Found by the persistence audit round.
+        try {
+          (Deno as { unrefTimer?: (id: unknown) => void }).unrefTimer?.(
+            this.heartbeatTimer,
+          );
+        } catch {
+          // aio-ok: a runtime without unrefTimer keeps the old behaviour.
+        }
       }
     } catch (e) {
       console.error(`[logger] cannot create ${this.dir}: ${e}`);

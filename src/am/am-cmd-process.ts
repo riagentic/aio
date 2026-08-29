@@ -35,7 +35,7 @@ import {
   writeLaunchInfo,
   writeLock,
 } from "../server/single-instance-lock.ts";
-import { SHUTDOWN_BUDGET_MS } from "../server/shutdown-budget.ts";
+import { EXIT_WAIT_MS } from "../server/shutdown-budget.ts";
 import { VERSION } from "../server/aio-cli.ts";
 import { detectMode, formatUptime, out, outError } from "./am-output.ts";
 import { repoRoot } from "./am-cmd-create.ts";
@@ -132,7 +132,9 @@ export async function prepareStdoutLog(
 // How long `am` waits for a STOPPING instance before it SIGKILLs — the
 // runtime's own worst-case graceful stop plus a margin, imported rather than
 // retyped: a 3 s wait against an 8 s budget killed legitimate final flushes.
-const SINGLETON_WAIT_MS = SHUTDOWN_BUDGET_MS + 1000;
+// `EXIT_WAIT_MS` covers the app's own exit watchdog too, so `am` never kills
+// an app one tick before it was going to end itself and say why.
+const SINGLETON_WAIT_MS = EXIT_WAIT_MS;
 /** Default for `--wait` on stop/restart, in seconds — the same budget. */
 const STOP_WAIT_DEFAULT_S = Math.ceil(SINGLETON_WAIT_MS / 1000);
 const POLL_INTERVAL_MS = 200;
@@ -1520,8 +1522,18 @@ export function lockedPidsEverywhere(): Map<
 function pidCommandLine(pid: number): string | null {
   try {
     if (Deno.build.os === "linux") {
-      return Deno.readTextFileSync(`/proc/${pid}/cmdline`)
+      const cmdline = Deno.readTextFileSync(`/proc/${pid}/cmdline`)
         .replaceAll("\0", " ").trim();
+      if (cmdline) return cmdline;
+      // EMPTY is not "no such process" — `/proc/<pid>/cmdline` is empty for a
+      // kernel thread, for a zombie, and for the instant between fork and
+      // execve. It used to be returned as-is, so the refusal below read
+      // "…it is running: " and stopped mid-sentence: a message that names
+      // nothing, on the exact path that decides whether to signal a stranger's
+      // process. `comm` is populated for every live pid, so it answers when
+      // cmdline cannot.
+      const comm = Deno.readTextFileSync(`/proc/${pid}/comm`).trim();
+      return comm || null;
     }
     if (Deno.build.os === "darwin") {
       const r = new Deno.Command("ps", {

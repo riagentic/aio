@@ -787,14 +787,53 @@ A summary of aio's security posture and known limitations:
 
 ### What aio protects
 
-| Threat                                    | Protection                                                                                    |
-| ----------------------------------------- | --------------------------------------------------------------------------------------------- |
-| Unauthorized WebSocket/HTTP access        | Token auth (`--expose`, `users`, or `resolveUser`) — timing-safe comparison for static tokens |
-| Cross-origin browser requests (localhost) | `Origin` header validation — only same-origin allowed when not exposed                        |
-| State leakage per user                    | Cell-level `ui: { include, forUser }` — server-side filtering per client                      |
-| Trojan API abuse from web                 | `/__aio/trojan/*` bound to `127.0.0.1` HTTP-only — unreachable from browser even with TLS     |
-| Reducer/effect crashes taking down server | All errors caught and logged, dispatch loop continues                                         |
-| XSS in error overlay                      | `escHtml()` sanitizes filenames, paths, and error text                                        |
+| Threat                                           | Protection                                                                                       |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------ |
+| Unauthorized WebSocket/HTTP access               | Token auth (`--expose`, `users`, or `resolveUser`) — timing-safe comparison for static tokens    |
+| Cross-origin browser requests (localhost)        | `Origin` header validation — only same-origin allowed when not exposed                           |
+| State leakage per user                           | Cell-level `ui: { include, forUser }` — server-side filtering per client                         |
+| Trojan API abuse from web                        | `/__aio/trojan/*` bound to `127.0.0.1` HTTP-only — unreachable from browser even with TLS        |
+| Reducer/effect crashes taking down server        | All errors caught and logged, dispatch loop continues                                            |
+| XSS in error overlay                             | `escHtml()` sanitizes filenames, paths, and error text                                           |
+| Clickjacking, `<base>` hijack, form exfiltration | Security headers on every response — see [Response security headers](#response-security-headers) |
+
+### Response security headers
+
+Every response carries a small, deliberate header set. The defaults are chosen
+so an app that never writes a `security` block behaves exactly as it did before:
+**a header is on by default only when it cannot break an app that works today.**
+
+| Header                      | Default                                                                     | Why it is safe to default                                                                                                 |
+| --------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `X-Content-Type-Options`    | `nosniff`                                                                   | A declared type is the type.                                                                                              |
+| `Referrer-Policy`           | `strict-origin-when-cross-origin`                                           | Already the modern browser default; stating it makes an older browser behave like a current one.                          |
+| `X-Frame-Options`           | `SAMEORIGIN` (only when no `allowedOrigins`)                                | An aio page in a cross-origin iframe already cannot work — the WS upgrade carries the embedder's `Origin` and is refused. |
+| `Content-Security-Policy`   | `base-uri 'self'; object-src 'none'; frame-ancestors …; form-action 'self'` | **No `default-src`** — every off-origin stylesheet, font, image and script still loads.                                   |
+| `Strict-Transport-Security` | only behind `--tls-cert`                                                    | aio's own `--expose` certificate is a self-signed local CA; pinning HTTPS on the strength of it would outlive the app.    |
+| `Permissions-Policy`        | none                                                                        | Restricting camera/mic/geolocation by guess breaks the app that uses them.                                                |
+
+The frame policy is **derived from `allowedOrigins`**, never declared twice: the
+same list that decides whether an embedder may open a socket decides whether it
+may frame the page, so the two can never disagree.
+
+```ts
+await aio.run({
+  cells,
+  allowedOrigins: ["https://dash.corp"], // may connect AND may embed
+  security: {
+    csp: "strict", // opt in to `default-src 'self'` — widen it if you use a CDN
+    permissionsPolicy: "camera=(), microphone=()",
+  },
+});
+```
+
+Every piece is switchable: `security: { headers: false }` restores exactly the
+pre-alpha72 behaviour, and `csp`, `frameOptions`, `referrerPolicy`, `hsts` and
+`permissionsPolicy` are individually settable. A `csp` string that is not
+`"basic"`, `"strict"` or `"off"` is used verbatim.
+
+A route that sets a header itself always wins — the default never overwrites
+what the app said.
 
 ### Keeping secrets out of clients and disk
 

@@ -50,3 +50,67 @@ export const SERVER_ONLY_SPECS: ReadonlySet<string> = new Set([
   "aio/doctor",
   "aio/aiol",
 ]);
+
+/** aio's own browser-reachable entry files, by the tail of their path. The
+ *  bundler names the RESOLVED file, not the specifier the author wrote. */
+const ENTRY_FOR_FILE: ReadonlyArray<[string, string]> = [
+  ["src/server-entry.ts", "aio/server"],
+  ["src/db/mod.ts", "aio/db"],
+  ["src/cell-test.ts", "aio/testing"],
+  ["src/cli.ts", "aio/cli"],
+  ["src/build.ts", "aio/build"],
+  ["src/build/ship.ts", "aio/ship"],
+];
+
+/**
+ * The bundler's "no matching export" error, said in aio's words.
+ *
+ * A component that does `import { route } from "aio/server"` — the single most
+ * likely mistake a new author makes, because the API they want IS on that
+ * entry — got esbuild's own sentence:
+ *
+ *     No matching export in "../../../../../../home/x/.aio/versions/v1.0.0-
+ *     alpha72/src/server-entry.ts" for import "route"
+ *
+ * which names the rule nowhere, the fix nowhere, and a path with seven `../`
+ * in it. The browser build maps `aio/server` to a browser-safe SUBSET, so the
+ * import resolves and only the NAME is missing — which is why the server-only
+ * specifier check never sees it and why the message that reaches the author is
+ * the bundler's.
+ *
+ * Returns null for any error this does not recognise, so an unrelated failure
+ * keeps its own words.
+ */
+export function explainServerOnlyImport(
+  text: string,
+  file?: string,
+  line?: number,
+): string | null {
+  const m = /No matching export in "([^"]+)" for import "([^"]+)"/.exec(text);
+  if (!m) return null;
+  const resolved = m[1]!.replaceAll("\\", "/");
+  const name = m[2]!;
+  const hit = ENTRY_FOR_FILE.find(([tail]) => resolved.endsWith(tail));
+  if (!hit) return null;
+  const spec = hit[1];
+  // esbuild sometimes THROWS an aggregate ("Build failed with 1 error:\n
+  // src/App.tsx:2:9: ERROR: …") instead of returning structured errors, and
+  // that string is all the caller has. The location is in it either way.
+  if (!file) {
+    const loc = /(^|\n)\s*([^\s:]+\.[jt]sx?):(\d+):\d+:/.exec(text);
+    if (loc) {
+      file = loc[2];
+      line = Number(loc[3]);
+    }
+  }
+  const at = file ? `${file}${line ? `:${line}` : ""}` : "a browser file";
+  return `\`${name}\` is a SERVER API, and this is the browser bundle.\n` +
+    `  ${at} imports { ${name} } from "${spec}", which a page cannot run — ` +
+    `it needs the filesystem, workers or SQLite.\n` +
+    `  • Server work belongs in a cell METHOD or the app entry; a component ` +
+    `reads the result from cell state.\n` +
+    `  • The documented escape hatch is a DYNAMIC import inside a method: ` +
+    `\`await import("${spec}")\` — a static import from a component is not.\n` +
+    `  • "${spec}" resolves in the browser build to the subset that CAN run ` +
+    `there, which is why the file resolved and only the name did not.`;
+}

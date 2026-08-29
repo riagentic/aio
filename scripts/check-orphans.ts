@@ -215,3 +215,39 @@ console.log(
   `no orphaned aio processes (${staleDirs.length} stale lock dir(s), ` +
     `${tmpDirs.length} ownerless /tmp/aio-* dir(s) — deno task clean:tmp removes them)`,
 );
+
+// ── The leak nobody was failing on ──
+//
+// This script has always COUNTED abandoned directories and always exited 0
+// about them. Measured on a developer machine after a few weeks of suite runs:
+// 5,612 ownerless `/tmp/aio-*` directories holding 4.3 GB. Every one is a test
+// that made a temp home and did not remove it, and the number only goes up.
+//
+// A process left running is red because it holds a port; a directory left
+// behind is not red, because one directory is nothing. Ten thousand of them is
+// not nothing, and there was no point at which anyone was told. So: a ceiling,
+// which only ever goes DOWN — the same ratchet as `check:silent-catch` and
+// friends. It is deliberately generous, because this counts what is on the
+// WHOLE machine (a colleague's suite, a container's leftovers), not just what
+// this run made; the job of the number is to catch a new leak class, not to
+// police a tidy /tmp.
+const LEFTOVER_CEILING = 400;
+const leftovers = staleDirs.length + tmpDirs.length;
+if (leftovers > LEFTOVER_CEILING) {
+  console.error(
+    `\ncheck:orphans FAIL — ${leftovers} abandoned director(ies) ` +
+      `(${staleDirs.length} stale lock, ${tmpDirs.length} ownerless ` +
+      `/tmp/aio-*), ceiling ${LEFTOVER_CEILING}.\n` +
+      `  Every one is a test that made a temp home and did not remove it. ` +
+      `They are invisible one at a time and 4 GB in aggregate.\n` +
+      `  \`deno task clean:tmp\` removes them; then find the test that made ` +
+      `them and give it an \`await using\` or a finally.`,
+  );
+  Deno.exit(1);
+}
+if (leftovers > 0 && leftovers <= LEFTOVER_CEILING / 4) {
+  console.log(
+    `  (${leftovers} abandoned dir(s), ceiling ${LEFTOVER_CEILING} — ` +
+      `lower it in scripts/check-orphans.ts to keep the win)`,
+  );
+}

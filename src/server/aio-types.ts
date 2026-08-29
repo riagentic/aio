@@ -126,6 +126,20 @@ export type UiConfig = {
    *  and hyphenation follows the UA locale. Set it to whatever your UI is
    *  actually written in (`"de"`, `"pt-BR"`, …). */
   lang?: string;
+  /** Writing direction — `<html dir="…">`. Default: absent (the browser's
+   *  own `ltr`).
+   *
+   *  Every stylesheet the framework ships is written with logical properties
+   *  (`margin-inline`, `inset-inline-end`, `text-align: start`), so this ONE
+   *  attribute mirrors the whole default UI — the theme, the components, the
+   *  title bar. That is what the logical CSS was for.
+   *
+   *  Deliberately NOT derived from `lang`: guessing "ar ⇒ rtl" is right often
+   *  enough to be trusted and wrong often enough to mirror an app that ships
+   *  Arabic content inside an LTR chrome. `"auto"` hands the question to the
+   *  browser, which reads the first strong character — the honest answer for
+   *  an app that has not decided. */
+  dir?: "ltr" | "rtl" | "auto";
   /** How much of the window the OS draws, on desktop (Electron) targets.
    *
    *  - `"standard"` (default) — the platform's own title bar and border.
@@ -265,6 +279,14 @@ export type AioConfig<S, A, E> = {
   maxConnections?: number; // max concurrent WebSocket clients (default: 100)
   wsLimits?: WsLimits; // per-client WS rate/size limits (advanced; defaults hardened)
   allowedOrigins?: string[]; // extra hosts/origins this app may be reached as — read by BOTH the WS Origin check and the Host (DNS-rebinding) gate (reverse proxy, custom domains)
+  /** How responses are hardened and encoded — security headers and
+   *  compression. Every field is optional and every default is chosen so that
+   *  an app which never writes this block behaves exactly as it did before
+   *  (see `security-headers.ts` for why each default cannot break a page).
+   *  The frame policy is DERIVED from `allowedOrigins` rather than declared
+   *  twice: the same list that lets an embedder open a socket lets it frame
+   *  the page. */
+  security?: import("./security-config.ts").SecurityConfig;
   strictOrigin?: boolean; // --expose hardening: require an Origin header on WS upgrade
   /** Behind a trusted reverse proxy, read the real client IP from this header's first hop for abuse/auth-fail/lockout bucketing (e.g. "x-forwarded-for"). Opt-in — only set it when a proxy actually fronts the app. */
   trustProxyHeader?: string;
@@ -405,6 +427,9 @@ export type AioConfig<S, A, E> = {
   ) => Record<string, unknown> | null;
   /** Internal: composed cell names — passed from CellsConfig for diagnostics */
   _cellNames?: string[];
+  /** Internal: the plugin names applied to this app, in order — for the boot
+   *  report, so an unexplained cell or route has a name to blame. */
+  _pluginNames?: string[];
   /** Internal: cell defs flagged `worker: true` (see src/server/cell-worker.ts). */
   _workerCells?: import("../state/cell-types.ts").CellDef[];
   /** Internal: the module a cell worker boots from. Unset means
@@ -702,6 +727,17 @@ export type CellsConfig = {
   wsLimits?: WsLimits;
   /** Extra allowed WS origins beyond localhost + own host (reverse proxy, custom domains). */
   allowedOrigins?: string[];
+  /** Response hardening + transfer encoding — see `SecurityConfig`. */
+  security?: import("./security-config.ts").SecurityConfig;
+  /** Reusable pieces of app — each contributes cells, routes, schedules and
+   *  observe-only hooks through the SAME keys this config already has, so a
+   *  plugin can never do anything the app could not have written itself. The
+   *  app's own values are applied over the plugins'; a collision between two
+   *  plugins throws at boot naming both. See `definePlugin`. */
+  plugins?: import("./plugin.ts").Plugin[];
+  /** Internal: the resolved plugin names, set during the merge in `run()` and
+   *  read by the boot report. */
+  _pluginNames?: string[];
   /** --expose hardening: require an Origin header on WS upgrade. */
   strictOrigin?: boolean;
   trustProxyHeader?: string;

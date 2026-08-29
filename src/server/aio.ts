@@ -35,7 +35,7 @@ import { timeTravelEnabled } from "../diagnostics/types.ts";
 import { teachableError } from "../diagnostics/error.ts";
 
 // Phase modules — extracted _run() logic
-import { bootStorage, replaySyncOps } from "./aio-boot.ts";
+import { bootStorage, isDevBoot, replaySyncOps } from "./aio-boot.ts";
 import { replayJournal } from "./journal.ts";
 import { createTimeline } from "./timeline.ts";
 import { makeRedactor } from "../diagnostics/redact.ts";
@@ -140,6 +140,9 @@ import { assertDenoVersion } from "./deno-version.ts";
 import { removalMessage, removalOf } from "../state/removals.ts";
 import { basename, dirname, fromFileUrl, join, resolve } from "@std/path";
 import { lint, printLint } from "./lint.ts";
+import { composeAsyncHooks, composeHooks, resolvePlugins } from "./plugin.ts";
+import { setFallbackLogDir } from "../diagnostics/logger-api.ts";
+import { installProcessSignals } from "./shutdown.ts";
 
 // ── Re-exports: public API surface ────────────────────────────────────
 export { VERSION } from "./aio-cli.ts";
@@ -578,7 +581,64 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
   }
 
   // Cells-based API: aio.run(cellsConfig) — zero-config: aio.run()
-  const fc = (a ?? {}) as CellsConfig;
+  let fc = (a ?? {}) as CellsConfig;
+  // ── Plugins ──
+  //
+  // FIRST, before any other config key is read, so every reader below sees one
+  // merged config and no code path can be written that forgets plugins exist.
+  //
+  // Everything a plugin contributes goes through the SAME keys `aio.run()`
+  // already has — cells, routes, schedules, allowedOrigins, the observe-only
+  // hooks — so a plugin can never do anything the app could not have written
+  // itself, and reading the merged config still explains the whole app. The
+  // app's own values are applied OVER the plugins': adding a plugin can never
+  // take a behaviour away. A collision between two plugins throws at boot,
+  // naming both, because whichever loaded second would otherwise silently
+  // shadow the first.
+  const _plugins = await resolvePlugins(fc.plugins, {
+    appId: resolveAppId(fc.appId),
+    dev: isDevBoot(),
+  });
+  if (_plugins.names.length) {
+    const _pluginErr = (e: unknown) => log.error(`plugin hook error: ${e}`);
+    fc = {
+      ...fc,
+      routes: Object.keys(_plugins.routes).length
+        // App last: an app route with the same pattern wins, deliberately.
+        ? { ..._plugins.routes, ...(fc.routes ?? {}) }
+        : fc.routes,
+      schedules: _plugins.schedules.length
+        ? [..._plugins.schedules, ...(fc.schedules ?? [])]
+        : fc.schedules,
+      allowedOrigins: _plugins.allowedOrigins.length
+        ? [
+          ...new Set([
+            ...(fc.allowedOrigins ?? []),
+            ..._plugins.allowedOrigins,
+          ]),
+        ]
+        : fc.allowedOrigins,
+      onAction: composeHooks(_plugins.onAction, fc.onAction, _pluginErr),
+      onEffect: composeHooks(_plugins.onEffect, fc.onEffect, _pluginErr),
+      onConnect: composeHooks(_plugins.onConnect, fc.onConnect, _pluginErr),
+      onDisconnect: composeHooks(
+        _plugins.onDisconnect,
+        fc.onDisconnect,
+        _pluginErr,
+      ),
+      onStart: composeAsyncHooks(
+        _plugins.onStart,
+        fc.onStart,
+        "start",
+        _pluginErr,
+      ),
+      // Unwinding order: the app's own `onStop` runs FIRST, then plugins in
+      // reverse, so a plugin that opened something in `onStart` closes it
+      // after the app code that was using it has finished.
+      onStop: composeAsyncHooks(_plugins.onStop, fc.onStop, "stop", _pluginErr),
+      _pluginNames: _plugins.names,
+    } as CellsConfig;
+  }
   // ── `--aio-data-contract` is a QUERY, and its stdout is MACHINE-READ ──
   //
   // `aio ship` and `updates-rebuild` run `<binary> --aio-data-contract` and
@@ -645,9 +705,30 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
     const isolate = fc.isolate ?? cliIsolate;
     // Zero-config cells: every cell() self-registers on definition — boot
     // whatever the entry imported (same behavior as the standalone runtime).
-    const allCells = fc.cells && fc.cells.length > 0
+    //
+    // A plugin's cells are added to whichever list applies. A plugin cell
+    // whose id the app ALSO declares is dropped, not deduplicated by ordering:
+    // the app's definition is the one that survives, which is rule 1 (the app
+    // always wins). Zero-config apps need this — every `cell()` self-registers
+    // on import, so a plugin's cells are already in the registry list and
+    // adding them again would be the same cell twice. `composeCells` still
+    // refuses a genuine clash between two DIFFERENT cells sharing an id.
+    const _ownCells = fc.cells && fc.cells.length > 0
       ? fc.cells
       : [...getRegisteredCells().values()];
+    const allCells = _plugins.cells.length
+      ? [
+        ...(_plugins.cells as typeof _ownCells).filter((p) =>
+          !_ownCells.some((o) =>
+            (("__aio" in o ? o : o.cell) as { __aio: { id: string } }).__aio
+              .id ===
+              (("__aio" in p ? p : p.cell) as { __aio: { id: string } }).__aio
+                .id
+          )
+        ),
+        ..._ownCells,
+      ]
+      : _ownCells;
     if (allCells.length === 0) {
       throw teachableError(
         "no cells to run",
@@ -1037,6 +1118,18 @@ async function _run<S, A, E>(
   registerAppDirs(appId, _dirs);
   // Always create them: auth.db / app.key / state.db all open files inside.
   ensureAppDirs(_dirs);
+  // SIGINT/SIGTERM, as early as boot can install them. A signal arriving
+  // before the handler exists is not merely early — it is LOST, and the app
+  // then runs forever having been asked to stop. See `installProcessSignals`
+  // for the measurement. libraryMode never installs them: an embedding host
+  // owns the process, and `app.close()` is how it stops us.
+  if (!config.libraryMode) installProcessSignals();
+  // Where the diagnostics sinks write when there is NO logger. `logging: false`
+  // used to send the action log and the crash checkpoint to `.aio/log`
+  // relative to the current directory — one ERROR per dispatch, and the two
+  // artifacts that exist to explain a crash silently not written. Turning off
+  // the console logger must not turn off the black box.
+  setFallbackLogDir(_dirs.logs);
   if (!config.libraryMode) {
     // A packaged app unpacks itself BEFORE any of our code runs, so this can
     // only observe where that happened — and say so when it happened somewhere
@@ -2300,6 +2393,7 @@ async function _run<S, A, E>(
         from: "default",
       },
       heap: _heapLine,
+      plugins: config._pluginNames,
       dataDir: _dirs.home,
       logs: { dir: _dirs.logs, level: cli.verbose ? "debug" : "info" },
       journal: config.journal

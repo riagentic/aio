@@ -24,3 +24,23 @@ export const TEARDOWN_TIMEOUT_MS = 5000;
 /** The whole graceful stop, worst case: drain + teardown. Anything that waits
  *  for an aio app to exit before escalating to SIGKILL waits at least this. */
 export const SHUTDOWN_BUDGET_MS = DRAIN_TIMEOUT_MS + TEARDOWN_TIMEOUT_MS;
+
+/** Slack over `SHUTDOWN_BUDGET_MS` before an aio process ends ITSELF.
+ *
+ *  Every shutdown PHASE is bounded (`shutdown.ts`'s `phase`), but until
+ *  alpha72 the EXIT was not: each process-wide exit path reads
+ *  `shutdownAllRuntimes().then(() => Deno.exit(0))`, so one resource nobody
+ *  unref'd — an open TLS connection, a worker that never posted its close, a
+ *  `setInterval` a subsystem forgot — keeps the event loop alive after Phase 7
+ *  and the `Deno.exit` never runs. The budget was an intention, not a
+ *  guarantee, and the caller waiting on it escalated to SIGKILL: an app that
+ *  "did not stop when asked" is an app that did not finish writing.
+ *
+ *  `stopProcess()` arms a watchdog for this long and ends the process anyway,
+ *  saying which apps were still stopping. 2 s of slack over the budget so a
+ *  legitimately slow-but-bounded teardown is never cut short. */
+export const EXIT_WATCHDOG_MS = SHUTDOWN_BUDGET_MS + 2000;
+
+/** How long anything that waits for an aio app to exit must wait before it may
+ *  SIGKILL: the app's own self-kill, plus a second for the exit to land. */
+export const EXIT_WAIT_MS = EXIT_WATCHDOG_MS + 1000;

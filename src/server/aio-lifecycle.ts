@@ -15,7 +15,7 @@ import { type BootExtras, bootLines, buildFacts } from "./boot-facts.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { discoverySupported, startDiscoveryResponder } from "./discovery.ts";
 import { instances, isProcessAlive } from "./single-instance-lock.ts";
-import { shutdownAllRuntimes } from "./shutdown.ts";
+import { shutdownAllRuntimes, stopProcess } from "./shutdown.ts";
 import { generatePin } from "./pairing.ts";
 import { appKeyPath } from "./app-key.ts";
 import { type Log, log as globalLog } from "../diagnostics/logger-api.ts";
@@ -259,9 +259,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
         log.warn(
           `parent process ${parentPid} is gone (AIO_PARENT_PID) — shutting down`,
         );
-        shutdownAllRuntimes().then(() => Deno.exit(0)).catch(() =>
-          Deno.exit(1)
-        );
+        stopProcess(0);
       }, 2000);
       // A watch must never be the thing that keeps an otherwise-finished
       // process alive.
@@ -641,7 +639,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
               log.info(`electron closed (${how}) — shutting down`);
               // This exits the PROCESS, so every app in it stops here —
               // including one still writing its final snapshot.
-              shutdownAllRuntimes().then(() => Deno.exit(0));
+              stopProcess(0);
             }
           })
           .catch((e) => log.error(`electron status: ${e}`));

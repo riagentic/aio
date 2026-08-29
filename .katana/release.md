@@ -15,6 +15,16 @@ Gates (must pass):
   regenerated
 - `deno task check:docs` passes
 - `deno task check:boundaries` passes — src/ module dependency matrix respected
+- `deno task check:audit` passes — the randomized adversarial rounds. Every
+  other gate here asks whether the code matches a decision someone wrote down;
+  these ask what happens on an input nobody chose, which is a class none of the
+  others can see. Nine defects in their first run, including a duplicated
+  `Accept-Encoding` token that handed a client a body it had said it could not
+  read and an `allowedOrigins` entry that made every response a 500. A finding
+  is replayable by its seed
+- `deno task check:bundle-size` passes — the size a page actually downloads,
+  under a ceiling that only goes down, AND every doc that quotes a size still
+  quotes the measured one
 - `deno publish --dry-run` succeeds
 - `deno task lab` passes — the onboarding lab: the REAL one-liners
   (`install.sh`, `run.sh`) on a fresh ubuntu container with no deno, no unzip

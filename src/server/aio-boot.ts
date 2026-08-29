@@ -40,6 +40,7 @@ import { migrateSchema, PERSIST_SCHEMA_VERSION } from "./persist-schema.ts";
 import type { Log } from "../diagnostics/logger-api.ts";
 import type { CheckpointData, DiagnosticsHooks } from "../diagnostics/mod.ts";
 import type { ServerSyncHandler } from "../sync/server-handler.ts";
+import { cloneState } from "../state/immutable.ts";
 import {
   getLowWater,
   loadOpsSince,
@@ -867,7 +868,27 @@ export async function bootStorage<S>(
     log,
   } = cfg;
 
-  let state = initialState;
+  // A MUTABLE working copy of the declaration.
+  //
+  // `composeCells` freezes `initialState` (so the state at t=0 behaves like
+  // every state after it — see `cell-compose.ts`), and boot is the one place
+  // that legitimately BUILDS state rather than reading it: the KV restore
+  // merges slices into it, `onMigrate` rewrites shapes, and `onRestore` is a
+  // documented MUTATION hook —
+  //
+  //     onRestore: (s) => { s.scores.entries = s.game.leaderboard;
+  //                         delete s.game; return s }
+  //
+  // — which the rename recipe in the docs tells people to write. Handed the
+  // frozen declaration, that assignment throws into the hook's own error guard
+  // and the migration is reported as a log line while the data quietly does not
+  // move. Caught by `tests/orphan-cell-preservation.test.ts` the first time the
+  // freeze landed.
+  //
+  // Deep, not shallow: a cell whose slice was never persisted keeps the frozen
+  // NESTED objects under a shallow copy, so `s.scores.entries = …` is exactly
+  // the write that would still fail.
+  let state = cloneState(initialState) as S;
 
   // Two homes are a trap, and a silent one. `dbPath` moves ONLY the database:
   // `auth.db`, `tls/`, `meta.json`, the journal and any previously-written
@@ -1171,8 +1192,14 @@ export async function bootStorage<S>(
       if (migrated) {
         hadPersistedState = true;
         persistedSnapshot = migrated; // raw stored shape — for drift detection
+        // The MUTABLE copy as the merge base, not the frozen declaration.
+        // `deepMerge` hands a key that the store does not carry straight back
+        // by reference, so merging from `initialState` would seed the runtime
+        // state with frozen subtrees — and a new cell's slice (exactly the
+        // shape a rename migration writes into) is precisely such a key.
+        // `state` is that copy and nothing has written to it yet.
         state = deepMerge(
-          initialState as Record<string, unknown>,
+          state as Record<string, unknown>,
           migrated,
         ) as S;
         // Top-level keys the merge dropped as "removed from schema" are CELLS,
@@ -1195,6 +1222,19 @@ export async function bootStorage<S>(
         log.debug(`persist: no saved state, using initialState`);
       }
     } catch (e) {
+      // RELEASE WHAT THIS BOOT OPENED, whatever the reason for leaving.
+      //
+      // `openAppDb` spawns the SQLite worker THREAD. A boot that got that far
+      // and then refused — a corrupt file, a schema mismatch, a failed
+      // migration — left the worker running, and a worker keeps the event loop
+      // alive: measured, a `try { await aio.run(…) } catch {}` around a
+      // corrupted `state.db` printed its refusal and then never exited. The
+      // caller sees a clean error and a process that hangs forever, which is
+      // the worst of both. A refusal is an exit path, so it releases like one.
+      if (asyncDb) {
+        await asyncDb.close().catch(() => {});
+        asyncDb = null;
+      }
       if (e instanceof AioError) throw e; // schema mismatch — already precise
       // A compiled binary that never embedded the SQLite worker fails here as
       // `Module not found: …/db-worker.ts`. The permissions advice below names

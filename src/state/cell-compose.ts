@@ -12,6 +12,7 @@ import { resolveCells } from "./cell-compose-resolve.ts";
 import { buildRootReducer } from "./cell-compose-reduce.ts";
 import { cloneState } from "./immutable.ts";
 import { buildRootExecutor } from "./cell-compose-execute.ts";
+import { deepFreeze } from "./immutable.ts";
 import {
   buildRegistry,
   destroyAll as _destroyAll,
@@ -80,6 +81,22 @@ export function composeCells(
       ? { ...base, __aio_status: status }
       : base;
   }
+  // FROZEN, exactly like every state after it.
+  //
+  // Committed state is frozen: immer's `autoFreeze` is never disabled, so a
+  // write to it throws in dev AND prod. The state BEFORE the first dispatch
+  // was the one exception — nothing produced it, so nothing froze it — and the
+  // hole was silent in the worst way: `app.state.count = 99` at boot, in an
+  // `onInit` hook or a component that ran before any action, SUCCEEDED and
+  // changed what `getState()` reported. The same line one dispatch later
+  // throws. A rule with a window in it is not a rule, and the window was
+  // exactly the moment an app is being wired up.
+  //
+  // Frozen in both modes on purpose: the freeze that catches this in
+  // production is immer's, and immer is never off, so matching it here keeps
+  // t=0 and t=1 the same shape. `freezeState` gates the EXTRA belt-and-braces
+  // pass in `dispatch.ts`, not this invariant.
+  deepFreeze(initialState);
 
   // ── Shared mutable state (passed by reference into subsystems) ──
   const disabledCells = new Set<string>();

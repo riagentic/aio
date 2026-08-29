@@ -4,6 +4,7 @@ import type { DiagnosticEvent } from "./diagnostic-bus.ts";
 import { randomUuid } from "../rand.ts";
 import { log } from "./logger-api.ts";
 import { ansi } from "./color.ts";
+import { frozenWriteMessage, isFrozenWriteError } from "../state/immutable.ts";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -379,6 +380,20 @@ export function extractUserFrames(stack: string | undefined): string[] {
  *  hatch, which only it knows), and everything about what to DO is here.
  *  @internal */
 export function generateTip(err: AioError): string | undefined {
+  // FIRST, before the per-code tips: a frozen-state write is recognisable by
+  // its message whatever code it arrives under, and it is the single most
+  // common thing an author does wrong. The engine's own sentence —
+  // `Cannot assign to read only property 'n' of object '#<Object>'` — names
+  // neither the cell, nor the rule, nor the fix; `state/immutable.ts` has been
+  // the authority for the sentence that does since alpha70, and it was wired
+  // into the reducer, the test harnesses and a browser-only listener. An
+  // effect, a lifecycle hook, a route handler or an `onStart` that writes
+  // `app.state.x = 1` got the raw text — and those paths are all CAUGHT by the
+  // framework, so no global error listener could ever have reached them.
+  // Found by `scripts/audit-round.ts 24`.
+  if (isFrozenWriteError(err.message)) {
+    return "Tip: " + frozenWriteMessage(err.message, err.context.cellName);
+  }
   switch (err.code) {
     case "REDUCE_ERROR": {
       const msg = err.message;

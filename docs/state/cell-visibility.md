@@ -30,13 +30,20 @@ sensitive or large data.
 
 Both `persist` and `visible` accept the same filter shapes:
 
-| Config                             | Effect                                                                                 |
-| ---------------------------------- | -------------------------------------------------------------------------------------- |
-| `"all"`                            | Include everything (default)                                                           |
-| `"none"`                           | Include nothing                                                                        |
-| `{ include: ["a", "b"] }`          | Only these top-level fields                                                            |
-| `{ exclude: ["cache"] }`           | Everything except these                                                                |
-| `{ exclude: ["accounts.secKey"] }` | **Deep**: remove the field everywhere under `accounts` (arrays traversed element-wise) |
+| Config                             | Effect                                                                                             |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `"all"`                            | Include everything (default)                                                                       |
+| `"none"`                           | Include nothing                                                                                    |
+| `{ include: ["a", "b"] }`          | Only these top-level fields                                                                        |
+| `{ exclude: ["cache"] }`           | Everything except these                                                                            |
+| `{ exclude: ["accounts.secKey"] }` | **Deep**: remove the field everywhere under `accounts` (arrays traversed element-wise)             |
+| `{ include: ["accounts.name"] }`   | **Deep**, the same spelling the other way round: keep only that field, everywhere under `accounts` |
+
+A dot path through an ARRAY keeps the array's shape: the client sees a list of
+the same length, one entry per row, holding only the included fields (`{}` for a
+row that has none of them). An empty list stays an empty list. The length is
+what index-addressed deltas resolve against, so a projection that dropped it
+would leave the client unable to apply the next patch.
 
 ```ts
 const trading = cell("trading", {

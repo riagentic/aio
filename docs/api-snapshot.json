@@ -93,7 +93,7 @@
         },
         "CellsConfig": {
           "kind": "typeAlias",
-          "sig": "a8dfcc7f5cb111c9"
+          "sig": "68b4b361c220e734"
         },
         "CellStatus": {
           "kind": "typeAlias",
@@ -142,6 +142,10 @@
         "DBOpts": {
           "kind": "typeAlias",
           "sig": "ea81cfaacd4e393a"
+        },
+        "definePlugin": {
+          "kind": "function",
+          "sig": "98b653b7828157df"
         },
         "degraded": {
           "kind": "function",
@@ -262,6 +266,18 @@
         "pk": {
           "kind": "function",
           "sig": "31d60dc050fc7c42"
+        },
+        "Plugin": {
+          "kind": "interface",
+          "sig": "e7ac707bd7251da3"
+        },
+        "PluginContribution": {
+          "kind": "interface",
+          "sig": "4607fab583d6d5ab"
+        },
+        "PluginSetupContext": {
+          "kind": "interface",
+          "sig": "8e0cd1c928185075"
         },
         "QueryOpts": {
           "kind": "typeAlias",
@@ -393,7 +409,7 @@
         },
         "UiConfig": {
           "kind": "typeAlias",
-          "sig": "b361ec89141c6ad4"
+          "sig": "e619a9f7801b6163"
         },
         "until": {
           "kind": "function",
@@ -417,7 +433,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "a0ceeb77d8b5fa16"
+          "sig": "5e459c4a31c29721"
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -1698,7 +1714,7 @@
         },
         "MergeStrategy": {
           "kind": "typeAlias",
-          "sig": "2ee8a419d0cf354e"
+          "sig": "adfcea5155c10f47"
         },
         "normalizeSyncConfig": {
           "kind": "function",
@@ -1880,6 +1896,14 @@
     },
     "./ui": {
       "symbols": {
+        "Alert": {
+          "kind": "function",
+          "sig": "c4cdef9803333f9d"
+        },
+        "AlertProps": {
+          "kind": "interface",
+          "sig": "fabd202085a1bda1"
+        },
         "Avatar": {
           "kind": "function",
           "sig": "f59f02304d854b5f"
@@ -1887,6 +1911,14 @@
         "AvatarProps": {
           "kind": "interface",
           "sig": "25280ab4ca02754d"
+        },
+        "Breadcrumb": {
+          "kind": "function",
+          "sig": "ab5087ebc74500c3"
+        },
+        "BreadcrumbProps": {
+          "kind": "interface",
+          "sig": "397be6b5edce6088"
         },
         "Button": {
           "kind": "function",
@@ -1932,6 +1964,18 @@
           "kind": "interface",
           "sig": "9c10e9161954d813"
         },
+        "Crumb": {
+          "kind": "interface",
+          "sig": "4080f49c3ce4dbd3"
+        },
+        "EmptyState": {
+          "kind": "function",
+          "sig": "3cd792f511752fdb"
+        },
+        "EmptyStateProps": {
+          "kind": "interface",
+          "sig": "e97416070662a72b"
+        },
         "Field": {
           "kind": "function",
           "sig": "dee80ef09a232bf2"
@@ -1960,6 +2004,18 @@
           "kind": "interface",
           "sig": "f71d4f22bcf79326"
         },
+        "Menu": {
+          "kind": "function",
+          "sig": "a3f4f853ca848982"
+        },
+        "MenuItem": {
+          "kind": "interface",
+          "sig": "6904b1432b863321"
+        },
+        "MenuProps": {
+          "kind": "interface",
+          "sig": "2358663ddb8940c6"
+        },
         "Modal": {
           "kind": "function",
           "sig": "b22adac97df99bc5"
@@ -1975,6 +2031,26 @@
         "PaginationProps": {
           "kind": "interface",
           "sig": "dfdbae098279860d"
+        },
+        "Progress": {
+          "kind": "function",
+          "sig": "24283fe27c711008"
+        },
+        "ProgressProps": {
+          "kind": "interface",
+          "sig": "76248e64b1de9106"
+        },
+        "RadioGroup": {
+          "kind": "function",
+          "sig": "4fa6b11566766669"
+        },
+        "RadioGroupProps": {
+          "kind": "interface",
+          "sig": "1e9d63f02ee09207"
+        },
+        "RadioOption": {
+          "kind": "interface",
+          "sig": "9b6d63d9dd02e2fa"
         },
         "Row": {
           "kind": "function",
@@ -1992,6 +2068,14 @@
           "kind": "interface",
           "sig": "4f3be0e50250c078"
         },
+        "Skeleton": {
+          "kind": "function",
+          "sig": "95a2fa8f7c92236d"
+        },
+        "SkeletonProps": {
+          "kind": "interface",
+          "sig": "2fa94532d53fe0c0"
+        },
         "Spinner": {
           "kind": "function",
           "sig": "d312cf60267ca5d5"
@@ -2004,6 +2088,18 @@
           "kind": "interface",
           "sig": "e5cf331c3815d0e4"
         },
+        "Switch": {
+          "kind": "function",
+          "sig": "6187a792320e987a"
+        },
+        "SwitchProps": {
+          "kind": "interface",
+          "sig": "4c01a7276add6817"
+        },
+        "TabItem": {
+          "kind": "interface",
+          "sig": "d7568ae2314484e2"
+        },
         "Table": {
           "kind": "function",
           "sig": "e08f3b39ac8fbaed"
@@ -2011,6 +2107,14 @@
         "TableProps": {
           "kind": "interface",
           "sig": "436421718889da1e"
+        },
+        "Tabs": {
+          "kind": "function",
+          "sig": "9af436240a0b8790"
+        },
+        "TabsProps": {
+          "kind": "interface",
+          "sig": "955f5964ccac9b57"
         },
         "Textarea": {
           "kind": "function",
@@ -2031,6 +2135,14 @@
         "ToastVariant": {
           "kind": "typeAlias",
           "sig": "43818e0b16d772be"
+        },
+        "Tooltip": {
+          "kind": "function",
+          "sig": "8df3dd1da718dc0c"
+        },
+        "TooltipProps": {
+          "kind": "interface",
+          "sig": "73b451b93a8a49d4"
         },
         "UI_CSS": {
           "kind": "variable",

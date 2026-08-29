@@ -290,6 +290,7 @@ export function buildLegacyConfig(
     _diagnostics: fc.diagnostics,
     _onCheckpointRestore: fc.onCheckpointRestore,
     _cellNames: composed.cellNames,
+    _pluginNames: fc._pluginNames,
     // The defs of cells flagged `worker: true` — _run spawns one Deno worker
     // each and routes their actions off the main dispatch queue.
     _workerCells: composed.cells.filter((f) => f.__aio.worker === true),
