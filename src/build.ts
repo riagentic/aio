@@ -13,9 +13,11 @@
  * ```
  */
 import { readDenoJson } from "./server/deno-json.ts";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { type BuildConfig, loadBuildConfig } from "./build/build-config.ts";
 import { appDirs, installRoot } from "./server/app-dirs.ts";
+import { BUILD_VERSION_ENV } from "./server/app-version.ts";
+import { targetForFlags, TARGETS } from "./build-all.ts";
 import { APP_ICON, APP_STYLE, BUNDLE_JS } from "./server/app-files.ts";
 import { slugify } from "./server/single-instance-lock.ts";
 import { ensureEmbeddedBundle, runBundle } from "./build/build-bundle.ts";
@@ -271,6 +273,82 @@ if (import.meta.main) {
     const cfg = await loadBuildConfig();
     console.log(appDirs(slugify(cfg.binaryName)).app);
     Deno.exit(0);
+  }
+  // ── ONE BUILD PATH ──────────────────────────────────────────────────
+  //
+  // A direct `deno run build.ts --compile --electron` used to be a SECOND
+  // entry point: it writes `<name>-<arch>.AppImage` into the project root,
+  // while `deno task build` runs the fleet, which places
+  // `dist/<name>-<version>-<arch>.AppImage`. Two paths, two names for one
+  // artifact, and only one of them covered by `test:build`'s 61 cases. The
+  // pre-alpha52 scaffold emitted a whole `compile:*` matrix that took the
+  // untested one.
+  //
+  // So a direct invocation resolves its target from the flags it was given
+  // (`targetForFlags`, derived from the fleet's own TARGETS table) and runs
+  // the fleet for exactly that target. Same placement, same version stamp,
+  // same tests, whichever spelling the caller typed.
+  //
+  // THE FLEET'S OWN CHILDREN MUST NOT RECURSE, and they are already marked:
+  // build-all spawns every per-target build with `AIO_BUILD_VERSION` set (it
+  // is how one fleet run stamps one version into every artifact). A process
+  // that has it is a child — or a parent build that deliberately handed a
+  // version down, which is the same contract. Nothing new to remember.
+  const _fleetChild = Deno.env.get(BUILD_VERSION_ENV) !== undefined;
+  if (!_fleetChild) {
+    const target = targetForFlags(Deno.args);
+    // A build flag combination that names no target is REFUSED, not built.
+    //
+    // Silently falling back to the old single-target path would leave exactly
+    // the second code path this delegation exists to close — and its artifact
+    // is the one nothing tests: unversioned, in the project root, invisible to
+    // `dist/manifest.json` and therefore to `am publish` and every updater.
+    // "It built something" is the worst answer here, because the something is
+    // unshippable and looks fine.
+    // The same vocabulary the matcher uses, derived from TARGETS — a hand-
+    // written copy here would decide "is this a build?" differently from
+    // "which build is it?", which is one question with two answers.
+    const buildVocabulary = new Set(
+      Object.values(TARGETS).flatMap((t) => t.flags),
+    );
+    const buildFlagsGiven = Deno.args.filter((a) => buildVocabulary.has(a));
+    if (!target && buildFlagsGiven.length > 0) {
+      console.error(
+        `[build] ✗ ${buildFlagsGiven.join(" ")} is not a build target.\n` +
+          `  Every build goes through the fleet, so one artifact is one name, ` +
+          `one version and one manifest entry.\n` +
+          `  Targets: ${Object.keys(TARGETS).join(", ")}\n` +
+          `  Run:     deno task build --targets=<name>   (or \`am build <name>\`)\n` +
+          `  If this came from a pre-alpha52 \`compile:*\` task, \`am fix ` +
+          `--migrate-tasks\` rewrites them into the targets they encoded.`,
+      );
+      Deno.exit(1);
+    }
+    if (target) {
+      const buildAll = new URL("./build-all.ts", import.meta.url);
+      const passthrough = Deno.args.filter((a) =>
+        a.startsWith("--entry=") || a.startsWith("--name=") ||
+        a.startsWith("--ui=") || a === "--release" || a === "--force" ||
+        a === "--allow-server-only"
+      );
+      const { code } = await new Deno.Command(Deno.execPath(), {
+        args: [
+          "run",
+          "-A",
+          buildAll.protocol === "file:" ? fromFileUrl(buildAll) : buildAll.href,
+          `--targets=${target}`,
+          `--build-spec=${
+            import.meta.url.startsWith("file:")
+              ? fromFileUrl(new URL(import.meta.url))
+              : import.meta.url
+          }`,
+          ...passthrough,
+        ],
+        stdout: "inherit",
+        stderr: "inherit",
+      }).output();
+      Deno.exit(code);
+    }
   }
   await build();
 }

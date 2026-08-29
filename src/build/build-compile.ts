@@ -2,6 +2,7 @@
  * @module
  * Build compile — withDevExcluded symlink manager + deno compile step + systemd service file.
  */
+import { BUILD_SCRATCH_DIR } from "../server/app-files.ts";
 import {
   DENO_JSON_NAMES,
   readDenoJson,
@@ -627,7 +628,7 @@ export async function runDenoCompile(cfg: BuildConfig): Promise<boolean> {
   // build deleted it (R-4).
   const outDir = cfg.outDir ?? root;
   const compileTarget = doElectron
-    ? join(dist, "AppDir", binaryName)
+    ? join(root, BUILD_SCRATCH_DIR, "AppDir", binaryName)
     : join(outDir, outName);
   if (!doElectron) await Deno.mkdir(outDir, { recursive: true });
   if (cfg.targetTriple) {
@@ -635,7 +636,11 @@ export async function runDenoCompile(cfg: BuildConfig): Promise<boolean> {
       `[compile] cross-compiling for ${cfg.platform} (${cfg.targetTriple})`,
     );
   }
-  if (doElectron) await Deno.mkdir(join(dist, "AppDir"), { recursive: true });
+  if (doElectron) {
+    await Deno.mkdir(join(root, BUILD_SCRATCH_DIR, "AppDir"), {
+      recursive: true,
+    });
+  }
 
   let hasDist = false;
   try {

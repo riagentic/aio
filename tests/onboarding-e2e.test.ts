@@ -187,7 +187,7 @@ Deno.test({
 
 // The scaffolded `compile` task is the fleet pipeline narrowed to the default
 // target — its binary lands in dist/. The direct build.ts spelling produces
-// the same artifact in the project root; both must boot.
+// the same artifact in `dist/`, versioned; both must boot.
 for (const via of ["task", "buildFlags"] as const) {
   Deno.test({
     name: `compile: \`${
@@ -202,15 +202,11 @@ for (const via of ["task", "buildFlags"] as const) {
           : await buildFlags(dir, "--compile");
         assertEquals(r.code, 0, `${via} compile failed:\n${r.err}`);
 
-        // The fleet places a VERSIONED name in dist/ (`app-0.1.<build>…`);
-        // the direct builder writes the bare name into the project root.
-        const binPath = via === "task" ? placedBinary(dir) : join(
-          dir,
-          [...Deno.readDirSync(dir)].find((e) =>
-            e.isFile && !e.name.includes(".")
-          )?.name ?? "",
-        );
-        assert(binPath !== dir + "/", "no compiled binary produced");
+        // BOTH spellings place the same versioned name in `dist/` — which is
+        // the point of this pair. `build.ts --compile` used to write the bare
+        // name into the project root instead: a second build path, and the
+        // untested one. There is one now, so there is one place to look.
+        const binPath = placedBinary(dir);
         await Deno.chmod(binPath, 0o755);
 
         // Run the binary from a DIFFERENT directory — a compiled binary must be

@@ -47,6 +47,22 @@ export const BUNDLE_JS = "app.js";
  *  build, which is why it is never where artifacts land (`--out=` is). */
 export const DIST_DIR = "dist";
 
+/** Where a build assembles things that are NOT its output: the AppImage
+ *  `AppDir`, the generated Gradle project, and anything else a packager needs
+ *  on disk to produce one file.
+ *
+ *  These used to live INSIDE `dist/` — `dist/AppDir/` held a whole copied
+ *  Electron runtime (hundreds of MB) and was never removed, `dist/android/`
+ *  held the Gradle project. So the directory an app author looks in for "what
+ *  did this build produce" was mostly scaffolding, and no rule said which
+ *  entries were output.
+ *
+ *  `dist/` is now exactly the answer to that question: artifacts, the browser
+ *  assets they are built from, and `manifest.json`. Nothing nested. Scratch
+ *  that is worth keeping between runs (Gradle's incremental state) is kept
+ *  here rather than deleted, so flattening `dist/` costs no build time. */
+export const BUILD_SCRATCH_DIR = ".aio/build";
+
 /** The scaffold's entry module. THE entry decider is `resolveEntryPath()`;
  *  this is only its fallback when a project declares nothing. */
 export const DEFAULT_ENTRY = "src/app.ts";
