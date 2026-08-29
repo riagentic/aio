@@ -145,7 +145,24 @@ yourself — your route is your responsibility. Set the equivalents explicitly:
 
 ```ts
 wsLimits: { maxMessageBytes: 1_000_000, messagesPerSec: 100, bytesPerSec: 5_000_000 }
+maxConnections: 100                     // concurrent WS clients, server-wide
 ```
+
+Those are the **defaults**, and they are chosen for a desktop app talking to
+itself. An exposed server usually wants larger ones — a photo is base64'd and
+JSON-wrapped before it reaches the socket (~1.35x), so a 0.75 MB image already
+trips the 1 MB frame default.
+
+**A refused frame is not silent.** Over-size, over-rate and over-byte-budget
+frames are dropped — and the sender is told, as a `diag` frame naming the limit
+it hit and the key that raises it. The `maxConnections` ceiling logs once per
+process when it is first reached, with the same. A limit enforced by silence is
+indistinguishable from a bug in your app.
+
+`maxConnections` counts **every** socket in the process, with no per-peer
+accounting: one machine holding the ceiling in idle sockets locks everyone else
+out. If your app is reachable by strangers, put a per-peer cap in front of it (a
+reverse proxy's `limit_conn`, or your own accounting in a route).
 
 For your own socket, cap the frame size on the RECEIVE side before allocating
 anything from a length header, and drop a client that exceeds a rate you choose.
