@@ -125,6 +125,7 @@
     "lint": "deno lint src/ amui/src/",
     "lint:aio": "deno run -A aiol/mod.ts",
     "check:docs": "deno run --allow-read scripts/check-docs.ts",
+    "check:env": "deno run --allow-read scripts/check-env.ts",
     "check:sanitizers": "deno run --allow-read scripts/check-sanitizers.ts",
     "check:doc-coverage": "deno run --allow-read --allow-run scripts/check-doc-coverage.ts",
     "check:api": "deno run --allow-read --allow-write --allow-run scripts/api-snapshot.ts --check",

@@ -44,6 +44,9 @@ jobs:
         run: deno task check
       - name: Docs check (every error code documented)
         run: deno task check:docs
+
+      - name: Check env vars are documented
+        run: deno task check:env
       - name: Docs index (content.md matches the docs tree)
         run: deno task update:docs -- --check
       - name: Docs coverage (every public export documented — roadmap B2)

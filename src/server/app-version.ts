@@ -26,6 +26,7 @@
  */
 
 import { join, relative, resolve } from "@std/path";
+import { DENO_JSON_NAMES } from "./deno-json.ts";
 
 /** The `major.minor` an app has before it writes one. */
 export const DEFAULT_BASE = "0.1";
@@ -470,8 +471,18 @@ export function resolveRuntimeVersion(opts: {
     if (d?.kind === "pinned") {
       return d.version;
     }
-    return "unknown (compiled binary carries no build stamp — rebuild it with " +
-      "aio's builder, `deno task build`)";
+    // NAME THE MISSING INGREDIENT, not just the tool that supplies it.
+    //
+    // "rebuild it with aio's builder" is one remedy, and it is not available
+    // to every app: a repo with two apps compiles its second one with a plain
+    // `deno compile` (aio's fleet reads one `entry`). That binary knew neither
+    // its version, its title nor its target, and the two flags that fix it are
+    // undiscoverable from the failure — a field report found them by reading
+    // aio's own build source.
+    return "unknown (compiled binary carries no build stamp — rebuild it " +
+      "with aio's builder, `deno task build`; a plain `deno compile` needs " +
+      `\`--include ${DENO_JSON_NAMES[0]} --include ${BUILD_STAMP_FILE}\`, ` +
+      "and `AIO_BUILD_VERSION` hands it a version from a parent build)";
   }
   if (opts.tree) {
     // A refused declaration (the BUILD refuses it outright) must not stop a
