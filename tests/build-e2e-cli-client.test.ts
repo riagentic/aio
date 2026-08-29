@@ -5,7 +5,12 @@
 // foreign cwds, over a real socket.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
-import { buildFlags, freePort, makeApp } from "./e2e-app-harness.ts";
+import {
+  buildFlags,
+  freePort,
+  makeApp,
+  placedBinary,
+} from "./e2e-app-harness.ts";
 
 const GATE = Deno.env.get("AIO_BUILD_E2E") === "1";
 
@@ -23,25 +28,26 @@ Deno.test({
     const clientDir = await makeApp("counter", "build-e2e-cli-cli-");
     let server: Deno.ChildProcess | undefined;
     try {
+      // The fleet's `server` target — the headless service binary. It used to
+      // be built without `--remote`, a flag set that names no target and
+      // therefore took the old single-target path.
       const s = await buildFlags(
         serverDir,
         "--compile",
         "--service",
         "--headless",
+        "--remote",
       );
       assertEquals(s.code, 0, `server build failed:\n${s.out}\n${s.err}`);
       const c = await buildFlags(clientDir, "--compile", "--cli", "--remote");
       assertEquals(c.code, 0, `cli-client build failed:\n${c.out}\n${c.err}`);
 
-      const bin = (dir: string) =>
-        join(
-          dir,
-          [...Deno.readDirSync(dir)].find((e) =>
-            e.isFile && !e.name.includes(".")
-          )!.name,
-        );
-      const serverBin = bin(serverDir);
-      const clientBin = bin(clientDir);
+      // `placedBinary` is the ONE rule for "where the build put the artifact":
+      // `dist/`, with the version in the name. This file used to carry its own
+      // copy ("the extension-less file in the project root"), which described
+      // the single-target builder — a second build path that no longer exists.
+      const serverBin = placedBinary(serverDir);
+      const clientBin = placedBinary(clientDir);
       await Deno.chmod(serverBin, 0o755);
       await Deno.chmod(clientBin, 0o755);
 

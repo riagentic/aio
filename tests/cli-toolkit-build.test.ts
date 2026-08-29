@@ -7,7 +7,13 @@
 // the shell sees: exit codes, stdout vs stderr, and `--json` being parseable.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join, resolve } from "@std/path";
-import { childEnv, freePort, kill, waitForHttp } from "./e2e-app-harness.ts";
+import {
+  childEnv,
+  freePort,
+  kill,
+  placedBinary,
+  waitForHttp,
+} from "./e2e-app-harness.ts";
 import { stopChild } from "./stop-child.ts";
 
 const ROOT = resolve(import.meta.dirname!, "..");
@@ -221,15 +227,9 @@ Deno.test({
       0,
       dec.decode(build.stderr) + dec.decode(build.stdout),
     );
-    const bins = [...Deno.readDirSync(dir)].filter((e) =>
-      e.isFile && !e.name.includes(".")
-    ).map((e) => e.name);
-    assertEquals(
-      bins.length,
-      1,
-      `one binary expected, got: ${bins.join(", ")}`,
-    );
-    const bin = join(dir, bins[0]!);
+    // The fleet places the artifact in `dist/`, with the version in the name
+    // — one rule, whichever spelling started the build.
+    const bin = placedBinary(dir);
     await Deno.chmod(bin, 0o755);
 
     const foreign = await Deno.makeTempDir({ prefix: "foreign-cwd-" });

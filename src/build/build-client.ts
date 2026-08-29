@@ -3,6 +3,7 @@
  * Build client — aio-client standalone Electron connect-page AppImage (Linux only).
  * No Deno binary, no server — pure Electron app for connecting to a remote aio server.
  */
+import { BUILD_SCRATCH_DIR } from "../server/app-files.ts";
 import { join } from "@std/path";
 import {
   appimageEnv,
@@ -23,7 +24,7 @@ import {
 
 /** Build the aio-client AppImage. Exits process on completion or error. */
 export async function buildClient(cfg: BuildConfig): Promise<void> {
-  const { os, arch, root, dist } = cfg;
+  const { os, arch, root } = cfg;
 
   // The standalone connect-page client is packaged as an AppImage and nothing
   // else, so it is Linux-only — a TOOL constraint (`appimagetool`), the same
@@ -43,7 +44,7 @@ export async function buildClient(cfg: BuildConfig): Promise<void> {
     Deno.exit(1);
   }
 
-  const appDir = join(dist, "AppDir");
+  const appDir = join(root, BUILD_SCRATCH_DIR, "AppDir");
   try {
     await Deno.remove(appDir, { recursive: true });
   } catch { /* no previous — skip */ }

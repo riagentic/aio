@@ -22,7 +22,7 @@ import {
   assertMatch,
   assertStringIncludes,
 } from "@std/assert";
-import { join } from "@std/path";
+import { basename, join } from "@std/path";
 import {
   assertServesApp,
   buildFlags,
@@ -47,15 +47,16 @@ function rootFiles(dir: string): string[] {
   return [...Deno.readDirSync(dir)].filter((e) => e.isFile).map((e) => e.name);
 }
 
-/** The compiled binary: an extension-less executable in the project root. */
+/** The compiled binary — the one the fleet PLACED in `dist/`.
+ *
+ *  It used to be "the extension-less file in the project root", which was true
+ *  of the single-target builder and of nothing else. Every route through the
+ *  build now ends in the fleet, so the artifact is in `dist/` and its name
+ *  carries the version — `placedBinary` is the shared helper that knows both
+ *  facts, and `isPlacedBinary` encodes the version rule directly (a name with
+ *  no version token is not a placed artifact). */
 function findBinary(dir: string): string {
-  const bin = rootFiles(dir).filter((n) => !n.includes("."));
-  assertEquals(
-    bin.length,
-    1,
-    `expected exactly one compiled binary, got: ${bin.join(", ") || "none"}`,
-  );
-  return join(dir, bin[0]!);
+  return placedBinary(dir);
 }
 
 /** Boot an artifact from a THROWAWAY cwd and prove it serves. Returns the body
@@ -64,7 +65,7 @@ async function bootFromForeignCwd(
   bin: string,
   args: string[],
   opts: { tls?: boolean; timeoutMs?: number } = {},
-): Promise<{ body: string; health: string }> {
+): Promise<{ body: string; health: string; appJs: string }> {
   const timeoutMs = opts.timeoutMs ?? 45_000;
   await Deno.chmod(bin, 0o755);
   const runCwd = await Deno.makeTempDir({ prefix: "foreign-cwd-" });
@@ -115,12 +116,20 @@ async function bootFromForeignCwd(
     });
     const body = await waitForHttp(`${base}/`, 10_000, client, headers)
       .catch(() => "");
+    // The bundle AS SHIPPED. `dist/app.js` used to be read off disk after a
+    // build — but `dist/` is one release, assembled clean (build-all.ts wipes
+    // and refills it with the placed artifacts), so the bundle a compiled
+    // binary serves lives INSIDE the binary. Reading it from the running
+    // artifact is also the stronger assertion: it proves what the binary
+    // hands a browser, not what a build step happened to leave on disk.
+    const appJs = await waitForHttp(`${base}/app.js`, 10_000, client, headers)
+      .catch(() => "");
     // A binary that fell back to dev mode is the portability bug resurfacing.
     assert(
       !/App\.tsx|dev lint|not found/i.test(log()) || !log().includes("✗"),
       `artifact logged a dev-mode failure:\n${log()}`,
     );
-    return { body, health };
+    return { body, health, appJs };
   } finally {
     client?.close();
     await kill(proc);
@@ -256,8 +265,13 @@ const SERVER_TARGETS = [
     html: true,
   },
   {
+    // The SAME artifact as `server`, launched without `--expose`. A local
+    // service is a runtime choice, not a build variant — it used to be built
+    // with `--compile --service --headless` (no `--remote`), a flag set that
+    // names no fleet target, so it was the one row that reached the old
+    // single-target path. Every build is now one of the fleet's targets.
     target: "server (local)",
-    build: ["--compile", "--service", "--headless"],
+    build: ["--compile", "--service", "--headless", "--remote"],
     flags: ["--client=server-only"],
     html: false,
   },
@@ -301,19 +315,25 @@ for (const t of SERVER_TARGETS) {
           "binary is suspiciously small",
         );
 
-        // A bundling target's dist/app.js must carry THIS aio's version stamp:
-        // it is what makes a bundle left over from an older framework detectable
-        // (and what lets the client name its build in the protocol handshake).
-        if (t.html) {
-          const js = await Deno.readTextFile(join(dir, "dist", "app.js"));
-          assertStringIncludes(js, versionStamp(VERSION).trim());
-        }
-
-        const { body, health } = await bootFromForeignCwd(bin, [...t.flags], {
-          tls: "tls" in t ? t.tls : false,
-        });
+        const { body, health, appJs } = await bootFromForeignCwd(
+          bin,
+          [...t.flags],
+          { tls: "tls" in t ? t.tls : false },
+        );
         assert(health.length > 0, "health endpoint returned nothing");
-        if (t.html) assertServesApp(body);
+        // A bundling target's bundle must carry THIS aio's version stamp: it
+        // is what makes a bundle left over from an older framework detectable
+        // (and what lets the client name its build in the protocol handshake).
+        // Read from the SERVING BINARY — `dist/` holds the release, not the
+        // build's intermediates.
+        if (t.html) {
+          assertServesApp(body);
+          assertStringIncludes(
+            appJs,
+            versionStamp(VERSION).trim(),
+            "the bundle the artifact serves carries no aio version stamp",
+          );
+        }
       } finally {
         await Deno.remove(dir, { recursive: true }).catch(() => {});
       }
@@ -333,12 +353,28 @@ Deno.test({
   fn: async () => {
     const dir = await makeApp("counter", "build-e2e-");
     try {
-      const r = await buildFlags(dir, "--compile", "--service", "--headless");
+      const r = await buildFlags(
+        dir,
+        "--compile",
+        "--service",
+        "--headless",
+        "--remote",
+      );
       assertEquals(r.code, 0, `server build failed:\n${r.err}`);
 
-      const unitName = rootFiles(dir).find((n) => n.endsWith(".service"));
-      assert(unitName, "the server build wrote no .service unit");
-      const unit = await Deno.readTextFile(join(dir, unitName));
+      // The unit is an ARTIFACT: the fleet places it in dist/ beside the
+      // binary it launches (it used to be read from the project root, which
+      // is where the old single-target path left it).
+      const distFiles = [...Deno.readDirSync(join(dir, "dist"))]
+        .filter((e) => e.isFile).map((e) => e.name);
+      const unitName = distFiles.find((n) => n.endsWith(".service"));
+      assert(
+        unitName,
+        `the server build wrote no .service unit — dist/: ${
+          distFiles.join(", ")
+        }`,
+      );
+      const unit = await Deno.readTextFile(join(dir, "dist", unitName));
       const exec = unit.match(/^ExecStart=(.*)$/m)?.[1];
       assert(exec, "unit has no ExecStart");
 
@@ -353,7 +389,14 @@ Deno.test({
         `unit does not put the binary in server-only mode: ${exec}`,
       );
 
-      const { health } = await bootFromForeignCwd(findBinary(dir), flags);
+      // The unit for the `server` target carries `--expose`, and an exposed
+      // app refuses plaintext: it generates a self-signed cert and serves
+      // HTTPS. Probe it the way the target is actually launched — which also
+      // proves the unit's own flags produce a reachable server, not just a
+      // running process.
+      const { health } = await bootFromForeignCwd(findBinary(dir), flags, {
+        tls: flags.includes("--expose"),
+      });
       assert(health.length > 0, "unit flags produced a non-serving process");
     } finally {
       await Deno.remove(dir, { recursive: true }).catch(() => {});
@@ -544,6 +587,20 @@ Deno.test({
           `staging dir not cleaned: ${e.name}`,
         );
       }
+      // `.aio/build/` is the OTHER kind of scratch and is deliberately kept:
+      // the AppImage `AppDir` and the generated Gradle project used to live in
+      // `dist/`, where `dist/AppDir/` held a whole copied Electron runtime and
+      // was never removed. They moved here so `dist/` is exactly the release —
+      // and they are KEPT rather than deleted so Gradle's incremental state
+      // survives, which is why flattening `dist/` costs no build time.
+      const distEntries = [...Deno.readDirSync(dist)];
+      assertEquals(
+        distEntries.filter((e) => e.isDirectory && e.name !== "ios").map((e) =>
+          e.name
+        ),
+        [],
+        "dist/ must hold the release and nothing else — no staging directories",
+      );
 
       // …and the fleet's server artifact genuinely runs.
       const browser = manifest.targets.find((t) => t.target === "browser")!;
@@ -1262,6 +1319,97 @@ Deno.test({
 
       const { health } = await bootFromForeignCwd(bin, ["--client=browser"]);
       assertEquals(JSON.parse(health).appVersion, "0.1.2");
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
+// ── ONE BUILD PATH ──────────────────────────────────────────────────
+//
+// `deno task build` (the fleet) and a direct `deno run build.ts --compile …`
+// used to be two code paths: the fleet placed `dist/<name>-<version>` and the
+// direct one wrote `<name>` into the project root, unversioned — and only the
+// fleet was covered by this file. The pre-alpha52 scaffold emitted a whole
+// `compile:*` matrix that took the untested one, so `am build` and
+// `deno task compile:electron` produced differently-named artifacts from one
+// source tree.
+//
+// Now a direct invocation resolves its target from its own flags and runs the
+// fleet. These three pin the result, because "one path" is a claim that decays
+// the moment someone adds a second entry point.
+Deno.test({
+  name: "one path: a direct build.ts invocation lands in dist/, versioned",
+  ignore: !GATE,
+  fn: async () => {
+    const dir = await makeApp("counter", "build-e2e-onepath-");
+    try {
+      // The SINGLE-TARGET spelling — what the legacy `compile:*` tasks run.
+      assertEquals((await buildFlags(dir, "--compile")).code, 0);
+
+      // It did not write an artifact into the project root.
+      const strays = rootFiles(dir).filter((n) => !n.includes("."));
+      assertEquals(
+        strays,
+        [],
+        `a direct build left an artifact in the project root: ${
+          strays.join(", ")
+        } — that is the second path this test exists to keep closed`,
+      );
+
+      // …and the version is in the name, wherever the caller entered from.
+      const bin = findBinary(dir);
+      const version = JSON.parse(
+        await Deno.readTextFile(join(dir, "deno.json")),
+      ).version as string;
+      assertStringIncludes(
+        basename(bin),
+        version,
+        "every artifact name carries its build version",
+      );
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
+Deno.test({
+  name: "one path: dist/ is FLAT — artifacts and assets, no nested directories",
+  ignore: !GATE,
+  fn: async () => {
+    const dir = await makeApp("counter", "build-e2e-flatdist-");
+    try {
+      assertEquals((await buildFlags(dir, "--compile")).code, 0);
+      const nested = [...Deno.readDirSync(join(dir, "dist"))]
+        .filter((e) => e.isDirectory)
+        .map((e) => e.name);
+      assertEquals(
+        nested,
+        [],
+        `dist/ holds nested directories: ${nested.join(", ")}. dist/ is the ` +
+          `answer to "what did this build produce" — staging belongs in ` +
+          `.aio/build/, which is what BUILD_SCRATCH_DIR is for`,
+      );
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
+Deno.test({
+  name: "one path: the fleet's own child does not recurse",
+  ignore: !GATE,
+  fn: async () => {
+    // The delegation is skipped when AIO_BUILD_VERSION is set, because that is
+    // exactly what the fleet passes its per-target children (and what a parent
+    // build passes when it hands a version down). If that marker ever stops
+    // being set, a build forks forever instead of failing — so assert the
+    // fleet spelling still terminates and produces one artifact.
+    const dir = await makeApp("counter", "build-e2e-norecurse-");
+    try {
+      const r = await task(dir, "build", "--targets=browser");
+      assertEquals(r.code, 0, `${r.out}\n${r.err}`);
+      assert(findBinary(dir), "the fleet produced no artifact");
     } finally {
       await Deno.remove(dir, { recursive: true }).catch(() => {});
     }

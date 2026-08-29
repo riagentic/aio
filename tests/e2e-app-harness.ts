@@ -60,9 +60,12 @@ export function placedBinary(dir: string): string {
   return resolve(dir, "dist", bins[0]!);
 }
 
-/** Run the single-target build pipeline (`dep/aio/src/build.ts`) with raw
- *  flags — artifacts land in the project ROOT, exactly what `deno task build`
- *  runs per target under the hood. The scaffold no longer carries a task per
+/** Run the build with raw single-target flags (`dep/aio/src/build.ts
+ *  --compile …`) — the spelling the pre-alpha52 `compile:*` tasks used.
+ *
+ *  It is no longer a second path: build.ts resolves the target from its own
+ *  flags and runs the FLEET, so artifacts land in `dist/` with the version in
+ *  the name, exactly as `deno task build` produces them. The scaffold no longer carries a task per
  *  target (alpha52 one-vocabulary diet: `build`/`compile` are the tasks), so
  *  target-specific artifact tests invoke the pipeline directly. */
 export async function buildFlags(

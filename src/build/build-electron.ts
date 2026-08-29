@@ -26,6 +26,7 @@ import {
 import {
   APP_ICON,
   APP_STYLE,
+  BUILD_SCRATCH_DIR,
   BUNDLE_JS,
   DIST_DIR,
 } from "../server/app-files.ts";
@@ -73,7 +74,7 @@ async function zipDir(dir: string, out: string): Promise<boolean> {
 export async function buildElectron(cfg: BuildConfig): Promise<void> {
   const { root, dist, binaryName, appTitle, os, arch, archStr } = cfg;
 
-  const appDir = join(dist, "AppDir");
+  const appDir = join(root, BUILD_SCRATCH_DIR, "AppDir");
 
   // Copy dist/ assets into AppDir/dist/ (Electron can't read Deno's embedded VFS)
   const appDirDist = join(appDir, DIST_DIR);

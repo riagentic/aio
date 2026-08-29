@@ -327,7 +327,9 @@ Deno.test({
         );
       };
       await build(["--compile", "--cli"]); // cli target → ./app
-      await build(["--compile", "--service", "--headless"]); // server target
+      // The `server` target's own flag set (`--remote` included) — the one
+      // the fleet passes, and the only spelling that names a target.
+      await build(["--compile", "--service", "--headless", "--remote"]);
       await build(["--compile", "--cli", "--remote"]); // cli-client → ./app-client
       const names = [...Deno.readDirSync(dir)].map((e) => e.name);
       assert(names.includes("app"), `no cli/service binary in ${names}`);

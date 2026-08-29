@@ -29,6 +29,7 @@ import {
   freePort,
   kill,
   makeApp,
+  placedBinary,
   spawn,
   waitForHttp,
 } from "./e2e-app-harness.ts";
@@ -37,17 +38,15 @@ import { generateSigningKey } from "../src/build/ship.ts";
 
 const GATE = Deno.env.get("AIO_BUILD_E2E") === "1";
 
-/** The compiled binary: the one extension-less executable in the project root. */
+/** The compiled binary — the one the fleet PLACED in `dist/`.
+ *
+ *  This file used to carry its own copy of "the extension-less file in the
+ *  project root", which described the single-target builder: a second build
+ *  path whose artifact was unversioned and absent from `dist/manifest.json`.
+ *  Every build now ends in the fleet, and `placedBinary` is the one rule for
+ *  where the artifact is and what it is called. */
 function findBinary(dir: string): string {
-  const bin = [...Deno.readDirSync(dir)]
-    .filter((e) => e.isFile && !e.name.includes("."))
-    .map((e) => e.name);
-  assertEquals(
-    bin.length,
-    1,
-    `expected exactly one compiled binary, got: ${bin.join(", ") || "none"}`,
-  );
-  return join(dir, bin[0]!);
+  return placedBinary(dir);
 }
 
 /** Drive one action into a running app the way a client does, and read the

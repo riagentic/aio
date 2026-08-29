@@ -18,7 +18,11 @@ import { androidLocalHTML, htmlOpen } from "../server/server-html-gen.ts";
 import type { BuildConfig } from "./build-config.ts";
 import type { BuildVersion } from "./build-version.ts";
 import { appIconPng } from "./app-icon.ts";
-import { APP_STYLE, BUNDLE_JS } from "../server/app-files.ts";
+import {
+  APP_STYLE,
+  BUILD_SCRATCH_DIR,
+  BUNDLE_JS,
+} from "../server/app-files.ts";
 
 /** The app version an APK declares, from THE resolved build version.
  *
@@ -58,7 +62,7 @@ export function androidVersion(
 
 /** Build the Android APK. Exits process on completion or error. */
 export async function buildAndroid(cfg: BuildConfig): Promise<void> {
-  const { dist, binaryName, appTitle, doRemote, doRelease } = cfg;
+  const { binaryName, appTitle, doRemote, doRelease } = cfg;
 
   const androidHome = resolveSdk(); // ANDROID_HOME, its Sdk subdir, or defaults
   if (!androidHome) {
@@ -94,7 +98,7 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
   }
   console.log(`[android] ✓ JDK ${jdk.home} (Java ${jdk.major})`);
 
-  const androidDir = join(dist, "android");
+  const androidDir = join(cfg.root, BUILD_SCRATCH_DIR, "android");
   try {
     await Deno.remove(androidDir, { recursive: true });
   } catch { /* no previous build — skip */ }
