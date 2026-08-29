@@ -756,6 +756,12 @@ function bootStandalone(
     /** App-level defaults, applied exactly as `aio.run` applies them. */
     cellDefaults?: import("./state/cell-defaults.ts").CellDefaults;
     localFirst?: boolean;
+    /** The app's own `perfBudget`. The in-process harnesses pass it through
+     *  for the same reason they pass `cellDefaults`: a harness measuring
+     *  against a budget the app does not use reports violations the app has
+     *  already answered, and a suite full of known-false warnings teaches
+     *  everyone to skim past the real ones. */
+    perfBudget?: PerfBudget;
   } = {},
 ): AioApp<Record<string, unknown>, Msg> {
   if (_cellApp) return _cellApp; // idempotent — first caller wins
@@ -788,6 +794,7 @@ function bootStandalone(
       persist: opts.persist !== false && opts.persist !== "none",
       persistKey: `aio:${opts.appId ?? "app"}`,
       onRestore: opts.onRestore,
+      perfBudget: opts.perfBudget,
       // push each committed state into per-cell signals so `counter.count`
       // reads (upgraded to reactive below) re-render the AIR tree. Skip
       // client-scoped cells — they own their signal state (see note above).
@@ -947,6 +954,7 @@ function runStandalone(
       circuitBreaker: cfg.circuitBreaker,
       cellDefaults: cfg.cellDefaults,
       localFirst: cfg.localFirst,
+      perfBudget: cfg.perfBudget as PerfBudget | undefined,
     }),
   );
 }

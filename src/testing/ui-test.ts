@@ -86,6 +86,11 @@ export interface TestUIOptions {
   cellDefaults?: HarnessBootOptions["cellDefaults"];
   /** The app's `aio.run({ localFirst })` — same reason. */
   localFirst?: boolean;
+  /** The app's `aio.run({ perfBudget })` — same reason. Without it every
+   *  budget is the DEFAULT, so a method the app has already budgeted trips a
+   *  ceiling it does not have in production, and the warning recommends the
+   *  override the app already wrote. */
+  perfBudget?: HarnessBootOptions["perfBudget"];
   /** Starting state for booted cells, installed BEFORE the first render:
    *  `{ hw: { gpus: [...] } }`. Per cell it is a shallow merge over that cell's
    *  declared initial state, so you pin only the fields under test.
@@ -1043,6 +1048,7 @@ async function _buildTestUI(
   _refuseUnsafeCells(cells, {
     cellDefaults: opts.cellDefaults,
     localFirst: opts.localFirst,
+    perfBudget: opts.perfBudget,
   });
   if (cells.length > 0) {
     const standalone = await import("../standalone-air.ts");

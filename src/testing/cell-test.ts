@@ -651,6 +651,8 @@ export async function bootCells(
     persist: false,
     cellDefaults: opts.cellDefaults,
     localFirst: opts.localFirst,
+    // The app's budgets, so the harness measures what production measures.
+    perfBudget: opts.perfBudget,
   });
   // A failing async method NOBODY awaited must not pass for silence — the same
   // ledger `testCell` keeps, so the same app code cannot pass one harness and
