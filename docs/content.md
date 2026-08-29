@@ -105,6 +105,7 @@
 - [Build & Deploy](build/README.md) — Running, compiling, and shipping AIO apps.
 - [Benchmarks — the D12 perf gate](build/benchmarks.md) — Performance is CI infrastructure (perfect-aio D12): boot time, dispatch
 - [Dev Mode](build/dev-mode.md) — aio.run() reads Deno.args automatically — no parsing code needed in your
+- [Environment variables](build/environment.md) — Every AIO variable the framework reads, in one table — because a variable
 - [Import Rules: Server vs Browser Bundle](build/imports.md) — aio apps have two separate bundles running simultaneously — code must
 - [Run any aio app from source — one line](build/run-from-source.md) — Point one command at an aio app and it takes care of everything between a source
 - [Runtime differences](build/runtime-differences.md) — The same cell code runs in three places.

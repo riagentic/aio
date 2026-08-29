@@ -1,7 +1,7 @@
 // The one-directory layout: `~/.<appId>/data/` is the whole backup, everything
 // outside it is disposable, and three override levels each take one line.
 // See docs/specs/2026-07-26-data-dir-and-updates.md.
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import {
   appDirs,
@@ -276,4 +276,31 @@ Deno.test("unsafeUnpackWarning: warns only for a shared unpack location", async 
       `must carry the runnable fix, got: ${msg}`,
     );
   });
+});
+
+// The warning must reach someone who can ACT on it.
+//
+// The AppImage runtime reads $TMPDIR and mounts the payload before AppRun —
+// before the app, before any line aio ships. So nothing inside the artifact
+// can move its own unpack directory, and the artifact aio's builder produces
+// is one a user double-clicks. A field report got this warning and had no way
+// to act on it: the one remedy it named was a shell invocation, and the
+// launch path that produced the warning had no shell.
+Deno.test("unsafeUnpackWarning: names every launcher that can set TMPDIR", () => {
+  const msg = unsafeUnpackWarning({
+    appImage: "/home/u/Downloads/notes.AppImage",
+    appDir: "/tmp/.mount_notesAbc123",
+    expected: "/home/u/.notes/app",
+    parentWorldWritable: true,
+  })!;
+  assert(msg, "the /tmp shape must warn");
+  // the terminal remedy, unchanged
+  assertStringIncludes(msg, "TMPDIR=/home/u/.notes/app");
+  // …and the one that reaches a double-click
+  assertStringIncludes(msg, "menu");
+  assertStringIncludes(msg, ".desktop");
+  // …and WHY nothing in the artifact can fix it, so nobody looks there
+  assertStringIncludes(msg, "before this app starts");
+  // …and that the app's own dir is an example, not a requirement
+  assertStringIncludes(msg, "not world-writable");
 });

@@ -577,6 +577,33 @@ Standalone Electron app with a connect page — no Deno runtime, no app code.
 Users type a server address and connect. Linux only. Output:
 `aio-client-x86_64.AppImage` (~80MB).
 
+## AppImage and TMPDIR
+
+An AppImage unpacks itself into `$TMPDIR` — and the **AppImage runtime reads
+that before your app starts**: before `AppRun`, before aio, before any line the
+artifact ships. Nothing inside the file can move its own unpack directory.
+
+The default is `/tmp`, which is world-readable, and on the FUSE-less extract
+path the directory name is a predictable digest another user on the host can
+create first. aio warns about this at boot when it happens.
+
+Only the **launcher** can set it:
+
+```sh
+TMPDIR="$HOME/.cache/notes" ./notes.AppImage
+```
+
+The menu entry `run.sh` installs already does — its `Exec=` creates a private
+per-user directory and sets `TMPDIR` before exec'ing the artifact. If you write
+your own `.desktop` file, do the same:
+
+```ini
+Exec=sh -c 'D="${XDG_CACHE_HOME:-$HOME/.cache}/notes"; mkdir -p "$D"; chmod 700 "$D"; TMPDIR="$D" exec "/home/u/app/notes/notes.AppImage" "$@"' _ %U
+```
+
+Any directory that is not world-writable silences the warning; the app's own
+data directory is simply the one it already owns.
+
 ## cli (terminal binary)
 
 ```sh

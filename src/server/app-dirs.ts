@@ -341,11 +341,28 @@ export function unsafeUnpackWarning(opts: {
   if (resolve(appDir) === resolve(expected)) return null;
   if (resolve(appDir).startsWith(resolve(expected) + "/")) return null;
   if (!parentWorldWritable) return null;
+  // NAME WHO CAN ACT ON THIS.
+  //
+  // The advice used to be `TMPDIR=… <appimage>` and nothing else, which is
+  // correct and reaches exactly the wrong person: the AppImage runtime reads
+  // $TMPDIR and mounts BEFORE AppRun, before the app, before any line aio
+  // ships can run — so nothing inside the artifact can move its own unpack
+  // directory, and the artifact aio's builder produces is one a user
+  // DOUBLE-CLICKS. A field report received this warning and had no way to act
+  // on it. The launcher is the only place the variable can be set, so the
+  // message names the launchers that do.
   return `this AppImage unpacked itself into ${appDir}, inside a ` +
     `world-writable directory — other users on this host can read it, and ` +
     `(on the FUSE-less extract path) the directory name is a predictable ` +
-    `digest they can create first. Launch it as: ` +
-    `TMPDIR=${expected} ${appImage}   (aio's own launchers do this)`;
+    `digest they can create first.\n` +
+    `  The AppImage runtime reads $TMPDIR and mounts before this app starts, ` +
+    `so only whoever LAUNCHES it can change this:\n` +
+    `    • from a terminal:  TMPDIR=${expected} ${appImage}\n` +
+    `    • from a menu:      the entry aio's installer writes already sets a ` +
+    `private TMPDIR — reinstall with run.sh, or add it to your own .desktop ` +
+    `Exec= line\n` +
+    `  Any directory that is not world-writable silences this; ${expected} is ` +
+    `simply the one this app already owns.`;
 }
 
 /** `unsafeUnpackWarning` against the live environment. Returns the message, or
