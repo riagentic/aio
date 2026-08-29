@@ -120,7 +120,26 @@ export function parseCreateArgs(args: string[]): CreateOpts {
       }
       opts.target = v;
       targetGiven = true;
-    } else if (!a.startsWith("-") && opts.name === undefined) opts.name = a;
+    } else if (a.startsWith("-")) {
+      // AN UNKNOWN FLAG IS AN ERROR, not a no-op.
+      //
+      // This loop used to end at the name branch, so anything it did not
+      // recognise fell off the end in silence. `am create app --dir=/tmp/x`
+      // therefore scaffolded into the CURRENT directory and reported success,
+      // naming a path the user had not asked for — measured: it created an app
+      // inside the framework repo itself. The project's own words, in
+      // `server/config.ts` about deno.json keys: "silently ignoring input is
+      // the worst available behaviour". `am log` has refused unknown flags
+      // since alpha70; this is the same rule, in the verb people run first.
+      throw new Error(
+        `am create: unknown flag ${a.split("=")[0]}\n` +
+          `  accepted: --template=<${TEMPLATES.join("|")}>, --target=<${
+            TARGETS.join("|")
+          }>, --aio-version=<v>, --mirror[=<path>], --jsr, --force\n` +
+          `  the app is created in ./<name> — there is no --dir; cd where you ` +
+          `want it first.`,
+      );
+    } else if (opts.name === undefined) opts.name = a;
   }
   // A CLI template is a CLI: with no `--target`, its default is `cli`, not
   // the browser — a scaffold whose `deno task compile` built a browser shell

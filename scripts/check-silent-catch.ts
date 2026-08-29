@@ -36,7 +36,7 @@ import { codeText } from "../src/diagnostics/code-mask.ts";
 // "silent catches" were the pattern quoted inside a string or a comment, so
 // the ratchet had been permitting 27 more real ones than anybody agreed to. A
 // ceiling measured on the wrong thing is a ceiling that rots upward.
-const CEILING = 342;
+const CEILING = 341;
 
 const ROOT = new URL("../src/", import.meta.url).pathname;
 

@@ -87,6 +87,17 @@ export { bindCell } from "./src/state/cell.ts";
 export { isCellWorker } from "./src/server/cell-worker-protocol.ts";
 /** Define a cell — state + methods (+ selectors, sync, cancelOn). The atomic unit of aio. */
 export { cell } from "./src/state/cell.ts";
+/** Package a reusable piece of app — its cells, routes, schedules and
+ *  observe-only hooks — as one value for `aio.run({ plugins: [...] })`. A
+ *  plugin contributes through the same config keys an app has, so it can never
+ *  do anything the app could not have written itself. */
+export { definePlugin } from "./src/server/plugin.ts";
+/** Plugin types — the contribution shape and what `setup()` is told. */
+export type {
+  Plugin,
+  PluginContribution,
+  PluginSetupContext,
+} from "./src/server/plugin.ts";
 /** Compose cells into a single dispatch/reduce/execute pipeline with dependency resolution. */
 export { composeCells } from "./src/state/cell.ts";
 /** Cell definition types — catalogs, compose, test context */

@@ -164,8 +164,15 @@ Deno.test("theme: every shadow token is a value box-shadow can take", () => {
   const shadows = [...css.matchAll(/--aio-shadow-\d:([^;]+);/g)].map((m) =>
     m[1]!.trim()
   );
-  assertEquals(shadows.length, 4, "two shadows, light + dark");
-  for (const v of shadows) {
+  // Light, dark, and the pair `prefers-contrast: more` turns OFF. A user who
+  // asked their OS for more contrast is asking for the soft elevation to stop,
+  // and `none` is the value that says so — it is a legal box-shadow, just not
+  // a layer, so it is counted here and skipped below.
+  const off = shadows.filter((v) => v === "none");
+  const drawn = shadows.filter((v) => v !== "none");
+  assertEquals(drawn.length, 4, "two shadows, light + dark");
+  assertEquals(off.length, 2, "both turned off under prefers-contrast: more");
+  for (const v of drawn) {
     for (const layer of v.split(/,(?![^(]*\))/)) {
       assert(
         // <offset-x> <offset-y> <blur> [<spread>] <colour>, colour last and hex

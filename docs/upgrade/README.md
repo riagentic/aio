@@ -12,6 +12,11 @@ reason to keep one (gated by `deno task check:docs`).
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha71 → alpha72](from-alpha71-to-alpha72.md) — nothing breaks: the wire is
+  compressed and revalidates (162 KB → 56 KB, then 304), security headers are
+  derived from `allowedOrigins`, `plugins: []`, a `text` merge that keeps both
+  edits, ten more `aio/ui` controls plus RTL — and an app that will not stop is
+  stopped anyway, including a signal that arrives mid-boot.
 - [alpha70 → alpha71](from-alpha70-to-alpha71.md) — nothing breaks: every
   artifact says which build it is (`1.2.<commit count>`, derived) and the
   installed file keeps the app's own name under `versions/<version>/`; a

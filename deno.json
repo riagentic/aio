@@ -1,6 +1,6 @@
 {
   "name": "@riagentic/aio",
-  "version": "1.0.0-alpha71",
+  "version": "1.0.0-alpha72",
   "appId": "aio",
   "exports": {
     ".": "./mod.ts",
@@ -137,6 +137,9 @@
     "check:release": "deno run -A scripts/release-check.ts",
     "check:graph": "deno run --allow-read scripts/check-graph.ts",
     "preflight": "deno run -A scripts/preflight.ts",
+    "bench:bundle": "deno run -A scripts/bundle-size.ts",
+    "check:audit": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno run -A scripts/audit-all.ts",
+    "check:bundle-size": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home AIO_BUNDLE_SIZE=1 deno test -A tests/bundle-size.test.ts",
     "bench": "deno run -A --v8-flags=--expose-gc scripts/bench.ts",
     "check:bench": "deno run -A --v8-flags=--expose-gc scripts/check-bench.ts",
     "soak": "deno run -A scripts/soak.ts --minutes=10",

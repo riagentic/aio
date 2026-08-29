@@ -6,7 +6,7 @@ import { nearestOf } from "../state/cell-helpers.ts";
 import { findFreePort } from "./paths.ts";
 
 /** Framework version — printed by --version, checked in tests */
-export const VERSION = "1.0.0-alpha71";
+export const VERSION = "1.0.0-alpha72";
 
 /** What `--version` prints: what this artifact IS, and what it was built with.
  *

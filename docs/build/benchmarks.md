@@ -16,8 +16,9 @@ Total runtime is a few seconds; everything is pure Deno, no external deps.
 
 ## What's measured
 
-Each timing metric runs a warmup pass, then N iterations, and reports the
-**median** and **p95** (`scripts/bench.ts`):
+Each timing metric runs a warmup pass, then N iterations, and reports **p10**,
+the **median** and **p95** (`scripts/bench.ts`). **p10 is what the gate reads**
+— see [Noise policy](#noise-policy) for why a median could not be.
 
 | metric            | unit  | what                                                                                                                                   |
 | ----------------- | ----- | -------------------------------------------------------------------------------------------------------------------------------------- |
@@ -41,22 +42,35 @@ fitting, the structural move is `scope: 'client'` — see
 
 ## Baselines & the gate
 
-`scripts/bench-baselines.json` (committed) holds one **floor per metric**:
-`maxMedian` — the maximum acceptable median. `scripts/check-bench.ts` compares
-each measured median against its floor and exits 1 naming the metric, measured
-value, and floor on any violation. p95 is recorded for context but not gated
-(too noisy for a shared machine).
+`scripts/bench-baselines.json` (committed) holds one **floor per metric** (under
+the key `maxMedian`, whose name predates the estimator change).
+`scripts/check-bench.ts` compares each measured **p10** against its floor and
+exits 1 naming the metric, the measured value, and the floor. The median and p95
+are recorded for context — they say something about variance — but the gate
+reads p10.
+
+It also **reports a floor sitting 3x or more above its number**, because a
+ceiling that far up is not gating anything and the next person to look should be
+told rather than have to notice.
 
 ## Noise policy
 
-- Floors carry **at least 2x headroom** over the measured medians recorded in
-  the baselines file (small/jittery metrics like `persist-write` and
-  `memory-boot-1k` get more). The gate exists to catch **2x+ regressions** —
-  algorithmic mistakes, accidental sync-in-loop, leaked per-op allocations — not
-  machine noise.
+**Why p10 and not the median.** Measured on a shared machine, three back-to-back
+runs of the _same build_ spread `proxy-array-10k`'s median across 53–70 ms — a
+30% swing, wider than any regression worth catching. The same runs' p10 spread
+48.9–52.4 (7%). A benchmark asks "how fast can this go", so every sample above
+the floor is contamination rather than signal, and the low quantile is the
+estimator for that question. The consequence of not having one: before alpha72
+every floor sat 2.4–7.3x above its number to absorb the measurement, and
+`proxy-array-10k` drifted 30 → 55 ms underneath a floor of 75 without anyone
+being told.
+
+- Floors are **2x the measured p10** — enough to cover a slower CI box, and
+  nothing else. They are lowered whenever a metric gets faster.
 - **Never ratchet on noise** (same policy as the coverage gate): a green run
   that happens to be fast is not a reason to lower floors, and a red run on a
-  loaded machine is a reason to re-run, not to raise them.
+  loaded machine is a reason to re-run, not to raise them. Running the full test
+  suite concurrently is enough to push `proxy-array-10k` from 56 to 83.
 - Raising a floor is an explicit decision: only for an understood, accepted
-  cost, with the new measured medians updated alongside it in
+  cost, with the new measured numbers updated alongside it in
   `scripts/bench-baselines.json`.

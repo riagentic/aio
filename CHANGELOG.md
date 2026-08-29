@@ -1,5 +1,191 @@
 # Changelog
 
+## v1.0.0-alpha72 — measured, not claimed (2026-08-29)
+
+> An audit of alpha71 against its own doctrine. Four things the framework
+> required of everyone else and had not done itself: the shutdown budget was a
+> number rather than a guarantee, nothing was ever compressed and `no-cache`
+> could not revalidate, the state before the first dispatch was the one state
+> that was not frozen, and five docs quoted a bundle size nobody had measured.
+> Plus what was simply missing: plugins, a text merge, ten keyboard-complete
+> components, and a theme that answers a machine set up differently. No breaking
+> changes: `docs/upgrade/from-alpha71-to-alpha72.md`.
+
+- **The shutdown budget is now a guarantee.** Every shutdown PHASE was bounded;
+  the EXIT was not — each process-wide path read
+  `shutdownAllRuntimes().then(() => Deno.exit(0))`, so one resource nobody
+  unref'd kept the loop alive after Phase 7 and the exit never ran. Measured in
+  a full-suite run: an `--expose` app ignored SIGTERM for 15 s, nearly 2x its
+  own declared 8 s budget, and had to be SIGKILLed — and a SIGKILLed app is one
+  that did not finish writing. `stopProcess()` arms an unref'd watchdog, ends
+  the process after `DRAIN + TEARDOWN + 2s`, names the runtimes still stopping,
+  and exits **75, not 0**: a forced exit must not tell a supervisor the app
+  stopped cleanly. `am` and the lock takeover wait it out.
+
+- **Responses are compressed, and `no-cache` finally revalidates.** Measured on
+  the alpha71 compiled counter binary: `GET /app.js` shipped 161,905 bytes with
+  `Cache-Control: no-cache` and no validator, so the directive degraded to a
+  full re-download on every page load; `grep -r content-encoding src/server` had
+  no hits at all. The same binary now: **56,131 bytes** with brotli, and a
+  **304** on reload. One decider wraps the one request path, so a route added
+  tomorrow gets it too — and the compatibility contract is the larger half,
+  pinned by test: a non-200, a stream (recognised by KIND, since SSE is `text/*`
+  and buffering it would hang forever), `no-transform`, an already-encoded body,
+  an incompressible type, a HEAD, a handler's own ETag, and an over-cap body
+  replayed WHOLE rather than truncated.
+
+- **Security headers, derived from what the app already declared.** They were a
+  documented non-goal on the reasoning that a proxy in front adds them — which
+  never reached the app with no proxy, which is most of them. `nosniff`,
+  `Referrer-Policy`, `X-Frame-Options` and a CSP with **no `default-src`**, so
+  nothing off-origin breaks. The frame policy reads `allowedOrigins`: an aio
+  page in a cross-origin iframe already could not work (the WS upgrade is
+  refused), so the one configuration where framing works is the one that said
+  so. HSTS only behind an operator's own certificate. `security: {}` is the new
+  key; `headers: false` is exactly the old behaviour.
+
+- **The state at t=0 is frozen, like every state after it.** `app.state.n = 99`
+  before any dispatch SUCCEEDED and changed what `getState()` reported; the same
+  line one dispatch later threw. A rule with a window in it is not a rule, and
+  the window was exactly the moment an app is being wired up.
+
+- **Plugins.** `plugins: [audit, metrics]` — a reusable piece of app (cells,
+  routes, schedules, observe-only hooks) as one value. A plugin contributes
+  through the SAME config keys `aio.run()` has, so it can never do anything the
+  app could not have written itself. Four rules, each tested: the app always
+  wins; a collision between two plugins throws AT BOOT naming both; hooks
+  compose rather than replace and one throwing never stops the next; a `setup()`
+  that throws refuses the boot rather than half-existing.
+
+- **`merge: { body: "text" }` — a three-way merge for prose.** Every string
+  field was `lww`: two people editing one note and one loses the whole thing,
+  silently. Now disjoint edits both survive and the same paragraph is a real
+  conflict, resolved by HLC and REPORTED. Two properties are fuzzed because a
+  merge without them is not usable: both peers compute the same string (3,000
+  cases) and the merge never invents a character (2,000 cases).
+
+- **Ten components, each keyboard-complete.** Switch, RadioGroup, Tabs, Menu,
+  Progress, Alert, Tooltip, Breadcrumb, Skeleton, EmptyState. A menu that opens
+  on click and cannot be closed with Escape looks finished and is not, and
+  shipping one is worse than shipping none — so each implements the WAI-ARIA
+  keyboard interaction for its role and is driven BY KEY in the tests (Escape
+  returns focus to the trigger; arrows step over disabled tabs; exactly one tab
+  is in the page's tab order).
+
+- **The theme answers three environments it had ignored**: `pointer: coarse`
+  (44px controls — aio builds APKs), `prefers-contrast: more`, and
+  `forced-colors: active`. Media queries only, so a default machine renders
+  byte-identically. Plus **RTL for real**: the component stylesheet's six
+  physical properties are gone, `ui.dir` writes `<html dir>`, and a ratchet
+  fails the build on a `padding-left` in framework CSS.
+
+- **Five more dev a11y warnings**, each a mistake that renders perfectly: a
+  `<button>` with no `type` (submits the form it is in), an `<a onClick>` with
+  no `href`, a positive `tabIndex`, `aria-hidden` on something still focusable,
+  and `aria-disabled` with a live `onClick`.
+
+- **The perf gate was gating nothing.** Three runs of the SAME build spread one
+  metric's median across 53-70 ms, so every floor sat 2.4-7.3x above its number
+  while the number drifted underneath. The gate now reads **p10** (stable to
+  ~7%), the floors are re-derived at 2x the measurement — five of seven
+  tightened — and `check:bench` REPORTS a floor 3x above its number instead of
+  hiding it. Behind it, a real fix: a read method over a 10k array built the
+  child path eagerly per element (ten thousand allocations to look ten thousand
+  entries up in a Map). Measured A/B: 50.1-52.6 ms -> 46.6-49.9 ms.
+
+- **`check:orphans` fails on the leak it had always counted.** 12,837 abandoned
+  directories, 4.3 GB, every one a test that made a temp home and did not remove
+  it — reported and exited 0 about, every time, for as long as it has existed.
+
+- **The bundle size is measured, and the docs quote the measurement.** Five
+  pages said "~20 KB gzipped" for the renderer and "~50 KB" for a small app; the
+  real numbers are 55 KB and 57 KB. `deno task bench:bundle` is the one
+  measurement, and the gate fails if a bundle grows OR if a doc stops matching
+  what it measured. `air-comparison.md` is rewritten: AIR is not a view layer,
+  and the table was not comparing like with like.
+
+- **A randomized audit, and it is a release gate.** `deno task check:audit` — 30
+  adversarial rounds over the whole surface, seeded so any finding replays
+  exactly. Every other gate asks whether the code matches a decision someone
+  wrote down; these ask what happens on an input nobody chose. Thirteen defects
+  in their first run, each now fixed with a test beside it: a duplicated
+  `Accept-Encoding` token that handed a client a body it had said it could not
+  read; an `allowedOrigins` entry that made every response a 500; a plugin
+  colliding with itself; a lone plugin hook left unguarded; `aria-controls`
+  naming an element that is not there (twice); `<Progress value={NaN}>` blanking
+  the page; the kit's own radios tripping the framework's own a11y check; a HEAD
+  that reported `content-length: 0` for a 43-byte blob; an `include:` filter
+  that dropped an empty list from the client's view entirely (`state.rows.map`
+  on `undefined`, in the one state every app starts in, and a delta stream the
+  client then could not apply); and the three process-lifetime bugs above.
+
+- **A beta-promise corpus.** `check:api`, the removals registry and the
+  docs-snippet gate all check the SHAPE of the surface; none would notice a
+  change that keeps the signature, keeps the export, keeps the doc, and changes
+  what the code does. `tests/beta-promise.test.ts` boots a small app for each
+  shape the docs teach and DRIVES it.
+
+- **An app asked to stop WHILE STARTING now stops.** The SIGINT/SIGTERM handlers
+  were installed near the end of boot, after the server was listening. A signal
+  arriving before that is not merely early — it is LOST:
+  `Deno.addSignalListener` replaces the default disposition, and a signal that
+  lands while that is being set up reaches neither the listener nor the default.
+  The process then ran forever, having been asked to stop. In production that is
+  a supervisor restarting an app quickly, a container stopping during startup,
+  or `am stop` straight after `am start`. Found by a seam test that signals its
+  child as soon as its key file appears and failed about one run in five, the
+  child's log showing a complete boot and then nothing for 45 seconds; adding a
+  listener at the top of the app's own module made it 8 for 8, which identified
+  the WINDOW rather than the app. The handlers are now installed at the top of
+  `aio.run()`, and `tests/signal-during-boot.test.ts` signals a real app at ten
+  delays that straddle boot — it fails in 44 s with the fix removed and passes
+  in 4 s with it.
+
+- **An aio process leaves when it is done — and a refused boot leaves too.** A
+  corrupt `state.db` produced an exemplary refusal
+  (`persistence
+  unavailable: file is not a database`) and then a process that
+  NEVER EXITED: measured at 45 s and still running, on a path whose entire job
+  is to fail cleanly. Three background timers — the logger heartbeat, the vitals
+  sampler, the crash-checkpoint debounce — were started at boot and torn down
+  only on the shutdown path, and a refusal never reaches one. None of them
+  should ever have been a reason for a process to stay alive. Refused boot:
+  never → 103 ms. And the number that matters more: a clean `libraryMode` boot
+  returned from `app.close()` in 53 ms and then sat for **5,054 ms**, every
+  embedding host, every time → now 49 ms. Behind it, two in the DB: `close()`
+  awaited the OPEN handshake first, so a file SQLite refuses left its worker
+  running forever (a database that could not be opened could not be closed), and
+  two drain races never cleared their 5 s timers when the drain won.
+
+- **Fixed:** the single most likely build error a new author hits —
+  `import { route } from "aio/server"` in a component — said in aio's words
+  instead of the bundler's. It used to read
+  `No matching export in
+  "../../../../../../../home/…/src/server-entry.ts" for import "route"`:
+  the rule nowhere, the fix nowhere, seven `../` in the path. The browser build
+  maps `aio/server` to a browser-safe SUBSET, so the import RESOLVES and only
+  the name is missing — which is why the server-only specifier check never sees
+  it. Now: what the API is, where server work belongs, and the documented
+  dynamic-import escape hatch.
+
+- **Fixed:** `logging: false` sent the action log and the crash checkpoint to
+  `.aio/log` RELATIVE TO THE CURRENT DIRECTORY — one ERROR per dispatch, and the
+  two artifacts whose whole job is to explain a crash silently not written.
+  Turning off the console logger must not turn off the black box.
+
+- **Fixed:** `am create app --dir=/somewhere` scaffolded into the CURRENT
+  directory and reported success, naming a path the user had not asked for — the
+  argument parser dropped anything it did not recognise. `am lab` and `am log`
+  have refused unknown flags for releases; the verb people run first did not.
+
+- **Fixed:** `am kill --stale` printed "it is running: " and stopped
+  mid-sentence — `/proc/<pid>/cmdline` is empty for a zombie, a kernel thread,
+  and the instant between fork and execve. This was the one real failure in a
+  clean full-suite run. **Fixed:** `air-comparison.md` claimed `useEffect` and
+  `useMemo` ignore their dependency arrays; they never did. **Fixed:** the
+  README claimed `am` "drives any running app" — the control API is dev-only,
+  which the tool says clearly and the README did not.
+
 ## v1.0.0-alpha71 — the build it is, installed under its own name (2026-08-28)
 
 > Every artifact now says which build it is, in its name and at runtime — and

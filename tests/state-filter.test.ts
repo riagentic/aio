@@ -1,7 +1,17 @@
 // `ui:` / `db:` field filters — the projection an app declares must mean the
 // same thing whichever side of the filter it is written on.
 import { assert, assertEquals } from "@std/assert";
-import { applyCellFieldFilter } from "../src/state/state-filter.ts";
+import {
+  applyCellFieldFilter,
+  filterPatchesByStrategy,
+} from "../src/state/state-filter.ts";
+import { applyWirePatches } from "../src/protocol/patch-ops.ts";
+import { enablePatches } from "immer";
+
+// The delta case below applies real Immer patches; `src/state-core.ts` does
+// this for the framework, and a test file that skips it fails on the plugin
+// rather than on the behaviour.
+enablePatches();
 
 // ── a dot path means the same thing on both sides of the filter ──────────
 //
@@ -62,4 +72,63 @@ Deno.test("state-filter: include through an array applies to every element, like
   const ex = applyCellFieldFilter({ exclude: ["rows.secret"] }, state);
   assert(!JSON.stringify(ex).includes("secret"));
   assertEquals((ex!.rows as unknown[]).length, 3);
+});
+
+// ── An include projection keeps the array's SHAPE ────────────────────
+//
+// `include: ["rows.token"]` on a cell whose list is empty used to drop `rows`
+// from the projection entirely: the client read `undefined` where the server
+// held `[]`, and a component's `state.rows.map(…)` threw on the one state
+// every app starts in. Worse on the delta path — the patch stream keeps
+// sending index ops for that array, so the first `add rows[0]` could not
+// resolve against a projection with no `rows` and the client had to fall back
+// to a full resync to catch up.
+//
+// The mixed case (SOME element has the path) always produced `{}` for the
+// others precisely to keep indices aligned. These pin the two cases that did
+// not read the same way.
+Deno.test("include: an empty array projects to an empty array", () => {
+  assertEquals(
+    applyCellFieldFilter({ include: ["rows.token"] }, {
+      rows: [],
+      secret: "s",
+    }),
+    { rows: [] },
+  );
+});
+
+Deno.test("include: an array whose elements all lack the path keeps its length", () => {
+  assertEquals(
+    applyCellFieldFilter({ include: ["rows.token"] }, {
+      rows: [{ id: 1 }, { id: 2 }],
+      secret: "s",
+    }),
+    { rows: [{}, {}] },
+    "the length is what index-addressed patches resolve against",
+  );
+});
+
+Deno.test("include: a patched projection equals the projection of the patched state", () => {
+  // The property `scripts/audit-round.ts 28` fuzzes, as one concrete case:
+  // a list that starts empty, one row added.
+  const filter = { include: ["rows.token"] };
+  const prev = { rows: [] as { token: string }[], secret: "s" };
+  const next = { rows: [{ token: "t" }], secret: "s" };
+  const ops = filterPatchesByStrategy(
+    [{
+      cell: "c",
+      ops: [{ op: "add", path: ["rows", 0], value: next.rows[0] }],
+    }],
+    new Map([["c", "filter"]]),
+    new Map([["c", {
+      mode: "include",
+      fields: new Set<string>(),
+      deepIncludes: [["rows", "token"]],
+    }]]),
+  );
+  assert(ops !== undefined, "an include filter must not force a full fallback");
+  assertEquals(
+    applyWirePatches(applyCellFieldFilter(filter, prev), ops![0]!.ops),
+    applyCellFieldFilter(filter, next),
+  );
 });

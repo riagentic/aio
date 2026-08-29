@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <code>v1.0.0-alpha71</code> · <a href="LICENSE">MIT</a> ·
+  <code>v1.0.0-alpha72</code> · <a href="LICENSE">MIT</a> ·
   <a href="docs/content.md">Docs</a> ·
   <a href="docs/basics/quickstart.md">Quickstart</a> ·
   <a href="CHANGELOG.md">Changelog</a>
@@ -74,11 +74,18 @@ and aio's whole job is state.
 
 ## What you get
 
-Persistence (worker-thread SQLite) · CRDT sync + offline queue · a ~20 KB
-(gzipped) signals renderer · async methods with cancellation · scheduling · HTTP
-routes · full auth with 2FA and OIDC · time-travel · `testCell`/`testUI` ·
-single-binary builds for browser, Electron, Android, CLI and service — and `am`,
-a CLI that inspects and drives any running app.
+Persistence (worker-thread SQLite) · CRDT sync + offline queue · a signals
+renderer · async methods with cancellation · scheduling · HTTP routes · full
+auth with 2FA and OIDC · security headers and compressed, revalidating responses
+· time-travel · `testCell`/`testUI` · plugins · single-binary builds for
+browser, Electron, Android, CLI and service — and `am`, a CLI that inspects and
+drives a running **dev** app (against production it reports: status, health,
+logs, data, installs and pins — the control API is dev-only by design, and says
+so when you ask it for more).
+
+A whole client — renderer, protocol, offline queue and CRDT merge — is 57 KB
+gzipped, 50 KB on the wire. `deno task bench:bundle` prints it and a gate keeps
+this sentence true.
 
 And one line runs _any_ aio app straight from its repo — installing whatever is
 missing, building, and starting it:

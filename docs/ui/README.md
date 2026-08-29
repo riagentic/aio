@@ -1,7 +1,7 @@
 # Rendering & UI
 
-AIO uses **AIR** — a built-in signal-based renderer (~20 KB gzipped, zero
-dependencies).
+AIO uses **AIR** — a built-in signal-based renderer (57 KB gzipped with the
+client runtime, zero dependencies).
 
 - [Component kit](kit.md) — `aio/ui`: button, inputs, field, table, card —
   basic, themeable, cell-bound

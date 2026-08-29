@@ -18,6 +18,7 @@ export const VALID_UI_KEYS = new Set<string>([
   "viewport", // AIO-423: override the <meta viewport> (string) or opt out (false)
   "head", // AIO-423: verbatim extra <head> content (meta/OG/favicon/fonts)
   "lang", // <html lang> — WCAG 3.1.1; default "en"
+  "dir", // <html dir> — "ltr" | "rtl" | "auto"; mirrors the whole default UI
   "chrome", // desktop window frame: "standard" | "themed" | "none"
   "theme", // the default look: "tokens" (default) | "auto" | "full" | "none"
 ]);
@@ -170,6 +171,8 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "syncIntervalMs",
   "maxConnections",
   "allowedOrigins",
+  "security",
+  "plugins",
   "strictOrigin",
   "trustProxyHeader",
   "wsLimits",
@@ -231,6 +234,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "_diagnostics",
   "_onCheckpointRestore",
   "_cellNames",
+  "_pluginNames",
   "_workerCells",
   "_workerEntry",
   "_healthGetter",
@@ -305,6 +309,9 @@ export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
   "schedules",
   "wsLimits",
   "allowedOrigins",
+  "security",
+  "plugins",
+  "_pluginNames",
   "strictOrigin",
   "trustProxyHeader",
   "fatalOnStart",
@@ -408,6 +415,14 @@ export const CONFIG_DOCS: Record<string, [string, string]> = {
   allowedOrigins: [
     "",
     "extra hosts/origins this app may be reached as — the WS Origin check AND the Host (DNS-rebinding) gate read this one list",
+  ],
+  plugins: [
+    "[]",
+    "reusable pieces of app — each contributes cells, routes, schedules and observe-only hooks through the same keys this config has; the app's own values win, and two plugins claiming one route throw at boot naming both",
+  ],
+  security: [
+    "{}",
+    "response hardening + transfer encoding — { headers, csp, frameOptions, referrerPolicy, hsts, permissionsPolicy, compress }; every default is chosen so an app that omits this behaves exactly as before",
   ],
   strictOrigin: ["false", "require Origin header on WS upgrade in expose mode"],
   trustProxyHeader: [
@@ -517,6 +532,10 @@ export const CONFIG_DOCS: Record<string, [string, string]> = {
  *  CONFIG_DOCS (every VALID_UI_KEYS entry must have a row). */
 export const UI_DOCS: Record<string, [string, string]> = {
   lang: ['"en"', "<html lang> — the document language (WCAG 3.1.1)"],
+  dir: [
+    "",
+    '<html dir> — "ltr" | "rtl" | "auto". Every stylesheet aio ships is written in logical properties, so this one attribute mirrors the whole default UI. Not derived from lang: guessing "ar => rtl" mirrors an app that ships Arabic content in an LTR chrome',
+  ],
   title: ['"AIO App"', "window title"],
   width: ["800", "window width (px)"],
   height: ["600", "window height (px)"],
@@ -568,6 +587,8 @@ export const CONFIG_GROUPS: [string, string[]][] = [
     "maxConnections",
     "wsLimits",
     "allowedOrigins",
+    "security",
+    "plugins",
     "strictOrigin",
     "trustProxyHeader",
     "childWindows",

@@ -245,6 +245,28 @@ type Pending = { resolve: (v: unknown) => void; reject: (e: Error) => void };
  *  police slow queries. */
 export const DB_REQUEST_TIMEOUT_MS = 120_000;
 
+/** Await `work`, but give up after `ms` — and CLEAR THE TIMER either way.
+ *
+ *  `Promise.race([work, new Promise(r => setTimeout(r, 5000))])` reads as "wait
+ *  at most 5s", and when `work` wins the timer is still armed: a pending timer
+ *  keeps the event loop alive, so the process hangs around for the full
+ *  ceiling. Measured on a clean embedded boot — `app.close()` returned in 53 ms
+ *  and the process did not unload until 5,054 ms, every time, on the shutdown
+ *  path of every `libraryMode` app. Two of these were in `close()`, which is
+ *  the one function whose job is to let go.
+ *
+ *  Found by the persistence audit round.
+ */
+function raceDeadline<T>(work: Promise<T>, ms: number): Promise<T | void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, ms);
+  });
+  return Promise.race([work, deadline]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+}
+
 /** Create an async SQLite DB backed by a dedicated Worker thread (+ optional read replicas).
  *  Workers spawn lazily on first call — zero overhead if SQLite is never used.
  *
@@ -627,7 +649,21 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
     },
     async close(): Promise<void> {
       if (!ready) return;
-      await ensureWorkers();
+      // A FAILED OPEN MUST STILL CLOSE.
+      //
+      // `ensureWorkers()` spawns the worker and THEN awaits its open
+      // handshake, so a file SQLite refuses ("file is not a database") leaves
+      // `ready` rejected with the worker already alive. Awaiting it here
+      // rethrew before a single `terminate()` — and a live worker keeps the
+      // event loop open, so:
+      //
+      //     try { await aio.run(…) } catch { }   // corrupt state.db
+      //     // ...clean refusal printed, and the process NEVER EXITS
+      //
+      // Measured: 45 s to a `timeout` kill, on a path whose whole job is to
+      // fail cleanly. The handshake's outcome is irrelevant to closing; what
+      // matters is that everything spawned is terminated below.
+      const openFailed = await ensureWorkers().then(() => false, () => true);
       // FIRST drain the writer-lock chain. A write queued BEHIND another has
       // not been posted to the worker yet, so it is absent from `pending` —
       // the loop below would not wait for it, `w.terminate()` would kill the
@@ -642,12 +678,7 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
         const deadline = Date.now() + 5000;
         for (let i = 0; i < 100; i++) {
           const chain = _writerLock;
-          await Promise.race([
-            chain,
-            new Promise<void>((r) =>
-              setTimeout(r, Math.max(0, deadline - Date.now()))
-            ),
-          ]);
+          await raceDeadline(chain, Math.max(0, deadline - Date.now()));
           if (_writerLock === chain || Date.now() >= deadline) break;
         }
       }
@@ -667,13 +698,23 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
         })
       );
       if (allPending.length > 0) {
-        await Promise.race([
-          Promise.all(allPending),
-          new Promise<void>((resolve) => setTimeout(resolve, 5000)), // 5s max wait for pending
-        ]);
+        await raceDeadline(Promise.all(allPending), 5000);
       }
-      // Close all workers with 5s timeout — terminate regardless
-      await Promise.all([writerWorker!, ...readerWorkers].map(async (w) => {
+      // Close all workers with 5s timeout — terminate regardless. Filtered,
+      // because a failed open can leave the writer unassigned while readers
+      // exist (or the reverse), and `[null, …]` would throw here instead of
+      // terminating the ones that ARE there.
+      const spawned = [writerWorker, ...readerWorkers].filter((
+        w,
+      ): w is Worker => !!w);
+      await Promise.all(spawned.map(async (w) => {
+        // A worker that never opened cannot answer a `close` — asking it costs
+        // the full 5 s ceiling on a path whose entire job is to fail fast. A
+        // refused boot went from hanging forever, to 5 s, to this.
+        if (openFailed) {
+          w.terminate();
+          return;
+        }
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
           await Promise.race([

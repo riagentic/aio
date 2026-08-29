@@ -658,7 +658,10 @@ export function parseNumArg(
 ): { ok: true; value: number } | { ok: false; error: string } {
   const n = Number(raw);
   if (raw === undefined || raw.trim() === "" || !Number.isFinite(n)) {
-    return { ok: false, error: `${label} must be a number (got "${raw}")` };
+    return {
+      ok: false,
+      error: `${label} must be a number (got "${raw}")` + appMeantHint(raw),
+    };
   }
   if (opts.integer && !Number.isInteger(n)) {
     return {
@@ -673,6 +676,41 @@ export function parseNumArg(
     return { ok: false, error: `${label} must be ≤ ${opts.max} (got ${n})` };
   }
   return { ok: true, value: n };
+}
+
+/** " — did you mean `--app=x`?", when the unparseable value names a real app.
+ *
+ *  `am` takes its target through `--app`, because the first positional of most
+ *  verbs is already a state path, an action or a client index. That is a
+ *  defensible grammar and an easy one to forget, and the failure was worse
+ *  than forgetting: `am surface my-app` answered
+ *
+ *      client index must be a number (got "my-app")
+ *
+ *  which is true, unhelpful, and says nothing about the flag that was meant.
+ *  A message that knows the answer and does not say it costs a round trip.
+ *
+ *  Only fires when the value actually names something — a running instance or
+ *  a declared component — so a genuine typo still gets the plain message.
+ *  Never throws: a hint that can fail is worse than no hint. */
+export function appMeantHint(raw: string | undefined): string {
+  const v = raw?.trim();
+  if (!v || /^[-\d.]/.test(v)) return "";
+  try {
+    const known = new Set<string>();
+    for (const c of components()) {
+      known.add(c.label);
+      known.add(c.appId);
+    }
+    for (const i of instances()) known.add(i.appId);
+    if (known.has(v)) {
+      return ` — "${v}" is an app, not a ${""}value here. Did you mean \`--app=${v}\`?`;
+    }
+  } catch {
+    // aio-ok: a hint is a convenience; failing to produce one must never turn
+    // a readable error into an unreadable one.
+  }
+  return "";
 }
 
 /** Parse "key=val" pairs → object, auto-parse values */

@@ -34,6 +34,7 @@ import { handleTrojan as _handleTrojanRoute } from "./server-trojan.ts";
 import { loadVendorImmer } from "./server-vendor.ts";
 import { BLOB_ID_RE, BLOB_URL_PREFIX, type BlobStore } from "./blobs.ts";
 import { appIconSvg } from "../build/app-icon.ts";
+import { etagOf } from "./http-encoding.ts";
 
 // Framework module URLs — this file lives in src/server/, so entry files at the
 // src/ root and folderized modules are one level up. The /__aio/ namespace
@@ -166,6 +167,8 @@ export interface StaticDeps {
   headExtra?: string; // AIO-423: ui.head — verbatim <head> content
   /** ui.lang — the document language every shell carries. */
   lang?: string;
+  /** ui.dir — `<html dir>`. See `UiConfig.dir`. */
+  dir?: import("./aio-types.ts").UiConfig["dir"];
   /** ui.chrome — how much of the desktop window the OS draws. */
   chrome?: "standard" | "themed" | "none";
   /** ui.theme — how much of the default look the shell emits. */
@@ -316,6 +319,7 @@ export function createStaticHandler(deps: StaticDeps): {
         theme: deps.theme,
         themeName: deps.themeName,
         lang: deps.lang,
+        dir: deps.dir,
       }),
       { headers: { "Content-Type": "text/html", ...deps.noCache } },
     );
@@ -528,7 +532,7 @@ export function createStaticHandler(deps: StaticDeps): {
       const file = pathname.slice(1);
       try {
         await _warnIfStaleArtifact(file);
-        const body = await Deno.readTextFile(join(absDistDir, file));
+        const body = await readDistCached(join(absDistDir, file));
         // The bundle records which UI component it was built from
         // (__aioBundleUi; absent = the App.tsx convention, which is what every
         // pre-stamp build bundled). Serving a bundle built from a DIFFERENT
@@ -567,7 +571,7 @@ export function createStaticHandler(deps: StaticDeps): {
           ? "text/css"
           : "application/javascript";
         return new Response(body, {
-          headers: { "Content-Type": ct, ...noCache },
+          headers: { "Content-Type": ct, ...noCache, ETag: _lastDistEtag },
         });
       } catch {
         return new Response("Not Found", { status: 404 });
@@ -579,6 +583,44 @@ export function createStaticHandler(deps: StaticDeps): {
   }
 
   // ── Helpers ──
+
+  /** The prod bundle, read once per version of the file on disk.
+   *
+   *  `dist/app.js` was read from disk and UTF-8 decoded on EVERY request — 162
+   *  KB of I/O and decode to hand back bytes that had not changed since the
+   *  process booted, which is the whole point of a production build. The cache
+   *  is keyed on `(mtime, size)` rather than "prod, so it cannot change",
+   *  because it CAN: a redeploy that rewrites dist/ under a running server is
+   *  exactly what `_warnIfStaleArtifact` exists to notice, and a cache that
+   *  outlived it would serve the old app while the warning said the opposite.
+   *  One `stat` per request instead of one full read.
+   *
+   *  The ETag is computed here too, so the response finisher does not hash the
+   *  same 162 KB again on every request — it uses the tag a handler supplies.
+   */
+  const _distCache = new Map<
+    string,
+    { mtime: number; size: number; body: string; etag: string }
+  >();
+  async function readDistCached(path: string): Promise<string> {
+    const st = await Deno.stat(path);
+    const mtime = st.mtime?.getTime() ?? 0;
+    const hit = _distCache.get(path);
+    if (hit && hit.mtime === mtime && hit.size === st.size) {
+      _lastDistEtag = hit.etag;
+      return hit.body;
+    }
+    const body = await Deno.readTextFile(path);
+    const etag = etagOf(
+      new TextEncoder().encode(body) as Uint8Array<ArrayBuffer>,
+    );
+    _distCache.set(path, { mtime, size: st.size, body, etag });
+    _lastDistEtag = etag;
+    return body;
+  }
+  /** The tag `readDistCached` just resolved — read by the response below,
+   *  which is the only caller and is synchronous with it. */
+  let _lastDistEtag = "";
 
   /** Transpile and serve an AIO internal module by URL */
   async function serveAioModule(

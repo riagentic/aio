@@ -160,6 +160,72 @@ function _devA11yCheck(tag: string, props: Record<string, unknown>): void {
       `[aio-dev] <${tag}> has no label association. Add id (for <label htmlFor>), aria-label, or aria-labelledby.`,
     );
   }
+  // ── The five below are the rest of what a linter would catch ──
+  //
+  // Each is a mistake that renders perfectly and fails only for someone using
+  // a keyboard, a screen reader, or a zoomed page — i.e. exactly the class of
+  // defect nobody finds by looking at the app. Dev-only and warn-once, like
+  // everything above: an a11y warning is an observation, never a behaviour.
+
+  // A <button> inside a form defaults to type="submit", so the "just a
+  // button" that opens a menu also submits the form and reloads the page.
+  // The single most common React-to-anything porting bug there is.
+  if (tag === "button" && !props.type) {
+    _warnA11yOnce(
+      `[aio-dev] <button> without type — inside a <form> it defaults to ` +
+        `type="submit" and will submit it. Write type="button" for a button ` +
+        `that is not the form's submit.`,
+    );
+  }
+  // `<a>` with no href is not a link: it is not focusable, Enter does nothing,
+  // and a screen reader announces nothing. An onClick on one is a button.
+  if (tag === "a" && props.onClick && props.href === undefined) {
+    _warnA11yOnce(
+      `[aio-dev] <a onClick> with no href is not focusable and not ` +
+        `announced — keyboard users cannot reach it. Use <button> for an ` +
+        `action, or give the <a> a real href.`,
+    );
+  }
+  // A positive tabindex re-orders the whole document's tab sequence, not just
+  // this element's, and the damage is invisible until someone tabs.
+  const ti = Number(props.tabIndex ?? props.tabindex);
+  if (Number.isFinite(ti) && ti > 0) {
+    _warnA11yOnce(
+      `[aio-dev] tabIndex={${ti}} — a positive tabindex re-orders the tab ` +
+        `sequence of the ENTIRE page, not just this element. Use 0 (focusable ` +
+        `in document order) or -1 (focusable only from script).`,
+    );
+  }
+  // `aria-hidden` on something focusable removes it from the accessibility
+  // tree while leaving it in the tab order: a keyboard user lands on an
+  // element their screen reader will not describe.
+  if (
+    props["aria-hidden"] === true || props["aria-hidden"] === "true"
+  ) {
+    const focusable = tag === "button" || tag === "a" || tag === "input" ||
+      tag === "select" || tag === "textarea" || tag === "summary" ||
+      (props.tabIndex !== undefined && Number(props.tabIndex) >= 0);
+    if (focusable) {
+      _warnA11yOnce(
+        `[aio-dev] <${tag}> is aria-hidden but still focusable — a keyboard ` +
+          `user lands on an element a screen reader will not describe. Add ` +
+          `tabIndex={-1} (or the \`inert\` attribute) as well.`,
+      );
+    }
+  }
+  // A control the author disabled through ARIA alone is still clickable and
+  // still keyboard-operable: the attribute describes it, it does not disable
+  // it. Real `disabled` (or a guard in the handler) is what stops the action.
+  if (
+    (props["aria-disabled"] === true || props["aria-disabled"] === "true") &&
+    props.onClick && !props.disabled
+  ) {
+    _warnA11yOnce(
+      `[aio-dev] <${tag}> is aria-disabled but its onClick still fires — ` +
+        `aria-disabled DESCRIBES a control, it does not disable it. Add the ` +
+        `\`disabled\` attribute, or return early in the handler.`,
+    );
+  }
 }
 
 /** Enable dev-mode warnings (excessive re-renders, also enables VDOM key warnings). */

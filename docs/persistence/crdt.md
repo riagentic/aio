@@ -124,15 +124,63 @@ Union by identity field. Concurrent add + remove keeps the item.
 
 Three-way merge against base. Concurrent add + remove removes the item.
 
+### text
+
+A **diff3** against the agreed base, for prose: notes, descriptions, comments,
+READMEs.
+
+```ts
+cell("docs", {
+  state: { body: "" },
+  sync: { merge: { body: "text" } },
+});
+```
+
+```
+base    intro / body / outro
+A       INTRO EDITED / body / outro
+B       intro / body / OUTRO EDITED
+result  INTRO EDITED / body / OUTRO EDITED     ← both survive, no conflict
+```
+
+Edits to **different** parts of the text are both applied. Edits to the **same**
+part are a real conflict: resolved by HLC exactly as `lww` would, and reported
+through `onConflict` — so the app can say "your change to this paragraph was
+replaced" instead of the user finding out later. Never a silent loss and never a
+mangled hybrid.
+
+Granularity follows the text: **lines** when there are lines (a paragraph is the
+unit people edit), **characters** when there are not — so a one-line title still
+merges `"Frist Post"` → `"First Post"` with someone else's appended `"!"`.
+
+Two properties are fuzzed in `tests/merge-text.test.ts`, because a merge without
+them is not usable: **both peers compute the same string** (3,000 randomized
+cases — otherwise the two have silently forked), and **the merge never invents a
+character** (2,000 cases — a merge that can invent is worse than one that loses,
+because nobody can tell).
+
+**What it is not:** a sequence CRDT (Yjs, Automerge). Those keep per-character
+identity that outlives the characters, which buys convergence under arbitrary
+concurrency and costs a different storage model than one value per field. A
+diff3 over the agreed base is convergent for what actually happens — a few
+peers, edits against a base both have seen — and honest about what does not. If
+your app is a shared code editor with twelve live cursors, put a sequence CRDT
+in a `visible: false` field and let aio sync its update blobs.
+
+Above 4,000 tokens per side it falls back to `lww`, reported as a conflict: a
+200 KB note is not being co-edited character by character, and a quadratic diff
+on it would stall the merge.
+
 ### When to Use What
 
-| Strategy      | Conflict-free  | Use case                            |
-| ------------- | -------------- | ----------------------------------- |
-| `lww`         | No (last wins) | Scalar fields, text, settings       |
-| `counter`     | Yes            | Scores, votes, inventory levels     |
-| `lww-per-key` | Per-key        | Profile objects, config maps        |
-| `set-add`     | Yes            | Collaborative lists (keep all)      |
-| `set-remove`  | Yes            | Collaborative lists (honor deletes) |
+| Strategy      | Conflict-free  | Use case                             |
+| ------------- | -------------- | ------------------------------------ |
+| `lww`         | No (last wins) | Scalars, settings, enums, flags      |
+| `text`        | Per-region     | Notes, descriptions, comments, prose |
+| `counter`     | Yes            | Scores, votes, inventory levels      |
+| `lww-per-key` | Per-key        | Profile objects, config maps         |
+| `set-add`     | Yes            | Collaborative lists (keep all)       |
+| `set-remove`  | Yes            | Collaborative lists (honor deletes)  |
 
 ## Local-first: `sync` for the whole app
 

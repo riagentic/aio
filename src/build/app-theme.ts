@@ -396,6 +396,71 @@ body{
   background:var(--aio-tint); color:var(--aio-accent-ink);
   font-size:.82em; font-weight:600;
 }
+
+/* ── the three environments a stylesheet must not ignore ────────── */
+/*
+   Everything above answers "what does this app look like". These three answer
+   "does it still work for someone whose machine is set up differently", and
+   until alpha72 the theme answered none of them. A default stylesheet that
+   only works on the author's monitor is not a default worth shipping.
+*/
+
+/* 1. A COARSE POINTER. aio builds Android APKs, and a 24px button that is
+      comfortable with a mouse is a miss with a thumb. WCAG 2.5.8 asks for
+      24px minimum and every platform guideline says 44. Only under
+      "pointer:coarse", so a dense desktop table is not inflated for a mouse
+      that does not need it. min-height + inline padding rather than a fixed
+      height: the control still grows with its content. */
+@media (pointer:coarse){
+  :where(button,[role="button"],input[type="button"],input[type="submit"],
+         input[type="reset"],select,summary,a.button,.aio-btn){
+    min-height:44px;
+  }
+  :where(input,textarea){min-height:44px}
+  /* A checkbox/radio is the one control a browser will not grow: give the
+     TAP TARGET the size instead of the box, so the visual stays 16px. */
+  :where(input[type="checkbox"],input[type="radio"]){
+    min-width:24px; min-height:24px;
+  }
+}
+
+/* 2. "prefers-contrast: more". A user who asked their OS for more contrast is
+      telling every app the same thing, and a theme built on soft borders and
+      muted secondary text is exactly what they are asking to be turned off.
+      Borders go to the ink colour, muted text stops being muted, and the
+      focus ring gets thick enough to find. */
+@media (prefers-contrast:more){
+  :root{
+    --aio-border:var(--aio-text);
+    --aio-muted:var(--aio-text);
+    --aio-shadow-1:none;
+    --aio-shadow-2:none;
+  }
+  :where(a,button,input,select,textarea,summary,[tabindex]):focus-visible{
+    outline-width:3px; outline-offset:3px;
+  }
+  :where(.card,dialog,details,input,select,textarea,button){border-width:2px}
+}
+
+/* 3. FORCED COLORS (Windows high contrast, and "forced-colors: active"
+      anywhere). The OS replaces every colour with its own palette, so custom
+      backgrounds and borders are discarded and anything that carried meaning
+      ONLY through colour disappears. Two things must be restored by hand: a
+      border where a background used to do the separating, and a focus ring in
+      the system's own highlight colour — the default one is drawn with our
+      accent, which is one of the colours that just vanished. */
+@media (forced-colors:active){
+  :where(.card,dialog,details,.badge,input,select,textarea,button){
+    border:1px solid CanvasText;
+  }
+  :where(a,button,input,select,textarea,summary,[tabindex]):focus-visible{
+    outline:3px solid Highlight; outline-offset:2px;
+  }
+  /* An SVG icon drawn with currentColor follows the system ink; one with a
+     baked fill does not. Ask the UA to adjust ours. */
+  :where(svg){forced-color-adjust:auto}
+  :where(.badge){background:Canvas; color:CanvasText}
+}
 }
 `;
 }

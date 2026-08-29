@@ -15,15 +15,40 @@ import { DatabaseSync } from "node:sqlite";
 import type { WirePatch } from "../src/protocol/patch-ops.ts";
 
 // ── stats ─────────────────────────────────────────────────────────────
-type Metric = { unit: string; median: number; p95: number; n: number };
+type Metric = {
+  unit: string;
+  /** The ROBUST estimator, and what the gate compares. */
+  p10: number;
+  min: number;
+  median: number;
+  p95: number;
+  n: number;
+};
 const metrics: Record<string, Metric> = {};
 
+/** Record one metric.
+ *
+ *  `p10` exists because the gate was unusable without it. A median on a shared
+ *  machine is dominated by whatever else is running: measured back-to-back on
+ *  an idle-ish box, `proxy-array-10k`'s median ranged 53–70 ms across three
+ *  runs of the SAME build — a 30% spread, which is wider than any regression
+ *  worth catching. The same runs' p10 ranged 48.9–52.4 (7%), and the minimum
+ *  tighter still.
+ *
+ *  That is not a quirk of this metric: a benchmark measures "how fast can this
+ *  go", and every sample above the floor is contamination, not signal. The low
+ *  quantile is the standard estimator for exactly that shape, and it is why
+ *  the committed ceiling could sit 2x above the real number for a year without
+ *  anyone noticing the drift underneath it. Median and p95 are still recorded
+ *  — they say something about variance — but the GATE reads p10. */
 function record(name: string, unit: string, samples: number[]): void {
   const s = [...samples].sort((a, b) => a - b);
   const at = (q: number) =>
     s[Math.min(s.length - 1, Math.ceil(q * s.length) - 1)]!;
   metrics[name] = {
     unit,
+    p10: at(0.1),
+    min: s[0]!,
     median: at(0.5),
     p95: at(0.95),
     n: samples.length,
@@ -293,13 +318,13 @@ const bootOpts = {
 
 // ── report ────────────────────────────────────────────────────────────
 const fmt = (v: number) => v >= 100 ? v.toFixed(1) : v.toFixed(3);
-console.log("\nmetric           unit    median      p95    n");
-console.log("─".repeat(46));
+console.log("\nmetric           unit       p10   median      p95    n");
+console.log("─".repeat(56));
 for (const [name, m] of Object.entries(metrics)) {
   console.log(
-    `${name.padEnd(16)} ${m.unit.padEnd(5)} ${fmt(m.median).padStart(8)} ${
-      fmt(m.p95).padStart(8)
-    } ${String(m.n).padStart(4)}`,
+    `${name.padEnd(16)} ${m.unit.padEnd(5)} ${fmt(m.p10).padStart(9)} ${
+      fmt(m.median).padStart(8)
+    } ${fmt(m.p95).padStart(8)} ${String(m.n).padStart(4)}`,
   );
 }
 

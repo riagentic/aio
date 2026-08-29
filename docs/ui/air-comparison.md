@@ -296,42 +296,75 @@ This is a known bug (resolved).
 
 ## 14. Bundle Size
 
-| Framework            | Core (min+gzip) | Grade |
-| -------------------- | --------------- | ----- |
-| **Svelte 5**         | ~5KB (compiled) |       |
-| **Solid**            | ~7KB            |       |
-| **AIR**              | ~20KB (gz)      |       |
-| **Vue 3**            | ~16KB           |       |
-| **React + ReactDOM** | ~40KB           |       |
+This table used to put AIR at "~20 KB" against a set of view-layer numbers, and
+it was wrong twice over: nothing measured the 20, and it was not comparing like
+with like. Both are fixed below — the numbers are what `deno task bench:bundle`
+prints, and `tests/bundle-size.test.ts` goes red if this page stops matching it.
 
-### Verdict: ✅ Competitive
+**View layer only** — what it takes to render a component:
 
-~20KB gzipped (59KB minified) — larger than Solid (~7KB) because of the VDOM and
-the reactive runtime, but 5x smaller than React. Svelte wins by compiling the
-framework away, but AIR is in the same tier as Solid.
+| Framework            | Core (min+gzip)  |
+| -------------------- | ---------------- |
+| **Svelte 5**         | ~5 KB (compiled) |
+| **Solid**            | ~7 KB            |
+| **Vue 3**            | ~16 KB           |
+| **React + ReactDOM** | ~40 KB           |
+
+AIR does not appear in that table, because AIR does not ship on its own. The
+smallest aio page pulls the renderer AND the client runtime — signals, the
+WebSocket protocol, the offline queue, CRDT merge and the reconnect logic —
+because those are what make `counter.count` a reactive read of server state
+rather than a variable.
+
+**What a page actually downloads:**
+
+| Bundle                                                      | gzip      | brotli |
+| ----------------------------------------------------------- | --------- | ------ |
+| aio: render a component                                     | 55 KB     | 48 KB  |
+| aio: + one cell (the counter app)                           | 57 KB     | 50 KB  |
+| React + Redux Toolkit + Router + a WS client + a sync layer | ~75-90 KB | —      |
+
+### Verdict: ⚠️ Bigger than a view layer, smaller than the stack it replaces
+
+If you want a renderer, AIR is the wrong size — Solid is 8x smaller and does
+that job. If you want state that is persisted, synced, offline-queued and
+reactive in the browser without assembling five libraries, 57 KB is the whole
+thing. Judge it against the second list, not the first.
+
+Since alpha72 the server compresses and revalidates, so the counter app is 50 KB
+on the wire and a 304 on every reload after that.
 
 ---
 
 ## 15. React Compatibility Layer
 
-| Compat API               | AIR            | Behavior                                  | Grade |
-| ------------------------ | -------------- | ----------------------------------------- | ----- |
-| `useState(init)`         | ✅ Provided    | Backed by signal, `[value, setter]` tuple | ✅    |
-| `useEffect(fn, deps?)`   | ✅ Provided    | Maps to `onMount`/`effect`, deps ignored  | ✅    |
-| `useCallback(fn, deps?)` | ✅ Provided    | No-op, returns fn                         | ✅    |
-| `useMemo(fn, deps?)`     | ✅ Provided    | Calls fn immediately, deps ignored        | ✅    |
-| `memo(Component)`        | ✅ Provided    | No-op, returns Component                  | ✅    |
-| `useRef(init)`           | ✅ Native      | Identical API                             | ✅    |
-| `createContext`          | ✅ Native      | Identical API                             | ✅    |
-| `onChange` -> `onInput`  | ✅ Auto-mapped | Form elements fire on keystroke           | ✅    |
-| `useId()`                | ✅ Native      | SSR-safe unique ID, per-root counter      | ✅    |
+| Compat API               | AIR            | Behavior                                                                                                                                           | Grade |
+| ------------------------ | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ----- |
+| `useState(init)`         | ✅ Provided    | Backed by signal, `[value, setter]` tuple                                                                                                          | ✅    |
+| `useEffect(fn, deps?)`   | ✅ Provided    | Deps are HONORED (React semantics): runs after mount, re-runs when a dep differs by `Object.is`, cleanup before re-run. With no deps, auto-tracks. | ✅    |
+| `useCallback(fn, deps?)` | ✅ Provided    | Returns the fn — components are not re-created, so there is no identity to stabilise                                                               | ✅    |
+| `useMemo(fn, deps?)`     | ✅ Provided    | Deps are HONORED — recomputes when one differs. `computed()` is the signal-native form                                                             | ✅    |
+| `memo(Component)`        | ✅ Provided    | Returns the component — AIR re-renders by signal, not by parent, so there is nothing to memoise                                                    | ✅    |
+| `useRef(init)`           | ✅ Native      | Identical API                                                                                                                                      | ✅    |
+| `createContext`          | ✅ Native      | Identical API                                                                                                                                      | ✅    |
+| `onChange` -> `onInput`  | ✅ Auto-mapped | Form elements fire on keystroke                                                                                                                    | ✅    |
+| `useId()`                | ✅ Native      | SSR-safe unique ID, per-root counter                                                                                                               | ✅    |
 
-### Verdict: ✅ Full migration coverage
+### Verdict: ✅ The common patterns, with the semantics they have in React
 
 React code compiles and runs after changing imports from `'react'` to `'aio'`.
-The compat layer covers all common patterns. `onChange` is auto-mapped to
-`onInput` on form elements, eliminating the last significant migration trap.
-`useId()` produces SSR-deterministic IDs matching React 18+ behavior.
+`useEffect` and `useMemo` honor their dependency arrays — this page claimed for
+several releases that they were ignored, which was never what
+`src/air/compat.ts` did; a shim that silently changed when an effect fires would
+be exactly the quiet divergence aio refuses everywhere else. `onChange` is
+auto-mapped to `onInput` on form elements, and `useId()` produces
+SSR-deterministic IDs matching React 18+.
+
+What is NOT covered, so a migration knows before it starts: class components,
+Suspense and lazy boundaries, portals, `useReducer`, `useLayoutEffect`,
+`useImperativeHandle`, and any library that reaches into React internals (most
+animation and DnD libraries do). The compat layer is a migration ramp, not a
+React implementation.
 
 ---
 
@@ -379,32 +412,32 @@ The compat layer covers all common patterns. `onChange` is auto-mapped to
 
 ## Scorecard Summary
 
-| Category                         | Grade | Notes                                      |
-| -------------------------------- | ----- | ------------------------------------------ |
-| Reactivity model                 | ✅    | Auto-tracked signals = best-in-class       |
-| Component re-render model        | ❌    | Re-executes functions (Solid runs once)    |
-| State primitives                 | ✅    | Full signal/computed/effect/batch/untrack  |
-| Lifecycle hooks                  | ✅    | Explicit named hooks, cleaner than React   |
-| Event handling — native events   | ✅    | No synthetic event overhead                |
-| Event handling — delegation      | ✅    | Root-level delegation via composedPath     |
-| Event handling — onChange compat | ✅    | Auto-mapped to onInput on form elements    |
-| JSX — VDOM vs compiled           | ❌    | VDOM overhead vs Solid/Svelte compiled     |
-| JSX — signal->DOM bypass         | ✅    | Props + text children bypass VDOM          |
-| JSX — className/style            | ✅    | Multi-format support                       |
-| Context                          | ✅    | Signal-backed, selector built-in           |
-| Error handling                   | ✅    | Declarative ErrorBoundary component        |
-| Async & Suspense                 | ✅    | Built-in resource(), lazy, Suspense        |
-| Forms                            | ✅    | Built-in signal-per-field forms            |
-| Animation                        | ✅    | Built-in Transition/TransitionGroup/spring |
-| Routing                          | ✅    | Built-in, server-integrated                |
-| SSR — hydration cost             | ❌    | Full hydration (Qwik has resumability)     |
-| SSR — mismatch safety            | ✅    | Safe fallback vs React's patch-in-place    |
-| Bundle size                      | ✅    | ~20KB gzipped                              |
-| React compat layer               | ✅    | Full coverage incl. useId, onChange compat |
-| Batteries included               | ✅    | Forms, animation, virtual list, async data |
-| Concurrent rendering             | ❌    | No priority scheduling                     |
+| Category                         | Grade | Notes                                                        |
+| -------------------------------- | ----- | ------------------------------------------------------------ |
+| Reactivity model                 | ✅    | Auto-tracked signals = best-in-class                         |
+| Component re-render model        | ❌    | Re-executes functions (Solid runs once)                      |
+| State primitives                 | ✅    | Full signal/computed/effect/batch/untrack                    |
+| Lifecycle hooks                  | ✅    | Explicit named hooks, cleaner than React                     |
+| Event handling — native events   | ✅    | No synthetic event overhead                                  |
+| Event handling — delegation      | ✅    | Root-level delegation via composedPath                       |
+| Event handling — onChange compat | ✅    | Auto-mapped to onInput on form elements                      |
+| JSX — VDOM vs compiled           | ❌    | VDOM overhead vs Solid/Svelte compiled                       |
+| JSX — signal->DOM bypass         | ✅    | Props + text children bypass VDOM                            |
+| JSX — className/style            | ✅    | Multi-format support                                         |
+| Context                          | ✅    | Signal-backed, selector built-in                             |
+| Error handling                   | ✅    | Declarative ErrorBoundary component                          |
+| Async & Suspense                 | ✅    | Built-in resource(), lazy, Suspense                          |
+| Forms                            | ✅    | Built-in signal-per-field forms                              |
+| Animation                        | ✅    | Built-in Transition/TransitionGroup/spring                   |
+| Routing                          | ✅    | Built-in, server-integrated                                  |
+| SSR — hydration cost             | ❌    | Full hydration (Qwik has resumability)                       |
+| SSR — mismatch safety            | ✅    | Safe fallback vs React's patch-in-place                      |
+| Bundle size                      | ⚠️    | 57 KB gzipped — the whole client, not a view layer (see §14) |
+| React compat layer               | ✅    | Full coverage incl. useId, onChange compat                   |
+| Batteries included               | ✅    | Forms, animation, virtual list, async data                   |
+| Concurrent rendering             | ❌    | No priority scheduling                                       |
 
-**Final score: 21 ✅ / 4 ❌**
+**Final score: 20 ✅ / 4 ❌ / 1 ⚠️**
 
 The 4 ❌ items are all **intentional architectural decisions** with clear
 reasons:

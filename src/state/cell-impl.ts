@@ -1280,6 +1280,11 @@ type StaleLedger = {
     /** …and last (inclusive); undefined = to the end. */
     to?: number;
   }>;
+  /** Per-invocation memo of built live-array views, keyed by path — see the
+   *  array read-method interception. Lives here because the ledger is already
+   *  the one object threaded through every proxy of one method call, and its
+   *  `log.length` is exactly the invalidation cursor the memo checks. */
+  live?: Map<string, { src: unknown[]; live: unknown[]; birth: number }>;
 };
 
 /** Array mutators that re-address existing indexes — a captured element proxy
@@ -1433,6 +1438,7 @@ export function createLiveProxy<S extends Record<string, unknown>>(
   _birth = 0,
 ): S {
   const pathKey = path.join(PATH_SEP);
+  const _liveArrays = (_stale.live ??= new Map());
   const noteRead = _watch ? (k: string) => _watch.reads.add(k) : undefined;
   const noteWrite = _watch ? (k: string) => _watch.writes.add(k) : undefined;
   /** Throw if this proxy's container was overwritten after its creation. The
@@ -1452,7 +1458,12 @@ export function createLiveProxy<S extends Record<string, unknown>>(
   /** Fetch a nested proxy through the cache, rebuilding it when the cached one
    *  predates an overwrite of its container — a fresh fetch through the parent
    *  is a NEW capture and must stay legal. */
-  const nestedProxy = (childPath: string[], cacheKey: string): unknown => {
+  const nestedProxy = (childKey: string, cacheKey: string): unknown => {
+    // `childKey`, not the built path: every call site's child is this proxy's
+    // own `path` plus one key, and the array is only NEEDED when the cache
+    // misses. Building it eagerly cost one 10k-element allocation storm per
+    // array read method — `s.items.reduce(...)` allocated ten thousand arrays
+    // to look ten thousand entries up in a Map, and then threw them away.
     let cached = _proxyCache.get(cacheKey);
     if (
       cached && _stale.log.length > cached.birth &&
@@ -1468,7 +1479,7 @@ export function createLiveProxy<S extends Record<string, unknown>>(
           methodName,
           getState,
           batcher,
-          childPath,
+          [...path, childKey],
           _proxyCache,
           _overlay,
           undefined,
@@ -1611,18 +1622,45 @@ export function createLiveProxy<S extends Record<string, unknown>>(
             // the SAME cached child proxy `receiver[i]` would return, so a
             // write through an element still batches like `s.items[i].q = 0`.
             const arr = fresh as unknown[];
-            const live = new Array(arr.length);
-            for (let i = 0; i < arr.length; i++) {
-              const el = arr[i];
-              if (el === null || typeof el !== "object") {
-                live[i] = el;
-                continue;
+            // MEMO. `rows.filter(...).map(...)`, or two reads in a row with no
+            // write between them, rebuilt the whole live view each time — for
+            // a 10k array that is 10k key strings and 10k Map lookups to hand
+            // back the identical proxies.
+            //
+            // Reused only when BOTH are true, and both are conservative:
+            //   • the underlying array is the SAME object, so the elements and
+            //     their indices cannot have changed; and
+            //   • the stale log has not grown by even one entry, so nothing
+            //     anywhere has invalidated a child proxy.
+            // Either one different ⇒ rebuild. It can be too cautious (a write
+            // to an unrelated path busts it); it cannot be wrong.
+            const memo = _liveArrays.get(pathKey);
+            let live: unknown[];
+            if (memo && memo.src === arr && memo.birth === _stale.log.length) {
+              live = memo.live;
+            } else {
+              live = new Array(arr.length);
+              // Hoisted: the parent half of every child's cache key is the
+              // same string for all N elements, so concatenating it inside the
+              // loop rebuilt it ten thousand times.
+              const childPrefix = pathKey + PATH_SEP;
+              for (let i = 0; i < arr.length; i++) {
+                const el = arr[i];
+                if (el === null || typeof el !== "object") {
+                  live[i] = el;
+                  continue;
+                }
+                const idx = String(i);
+                live[i] = nestedProxy(
+                  idx,
+                  path.length === 0 ? idx : childPrefix + idx,
+                );
               }
-              const idx = String(i);
-              live[i] = nestedProxy(
-                [...path, idx],
-                path.length === 0 ? idx : pathKey + PATH_SEP + idx,
-              );
+              _liveArrays.set(pathKey, {
+                src: arr,
+                live,
+                birth: _stale.log.length,
+              });
             }
             // deno-lint-ignore no-explicit-any
             return (live as any)[key](...args);
@@ -1693,7 +1731,7 @@ export function createLiveProxy<S extends Record<string, unknown>>(
         // `items[0]` names is a fact this method depends on; depending on it
         // is a read.
         noteRead?.(childKey);
-        return nestedProxy([...path, key], childKey);
+        return nestedProxy(key, childKey);
       }
 
       // AIO-4.3: any other function value on a non-array is a usage we

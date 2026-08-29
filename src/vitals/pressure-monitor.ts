@@ -185,6 +185,11 @@ export function createPressureMonitor(
   // quiet in between.
   let _overSince = 0;
   let _peakRate = 0;
+  // Unref'd for the same reason the logger heartbeat is: a SAMPLER must never
+  // be why a process is still running. It is cleared on the shutdown path, and
+  // a boot that refuses never reaches one — a corrupt `state.db` produced a
+  // clean refusal and then a process that never exited.
+  // Found by the persistence audit round.
   const _rateTimer = setInterval(() => {
     const rate = _broadcastCount;
     _broadcastCount = 0;
@@ -229,6 +234,11 @@ export function createPressureMonitor(
       }, "rate-clear");
     }
   }, 1000);
+  try {
+    (Deno as { unrefTimer?: (id: unknown) => void }).unrefTimer?.(_rateTimer);
+  } catch {
+    // aio-ok: a runtime without unrefTimer keeps the old behaviour.
+  }
 
   return {
     onBroadcastRound,

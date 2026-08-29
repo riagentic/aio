@@ -3,6 +3,7 @@
 import type { LogLevel, LogSink } from "./logger-types.ts";
 import { DEFAULT_LOG_DIR, now } from "./logger-types.ts";
 import { printConsole } from "./logger-format.ts";
+import { frozenWriteMessage, isFrozenWriteError } from "../state/immutable.ts";
 
 // ── Public singleton ──────────────────────────────────────────────────
 
@@ -18,10 +19,31 @@ export function getLogger(): LogSink | null {
   return _active;
 }
 
-/** Resolved log directory — the active logger's dir, or the default dot-dir.
- *  Single source of truth for the diagnostics + client-log sinks. */
+/** Where the app's logs live when no LOGGER is active.
+ *
+ *  Set at boot from the resolved app dirs. Without it, `logging: false` sent
+ *  the crash diagnostics to `.aio/log` RELATIVE TO THE CURRENT DIRECTORY:
+ *
+ *      ERROR action-log  write failed: NotFound: writefile '.aio/log/actions.jsonl'
+ *
+ *  once per dispatch — and the action log and the crash checkpoint, the two
+ *  artifacts that exist to explain a crash, were silently not written at all.
+ *  Turning off the console logger must not turn off the black box. */
+let _fallbackLogDir: string | null = null;
+
+/** Tell the diagnostics sinks where this app's logs live, independent of
+ *  whether a logger is running. Called once at boot, beside `registerAppDirs`.
+ *  Idempotent; the last app to boot in a process wins, which is the same rule
+ *  the logger itself follows. */
+export function setFallbackLogDir(dir: string | null): void {
+  _fallbackLogDir = dir;
+}
+
+/** Resolved log directory — the active logger's dir, the app's own log dir, or
+ *  the default dot-dir. Single source of truth for the diagnostics +
+ *  client-log sinks. */
 export function getLogDir(): string {
-  return _active?.logDir ?? DEFAULT_LOG_DIR;
+  return _active?.logDir ?? _fallbackLogDir ?? DEFAULT_LOG_DIR;
 }
 
 /** Public log API — falls back to console when AioLogger is not active.
@@ -168,5 +190,44 @@ export const log: Log = {
     c?: Record<string, unknown>,
   ): void {
     emit("error", a, b, c);
+    explainFrozenWrite(typeof b === "string" ? `${a} ${b}` : a);
   },
 };
+
+/** Said once per process — a frozen write in a hot path would otherwise repeat
+ *  the same paragraph every tick, which trains people to skip logs. */
+let _saidFrozen = false;
+
+/** @internal test seam — re-arm the once-per-process explanation. */
+// aio-ok: test-only seam — re-explaining on every tick is the bug it prevents
+export function _resetFrozenWriteHint(): void {
+  _saidFrozen = false;
+}
+
+/**
+ * A frozen-state write, explained — wherever it is LOGGED.
+ *
+ * Committed cell state is frozen (immer's `autoFreeze` is never disabled), so
+ * writing to it throws the engine's own sentence:
+ *
+ *     TypeError: Cannot assign to read only property 'n' of object '#<Object>'
+ *
+ * which names neither the cell, nor the rule, nor the fix. `immutable.ts` has
+ * been the authority for the sentence that DOES since alpha70, wired into the
+ * reducer, the test harnesses and a browser-only listener. Everywhere else —
+ * an effect, a lifecycle hook, a route handler, an `onStart` — got the raw
+ * text, and every one of those paths is CAUGHT by the framework, so no global
+ * error listener could ever reach them. What they all share is that they LOG.
+ *
+ * Observe-only: one extra line beside an error that was already reported. Dev
+ * and prod alike, because the write fails identically in both.
+ * Found by `scripts/audit-round.ts 24`.
+ */
+function explainFrozenWrite(line: string): void {
+  if (_saidFrozen || !line) return;
+  // The cheap test first: the engine's phrasings all contain one of these.
+  if (!/read.only|not extensible|Cannot delete property/i.test(line)) return;
+  if (!isFrozenWriteError(line)) return;
+  _saidFrozen = true;
+  emit("error", frozenWriteMessage("state is frozen"), undefined, undefined);
+}
