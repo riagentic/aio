@@ -3,6 +3,7 @@
 
 import type { Log } from "../diagnostics/logger-api.ts";
 import { blocking } from "../state/blocking.ts";
+import { _setUserStopHookActive } from "../state/dispatch.ts";
 import {
   abortAllInflight,
   endShutdownAbort,
@@ -420,7 +421,15 @@ export function createShutdownOrchestrator(
     // Arbitrary app code, so the budget is doing real work here: a hook that
     // awaits something that never arrives used to be a process that never died.
     if (refs.onStop) {
-      await phase(log, "hook onStop", tLeft, () => refs.onStop!());
+      // Marked, so a dispatch from inside the hook is refused with the ONE
+      // sentence that explains it: onStop runs after the final persist, so a
+      // write from here could not be saved even if it were admitted.
+      _setUserStopHookActive(true);
+      try {
+        await phase(log, "hook onStop", tLeft, () => refs.onStop!());
+      } finally {
+        _setUserStopHookActive(false);
+      }
     }
 
     // Phase 6: Release single-instance lock

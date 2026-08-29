@@ -69,22 +69,50 @@ await aio.run({
 
 ### Key options
 
-| Option                        | Type                                     | Description                                                                                                                                                                |
-| ----------------------------- | ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cells`                       | `CellEntry[]`                            | Cells to run — default: every imported `cell()` (they self-register)                                                                                                       |
-| `isolate`                     | `string[]`                               | Only activate these cells (dev convenience)                                                                                                                                |
-| `beforeReduce`                | `fn`                                     | Intercept actions before reduce — return null to drop                                                                                                                      |
-| `appId`                       | `string`                                 | App identity (locks, sockets, `state.db`) — default: deno.json `appId`/`title`/`name`, else the entry's directory name                                                     |
-| `schedules`                   | `Schedule[]`                             | Static always-on schedules                                                                                                                                                 |
-| `appDir`                      | `string`                                 | Where this app keeps everything — default `~/.<appId>`; see [Where Files Live](../persistence/where-files-live.md)                                                         |
-| `dbPragmas`                   | `string[]`                               | SQLite PRAGMAs for the app db, used verbatim — default WAL + `synchronous=NORMAL`; a ledger wants `FULL` ([sqlite](../persistence/sqlite.md#choosing-your-own-durability)) |
-| `routes`                      | `Record<string, fn>`                     | Custom HTTP routes — `/path` or `/prefix/*` (uploads, webhooks); see [Integrations](../examples/05-integrations.md)                                                        |
-| `dispatchStorm`               | `{ rate?, sustain?, breaker? } \| false` | Runaway-dispatch guard (default on: >200/s for 5s); `breaker` drops the storming action                                                                                    |
-| `users` / `resolveUser`       | map / `fn`                               | Auth — static token map or dynamic provider hook; see [auth](../../docs/auth/auth.md)                                                                                      |
-| `logging`                     | `LogConfig \| false`                     | Structured file logs — level (default `info`), dir (default `~/.<appId>/logs`)                                                                                             |
-| `maxConnections` / `wsLimits` | `number` / obj                           | WS safety limits (hardened defaults)                                                                                                                                       |
-| `onStart`                     | `(app) => void \| Promise<void>`         | Runs once the cells are bound. A throw — sync or async — is logged (`fatalOnStart: true` exits instead)                                                                    |
-| `onStop`                      | `() => void \| Promise<void>`            | Runs during shutdown and is **awaited**, inside the 5 s teardown budget — the place to finish your own writes (a flush, a handle, a child)                                 |
+| Option                        | Type                                     | Description                                                                                                                                                                   |
+| ----------------------------- | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cells`                       | `CellEntry[]`                            | Cells to run — default: every imported `cell()` (they self-register)                                                                                                          |
+| `isolate`                     | `string[]`                               | Only activate these cells (dev convenience)                                                                                                                                   |
+| `beforeReduce`                | `fn`                                     | Intercept actions before reduce — return null to drop                                                                                                                         |
+| `appId`                       | `string`                                 | App identity (locks, sockets, `state.db`) — default: deno.json `appId`/`title`/`name`, else the entry's directory name                                                        |
+| `schedules`                   | `Schedule[]`                             | Static always-on schedules                                                                                                                                                    |
+| `appDir`                      | `string`                                 | Where this app keeps everything — default `~/.<appId>`; see [Where Files Live](../persistence/where-files-live.md)                                                            |
+| `dbPragmas`                   | `string[]`                               | SQLite PRAGMAs for the app db, used verbatim — default WAL + `synchronous=NORMAL`; a ledger wants `FULL` ([sqlite](../persistence/sqlite.md#choosing-your-own-durability))    |
+| `routes`                      | `Record<string, fn>`                     | Custom HTTP routes — `/path` or `/prefix/*` (uploads, webhooks); see [Integrations](../examples/05-integrations.md)                                                           |
+| `dispatchStorm`               | `{ rate?, sustain?, breaker? } \| false` | Runaway-dispatch guard (default on: >200/s for 5s); `breaker` drops the storming action                                                                                       |
+| `users` / `resolveUser`       | map / `fn`                               | Auth — static token map or dynamic provider hook; see [auth](../../docs/auth/auth.md)                                                                                         |
+| `logging`                     | `LogConfig \| false`                     | Structured file logs — level (default `info`), dir (default `~/.<appId>/logs`)                                                                                                |
+| `maxConnections` / `wsLimits` | `number` / obj                           | WS safety limits (hardened defaults)                                                                                                                                          |
+| `onStart`                     | `(app) => void \| Promise<void>`         | Runs once the cells are bound. A throw — sync or async — is logged (`fatalOnStart: true` exits instead)                                                                       |
+| `onStop`                      | `() => void \| Promise<void>`            | Runs during shutdown and is **awaited**, inside the 5 s teardown budget — the place to finish your own writes (a flush, a handle, a child). **Must not dispatch** — see below |
+
+### `onStop` must not dispatch
+
+`onStop` runs at teardown **Phase 5** — after the dispatch drain (Phase 1) and
+after the final persist (Phase 2). A cell method called from it is refused:
+
+```
+WARN aio  dispatch after close() — 'wallet:lockVault' ignored
+  This came from your `onStop` hook. onStop runs AFTER the final persist, so a
+  write from it could not be saved even if it were admitted …
+```
+
+The refusal is the honest answer, not a limitation to work around: admitting the
+dispatch would move state the final snapshot has already read, so the write
+would be lost on disk while looking applied in memory — worse than a refusal.
+
+Call the plain function instead:
+
+```ts
+onStop: () => {
+  ring.lock();          // ✅ a function — runs, every time
+  // wallet.lockVault() // ❌ a dispatch — refused, and unsaveable anyway
+},
+```
+
+If the work must reach the store, it belongs **before** shutdown — in the method
+that decided it, or in a `schedules` entry — not in the hook that runs after the
+last write.
 
 ### Cell isolation (dev)
 
