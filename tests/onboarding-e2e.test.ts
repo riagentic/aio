@@ -258,10 +258,15 @@ Deno.test({
 
       if (capable) {
         assertEquals(r.code, 0, `android build failed:\n${msg}`);
-        const apk = [...Deno.readDirSync(dir)].some((e) =>
-          e.isFile && e.name.endsWith(".apk")
+        // The APK is PLACED in dist/ with the version in its name, like every
+        // other artifact — `--android` goes through the fleet now, so it can no
+        // longer be looked for in the project root.
+        const distFiles = [...Deno.readDirSync(join(dir, "dist"))]
+          .filter((e) => e.isFile).map((e) => e.name);
+        assert(
+          distFiles.some((n) => n.endsWith(".apk")),
+          `toolchain present but no .apk in dist/: ${distFiles.join(", ")}`,
         );
-        assert(apk, "toolchain present but no .apk produced");
       } else {
         assert(r.code !== 0, "expected a non-zero exit without the toolchain");
         assert(

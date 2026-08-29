@@ -300,9 +300,15 @@ Deno.test("build --compile --headless: refuses to package an android bundle as a
       "src",
       "build.ts",
     );
+    // Run the PER-TARGET build, the way the fleet runs it: `AIO_BUILD_VERSION`
+    // set. That marker is what tells `build.ts` it is a child rather than an
+    // entry point, so it builds instead of delegating — and it is the only way
+    // to reach the case this test is about. A fleet run starts from a clean
+    // `dist/`, so a bundle left by a PREVIOUS run can no longer be packaged at
+    // all; the hazard that remains is android-then-server INSIDE one fleet run,
+    // where the second target's child sees the first target's bundle. This is
+    // that child, with that bundle.
     const r = await new Deno.Command(Deno.execPath(), {
-      // The fleet's `server` target — its own flag set, exactly as the
-      // fleet passes it. A set that names no target is refused, by design.
       args: [
         "run",
         "-A",
@@ -313,6 +319,15 @@ Deno.test("build --compile --headless: refuses to package an android bundle as a
         "--remote",
       ],
       cwd: dir,
+      env: {
+        ...Deno.env.toObject(),
+        AIO_BUILD_VERSION: JSON.stringify({
+          version: "1.0.0",
+          base: "1.0",
+          build: 0,
+          source: "pinned",
+        }),
+      },
       stdout: "piped",
       stderr: "piped",
     }).output();
