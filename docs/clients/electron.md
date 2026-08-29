@@ -82,6 +82,45 @@ binds zero ports. The port is printed on the boot line and recorded in the lock,
 which is how `am shot` (a headless screenshot) finds it. Anything that speaks
 CDP can attach to `http://127.0.0.1:<port>/json`.
 
+## The Content-Security-Policy warning
+
+Every Electron run — dev **and** packaged — prints this:
+
+```
+Electron Security Warning (Insecure Content-Security-Policy)
+This renderer process has either no Content Security Policy set or a policy with
+"unsafe-eval" enabled. … This warning will not show up once the app is packaged.
+```
+
+Two things are worth knowing, because both are easy to misread:
+
+**The last sentence is not true for aio's Electron target.** Electron suppresses
+the warning when `app.isPackaged` is true, and an aio AppImage runs a copied
+Electron runtime against `main.cjs` rather than an asar bundle — so `isPackaged`
+is false and the warning follows the app into production.
+
+**aio's default CSP does not silence it, by design.** The default (`"basic"`)
+sends `base-uri`, `object-src`, `frame-ancestors` and `form-action` — the
+directives that cannot break a page — and deliberately says nothing about
+scripts, so an app that loads a font, a CDN script or an off-origin image keeps
+working. Electron's check probes whether `eval` runs; a policy with no
+`script-src` does not stop it, so the warning fires.
+
+To satisfy the check, restrict scripts:
+
+```ts
+await aio.run({
+  cells: [app],
+  security: { csp: "strict" }, // adds default-src 'self' + script-src without 'unsafe-eval'
+});
+```
+
+Read [`csp: "strict"`](../auth/auth.md#response-security-headers) first: it is
+opt-in precisely because it **can** break a page that reaches off-origin. If
+your renderer displays peer-controlled text or images — a chat, a feed, anything
+with someone else's content in it — that trade is usually worth making, and
+`img-src 'self' data: blob:` plus an explicit host is the usual adjustment.
+
 ## UDS transport
 
 By default (`transport: 'auto'`), local Electron apps use a local socket — a

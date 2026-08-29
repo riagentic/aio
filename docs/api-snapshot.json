@@ -1874,7 +1874,7 @@
         },
         "TestUIOptions": {
           "kind": "interface",
-          "sig": "99ecc65a2aa7a139"
+          "sig": "1707bf42e7782c48"
         },
         "TestWorkerMode": {
           "kind": "typeAlias",
