@@ -303,6 +303,39 @@ export function createWsManager(deps: WsDeps): WsManager {
   // Global rolling-window message counter — protects against distributed
   // clients each staying under the per-socket limit while flooding the server.
   let _totalMsgsThisSec = 0;
+  /** The connection ceiling has been reported once for this process. */
+  let _warnedMaxConn = false;
+
+  /** Tell the SENDER its frame was refused.
+   *
+   *  A limit enforced by silence is indistinguishable from a bug in the app.
+   *  Three of these paths dropped the frame, logged it on the SERVER, and
+   *  returned — while client sends are fire-and-forget, so a dropped frame is
+   *  a message that vanishes on both ends. A field report raised `wsLimits` on
+   *  both hops to stop losing photos (base64 + JSON wrapping puts a ~0.75 MB
+   *  image over the 1 MB frame default) and could only find out by inference.
+   *
+   *  `diag` is an existing S→C kind that every v3 client already routes to one
+   *  sink (overlay when the page has one, console otherwise), so this adds no
+   *  protocol vocabulary and no version bump — the refusal simply arrives. */
+  const refuse = (
+    socket: WebSocket,
+    kind: string,
+    message: string,
+    hint: string,
+  ): void => {
+    try {
+      socket.send(enc("diag", {
+        type: `ws-${kind}`,
+        severity: "error",
+        source: "server-ws",
+        message,
+        hint,
+        ts: Date.now(),
+      }));
+    } catch { /* aio-ok: the socket is gone — the log line is the record */ }
+  };
+
   /** One "fuse tripped" line per window, not one per dropped frame. */
   let _globalFuseReported = false;
   let _globalRateTimer: ReturnType<typeof setTimeout> | undefined;
@@ -513,6 +546,27 @@ export function createWsManager(deps: WsDeps): WsManager {
 
     const maxConn = deps.maxConnections ?? WS_MAX_CONNECTIONS;
     if (connections.size >= maxConn) {
+      // A CEILING THAT IS HIT IS SAID OUT LOUD — once, then debug.
+      //
+      // This was `deps.debug` alone: the 101st user of an exposed app got a
+      // bare 503 and the operator saw nothing at all. 100 is right for a
+      // desktop app talking to itself and surprising for a LAN server — a
+      // field report's relay registers up to 10,000 usernames and had never
+      // overridden it, because nothing had ever told them the number existed.
+      //
+      // Once per process, naming the knob: a full server would otherwise
+      // print one line per refused connection, which is how the one line that
+      // explains an outage gets lost.
+      if (!_warnedMaxConn) {
+        _warnedMaxConn = true;
+        log.warn(
+          "ws",
+          `connection ceiling reached: ${connections.size} of ${maxConn} — ` +
+            `further clients are refused with 503 until one disconnects. ` +
+            `Raise it with aio.run({ maxConnections: N }) if this app serves ` +
+            `more than ${maxConn} people at once. (said once per process)`,
+        );
+      }
       deps.debug(`ws: rejected — max connections (${maxConn})`);
       return new Response("Too Many Connections", { status: 503 });
     }
@@ -800,6 +854,18 @@ export function createWsManager(deps: WsDeps): WsManager {
           source: "server-ws",
         });
       }
+      // Told to the sender EVERY time, unlike the log line: the fuse is
+      // server-wide, so this client may be an innocent bystander and has no
+      // other way to learn its frame is gone.
+      refuse(
+        socket,
+        "global-rate",
+        `this frame was dropped: the server is over its total frame budget ` +
+          `(${globalCap}/sec across ${connections.size} client(s))`,
+        `this is a server-wide fuse, so another client may be the cause; ` +
+          `aio.run({ wsLimits: { messagesPerSec: N } }) raises both the ` +
+          `per-client budget and this ceiling`,
+      );
       return;
     }
 
@@ -824,6 +890,19 @@ export function createWsManager(deps: WsDeps): WsManager {
           socket.close(1008, "Rate limit exceeded");
         } catch { /* already closed */ }
         return;
+      }
+      // The drops BEFORE the threshold used to be silent on both ends — the
+      // client sends fire-and-forget, so its message simply vanished. It now
+      // learns on the first one, while it still has a socket to hear on.
+      if (meta.consecutiveDrops === 1) {
+        refuse(
+          socket,
+          "rate",
+          `this frame was dropped: this connection is over its budget of ` +
+            `${wsRateLimit} messages/sec`,
+          `raise it with aio.run({ wsLimits: { messagesPerSec: N } }), or ` +
+            `batch — ${CONSECUTIVE_DROP_THRESHOLD} in a row closes the socket`,
+        );
       }
       return;
     }
@@ -852,6 +931,11 @@ export function createWsManager(deps: WsDeps): WsManager {
         source: "server-ws",
       });
       try {
+        // The original refusal: a bare JSON object, which a non-aio peer can
+        // read — and aio's OWN client cannot, because `dec()` rejects anything
+        // that is not a v2 envelope and logs "undecodable frame — dropped".
+        // Kept for the peers it does serve; the envelope below is the one this
+        // framework's client actually surfaces.
         socket.send(
           JSON.stringify({
             error: "message_too_large",
@@ -860,6 +944,15 @@ export function createWsManager(deps: WsDeps): WsManager {
           }),
         );
       } catch { /* client gone */ }
+      refuse(
+        socket,
+        "too-large",
+        `this frame was dropped: ${e.data.length} bytes is over the ` +
+          `${wsMaxMessage}-byte limit`,
+        `raise it with aio.run({ wsLimits: { maxMessageBytes: N } }) — a ` +
+          `photo is base64'd and JSON-wrapped on the way here, so it arrives ` +
+          `about 1.35x its size on disk`,
+      );
       return;
     }
     meta.bytesThisSec += e.data.length;
@@ -874,6 +967,16 @@ export function createWsManager(deps: WsDeps): WsManager {
         ts: Date.now(),
         source: "server-ws",
       });
+      refuse(
+        socket,
+        "byte-rate",
+        `this frame was dropped: the connection is over its byte budget (${
+          (wsBytesPerSec / 1_000_000).toFixed(1)
+        } MB/s)`,
+        `raise it with aio.run({ wsLimits: { bytesPerSec: N } }) — a photo is ` +
+          `base64'd and JSON-wrapped on the way here, so it arrives about ` +
+          `1.35x its size on disk`,
+      );
       return;
     }
 

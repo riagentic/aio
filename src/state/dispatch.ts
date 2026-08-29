@@ -168,6 +168,23 @@ import { deepFreeze } from "./immutable.ts";
 /** Queue depth limit — prevents unbounded memory growth from burst dispatches.
  *  THE number: whatever the queue is allowed to hold, the drain must be
  *  allowed to process. */
+/** True while the app's own `onStop` hook is running.
+ *
+ *  The one thing the drop warning below could not say, and the one an app
+ *  author most needs: "this came from YOUR onStop". `onStop` runs at shutdown
+ *  Phase 5 — after the drain (Phase 1) and after the final persist (Phase 2)
+ *  — so a dispatch from it is refused, and could not have been saved even if
+ *  it were admitted. A field report's `onStop` was one line, `dm.lockVault()`,
+ *  whose whole job is wiping key material on exit: it never ran, on every
+ *  clean shutdown, and said so in a warning emitted at the one moment nobody
+ *  is watching. */
+let _inUserStopHook = false;
+
+/** @internal — set by the shutdown orchestrator around Phase 5. */
+export function _setUserStopHookActive(active: boolean): void {
+  _inUserStopHook = active;
+}
+
 const QUEUE_MAX = 10_000;
 /** Safety limit — prevents infinite effect→dispatch loops.
  *
@@ -508,7 +525,14 @@ export function createDispatch<S, A, E>(
                 `arrived after the final persist read the state; it is LOST ` +
                 `(the method ignored its abort signal past the drain deadline)`
               : `dispatch after close() — '${t}' ignored (further drops of ` +
-                `this type suppressed; ${closedDropCount} dropped so far)`,
+                `this type suppressed; ${closedDropCount} dropped so far)` +
+                (_inUserStopHook
+                  ? `\n  This came from your \`onStop\` hook. onStop runs ` +
+                    `AFTER the final persist, so a write from it could not ` +
+                    `be saved even if it were admitted — call the plain ` +
+                    `function instead of the cell method (the state half is ` +
+                    `already gone), or do the work before shutdown.`
+                  : ""),
           );
         }
         return rejectDropped(
