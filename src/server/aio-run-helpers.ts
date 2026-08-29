@@ -491,8 +491,18 @@ export function initDiagAndVitals(
  *  was fixed once, in isolation, so the artifact ended up HALF-identified —
  *  which is exactly why this is one function and not three lookups.
  *
- *  `deno compile` embeds deno.json next to the entry module (see
- *  `assetIncludes`), so the same lookup answers in dev and in a binary.
+ *  AIO'S BUILDER embeds deno.json next to the entry module — `assetIncludes`
+ *  passes `--include <deno.json>` and `--include .aio/build-version.json` —
+ *  so the same lookup answers in dev and in a binary it produced.
+ *
+ *  `deno compile` ON ITS OWN does NOT: it takes deno.json as the CONFIG,
+ *  which does not make the file readable through the binary's VFS. The read
+ *  below then misses, the walk finds nothing, and the binary knows neither
+ *  its version nor its title nor its target — reporting "unknown (compiled
+ *  binary carries no build stamp …)". A field report hit exactly this
+ *  compiling a repo's SECOND app by hand (the fleet reads one `entry`), and
+ *  this comment said the behaviour that does not hold. Both `--include`s are
+ *  now named in the failure itself.
  *
  *  Four levels up, NEAREST wins: the two-level version resolved `src/app.ts`
  *  but never a nested entry like `src/relay/app.ts`, which then silently

@@ -215,6 +215,7 @@ const FAST: [string, string[]][] = [
   ["check:log-prefix", ["deno", "task", "check:log-prefix"]],
   ["check:api", ["deno", "task", "check:api"]],
   ["check:docs", ["deno", "task", "check:docs"]],
+  ["check:env", ["deno", "task", "check:env"]],
   ["update:docs (no diff)", ["deno", "task", "update:docs", "--", "--check"]],
   ["check:doc-coverage", ["deno", "task", "check:doc-coverage"]],
   ["check:sanitizers", ["deno", "task", "check:sanitizers"]],

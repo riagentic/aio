@@ -455,9 +455,19 @@ else
     fi
     desktop_dir="$HOME/.local/share/applications"
     if mkdir -p "$desktop_dir" 2>/dev/null; then
+      # Exec sets TMPDIR to a private per-user directory FIRST.
+      #
+      # An AppImage unpacks itself into $TMPDIR — and the AppImage runtime
+      # reads it before AppRun, before the app, before anything aio ships can
+      # run. The default is /tmp, which is world-readable and (on the
+      # FUSE-less extract path) a predictable digest another user can create
+      # first. A field report got the warning aio prints about this and could
+      # not act on it: the advice reaches whoever LAUNCHES the artifact, and a
+      # double-click has no launcher to put it in — except this one.
       {
         printf '[Desktop Entry]\nType=Application\nName=%s\n' "$app_base"
-        printf 'Exec=%s\n' "$installed"
+        printf 'Exec=sh -c '\''D="${XDG_CACHE_HOME:-$HOME/.cache}/%s"; mkdir -p "$D"; chmod 700 "$D" 2>/dev/null; TMPDIR="$D" exec "%s" "$@"'\'' _ %%U\n' \
+          "$app_base" "$installed"
         [ -f "$icon" ] && printf 'Icon=%s\n' "$icon"
         printf 'Categories=Utility;\nTerminal=false\n'
       } > "$desktop_dir/$app_base.desktop" 2>/dev/null \
