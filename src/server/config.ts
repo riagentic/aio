@@ -241,6 +241,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "_reduceBreakdown",
   "_onReportOptsReady",
   "_syncCellIds",
+  "_persistingCellIds",
   "_getDBState",
   "_getUIState",
   "_cellPatchStrategies",
