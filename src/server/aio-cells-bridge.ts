@@ -308,6 +308,10 @@ export function buildLegacyConfig(
     _syncCellIds: composed.cells
       .filter((f) => f.__aio.syncConfig)
       .map((f) => f.__aio.id),
+    // Everything that is not explicitly `persist: "none"` reaches the store.
+    _persistingCellIds: composed.cells
+      .filter((f) => f.__aio.persist !== "none")
+      .map((f) => f.__aio.id),
     _cellMigrations: (() => {
       const m = new Map<
         string,

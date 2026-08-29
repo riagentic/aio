@@ -727,7 +727,40 @@ async function probeDataContract(binaryPath: string): Promise<DataContract> {
       `exited ${out.code}${tail ? `:\n       ${tail}` : ""}`,
     ));
   }
-  return parseDataContract(stdout, `\`${binaryPath} --aio-data-contract\``);
+  const contract = parseDataContract(
+    stdout,
+    `\`${binaryPath} --aio-data-contract\``,
+  );
+  // THE WARNING THE CLI USED TO OWN.
+  //
+  // `aio ship`'s CLI prints "N cell(s), schema vM" — so an operator sees a 0.
+  // A programmatic `shipApp()` caller saw nothing at all, and a repo with two
+  // apps MUST call it programmatically (the fleet builder reads one `entry`).
+  // A field report published every release of a messenger with `cells: {}`:
+  // the data gate the updater leads with had nothing to weigh, and a build
+  // that could not read a week of queued mail would have installed cleanly.
+  //
+  // The comparison needs both halves and both are here — the contract this
+  // function just parsed, and the count the binary printed on stderr. Silent
+  // when the app really persists nothing, which is the other meaning of an
+  // empty contract and is not a defect.
+  const persisting = Number(
+    /^\[aio\] persisting-cells: (\d+)$/m.exec(
+      new TextDecoder().decode(out.stderr),
+    )?.[1] ?? "0",
+  );
+  if (Object.keys(contract.cells).length === 0 && persisting > 0) {
+    console.warn(
+      `[ship] ⚠ the data contract declares 0 cells, but this build persists ` +
+        `${persisting} — every install will accept this release WITHOUT a ` +
+        `data check.\n` +
+        `        A cell reaches the contract by declaring \`version\` (or an ` +
+        `\`onMigrate\`): cell("name", { version: 1, … }).\n` +
+        `        Until then an incompatible build installs cleanly over a ` +
+        `user's existing data. See docs/deploy/updates.md.`,
+    );
+  }
+  return contract;
 }
 
 /** Did this exit mean "the file is not a program", rather than "the program
@@ -971,6 +1004,10 @@ export async function shipApp(opts: {
   commit?: string | null;
   /** Publish a `-dirty.*` / `-nogit.*` version anyway — logged, never silent. */
   allowDirty?: boolean;
+  /** How to spell "publish it anyway" in the surface the caller is using —
+   *  the `ship` CLI passes `"--allow-dirty"`, everything else gets the
+   *  option name. @internal */
+  escapeHint?: string;
   /** Path to a JSON `{ privateKey, publicKey }` (JWKs) — generateSigningKey(). */
   keyPath?: string;
   /** Manifest output path (default: `<binaryPath>.ship.json`). */
@@ -1086,11 +1123,15 @@ export async function shipApp(opts: {
     buildNumber ??= bv.build;
     commit ??= bv.commit;
   }
-  const unpublishable = unpublishableReason(version);
+  // The escape names what THIS caller can type: `shipApp()` takes an option,
+  // the `ship` CLI takes a flag, and the CLI passes its own spelling in.
+  const unpublishable = unpublishableReason(version, opts.escapeHint);
   if (unpublishable) {
     if (!opts.allowDirty) throw new Error(`[ship] ✗ ${unpublishable}`);
     console.warn(
-      `[ship] ⚠ --allow-dirty: publishing ${version} — ${unpublishable}`,
+      `[ship] ⚠ ${
+        opts.escapeHint ?? "allowDirty: true"
+      }: publishing ${version} — ${unpublishable}`,
     );
   }
   const fileName = opts.binaryPath.replace(/.*[\\/]/, "");
@@ -1652,6 +1693,7 @@ if (import.meta.main) {
       dataPath: flag("data"),
       noData: args.includes("--no-data"),
       allowDirty: args.includes("--allow-dirty"),
+      escapeHint: "--allow-dirty",
       channelDir: flag("channel-dir"),
     });
   } catch (e) {

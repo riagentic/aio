@@ -769,11 +769,13 @@ export async function buildAll(): Promise<number> {
   for (const n of buildVersionNotes(version)) {
     console.log(`  ${C.yellow}note:${C.r} ${n}`);
   }
-  if (release && unpublishableReason(version.version)) {
+  // A fleet build is reached from a CLI, so the CLI's own spelling is the
+  // one its reader can type.
+  const _unpublishable = unpublishableReason(version.version, "--allow-dirty");
+  if (release && _unpublishable) {
     console.log(
-      `  ${C.yellow}note:${C.r} ${
-        unpublishableReason(version.version)
-      } — this --release build cannot be published as is`,
+      `  ${C.yellow}note:${C.r} ${_unpublishable} — this --release build ` +
+        `cannot be published as is`,
     );
   }
   // Forwarded, not interpreted: only `--android` consults it (see
