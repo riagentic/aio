@@ -697,8 +697,21 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
     // "module evaluation is still pending … This is a bug in Deno", which
     // names neither aio nor the app. The factories register on call, so the
     // opt-in property survives and the hazard does not.
-    if (fc.updates) createUpdatesCell();
-    if (fc.feedback) createFeedbackCell();
+    //
+    // KEEP THE HANDLE. Registering is only half the job: an app that also
+    // passes an explicit `cells:` list makes the registry unreadable below,
+    // so aio created its own cell, dropped it on the floor, printed
+    // `updates  prod · manifest · every 6h · ask first` in the boot report,
+    // and only THEN called `beginUpdates()` — which threw as an unhandled
+    // rejection, after the success banner, leaving the app running with the
+    // feature dead. A field report (dm) shipped a self-update that could
+    // never run for the app's whole life, green in every test and every
+    // `deno task dev`, because the config that reaches this branch only
+    // exists in a released build.
+    const _builtins = [
+      fc.updates ? createUpdatesCell() : undefined,
+      fc.feedback ? createFeedbackCell() : undefined,
+    ].filter((c): c is NonNullable<typeof c> => c !== undefined);
 
     // Isolate filter
     const cliIsolate = parseCli().isolate;
@@ -713,9 +726,27 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
     // on import, so a plugin's cells are already in the registry list and
     // adding them again would be the same cell twice. `composeCells` still
     // refuses a genuine clash between two DIFFERENT cells sharing an id.
-    const _ownCells = fc.cells && fc.cells.length > 0
+    const _declared = fc.cells && fc.cells.length > 0
       ? fc.cells
       : [...getRegisteredCells().values()];
+    // aio's OWN cells are appended to whatever the app declared, deduped by
+    // id — the app's definition still wins if it listed the same cell itself.
+    // The config asked for the feature; dropping the cell that implements it
+    // because the app also spelled out its own list serves no one, and the
+    // plugin merge directly below has always worked exactly this way.
+    const _ownCells = _builtins.length
+      ? [
+        ..._declared,
+        ..._builtins.filter((b) => {
+          const bid =
+            (("__aio" in b ? b : b.cell) as { __aio: { id: string } }).__aio.id;
+          return !_declared.some((o) =>
+            (("__aio" in o ? o : o.cell) as { __aio: { id: string } }).__aio
+              .id === bid
+          );
+        }) as unknown as typeof _declared,
+      ]
+      : _declared;
     const allCells = _plugins.cells.length
       ? [
         ...(_plugins.cells as typeof _ownCells).filter((p) =>

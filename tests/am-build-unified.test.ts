@@ -12,6 +12,7 @@
 //      same artifact names; `deno task compile` and `am compile` the same
 //      single artifact.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { lastFlag } from "../src/build/build-flags.ts";
 import { join } from "@std/path";
 import {
   argvAfterVerb,
@@ -84,11 +85,16 @@ Deno.test("am compile is deno task compile; am compile <t> is build --targets=<t
     task: "compile",
     args: ["--release"],
   });
-  // The compile task already carries `--targets=<default>` and the fleet
-  // reads the FIRST one — so a second target must go through `build`.
+  // ONE VERB IS ONE TASK. `am compile <t>` runs the app's own `compile`
+  // task with the target as an override — it used to re-route to `build`,
+  // because the compile task line carries a `--targets=<default>` and the
+  // fleet read the FIRST one. That made `am compile cli` and
+  // `deno task compile --targets=cli` two different commands, which is the
+  // drift this module exists to prevent. The fleet now takes the LAST
+  // occurrence (and says so), matching `parseCli`.
   assertEquals(planTask("compile", ["cli"]), {
     ok: true,
-    task: "build",
+    task: "compile",
     args: ["--targets=cli"],
   });
   assert(!planTask("compile", ["cli", "server"]).ok);
@@ -312,4 +318,36 @@ Deno.test({
       await Deno.remove(dir, { recursive: true });
     }
   },
+});
+
+// ── the fleet's own argv rule ────────────────────────────────────────
+//
+// `flag()` in build-all.ts used to take the FIRST `--name=` in argv, while
+// `parseCli` (the runtime's reader) has always taken the LAST. One repo, two
+// answers to "which flag wins" — and the difference was reachable from a
+// command the scaffolder writes: `deno task compile` bakes
+// `--targets=<default>`, so `deno task compile --targets=cli` built the
+// DEFAULT and named its artifact accordingly, silently.
+Deno.test("build-all: the LAST --targets wins, and a repeat is reported", () => {
+  const seen: string[][] = [];
+  assertEquals(
+    lastFlag(
+      ["--targets=browser", "--targets=cli"],
+      "targets",
+      (v) => seen.push(v),
+    ),
+    "cli",
+    "the operator's flag comes after the task's and must win",
+  );
+  assertEquals(seen, [["browser", "cli"]], "a repeat is never silent");
+  // One occurrence is the ordinary case and says nothing.
+  seen.length = 0;
+  assertEquals(
+    lastFlag(["--targets=cli"], "targets", (v) => seen.push(v)),
+    "cli",
+  );
+  assertEquals(seen, []);
+  assertEquals(lastFlag([], "targets"), undefined);
+  // A prefix must not match a different flag.
+  assertEquals(lastFlag(["--targets-of=x"], "targets"), undefined);
 });
