@@ -276,6 +276,28 @@ export type AioConfig<S, A, E> = {
    *  in the state channel. Reserved: /__aio and /ws. */
   routes?: Record<string, import("./route.ts").RawRouteHandler>;
   syncIntervalMs?: number; // default: 50 — max 1 state push per N ms (0 = microtask coalescing only)
+  /** Flags this app answers ITSELF — declared so aio passes them through
+   *  instead of refusing them as unknown.
+   *
+   *  aio refuses an unknown flag rather than ignoring it (`--experse` used to
+   *  warn and boot, with the app on 127.0.0.1 while its author believed it was
+   *  on the LAN). That stays. This is how an app with its own verbs takes part
+   *  in the same vocabulary: declared flags pass through, and a typo in one
+   *  gets the same did-you-mean as a typo in aio's own.
+   *
+   *  Spelled exactly as typed — `"--sync"` for a switch, `"--user="` for one
+   *  that takes a value. Reading them is the app's job (`Deno.args`, or
+   *  `args()` from `aio/cli`); aio only stops refusing them.
+   *
+   *  ```ts
+   *  await aio.run({ cells: [app], appFlags: ["--sync", "--user="] });
+   *  ```
+   *
+   *  The alternative the error suggests — everything after a bare `--` —
+   *  cannot work for a compiled binary that bakes arguments into its argv:
+   *  the baked ones come first, the operator's come last, and no position
+   *  satisfies both. */
+  appFlags?: string[];
   maxConnections?: number; // max concurrent WebSocket clients (default: 100)
   wsLimits?: WsLimits; // per-client WS rate/size limits (advanced; defaults hardened)
   allowedOrigins?: string[]; // extra hosts/origins this app may be reached as — read by BOTH the WS Origin check and the Host (DNS-rebinding) gate (reverse proxy, custom domains)
@@ -730,6 +752,9 @@ export type CellsConfig = {
    *  in the state channel. Reserved: /__aio and /ws. */
   routes?: Record<string, import("./route.ts").RawRouteHandler>;
   maxConnections?: number;
+  /** Flags this app answers itself — declared so aio passes them through
+   *  instead of refusing them as unknown. See {@link AioConfig.appFlags}. */
+  appFlags?: string[];
   /** Per-client WebSocket safety limits (advanced; defaults are hardened). */
   wsLimits?: WsLimits;
   /** Extra allowed WS origins beyond localhost + own host (reverse proxy, custom domains). */

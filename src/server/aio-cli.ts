@@ -1,4 +1,7 @@
-import { AIO_RUNTIME_FLAG_SPECS } from "../diagnostics/runtime-flags.ts";
+import {
+  AIO_RUNTIME_FLAG_SPECS,
+  AIO_RUNTIME_FLAGS,
+} from "../diagnostics/runtime-flags.ts";
 // CLI parsing — pure functions, no aio.ts internal dependencies
 import { log } from "../diagnostics/logger-api.ts";
 import { teachableError } from "../diagnostics/error.ts";
@@ -116,9 +119,65 @@ function hintAlias(spelling: string, msg: string): void {
 // keep parsing fresh and cannot leak a cached answer into each other.
 let _parsedDefault: CliFlags | null = null;
 
+/** Flags the APP declared as its own (`aio.run({ appFlags })`), as they are
+ *  spelled on the command line. */
+let _appFlags: string[] = [];
+
+/** Declare the flags this app answers itself, so aio passes them through
+ *  instead of refusing them as unknown.
+ *
+ *  The refusal is right and stays: `--experse` used to warn and boot, with the
+ *  app bound to 127.0.0.1 while its author believed it was on the LAN. What it
+ *  lacked was a way for an app with its OWN verbs to take part. The escape the
+ *  error offers — "put an app's own arguments after a bare `--`" — cannot work
+ *  for a compiled binary that bakes arguments into its argv: the baked ones
+ *  come first and the operator's come last, so no position satisfies both. A
+ *  field report deleted its two words out of `Deno.args` with
+ *  `Object.defineProperty` before calling `aio.run()`, which works only
+ *  because that descriptor happens to be configurable.
+ *
+ *  Declared flags get the same treatment as aio's own: passed through, and
+ *  offered as a did-you-mean for a typo. Spelled `--name` (a switch) or
+ *  `--name=` (takes a value), exactly like `AIO_RUNTIME_FLAG_SPECS`.
+ *
+ *  @internal — the app-facing spelling is `aio.run({ appFlags: [...] })`. */
+export function declareAppFlags(names: readonly string[] | undefined): void {
+  const next: string[] = [];
+  for (const raw of names ?? []) {
+    const name = raw.trim();
+    if (!name.startsWith("--") || name.length < 3) {
+      throw teachableError(
+        `appFlags: ${JSON.stringify(raw)} is not a flag`,
+        `write it exactly as it is typed: "--sync" for a switch, "--user=" ` +
+          `for one that takes a value.`,
+      );
+    }
+    if (AIO_RUNTIME_FLAGS.has(name.endsWith("=") ? name.slice(0, -1) : name)) {
+      throw teachableError(
+        `appFlags: ${name} is one of aio's own flags`,
+        `pick another name — a flag cannot mean two things in one process, ` +
+          `and the app would silently lose whichever meaning aio applied ` +
+          `first. Run with --help for the full list.`,
+      );
+    }
+    next.push(name);
+  }
+  _appFlags = next;
+  // A declaration made after something already parsed must still take effect:
+  // the memo holds an answer computed under the old vocabulary.
+  _parsedDefault = null;
+}
+
+/** What the app declared. Pure read — used by `aio/cli`'s own parser so one
+ *  binary answers both vocabularies. @internal */
+export function appFlagSpecs(): readonly string[] {
+  return _appFlags;
+}
+
 /** Test seam: forget the memoized default parse. @internal */
 export function _resetParsedCli(): void {
   _parsedDefault = null;
+  _appFlags = [];
   _hintedBareServerUrl = false;
   _hintedAliases.clear();
   _cdpPort = undefined;
@@ -186,7 +245,9 @@ function badValue(
 
 function _parseCliUncached(args: readonly string[]): CliFlags {
   const r: CliFlags = { verbose: false };
-  const known = [...AIO_RUNTIME_FLAG_SPECS];
+  // aio's own flags plus whatever the app declared — one vocabulary, so a
+  // typo in an app flag gets the same did-you-mean as a typo in aio's.
+  const known = [...AIO_RUNTIME_FLAG_SPECS, ..._appFlags];
   for (const arg of args) {
     if (arg === "--") break; // everything after `--` belongs to the app
     if (arg.startsWith("--port=")) {
@@ -377,8 +438,12 @@ function _parseCliUncached(args: readonly string[]): CliFlags {
         near
           ? `did you mean ${near}${
             known.includes(near + "=") ? "=<value>" : ""
-          }? Run with --help for every flag; put an app's own arguments after a bare \`--\`.`
-          : `run with --help for every flag aio accepts; put an app's own arguments after a bare \`--\`, where aio stops parsing.`,
+          }? Run with --help for every flag. If this is your app's own flag, declare it: aio.run({ appFlags: ["${
+            arg.split("=")[0]
+          }"] }) — or put app arguments after a bare \`--\`.`
+          : `run with --help for every flag aio accepts. If this is your app's own flag, declare it: aio.run({ appFlags: ["${
+            arg.split("=")[0]
+          }"] }) — or put app arguments after a bare \`--\`, where aio stops parsing (a compiled binary that bakes arguments into its argv cannot use \`--\`; declare them).`,
       );
     }
   }

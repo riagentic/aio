@@ -196,6 +196,36 @@ Deno.test("answers", async () => {
 `CliExit(code)` instead of exiting, reads `input` as stdin (exhausted input is
 EOF, never a hang), and records raw-mode toggles in `raw`.
 
+## Your app's own flags
+
+aio **refuses** an unknown flag rather than ignoring it — `--experse` used to
+warn and boot, with the app on 127.0.0.1 while its author believed it was on the
+LAN. So an app with its own verbs has to say so:
+
+```ts
+await aio.run({
+  cells: [app],
+  appFlags: ["--sync", "--user="], // exactly as typed: "=" means it takes a value
+});
+```
+
+Declared flags pass through untouched — reading them is your job (`Deno.args`,
+or `args()` above). Everything else is still refused, and a typo in one of
+_your_ flags gets the same did-you-mean as a typo in one of aio's:
+
+```
+error: [aio] unknown flag: --snyc
+  did you mean --sync?
+```
+
+A name aio already owns is refused at declaration: one flag cannot mean two
+things in one process.
+
+> **Why not `--`?** The refusal also suggests putting app arguments after a bare
+> `--`. That works from a shell, and cannot work for a **compiled binary that
+> bakes arguments into its argv** — the baked ones come first, the operator
+> types theirs last, and no position satisfies both. Declare them.
+
 ## Shapes this fits
 
 - **`cli` target** — one compiled binary. It can be the server
