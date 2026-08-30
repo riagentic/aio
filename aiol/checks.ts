@@ -28,6 +28,7 @@ import {
   VALID_BUILD_KEYS,
   VALID_BUILD_TARGET_KEYS,
 } from "../src/server/config.ts";
+import { count } from "../src/diagnostics/fmt.ts";
 
 // ══════════════════════════════════════════════════════════════════════
 // 1. PROJECT CONFIG (deno.json)
@@ -917,7 +918,9 @@ export const checkPerformance: Checker = (ctx) => {
       report(
         "hint",
         "perf",
-        `${file.relative}: ${logLines.length} console.log call(s) — use log from 'aio' for structured logging`,
+        `${
+          count(logLines.length, "console.log call")
+        } — use log from 'aio' for structured logging`,
         { file: file.relative, line: logLines[0]!.num },
       );
     }

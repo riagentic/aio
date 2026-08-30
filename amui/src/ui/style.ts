@@ -1,3 +1,5 @@
+import { bytes, dur } from "aio";
+
 // Shared design tokens — one dark, modern system. Tuned for calm density and
 // clear status semantics (green=up, red=down/danger, blue=action).
 export const C = {
@@ -64,23 +66,15 @@ export const label: Record<string, string | number> = {
   textTransform: "uppercase",
 };
 
+/** Uptime for a tile — the framework's ONE duration spelling (`aio`),
+ *  with the UI's own answer for "not known yet". The arithmetic used to live
+ *  here as a fourth private copy that disagreed with the logger's. */
 export function fmtUptime(sec: number | null): string {
-  if (sec === null) return "—";
-  if (sec < 60) return `${sec}s`;
-  const m = Math.floor(sec / 60);
-  if (m < 60) return `${m}m ${sec % 60}s`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ${m % 60}m`;
-  return `${Math.floor(h / 24)}d ${h % 24}h`;
+  return sec === null ? "—" : dur(sec * 1000);
 }
 
-/** Human byte size (B / KB / MB / GB, base-1024). */
+/** A byte size for a tile — the framework's ONE spelling (`aio`), with
+ *  the UI's own answer for "not known yet". */
 export function fmtBytes(n: number | null | undefined): string {
-  if (n === null || n === undefined || !Number.isFinite(n)) return "—";
-  if (n < 1024) return `${n} B`;
-  const kb = n / 1024;
-  if (kb < 1024) return `${kb.toFixed(kb < 10 ? 1 : 0)} KB`;
-  const mb = kb / 1024;
-  if (mb < 1024) return `${mb.toFixed(mb < 10 ? 1 : 0)} MB`;
-  return `${(mb / 1024).toFixed(1)} GB`;
+  return n === null || n === undefined ? "—" : bytes(n);
 }

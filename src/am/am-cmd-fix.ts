@@ -33,6 +33,7 @@ import {
 import { meetsMinDeno, MIN_DENO } from "../server/deno-version.ts";
 import { parseDeclaredVersion } from "../server/app-version.ts";
 import { removalMessage, removalsInSource } from "../state/removals.ts";
+import { count } from "../diagnostics/fmt.ts";
 
 // fixed/would-fix/ok = safe auto-repairs; advise = a suggestion we DON'T apply
 // (it touches committed source or app logic); manual = a hard blocker am fix
@@ -629,7 +630,9 @@ export async function cmdFix(
           add(
             "aio version freshness",
             "advise",
-            `${behind} release(s) behind ${await latestTag(install)} — ` +
+            `${count(behind, "release")} behind ${await latestTag(
+              install,
+            )} — ` +
               `\`am pin --latest\` moves it (it checks for removed APIs first)`,
           );
         }
@@ -1215,9 +1218,15 @@ export async function cmdFix(
   }
   console.log(
     dry
-      ? `\n${would} safe fix(es) available, ${advise.length} suggestion(s), ` +
-        `${manual.length} blocker(s). Run \`am fix\` to apply the safe ones.`
-      : `\n${fixed} fixed, ${advise.length} suggestion(s), ${manual.length} ` +
+      ? `\n${would} safe fix(es) available, ${
+        count(advise.length, "suggestion")
+      }, ` +
+        `${
+          count(manual.length, "blocker")
+        }. Run \`am fix\` to apply the safe ones.`
+      : `\n${fixed} fixed, ${
+        count(advise.length, "suggestion")
+      }, ${manual.length} ` +
         `blocker(s).` + (manual.length ? "" : " Now run: deno task dev"),
   );
   if (advise.length) {

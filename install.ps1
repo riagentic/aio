@@ -26,6 +26,26 @@
 
 $ErrorActionPreference = 'Stop'
 
+# ── How this script talks ────────────────────────────────────────────────
+# The SAME vocabulary and colour rule as the sh installers and the framework
+# itself: `·` a step, `✓` something that now exists, `!` an advisory, `✗` a
+# refusal. install.ps1 used `>` and `+` with no colour at all while run.ps1
+# used `>` and `+` WITH colour — two spellings of one installer, on one OS.
+$script:AioColor = if ($env:FORCE_COLOR) { $true }
+  elseif ($env:NO_COLOR) { $false }
+  else { -not [Console]::IsOutputRedirected }
+function Say($glyph, $color, $m, $err = $false) {
+  if ($err) { [Console]::Error.WriteLine("$glyph $m") }
+  elseif ($script:AioColor) {
+    Write-Host "$glyph " -ForegroundColor $color -NoNewline
+    Write-Host $m
+  } else { Write-Host "$glyph $m" }
+}
+function Info($m) { Say '·' DarkGray $m }
+function Ok($m)   { Say '✓' Green    $m }
+function Warn($m) { Say '!' Yellow   $m $true }
+function Fail($m) { Say '✗' Red      $m $true; exit 1 }
+
 function Have($cmd) { [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
 
 # The version the FRAMEWORK requires, read from the framework itself. A number
@@ -86,10 +106,10 @@ function Invoke-AioInstall {
   # Before deno, on purpose: the clone needs only git, and it carries the one
   # authoritative statement of which deno version this framework requires.
   if (Test-Path (Join-Path $AioHome '.git')) {
-    Write-Host "> updating aio in $AioHome"
+    Info "updating aio in $AioHome"
     git -C $AioHome fetch --tags --force origin $AioBranch | Out-Null
   } else {
-    Write-Host "> cloning aio -> $AioHome"
+    Info "cloning aio -> $AioHome"
     $err = (git clone $AioRepo $AioHome 2>&1)
     if ($LASTEXITCODE -ne 0) { throw "git clone failed for ${AioRepo}:`n$err" }
   }
@@ -97,12 +117,12 @@ function Invoke-AioInstall {
     git -C $AioHome fetch --tags --force origin $env:AIO_REF 2>$null | Out-Null
     git -C $AioHome checkout -q --force $env:AIO_REF 2>$null
     if ($LASTEXITCODE -ne 0) { throw "AIO_REF=$($env:AIO_REF) is not a ref in $AioRepo" }
-    Write-Host "+ aio $($env:AIO_REF) (pinned via AIO_REF)"
+    Ok "aio $($env:AIO_REF) (pinned via AIO_REF)"
   } else {
     $AioTag = (git -C $AioHome describe --tags --abbrev=0 "origin/$AioBranch" 2>$null)
     if (-not $AioTag) { $AioTag = (git -C $AioHome tag -l 'v*' --sort=-creatordate | Select-Object -First 1) }
-    if ($AioTag) { git -C $AioHome checkout -q --force $AioTag; Write-Host "+ aio $AioTag" }
-    else { git -C $AioHome checkout -q --force $AioBranch; Write-Host "+ aio $AioBranch (no tags yet)" }
+    if ($AioTag) { git -C $AioHome checkout -q --force $AioTag; Ok "aio $AioTag" }
+    else { git -C $AioHome checkout -q --force $AioBranch; Ok "aio $AioBranch (no tags yet)" }
   }
 
   # ── Deno, at a version this framework can actually run on ──
@@ -113,23 +133,23 @@ function Invoke-AioInstall {
 
   $have = Get-DenoVersion
   if (-not $have) {
-    Write-Host "> deno not found - installing (aio needs $minDeno+)"
+    Info "deno not found - installing (aio needs $minDeno+)"
     irm https://deno.land/install.ps1 | iex
     $env:PATH = "$denoBin;$env:PATH"
     $have = Get-DenoVersion
     if (-not $have) { throw "deno install failed - see https://docs.deno.com/runtime/getting_started/installation/" }
-    Write-Host "+ deno $have installed"
+    Ok "deno $have installed"
   } elseif (Test-VersionAtLeast $have $minDeno) {
-    Write-Host "+ deno $have"
+    Ok "deno $have"
   } else {
-    Write-Host "> deno $have is older than the $minDeno aio requires - upgrading"
+    Info "deno $have is older than the $minDeno aio requires - upgrading"
     deno upgrade 2>$null | Out-Null
     $have = Get-DenoVersion
     if (-not (Test-VersionAtLeast $have $minDeno)) {
       # A deno from winget/choco/scoop cannot rewrite itself; install a private
       # one and put it first on PATH rather than failing with someone else's
       # permission error.
-      Write-Host "> that deno cannot upgrade itself - installing a private one in $denoBin"
+      Info "that deno cannot upgrade itself - installing a private one in $denoBin"
       irm https://deno.land/install.ps1 | iex
       $env:PATH = "$denoBin;$env:PATH"
       $have = Get-DenoVersion
@@ -144,17 +164,17 @@ aio needs deno $minDeno+ and this machine has $have, which could not be upgraded
   Then re-run this installer.
 "@
     }
-    Write-Host "+ deno $have"
+    Ok "deno $have"
   }
 
   # ── Install am from the clone ──
-  Write-Host '> installing am...'
+  Info 'installing am...'
   deno install -gAf --config (Join-Path $AioHome 'deno.json') -n am (Join-Path $AioHome 'src\am.ts')
   if ($LASTEXITCODE -ne 0) { throw 'installing am failed - the output above says why' }
   $env:PATH = "$denoBin;$env:PATH"
 
   if (Add-UserPath $denoBin) {
-    Write-Host "+ added $denoBin to your PATH (new terminals will have it)"
+    Ok "added $denoBin to your PATH (new terminals will have it)"
   }
 
   # An installed file is not an installed TOOL. `am version`, not `am --version`:
@@ -165,7 +185,7 @@ aio needs deno $minDeno+ and this machine has $have, which could not be upgraded
   $ver = ''
   if (Have 'am') { $ver = (am version 2>$null | Select-Object -First 1) }
   if (-not $ver -and (Test-Path $amBin)) { $ver = (& $amBin version 2>$null | Select-Object -First 1) }
-  if ($ver) { Write-Host "+ am installed: $ver" }
+  if ($ver) { Ok "am installed: $ver" }
   elseif (Test-Path $amBin) { throw "am is installed at $amBin but does not run" }
   else { throw "am did not install - expected $amBin" }
 

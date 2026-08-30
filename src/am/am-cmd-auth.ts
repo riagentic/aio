@@ -20,6 +20,7 @@ import { openSessionStore, type SessionStore } from "../server/sessions.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError, usage } from "./am-output.ts";
 import { appDirs } from "../server/app-dirs.ts";
+import { count } from "../diagnostics/fmt.ts";
 
 const USAGE = `am auth — manage the built-in auth (auth: true) of this app
 
@@ -251,7 +252,9 @@ export async function cmdAuth(
         out(
           mode === "json"
             ? { id, sessionsRevoked: n, tokensBurned: t }
-            : `revoked ${n} session(s) and ${t} pending token(s) for ${id}`,
+            : `revoked ${
+              count(n, "session")
+            } and ${t} pending token(s) for ${id}`,
           mode,
         );
         return;

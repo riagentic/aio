@@ -24,6 +24,8 @@ import {
   permissionFlags,
   scanCapabilities,
 } from "./capabilities.ts";
+import { HEY, NO } from "../diagnostics/fmt.ts";
+import { count } from "../diagnostics/fmt.ts";
 
 /** How an update client installs this artifact. The swap differs per target;
  *  everything before it (fetch → verify → stage) does not. `"source"` is a
@@ -556,7 +558,7 @@ export async function verifyManifestClaims(
         `signed by an untrusted key (${
           keyFingerprint(manifest.publicKey)
         }) — ` +
-        `not one of the ${trusted.length} key(s) this app trusts (${
+        `not one of the ${count(trusted.length, "key")} this app trusts (${
           trusted.map(keyFingerprint).join(", ")
         }). To rotate signing keys, publish a release signed by the CURRENT ` +
         `key that lists the new one in \`updates: { keys: [...] }\`.`,
@@ -624,7 +626,7 @@ async function collectSources(
     await walk(dir);
   } catch (e) {
     throw new Error(
-      `[ship] cannot read the source tree at ${dir}: ${e}. ` +
+      `${NO} cannot read the source tree at ${dir}: ${e}. ` +
         `A ship manifest states which permissions the binary needs — it is ` +
         `never signed off sources nobody could read. Pass --src=DIR.`,
     );
@@ -751,7 +753,7 @@ async function probeDataContract(binaryPath: string): Promise<DataContract> {
   );
   if (Object.keys(contract.cells).length === 0 && persisting > 0) {
     console.warn(
-      `[ship] ⚠ the data contract declares 0 cells, but this build persists ` +
+      `${HEY} the data contract declares 0 cells, but this build persists ` +
         `${persisting} — every install will accept this release WITHOUT a ` +
         `data check.\n` +
         `        A cell reaches the contract by declaring \`version\` (or an ` +
@@ -835,7 +837,7 @@ export function artifactFormat(bytes: Uint8Array): string | null {
  *  So this message names no hatch. A binary that cannot execute is not a
  *  releasable artifact on any channel, with a contract or without one. */
 function notRunnable(binaryPath: string, why: string): string {
-  return `[ship] ${binaryPath} is not a runnable program — ${why}.\n` +
+  return `${NO} ${binaryPath} is not a runnable program — ${why}.\n` +
     `       This is a BROKEN BUILD, not a missing data contract: an install ` +
     `that fetched it would fail its pre-swap smoke test and roll back. There ` +
     `is no flag for it and --no-data is not one — that hatch is for an ` +
@@ -855,9 +857,7 @@ export function parseDataContract(text: string, source: string): DataContract {
   } catch (e) {
     const first = text.trim().split("\n")[0] ?? "";
     throw new Error(
-      `[ship] ${source} is not JSON (${
-        e instanceof Error ? e.message : e
-      }).\n` +
+      `${NO} ${source} is not JSON (${e instanceof Error ? e.message : e}).\n` +
         (first ? `       first line: ${first.slice(0, 120)}\n` : "") +
         `       A data contract is the JSON object printed by ` +
         `\`<binary> --aio-data-contract\` and NOTHING else — if the file also ` +
@@ -871,7 +871,7 @@ export function parseDataContract(text: string, source: string): DataContract {
     typeof (parsed as DataContract).cells !== "object"
   ) {
     throw new Error(
-      `[ship] ${source} parsed as JSON but is not a data contract — it must ` +
+      `${NO} ${source} parsed as JSON but is not a data contract — it must ` +
         `be an object with a "cells" map (and a "schema" number). Got: ` +
         `${JSON.stringify(parsed).slice(0, 160)}`,
     );
@@ -903,7 +903,7 @@ export function parseSigningKey(
   text: string,
   path: string,
 ): { privateKey: JsonWebKey; publicKey: JsonWebKey } {
-  const head = `[ship] ${path} is not a release signing key`;
+  const head = `${NO} ${path} is not a release signing key`;
   const made = `       Make one with \`aio ship keygen\` — it WRITES the key ` +
     `outside the repo (0600) and prints only the public half, so ` +
     `\`ship keygen > key.json\` captures the summary, not the key.`;
@@ -966,7 +966,7 @@ export function parseSigningKey(
 /** The one wording for "this build could not tell us what it does with data" —
  *  cause AND the two ways out, so it is never a dead end. */
 function contractFailure(binaryPath: string, why: string): string {
-  return `[ship] ${binaryPath} ${why}, so this release cannot say what it ` +
+  return `${NO} ${binaryPath} ${why}, so this release cannot say what it ` +
     `does with existing data.\n` +
     `       Publishing anyway is allowed but NOT the default: a manifest ` +
     `with no data contract is refused by every install that already has ` +
@@ -1080,7 +1080,7 @@ export async function shipApp(opts: {
       },
     ).join("");
     throw new Error(
-      `[ship] ${opts.binaryPath} is not a publishable artifact — its first ` +
+      `${NO} ${opts.binaryPath} is not a publishable artifact — its first ` +
         `bytes are not an executable or an archive of any kind.\n` +
         `       aio publishes ELF / PE / Mach-O binaries, ZIP packages ` +
         `(.zip, .apk) and shebang launchers; this file starts "${head}".\n` +
@@ -1102,7 +1102,7 @@ export async function shipApp(opts: {
   const sources = await collectSources(sourceDir);
   if (sources.length === 0) {
     throw new Error(
-      `[ship] no .ts/.tsx sources under ${sourceDir} — refusing to sign a ` +
+      `${NO} no .ts/.tsx sources under ${sourceDir} — refusing to sign a ` +
         `capability claim that was never measured. Point at the app's ` +
         `sources with --src=DIR (or set "entry" in deno.json).`,
     );
@@ -1127,9 +1127,9 @@ export async function shipApp(opts: {
   // the `ship` CLI takes a flag, and the CLI passes its own spelling in.
   const unpublishable = unpublishableReason(version, opts.escapeHint);
   if (unpublishable) {
-    if (!opts.allowDirty) throw new Error(`[ship] ✗ ${unpublishable}`);
+    if (!opts.allowDirty) throw new Error(`${NO} ${unpublishable}`);
     console.warn(
-      `[ship] ⚠ ${
+      `${HEY} ${
         opts.escapeHint ?? "allowDirty: true"
       }: publishing ${version} — ${unpublishable}`,
     );
@@ -1150,7 +1150,7 @@ export async function shipApp(opts: {
   const name = opts.name ?? nameFromCfg ?? fileName;
   if (!opts.name && !nameFromCfg) {
     console.warn(
-      `[ship] \u26a0 no appId/title/name in ${join(root, "deno.json")} — ` +
+      `${HEY} no appId/title/name in ${join(root, "deno.json")} — ` +
         `falling back to the artifact's file name "${fileName}" as the ` +
         `release name.\n` +
         `       The client matches the manifest name against the app's own ` +
@@ -1167,7 +1167,7 @@ export async function shipApp(opts: {
       keyText = await Deno.readTextFile(key.path);
     } catch (e) {
       throw new Error(
-        `[ship] cannot read the signing key at ${key.path}: ${
+        `${NO} cannot read the signing key at ${key.path}: ${
           e instanceof Error ? e.message : e
         }\n       \`aio ship keygen\` writes one (outside any git work tree) ` +
           `and prints where it put it.`,
@@ -1190,11 +1190,11 @@ export async function shipApp(opts: {
     ] as const
   ) {
     const bad = safeTokenReason(field, value);
-    if (bad) throw new Error(`[ship] ${bad}`);
+    if (bad) throw new Error(`${NO} ${bad}`);
   }
   if (opts.target !== undefined && !isUpdateTarget(opts.target)) {
     throw new Error(
-      `[ship] unknown target "${opts.target}" — a manifest with a target no ` +
+      `${NO} unknown target "${opts.target}" — a manifest with a target no ` +
         `client can perform is signed, valid, and refused by every install ` +
         `("target mismatch"). Use one of: ${UPDATE_TARGETS.join(", ")}.`,
     );
@@ -1515,7 +1515,7 @@ async function keygenCli(args: string[]): Promise<void> {
   const pair = await generateSigningKey();
   if (args.includes("--stdout")) {
     console.error(
-      `ship: \u26a0 that is a PRIVATE release signing key on stdout. Anyone ` +
+      `${HEY} that is a PRIVATE release signing key on stdout. Anyone ` +
         `who has it can publish a signed update every install accepts. Send ` +
         `it to a secret store, never to a file in a repository.`,
     );
@@ -1708,8 +1708,11 @@ if (import.meta.main) {
       `  data     ${
         m.data
           ? `${
-            Object.keys(m.data.cells).length
-          } cell(s), schema v${m.data.schema}`
+            count(
+              Object.keys(m.data.cells).length,
+              "cell",
+            )
+          }, schema v${m.data.schema}`
           : "NOT DECLARED (--no-data) — installs holding data will refuse " +
             "this release"
       }\n` +

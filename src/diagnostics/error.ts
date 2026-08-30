@@ -3,7 +3,16 @@
 import type { DiagnosticEvent } from "./diagnostic-bus.ts";
 import { randomUuid } from "../rand.ts";
 import { log } from "./logger-api.ts";
-import { ansi } from "./color.ts";
+import {
+  indent,
+  mark,
+  stack,
+  type Style,
+  style,
+  termWidth,
+  type Tone,
+  wrap,
+} from "./fmt.ts";
 import { frozenWriteMessage, isFrozenWriteError } from "../state/immutable.ts";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -504,62 +513,139 @@ export function generateTip(err: AioError): string | undefined {
   }
 }
 
-// ─── ANSI helpers ────────────────────────────────────────────────────────────
-
-// Through `ansi()`: one decider for NO_COLOR / not-a-terminal, so an error box
-// redirected to a file is readable text instead of escape soup (color.ts).
-const RED = ansi("\x1b[31m");
-const YELLOW = ansi("\x1b[33m");
-const DIM = ansi("\x1b[2m");
-const BOLD = ansi("\x1b[1m");
-const RESET = ansi("\x1b[0m");
-const CYAN = ansi("\x1b[36m");
-
 // ─── Console formatter ──────────────────────────────────────────────────────
 
+/** The `file:line:col` a stack frame names, with the noise around it removed.
+ *  `at addItem (file:///home/a/src/cell.ts:14:20)` → that path, 14, 20. */
+export function frameLocation(
+  frame: string,
+): { file: string; line: number; col: number } | null {
+  const m = /((?:file:\/\/)?\/?[^\s()]+?):(\d+):(\d+)\)?$/.exec(frame.trim());
+  if (!m) return null;
+  const file = m[1]!.startsWith("file://")
+    ? decodeURIComponent(m[1]!.slice("file://".length))
+    : m[1]!;
+  return { file, line: Number(m[2]), col: Number(m[3]) };
+}
+
+/** The three lines around `line` of `file`, gutter-numbered, with the failing
+ *  one painted and a caret under `col`.
+ *
+ *  This is the single biggest thing the old box was missing. It printed a
+ *  path and a line number and left the reader to go open the file — while the
+ *  build, the linter and every editor show the code. Best-effort by
+ *  construction: no Deno (a browser), no read permission, a bundled or
+ *  generated path, a file that changed since the stack was captured — all mean
+ *  "no excerpt", never a throw inside an error reporter. */
+export function sourceExcerpt(
+  file: string,
+  line: number,
+  col: number,
+  st: Style = style,
+): string | null {
+  try {
+    // deno-lint-ignore no-explicit-any
+    const D = (globalThis as any).Deno;
+    if (!D?.readTextFileSync) return null;
+    if (/(?:^|\/)(?:dep\/aio|node_modules)\//.test(file)) return null;
+    const lines = D.readTextFileSync(file).split("\n") as string[];
+    if (line < 1 || line > lines.length) return null;
+    const from = Math.max(1, line - 1), to = Math.min(lines.length, line + 1);
+    const w = String(to).length;
+    const out: string[] = [];
+    for (let n = from; n <= to; n++) {
+      const text = lines[n - 1]!.replace(/\t/g, "  ");
+      const gutter = st.dim(`${String(n).padStart(w)} │ `);
+      out.push(n === line ? gutter + st.red(text) : gutter + st.dim(text));
+      if (n === line && col > 0) {
+        out.push(
+          st.dim(`${" ".repeat(w)} │ `) + " ".repeat(col - 1) + st.red("^"),
+        );
+      }
+    }
+    return out.join("\n");
+  } catch {
+    return null; // aio-ok: an unreadable source is no excerpt, never a crash
+  }
+}
+
+/** The error, in the house style: a red glyph, the code, the sentence, where
+ *  it happened with the code around it, and the one thing to do about it.
+ *
+ *  It replaces a 60-column `┏━━ AIO ERROR ━━┓` frame whose every line began
+ *  with `┃ Bold-Label:` — nine labelled rows for facts that are mostly absent,
+ *  a fixed width that neither wrapped a long message nor used a wide terminal,
+ *  and no sight of the code that failed. */
 export function formatErrorBox(err: AioError): string {
   const isWarn = WARN_CODES.has(err.code);
-  const color = isWarn ? YELLOW : RED;
-  const label = isWarn ? "WARN" : "ERROR";
+  const tone: Tone = isWarn ? "warn" : "bad";
+  const cols = termWidth();
 
-  const lines: string[] = [];
-  const bar = `${color}┃${RESET}`;
-
-  lines.push(
-    `${color}┏━━ AIO ${label} ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}`,
-  );
-  lines.push(`${bar} ${BOLD}Code:${RESET}    ${err.code}`);
-  if (err.context.cellName) {
-    lines.push(`${bar} ${BOLD}Cell:${RESET} ${err.context.cellName}`);
-  }
-  if (err.context.actionType) {
-    lines.push(`${bar} ${BOLD}Action:${RESET}  ${err.context.actionType}`);
-  }
-  if (err.context.effectType) {
-    lines.push(`${bar} ${BOLD}Effect:${RESET}  ${err.context.effectType}`);
-  }
-  if (err.context.hookName) {
-    lines.push(`${bar} ${BOLD}Hook:${RESET}    ${err.context.hookName}`);
-  }
-  if (err.context.machineState) {
-    lines.push(`${bar} ${BOLD}Machine:${RESET} ${err.context.machineState}`);
-  }
-  if (err.context.duration != null) {
-    lines.push(`${bar} ${BOLD}Duration:${RESET} ${err.context.duration}ms`);
-  }
-  lines.push(`${bar} ${BOLD}Message:${RESET} ${err.message}`);
-
-  // User stack frames
-  const userFrames = extractUserFrames(err.original?.stack ?? err.stack);
-  if (userFrames.length > 0) {
-    lines.push(`${bar}`);
-    lines.push(`${bar} ${DIM}Stack:${RESET}`);
-    for (const frame of userFrames) {
-      lines.push(`${bar}   ${DIM}${frame}${RESET}`);
+  // Subject: what of the app's own vocabulary this happened in. Joined on
+  // `·` as ONE dim line rather than one bold-labelled row each — five rows
+  // that are usually four empties is a form, not a message.
+  const c = err.context;
+  const here = (() => {
+    try {
+      // deno-lint-ignore no-explicit-any
+      return ((globalThis as any).Deno?.cwd?.() ?? "") + "/";
+    } catch {
+      return ""; // aio-ok: no cwd permission — paths stay absolute
     }
+  })();
+  /** A path as the reader knows it: relative to where they ran the command,
+   *  with the `file://` a stack frame carries removed. */
+  const short = (p: string) => p.replace(/file:\/\//g, "").replace(here, "");
+  const subject = [
+    c.cellName && `cell ${c.cellName}`,
+    c.actionType && `action ${c.actionType}`,
+    c.effectType && `effect ${c.effectType}`,
+    c.hookName && `hook ${c.hookName}`,
+    c.machineState && `machine ${c.machineState}`,
+    c.duration != null && `${c.duration}ms`,
+    // Joined PLAIN and dimmed once, at the end: a `dim(" · ")` between plain
+    // parts emits a reset after each separator, so everything past the first
+    // one lost its dim — the classic nested-escape bug.
+  ].filter(Boolean).join(" · ");
+
+  const parts: string[] = [];
+  parts.push(
+    `${mark(tone)} ${
+      style.bold(isWarn ? style.yellow(err.code) : style.red(err.code))
+    }` +
+      (subject ? "  " + style.dim(subject) : ""),
+  );
+  parts.push(indent(wrap(err.message, cols - 2).join("\n")));
+
+  const userFrames = extractUserFrames(err.original?.stack ?? err.stack);
+  const loc = userFrames.length ? frameLocation(userFrames[0]!) : null;
+  const excerpt = loc && sourceExcerpt(loc.file, loc.line, loc.col);
+  if (loc) {
+    const rel = short(loc.file);
+    parts.push(
+      indent(`${style.underline(rel)}${style.dim(`:${loc.line}:${loc.col}`)}`) +
+        (excerpt ? "\n" + indent(excerpt, "    ") : ""),
+    );
+  }
+  if (userFrames.length > 1) {
+    parts.push(
+      indent(userFrames.slice(1).map((f) => style.dim(short(f))).join("\n")),
+    );
   }
 
-  // Truncated state snapshot
+  const tip = generateTip(err);
+  if (tip) {
+    const body = tip.replace(/^Tip: /, "");
+    parts.push(
+      indent(
+        wrap(body, cols - 4).map((l, i) =>
+          i === 0 ? style.cyan("→ " + l) : style.cyan("  " + l)
+        ).join("\n"),
+      ),
+    );
+  }
+
+  // The footer: everything a reader needs only when they are filing a report.
   if (err.stateSnapshot) {
     // Guarded: the snapshot is the LIVE state, and a reducer that crashed on
     // unusual state (a BigInt, a cycle) is exactly when stringify dies too —
@@ -571,26 +657,17 @@ export function formatErrorBox(err: AioError): string {
     } catch {
       snap = "[unserializable: BigInt or circular structure]";
     }
-    const truncated = snap.length > 200 ? snap.slice(0, 200) + "…" : snap;
-    lines.push(`${bar}`);
-    lines.push(`${bar} ${DIM}State: ${truncated}${RESET}`);
+    parts.push(
+      indent(
+        style.dim(
+          "state  " + (snap.length > 200 ? snap.slice(0, 200) + "…" : snap),
+        ),
+      ),
+    );
   }
+  parts.push(indent(style.dim(`cid ${err.correlationId}`)));
 
-  // Tip
-  const tip = generateTip(err);
-  if (tip) {
-    lines.push(`${bar}`);
-    lines.push(`${bar} ${CYAN}${tip}${RESET}`);
-  }
-
-  // Correlation ID
-  lines.push(`${bar}`);
-  lines.push(`${bar} ${DIM}correlationId: ${err.correlationId}${RESET}`);
-  lines.push(
-    `${color}┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}`,
-  );
-
-  return lines.join("\n");
+  return "\n" + stack(...parts) + "\n";
 }
 
 export function formatErrorCompact(err: AioError): string {

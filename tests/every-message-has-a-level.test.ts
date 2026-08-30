@@ -306,9 +306,16 @@ function templateSpans(s: string): [number, number][] {
  *  long-running command writes its PROGRESS to stderr precisely so stdout
  *  stays machine-readable. A step line that says "this is a step" has told
  *  the reader what they need; what this gate exists to catch is the
- *  unmarked sentence that could equally be a failure. */
+ *  unmarked sentence that could equally be a failure.
+ *
+ *  `${NO}` / `${HEY}` / `${OK}` / `${NOTE}` count as the glyphs they ARE.
+ *  They are the house glyph constants (src/diagnostics/fmt.ts) — the same
+ *  `✗ ! ✓ ·`, coloured through the one decider — and the point of routing a
+ *  glyph through a constant is that it stops being a literal in the source.
+ *  A gate that cannot see them would push authors to write the character
+ *  twice: once for the reader, once for the test. */
 const CLI_MARKERS =
-  /✗|✘|⚠|✖|❌|▸|✓|\berror\b|\bErrors?\b|\bwarn(ing)?\b|\bnote:|\bhint:|\busage:|\bfailed\b|\bcannot\b|\bnot found\b|\brefus/i;
+  /✗|✘|⚠|✖|❌|▸|✓|\$\{(NO|HEY|OK|NOTE)\}|\bmark\(|\berror\b|\bErrors?\b|\bwarn(ing)?\b|\bnote:|\bhint:|\busage:|\bfailed\b|\bcannot\b|\bnot found\b|\brefus/i;
 
 Deno.test("output: a CLI diagnostic says whether you have to act", async () => {
   // Scanned: the first STRING LITERAL of each console.warn/error call. A call

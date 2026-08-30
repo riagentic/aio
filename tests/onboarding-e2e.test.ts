@@ -355,10 +355,23 @@ Deno.test({
       if (ELECTRON) {
         const r = await buildFlags(dir, "--compile", "--electron");
         assertEquals(r.code, 0, `electron build failed:\n${r.err}`);
-        const appimage = [...Deno.readDirSync(dir)].some((e) =>
+        // dist/, not the project root: `build.ts --compile --electron`
+        // resolves its target and runs the FLEET, which places every artifact
+        // in dist/ with the version in the name. The root was where the
+        // pre-alpha52 single-target builder wrote, and nothing has written
+        // there since — so this asserted "no AppImage produced" about a build
+        // that had just produced one.
+        const dist = join(dir, "dist");
+        const appimage = [...Deno.readDirSync(dist)].some((e) =>
           e.isFile && e.name.toLowerCase().endsWith(".appimage")
         );
-        assert(appimage, "no AppImage produced");
+        assert(
+          appimage,
+          `no AppImage in dist/ — it holds: ${
+            [...Deno.readDirSync(dist)].map((e) => e.name).join(", ") ||
+            "(nothing)"
+          }`,
+        );
       }
     } finally {
       await Deno.remove(dir, { recursive: true });

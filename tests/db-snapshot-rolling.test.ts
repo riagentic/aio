@@ -134,7 +134,7 @@ Deno.test("db worker: an error names the statement and its parameter count", asy
       { sql: "INSERT INTO t (id) VALUES (?)", params: [1] },
     ]).then(() => null, (e: Error) => e.message);
     assertStringIncludes(tx!, "UNIQUE constraint failed");
-    assertStringIncludes(tx!, "transaction of 2 statement(s)");
+    assertStringIncludes(tx!, "transaction of 2 statements");
     assertStringIncludes(tx!, "at statement 2");
     assertStringIncludes(tx!, "rolled back");
   } finally {

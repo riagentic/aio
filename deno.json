@@ -1,6 +1,6 @@
 {
   "name": "@riagentic/aio",
-  "version": "1.0.0-alpha72",
+  "version": "1.0.0-alpha73",
   "appId": "aio",
   "exports": {
     ".": "./mod.ts",
@@ -154,6 +154,7 @@
     "fmt": "deno fmt",
     "update:api-ref": "deno doc --html --name=aio --output=docs/api-ref mod.ts",
     "update:docs": "deno run --allow-read --allow-write scripts/gen-doc-index.ts",
+    "update:examples": "deno run -A scripts/sync-examples.ts",
     "check:matrix": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno test -A tests/examples.test.ts tests/examples-ui.test.ts && AIO_APPS_DIR=$INIT_CWD/.aio-test-home AIO_ONBOARD_E2E=1 deno test -A --no-check=remote tests/onboarding-e2e.test.ts && AIO_BUILD_SMOKE=1 deno test -A tests/am-onboard.test.ts"
   }
 }

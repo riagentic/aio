@@ -16,6 +16,7 @@ import {
 } from "./shutdown-budget.ts";
 import { log as rootLog } from "../diagnostics/logger-api.ts";
 import { pruneLockDir } from "./single-instance-lock.ts";
+import { count } from "../diagnostics/fmt.ts";
 
 /** How long everything AFTER the drain gets, IN TOTAL — persist, diagnostics,
  *  the user's `onStop`, the lock, the server and the databases share this one
@@ -373,7 +374,7 @@ export function createShutdownOrchestrator(
       const stuck = await settlePending(left(), ourCells, refs.getAppId());
       if (stuck > 0) {
         log.warn(
-          `shutdown: ${stuck} call(s) still running at the ` +
+          `shutdown: ${count(stuck, "call")} still running at the ` +
             `${DRAIN_TIMEOUT_MS}ms deadline (slow write, or an ignored ` +
             `abort signal) — their remaining writes are lost`,
         );

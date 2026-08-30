@@ -29,9 +29,25 @@ param(
 )
 $ErrorActionPreference = "Stop"
 
-function Info($m) { Write-Host "> $m" -ForegroundColor Cyan }
-function Ok($m) { Write-Host "+ $m" -ForegroundColor Green }
-function Fail($m) { Write-Host "x $m" -ForegroundColor Red; exit 1 }
+# ── How this script talks ────────────────────────────────────────────────
+# The SAME vocabulary and colour rule as the sh installers and the framework
+# itself: `·` a step, `✓` something that now exists, `!` an advisory, `✗` a
+# refusal. install.ps1 used `>` and `+` with no colour at all while run.ps1
+# used `>` and `+` WITH colour — two spellings of one installer, on one OS.
+$script:AioColor = if ($env:FORCE_COLOR) { $true }
+  elseif ($env:NO_COLOR) { $false }
+  else { -not [Console]::IsOutputRedirected }
+function Say($glyph, $color, $m, $err = $false) {
+  if ($err) { [Console]::Error.WriteLine("$glyph $m") }
+  elseif ($script:AioColor) {
+    Write-Host "$glyph " -ForegroundColor $color -NoNewline
+    Write-Host $m
+  } else { Write-Host "$glyph $m" }
+}
+function Info($m) { Say '·' DarkGray $m }
+function Ok($m)   { Say '✓' Green    $m }
+function Warn($m) { Say '!' Yellow   $m $true }
+function Fail($m) { Say '✗' Red      $m $true; exit 1 }
 
 function Get-MinDenoFrom($aioHome) {
   $file = Join-Path $aioHome 'src\server\deno-version.ts'

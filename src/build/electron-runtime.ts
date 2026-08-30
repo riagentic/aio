@@ -30,6 +30,7 @@ import {
   ensureElectronRuntime,
 } from "../electron/electron-runtime-fetch.ts";
 import { PLATFORMS } from "./platforms.ts";
+import { HEY } from "../diagnostics/fmt.ts";
 
 export { unzipInto } from "../electron/electron-runtime-fetch.ts";
 
@@ -152,7 +153,7 @@ export async function ensureHostElectronDist(
     const after = await Deno.readTextFile(join(root, name)).catch(() => null);
     if (after !== null && after !== text) {
       log.warn(
-        `[electron] \u26a0 ${join(root, name)} was MODIFIED by ` +
+        `${HEY} ${join(root, name)} was MODIFIED by ` +
           `\`deno install npm:electron\` (auto-install of the Electron ` +
           `runtime). Review the diff and commit it deliberately — the next ` +
           `build reads its pins from this file.`,

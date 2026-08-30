@@ -18,7 +18,17 @@
  */
 
 import type { GlobalFlags } from "./am-types.ts";
-import { detectMode, out, outError } from "./am-output.ts";
+import {
+  block,
+  count,
+  detectMode,
+  fold,
+  hints,
+  kv,
+  out,
+  outError,
+  stack,
+} from "./am-output.ts";
 import { resolveAioRoot, withoutAioFlag } from "./am-cmd-link.ts";
 import { join, relative, resolve } from "@std/path";
 import {
@@ -94,46 +104,89 @@ export async function pinInfo(appDir: string, root: string): Promise<PinInfo> {
 }
 
 function render(info: PinInfo, tags: string[]): string {
-  const lines: string[] = [];
-  lines.push(`aio version: ${info.pinned ?? "(unpinned)"}`);
-  if (info.linkedPath) {
-    lines.push(`  linked to: ${info.linkedRef ?? info.linkedPath}`);
-  } else {
-    lines.push(`  linked to: (nothing — run \`am fix\`)`);
-  }
-  if (info.drift) {
-    lines.push(
-      `  ⚠ DRIFT — this app asks for ${info.pinned} but is built against ` +
-        `${info.linkedRef ?? info.linkedPath}. \`am fix\` corrects it.`,
-    );
-  }
-  if (!info.pinned) {
-    lines.push(
-      `  ⚠ UNPINNED — a clone of this repo builds against whatever aio is ` +
-        `installed. Pin it: \`am pin --latest\``,
-    );
-  }
-  if (info.behind !== null && info.behind > 0) {
+  const linked = info.linkedPath
+    ? (info.linkedRef ?? info.linkedPath)
+    : "nothing yet";
+  // The RANGE is over orderable releases only: `main-<sha>` has no position,
+  // so "main-1d98… … v1.0.0-alpha72" was not a range, it was two strings.
+  // `sortVersions` returns parsed Semvers, not the tags — the RANGE wants the
+  // tags back, newest first, and only the orderable ones (`main-<sha>` has no
+  // position, so pairing it with a release was never a range).
+  const avail = sortVersions(info.available).map((v) => v.raw);
+  const loose = info.available.length - avail.length;
+  const facts = kv([
+    {
+      label: "aio",
+      value: info.pinned ?? "unpinned",
+      tone: info.pinned ? "ok" : "warn",
+    },
+    { label: "linked", value: linked, tone: info.drift ? "warn" : undefined },
+    { label: "latest", value: info.latest },
+    {
+      label: "provisioned",
+      // A count and a range, never the 34-item, 1200-character line this used
+      // to print — the question is "have I got enough of them here", and a
+      // list of every tag answers it worse than a number does.
+      value: info.available.length === 0
+        ? "none"
+        : String(info.available.length),
+      note: avail.length > 1
+        ? `${avail.at(-1)} … ${avail[0]}${
+          loose ? ` +${loose} unversioned` : ""
+        }`
+        : avail[0] ?? undefined,
+    },
+    { label: "releases", value: tags.length ? fold(tags, 4) : null },
+  ]);
+
+  // Warnings come BEFORE the reference facts: a reader who has a problem is
+  // reading to find it, and it was last on the page.
+  const warnings = [
+    info.drift &&
+    block(
+      "warn",
+      "Drift — this app is built against something it did not ask for.",
+      `deno.json pins ${info.pinned}; dep/aio points at ${
+        info.linkedRef ?? info.linkedPath
+      }.`,
+      "am fix",
+    ),
+    !info.pinned &&
+    block(
+      "warn",
+      "This app is not pinned.",
+      "A clone of this repo builds against whatever aio happens to be " +
+        "installed on that machine, which is how the same source produces two " +
+        "different apps.",
+      "am pin --latest",
+    ),
+    !info.linkedPath && info.pinned &&
+    block(
+      "warn",
+      "Nothing is linked.",
+      "The pin is recorded but dep/aio does not exist yet, so nothing builds.",
+      "am fix",
+    ),
     // A pin is a promise, not a prison: the app keeps building exactly as it
     // is, and it should still be able to see how far the world has moved.
-    lines.push(
-      `  ⓘ ${info.behind} release(s) behind ${info.latest} — this app keeps ` +
-        `building as pinned. \`am pin --latest\` moves it (checked first).`,
-    );
-  }
-  lines.push("");
-  lines.push(`  provisioned: ${info.available.join(", ") || "(none)"}`);
-  const shown = tags.slice(0, 6);
-  lines.push(
-    `  releases:    ${shown.join(", ")}${
-      tags.length > shown.length ? ", …" : ""
-    }`,
+    info.behind !== null && info.behind > 0 &&
+    block(
+      "info",
+      `${count(info.behind, "release")} behind ${info.latest}.`,
+      "This app keeps building as pinned — nothing changes until you move it.",
+      "am pin --latest",
+    ),
+  ].filter((b): b is string => typeof b === "string");
+
+  return stack(
+    facts,
+    ...warnings,
+    hints([
+      ["am pin <version>", "switch this app (provisions + relinks)"],
+      ["am pin main", "follow the branch tip (a moving target)"],
+      ["am pin <path>", "follow a framework checkout on this machine"],
+    ]),
   );
-  lines.push(`  latest:      ${info.latest ?? "(none)"}`);
-  lines.push("");
-  lines.push(`  am pin <version>   switch this app (provisions + relinks)`);
-  lines.push(`  am pin main        follow the branch tip (moving target)`);
-  return lines.join("\n");
 }
 
 /** One reason a target version would break this app. */
@@ -261,8 +314,9 @@ export async function cmdPin(
   const root = resolveAioRoot(args);
   if (!root) {
     outError(
-      "can't locate the aio install — reinstall via install.sh or pass --aio <path>",
+      "Can't locate the aio install.",
       mode,
+      "am fix   (or pass --aio <path>)",
     );
     Deno.exit(1);
   }
@@ -279,9 +333,10 @@ export async function cmdPin(
   }
   if (!hasConfig) {
     outError(
-      `no ${DENO_JSON_NAMES.join(" or ")} in ${appDir} — run this inside an ` +
-        `aio app`,
+      `No ${DENO_JSON_NAMES.join(" or ")} in ${appDir}.\n` +
+        `am pin reads and writes an app's pin, so it has to run inside one.`,
       mode,
+      "cd <your app>   ·   am create <name>",
     );
     Deno.exit(1);
   }

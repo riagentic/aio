@@ -36,6 +36,7 @@ import {
 import { resolveAppDir, resolveEntry } from "./build/build-config.ts";
 import { DIST_DIR } from "./server/app-files.ts";
 import { ansi } from "./diagnostics/color.ts";
+import { bytes, count, style, tally } from "./diagnostics/fmt.ts";
 import {
   crossCompileBlocker,
   hostPlatform,
@@ -298,6 +299,11 @@ interface TargetResult {
 
 // `ansi()` is the one place that decides NO_COLOR / not-a-terminal — a build
 // log piped into a file or a CI transcript should not carry escapes.
+// The fleet build's palette used to be seven private `\x1b[…m` constants —
+// a second spelling of the house colours, which is how `✓` ended up a
+// different green here than in `am`. Interpolation-shaped so the existing
+// `${C.green}…${C.r}` call sites keep working, but every code now comes from
+// `style` (src/diagnostics/fmt.ts) and therefore from the ONE colour decider.
 const C = {
   b: ansi("\x1b[1m"),
   dim: ansi("\x1b[2m"),
@@ -332,13 +338,11 @@ const flag = (name: string): string | undefined =>
   });
 
 /** Human byte size. */
-function human(n: number): string {
-  if (n < 1024) return `${n} B`;
-  const kb = n / 1024;
-  if (kb < 1024) return `${kb.toFixed(0)} KB`;
-  const mb = kb / 1024;
-  return mb < 1024 ? `${mb.toFixed(1)} MB` : `${(mb / 1024).toFixed(2)} GB`;
-}
+/** Artifact sizes, in the ONE spelling aio prints bytes in (`fmt.bytes`).
+ *  This used to round KB to whole numbers and GB to two decimals, so the same
+ *  file read `214 KB` here and `214.3 KB` in `am` — the second copy of a
+ *  formatter always ends up disagreeing with the first about something. */
+const human = bytes;
 
 const ARTIFACT_EXTS = new Set([
   ".AppImage",
@@ -879,7 +883,9 @@ export async function buildAll(): Promise<number> {
   } catch { /* nothing there yet, or not movable — nothing to protect */ }
 
   console.log(
-    `${C.b}Building ${targetList.length} target(s) for ${C.blue}${title}${C.r}${C.b} ${version.version} → ${
+    `${C.b}Building ${
+      count(targetList.length, "target")
+    } for ${C.blue}${title}${C.r}${C.b} ${version.version} → ${
       outDir.replace(root + "/", "")
     }/${C.r}${release ? ` ${C.dim}(release)${C.r}` : ""}`,
   );
@@ -1118,7 +1124,7 @@ export async function buildAll(): Promise<number> {
             // the first target's artifact and the summary would report both as
             // built. Refuse, and name the way out (per-target `name:`).
             throw new Error(
-              `[build] targets "${owner}" and "${r.target}" both produce ` +
+              `targets "${owner}" and "${r.target}" both produce ` +
                 `${
                   outDir.replace(root + SEPARATOR, "")
                 }/${name} — the second ` +
@@ -1204,7 +1210,7 @@ export async function buildAll(): Promise<number> {
   // ── summary ───────────────────────────────────────────────────────────────
   const failed = results.filter((r) => !r.ok);
   const rel = (p: string) => p.replace(root + "/", "");
-  console.log(`\n${C.b}── build summary ──${C.r}`);
+  console.log(`\n${C.b}built${C.r}`);
   const multi = new Set(results.map((r) => r.platform)).size > 1;
   const tag = (t: TargetResult) =>
     multi || !isHostPlatform(t.platform)
@@ -1250,12 +1256,15 @@ export async function buildAll(): Promise<number> {
   }
   const skipped = results.filter((r) => r.skipped).length;
   const built = results.length - failed.length - skipped;
+  // `✓ 2/3 build(s)` asked the reader to do the subtraction and told them
+  // nothing about which way it went. A tally names each outcome and drops the
+  // ones that did not happen, so a clean fleet reads `3 built → dist/`.
   console.log(
-    `\n${failed.length ? C.red : C.green}${
-      failed.length ? "✗" : "✓"
-    } ${built}/${results.length - skipped} build(s) → ${C.blue}${
-      rel(outDir)
-    }/${C.r}${skipped ? ` ${C.dim}(${skipped} skipped)${C.r}` : ""}`,
+    "\n  " + tally([
+      [built, "built", "ok"],
+      [skipped, "skipped", "warn"],
+      [failed.length, "failed", "bad"],
+    ]) + style.dim("  → ") + style.underline(rel(outDir) + "/"),
   );
   return failed.length ? 1 : 0;
 }

@@ -13,6 +13,8 @@
  * ```
  */
 import { readDenoJson } from "./server/deno-json.ts";
+import { ok } from "./build/build-say.ts";
+import { NO } from "./diagnostics/fmt.ts";
 import { fromFileUrl, join } from "@std/path";
 import {
   type BuildConfig,
@@ -96,7 +98,7 @@ export async function build(cfg?: BuildConfig): Promise<void> {
   // versionName instead (build-android.ts). Written for every packaging path,
   // never for a bundle-only build.
   await writeBuildStamp(root, cfg.version, VERSION);
-  console.log(`[build] \u2713 ${BUILD_STAMP_FILE} (${cfg.version.version})`);
+  ok(BUILD_STAMP_FILE, cfg.version.version);
 
   // ── Bake the Electron version into dist/ ────────────────────────────────
   // A plain compiled binary (`--compile`, not the AppImage) whose client is
@@ -113,9 +115,7 @@ export async function build(cfg?: BuildConfig): Promise<void> {
       join(dist, ELECTRON_VERSION_FILE),
       JSON.stringify({ version }) + "\n",
     );
-    console.log(
-      `[build] \u2713 dist/${ELECTRON_VERSION_FILE} (electron ${version})`,
-    );
+    ok(`dist/${ELECTRON_VERSION_FILE}`, `electron ${version}`);
   }
 
   // ── aio-client: standalone Electron connect-page AppImage ───────────────
@@ -161,7 +161,7 @@ export async function build(cfg?: BuildConfig): Promise<void> {
   const compileOk = await runDenoCompile(cfg);
   if (!compileOk) {
     console.error(
-      "[compile] ✗ deno compile failed — its own message is above this line.\n" +
+      "deno compile failed — its own message is above this line.\n" +
         "       fix: resolve what it names (a module it cannot find is usually " +
         "a server-only import reachable from the entry, or an asset missing " +
         "from deno.json `compile.include`), then re-run `deno task build`.",
@@ -314,7 +314,7 @@ if (import.meta.main) {
     const buildFlagsGiven = Deno.args.filter((a) => buildVocabulary.has(a));
     if (!target && buildFlagsGiven.length > 0) {
       console.error(
-        `[build] ✗ ${buildFlagsGiven.join(" ")} is not a build target.\n` +
+        `${NO} ${buildFlagsGiven.join(" ")} is not a build target.\n` +
           `  Every build goes through the fleet, so one artifact is one name, ` +
           `one version and one manifest entry.\n` +
           `  Targets: ${Object.keys(TARGETS).join(", ")}\n` +

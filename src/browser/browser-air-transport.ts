@@ -64,6 +64,7 @@ import {
   _stopClientVitals,
 } from "./browser-vitals.ts";
 import { _takeOfflineQueue as _coreTakeOfflineQueue } from "../state/state-transport.ts";
+import { count } from "../diagnostics/fmt.ts";
 
 let _ws: WebSocket | null = null;
 let _closed = false;
@@ -375,10 +376,14 @@ function _flushPending(pending: QueuedEntry[], send: (d: string) => void) {
       for (const e of rest) _queue.push(e.action, e.seq);
       _updateDegraded();
       console.warn(
-        `[aio:air] offline flush stopped after ${i} action(s) — the transport ` +
+        `[aio:air] offline flush stopped after ${
+          count(i, "action")
+        } — the transport ` +
           `refused the write (${
             err instanceof Error ? err.message : String(err)
-          }). The remaining ${rest.length} action(s) are back in the queue, in ` +
+          }). The remaining ${
+            count(rest.length, "action")
+          } are back in the queue, in ` +
           `order, and replay on the next connection; none of them were lost ` +
           `and none of their callers were left waiting on a frame that is not ` +
           `coming.`,

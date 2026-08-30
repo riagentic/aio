@@ -191,6 +191,7 @@ import {
   VALID_UI_KEYS,
   validateConfig,
 } from "./config.ts";
+import { count } from "../diagnostics/fmt.ts";
 
 /** Default broadcast throttle: 50ms = max 20 state pushes/sec */
 export const DEFAULT_SYNC_INTERVAL_MS = 50;
@@ -1564,7 +1565,9 @@ async function _run<S, A, E>(
       state = replay.state;
       if (replay.replayed > 0) {
         log.info(
-          `journal: recovered ${replay.replayed} action(s) past the last snapshot`,
+          `journal: recovered ${
+            count(replay.replayed, "action")
+          } past the last snapshot`,
         );
       }
       // A redacted entry cannot be replayed — its payload IS its arguments and
@@ -1594,7 +1597,9 @@ async function _run<S, A, E>(
               [...new Set(threw.map((s) => s.error ?? "threw"))].join("; ")
             }`;
         log.warn(
-          `journal: ${replay.skipped.length} action(s) COULD NOT be replayed — ` +
+          `journal: ${
+            count(replay.skipped.length, "action")
+          } COULD NOT be replayed — ` +
             `${why}: ${what} (seq ${Math.min(...seqs)}–${
               Math.max(...seqs)
             }). ` +

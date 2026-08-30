@@ -17,6 +17,7 @@ import {
   physicalMemoryBytes,
 } from "../server/heap-policy.ts";
 import type { BuildConfig } from "./build-config.ts";
+import { HEY, NO, OK } from "../diagnostics/fmt.ts";
 
 /** npm packages the FRAMEWORK only ever needs at BUILD / DEV / TEST time.
  *  None of them is reachable from a compiled binary:
@@ -137,7 +138,6 @@ export async function readDenoNmGraph(
 
 /** Temporarily remove dev symlinks, run compile callback, restore symlinks. Returns callback result. */
 export async function withDevExcluded(
-  tag: string,
   nmDir: string,
   fn: (excludes: string[]) => Promise<boolean>,
 ): Promise<boolean> {
@@ -178,14 +178,13 @@ export async function withDevExcluded(
     }
   }
   try {
-    return await _withDevExcluded(tag, nmDir, fn);
+    return await _withDevExcluded(nmDir, fn);
   } finally {
     if (held) await Deno.remove(lock).catch(() => {});
   }
 }
 
 async function _withDevExcluded(
-  tag: string,
   nmDir: string,
   fn: (excludes: string[]) => Promise<boolean>,
 ): Promise<boolean> {
@@ -266,7 +265,7 @@ async function _withDevExcluded(
     }
 
     console.log(
-      `[${tag}] excluding ${excludes.length} dev dirs, removed ${saved.length} symlinks`,
+      `excluding ${excludes.length} dev dirs, removed ${saved.length} symlinks`,
     );
 
     ok = await fn(excludes);
@@ -288,10 +287,10 @@ async function _withDevExcluded(
           await Deno.symlink(target, path);
         }
       } catch (e) {
-        console.warn(`[${tag}] \u26a0 failed to restore symlink ${path}: ${e}`);
+        console.warn(`${HEY} failed to restore symlink ${path}: ${e}`);
       }
     }
-    if (saved.length) console.log(`[${tag}] restored ${saved.length} symlinks`);
+    if (saved.length) console.log(`restored ${saved.length} symlinks`);
   }
   return ok;
 }
@@ -390,7 +389,7 @@ export async function assetIncludes(root: string): Promise<string[]> {
     // cannot be PARSED has to say so, or every asset it declares is dropped.
     if (!(e instanceof Deno.errors.NotFound)) {
       console.warn(
-        `[compile] ⚠ deno.json could not be read (${e}) — no compile.include applied`,
+        `${HEY} deno.json could not be read (${e}) — no compile.include applied`,
       );
     }
   }
@@ -398,7 +397,7 @@ export async function assetIncludes(root: string): Promise<string[]> {
     for (const [i, p] of decl.entries()) {
       if (typeof p !== "string" || !p.trim()) {
         throw new Error(
-          `[compile] \u2717 deno.json compile.include[${i}] is ${
+          `${NO} deno.json compile.include[${i}] is ${
             JSON.stringify(p)
           } — every entry must be a non-empty path relative to the project root.`,
         );
@@ -412,7 +411,7 @@ export async function assetIncludes(root: string): Promise<string[]> {
       const absolute = isAbsolute(entry);
       if (absolute || rel.startsWith("..") || isAbsolute(rel)) {
         throw new Error(
-          `[compile] \u2717 deno.json compile.include[${i}] ("${p}") is ` +
+          `${NO} deno.json compile.include[${i}] ("${p}") is ` +
             (absolute
               ? `absolute; paths are relative to the project root, and this ` +
                 `one would silently embed ${join(root, entry)} instead`
@@ -480,7 +479,7 @@ export async function v8FlagsArg(root: string): Promise<string[]> {
   } catch (e) {
     if (!(e instanceof Deno.errors.NotFound)) {
       console.warn(
-        `[compile] ⚠ deno.json could not be read (${e}) — no build.v8Flags applied`,
+        `${HEY} deno.json could not be read (${e}) — no build.v8Flags applied`,
       );
     }
   }
@@ -490,7 +489,7 @@ export async function v8FlagsArg(root: string): Promise<string[]> {
   // the fix. Say both here instead.
   if (misplaced) {
     throw new Error(
-      `[compile] ✗ deno.json has compile.v8Flags — it belongs under aio's ` +
+      `${NO} deno.json has compile.v8Flags — it belongs under aio's ` +
         `"build" block, not "compile" (which is Deno's own, and rejects ` +
         `unknown keys). Move it: "build": { "v8Flags": [...] }`,
     );
@@ -499,7 +498,7 @@ export async function v8FlagsArg(root: string): Promise<string[]> {
   // case, and it is exactly the one that needs the heap ceiling added below.
   if (decl !== undefined && !Array.isArray(decl)) {
     throw new Error(
-      `[compile] ✗ deno.json build.v8Flags is ${
+      `${NO} deno.json build.v8Flags is ${
         JSON.stringify(decl)
       } — it must be an ARRAY of flags, e.g. ["--max-old-space-size=16384"].`,
     );
@@ -508,7 +507,7 @@ export async function v8FlagsArg(root: string): Promise<string[]> {
   for (const [i, f] of (Array.isArray(decl) ? decl : []).entries()) {
     if (typeof f !== "string" || !f.trim()) {
       throw new Error(
-        `[compile] ✗ deno.json build.v8Flags[${i}] is ${
+        `${NO} deno.json build.v8Flags[${i}] is ${
           JSON.stringify(f)
         } — every entry must be a non-empty V8 flag string.`,
       );
@@ -518,7 +517,7 @@ export async function v8FlagsArg(root: string): Promise<string[]> {
     // V8, so the binary would ship with the default it was meant to change.
     if (!flag.startsWith("--")) {
       throw new Error(
-        `[compile] ✗ deno.json build.v8Flags[${i}] ("${f}") must start ` +
+        `${NO} deno.json build.v8Flags[${i}] ("${f}") must start ` +
           `with "--" — V8 ignores anything else, so the binary would keep the ` +
           `default this was meant to raise.`,
       );
@@ -527,7 +526,7 @@ export async function v8FlagsArg(root: string): Promise<string[]> {
     // two — both wrong, and neither reported by V8.
     if (flag.includes(",")) {
       throw new Error(
-        `[compile] ✗ deno.json build.v8Flags[${i}] ("${f}") contains a ` +
+        `${NO} deno.json build.v8Flags[${i}] ("${f}") contains a ` +
           `comma. Pass one flag per array entry — the list is comma-joined.`,
       );
     }
@@ -554,7 +553,7 @@ export async function v8FlagsArg(root: string): Promise<string[]> {
       declaredMaxHeap(root),
       physicalMemoryBytes(),
     );
-    if (note) console.warn(`[compile] \u26a0 ${note}`);
+    if (note) console.warn(`${HEY} ${note}`);
     if (mb !== null) flags.push(`--max-old-space-size=${mb}`);
   }
   return flags.length ? [`--v8-flags=${flags.join(",")}`] : [];
@@ -595,6 +594,12 @@ export function compileArgs(opts: {
 }): string[] {
   return [
     "compile",
+    // `-q`: deno compile prints an "Embedded Files" TREE of every module it
+    // bundled — several hundred lines for an app that has three of its own.
+    // The build already reports the artifact and its size on one line; the
+    // tree buried that under a page of scrollback. Diagnostics are not
+    // suppressed by `-q`, so a compile that FAILS still says why.
+    "-q",
     "-A",
     ...(opts.target ? ["--target", opts.target] : []),
     ...(opts.v8Flags ?? []),
@@ -633,7 +638,7 @@ export async function runDenoCompile(cfg: BuildConfig): Promise<boolean> {
   if (!doElectron) await Deno.mkdir(outDir, { recursive: true });
   if (cfg.targetTriple) {
     console.log(
-      `[compile] cross-compiling for ${cfg.platform} (${cfg.targetTriple})`,
+      `cross-compiling for ${cfg.platform} (${cfg.targetTriple})`,
     );
   }
   if (doElectron) {
@@ -653,16 +658,16 @@ export async function runDenoCompile(cfg: BuildConfig): Promise<boolean> {
   // without this a WASM app runs degraded in the binary/AppImage.
   const assets = await assetIncludes(root);
   const v8Flags = await v8FlagsArg(root);
-  if (v8Flags.length) console.log(`[compile] ${v8Flags[0]}`);
+  if (v8Flags.length) console.log(`${v8Flags[0]}`);
   if (assets.length) {
     console.log(
-      `[compile] embedding ${assets.length / 2} data asset(s): ${
+      `embedding ${assets.length / 2} data asset(s): ${
         assets.filter((a) => a !== "--include").join(", ")
       }`,
     );
   }
 
-  const ok = await withDevExcluded("compile", nmDir, async (excludes) => {
+  const ok = await withDevExcluded(nmDir, async (excludes) => {
     const result = await new Deno.Command("deno", {
       args: compileArgs({
         hasDist,
@@ -678,7 +683,7 @@ export async function runDenoCompile(cfg: BuildConfig): Promise<boolean> {
       stdout: "inherit",
       stderr: "inherit",
     }).output();
-    if (result.code === 0) console.log(`[compile] \u2713 ${compileTarget}`);
+    if (result.code === 0) console.log(`${OK} ${compileTarget}`);
     return result.code === 0;
   });
 
@@ -755,7 +760,7 @@ Environment=HOME=${home}
 WantedBy=multi-user.target
 `;
   await Deno.writeTextFile(serviceFile, unit);
-  console.log(`[service] \u2713 ${serviceFile}`);
+  console.log(`${OK} ${serviceFile}`);
   console.log(`
   Install:
     sudo cp ${binaryName} /usr/local/bin/

@@ -17,6 +17,7 @@ import {
   parseJournalEntries,
 } from "./record.ts";
 import type { DiffEntry, TimelineEntry } from "../server/timeline.ts";
+import { count } from "../diagnostics/fmt.ts";
 
 /** hh:mm:ss for a ms timestamp (local time). */
 function clock(ts: number): string {
@@ -177,7 +178,9 @@ export async function cmdReplay(
   if (dry) {
     out(
       mode === "pretty"
-        ? `would replay ${rows.length} action(s):\n${renderJournalRows(rows)}`
+        ? `would replay ${count(rows.length, "action")}:\n${
+          renderJournalRows(rows)
+        }`
         : { dryRun: true, count: rows.length, entries: rows },
       mode,
     );
@@ -238,7 +241,7 @@ export async function cmdReplay(
         ? `replay stopped at #${failed.seq} (${
           results.filter((r) => r.ok).length
         }/${rows.length} applied)`
-        : `replayed ${results.filter((r) => r.ok).length} action(s)`,
+        : `replayed ${count(results.filter((r) => r.ok).length, "action")}`,
     );
     if (skipped.length > 0) {
       lines.push(

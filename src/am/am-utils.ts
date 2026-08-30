@@ -576,6 +576,7 @@ export function parseGlobalFlags(
     else if (a === "--tables") flags.tables = true;
     else if (a === "--force") flags.force = true;
     else if (a === "--stale") flags.stale = true;
+    else if (a === "--long" || a === "-l") flags.long = true;
     else if (a === "--as-server") flags.asServer = true;
     else if (a === "--quiet") flags.quiet = true;
     else if (a.startsWith("--port=")) flags.port = num(a.slice(7), "--port");

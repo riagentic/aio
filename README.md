@@ -4,12 +4,12 @@
 
 <p align="center">
   <b>Write the state. Get the app.</b><br>
-  One <code>cell</code> is your server state, your database, your sync, and your UI —
+  One <code>cell</code> is your server state, your database, your sync and your UI —
   building to browser, desktop and Android from the same two files.
 </p>
 
 <p align="center">
-  <code>v1.0.0-alpha72</code> · <a href="LICENSE">MIT</a> ·
+  <code>v1.0.0-alpha73</code> · <a href="LICENSE">MIT</a> ·
   <a href="docs/content.md">Docs</a> ·
   <a href="docs/basics/quickstart.md">Quickstart</a> ·
   <a href="CHANGELOG.md">Changelog</a>
@@ -17,18 +17,22 @@
 
 ---
 
-## Start
+## ⚡ Start
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/riagentic/aio/main/install.sh | sh
 am create my-app && cd my-app && deno task dev
 ```
 
-That is a running app: persisted, synced, testable, and one flag away from a
-desktop window (`deno task dev --client=electron`) or an Android APK
-(`deno task build --targets=android`). Windows: `irm …/install.ps1 | iex`.
+That is a running app — persisted, synced, testable — and one flag from the
+rest:
 
-## The idea
+- 🖥️ **Desktop** — `deno task dev --client=electron`
+- 📱 **Android** — `deno task build --targets=android`
+- 📦 **One binary** — `deno task compile`
+- 🪟 **Windows** — install with `irm …/install.ps1 | iex`
+
+## 🧠 The idea
 
 State lives in a `cell`. You never write a store, an endpoint, a query, a
 migration, or a fetch — the cell **is** all of them.
@@ -60,52 +64,57 @@ export default function App() {
 }
 ```
 
-Two files. `count` is persisted to SQLite, broadcast to every connected client
-as a delta, restored on restart, and drivable from a test — because it is state,
-and aio's whole job is state.
+Two files. `count` is persisted to SQLite, broadcast to every client as a delta,
+restored on restart, and drivable from a test — because it is state, and state
+is aio's whole job.
 
 <p align="center">
-  <img src="docs/img/todo.png" alt="the todo example running in a browser" width="720">
+  <img src="docs/img/theme.png" alt="the todo example in light and dark, styled entirely by aio's default theme" width="860">
 </p>
 
 <p align="center"><i>
-  <a href="examples/todo">examples/todo</a> — 3 files, no build step, no config.
+  <a href="examples/todo">examples/todo</a> — 3 files, no stylesheet.
+  Light and dark come from <a href="docs/ui/theme.md"><code>ui.theme</code></a>,
+  whose accent is derived from the app's own name.
 </i></p>
 
-## What you get
+## 📦 What you get
 
-Persistence (worker-thread SQLite) · CRDT sync + offline queue · a signals
-renderer · async methods with cancellation · scheduling · HTTP routes · full
-auth with 2FA and OIDC · security headers and compressed, revalidating responses
-· time-travel · `testCell`/`testUI` · plugins · single-binary builds for
-browser, Electron, Android, CLI and service — and `am`, a CLI that inspects and
-drives a running **dev** app (against production it reports: status, health,
-logs, data, installs and pins — the control API is dev-only by design, and says
-so when you ask it for more).
+|                |                                                                        |
+| -------------- | ---------------------------------------------------------------------- |
+| 💾 **Data**    | worker-thread SQLite · CRDT sync · offline queue · migrations · backup |
+| 🎨 **UI**      | signals renderer · a default theme · routing · forms · SSR + hydrate   |
+| 🔐 **Auth**    | sessions · per-user tokens · TOTP · OIDC · PIN pairing                 |
+| 🧪 **Testing** | `testCell` / `testUI` — semantic, selector-free · time-travel          |
+| 🚚 **Ship**    | browser · Electron · Android · CLI · systemd service · signed updates  |
+| 🛠️ **Operate** | `am` — status, health, logs, state, dispatch, pins, installs           |
 
-A whole client — renderer, protocol, offline queue and CRDT merge — is 57 KB
-gzipped, 50 KB on the wire. `deno task bench:bundle` prints it and a gate keeps
+A whole client — renderer, protocol, offline queue, CRDT merge — is **57 KB
+gzipped**, 50 KB brotli. `deno task bench:bundle` prints it, and a gate keeps
 this sentence true.
 
-And one line runs _any_ aio app straight from its repo — installing whatever is
-missing, building, and starting it:
+## 🏃 Run any aio app, from its repo
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/riagentic/aio/main/run.sh | sh -s owner/repo
 ```
 
+Installs what is missing, builds, starts it. Nothing to read first.
+
 **[→ Every doc on one page](docs/content.md)** ·
 [Concepts](docs/basics/concepts.md) · [Pitfalls](docs/basics/pitfalls.md) ·
 [API](docs/basics/api-reference.md) · [`am`](docs/clients/app-manager.md)
 
-## Honestly
+## 🎯 Honestly
 
-aio is **alpha**: the surface still moves, each release names its breaks, and
-every app pins the version it was written against (`am pin`). It is built for
-apps where state is the product — dashboards, ops and trading tools, control
-panels, internal tools, local-first desktop and mobile. It is one embedded
-process by design, so it is **not** for content sites, SEO, or planet-scale
-public APIs. [Positioning & non-goals](docs/basics/positioning.md).
+- 🚧 **Alpha.** The surface still moves. Every release names its breaks, and
+  every app pins the version it was written against (`am pin`).
+- ✅ **Built for** apps where state is the product — dashboards, ops and trading
+  tools, control panels, internal tools, local-first desktop and mobile.
+- ❌ **Not for** content sites, SEO, or planet-scale public APIs. It is one
+  embedded process, by design.
+
+[Positioning & non-goals](docs/basics/positioning.md)
 
 ## License
 

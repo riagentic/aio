@@ -18,7 +18,19 @@
 import { join } from "@std/path";
 import { appDirs, installedAppPaths, installRoot } from "../server/app-dirs.ts";
 import type { GlobalFlags } from "./am-types.ts";
-import { detectMode, out, outError } from "./am-output.ts";
+import {
+  count,
+  detectMode,
+  heading,
+  hints,
+  indent,
+  mark,
+  out,
+  outError,
+  stack,
+  style,
+  table,
+} from "./am-output.ts";
 import { instances } from "../server/single-instance-lock.ts";
 import { readRecord } from "../server/install-record.ts";
 import { readPending } from "../server/updates-apply.ts";
@@ -174,7 +186,7 @@ export async function cmdRemove(
 
   if (failed.length > 0) {
     outError(
-      `removed ${removed.length} path(s); could NOT remove:\n` +
+      `removed ${count(removed.length, "path")}; could NOT remove:\n` +
         failed.map((f) => `  ${f.path} — ${f.error}`).join("\n"),
       mode,
     );
@@ -255,17 +267,40 @@ export async function cmdInstalled(
     out({ root, apps }, mode);
     return;
   }
+  // A TABLE, because it is one: an app per row, and the same four facts on
+  // every row. The old shape put `from …` and `built against aio …` on their
+  // own indented lines under each app, so twelve installed apps was a
+  // forty-line block in which nothing could be compared to anything.
   out(
-    apps.length === 0
-      ? `no installed apps in ${root}`
-      : `installed in ${root}:\n` +
-        apps.map((a) =>
-          `  ${a.name}${a.version ? ` ${a.version}` : ""}` +
-          `${a.versions > 1 ? `  (${a.versions} versions kept)` : ""}` +
-          `${a.source ? `\n      from ${a.source}` : ""}` +
-          `${a.aioVersion ? `\n      built against aio ${a.aioVersion}` : ""}`
-        ).join("\n"),
+    { root, apps },
     mode,
+    () =>
+      apps.length === 0
+        ? stack(
+          `${mark("note")} ${style.dim(`no installed apps in ${root}`)}`,
+          hints([["am create <name>", "scaffold one"]]),
+        )
+        : stack(
+          heading(count(apps.length, "app"), `installed in ${root}`),
+          indent(table(
+            apps.map((a) => ({
+              APP: a.name,
+              VERSION: a.version ?? style.dim("—"),
+              AIO: a.aioVersion ?? style.dim("—"),
+              KEPT: a.versions > 1 ? String(a.versions) : "",
+              FROM: a.source ?? "",
+            })),
+            {
+              columns: [
+                "APP",
+                "VERSION",
+                "AIO",
+                { key: "KEPT", align: "right" },
+                "FROM",
+              ],
+            },
+          )),
+        ),
   );
 }
 

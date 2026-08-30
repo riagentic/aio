@@ -90,6 +90,9 @@ const EXTRA_ON_BROWSER: Record<string, string> = {
   serverFn: "the `aio` specifier maps here — serverFn client proxy",
   serverFns: "the `aio` specifier maps here — serverFn definition passthrough",
   log: "the `aio` specifier maps here — no-op logger shim for shared modules",
+  bytes: "the `aio` specifier maps here — unit formatter, isomorphic (mod.ts)",
+  dur: "the `aio` specifier maps here — unit formatter, isomorphic (mod.ts)",
+  count: "the `aio` specifier maps here — unit formatter, isomorphic (mod.ts)",
   // Client-runtime plumbing consumed by src/* and generated shells, exported
   // for them rather than for app code (air.ts deliberately curates them out).
   client: "low-level client API (subscribe/getState/send) for shells",

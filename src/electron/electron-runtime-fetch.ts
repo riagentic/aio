@@ -30,6 +30,7 @@ import { join } from "@std/path";
 import { log as flog } from "../diagnostics/logger-api.ts";
 import { homedir } from "../server/paths.ts";
 import { isProcessAlive } from "../server/single-instance-lock.ts";
+import { HEY, OK } from "../diagnostics/fmt.ts";
 
 /** The Electron version a build falls back to when the app declares no exact
  *  one and none is installed. ONE decider — the scaffold's import map says
@@ -230,7 +231,7 @@ export async function unzipInto(
     if (out.success) {
       if (cmd === "python3") {
         warn(
-          "[electron] ⚠ unpacked with python's zipfile, which drops " +
+          `${HEY} unpacked with python's zipfile, which drops ` +
             "executable bits — install `unzip` for a package that runs " +
             "without a chmod",
         );
@@ -362,14 +363,14 @@ export async function ensureElectronRuntime(
   const mirror = opts.mirror ?? Deno.env.get("ELECTRON_MIRROR") ?? undefined;
   const dir = electronRuntimeDir(version, slug);
   if (await runtimeUsable(dir, slug)) {
-    log(`[electron] ✓ runtime ${version} (${slug}) — cached`);
+    log(`${OK} runtime ${version} (${slug}) — cached`);
     return dir;
   }
 
   return await withRuntimeLock(`${dir}.lock`, async (held) => {
     // Whoever we waited for may have finished it for us.
     if (await runtimeUsable(dir, slug)) {
-      log(`[electron] ✓ runtime ${version} (${slug}) — cached`);
+      log(`${OK} runtime ${version} (${slug}) — cached`);
       return dir;
     }
     if (!held) {
@@ -390,7 +391,7 @@ export async function ensureElectronRuntime(
     await Deno.mkdir(stage, { recursive: true });
     try {
       log(
-        `[electron] downloading runtime ${version} for ${slug} (~100 MB, once per machine)…`,
+        `downloading runtime ${version} for ${slug} (~100 MB, once per machine)…`,
       );
       const res = await doFetch(url);
       if (!res.ok) {
@@ -436,7 +437,7 @@ export async function ensureElectronRuntime(
             `rewriting the download.`,
         );
       }
-      log(`[electron] ✓ integrity check passed (${name})`);
+      log(`${OK} integrity check passed (${name})`);
 
       const zip = join(stage, "electron.zip");
       await Deno.writeFile(zip, bytes);
@@ -464,7 +465,7 @@ export async function ensureElectronRuntime(
 
       await Deno.remove(dir, { recursive: true }).catch(() => {});
       await Deno.rename(stage, dir);
-      log(`[electron] ✓ runtime ${version} (${slug}) ready`);
+      log(`${OK} runtime ${version} (${slug}) ready`);
       return dir;
     } finally {
       await Deno.remove(stage, { recursive: true }).catch(() => {});

@@ -18,7 +18,18 @@
 // process is a finding, and the finding names its fix: `am restart`.
 import { join, resolve } from "@std/path";
 import type { GlobalFlags } from "./am-types.ts";
-import { detectMode, out, outError } from "./am-output.ts";
+import {
+  block,
+  count,
+  detectMode,
+  heading,
+  indent,
+  out,
+  outError,
+  stack,
+  statusList,
+  tally,
+} from "./am-output.ts";
 import { instancesInProject, projectRoot } from "./am-cmd-process.ts";
 import type { InstanceInfo } from "../server/single-instance-lock.ts";
 
@@ -152,6 +163,19 @@ export async function cmdDoctor(
         message: "no running instance of this project — nothing to compare",
       },
       mode,
+      // A person asked a yes/no question and used to get `{ "ok": true,
+      // "findings": [], "message": … }` — braces, quotes and an empty array —
+      // because the object fell through to JSON.stringify. Say the answer.
+      () =>
+        stack(
+          heading("doctor", "nothing running"),
+          block(
+            "info",
+            "No instance of this project is running, so there is nothing to compare against the framework on disk.",
+            undefined,
+            "am start",
+          ),
+        ),
     );
     return;
   }
@@ -159,21 +183,29 @@ export async function cmdDoctor(
     running.map((i) => checkRunningAio(root, i)),
   );
   const bad = findings.filter((f) => !f.ok);
-  if (mode === "json") out({ ok: bad.length === 0, findings }, mode);
-  else {
-    for (const f of findings) {
-      console.log(
-        `  ${f.ok ? "✓" : "✗"} ${f.appId} (pid ${f.pid}) — ${f.detail}`,
-      );
-      if (f.fix) console.log(`      fix: ${f.fix}`);
-    }
-  }
+  out({ ok: bad.length === 0, findings }, mode, () =>
+    stack(
+      heading("doctor", count(findings.length, "instance")),
+      statusList(
+        findings.map((f) => ({
+          tone: f.ok ? "ok" as const : "bad" as const,
+          name: f.appId,
+          detail: `pid ${f.pid}  ${f.detail}`,
+        })),
+        { indent: "  " },
+      ),
+      indent(tally([
+        [findings.length - bad.length, "ok", "ok"],
+        [bad.length, "failed", "bad"],
+      ])),
+    ));
   if (bad.length > 0) {
     outError(
-      `${bad.length} running instance(s) serve a framework the disk no longer has — run ${
-        bad.map((f) => f.fix).join(" ; ")
-      }`,
+      `${
+        count(bad.length, "running instance")
+      } serve a framework the disk no longer has.`,
       mode,
+      bad.map((f) => f.fix).filter(Boolean).join("  ·  ") || "am fix",
     );
     Deno.exit(1);
   }

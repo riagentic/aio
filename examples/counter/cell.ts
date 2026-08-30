@@ -1,7 +1,7 @@
-// Cell — pure state + methods; UI and server both import from here
+// Cell — pure state + methods; UI and server both import from here.
 import { cell } from "aio";
 
-// persists by default — restart and count survives (persist: "all" is the default)
+// Persists by default — restart and the count survives.
 export const counter = cell("counter", {
   state: { count: 0 },
   methods: {

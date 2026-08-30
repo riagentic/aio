@@ -474,7 +474,7 @@ Deno.test({
             // One op, not two: the v3 write this build's predecessor made was
             // REFUSED while the cell was quarantined, so the log holds only
             // the v2 op the downgrade cannot fold.
-            /cell "nav" QUARANTINED — 1\/1 op\(s\) could not be folded/.test(
+            /cell "nav" QUARANTINED — 1\/1 op could not be folded/.test(
               e,
             ) &&
             /1 newer-shape skipped/.test(e) &&

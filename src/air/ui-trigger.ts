@@ -8,6 +8,8 @@
  * human — never calls handlers directly.
  */
 
+import { count } from "../diagnostics/fmt.ts";
+
 // deno-lint-ignore no-explicit-any
 type AnyEl = any;
 
@@ -279,7 +281,9 @@ export function triggerChar(el: AnyEl, ch: string): void {
     throw new Error(
       `cannot type "${ch}" into <${
         String(el.tagName ?? "input").toLowerCase()
-      }> — it already holds ${current.length} character(s) and maxLength is ` +
+      }> — it already holds ${
+        count(current.length, "character")
+      } and maxLength is ` +
         `${max}\n  a browser drops the keystroke; type a shorter value, or ` +
         `raise maxLength`,
     );

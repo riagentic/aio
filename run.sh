@@ -35,9 +35,30 @@ AIO_HOME="${AIO_HOME:-$HOME/.local/lib/aio}"
 AIO_BRANCH="${AIO_BRANCH:-main}"
 AIO_RAW="${AIO_RAW:-https://raw.githubusercontent.com/riagentic/aio/$AIO_BRANCH}"
 
-bold="\033[1m"; dim="\033[2m"; cyan="\033[36m"; green="\033[32m"; red="\033[31m"; reset="\033[0m"
-info() { printf "${cyan}▸${reset} %s\n" "$1"; }
+# ── How this script talks ────────────────────────────────────────────────
+# The SAME vocabulary the framework uses everywhere else (src/diagnostics/
+# fmt.ts): `·` a step, `✓` something that now exists, `!` an advisory, `✗` a
+# refusal — warnings and refusals on stderr, so `installer 2>/dev/null` keeps
+# working and a wrapper can tell output from trouble.
+#
+# And the SAME colour rule, which this script did not have: it painted escapes
+# into every pipe, log file and CI transcript unconditionally. FORCE_COLOR
+# wins, NO_COLOR (https://no-color.org) turns it off, otherwise colour only
+# when stdout is a terminal.
+if [ -n "${FORCE_COLOR:-}" ]; then _color=1
+elif [ -n "${NO_COLOR:-}" ]; then _color=0
+elif [ -t 1 ]; then _color=1
+else _color=0
+fi
+if [ "$_color" = 1 ]; then
+  bold="\033[1m"; dim="\033[2m"; cyan="\033[36m"; green="\033[32m"
+  red="\033[31m"; yellow="\033[33m"; reset="\033[0m"
+else
+  bold=""; dim=""; cyan=""; green=""; red=""; yellow=""; reset=""
+fi
+info() { printf "${dim}·${reset} %s\n" "$1"; }
 ok()   { printf "${green}✓${reset} %s\n" "$1"; }
+warn() { printf "${yellow}!${reset} %s\n" "$1" >&2; }
 fail() { printf "${red}✗${reset} %s\n" "$1" >&2; exit 1; }
 
 # ── args ──────────────────────────────────────────────────────────────

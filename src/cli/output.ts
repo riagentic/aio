@@ -1,102 +1,31 @@
-// output.ts — table, progress, spinner, style. Everything decorative asks
-// `io.color` / `io.tty` — the framework's ONE colour decider
-// (`colorEnabled`, src/diagnostics/color.ts; `defaultIO()` carries the same
-// value) — and degrades to plain lines that say the same thing. Turning colour off changes no
-// character of a message, only whether escapes surround it.
+// output.ts — the `aio/cli` half of the presentation layer: the pieces that
+// need a live stream (progress, spinner). The pure formatters —
+// `style`/`table`/`plainWidth` and the whole house vocabulary — live in
+// src/diagnostics/fmt.ts and are re-exported here unchanged.
+//
+// Why they live there and not here: `cli` is a LEAF in the boundary matrix, so
+// `am`, `build`, `server` and `diagnostics` may NOT import it. Those are
+// exactly the surfaces that must format the same way as `aio/cli` does, and a
+// second copy of `style()`/`table()` for them is how two vocabularies start.
+// One implementation, two doors.
+//
+// Everything decorative asks `io.color` / `io.tty` — the framework's ONE
+// colour decider (`colorEnabled`, src/diagnostics/color.ts; `defaultIO()`
+// carries the same value) — and degrades to plain lines that say the same
+// thing. Turning colour off changes no character of a message, only whether
+// escapes surround it.
 
-import { colorEnabled } from "../diagnostics/color.ts";
 import { type CliIO, defaultIO } from "./io.ts";
 
-/** Colour/emphasis helpers. Each returns `s` untouched when colour is off. */
-export type Style = Record<
-  | "bold"
-  | "dim"
-  | "underline"
-  | "red"
-  | "green"
-  | "yellow"
-  | "blue"
-  | "magenta"
-  | "cyan",
-  (s: string) => string
->;
-
-const CODES: Record<keyof Style, string> = {
-  bold: "1",
-  dim: "2",
-  underline: "4",
-  red: "31",
-  green: "32",
-  yellow: "33",
-  blue: "34",
-  magenta: "35",
-  cyan: "36",
-};
-
-/** A {@link Style} bound to an explicit colour decision — for tests, or a
- *  stream that is not stdout. */
-export function styleWith(color: boolean): Style {
-  const out = {} as Style;
-  for (const [k, code] of Object.entries(CODES)) {
-    out[k as keyof Style] = color
-      ? (s) => `\x1b[${code}m${s}\x1b[0m`
-      : (s) => s;
-  }
-  return out;
-}
-
-/** `style.bold("x")`, `style.red("x")`, … — bound to THE process decider
- *  (`colorEnabled`, the same value `defaultIO().color` carries). */
-export const style: Style = styleWith(colorEnabled);
-
-/** Strip ANSI escapes — the width a terminal actually shows. */
-export function plainWidth(s: string): number {
-  // deno-lint-ignore no-control-regex
-  return s.replace(/\x1b\[[0-9;]*m/g, "").length;
-}
-
-/** Column spec for {@link table}: a key, or a key with a header/alignment. */
-export type Column<R> = keyof R & string | {
-  key: keyof R & string;
-  header?: string;
-  align?: "left" | "right";
-};
-
-/** Options for {@link table}. */
-export type TableOptions<R> = {
-  /** Which columns, in order — default: every key of the first row. */
-  columns?: readonly Column<R>[];
-  /** Styling decision — default: the process decider. */
-  color?: boolean;
-};
-
-/** Render `rows` as an aligned text table (header bold when colour is on).
- *  Pure: returns the string, no trailing newline. No rows, no columns → "". */
-export function table<R extends Record<string, unknown>>(
-  rows: readonly R[],
-  opts: TableOptions<R> = {},
-): string {
-  if (rows.length === 0 && !opts.columns) return "";
-  const cols = (opts.columns ?? Object.keys(rows[0] ?? {})).map((c) =>
-    typeof c === "string" ? { key: c, header: c, align: "left" as const } : {
-      key: c.key,
-      header: c.header ?? c.key,
-      align: c.align ?? "left",
-    }
-  );
-  const cell = (v: unknown): string =>
-    v === null || v === undefined ? "" : typeof v === "string" ? v : String(v);
-  const body = rows.map((r) => cols.map((c) => cell(r[c.key])));
-  const widths = cols.map((c, i) =>
-    Math.max(c.header.length, ...body.map((r) => r[i]!.length))
-  );
-  const pad = (s: string, i: number) =>
-    cols[i]!.align === "right" ? s.padStart(widths[i]!) : s.padEnd(widths[i]!);
-  const st = styleWith(opts.color ?? defaultIO().color);
-  const line = (cells: string[]) => cells.map(pad).join("  ").trimEnd();
-  const head = st.bold(line(cols.map((c) => c.header)));
-  return [head, ...body.map(line)].join("\n");
-}
+export {
+  type Column,
+  plainWidth,
+  type Style,
+  style,
+  styleWith,
+  table,
+  type TableOptions,
+} from "../diagnostics/fmt.ts";
 
 /** A progress bar handle. */
 export type Progress = {

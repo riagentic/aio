@@ -427,18 +427,29 @@ Deno.test("human: bytes an operator can read", () => {
 });
 
 Deno.test("am lab is discoverable in `am help`", async () => {
-  const p = await new Deno.Command(Deno.execPath(), {
-    args: ["run", "-A", `${REPO}/src/am.ts`, "help"],
-    stdout: "piped",
-    stderr: "null",
-    env: { ...Deno.env.toObject(), AIO_AM_NO_DELEGATE: "1" },
-  }).output();
-  const help = new TextDecoder().decode(p.stdout);
-  assertStringIncludes(help, "lab windows");
-  assertStringIncludes(help, "lab macos");
-  assertStringIncludes(help, "lab linux");
-  assertStringIncludes(help, "lab android");
-  assertStringIncludes(help, "docs/testing/vm-labs.md");
+  const help = async (...args: string[]) => {
+    const p = await new Deno.Command(Deno.execPath(), {
+      args: ["run", "-A", `${REPO}/src/am.ts`, "help", ...args],
+      stdout: "piped",
+      stderr: "null",
+      env: { ...Deno.env.toObject(), AIO_AM_NO_DELEGATE: "1" },
+    }).output();
+    return new TextDecoder().decode(p.stdout);
+  };
+  // Two levels, and the gate checks both. Bare `am help` is the INDEX — one
+  // line per command — so it must name `lab` at all; the four platforms and
+  // the guide live in the entry, which is what `am help lab` and `--all`
+  // print in full. Asserting the prose against the index was asserting that
+  // the index is not an index.
+  const index = await help();
+  assertStringIncludes(index, "lab ");
+  for (const detailed of [await help("lab"), await help("--all")]) {
+    assertStringIncludes(detailed, "lab windows");
+    assertStringIncludes(detailed, "lab macos");
+    assertStringIncludes(detailed, "lab linux");
+    assertStringIncludes(detailed, "lab android");
+    assertStringIncludes(detailed, "docs/testing/vm-labs.md");
+  }
 });
 
 // ── The artifact hand-off ──────────────────────────────────

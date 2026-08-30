@@ -7,6 +7,8 @@ import { readDenoJson } from "../server/deno-json.ts";
 import { BUNDLE_JS, DIST_DIR, UI_ENTRY } from "../server/app-files.ts";
 import { basename, dirname, join, resolve, SEPARATOR } from "@std/path";
 import { slugify } from "./build-helpers.ts";
+import { bad, step, warn } from "./build-say.ts";
+import { NO } from "../diagnostics/fmt.ts";
 import {
   type BuildVersion,
   buildVersionFor,
@@ -163,7 +165,7 @@ function assertKnownFlags(args: readonly string[]): void {
   const unknown = unknownBuildFlags(args);
   if (unknown.length === 0) return;
   console.error(
-    `[build] \u2717 unknown flag(s): ${unknown.join(", ")}` +
+    `${NO} unknown flag(s): ${unknown.join(", ")}` +
       unknown.map(flagHint).join("") +
       `\n         known: ${
         flagVocabulary(BUILD_BOOL_FLAGS, BUILD_VALUE_FLAGS)
@@ -191,9 +193,7 @@ export function refuseBadBuildArgs(args: readonly string[]): void {
     .filter((f) => args.includes(f));
   if (shells.length > 1) {
     console.error(
-      `[build] \u2717 conflicting flags: ${
-        shells.join(" + ")
-      } — pick one shell target`,
+      `${NO} conflicting flags: ${shells.join(" + ")} — pick one shell target`,
     );
     Deno.exit(1);
   }
@@ -205,7 +205,7 @@ export function refuseBadBuildArgs(args: readonly string[]): void {
   const compiles = args.includes("--compile") || args.includes("--electron");
   if (args.includes("--service") && !compiles) {
     console.error(
-      "[build] \u2717 --service writes a systemd unit for a compiled binary, " +
+      "\u2717 --service writes a systemd unit for a compiled binary, " +
         "and this build compiles nothing.\n" +
         "       fix: `--compile --service` (the combination the unit file " +
         "describes), or drop --service to build only the bundle.",
@@ -287,13 +287,11 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
   // Notes are for a person: stderr. The version line is progress, stdout —
   // except when the build was asked a QUESTION (`--print-*`), whose stdout is
   // an answer a script parses (the onboarding one-liner read
-  // "[build] version …" as a path once).
+  // "version …" as a path once).
   const asked = isBuildQuestion(Deno.args);
   if (!fromFleet && !asked) {
-    for (const n of buildVersionNotes(version)) {
-      console.error(`[build] note: ${n}`);
-    }
-    console.log(`[build] version ${version.version}`);
+    for (const n of buildVersionNotes(version)) warn(n);
+    step("version", version.version);
   }
   const appDir = resolveAppDir(root, configEntry);
   // UI entry: --ui= (per-target, from build-all) else deno.json build.ui,
@@ -310,7 +308,7 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
       await Deno.stat(join(appDir, uiEntry));
     } catch {
       console.error(
-        `[build] ✗ UI entry not found: ${join(appDir, uiEntry)}\n` +
+        `${NO} UI entry not found: ${join(appDir, uiEntry)}\n` +
           `  (from ${
             uiArg !== undefined ? "--ui=" : "deno.json build.ui"
           }; the path is relative to the app dir — the directory of the entry module)`,
@@ -325,7 +323,7 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
   // by the build after that. Both are silent. Refuse, and name the fix.
   if (outDir === dist || outDir.startsWith(dist + SEPARATOR)) {
     console.error(
-      `[build] ✗ --out=${outArg} points inside dist/ — dist/ is the bundle ` +
+      `${NO} --out=${outArg} points inside dist/ — dist/ is the bundle ` +
         `staging dir: it is embedded into the binary wholesale and wiped by ` +
         `every build. Pick another directory (--out=release, --out=out/agent).`,
     );
@@ -363,7 +361,7 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
     ?.slice("--platform=".length) ?? "host";
   const resolved = resolvePlatforms([rawPlatform]);
   if (!resolved.ok) {
-    console.error(`[build] \u2717 ${resolved.error}`);
+    bad(resolved.error);
     Deno.exit(1);
   }
   const platform = resolved.platforms[0] ?? hostPlatform();
@@ -388,7 +386,7 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
     const why = shell ? crossCompileBlocker(shell, platform) : null;
     if (shell && why) {
       console.error(
-        `[build] \u2717 --platform=${platform} cannot be combined with ` +
+        `${NO} --platform=${platform} cannot be combined with ` +
           `--${shell}: ${why}`,
       );
       Deno.exit(1);

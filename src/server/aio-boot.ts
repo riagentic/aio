@@ -47,6 +47,7 @@ import {
   loadSnapshot,
   seedSyncSnapshot,
 } from "../sync/server-store.ts";
+import { count } from "../diagnostics/fmt.ts";
 
 /** What the boot replay needs to know about the app beyond the reducer —
  *  built by `bootStorage` (which has the cell metadata) and looked up by
@@ -375,7 +376,7 @@ export async function replaySyncOps<S>(
           log.info(`sync: restored cell "${cell}" from snapshot only`);
         }
       } else {
-        log.info(`sync: restored cell "${cell}" from ${applied} op(s)`);
+        log.info(`sync: restored cell "${cell}" from ${count(applied, "op")}`);
       }
       continue;
     }
@@ -399,7 +400,7 @@ export async function replaySyncOps<S>(
       : `Bump "${cell}"'s \`version\` and add an onMigrate(state, from) that ` +
         `converts the older shape, then restart.`;
     const what =
-      `${failed}/${total} op(s) could not be folded into "${cell}" ` +
+      `${failed}/${count(total, "op")} could not be folded into "${cell}" ` +
       `(${skipped.older} older-shape skipped, ${skipped.newer} newer-shape ` +
       `skipped, ${failures.length} failed) — first: ${failures[0] ?? "n/a"}`;
     if (ctx.dev) {
@@ -674,7 +675,7 @@ export function placeLoadedTables(
         log?.(
           `db: table "${b.table}" is empty but state.${
             b.path.join(".")
-          } holds ${held} item(s) — keeping them and writing them to ` +
+          } holds ${count(held, "item")} — keeping them and writing them to ` +
             `the table on the next sync (a new binding or a seeded default; ` +
             `an empty table never empties a non-empty ${
               b.shape === "map" ? "map" : "array"
@@ -1055,7 +1056,9 @@ export async function bootStorage<S>(
         throw e;
       }
     }
-    if (asyncDb) log.info(`sqlite: ${dbKeys.length} table(s) at ${dbPath}`);
+    if (asyncDb) {
+      log.info(`sqlite: ${count(dbKeys.length, "table")} at ${dbPath}`);
+    }
   }
 
   // ── 2. CRDT sync tables ───────────────────────────────────────────
@@ -1127,10 +1130,12 @@ export async function bootStorage<S>(
         broadcastRaw: syncBroadcastRef,
         log,
       });
-      log.info(`sync: ${syncCellIds.length} cell(s) with CRDT tables`);
+      log.info(`sync: ${count(syncCellIds.length, "cell")} with CRDT tables`);
     } else {
       log.warn(
-        `sync: ${syncCellIds.length} cell(s) have sync: true but no SQLite DB — CRDT disabled`,
+        `sync: ${
+          count(syncCellIds.length, "cell")
+        } have sync: true but no SQLite DB — CRDT disabled`,
       );
     }
   }
@@ -1648,8 +1653,11 @@ export async function loadAndMigrateSnapshot(
     log.warn(
       `persist: persistMode is "${persistMode}" but the stored document is in ` +
         `the "${otherMode}" layout (${
-          Object.keys(other).length
-        } key(s)) — migrating it to "${persistMode}" now. Booting empty over ` +
+          count(
+            Object.keys(other).length,
+            "key",
+          )
+        }) — migrating it to "${persistMode}" now. Booting empty over ` +
         `it is what this used to do, silently.`,
     );
     if (persistMode === "multi") await kvDb.setMulti(persistKey, other);
@@ -1669,7 +1677,7 @@ export async function loadAndMigrateSnapshot(
     else await kvDb.setMulti(persistKey, {}, Object.keys(other));
     log.info(
       `persist: migrated the stored document ${otherMode} → ${persistMode} ` +
-        `(${Object.keys(other).length} key(s))`,
+        `(${count(Object.keys(other).length, "key")})`,
     );
     persisted = verified;
   } else if (persisted && other) {
@@ -1679,8 +1687,11 @@ export async function loadAndMigrateSnapshot(
     log.warn(
       `persist: stored state exists in BOTH layouts. Booting on the ` +
         `"${persistMode}" one (persistMode); the "${otherMode}" copy (${
-          Object.keys(other).length
-        } key(s)) is IGNORED and left untouched — switch persistMode to read ` +
+          count(
+            Object.keys(other).length,
+            "key",
+          )
+        }) is IGNORED and left untouched — switch persistMode to read ` +
         `it, or delete it once you know which one you want.`,
     );
   }

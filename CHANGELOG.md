@@ -1,5 +1,89 @@
 # Changelog
 
+## v1.0.0-alpha73 — one voice (2026-08-30)
+
+> Everywhere aio talks to a person, it now talks the same way. Twelve surfaces
+> had twelve private vocabularies — five ANSI palettes, three colour deciders,
+> four "did you mean" thresholds, six byte formatters, three uptime formatters,
+> ten `[tag]` prefixes — and one of them answered a human with
+> `JSON.stringify(x, null, 2)`. There is one vocabulary now, one colour decider,
+> one of each formatter, and a gate on the property that matters: colour-off
+> output is colour-on output with the escapes removed, character for character.
+> `--json` is byte-identical. No breaking changes:
+> `docs/upgrade/from-alpha72-to-alpha73.md`.
+
+- **One presentation vocabulary** (`src/diagnostics/fmt.ts`), in `diagnostics/`
+  because that is the folder every other folder may already import — a copy in
+  `cli/` would have needed four new boundary-matrix edges. `kv` aligns label and
+  value, `block` wraps a warning and puts the fix on its own line, `statusList`
+  marks a run of checks, `tally` drops zero counts, `fold` turns a 34-item,
+  1200-character `provisioned:` line into a count and a range. Everything is
+  pure, so a test asserts on a rendered block without a TTY, and the JSON branch
+  never calls in.
+
+- **Colour is decoration, everywhere.** `install.sh`, `run.sh`, `install.ps1`
+  and `run.ps1` painted escapes into every pipe, log file and CI transcript
+  unconditionally, and `install.ps1` used a different glyph vocabulary from
+  `run.ps1` — on one OS. aiol ran a third decider (`NO_COLOR || CI`) that
+  ignored `FORCE_COLOR` in one direction and painted a redirected file in the
+  other. All five now follow the framework's one rule.
+
+- **Prose wraps to the terminal.** `am pin`'s unpinned warning was one
+  200-column line with the remedy trailing off the right edge. Every block is
+  measured against the real width now, and the fix is always its own copyable
+  line.
+
+- **An error shows the code that failed.** The 60-column `┏━━ AIO ERROR ━━┓`
+  frame — nine bold-labelled rows, mostly absent, no sight of the source — is a
+  glyph, the code, the sentence, and the failing line with a caret under the
+  column, read from disk at report time. Best-effort: no excerpt for an
+  unreadable file or one inside `dep/aio`. The production one-liner is
+  unchanged.
+
+- **`am doctor` stops answering a person in JSON.** It printed
+  `{ "ok": true, "findings": [], "message": … }` at a terminal, braces and all,
+  because an object with no bespoke renderer fell through to
+  `JSON.stringify(x, null, 2)`. That fallback is now `describe()` — the house
+  data renderer — so no command can ever be worse than aligned rows again.
+
+- **`am instances` is a table**, not nine `key=value` pairs per line; paths
+  nobody compares across rows moved behind `--long`. **`am help`** lists every
+  command on one line, derived from the same text `am help <command>` prints in
+  full (`--all` is the old wall) — and a new gate checks every registered
+  command has an entry, which caught `am tables` answering "no help entry".
+
+- **The boot report is one log entry.** Twenty-six facts each carried their own
+  timestamp, level and category: ~1000 characters of prefix. The terminal gets
+  an aligned block; `app.log` gets them as structured data (`web=…`, `bind=…`)
+  instead of twenty-six lines of prose.
+
+- **`deno compile -q`.** Every build printed deno's "Embedded Files" tree —
+  several hundred lines for an app with three modules of its own — under aio's
+  own one-line artifact report. Diagnostics are unaffected: a failed compile
+  still says why.
+
+- **Duplication removed, with the gates to keep it removed.** Six byte
+  formatters and three uptime formatters became `bytes`/`dur` (one rounded KB to
+  whole numbers, one rounded 90 minutes to `2h` — the same number read three
+  ways); two Levenshtein implementations became `nearestOf`; ~25 `thing(s)`
+  plurals became `count()`; aiol's three severity tables became one tone map;
+  `instanceAioColumn`, `am-output.section` and four build helpers were deleted
+  as dead. `bytes`/`dur`/`count` are exported from `aio` — public because they
+  were being copied instead.
+
+- **examples/counter and examples/todo are generated from the scaffold.** They
+  were meant to be in lockstep and nothing checked it: all six files had
+  drifted, and the one people READ — linked from the README — was the stale
+  design, 170 lines of inline `style={{…}}` against a scaffold that had moved to
+  the built-in theme. `deno task update:examples` regenerates them and a gate
+  pins them byte-for-byte. `am create` now formats what it writes, so a new
+  project no longer opens with a diff over code its author did not write.
+
+- **A real flake, fixed at the cause.** `tests/discovery.test.ts` retried until
+  three answers arrived — any three, including strangers' apps — while the
+  assertion under it measured only this run's three. On a machine with several
+  aio apps running that broke on the first sweep, every time.
+
 ## v1.0.0-alpha72 — measured, not claimed (2026-08-29)
 
 > An audit of alpha71 against its own doctrine. Four things the framework
