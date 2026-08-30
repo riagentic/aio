@@ -23,6 +23,7 @@ import {
   triggerSelect,
   triggerSetChecked,
 } from "./ui-trigger.ts";
+import { count } from "../diagnostics/fmt.ts";
 
 /** A trigger request from the server (a "ui-trigger" frame payload). */
 export type UITriggerRequest = {
@@ -152,7 +153,9 @@ export async function runUITrigger(
         const fresh = findByPath(req.path);
         if (!fresh?._el || (fresh._el as Element).isConnected === false) {
           throw new Error(
-            `"${req.path}" left the live surface after ${typed} character(s) ` +
+            `"${req.path}" left the live surface after ${
+              count(typed, "character")
+            } ` +
               `— the rest of ${JSON.stringify(req.text ?? "")} was not typed`,
           );
         }

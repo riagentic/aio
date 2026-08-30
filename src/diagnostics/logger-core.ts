@@ -28,6 +28,7 @@ import { observeAction } from "./logger-observe.ts";
 import { noRedaction } from "./redact.ts";
 import type { Redactor } from "./redact.ts";
 import { logPerf, logVitals, logVitalsSummary } from "./logger-vitals.ts";
+import { count } from "./fmt.ts";
 /** Structured file logger — routes entries to app.log, debug.log, error.log, warning.log, and perf.log. */
 export class AioLogger {
   private cfg: Required<LogConfig>;
@@ -637,7 +638,9 @@ export class AioLogger {
     if (this._writeErrors > 0) {
       console.error(
         `[logger] file logging recovered after ${this._writeErrors} failed ` +
-          `write(s) (${this._writeErrorsSuppressed} report(s) suppressed) — ` +
+          `write(s) (${
+            count(this._writeErrorsSuppressed, "report")
+          } suppressed) — ` +
           `${this._linesLost} log line(s) were lost and cannot be recovered`,
       );
     }

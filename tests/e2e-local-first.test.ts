@@ -164,7 +164,7 @@ export default function App() {
     }
     if (localFirst) {
       assert(
-        logBuf.includes("localFirst: 1 cell(s) run locally"),
+        logBuf.includes("localFirst: 1 cell run locally"),
         `the switch must SAY what it adopted:\n${logBuf.slice(-800)}`,
       );
     }

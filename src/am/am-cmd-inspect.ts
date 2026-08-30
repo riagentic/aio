@@ -22,6 +22,7 @@ import {
   trojanGet,
   trojanPost,
 } from "./am-http.ts";
+import { bytes } from "../diagnostics/fmt.ts";
 
 // ── Constants ───────────────────────────────────────────────
 
@@ -559,12 +560,11 @@ export type TopMetrics = {
   cells: Record<string, number>;
 };
 
-/** Human-readable bytes; -1 = an unserializable (cyclic) cell slice. */
+/** Human-readable bytes; -1 = an unserializable (cyclic) cell slice. The
+ *  SENTINEL is this command's; the arithmetic is the framework's one spelling
+ *  (`fmt.bytes`), so a size reads the same here as in a build or a log. */
 export function fmtBytes(n: number): string {
-  if (n < 0) return "(cyclic)";
-  if (n < 1024) return `${n} B`;
-  if (n < 1_048_576) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / 1_048_576).toFixed(1)} MB`;
+  return n < 0 ? "(cyclic)" : bytes(n);
 }
 
 /** Render ONE `am top` frame — pure (no I/O), so it's unit-testable. Cells are

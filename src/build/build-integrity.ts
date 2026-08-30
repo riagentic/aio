@@ -57,7 +57,7 @@ export async function verifyIntegrity(
   }
   if (hash !== expected) {
     throw new Error(
-      `[build] Integrity check failed for ${url}\n` +
+      `Integrity check failed for ${url}\n` +
         `  Expected: ${expected}\n` +
         `  Got:      ${hash}\n` +
         `  The content of this URL has changed since the last build.\n` +
@@ -117,7 +117,7 @@ export function makeHttpPlugin(cfg: BuildConfig): any {
           const r = await fetch(args.path);
           if (!r.ok) {
             throw new Error(
-              `[build] fetch ${args.path} -> HTTP ${r.status} — check the import URL is reachable (network/registry down?) and rebuild`,
+              `fetch ${args.path} -> HTTP ${r.status} — check the import URL is reachable (network/registry down?) and rebuild`,
             );
           }
           const contents = await r.text();

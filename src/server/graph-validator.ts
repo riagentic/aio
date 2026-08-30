@@ -197,6 +197,7 @@ export function resolveSpecifier(
 // same set, so the dev-server diagnostic and the linter can never disagree).
 import { SERVER_ONLY_AIO_SYMBOLS } from "../entries.ts";
 import { codeText } from "../diagnostics/code-mask.ts";
+import { count } from "../diagnostics/fmt.ts";
 
 /** Detect server-only APIs in browser-bound code.
  *  AIO-427: severity is split by CERTAINTY of breakage —
@@ -455,7 +456,7 @@ async function prodGraphErrors(opts: {
   opts.debug?.(
     `graph: prod bundle audited (${verdict.auditMs.toFixed(0)}ms) + ` +
       `evaluated (${verdict.evalMs.toFixed(0)}ms) — ${
-        verdict.ok ? "ok" : `${verdict.findings.length} refusal(s)`
+        verdict.ok ? "ok" : `${count(verdict.findings.length, "refusal")}`
       }`,
   );
   return verdict.findings.map((f) => ({

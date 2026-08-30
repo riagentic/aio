@@ -5,7 +5,21 @@
 
 import { VERSION } from "../server/aio.ts";
 import type { GlobalFlags } from "./am-types.ts";
-import { detectMode, fail, out, outError } from "./am-output.ts";
+import {
+  detectMode,
+  fail,
+  heading,
+  hints,
+  out,
+  outError,
+  pad,
+  stack,
+  style,
+  termWidth,
+  width,
+  wrap,
+} from "./am-output.ts";
+import type { Style } from "../diagnostics/fmt.ts";
 import { repoRoot } from "./am-cmd-create.ts";
 import { resolve } from "@std/path";
 
@@ -386,6 +400,86 @@ export function helpBlock(text: string, cmd: string): string | null {
   return picked.length > 0 ? picked.join("\n") : null;
 }
 
+/** One line per command: its signature, and the FIRST line of its
+ *  description. Derived from {@link HELP_TEXT} itself, so the summary cannot
+ *  drift from the prose — there is one help text, read two ways.
+ *
+ *  `am help` used to print all 240 lines of that prose: every flag of every
+ *  one of 62 commands, in paragraphs, past the top of the scrollback before
+ *  the reader had found the verb they wanted. The full entry is one keystroke
+ *  away (`am help <cmd>`) and the whole text is still one flag away
+ *  (`am help --all`); what the bare command owes you is the LIST. */
+export function helpSummary(text: string, st: Style = style): string {
+  const out: string[] = [];
+  const entries: { head: string; sig: string; desc: string }[] = [];
+  let head = "";
+  let afterBlank = true;
+  for (const line of text.split("\n")) {
+    if (!line.trim()) {
+      afterBlank = true;
+      continue;
+    }
+    // A heading sits at column 0 and STARTS a group only right after a blank
+    // line: several headings in the full text wrap over two lines, and without
+    // that rule the continuation ("so `am build` and `deno task build` can
+    // never differ)") became a group of its own. The parenthetical explaining
+    // a group is dropped — a one-line list wants the noun, not the essay.
+    if (/^\S/.test(line)) {
+      if (afterBlank) head = line.replace(/\s*\(.*$/, "").replace(/:$/, "");
+      afterBlank = false;
+      continue;
+    }
+    afterBlank = false;
+    const m = /^ {2}(\S(?:.*?\S)?)(?: {2,}(.*))?$/.exec(line);
+    if (m) {
+      entries.push({ head, sig: m[1]!, desc: (m[2] ?? "").trim() });
+    } else if (entries.length > 0) {
+      // A wrapped continuation of the entry above. Collected so the summary
+      // can cut on a SENTENCE — the first physical line alone ended every row
+      // mid-clause ("= deno task build — every target in deno.json"), which
+      // reads as a truncation bug rather than as a summary.
+      entries.at(-1)!.desc += " " + line.trim();
+    }
+  }
+  // First sentence, then a hard cap: a one-line row is a label, not the prose.
+  for (const e of entries) {
+    const dot = /\.(?:\s|$)/.exec(e.desc);
+    if (dot) e.desc = e.desc.slice(0, dot.index + 1);
+    e.desc = e.desc.replace(/\s+/g, " ").trim();
+  }
+  // One column for the whole list, so the descriptions line up across groups
+  // — but capped, or `create <name> [--template=counter|todo]` sets the column
+  // for 62 rows that do not need it.
+  const CAP = 24;
+  const w = Math.min(
+    CAP,
+    Math.max(
+      0,
+      ...entries.filter((e) => width(e.sig) <= CAP).map((e) => width(e.sig)),
+    ),
+  );
+  // Fit the terminal: the description gets whatever is left after the
+  // signature column, with an ellipsis when the sentence is longer than that.
+  const room = Math.max(24, termWidth() - w - 5);
+  let last = "";
+  for (const e of entries) {
+    if (width(e.desc) > room) {
+      e.desc = wrap(e.desc, room - 1)[0] + "…";
+    }
+    if (e.head !== last) {
+      if (out.length) out.push("");
+      out.push(st.bold(e.head));
+      last = e.head;
+    }
+    const sig = st.cyan(e.sig);
+    if (!e.desc) out.push(`  ${sig}`);
+    else if (width(e.sig) > w) {
+      out.push(`  ${sig}\n  ${" ".repeat(w)}  ${st.dim(e.desc)}`);
+    } else out.push(`  ${pad(sig, w)}  ${st.dim(e.desc)}`);
+  }
+  return out.join("\n");
+}
+
 export function cmdHelp(
   args: string[],
   flags: GlobalFlags,
@@ -399,7 +493,13 @@ export function cmdHelp(
   if (cmd) {
     const block = helpBlock(HELP_TEXT, cmd);
     if (block) {
-      console.log(`am ${cmd} — usage:\n\n${block}`);
+      console.log(
+        stack(
+          heading(`am ${cmd}`),
+          block,
+          hints([["am help", "every command"]]),
+        ),
+      );
       return;
     }
     // A mapped command with no entry of its own (`help`) or an unknown word:
@@ -410,7 +510,19 @@ export function cmdHelp(
         : `am: unknown command "${cmd}" — the full list:`,
     );
   }
-  console.log(`am ${VERSION} — aio manager\n\n${HELP_TEXT}`);
+  // `flags.all`, not `args.includes("--all")`: `--all` is a GLOBAL flag, so
+  // parseGlobalFlags consumes it before a command ever sees argv. Reading argv
+  // here made `am help --all` silently print the summary — the one form whose
+  // entire job is to print the opposite.
+  const full = flags.all === true;
+  console.log(stack(
+    heading("am", VERSION, "the aio app manager"),
+    full ? HELP_TEXT : helpSummary(HELP_TEXT),
+    hints([
+      ["am help <command>", "everything that command accepts"],
+      ["am help --all", "every command, in full"],
+    ]),
+  ));
 }
 
 export const HELP_TEXT = `Onboard:
@@ -476,7 +588,7 @@ Process (singleton — one instance per app identity):
   instances               List all running aio apps on this machine
 
 State:
-  state [path] [--wait=N] State query (dot-path, [*] wildcard, {pick})
+  state [path] [--wait=N]  State query (dot-path, [*] wildcard, {pick})
   state --ui [user]       Server-side UI-state projection (was \`am ui\`; for
                           live client UI use: surface)
   expect <path> <op> [v]  Assert on state (eq/ne/gt/lt/contains/exists…); e2e; --wait=N
@@ -551,6 +663,7 @@ Inspect:
                           must run with --cdp (or AIO_CDP=1); --json → {file,bytes,url}
   sql <query>             Execute read-only SQL
   sql --tables            List SQLite tables
+  tables                  The same list under its own name (= sql --tables)
   schedules               Active scheduled effects
   logs [filter]           Tail app log (--client for client.log) (--filter --lines --follow)
                           A filter is a substring, e.g. "am logs error"

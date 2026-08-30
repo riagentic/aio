@@ -75,7 +75,11 @@ Deno.test("am: help does not advertise commands that do not exist", async () => 
   const known = new Set(await amCommands());
   const advertised = [...help.matchAll(/^\s{2}([a-z][\w-]*)\b/gm)]
     .map((m) => m[1]!)
-    .filter((w) => !["json", "app", "entry", "wait"].includes(w));
+    // `am` is the binary, not a subcommand: the footer of the compact list
+    // names the command to type next (`am help <command>`), and it sits at the
+    // same indent as an entry. Excluded by name so the gate keeps doing its
+    // real job — catching an advertised subcommand that does not exist.
+    .filter((w) => !["json", "app", "entry", "wait", "am"].includes(w));
   const unknown = [...new Set(advertised)].filter((w) => !known.has(w));
   assertEquals(
     unknown,

@@ -1,4 +1,5 @@
 import { log } from "../diagnostics/logger-api.ts";
+import { count } from "../diagnostics/fmt.ts";
 
 // Reactive signal system for AIO renderer.
 // Provides: signal, computed, effect, batch — auto-tracked dependencies.
@@ -205,7 +206,7 @@ function _flush(): void {
         log.warn(
           "signal",
           `_flush exceeded ${_FLUSH_MAX_ITERATIONS} iterations — possible infinite loop. ` +
-            `${_pendingSubscribers.size} subscriber(s) still pending. ` +
+            `${count(_pendingSubscribers.size, "subscriber")} still pending. ` +
             `Use signal(value, "name") for easier debugging. Remaining subscribers cleared.`,
         );
         _pendingSubscribers.clear();

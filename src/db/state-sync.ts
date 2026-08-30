@@ -13,6 +13,7 @@ import {
 } from "../server/sql.ts";
 
 import { log } from "../diagnostics/logger-api.ts";
+import { count } from "../diagnostics/fmt.ts";
 
 /** One report per offending fact, for the whole process — a persist runs every
  *  debounce window and the same row shape would otherwise be named on each. */
@@ -110,7 +111,9 @@ async function reconcileTable(
       throw new Error(
         `db: table "${name}" is missing column(s) ${
           blocked.map((c) => `"${c}"`).join(", ")
-        } and holds ${rows[0]?.n} row(s), so SQLite has no value to put in ` +
+        } and holds ${
+          count(rows[0]?.n ?? 0, "row")
+        }, so SQLite has no value to put in ` +
           `them. Declare a default (\`text({ default: "" })\`) or make them ` +
           `nullable (\`text({ nullable: true })\`) and they are added on the ` +
           `next boot — or migrate the table yourself with app.db. Adding the ` +

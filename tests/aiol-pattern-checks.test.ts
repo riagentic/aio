@@ -662,7 +662,9 @@ async function consoleHints(
   const { checkPerformance } = await import("../aiol/checks.ts");
   await checkPerformance(ctx);
   return report.issues
-    .filter((i) => i.message.includes("console.log call(s)"))
+    // The message pluralises properly now (`1 console.log call` /
+    // `4 console.log calls`), so match the stem rather than a literal `(s)`.
+    .filter((i) => i.message.includes("console.log call"))
     .map((i) => i.file ?? "");
 }
 

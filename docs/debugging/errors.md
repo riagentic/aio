@@ -24,30 +24,35 @@ AioError format, error codes, correlation IDs, log files, and the onError hook.
 
 ## AioError console output
 
-Every AIO error produces a structured `AioError`. In dev mode, errors appear as
-colored boxes:
+Every AIO error produces a structured `AioError`. In dev mode it is printed in
+the framework's house style — a red glyph, the code, the sentence, the code that
+failed, and the one thing to do about it:
 
 ```
-+-  AIO ERROR -----------------------------------------+
-| REDUCE_ERROR in cell 'orderer'                    |
-| Action: orderer:placeOrder                           |
-| Machine state: idle                                  |
-|                                                      |
-| Cannot read property 'price' of undefined            |
-|                                                      |
-| at orderer.reduce (src/cell/orderer.ts:47:12)    |
-|                                                      |
-| State at crash:                                      |
-|   { status: 'idle', orders: [], lastPrice: null }    |
-|                                                      |
-| Tip: Check if the action payload has the expected    |
-|      shape.                                          |
-| Correlation: a1b2c3d4                                |
-+------------------------------------------------------+
+✗ REDUCE_ERROR  cell orderer · action orderer:placeOrder · machine idle
+
+  Cannot read property 'price' of undefined
+
+  src/cell/orderer.ts:47:12
+    46 │ function reduce(s, a) {
+    47 │   return { ...s, total: a.order.price }
+       │                          ^
+    at reduce (src/cell/orderer.ts:47:12)
+
+  → Check that the action payload has the shape the reducer expects.
+
+  state  {"status":"idle","orders":[],"lastPrice":null}
+  cid a1b2c3d4
 ```
 
-**Fields shown:** error code, cell name, action/effect/flow, filtered stack
-trace (your code only), state snapshot, actionable tip, correlation ID.
+**Fields shown:** error code, the cell/action/effect/hook it happened in, the
+message (wrapped to your terminal), the source line with a caret, the filtered
+stack (your code only), an actionable fix, the state snapshot, correlation ID.
+
+The source excerpt is best-effort: it is skipped for a file the process cannot
+read, or one inside `dep/aio`/`node_modules`. Colour follows `NO_COLOR` /
+`FORCE_COLOR` / "is stdout a terminal" like every other aio surface — with it
+off, the same characters are printed without the escapes.
 
 In prod mode, errors are compact one-liners:
 

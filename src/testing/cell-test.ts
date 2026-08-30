@@ -729,7 +729,9 @@ export async function bootCells(
     if (stableRounds >= ROUNDS - 2) {
       if (stillRunning.length > 0) {
         console.warn(
-          `[aio:test] settle() returned with ${stillRunning.length} call(s) ` +
+          `[aio:test] settle() returned with ${
+            count(stillRunning.length, "call")
+          } ` +
             `still in flight: ${stillRunning.join(", ")}. Dispatch is quiet, ` +
             `so committed state is settled — but if you did not park these ` +
             `deliberately, await the call itself instead of settle().`,
@@ -785,3 +787,4 @@ export {
   type TestServer,
   testServer,
 } from "./server-test.ts";
+import { count } from "../diagnostics/fmt.ts";

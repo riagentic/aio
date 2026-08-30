@@ -14,6 +14,9 @@ import { bundleClient, judgeClientBundle } from "./client-bundle.ts";
 import { appIconPng, appIconSvg } from "./app-icon.ts";
 import { misplacedIconHint, resolveAppIcon } from "./build-helpers.ts";
 import { explainServerOnlyImport } from "../server/server-only-specs.ts";
+import { bytes } from "../diagnostics/fmt.ts";
+import { bad, ok, step, warn } from "./build-say.ts";
+import { HEY, NO } from "../diagnostics/fmt.ts";
 
 /** Where the bundle's REAL input list is recorded — esbuild's own metafile,
  *  reduced to the local files it actually read.
@@ -95,7 +98,7 @@ async function writeBundleInputs(
     // rebuilds, which is correct, just slower. Say so rather than leave the
     // "cached" line unexplainably absent forever.
     console.warn(
-      `[build] \u26a0 could not record the bundle's inputs at ${path}: ${e} — ` +
+      `${HEY} could not record the bundle's inputs at ${path}: ${e} — ` +
         `every build will re-run esbuild until this is writable`,
     );
   }
@@ -139,7 +142,7 @@ export async function _discardBundle(root: string, out: string): Promise<void> {
   }
   if (discarded) {
     console.error(
-      "[build] \u2717 discarded dist/app.js — a refused build ships nothing, " +
+      "\u2717 discarded dist/app.js — a refused build ships nothing, " +
         "so the next run re-checks instead of reusing this one",
     );
   }
@@ -373,8 +376,7 @@ export function embedVerdict(opts: {
   if (!opts.canRebuild) {
     return {
       action: "refuse",
-      message:
-        `[build] \u2717 ${out} ${why}, and there is no ${opts.appEntry} ` +
+      message: `${NO} ${out} ${why}, and there is no ${opts.appEntry} ` +
         `to rebuild it from.\n` +
         `        This target embeds dist/ verbatim — the binary would serve ` +
         `that bundle as-is.\n` +
@@ -386,7 +388,7 @@ export function embedVerdict(opts: {
   }
   return {
     action: "rebuild",
-    message: `[build] \u26a0 ${out} ${why} — rebuilding the ${
+    message: `${HEY} ${out} ${why} — rebuilding the ${
       shapeName(want)
     } bundle before packaging`,
   };
@@ -443,7 +445,7 @@ export async function runBundle(
   // A missing decider is a broken build, and it says so here.
   if (typeof appDir !== "string" || appDir === "") {
     console.error(
-      "[build] ✗ BuildConfig.appDir is unset — build it with " +
+      "✗ BuildConfig.appDir is unset — build it with " +
         "loadBuildConfig() (or resolveAppDir(root, entry)); the app dir is " +
         "the one rule that decides where App.tsx, style.css and icon.png " +
         "live, in dev and in the packaged app alike.",
@@ -459,7 +461,7 @@ export async function runBundle(
     await Deno.stat(appEntry);
   } catch {
     console.error(
-      `[build] ✗ ${appEntry} not found — the app dir is the entry's directory ` +
+      `${NO} ${appEntry} not found — the app dir is the entry's directory ` +
         `(${
           cfg.entryFromFlag
             ? `--entry=${cfg.configEntry}`
@@ -474,11 +476,7 @@ export async function runBundle(
 
   if (bundleFresh) {
     const s = await Deno.stat(out);
-    console.log(
-      `[build] \u2713 dist/app.js cached (${
-        (s.size / 1024).toFixed(1)
-      } KB) — use --force to rebuild`,
-    );
+    ok("dist/app.js", `cached, ${bytes(s.size)} — --force rebuilds it`);
   } else {
     // Clean dist/ and rebuild
     try {
@@ -494,7 +492,7 @@ export async function runBundle(
     try {
       shares = resolveShare(root, mainConfig.share);
     } catch (e) {
-      console.error(`[build] \u2717 ${e instanceof Error ? e.message : e}`);
+      bad(e instanceof Error ? e.message : String(e));
       Deno.exit(1);
     }
 
@@ -534,12 +532,10 @@ export async function runBundle(
         // own message.
         const explained = explainServerOnlyImport(String(e));
         console.error(
-          explained
-            ? `[build] \u2717 ${explained}`
-            : `[build] \u2717 esbuild: ${e}`,
+          explained ? `${NO} ${explained}` : `${NO} esbuild: ${e}`,
         );
       }
-      await refuseBundle(root, out, "[build] \u2717 bundle failed");
+      await refuseBundle(root, out, "\u2717 bundle failed");
     }
 
     // The judgement — one decider, shared with the dev server. A leak, a
@@ -553,17 +549,18 @@ export async function runBundle(
     });
     if (!verdict.ok) {
       for (const line of verdict.lines) {
-        console.error(line.startsWith("\u2717") ? `[build] ${line}` : line);
+        console.error(line.startsWith("\u2717") ? `${line}` : line);
       }
       await refuseBundle(root, out);
     }
     for (const note of verdict.notes) {
-      console.log(`[build]   note: ${note}`);
+      step(note);
     }
-    console.log(
-      `[build] \u2713 bundle audited + evaluated (${
-        verdict.auditMs.toFixed(0)
-      }ms + ${verdict.evalMs.toFixed(0)}ms)`,
+    ok(
+      "bundle audited + evaluated",
+      `${verdict.auditMs.toFixed(0)}ms audit + ${
+        verdict.evalMs.toFixed(0)
+      }ms eval`,
     );
 
     // A STANDALONE Android build has no Deno runtime — the APK is a Kotlin
@@ -585,7 +582,7 @@ export async function runBundle(
       const reach = Object.entries(serverOnlyDynamic);
       if (reach.length > 0) {
         console.error(
-          "[build] \u2717 this app reaches server-only code, and a standalone " +
+          "\u2717 this app reaches server-only code, and a standalone " +
             "APK has no Deno runtime to run it:",
         );
         for (const [spec, importers] of reach) {
@@ -611,9 +608,7 @@ export async function runBundle(
     await writeBundleInputs(root, out, appDir, metaInputs);
 
     const stat = await Deno.stat(out);
-    console.log(
-      `[build] \u2713 dist/app.js (${(stat.size / 1024).toFixed(1)} KB)`,
-    );
+    ok("dist/app.js", bytes(stat.size));
   }
 
   // Copy style.css to dist/ -- from THE app dir (cfg.appDir), the same place
@@ -631,7 +626,7 @@ export async function runBundle(
   } catch { /* no style.css at the app dir; legacy src/ checked below */ }
   if (hasStyle) {
     await Deno.copyFile(styleSrc, join(dist, APP_STYLE));
-    console.log("[build] \u2713 dist/style.css");
+    ok("dist/style.css");
   } else if (appDir !== join(root, "src")) {
     // The legacy trap, made loud: a style.css at src/ that the app-dir rule
     // does NOT cover was never served in dev; silently shipping it would make
@@ -643,7 +638,7 @@ export async function runBundle(
     } catch { /* no stray stylesheet */ }
     if (strayStyle) {
       console.error(
-        "[build] ✗ src/style.css exists but the app dir is " + appDir +
+        "✗ src/style.css exists but the app dir is " + appDir +
           " (the entry's directory, where dev serves the UI from). " +
           "Move style.css next to your entry so dev and prod agree (WYSIDIWYSIP).",
       );
@@ -663,12 +658,12 @@ export async function runBundle(
     appDir,
   );
   if (misplacedIcon) {
-    console.warn(`[build] \u26a0 ${misplacedIconHint(misplacedIcon, appDir)}`);
+    warn(misplacedIconHint(misplacedIcon, appDir));
   }
   if (iconSrc) {
     await Deno.copyFile(iconSrc, join(dist, APP_ICON));
     await Deno.remove(join(dist, "icon.svg")).catch(() => {});
-    console.log("[build] \u2713 dist/icon.png");
+    ok("dist/icon.png");
   } else {
     // No app icon — GENERATE one rather than shipping none. `dist/icon.png` is
     // what the packaged Electron window, the AppImage and the favicon all read,
@@ -681,6 +676,6 @@ export async function runBundle(
     const label = appTitle ?? binaryName ?? basename(appDir);
     await Deno.writeFile(join(dist, APP_ICON), await appIconPng(label, 512));
     await Deno.writeTextFile(join(dist, "icon.svg"), appIconSvg(label));
-    console.log(`[build] \u2713 dist/icon.png (default, "${label}")`);
+    ok("dist/icon.png", `generated monogram "${label}"`);
   }
 }

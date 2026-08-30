@@ -220,6 +220,7 @@ export {
   useNavigate,
   useRoute,
 } from "./air/router.ts";
+import { count } from "./diagnostics/fmt.ts";
 
 // ── Islands — client-side framework interop, no server involved ───────
 //
@@ -575,7 +576,7 @@ export function initStandalone<S, A, E>(
         );
         if (stuck > 0) {
           standaloneLog.warn(
-            `close: ${stuck} call(s) still running at the ` +
+            `close: ${count(stuck, "call")} still running at the ` +
               `${DRAIN_TIMEOUT_MS}ms deadline (slow write, or an ignored ` +
               `abort signal) — their remaining writes are lost`,
           );
@@ -968,3 +969,11 @@ export { cell } from "./state/cell.ts";
 // `schedule` — Deno-free since alpha70 (the worker pool left it); `blocking`
 // stays server-only and refuses by name here.
 export { schedule } from "./state/schedule.ts";
+
+// ── Unit formatters ───────────────────────────────────────────────────
+// The standalone (Android WebView / no-server) half of `aio`'s
+// `bytes`/`dur`/`count` (mod.ts). Pure and isomorphic — a real re-export of
+// the one implementation, never a stub — because a symbol that exists on
+// `aio` everywhere and vanishes on one target is an app that builds fine and
+// fails to BUNDLE only there (tests/android-air-surface.test.ts).
+export { bytes, count, dur } from "./diagnostics/fmt.ts";

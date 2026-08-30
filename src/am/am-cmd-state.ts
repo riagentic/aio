@@ -4,7 +4,14 @@
  */
 
 import type { GlobalFlags } from "./am-types.ts";
-import { detectMode, out, outError } from "./am-output.ts";
+import {
+  describe,
+  detectMode,
+  out,
+  outError,
+  stack,
+  style,
+} from "./am-output.ts";
 import {
   amCtx,
   overwriteRefusal,
@@ -445,7 +452,18 @@ export async function cmdDispatch(
     if (data?.resultDropped) {
       out(`${label} — the method returned a value JSON cannot carry`, mode);
     } else if (data && "result" in data) {
-      out(`${label} → ${JSON.stringify(data.result, null, 2)}`, mode);
+      // The RETURN VALUE, in the house style rather than as raw JSON with
+      // braces and quotes. `--json` still carries it verbatim — this is the
+      // human branch, and a method that returns a record is exactly the case
+      // an aligned `label  value` block reads better than `{ "a": 1 }`.
+      out(
+        { message: label, result: data.result },
+        mode,
+        () =>
+          typeof data.result === "object" && data.result !== null
+            ? stack(style.dim(label), describe(data.result))
+            : `${style.dim(label)} ${String(data.result)}`,
+      );
     } else out(label, mode);
   } else out(result.data, mode);
 }

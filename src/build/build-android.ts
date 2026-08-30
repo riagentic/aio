@@ -23,6 +23,8 @@ import {
   BUILD_SCRATCH_DIR,
   BUNDLE_JS,
 } from "../server/app-files.ts";
+import { HEY, NO, NOTE, OK } from "../diagnostics/fmt.ts";
+import { count } from "../diagnostics/fmt.ts";
 
 /** The app version an APK declares, from THE resolved build version.
  *
@@ -49,7 +51,7 @@ export function androidVersion(
   const build = version.build;
   if (major > 20 || minor > 99 || build > 999_999) {
     throw new Error(
-      `[android] \u2717 version ${version.version} does not fit an Android ` +
+      `${NO} version ${version.version} does not fit an Android ` +
         `versionCode (max 2147483647): major must be \u2264 20, minor ` +
         `\u2264 99, build \u2264 999999. Android's integer is the whole ` +
         `budget — say so now rather than ship an APK that installs over a ` +
@@ -67,7 +69,7 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
   const androidHome = resolveSdk(); // ANDROID_HOME, its Sdk subdir, or defaults
   if (!androidHome) {
     console.error(
-      "[android] \u2717 ANDROID_HOME not set — install Android SDK and set ANDROID_HOME",
+      "${NO} ANDROID_HOME not set — install Android SDK and set ANDROID_HOME",
     );
     Deno.exit(1);
   }
@@ -78,7 +80,7 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
   const jdk = findJdk();
   if (!jdk.home) {
     console.error(
-      "[android] ✗ no usable JDK found — Android builds need a real JDK " +
+      `${NO} no usable JDK found — Android builds need a real JDK ` +
         `(compiles Java), version 17-${GRADLE_MAX_JDK}`,
     );
     if (jdk.newestFound > GRADLE_MAX_JDK) {
@@ -96,7 +98,7 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
     );
     Deno.exit(1);
   }
-  console.log(`[android] ✓ JDK ${jdk.home} (Java ${jdk.major})`);
+  console.log(`${OK} JDK ${jdk.home} (Java ${jdk.major})`);
 
   const androidDir = join(cfg.root, BUILD_SCRATCH_DIR, "android");
   try {
@@ -117,9 +119,9 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
   const overlaid = await _overlay(cfg.root, androidDir);
   if (overlaid.length) {
     console.log(
-      `[android] \u2713 overlay: ${overlaid.length} file(s) from android/`,
+      `${OK} overlay: ${count(overlaid.length, "file")} from android/`,
     );
-    for (const f of overlaid) console.log(`[android]   \u00b7 ${f}`);
+    for (const f of overlaid) console.log(`  \u00b7 ${f}`);
   }
 
   // Derive application ID from THE APK label (see apkLabel /
@@ -130,12 +132,12 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
   if (!applicationId) {
     console.error(
       cfg.androidApplicationId !== undefined
-        ? `[android] \u2717 android.applicationId ${
+        ? `${NO} android.applicationId ${
           JSON.stringify(cfg.androidApplicationId)
         } is not a valid Android package name — it needs at least two ` +
           `dot-separated segments, each starting with a letter ` +
           `(e.g. "com.example.wallet")`
-        : `[android] \u2717 APK name "${label}" produces invalid applicationId — must start with a letter`,
+        : `${NO} APK name "${label}" produces invalid applicationId — must start with a letter`,
     );
     Deno.exit(1);
   }
@@ -159,7 +161,7 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
   const hasIcon = iconPath !== null;
   if (misplacedIcon) {
     console.warn(
-      `[android] \u26a0 ${misplacedIconHint(misplacedIcon, cfg.appDir)}`,
+      `${HEY} ${misplacedIconHint(misplacedIcon, cfg.appDir)}`,
     );
   }
 
@@ -167,7 +169,7 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
   // The APK's declared version — from deno.json, the app's ONE identity file.
   const appVersion = androidVersion(cfg.version);
   console.log(
-    `[android] version ${appVersion.name} (versionCode ${appVersion.code})`,
+    `version ${appVersion.name} (versionCode ${appVersion.code})`,
   );
 
   const xmlFiles = new Set(["app/src/main/AndroidManifest.xml"]);
@@ -202,12 +204,12 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
   // a JRE it mis-detected — the root of the "[JAVA_COMPILER]" toolchain error.
   await _pinJdk(androidDir, jdk);
 
-  console.log(`[android] app: ${appNameKotlin} (${applicationId})`);
+  console.log(`app: ${appNameKotlin} (${applicationId})`);
 
   if (cfg.androidDevUrl) {
     // dev:android — point the WebView at the LIVE dev server, no bundled assets.
     await _applyDevUrl(androidDir, cfg.androidDevUrl);
-    console.log(`[android] ✓ dev build → ${cfg.androidDevUrl}`);
+    console.log(`${OK} dev build → ${cfg.androidDevUrl}`);
   } else {
     // Copy assets into android project
     const assetsDir = join(androidDir, "app/src/main/assets");
@@ -228,14 +230,14 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
   await Deno.mkdir(mipmapDir, { recursive: true });
   if (hasIcon) {
     await Deno.copyFile(iconPath, join(mipmapDir, "ic_launcher.png"));
-    console.log(`[android] \u2713 icon from ${iconPath}`);
+    console.log(`${OK} icon from ${iconPath}`);
   } else {
     const label = appTitle ?? binaryName;
     await Deno.writeFile(
       join(mipmapDir, "ic_launcher.png"),
       await appIconPng(label, 192),
     );
-    console.log(`[android] \u2713 default icon for "${label}"`);
+    console.log(`${OK} default icon for "${label}"`);
   }
 
   await _runGradle(
@@ -331,8 +333,6 @@ export async function _writeConnectPage(
    *  asking its user to type a server the build already recorded is the gap
    *  `build.server` was supposed to close. */
   bakedServer?: string | null,
-  /** Whose build is writing it — the log line names the target. */
-  tag = "android",
 ): Promise<void> {
   const connectHtml = `<!DOCTYPE html>
 ${htmlOpen()}
@@ -388,7 +388,7 @@ ${htmlOpen()}
 </body>
 </html>`;
   await Deno.writeTextFile(join(assetsDir, "index.html"), connectHtml);
-  console.log(`[${tag}] \u2713 connect page`);
+  console.log(`${OK} connect page`);
 }
 
 async function _writeLocalAssets(
@@ -420,7 +420,7 @@ async function _writeLocalAssets(
   // and a build that quietly stops being the app the config describes is the
   // bug this line exists to prevent.
   console.log(
-    "[android] note: the packaged shell is built before aio.run() runs — " +
+    `${NOTE} the packaged shell is built before aio.run() runs — ` +
       "ui.head, ui.viewport and ui.showStatus cannot reach it " +
       "(ui.theme and ui.lang do, applied at boot). " +
       "Use --android --remote if your app depends on them.",
@@ -433,7 +433,7 @@ async function _writeLocalAssets(
       join(assetsDir, APP_STYLE),
     );
   }
-  console.log("[android] \u2713 assets copied");
+  console.log("${OK} assets copied");
 }
 
 /** dev:android — retarget the WebView at a live dev-server URL (10.0.2.2:PORT
@@ -582,7 +582,7 @@ async function _runGradle(
   const gradleBin = findGradle();
   if (!gradleBin) {
     console.error(
-      "[android] \u2717 gradle not found — install Gradle and ensure it's on PATH or in a standard location",
+      "${NO} gradle not found — install Gradle and ensure it's on PATH or in a standard location",
     );
     console.error(
       "  checked: PATH, /usr/bin, /usr/local/bin, /snap/bin, /opt/gradle/bin, ~/.sdkman/",
@@ -599,7 +599,7 @@ async function _runGradle(
   // Generate gradle wrapper — pins version for reproducible builds. 8.14.3
   // (AGP 8.7.x needs 8.9+): 8.12.1 mis-detected Ubuntu's OpenJDK as a JRE
   // ("Is JDK: false" → "[JAVA_COMPILER]" toolchain error); fixed in 8.13+.
-  console.log(`[android] generating gradle wrapper (using ${gradleBin})...`);
+  console.log(`generating gradle wrapper (using ${gradleBin})...`);
   const wrapperResult = await new Deno.Command(gradleBin, {
     args: ["wrapper", "--gradle-version", "8.14.3"],
     cwd: androidDir,
@@ -609,17 +609,17 @@ async function _runGradle(
   }).output();
 
   if (wrapperResult.code !== 0) {
-    console.error("[android] \u2717 gradle wrapper generation failed");
+    console.error("${NO} gradle wrapper generation failed");
     Deno.exit(1);
   }
 
   const gradlew = join(androidDir, "gradlew");
   await chmodIfSupported(gradlew, 0o755);
-  console.log("[android] \u2713 gradle wrapper (pinned 8.14.3)");
+  console.log("${OK} gradle wrapper (pinned 8.14.3)");
 
   // Build APK using wrapper
   const gradleTask = doRelease ? "assembleRelease" : "assembleDebug";
-  console.log(`[android] ./gradlew ${gradleTask}...`);
+  console.log(`./gradlew ${gradleTask}...`);
   const gradleResult = await new Deno.Command(gradlew, {
     args: [gradleTask],
     cwd: androidDir,
@@ -629,7 +629,7 @@ async function _runGradle(
   }).output();
 
   if (gradleResult.code !== 0) {
-    console.error("[android] \u2717 gradle build failed");
+    console.error("${NO} gradle build failed");
     Deno.exit(1);
   }
 
@@ -646,7 +646,7 @@ async function _runGradle(
   const built = apkArtifact(present, doRelease);
   if (!built) {
     console.error(
-      `[android] \u2717 gradle reported success but wrote no APK in ` +
+      `${NO} gradle reported success but wrote no APK in ` +
         `${outputsDir}${
           present.length ? ` (found: ${present.join(", ")})` : ""
         }`,
@@ -659,7 +659,7 @@ async function _runGradle(
   await Deno.copyFile(join(outputsDir, built.file), apkDst);
   const apkStat = await Deno.stat(apkDst);
   const apkMb = (apkStat.size / 1024 / 1024).toFixed(1);
-  console.log(`[android] \u2713 ${label}${built.suffix}.apk (${apkMb} MB)`);
+  console.log(`${OK} ${label}${built.suffix}.apk (${apkMb} MB)`);
   if (built.suffix) {
     console.log(
       `\n  This APK is UNSIGNED \u2014 Android will refuse to install it as is.\n` +

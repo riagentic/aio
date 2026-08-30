@@ -1,5 +1,7 @@
 // logger-types.ts — Types, constants, and pure helpers for structured logging
 
+import { dur } from "./fmt.ts";
+
 /** Default log directory — dot-dir so project watchers/scanners skip it. */
 // Only reached by a logger created WITHOUT an app (a standalone script, or a
 // log call before boot wires `dir: <appDirs>.logs`). An app's logs live in
@@ -125,11 +127,11 @@ export function elapsed(start?: number): number | undefined {
   return start !== undefined ? Date.now() - start : undefined;
 }
 
-export function fmtUptime(ms: number): string {
-  const s = Math.round(ms / 1000);
-  if (s < 3600) return `${Math.round(s / 60)}m`;
-  return `${Math.round(s / 3600)}h`;
-}
+/** How long this logger has been up — ONE spelling of a duration, shared with
+ *  every other one aio prints (`fmt.dur`). Three of these existed and all three
+ *  disagreed: this one rounded 90 minutes to `2h`, `am` said `1h 30m`, and
+ *  amui said `1h 30m` from its own fourth copy. */
+export const fmtUptime: (ms: number) => string = dur;
 
 export function filterInternal(
   p: Record<string, unknown>,

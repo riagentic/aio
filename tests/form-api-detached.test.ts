@@ -111,7 +111,7 @@ Deno.test("useFieldArray: an out-of-range index is reported, not swallowed", () 
       4,
       `each out-of-range call must say so in dev — got:\n${warns.join("\n")}`,
     );
-    assert(warns.every((w) => /holds 2 item\(s\)/.test(w)), warns.join("\n"));
+    assert(warns.every((w) => /holds 2 items/.test(w)), warns.join("\n"));
   } finally {
     console.warn = orig;
     (globalThis as Record<string, unknown>).__aioDev = dev;

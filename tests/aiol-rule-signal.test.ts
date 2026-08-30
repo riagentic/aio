@@ -584,7 +584,7 @@ const VIOLATIONS: Case[] = [
         `{ state: { count: 0 }, methods: { go(s: { count: number }) { console.log(s.count); s.count++; } } }`,
       ),
     }),
-    expect: "console.log call(s)",
+    expect: "console.log call",
   },
   // security
   {

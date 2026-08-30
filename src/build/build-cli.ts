@@ -10,6 +10,7 @@ import {
   withDevExcluded,
 } from "./build-compile.ts";
 import type { BuildConfig } from "./build-config.ts";
+import { NO, OK } from "../diagnostics/fmt.ts";
 
 /** The scaffold's conventional module for a `cli-client` target: a CLI that
  *  talks to a remote aio server, which is a DIFFERENT program from the app's
@@ -43,7 +44,7 @@ export async function buildCli(cfg: BuildConfig): Promise<void> {
     await Deno.stat(join(root, cliEntry));
   } catch {
     console.error(
-      `[cli] \u2717 ${cliEntry} not found` +
+      `${NO} ${cliEntry} not found` +
         (cliEntry === REMOTE_CLI_DEFAULT
           ? ` — a remote CLI client compiles ${REMOTE_CLI_DEFAULT} by ` +
             `convention. Create it, or name the module in deno.json: ` +
@@ -65,7 +66,7 @@ export async function buildCli(cfg: BuildConfig): Promise<void> {
   );
   await Deno.mkdir(cfg.outDir ?? root, { recursive: true });
   console.log(
-    `[cli] compiling ${cliEntry} → ${cliTarget}${
+    `compiling ${cliEntry} → ${cliTarget}${
       cfg.targetTriple ? ` (${cfg.platform}, ${cfg.targetTriple})` : ""
     }`,
   );
@@ -74,10 +75,11 @@ export async function buildCli(cfg: BuildConfig): Promise<void> {
   // load WASM server-side too, and deno compile can't trace those reads.
   const assets = await assetIncludes(root);
 
-  const ok = await withDevExcluded("cli", nmDir, async (excludes) => {
+  const ok = await withDevExcluded(nmDir, async (excludes) => {
     const result = await new Deno.Command("deno", {
       args: [
         "compile",
+        "-q", // the module tree, not diagnostics — see compileArgs()
         "-A",
         ...(cfg.targetTriple ? ["--target", cfg.targetTriple] : []),
         ...(doRemote ? [] : dbWorkerInclude()),
@@ -90,12 +92,12 @@ export async function buildCli(cfg: BuildConfig): Promise<void> {
       stdout: "inherit",
       stderr: "inherit",
     }).output();
-    if (result.code === 0) console.log(`[cli] \u2713 ${cliTarget}`);
+    if (result.code === 0) console.log(`${OK} ${cliTarget}`);
     return result.code === 0;
   });
 
   if (!ok) {
-    console.error("[cli] \u2717 compile failed");
+    console.error("${NO} compile failed");
     Deno.exit(1);
   }
   Deno.exit(0);

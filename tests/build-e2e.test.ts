@@ -632,11 +632,27 @@ Deno.test({
       const r = await buildFlags(dir, "--compile", "--electron");
       assertEquals(r.code, 0, `electron build failed:\n${r.out}\n${r.err}`);
 
-      const image = rootFiles(dir).find((n) =>
-        n.toLowerCase().endsWith(".appimage")
+      // In `dist/`, like every other placed artifact — this looked in the
+      // project ROOT, which was true of the pre-alpha52 single-target builder
+      // and of nothing since: `build.ts --compile --electron` resolves its
+      // target and runs the FLEET, which places `<name>-<version>-<arch>-
+      // electron.AppImage` in dist/. The binary lookup beside this one
+      // (`placedBinary`) was moved when that changed and the AppImage lookup
+      // was not, so this gate asserted "no AppImage produced" about a build
+      // that had just produced one.
+      const distDir = join(dir, "dist");
+      const image = [...Deno.readDirSync(distDir)]
+        .filter((e) => e.isFile)
+        .map((e) => e.name)
+        .find((n) => n.toLowerCase().endsWith(".appimage"));
+      assert(
+        image,
+        `no AppImage in dist/ — it holds: ${
+          [...Deno.readDirSync(distDir)].map((e) => e.name).join(", ") ||
+          "(nothing)"
+        }`,
       );
-      assert(image, "no AppImage produced");
-      const imagePath = join(dir, image);
+      const imagePath = join(distDir, image);
       await Deno.chmod(imagePath, 0o755);
 
       // Extract (never mounts → works on FUSE-less hosts, same reason the build

@@ -20,6 +20,8 @@
 // direction for a dev/prod difference: dev is stricter, never more lenient.
 
 /** One value in a state tree that JSON cannot faithfully round-trip. */
+
+import { count } from "../diagnostics/fmt.ts";
 export interface PersistIssue {
   /** Dotted path from the state root, e.g. `cart.items.0.addedAt`. */
   path: string;
@@ -275,7 +277,7 @@ export function describeIssues(issues: PersistIssue[]): string {
   const more = issues.length > shown.length
     ? `\n  …and ${issues.length - shown.length} more`
     : "";
-  return `state contains ${issues.length} value(s) that JSON cannot ` +
+  return `state contains ${count(issues.length, "value")} that JSON cannot ` +
     `round-trip, so they would come back WRONG (or missing) on the next ` +
     `boot:\n${lines.join("\n")}${more}\n` +
     `  fix: store JSON-shaped data — a Date as \`.toISOString()\` or epoch ms, ` +

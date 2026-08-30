@@ -114,7 +114,7 @@ Deno.test("L26: withDevExcluded serializes, so a second build cannot see half a 
   const dir = await Deno.makeTempDir({ prefix: "aio-l26-" });
   try {
     const order: string[] = [];
-    const slow = withDevExcluded("a", dir, async () => {
+    const slow = withDevExcluded(dir, async () => {
       order.push("a:in");
       await new Promise((r) => setTimeout(r, 300));
       order.push("a:out");
@@ -122,7 +122,7 @@ Deno.test("L26: withDevExcluded serializes, so a second build cannot see half a 
     });
     // Starts while `a` is inside — it must WAIT, not interleave.
     await new Promise((r) => setTimeout(r, 50));
-    const second = withDevExcluded("b", dir, () => {
+    const second = withDevExcluded(dir, () => {
       order.push("b:in");
       return Promise.resolve(true);
     });

@@ -10,6 +10,7 @@ import {
 } from "./graph-validator.ts";
 import { transpile } from "./server-transpile.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { count } from "../diagnostics/fmt.ts";
 
 /** Regex matching non-type imports from @std/ or node: — these fail in the browser */
 const SERVER_ONLY_RE =
@@ -145,7 +146,9 @@ export function startGraphValidation(
         // browser; print loudly here too so the terminal names the file even
         // if no browser is open.
         log.error(
-          `[aio] graph: ${blocking.length} error(s) will break the browser client:`,
+          `[aio] graph: ${
+            count(blocking.length, "error")
+          } will break the browser client:`,
         );
         for (const err of blocking) {
           log.error(

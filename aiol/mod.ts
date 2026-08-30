@@ -15,6 +15,17 @@
 import { buildContext } from "./context.ts";
 import { ALL_CHECKS } from "./checks.ts";
 import type { Issue, LintReport, Severity } from "./types.ts";
+import { colorEnabled } from "../src/diagnostics/color.ts";
+import { nearestOf } from "../src/state/cell-helpers.ts";
+import {
+  count,
+  mark,
+  styleWith,
+  tally,
+  termWidth,
+  type Tone,
+  wrap,
+} from "../src/diagnostics/fmt.ts";
 /** The programmatic surface (alpha70 names): `lintProject(dir)` returns a
  *  `LintReport`. */
 export type { Issue, LintReport, SafeFixFn, Severity } from "./types.ts";
@@ -25,65 +36,65 @@ const VERSION = denoJson.version;
 
 // ── Colors ──────────────────────────────────────────────────────────
 
-const C = {
-  reset: "\x1b[0m",
-  bold: "\x1b[1m",
-  dim: "\x1b[2m",
-  red: "\x1b[31m",
-  yellow: "\x1b[33m",
-  green: "\x1b[32m",
-  cyan: "\x1b[36m",
-  gray: "\x1b[90m",
-  magenta: "\x1b[35m",
-} as const;
-
-const isCI = !!Deno.env.get("CI");
-const noColor = !!Deno.env.get("NO_COLOR") || Deno.args.includes("--no-color");
-const useColor = !noColor && !isCI;
-const c = (code: string, text: string) =>
-  useColor ? `${code}${text}${C.reset}` : text;
-
+// THE framework colour decider, not a third private copy. aiol used to run
+// its own (`NO_COLOR` || `CI` → off), which disagreed with the rest of aio in
+// both directions: it ignored `FORCE_COLOR` (so `aiol | less -R` in CI was
+// plain no matter what you asked for) and it painted a redirected file that
+// was not a terminal. `--no-color` is aiol's own flag and still wins.
+const useColor = colorEnabled && !Deno.args.includes("--no-color");
+const st = styleWith(useColor);
 // ── Severity formatting ─────────────────────────────────────────────
 
-const SEVERITY_ICON: Record<Severity, string> = {
-  error: "✗",
-  warn: "⚠",
-  hint: "·",
-};
-const SEVERITY_COLOR: Record<Severity, string> = {
-  error: C.red,
-  warn: C.yellow,
-  hint: C.cyan,
-};
-const SEVERITY_LABEL: Record<Severity, string> = {
-  error: "ERROR",
-  warn: "WARN ",
-  hint: "HINT ",
+// Severity → tone is the ONLY mapping left. The three tables that used to sit
+// here — a glyph per severity, a colour per severity, a 5-character LABEL per
+// severity — were a fourth private copy of what `fmt.mark()` decides for every
+// surface, and the labels ("ERROR", "WARN ", "HINT ") restated in words what
+// the coloured glyph already said.
+const TONE: Record<Severity, Tone> = {
+  error: "bad",
+  warn: "warn",
+  hint: "note",
 };
 
 function formatIssue(issue: Issue, showFixable = false): string {
-  const icon = SEVERITY_ICON[issue.severity];
-  const color = SEVERITY_COLOR[issue.severity];
-  const label = SEVERITY_LABEL[issue.severity];
+  const tone = TONE[issue.severity];
   const location = issue.file
     ? (issue.line ? `${issue.file}:${issue.line}` : issue.file)
     : "";
-  const loc = location ? ` ${c(C.dim, location)}` : "";
-  const fix = issue.fix ? `\n     ${c(C.dim, `→ ${issue.fix}`)}` : "";
   // `[fixable]` = --safe-fix rewrites it. `[manual]` = the safe fix DECLINES
   // this site on purpose (with the reason) — without the distinction, a
   // declined site kept rendering [fixable] forever and read as a broken tool.
-  const fixable = showFixable && issue.safeFix
-    ? ` ${c(C.green, "[fixable]")}`
+  const badge = showFixable && issue.safeFix
+    ? "  " + st.green("[fixable]")
     : issue.manual
-    ? ` ${c(C.yellow, "[manual]")}`
+    ? "  " + st.yellow("[manual]")
     : "";
+  // The LOCATION leads, the way every compiler and every editor puts it, and
+  // it appears ONCE. It used to be printed twice on every line — inside the
+  // message the check composed, and again dimmed at the end of the row — with
+  // the message itself unwrapped past the right edge in between.
+  const head = `  ${mark(tone, st)}  ${
+    location ? st.underline(location) : st.dim(issue.area)
+  }${location ? "  " + st.dim(issue.area) : ""}${badge}`;
+  const room = termWidth() - 5;
+  // A check that composed `<file>: <what>` into its message now says the file
+  // twice — once as the location above, once inside the sentence. Strip the
+  // echo rather than ask 40 checks to stop doing it.
+  const said = issue.file && issue.message.startsWith(issue.file + ":")
+    ? issue.message.slice(issue.file.length + 1).replace(/^\s*\d+:\s*/, "")
+      .trimStart()
+    : issue.message;
+  const body = wrap(said, room).map((l) => "     " + l).join("\n");
   const manual = issue.manual
-    ? `\n     ${c(C.yellow, `⚑ ${issue.manual}`)}`
+    ? "\n" +
+      wrap(issue.manual, room).map((l) => "     " + st.yellow(l)).join("\n")
     : "";
-  return `  ${c(color, `${icon} ${label}`)}  ${
-    c(C.dim, `[${issue.area}]`)
-  } ${issue.message}${fixable}${loc}${manual}${fix}`;
+  const fix = issue.fix
+    ? "\n" +
+      wrap(issue.fix, room).map((l, i) => "     " + st.cyan(i === 0 ? l : l))
+        .join("\n")
+    : "";
+  return `${head}\n${body}${manual}${fix}`;
 }
 
 // ── Output ──────────────────────────────────────────────────────────
@@ -116,12 +127,12 @@ export function printReport(
     return;
   }
 
-  console.log(`\n${c(C.bold, `aiol v${VERSION}`)} — scanning project\n`);
+  console.log(`\n${st.bold("aiol")}  ${st.dim(VERSION)}\n`);
 
   // Passed checks
   if (report.passed.length) {
     for (const p of report.passed) {
-      console.log(`  ${c(C.green, "✓")} ${p}`);
+      console.log(`  ${mark("ok", st)} ${st.dim(p)}`);
     }
     console.log();
   }
@@ -153,13 +164,16 @@ export function printReport(
   const w = warns.length;
   const h = hints.length;
 
-  console.log(c(C.dim, "─".repeat(60)));
+  // No 60-column `─` rule: the house style has no frames, and a fixed-width
+  // one in a 200-column terminal looked like a mistake.
   console.log(
-    `  ${c(C.bold, "Files:")} ${report.stats.filesScanned}  ${
-      c(C.bold, "Cells:")
-    } ${report.stats.cellsFound}  ${
-      c(C.bold, "Tests:")
-    } ${report.stats.testsFound}`,
+    "  " + st.dim(
+      [
+        count(report.stats.filesScanned, "file"),
+        count(report.stats.cellsFound, "cell"),
+        count(report.stats.testsFound, "test"),
+      ].join(" · "),
+    ),
   );
 
   const fixable = report.issues.filter((i) => i.safeFix).length;
@@ -167,9 +181,8 @@ export function printReport(
   // With --no-hints, hint-only projects read as clean; the count is still noted
   // (dimmed) so nothing is hidden silently — you know they're there, muted.
   const hintNote = hideHints && h
-    ? `  ${
-      c(C.dim, `(${h} hint${h > 1 ? "s" : ""} hidden — drop --no-hints to see)`)
-    }`
+    ? "  " +
+      st.dim(`(${count(h, "hint")} hidden — drop --no-hints to see)`)
     : "";
   if (total === 0) {
     // The verdict claims exactly what was checked: aiol is fmt-agnostic on
@@ -178,25 +191,27 @@ export function printReport(
     // rejected (a field report). Architecture is aiol's scope; formatting is
     // `deno fmt`'s.
     console.log(
-      `  ${c(C.green + C.bold, "✓ No architectural issues found")}  ${
-        c(C.dim, "(formatting is deno fmt's job — run it before a commit)")
+      `  ${mark("ok", st)} ${st.bold("No architectural issues found")}  ${
+        st.dim("(formatting is deno fmt's job — run it before a commit)")
       }`,
     );
   } else if (hideHints && e === 0 && w === 0) {
     console.log(
-      `  ${c(C.green + C.bold, "✓ No errors or warnings")}${hintNote}`,
+      `  ${mark("ok", st)} ${st.bold("No errors or warnings")}${hintNote}`,
     );
   } else {
-    const parts: string[] = [];
-    if (e) parts.push(c(C.red, `${e} error${e > 1 ? "s" : ""}`));
-    if (w) parts.push(c(C.yellow, `${w} warning${w > 1 ? "s" : ""}`));
-    if (h && !hideHints) parts.push(c(C.cyan, `${h} hint${h > 1 ? "s" : ""}`));
-    console.log(`  ${parts.join(" · ")}${hintNote}`);
+    console.log(
+      "  " + tally([
+        [e, ["error", "errors"], "bad"],
+        [w, ["warning", "warnings"], "warn"],
+        [hideHints ? 0 : h, ["hint", "hints"], "note"],
+      ], { style: st }) + hintNote,
+    );
     if (fixable > 0 && !showFixable) {
       console.log(
-        `  ${c(C.green, `${fixable} auto-fixable`)} — run with ${
-          c(C.bold, "--safe-fix")
-        } to apply`,
+        `  ${st.green(`${fixable} auto-fixable`)} ${st.dim("— run")} ${
+          st.cyan("aiol --safe-fix")
+        } ${st.dim("to apply")}`,
       );
     }
   }
@@ -219,15 +234,15 @@ async function applySafeFixes(
       if (ok) {
         applied++;
         say(
-          `  ${c(C.green, "✓ fixed")}  ${
-            c(C.dim, `[${issue.area}]`)
+          `  ${mark("ok", st)} ${st.green("fixed")}  ${
+            st.dim(issue.area)
           } ${issue.message}`,
         );
       }
     } catch (e) {
       say(
-        `  ${c(C.red, "✗ failed")} ${
-          c(C.dim, `[${issue.area}]`)
+        `  ${mark("bad", st)} ${st.red("failed")} ${
+          st.dim(issue.area)
         } ${issue.message}: ${e}`,
       );
     }
@@ -271,31 +286,11 @@ const FLAGS = [
  *  `--safe_fix`, `--fix`).
  *  @internal CLI plumbing pinned by tests/aiol-no-hints.test.ts — not API. */
 export function nearestFlag(given: string): string | null {
-  const dist = (a: string, b: string): number => {
-    let prev = [...Array(b.length + 1).keys()];
-    for (let i = 1; i <= a.length; i++) {
-      const cur = [i];
-      for (let j = 1; j <= b.length; j++) {
-        cur[j] = Math.min(
-          prev[j]! + 1,
-          cur[j - 1]! + 1,
-          prev[j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1),
-        );
-      }
-      prev = cur;
-    }
-    return prev[b.length]!;
-  };
-  let best: string | null = null;
-  let bestD = 4;
-  for (const f of FLAGS) {
-    const d = dist(given, f);
-    if (d < bestD) {
-      bestD = d;
-      best = f;
-    }
-  }
-  return best;
+  // THE "did you mean" of this repo (src/state/cell-helpers.ts), not a second
+  // Levenshtein with its own threshold. The two implementations here were
+  // character-for-character the same recurrence written two different ways,
+  // and only the bound differed — so the bound is what this passes.
+  return nearestOf(given, FLAGS, 4);
 }
 
 if (import.meta.main) {
@@ -385,17 +380,18 @@ Only harmless changes: missing config, unused imports. Never changes behavior.
     const say = json ? console.error : console.log;
     const fixable = report.issues.filter((i) => i.safeFix).length;
     if (fixable === 0) {
-      say(`  ${c(C.dim, "No auto-fixable issues found.")}`);
+      say(`  ${st.dim("No auto-fixable issues found.")}`);
       printReport(report, json, true, hideHints);
     } else {
-      say(`\n${c(C.bold, `aiol v${VERSION}`)} — applying safe fixes\n`);
+      say(
+        `\n${st.bold("aiol")}  ${st.dim(VERSION)}  ${
+          st.dim("applying safe fixes")
+        }\n`,
+      );
       const applied = await applySafeFixes(report, projectDir, say);
       say(
         `\n  ${
-          c(
-            C.green + C.bold,
-            `${applied} fix${applied !== 1 ? "es" : ""} applied`,
-          )
+          st.green(st.bold(count(applied, "fix", "fixes") + " applied"))
         }\n`,
       );
       // What REMAINS is the truth the caller acts on — print it (report-only

@@ -311,3 +311,15 @@ export type {
   JsxIntrinsicElements,
   JsxNode,
 } from "./src/jsx-runtime.ts";
+
+/** The unit formatters every aio surface prints through — `bytes(219442)` →
+ *  `214.3 KB`, `dur(48_780_000)` → `13h 33m`, `count(1, "app")` → `1 app`.
+ *
+ *  On the CORE entry because both halves of an app need them: a browser tile
+ *  showing a file size and a CLI row showing the same size must agree, and
+ *  they are pure and isomorphic. Public because they were being copied
+ *  instead — six private byte formatters and three uptime formatters lived in
+ *  this repo alone, one rounding KB to whole numbers and one rounding 90
+ *  minutes to `2h`, so one number read three ways. The alternative to
+ *  exporting them is a seventh copy in every app that shows a size. */
+export { bytes, count, dur } from "./src/diagnostics/fmt.ts";

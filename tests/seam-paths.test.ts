@@ -332,10 +332,19 @@ Deno.test({
     const appKey = join(sb.appHome, "data", "app.key");
     const tlsDir = join(sb.appHome, "data", "tls");
     try {
+      // Wait for the FILES, not for the directory that will hold them.
+      // `data/tls/` is created before openssl writes into it, so waiting on
+      // the directory and then stopping the child raced the write: under a
+      // loaded full-suite run the app was killed between `mkdir tls/` and
+      // `tls-cert.pem`, and the assertion below read "no such file" as a
+      // security failure. What this test is about is the MODE of those files,
+      // which cannot be checked before they exist.
       await waitFor(async () => {
-        const a = await Deno.stat(appKey).catch(() => null);
-        const t = await Deno.stat(tlsDir).catch(() => null);
-        return a && t ? true : null;
+        const found = await Promise.all(
+          [appKey, join(tlsDir, "tls-key.pem"), join(tlsDir, "tls-cert.pem")]
+            .map((p) => Deno.stat(p).catch(() => null)),
+        );
+        return found.every(Boolean) ? true : null;
       });
       await stopChild(proc, {
         label: "the app under test (--expose)",

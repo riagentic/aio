@@ -2,6 +2,7 @@
 // Signal-based, works with the AIO renderer's tracking system.
 
 import { type Signal, signal } from "../state/signal.ts";
+import { count } from "../diagnostics/fmt.ts";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -344,7 +345,9 @@ export function useFieldArray<T>(initial: T[] = []): FieldArrayState<T> {
     if ((globalThis as Record<string, unknown>).__aioDev === true) {
       console.warn(
         `[aio] useFieldArray.${op}(${index}) is out of range — the list holds ` +
-          `${len} item(s), so nothing changed. The index is stale or came ` +
+          `${
+            count(len, "item")
+          }, so nothing changed. The index is stale or came ` +
           `from a different list.`,
       );
     }

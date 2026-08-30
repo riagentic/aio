@@ -134,7 +134,7 @@ Deno.test("field report §3.1 — dev: a replay the reducer refuses REFUSES to b
       AioError,
     );
     assert(err.message.includes(`"${CELL}"`), err.message);
-    assert(/2\/2 op\(s\)/.test(err.message), err.message);
+    assert(/2\/2 ops/.test(err.message), err.message);
     assert(/Cannot read properties/.test(err.message), err.message);
     assert(/onMigrate/.test(err.message), "names the fix");
     assert(/NOTHING was written/.test(err.message), err.message);

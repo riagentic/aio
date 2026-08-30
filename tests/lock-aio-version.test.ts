@@ -9,10 +9,7 @@ import {
   removeLock,
 } from "../src/server/single-instance-lock.ts";
 import { VERSION } from "../src/server/aio-cli.ts";
-import {
-  instanceAioColumn,
-  instanceAioMismatch,
-} from "../src/am/am-cmd-process.ts";
+import { instanceAioMismatch } from "../src/am/am-cmd-process.ts";
 
 const TEST_APP = "aio-test-lock-version-" + Deno.pid;
 
@@ -41,13 +38,13 @@ Deno.test("lock: acquire without meta writes no aioVersion (old shape preserved)
   }
 });
 
-Deno.test("am instances: the aio column, and the mismatch mark", () => {
-  assertEquals(instanceAioColumn(VERSION), `aio=${VERSION}`);
-  assertEquals(instanceAioColumn(undefined), "aio=?");
-  assertEquals(
-    instanceAioColumn("1.0.0-alpha1"),
-    `aio=1.0.0-alpha1  ≠ am ${VERSION}`,
-  );
+Deno.test("am instances: the aio mismatch decision", () => {
+  // `instanceAioColumn` — the string builder that produced
+  // `aio=1.0.0-alpha1  ≠ am …` for the old key=value listing — is gone with
+  // that listing: `am instances` renders an AIO column through the shared
+  // table, so the only thing left to decide is whether there IS a mismatch.
+  // Unknown is not a mismatch; it is printed as `?` so the absence is visible
+  // rather than asserted.
   assertEquals(instanceAioMismatch(undefined), false);
   assertEquals(instanceAioMismatch(VERSION), false);
   assertEquals(instanceAioMismatch("0.0.1"), true);

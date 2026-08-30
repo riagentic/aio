@@ -39,6 +39,7 @@ import {
   PROTOCOL_MISMATCH_CLOSE_CODE,
   protoHello,
 } from "../protocol/protocol-version.ts";
+import { count } from "../diagnostics/fmt.ts";
 
 /** Is this socket "error" just the peer going away?
  *
@@ -844,7 +845,9 @@ export function createWsManager(deps: WsDeps): WsManager {
         _globalFuseReported = true;
         const msg =
           `ws: global rate limit exceeded (${_totalMsgsThisSec} msg/sec over ` +
-          `${connections.size} client(s), cap ${globalCap}) — dropping frames ` +
+          `${
+            count(connections.size, "client")
+          }, cap ${globalCap}) — dropping frames ` +
           `until the next second`;
         log.error("ws", msg);
         writeClientLog(meta.index, {
@@ -861,7 +864,7 @@ export function createWsManager(deps: WsDeps): WsManager {
         socket,
         "global-rate",
         `this frame was dropped: the server is over its total frame budget ` +
-          `(${globalCap}/sec across ${connections.size} client(s))`,
+          `(${globalCap}/sec across ${count(connections.size, "client")})`,
         `this is a server-wide fuse, so another client may be the cause; ` +
           `aio.run({ wsLimits: { messagesPerSec: N } }) raises both the ` +
           `per-client budget and this ceiling`,

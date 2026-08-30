@@ -36,6 +36,20 @@ async function tmp(): Promise<string> {
   return await Deno.makeTempDir({ prefix: "aio-updates-" });
 }
 
+/** Remove the swap script `swapDirectoryDetached` wrote to the system temp dir,
+ *  and the `.patched` copy a test made beside it.
+ *
+ *  The script deliberately lives OUTSIDE both install directories (it has to —
+ *  a process cannot move the directory it runs from), so the per-test `finally`
+ *  that removes `dir` never reached it. Three tests here left two files each,
+ *  every run, and `deno task check:orphans` counted 507 of them: invisible one
+ *  at a time, and the reason that gate exists. */
+async function dropSwapScript(path: string): Promise<void> {
+  for (const p of [path, `${path}.patched`]) {
+    await Deno.remove(p).catch(() => {});
+  }
+}
+
 Deno.test("swap: the artifact path is never missing, and the old one is kept", async () => {
   const dir = await tmp();
   try {
@@ -406,6 +420,7 @@ Deno.test("directory swap: a path with a space and a quote survives it", async (
     const out = await new Deno.Command("/bin/sh", {
       args: [patched, ...spawned.args.slice(1)],
     }).output();
+    await dropSwapScript(spawned.args[0]!);
     assert(out.success, new TextDecoder().decode(out.stderr));
     assertEquals(await Deno.readTextFile(join(current, "VERSION")), "2.0.0");
     assertEquals(await Deno.readTextFile(join(previous, "VERSION")), "1.0.0");
@@ -460,6 +475,7 @@ Deno.test("directory swap: handed to a shell OUTSIDE both directories", async ()
       call.args.some((a) => a.endsWith("run.sh") || a.endsWith("run.bat")),
       "starts the new launcher",
     );
+    await dropSwapScript(script);
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
@@ -496,6 +512,7 @@ Deno.test("directory swap: the generated script really performs the swap", async
     const out = await new Deno.Command("/bin/sh", {
       args: [patched, ...spawned.args.slice(1)],
     }).output();
+    await dropSwapScript(script);
     assert(out.success, new TextDecoder().decode(out.stderr));
 
     assertEquals(await Deno.readTextFile(join(current, "VERSION")), "2.0.0");

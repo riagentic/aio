@@ -19,6 +19,7 @@ import { _timingSafeEqual } from "./server-auth.ts";
 import type { SessionStore } from "./sessions.ts";
 import type { AioUser } from "./aio-types.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { count } from "../diagnostics/fmt.ts";
 
 /** OWASP 2023 recommendation for PBKDF2-HMAC-SHA-256. */
 const PBKDF2_ITERS = 600_000;
@@ -455,7 +456,9 @@ export function openUserStore(
         // say so at the moment it happens rather than leaving it to a report.
         log.warn(
           `[aio] auth: password changed for id=${id} but this user store has ` +
-            `no session store bound — ${_liveSessionsFor(id)} session(s) ` +
+            `no session store bound — ${
+              count(_liveSessionsFor(id), "session")
+            } ` +
             `SURVIVE the change. Open it as ` +
             `openUserStore(path, { sessions: () => sessionStore }).`,
         );
@@ -510,8 +513,11 @@ export function openUserStore(
         log.warn(
           `[aio] auth: user id=${id} removed but this user store has no ` +
             `session store bound — ${
-              _liveSessionsFor(id)
-            } session(s) SURVIVE ` +
+              count(
+                _liveSessionsFor(id),
+                "session",
+              )
+            } SURVIVE ` +
             `the deletion. Open it as ` +
             `openUserStore(path, { sessions: () => sessionStore }).`,
         );
