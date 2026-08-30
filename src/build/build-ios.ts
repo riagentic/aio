@@ -17,6 +17,7 @@ import { readDenoJson } from "../server/deno-json.ts";
 import { appIconPng } from "./app-icon.ts";
 import { _writeConnectPage, androidVersion } from "./build-android.ts";
 import { misplacedIconHint, resolveAppIcon } from "./build-helpers.ts";
+import { HEY, NO, NOTE, OK } from "../diagnostics/fmt.ts";
 
 /** The reverse-DNS bundle id: `ios.bundleId` from deno.json when declared,
  *  else `app.aio.<label>` — one decider, like `androidApplicationId`. */
@@ -104,7 +105,7 @@ export async function buildIos(cfg: BuildConfig): Promise<void> {
   if (!cfg.doRemote) {
     // No `ios` app target exists and none can: the app IS a Deno process.
     console.error(
-      "[ios] ✗ there is no Deno runtime on iOS, so an app cannot run " +
+      `${NO} there is no Deno runtime on iOS, so an app cannot run ` +
         "there — only a CLIENT can. Build `ios-client` (`--ios --remote`), " +
         "and run the server as `server` / `server-app` elsewhere.",
     );
@@ -118,10 +119,10 @@ export async function buildIos(cfg: BuildConfig): Promise<void> {
   if (!bundleId) {
     console.error(
       explicitId !== undefined
-        ? `[ios] ✗ ios.bundleId ${JSON.stringify(explicitId)} is not a ` +
+        ? `${NO} ios.bundleId ${JSON.stringify(explicitId)} is not a ` +
           `valid bundle identifier — reverse-DNS, two or more dot-separated ` +
           `segments of letters, digits and hyphens (e.g. "com.example.wallet")`
-        : `[ios] ✗ name "${binaryName}" produces no valid bundle id — ` +
+        : `${NO} name "${binaryName}" produces no valid bundle id — ` +
           `it must start with a letter`,
     );
     Deno.exit(1);
@@ -147,7 +148,7 @@ export async function buildIos(cfg: BuildConfig): Promise<void> {
   // The connect page — the same one the Android client opens.
   const www = join(dir, "App", "www");
   await Deno.mkdir(www, { recursive: true });
-  await _writeConnectPage(www, plistText(appName), cfg.bakedServer, "ios");
+  await _writeConnectPage(www, plistText(appName), cfg.bakedServer);
 
   // Icon: the app's own `icon.png` when it has one (Xcode validates the
   // 1024×1024 requirement at archive time and says so), else the generated
@@ -161,17 +162,17 @@ export async function buildIos(cfg: BuildConfig): Promise<void> {
   );
   const { icon, misplaced } = await resolveAppIcon(root, cfg.appDir);
   if (misplaced) {
-    console.warn(`[ios] ⚠ ${misplacedIconHint(misplaced, cfg.appDir)}`);
+    console.warn(`${HEY} ${misplacedIconHint(misplaced, cfg.appDir)}`);
   }
   if (icon) {
     await Deno.copyFile(icon, iconDest);
-    console.log(`[ios] ✓ icon from ${icon} (App Store requires 1024×1024)`);
+    console.log(`${OK} icon from ${icon} (App Store requires 1024×1024)`);
   } else {
     await Deno.writeFile(iconDest, await appIconPng(binaryName, 1024));
-    console.log("[ios] ✓ icon (generated monogram, 1024×1024)");
+    console.log(`${OK} icon (generated monogram, 1024×1024)`);
   }
   console.log(
-    `[ios] ✓ Xcode project ${
+    `${OK} Xcode project ${
       join(dir, "App.xcodeproj")
     } (${bundleId} ${version.name})`,
   );
@@ -181,7 +182,7 @@ export async function buildIos(cfg: BuildConfig): Promise<void> {
   const xcodebuild = await _whichXcodebuild();
   if (!xcodebuild) {
     console.log(
-      `[ios] note: no xcodebuild on this host (${Deno.build.os}) — the ` +
+      `${NOTE} no xcodebuild on this host (${Deno.build.os}) — the ` +
         `project is complete; on a Mac, open App.xcodeproj inside the ` +
         `artifact (or run \`deno task build --targets=ios-client\` there) ` +
         `to build and sign it.`,
@@ -211,7 +212,7 @@ export async function buildIos(cfg: BuildConfig): Promise<void> {
     const err = new TextDecoder().decode(p.stderr) +
       new TextDecoder().decode(p.stdout);
     console.error(
-      `[ios] ✗ xcodebuild failed:\n${
+      `${NO} xcodebuild failed:\n${
         err.trimEnd().split("\n").slice(-20).join("\n")
       }`,
     );
@@ -225,7 +226,7 @@ export async function buildIos(cfg: BuildConfig): Promise<void> {
     "App.app",
   );
   console.log(
-    `[ios] ✓ ${app} (simulator, unsigned) — for a device, open the ` +
+    `${OK} ${app} (simulator, unsigned) — for a device, open the ` +
       `project in Xcode, pick your team, and Archive.`,
   );
 }

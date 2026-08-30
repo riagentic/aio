@@ -29,6 +29,7 @@
 // Exit code is the gate: 0 = every scenario passed.
 
 import { basename, join, resolve } from "@std/path";
+import { mark, NO, style } from "../src/diagnostics/fmt.ts";
 
 const HERE = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
@@ -635,7 +636,7 @@ async function assertRepoIsReadable(): Promise<void> {
   }
   if (bad.length === 0) return;
   console.error(
-    `\n\x1b[31m✗ this checkout is not readable by the lab\x1b[0m — the ` +
+    `\n${NO} ${style.red("this checkout is not readable by the lab")} — the ` +
       `container clones it as an unprivileged user, and git fails with ` +
       `"Permission denied" or "has a null OID" instead of saying so.\n` +
       bad.map((b) => `      ${b.replace(HERE + "/", "")}`).join("\n") +
@@ -682,7 +683,7 @@ const failed = results.filter(([, ok]) => !ok);
 const secs = Math.round((Date.now() - started) / 1000);
 console.log(`\n${"═".repeat(72)}`);
 for (const [name, ok] of results) {
-  console.log(`  ${ok ? "\x1b[32m✓" : "\x1b[31m✗"} ${name}\x1b[0m`);
+  console.log(`  ${mark(ok ? "ok" : "bad")} ${name}`);
 }
 if (failed.length === 0) {
   console.log(

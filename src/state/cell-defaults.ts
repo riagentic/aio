@@ -21,6 +21,7 @@ import {
 import { normalizeSyncConfig } from "../sync/types.ts";
 import { persistFilterOnSyncCellMessage } from "./cell-create.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { count } from "../diagnostics/fmt.ts";
 
 /** App-wide defaults for what a cell left undecided. `visible` (alpha52)
  *  takes full CellVisibility — forUser/publicFields are settable as app-wide
@@ -195,7 +196,7 @@ export function applyLocalFirst(
     adopted.push(f.__aio.id);
   }
   log.info(
-    `localFirst: ${adopted.length} cell(s) run locally and sync — ` +
+    `localFirst: ${count(adopted.length, "cell")} run locally and sync — ` +
       `${adopted.join(", ") || "none"}` +
       (kept.length ? `; server-only by opt-out: ${kept.join(", ")}` : "") +
       (unable.length

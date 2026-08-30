@@ -1,13 +1,16 @@
-// UI — todo list with inline editing, filtering, keyboard support
+// UI — a filterable todo list.
+//
+// No stylesheet: app.ts opted into aio's default theme (`ui.theme: "auto"`),
+// which styles semantic HTML and the classes used here (card / row / stack /
+// badge / muted). Add src/style.css and it steps aside. See docs/ui/theme.md.
+import type { JSX } from "aio";
 import { useLocal } from "aio/air";
 import { type Filter, type Todo, todo, view } from "./cell.ts";
 
 const FILTERS: Filter[] = ["all", "active", "done"];
 
-export default function App() {
+export default function App(): JSX.Element {
   const { local: input, set: setInput } = useLocal("");
-  const { local: editing, set: setEditing } = useLocal<number | null>(null);
-  const { local: editText, set: setEditText } = useLocal("");
 
   const filtered: Todo[] = todo.items.filter((t: Todo) =>
     view.filter === "all" ? true : view.filter === "done" ? t.done : !t.done
@@ -15,138 +18,69 @@ export default function App() {
   const remaining = todo.items.filter((t: Todo) => !t.done).length;
 
   return (
-    <div
-      style={{
-        maxWidth: 480,
-        margin: "2rem auto",
-        fontFamily: "system-ui, sans-serif",
-      }}
-    >
-      <h1 style={{ textAlign: "center", color: "#c77" }}>todos</h1>
+    <main style={{ maxWidth: "36rem" }}>
+      <h1>todos</h1>
 
-      {/* Add */}
-      {
-        /* AIR auto-prevents navigation on handled form submits — no
-          e.preventDefault() needed (opt back in with data-native-submit). */
-      }
       <form
+        class="row"
         onSubmit={() => {
           if (input.trim()) {
-            // await = applied: the Promise resolves on server ack, so state
-            // read right after is fresh (AIO6). Unawaited = fire-and-forget.
             todo.add(input.trim());
             setInput("");
           }
         }}
-        style={{ display: "flex", gap: "0.5rem", marginBottom: "1rem" }}
       >
         <input
           value={input}
           onChange={(e) => setInput(e.currentTarget.value)}
           placeholder="What needs to be done?"
-          style={{ flex: 1, padding: "0.5rem", fontSize: "1rem" }}
+          style={{ flex: 1 }}
         />
-        <button type="submit" style={{ padding: "0.5rem 1rem" }}>Add</button>
+        <button type="submit">Add</button>
       </form>
 
-      {/* List */}
-      <ul style={{ listStyle: "none", padding: 0 }}>
+      <ul style={{ listStyle: "none", padding: 0, marginTop: "1rem" }}>
         {filtered.map((t) => (
-          <li
-            key={t.id}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "0.5rem",
-              padding: "0.5rem 0",
-              borderBottom: "1px solid #eee",
-            }}
-          >
+          <li key={t.id} class="row" style={{ padding: "0.4rem 0" }}>
             <input
               type="checkbox"
               checked={t.done}
-              onChange={() => todo.toggle(t.id)}
+              onChange={() =>
+                todo.toggle(t.id)}
             />
-            {editing === t.id
-              ? (
-                <input
-                  value={editText}
-                  onChange={(e) => setEditText(e.currentTarget.value)}
-                  onBlur={() => {
-                    if (editText.trim()) todo.edit(t.id, editText.trim());
-                    setEditing(null);
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      if (editText.trim()) todo.edit(t.id, editText.trim());
-                      setEditing(null);
-                    }
-                    if (e.key === "Escape") setEditing(null);
-                  }}
-                  autoFocus
-                  style={{ flex: 1, padding: "0.25rem" }}
-                />
-              )
-              : (
-                <span
-                  onDblClick={() => {
-                    setEditing(t.id);
-                    setEditText(t.text);
-                  }}
-                  style={{
-                    flex: 1,
-                    textDecoration: t.done ? "line-through" : "none",
-                    color: t.done ? "#999" : "inherit",
-                    cursor: "pointer",
-                  }}
-                >
-                  {t.text}
-                </span>
-              )}
+            <span
+              style={{
+                flex: 1,
+                textDecoration: t.done ? "line-through" : "none",
+              }}
+              class={t.done ? "muted" : ""}
+            >
+              {t.text}
+            </span>
             <button
               type="button"
-              onClick={() => todo.remove(t.id)}
-              style={{
-                color: "#c44",
-                border: "none",
-                background: "none",
-                cursor: "pointer",
-              }}
+              class="ghost"
+              onClick={() =>
+                todo.remove(t.id)}
             >
-              x
+              ×
             </button>
           </li>
         ))}
       </ul>
 
-      {/* Footer */}
       {todo.items.length > 0 && (
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            marginTop: "0.5rem",
-            fontSize: "0.85rem",
-            color: "#888",
-          }}
-        >
-          <span>{remaining} item{remaining !== 1 ? "s" : ""} left</span>
-          <div style={{ display: "flex", gap: "0.25rem" }}>
+        <div class="row" style={{ justifyContent: "space-between" }}>
+          <span class="muted">
+            {remaining} item{remaining !== 1 ? "s" : ""} left
+          </span>
+          <div class="row">
             {FILTERS.map((f) => (
               <button
                 key={f}
                 type="button"
+                class={view.filter === f ? "primary" : "ghost"}
                 onClick={() => view.setFilter(f)}
-                style={{
-                  padding: "0.2rem 0.5rem",
-                  border: view.filter === f
-                    ? "1px solid #c77"
-                    : "1px solid transparent",
-                  background: "none",
-                  cursor: "pointer",
-                  borderRadius: 3,
-                }}
               >
                 {f}
               </button>
@@ -154,18 +88,14 @@ export default function App() {
           </div>
           <button
             type="button"
-            onClick={() => todo.clearDone()}
-            style={{
-              border: "none",
-              background: "none",
-              cursor: "pointer",
-              color: "#888",
-            }}
+            class="ghost"
+            onClick={() =>
+              todo.clearDone()}
           >
             Clear done
           </button>
         </div>
       )}
-    </div>
+    </main>
   );
 }

@@ -12,6 +12,12 @@ reason to keep one (gated by `deno task check:docs`).
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha72 → alpha73](from-alpha72-to-alpha73.md) — nothing breaks: one
+  presentation vocabulary for every surface aio shows a person (`am`, the build,
+  the log, errors, the linter, the installers), colour that honours `NO_COLOR`
+  everywhere, prose that wraps to your terminal, errors that show the failing
+  source line — plus `bytes`/`dur`/`count` on `aio`, `am instances --long`, and
+  an `am help` you can read. `--json` is byte-identical.
 - [alpha71 → alpha72](from-alpha71-to-alpha72.md) — nothing breaks: the wire is
   compressed and revalidates (162 KB → 56 KB, then 304), security headers are
   derived from `allowedOrigins`, `plugins: []`, a `text` merge that keeps both

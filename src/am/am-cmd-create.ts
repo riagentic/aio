@@ -23,6 +23,7 @@ import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, fail, out } from "./am-output.ts";
 import { resolve } from "@std/path";
 import { colorEnabled } from "../diagnostics/color.ts";
+import { styleWith } from "../diagnostics/fmt.ts";
 import { PATH_PIN_PREFIX } from "../server/framework-pin.ts";
 import {
   ensureVersion,
@@ -670,6 +671,23 @@ export async function cmdCreate(
     if (aioPath) await syncFrameworkDeps(dir, aioPath);
   }
 
+  // Format what was just written, BEFORE the first commit.
+  //
+  // The templates are TypeScript template literals inside this file, so
+  // `deno fmt` on the framework never touches their contents — and a scaffolded
+  // app therefore started life unformatted (`? true: view.filter === "done"`).
+  // The very first thing a new project does is `deno task fmt` or a commit
+  // hook, and it opened with a diff over code the user did not write. Running
+  // the app's OWN `fmt` task here means the file on disk is the file the
+  // toolchain agrees on. Best-effort: an app whose deno is missing is still a
+  // valid scaffold, and a formatting failure must never lose the project.
+  await new Deno.Command(Deno.execPath(), {
+    args: ["fmt", "--quiet"],
+    cwd: dir,
+    stdout: "null",
+    stderr: "null",
+  }).output().catch(() => {});
+
   // Make it a real project from second one — best-effort, never fatal.
   const git = await tryGitInit(dir);
 
@@ -692,11 +710,11 @@ export async function cmdCreate(
     return;
   }
 
-  const C = mode === "pretty" && colorEnabled; // NO_COLOR, and pipes
-  const b = (s: string) => C ? `\x1b[1m${s}\x1b[0m` : s;
-  const dim = (s: string) => C ? `\x1b[2m${s}\x1b[0m` : s;
-  const cyan = (s: string) => C ? `\x1b[36m${s}\x1b[0m` : s;
-  const grn = (s: string) => C ? `\x1b[32m${s}\x1b[0m` : s;
+  // `styleWith` bound to the SAME decision this branch already made — four
+  // hand-written `\x1b[…m` wrappers were a fifth private palette, identical to
+  // the house one except that nothing kept them identical.
+  const st = styleWith(mode === "pretty" && colorEnabled);
+  const b = st.bold, dim = st.dim, cyan = st.cyan, grn = st.green;
   // Show the chosen target's dev command + a hint about other targets.
   const devHint = opts.target === "browser"
     ? `→ ${opts.target} (others: --client=electron|cli|server-only)`

@@ -265,8 +265,8 @@ AIO checks for common import mistakes at four levels:
    ```
 3. **Build time**: the same bundle, written to disk, judged by the same decider,
    then **evaluated** before it can become an artifact
-   (`[build] ✓ bundle audited + evaluated`). A bundle that cannot load never
-   reaches `deno compile`, an APK or an installer.
+   (`✓ bundle audited + evaluated`). A bundle that cannot load never reaches
+   `deno compile`, an APK or an installer.
 4. **Runtime**: Error overlay shows fix suggestions (e.g., "Add X to deno.json
    imports").
 

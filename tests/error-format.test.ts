@@ -15,8 +15,14 @@ Deno.test("formatErrorBox — contains cell name and error code", () => {
   });
   const output = formatErrorBox(err);
   assertStringIncludes(output, "REDUCE_ERROR");
-  assertStringIncludes(output, "orderer");
-  assertStringIncludes(output, "AIO ERROR");
+  // The app's own vocabulary — cell and action — on ONE dim subject line,
+  // not five bold-labelled rows of which four are usually empty.
+  assertStringIncludes(output, "cell orderer");
+  assertStringIncludes(output, "action orderer:buy");
+  // No frame. The house style has no box drawing anywhere, and the old
+  // `┏━━ AIO ERROR ━━┓` was a fixed 60 columns that neither wrapped a long
+  // message nor used a wide terminal.
+  assertEquals(/[┏┃┗━]/.test(output), false);
 });
 
 Deno.test("formatErrorBox — warning codes show AIO WARNING", () => {
@@ -26,7 +32,11 @@ Deno.test("formatErrorBox — warning codes show AIO WARNING", () => {
     budget: 100,
   });
   const output = formatErrorBox(err);
-  assertStringIncludes(output, "AIO WARN");
+  // A warning is the same shape in a different tone — the `!` glyph and the
+  // code, never a differently-worded banner.
+  assertStringIncludes(output, "BUDGET_REDUCE");
+  assertStringIncludes(output, "!");
+  assertEquals(output.includes("\u2717"), false); // not the error glyph
 });
 
 Deno.test("formatErrorBox — includes tip for EFFECT_TIMEOUT", () => {
@@ -35,7 +45,9 @@ Deno.test("formatErrorBox — includes tip for EFFECT_TIMEOUT", () => {
     effectType: "api:fetch",
   });
   const output = formatErrorBox(err);
-  assertStringIncludes(output, "Tip:");
+  // The remedy is an arrow, not a `Tip:` label: it is the line the reader
+  // acts on, and labelling it as advice buried it among the other rows.
+  assertStringIncludes(output, "→");
   assertStringIncludes(output, "timed out");
 });
 

@@ -25,6 +25,7 @@ import type { ClientMeta } from "./server-ws.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
 import type { AioUser } from "./aio.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { bytes } from "../diagnostics/fmt.ts";
 
 /** Payload stats per client — tracked for vitals/trojan introspection */
 export type PayloadStats = Map<
@@ -127,12 +128,11 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
       );
       if (fresh.length === 0) return;
       for (const [cellName] of fresh) _warnedBigCells.add(cellName);
-      const mb = (n: number) => `${(n / (1024 * 1024)).toFixed(1)}MB`;
       log.warn(
-        `[aio] broadcast: a full-state frame is ${mb(json.length)} — over ` +
-          `the ${mb(BROADCAST_FULL_WARN_BYTES)} WS frame budget. Largest ` +
+        `[aio] broadcast: a full-state frame is ${bytes(json.length)} — over ` +
+          `the ${bytes(BROADCAST_FULL_WARN_BYTES)} WS frame budget. Largest ` +
           `cell(s): ${
-            fresh.map(([c, n]) => `"${c}" (${mb(n)})`).join(", ")
+            fresh.map(([c, n]) => `"${c}" (${bytes(n)})`).join(", ")
           }. Cell state is broadcast to every client on change — bulk rows ` +
           `belong in db: tables, binaries in files — see ` +
           `docs/persistence/big-data.md.`,

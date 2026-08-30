@@ -30,6 +30,7 @@ import {
   BUNDLE_JS,
   DIST_DIR,
 } from "../server/app-files.ts";
+import { HEY, NO, OK } from "../diagnostics/fmt.ts";
 
 /** Zip a directory's CONTENTS, portably.
  *
@@ -57,14 +58,14 @@ async function zipDir(dir: string, out: string): Promise<boolean> {
       }).output();
       if (r.success) return true;
       console.error(
-        `[electron] ⚠ ${cmd}: ${
+        `${HEY} ${cmd}: ${
           new TextDecoder().decode(r.stderr).trim().split("\n")[0] ?? ""
         }`,
       );
     } catch { /* not installed — try the next */ }
   }
   console.error(
-    "[electron] ✗ neither `zip` nor PowerShell could pack it — install zip " +
+    `${NO} neither \`zip\` nor PowerShell could pack it — install zip ` +
       "(Debian/Ubuntu: sudo apt install zip)",
   );
   return false;
@@ -92,15 +93,13 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
     }
     if (name === BUNDLE_JS && !exists) {
       console.error(
-        `[electron] ✗ ${
-          join(dist, name)
-        } missing — bundle step did not produce it`,
+        `${NO} ${join(dist, name)} missing — bundle step did not produce it`,
       );
       Deno.exit(1);
     }
     if (exists) await Deno.copyFile(join(dist, name), join(appDirDist, name));
   }
-  console.log("[electron] \u2713 dist/ assets copied to AppDir/dist/");
+  console.log("${OK} dist/ assets copied to AppDir/dist/");
 
   // Copy Electron runtime — auto-install on first build so `--electron` works
   // OUT OF THE BOX; loud manual fallback if it fails. WHERE it lives, and the
@@ -116,7 +115,7 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
     const version = await installedElectronVersion(root);
     if (!version) {
       console.error(
-        "[electron] ✗ cannot tell which Electron version to fetch for " +
+        `${NO} cannot tell which Electron version to fetch for ` +
           `${cfg.platform} — install it once here so the version is pinned:\n` +
           "      deno task install:electron",
       );
@@ -125,18 +124,18 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
     try {
       electronSrc = await ensureElectronDist(version, cfg.platform);
     } catch (e) {
-      console.error(`[electron] ✗ ${e instanceof Error ? e.message : e}`);
+      console.error(`${NO} ${e instanceof Error ? e.message : e}`);
       Deno.exit(1);
     }
   }
   const electronDst = join(appDir, "electron");
   if (electronSrc === null) {
-    console.error(`[electron] \u2717 ${electronMissingHint()}`);
+    console.error(`${NO} ${electronMissingHint()}`);
     Deno.exit(1);
   }
-  console.log("[electron] copying Electron runtime...");
+  console.log(`copying Electron runtime...`);
   await copyDir(electronSrc, electronDst);
-  console.log("[electron] \u2713 electron/ copied");
+  console.log("${OK} electron/ copied");
 
   // Icon \u2014 from THE app-dir decider (cfg.appDir), same place dev reads it
   const { icon: userIcon, misplaced } = await resolveAppIcon(
@@ -145,14 +144,14 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
   );
   if (misplaced) {
     console.warn(
-      `[electron] \u26a0 ${misplacedIconHint(misplaced, cfg.appDir)}`,
+      `${HEY} ${misplacedIconHint(misplaced, cfg.appDir)}`,
     );
   }
   if (userIcon) {
     // Outside the stat's catch: an EXISTING icon that fails to copy (EACCES,
     // disk full) is a broken build, never a silent placeholder downgrade.
     await Deno.copyFile(userIcon, join(appDir, `${binaryName}.png`));
-    console.log(`[electron] \u2713 icon from ${userIcon}`);
+    console.log(`${OK} icon from ${userIcon}`);
   } else {
     // The app ships no icon — generate its monogram rather than the same flat
     // square every icon-less app used to get. Three running aio apps must be
@@ -160,7 +159,7 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
     // icon does before someone draws a real one.
     await writeDefaultIcon(join(appDir, binaryName), appTitle ?? binaryName);
     console.log(
-      `[electron] \u2713 default icon for "${appTitle ?? binaryName}"`,
+      `${OK} default icon for "${appTitle ?? binaryName}"`,
     );
   }
 
@@ -177,7 +176,7 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
   } else if (os === "darwin") {
     await _packageMacos(cfg, appDir, archStr, root, binaryName);
   } else {
-    console.error(`[electron] \u2717 unsupported platform: ${os}`);
+    console.error(`${NO} unsupported platform: ${os}`);
     Deno.exit(1);
   }
 }
@@ -223,7 +222,7 @@ Categories=Utility;
   }).output().then((r) => r.success).catch(() => false);
   if (!hasFile) {
     console.error(
-      "[appimage] \u2717 `file` is not installed, and appimagetool requires it.\n" +
+      "${NO} `file` is not installed, and appimagetool requires it.\n" +
         "      Debian/Ubuntu:  sudo apt install -y file\n" +
         "      Fedora/RHEL:    sudo dnf install -y file\n" +
         "      Alpine:         sudo apk add file",
@@ -236,7 +235,7 @@ Categories=Utility;
     cfg.outDir ?? root,
     `${binaryName}-${arch}.AppImage`,
   );
-  console.log("[appimage] packaging...");
+  console.log(`packaging...`);
   const appimageResult = await new Deno.Command(toolPath, {
     args: [appDir, appImageOut],
     stdout: "inherit",
@@ -245,15 +244,13 @@ Categories=Utility;
   }).output();
 
   if (appimageResult.code !== 0) {
-    console.error("[appimage] \u2717 appimagetool failed");
+    console.error("${NO} appimagetool failed");
     Deno.exit(1);
   }
 
   const appImageStat = await Deno.stat(appImageOut);
   console.log(
-    `[appimage] \u2713 ${binaryName}-${arch}.AppImage (${
-      formatMb(appImageStat.size)
-    } MB)`,
+    `${OK} ${binaryName}-${arch}.AppImage (${formatMb(appImageStat.size)} MB)`,
   );
 }
 
@@ -278,24 +275,22 @@ SET ELECTRON_PATH=%HERE%electron\\electron.exe
       `${displayName}\n\nRun: double-click run.bat or ${binaryName}.exe\n`,
     ),
   ]);
-  console.log("[electron] \u2713 run.bat launcher");
+  console.log("${OK} run.bat launcher");
 
   await Deno.mkdir(cfg.outDir ?? root, { recursive: true });
   const zipOut = join(cfg.outDir ?? root, `${binaryName}-win-${archStr}.zip`);
-  console.log("[electron] zipping Windows package...");
+  console.log(`zipping Windows package...`);
   // `zip` first, PowerShell second: Compress-Archive exists only on Windows,
   // and that single call was the whole reason a Windows package could not be
   // built anywhere else.
   if (!await zipDir(appDir, zipOut)) {
-    console.error("[electron] \u2717 could not zip the Windows package");
+    console.error("${NO} could not zip the Windows package");
     Deno.exit(1);
   }
 
   const zipStat = await Deno.stat(zipOut);
   console.log(
-    `[electron] \u2713 ${binaryName}-win-${archStr}.zip (${
-      formatMb(zipStat.size)
-    } MB)`,
+    `${OK} ${binaryName}-win-${archStr}.zip (${formatMb(zipStat.size)} MB)`,
   );
 }
 
@@ -315,20 +310,18 @@ exec "$HERE/${binaryName}" "$@"
   const launcherPath = join(appDir, "run.sh");
   await Deno.writeTextFile(launcherPath, launcher);
   await chmodIfSupported(launcherPath, 0o755);
-  console.log("[electron] \u2713 run.sh launcher");
+  console.log("${OK} run.sh launcher");
 
   await Deno.mkdir(cfg.outDir ?? root, { recursive: true });
   const zipOut = join(cfg.outDir ?? root, `${binaryName}-mac-${archStr}.zip`);
-  console.log("[electron] zipping macOS package...");
+  console.log(`zipping macOS package...`);
   if (!await zipDir(appDir, zipOut)) {
-    console.error("[electron] \u2717 could not zip the macOS package");
+    console.error("${NO} could not zip the macOS package");
     Deno.exit(1);
   }
 
   const zipStat = await Deno.stat(zipOut);
   console.log(
-    `[electron] \u2713 ${binaryName}-mac-${archStr}.zip (${
-      formatMb(zipStat.size)
-    } MB)`,
+    `${OK} ${binaryName}-mac-${archStr}.zip (${formatMb(zipStat.size)} MB)`,
   );
 }

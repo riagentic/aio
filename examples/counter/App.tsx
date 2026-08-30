@@ -1,36 +1,43 @@
-// UI component — export default, framework mounts it
+// UI — export default; the framework mounts it.
+//
+// No stylesheet: app.ts opted into aio's default theme (`ui.theme: "auto"`),
+// which styles semantic HTML and a handful of classes, keyed to this app's
+// name. Write `src/style.css` and it steps aside entirely. See
+// docs/ui/theme.md.
+//
+// `JSX.Element` needs the type import below; `aio` re-exports it so this is
+// the only line to remember.
+import type { JSX } from "aio";
 import { counter } from "./cell.ts";
 
-const btn: Record<string, string> = {
-  padding: "0.75rem 1.5rem",
-  fontSize: "1.25rem",
-  cursor: "pointer",
-};
-
-export default function App() {
+export default function App(): JSX.Element {
   return (
-    <div
-      style={{
-        padding: "3rem",
-        fontFamily: "system-ui, sans-serif",
-        textAlign: "center",
-      }}
-    >
+    <main>
       <h1>AIO Counter</h1>
-      <div style={{ fontSize: "4rem", margin: "1rem 0", color: "#00a6cc" }}>
-        {counter.count}
+      <div class="card stack" style={{ alignItems: "center" }}>
+        <div style={{ fontSize: "3.5rem", fontWeight: 700 }}>
+          {counter.count}
+        </div>
+        <div class="row">
+          <button type="button" t="minus" onClick={() => counter.decrement()}>
+            −
+          </button>
+          <button type="button" class="ghost" onClick={() => counter.reset()}>
+            Reset
+          </button>
+          <button
+            type="button"
+            t="plus"
+            class="primary"
+            onClick={() => counter.increment()}
+          >
+            +
+          </button>
+        </div>
       </div>
-      <div style={{ display: "flex", gap: "0.5rem", justifyContent: "center" }}>
-        <button type="button" onClick={() => counter.decrement()} style={btn}>
-          −
-        </button>
-        <button type="button" onClick={() => counter.reset()} style={btn}>
-          Reset
-        </button>
-        <button type="button" onClick={() => counter.increment()} style={btn}>
-          +
-        </button>
-      </div>
-    </div>
+      <p class="muted">
+        State lives in <code>src/cell.ts</code>. Change it and this updates.
+      </p>
+    </main>
   );
 }

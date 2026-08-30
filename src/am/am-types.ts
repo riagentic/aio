@@ -77,6 +77,10 @@ export type GlobalFlags = {
    *  the default one's. `AIO_APPS_DIR` is the env-level equivalent (it
    *  relocates every app's home AND the lock dir). */
   home?: string;
+  /** `--long` — the columns a listing keeps behind a flag because nobody
+   *  compares them across rows (paths, sockets, data homes). The default
+   *  listing is the one you scan; `--long` is the one you grep. */
+  long?: boolean;
   /** `--timeout=<ms>` — how long `am` waits for a live client to answer a
    *  `surface`/`trigger`. Must exceed the server's own client-reply wait so
    *  the server's NAMED reason arrives before `am` gives up. */

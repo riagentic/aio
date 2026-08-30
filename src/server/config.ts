@@ -729,7 +729,7 @@ export function validateConfig(
     });
     log.error(
       teachMessage(
-        `unknown ${label} key(s): ${named.join(", ")}`,
+        `unknown ${label}(s): ${named.join(", ")}`,
         `remove them, or fix the spelling — the full list of valid keys is below`,
       ),
     );

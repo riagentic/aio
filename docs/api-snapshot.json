@@ -55,6 +55,10 @@
           "kind": "function+namespace",
           "sig": "3bb310eee8c46842"
         },
+        "bytes": {
+          "kind": "function",
+          "sig": "a3e777ce9fa9750a"
+        },
         "call": {
           "kind": "function",
           "sig": "b1d462c046f3c5f1"
@@ -127,6 +131,10 @@
           "kind": "interface",
           "sig": "fca122a526af8b9a"
         },
+        "count": {
+          "kind": "function",
+          "sig": "e38569e3dcc39e6a"
+        },
         "createAuthClient": {
           "kind": "function",
           "sig": "a43c003a0ef7c810"
@@ -170,6 +178,10 @@
         "DirectCalling": {
           "kind": "typeAlias",
           "sig": "4c85168aa664ea92"
+        },
+        "dur": {
+          "kind": "function",
+          "sig": "25274a56e178b823"
         },
         "generateTotpSecret": {
           "kind": "function",
@@ -433,7 +445,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "5e459c4a31c29721"
+          "sig": "942c3eff89813cb4"
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -1095,8 +1107,8 @@
           "sig": "7ddab9eef7f375b9"
         },
         "plainWidth": {
-          "kind": "function",
-          "sig": "bb44016989fef165"
+          "kind": "variable",
+          "sig": "1588a0f075829371"
         },
         "progress": {
           "kind": "function",

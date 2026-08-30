@@ -164,6 +164,7 @@ export const DEV_FRAME_BUDGET_MS = 16;
  *  `deepFreeze`s that had drifted apart (see `state/immutable.ts`). */
 export { deepFreeze } from "./immutable.ts";
 import { deepFreeze } from "./immutable.ts";
+import { count } from "../diagnostics/fmt.ts";
 
 /** Queue depth limit — prevents unbounded memory growth from burst dispatches.
  *  THE number: whatever the queue is allowed to hold, the drain must be
@@ -1012,8 +1013,11 @@ export function createDispatch<S, A, E>(
         const err = createAioError(
           "DISPATCH_ABORTED",
           `the dispatch drain loop aborted; ${
-            (inFlight ? 1 : 0) + queue.length
-          } action(s) were NOT applied. The action being processed threw ` +
+            count(
+              (inFlight ? 1 : 0) + queue.length,
+              "action",
+            )
+          } were NOT applied. The action being processed threw ` +
             `outside every per-action guard — the error above this one names ` +
             `the cause. Dispatch itself has been reset and accepts new ` +
             `actions; the listed actions must be retried by their callers.`,
@@ -1040,7 +1044,9 @@ export function createDispatch<S, A, E>(
         const left = deadline - Date.now();
         if (left <= 0) {
           log.warn(
-            `shutdown: ${effectPromises.size} effect(s) still running after ` +
+            `shutdown: ${
+              count(effectPromises.size, "effect")
+            } still running after ` +
               `${timeoutMs}ms — sealing the queue; their writes are lost`,
           );
           break;

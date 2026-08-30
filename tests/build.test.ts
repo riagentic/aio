@@ -886,7 +886,11 @@ Deno.test("compileArgs: output + entry are last, dist omitted when absent", () =
     out: "bin",
     entry: "src/app.ts",
   });
-  assertEquals(args, ["compile", "-A", "-o", "bin", "src/app.ts"]);
+  // `-q` sits with `compile`: deno otherwise prints an "Embedded Files" tree
+  // of every module in the bundle — hundreds of lines for an app with three of
+  // its own — while the build already reports the artifact and its size on one
+  // line. Diagnostics are unaffected, so a compile that FAILS still says why.
+  assertEquals(args, ["compile", "-q", "-A", "-o", "bin", "src/app.ts"]);
 });
 
 Deno.test("distCandidates: entry-relative BEFORE the filesystem (portability)", () => {

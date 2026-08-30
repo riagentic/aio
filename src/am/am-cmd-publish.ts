@@ -35,6 +35,7 @@ import {
   type ShipManifest,
 } from "../build/ship.ts";
 import { appIdFromConfig } from "../server/single-instance-lock.ts";
+import { count } from "../diagnostics/fmt.ts";
 
 /** What `dist/manifest.json` records — the fleet build's own report. */
 type BuildManifest = {
@@ -347,7 +348,7 @@ export async function cmdPublish(
       `    ${shipped[i]!.spec.file}`,
       `    ${manifestFileName(m.platform)}  (${shipped[i]!.spec.target}, ${
         m.data
-          ? `${Object.keys(m.data.cells).length} cell(s) declared`
+          ? `${count(Object.keys(m.data.cells).length, "cell")} declared`
           : "data NOT declared"
       })`,
     ]),

@@ -8,6 +8,7 @@ import { listReports, type Report, summarize } from "../server/report.ts";
 import { detectMode, out, outError } from "./am-output.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import { resolveAmAppId } from "./am-utils.ts";
+import { count } from "../diagnostics/fmt.ts";
 
 /** `am report [list|show <id>|path] [--app=id] [--json]` */
 export async function cmdReport(
@@ -95,7 +96,7 @@ export async function cmdReport(
   }
   out(
     [
-      `${reports.length} report(s) for ${appId} — ${dirs.data}/reports`,
+      `${count(reports.length, "report")} for ${appId} — ${dirs.data}/reports`,
       "",
       ...reports.map((r) => `  ${r.id.slice(0, 24)}  ${summarize(r)}`),
       "",

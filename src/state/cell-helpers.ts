@@ -59,6 +59,11 @@ export function extractForUser(
 export function nearestOf(
   bad: string,
   candidates: Iterable<string>,
+  /** Reject anything this many edits away or more — default 3. A longer
+   *  vocabulary of longer words (CLI flags: `--safe-fix` vs `--safefix`)
+   *  wants a looser bound; the caller says so rather than keeping a second
+   *  copy of the algorithm with a different constant, which is what aiol did. */
+  maxDistance = 3,
 ): string | null {
   const dist = (a: string, b: string): number => {
     const d: number[][] = Array.from(
@@ -77,7 +82,7 @@ export function nearestOf(
     }
     return d[a.length]![b.length]!;
   };
-  let best: string | null = null, bestD = 3;
+  let best: string | null = null, bestD = maxDistance;
   for (const k of candidates) {
     const dd = dist(bad.toLowerCase(), k.toLowerCase());
     if (dd < bestD) [best, bestD] = [k, dd];

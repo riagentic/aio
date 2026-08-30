@@ -23,6 +23,7 @@ import {
   PersistSerializeError,
   stringifyWithIssues,
 } from "./persist-guard.ts";
+import { bytes } from "../diagnostics/fmt.ts";
 
 // ── Per-cell size guardrails ─────────────────────────────────────────
 //
@@ -59,10 +60,9 @@ export const CELL_SIZE_TIER_HINT =
   `persist flush and broadcast to every client. Bulk rows belong in db: ` +
   `tables, binaries in files — see ${BIG_DATA_DOC}.`;
 
-const _fmtBytes = (n: number): string =>
-  n >= 1024 * 1024
-    ? `${(n / (1024 * 1024)).toFixed(1)}MB`
-    : `${(n / 1024).toFixed(0)}KB`;
+// The framework's ONE byte spelling. This used to round KB to whole numbers,
+// so the same slice read `214KB` here and `214.3 KB` in `am top`.
+const _fmtBytes = bytes;
 
 /** Configuration for the persistence manager — KV/SQLite handles, debounce timing, and state accessors. */
 export interface PersistenceConfig {

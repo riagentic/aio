@@ -45,14 +45,19 @@ Deno.test("am: formatUptime — seconds", () => {
 });
 
 Deno.test("am: formatUptime — minutes", () => {
-  assertEquals(formatUptime(60), "1m 0s");
-  assertEquals(formatUptime(125), "2m 5s");
+  // Zero-padded: uptimes are read as a COLUMN in `am instances`, and
+  // "2m 05s" under "59m 59s" lines up where "2m 5s" does not. Same spelling
+  // as every other duration aio prints (fmt.dur).
+  assertEquals(formatUptime(60), "1m 00s");
+  assertEquals(formatUptime(125), "2m 05s");
   assertEquals(formatUptime(3599), "59m 59s");
 });
 
-Deno.test("am: formatUptime — hours", () => {
-  assertEquals(formatUptime(3600), "1h 0m");
-  assertEquals(formatUptime(7265), "2h 1m");
+Deno.test("am: formatUptime — hours, then days", () => {
+  assertEquals(formatUptime(3600), "1h 00m");
+  assertEquals(formatUptime(7265), "2h 01m");
+  // Past two days, hours stop being a unit anyone reads: 76h 17m is "3 days".
+  assertEquals(formatUptime(274_620), "3d 4h");
 });
 
 // ── Unit: parsePayload ───────────────────────────────────────

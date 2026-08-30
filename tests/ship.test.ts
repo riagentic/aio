@@ -8,6 +8,7 @@ import {
   assertThrows,
 } from "@std/assert";
 import { join } from "@std/path";
+import { stripAnsi } from "../src/diagnostics/fmt.ts";
 import {
   artifactFormat,
   buildShipManifest,
@@ -1076,7 +1077,11 @@ Deno.test("shipApp: --data with log lines in it names the file, not a stack", as
         }),
       Error,
     );
-    assert(err.message.startsWith("[ship]"), err.message);
+    // The refusal opens with the house glyph, not a private `[ship]` tag:
+    // every aio surface marks a refusal the same way, and a per-module prefix
+    // repeated on every line of a wall of them told the reader nothing they
+    // could not see from the command they had just run.
+    assert(/^\u2717/.test(stripAnsi(err.message)), err.message);
     assert(err.message.includes(dataPath), err.message);
     assert(err.message.includes("--aio-data-contract"), err.message);
   } finally {

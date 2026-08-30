@@ -30,6 +30,7 @@ import {
   RESTART_EXIT_CODE,
   restartBlockedReason,
 } from "./dev-restart.ts";
+import { count } from "../diagnostics/fmt.ts";
 
 /** One SIGHUP guard per process — see the headless branch in startLifecycle. */
 let _sighupGuarded = false;
@@ -290,17 +291,31 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
       : "uds";
   const transportLabel = transport === "uds" ? `, ${localKind}` : "";
 
-  const p = (key: string) => `  ${key.padEnd(10)}`;
+  // THE BOOT REPORT — one entry, not twenty-eight.
+  //
+  // Every fact below used to be its own `log.info`, so the terminal showed 28
+  // lines each restating the same timestamp, level and category: 1100
+  // characters of prefix carrying 28 facts, and the facts themselves left of
+  // an eyeballed `padEnd(10)`. They are one report about one boot, so they are
+  // one entry — the logger aligns a wide field set into a block under the
+  // line (logger-format.ts), which means the app.log gets them as STRUCTURED
+  // data (greppable as `web=…`) instead of 28 lines of prose. One call, so the
+  // console and the file can never disagree about what was reported.
+  const facts: Record<string, string> = {};
+  const say = (k: string, v: unknown) => {
+    if (v !== undefined && v !== null && v !== "") facts[k] = String(v);
+  };
+
   if (expose && token) {
     log.warn(
-      "⚠ token auth via URL query parameter is insecure in expose mode — use Authorization header instead",
+      "token auth via URL query parameter is insecure in expose mode — use an Authorization header instead",
     );
   }
   // `!perUserAuth` covers users/resolveUser/auth:true; `!token` covers the
   // shared app key. Only an app with NONE of them is actually open.
   if (expose && !perUserAuth && !token) {
     log.warn(
-      "⚠ no authentication configured with --expose — any website can connect via WebSocket",
+      "no authentication configured with --expose — any website can connect via WebSocket",
     );
   }
   // "No TCP port" has two shapes and the report must not print a number for
@@ -309,29 +324,28 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
   // that bound nothing is the exact class of confidently-wrong line this
   // codebase keeps deleting.
   const noPort = skipHttp || !!deps.httpSocketPath;
+  const headline = noPort
+    ? `running (${mode}, ${shell}, ${localKind} — no TCP port)`
+    : `running (${mode}, ${shell}${transportLabel})`;
   if (noPort) {
-    log.info(`running (${mode}, ${shell}, ${localKind} — no TCP port)`);
-    if (deps.httpSocketPath) log.info(`${p("http")}${deps.httpSocketPath}`);
+    say("http", deps.httpSocketPath);
   } else {
-    log.info(`running (${mode}, ${shell}${transportLabel})`);
     const wsProto = useHttps ? "wss" : "ws";
     // `bindHost` is the transport's OWN resolved answer — re-deriving it here
     // (from the flag only) made the report contradict the bind for an app
     // that set `host` in config.
-    log.info(`${p("web")}${url}`);
-    log.info(`${p("ws")}${wsProto}://${advertiseHost}:${port}/ws`);
+    say("web", url);
+    say("ws", `${wsProto}://${advertiseHost}:${port}/ws`);
   }
-  if (udsHandle) log.info(`${p(localKind)}${udsHandle.socketPath}`);
-  if (server.trojanPort) {
-    log.info(`${p("trojan")}http://localhost:${server.trojanPort}`);
-  }
+  if (udsHandle) say(localKind, udsHandle.socketPath);
+  if (server.trojanPort) say("trojan", `http://localhost:${server.trojanPort}`);
   // Printed ONLY when asked for: a debugging port is a port, and the
   // "no TCP port" line above must stay literally true by default.
   const cdp = cdpPort();
-  if (cdp) log.info(`${p("cdp")}127.0.0.1:${cdp} (opt-in, loopback)`);
-  log.info(`${p("id")}${appId}`);
-  log.info(`${p("version")}${appVersion}`);
-  log.info(`${p("aio")}${VERSION}`);
+  if (cdp) say("cdp", `127.0.0.1:${cdp} (opt-in, loopback)`);
+  say("id", appId);
+  say("version", appVersion);
+  say("aio", VERSION);
   // What this process actually IS — read from the process, never from config,
   // so the report cannot describe a different app than the one running.
   // Two facts the lifecycle owns and the boot report could not derive: the
@@ -356,27 +370,25 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
       : "off (plain http)",
   };
   for (const [label, value] of bootLines(buildFacts(), _bootExtras)) {
-    log.info(`${p(label)}${value}`);
+    say(label, value);
   }
-  log.info(`${p("title")}${title}`);
-  log.info(`${p("singleton")}${String(singletonMode)}`);
-  log.info(`${p("persist")}${shouldPersist ? persistMode : "false"}`);
-  if (asyncDb) {
-    const dbKeyCount = Object.keys(db ?? {}).length;
-    log.info(
-      `${p("sqlite")}${dbKeyCount} table${dbKeyCount !== 1 ? "s" : ""}`,
-    );
-  }
-  log.info(`${p("expose")}${expose}`);
-  const authLabel = deps.authMode ??
-    (users ? `${Object.keys(users).length} user(s)` : token ? "token" : "none");
-  log.info(`${p("auth")}${authLabel}`);
-  if (schedules?.length) {
-    log.info(`${p("schedules")}${schedules.length}`);
-  }
-  if (maxConnections !== undefined) {
-    log.info(`${p("maxconn")}${maxConnections}`);
-  }
+  say("title", title);
+  say("singleton", String(singletonMode));
+  say("persist", shouldPersist ? persistMode : "false");
+  if (asyncDb) say("sqlite", count(Object.keys(db ?? {}).length, "table"));
+  say("expose", String(expose));
+  say(
+    "auth",
+    deps.authMode ??
+      (users
+        ? count(Object.keys(users).length, "user")
+        : token
+        ? "token"
+        : "none"),
+  );
+  if (schedules?.length) say("schedules", String(schedules.length));
+  if (maxConnections !== undefined) say("maxconn", String(maxConnections));
+  log.info(headline, facts);
 
   // Share URLs — shown separately so they're easy to copy.
   //

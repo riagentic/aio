@@ -186,3 +186,11 @@ export {
   signOut,
   useUser,
 } from "./browser/browser-auth-ui.ts";
+
+// ── Unit formatters ───────────────────────────────────────────────────
+// The browser half of `aio`'s `bytes`/`dur`/`count` (mod.ts). They are pure
+// and isomorphic — a real re-export of the same module, not a stub — and they
+// are here because this file IS `aio` inside a browser bundle: a tile showing
+// a file size and the CLI row showing the same size have to agree, and the
+// only way that holds is if both import the one implementation.
+export { bytes, count, dur } from "./diagnostics/fmt.ts";

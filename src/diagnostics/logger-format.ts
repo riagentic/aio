@@ -2,6 +2,7 @@
 
 import type { LogEntry } from "./logger-types.ts";
 import { colorEnabled as USE_COLOR, paint } from "./color.ts";
+import { kv, style } from "./fmt.ts";
 
 // ── Plain text formatter ──────────────────────────────────────────────
 
@@ -82,6 +83,13 @@ function colorizeMsg(msg: string, lvl: string): string {
   return out;
 }
 
+/** How many `key=value` pairs still read as a tail on one line. Past this,
+ *  the fields ARE the message and belong in an aligned block under it — the
+ *  boot report is 26 of them, and inline that is one 900-character line (it
+ *  was worse before: 26 separate entries, each restating the same timestamp,
+ *  level and category, so 1000 characters of prefix carried 26 facts). */
+const INLINE_FIELDS = 4;
+
 export function printConsole(e: LogEntry): void {
   const lvlStr = (typeof e.lvl === "string" ? e.lvl : "debug").toUpperCase()
     .padEnd(5);
@@ -89,20 +97,40 @@ export function printConsole(e: LogEntry): void {
   const ts = paint(e.ts, C.lightGray);
   const lvl = paint(lvlStr, color, C.bold);
   const cat = paint(e.cat.padEnd(10), C.white);
+  const entries = e.data ? Object.entries(e.data) : [];
+  const cell = (v: unknown) =>
+    String(typeof v === "object" ? safeStringify(v) : v);
+
+  // The prefix is a fixed ~40 columns of timestamp + level + category, and a
+  // message longer than what is left ran off the right edge. Wrap it under
+  // itself, so a paragraph of advice reads as a paragraph.
+  // The message is NOT wrapped, and that is a decision, not an omission.
+  // A log line is a stream people and tools grep: `deno task dev | grep
+  // "looks secret"` and twenty of this project's own gate tests match a PHRASE
+  // against it, and a soft-wrap inserted mid-phrase breaks every one of them
+  // (28 did, the first time this wrapped). The terminal soft-wraps a long line
+  // by itself and loses nothing; a hard wrap loses the grep. Blocks — `am`,
+  // the build, the error report — wrap, because they are read, not matched.
+  const gutter = "    ";
   const msg = colorizeMsg(e.msg, e.lvl);
-  const data = e.data
+
+  const data = entries.length > 0 && entries.length <= INLINE_FIELDS
     ? "  " +
-      Object.entries(e.data).map(([k, v]) =>
-        `${paint(k, C.dim)}=${
-          paint(
-            String(typeof v === "object" ? safeStringify(v) : v),
-            C.cyan,
-          )
-        }`
-      ).join(" ")
+      entries.map(([k, v]) => `${paint(k, C.dim)}=${paint(cell(v), C.cyan)}`)
+        .join(" ")
     : "";
   const dur = e.dur !== undefined ? `  ${paint(`${e.dur}ms`, C.magenta)}` : "";
-  const line = `${ts}  ${lvl}  ${cat}  ${msg}${data}${dur}`;
+  // A wide field set becomes an aligned block under the line: dim labels,
+  // plain values, ONE timestamp for the lot. The app.log still receives them
+  // as structured data — this is only how the console draws them.
+  const bulk = entries.length > INLINE_FIELDS
+    ? "\n" +
+      kv(entries.map(([k, v]) => ({ label: k, value: cell(v) })), {
+        indent: gutter,
+        style,
+      })
+    : "";
+  const line = `${ts}  ${lvl}  ${cat}  ${msg}${data}${dur}${bulk}`;
   // The level decides the STREAM, not just the word. A warning printed on
   // stdout cannot be separated by `2>`, a wrapper cannot tell it from output,
   // and anything watching console.warn/console.error — a test, a host app, the

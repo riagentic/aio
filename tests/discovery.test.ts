@@ -63,10 +63,19 @@ Deno.test({
       // datagram — UDP promises nothing — and a miss is not the property under
       // test; that the one responder reports every app is.
       let apps: Awaited<ReturnType<typeof discoverAioApps>> = [];
+      const mine = () => apps.filter((a) => a.name.startsWith(tag));
       const deadline = Date.now() + 15_000;
       while (Date.now() < deadline) {
         apps = await discoverAioApps({ timeoutMs: 800, nonce });
-        if (apps.length >= 3) break;
+        // OURS, not "three answers". `apps.length >= 3` broke the retry the
+        // instant three STRANGERS answered — and on a machine with several aio
+        // apps running that is the first sweep, every time, whether or not our
+        // own datagram arrived. The loop was measuring the neighbourhood while
+        // the assertion under it measured the thing under test, which is
+        // exactly the mistake the comment above warns about. That is the whole
+        // flake: it never failed on an empty machine and never passed reliably
+        // on a busy one.
+        if (mine().length >= hostApps.length) break;
       }
       // Every answer the nonce sweep kept is OURS — a stranger's app cannot
       // echo a nonce it never saw. So the count is exact, not a floor.

@@ -50,6 +50,7 @@ import {
 } from "../protocol/protocol-version.ts";
 
 import { log } from "../diagnostics/logger-api.ts";
+import { count } from "../diagnostics/fmt.ts";
 
 enablePatches();
 
@@ -540,7 +541,7 @@ export function connectCli<S>(
       if (queue.length > 0) {
         log.warn(
           "cli",
-          `closed with ${queue.length} action(s) still queued — ` +
+          `closed with ${count(queue.length, "action")} still queued — ` +
             `they were never sent; their callers reject`,
         );
         queue.length = 0;
@@ -882,7 +883,7 @@ export function connectCliUDS<S>(
       if (queue.length > 0) {
         log.warn(
           "cli",
-          `UDS closed with ${queue.length} action(s) still queued — ` +
+          `UDS closed with ${count(queue.length, "action")} still queued — ` +
             `they were never sent; their callers reject`,
         );
         queue.length = 0;

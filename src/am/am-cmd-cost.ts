@@ -16,6 +16,7 @@ import type { GlobalFlags } from "./am-types.ts";
 import { out, outError } from "./am-output.ts";
 import { amCtx } from "./am-utils.ts";
 import { trojanGet } from "./am-http.ts";
+import { bytes } from "../diagnostics/fmt.ts";
 
 type KeyCost = {
   key: string;
@@ -54,12 +55,11 @@ type CostReport = {
   stateBytes: Record<string, number>;
 };
 
-/** Bytes, at a glance: 412 B · 7.9 KB · 1.2 MB. */
+/** Bytes, at a glance: `412 B` · `7.9 KB` · `1.2 MB`. Nothing measured reads
+ *  as `—`, not as `0 B` — that distinction is this command's; the arithmetic
+ *  is the framework's one spelling (`fmt.bytes`). */
 export function fmtBytes(n: number): string {
-  if (!Number.isFinite(n) || n <= 0) return "—";
-  if (n < 1024) return `${Math.round(n)} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return !Number.isFinite(n) || n <= 0 ? "—" : bytes(n);
 }
 
 const fmtRate = (n: number): string => n <= 0 ? "—" : `${fmtBytes(n)}/s`;

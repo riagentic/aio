@@ -10,6 +10,7 @@
 // @ts-ignore node:sqlite types unavailable when an old @types/node shadows them
 import { DatabaseSync } from "node:sqlite";
 import type { QueryResult, WorkerRequest, WorkerResponse } from "./types.ts";
+import { count } from "../diagnostics/fmt.ts";
 
 // node:sqlite requires SupportedValueType — runtime values are always valid SQL params
 // deno-lint-ignore no-explicit-any
@@ -147,7 +148,7 @@ function sqlContext(data: WorkerRequest): string {
     const st = at >= 0 ? data.stmts[at] : undefined;
     return [
       "",
-      `  in a transaction of ${data.stmts.length} statement(s)` +
+      `  in a transaction of ${count(data.stmts.length, "statement")}` +
       (st ? `, at statement ${at + 1}` : ""),
       ...(st
         ? [`  sql: ${clip(st.sql)}`, `  params: ${st.params?.length ?? 0}`]

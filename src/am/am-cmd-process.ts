@@ -37,7 +37,22 @@ import {
 } from "../server/single-instance-lock.ts";
 import { EXIT_WAIT_MS } from "../server/shutdown-budget.ts";
 import { VERSION } from "../server/aio-cli.ts";
-import { detectMode, formatUptime, out, outError } from "./am-output.ts";
+import {
+  block,
+  count,
+  detectMode,
+  formatUptime,
+  heading,
+  hints,
+  indent,
+  mark,
+  out,
+  outError,
+  stack,
+  style,
+  table,
+  tally,
+} from "./am-output.ts";
 import { repoRoot } from "./am-cmd-create.ts";
 import {
   declaredPort,
@@ -1291,17 +1306,25 @@ export async function cmdStatus(
   if (!pf) {
     const others = instances();
     out(
-      mode === "pretty"
-        ? `${appId}: stopped` +
-          (others.length > 0
-            ? `\n  (running: ${
-              others.map((i) =>
-                `${i.appId} @ ${i.socketPath ? "uds" : `:${i.port}`}`
-              ).join(", ")
-            } — this directory resolves to "${appId}"; use --app=<id>)`
-            : "")
-        : { appId, status: "stopped", running: others.map((i) => i.appId) },
+      { appId, status: "stopped", running: others.map((i) => i.appId) },
       mode,
+      () =>
+        stack(
+          `${mark("warn")} ${style.bold(appId)}  ${style.dim("stopped")}`,
+          others.length > 0 &&
+            block(
+              "info",
+              `This directory resolves to "${appId}", and nothing by that name is running.`,
+              `${count(others.length, "other app")} ${
+                others.length === 1 ? "is" : "are"
+              }: ${
+                others.map((i) =>
+                  `${i.appId} @ ${i.socketPath ? "uds" : `:${i.port}`}`
+                ).join(", ")
+              }.`,
+              "am status --app=<id>",
+            ),
+        ),
     );
     Deno.exit(1);
   }
@@ -1413,33 +1436,62 @@ export function instanceAioMismatch(v: string | undefined): boolean {
   return v !== undefined && v !== VERSION;
 }
 
-/** The `aio=` column of one `am instances` row. Pure. */
-export function instanceAioColumn(v: string | undefined): string {
-  return `aio=${v ?? "?"}${instanceAioMismatch(v) ? `  ≠ am ${VERSION}` : ""}`;
-}
-
 export function cmdInstances(_args: string[], flags: GlobalFlags): void {
   const mode = detectMode(flags);
   const all = instances();
 
   if (all.length === 0) {
-    out(mode === "pretty" ? "no running aio instances" : [], mode);
+    out(
+      mode === "pretty" ? "no running aio instances" : [],
+      mode,
+      () =>
+        stack(
+          heading("instances", "none running"),
+          hints([["am start", "start the app in this directory"]]),
+        ),
+    );
     return;
   }
 
   if (mode === "pretty") {
-    for (const inst of all) {
-      const transport = inst.socketPath ? "uds" : "ws";
-      const uptime = formatUptime(
-        Math.round((Date.now() - inst.startedAt) / 1000),
-      );
-      const uds = inst.socketPath ? ` (${inst.socketPath})` : "";
-      console.log(
-        `${inst.appId}  pid=${inst.pid}  port=${inst.port}  ${inst.status}  ${transport}${uds}  uptime=${uptime}  ${
-          instanceAioColumn(inst.aioVersion)
-        }  home=${inst.home}  cwd=${inst.cwd}`,
-      );
-    }
+    // A table, because this IS a table: nine `key=value` pairs per line, one
+    // line per app, is a shape a person cannot scan down. The columns a reader
+    // uses to pick an app come first; `home` and `cwd` are paths nobody
+    // compares across rows, so they move behind `--long`.
+    const long = flags.long === true;
+    const rows = all.map((inst) => ({
+      "": mark(inst.status === "started" ? "run" : "warn"),
+      APP: inst.appId,
+      PID: String(inst.pid),
+      LISTENING: inst.socketPath ? "uds" : `:${inst.port}`,
+      UP: formatUptime(Math.round((Date.now() - inst.startedAt) / 1000)),
+      AIO: instanceAioMismatch(inst.aioVersion)
+        ? style.yellow(`${inst.aioVersion ?? "?"} ≠`)
+        : inst.aioVersion ?? style.dim("?"),
+      ...(long
+        ? { SOCKET: inst.socketPath ?? "", HOME: inst.home, CWD: inst.cwd }
+        : {}),
+    }));
+    const mismatched = all.filter((i) => instanceAioMismatch(i.aioVersion));
+    console.log(stack(
+      indent(table(rows, {
+        columns: (Object.keys(rows[0]!) as (keyof typeof rows[0])[]).map((
+          k,
+        ) => ({
+          key: k,
+          align: k === "PID" ? "right" as const : "left" as const,
+        })),
+      })),
+      indent(tally([[all.length, "running", "ok"]])) +
+        (mismatched.length
+          ? style.dim("  ·  ") + style.yellow(
+            `${mismatched.map((i) => i.appId).join(", ")} ${
+              mismatched.length === 1 ? "runs" : "run"
+            } an aio that is not ${VERSION}`,
+          )
+          : ""),
+      long ? "" : hints([["am instances --long", "sockets, homes and cwds"]]),
+    ));
   } else {
     out(
       all.map((inst) => ({
