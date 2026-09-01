@@ -9,6 +9,12 @@ import { randomUuid } from "../rand.ts";
 import { attachMeta } from "./cell-catalog.ts";
 import { _cellSignals, getCellSignal } from "./state-signals.ts";
 import { ackMethodKey } from "../protocol/ack-registry.ts";
+import {
+  context,
+  contextNote,
+  SIDE,
+  WHERE_HINT,
+} from "../diagnostics/contexts.ts";
 import { _ackSink } from "./ack-sink.ts";
 import { trackPath } from "./state-subs.ts";
 import { nameIsTaken } from "./cell-helpers.ts";
@@ -128,17 +134,28 @@ export function reportHiddenRead(
   cellName: string,
   key: string,
   reason: string,
-  context = "read from client context",
+  context = `read in ${SIDE.client}`,
 ): never {
   const id = `${cellName}.${key}`;
   throw new Error(
     `[aio] ${id} ${context} — ${reason}. ` +
-      `\`visible:\` is enforced on ALL client reads (browser and ` +
-      `standalone/electron alike), in dev and prod. Two fixes: publish the ` +
+      // ONE name for the side, not three. This sentence used to read
+      // "enforced on ALL client reads (browser and standalone/electron
+      // alike)" — three spellings of one idea, in one line, which is how a
+      // reader learns that the words are decoration.
+      `\`visible:\` is enforced on every read in ${SIDE.client} — wherever ` +
+      `your UI runs — in dev and prod alike. Two fixes: publish the ` +
       `non-secret FACT as its own visible field (e.g. \`has${
         (key.split(".").pop() ?? key).replace(/^./, (c) => c.toUpperCase())
-      }: boolean\`) and read that, or read \`${key}\` in a server-side/async ` +
-      `method (routes, effects, methods).`,
+      }: boolean\`) and read that, or read \`${key}\` in ${SIDE.server} — a ` +
+      `server-side/async method (routes, effects, methods).\n` +
+      // Name WHERE you are, not only what is refused. This fires from places
+      // that look identical in a source file, and the reader's next question
+      // is always which one they are in. The sync method is the expensive
+      // case: reading a hidden field there is correct-looking TypeScript that
+      // only dies when the reducer replays.
+      `  ${WHERE_HINT}. Note: ${contextNote("a sync method")} — where ` +
+      `hidden fields are not present.`,
   );
 }
 
@@ -264,9 +281,14 @@ export function guardHiddenReplay<S extends object>(def: CellDef, draft: S): S {
   return guardHidden(
     def,
     draft as unknown as Record<string, unknown>,
-    "read during client-side replay of a sync method (sync methods replay " +
-      "on the client — read hidden fields only in server-side/async " +
-      "methods, or publish a non-secret fact field)",
+    // The side OBSERVED, then the context by name. A sync method is DECLARED
+    // server-side and this guard fires precisely when it is running on the
+    // client, so anything derived from the declaration names the wrong side at
+    // the one moment the side is the whole point. See the note in
+    // `diagnostics/contexts.ts` about the helper that used to do exactly that.
+    `read in ${SIDE.client} — this is ${
+      context("a sync method").name
+    }, and sync methods replay on the client`,
   ) as unknown as S;
 }
 
@@ -378,9 +400,9 @@ export function bindCellReactive(
       Object.defineProperty(def, key, {
         value: (...args: unknown[]) => {
           trackPath(cellName);
-          // selectors in client context see the ui-FILTERED slice —
-          // same data a browser client would hold after a broadcast, so a
-          // selector can't leak a ui-excluded secret in standalone/electron.
+          // Selectors run in client context and see the ui-FILTERED slice —
+          // the same data any client holds after a broadcast, so a selector
+          // cannot leak a ui-excluded secret wherever the UI runs.
           const own = guardHidden(
             def,
             filterSlice(

@@ -4,6 +4,7 @@
 import { assert, assertEquals } from "@std/assert";
 import {
   _SCANNED_FS_APIS,
+  AIO_BASELINE,
   type Capabilities,
   scanCapabilities,
 } from "../src/build/capabilities.ts";
@@ -30,11 +31,49 @@ Deno.test("scanCapabilities: detects each category from real API usage", () => {
   });
 });
 
-Deno.test("scanCapabilities: a pure app needs nothing (never -A)", () => {
+Deno.test("scanCapabilities: a pure app still needs what AIO needs", () => {
+  // This test used to assert `[]`, and it was pinning a bug. Scanning an app's
+  // own sources answers "what does MY code need" — but the binary also
+  // contains aio, which binds a socket, opens SQLite, writes logs and a lock,
+  // and reads config from the environment. A scaffolded counter app touches
+  // none of those APIs itself, so the manifest said
+  // `least-privilege run flags: (none)`.
+  //
+  // MEASURED: `deno run src/app.ts` on a freshly scaffolded app with no flags
+  // dies inside `immer` reading NODE_ENV, before aio prints a line, in a
+  // dependency the user never wrote. Advice that produces an app which cannot
+  // start is worse than no advice — and `runFlags` travels in the SIGNED
+  // release manifest.
   const caps = scanCapabilities([
     { content: `export const add = (a: number, b: number) => a + b;` },
   ]);
-  assertEquals(permissionFlags(caps), []);
+  assertEquals(permissionFlags(caps), [
+    "--allow-net",
+    "--allow-read",
+    "--allow-write",
+    "--allow-env",
+  ]);
+  // …and never the escalations, which aio genuinely does without.
+  assertEquals([caps.ffi, caps.run, caps.sys], [false, false, false]);
+});
+
+Deno.test("capabilities: the baseline is a FLOOR, and never -A", () => {
+  // The floor must stay a floor: every baseline flag present whatever the app
+  // does, and the three real escalations still earned rather than granted.
+  for (const cap of ["net", "read", "write", "env"] as const) {
+    assertEquals(AIO_BASELINE[cap], true, `${cap} is what aio itself needs`);
+  }
+  for (const cap of ["ffi", "run", "sys"] as const) {
+    assertEquals(
+      AIO_BASELINE[cap],
+      false,
+      `${cap} is an escalation an app must show it needs`,
+    );
+  }
+  assert(
+    !permissionFlags({ ...AIO_BASELINE }).includes("-A"),
+    "the whole point is that it is never -A",
+  );
 });
 
 Deno.test("scanCapabilities: a mention in a COMMENT does not grant a permission", () => {
@@ -45,7 +84,10 @@ Deno.test("scanCapabilities: a mention in a COMMENT does not grant a permission"
     },
   ]);
   assertEquals(caps.ffi, false);
-  assertEquals(caps.net, false);
+  // `net` is baseline (aio binds a socket), so the comment grants nothing that
+  // was not already true — what this pins is that a MENTION adds nothing: ffi
+  // and run are not in the floor and stay off.
+  assertEquals(caps.run, false);
 });
 
 Deno.test("permissionFlags: emits only the needed allow-flags, never -A", () => {
@@ -101,7 +143,15 @@ Deno.writeTextFileSync("./out/report.json", cfg);`,
   }]);
   assertEquals(caps.read, true);
   assertEquals(caps.write, true);
-  assertEquals(permissionFlags(caps), ["--allow-read", "--allow-write"]);
+  // Read/write are baseline too now, so this asserts what it always meant: the
+  // *Sync spellings are SEEN. The regression it guards (a manifest that
+  // advertised `runFlags: []`) is dead twice over.
+  assertEquals(permissionFlags(caps), [
+    "--allow-net",
+    "--allow-read",
+    "--allow-write",
+    "--allow-env",
+  ]);
 });
 
 // One decider: the exported list and the regexes that do the matching must name
@@ -145,4 +195,81 @@ Deno.test("capabilities: the scanned-API list and the read/write regexes agree",
         `add it so the Sync-spelling guard above covers it too`,
     );
   }
+});
+
+// The gate that would have caught this: RUN an app with the flags we advertise.
+//
+// Three instances of one bug reached users before this existed — `updates:`
+// forced into the net signal, the `*Sync` spellings, and a scaffolded app told
+// it needed "(none)" — because every test asked what the SCANNER returned and
+// none asked whether the answer works. `runFlags` is in the signed release
+// manifest, so the advice travels.
+Deno.test({
+  name: "capabilities: an app RUNS with the flags the manifest advertises",
+  sanitizeResources: false, // aio-ok: the child is killed below; Deno sees its pipes
+  async fn() {
+    const dir = await Deno.makeTempDir({ prefix: "aio-caps-run-" });
+    try {
+      const root = new URL("..", import.meta.url).pathname;
+      await Deno.writeTextFile(
+        `${dir}/deno.json`,
+        JSON.stringify({
+          name: "capsapp",
+          version: "0.1.0",
+          imports: { aio: `${root}mod.ts` },
+        }),
+      );
+      // The app a scaffold produces: its own source touches no permissioned
+      // API at all, which is exactly the case that scanned to nothing.
+      await Deno.writeTextFile(
+        `${dir}/app.ts`,
+        `import { aio, cell } from "aio";\n` +
+          `const c = cell("caps", { state: { n: 0 }, methods: { bump(s: { n: number }) { s.n++; } } });\n` +
+          `await aio.run({ cells: [c], client: "server-only", libraryMode: true, appDir: ${
+            JSON.stringify(dir + "/data")
+          } });\n`,
+      );
+      const flags = permissionFlags(
+        scanCapabilities([{
+          content: await Deno.readTextFile(`${dir}/app.ts`),
+        }]),
+      );
+      assert(
+        flags.length > 0,
+        "advice of '(none)' is what this test exists for",
+      );
+      const proc = new Deno.Command(Deno.execPath(), {
+        args: ["run", ...flags, `${dir}/app.ts`, "--port=0"],
+        cwd: dir,
+        stdout: "piped",
+        stderr: "piped",
+      }).spawn();
+      // Let it boot, then end it and read everything it said. A permission it
+      // was told it did not need shows up as NotCapable — from anywhere in the
+      // graph, including a dependency the app author never wrote (the real one
+      // was `immer` reading NODE_ENV, before aio printed a line).
+      const killer = setTimeout(() => {
+        try {
+          proc.kill();
+        } catch { /* already gone */ }
+      }, 8_000);
+      const { stdout, stderr } = await proc.output();
+      clearTimeout(killer);
+      const out = new TextDecoder().decode(stderr) +
+        new TextDecoder().decode(stdout);
+      assert(
+        !/NotCapable|Requires .* access/.test(out),
+        `the advertised flags must actually run the app; got:\n${
+          out.slice(0, 700)
+        }`,
+      );
+      assert(
+        /running \(/.test(out),
+        `…and it must reach "running", not merely avoid a permission error; ` +
+          `got:\n${out.slice(0, 700)}`,
+      );
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
 });

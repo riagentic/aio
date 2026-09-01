@@ -11,7 +11,7 @@
 - [Architecture](basics/architecture.md) — AIO is a full-stack Deno/TypeScript application framework built around cells
 - [Core Concepts](basics/concepts.md) — Everything you need to understand about how aio works.
 - [FAQ](basics/faq.md) — Common questions about what aio does, doesn't do, and why.
-- [AIO Documentation](basics/index.md) — avoiding rule
+- [AIO Documentation](basics/index.md) — one table: Deno., hidden fields, tracked reads, and what refuses you
 - [Migrating to AIO](basics/migration.md) — You have an existing Deno application and want to integrate AIO.
 - [Common Pitfalls](basics/pitfalls.md) — The traps people actually hit — each with the rule that avoids it.
 - [Plugins](basics/plugins.md) — A plugin is a reusable piece of app: its cells, its routes, its schedules
@@ -20,6 +20,7 @@
 - [AIO Quickstart](basics/quickstart.md) — Start a new aio app from scratch.
 - [Versioning & Deprecation Policy](basics/semver-policy.md) — aio follows semver from 1.0.0 on.
 - [Tutorial -- Building with AIO Step by Step](basics/tutorial.md) — Each section builds on the previous, but you can stop at any point.
+- [Where does this code run?](basics/where-code-runs.md) — aio has one syntax and six places it executes.
 
 ## State — cells — the core: cells, methods, workflows, scheduling
 
@@ -38,7 +39,7 @@
 
 ## UI — AIR renderer — components, signals, routing, forms
 
-- [Rendering & UI](ui/README.md) — AIO uses AIR — a built-in signal-based renderer (57 KB gzipped with the
+- [Rendering & UI](ui/README.md) — AIO uses AIR — a built-in signal-based renderer (60 KB gzipped with the
 - [AIR Advanced Patterns](ui/air-advanced.md) — SSR, portals, islands, code splitting, virtual scrolling, dimensions, deferred
 - [AIR Animation](ui/air-animation.md) — CSS-first declarative transitions for enter/exit animations, imperative spring
 - [AIR vs React vs Best-in-Class — Full Comparison](ui/air-comparison.md) — Reference frameworks: React 19, Solid.js 1.9 (signal pioneer), Svelte
@@ -195,6 +196,7 @@
 - [Upgrading from alpha70 to alpha71](upgrade/from-alpha70-to-alpha71.md) — this release is what alpha70's own promise looks like when it is checked: every
 - [Upgrading from alpha71 to alpha72](upgrade/from-alpha71-to-alpha72.md) — key (security), one new UI key (ui.dir), one new config array (plugins),
 - [Upgrading from alpha72 to alpha73](upgrade/from-alpha72-to-alpha73.md) — every line it prints to a person, in one vocabulary — plus three tiny additions
+- [Upgrading from alpha73 to alpha74](upgrade/from-alpha73-to-alpha74.md) — end to end plus the hunt that followed them: fixes to what aio serves, what it
 - [Upgrade from v1.0.0-alpha8 to v1.0.0-alpha9](upgrade/from-alpha8-to-alpha9.md) — The internal machine state field is renamed.
 - [Upgrade from v1.0.0-alpha9 to v1.0.0-alpha10](upgrade/from-alpha9-to-alpha10.md) — Alpha10 is fully additive.
 - [Upgrade from v0.1 to v0.2](upgrade/from-v0.1-to-v0.2.md) — preserved)

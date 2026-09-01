@@ -1301,6 +1301,40 @@ await aio.run({ perfBudget: { methods: { "models:scan": { timeout: 0 } } } });
     expect: "is a SYNC method (the reducer) and calls `fetch()`",
   },
   {
+    name: "a cell method called from a timer",
+    files: app({
+      "src/cell.ts": `import { cell } from "aio";\n` +
+        `export const projects = cell("projects", { state: { list: [] as string[] }, ` +
+        `methods: { scan(s) { s.list = []; } } });\n` +
+        `export function boot() { setTimeout(() => projects.scan(), 0); }\n`,
+    }),
+    expect: "is a cell method called from a timer",
+  },
+  {
+    name: "a component reading a ui-hidden field",
+    files: app({
+      "src/vault.ts": `import { cell } from "aio";\n` +
+        `export const vault = cell("vault", { state: { locked: true, encSecKey: "" }, ` +
+        `visible: { exclude: ["encSecKey"] }, methods: { unlock(s) { s.locked = false; } } });\n`,
+      "src/App.tsx": `import { vault } from "./vault.ts";\n` +
+        `export function App() { return <div>{vault.encSecKey}</div>; }\n`,
+    }),
+    expect: "reads a field cell",
+  },
+  {
+    name: "a replaying reducer dispatching to another cell",
+    files: app({
+      "src/toasts.ts": `import { cell } from "aio";\n` +
+        `export const toasts = cell("toasts", { state: { items: [] as string[] }, ` +
+        `methods: { add(s, t: string) { s.items = [...s.items, t]; } } });\n`,
+      "src/cell.ts": `import { cell } from "aio";\n` +
+        `import { toasts } from "./toasts.ts";\n` +
+        `export const notes = cell("notes", { state: { items: [] as string[] }, sync: true, ` +
+        `methods: { add(s, t: string) { s.items = [...s.items, t]; toasts.add("added"); } } });\n`,
+    }),
+    expect: "REPLAYS on the client",
+  },
+  {
     name: "own.set keyed by a constant while the resource varies by id",
     files: app({
       "src/cell.ts": `import { cell, own } from "aio";\n` +

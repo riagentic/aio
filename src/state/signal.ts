@@ -815,3 +815,105 @@ export function effect(fn: () => void | CleanupFn): CleanupFn {
 
   return dispose;
 }
+
+// ── trackedMemo ─────────────────────────────────────────────────────
+
+/** A cache whose HITS still subscribe — the correct version of the memo every
+ *  app hand-rolls wrong.
+ *
+ *  The trap it closes: a component re-renders only for signals it touched
+ *  **while rendering**, and one cell is one signal, so any app with a list
+ *  large enough to matter memoizes. A plain cache that returns a hit without
+ *  touching the cell therefore subscribes to NOTHING — permanently, for that
+ *  component instance. The consequence is worse than "stale": the instance
+ *  that got the MISS works forever and the one that got the HIT is dead
+ *  forever, from the same cache, in the same frame. Right data, stale DOM, and
+ *  nothing to see — a component that subscribes to nothing renders fine, once.
+ *
+ *  So a hit REPLAYS the read set the miss recorded, into whatever tracking
+ *  scope is open now. The caller subscribes to exactly what computing the
+ *  value would have read.
+ *
+ *  Freshness comes from the same recorded set: every dependency's version is
+ *  captured at compute time, and a hit whose dependencies have moved
+ *  recomputes. No dependency array — the reads ARE the dependencies.
+ *
+ * ```ts
+ * // module scope — shared across every component that asks
+ * const visibleRows = trackedMemo((filter: string) =>
+ *   accounts.list.filter((a) => a.name.includes(filter))
+ * );
+ *
+ * function Panel({ filter }: { filter: string }) {
+ *   return <List rows={visibleRows(filter)} />; // hit or miss, it subscribes
+ * }
+ * ```
+ *
+ *  `key` maps the argument to a cache key (default: the argument itself, by
+ *  `Map` identity). `max` bounds the cache, evicting least-recently-used —
+ *  unbounded is the other way an app-level cache goes wrong. */
+export function trackedMemo<K, V>(
+  compute: (key: K) => V,
+  opts?: { key?: (arg: K) => unknown; max?: number },
+): (arg: K) => V {
+  type Entry = {
+    value: V;
+    deps: SignalImpl<unknown>[];
+    versions: number[];
+  };
+  const cache = new Map<unknown, Entry>();
+  const keyOf = opts?.key ?? ((a: K) => a as unknown);
+  const max = opts?.max ?? 0;
+
+  const fresh = (e: Entry): boolean => {
+    for (let i = 0; i < e.deps.length; i++) {
+      if (e.deps[i]!._version !== e.versions[i]) return false;
+    }
+    return true;
+  };
+
+  return (arg: K): V => {
+    const k = keyOf(arg);
+    const hit = cache.get(k);
+    if (hit && fresh(hit)) {
+      // THE point of this function: put the recorded reads into the scope that
+      // is open NOW, so a hit subscribes exactly as a miss would have.
+      const tracker = _currentTracker();
+      if (tracker) { for (const d of hit.deps) tracker.add(d); }
+      if (max > 0) {
+        // Touch for LRU — re-inserting moves the key to the end.
+        cache.delete(k);
+        cache.set(k, hit);
+      }
+      return hit.value;
+    }
+    // Miss: compute in a scope of its OWN, so the reads are recorded exactly
+    // once and replayed deliberately — never leaked into the caller's scope
+    // twice, and never lost if `compute` throws.
+    const deps = _trackStart();
+    let value: V;
+    try {
+      value = compute(arg);
+    } finally {
+      _trackEnd(deps);
+    }
+    const list = [...deps];
+    const entry: Entry = {
+      value,
+      deps: list,
+      versions: list.map((d) => d._version),
+    };
+    cache.delete(k);
+    cache.set(k, entry);
+    if (max > 0) {
+      while (cache.size > max) {
+        const oldest = cache.keys().next();
+        if (oldest.done) break;
+        cache.delete(oldest.value);
+      }
+    }
+    const tracker = _currentTracker();
+    if (tracker) { for (const d of list) tracker.add(d); }
+    return value;
+  };
+}

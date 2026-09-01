@@ -130,7 +130,9 @@ Deno.test("replay guard parity: dev throws naming cell + field on BOTH paths", (
       b.threw.includes("sync methods replay on the client"),
       `replay names ITS context: ${b.threw}`,
     );
-    assert(b.threw.includes("non-secret fact field"), "names the fix");
+    // The fix, by its actionable form — the fact-field NAME the message
+    // generates — rather than by a phrase that a rewording can drop.
+    assert(b.threw.includes("hasSecret: boolean"), `names the fix: ${b.threw}`);
     assertEquals([a.warns, b.warns], [0, 0], "dev throws, never warns");
   } finally {
     reset();

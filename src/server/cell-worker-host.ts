@@ -23,6 +23,7 @@
 import type { WirePatch as Patch } from "../protocol/patch-ops.ts";
 import { nameIsTaken } from "../state/cell-helpers.ts";
 import { composeCells } from "../state/cell-compose.ts";
+import { context } from "../diagnostics/contexts.ts";
 import { getRegisteredCells } from "../state/cell-reactive.ts";
 import { createDispatch } from "../state/dispatch.ts";
 import { createOwnManager } from "../state/own.ts";
@@ -96,7 +97,9 @@ function isolatePeerCells(hosted: string): void {
         Object.defineProperty(def, key, {
           get() {
             throw new Error(
-              `[aio] cell "${hosted}" runs in a worker and cannot read ` +
+              `[aio] cell "${hosted}" runs in ${
+                context("a worker isolate").name
+              } and cannot read ` +
                 `"${name}.${key}" — a worker cell has ONLY its own state, so ` +
                 `this read would silently return ${name}'s declared default ` +
                 `forever. Pass the value in as a method argument, do the read ` +

@@ -615,7 +615,7 @@ export async function cmdCreate(
       // live tree on this machine. That still needs a pin — and specifically
       // the `path:` one, or the app is born red.
       //
-      // Without it, `doctor` FAILED ("no aioVersion — run `am pin --latest`")
+      // Without it, `doctor` FAILED ("no aioVersion — run `am pin latest`")
       // while `aiol` WARNED the moment a pin existed and dep/aio pointed at a
       // checkout rather than the version store. Two first-party tools with
       // opposite demands and no configuration satisfying both: one field

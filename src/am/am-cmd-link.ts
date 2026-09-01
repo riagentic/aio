@@ -233,7 +233,7 @@ export async function cmdLink(
     : explicitRoot
     ? `${root} (--aio override)`
     : `${root}\n  ⚠ this app has no aioVersion pin, so a clone builds against ` +
-      `whatever aio is installed. Pin it: \`am pin --latest\``;
+      `whatever aio is installed. Pin it: \`am pin latest\``;
   out(
     mode === "pretty"
       ? (r === "ok"

@@ -139,6 +139,14 @@ export interface StaticDeps {
   debug: (msg: string) => void;
   title: string;
   absBaseDir: string;
+  /** THE app-dir ladder, most authoritative first, `absBaseDir` included and
+   *  first. Absent (or one entry) is the ordinary case: a dev server, or an
+   *  app that named its own `baseDir`. A compiled binary has two — the
+   *  embedded VFS dir the build put its assets in, then `<cwd>/src`, which was
+   *  its ONLY root before and stays reachable behind it. Every root here is an
+   *  app dir and gets every guard `absBaseDir` gets; `serveDirs` still wins
+   *  over all of them. See `baseDirCandidates`. */
+  absBaseDirs?: string[];
   /** Extra READ-ONLY roots the dev server may serve, `"/urlPrefix" → dir`.
    *  A relative dir is resolved ONCE against the process cwd, exactly like
    *  `baseDir` — see `_roots` below. Dev only: prod bundles already follow
@@ -196,6 +204,10 @@ export interface StaticDeps {
       { lastPayloadBytes: number; totalBytes: number; count: number }
     >;
     clientBackpressure: Record<string, number>;
+    /** Clients on the UDS socket. A desktop app has ALL of its clients here
+     *  and none in `clientBackpressure`, which is keyed by WS client id — so
+     *  `aio_clients_connected` read 0 for the whole desktop target. */
+    udsClients?: number;
     rawState?: Record<string, unknown>;
   };
   // Trojan
@@ -264,6 +276,27 @@ export function createStaticHandler(deps: StaticDeps): {
       checked: true,
     })),
   ];
+
+  // THE app-dir ladder, resolved once. `absBaseDir` is always first and always
+  // present, so every existing caller reads the same value it always did; a
+  // second entry only appears for a compiled binary that did not name its own
+  // baseDir. Deduped here too, because this is the list the guards run over.
+  const _appRoots: string[] = [
+    resolve(deps.absBaseDir),
+    ...(deps.absBaseDirs ?? []).map((d) => resolve(d)),
+  ].filter((d, i, a) => a.indexOf(d) === i);
+
+  /** Does a path resolve to something readable? The ladder's only question.
+   *  `stat`, not `readFile`: the answer decides a ROOT, and the file is read
+   *  (and every guard re-run) against that root afterwards. */
+  async function _pathExists(p: string): Promise<boolean> {
+    try {
+      await Deno.stat(p);
+      return true;
+    } catch {
+      return false;
+    }
+  }
 
   /** Fail loud, once per root, the first time anything asks for it: a root
    *  that is not a directory serves nothing but 404s, and the symptom the
@@ -779,7 +812,11 @@ export function createStaticHandler(deps: StaticDeps): {
       const body = formatPrometheus({
         uptimeSeconds: Math.round((Date.now() - _startedAt) / 1000),
         memory: Deno.memoryUsage(),
-        clients: Object.keys(extra.clientBackpressure ?? {}).length,
+        // BOTH transports. A local desktop app opens no TCP ports, so every
+        // client is on the socket — and a metric a supervisor scrapes reading
+        // a confident 0 is worse than one that is absent.
+        clients: Object.keys(extra.clientBackpressure ?? {}).length +
+          (extra.udsClients ?? 0),
         cells,
         payloads: extra.payloadStats,
       });
@@ -838,7 +875,7 @@ export function createStaticHandler(deps: StaticDeps): {
       // from (THE app-dir decider). PNG first: that is the file the build,
       // Electron and Android all read, so a project with both cannot end up
       // with a browser tab that disagrees with its taskbar entry.
-      const dirs = [deps.absDistDir, deps.absBaseDir].filter(
+      const dirs = [deps.absDistDir, ..._appRoots].filter(
         Boolean,
       ) as string[];
       for (const dir of dirs) {
@@ -961,12 +998,28 @@ export function createStaticHandler(deps: StaticDeps): {
     // treated, guards included — an extra root must not be a weaker root.
     let root = absBaseDir;
     let rel = filename;
+    let matchedRoot = false;
     for (const r of _roots) {
       if (pathname === r.prefix || pathname.startsWith(r.withSlash)) {
         await _warnIfMissing(r);
         root = r.dir; // absolute — see _roots
         rel = pathname.slice(r.withSlash.length).replace(/^\//, "");
+        matchedRoot = true;
         break;
+      }
+    }
+    // No `serveDirs` prefix claimed it: walk the app-dir ladder and let the
+    // first root that HAS the file serve it. Per-FILE, not per-directory: a
+    // compiled binary's embedded dir always exists (the entry module is in
+    // it), so picking a directory up front would pin every request to a root
+    // that may hold only modules. The last candidate is the fallthrough, so a
+    // miss 404s (or SPA-falls-back) exactly where it always did.
+    if (!matchedRoot && _appRoots.length > 1) {
+      for (const dir of _appRoots) {
+        if (await _pathExists(resolve(dir, rel))) {
+          root = dir;
+          break;
+        }
       }
     }
     const filepath = resolve(root, rel);

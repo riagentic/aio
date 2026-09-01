@@ -66,6 +66,14 @@ export type AioErrorContext = {
   budget?: number;
   machineState?: string;
   callStack?: string[];
+  /** This cell has blown the SAME budget repeatedly.
+   *
+   *  A one-off slow call and a cell that is heavy every tick have different
+   *  answers — `blocking()` for the call, `worker: true` for the cell — and a
+   *  tip that named both every time would be advice to pick from rather than
+   *  advice. The dispatcher counts (it is where the violations pass); the
+   *  remedy stays in `errorTip`, once. */
+  repeatOffender?: boolean;
 };
 
 export type ReportErrorOpts = {
@@ -388,6 +396,27 @@ export function extractUserFrames(stack: string | undefined): string[] {
  *  at its single source: the dispatcher states facts (and the per-method
  *  hatch, which only it knows), and everything about what to DO is here.
  *  @internal */
+/** The per-CELL answer, offered only once the per-CALL one has stopped fitting.
+ *
+ *  Field report: "`worker: true` is unambiguously the best thing I adopted this
+ *  cycle — it deleted a hand-rolled worker and came out 456 lines lighter. The
+ *  only criticism is discoverability: I hand-rolled first and found the
+ *  built-in later. If a cell's tick regularly exceeds a frame budget, a
+ *  dev-mode hint would route people to it at exactly the moment they care."
+ *
+ *  Gated on repetition on purpose. `blocking()` is the right answer for one
+ *  slow call; `worker: true` is the right answer for a cell that is heavy every
+ *  tick, which is the case `docs/state/methods.md` already calls "every method
+ *  here can be heavy". Naming both on a first violation would be a menu. */
+function workerHint(err: AioError): string {
+  if (!err.context.repeatOffender) return "";
+  const cell = err.context.cellName;
+  return ` This cell has blown its budget repeatedly — if most of its work is ` +
+    `heavy, give it a thread of its own: \`worker: true\` on ${
+      cell ? `cell("${cell}", …)` : "the cell"
+    } (docs/state/cell-workers.md).`;
+}
+
 export function generateTip(err: AioError): string | undefined {
   // FIRST, before the per-code tips: a frozen-state write is recognisable by
   // its message whatever code it arrives under, and it is the single most
@@ -486,7 +515,8 @@ export function generateTip(err: AioError): string | undefined {
       }ms) — every client's actions waited that long. If it's I/O, make the ` +
         `method async so it suspends at the await; if it's COMPUTE, an await ` +
         `doesn't help (the isolate is still blocked) — move it off-thread with ` +
-        `blocking("id", fn, arg). See docs/debugging/performance.md.`;
+        `blocking("id", fn, arg).` + workerHint(err) +
+        ` See docs/debugging/performance.md.`;
     case "BUDGET_EFFECT":
       // THE remedy for this code. The dispatcher states the facts and the
       // per-method escape hatch (it is the only thing that knows the method
@@ -497,7 +527,7 @@ export function generateTip(err: AioError): string | undefined {
         err.context.budget ?? 5
       }ms). An effect must return immediately: kick off async I/O without ` +
         `awaiting it here, or hand CPU work to blocking("id", fn, ` +
-        `arg). See docs/debugging/performance.md.`;
+        `arg).` + workerHint(err) + ` See docs/debugging/performance.md.`;
     case "PERSIST_ERROR":
       return "Tip: State persist failed — changes are in memory but will be lost on restart. Check disk space and file permissions.";
     case "PERSIST_SCHEMA":

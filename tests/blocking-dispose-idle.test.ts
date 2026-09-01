@@ -65,6 +65,7 @@ Deno.test("shutdown: Phase 7 retires the global pool's idle threads", async () =
     diagHooks: null,
     getVitalsCheckTimer: () => undefined,
     getVitalsSystem: () => undefined,
+    onStopping: undefined,
     onStop: undefined,
     appLock: null,
     scheduleManager: { cancelAll: noop },

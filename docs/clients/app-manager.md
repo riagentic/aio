@@ -91,7 +91,7 @@ can break it. A pinned app builds against its own worktree forever.
 
 It never overrides a pin you chose — an app held at an older release stays
 there. `--dry-run` reports the seal and writes nothing. Change it any time with
-`am pin <version>` (or `am pin --latest`, which stays within your major).
+`am pin <version>` (or `am pin latest`, which stays within your major).
 
 `am fix` also reports how far behind the pin is — an advisory, never a change. A
 pin is a promise, not a prison: the app keeps building exactly as pinned, and
@@ -542,7 +542,7 @@ build against whatever version happened to be installed. The pin fixes that:
 am pin                    # what this app asks for, what it's linked to, what's available
 am pin v1.0.0-alpha38     # switch: provision that version, relink, record it
 am pin main               # follow the branch tip (a moving target, re-synced on every `am fix`)
-am pin --latest           # newest release
+am pin latest           # newest release
 am pin /path/to/aio       # LOCAL-DEV pin: follow a framework checkout on this machine
 ```
 
@@ -566,10 +566,10 @@ Every later `am fix` keeps linking that checkout, which is the workflow for
 developing an app against a work-in-progress framework. The one pin reader
 prefers the local override and says so once per process
 (`aio: local path pin → /abs/checkout`); a dangling override (no `mod.ts` at the
-path) fails loudly instead of falling back. Pinning a release
-(`am pin --latest`, `am pin v…`) **removes** `.aio/pin.local`, so the release
-really is what runs. A legacy `aioVersion: "path:…"` in `deno.json` is still
-read, with a one-time warning telling you to move it (`am pin <that path>`).
+path) fails loudly instead of falling back. Pinning a release (`am pin latest`,
+`am pin v…`) **removes** `.aio/pin.local`, so the release really is what runs. A
+legacy `aioVersion: "path:…"` in `deno.json` is still read, with a one-time
+warning telling you to move it (`am pin <that path>`).
 
 Inside a path-pinned app, the installed `am` **delegates** to the pinned
 checkout's own am (announced on stderr; `AIO_AM_NO_DELEGATE=1` opts out) — so am
@@ -667,7 +667,15 @@ deno task am trigger App:Email setValue "a@b"      # REPLACE the field's value
 deno task am trigger App:Search focus               # focus / blur / hover / scroll / press
 deno task am trigger App:Stage keyDown ArrowLeft    # HOLD a key (games, drag) …
 deno task am trigger App:Stage keyUp ArrowLeft      # … then release it — press is a tap
+deno task am trigger window press "Escape"         # a WINDOW-level key (onGlobalKey)
 ```
+
+`window` is the address for a key that belongs to no element. `onGlobalKey`
+registers on the document, so nothing on the surface owns the binding — and
+aiming the key at an `<input>` instead does nothing at all, because
+`onGlobalKey` ignores the chord while focus is in a field. It accepts `press` /
+`keyDown` / `keyUp` and refuses everything else: a click on the window is not a
+gesture a user can make.
 
 **Which client?** With no index, `surface` and `trigger` drive the **newest UI
 client** — the page in front of you. An explicit index is the server's
@@ -705,6 +713,43 @@ am surface --full                    # untruncated element text
 
 A filter that matches nothing exits non-zero and lists the components that ARE
 in the surface — an empty result is nearly always a typo.
+
+### Which context does a file run in? (`am where`)
+
+```sh
+am where src/ui/Panel.tsx
+am where src/helpers.server.ts --json
+```
+
+aio has one syntax and six places it executes, and almost nothing in a source
+file says which one you are in. This answers from the module graph the dev
+server already walks: the context, the **import chain from the UI entry** that
+put the file there, and the rules that follow (`Deno.*`, hidden
+`visible.exclude` fields, whether a read subscribes).
+
+```
+  file        src/ui/Panel.tsx
+  context     the browser links this at boot (static import from the UI)
+  reached by  src/App.tsx  →  src/panels.ts  →  src/ui/Panel.tsx
+
+  · `Deno.*` and `@std/*`: NO — this code is in a browser
+  · hidden (`visible.exclude`) fields: a read THROWS, dev and prod alike
+  · a read subscribes ONLY inside a component body, never in a handler …
+```
+
+A **cell file gets an extra line**, because it is two contexts at once: the
+module is linked into the bundle, while its async methods run in server context
+and may use `Deno.*` — with the imports they need in a `*.server.ts` module,
+never at the top of the cell file. Saying only the first is how a reader
+concludes something false about their own methods.
+
+Four verdicts, all derived from the graph rather than guessed: `browser-eager`
+(statically imported from the UI), `browser-deferred` (reached only through a
+dynamic import — the browser may never load it), `server-only` (not in the
+client graph) and `unreached` (nothing the UI loads imports it: server context,
+or dead code). A `*.server.ts` filename overrides all four.
+
+The full map is [Where does this code run?](../basics/where-code-runs.md).
 
 ### Screenshots (`am shot`)
 

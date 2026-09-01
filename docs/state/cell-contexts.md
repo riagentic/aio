@@ -46,6 +46,13 @@ Effects are a server concern: during a client replay `s.$do` swallows everything
 — the effects already ran on the server, and firing them again here would double
 them.
 
+**Anything else the reducer calls is NOT exempt.** A replaying reducer that
+dispatches to another cell does it once in the browser (over the wire) and once
+on the server; one that logs writes two entries per action. `aiol` refuses both
+by name and points at `$do`, alongside the rule that refuses a hidden-field read
+in the same place — both are decidable from the cell definition, so neither has
+to be found live.
+
 ## Combinations that are refused
 
 At `cell()` time (`src/state/cell-create.ts`, `cell-methods-factory.ts`):

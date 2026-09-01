@@ -113,6 +113,7 @@ export {
   effect,
   type Signal,
   signal,
+  trackedMemo,
   untrack,
 } from "./state/signal.ts";
 // `log` — the same call an app makes on the server.

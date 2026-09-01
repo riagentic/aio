@@ -432,7 +432,7 @@ React implementation.
 | Routing                          | ✅    | Built-in, server-integrated                                  |
 | SSR — hydration cost             | ❌    | Full hydration (Qwik has resumability)                       |
 | SSR — mismatch safety            | ✅    | Safe fallback vs React's patch-in-place                      |
-| Bundle size                      | ⚠️    | 57 KB gzipped — the whole client, not a view layer (see §14) |
+| Bundle size                      | ⚠️    | 60 KB gzipped — the whole client, not a view layer (see §14) |
 | React compat layer               | ✅    | Full coverage incl. useId, onChange compat                   |
 | Batteries included               | ✅    | Forms, animation, virtual list, async data                   |
 | Concurrent rendering             | ❌    | No priority scheduling                                       |

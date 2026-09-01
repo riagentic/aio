@@ -33,6 +33,35 @@ const ws = cell("ws", {
 | Available in | `onInit`, `onDestroy` | `onInit`, `onDestroy`          |
 | Use when     | Reading own state     | Coordinating with another cell |
 
+### Starting work when the app comes up
+
+`state/methods.md` says, correctly, **never write
+`setTimeout(() => cell.other(), 0)`** — it escapes the action log, time-travel
+and cancellation. But "scan the disk once at boot" is a real need, and without a
+worked example the prohibited shape is the one people reach for. A field report
+shipped it in **five** `onInit`s, each with an `aiol-ok` comment explaining why
+it was necessary. It was not. Three answers, by when the work should happen:
+
+```ts
+// 1. From a cell, as it initialises — dispatch through the app handle.
+onInit(app) {
+  app.dispatch({ type: "projects:scan" });   //  in the log, cancellable
+},
+
+// 2. Once, after every cell is bound and the app is serving.
+await aio.run({
+  cells: [projects],
+  onStart: () => projects.scan(),            //  the method, called normally
+});
+
+// 3. Repeatedly — a static entry, armed once by the framework.
+schedules: [{ id: "rescan", every: "5m", action: "projects:scan" }],
+```
+
+The rule underneath: a cell method is how work enters the system, and `onInit` /
+`onStart` / `schedules` are the three doors. A timer that calls one from outside
+is a fourth door that skips the hallway — `aiol` refuses it.
+
 ---
 
 ## Cell dependencies
@@ -84,7 +113,48 @@ await aio.run({
 | `logging`                     | `LogConfig \| false`                     | Structured file logs — level (default `info`), dir (default `~/.<appId>/logs`)                                                                                                |
 | `maxConnections` / `wsLimits` | `number` / obj                           | WS safety limits (hardened defaults)                                                                                                                                          |
 | `onStart`                     | `(app) => void \| Promise<void>`         | Runs once the cells are bound. A throw — sync or async — is logged (`fatalOnStart: true` exits instead)                                                                       |
+| `onStopping`                  | `() => void \| Promise<void>`            | Runs **before** dispatch closes — the one place to quiesce your own producers (a timer, a poller, a queue). **May dispatch**, and the write is persisted — see below          |
 | `onStop`                      | `() => void \| Promise<void>`            | Runs during shutdown and is **awaited**, inside the 5 s teardown budget — the place to finish your own writes (a flush, a handle, a child). **Must not dispatch** — see below |
+
+### `onStopping` — stop your producers while dispatch still works
+
+Shutdown closes dispatch **first** (Phase 1) and runs user hooks **last** (Phase
+5). So anything of yours that dispatches on its own schedule — a `setInterval`,
+an RPC queue writing its result back, a promise `finally`, a debounce that has
+not fired — lands in the drain window and earns:
+
+```
+WARN aio  dispatch is draining — 'sync:set' is new input and was refused
+  A producer of yours is still dispatching while the app closes. Stop it in
+  `onStopping` …
+```
+
+`onStop` cannot prevent that: by the time it runs, the refusal is already
+logged. `onStopping` runs at **Phase 0**, before the state is marked
+shutting-down and before `dispatch.close()`, which makes it the only moment an
+app can turn its own producers off — and a write from it is admitted _and_
+captured by the final persist.
+
+```ts
+let poll: number | undefined;
+
+await aio.run({
+  cells: [sync],
+  onStart: () => {
+    poll = setInterval(() => sync.pull(), 5_000);
+  },
+  onStopping: async () => {
+    clearInterval(poll); // ✅ nothing of mine dispatches from here on
+    await sync.flush(); // ✅ a dispatch — admitted, and persisted
+  },
+  onStop: () => {
+    ring.lock(); // after-the-fact work still belongs here
+  },
+});
+```
+
+It is awaited, inside the drain budget, and error-guarded like every other hook:
+a hook that throws or never resolves is reported and shutdown continues.
 
 ### `onStop` must not dispatch
 
@@ -110,9 +180,9 @@ onStop: () => {
 },
 ```
 
-If the work must reach the store, it belongs **before** shutdown — in the method
-that decided it, or in a `schedules` entry — not in the hook that runs after the
-last write.
+If the work must reach the store, it belongs **before** shutdown — in
+`onStopping` (above), in the method that decided it, or in a `schedules` entry —
+not in the hook that runs after the last write.
 
 ### Cell isolation (dev)
 

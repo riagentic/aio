@@ -296,6 +296,9 @@ export interface ShutdownRefs {
   } | null;
   getVitalsCheckTimer: () => ReturnType<typeof setInterval> | undefined;
   getVitalsSystem: () => { destroy: () => void } | undefined;
+  /** Phase 0 — the app quiesces its own producers while dispatch still works.
+   *  See `AioConfig.onStopping`, which owns the contract. */
+  onStopping: (() => void | Promise<void>) | undefined;
   onStop: (() => void | Promise<void>) | undefined;
   appLock: { release: () => void } | null;
   scheduleManager: { cancelAll: () => void };
@@ -349,6 +352,18 @@ export function createShutdownOrchestrator(
     // they go through `phase` for its OTHER guarantee: a throw here used to
     // abandon the whole rest of the shutdown, lock and databases included.
     const gate = () => DRAIN_TIMEOUT_MS;
+    // Phase 0: the app stops its OWN producers, while dispatch still accepts
+    // input. Everything below refuses new dispatches, so this is the only
+    // moment an app can quiesce a raw timer, an RPC queue or a promise
+    // `finally` that writes back. Without it those land in the drain window
+    // and earn "dispatch is draining — '<action>' is new input and was
+    // refused" — a warning emitted at the one moment nobody is watching, for
+    // a write the app had no supported way to prevent. Inside the drain
+    // budget, and error-guarded like every other hook: a shutdown must not
+    // depend on app code finishing.
+    if (refs.onStopping) {
+      await phase(log, "hook onStopping", gate, () => refs.onStopping!());
+    }
     await phase(log, "mark shutting down", gate, () => refs.setShuttingDown());
     await phase(log, "close dispatch", gate, () => refs.dispatch.close());
     // Abort BEFORE draining. A streaming method (an SSE reply, a subprocess

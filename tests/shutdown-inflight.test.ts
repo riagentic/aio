@@ -33,6 +33,25 @@ type StreamState = { chunks: string[]; status: string };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** `boot` plus extra top-level config — for the lifecycle hooks. */
+async function boot2(
+  dir: string,
+  cells: unknown[],
+  extra: Record<string, unknown>,
+) {
+  const { aio } = await import("../mod.ts");
+  return await aio.run({
+    cells,
+    appId: "shutdown-quiesce-app",
+    client: "server-only",
+    persist: true,
+    libraryMode: true,
+    port: freePort(),
+    appDir: dir,
+    ...extra,
+  } as Any);
+}
+
 async function boot(dir: string, cells: unknown[]) {
   const { aio } = await import("../mod.ts");
   return await aio.run({
@@ -114,6 +133,66 @@ Deno.test({
           restored.chunks.length < 500,
         `the partial stream survives: had ${mid.chunks.length} chunks ` +
           `mid-flight, persisted ${restored.chunks.length}`,
+      );
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
+// The hook that lets an app stop its OWN producers.
+//
+// Field report: an RPC queue dispatched `sync.set` from a promise `finally`.
+// Phase 1 closes dispatch and drains; user hooks are Phase 5. So the write
+// landed in the drain window and earned
+// "dispatch is draining — 'sync:set' is new input and was refused", and
+// `onStop` could not prevent it — by the time it runs, the refusal is already
+// logged. The only userland signal that fired early enough was
+// `onConnect`/`onDisconnect`: a TRANSPORT event doing a LIFECYCLE job, on an
+// ordering (the window's socket closing before aio notices Electron exited)
+// that was never a contract.
+//
+// Asserted against the DISK, not `getState()`: the claim is that a write from
+// onStopping is admitted AND captured by the final persist, which is the only
+// thing that makes the hook worth having.
+Deno.test({
+  name: "shutdown: onStopping can still dispatch — onStop still cannot",
+  async fn() {
+    const { cell } = await import("../mod.ts");
+    const dir = await Deno.makeTempDir({ prefix: "aio-shutdown-quiesce-" });
+    const make = () =>
+      cell("quiesce", {
+        state: { marks: [] as string[] },
+        methods: {
+          mark(s: { marks: string[] }, who: string) {
+            s.marks = [...s.marks, who];
+          },
+        },
+      });
+    try {
+      const q = make() as Any;
+      const app = await boot2(dir, [q], {
+        // Phase 0 — dispatch is open, the final persist has not run.
+        onStopping: async () => {
+          await q.mark("stopping");
+        },
+        // Phase 5 — after close() and after the persist. Unchanged behaviour:
+        // the write is refused, and this test is what keeps that honest.
+        onStop: async () => {
+          await q.mark("stop");
+        },
+      });
+      await app.close();
+
+      const app2 = await boot2(dir, [make()], {}) as Any;
+      const restored = app2.getState().quiesce as { marks: string[] };
+      await app2.close();
+      assertEquals(
+        restored.marks,
+        ["stopping"],
+        "a dispatch from onStopping must be admitted and persisted; one from " +
+          "onStop must still be refused (it runs after the final persist, so " +
+          "admitting it would be a write that could never be saved)",
       );
     } finally {
       await Deno.remove(dir, { recursive: true }).catch(() => {});

@@ -14,7 +14,12 @@ type Call = boolean | { cell: string; ops: unknown[] }[] | undefined;
 function fakeHandle(calls: Call[]): UDSHandle {
   return {
     broadcast: () => {},
-    broadcastState: (forceOrPatches) => calls.push(forceOrPatches as Call),
+    broadcastState: (forceOrPatches) => {
+      calls.push(forceOrPatches as Call);
+      // The handle reports WHAT IT SENT (see UDSHandle) — this fake pretends
+      // one client got a patch, which is all these throttle tests need.
+      return { full: 0, patch: 1 };
+    },
     shutdown: () => {},
     socketPath: "/tmp/fake.sock",
     clients: () => [],

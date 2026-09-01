@@ -8,6 +8,18 @@
 import { compactPatches } from "../state/patch-compact.ts";
 import { writeClientLog } from "./client-log.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { degraded } from "../diagnostics/degraded.ts";
+import { warnBigFullState } from "./server-broadcast.ts";
+
+/** Queued-but-unwritten frames on ONE UDS connection before the app says so.
+ *  Generous: a burst of state during a slow render is normal, a peer that has
+ *  stopped reading is not, and only the second should be reported. */
+const WRITE_QUEUE_WARN = 64;
+
+/** A UDS peer that has stopped draining its socket. Module scope, like the
+ *  broadcast trackers: one tracker for the transport, whatever listener the
+ *  connection belongs to. */
+const _writeBacklog = degraded("uds:write-backlog");
 import {
   _recordClientDegraded,
   type DegradedChange,
@@ -51,9 +63,24 @@ export const CLIENT_REPLY_TIMEOUT_MS = 5000;
  *  fails the command instead of printing the error as a success. */
 export function clientReplyTimeoutError(index: number): string {
   return `client ${index} did not respond within ${CLIENT_REPLY_TIMEOUT_MS}ms — ` +
-    `it is connected but not answering ui requests: its main thread is busy ` +
-    `(a long render/effect), or it is a headless/thin client that does not ` +
-    `run the ui-trigger handler. Check \`am clients\` for the index you meant.`;
+    `it is connected but not answering ui requests. Three causes, most common ` +
+    `first:\n` +
+    // THE WINDOW IS NOT ON SCREEN, and it was missing entirely. Chromium
+    // throttles an occluded, minimised or unmapped renderer until it stops
+    // answering — a field report lost two separate debugging passes to this,
+    // hunting a render loop that did not exist, once suspecting their own
+    // component and once a broadcast storm. Electron CPU was ~0% throughout,
+    // which is the tell the old message made impossible to use: it offered two
+    // explanations, both of them "something is busy".
+    `  · the window is not VISIBLE — occluded, minimised, or on an unmapped ` +
+    `display. Chromium throttles a hidden renderer until it stops answering. ` +
+    `Near-zero CPU for the app points here, not at a busy thread.\n` +
+    `  · its main thread really is busy (a long render or effect) — expect ` +
+    `high CPU\n` +
+    `  · it is a headless/thin client that does not run the ui-trigger ` +
+    `handler\n` +
+    `Check \`am clients\` for the index you meant, and \`--timeout=<ms>\` to ` +
+    `wait longer.`;
 }
 
 export type UDSClient = {
@@ -71,7 +98,15 @@ type PatchEntry = {
 
 export type UDSHandle = {
   broadcast: (msg: string) => void;
-  broadcastState: (forceOrPatches?: boolean | PatchEntry[]) => void;
+  /** Push state to every UDS client. Returns WHAT WENT OUT — how many clients
+   *  got a whole slice and how many got a patch — because `am cost` attributes
+   *  a round to the cells that produced it and cannot honestly do that from
+   *  what the caller ASKED for. A request to send may produce nothing at all
+   *  (every client already holds that exact state), and reporting a push there
+   *  is a plausible number that is wrong. */
+  broadcastState: (
+    forceOrPatches?: boolean | PatchEntry[],
+  ) => { full: number; patch: number };
   shutdown: () => void;
   socketPath: string;
   clients: () => UDSClient[];
@@ -199,10 +234,30 @@ export function createUDSListener(
 
   // AIO-216: per-connection write queue to prevent byte interleaving
   const _writeQueues = new WeakMap<LocalConn, Promise<void>>();
+  /** Frames queued and not yet written, per connection — see `sendTo`. */
+  const _writeDepth = new WeakMap<LocalConn, number>();
 
   function sendTo(conn: LocalConn, msg: string, onSent?: () => void): void {
     const encoded = new TextEncoder().encode(msg + "\n");
     const prev = _writeQueues.get(conn) ?? Promise.resolve();
+    // Depth is OBSERVED, not capped. The WS transport throttles and freezes a
+    // slow client, and this one had neither — a peer that stops reading grows
+    // an unbounded promise chain, each link holding an encoded frame, with
+    // nothing anywhere saying so. Dropping frames instead would be worse: the
+    // peer here is the app's OWN window, and a silently skipped state frame is
+    // a frozen UI. So the memory keeps growing and the app now says that it is
+    // — one structured event at `/__aio/health`, and one on recovery.
+    const depth = (_writeDepth.get(conn) ?? 0) + 1;
+    _writeDepth.set(conn, depth);
+    if (depth > WRITE_QUEUE_WARN) {
+      _writeBacklog.fail(
+        new Error(
+          `a UDS client has ${depth} frames queued and is not draining them — ` +
+            `it has stopped reading its socket. Every queued frame is held in ` +
+            `memory until it does.`,
+        ),
+      );
+    }
     const next = prev.then(async () => {
       const writer = conn.writable.getWriter();
       try {
@@ -213,11 +268,16 @@ export function createUDSListener(
       }
     }).catch(() => {
       _writeQueues.delete(conn);
+      _writeDepth.delete(conn);
       connSet.delete(conn);
       clientMap.delete(conn);
       try {
         conn.close();
       } catch { /* already closed */ }
+    }).finally(() => {
+      const left = (_writeDepth.get(conn) ?? 1) - 1;
+      _writeDepth.set(conn, left);
+      if (left === 0) _writeBacklog.ok();
     });
     _writeQueues.set(conn, next);
   }
@@ -246,7 +306,16 @@ export function createUDSListener(
         }
         uiState = filtered;
       }
-      return JSON.stringify(uiState);
+      const json = JSON.stringify(uiState);
+      // The same guardrail the WS path has had. It used to live INSIDE the WS
+      // broadcaster, so a desktop app — every client on this socket, no TCP
+      // port open at all — got no warning at any size: a field report put
+      // 83,000 rows in a cell, reached a 17 GB heap, and wrote "it is a bug aio
+      // makes easy and gives no feedback about". The feedback existed and was
+      // blind on their transport.
+      const snapshot = uiState;
+      warnBigFullState(json, () => snapshot);
+      return json;
     } catch (e) {
       log.error("uds", `state snapshot failed — ${e}`);
       return undefined;
@@ -260,6 +329,8 @@ export function createUDSListener(
       for (const conn of connSet) sendTo(conn, msg);
     },
     broadcastState: (forceOrPatches?: boolean | PatchEntry[]) => {
+      // Counted, not assumed — see the type. Every `sendTo` below bumps one.
+      let full = 0, patch = 0;
       const force = forceOrPatches === true;
       // Patches are pre-filtered by aio.ts filterPatchesByStrategy — use directly
       const patches = Array.isArray(forceOrPatches)
@@ -303,12 +374,14 @@ export function createUDSListener(
               );
               if (fullJson !== client.lastFullJson) {
                 const fj = fullJson;
+                full++;
                 sendTo(conn, encRaw("state", fullJson), () => {
                   client.lastFullJson = fj;
                 });
               }
             } else {
               const fj = fullJson;
+              patch++;
               sendTo(
                 conn,
                 encRaw("patches", patchJson),
@@ -328,10 +401,12 @@ export function createUDSListener(
         if (!json) continue;
         if (json === client.lastFullJson) continue; // no change
         const j = json;
+        full++;
         sendTo(conn, encRaw("state", json), () => {
           client.lastFullJson = j;
         });
       }
+      return { full, patch };
     },
     clients: () => [...clientMap.values()],
     requestClientState: (

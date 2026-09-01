@@ -243,12 +243,19 @@ one action. Each `await` boundary starts a new batch.
 > A method body runs on the server's single dispatch path, so the time it spends
 > is time **every** connected client's next action waits. Three cases:
 >
-> | The work is…                     | Do this                                                                       |
-> | -------------------------------- | ----------------------------------------------------------------------------- |
-> | fast (a few ms of state shaping) | just write it — this is the common case                                       |
-> | I/O (fetch, file, DB)            | `async` + `await` — the runtime waits, your thread doesn't                    |
-> | CPU-bound or a sync-only API     | `await blocking(id, fn, arg)` — a real worker thread                          |
-> | every method here can be heavy   | `worker: true` on the cell — its own thread ([cell workers](cell-workers.md)) |
+> | The work is…                                     | Do this                                                                       |
+> | ------------------------------------------------ | ----------------------------------------------------------------------------- |
+> | fast (a few ms of state shaping)                 | just write it — this is the common case                                       |
+> | I/O of BOUNDED size (a fetch, one file, a query) | `async` + `await` — the runtime waits, your thread doesn't                    |
+> | a directory WALK, or a large read                | `await blocking(id, fn, arg)` — I/O by type, CPU-and-syscall-bound by latency |
+> | CPU-bound or a sync-only API                     | `await blocking(id, fn, arg)` — a real worker thread                          |
+> | every method here can be heavy                   | `worker: true` on the cell — its own thread ([cell workers](cell-workers.md)) |
+>
+> The first two rows are the one people conflate. "I/O" reads as "the runtime
+> waits, so this is free" — true of a fetch, false of a recursive `stat` walk,
+> which holds the single dispatch path for as long as it runs. A field report
+> put a 1.3 GB tree walk in a cell method on the strength of that row, and the
+> CPU warning two paragraphs down did not read as being about it.
 >
 > Same idea for big arrays: `s.list.push(x)` emits one `add` patch, while
 > `s.list = [...s.list, x]` re-ships the whole list on every commit

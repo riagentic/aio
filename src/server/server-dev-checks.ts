@@ -1,5 +1,6 @@
 // Dev-mode startup validation — server-only import scanning + graph validation
 import { UI_ENTRY } from "./app-files.ts";
+import { SIDE } from "../diagnostics/contexts.ts";
 import { join } from "@std/path";
 import {
   BLOCKING_CATEGORIES,
@@ -185,7 +186,7 @@ export function startGraphValidation(
         const MAX_SHOWN = 10;
         log.warn(
           `[aio] graph: server-only API reachable from the browser bundle ` +
-            `(blank-screens if it runs client-side):`,
+            `(blank-screens if it runs in ${SIDE.client}):`,
           { detail: String() },
         );
         for (const err of apiWarnings.slice(0, MAX_SHOWN)) {

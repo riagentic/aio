@@ -7,6 +7,7 @@
 // - Machine auto-generation
 // - Inter-cell call() — callback form only (typed, no raw strings)
 
+import { WHERE_HINT } from "../diagnostics/contexts.ts";
 import type { Msg } from "./cell-types.ts";
 import { cloneState } from "./immutable.ts";
 import { removalMessage, removalOf } from "./removals.ts";
@@ -376,7 +377,13 @@ function callCeilingFix(method: string, timeoutMs: number): string {
     `Under transaction: { serialize: true } the still-running method HOLDS ` +
     `the cell's mutex, so every later async call on it queues behind it ` +
     `and burns its own ceiling — one slow method cascades. Or fetch outside ` +
-    `and commit with a sync reducer (docs/state/methods.md).`;
+    `and commit with a sync reducer (docs/state/methods.md).\n  ` +
+    // The fourth site of the ONE shape. A ceiling fires while the reader is
+    // wrong about which context their work is in as often as not — the fetch
+    // belongs outside the method, the blocking compute belongs on a worker —
+    // and this error arrives without being asked for, which a doc page and a
+    // command cannot do.
+    WHERE_HINT;
 }
 
 /** Where in its ceiling a call says "still running (slow)" — once, at info.

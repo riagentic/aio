@@ -4,12 +4,14 @@ import { readDenoJsonSync } from "./deno-json.ts";
 import { resolveShare, type ShareRoot } from "./app-dirs.ts";
 import { ESBUILD_SPEC } from "../build/esbuild-shared.ts";
 import {
+  BUNDLE_ENTRY_KEY,
   bundleClient,
   type EsbuildModule,
   judgeClientBundle,
 } from "../build/client-bundle.ts";
 import { SERVER_ONLY_SPECS } from "./server-only-specs.ts";
 import { SERVER_FILE_RE } from "../entries.ts";
+import { WHERE_HINT } from "../diagnostics/contexts.ts";
 
 /** Error categories for module validation failures */
 export type ErrorCategory =
@@ -444,6 +446,27 @@ async function prodGraphErrors(opts: {
     }ms, ${Object.keys(bundle.inputs).length} inputs)`,
   );
   if (!bundle.ok) {
+    // THE beginner mistake, translated. `export function App()` instead of
+    // `export default function App()` is the first thing anyone gets wrong,
+    // and esbuild answers it by naming `_build_entry.tsx` — a synthetic file
+    // the user never wrote — while the generic fix line explains the MECHANISM
+    // ("the prod bundle is built from the same files dev serves") rather than
+    // the edit. Found by scaffolding an app and making the mistake.
+    const missingDefault = bundle.errors.some((e) =>
+      /No matching export in .* for import "default"/.test(e)
+    );
+    if (missingDefault) {
+      return refusal(
+        `${uiEntry} has no DEFAULT export — the UI entry is imported as ` +
+          `\`import App from "./${uiEntry}"\`, so a named export alone is ` +
+          `invisible to it. (esbuild reports this against its own generated ` +
+          `entry, ${BUNDLE_ENTRY_KEY}, which is why the message names a file ` +
+          `you did not write.)`,
+        `add \`default\`: \`export default function App() { … }\` — or, if ` +
+          `the component is already declared, \`export default App;\` at the ` +
+          `end of ${uiEntry}.`,
+      );
+    }
     return refusal(
       `\`deno task build\` would fail on this graph — esbuild: ${
         bundle.errors.join("; ")
@@ -695,7 +718,7 @@ export async function validateGraph(
       message:
         `"${imp.spec}" is a *.server.ts module, statically imported from a client-loaded file — the dev server never serves it to the browser (404), so the app blank-screens at boot`,
       fix:
-        `Load it lazily from a server-only path — \`const m = await import("${imp.spec}")\` inside a cell method — or use \`import type\`. A static import of a *.server.ts module is never client-safe (docs/build/imports.md).`,
+        `Load it lazily from a server-only path — \`const m = await import("${imp.spec}")\` inside a cell method — or use \`import type\`. A static import of a *.server.ts module is never client-safe (docs/build/imports.md).\n  ${WHERE_HINT}`,
     });
   }
   for (const imp of serverEntryImports) {
@@ -707,7 +730,7 @@ export async function validateGraph(
       message:
         `"${imp.spec}" is aio's SERVER entry (SQLite, workers, the filesystem), statically imported from a browser-loaded file — the browser import map omits it deliberately, so the page dies at boot with "Failed to resolve module specifier"`,
       fix:
-        `This is a server-only module in a client graph, NOT a missing dependency — there is no npm package to add, and adding one to deno.json will not help. Either move the import into a cell METHOD (\`const { createDB } = await import("${imp.spec}")\` — methods run on the server), or put it in a \`*.server.ts\` module and import THAT lazily. See docs/build/imports.md.`,
+        `This is a server-only module in a client graph, NOT a missing dependency — there is no npm package to add, and adding one to deno.json will not help. Either move the import into a cell METHOD (\`const { createDB } = await import("${imp.spec}")\` — methods run on the server), or put it in a \`*.server.ts\` module and import THAT lazily. See docs/build/imports.md.\n  ${WHERE_HINT}`,
     });
   }
   // A module reached ONLY via dynamic import (`await import("aio")` /

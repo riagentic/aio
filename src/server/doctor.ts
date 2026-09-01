@@ -160,7 +160,7 @@ export async function runDoctor(
         source === "local" ? LOCAL_PIN_FILE : "deno.json aioVersion"
       })`,
       ok: pin !== null,
-      fix: "run `am pin --latest` and commit deno.json — otherwise a clone " +
+      fix: "run `am pin latest` and commit deno.json — otherwise a clone " +
         "builds against whatever aio is installed. Following a framework " +
         "CHECKOUT on this machine instead? That is a pin too: " +
         "`am pin path:/abs/path/to/aio` — the form that keeps doctor AND " +

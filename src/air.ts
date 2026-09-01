@@ -27,6 +27,7 @@ export {
   memo,
   type Signal,
   signal,
+  trackedMemo,
   untrack,
 } from "./browser-air.ts";
 

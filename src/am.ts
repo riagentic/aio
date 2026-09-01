@@ -86,7 +86,13 @@ import { cmdTheme } from "./am/am-cmd-theme.ts";
 import { cmdCost } from "./am/am-cmd-cost.ts";
 import { cmdShot } from "./am/am-cmd-shot.ts";
 import { cmdLab } from "./am/am-cmd-lab.ts";
-import { parseGlobalFlags, resolveAmAppId, targetHome } from "./am/am-utils.ts";
+import {
+  adoptRunningHome,
+  parseGlobalFlags,
+  resolveAmAppId,
+  targetHome,
+} from "./am/am-utils.ts";
+import { cmdWhere } from "./am/am-cmd-where.ts";
 import { PATH_PIN_PREFIX } from "./am/am-versions.ts";
 import { removedAmVerb, retiredSpellingLine } from "./state/removals.ts";
 import { readDenoJsonSync, readLocalPinSync } from "./server/deno-json.ts";
@@ -126,6 +132,7 @@ const COMMANDS: Record<string, CmdHandler> = {
   client: cmdClient,
   surface: cmdSurface,
   trigger: cmdTrigger,
+  where: cmdWhere, // which execution context a file runs in, from the graph
   shot: cmdShot,
   sql: cmdSql,
   tables: cmdTables,
@@ -288,6 +295,11 @@ async function main(): Promise<void> {
       Deno.exit(1);
     }
     targetHome(resolveAmAppId(flags.app), flags.home);
+  } else {
+    // No `--home`: follow the instance that is actually running, if there is
+    // exactly one. Bound in the same place and for the same reason — before
+    // any command resolves a lock or a directory. See `adoptRunningHome`.
+    adoptRunningHome(resolveAmAppId(flags.app));
   }
   // `am <anything> --help` answers with usage, never with a command result.
   if (flags.help) {

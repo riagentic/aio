@@ -13,7 +13,11 @@ import type {
 import { isAsyncFunction, type Method } from "./cell-impl.ts";
 import { createCellFromMethods } from "./cell-methods-factory.ts";
 import { registerCell } from "./cell-reactive.ts";
-import { removalMessage, removalsUsedBy } from "./removals.ts";
+import {
+  removalMessage,
+  removalsUsedBy,
+  retiredCellConfigKeys,
+} from "./removals.ts";
 import { nearestOf } from "./cell-helpers.ts";
 import type {
   MethodsCellConfig,
@@ -32,7 +36,6 @@ const VALID_CELL_KEYS: ReadonlySet<string> = new Set([
   "selectors",
   "sync",
   "persist",
-  "ui",
   "visible",
   "access",
   "scope",
@@ -156,6 +159,23 @@ export function cell(name: string, config: any): any {
     throw new Error(removalMessage(r, name));
   }
 
+  // A RETIRED spelling that is READ FROM CONFIG is refused in exactly one
+  // place — `resolveVisibility` below throws in dev and logs-and-honours in
+  // prod (alpha70's `cell({ ui })` row). What was missing is only this: the
+  // unknown-option check must not ALSO report it. Without the exclusion,
+  // taking `"ui"` out of VALID_CELL_KEYS turns prod's "logged and honoured"
+  // into a hard refusal — the one path that must keep running.
+  //
+  // Adding a second `refuseRetired` call here instead was the obvious move and
+  // the wrong one: prod then logged the same removal twice, which
+  // `tests/alpha70-retirements.test.ts` refused by asserting "prod: one error
+  // line". One fact, one home.
+  const retiredKeys = new Set(
+    retiredCellConfigKeys(config as Record<string, unknown>).map((r) =>
+      /^cell\(\{\s*(\w+)\s*\}\)$/.exec(r.key)?.[1] ?? ""
+    ),
+  );
+
   // An unknown key is a typo, and a typo that is accepted is a feature that
   // silently does not exist. `aio.run()` has refused a misspelled key across
   // 156 of them for releases; the OTHER half of an app's configuration —
@@ -164,7 +184,7 @@ export function cell(name: string, config: any): any {
   // persisted anyway, and `sync: { mrege: … }` silently resolved every
   // conflict last-write-wins instead of the strategy the app declared.
   const unknown = Object.keys(config as Record<string, unknown>)
-    .filter((k) => !VALID_CELL_KEYS.has(k));
+    .filter((k) => !VALID_CELL_KEYS.has(k) && !retiredKeys.has(k));
   if (unknown.length > 0) {
     const hints = unknown.map((k) => {
       const near = nearestKey(k);

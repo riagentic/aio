@@ -115,6 +115,7 @@ Either way, calling during render is the normal case, and it is tracked.
 | A cell method (methods write state, not read UI) | no       |
 | `.peek()`, anywhere                              | no       |
 | Module top level                                 | no       |
+| **A cache HIT that returns before reading**      | **no**   |
 
 Most of these are correct and deliberate — an event handler reading
 `count.peek()` to compute the next value must NOT subscribe the handler to
@@ -148,6 +149,77 @@ function Stage() {
    [equality rules](air-signals.md). A named signal warns when it skips.
 5. **Is the value derived once and cached?** A `computed()` re-runs when its own
    tracked reads change; if it read `.peek()`, it never will.
+6. **Did a cache hand it back without reading?** See below — this one is
+   permanent, per instance, and looks like nothing.
+
+## A cache hit skips the read — so it skips the subscription
+
+Because [one cell is one signal](#one-cell-is-one-signal), any list large enough
+to matter pushes an app toward memoizing. And a plain cache is the one shape
+where "the read is in the body" is not enough — because on a **hit** there is no
+read at all:
+
+```tsx
+import { cell } from "aio";
+
+type Row = { name: string };
+const accounts = cell("accounts", {
+  state: { list: [] as Row[] },
+  methods: {},
+});
+const cache = new Map<string, Row[]>();
+
+function rows(filter: string) {
+  const hit = cache.get(filter);
+  if (hit) return hit; //  returns before touching the cell
+  const v = accounts.list.filter((a) => a.name.includes(filter));
+  cache.set(filter, v);
+  return v;
+}
+
+function Panel({ filter }: { filter: string }) {
+  return <ul>{rows(filter).map((a) => <li>{a.name}</li>)}</ul>; // subscribed only on a MISS
+}
+```
+
+This is worse than "stale", in two ways:
+
+- It is **per component instance and permanent**. The instance that got the miss
+  works forever; the one that got the hit is dead forever — from the same cache,
+  in the same frame. Nothing re-arms it, because nothing re-renders it.
+- There is **no symptom**. A component that subscribes to nothing renders
+  correctly, once. The data in the cell is right; only the DOM is old.
+
+Use `trackedMemo`, which records the read set on a miss and **replays it on a
+hit**, so the caller subscribes to exactly what computing the value would have
+read. Freshness comes from the same recorded set — no dependency array:
+
+```tsx
+import { cell } from "aio";
+import { trackedMemo } from "aio/air";
+
+const accounts = cell("accounts", {
+  state: { list: [] as { name: string }[] },
+  methods: {},
+});
+
+const rows = trackedMemo((filter: string) =>
+  accounts.list.filter((a) => a.name.includes(filter))
+);
+
+function Panel({ filter }: { filter: string }) {
+  return <ul>{rows(filter).map((a) => <li>{a.name}</li>)}</ul>;
+}
+```
+
+`trackedMemo(compute, { key, max })` — `key` maps the argument to a cache key
+(default: the argument itself), `max` bounds the cache and evicts
+least-recently-used.
+
+In dev, aio names this when it sees it: a component that renders reading **no**
+signals while another instance of the same component read some is reported by
+name, with the fix. A component that reads nothing everywhere (a static one) is
+not reported — that is not this bug.
 
 ## Extracting a component is a fix, but not for the reason it looks like
 

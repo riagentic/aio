@@ -1,5 +1,111 @@
 # Changelog
 
+## v1.0.0-alpha74 — read the artifact, not the source tree (2026-09-01)
+
+> Two field reports closed end to end, then a hunt that found fifteen more by
+> USING what had just been built rather than reading it. One sentence connects
+> most of it, and it is the ask one reporter led with: **the checks that decide
+> "is this right" must read the thing that ships, not the thing beside it.** A
+> compiled binary served assets from a directory on the build machine; `am cost`
+> reported an idle app on the transport every desktop app uses; the
+> least-privilege manifest described a binary that cannot boot. Each gate was
+> green throughout. Additive only, no compat break:
+> `docs/upgrade/from-alpha73-to-alpha74.md`.
+
+- **A compiled binary served app assets from `<cwd>/src`.** `_inferBaseDir`
+  opted compiled binaries out of the entry-relative rule on the strength of a
+  comment saying "build sets baseDir anyway" — and the build never set it, zero
+  assignments in `src/build/`. `distDir` had a candidate ladder and
+  `/__aio/icon` had a two-directory one; every OTHER asset resolved against a
+  directory that exists on no user's machine. `<img src="/assets/logo.svg">` was
+  a real URL in dev and a broken-image glyph on a first-run screen, with 1283
+  tests green. `baseDirCandidates` is the ladder now — embedded VFS first,
+  `<cwd>/src` behind it, resolved per FILE — the compile step reads the BUNDLE
+  and names every asset URL the binary will not be able to serve, and an E2E
+  boots the artifact with the project deleted and fetches one.
+
+- **`am cost` was blind on UDS**, the transport a local desktop app uses for
+  every client because it opens no TCP ports at all. Reported from the field as
+  `connections: 0`; the attribution was worse, sitting inside the WS send loop,
+  so `am cost` reported an IDLE app for the whole desktop target while a poller
+  reassigned a 100 KB array every five seconds. `attributeRound` is shared by
+  both transports now, and `broadcastState` reports what it ACTUALLY sent rather
+  than the caller assuming from what it asked. Three siblings went with it: the
+  broadcasts/sec pressure alarm, `aio_clients_connected` in `/__aio/metrics`,
+  and `am status`, which disagreed with `am clients` about the same app.
+
+- **`least-privilege run flags: (none)`** described a binary that dies inside
+  `immer` before aio prints a line. The scan read the app's sources and never
+  what aio itself needs, so a scaffolded app's floor was zero — and `runFlags`
+  travels in the SIGNED release manifest. `AIO_BASELINE` is that floor, measured
+  against a real app, and the gate now SPAWNS one with the advertised flags and
+  requires it to reach "running".
+
+- **A UDS peer that stops reading is reported instead of buffered.** WS
+  throttles and freezes a slow client; the socket transport had no bound and no
+  diagnostic, so a hidden window accumulated frames in memory while
+  `/__aio/health` said "healthy". Observed, not capped — dropping a frame to the
+  app's own window is worse than the leak.
+
+- **An app's `onStop` could not log.** The bridge detached the logger eight
+  lines before calling the hook, so "say what you cleaned up" — half of what
+  that hook is for — went nowhere.
+
+- **`onStopping`** — quiesce your own producers while dispatch still works.
+  Shutdown closes dispatch first and runs user hooks last, so a raw timer or a
+  promise `finally` landed in the drain window and was refused, and `onStop`
+  could not prevent it. Phase 0, awaited, and a write from it is persisted.
+
+- **`trackedMemo`** — a cache whose HITS still subscribe. One cell is one
+  signal, so any list large enough to matter forces a memo, and a plain cache
+  that returns a hit without touching the cell subscribes to nothing —
+  permanently, per component instance. Dev names it when it sees it.
+
+- **One name per execution context.** aio has six and the same idea had five
+  spellings across `src/`; a reader cannot build a map from a vocabulary that
+  changes per file. `src/diagnostics/contexts.ts` is the single source, a gate
+  checks `docs/basics/where-code-runs.md` against it row for row, and all four
+  context refusals now point at that map instead of one of them.
+
+- **`am where <file>`** answers "which context is this, and why" from the module
+  graph the dev server already walks — the verdict, the import chain from the UI
+  entry, and the rules that follow. It answers `unknown` when it could not build
+  a graph, rather than guessing `server-only` at a `.tsx` component.
+
+- **The most common beginner mistake gets a fix it can type.** A UI entry with
+  no `default` export was reported as an esbuild error against a file the user
+  never wrote, with a fix line explaining the mechanism.
+
+- **A build machine no longer decides who runs your service.** The generated
+  systemd unit took `User=` from `$USER ?? "root"` — so a container or CI build
+  emitted `User=root` and the operator's service ran as root because of where it
+  was built. It fails closed now, and the value is labelled where it is read.
+
+- **Static rules for three classes** that used to be found at runtime: a reducer
+  that REPLAYS may not dispatch to another cell or log (both happen twice), a
+  `.tsx` file may not read a `visible.exclude` field, and a cell method may not
+  be called from a timer — the last with all three doors named, because a field
+  report shipped that prohibited shape five times for want of one example.
+
+- **`am` follows the RUNNING instance's data home**, `am trigger window press`
+  drives a key that belongs to no element, a list key containing `/` no longer
+  makes a page unaddressable, and a BUILD flag typed at a running app is refused
+  as a category error rather than a typo.
+
+- **`am pin latest` is a word, like `main`.** It failed with
+  `aio version
+  "latest" not found` and then listed the very releases it was
+  being asked for. Every other target of that command is a word (`am pin main`,
+  `am pin
+  v1.0.0-alpha73`, `am pin /opt/aio-checkout`); "the newest release"
+  was the only one that demanded a flag, so the spelling a user reaches for
+  first was the one that did not work.
+
+- **Two flakes at the root of the suite itself**: a test wrote `.aio.log` into
+  the repo root where another test read it, and `deno task test | tail` reports
+  exit 0 over the word FAILED. The first is fixed and gated; the second is why
+  the release gate uses `Deno.Command` and never a shell pipe.
+
 ## v1.0.0-alpha73 — one voice (2026-08-30)
 
 > Everywhere aio talks to a person, it now talks the same way. Twelve surfaces

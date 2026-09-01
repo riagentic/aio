@@ -401,6 +401,16 @@ export function createServer(config: ServerConfig): ServerHandle {
   }
 
   const absBaseDir = resolve(config.baseDir);
+  // THE app-dir ladder for every asset this server serves, most authoritative
+  // first. `baseDir` alone was the whole answer, which is why a compiled
+  // binary served every non-bundle asset out of `<cwd>/src` — a directory that
+  // exists on no user's machine. The ORDER is decided once, upstream
+  // (`baseDirCandidates`); this only resolves it. Deduped, because a caller
+  // that repeats the primary must not make the server stat it twice per file.
+  const absBaseDirs = [
+    absBaseDir,
+    ...(config.baseDirFallbacks ?? []).map((d) => resolve(d)),
+  ].filter((d, i, a) => a.indexOf(d) === i);
 
   // The app's deno.json imports feed the browser import map (see
   // readAppDenoImports — the startup linter reads the same thing, through the
@@ -414,7 +424,7 @@ export function createServer(config: ServerConfig): ServerHandle {
   const IMPORT_MAP = JSON.stringify({ imports: importMapObj });
 
   const absDistDir = distDir ? resolve(distDir) : null;
-  const hasCSS = appHasStylesheet(absBaseDir, absDistDir);
+  const hasCSS = absBaseDirs.some((d) => appHasStylesheet(d, absDistDir));
   if (hasCSS) debug("style.css detected — injecting <link>");
   else {
     // A stylesheet that exists and is never served is the quietest failure in
@@ -544,6 +554,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     costMeter: config.costMeter,
     getTTBroadcast: config.getTTBroadcast,
     udsBroadcastRef: config.udsBroadcastRef,
+    udsClientCount: config.udsClientCount,
   });
 
   // Forward diagnostic bus events to all connected dev clients via WS
@@ -569,6 +580,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     debug,
     title,
     absBaseDir,
+    absBaseDirs,
     // DEV ONLY: prod serves the bundle, which already followed these imports
     // at build time. Gating it here means a production server cannot be made
     // to read outside its own root by a config key at all.
@@ -607,6 +619,7 @@ export function createServer(config: ServerConfig): ServerHandle {
       return {
         payloadStats: wsMgr.payloadStats,
         clientBackpressure: clientBP,
+        udsClients: config.udsClientCount?.() ?? 0,
         rawState: config.trojan
           ? config.trojan.getState() as Record<string, unknown>
           : undefined,

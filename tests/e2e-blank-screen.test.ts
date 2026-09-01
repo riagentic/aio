@@ -200,10 +200,18 @@ Deno.test({
     );
     // The prod-graph gate (alpha70+) refuses this at boot, before any
     // render: the diagnostic page and the log both name the missing export.
+    const all = log + dom;
     assert(
-      log.includes("no default export") ||
-        (log + dom).includes('for import "default"'),
+      /no default export/i.test(all) || all.includes('for import "default"'),
       "the missing default export is named",
+    );
+    // …and, since alpha74, the EDIT is named too. esbuild reports this against
+    // its own generated entry — a file the user never wrote — and the generic
+    // fix line explained the mechanism rather than what to type.
+    assert(
+      all.includes("export default function App()") ||
+        all.includes("export default App;"),
+      `the fix must be an edit that can be typed, got:\n${all.slice(0, 600)}`,
     );
   },
 });
