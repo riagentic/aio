@@ -19,15 +19,37 @@ export type Capabilities = {
   sys: boolean; // hostname/osRelease/systemMemoryInfo/networkInterfaces
 };
 
-const EMPTY: Capabilities = {
-  net: false,
-  read: false,
-  write: false,
-  ffi: false,
-  env: false,
-  run: false,
-  sys: false,
-};
+/** What EVERY aio app needs before a line of its own code asks for anything.
+ *
+ *  The scan starts HERE, not at zero, and that is the whole point. Scanning an
+ *  app's own sources answers "what does MY code need" — but the binary also
+ *  contains aio, which binds a socket, opens SQLite, writes logs and a lock,
+ *  and reads config from the environment. A scaffolded counter app touches
+ *  none of those APIs itself, so the scan returned nothing and the manifest
+ *  said `least-privilege run flags: (none)`.
+ *
+ *  MEASURED, not assumed: `deno run src/app.ts` on a freshly scaffolded app
+ *  dies inside `immer` reading `NODE_ENV` — before aio prints a line, in a
+ *  dependency the user never wrote. With these four it boots. Advice that
+ *  produces an app which cannot start is worse than no advice, and this one
+ *  also travels: `runFlags` is part of the SIGNED release manifest.
+ *
+ *  This file records two earlier instances of the same bug, both fixed by
+ *  widening a regex rather than giving the scan a floor — `updates:` forced
+ *  into the net signal, and the `*Sync` spellings ("the signed manifest
+ *  advertised `runFlags: []` — following that advice launched a binary that
+ *  died on PermissionDenied at its first file read"). Three patches, one
+ *  cause: a scan of the app cannot see the framework. */
+export const AIO_BASELINE: Readonly<Capabilities> = Object.freeze({
+  net: true, // the server binds; the client connects
+  read: true, // deno.json, dist/, the app dir
+  write: true, // state.db, logs, the lock, the socket
+  env: true, // AIO_PORT / HOME / XDG_* — and immer's NODE_ENV
+  // Not baseline: aio degrades without them, and they are real escalations.
+  ffi: false, // windows named pipes only
+  run: false, // spawning electron / a subprocess
+  sys: false, // heap policy reads system memory, and does without
+});
 
 // Signal → capability. Matched against comment-stripped source.
 const SIGNALS: [keyof Capabilities, RegExp][] = [
@@ -89,9 +111,10 @@ export const _SCANNED_FS_APIS: readonly string[] = [
   "makeTempFile",
 ];
 
-/** Scan source contents → the capabilities they require. */
+/** The capabilities an app's binary requires: {@linkcode AIO_BASELINE} — what
+ *  aio itself needs — plus whatever the app's own sources ask for on top. */
 export function scanCapabilities(sources: { content: string }[]): Capabilities {
-  const caps: Capabilities = { ...EMPTY };
+  const caps: Capabilities = { ...AIO_BASELINE };
   for (const { content } of sources) {
     // Strip comments so a mention in a comment doesn't grant a permission.
     const code = content
@@ -140,7 +163,16 @@ export function manifestReport(caps: Capabilities): string {
   for (
     const [cap, on] of Object.entries(caps) as [keyof Capabilities, boolean][]
   ) {
-    if (on) lines.push(`  • --allow-${cap} — ${why[cap]}`);
+    // WHY a flag is there is the difference between a manifest you can narrow
+    // and one you can only accept: "aio itself" is not something the reader
+    // can remove by changing their code, and everything else is.
+    if (on) {
+      lines.push(
+        `  • --allow-${cap} — ${why[cap]}${
+          AIO_BASELINE[cap] ? " (aio itself)" : ""
+        }`,
+      );
+    }
   }
   return lines.join("\n");
 }

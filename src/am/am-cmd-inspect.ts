@@ -1136,6 +1136,7 @@ export async function cmdTrigger(
         "  (same words, same meanings as testUI's ui.X.type / ui.X.setValue)\n" +
         "keyDown/keyUp hold/release a key (games, drag) — pair them around frames\n" +
         'modifiers: press "ctrl+Enter" · click "ctrl" · click "ctrl+shift"\n' +
+        'a WINDOW-level key (onGlobalKey) has no element: am trigger window press "Escape"\n' +
         "discover paths with: am surface",
       mode,
     );

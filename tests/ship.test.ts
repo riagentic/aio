@@ -75,8 +75,18 @@ Deno.test("ship manifest: capabilities + least-privilege run flags, no -A", asyn
   assertEquals(m.size, 6);
   assertEquals(m.capabilities.ffi, true);
   assertEquals(m.capabilities.net, true);
-  assertEquals(m.runFlags, ["--allow-net", "--allow-ffi"]);
+  // The app's own signals sit ON TOP of aio's baseline — the binary contains
+  // the framework too, and a manifest that advertised only what the app's
+  // source touched described a binary that could not boot.
+  assertEquals(m.runFlags, [
+    "--allow-net",
+    "--allow-read",
+    "--allow-write",
+    "--allow-ffi",
+    "--allow-env",
+  ]);
   assert(!m.runFlags.includes("-A"));
+  assert(!m.runFlags.includes("--allow-run"), "escalations stay earned");
 });
 
 Deno.test("ship manifest: unsigned is REFUSED unless explicitly allowed", async () => {
@@ -277,7 +287,14 @@ Deno.test("shipApp: one command → binary + source → signed ship.json (batter
     // Manifest reflects the real binary + scanned capabilities + signature.
     assertEquals(m.name, "wallet");
     assertEquals(m.version, "2.0.0");
-    assertEquals(m.runFlags, ["--allow-net", "--allow-ffi"]);
+    // aio's own baseline, plus what the app's source asked for.
+    assertEquals(m.runFlags, [
+      "--allow-net",
+      "--allow-read",
+      "--allow-write",
+      "--allow-ffi",
+      "--allow-env",
+    ]);
     assert(m.signature, "signed with the provided key");
 
     // ship.json was written next to the binary and verifies against the binary.
@@ -321,7 +338,14 @@ Deno.test("shipApp: scans THE app dir (from the entry) and refuses an unmeasured
     // Capabilities actually measured, from where the app's sources live.
     assertEquals(m.capabilities.ffi, true);
     assertEquals(m.capabilities.net, true);
-    assertEquals(m.runFlags, ["--allow-net", "--allow-ffi"]);
+    // aio's own baseline, plus what the app's source asked for.
+    assertEquals(m.runFlags, [
+      "--allow-net",
+      "--allow-read",
+      "--allow-write",
+      "--allow-ffi",
+      "--allow-env",
+    ]);
     // …and the artifact carries the app's real version, not a confident 0.0.0.
     assertEquals(m.version, "2.3.4");
 

@@ -34,6 +34,11 @@ export interface ServerConfig {
    *  the login flows make the SHELL public (see server.ts). */
   blobs?: import("./blobs.ts").BlobStore;
   baseDir: string;
+  /** App dirs tried AFTER `baseDir` when resolving an app asset, in order.
+   *  A compiled binary's embedded (VFS) app dir is `baseDir` and `<cwd>/src`
+   *  sits here behind it — see `baseDirCandidates`, which owns the order.
+   *  Empty whenever the app named `baseDir` itself: that is its decision. */
+  baseDirFallbacks?: string[];
   debug: (msg: string) => void;
   prod?: boolean; // serve pre-built dist/ instead of live-transpiling
   distDir?: string; // absolute path to dist/ (required when prod=true)
@@ -72,6 +77,9 @@ export interface ServerConfig {
   callTimeouts?: CallTimeouts;
   /** Late-bound UDS raw broadcast — carries tt-state to electron clients. */
   udsBroadcastRef?: { fn: ((raw: string) => void) | null };
+  /** How many clients are on the UDS socket — the cost meter counts both
+   *  transports, and a desktop app has all of its clients here. */
+  udsClientCount?: () => number;
   fullStateThreshold?: number; // 0-1: ratio of changed keys for delta vs full broadcast (default: 0.5)
   maxConnections?: number; // max concurrent WebSocket clients (default: 100)
   wsLimits?: import("./aio-types.ts").WsLimits; // per-client WS rate/size limits (W6.6)

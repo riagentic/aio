@@ -497,6 +497,26 @@ export function retiredSpellingLine(r: Removal, subject?: string): string {
   return `${now}${removalMessage(r, subject)}`;
 }
 
+/** Retired spellings a `cell()` CONFIG OBJECT is carrying.
+ *
+ *  `removalsUsedBy` answers the same question for `kind: "cell-config"` rows —
+ *  keys whose removal is total. This answers it for the `kind: "api"` rows
+ *  whose key IS a config key written as a call shape (`cell({ ui })`), which
+ *  the source scanner matches by pattern and which nothing checked at runtime.
+ *  `cell({ ui })` therefore passed `cell()` silently for eight releases while
+ *  the TYPE had already dropped it — the app worked and its types died.
+ *
+ *  Keyed off the row's own `key`, so adding a row is all it takes to enforce
+ *  one: no second list to keep in step. */
+export function retiredCellConfigKeys(
+  config: Record<string, unknown>,
+): readonly Removal[] {
+  return REMOVALS.filter((r) => {
+    const m = /^cell\(\{\s*(\w+)\s*\}\)$/.exec(r.key);
+    return m !== null && config[m[1]!] !== undefined;
+  });
+}
+
 /** THE dev/prod split for a removed spelling that is READ FROM CONFIG and so
  *  cannot simply cease to exist (`cell({ ui })`, `cellDefaults.ui`,
  *  `listensTo: […]`, deno.json `target`): dev (`__aioDev`) THROWS with the

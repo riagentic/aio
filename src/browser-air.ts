@@ -100,6 +100,7 @@ export {
   effect,
   type Signal,
   signal,
+  trackedMemo,
   untrack,
 } from "./state/signal.ts";
 export { Show } from "./air/show.ts";

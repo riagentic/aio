@@ -412,6 +412,30 @@ function walkOutput(
   }
 }
 
+/** A list key, made safe to put inside an ADDRESS.
+ *
+ *  Surface paths join their segments with `/` and wrap a key in `[…]`, so a key
+ *  containing either character produces an address nothing can parse back:
+ *
+ *      App/TreePage/TreeRow[/home/dev/tmp/cc/src]:SrcButton
+ *
+ *  An absolute path is the NATURAL key for a file tree — it IS the row's
+ *  identity — so this is a shape apps keep arriving at (a field report). Lookup
+ *  is exact-match, so such a path still resolved; what it could not do is be
+ *  read, split, or prefix-matched, which is what `--path=`, `am surface`'s tree
+ *  and every human reading a surface do with it.
+ *
+ *  Percent-encoding, and only of the three characters that break the grammar:
+ *  a key without them is byte-identical to what shipped, so no existing address
+ *  changes. `%` goes first, or the encoding would not round-trip.
+ */
+function _encodeKey(key: string | number): string {
+  return String(key)
+    .replace(/%/g, "%25")
+    .replace(/\//g, "%2F")
+    .replace(/\]/g, "%5D");
+}
+
 function walkComponent(
   v: VNode,
   parentPath: string,
@@ -435,7 +459,7 @@ function walkComponent(
   const handle = typeof v.props?.t === "string" && v.props.t
     ? v.props.t
     : undefined;
-  const keyPart = v.key !== undefined ? `[${v.key}]` : "";
+  const keyPart = v.key !== undefined ? `[${_encodeKey(v.key)}]` : "";
   let path = parentPath
     ? `${parentPath}/${name}${keyPart}`
     : `${name}${keyPart}`;

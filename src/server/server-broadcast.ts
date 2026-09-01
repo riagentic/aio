@@ -50,6 +50,9 @@ export interface BroadcastDeps {
    *  (Ctrl+.) never received a frame and never even bound its shortcut. Set by
    *  aio-server after the UDS listener exists (syncBroadcastRef pattern). */
   udsBroadcastRef?: { fn: ((raw: string) => void) | null };
+  /** How many clients are on the UDS socket. A desktop app's clients are ALL
+   *  here and none in `connections` — see the count in `flush`. */
+  udsClientCount?: () => number;
   /** Cost meter (`am cost`) — records the EXACT bytes handed to each socket and,
    *  once per round, which cell/key those bytes came from. Attribution lives
    *  here because this is the only place that knows both. */
@@ -93,51 +96,14 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
   // pure allocation churn on the hottest path in the file.
   const _encoder = new TextEncoder();
 
-  // Big-frame guardrail bookkeeping: one warning per offending cell, and the
-  // per-cell breakdown (an extra serialization pass) only runs when the frame
-  // has GROWN past everything already analyzed — a chronic offender is
-  // analyzed once, not on every round.
-  const _warnedBigCells = new Set<string>();
-  let _analyzedFrameLen = 0;
-
-  /** One-time warning when a full-state frame exceeds the 1MB budget, naming
-   *  the cell(s) responsible and the right tier. Observe-only, identical in
-   *  dev and prod — it must never break a send. */
+  /** The WS transport's view of `warnBigFullState` (module scope, shared with
+   *  UDS). The bookkeeping moved there with it — a chronic offender is analyzed
+   *  once per PROCESS, not once per transport. */
   function _warnBigFullState(json: string, meta: ClientMeta): void {
-    if (json.length <= BROADCAST_FULL_WARN_BYTES) return;
-    if (json.length <= _analyzedFrameLen) return; // already analyzed this size
-    try {
-      _analyzedFrameLen = json.length;
-      const ui = filterStateBySubs(getUIState(meta.user), meta.subscriptions);
-      if (ui === null || typeof ui !== "object") return;
-      const sizes = Object.entries(ui as Record<string, unknown>).map(
-        ([cellName, v]) => {
-          let n = 0;
-          try {
-            n = JSON.stringify(v)?.length ?? 0;
-          } catch { /* unserializable — 0 */ }
-          return [cellName, n] as const;
-        },
-      );
-      const over = sizes.filter(([, n]) => n > BROADCAST_FULL_WARN_BYTES);
-      // No single cell over the line but the sum is → name the biggest one.
-      const biggest = sizes.sort((a, b) => b[1] - a[1])[0];
-      const offenders = over.length > 0 ? over : biggest ? [biggest] : [];
-      const fresh = offenders.filter(([cellName]) =>
-        !_warnedBigCells.has(cellName)
-      );
-      if (fresh.length === 0) return;
-      for (const [cellName] of fresh) _warnedBigCells.add(cellName);
-      log.warn(
-        `[aio] broadcast: a full-state frame is ${bytes(json.length)} — over ` +
-          `the ${bytes(BROADCAST_FULL_WARN_BYTES)} WS frame budget. Largest ` +
-          `cell(s): ${
-            fresh.map(([c, n]) => `"${c}" (${bytes(n)})`).join(", ")
-          }. Cell state is broadcast to every client on change — bulk rows ` +
-          `belong in db: tables, binaries in files — see ` +
-          `docs/persistence/big-data.md.`,
-      );
-    } catch { /* observe-only */ }
+    warnBigFullState(
+      json,
+      () => filterStateBySubs(getUIState(meta.user), meta.subscriptions),
+    );
   }
 
   /** getUIState/serialize failures per broadcast round. Escalates to
@@ -183,8 +149,14 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
       // serialized value per op is work proportional to the patch, which is
       // small by construction; a full resend is attributed as "*" because "the
       // whole slice went" is the finding a reader needs.
-      if (costMeter && connections.size > 0) {
-        costMeter.setClientCount(connections.size);
+      // BOTH transports. A local desktop app opens no TCP ports, so its
+      // clients are all on the socket and `connections` is empty — which is
+      // literally the number a field report saw: "am cost reports
+      // connections: 0 on UDS". `bytesPerSecPerClient` divides by this, so a
+      // zero made the whole per-client column meaningless on that target.
+      if (costMeter) {
+        const total = connections.size + (deps.udsClientCount?.() ?? 0);
+        if (total > 0) costMeter.setClientCount(total);
       }
       // Did any client receive a whole slice rather than a diff? Attribution has
       // to describe what was SENT: reporting 5 bytes of changed keys while the
@@ -213,7 +185,10 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
       // One ROUND regardless of client count — the per-client sends below feed
       // payload/bandwidth, but the broadcasts/sec rate diagnoses dispatch
       // frequency and must not scale with how many sockets are connected.
-      // (Zero connections → zero wire → no round to rate.)
+      // (Zero WS connections → this flush put nothing on a wire → no round to
+      // rate. The UDS broadcaster counts ITS rounds itself, in
+      // `createUdsBroadcastController`, because it sends on its own schedule —
+      // counting them here would rate a broadcast that never happened.)
       if (connections.size > 0) {
         vitalsSystem?.pressureMonitor?.onBroadcastRound();
       }
@@ -393,48 +368,16 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
 
       // ── Attribution, once per round: where did those bytes come from ──
       //
-      // The half no app can compute for itself. A patch attributes each changed
-      // key's serialized value; a full send attributes the whole slice as "*"
-      // with its real size, because "everything went" is the finding — and the
-      // number has to match what left the socket, not what merely changed.
+      // The half no app can compute for itself — see `attributeRound`, which
+      // both transports call so neither can drift into its own answer.
       if (costMeter && (anyPatchSend || anyFullSend)) {
-        // ONE round id for everything attributed below, so `am cost` counts
-        // pushes by round. Timestamps used to stand in for the round and two
-        // rounds inside one millisecond became one.
-        const round = costMeter.beginRound();
-        const cells = patchesToSend.length > 0
-          ? patchesToSend.map((p) => p.cell)
-          : [];
-        if (anyFullSend) {
-          const ui = getUIState() as Record<string, unknown> | undefined;
-          const named = cells.length > 0 ? cells : Object.keys(ui ?? {});
-          for (const cell of named) {
-            let bytes = 0;
-            try {
-              bytes = JSON.stringify(ui?.[cell] ?? null)?.length ?? 0;
-            } catch {
-              /* unserializable — 0 rather than a throw in a hot path */
-            }
-            costMeter.recordAttribution(cell, "*", bytes, round);
-          }
-        }
-        if (anyPatchSend && !force) {
-          for (const entry of patchesToSend) {
-            for (const op of entry.ops) {
-              const key = (op.path?.[0] as string | undefined) ?? "*";
-              let bytes = 0;
-              try {
-                bytes = JSON.stringify(op.value ?? null)?.length ?? 0;
-              } catch { /* as above */ }
-              costMeter.recordAttribution(
-                entry.cell,
-                String(key),
-                bytes,
-                round,
-              );
-            }
-          }
-        }
+        attributeRound(costMeter, {
+          anyPatchSend,
+          anyFullSend,
+          force,
+          patchesToSend,
+          getUIState: getUIState as () => Record<string, unknown> | undefined,
+        });
       }
     } catch (e) {
       // This catch wraps the ENTIRE flush loop — patch compaction, per-client
@@ -520,4 +463,131 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
     flushUrgent: () => coalescer.flushUrgent(),
     shutdown,
   };
+}
+
+/** Attribute ONE broadcast round to the cells (and keys) that produced it.
+ *
+ *  Shared by BOTH transports, which is the whole point. This logic used to sit
+ *  inside the WS send loop, so a local desktop app — zero TCP ports by design,
+ *  every client on the UDS socket — pushed state that `am cost` attributed to
+ *  nothing at all. A field report hit exactly that: "am cost reports
+ *  connections: 0 on UDS, so push volume isn't visible there." The file had
+ *  already learned the lesson one function away, for the time-travel channel
+ *  ("An electron-only app has ZERO WS connections — the UDS path must count,
+ *  or its panel silently starves"), and the meter never got it.
+ *
+ *  A patch attributes each changed key's serialized value; a full send
+ *  attributes the whole slice as `"*"` with its real size, because "everything
+ *  went" is the finding a reader needs — and the number has to match what left
+ *  the socket, not what merely changed. */
+export function attributeRound(
+  costMeter: {
+    beginRound(): number;
+    recordAttribution(
+      cell: string,
+      key: string,
+      bytes: number,
+      round: number,
+    ): void;
+  },
+  what: {
+    anyPatchSend: boolean;
+    anyFullSend: boolean;
+    force: boolean;
+    patchesToSend: readonly PatchEntry[];
+    getUIState: () => Record<string, unknown> | undefined;
+  },
+): void {
+  const { anyPatchSend, anyFullSend, force, patchesToSend } = what;
+  if (!anyPatchSend && !anyFullSend) return;
+  // ONE round id for everything attributed below, so `am cost` counts pushes
+  // by round. Timestamps used to stand in for the round and two rounds inside
+  // one millisecond became one.
+  const round = costMeter.beginRound();
+  const cells = patchesToSend.length > 0
+    ? patchesToSend.map((p) => p.cell)
+    : [];
+  if (anyFullSend) {
+    const ui = what.getUIState();
+    const named = cells.length > 0 ? cells : Object.keys(ui ?? {});
+    for (const cell of named) {
+      let bytes = 0;
+      try {
+        bytes = JSON.stringify(ui?.[cell] ?? null)?.length ?? 0;
+      } catch {
+        /* unserializable — 0 rather than a throw in a hot path */
+      }
+      costMeter.recordAttribution(cell, "*", bytes, round);
+    }
+  }
+  if (anyPatchSend && !force) {
+    for (const entry of patchesToSend) {
+      for (const op of entry.ops) {
+        const key = (op.path?.[0] as string | undefined) ?? "*";
+        let bytes = 0;
+        try {
+          bytes = JSON.stringify(op.value ?? null)?.length ?? 0;
+        } catch { /* as above */ }
+        costMeter.recordAttribution(entry.cell, String(key), bytes, round);
+      }
+    }
+  }
+}
+
+/** One cell's state is too big to be pushed on every change — say which cell,
+ *  and which of them is the largest.
+ *
+ *  MODULE SCOPE, and shared by both transports. It used to live inside the WS
+ *  broadcaster, so an Electron app — which opens no TCP ports and keeps every
+ *  client on the socket — never saw it. A field report put 83,000 rows in a
+ *  cell, reached a 17 GB heap and 200 ms render stalls, and wrote: "it is a bug
+ *  aio makes easy and gives no feedback about." The feedback existed. It was
+ *  blind on their transport, which is the same lens that hid `am cost`,
+ *  `am status`, the pressure alarm and `aio_clients_connected`.
+ *
+ *  Once per cell per process: the size is a fact about the app's shape, not
+ *  about this frame, and a line per broadcast is a line nobody reads. */
+const _warnedBigCells = new Set<string>();
+let _analyzedFrameLen = 0;
+
+export function warnBigFullState(json: string, view: () => unknown): void {
+  if (json.length <= BROADCAST_FULL_WARN_BYTES) return;
+  if (json.length <= _analyzedFrameLen) return; // already analyzed this size
+  try {
+    _analyzedFrameLen = json.length;
+    const ui = view();
+    if (ui === null || typeof ui !== "object") return;
+    const sizes = Object.entries(ui as Record<string, unknown>).map(
+      ([cellName, v]) => {
+        let n = 0;
+        try {
+          n = JSON.stringify(v)?.length ?? 0;
+        } catch { /* unserializable — 0 */ }
+        return [cellName, n] as const;
+      },
+    );
+    const over = sizes.filter(([, n]) => n > BROADCAST_FULL_WARN_BYTES);
+    // No single cell over the line but the sum is → name the biggest one.
+    const biggest = sizes.sort((a, b) => b[1] - a[1])[0];
+    const offenders = over.length > 0 ? over : biggest ? [biggest] : [];
+    const fresh = offenders.filter(([cellName]) =>
+      !_warnedBigCells.has(cellName)
+    );
+    if (fresh.length === 0) return;
+    for (const [cellName] of fresh) _warnedBigCells.add(cellName);
+    log.warn(
+      `[aio] broadcast: a full-state frame is ${bytes(json.length)} — over ` +
+        `the ${bytes(BROADCAST_FULL_WARN_BYTES)} budget. Largest cell(s): ${
+          fresh.map(([c, n]) => `"${c}" (${bytes(n)})`).join(", ")
+        }. Cell state is pushed to every client on change — bulk rows belong ` +
+        `in db: tables, binaries in files — see docs/persistence/big-data.md.`,
+    );
+  } catch { /* observe-only */ }
+}
+
+/** @internal tests — the once-per-cell latch is process-global. */
+// aio-ok: test seam — tests/big-state-warning-uds.test.ts clears the latch between cases
+export function _resetBigStateWarnings(): void {
+  _warnedBigCells.clear();
+  _analyzedFrameLen = 0;
 }

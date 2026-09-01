@@ -4136,6 +4136,283 @@ export const checkSyncMethodHiddenReads: Checker = (ctx) => {
 };
 
 // ══════════════════════════════════════════════════════════════════════
+// 25d. A CELL METHOD CALLED FROM A TIMER
+// ══════════════════════════════════════════════════════════════════════
+//
+// `docs/state/methods.md` says it plainly — "never write
+// `setTimeout(() => cell.other(), 0)`; it escapes the action log, time-travel,
+// and cancellation" — and a field report shipped exactly that in FIVE `onInit`s,
+// each with an `aiol-ok` comment arguing it was necessary. It was not: `onInit`
+// can `app.dispatch`, `aio.run({ onStart })` runs after every cell is bound, and
+// `schedules:` arms repeating work. Three doors; the timer is a fourth that
+// skips the hallway.
+//
+// The reason the prohibition alone did not hold: it lives in one file, and the
+// page a reader lands on for "start work at boot" had no worked example. Both
+// halves are fixed — this is the half that refuses.
+export const checkTimerDispatch: Checker = (ctx) => {
+  const { tsFiles, tsxFiles, cells, report, pass } = ctx;
+  // The cell BINDINGS in this project — a call is only interesting if the
+  // thing being called is a cell.
+  const bindings = new Set<string>();
+  for (const c of cells) {
+    const line = codeText(c.file.content).split("\n")[c.line - 1] ?? "";
+    const b = /\b(?:const|let|var)\s+(\w+)\s*=\s*cell\s*\(/.exec(line);
+    if (b) bindings.add(b[1]!);
+  }
+  if (bindings.size === 0) return;
+  let found = 0, checked = 0;
+  for (const file of [...tsFiles, ...tsxFiles]) {
+    if (/\.test\.tsx?$/.test(file.name)) continue;
+    checked++;
+    const code = codeText(file.content);
+    // `setTimeout(() => x.y(...)` / `setTimeout(function () { x.y(...)`.
+    // Deliberately narrow: a timer that calls a PLAIN function is ordinary
+    // code, and only a cell method escapes the log by this route.
+    const RE =
+      /\bset(?:Timeout|Interval)\s*\(\s*(?:\(\s*\)\s*=>|function\s*\(\s*\)\s*\{)\s*(?:void\s+)?(\w+)\s*\.\s*(\w+)\s*\(/g;
+    for (const m of codeMatches(file.content, RE)) {
+      const obj = m[1]!, method = m[2]!;
+      if (!bindings.has(obj)) continue;
+      const line = code.slice(0, m.index!).split("\n").length;
+      if (isSuppressed(file.lines, line - 1)) continue;
+      found++;
+      report(
+        "error",
+        "cells",
+        `${file.relative}:${line} — \`${obj}.${method}()\` is a cell method ` +
+          `called from a timer. That escapes the action log, time-travel and ` +
+          `cancellation: the dispatch has no cause the runtime can see.\n` +
+          `      fix: from a cell, \`onInit(app) { app.dispatch(…) }\`; once at ` +
+          `boot, \`aio.run({ onStart: () => ${obj}.${method}() })\`; ` +
+          `repeatedly, a static \`schedules:\` entry. See ` +
+          `docs/state/lifecycle.md.`,
+        {
+          file: file.relative,
+          line,
+          fix: `onStart: () => ${obj}.${method}()`,
+        },
+      );
+    }
+  }
+  if (checked > 0 && found === 0) pass("no cell method is called from a timer");
+};
+
+// ══════════════════════════════════════════════════════════════════════
+// 25c. A COMPONENT READING A FIELD `visible` HIDES
+// ══════════════════════════════════════════════════════════════════════
+//
+// The runtime tripwire (`reportHiddenRead`) throws on ANY client read of a
+// hidden field, in dev and prod alike, and it is the guarantee. Rule 25 already
+// names the two cases that live INSIDE the cell literal — a sync method of a
+// replaying cell, and any selector. This is the third and most common one, and
+// nothing saw it: a read in a `.tsx` file.
+//
+// A `.tsx` file is browser context by construction, so `vault.encSecKey` there
+// is a read that throws the moment the component renders. A field report lost a
+// day to exactly this shape: a lock screen asked "does a vault exist?", got
+// `undefined` forever (the older prod behaviour), and behaved.
+//
+// This is the static half of the ask to make hidden reads a COMPILE error.
+// The type-level version cannot be written: `cell()` returns ONE type used
+// identically by a component body and an async method, so `Omit`ting the
+// excluded keys would refuse every legitimate server-side read too. The
+// FILENAME is what carries the context — the same fact `*.server.ts` and
+// `am where` rest on — so the check belongs here.
+export const checkTsxHiddenReads: Checker = (ctx) => {
+  const { tsFiles, tsxFiles, cells, report, pass } = ctx;
+  // Every cell's hidden fields, by the BINDING an app writes them through.
+  const hidden = new Map<
+    string,
+    { cell: string; top: Set<string>; leaves: Map<string, string> }
+  >();
+  for (const file of [...tsFiles, ...tsxFiles]) {
+    const raw = file.content;
+    const code = codeText(raw);
+    for (const m of codeMatches(raw, _CELL_BLOCK_RE)) {
+      const name = m[1]!;
+      const open = code.indexOf("{", m.index! + m[0].length - 1);
+      const end = _balancedClose(code, open);
+      if (end === -1) continue;
+      const info = cells.find((c) =>
+        c.name === name && c.file.path === file.path
+      );
+      const { top, leaves } = _hiddenOf(
+        _staticVisibility(raw, code, open, end),
+        info?.stateKeys ?? [],
+      );
+      if (top.size === 0 && leaves.size === 0) continue;
+      const line = code.slice(0, m.index!).split("\n").length;
+      const bind = /\b(?:const|let|var)\s+(\w+)\s*=\s*cell\s*\(/.exec(
+        code.split("\n")[line - 1] ?? "",
+      );
+      if (bind) hidden.set(bind[1]!, { cell: name, top, leaves });
+    }
+  }
+  if (hidden.size === 0) return;
+  let found = 0, checked = 0;
+  for (const file of tsxFiles) {
+    if (/\.test\.tsx?$/.test(file.name)) continue;
+    checked++;
+    const code = codeText(file.content);
+    for (const [bind, { cell, top }] of hidden) {
+      for (const key of top) {
+        // `(?<![.\w$])` for the same reason rule 20 needs it: a STATE FIELD
+        // that happens to share the binding's name (`s.vault.x`) is not a read
+        // of the cell.
+        const re = new RegExp(
+          `(?<![.\\w$])${bind}\\s*\\.\\s*${key}\\b`,
+          "g",
+        );
+        const hit = re.exec(code);
+        if (!hit) continue;
+        const line = code.slice(0, hit.index).split("\n").length;
+        if (isSuppressed(file.lines, line - 1)) continue;
+        found++;
+        const fact = `has${key.charAt(0).toUpperCase()}${key.slice(1)}`;
+        report(
+          "error",
+          "cells",
+          `${file.relative}:${line} — \`${bind}.${key}\` reads a field cell ` +
+            `"${cell}" hides (\`visible\`), from a .tsx file. That is CLIENT ` +
+            `context, where the field is not present: the read THROWS when the ` +
+            `component renders, in dev and in prod. ` +
+            `Publish the non-secret FACT beside the secret ` +
+            `(\`${fact}: boolean\`) and read that, or read \`${key}\` in a ` +
+            `server-side/async method.`,
+          {
+            file: file.relative,
+            line,
+            fix:
+              `state: { ${fact}: false, … } — set it where ${key} is written; read ${bind}.${fact} here`,
+          },
+        );
+        break; // one finding per (file, binding, field) — not one per read
+      }
+    }
+  }
+  if (checked > 0 && found === 0) {
+    pass("no component reads a ui-hidden field");
+  }
+};
+
+// ══════════════════════════════════════════════════════════════════════
+// 25b. A SIDE EFFECT IN A REDUCER THAT REPLAYS — so it happens TWICE
+// ══════════════════════════════════════════════════════════════════════
+//
+// A sync method IS the reducer, and under `sync:` / `localFirst` /
+// `scope: "client"` the SAME function also runs in the browser as an optimistic
+// replay. Mutating `s` is what replay is for — the server's answer supersedes
+// it. Anything else in that body happens once on the client and once on the
+// server.
+//
+// Effects are already exempt by construction: during a replay `s.$do` swallows
+// everything, because those effects ran on the server. What is NOT exempt is a
+// call the author wrote directly:
+//
+//   - ANOTHER CELL'S METHOD. On the client that is a dispatch over the wire, so
+//     the server runs it — and the server's own reducer runs it again. A field
+//     report's toast helper double-logged every toast into its event log.
+//   - AN OBSERVER (`log.*` / `console.*`). Two lines per action, one of them
+//     from a context the reader does not expect to be logging at all.
+//
+// Statically decidable from the cell definition, which is why it is a rule and
+// not a paragraph. The exemptions are the ones that make it safe to be an
+// error: nested function literals are blanked (a callback handed to `$do` /
+// `own.set` / `schedule` is not this body), `$do(…)` spans are skipped, and a
+// cell calling its OWN methods is `checkSelfMethodCall`'s subject, not this
+// one.
+export const checkSyncReplayEffects: Checker = (ctx) => {
+  const { cells, report, pass } = ctx;
+  let found = 0, checked = 0;
+  // Every cell binding in the project — `export const toasts = cell("toasts",`
+  // — so a cross-cell call is recognised by the NAME the author wrote.
+  const bindings = new Map<string, string>();
+  for (const c of cells) {
+    const line = codeText(c.file.content).split("\n")[c.line - 1] ?? "";
+    const b = /\b(?:const|let|var)\s+(\w+)\s*=\s*cell\s*\(/.exec(line);
+    if (b) bindings.set(b[1]!, c.name);
+  }
+  for (const cell of cells) {
+    if (/\.test\.tsx?$/.test(cell.file.name)) continue;
+    const code = codeText(cell.file.content);
+    const span = _cellConfigSpan(code, cell.line);
+    if (!span) continue;
+    const lit = code.slice(span[0], span[1] + 1);
+    // Exactly the predicate checkSyncMethodHiddenReads uses for "this reducer
+    // also runs on the client" — one rule for one fact.
+    const replays =
+      (/\bsync\s*:/.test(lit) && !/\bsync\s*:\s*false\b/.test(lit)) ||
+      /\bscope\s*:\s*["'`]client["'`]/.test(lit);
+    if (!replays) continue;
+    const meth = _blockOf(code, span[0], span[1], "methods");
+    if (!meth) continue;
+    const skip = doSpans(code);
+    const selfBind = /\b(?:const|let|var)\s+(\w+)\s*=\s*cell\s*\(/.exec(
+      code.split("\n")[cell.line - 1] ?? "",
+    )?.[1];
+    for (const fn of _members(code, meth[0], meth[1])) {
+      if (fn.async) continue;
+      checked++;
+      const body = _blankNestedFns(fn.body);
+      const hits: Array<{ at: number; what: string; why: string }> = [];
+      for (const m of body.matchAll(/(?<![.\w$])(\w+)\s*\.\s*(\w+)\s*\(/g)) {
+        const obj = m[1]!, member = m[2]!;
+        const abs = fn.start + m.index!;
+        if (skip.some(([a, b]) => abs > a && abs < b)) continue;
+        if (obj === selfBind) continue; // a self-call — a different rule
+        if (bindings.has(obj) && bindings.get(obj) !== cell.name) {
+          hits.push({
+            at: m.index!,
+            what: `${obj}.${member}()`,
+            why: `\`${obj}\` is another cell. On the client that call is a ` +
+              `DISPATCH to the server, and the server's own reducer makes it ` +
+              `again — the action happens twice`,
+          });
+        } else if (
+          (obj === "log" || obj === "console") &&
+          /^(log|info|warn|error|debug|trace)$/.test(member)
+        ) {
+          hits.push({
+            at: m.index!,
+            what: `${obj}.${member}()`,
+            why:
+              `an observer in a replaying reducer runs once in the browser ` +
+              `and once on the server — two entries per action`,
+          });
+        }
+      }
+      const hit = hits[0];
+      if (!hit) continue;
+      const line = code.slice(0, fn.start + hit.at).split("\n").length;
+      if (isSuppressed(cell.file.lines, line - 1)) continue;
+      found++;
+      report(
+        "error",
+        "cells",
+        `${cell.file.relative}:${line} — \`${cell.name}.${fn.name}()\` is a ` +
+          `SYNC method of a cell that REPLAYS on the client ` +
+          `(sync/localFirst/scope:"client"), and it calls \`${hit.what}\`. ` +
+          `${hit.why}.\n` +
+          `      fix: mutate \`${fn.param || "s"}\` here and nothing else — ` +
+          `hand the effect to \`${fn.param || "s"}.$do(…)\`, which a replay ` +
+          `swallows because it already ran on the server; or take this cell ` +
+          `out of \`sync\` if its reducer genuinely has to do more than write ` +
+          `state.`,
+        {
+          file: cell.file.relative,
+          line,
+          fix: `${fn.param || "s"}.$do(() => ${hit.what})`,
+        },
+      );
+    }
+  }
+  if (checked > 0 && found === 0) {
+    pass("no replaying reducer has a side effect of its own");
+  }
+};
+
+// ══════════════════════════════════════════════════════════════════════
 // 26. A STATE FIELD NAMED LIKE A CREDENTIAL, VISIBLE TO EVERY CLIENT
 // ══════════════════════════════════════════════════════════════════════
 //
@@ -5037,5 +5314,8 @@ export const ALL_CHECKS: Checker[] = [
   checkAlpha70Renames,
   checkProxyEscape,
   checkSyncMethodIO,
+  checkSyncReplayEffects,
+  checkTsxHiddenReads,
+  checkTimerDispatch,
   checkOwnKeyIdentity,
 ];

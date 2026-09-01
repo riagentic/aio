@@ -149,6 +149,54 @@ const Summary = () => <span>Total: {total.value}</span>;
 - **Composable**: computeds can depend on other computeds.
 - **Diamond-safe**: computed at the bottom of a diamond only runs once.
 
+A `computed()` is one value. For a value derived **per key** — one row set per
+filter, one total per account — see [`trackedMemo()`](#trackedmemo) below, and
+not a hand-rolled `Map`: a cache hit that skips the read also skips the
+subscription, permanently. That trap is
+[reactivity tracking](reactivity-tracking.md#a-cache-hit-skips-the-read--so-it-skips-the-subscription).
+
+---
+
+## trackedMemo()
+
+```ts
+function trackedMemo<K, V>(
+  compute: (arg: K) => V,
+  opts?: { key?: (arg: K) => unknown; max?: number },
+): (arg: K) => V;
+```
+
+A per-key cache whose **hits still subscribe**. On a miss it records which
+signals `compute` read; on a hit it replays that read set into the tracking
+scope that is open now, so the caller subscribes to exactly what computing the
+value would have read. The same recorded set decides freshness — a hit whose
+dependencies have moved recomputes. No dependency array.
+
+```tsx
+import { cell } from "aio";
+import { trackedMemo } from "aio/air";
+
+const accounts = cell("accounts", {
+  state: { list: [] as { name: string }[] },
+  methods: {},
+});
+
+const rows = trackedMemo((filter: string) =>
+  accounts.list.filter((a) => a.name.includes(filter))
+);
+
+function Panel({ filter }: { filter: string }) {
+  return <ul>{rows(filter).map((a) => <li>{a.name}</li>)}</ul>;
+}
+```
+
+- `key` maps the argument to a cache key (default: the argument itself, by `Map`
+  identity) — pass it when the argument is an object.
+- `max` bounds the cache, evicting least-recently-used. Unbounded by default.
+
+Reach for it when the thing being cached is **keyed** and shared across
+components; `computed()` is the right answer for a single derived value.
+
 ---
 
 ## effect()

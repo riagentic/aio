@@ -693,7 +693,18 @@ export function createScheduleManager(
         `schedule '${id}' is set dynamically twice (existing ${existing.kind} ` +
           `replaced by new ${kind}) — same id, replace semantics. If two ` +
           `reducers independently schedule the same id, one will cancel the ` +
-          `other. Use unique ids per schedule source.`,
+          `other. Use unique ids per schedule source.` +
+          // Name the REMEDY, not only the mechanism. `every` and the
+          // self-scheduling `after` chain are taught next to each other, and
+          // combining them wrongly is easy: a field report shipped the wrong
+          // shape in two cells before this warning taught them the rule, and
+          // said the message described what happened without saying what to do.
+          (existing.kind === "every" && kind === "every"
+            ? ` An \`every\` re-armed from inside its OWN tick restarts the ` +
+              `interval on every pass: arm it ONCE (from \`onStart\` or a ` +
+              `static \`schedules:\` entry) and let it repeat. A tick that ` +
+              `re-schedules itself wants \`after\`, not \`every\`.`
+            : ""),
       );
     }
     cancelTimer(id); // re-schedule: cancel previous

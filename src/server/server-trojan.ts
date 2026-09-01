@@ -399,7 +399,13 @@ function handleGet(
     }
     return json({
       uptime: Math.round((Date.now() - trojan.startedAt) / 1000),
-      connections: deps.getWsClients().length,
+      // BOTH transports. `am status` printed `connections: 0` for a desktop
+      // app while `am clients` — twenty lines below, from the same trojan —
+      // listed its one live UDS client. Two routes, one running app, two
+      // answers, and the operator has no way to tell which is lying. A local
+      // Electron app opens no TCP ports at all, so its clients are ALL here.
+      connections: deps.getWsClients().length +
+        (trojan.udsClients?.() ?? []).length,
       schedules: trojan.getSchedules().length,
       cells: cellSizes,
     });

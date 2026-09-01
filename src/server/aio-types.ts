@@ -412,6 +412,27 @@ export type AioConfig<S, A, E> = {
   onStart?: (app: AioApp<S, A>) => void | Promise<void>;
   /** If true, an onStart error terminates the process. Default: false (log and continue). */
   fatalOnStart?: boolean;
+  /** Quiesce YOUR OWN producers — the one place an app can stop dispatching
+   *  while dispatch still works.
+   *
+   *  Runs before ANY of shutdown: before the state is marked shutting-down,
+   *  before `dispatch.close()`, before the drain. So a write from here is
+   *  admitted, and it is captured by the final persist.
+   *
+   *  This exists because `onStop` cannot do it. `onStop` is Phase 5 — after
+   *  the drain — so anything that dispatches from a raw timer or a promise
+   *  `finally` (an RPC queue writing its result back, a poller, a debounce
+   *  that has not fired) lands in the drain window and earns
+   *  `dispatch is draining — '<action>' is new input and was refused`. By the
+   *  time `onStop` runs, the refusal has already been logged; the only
+   *  userland signal that fired early enough was `onConnect`/`onDisconnect`, a
+   *  TRANSPORT event doing a LIFECYCLE job.
+   *
+   *  Stop timers, cancel queues, resolve what is in flight. Awaited, inside
+   *  the drain budget; a throw is logged and shutdown continues, like every
+   *  other hook. Keep the after-the-fact work (flushing secrets, closing
+   *  handles) in `onStop`, which still runs. */
+  onStopping?: () => void | Promise<void>;
   onStop?: () => void | Promise<void>;
   onError?: (error: AioError) => void;
   /** Internal: schedule cancel callback set by _run, used by cells disable */
@@ -787,6 +808,9 @@ export type CellsConfig = {
   onDisconnect?: (user?: AioUser) => void;
   onStart?: (app: AioApp) => void | Promise<void>;
   fatalOnStart?: boolean;
+  /** Quiesce your own producers, before dispatch closes — see the twin on
+   *  `AioConfig`, which documents the rule. */
+  onStopping?: () => void | Promise<void>;
   onStop?: () => void | Promise<void>;
   onError?: (error: AioError) => void;
   onRestore?: (state: unknown) => unknown;

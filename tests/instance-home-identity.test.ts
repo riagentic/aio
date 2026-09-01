@@ -278,4 +278,18 @@ Deno.test("am timeouts: transport waits strictly longer than the server's client
     /busy/.test(msg) && /headless/.test(msg) && /am clients/.test(msg),
     msg,
   );
+  // VISIBILITY, first and by name. A field report lost two debugging passes to
+  // this message: Chromium throttles an occluded or minimised renderer until it
+  // stops answering, and the old text offered only two causes, both of them
+  // "something is busy" — so the reader went hunting a render loop that did not
+  // exist, twice, while Electron CPU sat at ~0%.
+  assert(/VISIBLE/.test(msg), `visibility must be named: ${msg}`);
+  assert(
+    msg.indexOf("VISIBLE") < msg.indexOf("main thread really is busy"),
+    `and listed FIRST — it is the most common cause: ${msg}`,
+  );
+  // The CPU tell, which is what makes the three distinguishable in practice.
+  assert(/CPU/.test(msg), `name the signal that separates them: ${msg}`);
+  // …and the flag that buys more time, which the message never mentioned.
+  assert(/--timeout/.test(msg), msg);
 });

@@ -294,6 +294,20 @@ beside the secret (`hasVault: boolean`) and read that, or read the secret in a
 server-side/async method (routes, effects, methods) — see
 [cell contexts](cell-contexts.md).
 
+**`aiol` names the read before anything runs.** Three shapes are decidable from
+the source, and each is a lint error with `file:line` and the same two fixes: a
+read in a `.tsx` file (client context by construction), a selector on any cell
+(selectors run client-side), and a sync method of a `sync`/`localFirst`/
+`scope: "client"` cell (its reducer replays in the browser). The runtime
+tripwire stays the guarantee — it catches the reads no static rule can see, such
+as one through a dynamically chosen key.
+
+There is deliberately no _type-level_ version. `cell()` returns one type, and a
+component body and an async method read it through the same binding — so
+`Omit`ting the excluded keys would refuse every legitimate server-side read as
+well. The context lives in the filename and in the cell config, which is where
+the rules look; `am where <file>` answers the general question.
+
 ## Interaction with Sync
 
 Cells with `sync: true` are excluded from the `aio_kv` snapshot: their durable

@@ -2,7 +2,11 @@
  * @module
  * Build compile — withDevExcluded symlink manager + deno compile step + systemd service file.
  */
-import { BUILD_SCRATCH_DIR } from "../server/app-files.ts";
+import {
+  APP_STYLE,
+  BUILD_SCRATCH_DIR,
+  BUNDLE_JS,
+} from "../server/app-files.ts";
 import {
   DENO_JSON_NAMES,
   readDenoJson,
@@ -332,6 +336,85 @@ const ASSET_SKIP_DIRS = new Set([
   ".aio",
   ".cache",
 ]);
+
+/** URL-path extensions worth checking. Deliberately narrow: an extension-less
+ *  path is a ROUTE, and a route is the app's business. */
+const ASSET_URL_EXT =
+  /\.(svg|png|jpe?g|gif|webp|avif|ico|bmp|woff2?|ttf|otf|eot|mp[34]|webm|ogg|wav|pdf|json|txt|csv|xml|wasm|glb|gltf|md)$/i;
+
+/** Every absolute asset URL a bundle asks a browser to fetch — `src="/x.svg"`,
+ *  `url(/fonts/y.woff2)`, a fetch of a literal path. String-literal scan, not a
+ *  parser: the bundle is minified JS plus CSS, and the only thing that matters
+ *  is which paths it names. */
+export function assetUrlsIn(bundle: string): string[] {
+  const out = new Set<string>();
+  // Quoted string literals and css url(…) — both reduce to "a / path".
+  for (
+    const m of bundle.matchAll(
+      /(?:"|'|`|url\(\s*"?'?)(\/[A-Za-z0-9._~\-/]+)(?:"|'|`|"?'?\s*\))/g,
+    )
+  ) {
+    const p = m[1]!;
+    if (p.startsWith("//")) continue; // protocol-relative URL, not a path
+    if (p.startsWith("/__aio/")) continue; // the framework's own routes
+    if (!ASSET_URL_EXT.test(p)) continue;
+    out.add(p);
+  }
+  return [...out].sort();
+}
+
+/** Asset URLs the bundle references that the ARTIFACT will not be able to
+ *  serve — the check the gates were missing.
+ *
+ *  Every gate aio had read the SOURCE TREE, and the source tree is not what
+ *  ships: `<img src="/assets/logo.svg">` is a real URL in dev (the dev server
+ *  serves the app dir, and the file really is in the repo) and a broken-image
+ *  glyph in the compiled binary, because nothing embedded the file. Typecheck,
+ *  lint and a full suite all pass; the first person to see it is a user, on a
+ *  first-run screen.
+ *
+ *  Pure — every input injected — so the RULE is unit-testable without running
+ *  a build. Reports two distinct mistakes and never conflates them:
+ *   - `missing`: the file is not in the app dir at all (broken in dev too);
+ *   - `unembedded`: the file EXISTS and nothing will put it in the binary,
+ *     which is the dev/prod divergence this exists to catch.
+ *
+ *  `dist/` counts as embedded: the build stages it and `deno compile` takes it
+ *  wholesale, so an asset the bundler copied there ships already. */
+export function unservableAssetRefs(opts: {
+  /** Absolute URL paths the bundle references — see `assetUrlsIn`. */
+  urls: string[];
+  /** Root-relative include paths (files or dirs) the compile will embed. */
+  included: string[];
+  /** The app dir a URL path resolves against at runtime — THE app-dir decider
+   *  (`baseDirCandidates`), root-relative. */
+  appDir: string;
+  /** Is `dist/` being embedded? */
+  hasDist: boolean;
+  /** Does this root-relative path exist on disk? Injected, so the rule is pure. */
+  exists: (rel: string) => boolean;
+}): Array<{ url: string; rel: string; why: "missing" | "unembedded" }> {
+  const norm = (p: string) => p.replace(/\\/g, "/").replace(/^\.\//, "");
+  const covered = [
+    ...(opts.hasDist ? ["dist"] : []),
+    ...opts.included.map(norm),
+  ];
+  const out: Array<
+    { url: string; rel: string; why: "missing" | "unembedded" }
+  > = [];
+  for (const url of opts.urls) {
+    const rel = norm(join(opts.appDir, url.slice(1)));
+    // Served straight out of dist/ (the bundler's own output, e.g. /app.js).
+    if (opts.hasDist && opts.exists(norm(join("dist", url.slice(1))))) continue;
+    if (!opts.exists(rel)) {
+      out.push({ url, rel, why: "missing" });
+      continue;
+    }
+    const embedded = covered.some((c) => rel === c || rel.startsWith(c + "/"));
+    if (!embedded) out.push({ url, rel, why: "unembedded" });
+  }
+  return out;
+}
 
 /** `--include` args for the app's runtime DATA ASSETS that `deno compile` can't
  *  trace — anything loaded via `Deno.readFile(new URL("./x", import.meta.url))`
@@ -666,6 +749,14 @@ export async function runDenoCompile(cfg: BuildConfig): Promise<boolean> {
       }`,
     );
   }
+  // READ THE ARTIFACT'S OWN BUNDLE, not the source tree. Every other gate aio
+  // has walks src/, and src/ is not what ships — which is how an asset URL
+  // that resolves in dev shipped as a broken-image glyph on a first-run
+  // screen with a full suite green. This is a warning, not a refusal: a
+  // string literal is a heuristic (an app may serve `/report.pdf` from its own
+  // `routes`), and a build that stops on a guess is worse than one that says
+  // exactly what it found. The E2E gate is the hard half.
+  await warnUnservableAssets(root, dist, hasDist, configEntry, assets);
 
   const ok = await withDevExcluded(nmDir, async (excludes) => {
     const result = await new Deno.Command("deno", {
@@ -690,6 +781,55 @@ export async function runDenoCompile(cfg: BuildConfig): Promise<boolean> {
   return ok;
 }
 
+/** Read the bundle that is about to be embedded and say which of the asset
+ *  URLs it names the artifact will not be able to answer. See
+ *  `unservableAssetRefs` for the rule; this is only the I/O around it. */
+async function warnUnservableAssets(
+  root: string,
+  dist: string,
+  hasDist: boolean,
+  entry: string,
+  assets: string[],
+): Promise<void> {
+  if (!hasDist) return; // no bundle to read — nothing to check
+  let bundle = "";
+  for (const f of [BUNDLE_JS, APP_STYLE]) {
+    bundle += await Deno.readTextFile(join(dist, f)).catch(() => "");
+  }
+  if (!bundle) return;
+  const urls = assetUrlsIn(bundle);
+  if (!urls.length) return;
+  const bad = unservableAssetRefs({
+    urls,
+    included: assets.filter((a) => a !== "--include"),
+    // The app dir a browser URL resolves against is the ENTRY'S directory —
+    // the same rule the runtime applies (`baseDirCandidates`). Asking a
+    // different question here than the server asks is how the two disagree.
+    appDir: relative(root, dirname(join(root, entry))) || ".",
+    hasDist,
+    exists: (rel) => {
+      try {
+        Deno.statSync(join(root, rel));
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  });
+  for (const b of bad) {
+    console.warn(
+      b.why === "missing"
+        ? `${HEY} the bundle requests ${b.url} and ${b.rel} does not exist — ` +
+          `that URL 404s in dev and in the artifact.`
+        : `${HEY} the bundle requests ${b.url}, which resolves to ${b.rel} — ` +
+          `a file the dev server serves and this binary will NOT contain. ` +
+          `Embed it: add "compile": { "include": ["${b.rel}"] } to deno.json ` +
+          `(or inline the asset). Without it the URL works in \`deno task ` +
+          `dev\` and is a broken link in every shipped artifact.`,
+    );
+  }
+}
+
 /** Runtime flags for the generated systemd unit.
  *
  *  These MUST be flags the compiled binary actually parses — a unit is copied
@@ -711,8 +851,32 @@ export function serviceExecFlags(
 /** Write a systemd .service unit file for the compiled binary. */
 export async function writeServiceFile(cfg: BuildConfig): Promise<void> {
   const { binaryName, appTitle, doRemote, doHeadless } = cfg;
-  const user = Deno.env.get("USER") ?? "root";
+  // BUILD-MACHINE IDENTITY, and the unit is copied verbatim to a server.
+  //
+  // `User=` and `HOME=` were taken from the build environment and written as
+  // though they were facts about the target. They are not: build as `dev`,
+  // install on a host with no `dev` account, and systemd refuses the unit with
+  // "Failed to determine user credentials". Same class as a compiled binary
+  // serving `<cwd>/src` — a value that was true where the command was TYPED,
+  // applied to a machine that lives somewhere else.
+  //
+  // The `?? "root"` was the dangerous half. A build with no `$USER` — a
+  // container, a CI runner, i.e. the normal release pipeline — silently
+  // emitted `User=root`, so the operator's service ran the app as root
+  // because of where it was BUILT. aio does not know who should run this
+  // service and must not guess; the placeholder fails the unit closed, with a
+  // name that says what to do, which is the safe direction to be wrong in.
+  const buildUser = Deno.env.get("USER");
+  const user = buildUser ?? "REPLACE-ME";
   const home = Deno.env.get("HOME") ?? `/home/${user}`;
+  if (!buildUser) {
+    console.warn(
+      `${HEY} this build has no $USER, so the generated ${binaryName}.service ` +
+        `cannot name the account to run as. It carries \`User=REPLACE-ME\`, ` +
+        `which systemd refuses until you set it — deliberately, rather than ` +
+        `defaulting to root because of how the build was run.`,
+    );
+  }
   // `?? "."` keeps a hand-built config (a test, a custom script) writing into
   // the cwd exactly as it did before --out= existed.
   const serviceFile = join(
@@ -748,12 +912,16 @@ ExecStart=/usr/local/bin/${binaryName} ${
 Restart=always
 RestartPreventExitStatus=143   # aio.stop() exits 143 to stay down
 RestartSec=5
+# BUILD-MACHINE VALUE — this came from the machine that built the binary, not
+# from the host you are installing on. Set it to the account this service
+# should run as (aio has no way to know, and will not guess).
 User=${user}
 # Tells the app it is supervised, so it EXITS after an update instead of
 # spawning its own successor (two processes fighting over one app lock). systemd
 # sets INVOCATION_ID, which aio also honours; this is the explicit spelling for
 # any other supervisor.
 Environment=AIO_SUPERVISED=1
+# Also a build-machine value — the app's data directory hangs off it.
 Environment=HOME=${home}
 
 [Install]

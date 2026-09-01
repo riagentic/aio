@@ -8,6 +8,7 @@ import { _resetCallTimeouts, resetPending } from "./cell-impl.ts";
 import { _resetDegraded } from "../diagnostics/degraded.ts";
 import { _resetMethodCancel } from "./method-cancel.ts";
 import { _resetSubs } from "./state-subs.ts";
+import { _resetBudgetMisses } from "./dispatch.ts";
 import { _resetRootSignals } from "./signal.ts";
 import { _resetSelectorHints } from "./cell-helpers.ts";
 import { _resetTransactionHints } from "./cell-methods-factory.ts";
@@ -37,6 +38,10 @@ export function _resetAioRuntime(): void {
   // The degraded registry is process-global; without this a test's escalation
   // bleeds into every later test's /__aio/health.
   _resetDegraded();
+  // Per-cell budget-violation counts: three misses promote a cell to "repeat
+  // offender" and change the tip it gets, so carrying them between tests
+  // rewrites a later test's message.
+  _resetBudgetMisses();
   _resetMethodCancel();
   _resetSubs();
   // Module-level `signal()`s are state a test can write just as easily as a

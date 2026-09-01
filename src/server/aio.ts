@@ -127,6 +127,7 @@ import {
 import { PERSIST_SCHEMA_VERSION } from "./persist-schema.ts";
 import { deriveDataContract } from "./updates-core.ts";
 import {
+  baseDirCandidates,
   distCandidates,
   envPort,
   findFreePort,
@@ -316,7 +317,7 @@ export function _warnPinDrift(): void {
     `version: this app pins aio ${declared} (deno.json aioVersion) but is ` +
       `RUNNING ${VERSION}. Everything below — defaults, semantics, the wire ` +
       `protocol — is ${VERSION}'s. Run \`am pin ${declared}\` to get what the ` +
-      `app declares, or \`am pin --latest\` to record what it is running.`,
+      `app declares, or \`am pin latest\` to record what it is running.`,
   );
 }
 
@@ -508,15 +509,15 @@ export function _denoJsonTargetClient():
   }
 }
 
-function _inferBaseDir(): string {
-  try {
-    const main = new URL(Deno.mainModule);
-    if (main.protocol === "file:" && !isCompiled()) {
-      const dir = main.pathname.split("/").slice(0, -1).join("/");
-      if (dir) return dir;
-    }
-  } catch { /* unusual entry — fall through */ }
-  return join(Deno.cwd(), "src");
+/** THE app-dir ladder for this process, most authoritative first — see
+ *  `baseDirCandidates`, which owns the rule. Every input is read here and
+ *  nowhere downstream, so one process has one answer. */
+function _inferBaseDirs(): [string, ...string[]] {
+  return baseDirCandidates({
+    mainModule: Deno.mainModule,
+    cwd: Deno.cwd(),
+    compiled: isCompiled(),
+  });
 }
 
 /** A LogSink that writes EVERY line to stderr — installed only for
@@ -637,6 +638,9 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
       // Unwinding order: the app's own `onStop` runs FIRST, then plugins in
       // reverse, so a plugin that opened something in `onStart` closes it
       // after the app code that was using it has finished.
+      // No plugin twin: `onStopping` quiesces the APP's own producers, and a
+      // plugin that owns one closes it in its `onStop` as it always has.
+      onStopping: fc.onStopping,
       onStop: composeAsyncHooks(_plugins.onStop, fc.onStop, "stop", _pluginErr),
       _pluginNames: _plugins.names,
     } as CellsConfig;
@@ -1297,9 +1301,14 @@ async function _run<S, A, E>(
   ) return null!;
 
   // Zero-config baseDir: the main module's directory — always right for
-  // `deno run src/app.ts` regardless of cwd. Compiled binaries embed their
-  // entry, so they keep the cwd/src fallback (build sets baseDir anyway).
-  const baseDir = resolve(config.baseDir ?? _inferBaseDir());
+  // `deno run src/app.ts` regardless of cwd, and in a compiled binary the VFS
+  // directory that `compile.include` embedded the app's assets into. A binary
+  // ALSO keeps `<cwd>/src` behind it (baseDirFallbacks), so one run beside a
+  // real source tree still serves from it. An explicit `baseDir` is the app's
+  // decision and gets no ladder under it.
+  const baseDirs = _inferBaseDirs();
+  const baseDir = resolve(config.baseDir ?? baseDirs[0]);
+  const baseDirFallbacks = config.baseDir ? [] : baseDirs.slice(1);
   const VERBOSE = cli.verbose;
 
   // Prod detection
@@ -1417,8 +1426,16 @@ async function _run<S, A, E>(
     : "default";
   const useElectron = client === "electron";
   const isHeadless = client === "server-only" || client === "cli";
-  const { reduce, execute, onAction, onEffect, onStart, onStop, onError } =
-    config;
+  const {
+    reduce,
+    execute,
+    onAction,
+    onEffect,
+    onStart,
+    onStopping,
+    onStop,
+    onError,
+  } = config;
   const shouldPersist = (cli.persist ?? config.persist) !== false;
   // autoGetUIState is always defined by composeCellsWiring (ui defaults to "all"),
   // so the (s) => s fallback here is a safety net, not the primary path.
@@ -1465,12 +1482,12 @@ async function _run<S, A, E>(
   // The look is opt-in (`ui.theme` defaults to "tokens", which paints
   // nothing), so there is nothing to announce for an app that never asked.
   // An app that DID ask hears which of the two ways it landed. THE decider,
-  // not a second copy: a compiled binary's baseDir is `<cwd>/src` and its
-  // stylesheet lives in the embedded dist/, so asking only one of them made
-  // this line confidently wrong there.
+  // not a second copy: a compiled binary's stylesheet lives in the embedded
+  // dist/ while its app dir is the VFS entry dir with `<cwd>/src` behind it,
+  // so asking only one of the three made this line confidently wrong there.
   const themeNote = _themeBootNote(
     ui.theme,
-    appHasStylesheet(baseDir, distDir),
+    [baseDir, ...baseDirFallbacks].some((d) => appHasStylesheet(d, distDir)),
   );
   if (themeNote) log[themeNote.level](themeNote.message);
 
@@ -1666,16 +1683,26 @@ async function _run<S, A, E>(
     });
   }
 
-  const udsCtrl = createUdsBroadcastController({
-    getUdsHandle: () => udsHandle,
-    syncIntervalMs: udsSyncIntervalMs,
-  });
   // Cost meter (`am cost`): always on, bounded rings, zero configuration. The
   // question it answers — "what does aio move on my behalf, and where does it
   // come from" — is asked AFTER something feels slow, which is exactly when an
   // opt-in diagnostic is not enabled. See src/vitals/cost-meter.ts.
+  //
+  // Created BEFORE the UDS controller, which now attributes its own rounds:
+  // a local desktop app opens no TCP ports, so every one of its clients is on
+  // the socket and `am cost` reported an idle app (a field report).
   const costMeter = createCostMeter();
   costMeter.setKnownCells(config._cellNames ?? []);
+
+  const udsCtrl = createUdsBroadcastController({
+    getUdsHandle: () => udsHandle,
+    syncIntervalMs: udsSyncIntervalMs,
+    costMeter: () => costMeter,
+    onBroadcastRound: () => vitalsSystem?.pressureMonitor?.onBroadcastRound(),
+    // The same projection the WS path attributes from — `state` is the live
+    // binding this closure reads at send time, not a value captured now.
+    getUIState: () => getUIState(state) as Record<string, unknown> | undefined,
+  });
   // A GETTER, not the value: `record()` swaps in a new TTState per action.
   const onPerf = buildOnPerf(() => tt, vitalsSystem, costMeter);
 
@@ -2091,6 +2118,7 @@ async function _run<S, A, E>(
     diagHooks,
     getVitalsCheckTimer: () => _vitalsCheckTimer,
     getVitalsSystem: () => vitalsSystem,
+    onStopping,
     onStop,
     appLock,
     scheduleManager,
@@ -2275,6 +2303,7 @@ async function _run<S, A, E>(
       ? "electron"
       : "browser",
     baseDir,
+    baseDirFallbacks,
     expose,
     token,
     users,

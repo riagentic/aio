@@ -26,7 +26,13 @@ export type UITriggerAction =
   | "blur";
 
 function view(el: AnyEl): AnyEl {
-  return el.ownerDocument?.defaultView ?? globalThis;
+  // `el` is usually an element; it is the DOCUMENT when a key is aimed at the
+  // window (`onGlobalKey` has no element to own it). A document's
+  // `ownerDocument` is null and its own `defaultView` is the window — without
+  // that second hop the event would be constructed from `globalThis`, which is
+  // the right object in a browser and the wrong one under a harness that
+  // mounts its own window.
+  return el.ownerDocument?.defaultView ?? el.defaultView ?? globalThis;
 }
 
 function ev(el: AnyEl, name: string, init: Record<string, unknown> = {}) {

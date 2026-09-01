@@ -4,6 +4,10 @@ The traps people actually hit — each with the rule that avoids it. Honest by
 design: if something here bites you and isn't listed, that's a bug in this page
 — report it.
 
+Many of the entries below are one question read wrong: **which context is this
+code in?** aio has one syntax and six places it executes.
+[Where does this code run?](where-code-runs.md) is that map, in one table.
+
 ## State & cells
 
 **Inferred appId follows your project name.** Zero-config apps derive their

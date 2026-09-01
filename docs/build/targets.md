@@ -99,6 +99,14 @@ dist/
   manifest.json            { app, title, version, commit, dirty, buildNumber, builtAt, server, targets:[…] }
 ```
 
+**The systemd unit carries two build-machine values, on purpose and labelled.**
+`User=` and `Environment=HOME=` come from the machine that BUILT the binary, not
+the host you install on — aio has no way to know which account should run your
+service, so it says so in the file rather than deciding for you. Set `User=`
+before enabling the unit. A build with no `$USER` (a container, a CI runner)
+writes `User=REPLACE-ME`, which systemd refuses until you set it — deliberately,
+instead of defaulting to `root` because of how the build was run.
+
 Every artifact carries **the app version** right after its name —
 `major.minor.<commit count>`, `-dirty.<hash8>` when built from uncommitted
 changes — and reports the same string from `--version`, the boot line and

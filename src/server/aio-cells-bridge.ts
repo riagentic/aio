@@ -206,26 +206,45 @@ export function buildLegacyConfig(
       // e.g. `members.seed()` in onStart threw ("cell runtime not booted")
       // because the method binding happened after this hook. See aio.ts.
     }) as AioConfig<Record<string, unknown>, unknown, unknown>["onStart"],
+    // Phase 0 — before dispatch closes. Nothing of the framework's belongs
+    // here: the bridge's own teardown (logger flush, cell destroy) is
+    // after-the-fact work and stays in `onStop`. This is the app quiescing
+    // its own producers, so it is a straight pass-through.
+    onStopping: fc.onStopping,
     onStop: async () => {
-      logger?.onStop();
-      // Drain in-flight writes before clearing the singleton. Without this,
-      // the final "stopped" entry + any late error logs race the process exit
-      // and can be lost (F-3).
-      await logger?.flush();
-      setLogger(null);
-      if (appRef.current) {
-        composed.destroyAll({
-          dispatch: (a) => appRef.current!.dispatch(a),
-          getState: () => appRef.current!.getState(),
-        });
-      }
+      // THE APP'S HOOK RUNS BEFORE THE LOGGER IS TORN DOWN.
+      //
+      // It used to run LAST — after `setLogger(null)` — so every `log.*` an
+      // app made from its own `onStop` went nowhere. "Wipe secrets on the way
+      // out" and "say what was cleaned up" are the two things people do in
+      // this hook, and the second was silent: no line, no warning, no error.
+      // The comment below even describes a hook that "logged its first line
+      // and never its last", which by then could not happen at all, because
+      // there was nothing left to log to.
+      //
       // AWAITED. The orchestrator budgets this phase (5 s teardown) precisely
       // so arbitrary app code can finish; calling the hook without awaiting it
       // resolved the phase the moment the hook STARTED, and an async `onStop`
       // — a flush to a remote, a handle to close, a child to wait for — was
       // abandoned ~ms before `Deno.exit`. Measured: a 4.5 s hook logged its
       // first line and never its last, on every `am stop`.
+      // Cells first, exactly where they were: a cell's `onDestroy` runs BEFORE
+      // the app's `onStop`, and `tests/beta-promise.test.ts` pins that order.
+      // Fixing the logger needed ONE thing moved, not two — the first attempt
+      // moved this too and silently reordered a lifecycle an app can observe.
+      if (appRef.current) {
+        composed.destroyAll({
+          dispatch: (a) => appRef.current!.dispatch(a),
+          getState: () => appRef.current!.getState(),
+        });
+      }
       if (fc.onStop) await fc.onStop();
+      logger?.onStop();
+      // Drain in-flight writes before clearing the singleton. Without this,
+      // the final "stopped" entry + any late error logs race the process exit
+      // and can be lost (F-3).
+      await logger?.flush();
+      setLogger(null);
     },
     onRestore: onRestore as AioConfig<
       Record<string, unknown>,

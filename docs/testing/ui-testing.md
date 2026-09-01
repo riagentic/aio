@@ -287,6 +287,19 @@ It resolves the right document, removes itself on unmount, ignores the chord
 while focus is in an input (`ignoreInInput: false` to opt out), and is driven by
 an ordinary `ui.<anything>.press("Escape")`.
 
+From `am`, where every path names an element, the binding has its own address:
+
+```sh
+am trigger window press "Escape"
+am trigger window press "ctrl+k"
+```
+
+`window` accepts `press` / `keyDown` / `keyUp` and nothing else — a click on the
+window is not a gesture a user can make, and reporting `ok` for one would be the
+silent no-op this address exists to remove. It is not a substitute for pressing
+on an element: aiming a window-level key at an `<input>` on the surface does
+nothing at all, because `ignoreInInput` correctly skips it.
+
 ## How names are derived (deterministic)
 
 `LABEL + ROLE`, both inferred from the TSX — a pure function of the render:

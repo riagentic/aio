@@ -43,6 +43,12 @@ import { join } from "@std/path";
 /** The moving pin — `origin/main`, refreshed on every link. */
 export const MAIN = "main";
 
+/** "The newest release", as a WORD — `am pin latest`, the sibling of
+ *  {@link MAIN}. Not a ref: it RESOLVES to one through {@link latestTag},
+ *  within the app's current major unless `--major` says otherwise. The
+ *  `--latest` flag is the same act under its older spelling. */
+export const LATEST = "latest";
+
 // The pin vocabulary — where versions live, what a path pin means, and whether
 // a `dep/aio` link satisfies a pin — lives in `src/server/framework-pin.ts`,
 // because `aio doctor` reports on the same pairing and `server` may not import
@@ -177,7 +183,7 @@ export function parseVersion(tag: string): Semver | null {
  *  ONE ORDERING. This used to be a second implementation, and it disagreed with
  *  the one the in-app updater uses on 22 of 24 tried pairs — every one of them
  *  the shape this project ships (`alpha9` vs `alpha62`), because SemVer
- *  compares such identifiers as ASCII. `am pin --latest` and `updates` could
+ *  compares such identifiers as ASCII. `am pin latest` and `updates` could
  *  therefore name different releases as "newest" from the same tag list. The
  *  parsing stays here (it decides which tags are orderable AT ALL); the order
  *  comes from `updates-core`. */
@@ -196,7 +202,7 @@ export function sortVersions(tags: string[]): Semver[] {
 
 /** The newest release, optionally restricted to one major line.
  *
- *  `am pin --latest` restricts to the app's CURRENT major: crossing a major is a
+ *  `am pin latest` restricts to the app's CURRENT major: crossing a major is a
  *  breaking upgrade and must be asked for (`--major`), not delivered by a command
  *  whose name says "latest". That distinction is what makes this survive 2.0. */
 export function newestVersion(
@@ -235,7 +241,7 @@ export type EnsureResult =
 /** A LOCAL-DEV pin (`isPathPin`) is deliberately machine-specific: committing
  *  it pins teammates to a path that likely does not exist, which fails LOUDLY
  *  (ensureVersion refuses with the fix) rather than silently linking something
- *  else. `am pin --latest` returns to a reproducible tag pin. */
+ *  else. `am pin latest` returns to a reproducible tag pin. */
 export async function ensureVersion(
   root: string,
   ref: string,
@@ -252,7 +258,7 @@ export async function ensureVersion(
       ok: false,
       error: `local-dev pin ${ref} points at a path with no aio checkout ` +
         `(mod.ts not found). Restore the checkout, re-pin with ` +
-        `"am pin <path>", or return to a release: "am pin --latest".`,
+        `"am pin <path>", or return to a release: "am pin latest".`,
     };
   }
 
@@ -376,7 +382,7 @@ export async function readPin(appDir: string): Promise<string | null> {
 /** Where a pin is RECORDED. A path pin goes to the git-ignored
  *  `.aio/pin.local` (per-machine, never committed) and leaves `aioVersion`
  *  alone; a version ref goes to deno.json — and REMOVES a local override, so
- *  `am pin --latest` is really a move to that release rather than a line the
+ *  `am pin latest` is really a move to that release rather than a line the
  *  override keeps winning over. Returns what was written, for the report. */
 export async function writePin(
   appDir: string,

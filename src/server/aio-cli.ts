@@ -7,9 +7,10 @@ import { log } from "../diagnostics/logger-api.ts";
 import { teachableError } from "../diagnostics/error.ts";
 import { nearestOf } from "../state/cell-helpers.ts";
 import { findFreePort } from "./paths.ts";
+import { BUILD_BOOL_FLAGS, BUILD_VALUE_FLAGS } from "../build/build-flags.ts";
 
 /** Framework version — printed by --version, checked in tests */
-export const VERSION = "1.0.0-alpha73";
+export const VERSION = "1.0.0-alpha74";
 
 /** What `--version` prints: what this artifact IS, and what it was built with.
  *
@@ -423,6 +424,12 @@ function _parseCliUncached(args: readonly string[]): CliFlags {
       // the same mistake with higher stakes, because a flag is what an
       // operator types at 2am.
       const name = arg.split("=")[0]!;
+      // A BUILD flag typed at a running app is not a typo, it is a category
+      // error — and answering it with "did you mean --client=?" sends the
+      // reader hunting for a misspelling that is not there. The vocabulary is
+      // imported, never retyped, so the two lists cannot drift.
+      const buildOnly = _buildFlagAdvice(name);
+      if (buildOnly) throw teachableError(`unknown flag: ${arg}`, buildOnly);
       const near = nearestOf(
         name,
         known.map((k) => k.endsWith("=") ? k.slice(0, -1) : k),
@@ -442,6 +449,38 @@ function _parseCliUncached(args: readonly string[]): CliFlags {
     }
   }
   return r;
+}
+
+/** Is this flag part of the BUILD's vocabulary rather than the runtime's? If
+ *  so, say that — and name the runtime spelling where one exists.
+ *
+ *  `--headless` and `--no-electron` are the two people actually type at a
+ *  binary: both are build-time decisions baked into the artifact, and the
+ *  runtime spelling for "server, no UI" is `--client=server-only`. The old
+ *  refusal was correct and read like a misspelling, which costs the reader the
+ *  minute it takes to go looking for one. The same near-miss in the other
+ *  direction (a runtime flag passed to the build) is already a red gate —
+ *  `tests/build-flags.test.ts`. */
+function _buildFlagAdvice(name: string): string | null {
+  const RUNTIME_SPELLING: Record<string, string> = {
+    "--headless": "--client=server-only",
+    "--no-electron": "--client=browser",
+    "--service": "--client=server-only",
+    "--cli": "--client=cli",
+    "--client": "--client=browser",
+    "--electron": "--client=electron",
+  };
+  const isBuild = (BUILD_BOOL_FLAGS as readonly string[]).includes(name) ||
+    (BUILD_VALUE_FLAGS as readonly string[]).includes(name) ||
+    name === "--no-electron";
+  if (!isBuild) return null;
+  const runtime = RUNTIME_SPELLING[name];
+  return `that is a BUILD flag (\`deno task build\`), not a runtime one — it ` +
+    `is a decision baked into the artifact, so a built binary cannot be asked ` +
+    `to change it now.` +
+    (runtime
+      ? ` The runtime spelling for what it selects is \`${runtime}\`.`
+      : ` Pass it to the build instead.`);
 }
 
 /** Prints CLI usage. The usage line and the client default are the CALLER's

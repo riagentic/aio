@@ -100,6 +100,8 @@ export interface ServerSetupDeps<S, A> {
   /** The shell the app runs in (electron | browser) — for the graph evaluation. */
   shell?: "browser" | "electron";
   baseDir: string;
+  /** App dirs tried AFTER `baseDir`, in order — see `baseDirCandidates`. */
+  baseDirFallbacks?: string[];
   expose: boolean;
   token: string | undefined;
   users: Record<string, AioUser> | undefined;
@@ -294,6 +296,7 @@ export async function setupTransport<S, A>(
     distDir,
     electronDistDir,
     baseDir,
+    baseDirFallbacks,
     expose,
     token,
     users,
@@ -569,6 +572,9 @@ export async function setupTransport<S, A>(
   // set once the UDS listener exists (syncBroadcastRef pattern). Without it
   // the Electron window's time-travel panel never received a frame.
   const udsBroadcastRef: { fn: ((raw: string) => void) | null } = { fn: null };
+  // Late-bound like the broadcast fn above it, and for the same reason: the
+  // UDS server does not exist yet when the HTTP server's deps are built.
+  const udsClientsRef: { fn: (() => number) | null } = { fn: null };
 
   const server: ServerHandle = skipHttp
     ? {
@@ -604,6 +610,7 @@ export async function setupTransport<S, A>(
       loadSnapshot: (json: string) => app.loadSnapshot(json),
       blobs: deps.blobs,
       baseDir,
+      baseDirFallbacks,
       serveDirs: config.serveDirs,
       debug: (msg: string) => log.debug(msg),
       prod,
@@ -637,6 +644,7 @@ export async function setupTransport<S, A>(
       bootedCells: config._cellNames,
       callTimeouts: _getCallTimeouts(),
       udsBroadcastRef,
+      udsClientCount: () => udsClientsRef.fn?.() ?? 0,
       fullStateThreshold: config.fullStateThreshold,
       routes: config.routes,
       maxConnections: config.maxConnections,
@@ -832,6 +840,7 @@ export async function setupTransport<S, A>(
     udsRef.current = uds;
     const u = uds;
     udsBroadcastRef.fn = (raw) => u.broadcast(raw);
+    udsClientsRef.fn = () => u.clients().length;
     log.info(
       isPipePath(socketPath)
         ? `transport: named pipe at ${socketPath}`

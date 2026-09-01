@@ -8,6 +8,7 @@
 //   - dot-path excludes strip the nested value (same as the broadcast filter)
 //   - selectors see the filtered slice (no leak through computed reads)
 //   - server-side reads (bindCell — routes/effects) still see everything
+import { SIDE } from "../src/diagnostics/contexts.ts";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { cell } from "../src/state/cell-create.ts";
 import { bindCell } from "../src/state/cell-catalog.ts";
@@ -350,7 +351,10 @@ Deno.test("B7: a hidden read THROWS in dev AND in prod — the mirrored fact fie
       "b7-dev-seeds.vaultCheck",
       () => s.vaultCheck,
     );
-    assert(msg.includes("read from client context"), msg);
+    // Assert against THE vocabulary, not a literal: the message must name the
+    // side the read came from, whatever words that side is currently spelled
+    // with (src/diagnostics/contexts.ts).
+    assert(msg.includes(SIDE.client), msg);
     assertEquals(s.hasVault, true, "the mirrored non-secret fact still reads");
   } finally {
     reset();
