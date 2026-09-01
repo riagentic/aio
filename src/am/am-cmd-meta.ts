@@ -620,7 +620,7 @@ Framework version:
   pin                     Which aio version this app builds against
   pin <version>           Switch to it (provisions + relinks + records it)
   pin main                Follow the branch tip (a moving target)
-  pin --latest            Pin the newest release
+  pin latest              Pin the newest release (--latest is the same)
 
 Manual labs (a REAL desktop or device you click around in — not a gate):
   lab windows             Boot Windows in a container, mount dist/, print the
@@ -657,10 +657,13 @@ Inspect:
   surface --component=X   only that component (every instance), with its subtree
   surface --path=A/B      only that subtree, by path prefix
   surface --depth=N       cap the tree depth (0 = the component alone)
-  trigger <idx> <path> <action> [text]  Drive the live UI (click/type/setValue/press/keyDown/keyUp/hover/focus/blur/scroll) — same engine as testUI
+  trigger <idx> <path> <action> [text]  Drive the live UI (click/type/setValue/press/keyDown/keyUp/hover/focus/blur/scroll) — same engine as testUI; path "window" drives an onGlobalKey binding
                           type APPENDS to the field, setValue REPLACES it (as in testUI)
   shot [n] [--out=F.png] [--full]  PNG of the live Electron window via CDP — the app
                           must run with --cdp (or AIO_CDP=1); --json → {file,bytes,url}
+  where <file>            Which execution context this file runs in, and WHY —
+                          the import chain from the UI entry, from the same
+                          module graph the dev server walks
   sql <query>             Execute read-only SQL
   sql --tables            List SQLite tables
   tables                  The same list under its own name (= sql --tables)

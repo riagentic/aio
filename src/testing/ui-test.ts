@@ -1827,6 +1827,49 @@ async function _buildTestUI(
     return shows;
   }
 
+  /** A predicate may only read keys the cell actually has.
+   *
+   *  Field report: `expectCell(core, (c) => c.view !== null)` PASSED against a
+   *  `view` the cell does not declare — `undefined !== null` is true — so it
+   *  was "a green test for a screen that never rendered", and it cost a
+   *  debugging session to a test that was passing for the wrong reason.
+   *
+   *  `assertBooted` above already refuses a cell this mount never booted. This
+   *  is the same class one level in: the cell is booted, and the KEY is not
+   *  there. Their words, and the rule this file should be held to: "a test
+   *  kit's failure mode should never be 'silently true'."
+   *
+   *  Declared state, methods, selectors and the internals a runtime probes
+   *  (`__aio`, `then`, symbols) read through untouched; anything else throws
+   *  naming the key and what the cell does have. */
+  const guardUnknownKeys = (cell: AnyDoc, api: string): AnyDoc => {
+    const declared = new Set(
+      Object.keys((cell?.__aio?.state ?? {}) as object),
+    );
+    const id = (cell?.__aio?.id as string | undefined) ?? "?";
+    return new Proxy(cell as object, {
+      get(target, prop, recv) {
+        if (typeof prop === "symbol") return Reflect.get(target, prop, recv);
+        // A method, a selector, or anything the cell really exposes — the
+        // shape question answered with a DESCRIPTOR, never by reading the
+        // value (that would invoke a reactive getter just to ask about it).
+        if (
+          declared.has(prop) || prop.startsWith("__") || prop === "then" ||
+          Object.getOwnPropertyDescriptor(target, prop) !== undefined ||
+          prop in (Object.getPrototypeOf(target) ?? {})
+        ) return Reflect.get(target, prop, recv);
+        throw new Error(
+          `[aio] ui.${api}(): cell '${id}' has no '${String(prop)}'. Reading ` +
+            `it would be \`undefined\`, so a check like \`c.${String(prop)} ` +
+            `!== null\` passes without testing anything — a green test for a ` +
+            `screen that never rendered. It has: ${
+              [...declared].sort().join(", ") || "(no state keys)"
+            }.`,
+        );
+      },
+    }) as AnyDoc;
+  };
+
   /** A cell this mount never booted cannot be asserted against.
    *
    *  `expectCell`'s predicate receives the cell DEF, whose reactive getters
@@ -1928,6 +1971,9 @@ async function _buildTestUI(
     ) {
       await drain();
       assertBooted(cell, "expectCell");
+      // …and a key the cell does not HAVE is a broken assertion, not a false
+      // one. See `guardUnknownKeys`.
+      const subject = guardUnknownKeys(cell, "expectCell");
       // Retry briefly (like waitFor): a client-scoped cell's reactive binding
       // can land a beat after the first render, and a one-shot check read it
       // as "predicate wrong" — which sent people debugging the app instead of
@@ -1941,7 +1987,7 @@ async function _buildTestUI(
       while (true) {
         await settle();
         try {
-          if (pred(cell)) return;
+          if (pred(subject)) return;
           lastErr = undefined; // it ran; it was merely false
         } catch (e) {
           lastErr = e;

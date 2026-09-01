@@ -77,3 +77,53 @@ Deno.test("tests: the suite is running against a pinned data home", () => {
     `expected app paths under the test home, got ${probe}`,
   );
 });
+
+Deno.test("tests: no test writes into the repo root", () => {
+  // A test that writes a file into the shared cwd changes another test's
+  // ANSWER. `am.test.ts` wrote `.aio.log` there, and `logPathFor` resolves that
+  // exact relative path as its legacy candidate — so
+  // `am-log-finds-the-app-log` intermittently asserted against a file a
+  // different test file had just created. It passed alone and failed in the
+  // suite, which is the shape that makes a release run untrustworthy (and cost
+  // a field report an hour of exactly that).
+  //
+  // Write into a temp dir and give the subprocess `cwd`. There is no case that
+  // needs the repo root.
+  const offenders: string[] = [];
+  for (const e of Deno.readDirSync(new URL("./", import.meta.url))) {
+    if (!e.isFile || !/\.test\.tsx?$/.test(e.name)) continue;
+    const raw = Deno.readTextFileSync(
+      new URL(`./${e.name}`, import.meta.url),
+    );
+    // A file that takes responsibility for its own cwd is doing the right
+    // thing — the relative write then lands in ITS temp dir, which is the
+    // pattern this gate exists to encourage.
+    if (/Deno\.chdir\(/.test(raw)) continue;
+    // Template literals are DATA — fixture SOURCE handed to a scanner or
+    // written into a child script — not code this file runs. Blanked with
+    // offsets kept, so a real finding still names its line. (Same reasoning as
+    // the comment exemption in tests/context-vocabulary.test.ts: a rule that
+    // cannot tell a program from a program it is quoting reports noise, and a
+    // gate with false positives gets switched off.)
+    const src = raw.replace(
+      /`(?:[^`\\]|\\.)*`/g,
+      (m) => m.replace(/[^\n]/g, " "),
+    );
+    // A bare relative path handed to a writer — no `join(dir, …)`, no `/tmp`.
+    for (
+      const m of src.matchAll(
+        /Deno\.(?:writeTextFile|writeFile|mkdir|create)(?:Sync)?\(\s*"(\.[^"]*|[A-Za-z0-9_][^"/]*)"/g,
+      )
+    ) {
+      const line = src.slice(0, m.index).split("\n").length;
+      offenders.push(`tests/${e.name}:${line} — writes "${m[1]}"`);
+    }
+  }
+  assertEquals(
+    offenders,
+    [],
+    "write into a temp dir and pass it as the subprocess `cwd`; a file in the " +
+      "repo root is visible to every other test file:\n  " +
+      offenders.join("\n  "),
+  );
+});

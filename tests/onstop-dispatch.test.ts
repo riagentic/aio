@@ -13,7 +13,8 @@
 // that turns it from noise into an instruction.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { cell } from "../mod.ts";
-import { testServer } from "../src/testing/server-test.ts";
+import { freePort, testServer } from "../src/testing/server-test.ts";
+import { join } from "@std/path";
 import { createDispatch } from "../src/state/dispatch.ts";
 import { _setUserStopHookActive } from "../src/state/dispatch.ts";
 
@@ -92,4 +93,60 @@ Deno.test("onStop: the hook still runs, and a plain call inside it works", async
   }
   assert(plainRan, "onStop itself must still run — nothing here changes that");
   assert(locked);
+});
+
+// ── …and it can SAY what it did ─────────────────────────────────────
+//
+// The other half, found by running an app and stopping it rather than by
+// reading the code. `onStop` is where "wipe secrets on the way out" and "say
+// what was cleaned up" both live, and the second was silent: the cells bridge
+// ran `setLogger(null)` EIGHT LINES before it called the app's hook, so every
+// `log.*` from `onStop` went nowhere — no line, no warning, no error.
+//
+// The comment above that call even describes a hook that "logged its first
+// line and never its last", a symptom that by then could not occur, because
+// there was nothing left to log to.
+Deno.test("onStop: the app's hook runs while the logger is still attached", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "aio-onstop-log-" });
+  try {
+    const c = cell("onstoplog", {
+      state: { n: 0 },
+      methods: {
+        bump(s: { n: number }) {
+          s.n++;
+        },
+      },
+    });
+    const { log } = await import("../mod.ts");
+    let ranAt = -1;
+    const { aio } = await import("../mod.ts");
+    const app = await aio.run({
+      cells: [c],
+      appId: "onstop-log-app",
+      client: "server-only",
+      libraryMode: true,
+      appDir: dir,
+      port: freePort(),
+      onStop: () => {
+        ranAt = Date.now();
+        log.info("ONSTOP_MARKER cleaned up");
+      },
+      // deno-lint-ignore no-explicit-any
+    } as any);
+    await app.close();
+    assert(ranAt > 0, "the hook must run at all");
+
+    // The DISK, because that is where an operator reads it. A hook that logs
+    // into a detached sink is indistinguishable from a hook that did not run.
+    const text = await Deno.readTextFile(join(dir, "logs", "app.log"));
+    assertStringIncludes(text, "ONSTOP_MARKER cleaned up");
+    // …and it lands BEFORE the framework's own "stopped" line, so the order a
+    // reader sees is the order things happened.
+    assert(
+      text.indexOf("ONSTOP_MARKER") < text.lastIndexOf("stopped"),
+      "the app's own hook logs before the framework reports it stopped",
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
+  }
 });

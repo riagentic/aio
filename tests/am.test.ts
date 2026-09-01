@@ -702,12 +702,19 @@ Deno.test("am-cli: help — lists commands", async () => {
 });
 
 Deno.test("am-cli: logs — reads .aio.log", async () => {
-  // Write a temporary log file
+  // In a cwd of ITS OWN. `.aio.log` is a legacy candidate resolved relative to
+  // the process cwd, so writing one into the repo root put a file every other
+  // test file could see — `am-log-finds-the-app-log` asserts what
+  // `logPathFor` returns when neither current file exists, and intermittently
+  // got this one instead. A test must not leave shared state where another
+  // test's answer changes because of it.
+  const cwd = await Deno.makeTempDir({ prefix: "aio-amlog-cwd-" });
   const logContent = "line1 hello\nline2 world\nline3 error found\n";
-  await Deno.writeTextFile(".aio.log", logContent);
+  await Deno.writeTextFile(join(cwd, ".aio.log"), logContent);
   try {
     const result = await new Deno.Command("deno", {
       args: ["run", "-A", "--unstable-kv", amScript, "--json", "logs"],
+      cwd,
       stdout: "piped",
       stderr: "piped",
     }).output();
@@ -717,15 +724,20 @@ Deno.test("am-cli: logs — reads .aio.log", async () => {
     assertEquals(data.total, 4); // 3 lines + trailing empty
     assertEquals(data.lines.length > 0, true);
   } finally {
-    await Deno.remove(".aio.log").catch(() => {});
+    await Deno.remove(cwd, { recursive: true }).catch(() => {});
   }
 });
 
 Deno.test("am-cli: logs — filter works", async () => {
-  await Deno.writeTextFile(".aio.log", "info: ok\nerror: bad\ninfo: fine\n");
+  const cwd = await Deno.makeTempDir({ prefix: "aio-amlog-cwd2-" });
+  await Deno.writeTextFile(
+    join(cwd, ".aio.log"),
+    "info: ok\nerror: bad\ninfo: fine\n",
+  );
   try {
     const result = await new Deno.Command("deno", {
       args: ["run", "-A", "--unstable-kv", amScript, "--json", "logs", "error"],
+      cwd,
       stdout: "piped",
       stderr: "piped",
     }).output();
@@ -735,7 +747,7 @@ Deno.test("am-cli: logs — filter works", async () => {
     assertEquals(data.filter, "error");
     assertEquals(data.lines.every((l: string) => l.includes("error")), true);
   } finally {
-    await Deno.remove(".aio.log").catch(() => {});
+    await Deno.remove(cwd, { recursive: true }).catch(() => {});
   }
 });
 

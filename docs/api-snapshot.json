@@ -97,7 +97,7 @@
         },
         "CellsConfig": {
           "kind": "typeAlias",
-          "sig": "21cdd0d7d641f588"
+          "sig": "f8e35d6af1bdd950"
         },
         "CellStatus": {
           "kind": "typeAlias",
@@ -445,7 +445,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "942c3eff89813cb4"
+          "sig": "5cef9bbb5b22185c"
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -774,6 +774,10 @@
         "Suspense": {
           "kind": "variable",
           "sig": "1588a0f075829371"
+        },
+        "trackedMemo": {
+          "kind": "function",
+          "sig": "fe816ee9e6d6fa2b"
         },
         "Transition": {
           "kind": "function",
@@ -1246,7 +1250,7 @@
         },
         "AioErrorContext": {
           "kind": "typeAlias",
-          "sig": "9f63e69a906aac14"
+          "sig": "52cbdcba2f0fd6f1"
         },
         "AioErrorSource": {
           "kind": "typeAlias",

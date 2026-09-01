@@ -1,5 +1,6 @@
 // Shared dispatch loop — used by both aio.ts (server) and standalone.ts (Android)
 // Re-entrant-safe: effects can call dispatch(), actions are queued and drained in order
+import { WHERE_HINT } from "../diagnostics/contexts.ts";
 import type { ScheduleEffect } from "./schedule.ts";
 import type { OwnEffect } from "./own.ts";
 import { isFrameworkCell } from "./framework-cells.ts";
@@ -260,6 +261,42 @@ type DispatchFn<A> = ((action: A) => Promise<unknown>) & {
 };
 
 /** Creates a re-entrant-safe dispatch loop that drains queued actions in order */
+/** How many budget violations each cell has produced, and whether it has
+ *  crossed into "this is what this cell always does".
+ *
+ *  THREE, not two: a cold start, a first big import and one unlucky GC are
+ *  each a single slow tick, and advising a thread on the strength of one is
+ *  how a hint becomes noise. Bounded — a runaway app must not grow this map
+ *  without limit, and the cells that matter here are few.
+ *
+ *  Field report: `worker: true` "removed more of my code than anything else in
+ *  aio… the only criticism is discoverability: I hand-rolled first and found
+ *  the built-in later." */
+const _budgetMisses = new Map<string, number>();
+const BUDGET_REPEAT_AT = 3;
+const BUDGET_MISS_CELLS_MAX = 64;
+
+function _countBudgetMiss(cell: string): boolean {
+  const n = (_budgetMisses.get(cell) ?? 0) + 1;
+  if (_budgetMisses.size >= BUDGET_MISS_CELLS_MAX && !_budgetMisses.has(cell)) {
+    return false;
+  }
+  _budgetMisses.set(cell, n);
+  return n >= BUDGET_REPEAT_AT;
+}
+
+/** @internal tests — the counter is process-global. */
+// aio-ok: test seam — tests/budget-worker-hint.test.ts pins the threshold and the bound
+export function _resetBudgetMisses(): void {
+  _budgetMisses.clear();
+}
+
+/** @internal tests — the threshold rule itself, without a dispatcher. */
+// aio-ok: test seam — tests/budget-worker-hint.test.ts pins THREE and the cell cap
+export function _budgetMissCount(cell: string): boolean {
+  return _countBudgetMiss(cell);
+}
+
 export function createDispatch<S, A, E>(
   deps: DispatchDeps<S, A, E>,
 ): DispatchFn<A> {
@@ -384,7 +421,17 @@ export function createDispatch<S, A, E>(
           ? " (async method: only the SYNC prefix before the first await counts here)"
           : "") +
         hatch,
-      { cellName: type?.split(":")[0], actionType: type, duration, budget },
+      {
+        cellName: perfCell,
+        actionType: type,
+        duration,
+        budget,
+        // A cell that blows the SAME budget again is a different problem from
+        // one slow call, and has a different answer — `worker: true` rather
+        // than `blocking()`. Counted here because this is where the violations
+        // pass; the remedy stays in `errorTip`, once. See `workerHint`.
+        repeatOffender: perfCell ? _countBudgetMiss(perfCell) : false,
+      },
     );
     reportAioError(err, _reportOpts);
     if (perfLog) {
@@ -520,7 +567,18 @@ export function createDispatch<S, A, E>(
             phase === "draining"
               ? `dispatch is draining — '${t}' is new input and was refused ` +
                 `(further drops of this type suppressed; ${closedDropCount} ` +
-                `dropped so far)`
+                `dropped so far)` +
+                // Name the fix, not just the refusal. This fires for a
+                // producer the app still has running — a raw timer, a poller,
+                // a promise `finally` that writes back — and `onStop` cannot
+                // prevent it: by the time onStop runs, this line is already
+                // logged. `onStopping` is the hook that runs while dispatch
+                // is still open, which is the only moment an app can stop it.
+                `\n  A producer of yours is still dispatching while the app ` +
+                `closes. Stop it in \`onStopping\` — the hook that runs BEFORE ` +
+                `dispatch closes, so a write from it is still admitted and ` +
+                `still persisted. (\`onStop\` is too late: it runs after the ` +
+                `drain.)\n  ${WHERE_HINT}`
               : lostWrite
               ? `dispatch is sealed — '${t}' is an in-flight write that ` +
                 `arrived after the final persist read the state; it is LOST ` +
@@ -532,7 +590,9 @@ export function createDispatch<S, A, E>(
                     `AFTER the final persist, so a write from it could not ` +
                     `be saved even if it were admitted — call the plain ` +
                     `function instead of the cell method (the state half is ` +
-                    `already gone), or do the work before shutdown.`
+                    `already gone), move the dispatch to \`onStopping\` ` +
+                    `(which runs before dispatch closes, and IS persisted), ` +
+                    `or do the work before shutdown.\n  ${WHERE_HINT}`
                   : ""),
           );
         }
@@ -546,7 +606,8 @@ export function createDispatch<S, A, E>(
               "dispatch is draining — the app is closing: methods already " +
                 "running are finishing their writes and the final persist " +
                 "captures them; this action is NEW input and was refused, " +
-                "not applied",
+                "not applied. Quiesce the producer in `onStopping`, which " +
+                "runs while dispatch is still open",
               { actionType: a?.type as string },
             )
             : createAioError(

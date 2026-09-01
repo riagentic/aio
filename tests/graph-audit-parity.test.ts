@@ -41,6 +41,7 @@ import {
 import { transpile } from "../src/server/server-transpile.ts";
 import { buildBrowserImportMap } from "../src/server/server-html-importmap.ts";
 import { ESBUILD_SPEC } from "../src/build/esbuild-shared.ts";
+import { BUNDLE_ENTRY_KEY } from "../src/build/client-bundle.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const _childCovDir = Deno.env.get("DENO_COVERAGE_DIR") ??
@@ -590,4 +591,74 @@ Deno.test("evaluateBundle: a browser's globals, not a worker's — Buffer/proces
   const hang = await evaluateBundle(`await new Promise(() => {});`, "esm", 200);
   assertEquals(hang.ok, false);
   if (!hang.ok) assertEquals(hang.name, "timeout");
+});
+
+// THE beginner mistake, and the error it used to get.
+//
+// `export function App()` instead of `export default function App()` is the
+// first thing anyone gets wrong. esbuild answers it against ITS OWN generated
+// entry — a file the user never wrote — and the generic fix line explained the
+// mechanism ("the prod bundle is built from the same files dev serves")
+// instead of the edit. Found by scaffolding an app and making the mistake, not
+// by reading the code.
+Deno.test({
+  name: "graph: a UI entry with no default export names the FILE and the EDIT",
+  sanitizeOps: false, // aio-ok: esbuild's service is a shared child stopped once per test
+  fn: async () => {
+    const dir = await makeApp({
+      "App.tsx": `export function App() { return <div>hi</div>; }\n`,
+    });
+    try {
+      const { valid, refused } = await validatorVerdict(dir);
+      assertEquals(valid, false, "a bundle that cannot build must refuse");
+      assertEquals(refused.length, 1);
+      const e = refused[0]!;
+      // The user's file, not the synthetic one.
+      assertStringIncludes(e.message, "App.tsx has no DEFAULT export");
+      // …and the reason the OTHER filename appears at all, said out loud, so
+      // nobody goes looking for `_build_entry.tsx` in their own tree.
+      assertStringIncludes(e.message, BUNDLE_ENTRY_KEY);
+      assertStringIncludes(e.message, "a file you did not write");
+      // The FIX is an edit that can be typed, in both shapes people write.
+      assertStringIncludes(e.fix, "export default function App()");
+      assertStringIncludes(e.fix, "export default App;");
+      // It must NOT fall through to the generic mechanism sentence.
+      assert(
+        !e.fix.includes("built from the same files dev serves"),
+        `the generic fix explains the mechanism, not the edit: ${e.fix}`,
+      );
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
+Deno.test({
+  name: "graph: an UNRELATED bundle failure keeps the generic explanation",
+  sanitizeOps: false, // aio-ok: esbuild's service is a shared child stopped once per test
+  fn: async () => {
+    // The translation must be narrow. A different esbuild failure still gets
+    // the sentence that is true of all of them — a special case that swallowed
+    // the general one would be worse than no special case.
+    // A NAMED export that does not exist — same esbuild error family ("No
+    // matching export"), different import, so it must NOT be translated into
+    // the default-export advice. A special case that swallowed its neighbours
+    // would be worse than no special case.
+    const dir = await makeApp({
+      "helper.ts": `export const there = 1;\n`,
+      "App.tsx": `import { notThere } from "./helper.ts";\n` +
+        `export default function App() { return <div>{notThere}</div>; }\n`,
+    });
+    try {
+      const { refused } = await validatorVerdict(dir);
+      assertEquals(refused.length, 1, JSON.stringify(refused));
+      assertStringIncludes(refused[0]!.fix, "esbuild cannot resolve");
+      assert(
+        !refused[0]!.message.includes("no DEFAULT export"),
+        refused[0]!.message,
+      );
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
 });

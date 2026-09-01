@@ -61,6 +61,7 @@ function stubRefs(over: Partial<ShutdownRefs> = {}): Trace {
     },
     getVitalsCheckTimer: () => undefined,
     getVitalsSystem: () => ({ destroy: mark("vitals") }),
+    onStopping: undefined,
     onStop: mark("hook"),
     appLock: { release: mark("lock") },
     scheduleManager: { cancelAll: mark("schedules") },
@@ -264,4 +265,84 @@ Deno.test("shutdown: order is persist → diag → hooks → lock → server →
   assert(at("lock") < at("sqlite"));
   assert(at("server") < at("sqlite"), "stop accepting before closing the db");
   assertEquals(done.at(-1), "running:false");
+});
+
+// ── Phase 0: onStopping ─────────────────────────────────────────────────────
+//
+// The hook exists because `onStop` cannot do its job: Phase 1 closes dispatch
+// and drains, user hooks are Phase 5, so an app that dispatches from a raw
+// timer or a promise `finally` lands in the drain window and earns
+// "dispatch is draining — '<action>' is new input and was refused". By the time
+// onStop runs the refusal is already logged. The only userland signal that
+// fired early enough was onConnect/onDisconnect — a transport event doing a
+// lifecycle job, and an ordering that was never a contract.
+
+Deno.test("shutdown: onStopping runs while dispatch is still open", async () => {
+  const { refs, done } = stubRefs({
+    onStopping: () => {
+      done.push("quiesce");
+    },
+  });
+  const { shutdown } = createShutdownOrchestrator(refs);
+  assertEquals(await within(shutdown(), BOUND_MS), undefined);
+  // BEFORE the mark and BEFORE the close — both, or a write from the hook is
+  // either refused (close) or dropped by the final persist (mark).
+  assert(done.includes("quiesce"), `onStopping must run — got ${done}`);
+  assert(
+    done.indexOf("quiesce") < done.indexOf("setShuttingDown"),
+    `onStopping must run before the state is marked — got ${done}`,
+  );
+  assert(
+    done.indexOf("quiesce") < done.indexOf("dispatch.close"),
+    `onStopping must run before dispatch closes — got ${done}`,
+  );
+  // …and it is the FIRST thing that happens, so nothing shutdown does can
+  // change what the app sees while it quiesces.
+  assertEquals(done[0], "quiesce");
+});
+
+Deno.test("shutdown: onStopping is awaited, and bounded like every other phase", async () => {
+  // Awaited: a hook that resolves late must still be finished before dispatch
+  // closes, or the hook is decorative — it would be quiescing into a window
+  // that had already shut.
+  let finished = false;
+  const { refs, done } = stubRefs({
+    onStopping: async () => {
+      await new Promise((r) => setTimeout(r, 50));
+      finished = true;
+    },
+  });
+  const { shutdown } = createShutdownOrchestrator(refs);
+  assertEquals(await within(shutdown(), BOUND_MS), undefined);
+  assert(finished, "onStopping must be awaited, not fired and forgotten");
+  assertEquals(done[0], "setShuttingDown");
+
+  // Bounded: app code that never resolves must not become a process that never
+  // dies — the same rule Phase 5 already lives under.
+  const stuck = stubRefs({ onStopping: never });
+  const s2 = createShutdownOrchestrator(stuck.refs);
+  assertEquals(await within(s2.shutdown(), BOUND_MS), undefined);
+  for (const step of TAIL) {
+    assert(
+      stuck.done.includes(step),
+      `'${step}' must still run — got ${stuck.done}`,
+    );
+  }
+});
+
+Deno.test("shutdown: a throwing onStopping does not abandon the shutdown", async () => {
+  const { refs, done, errors } = stubRefs({
+    onStopping: () => {
+      throw new Error("producer refused to stop");
+    },
+  });
+  const { shutdown } = createShutdownOrchestrator(refs);
+  assertEquals(await within(shutdown(), BOUND_MS), undefined);
+  assert(
+    errors.some((e) => e.includes("producer refused to stop")),
+    `the throw must be reported, not swallowed — got ${errors}`,
+  );
+  for (const step of TAIL) {
+    assert(done.includes(step), `'${step}' must still run — got ${done}`);
+  }
 });

@@ -10,7 +10,8 @@ export interface MetricsInput {
   uptimeSeconds: number;
   /** Deno.memoryUsage() snapshot */
   memory?: { rss: number; heapTotal: number; heapUsed: number };
-  /** Connected WS client count */
+  /** Connected clients, BOTH transports — a desktop app's are all on the
+   *  UDS socket, and this read 0 for that whole target. */
   clients?: number;
   /** Per-cell health: errors + enabled flag */
   cells?: Record<string, { errors: number; enabled: boolean }>;
@@ -48,7 +49,7 @@ export function formatPrometheus(m: MetricsInput): string {
   }
 
   if (m.clients !== undefined) {
-    gauge("aio_clients_connected", "Connected WebSocket clients", m.clients);
+    gauge("aio_clients_connected", "Connected clients (WS + UDS)", m.clients);
   }
 
   if (m.cells && Object.keys(m.cells).length > 0) {

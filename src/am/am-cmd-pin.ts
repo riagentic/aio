@@ -6,7 +6,7 @@
  *                           linked to, and which versions are available
  *   am pin v1.0.0-alpha38   pin that version: provision it, relink, record it
  *   am pin main             follow the branch tip (explicitly a moving target)
- *   am pin --latest         pin the newest release
+ *   am pin latest           pin the newest release (`--latest` is the same)
  *   am pin <path>           LOCAL-DEV pin: follow a framework checkout on this
  *                           machine (`am pin /opt/aio-checkout`) — for
  *                           developing an app against a WIP framework
@@ -36,6 +36,7 @@ import {
   currentLink,
   ensureVersion,
   knownTags,
+  LATEST,
   latestTag,
   linkTo,
   MAIN,
@@ -107,11 +108,9 @@ function render(info: PinInfo, tags: string[]): string {
   const linked = info.linkedPath
     ? (info.linkedRef ?? info.linkedPath)
     : "nothing yet";
-  // The RANGE is over orderable releases only: `main-<sha>` has no position,
-  // so "main-1d98… … v1.0.0-alpha72" was not a range, it was two strings.
-  // `sortVersions` returns parsed Semvers, not the tags — the RANGE wants the
-  // tags back, newest first, and only the orderable ones (`main-<sha>` has no
-  // position, so pairing it with a release was never a range).
+  // The RANGE is over orderable releases only, and `sortVersions` returns
+  // parsed Semvers rather than the tags — so map back to `raw`. `main-<sha>`
+  // has no position, and pairing it with a release was never a range.
   const avail = sortVersions(info.available).map((v) => v.raw);
   const loose = info.available.length - avail.length;
   const facts = kv([
@@ -158,7 +157,7 @@ function render(info: PinInfo, tags: string[]): string {
       "A clone of this repo builds against whatever aio happens to be " +
         "installed on that machine, which is how the same source produces two " +
         "different apps.",
-      "am pin --latest",
+      "am pin latest",
     ),
     !info.linkedPath && info.pinned &&
     block(
@@ -174,7 +173,7 @@ function render(info: PinInfo, tags: string[]): string {
       "info",
       `${count(info.behind, "release")} behind ${info.latest}.`,
       "This app keeps building as pinned — nothing changes until you move it.",
-      "am pin --latest",
+      "am pin latest",
     ),
   ].filter((b): b is string => typeof b === "string");
 
@@ -182,11 +181,41 @@ function render(info: PinInfo, tags: string[]): string {
     facts,
     ...warnings,
     hints([
+      ["am pin latest", "the newest release in this app's major"],
       ["am pin <version>", "switch this app (provisions + relinks)"],
       ["am pin main", "follow the branch tip (a moving target)"],
       ["am pin <path>", "follow a framework checkout on this machine"],
     ]),
   );
+}
+
+/** What `am pin`'s arguments ask for: the newest release, or an explicit ref.
+ *
+ *  `latest` is a WORD, the sibling of `main`. Every other target of this
+ *  command is one — `am pin main`, `am pin v1.0.0-alpha73`, `am pin
+ *  /opt/aio-checkout` — so "the newest release" was the only one that demanded
+ *  a flag, and the spelling a user reaches for first (`am pin latest`, by
+ *  analogy with the line right above it in the help) failed with
+ *  `aio version "latest" not found`, listing the very releases it was asking
+ *  for. `--latest` keeps working: it is in shipped docs and in every upgrade
+ *  guide, and there is no reason to break it.
+ *
+ *  The word cannot shadow a real ref: `latestTag()` resolves over PARSEABLE
+ *  versions only, so a git tag literally named `latest` is not reachable as a
+ *  pin target through any path — `main` is the spelling for a moving ref.
+ *
+ *  `--aio <path>` carries its value as a SEPARATE argument, and that value is
+ *  a path, never the ref this scan is looking for — hence `withoutAioFlag`.
+ *
+ *  Pure, so one test pins both spellings to the same act. */
+export function pinTarget(
+  args: string[],
+): { wantLatest: boolean; explicit: string | undefined } {
+  const positional = withoutAioFlag(args).find((a) => !a.startsWith("--"));
+  return {
+    wantLatest: args.includes("--latest") || positional === LATEST,
+    explicit: positional === LATEST ? undefined : positional,
+  };
 }
 
 /** One reason a target version would break this app. */
@@ -341,10 +370,7 @@ export async function cmdPin(
     Deno.exit(1);
   }
 
-  const wantLatest = args.includes("--latest");
-  // `--aio <path>` carries its value as a separate argument, and that value is
-  // a PATH — never the version ref this positional scan is looking for.
-  const explicit = withoutAioFlag(args).find((a) => !a.startsWith("--"));
+  const { wantLatest, explicit } = pinTarget(args);
   const pinned = await readPin(appDir);
 
   // No target → report only. Never changes anything, so it is safe to run
@@ -362,7 +388,7 @@ export async function cmdPin(
   // keeps linking THIS checkout — the recorded form of `am link --aio=<path>`,
   // for developing an app against a work-in-progress framework. It is
   // machine-specific by nature; ensureVersion fails LOUDLY on a machine where
-  // the path does not exist, and `am pin --latest` returns to a release.
+  // the path does not exist, and `am pin latest` returns to a release.
   if (
     ref !== "" &&
     (isPathPin(ref) || ref.startsWith("/") || ref.startsWith("./") ||
@@ -377,7 +403,7 @@ export async function cmdPin(
     console.error(
       `⚠ local-dev pin — this machine only: recorded in ${LOCAL_PIN_FILE} ` +
         `(git-ignored), deno.json untouched. Return to a release with ` +
-        `"am pin --latest".`,
+        `"am pin latest".`,
     );
   }
   if (wantLatest) {
@@ -393,7 +419,7 @@ export async function cmdPin(
       outError(
         major === undefined
           ? `no release tags found in ${root} — use \`am pin main\``
-          : `no releases in the ${major}.x line. \`am pin --latest --major\` ` +
+          : `no releases in the ${major}.x line. \`am pin latest --major\` ` +
             `crosses to the newest major (a BREAKING upgrade — read the upgrade guide).`,
         mode,
       );
@@ -510,7 +536,7 @@ export async function cmdPin(
           : "") +
         (wrote.file === "deno.json"
           ? `  commit deno.json so a clone builds against the same version`
-          : `  commit nothing — \`am pin --latest\` returns to a release`)
+          : `  commit nothing — \`am pin latest\` returns to a release`)
       : {
         pinned: res.ref,
         requested: ref,

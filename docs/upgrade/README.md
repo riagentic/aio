@@ -12,6 +12,12 @@ reason to keep one (gated by `deno task check:docs`).
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha73 → alpha74](from-alpha73-to-alpha74.md) — nothing breaks: a compiled
+  binary serves the assets it embedded, `am cost`/`am status`/`/__aio/metrics`
+  and the big-state guardrail all see the UDS transport a desktop app actually
+  uses, `least-privilege run flags` describes a binary that boots, and the
+  generated systemd unit stops picking an account for you — plus `onStopping`,
+  `trackedMemo`, `am where`, and three new `aiol` rules.
 - [alpha72 → alpha73](from-alpha72-to-alpha73.md) — nothing breaks: one
   presentation vocabulary for every surface aio shows a person (`am`, the build,
   the log, errors, the linter, the installers), colour that honours `NO_COLOR`

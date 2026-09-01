@@ -33,6 +33,19 @@ const OWNERS: Record<string, [Owner, string]> = {
   _resetCellBindings: ["RUNTIME", "cell→signal bindings"],
   _resetCallTimeouts: ["RUNTIME", "per-call timeout registry"],
   _resetDegraded: ["RUNTIME", "process-global degraded registry"],
+  _resetBigStateWarnings: [
+    "MANUAL",
+    "the once-per-cell big-state latch. It lives in src/server/ and the one " +
+    "call — _resetAioRuntime — is in src/state/, which may not import server " +
+    "(the boundary matrix). Loosening a red gate to save one line is the " +
+    "wrong trade, so the one test that fires the warning clears it itself",
+  ],
+  _resetBudgetMisses: [
+    "RUNTIME",
+    "per-cell budget-violation counts — three misses promote a cell to " +
+    "'repeat offender', and carrying them between tests changes a later " +
+    "test's message",
+  ],
   _resetMethodCancel: ["RUNTIME", "cancellation registry"],
   _resetSubs: ["RUNTIME", "subscription registry"],
   _resetRootSignals: ["RUNTIME", "module-scope signal state"],

@@ -34,6 +34,7 @@ import {
 } from "./renderer-state.ts";
 import { _flushPending } from "./renderer-flush.ts";
 import { _componentName } from "./hook-error.ts";
+import { count } from "../diagnostics/fmt.ts";
 
 // ── Schedule ──────────────────────────────────────────────────────────
 
@@ -263,6 +264,10 @@ export function _rerenderComponent(inst: ComponentInstance): void {
     _subscribeComponentDeps(inst, deps);
   }
 
+  if (_isDev() && typeof vnode.tag === "function") {
+    _warnIfLostSubscription(vnode.tag as ComponentFn, inst, deps);
+  }
+
   // AIO-167 diagnostic: warn if component has no signal deps after re-render
   if (_devMode && deps.size === 0 && inst.unsubs.length === 0) {
     const name = typeof vnode.tag === "function"
@@ -273,6 +278,63 @@ export function _rerenderComponent(inst: ComponentInstance): void {
     );
   }
 }
+
+// ── The memo that silently unsubscribes ──────────────────────────────
+//
+// One cell is one signal, so any list large enough to matter forces an app to
+// memoize — and a cache that returns a HIT without touching the cell subscribes
+// to nothing, permanently, for that component instance. The instance that got
+// the miss works forever; the one that got the hit is dead forever. From the
+// same cache, in the same frame.
+//
+// The existing zero-dep warning (below, AIO-167) cannot see it: it fires on the
+// RE-render path, and this component never re-renders — that IS the symptom.
+//
+// A plain "0 deps on first render" warning would be noise: a static component
+// legitimately reads nothing. What is NOT ambiguous is the same component
+// function rendering with deps in one instance and none in another — a static
+// component reads zero everywhere. So that comparison is the tell, and it costs
+// one number per component function. Dev only, observe-only.
+//
+// Gated on `__aioDev` — the flag the dev server and every test harness set —
+// rather than the renderer's own `_devMode`, which nothing in the framework
+// ever turns on (it is `setDevMode`, an app's opt-in). A warning behind a flag
+// nobody sets is a warning that does not exist; `memo.ts`, `form.ts` and
+// `renderer-flush.ts` already read `__aioDev` for exactly this reason.
+const _maxDepsSeen = new WeakMap<ComponentFn, number>();
+
+function _isDev(): boolean {
+  return (globalThis as Record<string, unknown>).__aioDev === true;
+}
+
+function _warnIfLostSubscription(
+  tag: ComponentFn,
+  inst: ComponentInstance,
+  deps: Set<unknown>,
+): void {
+  const seen = _maxDepsSeen.get(tag) ?? 0;
+  if (deps.size > seen) {
+    _maxDepsSeen.set(tag, deps.size);
+    return;
+  }
+  // Subscribed through something other than a tracked read (a manual
+  // `subscribe`) — not this bug.
+  if (deps.size > 0 || seen === 0 || inst.unsubs.length > 0) return;
+  if (_warnedLostSub.has(tag)) return;
+  _warnedLostSub.add(tag);
+  console.warn(
+    `[aio-dev] <${
+      tag.name || "Anonymous"
+    }> rendered reading NO signals, while another instance of it read ` +
+      `${count(seen, "signal")} — this instance will never re-render.\n` +
+      `  A read is tracked only while the component body runs, so a cache ` +
+      `that returns a HIT without touching the cell subscribes to nothing. ` +
+      `Use \`trackedMemo\` from "aio/air", which replays the recorded read ` +
+      `set on a hit, or read one key of every input cell on every call. ` +
+      `See docs/ui/reactivity-tracking.md.`,
+  );
+}
+const _warnedLostSub = new WeakSet<ComponentFn>();
 
 // ── Subscribe component instance to its deps ─────────────────────────
 
@@ -488,6 +550,9 @@ export function _createHooks(rootState: RootState): VDomHooks {
         inst._dtLastMs = performance.now() - hs.dtStart;
       }
       _subscribeComponentDeps(inst, hs.deps!);
+      if (_isDev() && typeof vnode.tag === "function") {
+        _warnIfLostSubscription(vnode.tag as ComponentFn, inst, hs.deps!);
+      }
       _instanceStack.push(inst);
 
       // AIO-390: onMount must run AFTER the component's DOM subtree (and refs)

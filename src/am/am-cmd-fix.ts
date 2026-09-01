@@ -585,7 +585,7 @@ export async function cmdFix(
             `was unpinned — recorded "aioVersion": "${ref}" (dep/aio links a ` +
               `local checkout, so a version pin would contradict the link). ` +
               `Machine-specific by design — pin a release with ` +
-              `\`am pin --latest\` before sharing the app`,
+              `\`am pin latest\` before sharing the app`,
           );
         }
       } else {
@@ -633,7 +633,7 @@ export async function cmdFix(
             `${count(behind, "release")} behind ${await latestTag(
               install,
             )} — ` +
-              `\`am pin --latest\` moves it (it checks for removed APIs first)`,
+              `\`am pin latest\` moves it (it checks for removed APIs first)`,
           );
         }
       }

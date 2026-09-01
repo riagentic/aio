@@ -5,6 +5,8 @@
 - [Architecture](architecture.md) — module map, data flow, key boundaries
 - [Quickstart](quickstart.md) — install and run your first app
 - [Core Concepts](concepts.md) — mental model and framework rules
+- [Where does this code run?](where-code-runs.md) — the six execution contexts,
+  one table: `Deno.*`, hidden fields, tracked reads, and what refuses you
 - [Project Structure](project-structure.md) — file organization
 - [API Reference](api-reference.md) — all exports, types, configs
 - [Tutorial](tutorial.md) — step-by-step from zero to running app

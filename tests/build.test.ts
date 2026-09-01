@@ -802,8 +802,16 @@ Deno.test("compile: WASM read via import.meta.url works ONLY when embedded (regr
 // AppImage.
 
 import { appimageEnv } from "../src/build/build-helpers.ts";
-import { compileArgs } from "../src/build/build-compile.ts";
-import { distCandidates, realDistCandidates } from "../src/server/paths.ts";
+import {
+  assetUrlsIn,
+  compileArgs,
+  unservableAssetRefs,
+} from "../src/build/build-compile.ts";
+import {
+  baseDirCandidates,
+  distCandidates,
+  realDistCandidates,
+} from "../src/server/paths.ts";
 
 Deno.test("appimageEnv: extract-and-run is always set (FUSE-less hosts)", () => {
   const env = appimageEnv("x86_64");
@@ -909,6 +917,160 @@ Deno.test("distCandidates: entry-relative BEFORE the filesystem (portability)", 
   assert(c.includes("/usr/local/bin/dist"), "exec dir fallback kept");
   const cwdIdx = c.indexOf("/somewhere/else/dist");
   assert(cwdIdx > 1, "cwd must NOT be probed before the embedded dist");
+});
+
+Deno.test("assetUrlsIn: finds what a browser will actually fetch", () => {
+  const bundle = `
+    o.src="/assets/logo.svg";h('img',{src:'/img/a.png'});
+    fetch(\`/data/seed.json\`);
+    .hero{background:url(/fonts/x.woff2)}
+    r.push("/settings");            // a route, not an asset
+    u="//cdn.example.com/a.png";    // protocol-relative, not our path
+    q("/__aio/icon");               // the framework's own route
+    rel="./local.svg";              // relative — resolves per-page, not an app-dir asset
+  `;
+  assertEquals(assetUrlsIn(bundle), [
+    "/assets/logo.svg",
+    "/data/seed.json",
+    "/fonts/x.woff2",
+    "/img/a.png",
+  ]);
+});
+
+Deno.test("unservableAssetRefs: the asset that works in dev and ships broken", () => {
+  // The exact shape that shipped: the file is really in the repo, the dev
+  // server really serves it, and nothing embeds it — so the URL is live in
+  // `deno task dev` and a broken-image glyph in the AppImage, with every
+  // source-reading gate green.
+  const present = new Set(["src/assets/logo.svg", "dist/app.js"]);
+  const bad = unservableAssetRefs({
+    urls: ["/assets/logo.svg"],
+    included: [],
+    appDir: "src",
+    hasDist: true,
+    exists: (r) => present.has(r),
+  });
+  assertEquals(bad, [{
+    url: "/assets/logo.svg",
+    rel: "src/assets/logo.svg",
+    why: "unembedded",
+  }]);
+  // …declared, and it is clean. A DIRECTORY include covers what is under it.
+  assertEquals(
+    unservableAssetRefs({
+      urls: ["/assets/logo.svg"],
+      included: ["src/assets"],
+      appDir: "src",
+      hasDist: true,
+      exists: (r) => present.has(r),
+    }),
+    [],
+  );
+});
+
+Deno.test("unservableAssetRefs: dist/ ships, and a typo is not an embed bug", () => {
+  const present = new Set(["dist/app.js", "dist/logo.png"]);
+  const exists = (r: string) => present.has(r);
+  // Anything the bundler put in dist/ is embedded wholesale — never a finding.
+  assertEquals(
+    unservableAssetRefs({
+      urls: ["/app.js", "/logo.png"],
+      included: [],
+      appDir: "src",
+      hasDist: true,
+      exists,
+    }),
+    [],
+  );
+  // A path that exists nowhere is a DIFFERENT mistake — it 404s in dev too, so
+  // calling it an embedding problem would send the reader to the wrong fix.
+  assertEquals(
+    unservableAssetRefs({
+      urls: ["/assets/typo.svg"],
+      included: ["src/assets"],
+      appDir: "src",
+      hasDist: true,
+      exists,
+    }),
+    [{ url: "/assets/typo.svg", rel: "src/assets/typo.svg", why: "missing" }],
+  );
+});
+
+Deno.test("baseDirCandidates: a compiled binary reads its EMBEDDED app dir first", () => {
+  // The shipped bug: `_inferBaseDir` opted compiled binaries OUT of the
+  // entry-relative rule on the strength of a comment saying "build sets
+  // baseDir anyway" — and the build never set it (zero assignments in
+  // src/build/). So every shipped binary served app assets from `<cwd>/src`, a
+  // directory that exists on no user's machine, and `<img src="/assets/x.svg">`
+  // was a real URL in dev and a broken-image glyph in the AppImage.
+  const c = baseDirCandidates({
+    mainModule: "file:///tmp/deno-compile-myapp/src/app.ts",
+    cwd: "/somewhere/else",
+    compiled: true,
+  });
+  // Entry-relative first: `deno compile` embeds `compile.include` files into a
+  // VFS rooted next to the entry, and readFile/stat/realPath all answer there.
+  assertEquals(c[0], "/tmp/deno-compile-myapp/src");
+  // …and the old root stays reachable BEHIND it, so a binary run beside a real
+  // source tree keeps serving from it. Nothing that resolved before stops.
+  assertEquals(c[1], "/somewhere/else/src");
+  assertEquals(c.length, 2);
+});
+
+Deno.test("baseDirCandidates: uncompiled is the entry dir, and only that", () => {
+  // `deno run src/app.ts` from anywhere — the rule that already worked.
+  const c = baseDirCandidates({
+    mainModule: "file:///proj/src/app.ts",
+    cwd: "/somewhere/else",
+    compiled: false,
+  });
+  assertEquals(c, ["/proj/src"]);
+});
+
+Deno.test("baseDirCandidates: always answers, and never repeats itself", () => {
+  // An entry that is not a file: URL (a data: or http: main module) has no
+  // directory — the cwd fallback is what makes the list non-empty, which is
+  // what lets every caller read [0] without a fallback of its own.
+  assertEquals(
+    baseDirCandidates({ mainModule: "data:,1", cwd: "/here", compiled: false }),
+    ["/here/src"],
+  );
+  // A binary run from the directory its VFS mirrors must not stat the same
+  // root twice per request.
+  assertEquals(
+    baseDirCandidates({
+      mainModule: "file:///app/src/app.ts",
+      cwd: "/app",
+      compiled: true,
+    }),
+    ["/app/src"],
+  );
+});
+
+Deno.test("baseDirCandidates: the ladder distCandidates already had", () => {
+  // The asymmetry that caused this was inside one file: distDir got a ladder,
+  // /__aio/icon got a two-dir ladder, every OTHER asset got one directory.
+  // Both deciders must now agree that the embedded copy outranks the cwd.
+  const opts = {
+    mainModule: "file:///tmp/deno-compile-app/src/app.ts",
+    cwd: "/mnt/elsewhere",
+  };
+  const base = baseDirCandidates({ ...opts, compiled: true });
+  const dist = distCandidates({
+    ...opts,
+    execDir: "/usr/bin",
+    moduleDir: null,
+  });
+  assert(
+    base[0].startsWith("/tmp/deno-compile-") &&
+      !!dist[0]?.startsWith("/tmp/deno-compile-"),
+    "both ladders must prefer the artifact's own copy over the process cwd",
+  );
+  assert(
+    base.indexOf("/mnt/elsewhere/src") > 0 &&
+      dist.indexOf("/mnt/elsewhere/dist") > 0,
+    "…and both must keep the filesystem probe as a fallback, not a first try",
+  );
 });
 
 Deno.test("realDistCandidates: never the compile VFS (Electron blank window)", () => {
@@ -1118,6 +1280,72 @@ Deno.test("proto: mismatch reason names which side is old and its version", () =
 // starts a new DIRECTIVE. A title of "My App\nExecStart=…\nUser=root" produced
 // a unit that ran something else as root on the machine the operator installs
 // it on. `binaryName` was already slugified; `appTitle` is free text.
+Deno.test("writeServiceFile: a build with no $USER does NOT run the service as root", async () => {
+  // Field report §8.2's class, third instance and the security-relevant one:
+  // "a confident answer where 'I don't know' was available."
+  //
+  // `User=${Deno.env.get("USER") ?? "root"}` wrote the BUILD machine's account
+  // into a unit copied verbatim to a server. The fallback was the dangerous
+  // half — a container or CI build (the normal release pipeline) has no $USER,
+  // so the operator's service ran the app as ROOT because of how it was built.
+  // aio cannot know who should run the service, so it must not guess: the
+  // placeholder fails the unit closed, which is the safe direction to be wrong.
+  const { writeServiceFile } = await import("../src/build/build-compile.ts");
+  const dir = await Deno.makeTempDir({ prefix: "aio-unit-" });
+  const prev = Deno.env.get("USER");
+  try {
+    Deno.env.delete("USER");
+    await writeServiceFile(
+      {
+        binaryName: "svc",
+        appTitle: "Svc",
+        outDir: dir,
+        root: dir,
+      } as unknown as Parameters<typeof writeServiceFile>[0],
+    );
+    const unit = await Deno.readTextFile(join(dir, "svc.service"));
+    assert(
+      !/^User=root$/m.test(unit),
+      `a build environment must never decide the service runs as root:\n${unit}`,
+    );
+    assertStringIncludes(unit, "User=REPLACE-ME");
+    // …and the unit says WHY, where the operator is already reading.
+    assertStringIncludes(unit, "BUILD-MACHINE VALUE");
+  } finally {
+    if (prev === undefined) Deno.env.delete("USER");
+    else Deno.env.set("USER", prev);
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("writeServiceFile: the build user is LABELLED, never presented as a fact", async () => {
+  const { writeServiceFile } = await import("../src/build/build-compile.ts");
+  const dir = await Deno.makeTempDir({ prefix: "aio-unit2-" });
+  const prev = Deno.env.get("USER");
+  try {
+    Deno.env.set("USER", "builder");
+    await writeServiceFile(
+      {
+        binaryName: "svc",
+        appTitle: "Svc",
+        outDir: dir,
+        root: dir,
+      } as unknown as Parameters<typeof writeServiceFile>[0],
+    );
+    const unit = await Deno.readTextFile(join(dir, "svc.service"));
+    // The value is still there — a unit that starts is worth more than one
+    // that does not — but it can no longer read as a decision aio made about
+    // the TARGET.
+    assertStringIncludes(unit, "User=builder");
+    assertStringIncludes(unit, "BUILD-MACHINE VALUE");
+    assertStringIncludes(unit, "aio has no way to know, and will not guess");
+  } finally {
+    if (prev === undefined) Deno.env.delete("USER");
+    else Deno.env.set("USER", prev);
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
+  }
+});
+
 Deno.test("writeServiceFile: a title cannot inject systemd directives", async () => {
   const { writeServiceFile } = await import("../src/build/build-compile.ts");
   const dir = await Deno.makeTempDir({ prefix: "aio-unit-" });

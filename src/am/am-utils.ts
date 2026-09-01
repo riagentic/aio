@@ -7,6 +7,7 @@
 import { readDenoJsonSync } from "../server/deno-json.ts";
 import { envPort, resolveEntryPath } from "../server/paths.ts";
 import {
+  type InstanceInfo,
   instances,
   type LockData,
   lockKey,
@@ -234,6 +235,49 @@ export function resolveEntry(flagEntry?: string): string | null {
 export function targetHome(appId: string, home: string): void {
   registerAppDirs(appId, appDirs(appId, home));
   _homePinned = true;
+}
+
+/** Follow the RUNNING instance's data home, when there is exactly one and no
+ *  `--home` pinned another.
+ *
+ *  Every `am` reader of an app's files — `am logs`, `am data`, `am report`,
+ *  `am auth`, the error log — computed its directory from the INVOKING
+ *  process's environment (`$HOME`, `$AIO_APPS_DIR`) and not from where the app
+ *  it is inspecting actually lives. The two agree in the common case and part
+ *  company exactly when it matters: an app booted with `appDir` (the packaged
+ *  Electron shape), one started by a service manager, or an `am` run under a
+ *  different user. `am logs` then reported "no log file at <a path that was
+ *  never this app's>" while the app was up and writing. Reported twice, from
+ *  two different apps — and it is the same root cause as a compiled binary
+ *  serving `<cwd>/src` and the generated systemd unit's `User=$USER`: an
+ *  environment that was true where the command was TYPED, applied to a process
+ *  that lives somewhere else.
+ *
+ *  The lock already carries the answer (`LockData.home`), and `targetHome` is
+ *  already the one seam that makes every `appDirs()` reader follow it. So this
+ *  is not a new rule, it is the existing rule applied without being asked.
+ *
+ *  Deliberately narrow, and silent when it changes nothing:
+ *   - `--home` pinned ⇒ untouched. That is the operator saying which instance.
+ *   - nothing running ⇒ untouched. The default home is the only answer there,
+ *     and it is the right one for `am remove` after a crash.
+ *   - two instances of one id ⇒ untouched. That is a real ambiguity;
+ *     {@linkcode liveLock} already names the `--home=` that resolves it, and
+ *     picking one here would be the silent retarget `--home` exists to prevent.
+ *   - the running home EQUALS the computed one ⇒ nothing to adopt. */
+export function adoptRunningHome(appId: string): void {
+  if (_homePinned) return;
+  let running: InstanceInfo[];
+  try {
+    running = instances(appId);
+  } catch {
+    return; // no lock dir readable — the default home is the only answer
+  }
+  const live = running.filter((i) => i.alive);
+  if (live.length !== 1) return;
+  const home = live[0]!.home;
+  if (!home || home === appDirs(appId).home) return;
+  registerAppDirs(appId, appDirs(appId, home));
 }
 
 /** Whether `--home` named an instance. When it did, {@linkcode liveLock} must

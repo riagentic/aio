@@ -16,7 +16,12 @@
 //   2. the scaffold's `compile` task is the SAME command as the explicit
 //      `compile:<target>` task for that target — one decider, checked.
 
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
 import { join } from "@std/path";
 
 import {
@@ -384,4 +389,42 @@ Deno.test("build flags: no table entry is a flag nothing reads", async () => {
       `gets no refusal and no effect, which is the exact silence this module ` +
       `exists to remove:\n     ${stray.join("\n     ")}`,
   );
+});
+
+// ── the same near-miss, the other direction ──────────────────────────
+//
+// "a runtime flag is not a build flag" (above) has been a red gate for
+// releases. The reverse — a BUILD flag typed at a running app — was refused
+// correctly and phrased as though it were a misspelling, so the reader went
+// looking for a typo that was not there. `--headless` and `--no-electron` are
+// the two people actually type at a binary.
+import { parseCli } from "../src/server/aio-cli.ts";
+
+Deno.test("runtime: a BUILD flag is refused as a CATEGORY error, not a typo", () => {
+  for (
+    const [flag, runtime] of [
+      ["--headless", "--client=server-only"],
+      ["--no-electron", "--client=browser"],
+      ["--cli", "--client=cli"],
+    ] as const
+  ) {
+    const e = assertThrows(() => parseCli([flag])) as Error;
+    assertStringIncludes(e.message, "BUILD flag");
+    assertStringIncludes(
+      e.message,
+      runtime,
+      `${flag} must name the runtime spelling for what it selects`,
+    );
+    assert(
+      !/did you mean/.test(e.message),
+      `${flag} is not a misspelling — a did-you-mean sends the reader hunting ` +
+        `for a typo that is not there: ${e.message}`,
+    );
+  }
+});
+
+Deno.test("runtime: an actual typo still gets its did-you-mean", () => {
+  // The category branch must not swallow the case it sits in front of.
+  const e = assertThrows(() => parseCli(["--experse"])) as Error;
+  assertStringIncludes(e.message, "did you mean --expose");
 });

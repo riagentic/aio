@@ -312,7 +312,9 @@ Deno.test("am fix seals a local-checkout link with a path: pin, and the pin deci
     );
     // …and the seal SAYS it is machine-specific, with the way out.
     assertStringIncludes(pin.note, "path:");
-    assertStringIncludes(pin.note, "am pin --latest");
+    // The word, not the flag: `latest` is the sibling of `main`, and every
+    // current message names it that way. `--latest` still works.
+    assertStringIncludes(pin.note, "am pin latest");
 
     // THE decider every reporter asks (aiol, doctor, am pin) agrees by
     // construction — no "pin does not match dep/aio" the moment fix exits.

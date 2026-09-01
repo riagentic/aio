@@ -16,6 +16,54 @@ export function isCompiled(): boolean {
   return !import.meta.url.startsWith("file://");
 }
 
+/** Ordered `baseDir` (THE app dir) candidates, most authoritative first — the
+ *  same shape `distCandidates` already has, applied to the directory every
+ *  OTHER app asset is served from.
+ *
+ *  This exists because the two were not the same shape, and the gap shipped:
+ *  `distCandidates` gave a compiled binary an entry-relative ladder so it finds
+ *  its bundle from any cwd, `/__aio/icon` got a two-directory ladder so the app
+ *  icon survives, and every other app asset got `<cwd>/src` alone — a directory
+ *  that exists on no user's machine. `<img src="/assets/logo.svg">` was a real
+ *  URL in dev (the dev server serves the app dir, the file is really there) and
+ *  a broken-image glyph in the shipped AppImage, with every gate green, because
+ *  no gate reads the artifact.
+ *
+ *  Entry-relative comes FIRST for a compiled binary. `deno compile` mirrors the
+ *  project tree into a VFS rooted next to the entry module, and everything
+ *  `compile.include` names is fully readable there — `readFile`, `stat` AND
+ *  `realPath` all answer, which is exactly what `serveFile`'s symlink-escape
+ *  guard needs. So the asset that SHIPPED inside the binary wins over whatever
+ *  happens to sit in the directory the operator typed the command from.
+ *
+ *  `<cwd>/src` stays as the LAST candidate rather than being replaced: it was a
+ *  compiled binary's only root before, so a binary run beside a real source
+ *  tree keeps serving from it. Nothing that resolved before resolves
+ *  differently unless the binary embeds that same path, which is the fix.
+ *
+ *  Uncompiled, the entry's directory is the whole answer and always has been —
+ *  `deno run src/app.ts` is right regardless of cwd. */
+export function baseDirCandidates(opts: {
+  mainModule: string;
+  cwd: string;
+  compiled: boolean;
+}): [string, ...string[]] {
+  // Non-empty BY TYPE, not by comment: `<cwd>/src` is pushed whenever nothing
+  // else resolved, so every caller can read [0] without a fallback of its own
+  // — and a future edit that could return nothing fails to compile here.
+  const out: string[] = [];
+  const push = (dir: string) => {
+    const c = resolve(dir);
+    if (!out.includes(c)) out.push(c);
+  };
+  try {
+    const main = new URL(opts.mainModule);
+    if (main.protocol === "file:") push(fromFileUrl(new URL(".", main)));
+  } catch { /* unusual entry (data:, http:) — the cwd fallback answers */ }
+  if (opts.compiled || out.length === 0) push(join(opts.cwd, "src"));
+  return out as [string, ...string[]];
+}
+
 /** Ordered `dist/` candidates for prod-detection in a COMPILED binary, most
  *  authoritative first. Pure (every input injected) so the ORDER — the part
  *  that broke — is unit-testable without compiling.

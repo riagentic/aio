@@ -124,6 +124,38 @@ function allPaths(): string[] {
 
 const settle = () => new Promise((r) => setTimeout(r, 60));
 
+/** The reserved path for a key that belongs to the WINDOW, not to an element.
+ *
+ *  `onGlobalKey` — the primitive for "Escape closes the lightbox", "⌘K opens
+ *  the palette" — registers on the document, so no element on the surface OWNS
+ *  the binding. From `testUI` the workaround is documented and fine
+ *  (`ui.<anything>.press("Escape")` bubbles up). From `am` it is not: every
+ *  path names an element, and the obvious candidates are the wrong ones — an
+ *  input is skipped by `ignoreInInput`, and anything else is a guess about
+ *  someone's DOM. So the app's primary keyboard gesture was undrivable from
+ *  the CLI, with a reply that read like a missing element.
+ *
+ *  This is the address for it. Key actions only: a click or a `type` on the
+ *  window is not a gesture a user can make, and silently accepting one would
+ *  report ok for an interaction that did nothing. */
+const WINDOW_PATH = "window";
+const KEY_ACTIONS = new Set(["press", "keyDown", "keyUp"]);
+
+/** The document to dispatch a window-level event on. Dispatching on the
+ *  DOCUMENT (not `document.body`) is what reaches both listener homes: a
+ *  document listener sees it directly and a `window` listener sees it as the
+ *  last hop of propagation — and the event's target has no `tagName`, so
+ *  `ignoreInInput` correctly does not treat it as typing into a field. */
+// deno-lint-ignore no-explicit-any
+function windowTarget(): any | null {
+  for (const st of _liveRoots) {
+    const doc = (st.root as { ownerDocument?: unknown } | undefined)
+      ?.ownerDocument;
+    if (doc) return doc;
+  }
+  return (globalThis as { document?: unknown }).document ?? null;
+}
+
 /** Execute a trigger request against the live surface — same event sequences
  *  as `testUI` (shared `ui-trigger`), re-resolving between typed characters so
  *  controlled inputs behave. Resolves after the app had time to re-render. */
@@ -132,13 +164,40 @@ export async function runUITrigger(
 ): Promise<UITriggerResult> {
   const base = { path: req.path, action: req.action };
   try {
+    if (req.path === WINDOW_PATH) {
+      if (!KEY_ACTIONS.has(req.action)) {
+        return {
+          ...base,
+          ok: false,
+          error: `"${WINDOW_PATH}" is the address for a WINDOW-LEVEL KEY ` +
+            `(onGlobalKey) — "${req.action}" needs an element. ` +
+            `Accepted here: ${[...KEY_ACTIONS].join(", ")}.`,
+          available: allPaths(),
+        };
+      }
+      const doc = windowTarget();
+      if (!doc) {
+        return { ...base, ok: false, error: `no document on this client` };
+      }
+      triggerAction(
+        doc,
+        req.action as "press" | "keyDown" | "keyUp",
+        req.key,
+        req.mods,
+      );
+      await settle();
+      return { ...base, ok: true, surface: getSerializedSurfaces() };
+    }
     const info = findByPath(req.path);
     if (!info || !info._el) {
       return {
         ...base,
         ok: false,
         error: `element not found on the live surface`,
-        available: allPaths(),
+        // `window` is a real address and does not appear on the surface, so a
+        // miss that lists only elements hides the one answer for a key that
+        // belongs to no element.
+        available: [WINDOW_PATH, ...allPaths()],
       };
     }
     if (req.action === "type") {

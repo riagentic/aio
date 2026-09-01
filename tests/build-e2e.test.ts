@@ -220,6 +220,86 @@ Deno.test({
   },
 });
 
+// ── the artifact serves the app's ASSETS, not just its bundle ───────────────
+//
+// The gap this closes: `distCandidates` gave a compiled binary an entry-relative
+// ladder so it finds its bundle from any cwd, and `/__aio/icon` got a two-dir
+// ladder so the icon survives — while every OTHER app asset was resolved from
+// `<cwd>/src` alone, a directory that exists on no user's machine. So
+// `<img src="/assets/logo.svg">` was a real URL in dev (the dev server serves
+// the app dir, and the file really is in the repo) and a broken-image glyph in
+// the shipped AppImage, on a first-run screen, with typecheck, lint and 1283
+// tests green. Nothing in that stack ever fetched an asset URL FROM THE
+// ARTIFACT — which is the only place the two roots disagree.
+Deno.test({
+  name: "artifact: an embedded asset is SERVED, with the source tree DELETED",
+  ignore: !GATE,
+  fn: async () => {
+    const dir = await makeApp("counter", "build-e2e-assets-");
+    const keep = await Deno.makeTempDir({ prefix: "artifact-assets-" });
+    try {
+      const marker = `ASSET_MARKER_${crypto.randomUUID().slice(0, 8)}`;
+      const svg =
+        `<svg xmlns="http://www.w3.org/2000/svg"><!--${marker}--></svg>`;
+      await Deno.mkdir(join(dir, "src", "assets"), { recursive: true });
+      await Deno.writeTextFile(join(dir, "src", "assets", "logo.svg"), svg);
+      // Declared exactly the way an app declares one — deno.json compile.include.
+      const djPath = join(dir, "deno.json");
+      const dj = JSON.parse(await Deno.readTextFile(djPath));
+      dj.compile = { ...dj.compile, include: ["src/assets"] };
+      await Deno.writeTextFile(djPath, JSON.stringify(dj, null, 2));
+      // …and referenced the way an app references one: an absolute URL in the
+      // markup, which is what makes it the browser's request and not a module.
+      const app = await Deno.readTextFile(join(dir, "src", "App.tsx"));
+      await Deno.writeTextFile(
+        join(dir, "src", "App.tsx"),
+        app.replace("<div", `<img src="/assets/logo.svg" /><div`),
+      );
+      assertEquals((await buildFlags(dir, "--compile")).code, 0);
+
+      const bin = join(keep, "app");
+      await Deno.copyFile(findBinary(dir), bin);
+      // Destroy the project. Everything left is inside the binary — so a pass
+      // here cannot be the source tree answering on the artifact's behalf.
+      await Deno.remove(dir, { recursive: true });
+      await Deno.chmod(bin, 0o755);
+
+      const port = freePort();
+      const runCwd = await Deno.makeTempDir({ prefix: "foreign-cwd-" });
+      const { proc, log } = spawn(
+        bin,
+        [`--port=${port}`, "--client=browser"],
+        runCwd,
+      );
+      try {
+        const base = `http://127.0.0.1:${port}`;
+        await waitForHttp(`${base}/__aio/health`, 45_000).catch((e) => {
+          throw new Error(`${e}\n--- artifact log ---\n${log()}`);
+        });
+        const served = await waitForHttp(`${base}/assets/logo.svg`, 10_000)
+          .catch((e) => {
+            throw new Error(
+              `the artifact did not serve an asset it embedded — the app dir ` +
+                `ladder is broken (${e})\n--- artifact log ---\n${log()}`,
+            );
+          });
+        assertStringIncludes(
+          served,
+          marker,
+          "the artifact answered /assets/logo.svg with something that is not " +
+            "the file it embedded",
+        );
+      } finally {
+        await kill(proc);
+        await Deno.remove(runCwd, { recursive: true }).catch(() => {});
+      }
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+      await Deno.remove(keep, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
 // The bundle is REPRODUCIBLE: same sources in, same bytes out. A build that
 // varies run to run makes every freshness/cache question unanswerable — you can
 // never tell a stale artifact from a differently-ordered fresh one — and it is

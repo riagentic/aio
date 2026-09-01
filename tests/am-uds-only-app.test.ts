@@ -227,6 +227,25 @@ await new Promise(() => {});
         "the click drove the live window",
       );
 
+      // `am status` disagreed with `am clients` about THIS app.
+      //
+      // Second field report (cc, an Electron app over UDS), reproduced by its
+      // author: `am clients` listed one live electron/uds client while
+      // `am status` printed `connections: 0` in the same breath. Two trojan
+      // routes, twenty lines apart, one running app, two answers — and nothing
+      // tells the operator which is lying. `clients` already merged both
+      // transports; `metrics`, which `am status` reads, counted WS only.
+      //
+      // Asserted HERE because this is the one test with a real UDS client
+      // attached: a unit test of the sum would have passed all along.
+      const metrics = await am("metrics");
+      assertEquals(
+        (metrics.json as { connections?: number }).connections,
+        clients.length,
+        `am status must agree with am clients about the same app: ` +
+          `${metrics.stdout}`,
+      );
+
       const disp = await am("dispatch", "c:inc");
       assertEquals(disp.code, 0, `am dispatch: ${disp.stdout} ${disp.stderr}`);
       assertEquals((await am("state", "c.n")).json, 2);

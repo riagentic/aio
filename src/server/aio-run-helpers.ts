@@ -10,6 +10,7 @@ import {
   type TTState,
 } from "../diagnostics/time-travel.ts";
 import { createCoalescer } from "./broadcast-coalescer.ts";
+import { attributeRound } from "./server-broadcast.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
 import type { ComposedCells } from "../state/cell.ts";
 import type { ServerHandle } from "./server-types.ts";
@@ -318,13 +319,44 @@ export type UdsBroadcastController = {
 export function createUdsBroadcastController(refs: {
   getUdsHandle: () => UDSHandle | null;
   syncIntervalMs: number;
+  /** The cost meter, so `am cost` sees the UDS transport at all. Optional
+   *  because a caller without one (every unit test of the throttle) must not
+   *  have to build one — the attribution simply does not happen. */
+  costMeter?: () => Parameters<typeof attributeRound>[0] | null;
+  /** The client-facing state, for attributing a whole-slice resend. */
+  getUIState?: () => Record<string, unknown> | undefined;
+  /** Count ONE real broadcast round — `vitals`' broadcasts/sec pressure alarm.
+   *  The WS flush only counts a round when it has WS clients, which is right
+   *  for WS and left a desktop app (every client on the socket) with the alarm
+   *  permanently silent. Same class as the cost meter above it. */
+  onBroadcastRound?: () => void;
 }): UdsBroadcastController {
   const broadcastState = (
     forceOrPatches?: boolean | PatchEntry[],
   ) => {
     const handle = refs.getUdsHandle();
     if (!handle) return;
-    handle.broadcastState(forceOrPatches);
+    const sent = handle.broadcastState(forceOrPatches);
+    // Attribute what ACTUALLY left the socket. `am cost` used to see nothing
+    // on UDS — the transport a local desktop app uses for every client,
+    // because it opens no TCP ports at all — so the one command that answers
+    // "what is this app moving, and which cell is moving it" reported an idle
+    // app. The rule itself is `attributeRound`, shared with the WS path, so
+    // the two transports cannot drift into two answers.
+    if (!sent || (sent.full === 0 && sent.patch === 0)) return;
+    // A round that really put bytes on a wire — counted for both diagnostics.
+    refs.onBroadcastRound?.();
+    const meter = refs.costMeter?.();
+    if (!meter) return;
+    const force = forceOrPatches === true;
+    const patches = Array.isArray(forceOrPatches) ? forceOrPatches : [];
+    attributeRound(meter, {
+      anyFullSend: sent.full > 0,
+      anyPatchSend: sent.patch > 0,
+      force,
+      patchesToSend: patches,
+      getUIState: refs.getUIState ?? (() => undefined),
+    });
   };
   // The shared coalescer buffers patches (and a pending force-full) across the
   // queue/throttle window and flushes them as ONE send — identical semantics
