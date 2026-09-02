@@ -8,10 +8,33 @@ export function resolveCells(entries: CellEntry[]): CellDef[] {
   const deps = new Map<string, string[]>();
 
   const seen = new Set<string>();
-  for (const entry of entries) {
+  for (const [i, entry] of entries.entries()) {
+    // A bad entry used to surface as a raw JS TypeError — "Cannot use 'in'
+    // operator to search for '__aio' in undefined" — naming neither the array,
+    // the position, nor the cause. `cells:` is the one array EVERY app writes,
+    // and a typo'd or missing import is how it goes wrong: the name resolves
+    // to `undefined` and the message blames an operator the app never used.
+    const at = `aio.run({ cells }): cells[${i}]`;
+    if (entry === null || typeof entry !== "object") {
+      throw new Error(
+        `${at} is ${
+          entry === undefined
+            ? "undefined"
+            : `${typeof entry} ${JSON.stringify(entry)}`
+        }, not a cell. The usual cause is a typo'd or missing import — check ` +
+          `the name you passed. Each entry is a cell() result, or ` +
+          `{ cell, dependsOn: [...] }.`,
+      );
+    }
     const f = "__aio" in entry
       ? entry as CellDef
       : (entry as { cell: CellDef }).cell;
+    if (f === null || typeof f !== "object" || !("__aio" in f)) {
+      throw new Error(
+        `${at} is an object, but not a cell — it has no __aio. Pass the ` +
+          `cell() result itself, or { cell, dependsOn: [...] } wrapping one.`,
+      );
+    }
     if (seen.has(f.__aio.id)) {
       throw new Error(
         `duplicate cell name: '${f.__aio.id}' — two cells passed to aio.run({ cells }) share this name. Rename one (e.g. '${f.__aio.id}2') or remove the duplicate entry.`,

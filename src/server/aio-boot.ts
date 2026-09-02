@@ -517,6 +517,17 @@ export function resolveDbBindings(
   };
 
   for (const [key, entry] of Object.entries(dbSchema)) {
+    if (entry === null || typeof entry !== "object") {
+      throw new Error(
+        `db: mapping "${key}" is ${
+          entry === undefined
+            ? "undefined"
+            : `${typeof entry} ${JSON.stringify(entry)}`
+        }, not a table. The usual cause is a typo'd or missing import — ` +
+          `check the value you passed for "${key}". Each entry is a ` +
+          `table({ … }) result, or { table, path, shape }.`,
+      );
+    }
     let table: string;
     let path: string[];
     const mapping = dbMappingOf(entry);

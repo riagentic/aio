@@ -19,6 +19,7 @@ import {
   retiredCellConfigKeys,
 } from "./removals.ts";
 import { nearestOf } from "./cell-helpers.ts";
+import { log } from "../diagnostics/logger-api.ts";
 import type {
   MethodsCellConfig,
   SelectorAccessors,
@@ -51,6 +52,17 @@ const VALID_CELL_KEYS: ReadonlySet<string> = new Set([
   "onRestore",
   "worker",
 ]);
+
+/** Cell config keys whose value must be a FUNCTION. */
+/** Exported ONLY so tests/callable-config-completeness.test.ts can prove this
+ *  list still covers every function-valued key `cell()` accepts. @internal */
+export const _CALLABLE_CELL_KEYS = [
+  "onInit",
+  "onDestroy",
+  "onRestore",
+  "onMigrate",
+  "validate",
+] as const;
 
 /** The closest valid key, when a typo is one edit away from a real one. */
 function nearestKey(bad: string): string | null {
@@ -183,6 +195,37 @@ export function cell(name: string, config: any): any {
   // so `method:` for `methods:` produced a cell with no methods, `presist:`
   // persisted anyway, and `sync: { mrege: … }` silently resolved every
   // conflict last-write-wins instead of the strategy the app declared.
+  // …and the keys aio DOES read, whose values must be callable. A typo'd or
+  // missing import leaves `undefined` behind and the hook silently never runs
+  // — the same sentence above, one level in. A non-function was worse still:
+  // lifecycle hooks are observe-only and error-guarded, so calling a string
+  // threw into the guard and was swallowed, leaving no trace anywhere.
+  //
+  // Explicit `undefined`/`null` warns rather than throws: `onInit: opts.onInit`
+  // and `onInit: isDev ? devInit : undefined` are legitimate, and refusing them
+  // would break working cells. An ABSENT key says nothing at all.
+  for (const key of _CALLABLE_CELL_KEYS) {
+    if (!(key in (config as Record<string, unknown>))) continue;
+    const value = (config as Record<string, unknown>)[key];
+    if (typeof value === "function") continue;
+    if (value === undefined || value === null) {
+      log.warn(
+        "cell",
+        `[${name}] ${key} is declared but its value is ${
+          value === null ? "null" : "undefined"
+        } — it will never run, and nothing else would have said so. The usual ` +
+          `cause is a typo'd or missing import; if the absence is deliberate, ` +
+          `omit the key.`,
+      );
+      continue;
+    }
+    throw new Error(
+      `[${name}] cell(): ${key} must be a function, got ${typeof value} ` +
+        `${JSON.stringify(value)}. Hooks are called, not read — pass the ` +
+        `function itself (no parentheses).`,
+    );
+  }
+
   const unknown = Object.keys(config as Record<string, unknown>)
     .filter((k) => !VALID_CELL_KEYS.has(k) && !retiredKeys.has(k));
   if (unknown.length > 0) {

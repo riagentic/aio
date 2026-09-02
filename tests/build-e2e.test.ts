@@ -502,6 +502,8 @@ Deno.test({
         // --help is the one CLI path guaranteed to terminate; it proves the
         // binary loads its whole module graph (a missing include crashes here).
         const p = await new Deno.Command(bin, {
+          // A compiled binary resolves its home as `~/.<appId>` unless this is set.
+          env: { AIO_APPS_DIR: join(dir, ".aio-home") },
           args: ["--help"],
           cwd: runCwd,
           stdout: "piped",
@@ -739,6 +741,8 @@ Deno.test({
       // itself sets APPIMAGE_EXTRACT_AND_RUN).
       const outDir = await Deno.makeTempDir({ prefix: "appimage-extract-" });
       const x = await new Deno.Command(imagePath, {
+        // A compiled binary resolves its home as `~/.<appId>` unless this is set.
+        env: { AIO_APPS_DIR: join(dir, ".aio-home") },
         args: ["--appimage-extract"],
         cwd: outDir,
         stdout: "null",
@@ -963,6 +967,8 @@ Deno.exit(0);
       const runCwd = await Deno.makeTempDir({ prefix: "foreign-cwd-" });
       try {
         const p = await new Deno.Command(bin, {
+          // A compiled binary resolves its home as `~/.<appId>` unless this is set.
+          env: { AIO_APPS_DIR: join(dir, ".aio-home") },
           args: ["--client=server-only"],
           cwd: runCwd,
           stdout: "piped",
@@ -1138,6 +1144,8 @@ Deno.test({
       const bin = join(dist, hostFile);
       await Deno.chmod(bin, 0o755);
       const run = await new Deno.Command(bin, {
+        // A compiled binary resolves its home as `~/.<appId>` unless this is set.
+        env: { AIO_APPS_DIR: join(dir, ".aio-home") },
         args: ["--help"],
         stdout: "piped",
         stderr: "piped",
@@ -1404,6 +1412,8 @@ Deno.test({
       await Deno.chmod(bin, 0o755);
       const foreign = await Deno.makeTempDir({ prefix: "foreign-cwd-" });
       const v = await new Deno.Command(bin, {
+        // A compiled binary resolves its home as `~/.<appId>` unless this is set.
+        env: { AIO_APPS_DIR: join(dir, ".aio-home") },
         args: ["--version"],
         cwd: foreign,
         stdout: "piped",

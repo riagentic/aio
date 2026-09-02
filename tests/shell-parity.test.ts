@@ -17,7 +17,7 @@
 //   4. the app-dir decider — the build resolves the app dir with the same
 //      rule the dev server uses (the entry's directory), for every layout.
 
-import { assert, assertEquals } from "jsr:@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { dirname, join, resolve } from "@std/path";
 import {
   androidLocalHTML,

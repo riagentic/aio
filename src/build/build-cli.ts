@@ -10,7 +10,8 @@ import {
   withDevExcluded,
 } from "./build-compile.ts";
 import type { BuildConfig } from "./build-config.ts";
-import { NO, OK } from "../diagnostics/fmt.ts";
+import { NO } from "../diagnostics/fmt.ts";
+import { compiled } from "./build-say.ts";
 
 /** The scaffold's conventional module for a `cli-client` target: a CLI that
  *  talks to a remote aio server, which is a DIFFERENT program from the app's
@@ -65,10 +66,15 @@ export async function buildCli(cfg: BuildConfig): Promise<void> {
     artifactName(cliBase, cfg.platform),
   );
   await Deno.mkdir(cfg.outDir ?? root, { recursive: true });
+  // Project-relative: an absolute path here reads as "your artifact is at
+  // /home/me/app/app", and under the fleet it is not — it is staged and moved.
+  // `compiled()` below says which of the two this run is.
   console.log(
-    `compiling ${cliEntry} → ${cliTarget}${
-      cfg.targetTriple ? ` (${cfg.platform}, ${cfg.targetTriple})` : ""
-    }`,
+    `compiling ${cliEntry} → ${
+      cliTarget.startsWith(root + "/")
+        ? cliTarget.slice(root.length + 1)
+        : cliTarget
+    }${cfg.targetTriple ? ` (${cfg.platform}, ${cfg.targetTriple})` : ""}`,
   );
 
   // Embed app data assets (.wasm + declared compile.include) — a CLI app can
@@ -92,12 +98,12 @@ export async function buildCli(cfg: BuildConfig): Promise<void> {
       stdout: "inherit",
       stderr: "inherit",
     }).output();
-    if (result.code === 0) console.log(`${OK} ${cliTarget}`);
+    if (result.code === 0) compiled(cliTarget, root);
     return result.code === 0;
   });
 
   if (!ok) {
-    console.error("${NO} compile failed");
+    console.error(`${NO} compile failed`);
     Deno.exit(1);
   }
   Deno.exit(0);

@@ -14,7 +14,7 @@
 // only. `_setFlushBudget(0)` forces a yield after every component so the
 // mid-batch path is exercised deterministically.
 
-import { assert, assertEquals } from "jsr:@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { signal } from "../src/state/signal.ts";
 import { h } from "../src/air/vdom.ts";
 import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";

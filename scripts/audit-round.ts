@@ -145,7 +145,7 @@ const NASTY = [
   "line\n".repeat(200),
   "\\",
   "%00",
-  "${x}",
+  "${x}", // aio-ok: a fuzz payload — the point is that a literal ${x} survives unexpanded
   "`x`",
 ];
 

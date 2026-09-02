@@ -14,6 +14,7 @@
 // from output. Same rule the framework logger follows (logger-format.ts).
 
 import { block, mark, style } from "../diagnostics/fmt.ts";
+import { BUILD_VERSION_ENV } from "../server/app-version.ts";
 
 /** `✓ dist/app.js   214.3 KB` — a thing that now exists. stdout. */
 export function ok(what: string, detail?: string): void {
@@ -39,4 +40,22 @@ export function bad(headline: string, body?: string, fix?: string): string {
   const s = block("bad", headline, body, fix, { indent: "" });
   console.error(s);
   return s;
+}
+
+/** The compile step's own "this file now exists" line.
+ *
+ *  It is NOT the artifact's final location. Since "one path, one name, one
+ *  dist/" every build runs under the fleet, which MOVES what the compiler
+ *  produced into the out dir under a versioned, target-suffixed name — so a
+ *  `✓ /home/me/app/app` printed here names a path that does not exist by the
+ *  time the build finishes, and a reader (or a script) that takes it for the
+ *  artifact looks in the wrong place. Under the fleet the line says what it
+ *  is: a staged file the summary will place. Standalone, it is the answer. */
+export function compiled(path: string, root: string): void {
+  const rel = path.startsWith(root + "/") ? path.slice(root.length + 1) : path;
+  if (Deno.env.get(BUILD_VERSION_ENV) === undefined) {
+    ok(path);
+    return;
+  }
+  step(`compiled ${rel}`, "staged — the summary below places it");
 }

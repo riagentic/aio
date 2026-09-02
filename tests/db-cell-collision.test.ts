@@ -9,7 +9,7 @@
 // shape boots, the cell's slice is untouched, and the boot log names the
 // working alternative. Decision table: tests/db-cell-binding.test.ts.
 
-import { assert, assertEquals } from "jsr:@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { freePort } from "../src/testing/server-test.ts";
 import { resolveDbBindings } from "../src/server/aio-boot.ts";
 

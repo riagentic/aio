@@ -15,8 +15,14 @@
  * remove it.
  */
 
-import { join } from "@std/path";
-import { appDirs, installedAppPaths, installRoot } from "../server/app-dirs.ts";
+import { join, resolve, SEPARATOR } from "@std/path";
+import {
+  appDirs,
+  appsRoot,
+  installedAppParents,
+  installedAppPaths,
+  installRoot,
+} from "../server/app-dirs.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import {
   count,
@@ -52,6 +58,33 @@ export function dataRemovalGate(
   return opts.interactive ? "ask" : "refuse";
 }
 
+/** Is `path` a path this command may delete — a PROPER descendant of `parent`?
+ *
+ *  `appNameError` refuses `.`, `..` and `a/b` because `join()` normalizes them,
+ *  and its own message says why: "am remove .. would delete $HOME". That guard
+ *  was the only thing standing between a name and a recursive delete of the
+ *  user's home, and two of the three paths an install occupies are built from
+ *  `homedir()` rather than from `installRoot()`, so no sandbox variable moves
+ *  them:
+ *
+ *      installedAppPaths("..").binLink  →  ~/.local
+ *      installedAppPaths("../..").binLink  →  ~
+ *
+ *  One guard, one mistake away from the whole home directory. This is the
+ *  second one, and it does not depend on the name at all: whatever the name
+ *  resolved to, the path must sit strictly inside the directory that owns it.
+ *  Equal-to-parent is refused as firmly as outside-it — deleting the parent is
+ *  the failure mode, not a boundary case.
+ *
+ *  (Written after a mutation test disabled `appNameError` and the traversal
+ *  case removed ~/.local before the assertion could fail.) */
+export function insideParent(path: string, parent: string): boolean {
+  const p = resolve(path);
+  const base = resolve(parent);
+  if (p === base) return false;
+  return p.startsWith(base.endsWith(SEPARATOR) ? base : base + SEPARATOR);
+}
+
 async function exists(path: string): Promise<boolean> {
   try {
     await Deno.lstat(path);
@@ -64,18 +97,26 @@ async function exists(path: string): Promise<boolean> {
 /** Every path an install created, and whether it is there. Pure enough to
  *  print before anything is deleted. */
 export async function installedFootprint(name: string): Promise<
-  { path: string; kind: string; present: boolean }[]
+  { path: string; kind: string; present: boolean; parent: string }[]
 > {
   const p = installedAppPaths(name);
-  const out: { path: string; kind: string; present: boolean }[] = [];
+  const parents = installedAppParents();
+  const out: {
+    path: string;
+    kind: string;
+    present: boolean;
+    parent: string;
+  }[] = [];
+  // Each path travels with the directory that owns it, so the removal loop can
+  // check containment without re-deriving where anything is supposed to live.
   for (
-    const [path, kind] of [
-      [p.dir, "the app and its versions"],
-      [p.desktop, "menu entry"],
-      [p.binLink, "PATH symlink"],
+    const [path, kind, parent] of [
+      [p.dir, "the app and its versions", parents.dir],
+      [p.desktop, "menu entry", parents.desktop],
+      [p.binLink, "PATH symlink", parents.binLink],
     ] as const
   ) {
-    out.push({ path, kind, present: await exists(path) });
+    out.push({ path, kind, parent, present: await exists(path) });
   }
   return out;
 }
@@ -157,6 +198,28 @@ export async function cmdRemove(
       `"${name}" is running (pid ${running.pid}) — stop it first:\n` +
         `      am stop --app=${name}\n` +
         `  or re-run with --force to remove it anyway`,
+      mode,
+    );
+    Deno.exit(1);
+  }
+
+  // THE SECOND GUARD. `appNameError` above refuses the names that resolve
+  // outside an app's own directories; this refuses the PATHS, whatever name
+  // produced them. Two guards because the first one is one edit away from the
+  // user's home directory: `installedAppPaths("..").binLink` is `~/.local`,
+  // and `Deno.remove(…, { recursive: true })` does not ask twice.
+  const escaping = [...present, {
+    path: dataDir,
+    kind: "app data",
+    parent: appsRoot(),
+  }].filter((f) => !insideParent(f.path, f.parent));
+  if (escaping.length > 0) {
+    outError(
+      `refusing to remove "${name}": ${
+        escaping.map((f) => `${f.path} is not inside ${f.parent}`).join("; ")
+      }.\n` +
+        `  This is a bug in aio, not something you did — please report it with ` +
+        `this line (\`am report\`).`,
       mode,
     );
     Deno.exit(1);

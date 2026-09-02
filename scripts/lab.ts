@@ -30,6 +30,11 @@
 
 import { basename, join, resolve } from "@std/path";
 import { mark, NO, style } from "../src/diagnostics/fmt.ts";
+import {
+  artifactPaths,
+  outDirOf,
+  readBuildManifest,
+} from "../src/build/build-manifest.ts";
 
 const HERE = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
@@ -449,12 +454,23 @@ async function runWindowsApp(): Promise<boolean> {
       console.error("✗ the windows cross-compile failed");
       return false;
     }
-    const exe = [...Deno.readDirSync(appDir)]
-      .filter((e) => e.isFile && e.name.endsWith(".exe"))
-      .map((e) => e.name)
-      .sort()[0];
-    if (!exe) {
-      console.error("✗ the build produced no .exe");
+    // The fleet places artifacts in the out dir under a versioned name and
+    // records them; the project root this used to scan has held nothing since
+    // "one path, one name, one dist/". Two failures were hiding behind one
+    // message here: `--platform=windows` was dropped on the way to the fleet
+    // (so the build produced a LINUX binary), and the .exe it did produce
+    // would not have been looked for in the right place either.
+    const outDir = await outDirOf(appDir);
+    const exePath = artifactPaths(
+      outDir,
+      await readBuildManifest(outDir),
+      { suffix: ".exe" },
+    ).sort()[0];
+    if (!exePath) {
+      console.error(
+        `✗ the build produced no .exe in ${outDir} — ` +
+          `check the build output above for the platform it actually built`,
+      );
       return false;
     }
     // Its own directory, world-readable: the container runs as a different
@@ -464,11 +480,11 @@ async function runWindowsApp(): Promise<boolean> {
     // of the container.
     const stage = join(work, "stage");
     await Deno.mkdir(stage);
-    await Deno.copyFile(join(appDir, exe), join(stage, "app.exe"));
+    await Deno.copyFile(exePath, join(stage, "app.exe"));
     await Deno.chmod(work, 0o755);
     await Deno.chmod(stage, 0o755);
     await Deno.chmod(join(stage, "app.exe"), 0o755);
-    console.log(`▸ artifact: ${exe}`);
+    console.log(`▸ artifact: ${basename(exePath)}`);
 
     const r = await run([
       RUNTIME,

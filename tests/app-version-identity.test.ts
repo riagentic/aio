@@ -15,6 +15,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
+import { aioTestDir } from "../src/testing/test-strict.ts";
 
 const ENTRY =
   `const v = (globalThis as { __aio?: { appVersion?: string } }).__aio;
@@ -28,6 +29,11 @@ async function versionSeenBy(
   const r = await new Deno.Command(Deno.execPath(), {
     args: ["run", "-A", join(opts.projectDir, "src", "app.ts")],
     cwd: opts.cwd,
+    // The probe boots a real app with a unique appId; without a pin it resolves
+    // its home to `~/.ver-probe-<hash>` and leaves it there.
+    env: {
+      AIO_APPS_DIR: Deno.env.get("AIO_APPS_DIR") ?? aioTestDir("ver-probe-"),
+    },
     stdout: "piped",
     stderr: "piped",
   }).output();

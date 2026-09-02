@@ -78,6 +78,23 @@ limits), don't use a static `every` — seed a one-shot `after` and let the meth
 schedule its next run:
 [Backoff on rate-limit](#backoff-on-rate-limit-dynamic-polling).
 
+Every entry is validated as config, before the app boots — so a malformed one
+never reaches the first tick:
+
+- `every` and `after` are **plain numbers of milliseconds**. `every: "5m"` is
+  refused by name; aio's CLI takes `60s` spellings (`am cost --window=60s`), the
+  config does not.
+- `action` is an action **object** — `cell.method.action()`, or
+  `{ type: "cell:method", payload }`. A bare `"cell:method"` string is refused
+  here rather than failing on the first tick, which for an `at`/`cron` entry can
+  be days after the deploy.
+- Each entry declares exactly one of `every` / `after` / `at` / `cron`, ids are
+  unique (a duplicate would silently replace the earlier entry), and an unknown
+  key gets a did-you-mean.
+
+The dev server transpiles without type-checking, so the `ScheduleDef` type alone
+does not catch these in your app — the runtime check is what holds.
+
 ---
 
 ## Schedule types

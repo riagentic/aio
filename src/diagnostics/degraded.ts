@@ -204,7 +204,7 @@ function _evictForNewName(incoming: string): void {
         `watched at once — evicting the least recently used ("${victim.name}"` +
         `${victim.escalated ? ", which was still degraded" : ""}) to make ` +
         `room for "${incoming}". Cause: a name built per resource, e.g. ` +
-        "degraded(`fetch:${url}`), creates one tracker per URL and the " +
+        "degraded(`fetch:${url}`), creates one tracker per URL and the " + // aio-ok: example code shown TO the user, quoted as they would write it
         `registry is what remembers "this has been failing for hours". ` +
         `Fix: use a stable name — degraded("fetch") — and put the resource ` +
         `in the error passed to fail(), which is what the report shows.`,

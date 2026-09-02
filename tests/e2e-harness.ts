@@ -15,6 +15,7 @@
 const _childCovDir = Deno.env.get("DENO_COVERAGE_DIR") ??
   Deno.makeTempDirSync({ prefix: "aio-e2e-cov-" });
 import { testDisplayEnv } from "../src/testing/test-display.ts";
+import { aioTestDir } from "../src/testing/test-strict.ts";
 import { stopChild } from "./stop-child.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
@@ -305,7 +306,20 @@ export function spawnServer(dir: string, port: number): Deno.ChildProcess {
     // this harness passes --client=server-only so nothing opens today, but
     // `aio.run()`'s DEFAULT client is electron, and one spawned app that
     // forgets the flag is a window in your face mid-keystroke.
-    env: { DENO_COVERAGE_DIR: _childCovDir, ...testDisplayEnv() },
+    //
+    // AIO_APPS_DIR for the same reason, one layer down. A spawned app resolves
+    // its home as `~/.<appId>` when nothing pins it, and this harness scaffolds
+    // a UNIQUE appId per run — so a suite run outside `deno task test` (which
+    // is the documented way to run one file: `deno test -A tests/x.test.ts`)
+    // left one `~/.e2e-<hash>` per e2e app in the developer's home. A hundred
+    // of them accumulated before anyone looked. The sandbox belongs to the
+    // harness that creates the app, not to the invocation that happens to be
+    // used; `??` so the runner's own pin still wins.
+    env: {
+      DENO_COVERAGE_DIR: _childCovDir,
+      AIO_APPS_DIR: Deno.env.get("AIO_APPS_DIR") ?? aioTestDir("e2e-apps-"),
+      ...testDisplayEnv(),
+    },
     args: [
       "run",
       "-A",
@@ -356,6 +370,8 @@ export async function openTab(server: Server): Promise<Tab> {
       "--no-sandbox",
       "--disable-gpu",
       "--disable-dev-shm-usage",
+      `--password-store=basic`,
+      `--use-mock-keychain`,
       `--user-data-dir=${profile}`,
       `${server.base}/`,
     ],

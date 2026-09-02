@@ -445,7 +445,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "5cef9bbb5b22185c"
+          "sig": "e1613946f17c121c"
         },
         "VitalsConfig": {
           "kind": "typeAlias",

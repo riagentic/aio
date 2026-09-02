@@ -2,8 +2,15 @@
 // on memory growth. Detects scheduler/subscription/listener leaks that only
 // show up over time.
 //
-//   deno task soak            # 10 minutes (CI-friendly quick soak)
-//   deno task soak -- --minutes=4320   # the full 72h run
+//   deno task soak                     # 10 minutes (CI-friendly quick soak)
+//   deno task soak:72h                 # the full 72h run
+//   deno task soak --minutes=4320      # any duration; the LAST --minutes wins
+//
+// `--minutes` is declared to `aio.run` via `appFlags`. Without that, aio's CLI
+// parser refuses it as an unknown flag before the soak starts — which is what
+// both deno.json tasks did, so `deno task soak` and `deno task soak:72h` each
+// failed in under a second. A 72-hour run is a named beta gate; it could not
+// be started at all.
 //
 // Load profile per second: ~20 WS dispatches across 4 clients + a
 // schedule.every tick + one client churn (disconnect/reconnect) every 5s.
@@ -13,8 +20,11 @@ import { aio } from "../mod.ts";
 import { cell } from "../src/state/cell.ts";
 import { enc } from "../src/protocol/envelope.ts";
 
+// LAST wins: `deno task soak --minutes=4320` appends to the task's own
+// `--minutes=10`, and `find` would have taken the task's value and silently
+// ignored the one the operator typed.
 const minutes = Number(
-  Deno.args.find((a) => a.startsWith("--minutes="))?.slice(10) ?? 10,
+  Deno.args.filter((a) => a.startsWith("--minutes=")).at(-1)?.slice(10) ?? 10,
 );
 const GROWTH_LIMIT_MB_PER_MIN = 0.5;
 
@@ -34,6 +44,10 @@ const counter = cell("soak", {
 
 const app = await aio.run({
   appId: "aio-soak",
+  // Trailing `=` because it takes a VALUE (the spelling `appFlags` documents:
+  // "--sync" is a switch, "--user=" takes one). Without it aio refuses
+  // `--minutes=10` as unknown, before any soaking happens.
+  appFlags: ["--minutes="],
   cells: [counter],
   client: "server-only",
   transport: "ws",
@@ -144,4 +158,16 @@ if (slope > GROWTH_LIMIT_MB_PER_MIN) {
   Deno.exit(1);
 }
 console.log("[soak] PASS: no sustained heap growth");
+// The 72-hour soak is a named beta gate, and until now nothing recorded that
+// it had ever run. A PASS writes its own row — but only a run long enough to
+// BE that claim: a green 10-minute soak is a useful smoke test and is not
+// evidence of 72 hours, and a ledger that blurs the two is worse than none.
+if (minutes >= 4320) {
+  const { recordProof } = await import("./proof.ts");
+  await recordProof(
+    "soak",
+    "72h",
+    `${minutes}min, slope ${slope.toFixed(3)} MB/min`,
+  );
+}
 Deno.exit(0);

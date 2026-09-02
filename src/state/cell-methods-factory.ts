@@ -68,6 +68,42 @@ export function createCellFromMethods<
   checkReservedKeys(name, methodNames, "method");
   checkReservedKeys(name, selectorNames, "selector");
 
+  // …and their VALUES, which nothing looked at. A typo'd or missing import
+  // leaves `undefined` behind: that used to surface from cell() as "Cannot
+  // read properties of undefined (reading 'Symbol(aio.async)')", naming an
+  // internal symbol instead of the method. A non-function that is not
+  // undefined was worse — cell() ACCEPTED it, the app booted, and the first
+  // call threw "fn is not a function" under a hint that said to check the
+  // action payload, which was never the problem.
+  for (const key of methodNames) {
+    const m = (methods as Record<string, unknown>)[key];
+    if (typeof m !== "function") {
+      throw new Error(
+        `[cell:${name}] method '${key}' is ${
+          m === undefined ? "undefined" : `${typeof m} ${JSON.stringify(m)}`
+        }, not a function. The usual cause is a typo'd or missing import — ` +
+          `check the name you passed for '${key}'.`,
+      );
+    }
+  }
+  // A selector is a function, or the deps form { deps: [...], fn } — both are
+  // valid spellings and both are accepted here.
+  const selectorDefs = (config.selectors ?? {}) as Record<string, unknown>;
+  for (const key of selectorNames) {
+    const sel = selectorDefs[key];
+    const depsForm = sel !== null && typeof sel === "object" &&
+      Array.isArray((sel as { deps?: unknown }).deps) &&
+      typeof (sel as { fn?: unknown }).fn === "function";
+    if (typeof sel !== "function" && !depsForm) {
+      throw new Error(
+        `[cell:${name}] selector '${key}' is ${
+          sel === undefined ? "undefined" : typeof sel
+        }, not a function or a { deps, fn } object. The usual cause is a ` +
+          `typo'd or missing import — check the name you passed for '${key}'.`,
+      );
+    }
+  }
+
   // alpha52: state keys are validated too. The `$` prefix is the method draft
   // meta-namespace ($signal/$commit/$live/$do) — a state key there would be
   // shadowed by the interception on every read inside a method, silently.
@@ -161,7 +197,21 @@ export function createCellFromMethods<
       for (const [methodKey, trigger] of Object.entries(config.listensTo)) {
         const triggers = Array.isArray(trigger) ? trigger : [trigger];
         for (const tr of triggers) {
-          const t = typeof tr === "string" ? tr : tr.type;
+          const t = typeof tr === "string"
+            ? tr
+            : (tr as { type?: unknown } | null | undefined)?.type;
+          if (typeof t !== "string" || !t) {
+            throw new Error(
+              `[cell:${name}] listensTo: { ${methodKey}: … } — the trigger is ` +
+                `${
+                  tr === undefined
+                    ? "undefined"
+                    : `${typeof tr} ${JSON.stringify(tr)}`
+                }, not an action. The usual cause is a typo'd or missing ` +
+                `import — pass the action itself (e.g. cart.clear) or its ` +
+                `type string ("cart:clear").`,
+            );
+          }
           if (!methods[methodKey]) {
             throw new Error(
               `[cell:${name}] listensTo: { ${methodKey}: "${t}" } — no method ` +

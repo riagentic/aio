@@ -6,63 +6,17 @@
 // strictOrigin on the cells API). This test extracts the REAL typed keys via
 // `deno doc --json` and asserts every public one is allowlisted.
 import { assert, assertEquals } from "@std/assert";
+import { typedKeys as _typedKeys } from "./typed-keys-helper.ts";
+
+/** The keys `aio-types.ts` declares for a type — one extractor, shared with
+ *  tests/callable-config-completeness.test.ts (see that helper for why). */
+const typedKeys = (typeName: string) =>
+  _typedKeys("src/server/aio-types.ts", typeName);
 import {
   VALID_AIO_CONFIG_KEYS,
   VALID_FEATURES_CONFIG_KEYS,
   VALID_UI_KEYS,
 } from "../src/server/config.ts";
-
-// Coverage profiles from spawned deno processes go to a throwaway temp dir —
-// never into the repo (an empty DENO_COVERAGE_DIR means "cwd"), never into
-// the parent's coverage profile.
-const _childCovDir = Deno.env.get("DENO_COVERAGE_DIR") ??
-  Deno.makeTempDirSync({ prefix: "aio-child-cov-" });
-
-async function typedKeys(typeName: string): Promise<string[]> {
-  const out = await new Deno.Command(Deno.execPath(), {
-    env: { DENO_COVERAGE_DIR: _childCovDir },
-    args: ["doc", "--json", "src/server/aio-types.ts"],
-    cwd: new URL("..", import.meta.url).pathname,
-    stdout: "piped",
-    stderr: "null",
-  }).output();
-  const doc = JSON.parse(new TextDecoder().decode(out.stdout)) as {
-    nodes: Record<string, { symbols: Array<Record<string, unknown>> }>;
-  };
-  const symbols = Object.values(doc.nodes)[0]!.symbols;
-  const sym = symbols.find((s) => s.name === typeName) as {
-    declarations: Array<{
-      kind: string;
-      // deno-lint-ignore no-explicit-any
-      def: any;
-    }>;
-  } | undefined;
-  assert(sym, `type ${typeName} not found in aio-types.ts doc output`);
-
-  const props: string[] = [];
-  // deno-lint-ignore no-explicit-any
-  const collect = (t: any): void => {
-    if (!t) return;
-    if (t.kind === "typeLiteral") {
-      for (const p of t.value?.properties ?? t.typeLiteral?.properties ?? []) {
-        props.push(p.name);
-      }
-    } else if (t.kind === "intersection" || t.kind === "union") {
-      for (const part of t.value ?? []) collect(part);
-    }
-  };
-  for (const decl of sym.declarations) {
-    if (decl.kind === "typeAlias") collect(decl.def?.tsType);
-    if (decl.kind === "interface") {
-      for (const p of decl.def?.properties ?? []) props.push(p.name);
-    }
-  }
-  assert(
-    props.length > 3,
-    `extracted too few keys for ${typeName} — doc shape drifted?`,
-  );
-  return props.filter((p) => !p.startsWith("_"));
-}
 
 function assertCovered(keys: string[], allow: Set<string>, label: string) {
   const missing = keys.filter((k) => !allow.has(k));

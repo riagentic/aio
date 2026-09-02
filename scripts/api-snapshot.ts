@@ -20,11 +20,19 @@ const SNAPSHOT_PATH = new URL("../docs/api-snapshot.json", import.meta.url);
 const ROOT = new URL("../", import.meta.url);
 
 type SymbolEntry = { kind: string; sig: string; experimental?: true };
+/** One line of API drift, and whether it BREAKS a caller.
+ *
+ *  The gate used to print every change with one verdict — "regenerate, review,
+ *  commit" — so a removed export and a new one read identically, and the
+ *  additive-only policy (the post-alpha70 insurance, and the standing rule
+ *  that a compat break needs explicit approval) rested on a human spotting
+ *  which lines were which in an undifferentiated list. */
+type ApiChange = { line: string; breaking: boolean; experimental: boolean };
 type EntrySnapshot = {
   experimental?: true;
   symbols: Record<string, SymbolEntry>;
 };
-type Snapshot = {
+export type Snapshot = {
   $comment: string;
   entries: Record<string, EntrySnapshot>;
 };
@@ -183,8 +191,14 @@ async function buildSnapshot(): Promise<{
 
 // ── Diff ─────────────────────────────────────────────────────────────
 
-function diffSnapshots(committed: Snapshot, current: Snapshot): string[] {
-  const lines: string[] = [];
+export function diffSnapshots(
+  committed: Snapshot,
+  current: Snapshot,
+): ApiChange[] {
+  const lines: ApiChange[] = [];
+  const add = (line: string, breaking: boolean, experimental = false): void => {
+    lines.push({ line, breaking, experimental: !!experimental });
+  };
   const allEntries = new Set([
     ...Object.keys(committed.entries),
     ...Object.keys(current.entries),
@@ -193,18 +207,22 @@ function diffSnapshots(committed: Snapshot, current: Snapshot): string[] {
     const a = committed.entries[entry];
     const b = current.entries[entry];
     if (!a) {
-      lines.push(`+ entry ${entry} (new export entry)`);
+      add(`+ entry ${entry} (new export entry)`, false);
       continue;
     }
     if (!b) {
-      lines.push(`- entry ${entry} (export entry removed)`);
+      add(`- entry ${entry} (export entry removed)`, true);
       continue;
     }
     if (!!a.experimental !== !!b.experimental) {
-      lines.push(
+      // Dropping @experimental is a PROMOTION (the promise gets stronger).
+      // Adding it to something that was stable withdraws a promise, which is
+      // exactly the thing the additive-only policy exists to catch.
+      add(
         `~ entry ${entry}: @experimental ${
           a.experimental ? "removed" : "added"
         }`,
+        !a.experimental,
       );
     }
     const names = new Set([
@@ -214,15 +232,28 @@ function diffSnapshots(committed: Snapshot, current: Snapshot): string[] {
     for (const name of [...names].sort()) {
       const sa = a.symbols[name];
       const sb = b.symbols[name];
-      if (!sa) lines.push(`+ ${entry} › ${name} (${sb!.kind}) added`);
-      else if (!sb) lines.push(`- ${entry} › ${name} (${sa.kind}) removed`);
-      else if (sa.sig !== sb.sig || sa.kind !== sb.kind) {
-        lines.push(`~ ${entry} › ${name} signature changed`);
+      if (!sa) add(`+ ${entry} › ${name} (${sb!.kind}) added`, false);
+      // A symbol the committed snapshot marked @experimental carries no
+      // stability promise — removing or reshaping it is the marker working,
+      // not a break. That is the whole reason the marker exists.
+      else if (!sb) {
+        add(
+          `- ${entry} › ${name} (${sa.kind}) removed`,
+          !sa.experimental,
+          sa.experimental,
+        );
+      } else if (sa.sig !== sb.sig || sa.kind !== sb.kind) {
+        add(
+          `~ ${entry} › ${name} signature changed`,
+          !sa.experimental,
+          sa.experimental,
+        );
       } else if (!!sa.experimental !== !!sb.experimental) {
-        lines.push(
+        add(
           `~ ${entry} › ${name}: @experimental ${
             sa.experimental ? "removed" : "added"
           }`,
+          !sa.experimental,
         );
       }
     }
@@ -268,14 +299,47 @@ async function main(): Promise<void> {
 
   const diff = diffSnapshots(committed, snapshot);
   if (diff.length) {
+    const breaking = diff.filter((c) => c.breaking);
+    const additive = diff.filter((c) => !c.breaking);
     console.error(
       `✗ public API surface drifted from the committed snapshot (${diff.length} change${
         diff.length === 1 ? "" : "s"
       }):\n`,
     );
-    for (const line of diff) console.error(`  ${line}`);
+    // Breaking FIRST and named as such. Everything below is additive, which
+    // the policy allows; everything here needs a decision from a person.
+    if (breaking.length) {
+      console.error(
+        `  BREAKING — ${breaking.length} change${
+          breaking.length === 1 ? "" : "s"
+        } a caller can feel:`,
+      );
+      for (const c of breaking) console.error(`    ${c.line}`);
+      console.error("");
+    }
+    if (additive.length) {
+      console.error(
+        `  additive — ${additive.length} (the policy allows these):`,
+      );
+      for (const c of additive) {
+        console.error(
+          `    ${c.line}${
+            c.experimental ? "  [@experimental — no promise]" : ""
+          }`,
+        );
+      }
+      console.error("");
+    }
     console.error(
-      "\nIf this change is intentional, regenerate with `deno task update:api`, review the diff, and commit it.",
+      breaking.length
+        ? "This removes or reshapes public surface. aio is additive-only since " +
+          "alpha70: a compat break is a DECISION, not a regeneration. Get it " +
+          "approved, write the upgrade guide and the removals registry row, " +
+          "THEN `deno task update:api`.\n" +
+          "Nothing to break? Mark the symbol `@experimental` and it carries no " +
+          "promise — the snapshot already tracks that per symbol."
+        : "Additive only. Regenerate with `deno task update:api`, review the " +
+          "diff, and commit it.",
     );
     Deno.exit(1);
   }

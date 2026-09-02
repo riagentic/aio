@@ -37,15 +37,37 @@ const USAGE = `am auth — manage the built-in auth (auth: true) of this app
 Omitting --password generates a strong one and prints it once.
 "am auth passwd" also clears the lockout and kills every session.`;
 
-/** Random 16-char password (a–z A–Z 0–9, ~95 bits) for --password-less flows. */
-const generatePassword = (): string => {
+/** Random 16-char password (a–z A–Z 0–9, ~95 bits) for --password-less flows.
+ *
+ *  Rejection sampling, not `byte % 62`. 256 is not a multiple of 62, so the
+ *  modulo maps 0–7 five times over and 8–61 four times: the first eight
+ *  characters of the alphabet come up 25% more often than the rest. The
+ *  entropy loss is small — a fraction of a bit across sixteen characters — but
+ *  this is the password that seeds the first admin and the one `am auth passwd`
+ *  hands out during a breach, and "small enough not to matter" is not a claim
+ *  worth making when the fix is to discard the 8 bytes that do not divide.
+ *
+ *  Exported for the test that measures the distribution; it is not am's API. */
+export const _generatePassword = (): string => {
   const chars =
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  // The largest multiple of 62 that fits in a byte: 248. A byte at or above it
+  // is thrown away and redrawn, which costs 8/256 of the draws and buys an
+  // exactly uniform alphabet.
+  const limit = 256 - (256 % chars.length);
   let s = "";
-  for (const b of bytes) s += chars[b % chars.length];
+  while (s.length < 16) {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    for (const b of bytes) {
+      if (b >= limit) continue;
+      s += chars[b % chars.length];
+      if (s.length === 16) break;
+    }
+  }
   return s;
 };
+
+const generatePassword = _generatePassword;
 
 const flag = (args: string[], name: string): string | undefined =>
   args.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3);

@@ -12,6 +12,11 @@ reason to keep one (gated by `deno task check:docs`).
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha74 → alpha75](from-alpha74-to-alpha75.md) — nothing breaks: every build
+  flag reaches the build (`--platform`, `--out`, `--android-dev-url` were parsed
+  and then dropped), `dev:android` and `install:android` find the APK again, a
+  failed crash checkpoint says so, `am auth` generates a uniform password, and
+  `am remove` refuses a path outside the app it names
 - [alpha73 → alpha74](from-alpha73-to-alpha74.md) — nothing breaks: a compiled
   binary serves the assets it embedded, `am cost`/`am status`/`/__aio/metrics`
   and the big-state guardrail all see the UDS transport a desktop app actually

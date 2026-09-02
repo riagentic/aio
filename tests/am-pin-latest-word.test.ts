@@ -7,7 +7,7 @@
 // releases it was being asked for. Both spellings are one act; this pins them
 // to it.
 
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertStringIncludes } from "@std/assert";
 import { pinTarget } from "../src/am/am-cmd-pin.ts";
 import { LATEST, MAIN } from "../src/am/am-versions.ts";
 
@@ -74,4 +74,36 @@ Deno.test("am pin: `--aio <path>` is not mistaken for the target", () => {
     wantLatest: false,
     explicit: "v1.2.3",
   });
+});
+
+// A refusal that names ONE of the two words it accepts.
+//
+// Found by walking the upgrade path a real user walks: alpha73 → alpha74. `am
+// pin latest` now works (this release shipped it), but `am pin newest` — or
+// `current`, or anything else a person reaches for — was refused with a message
+// naming only `"main"`, the BRANCH TIP. So the reader learned about the one
+// word that gives them something other than what they asked for, and never
+// learned `latest` exists.
+//
+// Same shape as the bug the word itself fixed: "the spelling a user reaches for
+// first was the one that did not work."
+Deno.test("am pin: an unknown ref names BOTH words, not just `main`", async () => {
+  const { ensureVersion } = await import("../src/am/am-versions.ts");
+  // A git repo with no aio tags: `newest` cannot resolve, which is the case
+  // under test — the message it produces is the whole point.
+  const dir = await Deno.makeTempDir({ prefix: "aio-pinword-" });
+  await new Deno.Command("git", { args: ["init", "-q", dir] }).output();
+  try {
+    const r = await ensureVersion(dir, "newest");
+    assertEquals(r.ok, false);
+    const msg = (r as { error: string }).error;
+    // The word that would have answered the question.
+    assertStringIncludes(msg, '"latest"');
+    assertStringIncludes(msg, "newest release");
+    // …still beside the one that was already there, which means something else.
+    assertStringIncludes(msg, '"main"');
+    assertStringIncludes(msg, "branch tip");
+  } finally {
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
+  }
 });

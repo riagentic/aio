@@ -1,4 +1,4 @@
-import { assertEquals } from "jsr:@std/assert";
+import { assertEquals } from "@std/assert";
 import { _injectState, _reset } from "../src/state-core.ts";
 // `useCell` was REMOVED in alpha52 (direct cell access replaced it) — its
 // tests went with it; direct reads are covered by cell-reactive tests.

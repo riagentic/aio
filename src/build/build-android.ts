@@ -69,7 +69,7 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
   const androidHome = resolveSdk(); // ANDROID_HOME, its Sdk subdir, or defaults
   if (!androidHome) {
     console.error(
-      "${NO} ANDROID_HOME not set — install Android SDK and set ANDROID_HOME",
+      `${NO} ANDROID_HOME not set — install Android SDK and set ANDROID_HOME`,
     );
     Deno.exit(1);
   }
@@ -433,7 +433,7 @@ async function _writeLocalAssets(
       join(assetsDir, APP_STYLE),
     );
   }
-  console.log("${OK} assets copied");
+  console.log(`${OK} assets copied`);
 }
 
 /** dev:android — retarget the WebView at a live dev-server URL (10.0.2.2:PORT
@@ -582,7 +582,7 @@ async function _runGradle(
   const gradleBin = findGradle();
   if (!gradleBin) {
     console.error(
-      "${NO} gradle not found — install Gradle and ensure it's on PATH or in a standard location",
+      `${NO} gradle not found — install Gradle and ensure it's on PATH or in a standard location`,
     );
     console.error(
       "  checked: PATH, /usr/bin, /usr/local/bin, /snap/bin, /opt/gradle/bin, ~/.sdkman/",
@@ -609,13 +609,13 @@ async function _runGradle(
   }).output();
 
   if (wrapperResult.code !== 0) {
-    console.error("${NO} gradle wrapper generation failed");
+    console.error(`${NO} gradle wrapper generation failed`);
     Deno.exit(1);
   }
 
   const gradlew = join(androidDir, "gradlew");
   await chmodIfSupported(gradlew, 0o755);
-  console.log("${OK} gradle wrapper (pinned 8.14.3)");
+  console.log(`${OK} gradle wrapper (pinned 8.14.3)`);
 
   // Build APK using wrapper
   const gradleTask = doRelease ? "assembleRelease" : "assembleDebug";
@@ -629,7 +629,7 @@ async function _runGradle(
   }).output();
 
   if (gradleResult.code !== 0) {
-    console.error("${NO} gradle build failed");
+    console.error(`${NO} gradle build failed`);
     Deno.exit(1);
   }
 

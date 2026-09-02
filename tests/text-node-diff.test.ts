@@ -5,7 +5,7 @@
 // leading child is always "", and a signal-driven number change (61→62) was not
 // reflected in the DOM (frozen one value behind) — the electron balance bug.
 
-import { assertEquals } from "jsr:@std/assert";
+import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
 import { signal } from "../src/state/signal.ts";
 import { h } from "../src/air/vdom.ts";

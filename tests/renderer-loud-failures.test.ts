@@ -137,3 +137,64 @@ Deno.test("memo(C, compare) reports that the comparator is ignored", () => {
     g.__aioDev = prev;
   }
 });
+
+// ── An undefined component rendered <undefined></undefined> ──────────────────
+// `h()` never looked at `tag`. A typo'd import, a missing export, or — the case
+// no type-checker can catch — a circular import whose binding is still
+// undefined while the module evaluates, all produced a VNode with
+// `tag: undefined`, which SSR wrote as "<undefined></undefined>" and the
+// browser created as an <undefined> element. No error, no warning: the
+// developer sees a blank area and has nothing to search for.
+//
+// Dev throws (server-html-gen.ts's blank-screen guard turns a render throw into
+// an in-page overlay AND a terminal report). Prod reports once and renders
+// NOTHING — the documented category (b) split, deliberate here because one
+// component broken by a circular import must not take a whole production page
+// down when the old behaviour merely rendered it invisibly.
+
+Deno.test("h(): an undefined tag throws in dev and names the likely causes", async () => {
+  const { renderToString } = await import("../src/air/vdom-ssr.ts");
+  const prevDev = (globalThis as Record<string, unknown>).__aioDev;
+  (globalThis as Record<string, unknown>).__aioDev = true;
+  try {
+    const missing = ({} as Record<string, unknown>).Card;
+    let msg = "";
+    try {
+      renderToString(h(missing as never, { title: "hi" }));
+    } catch (e) {
+      msg = (e as Error).message;
+    }
+    assertStringIncludes(msg, "JSX tag is undefined");
+    assertStringIncludes(msg, "circular import");
+    // The props are the only handle on WHICH call site it was — the identifier
+    // is gone by the time `h` sees it.
+    assertStringIncludes(msg, "title");
+  } finally {
+    (globalThis as Record<string, unknown>).__aioDev = prevDev;
+  }
+});
+
+Deno.test("h(): in prod an undefined tag renders nothing, and says so once", async () => {
+  const { renderToString } = await import("../src/air/vdom-ssr.ts");
+  const { _badTagMessage } = await import("../src/air/vdom-create.ts");
+  const prevDev = (globalThis as Record<string, unknown>).__aioDev;
+  delete (globalThis as Record<string, unknown>).__aioDev;
+  const seen: string[] = [];
+  const prevErr = console.error;
+  console.error = (...a: unknown[]) => void seen.push(String(a[0]));
+  try {
+    const missing = ({} as Record<string, unknown>).Card;
+    // Nothing, not "<undefined></undefined>" — the whole point.
+    const out = renderToString(h(missing as never, { uniqueProp: 1 }));
+    assertEquals(out.includes("undefined"), false, out);
+    // …and re-rendering the same broken component does not spam the log.
+    renderToString(h(missing as never, { uniqueProp: 1 }));
+    assertEquals(seen.length, 1, seen.join("\n"));
+    assertStringIncludes(seen[0]!, "JSX tag is undefined");
+  } finally {
+    console.error = prevErr;
+    (globalThis as Record<string, unknown>).__aioDev = prevDev;
+  }
+  // The message is one function, so dev and prod cannot drift apart.
+  assertStringIncludes(_badTagMessage(undefined, {}), "JSX tag is undefined");
+});

@@ -210,6 +210,10 @@ const FAST: [string, string[]][] = [
   ["lint:aio", ["deno", "task", "lint:aio"]],
   ["check:boundaries", ["deno", "task", "check:boundaries"]],
   ["check:silent-catch", ["deno", "task", "check:silent-catch"]],
+  ["check:placeholders", ["deno", "task", "check:placeholders"]],
+  ["check:gated-tests", ["deno", "task", "check:gated-tests"]],
+  ["check:lock", ["deno", "task", "check:lock"]],
+  ["check:home-clean", ["deno", "task", "check:home-clean"]],
   ["check:vacuous", ["deno", "task", "check:vacuous"]],
   ["check:dead-wiring", ["deno", "task", "check:dead-wiring"]],
   ["check:log-prefix", ["deno", "task", "check:log-prefix"]],
@@ -289,6 +293,17 @@ function report(results: Result[]): void {
 
 console.log(`\nrelease check — v${VERSION}\n`);
 console.log("surfaces");
+// The physical matrix is PRINTED at every release, never enforced here: a cut
+// made on Linux cannot be blocked by a Mac this machine does not have. What it
+// must not do is stay invisible — the beta gate names five things only real
+// hardware can answer, and before this they were tracked by memory. Seeing
+// "0/6 proven" beside a green release is the point.
+await new Deno.Command(Deno.execPath(), {
+  args: ["run", "-A", `${root}scripts/proof.ts`],
+  stdout: "inherit",
+  stderr: "inherit",
+}).output();
+
 const surfaces = await surfaceChecks();
 report(surfaces);
 

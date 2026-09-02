@@ -43,5 +43,11 @@ Deno.test({
     );
     assertEquals(out.code, 0);
     assertMatch(text, /READY \\\\\.\\pipe\\aio-test-/);
+    // Write the row. Until this existed nothing recorded that the Windows
+    // named-pipe transport had EVER been exercised — the beta gate's Windows
+    // claim rested on someone remembering, and this release keeps finding
+    // remembered things to be wrong. Last line, so only a full pass records.
+    const { recordProof } = await import("../scripts/proof.ts");
+    await recordProof("windows", "wine", `${m[1]} cases`);
   },
 });

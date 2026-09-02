@@ -107,6 +107,12 @@ export const FLEET_VALUE_FLAGS = [
   "--name",
   "--entry",
   "--ui",
+  // Same reason, and it was missed: `dev:android` spawns the build with this,
+  // the build routes to the fleet, and a flag the fleet does not know is a
+  // flag the refusal gate rejects — so the one task that passes it could not
+  // reach the builder that reads it. `build-flags.test.ts` caught it the
+  // moment build-all started reading the flag, which is what that gate is for.
+  "--android-dev-url",
 ] as const;
 
 /** The `--flags` in `args` that are not in `bools`/`values`. A bare value flag

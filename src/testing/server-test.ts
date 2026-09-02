@@ -253,6 +253,8 @@ export function testBrowser(
         "--no-sandbox",
         "--disable-gpu",
         "--disable-dev-shm-usage",
+        `--password-store=basic`,
+        `--use-mock-keychain`,
         `--user-data-dir=${profile}`,
         ...(opts.extraArgs ?? []),
         url,

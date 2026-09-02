@@ -690,12 +690,12 @@ export const LEDGER: readonly string[] = [
   "no-assertions|tests/error-memory.test.ts|memory monitor — stop clears interval",
   "empty-loop|tests/esbuild-plugin.test.ts|plugin: does NOT intercept regular imports",
   "empty-loop|tests/every-message-has-a-level.test.ts|output: the allowlist is real — every entry still exists and still prints",
-  "no-assertions|tests/examples-boot.test.ts|example ${dir}: boots and serves",
-  "no-assertions|tests/examples-ui.test.ts|example UI ${label}: user clicks drive the rendered counter",
-  "no-assertions|tests/examples.test.ts|example targets/${target}: boots + counter increments over WS",
+  "no-assertions|tests/examples-boot.test.ts|example ${dir}: boots and serves", // aio-ok: a LEDGER of test names read from source, where the name is still a template
+  "no-assertions|tests/examples-ui.test.ts|example UI ${label}: user clicks drive the rendered counter", // aio-ok: a LEDGER of test names read from source, where the name is still a template
+  "no-assertions|tests/examples.test.ts|example targets/${target}: boots + counter increments over WS", // aio-ok: a LEDGER of test names read from source, where the name is still a template
   "no-assertions|tests/examples.test.ts|example counter: boots + counter increments over WS",
   "no-assertions|tests/examples.test.ts|example todo: boots + serves UI",
-  "no-assertions|tests/examples.test.ts|example ${target}: boots + serves connect page",
+  "no-assertions|tests/examples.test.ts|example ${target}: boots + serves connect page", // aio-ok: a LEDGER of test names read from source, where the name is still a template
   "no-assertions|tests/examples.test.ts|example cli-remote: client drives the cli example server via stdin",
   "no-assertions|tests/field-filter-validation.test.ts|filter: valid nested exclude is accepted (head resolves)",
   "no-assertions|tests/field-filter-validation.test.ts|filter: valid top-level include/exclude accepted",
