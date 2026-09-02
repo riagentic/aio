@@ -56,13 +56,58 @@ export function _armTestStrict(): void {
 // sandbox, unless the runner already pinned one (aio's own suite does, in its
 // `deno test` task). An explicit `registerAppDirs()` still wins per app — that is
 // the escape hatch for a test that wants a specific fixture directory.
+/** THE root for every directory a test creates: `~/tmp/aio/`.
+ *
+ *  USER SPACE, not `/tmp`. A test's scratch holds real application data — an
+ *  `auth.db`, an `app.key`, TLS material, whatever an app under test wrote —
+ *  and `/tmp` is world-writable with a sticky bit shared by every account on
+ *  the machine. The directories themselves are 0700 either way; the reason not
+ *  to put them under `/tmp` is that the parent is not ours, which is what makes
+ *  the classic symlink and pre-creation races possible at all. Nothing about a
+ *  test needs that exposure.
+ *
+ *  One predictable place, so "what did the tests leave behind" is one `ls` and
+ *  one `rm -rf`. `AIO_TEST_ROOT` overrides it for a runner that wants its own.
+ *
+ *  `HOME` is read directly rather than through `paths.ts`: read the header of
+ *  this file — everything reachable from here rides in every app's browser
+ *  bundle, and importing a server module is how the bundler comes to refuse
+ *  every browser build.
+ *
+ *  @internal */
+export function aioTestRoot(): string {
+  const override = Deno.env.get("AIO_TEST_ROOT");
+  if (override && override.trim()) {
+    Deno.mkdirSync(override, { recursive: true, mode: 0o700 });
+    return override;
+  }
+  const home = (Deno.env.get("HOME") ?? Deno.env.get("USERPROFILE") ?? "")
+    .replace(/[/\\]+$/, "");
+  if (!home) {
+    // No home to be private in — fall back rather than fail a whole suite, and
+    // the 0700 below is then the only thing protecting it.
+    const tmp = (Deno.env.get("TMPDIR") || "/tmp").replace(/[/\\]+$/, "");
+    const root = `${tmp}/aio`;
+    Deno.mkdirSync(root, { recursive: true, mode: 0o700 });
+    return root;
+  }
+  const root = `${home}/tmp/aio`;
+  Deno.mkdirSync(root, { recursive: true, mode: 0o700 });
+  return root;
+}
+
+/** A fresh directory under `aioTestRoot()`. @internal */
+export function aioTestDir(prefix: string): string {
+  return Deno.makeTempDirSync({ dir: aioTestRoot(), prefix });
+}
+
 let _sandboxed = false;
 function _sandboxAppDirs(): void {
   if (_sandboxed) return;
   _sandboxed = true;
   try {
     if (Deno.env.get("AIO_APPS_DIR")) return; // runner already pinned it
-    const dir = Deno.makeTempDirSync({ prefix: "aio-test-apps-" });
+    const dir = aioTestDir("apps-");
     Deno.env.set("AIO_APPS_DIR", dir);
     globalThis.addEventListener("unload", () => {
       try {

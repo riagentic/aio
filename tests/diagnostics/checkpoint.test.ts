@@ -91,3 +91,68 @@ Deno.test("checkpoint: BigInt state degrades the snapshot, it does not fail the 
     "the BigInt is recorded, readably",
   );
 });
+
+// ── The directory is the writer's own responsibility ─────────────────────────
+// `logger-core.ts` mkdirs the log dir; the checkpoint writer shares that path
+// but only ever USED it. So an app that enables checkpoints while the log
+// directory does not exist yet got a dead feature AND one
+// "[checkpoint] write failed: NotFound" per write, forever — the framework
+// reporting its own failure on a loop instead of doing the one syscall that
+// fixes it. Observed in `deno task bench`, which writes into a fresh temp dir.
+//
+// Every other test in this file mkdirs first, which is exactly why nothing
+// caught it.
+
+Deno.test("checkpoint: writes into a directory that does not exist yet", async () => {
+  const dir = `${TEST_DIR}/cp-missing/nested`;
+  const cp = createCheckpoint(dir, 0);
+  await cp.write({
+    ts: Date.now(),
+    state: { n: { v: 1 } },
+    recentActions: ["n:set"],
+    cells: { n: { errors: 0, enabled: true } },
+  });
+  const read = readCheckpoint(dir);
+  assertExists(read, "the checkpoint was never written");
+  assertEquals((read.state as { n: { v: number } }).n.v, 1);
+});
+
+Deno.test("checkpoint: the emergency sync write creates its directory too", () => {
+  const dir = `${TEST_DIR}/cp-missing-sync/nested`;
+  const cp = createCheckpoint(dir, 0);
+  cp.writeSync({
+    ts: Date.now(),
+    state: { n: { v: 2 } },
+    recentActions: ["n:set"],
+    cells: { n: { errors: 0, enabled: true } },
+  });
+  const read = readCheckpoint(dir);
+  assertExists(read, "the crash-handler checkpoint was never written");
+  assertEquals((read.state as { n: { v: number } }).n.v, 2);
+});
+
+Deno.test("checkpoint: survives its directory disappearing under it", async () => {
+  // This is what `deno task bench` was hitting: several apps boot into ONE
+  // data dir in sequence, and a later boot archives the log directory out from
+  // under a writer that had already written into it. Nine identical
+  // "[checkpoint] write failed: NotFound" lines per run, and every checkpoint
+  // after the first one lost — the framework reporting its own failure on a
+  // loop rather than doing the one idempotent syscall that fixes it.
+  const dir = `${TEST_DIR}/cp-vanishing`;
+  const cp = createCheckpoint(dir, 0);
+  const data = (n: number) => ({
+    ts: Date.now(),
+    state: { n: { v: n } },
+    recentActions: ["n:set"],
+    cells: { n: { errors: 0, enabled: true } },
+  });
+  await cp.write(data(1));
+  assertExists(readCheckpoint(dir));
+
+  // …and now it is gone, exactly as a log archive leaves it.
+  await Deno.remove(dir, { recursive: true });
+  await cp.write(data(2));
+  const after = readCheckpoint(dir);
+  assertExists(after, "the write after the directory vanished was lost");
+  assertEquals((after.state as { n: { v: number } }).n.v, 2);
+});

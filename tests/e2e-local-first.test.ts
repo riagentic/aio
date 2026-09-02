@@ -175,6 +175,8 @@ export default function App() {
         "--no-sandbox",
         "--disable-gpu",
         "--disable-dev-shm-usage",
+        `--password-store=basic`,
+        `--use-mock-keychain`,
         `--user-data-dir=${profile}`,
         `${base}/`,
       ],

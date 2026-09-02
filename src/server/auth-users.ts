@@ -191,6 +191,9 @@ export interface UserStore {
   /** Stage a TOTP secret (base32) — not active until enableTotp. */
   setTotpSecret(id: string, secretB32: string): boolean;
   enableTotp(id: string): boolean;
+  /** Clear a second factor. True when one was actually enrolled — NOT whether
+   *  the user exists (`get` answers that). The recovery path for a lost
+   *  authenticator; there are no user-held recovery codes. */
   disableTotp(id: string): boolean;
   totpSecret(id: string): { secret: string; enabled: boolean } | null;
   /** Issue a one-shot token (returned raw, stored hashed) with a TTL. */
@@ -296,8 +299,15 @@ export function openUserStore(
   const updTotpOn = db.prepare(
     "UPDATE users SET totp_on = ? WHERE id = ? AND totp IS NOT NULL",
   );
+  // Scoped to rows that actually CARRY a factor, so `changes` answers "was one
+  // cleared" rather than "does this user exist" — which is what the one caller
+  // reading the result asks. `am auth totp <id> off` told an operator "second
+  // factor cleared" for an account that never had one, in the middle of a
+  // lost-device recovery, which is the worst moment to imply an account was
+  // protected. Existence is already answered separately, by `get`.
   const totpOff = db.prepare(
-    "UPDATE users SET totp_on = 0, totp = NULL WHERE id = ?",
+    "UPDATE users SET totp_on = 0, totp = NULL " +
+      "WHERE id = ? AND (totp IS NOT NULL OR totp_on = 1)",
   );
   const del = db.prepare("DELETE FROM users WHERE id = ?");
   const cnt = db.prepare("SELECT COUNT(*) AS n FROM users");

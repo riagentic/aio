@@ -311,31 +311,86 @@ Deno.test({
       }
       await Deno.mkdir(resolve(dir, "dep"), { recursive: true });
       await Deno.symlink(REPO_ROOT, resolve(dir, "dep/aio"));
-      const build = async (args: string[]): Promise<void> => {
-        const { code, stderr } = await new Deno.Command("deno", {
+      const build = async (args: string[]): Promise<string> => {
+        const { code, stderr, stdout } = await new Deno.Command("deno", {
           args: ["run", "-A", "dep/aio/src/build.ts", ...args],
           cwd: dir,
           stderr: "piped",
-          stdout: "null",
+          stdout: "piped",
         }).output();
-        assertEquals(
-          code,
-          0,
-          `build ${args.join(" ")} failed:\n${
-            new TextDecoder().decode(stderr)
+        const out = new TextDecoder().decode(stdout) +
+          new TextDecoder().decode(stderr);
+        assertEquals(code, 0, `build ${args.join(" ")} failed:\n${out}`);
+        return out;
+      };
+      /** What `dist/manifest.json` (or another out-dir's) says this build
+       *  produced — the file a release pipeline reads, so the test reads the
+       *  same one rather than a directory listing that can drift from it. */
+      const manifest = async (out = "dist") => {
+        const path = resolve(dir, out, "manifest.json");
+        return JSON.parse(await Deno.readTextFile(path)) as {
+          targets: {
+            target: string;
+            ok: boolean;
+            artifacts: { file: string }[];
+          }[];
+        };
+      };
+      /** Every artifact the manifest claims is on disk, in the same dir. */
+      const assertPlaced = async (out: string, target: string) => {
+        const m = await manifest(out);
+        const t = m.targets.find((x) => x.target === target);
+        assert(
+          t?.ok,
+          `${out}/manifest.json does not record a successful "${target}": ${
+            JSON.stringify(m.targets)
           }`,
         );
+        assert(t.artifacts.length > 0, `"${target}" recorded no artifact`);
+        for (const a of t.artifacts) {
+          const st = await Deno.stat(resolve(dir, out, a.file));
+          assert(
+            st.isFile || st.isDirectory,
+            `${out}/${a.file} is in the manifest but not on disk`,
+          );
+        }
+        return t.artifacts.map((a) => a.file);
       };
-      await build(["--compile", "--cli"]); // cli target → ./app
+
+      // Every build goes through the fleet (alpha73), so an artifact lands in
+      // the out dir under ONE name, carrying its version and its target, and
+      // the manifest is what names it. Asserting the listing instead of the
+      // manifest is what let this test rot: it kept checking for `./app` in
+      // the project root for four releases after nothing wrote one.
+      await build(["--compile", "--cli"]);
+      await assertPlaced("dist", "cli");
+
       // The `server` target's own flag set (`--remote` included) — the one
       // the fleet passes, and the only spelling that names a target.
       await build(["--compile", "--service", "--headless", "--remote"]);
-      await build(["--compile", "--cli", "--remote"]); // cli-client → ./app-client
-      const names = [...Deno.readDirSync(dir)].map((e) => e.name);
-      assert(names.includes("app"), `no cli/service binary in ${names}`);
+      await assertPlaced("dist", "server");
+
+      // dist/ is ONE release, rebuilt clean, so a narrower build legitimately
+      // replaces a wider one — but never silently. The note names what it
+      // dropped AND the flag that would have kept both; without it, an
+      // artifact that was there a minute ago is just gone.
+      const clientOut = await build(["--compile", "--cli", "--remote"]);
+      const placed = await assertPlaced("dist", "cli-client");
+      assertStringIncludes(clientOut, "no longer holds");
+      assertStringIncludes(clientOut, "server");
+      assertStringIncludes(clientOut, "--targets=");
       assert(
-        names.includes("app-client"),
-        `no remote client binary in ${names}`,
+        !(await Deno.stat(resolve(dir, "dist"))
+          .then(() =>
+            [...Deno.readDirSync(resolve(dir, "dist"))].some((e) =>
+              e.name.includes("-server")
+            )
+          )),
+        `the dropped server artifact is still in dist/ — the note lied`,
+      );
+      assert(
+        placed.some((f) => f.includes("client")),
+        `the client artifact is not named as one: ${placed}`,
       );
 
       // `--out=` — the answer to "I orchestrate my own builds" (R-4).
@@ -343,13 +398,7 @@ Deno.test({
       // into the binary wholesale and wiped by every build, so the first
       // artifact is gone by the time the second finishes.
       await build(["--compile", "--cli", "--out=release/one"]);
-      const staged = [...Deno.readDirSync(resolve(dir, "release/one"))].map(
-        (e) => e.name,
-      );
-      assert(
-        staged.includes("app"),
-        `--out= did not place the binary: ${staged}`,
-      );
+      await assertPlaced("release/one", "cli");
 
       // …and an --out inside dist/ is REFUSED, because that is the trap.
       const bad = await new Deno.Command("deno", {

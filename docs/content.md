@@ -197,6 +197,7 @@
 - [Upgrading from alpha71 to alpha72](upgrade/from-alpha71-to-alpha72.md) — key (security), one new UI key (ui.dir), one new config array (plugins),
 - [Upgrading from alpha72 to alpha73](upgrade/from-alpha72-to-alpha73.md) — every line it prints to a person, in one vocabulary — plus three tiny additions
 - [Upgrading from alpha73 to alpha74](upgrade/from-alpha73-to-alpha74.md) — end to end plus the hunt that followed them: fixes to what aio serves, what it
+- [Upgrading from alpha74 to alpha75](upgrade/from-alpha74-to-alpha75.md) — snapshot moved by exactly one hash, the version string.
 - [Upgrade from v1.0.0-alpha8 to v1.0.0-alpha9](upgrade/from-alpha8-to-alpha9.md) — The internal machine state field is renamed.
 - [Upgrade from v1.0.0-alpha9 to v1.0.0-alpha10](upgrade/from-alpha9-to-alpha10.md) — Alpha10 is fully additive.
 - [Upgrade from v0.1 to v0.2](upgrade/from-v0.1-to-v0.2.md) — preserved)

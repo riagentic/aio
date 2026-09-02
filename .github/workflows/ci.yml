@@ -59,6 +59,18 @@ jobs:
         run: deno task lint:aio
       - name: Silent catch (no swallowed errors)
         run: deno task check:silent-catch
+
+      - name: Placeholders (no ${…} that never interpolates)
+        run: deno task check:placeholders
+
+      - name: Gated tests (no opt-in nothing turns on)
+        run: deno task check:gated-tests
+
+      - name: Lock (every dependency request is bounded)
+        run: deno task check:lock
+
+      - name: Home clean (no test wrote into $HOME)
+        run: deno task check:home-clean
       - name: Vacuous tests (a green test must prove something)
         run: deno task check:vacuous
       - name: Dead wiring (an export nothing reaches — src/, aiol/, amui/)

@@ -7,6 +7,7 @@ import {
   parseCron,
   schedule,
   type ScheduleEffect,
+  validateSchedules,
 } from "../src/state/schedule.ts";
 
 const noop = {
@@ -604,4 +605,174 @@ Deno.test("schedule.after accepts 0ms (alpha52) and still rejects negatives", ()
     Error,
     ">= 0",
   );
+});
+
+// ── Static `schedules:` validation ──────────────────────────────────
+// A malformed entry used to be found late or not at all: `every: "5m"` threw
+// out of scheduleManager.start() after persistence was open, the port bound
+// and `started` logged; a string `action:` was never validated and detonated
+// at FIRE time — one internal HOOK_ERROR per tick, blaming action-kind.ts and
+// an `onAction` hook the app never wrote. For an `at`/`cron` entry the first
+// tick can be days after the deploy. The dev server does not type-check, so
+// ScheduleDef type protects this repo, not the app that ships the mistake.
+
+const goodAction = { type: "jobs:tick" };
+
+Deno.test("validateSchedules: a duration STRING names the number form", () => {
+  const e = assertThrows(
+    () => validateSchedules([{ id: "tick", every: "1s", action: goodAction }]),
+    Error,
+  );
+  assertStringIncludes(e.message, "schedules 'tick'.every");
+  assertStringIncludes(e.message, 'string "1s"');
+  assertStringIncludes(e.message, "300_000");
+});
+
+Deno.test("validateSchedules: a bare-string action is refused HERE, not on the first tick", () => {
+  const e = assertThrows(
+    () => validateSchedules([{ id: "tick", every: 1000, action: "jobs:tick" }]),
+    Error,
+  );
+  assertStringIncludes(e.message, "schedules 'tick'.action");
+  assertStringIncludes(e.message, "cell.method.action()");
+  // The old failure said none of this — it named action-kind.ts and onAction.
+  assertStringIncludes(e.message, "not here");
+});
+
+Deno.test("validateSchedules: an action object with no type is refused", () => {
+  assertThrows(
+    () => validateSchedules([{ id: "t", every: 1000, action: { payload: 1 } }]),
+    Error,
+    ".action is",
+  );
+});
+
+Deno.test("validateSchedules: a duplicate id is refused (it would replace the first)", () => {
+  const e = assertThrows(
+    () =>
+      validateSchedules([
+        { id: "tick", every: 1000, action: goodAction },
+        { id: "tick", every: 2000, action: goodAction },
+      ]),
+    Error,
+  );
+  assertStringIncludes(e.message, "declared twice");
+});
+
+Deno.test("validateSchedules: an unknown key gets a did-you-mean", () => {
+  const e = assertThrows(
+    () =>
+      validateSchedules([
+        { id: "t", evrey: 1000, action: goodAction } as unknown,
+      ]),
+    Error,
+  );
+  assertStringIncludes(e.message, 'unknown key "evrey"');
+  assertStringIncludes(e.message, 'did you mean "every"');
+});
+
+Deno.test("validateSchedules: zero or two triggers are both refused", () => {
+  assertStringIncludes(
+    assertThrows(
+      () => validateSchedules([{ id: "t", action: goodAction }]),
+      Error,
+    )
+      .message,
+    "no trigger",
+  );
+  assertStringIncludes(
+    assertThrows(
+      () =>
+        validateSchedules([
+          { id: "t", every: 1000, cron: "0 9 * * *", action: goodAction },
+        ]),
+      Error,
+    ).message,
+    "2 triggers (every, cron)",
+  );
+});
+
+Deno.test("validateSchedules: the every floor and the after floor hold at config time", () => {
+  assertStringIncludes(
+    assertThrows(
+      () => validateSchedules([{ id: "t", every: 5, action: goodAction }]),
+      Error,
+    ).message,
+    "10ms",
+  );
+  assertStringIncludes(
+    assertThrows(
+      () => validateSchedules([{ id: "t", after: -1, action: goodAction }]),
+      Error,
+    ).message,
+    "cannot be negative",
+  );
+});
+
+Deno.test("validateSchedules: at/cron want a string; skipIfRunning is every-only", () => {
+  assertStringIncludes(
+    assertThrows(
+      () => validateSchedules([{ id: "t", cron: 9, action: goodAction }]),
+      Error,
+    ).message,
+    "not a string",
+  );
+  assertStringIncludes(
+    assertThrows(
+      () =>
+        validateSchedules([
+          {
+            id: "t",
+            cron: "0 9 * * *",
+            skipIfRunning: true,
+            action: goodAction,
+          },
+        ]),
+      Error,
+    ).message,
+    "every-only",
+  );
+});
+
+Deno.test("validateSchedules: every valid shape passes, and none passes vacuously", () => {
+  const good = [
+    { id: "a", every: 1000, action: goodAction, skipIfRunning: true },
+    { id: "b", after: 0, action: { type: "x:go", payload: { n: 1 } } },
+    { id: "c", at: "2030-01-01T09:00:00Z", action: goodAction },
+    { id: "d", cron: "0 9 * * *", action: goodAction },
+  ];
+  validateSchedules(good);
+  validateSchedules([]);
+  // Accepting all four proves nothing on its own — a validator that returned
+  // early would do the same. Breaking ONE field of each shape must be refused.
+  for (const def of good) {
+    assertThrows(
+      () => validateSchedules([{ ...def, action: "x:go" }]),
+      Error,
+      ".action is",
+    );
+  }
+  // …and a bad entry is found behind valid ones, so every entry is read.
+  assertThrows(
+    () =>
+      validateSchedules([...good, {
+        id: "e",
+        every: "1s",
+        action: goodAction,
+      }]),
+    Error,
+    "not a number of milliseconds",
+  );
+});
+
+Deno.test("validateSchedules: the CONTAINER is checked before its contents", () => {
+  // `schedules: {}` has no `length`, so a call site guarding on
+  // `schedules?.length` skipped it and the whole config was silently ignored;
+  // `schedules: "1s"` DOES have one, so it arrived here and died on `.forEach`.
+  for (const bad of ["1s", { id: "tick" }, 7]) {
+    assertStringIncludes(
+      assertThrows(() => validateSchedules(bad as never), Error).message,
+      "not an array",
+    );
+  }
 });

@@ -5,7 +5,7 @@
 // desynced: sibling nodes were lost and dynamic text was written to the wrong
 // position (silent DOM corruption — the app looked alive but rendered garbage).
 
-import { assertEquals } from "jsr:@std/assert";
+import { assertEquals } from "@std/assert";
 import { signal } from "../src/state/signal.ts";
 import { Fragment, h } from "../src/air/vdom.ts";
 import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";

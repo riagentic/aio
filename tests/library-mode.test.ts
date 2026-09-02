@@ -4,7 +4,7 @@
 // singleton lock (so the same appId can boot twice sequentially). This unlocks
 // end-to-end server tests, the gap that let a persistence bugs ship.
 
-import { assertEquals } from "jsr:@std/assert";
+import { assertEquals } from "@std/assert";
 import { freePort } from "../src/testing/server-test.ts";
 
 const PORT = freePort();

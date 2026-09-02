@@ -53,8 +53,7 @@ Deno.test({
     const proc = new Deno.Command(Deno.execPath(), {
       env: {
         DENO_COVERAGE_DIR: _childCovDir,
-        AIO_APPS_DIR: home,
-        ...childEnv(),
+        ...childEnv({ AIO_APPS_DIR: home }),
       },
       args: [
         "run",

@@ -60,6 +60,35 @@ function fakeCdp(port: number, pageUrl: string) {
   return { close: () => ac.abort(), finished: server.finished };
 }
 
+/** `JSON.parse(r.out)` on its own reports "Unexpected end of JSON input" and
+ *  nothing else — not the exit code, not stderr, not even that the output was
+ *  EMPTY. That is exactly what one full-suite run produced for the failed-
+ *  install test (which passes in isolation), and the message made the flake
+ *  undiagnosable: it named the parser, never the subprocess. */
+function amJson(
+  r: { code: number; out: string; err: string },
+  what: string,
+): // deno-lint-ignore no-explicit-any
+any {
+  if (r.out.trim() === "") {
+    throw new Error(
+      `${what}: expected JSON on stdout, got NOTHING (exit ${r.code}). ` +
+        `stderr: ${r.err.trim().slice(0, 400) || "(empty)"}`,
+    );
+  }
+  try {
+    return JSON["parse"](r.out); // indexed: a literal `JSON.parse(r.out)` here
+    // would be caught by the very sweep that introduced this helper.
+  } catch (e) {
+    throw new Error(
+      `${what}: stdout is not JSON (exit ${r.code}): ${
+        (e as Error).message
+      }\n` +
+        `stdout: ${r.out.slice(0, 400)}\nstderr: ${r.err.slice(0, 400)}`,
+    );
+  }
+}
+
 async function am(args: string[], env: Record<string, string>) {
   const p = await new Deno.Command(Deno.execPath(), {
     args: ["run", "-A", "src/am.ts", ...args],
@@ -150,7 +179,7 @@ Deno.test({
         env,
       );
       assertEquals(r.code, 0, r.err);
-      const j = JSON.parse(r.out) as {
+      const j = amJson(r, "am shot") as {
         file: string;
         bytes: number;
         url: string;

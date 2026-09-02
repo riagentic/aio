@@ -44,6 +44,7 @@ import { setupDispatch } from "./aio-dispatch.ts";
 import { hostedCellName, startCellWorkerHost } from "./cell-worker-host.ts";
 import { createCellWorkerPool } from "./cell-worker-pool.ts";
 import { isScheduleEffect } from "../state/schedule.ts";
+import { validateSchedules } from "../state/schedule.ts";
 import {
   currentHeapLimitBytes,
   describeHeapPolicy,
@@ -190,6 +191,7 @@ import {
   VALID_AIO_CONFIG_KEYS,
   VALID_FEATURES_CONFIG_KEYS,
   VALID_UI_KEYS,
+  validateCallableConfig,
   validateConfig,
 } from "./config.ts";
 import { count } from "../diagnostics/fmt.ts";
@@ -562,6 +564,24 @@ async function run<S extends Record<string, unknown>>(
 ): Promise<AioApp<S, any>>;
 // deno-lint-ignore no-explicit-any
 async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
+  // ── the app's OWN flags join the vocabulary before argv is ever read ──
+  //
+  // This used to happen at the end of config composition, ~120 lines below —
+  // long after the `--help` query on the very next line calls `parseCli()`,
+  // which REFUSES an unknown flag by throwing. So `appFlags` never worked at
+  // all: `aio.run({ appFlags: ["--sync"] })` invoked as `app --sync` died in
+  // the parser before the declaration it needed was made. That is the escape
+  // hatch every "unknown flag" error names ("declare it: aio.run({ appFlags:
+  // [...] })"), so the remedy aio recommends was itself broken, and
+  // `deno task soak`/`soak:72h` — a named beta gate — could not start.
+  //
+  // `declareAppFlags` clears the parse cache, so declaring here is what makes
+  // every later `parseCli()` see the app's vocabulary. Plugins contribute no
+  // flags (the merge below touches routes/schedules/origins/hooks only), so
+  // the raw config is the whole truth at this point.
+  if (typeof a === "object" && a && "appFlags" in a) {
+    declareAppFlags((a as CellsConfig).appFlags);
+  }
   // ── `--help` is a QUERY: it must not boot the app ──
   //
   // This check used to live in `_run`, three phases later — by which time the
@@ -585,6 +605,13 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
 
   // Cells-based API: aio.run(cellsConfig) — zero-config: aio.run()
   let fc = (a ?? {}) as CellsConfig;
+  // Hook authorship is read HERE, from the object the app actually wrote, and
+  // nowhere later. Every rebuild below materialises omitted hooks — the plugin
+  // merge writes `onStopping: fc.onStopping` and composes the rest, the cells
+  // bridge spreads them again — so downstream "the key is present" stops
+  // meaning "the app wrote it", and warning there fired on every boot of every
+  // app about hooks it had never mentioned.
+  validateCallableConfig(fc as unknown as Record<string, unknown>);
   // ── Plugins ──
   //
   // FIRST, before any other config key is read, so every reader below sees one
@@ -672,6 +699,12 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
     VALID_FEATURES_CONFIG_KEYS,
     "CellsConfig",
   );
+  // Statically knowable, so it is refused while it is still config — not out
+  // of scheduleManager.start() once persistence is open and the port is bound.
+  if (fc.schedules !== undefined) validateSchedules(fc.schedules);
+  // Post-merge: refuse a non-function, but do not read absence as intent —
+  // authorship was checked above, on the app's own object.
+  validateCallableConfig(fc as unknown as Record<string, unknown>, false);
   // BEFORE anything reads argv. The app's own verbs join aio's vocabulary
   // here, so a declared flag is passed through rather than refused — and a
   // typo in one gets the same did-you-mean as a typo in aio's own.
@@ -1457,6 +1490,10 @@ async function _run<S, A, E>(
       validateMemoryConfig(config.memory as Record<string, unknown>);
     }
   }
+  if (config.schedules !== undefined) validateSchedules(config.schedules);
+  // Post-bridge: hooks the app omitted have been materialised as `undefined`
+  // by the mechanical spread, so presence no longer implies authorship.
+  validateCallableConfig(config as unknown as Record<string, unknown>, false);
   printLint(
     await lint(
       initialState,
@@ -2388,6 +2425,14 @@ async function _run<S, A, E>(
   // resolved one. Printing 0 is the same confidently-wrong line as printing a
   // number for an app that bound nothing.
   const livePort = transport.server.boundPort ?? port;
+  // …including `app.port`, which the type calls "server port — available after
+  // aio.run(), useful for connectCli()". The app object is built ~200 lines
+  // above, BEFORE a listener exists, so it carried the REQUESTED port: an app
+  // started with `port: 0` handed its caller a 0 while serving on a real one,
+  // and `connectCli()` — the use the type names — could not be done from the
+  // handle at all. The boot report, the ws URL and the lock all learned to say
+  // the resolved port; this is the surface that did not.
+  (app as { port?: number }).port = livePort;
   udsHandle = transport.udsHandle;
   udsRef.current = udsHandle;
 

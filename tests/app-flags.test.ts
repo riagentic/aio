@@ -83,3 +83,71 @@ Deno.test("appFlags: declaring resets a parse made under the old vocabulary", ()
   assertThrows(() => parseCli(["--sync"]), Error, "unknown flag");
   reset();
 });
+
+// ── …and it must work through aio.run(), which is where it did NOT ──────────
+//
+// Every test above calls `declareAppFlags` directly, and all of them passed
+// while the feature was dead end to end: `aio.run()` called `parseCli()` for
+// the `--help` query ~120 lines BEFORE it declared the app's flags, and
+// `parseCli` refuses an unknown flag by throwing. So the field report that
+// asked for this (dm §5) got a feature that could not be used, and the
+// workaround it had already invented — deleting its own words out of
+// `Deno.args` before calling `aio.run()` — remained the only thing that
+// worked.
+//
+// This drives the real binary, because `Deno.args` is the whole point: a
+// harness that hands the parser a fabricated array cannot see this bug. It is
+// the transport-boundary gap in todo.md, in miniature.
+const ROOT = new URL("..", import.meta.url).pathname;
+
+async function bootWithArgs(
+  args: string[],
+): Promise<{ out: string; code: number }> {
+  const probe = `${ROOT}tests/.app-flags-probe.tmp.ts`;
+  await Deno.writeTextFile(
+    probe,
+    `import { aio } from "../mod.ts";\n` +
+      `import { cell } from "../src/state/cell.ts";\n` +
+      `const c = cell("appflagprobe", { state: { n: 0 }, methods: {} });\n` +
+      `const app = await aio.run({\n` +
+      `  cells: [c], appId: "appflagprobe", client: "server-only",\n` +
+      `  persist: false, libraryMode: true, singleton: false, port: 0,\n` +
+      `  baseDir: Deno.makeTempDirSync(), dbPath: ":memory:",\n` +
+      `  appFlags: ["--sync", "--user="],\n` +
+      `} as never);\n` +
+      `console.log("BOOTED");\n` +
+      `await (app as unknown as { close?: () => Promise<void> }).close?.();\n`,
+  );
+  try {
+    const r = await new Deno.Command(Deno.execPath(), {
+      args: ["run", "-A", probe, ...args],
+      cwd: ROOT,
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    return {
+      out: new TextDecoder().decode(r.stdout) +
+        new TextDecoder().decode(r.stderr),
+      code: r.code,
+    };
+  } finally {
+    await Deno.remove(probe).catch(() => {});
+  }
+}
+
+Deno.test("appFlags: a declared flag survives aio.run() with it in argv", async () => {
+  for (const arg of ["--sync", "--user=bob"]) {
+    const { out, code } = await bootWithArgs([arg]);
+    assert(
+      out.includes("BOOTED"),
+      `aio.run() refused the declared flag ${arg}:\n${out.slice(0, 500)}`,
+    );
+    assert(code === 0, `exit ${code} for ${arg}`);
+  }
+});
+
+Deno.test("appFlags: an UNDECLARED flag is still refused — the strictness is the point", async () => {
+  const { out, code } = await bootWithArgs(["--nope"]);
+  assertStringIncludes(out, "unknown flag: --nope");
+  assert(code !== 0, "an unknown flag must not boot the app");
+});

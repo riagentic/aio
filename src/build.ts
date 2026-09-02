@@ -23,7 +23,7 @@ import {
 } from "./build/build-config.ts";
 import { appDirs, installRoot } from "./server/app-dirs.ts";
 import { BUILD_VERSION_ENV } from "./server/app-version.ts";
-import { targetForFlags, TARGETS } from "./build-all.ts";
+import { forwardedToFleet, targetForFlags, TARGETS } from "./build-all.ts";
 import { APP_ICON, APP_STYLE, BUNDLE_JS } from "./server/app-files.ts";
 import { slugify } from "./server/single-instance-lock.ts";
 import { ensureEmbeddedBundle, runBundle } from "./build/build-bundle.ts";
@@ -333,11 +333,7 @@ if (import.meta.main) {
       // a script path for `deno run`, never a module to embed.
       const asPath = (spec: string) =>
         spec.startsWith("file:") ? fromFileUrl(spec) : spec;
-      const passthrough = Deno.args.filter((a) =>
-        a.startsWith("--entry=") || a.startsWith("--name=") ||
-        a.startsWith("--ui=") || a === "--release" || a === "--force" ||
-        a === "--allow-server-only"
-      );
+      const passthrough = forwardedToFleet(Deno.args);
       const { code } = await new Deno.Command(Deno.execPath(), {
         args: [
           "run",

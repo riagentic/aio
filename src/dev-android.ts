@@ -11,10 +11,11 @@
  * SDK (adb + emulator) and at least one AVD; fails loud with steps otherwise.
  */
 import { readDenoJsonSync } from "./server/deno-json.ts";
-import { join } from "@std/path";
+import { basename, join } from "@std/path";
 import { resolveSdk } from "./build/build-helpers.ts";
 import { resolveEntry } from "./build/build-config.ts";
 import { androidApplicationId } from "./build/build-android.ts";
+import { soleArtifact } from "./build/build-manifest.ts";
 
 const dec = new TextDecoder();
 
@@ -169,14 +170,16 @@ async function main(): Promise<void> {
     console.error(build.out + build.err);
     fail("APK build failed (see above)");
   }
-  const apk = [...Deno.readDirSync(Deno.cwd())]
-    .filter((e) => e.isFile && e.name.endsWith(".apk"))
-    .map((e) => ({
-      name: e.name,
-      m: Deno.statSync(e.name).mtime?.getTime() ?? 0,
-    }))
-    .sort((a, b) => b.m - a.m)[0]?.name;
-  if (!apk) fail("no .apk produced by the build");
+  // The fleet places every artifact in the out dir and records it; nothing is
+  // left in the cwd this used to scan. Ask the manifest.
+  const found = await soleArtifact(Deno.cwd(), {
+    target: "android",
+    suffix: ".apk",
+    what: "an .apk",
+  });
+  if ("error" in found) fail(found.error);
+  const apkPath = (found as { path: string }).path;
+  const apk = basename(apkPath);
   // THE applicationId rule (build-android.ts), applied to the APK label —
   // which the build sets to the binary name. A re-derived regex here was a
   // second decider waiting to drift.
@@ -249,7 +252,7 @@ async function main(): Promise<void> {
   }
 
   console.log(`[dev:android] installing ${apk}...`);
-  const inst = await run(adb, ["install", "-r", join(Deno.cwd(), apk)]);
+  const inst = await run(adb, ["install", "-r", apkPath]);
   if (inst.code !== 0) {
     console.error(inst.out + inst.err);
     try {

@@ -120,8 +120,7 @@ Deno.test({
       cwd: proj,
       env: {
         DENO_COVERAGE_DIR: _childCovDir,
-        AIO_APPS_DIR: home,
-        ...childEnv(),
+        ...childEnv({ AIO_APPS_DIR: home }),
       },
       stdin: "null",
       stdout: "piped",

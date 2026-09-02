@@ -40,6 +40,24 @@ async function sizes(): Promise<BundleSizes> {
   return cached;
 }
 
+/** Every live doc that could name a bundle size — the whole tree except the
+ *  historical corners, where an old number is the POINT (an upgrade guide
+ *  quoting the size at that release must not be rewritten to today's). */
+async function liveDocPages(root: string): Promise<string[]> {
+  const out: string[] = [];
+  const walk = async (rel: string): Promise<void> => {
+    for await (const e of Deno.readDir(`${root}${rel}`)) {
+      const next = `${rel}/${e.name}`;
+      if (e.isDirectory) {
+        if (/^(upgrade|release-notes|specs|api-ref)$/.test(e.name)) continue;
+        await walk(next);
+      } else if (e.name.endsWith(".md")) out.push(next.slice(1));
+    }
+  };
+  await walk("/docs");
+  return out;
+}
+
 Deno.test({
   name: "bundle size: the browser bundle stays under its ceiling",
   ignore: !RUN,
@@ -107,14 +125,16 @@ Deno.test({
     // numbers ("~20 KB gzipped", "~50 KB gzipped") were copied between these
     // files until nobody could find the original; a doc that names a size must
     // now name a size this test just produced.
-    const PAGES = [
-      "docs/ui/air-setup.md",
-      "docs/ui/README.md",
-      "docs/ui/air-comparison.md",
-      "docs/basics/faq.md",
-      "docs/basics/quickstart.md",
-      "docs/content.md",
-    ];
+    //
+    // This used to be a hand-listed set of six pages, and that is exactly how
+    // the bug it exists to prevent survived: docs/ui/comparison.md — a SECOND
+    // React-vs-AIR table — kept saying "~20KB (gz)" through the whole release
+    // that corrected every listed page, because nobody added it to the list.
+    // CLAUDE.md carried the same number for the same reason (it is exempt from
+    // the docs gates, which is about not tidying it into docs/, not about
+    // being allowed to be wrong). A whitelist of pages is a whitelist of
+    // pages that drift; every live doc is scanned now.
+    const PAGES = [...(await liveDocPages(root)), "CLAUDE.md", "README.md"];
     const stale: string[] = [];
     for (const page of PAGES) {
       let text: string;
@@ -128,6 +148,19 @@ Deno.test({
         // ±4 KB: a doc rounds, and a one-KB drift is not worth a red gate.
         if (Math.abs(n - measured) > 4) {
           stale.push(`${page}: "${m[0]}" — measured ${measured} KB`);
+        }
+      }
+      // …and a markdown row whose label starts "aio:" states a bundle size in
+      // its FIRST KB column (gzip; the second is brotli and is a different
+      // number). air-comparison.md §14 tells the reader this test goes red if
+      // that table stops matching — it did not, because the column header says
+      // "gzip" and the regex above needs the letters next to the number.
+      for (const m of text.matchAll(/^\|\s*aio:[^|]*\|\s*~?(\d+)\s*KB/gim)) {
+        const n = Number(m[1]);
+        if (Math.abs(n - measured) > 4) {
+          stale.push(
+            `${page}: "${m[0].trim()}" — measured ${measured} KB (gzip column)`,
+          );
         }
       }
     }

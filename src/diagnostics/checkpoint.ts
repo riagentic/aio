@@ -119,6 +119,16 @@ export function createCheckpoint(
 ) {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let pending: CheckpointData | null = null;
+  // `logger-core.ts` mkdirs the log dir, and the checkpoint shares that path
+  // but only ever USED it — so with checkpoints on and the directory not yet
+  // created, every write failed NotFound and logged one error, forever: the
+  // framework reporting its own failure on a loop instead of doing the one
+  // idempotent syscall that fixes it. Done once, lazily, so the steady state
+  // is still a plain write.
+  let dirReady = false;
+  // …and if a write fails for a reason mkdir cannot fix (a read-only mount, a
+  // full disk), the SAME message must not repeat on every debounce tick.
+  let lastError = "";
 
   // ONE tmp file, so two overlapping writes raced: both wrote it, the first
   // rename consumed it, the second failed with NotFound — and that rejection
@@ -135,29 +145,97 @@ export function createCheckpoint(
       ? data
       : { ...data, state: _redactCheckpointState(data.state, redact) };
 
+  /** One line per DISTINCT failure. The same error every debounce tick is not
+   *  more information, it is a log nobody can read. */
+  function reportWriteError(e: unknown): void {
+    const msg = `${e}`;
+    if (msg === lastError) return;
+    lastError = msg;
+    // The crash path calls this, so it must not become the reason a crash
+    // handler dies: a torn-down sink swallows the report, never the process.
+    try {
+      log.error(`[checkpoint] write failed: ${msg}`);
+    } catch {
+      // aio-ok: reporting a failed write must never outrank the crash we are
+      // in the middle of handling.
+    }
+  }
+
   function write(data: CheckpointData): Promise<void> {
     return enqueue(async () => {
       const tmp = `${dir}/${TMP}`;
       const target = `${dir}/${FILE}`;
       const json = _safeStringify(scrub(data));
+      if (!dirReady) {
+        await Deno.mkdir(dir, { recursive: true, mode: 0o700 }).catch(() => {});
+        dirReady = true;
+      }
       // `mode` only applies at CREATE time, so a leftover tmp from an earlier
       // crash — or an existing checkpoint written by an older, laxer build —
       // would keep its old permissions through the rename. Remove both first.
       await Deno.remove(tmp).catch(() => {});
-      await Deno.writeTextFile(tmp, json, MODE);
+      try {
+        await Deno.writeTextFile(tmp, json, MODE);
+      } catch (e) {
+        // The directory can go away UNDER a live writer — log rotation runs in
+        // it, another app booting into the same data dir archives it, an
+        // operator clears logs. Latching `dirReady` after the first success
+        // would then fail every write for the rest of the process's life. A
+        // NotFound is the one error re-running mkdir can fix, so it is the one
+        // error worth a single retry; anything else propagates unchanged.
+        if (!(e instanceof Deno.errors.NotFound)) throw e;
+        await Deno.mkdir(dir, { recursive: true, mode: 0o700 }).catch(() => {});
+        await Deno.writeTextFile(tmp, json, MODE);
+      }
       await Deno.rename(tmp, target);
     });
   }
 
-  /** Synchronous emergency write — for crash handler. */
+  /** Synchronous emergency write — for crash handler.
+   *
+   *  Best-effort, but never SILENT. This is the one artifact that exists to
+   *  explain a crash: when it cannot be written, "no checkpoint on disk" must
+   *  not be the only evidence, or the reader is left guessing whether the
+   *  process died before the handler ran or the handler itself failed. It
+   *  carries the same NotFound retry as `write()` — the directory can be
+   *  archived or cleared under a live process, and the emergency path must not
+   *  be weaker than the routine one it stands in for. */
   function writeSync(data: CheckpointData): void {
-    try {
-      const path = `${dir}/${FILE}`;
+    const path = `${dir}/${FILE}`;
+    const json = _safeStringify(scrub(data));
+    const attempt = (): void => {
+      if (!dirReady) {
+        try {
+          Deno.mkdirSync(dir, { recursive: true, mode: 0o700 });
+        } catch {
+          // aio-ok: already there, or unfixable — the write below decides,
+          // and reports through reportWriteError either way.
+        }
+        dirReady = true;
+      }
       try {
         Deno.removeSync(path);
-      } catch { /* nothing to clear */ }
-      Deno.writeTextFileSync(path, _safeStringify(scrub(data)), MODE);
-    } catch { /* best effort during crash */ }
+      } catch {
+        // aio-ok: nothing to clear. `mode` applies at CREATE time only, so
+        // this is about permissions on a leftover file, not about the write.
+      }
+      Deno.writeTextFileSync(path, json, MODE);
+    };
+    try {
+      attempt();
+    } catch (e) {
+      if (e instanceof Deno.errors.NotFound) {
+        try {
+          Deno.mkdirSync(dir, { recursive: true, mode: 0o700 });
+          Deno.writeTextFileSync(path, json, MODE);
+          return;
+        } catch (retry) {
+          reportWriteError(retry);
+          return;
+        }
+      }
+      reportWriteError(e);
+    }
   }
 
   /** Schedule a debounced write. */
@@ -169,15 +247,13 @@ export function createCheckpoint(
       // time. Idempotent, and still one avoidable disk write at the moment the
       // process is trying to leave.
       pending = null;
-      write(data).catch((e) => log.error(`[checkpoint] write failed: ${e}`)); // AIO-279: log instead of swallow
+      write(data).catch(reportWriteError); // AIO-279: log instead of swallow
       return;
     }
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => {
       if (pending) {
-        write(pending).catch((e) =>
-          log.error(`[checkpoint] write failed: ${e}`)
-        ); // AIO-279
+        write(pending).catch(reportWriteError); // AIO-279
       }
       timer = null;
     }, debounceMs);

@@ -9,7 +9,7 @@
 // whose children are all real static VNodes (icons / static markup, no text)
 // must still be static so the optimization survives where it is sound.
 
-import { assert } from "jsr:@std/assert";
+import { assert } from "@std/assert";
 import { h } from "../src/air/vdom.ts";
 
 Deno.test("element with a text child is NOT static (text may be dynamic)", () => {

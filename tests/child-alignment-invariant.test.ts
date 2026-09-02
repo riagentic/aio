@@ -5,7 +5,7 @@
 // fragments, portals, mixed dynamic text, nested) across re-renders and asserts
 // no `child-desync` warning is ever emitted.
 
-import { assert, assertEquals } from "jsr:@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { signal } from "../src/state/signal.ts";
 import { Fragment, h, Portal } from "../src/air/vdom.ts";
 import {

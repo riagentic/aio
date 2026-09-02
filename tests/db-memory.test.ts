@@ -3,7 +3,7 @@
 // DB can't be shared across Workers, so a stray `readers > 0` is ignored (each
 // reader would open its own empty :memory: DB and silently return no rows).
 
-import { assert, assertEquals } from "jsr:@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { createDB } from "../src/server-entry.ts";
 
 Deno.test("createDB(:memory:) round-trips without a file", async () => {

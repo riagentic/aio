@@ -15,6 +15,7 @@ import {
   assertNotEquals,
   assertStringIncludes,
 } from "@std/assert";
+import { awaitStableTotpWindow } from "./totp-window-helper.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { _resetAuthFails } from "../src/server/server-auth.ts";
 import { _resetSecurityWarnings } from "../src/server/server.ts";
@@ -261,6 +262,10 @@ Deno.test("totp: enabling a factor requires the password, exactly like disabling
       password: "password123",
     });
     const { secret } = await b.json("totp/setup", undefined, token);
+    // Not near a window edge: a code computed for `step - 1` is two windows
+    // stale if the boundary rolls before the server checks it, and the 401
+    // that follows has nothing to do with what this test asserts.
+    await awaitStableTotpWindow();
     const step = Math.floor(Date.now() / 30_000);
 
     // The stolen-session attacker: session only, no password.
@@ -403,6 +408,10 @@ Deno.test("oidc: an external identity cannot land on a local account", async () 
       email: "alice@example.com",
     });
     const { secret } = await b.json("totp/setup", undefined, token);
+    // Not near a window edge: a code computed for `step - 1` is two windows
+    // stale if the boundary rolls before the server checks it, and the 401
+    // that follows has nothing to do with what this test asserts.
+    await awaitStableTotpWindow();
     const step = Math.floor(Date.now() / 30_000);
     const en = await b.post("totp/enable", {
       code: await totpCode(secret, step - 1),
@@ -607,6 +616,10 @@ Deno.test("reset: a pending TOTP token cannot outlive the reset that revokes eve
       email: "alice@example.com",
     });
     const { secret } = await b.json("totp/setup", undefined, token);
+    // Not near a window edge: a code computed for `step - 1` is two windows
+    // stale if the boundary rolls before the server checks it, and the 401
+    // that follows has nothing to do with what this test asserts.
+    await awaitStableTotpWindow();
     const step = Math.floor(Date.now() / 30_000);
     const en = await b.post("totp/enable", {
       code: await totpCode(secret, step - 1),

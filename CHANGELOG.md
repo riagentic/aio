@@ -1,5 +1,541 @@
 # Changelog
 
+## v1.0.0-alpha75 — the instrument, and the second guard (2026-09-02)
+
+> Two things went wrong in the same shape this release. A gate measured the repo
+> AND a stale copy of it and reported coverage thirty points under the truth,
+> which is why "the floor is flaky, don't trust it" had been written down
+> instead of fixed. And `am remove` had exactly one guard between a name and a
+> recursive delete of `$HOME` — its own message said so — so the day that guard
+> was disabled for a mutation test, the delete happened. Everything below is
+> either a measurement that was lying, or a rule that was alone.
+
+- **Every build flag reaches the fleet, and every caller looks where the
+  artifact is.** alpha73 made the fleet the only build path and `build.ts` a
+  router — which forwarded a hand-written subset of the flags it accepts.
+  `--platform=windows` produced a host ELF binary under the host's name
+  (`build-cli.ts` documents that exact failure as fixed; it had regressed),
+  `--out=release/one` put artifacts in `dist/` and created nothing, and
+  `--android-dev-url=` was dropped so `dev:android` built a production APK.
+  Three callers still scanned the project root for artifacts the fleet places in
+  `dist/`, each reporting "nothing built" after a successful build:
+  `dev:android`, `install:android --build`, and the Windows lab. One declarative
+  map now decides the vocabulary, `build-manifest.ts` answers "where is the
+  artifact", and a test reads the builder's own source for flags that are
+  neither forwarded nor declared fleet-owned.
+- **The crash checkpoint says when it cannot write.** `writeSync` is called from
+  the crash handler and swallowed everything, so a failed emergency write and a
+  process that never reached the handler left identical evidence: no file, no
+  line. It now reports (deduped) and carries the same NotFound retry the routine
+  path had — the emergency path was strictly weaker than the one it stands in
+  for.
+- **Fifteen error messages printed `${NO}` instead of `✗`.** A quote character
+  in the wrong place: every glyph on the Android and Electron build paths was a
+  literal `${OK}`/`${NO}`, including "compile failed" and "ANDROID_HOME not
+  set". `check:placeholders` makes the class unshippable.
+- **A test that no gate runs is a test that is not there.** `check:matrix` was
+  in neither `release-check.ts` nor CI, and the build smoke inside it had been
+  RED for four releases with every release gate green — it still asserted
+  `./app` in the project root. `ELECTRON_E2E` was set by nothing at all: three
+  Electron E2E cases had never run once, and pass in seven seconds now that they
+  do. `check:gated-tests` requires every opt-in gate to be turned on by a task a
+  gate chain runs, or to be declared as needing hardware AND hold a row in the
+  physical proof matrix.
+- **The coverage gate was measuring this repo AND an installed copy of it.** It
+  reported 52.4% against a 73% floor; `crash-handler.ts` came out at 2% and is
+  97% when its own tests run alone. The filter was `path.includes("/src/")`,
+  which on any machine that has run `install.sh` also matches
+  `~/.local/lib/aio/src/…`. Anchored to the repo, the same profile reads
+  **83.5%** — and that is the whole of "the coverage floor is flaky by nature".
+  It was never flake; the number moved with whether `install.sh` had run.
+- **A dependency cannot drift without a file changing.** 17 test files imported
+  `jsr:@std/assert` bare while 862 used the pinned mapping: two spellings, one
+  floating at `@*`. `check:lock` refuses an unbounded request in the lock and at
+  the import site.
+- **`am trust` and `am auth` had no tests at all** — the only two files in
+  `src/` with none, and both security-critical. `am trust` asks a person to
+  install a root CA and argues for itself by saying the root is name-
+  constrained; nothing read the certificate to check. It is, critically, and the
+  tests read the artifact rather than the source string. Writing the `am
+  auth`
+  tests found two defects: the generated password was `byte % 62`, so 'a'–'h'
+  came up 25% more often than the rest (it seeds the first admin and is what a
+  breach hands out — rejection-sampled now), and `disableTotp` answered "does
+  this user exist" rather than "was a factor cleared", so a lost-device recovery
+  reported a second factor cleared on an account that never had one.
+- **`am remove` has a second guard.** `installedAppPaths` builds two of its
+  three paths from `homedir()`, not from `installRoot()`, so no sandbox variable
+  moves them: `installedAppPaths("..").binLink` is `~/.local`. The name check
+  was the only thing standing between that and a recursive delete.
+  `insideParent()` now refuses any path that is not a PROPER descendant of the
+  directory that owns it — equal-to-parent as firmly as outside-it, because
+  deleting the parent is the failure mode. Verified with the name check
+  disabled: every canary survives.
+- **Tests no longer write into the developer's home.** A spawned app resolves
+  its home as `~/.<appId>` unless `AIO_APPS_DIR` is pinned; the suite's task
+  pins it, running one file does not — so every e2e app, scaffolded fixture and
+  version probe left a uniquely-named directory behind. 169 had accumulated.
+  Pinned at every spawn site, all test scratch now lands under one root —
+  `~/tmp/aio/`, mode 0700, in USER SPACE rather than `/tmp`, because a test's
+  scratch holds an `auth.db`, an `app.key` and TLS material and `/tmp`'s parent
+  is not ours (overridable with `AIO_TEST_ROOT`) — and `check:home-clean` fails
+  on any stray without ever deleting anything.
+- **Tests for the paths a locked-out person is actually on** — the reset-token
+  form, the TOTP step and every submit behind them ran at 43%. The reset request
+  reveals nothing about whether an account exists, a completed reset does not
+  sign you in, a wrong code burns the one-shot pending, and "Forgot password?"
+  only appears when the server can send the mail that carries the token. Plus
+  `am report` (7% covered — an ambiguous id prefix must refuse rather than show
+  the wrong crash) and `logger-vitals`, which had no test file naming it.
+- **`test-strict.ts`' import list is pinned, not described.** Its header says
+  everything reachable from there rides in every browser bundle and that one
+  static import made the bundler refuse every build — then said the rule was
+  "kept here, in words". Adding one cost `test:e2e` 9 of its 11 cases, with a
+  failure that named neither the file nor the import.
+
+- **Worker-cell parity is tested, not asserted.** `tests/cell-workers.test.ts`
+  has always stated the contract in prose — "Everything else (state,
+  persistence, broadcast) must behave exactly as it does for a normal cell,
+  because the worker only streams patches home" — and nothing pinned it, while
+  the claim has been FALSE at least twice (schedule effects came home as actions
+  and vanished; teardown streamed a destroy-reset home and persisted it over
+  real data). `tests/worker-parity.test.ts` puts two cells with IDENTICAL config
+  in one spawned app, one `worker: true` and one not, and compares them across
+  state, a `Date` payload (the two hops differ — a worker round trip is
+  structuredClone, the socket is JSON), sync returns, async returns, async
+  throws, and a schedule effect returned from a method. They agree on all six.
+
+  Verified against the real bug rather than a proxy: stop posting a worker's
+  schedule effects home — the historical failure exactly — and the test fails on
+  `/parity/later`.
+
+- **A transport differential, and the two divergences it immediately found.**
+  `tests/transport-differential.test.ts` dispatches the same call in-process and
+  over a real WebSocket and compares the state that lands — the shape this repo
+  already trusts for sync/async parity, applied to the boundary the harness
+  cannot cross. Two payloads land differently and now say so:
+  `{ gone: undefined }` keeps its key in-process and loses the KEY over the wire
+  (so `"gone" in state` is true in a test and false in a browser), and `-0`
+  arrives as `0`. Both are JSON's documented behaviour rather than aio defects,
+  so they are PINNED as known divergences: a change in either direction — the
+  wire learning to carry one, or a new loss appearing — turns the test red.
+
+  The differential covers a method's RETURN value too, and that path came out
+  well: `serializeReturn` already knew that `Map`/`Set`/`RegExp`/`Error` become
+  `{}` and warns — in dev AND prod, observe-only — that "the caller receives a
+  DIFFERENT value than the method returned". The test pins the value AND the
+  warning, because an unwarned `{}` is the bug and a warned one is the design.
+  That path is the model state was missing until this release. The pin was
+  written expecting `undefined` and was wrong: the framework was better than the
+  guess, which is worth recording as often as the reverse.
+
+  Async methods are covered too, value and throw. The contract there is
+  `_callId` — `aio-server.ts`: "an ASYNC method carries `_callId`; the executor
+  resolves that id with the method's RETURN value when it completes … SYNC/void
+  methods have no `_callId`; dispatch() already resolves with their value". A
+  socket caller that omits it receives the early reduce result and no
+  correlation, which is the contract rather than a defect.
+
+  The first version of this test passed all seven cases while being blind: it
+  compared both sides with a bare `JSON.stringify`, which drops `undefined` and
+  normalises `-0` on BOTH sides, hiding exactly what it was built to detect. The
+  comparison keeps the lossy shapes visible now, and the known-divergence pin
+  additionally asserts the divergence still IS one, so the list cannot rot into
+  a tautology the day the two sides agree.
+
+- **Two flakes in the release-gate suite, diagnosed and fixed** — both found by
+  re-running rather than by reading, and both in the incidental parts of tests
+  rather than in what they assert.
+
+  `oidc: an external identity cannot land on a local account` failed with a bare
+  `401`. The cause was three lines above the assertion: a TOTP code is computed
+  for `step - 1` and then awaited, so if the 30-second window rolls before the
+  server validates it, the code is two windows stale. The test now waits out an
+  imminent window edge — deterministic, unlike a retry, and at most a few
+  hundred ms on the rare run that starts near a boundary.
+
+  `kill --stale: the refusal always NAMES the process` failed reading
+  `it is running: tokio-runtime-w` — a Rust thread, from a pid the test had
+  spawned and which had been recycled under load. The invariant the test exists
+  for (the refusal never trails off after the colon) HELD; only the secondary
+  name check was reading a stranger. It now asserts the name only while the pid
+  is still ours, and a mutation that makes the refusal trail off still turns it
+  red.
+
+  Worth fixing rather than re-running: the beta gate is ten consecutive alphas
+  judged by hand, and a suite that flakes pollutes exactly that judgment — a
+  flake read as a defect, or a defect waved off as a flake.
+
+- **State the wire cannot carry is reported where it is written.** Measured, not
+  reasoned about: a `Map` in cell state is a real `Map` to the method that wrote
+  it and to any in-process test that reads it back, and `{}` to every client and
+  to `state.db`.
+
+  ```
+  IN-PROCESS  m: Map   s: Set   d: Date
+  OVER WIRE   {"m":{}, "s":{},  "d":"2020-01-02T03:04:05.000Z"}
+  ```
+
+  So a `testCell` test asserting `state.m.get("k") === 1` passes while the same
+  app is broken in a browser — green-test-broken-prod by construction, which the
+  dev==prod doctrine names as the thing never to allow. EFFECTS have been
+  guarded against exactly this since `cloneEffects`, whose comment spells out
+  the reason ("JSON loses undefined/NaN/Infinity/Date/Map/Set and silently
+  corrupted the executor's payload contract"); state — the surface that also
+  gets persisted — never was.
+
+  A commit that writes a `Map`, `Set`, function, symbol or bigint now warns at
+  the write, naming the cell, the path, and what is lost. Over the PATCHES, so
+  it is O(change); once per cell+path+kind, so a value written every tick does
+  not fill the log. `Date`/`NaN`/`Infinity` change form without destroying data
+  and are deliberately out of scope — dates in state are far too common for a
+  warning about them to stay readable, and the omission is written down rather
+  than left to be discovered.
+
+- **`app.port` reported the port you ASKED for, not the one it got.** The type
+  calls it "server port — available after `aio.run()`, useful for
+  `connectCli()`", and the app object is built before a listener exists — so an
+  app started with `port: 0` ("pick a free port") handed its caller a literal
+  `0` while serving on a real port, and the use the type names could not be done
+  from the handle at all. `aio.ts` already had the resolved value and the right
+  reasoning beside it ("every place that NAMES a port — the boot report, the ws
+  URL, the lock — has to say the resolved one. Printing 0 is the same
+  confidently-wrong line as printing a number for an app that bound nothing");
+  the public handle was the one surface that never got it. A value correct in
+  two of three places, which is this repo's most repeated shape.
+
+- **`check:api` says which changes are BREAKING, instead of reporting them all
+  the same way.** The gate has always detected drift and always answered it with
+  one sentence — "regenerate with `deno task update:api`, review the diff, and
+  commit it" — so a removed export and a new one printed identically. The
+  additive-only policy that has held since alpha70, and the standing rule that a
+  compat break needs explicit approval, therefore rested on a person spotting
+  which lines were which in an undifferentiated list, at the exact moment the
+  tempting thing to do is regenerate and move on. A removal or a signature
+  change on a stable symbol is now reported as **BREAKING**, first, and told
+  that it is a decision rather than a regeneration — approval, an upgrade guide,
+  a `removals.ts` row, _then_ the snapshot. Additive changes keep the old,
+  cheerful instruction.
+
+- **`@experimental` is documented, and now does something.** The snapshot has
+  recorded the JSDoc tag per symbol all along; nothing carried it and no page
+  mentioned it. It is what makes additive-only survivable — without it, an
+  unsettled API can only ship as stable and be stuck, or not ship — so the
+  classifier honours it (removing or reshaping an `@experimental` symbol is
+  additive, and marked `[@experimental — no promise]`), the failure message
+  offers it, and `docs/basics/semver-policy.md` explains it. Promotion out of
+  `@experimental` is additive; moving a stable symbol INTO it is a break,
+  because it withdraws a promise callers already had.
+
+- **A physical-proof matrix, written by the gates themselves**
+  (`deno task
+  proof`). The beta gate names five things this machine cannot
+  answer — a real Windows pass, a real macOS pass, an Android device, the
+  72-hour soak, an off-box remote run — and every one is behind an opt-in env
+  gate that reads `ignored (0ms)` in a normal suite. Nothing recorded whether
+  any had **ever** run, so "we tested Windows" was a memory, and this release
+  keeps finding remembered things to be wrong. Rows are written by the gate on
+  success, at its last line, with the date and commit it ran against: evidence,
+  not a claim. A 10-minute soak deliberately does not write the 72-hour row.
+
+  It reports the honest state — **1/6 proven**, the Windows named-pipe transport
+  under Wine (11 cases, written by the gate at the commit it ran against) — and
+  separates two things worth separating: four claims have a gate that has not
+  been run, and **two have no gate at all** (an Android device, and the off-box
+  remote run; `am lab android` proves the CLI against a fake adb, not a phone).
+  `check:release` prints the matrix at every release without enforcing it — a
+  cut made on Linux cannot be blocked by a Mac that is not here — so "0/6
+  proven" is visible beside a green release instead of being remembered.
+
+- **`aio.run({ appFlags })` never worked, and it is the remedy every
+  unknown-flag error names.** `aio.run()` calls `parseCli()` for the `--help`
+  query about 120 lines before it declared the app's own flags, and `parseCli`
+  refuses an unknown flag by throwing — so `aio.run({ appFlags: ["--sync"] })`
+  invoked as `app --sync` died in the parser before the declaration it needed
+  was made. Both documented spellings failed, switch and value alike. The
+  feature came from a field report (dm §5) whose own workaround — deleting its
+  words out of `Deno.args` before calling `aio.run()` — therefore remained the
+  only thing that worked. Declared before argv is read now; an UNDECLARED flag
+  is still refused, which was always the point.
+
+  Its five tests passed throughout, because every one of them calls
+  `declareAppFlags` directly and never goes through `aio.run()` — the
+  transport/boundary gap `todo.md` now tracks, in miniature. The new test drives
+  a real binary, because `Deno.args` is the whole point and a harness that hands
+  the parser a fabricated array cannot see this.
+
+- **`deno task soak` and `soak:72h` could not start** — the 72-hour soak is a
+  named beta gate, and both tasks failed in under a second on
+  `unknown flag: --minutes`, for the reason above. Fixed with the same change,
+  plus `--minutes=` declared on the soak app and the LAST occurrence winning so
+  `deno task soak --minutes=4320` overrides the task's own default instead of
+  being silently ignored. Verified running: heap samples, frame counts, and a
+  refusal to give a verdict when a run is too short to have one.
+
+- **`check:orphans` explains its two numbers separately, because they have
+  different causes.** It reported "N abandoned director(ies) (stale lock,
+  ownerless /tmp/aio-*)" and then told the reader, of both, that "every one is a
+  test that made a temp home and did not remove it" — which is true of the
+  `/tmp` half and not of the other. The stale locks are app homes under
+  `AIO_APPS_DIR`, left by the hundreds of apps a suite boots, and
+  `deno task test` already resets that home at the start of every run. Acting on
+  the message as written means hunting `makeTempDir` calls for a population
+  where that is not the cause; the two halves now carry their own explanation
+  and their own remedy, and the message says which one is worth fixing at the
+  source.
+
+- **`am trigger` answers the command you typed, not the app you did not
+  target.** Found by driving the documented
+  `am create → start → surface →
+  trigger` loop by hand. `am surface` reports a
+  form as `events: ["submit"]`, so `am trigger "App:Form" submit` is the obvious
+  next move — and it landed in a usage list of fifteen actions that does not
+  contain the word just typed and says nothing about forms. There is no `submit`
+  action deliberately: these are the browser's real gestures, not shortcuts (the
+  rule that makes `type` fire keydown/input/keyup per character), and a form is
+  submitted by pressing Enter in a field or clicking its button — which is
+  exactly what `ui-trigger.ts` dispatches `submit` from. So the refusal now
+  names those two gestures instead of adding a synthetic action. Separately, and
+  the reason this was hard to see: the app TARGET was resolved before the
+  command was parsed, so the same typo from a directory with no app running
+  answered "am does not know which app to target" — a true sentence about a
+  different problem. A malformed command is malformed whether or not anything is
+  running.
+
+- **Fixed a false alarm the hook check itself introduced.** The check warns when
+  a hook key is present but `undefined`, because writing the key is what
+  declares the intent — but that signal survives only as far as the cells
+  bridge, which spreads keys mechanically (`onStopping: fc.onStopping`) and so
+  materialises every hook an app omitted as an explicit `undefined`. Validating
+  after that point warned on **every boot of every app**, about hooks it had
+  never mentioned. Found by booting a real app for an unrelated reason; every
+  unit test of the validator passed throughout, because they all hand it a clean
+  object. The bridge was not the only rebuild, either: the plugin merge writes
+  `onStopping: fc.onStopping` verbatim and composes the other six, so any app
+  using ANY plugin got seven of these — the first fix caught only the bridge.
+  The rule the two together teach: **any rebuild of the config destroys
+  authorship**, so it is read once now, from the object the app itself passed,
+  before anything merges into it. Every later call refuses a non-function (no
+  spread produces one of those) without reading absence as intent.
+
+- **`validateSchedules`' own key list is gated against `ScheduleDef`** — a
+  follow-through on the fix that introduced it. A key added to the type but not
+  to the validator's list would be refused as _unknown_, turning a legitimate
+  config into a boot failure with a did-you-mean pointing at nothing: exactly
+  the class `tests/config-allowlist.test.ts` was written to kill, reintroduced
+  by a validator that arrived later and brought its own hand-written list.
+  Deriving it needed a fix to the shared type reader too — `A & (B | C)` wraps
+  the union in a `parenthesized` node, and the walk had been stopping at the
+  parenthesis. Its "extracted too few keys — doc shape drifted?" assertion is
+  what caught that, rather than a gate quietly passing on a short list.
+
+- **The callable-key guards can no longer rot, and closing that found one more
+  hole.** `validateCallableConfig` and its `cell()` twin each police a
+  hand-written list of keys — and a hand-written list is a list that drifts: add
+  `onPause?: () => void` to the config type tomorrow and the guard silently does
+  not cover it, putting a typo'd import right back where it started. A new
+  completeness test derives the list from the config TYPES and fails if the
+  runtime's list has fallen behind. On its first run it found
+  **`onCheckpointRestore`** — function-valued, user-written, and unchecked, so a
+  typo'd import meant crash recovery silently never happened: the same "a
+  diagnostic feature is itself quietly off" shape as the checkpoint writer that
+  could not create its own directory. Now checked. The test proves its own parse
+  reads the compiler's own view of the types (`deno doc --json`), not the source
+  text — the first version regex-parsed it and reported
+  `long?: (keyof M &
+  string)[]` as a function, because `key?: (` does not mean
+  "function". That extraction now lives in ONE place
+  (`tests/typed-keys-helper.ts`), shared with the allowlist-drift gate that had
+  been doing it correctly all along.
+
+- **"Pinned by `tests/x.test.tsx`" is a promise, and nothing checked it was
+  still keepable.** Prose that names the test guaranteeing a claim tells the
+  reader they need not re-derive it, because a gate re-derives it every run — so
+  a rename or a deletion turns that sentence into a lie no gate detects. That is
+  exactly how `docs/ui/air-comparison.md` came to promise
+  "tests/bundle-size.test.ts goes red if this page stops matching it" about a
+  table that gate could not read. `check:docs` now resolves every test file
+  named as the thing that pins, gates, guards or enforces a claim — across the
+  live docs, `src/`, and `CLAUDE.md` — in both phrasings ("pinned by `tests/x`"
+  and "`tests/x` fuzzes exactly that"). Deliberately scoped to those
+  promise-words rather than to every `tests/…` path: docs also name test files
+  as things to CREATE, and a check that cannot tell a promise from an
+  instruction would cry wolf. Nothing was broken today — five paths that looked
+  missing were `.tsx` files my first scan truncated to `.ts`, and the rest are
+  illustrative names in examples.
+
+- **A `db:` mapping and a `listensTo:` trigger name themselves when they are not
+  what they should be.** Both were the same shape as the `cells:` entry fix in
+  this release: a typo'd or missing import leaves `undefined`, which reached an
+  internal property access and surfaced as a raw JS TypeError —
+  `Cannot use 'in' operator to search for 'table' in undefined` for
+  `db: { "notes.items": tabel({ … }) }`, and
+  `Cannot read properties of undefined (reading 'type')` for
+  `listensTo: { onCartCleared: cart.claer }`. Neither named the mapping, the
+  key, or the cause, though both loops had the key in scope the whole time and
+  every neighbouring throw in those blocks already speaks in the right voice.
+  Both documented `listensTo` spellings (a type string, and `{ type }` objects,
+  singly or in an array) are unchanged.
+
+- **A cell lifecycle hook that never runs is no longer invisible either.** The
+  app-level twin of this (the `aio.run` hook check in this release) was the same
+  class, and `cell()`'s was worse. `onInit: mod.setUp` — one letter off, so
+  `undefined` — was accepted, never ran, and said nothing at all. A non-function
+  did get reported, but only at init and in the framework's own vocabulary:
+  `TypeError: f.__aio.onInit is not a function` — an internal field access,
+  raised after the cell was already built, naming neither the key the app wrote
+  nor why it is undefined. `cell()` already refuses an unknown key because "a
+  key aio does not read does nothing — silently, until you notice the behaviour
+  you configured never happened"; a key it DOES read whose value is `undefined`
+  does exactly the same. `onInit`, `onDestroy`, `onRestore`, `onMigrate` and
+  `validate` are now checked where they are declared, with the same split as the
+  app level: a non-function is refused, an explicit `undefined`/`null` warns
+  (both `onInit: opts.onInit` and `onInit: isDev ? devInit : undefined` are
+  legitimate), and an ABSENT key still says nothing.
+
+- **The bundle-size gate scanned a hand-written list of pages, so the number it
+  exists to police survived in two places.** A previous release corrected "~20
+  KB gzipped" for the renderer across every page the gate listed — and
+  `docs/ui/comparison.md`, a SECOND React-vs-AIR table, kept saying `~20KB (gz)`
+  the whole time, because nobody added it to the list. `CLAUDE.md` carried the
+  same number for the same reason: it is exempt from the docs gates, which is
+  about not tidying it into `docs/`, not about being allowed to be wrong. Both
+  now name the measured number, and the gate walks every live doc (plus
+  `CLAUDE.md` and the README) instead of a whitelist that drifts. It also reads
+  the `§14` table in `docs/ui/air-comparison.md`, whose prose promises "this
+  test goes red if this page stops matching it" — it did not, because that
+  table's column header says `gzip` and the regex needed the letters beside the
+  number; those rows had drifted to 55/57 against a measured 59/61.
+
+- **Checkpoints stopped writing the moment their directory moved, and said so
+  forever.** `logger-core.ts` creates the log directory; the checkpoint writer
+  shares that path but only ever USED it. So a writer whose directory did not
+  exist yet — or, the case actually observed, one whose directory was archived
+  out from under it when a second app booted into the same data dir — failed
+  every write from then on, logging an identical
+  `[checkpoint] write failed: NotFound` each time. `deno task bench` emitted
+  nine per run; the diagnostic feature that exists for the crash you did not see
+  was itself silently off. The writer now creates its own directory, and retries
+  once on `NotFound` — the one error re-running `mkdir` can fix — so it is
+  self-healing whatever removed the directory. Repeated identical failures now
+  report once rather than once per debounce tick. Every existing test in
+  `checkpoint.test.ts` created the directory first, which is exactly why nothing
+  caught it; the bench run is clean now (9 errors → 0).
+
+- **A typo'd component rendered `<undefined></undefined>`.** `h()` never looked
+  at its `tag`, so a missing export, a typo'd import, or — the case no
+  type-checker can catch — a circular import whose binding is still `undefined`
+  while the module evaluates, all produced a VNode SSR wrote as
+  `<undefined></undefined>` and the browser created as an `<undefined>` element.
+  No error, no warning: a blank area with nothing to search for. Dev now throws,
+  and the existing blank-screen guard turns that into an in-page overlay AND a
+  terminal report; **prod reports once and renders nothing** — the documented
+  category (b) split, deliberate here because one component broken by a circular
+  import must not take a whole production page down when the old behaviour
+  merely rendered it invisibly. The message names the three likely causes and
+  the props at the call site, which is the only handle left once the identifier
+  is gone. No measurable cost: one `typeof`, and the common (string) tag exits
+  on the first comparison — `check:bench` is unchanged; the bundle grows 1 KB
+  raw on AIR alone and not at all on the shipping app (61 KB gz either way). The
+  overlay half was verified by hand against real chromium — the page names
+  `JSX tag is undefined` and the circular-import cause — but is NOT gated: the
+  blank-screen e2e harness fast-forwards timers to dump the DOM, which is
+  deterministic for the module-load failures it was built for and races one that
+  happens a stage later, at render. A flaky test on a release gate is worth less
+  than none, so it was written, proven, and then removed. The guard itself is
+  unit-tested in both modes.
+
+- **A cell method or selector that is not a function is refused by name.**
+  Method NAMES were validated against reserved keys; their VALUES never were.
+  `methods: { tick: undefined }` surfaced from `cell()` as "Cannot read
+  properties of undefined (reading 'Symbol(aio.async)')", naming an internal
+  symbol. A non-function that was not undefined was worse: `cell()` ACCEPTED it,
+  the app booted, and the first call threw "fn is not a function" under a
+  remediation hint that said to check the action payload — which was never the
+  problem. Both selector spellings (a function, or `{ deps, fn }`) still pass.
+
+- **`schedules:` is checked as a container, not just per entry** — a fix to the
+  fix in this release. `schedules: {}` has no `length`, so the call site
+  guarding on `schedules?.length` skipped it and the whole config was silently
+  ignored; `schedules: "1s"` DOES have one, so it reached the validator and died
+  on `.forEach`. The guard is on presence now, and the container's shape is
+  checked before its contents.
+
+- **A hook that never runs is no longer invisible.** `onStart: mod.bootUP` — one
+  letter off, so `undefined` — booted an app that reported `"status": "healthy"`
+  while the startup work it names never happened, and nothing was logged, at
+  boot or after. Every function-valued config key (`onStart`, `onStop`,
+  `onStopping`, `onAction`, `onEffect`, `onConnect`, `onDisconnect`, `onError`,
+  `onRestore`, `beforeReduce`, `resolveUser`) is now checked where it is
+  declared. The two cases get different answers because they are not equally
+  knowable: a **non-function** has no working reading and is refused; an
+  explicit **`undefined`/`null`** warns and names the key, since
+  `onStart: opts.onStart` and `onStart: isDev ? devBoot : undefined` are both
+  legitimate and refusing them would break working apps. An ABSENT key still
+  says nothing — writing the key is what declares the intent.
+
+- **A bad `cells:` entry names itself.** `cells:` is the one array every app
+  writes, and a typo'd or missing import is how it goes wrong. The resulting
+  `undefined` hit `"__aio" in entry` and surfaced as a raw JS TypeError —
+  "Cannot use 'in' operator to search for '__aio' in undefined" — blaming an
+  operator the app never wrote and naming neither the array nor the position. It
+  now reads `aio.run({ cells }): cells[1] is undefined, not a cell` and names
+  the import as the usual cause. (`plugins:` already did this correctly;
+  `cells:` was the one that missed it.)
+
+- **A declared route with no handler answered `200 text/html`.** The boot loop
+  that refuses a bad route KEY never looked at the handler, and `Object.keys`
+  visits a key whose value is `undefined` — which is exactly what a typo'd or
+  missing import leaves behind. `matchRoute` treats a falsy handler as no match,
+  so the request fell through to the app shell: HTTP 200,
+  `content-type:
+  text/html`, on a route the app declared as an API. A caller
+  sees success and parses HTML as JSON, failing far from the cause, and nothing
+  was logged — at boot or per request. A non-function value was the same mistake
+  one step louder: a 500 and a `handler is not a function` line, but only once
+  someone hit the path, and forever after. Both are knowable at boot, and both
+  are now refused there, naming the route, the value and the import that usually
+  caused it. Same class as the `schedules:` fix in this release, found with the
+  same lens: config that is statically knowable but validated only when it
+  fires.
+
+- **A malformed `schedules:` entry is refused as config, not at fire time.**
+  Found by building quant's app shape — a long-running server-only app whose
+  work is armed by a static schedule. Two failures, one cause: `every: "1s"`
+  slipped past every numeric comparison (`"1s" < 10` is false) and threw out of
+  `scheduleManager.start()` — AFTER persistence was open, the port bound, cell
+  init run and `started` logged, so the app half-started and then died, which
+  under a restart supervisor is a loop. A bare-string `action: "jobs:tick"` was
+  not validated at all: the app booted clean, logged `schedules: 1 started`, and
+  then threw one internal `HOOK_ERROR` per tick
+  (`Cannot read properties of undefined (reading 'endsWith')`, blaming
+  `action-kind.ts` and an `onAction` hook the app never wrote) — naming neither
+  the schedule nor the mistake. For an `at`/`cron` entry that first tick can be
+  days after the deploy that broke it. `aio.run()` now validates every entry at
+  the config seam, before any side effect: duration keys are numbers (the
+  refusal names `300_000`, and that aio's CLI takes `60s` spellings while the
+  config does not), `action` is an action object, exactly one trigger per entry,
+  ids are unique, and an unknown key gets a did-you-mean. The `ScheduleDef` type
+  said all of this already — but the dev server transpiles without
+  type-checking, so the type protected this repo and not the app shipping the
+  mistake.
+
+- **`am pin` names BOTH words it accepts.** `am pin latest` landed in alpha74;
+  the refusal for anything else still named only `"main"` — the BRANCH TIP — so
+  a reader who typed `newest` or `current` learned about the one word that gives
+  them something other than what they asked for, and never learned `latest`
+  exists. Found by walking the upgrade path a real user walks (alpha73 →
+  alpha74) against the pushed tag. Same shape as the bug the word itself fixed:
+  "the spelling a user reaches for first was the one that did not work."
+
+  Also verified on that walk, and working: the documented upgrade
+  (`am pin --latest && am fix`) takes an alpha73 app to alpha74 and its tests
+  still pass. Note the structural limit it exposes — the tooling that performs
+  an upgrade is always the OLD version's, so an improvement to `am pin` can
+  never help the upgrade INTO the release that contains it. `am pin latest`
+  therefore fails from alpha73 while listing alpha74 as available; `--latest` is
+  the form that works from there, and it is what the upgrade guide says.
+
 ## v1.0.0-alpha74 — read the artifact, not the source tree (2026-09-01)
 
 > Two field reports closed end to end, then a hunt that found fifteen more by

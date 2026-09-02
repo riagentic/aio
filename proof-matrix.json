@@ -1,0 +1,9 @@
+[
+  {
+    "target": "windows",
+    "env": "wine",
+    "commit": "51750ac",
+    "date": "2026-09-01",
+    "detail": "11 cases"
+  }
+]

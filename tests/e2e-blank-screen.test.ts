@@ -143,6 +143,8 @@ async function renderBroken(appTsx: string): Promise<{
         "--no-sandbox",
         "--disable-gpu",
         "--disable-dev-shm-usage",
+        `--password-store=basic`,
+        `--use-mock-keychain`,
         `--user-data-dir=${profile}`,
         // fast-forwards timers so the sync overlay is present at dump time;
         // WS state round-trips do NOT complete under virtual time, so this
@@ -232,6 +234,8 @@ Deno.test({
         "--no-sandbox",
         "--disable-gpu",
         "--disable-dev-shm-usage",
+        `--password-store=basic`,
+        `--use-mock-keychain`,
         `--user-data-dir=${profile}`,
         `http://localhost:${port}/`,
       ],
@@ -273,6 +277,8 @@ Deno.test({
         "--no-sandbox",
         "--disable-gpu",
         "--disable-dev-shm-usage",
+        `--password-store=basic`,
+        `--use-mock-keychain`,
         `--user-data-dir=${profile}`,
         `http://localhost:${port}/`,
       ],

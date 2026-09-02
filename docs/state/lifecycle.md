@@ -55,7 +55,7 @@ await aio.run({
 });
 
 // 3. Repeatedly — a static entry, armed once by the framework.
-schedules: [{ id: "rescan", every: "5m", action: "projects:scan" }],
+schedules: [{ id: "rescan", every: 300_000, action: projects.scan.action() }],
 ```
 
 The rule underneath: a cell method is how work enters the system, and `onInit` /

@@ -320,15 +320,15 @@ rather than a variable.
 
 | Bundle                                                      | gzip      | brotli |
 | ----------------------------------------------------------- | --------- | ------ |
-| aio: render a component                                     | 55 KB     | 48 KB  |
-| aio: + one cell (the counter app)                           | 57 KB     | 50 KB  |
+| aio: render a component                                     | 59 KB     | 51 KB  |
+| aio: + one cell (the counter app)                           | 61 KB     | 53 KB  |
 | React + Redux Toolkit + Router + a WS client + a sync layer | ~75-90 KB | —      |
 
 ### Verdict: ⚠️ Bigger than a view layer, smaller than the stack it replaces
 
 If you want a renderer, AIR is the wrong size — Solid is 8x smaller and does
 that job. If you want state that is persisted, synced, offline-queued and
-reactive in the browser without assembling five libraries, 57 KB is the whole
+reactive in the browser without assembling five libraries, 61 KB is the whole
 thing. Judge it against the second list, not the first.
 
 Since alpha72 the server compresses and revalidates, so the counter app is 50 KB
