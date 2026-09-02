@@ -1087,10 +1087,11 @@ export async function cmdTrigger(
   flags: GlobalFlags,
 ): Promise<void> {
   const mode = detectMode(flags);
-  const appId = resolveAmAppId(flags.app);
-  const port = resolvePort(flags.port, appId, {
-    explicit: flags.app !== undefined,
-  });
+  // Parse and validate the COMMAND before resolving which app to send it to.
+  // Target resolution ran first, so `am trigger X submit` from a directory
+  // with no targetable app answered "am does not know which app to target" —
+  // a true sentence about a different problem. A malformed command is
+  // malformed whether or not anything is running, and saying so needs no app.
   // ── the index is OPTIONAL, and it is not the first thing anyone types ──
   //
   // `am surface` needs no index (it drives the newest UI client); `am trigger`
@@ -1126,8 +1127,23 @@ export async function cmdTrigger(
     "dragTo",
   ]);
   if (!path || !action || !actions.has(action)) {
+    // `am surface` reports a form as `events: ["submit"]`, so reaching for
+    // `am trigger <form> submit` is the obvious next move — and it lands in a
+    // usage list that never mentions forms. There is no `submit` action on
+    // purpose: these are the browser's real gestures, not shortcuts (the same
+    // rule that makes `type` fire keydown/input/keyup per character), and a
+    // form is submitted by a person pressing Enter or clicking a button. Name
+    // the gesture rather than leaving the reader to infer it from a list of
+    // fifteen words that does not contain the one they typed.
+    const hint = action === "submit"
+      ? "\nthere is no `submit` action — a form is submitted by a real " +
+        "gesture:\n" +
+        '  am trigger "<…:TheInput>" press "Enter"   (Enter inside the form)\n' +
+        '  am trigger "<…:AddButton>" click          (its submit button)\n'
+      : "";
     outError(
-      'usage: am trigger "<Component…:Element>" <action> [text]\n' +
+      hint +
+        'usage: am trigger "<Component…:Element>" <action> [text]\n' +
         '       am trigger <clientIdx> "<…>" <action> [text]   # a specific client\n' +
         "actions: click, dblclick, type <text>, setValue <text>, press, keyDown,\n" +
         "         keyUp, hover, focus, blur, select <value>, check, uncheck,\n" +
@@ -1142,6 +1158,10 @@ export async function cmdTrigger(
     );
     Deno.exit(1);
   }
+  const appId = resolveAmAppId(flags.app);
+  const port = resolvePort(flags.port, appId, {
+    explicit: flags.app !== undefined,
+  });
   // ONE decider for "did this trigger actually happen".
   //
   // A trigger's reply carries its OWN `ok`: `runUITrigger` (src/air/ui-remote.ts)

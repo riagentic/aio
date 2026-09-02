@@ -99,7 +99,7 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
     }
     if (exists) await Deno.copyFile(join(dist, name), join(appDirDist, name));
   }
-  console.log("${OK} dist/ assets copied to AppDir/dist/");
+  console.log(`${OK} dist/ assets copied to AppDir/dist/`);
 
   // Copy Electron runtime — auto-install on first build so `--electron` works
   // OUT OF THE BOX; loud manual fallback if it fails. WHERE it lives, and the
@@ -135,7 +135,7 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
   }
   console.log(`copying Electron runtime...`);
   await copyDir(electronSrc, electronDst);
-  console.log("${OK} electron/ copied");
+  console.log(`${OK} electron/ copied`);
 
   // Icon \u2014 from THE app-dir decider (cfg.appDir), same place dev reads it
   const { icon: userIcon, misplaced } = await resolveAppIcon(
@@ -222,7 +222,7 @@ Categories=Utility;
   }).output().then((r) => r.success).catch(() => false);
   if (!hasFile) {
     console.error(
-      "${NO} `file` is not installed, and appimagetool requires it.\n" +
+      `${NO} \`file\` is not installed, and appimagetool requires it.\n` +
         "      Debian/Ubuntu:  sudo apt install -y file\n" +
         "      Fedora/RHEL:    sudo dnf install -y file\n" +
         "      Alpine:         sudo apk add file",
@@ -244,7 +244,7 @@ Categories=Utility;
   }).output();
 
   if (appimageResult.code !== 0) {
-    console.error("${NO} appimagetool failed");
+    console.error(`${NO} appimagetool failed`);
     Deno.exit(1);
   }
 
@@ -275,7 +275,7 @@ SET ELECTRON_PATH=%HERE%electron\\electron.exe
       `${displayName}\n\nRun: double-click run.bat or ${binaryName}.exe\n`,
     ),
   ]);
-  console.log("${OK} run.bat launcher");
+  console.log(`${OK} run.bat launcher`);
 
   await Deno.mkdir(cfg.outDir ?? root, { recursive: true });
   const zipOut = join(cfg.outDir ?? root, `${binaryName}-win-${archStr}.zip`);
@@ -284,7 +284,7 @@ SET ELECTRON_PATH=%HERE%electron\\electron.exe
   // and that single call was the whole reason a Windows package could not be
   // built anywhere else.
   if (!await zipDir(appDir, zipOut)) {
-    console.error("${NO} could not zip the Windows package");
+    console.error(`${NO} could not zip the Windows package`);
     Deno.exit(1);
   }
 
@@ -310,13 +310,13 @@ exec "$HERE/${binaryName}" "$@"
   const launcherPath = join(appDir, "run.sh");
   await Deno.writeTextFile(launcherPath, launcher);
   await chmodIfSupported(launcherPath, 0o755);
-  console.log("${OK} run.sh launcher");
+  console.log(`${OK} run.sh launcher`);
 
   await Deno.mkdir(cfg.outDir ?? root, { recursive: true });
   const zipOut = join(cfg.outDir ?? root, `${binaryName}-mac-${archStr}.zip`);
   console.log(`zipping macOS package...`);
   if (!await zipDir(appDir, zipOut)) {
-    console.error("${NO} could not zip the macOS package");
+    console.error(`${NO} could not zip the macOS package`);
     Deno.exit(1);
   }
 

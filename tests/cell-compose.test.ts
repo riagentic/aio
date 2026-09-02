@@ -1,4 +1,9 @@
-import { assertEquals, assertExists } from "@std/assert";
+import {
+  assertEquals,
+  assertExists,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
 import { schedule } from "../src/state/schedule.ts";
 import { until } from "../src/state/async-helpers.ts";
 import type { CellEffect } from "../src/state/cell-impl.ts";
@@ -585,5 +590,207 @@ Deno.test("reduce error includes context for guarded cells", () => {
     msg.includes("door is locked"),
     true,
     `original error preserved, got: "${msg}"`,
+  );
+});
+
+// ── A bad `cells:` entry names itself ────────────────────────────
+// `cells:` is the one array EVERY app writes, and a typo'd or missing import
+// is how it goes wrong. `"__aio" in entry` threw a raw JS TypeError on the
+// resulting `undefined` — "Cannot use 'in' operator to search for '__aio' in
+// undefined" — blaming an operator the app never wrote and naming neither the
+// array nor the position.
+
+Deno.test("cells: a bad entry names the array, the index and the likely cause", () => {
+  const bad: Array<[string, unknown]> = [
+    ["undefined", undefined],
+    ["a string", "counter"],
+    ["a number", 7],
+  ];
+  for (const [label, entry] of bad) {
+    const err = assertThrows(
+      () => composeCells([counter, entry] as never),
+      Error,
+    );
+    assertStringIncludes(err.message, "cells[1]", label);
+    assertStringIncludes(err.message, "import", label);
+  }
+  // An object that simply is not a cell gets its own sentence — the import is
+  // fine there, the value is just the wrong thing.
+  const err = assertThrows(() => composeCells([{}] as never), Error);
+  assertStringIncludes(err.message, "cells[0]");
+  assertStringIncludes(err.message, "no __aio");
+});
+
+// ── A method or selector that is not a function ──────────────────────────────
+// Method NAMES were validated against reserved keys; their VALUES never were.
+// `methods: { tick: undefined }` (a typo'd import) surfaced from cell() as
+// "Cannot read properties of undefined (reading 'Symbol(aio.async)')", naming
+// an internal symbol. A non-function that is not undefined was worse: cell()
+// ACCEPTED it, the app booted, and the first call threw "fn is not a function"
+// under a remediation hint that said to check the action payload — which was
+// never the problem.
+
+Deno.test("cell(): a method that is not a function is refused, by name", () => {
+  for (const [label, v] of [["undefined", undefined], ["a string", "tick"]]) {
+    const err = assertThrows(
+      () => cell("badm", { state: { n: 0 }, methods: { tick: v as never } }),
+      Error,
+    );
+    assertStringIncludes(err.message, "method 'tick'", String(label));
+    assertStringIncludes(err.message, "not a function", String(label));
+    assertStringIncludes(err.message, "import", String(label));
+  }
+});
+
+Deno.test("cell(): a selector that is not a function is refused — BOTH forms pass", () => {
+  const err = assertThrows(
+    () =>
+      cell("bads", {
+        state: { n: 0 },
+        methods: {},
+        selectors: { d: undefined as never },
+      }),
+    Error,
+  );
+  assertStringIncludes(err.message, "selector 'd'");
+  // The deps form is a legitimate object, and must keep working.
+  const ok = cell("goods", {
+    state: { n: 2 },
+    methods: {},
+    selectors: {
+      plain: (s: { n: number }) => s.n * 2,
+      withDeps: { deps: ["counter"], fn: (s: { n: number }) => s.n },
+    },
+  });
+  assertExists(ok);
+});
+
+// ── A cell lifecycle hook that never runs ────────────────────────────────────
+// The app-level twin of this (validateCallableConfig, server/config.ts) landed
+// first; the CELL level was the same class and worse. A typo'd import leaves
+// `undefined` and the hook silently never runs — cell()'s own unknown-key
+// message already argues why that matters ("A key aio does not read does
+// nothing — silently, until you notice the behaviour you configured never
+// happened"), and a key it DOES read whose value is undefined does the same.
+// A non-function WAS reported, but only at init and in the framework's own
+// vocabulary — "TypeError: f.__aio.onInit is not a function", an internal
+// field access raised after the cell was built, naming neither the key the app
+// wrote nor why it is undefined.
+
+async function cellWarnings(make: () => unknown): Promise<string[]> {
+  const { getLogger, setLogger } = await import(
+    "../src/diagnostics/logger-api.ts"
+  );
+  const seen: string[] = [];
+  const prev = getLogger();
+  setLogger(
+    {
+      logDir: "",
+      pub: (lvl: string, _cat: string, msg: string) => {
+        if (lvl === "warn") seen.push(msg);
+      },
+      perf: () => {},
+      flush: () => Promise.resolve(),
+      // deno-lint-ignore no-explicit-any
+    } as any,
+  );
+  try {
+    make();
+  } finally {
+    setLogger(prev);
+  }
+  return seen;
+}
+
+Deno.test("cell(): a lifecycle hook that is not a function is refused", () => {
+  for (
+    const key of ["onInit", "onDestroy", "onRestore", "onMigrate", "validate"]
+  ) {
+    const err = assertThrows(
+      () =>
+        cell(`hk${key}`, {
+          state: { n: 0 },
+          methods: {},
+          [key]: "setup",
+        } as never),
+      Error,
+    );
+    assertStringIncludes(err.message, `${key} must be a function`, key);
+  }
+});
+
+Deno.test("cell(): a hook declared as undefined warns — it would never run", async () => {
+  const warnings = await cellWarnings(() =>
+    cell(
+      "hkundef",
+      { state: { n: 0 }, methods: {}, onInit: undefined } as never,
+    )
+  );
+  assertEquals(warnings.length, 1, warnings.join("\n"));
+  assertStringIncludes(warnings[0]!, "onInit");
+  assertStringIncludes(warnings[0]!, "import");
+  assertStringIncludes(warnings[0]!, "omit the key");
+});
+
+Deno.test("cell(): a real hook, and an ABSENT one, are both silent", async () => {
+  assertEquals(
+    await cellWarnings(() =>
+      cell("hkok", { state: { n: 0 }, methods: {}, onInit: () => {} })
+    ),
+    [],
+  );
+  assertEquals(
+    await cellWarnings(() =>
+      cell("hkabsent", { state: { n: 0 }, methods: {} })
+    ),
+    [],
+  );
+});
+
+Deno.test("cell(): a listensTo trigger that is not an action names itself", () => {
+  // `listensTo: { onCartCleared: cart.clear }` is the documented form, so a
+  // typo'd or missing import makes the VALUE undefined — which reached
+  // `tr.type` and threw "Cannot read properties of undefined (reading
+  // 'type')". Every other mistake in that block already names the cell, the
+  // key and the fix; this one named an internal property access.
+  for (const [i, bad] of [undefined, 7, {}].entries()) {
+    const err = assertThrows(
+      () =>
+        cell(`ltbad${i}`, {
+          state: { n: 0 },
+          methods: {
+            onIt(s: { n: number }) {
+              s.n++;
+            },
+          },
+          listensTo: { onIt: bad },
+        } as never),
+      Error,
+    );
+    assertStringIncludes(err.message, "not an action", String(bad));
+    assertStringIncludes(err.message, "import", String(bad));
+  }
+  // Both documented spellings keep working.
+  assertExists(
+    cell("ltstr", {
+      state: { n: 0 },
+      methods: {
+        onIt(s: { n: number }) {
+          s.n++;
+        },
+      },
+      listensTo: { onIt: "cart:clear" },
+    } as never),
+  );
+  assertExists(
+    cell("ltobj", {
+      state: { n: 0 },
+      methods: {
+        onIt(s: { n: number }) {
+          s.n++;
+        },
+      },
+      listensTo: { onIt: [{ type: "cart:clear" }] },
+    } as never),
   );
 });

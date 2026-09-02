@@ -151,6 +151,8 @@ await aio.run({ persist: false, schedules: [{ id: "tick", every: 600, action: da
           "--no-sandbox",
           "--disable-gpu",
           "--disable-dev-shm-usage",
+          `--password-store=basic`,
+          `--use-mock-keychain`,
           `--user-data-dir=${profile}`,
           `${base}/`,
         ],

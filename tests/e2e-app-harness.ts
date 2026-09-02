@@ -11,6 +11,7 @@ import { resolve } from "@std/path";
 import { scaffold } from "../src/am/am-cmd-create.ts";
 import { stripVersionToken } from "../src/build/build-version.ts";
 import { descendantPids } from "../src/server/single-instance-lock.ts";
+import { aioTestDir } from "../src/testing/test-strict.ts";
 
 export const REPO_ROOT = resolve(import.meta.dirname!, "..");
 const dec = new TextDecoder();
@@ -114,8 +115,33 @@ export function freePort(): number {
  *  • `AIO_NO_OPEN` — no browser tab out of a test (see `open-external.ts`).
  *
  *  Spread it LAST so nothing in the test's own env can switch either off. */
-export function childEnv(): Record<string, string> {
-  return { AIO_PARENT_PID: String(Deno.pid), AIO_NO_OPEN: "1" };
+export function childEnv(
+  own: Record<string, string> = {},
+): Record<string, string> {
+  return {
+    AIO_PARENT_PID: String(Deno.pid),
+    AIO_NO_OPEN: "1",
+    // …and three, about not escaping into the developer's HOME. A spawned app
+    // resolves its home as `~/.<appId>` when nothing pins it, and these
+    // harnesses scaffold a UNIQUE appId per run — so running one test file
+    // directly (`deno test -A tests/x.test.ts`, the documented way) left one
+    // `~/.app-<hash>` behind per app. Fifty accumulated before anyone looked.
+    // …and it is a FLOOR, never an override. This block is spread LAST so the
+    // two safety variables above cannot be switched off — which meant the
+    // sandbox clobbered the one a test had chosen for itself, and two LAN
+    // tests then looked for their app's TLS cert in a directory the app had
+    // never been pointed at. A caller that pins its own passes it in `own`.
+    AIO_APPS_DIR: own.AIO_APPS_DIR ?? Deno.env.get("AIO_APPS_DIR") ??
+      _childAppsDir(),
+    ...own,
+  };
+}
+
+/** One sandbox per test PROCESS, under `<tmp>/aio/`. Lazy: a test file that
+ *  never spawns an app never creates it. */
+let _childApps: string | undefined;
+function _childAppsDir(): string {
+  return _childApps ??= aioTestDir("spawned-apps-");
 }
 
 /** Spawn a long-running process; drain stderr in the background so it can't

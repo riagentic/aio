@@ -9,16 +9,17 @@ name, so the table cannot fall behind the code.
 
 ## Running an app
 
-| Variable             | Read by          | Effect                                                                                                                                   |
-| -------------------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `AIO_PORT`           | boot             | Port to serve on. `--port` wins over it; both win over `port:` in config                                                                 |
-| `AIO_HOME`           | installers, `am` | Where aio itself lives (checkout or install root)                                                                                        |
-| `AIO_APPS_DIR`       | app dirs         | Root for every app's data directory — the one switch that moves all of them (see [where files live](../persistence/where-files-live.md)) |
-| `AIO_INSTALL_ROOT`   | installs         | Where an installed app lives (`am installed` lists them). Default `~/app/<name>/`                                                        |
-| `AIO_VERSIONS_DIR`   | framework pin    | Where pinned aio versions are kept                                                                                                       |
-| `AIO_UPDATE_CHANNEL` | update check     | Follow a different channel than the one stamped into the artifact                                                                        |
-| `AIO_PARENT_PID`     | Electron child   | The pid the window must not outlive — set by the launcher, not by hand                                                                   |
-| `AIO_NO_OPEN=1`      | `open-external`  | Never open a browser or a file manager. For any harness that must not spawn a UI                                                         |
+| Variable             | Read by          | Effect                                                                                                                                                                           |
+| -------------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AIO_PORT`           | boot             | Port to serve on. `--port` wins over it; both win over `port:` in config                                                                                                         |
+| `AIO_HOME`           | installers, `am` | Where aio itself lives (checkout or install root)                                                                                                                                |
+| `AIO_APPS_DIR`       | app dirs         | Root for every app's data directory — the one switch that moves all of them (see [where files live](../persistence/where-files-live.md))                                         |
+| `AIO_INSTALL_ROOT`   | installs         | Where an installed app lives (`am installed` lists them). Default `~/app/<name>/`                                                                                                |
+| `AIO_TEST_ROOT`      | tests            | Root for every directory the test harnesses create. Default `~/tmp/aio/`, mode 0700 — user space, not `/tmp`: a test's scratch holds an `auth.db`, an `app.key` and TLS material |
+| `AIO_VERSIONS_DIR`   | framework pin    | Where pinned aio versions are kept                                                                                                                                               |
+| `AIO_UPDATE_CHANNEL` | update check     | Follow a different channel than the one stamped into the artifact                                                                                                                |
+| `AIO_PARENT_PID`     | Electron child   | The pid the window must not outlive — set by the launcher, not by hand                                                                                                           |
+| `AIO_NO_OPEN=1`      | `open-external`  | Never open a browser or a file manager. For any harness that must not spawn a UI                                                                                                 |
 
 ## Building
 

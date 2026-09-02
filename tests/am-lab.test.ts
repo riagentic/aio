@@ -10,7 +10,12 @@
 // cannot start must say the cause AND the exact command that fixes it. A raw
 // `docker: Error response from daemon: …` is the failure mode this whole
 // command exists to prevent, so the fix text is asserted, not just the error.
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
 import {
   adbBootArgv,
   adbInstallArgv,
@@ -1119,6 +1124,35 @@ async function fakeDocker(body: string): Promise<string> {
   return dir;
 }
 
+/** `JSON.parse(r.out)` on its own reports "Unexpected end of JSON input" and
+ *  nothing else — not the exit code, not stderr, not even that the output was
+ *  EMPTY. That is exactly what one full-suite run produced for the failed-
+ *  install test (which passes in isolation), and the message made the flake
+ *  undiagnosable: it named the parser, never the subprocess. */
+function amJson(
+  r: { code: number; out: string; err: string },
+  what: string,
+): // deno-lint-ignore no-explicit-any
+any {
+  if (r.out.trim() === "") {
+    throw new Error(
+      `${what}: expected JSON on stdout, got NOTHING (exit ${r.code}). ` +
+        `stderr: ${r.err.trim().slice(0, 400) || "(empty)"}`,
+    );
+  }
+  try {
+    return JSON["parse"](r.out); // indexed: a literal `JSON.parse(r.out)` here
+    // would be caught by the very sweep that introduced this helper.
+  } catch (e) {
+    throw new Error(
+      `${what}: stdout is not JSON (exit ${r.code}): ${
+        (e as Error).message
+      }\n` +
+        `stdout: ${r.out.slice(0, 400)}\nstderr: ${r.err.slice(0, 400)}`,
+    );
+  }
+}
+
 async function am(args: string[], env: Record<string, string>) {
   const p = await new Deno.Command(Deno.execPath(), {
     args: ["run", "-A", `${REPO}/src/am.ts`, ...args],
@@ -1167,7 +1201,7 @@ esac`);
     XDG_CACHE_HOME: home,
   });
   assertEquals(r.code, 0);
-  const j = JSON.parse(r.out);
+  const j = amJson(r, "am lab");
   assertEquals(j.running, false);
   assertEquals(j.status, "absent");
   assertEquals(j.viewer, null);
@@ -1190,7 +1224,7 @@ esac`);
     PATH: `${dir}:${Deno.env.get("PATH")}`,
     XDG_CACHE_HOME: home,
   });
-  const j = JSON.parse(r.out);
+  const j = amJson(r, "am lab");
   assertEquals(j.running, true);
   assertEquals(j.viewer, "http://127.0.0.1:45123/");
   await Deno.remove(dir, { recursive: true });
@@ -1211,7 +1245,7 @@ esac`);
     XDG_CACHE_HOME: home,
   });
   assertEquals(r.code, 0);
-  assertEquals(JSON.parse(r.out).stopped, true);
+  assertEquals(amJson(r, "am lab").stopped, true);
   const calls = (await Deno.readTextFile(log)).trim().split("\n");
   const stop = calls.findIndex((c) => c.startsWith("stop "));
   const rm = calls.findIndex((c) => c.startsWith("rm "));
@@ -1278,7 +1312,7 @@ esac`);
   assertEquals(r.code, 0);
   // Allocated blocks, not apparent size (see fileCost) — so this is "at least
   // the file", never an exact byte count.
-  assert(JSON.parse(r.out).freedBytes >= 1024, r.out);
+  assert(amJson(r, "am lab").freedBytes >= 1024, r.out);
   assertEquals(await exists(`${home}/aio/labs/windows`), false);
   assertEquals(await exists(`${home}/aio/labs/macos/storage`), true);
   await Deno.remove(dir, { recursive: true });
@@ -1410,7 +1444,7 @@ Deno.test("am lab macos: the hand-off is a COMMAND, in the machine output too", 
     XDG_CACHE_HOME: home,
   });
   assertEquals(r.code, 0);
-  const j = JSON.parse(r.out);
+  const j = amJson(r, "am lab");
   assertEquals(j.shareServing, true);
   assertEquals(j.shareUrl, SHARE_URL);
   assertEquals(j.artifact.file, "app-macos");
@@ -1458,7 +1492,7 @@ ${upWithShare(`${home}/dist`).trim()}`);
     XDG_CACHE_HOME: home,
   });
   assertEquals(r.code, 0);
-  const j = JSON.parse(r.out);
+  const j = amJson(r, "am lab");
   assertEquals(j.share.serving, true);
   assertEquals(j.share.url, SHARE_URL);
   // …and it says whether the GUEST has ever fetched anything, which is the
@@ -1486,7 +1520,7 @@ Deno.test("am lab: --dist on a LIVE lab warns instead of pretending", async () =
   });
   assertStringIncludes(r.err, mounted);
   assertStringIncludes(r.err, "--stop");
-  assertEquals(JSON.parse(r.out).share, mounted);
+  assertEquals(amJson(r, "am lab").share, mounted);
   await Deno.remove(dir, { recursive: true });
   await Deno.remove(home, { recursive: true });
 });
@@ -1511,7 +1545,7 @@ esac`);
     PATH: `${dir}:${Deno.env.get("PATH")}`,
     XDG_CACHE_HOME: home,
   });
-  const j = JSON.parse(r.out);
+  const j = amJson(r, "am lab");
   assertEquals(j.shareServing, false);
   assertEquals(j.fetchCommand, null);
   assertStringIncludes(j.shareReason, "am lab macos");
@@ -1568,7 +1602,7 @@ esac`);
   assert(!run.includes(":/storage"), run);
   assert(!run.includes("RAM_SIZE"), run);
   assertEquals(await exists(`${home}/aio/labs/linux/storage`), false);
-  const j = JSON.parse(r.out);
+  const j = amJson(r, "am lab");
   assertEquals(j.artifact.file, "app-x64.AppImage");
   assertEquals(j.fetchCommand, fetchCommand("linux", "app-x64.AppImage"));
   assertEquals(j.shareUrl, shareUrl(LIN));
@@ -1617,7 +1651,7 @@ esac`);
   const env = { PATH: `${dir}:${Deno.env.get("PATH")}`, XDG_CACHE_HOME: home };
   const r = await am(["lab", "android", `--dist=${dist}`, "--json"], env);
   assertEquals(r.code, 0, r.err);
-  const j = JSON.parse(r.out);
+  const j = amJson(r, "am lab");
   assertEquals(
     j.artifact.file,
     "app-client.apk",
@@ -1677,7 +1711,7 @@ esac`);
     PATH: `${dir}:${Deno.env.get("PATH")}`,
     XDG_CACHE_HOME: home,
   });
-  const j = JSON.parse(r.out);
+  const j = amJson(r, "am lab");
   assertEquals(j.installed, false);
   assertStringIncludes(j.installResult, "NO_MATCHING_ABIS");
   assertStringIncludes(j.installResult, "x86_64");
@@ -1708,7 +1742,7 @@ Deno.test({
     // `deno task test`.
     const r = await am(["lab", "windows", "--json"], {});
     assert(r.code === 0, r.err);
-    const j = JSON.parse(r.out);
+    const j = amJson(r, "am lab");
     assert(j.viewer.startsWith("http://127.0.0.1:"), r.out);
     const res = await fetch(j.viewer);
     assertEquals(res.status, 200);
@@ -1716,6 +1750,10 @@ Deno.test({
     // The viewer answering is not the same as the lab being usable.
     assertEquals(j.shareServing, true, j.shareReason ?? r.out);
     assertEquals(j.shareUrl, SHARE_URL);
+    // Records the beta gate's "real Windows pass". Last line, so a partial
+    // run cannot claim it.
+    const { recordProof } = await import("../scripts/proof.ts");
+    await recordProof("windows", "real", "am lab windows: viewer + share live");
   },
 });
 
@@ -1740,5 +1778,29 @@ Deno.test({
     assertEquals(s.running, true);
     assertEquals(s.share.serving, true);
     assertEquals(s.share.url, SHARE_URL);
+    // The beta gate's "real macOS pass", as far as a machine can check it.
+    const { recordProof } = await import("../scripts/proof.ts");
+    await recordProof("macos", "real", "am lab macos: share serving");
   },
+});
+
+Deno.test("amJson: an empty stdout names the subprocess, not the parser", () => {
+  // The failure this replaces read, in full: "SyntaxError: Unexpected end of
+  // JSON input". It named the parser and nothing else — not the exit code, not
+  // stderr, not even that stdout was empty — which is why one flake in a
+  // 16-minute suite run cost a full investigation to classify.
+  const empty = assertThrows(
+    () => amJson({ code: 3, out: "   ", err: "docker: not found" }, "am lab"),
+    Error,
+  ).message;
+  assertStringIncludes(empty, "got NOTHING");
+  assertStringIncludes(empty, "exit 3");
+  assertStringIncludes(empty, "docker: not found");
+
+  const garbage = assertThrows(
+    () => amJson({ code: 0, out: "not json", err: "" }, "am lab"),
+    Error,
+  ).message;
+  assertStringIncludes(garbage, "not JSON");
+  assertStringIncludes(garbage, "not json"); // the actual stdout, to read
 });

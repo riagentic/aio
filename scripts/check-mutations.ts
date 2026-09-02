@@ -446,8 +446,8 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "persisted keys bleed between cells \u2014 one cell's restore picks up another's rows, and a neighbouring prefix silently overwrites them",
     file: "src/server/skv-sqlite.ts",
-    find: "        [`${prefix}${SEP}`, `${prefix}${SEP}${HIGH}`],",
-    replace: "        [prefix, `${prefix}${HIGH}`],",
+    find: "        [`${prefix}${SEP}`, `${prefix}${SEP}${HIGH}`],", // aio-ok: the literal SOURCE line this mutation patches in and out
+    replace: "        [prefix, `${prefix}${HIGH}`],", // aio-ok: the literal SOURCE line this mutation patches in and out
     test: "tests/skv-sqlite.test.ts",
     filter: "sqliteKv: prefixes never bleed into each other",
   },

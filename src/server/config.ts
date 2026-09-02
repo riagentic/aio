@@ -714,6 +714,85 @@ export function formatValidConfig(): string {
   return lines.join("\n");
 }
 
+/** Config keys whose value must be a FUNCTION.
+ *
+ *  A hook that never runs is invisible. `onStart: mod.bootUP` — one letter off,
+ *  so `undefined` — booted an app that reported `"status": "healthy"` while the
+ *  startup work it names never happened, and NOTHING was logged, at boot or
+ *  after. The route fix (server.ts) is the same shape one surface over; this is
+ *  the shape for every function-valued key.
+ *
+ *  Two outcomes, because the two cases are not equally knowable:
+ *
+ *  - **not a function, and not absent** — there is no reading of
+ *    `onStart: "boot"` that works. Throw.
+ *  - **explicitly `undefined`/`null`** — almost always a typo'd import, but
+ *    `onStart: opts.onStart` and `onStart: isDev ? devBoot : undefined` are
+ *    both legitimate, so this cannot be a refusal without breaking working
+ *    apps. Warn, name the key, and say how to make the absence deliberate.
+ *
+ *  Absent keys say nothing at all — `in` is the whole distinction: the app
+ *  wrote the key, so the app meant to hook something. */
+/** Exported ONLY so tests/callable-config-completeness.test.ts can prove this
+ *  list still covers every function-valued key the config type declares — a
+ *  hand-written list is a list that drifts. @internal */
+export const _CALLABLE_CONFIG_KEYS = [
+  "onAction",
+  "onEffect",
+  "onConnect",
+  "onDisconnect",
+  "onStart",
+  "onStopping",
+  "onStop",
+  "onError",
+  "onRestore",
+  "beforeReduce",
+  "resolveUser",
+  // Found by tests/callable-config-completeness.test.ts on its first run: the
+  // hook that restores state after a crash was function-valued and unchecked,
+  // so a typo'd import meant crash recovery silently never happened — the
+  // same "a diagnostic feature is itself quietly off" shape as the checkpoint
+  // writer that could not create its own directory.
+  "onCheckpointRestore",
+] as const;
+
+export function validateCallableConfig(
+  config: Record<string, unknown>,
+  /** Whether "the key is present" still means "the app wrote it".
+   *
+   *  False after the cells bridge, which spreads keys mechanically
+   *  (`onStopping: fc.onStopping`) and so MATERIALISES every hook the app
+   *  omitted as an explicit `undefined`. Warning there fired on every boot of
+   *  every app — a warning about a hook the app never mentioned, which is the
+   *  cry-wolf failure this check exists to avoid. A non-function value is
+   *  still refused on both paths: no spread produces one of those. */
+  appAuthored = true,
+): void {
+  for (const key of _CALLABLE_CONFIG_KEYS) {
+    if (!(key in config)) continue;
+    const value = config[key];
+    if (typeof value === "function") continue;
+    if (value === undefined || value === null) {
+      if (!appAuthored) continue;
+      log.warn(
+        "aio",
+        `${key} is declared but its value is ${
+          value === null ? "null" : "undefined"
+        } — ` +
+          `the hook will never run, and nothing else would have said so. The ` +
+          `usual cause is a typo'd or missing import; if the absence is ` +
+          `deliberate, omit the key.`,
+      );
+      continue;
+    }
+    throw new Error(
+      `[aio] ${key} must be a function, got ${typeof value} ` +
+        `${JSON.stringify(value)}. Hooks are called, not read — pass the ` +
+        `function itself (no parentheses).`,
+    );
+  }
+}
+
 export function validateConfig(
   obj: Record<string, unknown>,
   validKeys: Set<string>,

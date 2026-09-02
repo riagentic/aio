@@ -10,7 +10,7 @@
 //    hardcoded 1 per untracked child, skipping past the sibling after a Portal
 //    (which occupies 0 DOM nodes) and duplicating it.
 
-import { assertEquals } from "jsr:@std/assert";
+import { assertEquals } from "@std/assert";
 import { signal } from "../src/state/signal.ts";
 import {
   ErrorBoundary,

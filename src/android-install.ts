@@ -22,10 +22,11 @@
  * silently landing on a virtual device is the kind of helpfulness that costs an
  * hour, and the emulator already has `dev:android`.
  */
-import { join } from "@std/path";
+import { isAbsolute, join } from "@std/path";
 import { resolveSdk } from "./build/build-helpers.ts";
 import { androidApplicationId } from "./build/build-android.ts";
 import { stripVersionToken } from "./build/build-version.ts";
+import { outDirOf } from "./build/build-manifest.ts";
 
 const dec = new TextDecoder();
 
@@ -171,8 +172,9 @@ export function pickApk(
     .sort((a, b) => b.mtime - a.mtime);
   if (apks.length === 0) {
     return {
-      error: "no .apk in this directory",
-      hint: "`deno task build --targets=android` builds one (or pass --build)",
+      error: "no .apk in the build output or this directory",
+      hint: "`deno task build --targets=android` builds one into dist/ " +
+        "(or pass --build to do it here)",
     };
   }
   const newest = apks[0]!;
@@ -236,12 +238,31 @@ async function main(): Promise<void> {
     }
   }
 
-  const files: { name: string; mtime: number }[] = [];
-  for (const e of Deno.readDirSync(Deno.cwd())) {
-    if (!e.isFile) continue;
-    const st = Deno.statSync(e.name);
-    files.push({ name: e.name, mtime: st.mtime?.getTime() ?? 0 });
-  }
+  // WHERE the APK is. Since "one path, one name, one dist/" the fleet places
+  // every artifact in the out dir and leaves nothing in the project root — so
+  // that is looked at first. The cwd is still a fallback: `--apk=` may name a
+  // file anywhere, and an APK someone dropped beside the project should still
+  // install rather than be reported as absent.
+  const outDir = await outDirOf(Deno.cwd());
+  const listDir = (dir: string): { name: string; mtime: number }[] => {
+    const out: { name: string; mtime: number }[] = [];
+    try {
+      for (const e of Deno.readDirSync(dir)) {
+        if (!e.isFile) continue;
+        const st = Deno.statSync(join(dir, e.name));
+        out.push({ name: e.name, mtime: st.mtime?.getTime() ?? 0 });
+      }
+    } catch {
+      // aio-ok: no out dir yet — the cwd fallback below is the answer, and an
+      // empty result is reported by pickApk with the command that fills it.
+    }
+    return out;
+  };
+  const fromOut = listDir(outDir);
+  const apkDir = fromOut.some((f) => f.name.endsWith(".apk"))
+    ? outDir
+    : Deno.cwd();
+  const files = apkDir === outDir ? fromOut : listDir(Deno.cwd());
   const chosenApk = pickApk(files, flag("apk"));
   if ("error" in chosenApk) {
     fail(chosenApk.error, ...(chosenApk.hint ? [chosenApk.hint] : []));
@@ -269,7 +290,7 @@ async function main(): Promise<void> {
     dev.serial,
     "install",
     "-r",
-    join(Deno.cwd(), apk),
+    isAbsolute(apk) ? apk : join(apkDir, apk),
   ]);
   if (inst.code !== 0 || /Failure|Error/.test(inst.out + inst.err)) {
     console.error(inst.out + inst.err);

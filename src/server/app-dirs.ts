@@ -43,6 +43,12 @@ import { homedir } from "./paths.ts";
  *  directory, `/srv/aio/wallet` has no reason to hide. Dev and prod resolve
  *  identically, so "swap the binary, the data is untouched" holds with no
  *  asterisk. */
+/** The directory that owns every app home — `AIO_APPS_DIR`, else `homedir()`.
+ *  The containment check `am remove --data` runs before it deletes anything. */
+export function appsRoot(): string {
+  return Deno.env.get("AIO_APPS_DIR") ?? homedir();
+}
+
 export function appHome(appId: string, configured?: string): string {
   if (configured) return configured;
   const root = Deno.env.get("AIO_APPS_DIR");
@@ -177,6 +183,27 @@ export function installRoot(): string {
   return join(homedir(), "app");
 }
 
+/** The directory that OWNS each path an install occupies — the fixed parents,
+ *  derived from nothing but the environment, so a caller can check containment
+ *  without trusting the name that produced the path.
+ *
+ *  Two of the three do not live under `installRoot()`: a `.desktop` entry and a
+ *  PATH symlink go where the desktop and the shell look for them, which is
+ *  `homedir()`. `AIO_INSTALL_ROOT` therefore does not move them, and a name
+ *  like `..` resolves `binLink` to `~/.local`. `am remove` refuses any path
+ *  that is not strictly inside its parent here. */
+export function installedAppParents(): {
+  dir: string;
+  desktop: string;
+  binLink: string;
+} {
+  return {
+    dir: installRoot(),
+    desktop: join(homedir(), ".local", "share", "applications"),
+    binLink: join(homedir(), ".local", "bin"),
+  };
+}
+
 /** Every path `run.sh` creates when it installs `name`. Pure — the caller
  *  removes or inspects them; nothing here touches the filesystem. */
 export function installedAppPaths(name: string): {
@@ -185,18 +212,13 @@ export function installedAppPaths(name: string): {
   desktop: string;
   binLink: string;
 } {
-  const dir = join(installRoot(), name);
+  const parents = installedAppParents();
+  const dir = join(parents.dir, name);
   return {
     dir,
     stable: join(dir, name),
-    desktop: join(
-      homedir(),
-      ".local",
-      "share",
-      "applications",
-      `${name}.desktop`,
-    ),
-    binLink: join(homedir(), ".local", "bin", name),
+    desktop: join(parents.desktop, `${name}.desktop`),
+    binLink: join(parents.binLink, name),
   };
 }
 

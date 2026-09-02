@@ -357,6 +357,27 @@ export function createServer(config: ServerConfig): ServerHandle {
 
   // Custom routes: reserve the framework namespaces loudly at boot.
   for (const key of Object.keys(config.routes ?? {})) {
+    // The handler, before the key. `Object.keys` visits a key whose value is
+    // `undefined`, and that is the realistic mistake: a typo'd or missing
+    // import resolves to `undefined`, the route is DECLARED, and nothing ever
+    // says otherwise — `matchRoute` returns null for a falsy handler, so the
+    // request falls through to the app shell and answers **200 text/html**.
+    // An API client sees success and parses HTML as JSON, failing somewhere
+    // far from the cause. A non-function value is the same class one step
+    // louder: a 500 and a `handler is not a function` line, but only once
+    // someone hits the path, and forever after. Both are knowable here.
+    const handler = (config.routes ?? {})[key];
+    if (typeof handler !== "function") {
+      throw new Error(
+        `[aio] custom route "${key}" has no handler — its value is ` +
+          `${handler === undefined ? "undefined" : typeof handler}, not a ` +
+          `function. A declared route with no handler is never served: the ` +
+          `request falls through to the app shell and answers 200 text/html, ` +
+          `so a caller sees success and parses the wrong thing. The usual ` +
+          `cause is a typo'd or missing import — check the name you passed ` +
+          `for "${key}".`,
+      );
+    }
     if (!key.startsWith("/") || isReservedRoutePath(key)) {
       throw new Error(
         `[aio] invalid custom route "${key}" — routes must start with "/" and ` +

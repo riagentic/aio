@@ -7,6 +7,8 @@
 // top-level export, server-only — see src/state/removals.ts).
 import { selfMethodOf } from "./self.ts";
 import { removalOf, retiredSpellingLine } from "./removals.ts";
+import { teachableError } from "../diagnostics/error.ts";
+import { nearestOf } from "./cell-helpers.ts";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -65,6 +67,179 @@ export type ScheduleDef =
     | { at: string }
     | { cron: string }
   );
+
+// ── Static `schedules:` validation — at CONFIG time, not fire time ──
+
+const SCHEDULE_DOC = "docs/state/scheduling.md";
+const TRIGGERS = ["every", "after", "at", "cron"] as const;
+/** Exported ONLY so tests/callable-config-completeness.test.ts can prove this
+ *  still matches `ScheduleDef` — a key added to the type but not here would be
+ *  refused as unknown, turning a legitimate config into a boot failure, which
+ *  is precisely the class tests/config-allowlist.test.ts exists to kill.
+ *  @internal */
+export const SCHEDULE_KEYS = new Set<string>([
+  ...TRIGGERS,
+  "id",
+  "action",
+  "skipIfRunning",
+]);
+
+function describeValue(v: unknown): string {
+  if (v === null) return "null";
+  if (v === undefined) return "missing";
+  if (Array.isArray(v)) return "an array";
+  return `${typeof v} ${JSON.stringify(v)}`;
+}
+
+/** Refuse a malformed `aio.run({ schedules })` entry while it is still config.
+ *
+ *  Every field checked here is statically knowable, and every one of them used
+ *  to be discovered late. `every: "5m"` threw out of `scheduleManager.start()`
+ *  AFTER the app had opened persistence, bound a port, run cell init and
+ *  logged `started` — a half-started app under a restart supervisor. A string
+ *  `action:` was not caught at all: it detonated at FIRE time, one internal
+ *  `HOOK_ERROR` per tick, blaming `action-kind.ts` and an `onAction` hook the
+ *  app never wrote, naming neither the schedule nor the real mistake. For an
+ *  `at`/`cron` entry that first tick can be days after the deploy that broke
+ *  it. The `ScheduleDef` type catches none of this for the app that ships it,
+ *  because the dev server transpiles without type-checking — the type protects
+ *  this repo, not the user. So the check exists at runtime, and it runs first. */
+export function validateSchedules(defs: readonly unknown[]): void {
+  // Not an array: `schedules: {}` has no `length`, so a call site guarding on
+  // `schedules?.length` skips it and the whole config is silently ignored,
+  // and `schedules: "1s"` DOES have one, so it arrives here and dies on
+  // `.forEach`. Both are the class this validator exists to close, so the
+  // shape of the container is checked before its contents.
+  if (!Array.isArray(defs)) {
+    throw teachableError(
+      `schedules is ${describeValue(defs)}, not an array`,
+      "schedules is a LIST of entries: [{ id, action, every: 300_000 }]",
+      SCHEDULE_DOC,
+    );
+  }
+  const seen = new Set<string>();
+  defs.forEach((raw, i) => {
+    const at = (id?: unknown) =>
+      typeof id === "string" && id ? `schedules '${id}'` : `schedules[${i}]`;
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      throw teachableError(
+        `${at()} is ${describeValue(raw)}, not an object`,
+        "each entry is { id, action, and exactly one of every/after/at/cron }",
+        SCHEDULE_DOC,
+      );
+    }
+    const d = raw as Record<string, unknown>;
+    if (typeof d.id !== "string" || !d.id) {
+      throw teachableError(
+        `${at()}.id is ${describeValue(d.id)}, not a non-empty string`,
+        "give the schedule an id — it is the handle schedule.cancel(id) uses",
+        SCHEDULE_DOC,
+      );
+    }
+    if (seen.has(d.id)) {
+      throw teachableError(
+        `${at(d.id)} is declared twice`,
+        "ids are the schedule's identity: the second entry would silently " +
+          "replace the first and leak its timer — rename one",
+        SCHEDULE_DOC,
+      );
+    }
+    seen.add(d.id);
+    for (const key of Object.keys(d)) {
+      if (SCHEDULE_KEYS.has(key)) continue;
+      const near = nearestOf(key, SCHEDULE_KEYS);
+      throw teachableError(
+        `${at(d.id)}: unknown key "${key}"` +
+          (near ? ` (did you mean "${near}"?)` : ""),
+        `remove it, or use one of ${[...SCHEDULE_KEYS].join(", ")}`,
+        SCHEDULE_DOC,
+      );
+    }
+    const action = d.action as { type?: unknown } | undefined;
+    if (
+      typeof action !== "object" || action === null ||
+      typeof action.type !== "string" || !action.type
+    ) {
+      throw teachableError(
+        `${at(d.id)}.action is ${
+          describeValue(d.action)
+        }, not an action object`,
+        'use cell.method.action() (or { type: "cell:method", payload }) — a ' +
+          "bare string is dispatched as an action with no type and fails on " +
+          "the first tick, not here",
+        SCHEDULE_DOC,
+      );
+    }
+    const triggers = TRIGGERS.filter((k) => d[k] !== undefined);
+    if (triggers.length !== 1) {
+      throw teachableError(
+        `${at(d.id)} declares ${
+          triggers.length === 0
+            ? "no trigger"
+            : `${triggers.length} triggers (${triggers.join(", ")})`
+        }`,
+        "each schedule fires one way: every (repeating ms), after (once, ms), " +
+          "at (an ISO time) or cron (a cron expression)",
+        SCHEDULE_DOC,
+      );
+    }
+    const trigger = triggers[0]!;
+    const value = d[trigger];
+    if (trigger === "every" || trigger === "after") {
+      if (typeof value !== "number" || !Number.isFinite(value)) {
+        throw teachableError(
+          `${at(d.id)}.${trigger} is ${
+            describeValue(value)
+          }, not a number of milliseconds`,
+          'durations are plain numbers: write 300_000, not "5m" — aio\'s CLI ' +
+            "takes 60s spellings, the config does not",
+          SCHEDULE_DOC,
+        );
+      }
+      if (trigger === "every" && value < 10) {
+        throw teachableError(
+          `${at(d.id)}.every is ${value}ms`,
+          "the floor is 10ms — a faster interval is a hot loop, not a schedule",
+          SCHEDULE_DOC,
+        );
+      }
+      if (trigger === "after" && value < 0) {
+        throw teachableError(
+          `${at(d.id)}.after is ${value}ms`,
+          "a delay cannot be negative — 0 means the next tick",
+          SCHEDULE_DOC,
+        );
+      }
+    } else if (typeof value !== "string" || !value) {
+      throw teachableError(
+        `${at(d.id)}.${trigger} is ${describeValue(value)}, not a string`,
+        trigger === "at"
+          ? 'at takes an ISO timestamp, e.g. "2026-01-01T09:00:00Z"'
+          : 'cron takes an expression, e.g. "0 9 * * *"',
+        SCHEDULE_DOC,
+      );
+    }
+    if (d.skipIfRunning !== undefined) {
+      if (trigger !== "every") {
+        throw teachableError(
+          `${at(d.id)} sets skipIfRunning on an "${trigger}" schedule`,
+          "skipIfRunning is every-only — a one-shot schedule has no previous " +
+            "tick to skip",
+          SCHEDULE_DOC,
+        );
+      }
+      if (typeof d.skipIfRunning !== "boolean") {
+        throw teachableError(
+          `${at(d.id)}.skipIfRunning is ${
+            describeValue(d.skipIfRunning)
+          }, not a boolean`,
+          "skipIfRunning: true drops a tick while the previous one is running",
+          SCHEDULE_DOC,
+        );
+      }
+    }
+  });
+}
 
 // ── The timer ceiling — ONE decider ─────────────────────────────────
 
@@ -851,11 +1026,30 @@ export function createScheduleManager(
     }
   }
 
+  /** A duration that is not a number slips past every comparison below —
+   *  `"1s" < 10` is false, `Number.isFinite("1s")` reports only the coerced
+   *  NaN, and `setInterval` turns the string into a 1ms hot loop. The type
+   *  says `number`, but the dev server is transpile-only: a string reaches here
+   *  from any app that never ran `deno check`, including the `schedules:`
+   *  entries the framework arms itself at boot. aio's CLI does take `60s`
+   *  spellings (`am cost --window=60s`), so reaching for one here is the
+   *  natural mistake — name the accepted form instead of reporting the
+   *  coercion. */
+  function requireMs(api: string, id: string, ms: number): void {
+    if (typeof ms !== "number") {
+      throw new Error(
+        `schedule.${api} '${id}': ms is a plain NUMBER of milliseconds, got ` +
+          `${typeof ms} ${JSON.stringify(ms)} — write 300_000, not "5m"`,
+      );
+    }
+  }
+
   function handleAfter(
     id: string,
     ms: number,
     action: { type: string; payload?: unknown },
   ): void {
+    requireMs("after", id, ms);
     // 0 is a real delay ("next tick" — schedule.next arms it); negatives are a
     // caller bug. The old floor of 1 forced `next` to carry a 1ms sentinel.
     if (ms < 0) {
@@ -878,6 +1072,7 @@ export function createScheduleManager(
     action: { type: string; payload?: unknown },
     skipIfRunning = false,
   ): void {
+    requireMs("every", id, ms);
     if (ms < 10) {
       throw new Error(`schedule.every '${id}': ms must be >= 10, got ${ms}`); // AIO-252
     }

@@ -3,7 +3,7 @@
 // overridable via ui.viewport, opt-out-able with `false`, plus a ui.head escape
 // hatch for meta/OG/favicon/fonts.
 
-import { assert, assertEquals, assertStringIncludes } from "jsr:@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import {
   androidLocalHTML,
   generateHTML,

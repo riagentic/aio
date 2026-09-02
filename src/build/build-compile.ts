@@ -22,6 +22,7 @@ import {
 } from "../server/heap-policy.ts";
 import type { BuildConfig } from "./build-config.ts";
 import { HEY, NO, OK } from "../diagnostics/fmt.ts";
+import { compiled } from "./build-say.ts";
 
 /** npm packages the FRAMEWORK only ever needs at BUILD / DEV / TEST time.
  *  None of them is reachable from a compiled binary:
@@ -774,7 +775,7 @@ export async function runDenoCompile(cfg: BuildConfig): Promise<boolean> {
       stdout: "inherit",
       stderr: "inherit",
     }).output();
-    if (result.code === 0) console.log(`${OK} ${compileTarget}`);
+    if (result.code === 0) compiled(compileTarget, root);
     return result.code === 0;
   });
 

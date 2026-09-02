@@ -495,6 +495,62 @@ function within(a: string, b: string): boolean {
   return x === y || x.startsWith(y.endsWith(SEPARATOR) ? y : y + SEPARATOR);
 }
 
+/** EVERY value flag the single-target builder reads, and the fleet flag that
+ *  carries it. The fleet is the only build path now (see ONE BUILD PATH), so a
+ *  flag this map does not name is a flag that is PARSED, VALIDATED and then
+ *  dropped on the floor — accepted in full and silently ignored.
+ *
+ *  That is not hypothetical. `--platform=windows` reached `refuseBadBuildArgs`,
+ *  resolved to a real platform spec, and then never left this process: the
+ *  build produced a host ELF binary under the host's name and called it done.
+ *  `build-cli.ts` carries a comment describing that exact failure as fixed.
+ *  `--out=` went the same way, taking the R-4 remedy with it, and
+ *  `--android-dev-url=` took `dev:android`'s whole reason to exist.
+ *
+ *  @internal alpha75 — a build/tooling internal reachable for tests; not
+ *  app-facing API.
+ *
+ *  `tests/build-flag-passthrough.test.ts` reads the builder's own source for
+ *  the flags it parses and fails on any that is neither forwarded here nor
+ *  listed as fleet-owned — so the next flag cannot be dropped in silence. */
+export const FLEET_FLAG_FOR: Readonly<Record<string, string>> = {
+  "--entry": "--entry",
+  "--name": "--name",
+  "--ui": "--ui",
+  "--out": "--out",
+  // The fleet's axis is a LIST (it fans one build over many platforms); the
+  // single-target builder takes exactly one. One name each way, not two.
+  "--platform": "--platforms",
+  "--android-dev-url": "--android-dev-url",
+};
+
+/** Boolean flags the fleet acts on itself.
+ *
+ *  @internal alpha75 — a build/tooling internal; not app-facing API. */
+export const FLEET_BOOLEANS: readonly string[] = [
+  "--release",
+  "--force",
+  "--allow-server-only",
+];
+
+/** The fleet's own argv for a delegated single-target build.
+ *
+ *  @internal alpha75 — a build/tooling internal; not app-facing API. */
+export function forwardedToFleet(args: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const a of args) {
+    if (FLEET_BOOLEANS.includes(a)) {
+      out.push(a);
+      continue;
+    }
+    const eq = a.indexOf("=");
+    if (eq <= 0) continue;
+    const fleet = FLEET_FLAG_FOR[a.slice(0, eq)];
+    if (fleet) out.push(`${fleet}=${a.slice(eq + 1)}`);
+  }
+  return out;
+}
+
 /** True if `outDir` is unsafe to wipe+recreate: the `out` dir is assembled by
  *  removing it RECURSIVELY, so it must be a dedicated subdir of the project
  *  that CONTAINS no protected directory and lives INSIDE none — never the root,
@@ -538,6 +594,16 @@ export function unsafeOutDir(
     join(rootDir, ".git"),
     ...appDirs,
   ].map(trimSep).filter((d) => d !== rootDir);
+  // dist/ is the per-target builds' own scratch: every child wipes it
+  // recursively before bundling, so an out dir INSIDE it is deleted mid-run by
+  // a sibling target — after the first one reported success. `out: "dist"`
+  // ITSELF stays legal, and is the default: the fleet moves the previous dist/
+  // aside before any child runs, which is what makes the exact case safe and
+  // the nested case fatal. The single-target builder refused `--out=dist/x`
+  // for the same reason; since alpha73 routes every build through the fleet,
+  // the rule has to live where the decision now is.
+  const distDir = trimSep(join(rootDir, DIST_DIR));
+  if (out !== distDir && within(out, distDir)) return true;
   // Both directions: `out` may not sit inside a protected dir, and may not
   // swallow one.
   return protectedDirs.some((d) => within(out, d) || within(d, out));
@@ -784,6 +850,20 @@ export async function buildAll(): Promise<number> {
     ),
   ];
   if (unsafeOutDir(outDir, root, appDirs)) {
+    // dist/ has its own reason, and a generic "pick another directory" would
+    // hide it: this one is not about deleting the user's files, it is about
+    // the build deleting its OWN output between targets.
+    const distDir = resolve(join(root, DIST_DIR));
+    if (outDir !== distDir && outDir.startsWith(distDir + SEPARATOR)) {
+      console.error(
+        `${C.red}✗ refusing to build into ${outDir}${C.r} — it points inside ` +
+          `dist/, which is the bundle staging dir: it is embedded into the ` +
+          `binary wholesale and wiped by every target this run builds.\n  ` +
+          `${C.dim}fix: pick a directory of its own (--out=release, ` +
+          `--out=out/agent).${C.r}`,
+      );
+      return 1;
+    }
     console.error(
       `${C.red}✗ refusing to build into ${outDir}${C.r} — it is assembled by ` +
         `DELETING it recursively, so "out" must be a dedicated subdirectory ` +
@@ -951,6 +1031,13 @@ export async function buildAll(): Promise<number> {
             ? [`--entry=${t.entry ?? flag("entry")}`]
             : []),
           ...((t.ui ?? flag("ui")) ? [`--ui=${t.ui ?? flag("ui")}`] : []),
+          // `dev:android`'s whole point: the APK it builds must dial the dev
+          // server instead of embedding its bundle. The flag reaches the fleet
+          // (build.ts forwards it) and has to reach the BUILDER, or the dev
+          // task produces a production APK and says nothing.
+          ...(flag("android-dev-url")
+            ? [`--android-dev-url=${flag("android-dev-url")}`]
+            : []),
         ];
         if (release) args.push("--release");
         if (force) args.push("--force");

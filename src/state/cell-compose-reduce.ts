@@ -10,6 +10,7 @@ import {
   produceWithPatches,
 } from "immer";
 import { log } from "../diagnostics/logger-api.ts";
+import { warnWireLoss } from "./wire-fidelity.ts";
 import { narrowPatches } from "./patch-compact.ts";
 import { applyWirePatches, type WirePatch } from "../protocol/patch-ops.ts";
 import type { ScheduleEffect } from "./schedule.ts";
@@ -212,6 +213,7 @@ export function reduceCell(
     // slice is in hand — by broadcast time only the new state is left, and
     // the prefix can no longer be proven.
     cellPatches = narrowPatches(cellState, cellPatches as Patch[]);
+    warnWireLoss(cellName, cellPatches as Patch[]);
     const tProduce = _perfCheck ? performance.now() - t0 : 0;
 
     // Effects already cloned inside produceWithPatches (before draft revocation)
@@ -321,6 +323,7 @@ export function reduceCell(
   // both must, or the optimisation would apply only to cells that happen to
   // declare a state machine.
   cellPatches = narrowPatches(cellState, cellPatches as Patch[]);
+  warnWireLoss(cellName, cellPatches as Patch[]);
   const stProduce = _perfCheck ? performance.now() - st0 : 0;
 
   // Effects already cloned inside produceWithPatches (before draft revocation)

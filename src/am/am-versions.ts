@@ -296,9 +296,13 @@ export async function ensureVersion(
     const tags = (await knownTags(root)).slice(0, 8);
     return {
       ok: false,
-      error: `aio version "${ref}" not found in ${root}. Known: ${
-        tags.join(", ") || "(none)"
-      }${tags.length === 8 ? ", …" : ""}. Use "main" for the branch tip.`,
+      error:
+        `aio version "${ref}" not found in ${root}. Known: ${
+          tags.join(", ") || "(none)"
+        }${
+          tags.length === 8 ? ", …" : ""
+        }. Both WORDS are accepted: "${LATEST}" for the newest release, ` +
+        `"${MAIN}" for the branch tip.`,
     };
   }
 

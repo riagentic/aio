@@ -124,6 +124,31 @@ async function main(): Promise<void> {
 
   // R2.2: every AioErrorCode must be documented in docs/debugging/errors.md, so
   // a new code can never ship without an operator-facing explanation.
+  // A snippet is a fragment, so no type-checker ever sees it: the docs are the
+  // one surface where a shape the framework refuses can ship green. This runs
+  // the two shapes `validateSchedules` refuses against every fenced block.
+  const schedIssues = checkScheduleShapes(docs);
+  console.log(
+    `Schedule shapes in docs: ${
+      schedIssues.length
+        ? `${schedIssues.length} the framework refuses`
+        : "all valid"
+    }`,
+  );
+  if (schedIssues.length) fatal.push(...schedIssues);
+
+  // A doc that names the test guaranteeing its claim is making a promise on
+  // that test's behalf. The promise must at least still be reachable.
+  const claimIssues = await checkGateClaims(docs);
+  console.log(
+    `Gate claims (\"pinned by tests/…\"): ${
+      claimIssues.length
+        ? `${claimIssues.length} name a missing test`
+        : "all resolve"
+    }`,
+  );
+  if (claimIssues.length) fatal.push(...claimIssues);
+
   const codeIssues = await checkErrorCodes();
   console.log(
     `\nError-code coverage: ${
@@ -445,6 +470,124 @@ async function checkHarnessMembers(): Promise<string[]> {
 const HISTORICAL_DIRS = [/\/upgrade\//, /\/specs\//, /\/release-notes\//];
 
 export type DocFile = { rel: string; lines: string[] };
+
+/** A schedule the docs TEACH but the framework REFUSES.
+ *
+ *  `aio.run({ schedules })` validates every entry at the config seam
+ *  (`validateSchedules`, src/state/schedule.ts): durations are numbers of
+ *  milliseconds and `action` is an action object. Nothing checked that the
+ *  docs agreed — snippets are fragments, so no type-checker sees them — and
+ *  docs/state/lifecycle.md shipped `{ every: "5m", action: "projects:scan" }`,
+ *  wrong in both, in the one example teaching the feature. A reader copying it
+ *  now gets a refusal at boot, which is the best possible outcome for THEM and
+ *  the worst possible advertisement for us.
+ *
+ *  Scoped to fenced code blocks in live docs: prose that NAMES the refused
+ *  spelling (this file's own message, or scheduling.md explaining it) is the
+ *  documentation working, not a defect. */
+function checkScheduleShapes(docs: DocFile[]): string[] {
+  const out: string[] = [];
+  for (const doc of docs) {
+    let fenced = false;
+    let block: string[] = [];
+    let blockStart = 0;
+    const flush = () => {
+      // Only blocks that are actually about schedules — `action:` is a fine
+      // key elsewhere (the alpha10 `interact({ action })` shape, say).
+      const text = block.join("\n");
+      if (/\bschedules?\s*:/.test(text) || /\bschedule\./.test(text)) {
+        block.forEach((line, i) => {
+          const loc = `${doc.rel}:${blockStart + i + 1}`;
+          const dur = /\b(every|after)\s*:\s*['"]/.exec(line);
+          if (dur) {
+            out.push(
+              `  ${loc}  ${dur[1]}: takes a NUMBER of milliseconds — ` +
+                `write 300_000, not a "5m" string (aio.run refuses this at boot)`,
+            );
+          }
+          if (/\baction\s*:\s*['"]/.test(line)) {
+            out.push(
+              `  ${loc}  action: takes an action OBJECT — ` +
+                `cell.method.action() or { type: "cell:method" } ` +
+                `(aio.run refuses a bare string at boot)`,
+            );
+          }
+        });
+      }
+      block = [];
+    };
+    doc.lines.forEach((line, i) => {
+      if (line.trimStart().startsWith("```")) {
+        if (fenced) flush();
+        else blockStart = i + 1;
+        fenced = !fenced;
+        return;
+      }
+      if (fenced) block.push(line);
+    });
+    if (fenced) flush(); // unterminated fence — check what we saw
+  }
+  return out;
+}
+
+/** A test file named as the thing that GUARANTEES something must exist.
+ *
+ *  Prose like "pinned by `tests/x.test.tsx`" is a promise: it tells the reader
+ *  they need not re-derive the claim, because a gate re-derives it every run.
+ *  A rename or a deletion turns that into a lie nothing detects — which is
+ *  precisely how docs/ui/air-comparison.md came to say "tests/bundle-size.test.ts
+ *  goes red if this page stops matching it" about a table the gate could not
+ *  read.
+ *
+ *  Deliberately scoped to promise-words rather than to every `tests/…` path:
+ *  docs also name test files as things to CREATE ("Create `tests/queue.test.ts`")
+ *  and as illustrative paths in examples, and a check that cannot tell those
+ *  apart would cry wolf. */
+async function checkGateClaims(docs: DocFile[]): Promise<string[]> {
+  const CLAIM_BEFORE =
+    /(?:pinned|gated|guarded|enforced)\s+by[^.]{0,120}?`?(tests\/[A-Za-z0-9_./-]*\.test\.tsx?)`?/gi;
+  const CLAIM_AFTER =
+    /`(tests\/[A-Za-z0-9_./-]*\.test\.tsx?)`\s+(?:pins|fuzzes|proves|gates|enforces|guards)\b/gi;
+  const out: string[] = [];
+  const seen = async (ref: string): Promise<boolean> => {
+    try {
+      await Deno.stat(SRC(ref));
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const scan = async (label: string, text: string): Promise<void> => {
+    for (const re of [CLAIM_BEFORE, CLAIM_AFTER]) {
+      re.lastIndex = 0;
+      for (const m of text.matchAll(re)) {
+        const ref = m[1]!;
+        if (!(await seen(ref))) {
+          out.push(
+            `  ${label}: names ${ref} as what guarantees this — that file does not exist`,
+          );
+        }
+      }
+    }
+  };
+  for (const doc of docs) await scan(doc.rel, doc.lines.join("\n"));
+  // CLAUDE.md is exempt from the docs KATA (it is not tidied into docs/), not
+  // from being true — and it is dense with exactly these claims, naming the
+  // fuzzers and parity tests that make its architecture notes trustworthy.
+  await scan("CLAUDE.md", await Deno.readTextFile(SRC("CLAUDE.md")));
+  for await (
+    const entry of walk(SRC("src"), {
+      exts: [".ts", ".tsx"],
+      includeDirs: false,
+    })
+  ) {
+    await scan(
+      entry.path.replace(SRC(""), ""),
+      await Deno.readTextFile(entry.path),
+    );
+  }
+  return out;
+}
 
 async function readLiveDocs(): Promise<DocFile[]> {
   const out: DocFile[] = [];

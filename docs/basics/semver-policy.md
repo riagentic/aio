@@ -20,7 +20,31 @@ The public surface is exactly what the CI-enforced snapshot locks
 
 **Not** public API: `_`-prefixed or `@internal` symbols, `src/` folder layout,
 log/error message wording (error _codes_ are stable), and undocumented behavior
-of internal modules.
+
+### `@experimental` — surface that carries no promise
+
+A symbol whose shape is not settled yet can ship tagged `@experimental` in its
+JSDoc. The snapshot records the tag per symbol, and `check:api` treats that
+symbol's removal or reshaping as **additive**, not as a break:
+
+```ts
+/** Shape still being learned from real apps.
+ * @experimental */
+export function somethingNew(): void {}
+```
+
+This is what makes additive-only survivable. Without it the only two options for
+an unsettled API are to ship it as stable and be stuck with it, or not ship it
+at all — and the first is how a framework accumulates surface it cannot change.
+Promoting a symbol OUT of `@experimental` is additive (the promise gets
+stronger); moving a stable symbol INTO it is a break, because it withdraws a
+promise callers already had.
+
+`check:api` says which of the two a diff is. A removal or a signature change on
+a stable symbol is reported as **BREAKING** and needs the decision an aio compat
+break needs — approval, an upgrade guide, a `removals.ts` row — before the
+snapshot is regenerated. Additive changes just say "regenerate and commit". of
+internal modules.
 
 ## What counts as breaking (major bump after 1.0)
 

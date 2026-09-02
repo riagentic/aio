@@ -5,7 +5,7 @@
 // non-text node; the nodeType guard skipped the bind entirely and the signal
 // child silently never updated (frozen with no error — the worst failure mode).
 
-import { assertEquals } from "jsr:@std/assert";
+import { assertEquals } from "@std/assert";
 import { signal } from "../src/state/signal.ts";
 import { Fragment, h } from "../src/air/vdom.ts";
 import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";

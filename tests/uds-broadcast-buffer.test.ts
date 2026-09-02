@@ -5,7 +5,7 @@
 // (e.g. an optimistic SOL balance) was silently discarded, freezing the
 // electron (UDS) client at its connect-time value until an unrelated dispatch.
 
-import { assert, assertEquals } from "jsr:@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { createUdsBroadcastController } from "../src/server/aio-run-helpers.ts";
 import type { UDSHandle } from "../src/server/uds.ts";
 

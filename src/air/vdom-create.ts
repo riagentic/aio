@@ -19,6 +19,24 @@ import {
 } from "./vdom-lazy.ts";
 import { _reportHookError } from "./hook-error.ts";
 
+/** Props signatures already reported for an invalid tag — a bad component sits
+ *  in a render path that runs on every update, and one report is the useful
+ *  one. Keyed by prop names, so a SECOND broken component still reports. */
+const _badTagsReported = new Set<string>();
+
+/** The message for a tag that is neither an element name, a component, nor a
+ *  framework symbol. Exported for the test that pins the wording. @internal */
+export function _badTagMessage(tag: unknown, props: unknown): string {
+  const names = Object.keys((props ?? {}) as Record<string, unknown>)
+    .filter((k) => k !== "children");
+  return `[air] JSX tag is ${
+    tag === null ? "null" : typeof tag
+  }, not a component or an element name. The usual cause is a typo'd import, ` +
+    `a missing export, or a circular import (the binding is still undefined ` +
+    `while the module is evaluating).` +
+    (names.length ? ` Props at this call site: ${names.join(", ")}.` : "");
+}
+
 // ── h() — JSX factory ────────────────────────────────────────────────
 
 /** Create a virtual DOM node — the JSX factory function for AIO components. */
@@ -33,6 +51,37 @@ export function h(
   props: Record<string, unknown> | null,
   ...rawChildren: VChild[]
 ): VNode {
+  // A valid tag is a string (intrinsic), a function (component) or a framework
+  // symbol (Fragment/Portal/Suspense/ErrorBoundary/_Null). Anything else is a
+  // mistake, and `undefined` is the one that actually happens: a typo'd
+  // import, a missing export, or — the case no type-checker can catch — a
+  // circular import whose binding is still undefined while the module
+  // evaluates. Without this, `<Card />` rendered `<undefined></undefined>`:
+  // invalid markup, no error, nothing to search for.
+  //
+  // Dev throws (the blank-screen guard in server-html-gen.ts turns a render
+  // throw into an in-page overlay AND a terminal report); prod reports once
+  // and renders NOTHING instead. That split is the documented category (b) —
+  // dev stricter, prod degrades — and it is deliberate here: one component
+  // broken by a circular import must not take a whole production page down
+  // when the old behaviour merely rendered it invisibly.
+  //
+  // One `typeof` on the hot path; the common (string) case exits on the first
+  // comparison.
+  const tagType = typeof tag;
+  if (tagType !== "string" && tagType !== "function" && tagType !== "symbol") {
+    const msg = _badTagMessage(tag, props);
+    if ((globalThis as Record<string, unknown>).__aioDev === true) {
+      throw new Error(msg);
+    }
+    const sig = Object.keys((props ?? {}) as Record<string, unknown>).join(",");
+    if (!_badTagsReported.has(sig)) {
+      _badTagsReported.add(sig);
+      console.error(msg);
+    }
+    return nullSlot();
+  }
+
   const p = props ?? {};
   const key = p.key as string | number | undefined;
   if (key !== undefined) delete p.key;

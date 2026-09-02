@@ -238,10 +238,21 @@ if (leftovers > LEFTOVER_CEILING) {
     `\ncheck:orphans FAIL — ${leftovers} abandoned director(ies) ` +
       `(${staleDirs.length} stale lock, ${tmpDirs.length} ownerless ` +
       `/tmp/aio-*), ceiling ${LEFTOVER_CEILING}.\n` +
-      `  Every one is a test that made a temp home and did not remove it. ` +
-      `They are invisible one at a time and 4 GB in aggregate.\n` +
-      `  \`deno task clean:tmp\` removes them; then find the test that made ` +
-      `them and give it an \`await using\` or a finally.`,
+      `  They are invisible one at a time and 4 GB in aggregate.\n` +
+      // The two halves have DIFFERENT causes and different fixes, and saying
+      // "every one is a test that did not remove its temp home" of both sent
+      // a reader hunting `makeTempDir` calls for the half where that is not
+      // the cause at all — the stale locks are app homes under AIO_APPS_DIR,
+      // left by the hundreds of apps a suite boots, and `deno task test`
+      // already resets that home at the START of every run.
+      `  ${staleDirs.length} stale lock: app homes under AIO_APPS_DIR whose ` +
+      `owner is gone. A suite boots hundreds of apps, and \`deno task test\` ` +
+      `resets that home each run — so roughly one run's worth is expected, ` +
+      `and a number far above that is the signal.\n` +
+      `  ${tmpDirs.length} ownerless /tmp/aio-*: a test made a temp dir and ` +
+      `did not remove it. THIS is the one to fix at the source — find the ` +
+      `test and give it an \`await using\` or a finally.\n` +
+      `  \`deno task clean:tmp\` removes both.`,
   );
   Deno.exit(1);
 }
