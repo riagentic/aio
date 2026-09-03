@@ -29,8 +29,10 @@ dispatch(action)
 The biggest server-side win. Controls what the server _sends_ per client:
 
 ```ts
+type Order = { id: string; userId: string };
+
 const orders = cell("orders", {
-  state: { items: [], internal: [] },
+  state: { items: [] as Order[], internal: [] as string[] },
   visible: {
     exclude: ["internal"],
     forUser: (exposed, user?) => {

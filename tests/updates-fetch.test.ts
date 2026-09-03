@@ -24,11 +24,12 @@ import {
   writeTrust,
 } from "../src/server/updates-check.ts";
 import { freePort } from "../src/testing/server-test.ts";
+import { tempDir } from "../src/testing/temp-dir.ts";
 
 const KEY: JsonWebKey = { kty: "OKP", crv: "Ed25519", x: "abc" };
 
 async function tmp(prefix: string): Promise<string> {
-  return await Deno.makeTempDir({ prefix: `aio-upd-${prefix}-` });
+  return await tempDir(`aio-upd-${prefix}-`);
 }
 
 /** A well-formed manifest, as a plain object, so a table test can break one

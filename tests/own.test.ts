@@ -3,7 +3,7 @@
 
 import { assertEquals, assertThrows } from "@std/assert";
 import { cell } from "../src/state/cell.ts";
-import { testCell } from "../src/testing/cell-test.ts";
+import { bootCells, testCell } from "../src/testing/cell-test.ts";
 import {
   createOwnManager,
   isOwnEffect,
@@ -137,25 +137,35 @@ Deno.test("own manager: invalid id throws", () => {
 
 // ── Cell integration: effects flow through reduce ───────────────────
 
+/** Factory runs, recorded — the only way to see an ASYNC method's `$do`, which
+ *  dispatches mid-method rather than riding the reduce's effects array. */
+const holderLog: string[] = [];
+
 const holder = cell("holder382", {
   state: { acquired: 0 },
   methods: {
-    acquire(s): OwnEffect {
+    acquire(s) {
       s.acquired += 1;
-      return own.set("holder382:res", () => () => {});
+      s.$do(own.set("holder382:res", () => {
+        holderLog.push("acquire");
+        return () => holderLog.push("dispose");
+      }));
     },
-    release(_s): OwnEffect {
-      return own.dispose("holder382:res");
+    release(s) {
+      s.$do(own.dispose("holder382:res"));
     },
-    async acquireAsync(s): Promise<OwnEffect> {
+    async acquireAsync(s) {
       await Promise.resolve();
       s.acquired += 1;
-      return own.set("holder382:res", () => () => {});
+      s.$do(own.set("holder382:res", () => {
+        holderLog.push("acquire:async");
+        return () => holderLog.push("dispose:async");
+      }));
     },
   },
 });
 
-testCell(holder, "sync method returning own.set emits the effect", (t) => {
+testCell(holder, "sync method: $do(own.set) emits the effect", (t) => {
   t.init();
   t.send.acquire!();
   t.expect.state((s) => s.acquired === 1);
@@ -165,7 +175,7 @@ testCell(holder, "sync method returning own.set emits the effect", (t) => {
   assertEquals((effects[0] as OwnEffect).id, "holder382:res");
 });
 
-testCell(holder, "sync method returning own.dispose emits the effect", (t) => {
+testCell(holder, "sync method: $do(own.dispose) emits the effect", (t) => {
   t.init();
   t.send.release!();
   const effects = t.getEffects();
@@ -173,16 +183,18 @@ testCell(holder, "sync method returning own.dispose emits the effect", (t) => {
   assertEquals((effects[0] as OwnEffect).kind, "dispose");
 });
 
-testCell(
-  holder,
-  "async method returning own.set bridges via __effects (AIO-381 path)",
-  async (t) => {
-    t.init();
-    await t.send.acquireAsync!();
-    t.expect.state((s) => s.acquired === 1);
-    const effects = t.getEffects();
-    assertEquals(effects.length, 1);
-    assertEquals(isOwnEffect(effects[0]), true);
-    assertEquals((effects[0] as OwnEffect).kind, "set");
+Deno.test(
+  "async method: $do(own.set) reaches the registry (AIO-381 path)",
+  async () => {
+    holderLog.length = 0;
+    const h = await bootCells([holder]);
+    try {
+      // deno-lint-ignore no-explicit-any
+      await (holder as any).acquireAsync();
+      assertEquals(holderLog, ["acquire:async"], "the factory ran");
+    } finally {
+      h.dispose();
+    }
+    assertEquals(holderLog, ["acquire:async", "dispose:async"]);
   },
 );

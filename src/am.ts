@@ -96,6 +96,8 @@ import { cmdWhere } from "./am/am-cmd-where.ts";
 import { PATH_PIN_PREFIX } from "./am/am-versions.ts";
 import { removedAmVerb, retiredSpellingLine } from "./state/removals.ts";
 import { readDenoJsonSync, readLocalPinSync } from "./server/deno-json.ts";
+import { routeAmLogsToStderr } from "./am/am-log.ts";
+import { unknownFlagError } from "./am/am-flags.ts";
 
 // ── Command map ────────────────────────────────────────────
 
@@ -281,6 +283,8 @@ export function sameFile(a: string, b: string): boolean {
 }
 
 async function main(): Promise<void> {
+  // FIRST: stdout belongs to the command's own document (see am-log.ts).
+  routeAmLogsToStderr();
   await delegateToPathPin();
   const { command, args, flags } = parseGlobalFlags(Deno.args);
   if (flags.error) {
@@ -317,10 +321,19 @@ async function main(): Promise<void> {
     outError(unknownCommandLine(command), detectMode(flags));
     Deno.exit(1);
   }
+  // ONE answer to a mistyped flag, for every verb (see am-flags.ts). It runs
+  // here rather than inside each command so the three behaviours it replaces —
+  // refuse / ignore / read it as an argument — cannot come back one command at
+  // a time.
+  const flagError = unknownFlagError(cmd, args);
+  if (flagError) {
+    outError(flagError, detectMode(flags));
+    Deno.exit(1);
+  }
   try {
     await handler(args, flags);
   } catch (e) {
-    outError(String(e), detectMode(flags));
+    outError(e instanceof Error ? e.message : String(e), detectMode(flags));
     Deno.exit(1);
   }
 }

@@ -28,10 +28,10 @@ async function defineCell(name: string) {
         s.log = [...s.log, v];
       },
       // A long-running write loop — the "streaming reply" shape.
-      async stream(s: Doc & Partial<MethodDraftMeta>, n: number) {
+      async stream(s: Doc & MethodDraftMeta, n: number) {
         s.status = "streaming";
         for (let i = 0; i < n; i++) {
-          if (s.$signal?.aborted) {
+          if (s.$signal.aborted) {
             s.status = "aborted";
             return;
           }

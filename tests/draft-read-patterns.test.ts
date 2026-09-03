@@ -402,7 +402,7 @@ Deno.test(
     assertEquals(caught instanceof Error, true);
     assertEquals(
       (caught as unknown as Error).message,
-      "[mycell:myMethod] doSomething() is not supported on live async state — snapshot first: const items = [...s.items]",
+      "[mycell:myMethod] doSomething() is not supported on live async state (s) — snapshot first: const copy = { ...s }",
     );
   },
 );

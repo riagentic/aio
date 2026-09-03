@@ -4,6 +4,7 @@
 import type { SkvInstance, SkvStmt } from "./skv.ts";
 import type { DB } from "../db/mod.ts";
 import {
+  checkTableShape,
   type DirtyHint,
   planTablesIncremental,
   type TableIndex,
@@ -134,7 +135,16 @@ export interface PersistenceManager {
    *  (or with a patch the hint cannot express) the table takes the full
    *  identity-first pass. Correctness never depends on the hint. */
   schedulePersist(cellPatches?: CellPatches): void;
+  /** Close the debounce window NOW: run a cycle and resolve when it has
+   *  landed (or been refused). Never rejects — a refused write is reported
+   *  through `onError` inside the cycle; ask {@linkcode lastCycleError} when
+   *  "did it land" is the question. Concurrent callers are serialized. */
   flushPersist(): Promise<void>;
+  /** The error the MOST RECENT cycle reported, or null when it committed
+   *  clean. `flushPersist()` resolving is not "written": the cycle catches
+   *  every failure so the loop survives it, so a caller that promises
+   *  durability (`am persist`) reads this to keep the promise honest. */
+  lastCycleError(): Error | null;
   setShuttingDown(): void;
   resetPrevState(): void;
 }
@@ -249,6 +259,51 @@ export function createPersistenceManager(
     return v;
   };
   let prevDbState: Record<string, unknown> = baseline();
+
+  // The plan schema is validated HERE, once, before the first window — not
+  // discovered on the first debounce window and re-discovered on every one
+  // after it. A table this manager plans is a table it must be able to plan:
+  //
+  //  • every planned table must be BOUND to a state path (when the binding
+  //    list is known). The boot used to pass the full `db:` schema — SQL-only
+  //    tables included — while `getTableState` (correctly) omitted them, so
+  //    the planner saw a table whose bound value was `undefined`, threw by
+  //    name on EVERY window, and the whole SQLite half never ran: rows pushed
+  //    into the BOUND tables were written nowhere (they are excluded from the
+  //    snapshot by design) while the snapshot half kept committing, so the
+  //    app looked healthy and every row was gone at the next boot. Two
+  //    deciders (boot: "SQL-only"; planner: "bound") disagreeing about the
+  //    same table. The boot now derives the plan schema from the bindings,
+  //    and this guard makes that decision structural: a plan schema the
+  //    bindings do not vouch for cannot be constructed.
+  //  • the bound value must be a shape the planner accepts (an array, or a
+  //    pk-keyed map for `shape: "map"`), checked against the boot baseline.
+  //    A planner that throws on window 1 would throw on every window; that
+  //    is a boot-time misconfiguration and it fails the boot.
+  if (dbSchema) {
+    const bound = cfg.tableBindings
+      ? new Set(
+        cfg.tableBindings.filter((b) => b.path.length > 0).map((b) => b.table),
+      )
+      : null;
+    for (const name of Object.keys(dbSchema)) {
+      if (bound && !bound.has(name)) {
+        throw new Error(
+          `persist: db: table "${name}" is in the persistence plan but is ` +
+            `bound to no state path (it is SQL-only). An SQL-only table is ` +
+            `driven by app.db and must never be planned: planning it would ` +
+            `refuse every persist window and silently stop EVERY bound ` +
+            `table from being written. (Internal: the boot passed the full ` +
+            `schema instead of the bound one — see aio-boot.ts.)`,
+        );
+      }
+      const v = prevDbState[name];
+      // An engine-level caller (no binding list) may add a table's array to
+      // state later; only a value that IS there can be shape-checked.
+      if (v === undefined && !bound) continue;
+      checkTableShape(name, v, dbSchema[name]!);
+    }
+  }
 
   // One report per offending path — a persist runs every debounce window, and
   // the same bad field would otherwise log on every one of them.
@@ -374,8 +429,12 @@ export function createPersistenceManager(
     }
   }
 
+  // The failure the current/most recent cycle reported — see
+  // `lastCycleError()`. Cleared when a cycle starts, set by every report.
+  let _cycleError: Error | null = null;
   function _reportPersistError(e: unknown): void {
     const err = createAioError("PERSIST_ERROR", e, {});
+    _cycleError = err;
     reportAioError(err, getReportOpts());
   }
 
@@ -750,6 +809,7 @@ export function createPersistenceManager(
    *  One read makes the two halves describe the same instant; one transaction
    *  makes them land together or not at all. */
   async function _persistOnce(): Promise<void> {
+    _cycleError = null;
     // Before anything is planned: the version stamp rides in the SAME
     // transaction as the snapshot, and building it needs the stored map.
     await _loadStoredVersions();
@@ -899,7 +959,19 @@ export function createPersistenceManager(
     }, persistMs);
   }
 
-  async function flushPersist(): Promise<void> {
+  // Flushes are SERIALIZED. Two callers that both passed the "await the
+  // in-flight cycle" gate below on the same tick (the gate reads `inFlight`
+  // before either has set it) each started a cycle of their own, and two
+  // `_persistOnce` ran side by side against one baseline. The shutdown flush
+  // and a journal-refusal flush (aio.ts) are exactly such a pair.
+  let _flushChain: Promise<void> = Promise.resolve();
+  function flushPersist(): Promise<void> {
+    const run = _flushChain.then(_flushOnce);
+    _flushChain = run.catch(() => {});
+    return run;
+  }
+
+  async function _flushOnce(): Promise<void> {
     if (persistTimer) {
       clearTimeout(persistTimer);
       persistTimer = null;
@@ -971,5 +1043,11 @@ export function createPersistenceManager(
     _baselineOverride = undefined; // the boot picture is used exactly once
   }
 
-  return { schedulePersist, flushPersist, setShuttingDown, resetPrevState };
+  return {
+    schedulePersist,
+    flushPersist,
+    lastCycleError: () => _cycleError,
+    setShuttingDown,
+    resetPrevState,
+  };
 }

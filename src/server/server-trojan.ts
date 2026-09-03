@@ -25,6 +25,7 @@ import {
   SNAPSHOT_MAX_BODY,
 } from "./read-body.ts";
 import { enc } from "../protocol/envelope.ts";
+import { snapshotShapeError } from "./server-static.ts";
 import type { AioUser } from "./aio.ts";
 import {
   _isFrameworkInternalActionType,
@@ -82,7 +83,7 @@ export interface TrojanDeps {
     getMigrations?: () =>
       | import("./aio-boot.ts").MigrationSummary
       | undefined;
-    forcePersist?: () => void;
+    forcePersist?: () => Promise<void>;
     sqlQuery?: (sql: string) => Promise<unknown[]>;
     shutdown?: () => Promise<void>;
     startedAt: number;
@@ -575,14 +576,10 @@ async function handlePost(
         // capture, a refused write-set — was logged as EFFECT_ASYNC_ERROR
         // while this route had already answered {"ok":true}. The browser and
         // the CLI client both carry an id; the operator's door did not.
-        // Only an ASYNC method settles an id — the reducer answers "blocked"
-        // for a sync one, which never forwards to the executor. A sync method
-        // already answers through the reduce result (its throw propagates).
-        const asyncOnes = trojan.cellAsyncMethods?.()[cell] ?? [];
-        const pl = (action.payload ?? {}) as Record<string, unknown>;
-        if (asyncOnes.includes(method) && typeof pl._callId !== "string") {
-          action.payload = { ...pl, _callId: `trojan-${crypto.randomUUID()}` };
-        }
+        // The id itself is minted in `dispatchNetwork` (aio-server.ts) now,
+        // for every door at once — this route's private stamp was why the
+        // operator's door reported honestly while the WS and UDS doors did
+        // not, and a client is never trusted with it.
       } else if (sepIdx <= 0 && Object.keys(methods).length > 0) {
         // No separator, and this app is cells: every action a cell handles is
         // `<cell>:<method>`, so a bare type reaches nothing — and it used to
@@ -688,7 +685,13 @@ async function handlePost(
       if (body === null) {
         return err(`snapshot too large (max ${SNAPSHOT_MAX_BODY} bytes)`, 413);
       }
-      JSON.parse(body); // validate
+      // The SAME shape check the HTTP endpoint makes — its doc comment says
+      // "shared by every snapshot door", and this one was not calling it.
+      // `JSON.parse` alone accepts `{"counter": 1}`: it loads, and the next
+      // dispatch on that cell throws `Cannot create property 'count' on
+      // number` far away from the POST that caused it.
+      const shape = snapshotShapeError(JSON.parse(body));
+      if (shape) return err(shape);
       deps.loadSnapshot(body);
       return json({ ok: true });
     } catch {
@@ -790,7 +793,16 @@ async function handlePost(
 
   if (route === "persist") {
     if (!trojan.forcePersist) return err("persistence not available", 501);
-    trojan.forcePersist();
+    // Awaited: `ok: true` is the claim "it is on disk", so the reply waits
+    // for the write — and a refused write is a 500, not a "persisted".
+    try {
+      await trojan.forcePersist();
+    } catch (e) {
+      return err(
+        `persist failed: ${e instanceof Error ? e.message : String(e)}`,
+        500,
+      );
+    }
     return json({ ok: true });
   }
 

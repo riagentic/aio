@@ -6,7 +6,7 @@
 // it verbatim (`schedule.blocking` went out in alpha70; `blocking` is its own
 // top-level export, server-only — see src/state/removals.ts).
 import { selfMethodOf } from "./self.ts";
-import { removalOf, retiredSpellingLine } from "./removals.ts";
+import { removalOf, retiredSpellingLine } from "./removals-core.ts";
 import { teachableError } from "../diagnostics/error.ts";
 import { nearestOf } from "./cell-helpers.ts";
 
@@ -203,6 +203,15 @@ export function validateSchedules(defs: readonly unknown[]): void {
           SCHEDULE_DOC,
         );
       }
+      if (trigger === "every" && value > MAX_TIMER_DELAY) {
+        throw teachableError(
+          `${at(d.id)}.every is ${value}ms (${
+            Math.round(value / 86_400_000)
+          } days)`,
+          EVERY_CEILING_HINT,
+          SCHEDULE_DOC,
+        );
+      }
       if (trigger === "after" && value < 0) {
         throw teachableError(
           `${at(d.id)}.after is ${value}ms`,
@@ -259,6 +268,20 @@ export const MAX_TIMER_DELAY = 2_147_483_647; // 2^31-1 ms ≈ 24.85 days
 
 /** How often a beyond-ceiling timer re-checks how far away its deadline is. */
 const RECHECK_MS = 86_400_000; // 24h
+
+/** Why `every` REFUSES the ceiling that `after`/`at`/`cron` clamp — the same
+ *  words at config time (`validateSchedules`) and at the call site
+ *  (`handleEvery`). A one-shot deadline can be re-checked every 24h without
+ *  changing what it means; a repeating interval cannot be re-checked without
+ *  becoming a different schedule, and unclamped `setInterval` truncates the
+ *  int32 to 1ms — the 25-day report became ~1000 dispatches a second, with
+ *  nothing logged (measured: 48 dispatches in 100ms). */
+const EVERY_CEILING_HINT =
+  `every caps at ${
+    Math.floor(MAX_TIMER_DELAY / 86_400_000)
+  } days (setInterval stores its delay in an int32 and truncates anything ` +
+  `longer to 1ms — a hot loop, not a monthly job). For cadences past ` +
+  `24.85 days use cron ("0 9 1 * *"), or at/after re-armed from the action.`;
 
 // ── Effect creators (pure) ──────────────────────────────────────────
 
@@ -399,12 +422,13 @@ const _poll: PollFn = ((
   return _pollEffect(id, attempt, a4 as PollOpts, a3);
 }) as PollFn;
 
-/** Effect creators for declarative scheduling — use in reducers to schedule/cancel timers.
+/** Effect creators for declarative scheduling — hand them to `s.$do(...)` from
+ * a method to schedule or cancel timers.
  * @example
  * ```ts
- * return [schedule.after('save-timeout', 3000, A.save())]
- * return [schedule.cron('daily-report', '0 8 * * *', A.report())]
- * return [schedule.cancel('save-timeout')]
+ * s.$do(schedule.after('save-timeout', 3000, self('save')))
+ * s.$do(schedule.cron('daily-report', '0 8 * * *', self('report')))
+ * s.$do(schedule.cancel('save-timeout'))
  * ``` */
 export const schedule = {
   after: <A>(
@@ -1082,6 +1106,14 @@ export function createScheduleManager(
     if (!Number.isFinite(ms)) {
       throw new Error(`schedule.every '${id}': ms must be finite, got ${ms}`);
     }
+    // `armDeadline` clamps after/at/cron; an interval has no deadline to
+    // re-check, so it is refused instead — see EVERY_CEILING_HINT.
+    if (ms > MAX_TIMER_DELAY) {
+      throw new Error(
+        `schedule.every '${id}': ${ms}ms is past the setInterval ceiling ` +
+          `(${MAX_TIMER_DELAY}ms) — ${EVERY_CEILING_HINT}`,
+      );
+    }
     const timerId = clock.setInterval(() => {
       // The previous tick is still working: drop this one rather than stacking
       // a second copy of the same poll on top of it. `inFlight` is cleared in a
@@ -1224,6 +1256,15 @@ export function createScheduleManager(
       }
       armDeadline(id, "cron", next.getTime(), () => {
         log.debug(`schedule: cron '${id}' fired`);
+        // THIS arming's identity, taken before the action runs. The action
+        // may cancel the id (AIO-142), or replace it — an `after` under the
+        // same id is the natural way to write "retry in five minutes" from a
+        // cron tick. `timers.has(id)` could not tell those apart from "still
+        // mine": it was true for the `after` the action had just installed,
+        // so the cron re-armed over it — `setTimer(internal)` cancels whatever
+        // holds the id — and the retry silently never fired. The epoch moves
+        // on every cancel and every replace, so it can.
+        const epoch = epochs.get(id);
         // safeDispatch, not a raw `dispatch` in a try/catch that could never
         // catch anything: dispatch reports failure by REJECTING (see the note
         // in safeDispatch), so a failing cron tick used to produce ZERO
@@ -1231,8 +1272,7 @@ export function createScheduleManager(
         // through the shutdown drain. Repeating kinds survive a failed tick;
         // a closed dispatch loop cancels the schedule from inside safeDispatch.
         safeDispatch(id, action, "cron");
-        // Only reschedule if action didn't cancel this cron (AIO-142)
-        if (timers.has(id)) scheduleNext();
+        if (epochs.get(id) === epoch) scheduleNext();
       }, !first);
       log.debug(
         `schedule: cron '${id}' next at ${next.toISOString()} (${
@@ -1419,7 +1459,12 @@ export function createVirtualTimers(
   return {
     setTimeout: (fn, ms) => arm(fn, ms, 0),
     clearTimeout: clear,
-    setInterval: (fn, ms) => arm(fn, ms, Math.max(1, ms)),
+    // The truncation applies to the PERIOD too: a real setInterval past the
+    // ceiling fires every 1ms, not once now and then monthly. Only the first
+    // fire used to be faithful, so a 25-day `every` that was a ~1000Hz storm
+    // in production was one quiet tick here.
+    setInterval: (fn, ms) =>
+      arm(fn, ms, ms > MAX_TIMER_DELAY ? 1 : Math.max(1, ms)),
     clearInterval: clear,
     now: () => now,
     pending: () => q.size,

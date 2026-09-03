@@ -73,6 +73,10 @@ import {
   versionPath,
   versionsDir,
 } from "../server/framework-pin.ts";
+import {
+  GIT_NO_PROMPT_ENV,
+  looksLikeAuthChallenge,
+} from "../server/git-noninteractive.ts";
 
 async function git(
   cwd: string,
@@ -83,6 +87,8 @@ async function git(
       args: ["-C", cwd, ...args],
       stdout: "piped",
       stderr: "piped",
+      stdin: "null",
+      env: GIT_NO_PROMPT_ENV,
     }).output();
     return {
       ok: p.success,
@@ -288,12 +294,35 @@ export async function ensureVersion(
   const sha = /^main-([0-9a-f]{7,40})$/.exec(ref)?.[1];
   const target = sha ? sha : ref === MAIN ? `origin/${MAIN}` : ref;
   let has = await git(root, ["rev-parse", "--verify", "--quiet", target]);
+  let fetchFailed = "";
   if (!has.ok) {
-    await git(root, ["fetch", "--tags", "--force", "origin", MAIN]);
+    const fetched = await git(root, [
+      "fetch",
+      "--tags",
+      "--force",
+      "origin",
+      MAIN,
+    ]);
+    if (!fetched.ok) fetchFailed = fetched.out;
     has = await git(root, ["rev-parse", "--verify", "--quiet", target]);
   }
   if (!has.ok) {
     const tags = (await knownTags(root)).slice(0, 8);
+    // The fetch failing is a DIFFERENT fact than the ref not existing, and
+    // hiding it behind "version not found" sent a user hunting the wrong
+    // bug. Notably: GitHub rate-limits anonymous HTTPS git and answers a
+    // throttled fetch of a PUBLIC repo with an auth challenge
+    // (intermittently — a retry may pass). Prompts are off
+    // (GIT_NO_PROMPT_ENV), so that challenge lands here as a failure, and
+    // the message must say what it is and what to do.
+    const fetchNote = !fetchFailed ? "" : `\nRefreshing from origin also ` +
+      `failed: ${fetchFailed.split("\n")[0]}\n` +
+      (looksLikeAuthChallenge(fetchFailed)
+        ? `GitHub is rate-limiting anonymous fetches from this network ` +
+          `right now (it challenges even public repos; a retry in a minute ` +
+          `often passes). aio itself never needs credentials.`
+        : `Check the network and the remote, then retry.`) +
+      `\nManual fetch: git -C ${root} fetch --tags --force origin ${MAIN}`;
     return {
       ok: false,
       error:
@@ -302,7 +331,7 @@ export async function ensureVersion(
         }${
           tags.length === 8 ? ", …" : ""
         }. Both WORDS are accepted: "${LATEST}" for the newest release, ` +
-        `"${MAIN}" for the branch tip.`,
+        `"${MAIN}" for the branch tip.` + fetchNote,
     };
   }
 

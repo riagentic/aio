@@ -9,40 +9,38 @@ app. CLI flags override config values:
 deno task dev --port=3000 --client=browser --no-persist --title="My App"
 ```
 
-| Flag                  | Effect                                                                                                                                            |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--port=N`            | Override server port                                                                                                                              |
-| `--client=X`          | Client mode: `electron`, `browser`, `cli`, `server-only` (replaces `--no-electron` / `--headless`)                                                |
-| `--no-persist`        | Disable SQLite state persistence                                                                                                                  |
-| `--keep-server`       | Keep server running after Electron window closes                                                                                                  |
-| `--takeover`          | Kill existing instance before starting (use with `singleton: true`; `--kill-existing` is the deprecated alias)                                    |
-| `--title=X`           | Override window/page title                                                                                                                        |
-| `--verbose`           | Verbose logging — actions, state, effects, WS, HTTP, persistence                                                                                  |
-| `--prod`              | Force prod mode — serve pre-built `dist/app.js` (auto-detected in compiled binaries)                                                              |
-| `--width=N`           | Override Electron window width (default: 800)                                                                                                     |
-| `--height=N`          | Override Electron window height (default: 600)                                                                                                    |
-| `--expose`            | Bind `0.0.0.0` + auto-HTTPS — share app with other devices on LAN (no auth by default; `key: true` opts in)                                       |
-| `--tls-cert=PATH`     | TLS certificate file (PEM) — used with `--expose` (auto-generated if omitted; `--cert` is a deprecated alias)                                     |
-| `--tls-key=PATH`      | TLS private key file (PEM) — used with `--expose` (auto-generated if omitted; `--key` is a deprecated alias)                                      |
-| `--transport=X`       | Transport mode: `uds`, `ws`, or `auto` (default: `auto`)                                                                                          |
-| `--server-url=URL`    | Thin client mode — launch Electron connecting to remote aio server (no local server)                                                              |
-| `--host=ADDR`         | Bind ONE address instead of the expose default (`0.0.0.0` exposed, `127.0.0.1` not) — e.g. serve one interface only                               |
-| `--no-tls`            | With `--expose`: serve PLAIN HTTP/WS — everything on the wire is readable by the LAN; only behind a TLS-terminating proxy                         |
-| `--key=X`             | Deprecated alias of `--tls-key` (`--cert` = alias of `--tls-cert`)                                                                                |
-| `--connect`           | Open the Electron thin-client connect page (enter any server URL; bare `--server-url` is the deprecated alias)                                    |
-| `--channel=X`         | Follow release channel X for updates (`dev`, `test`, `prod`, …)                                                                                   |
-| `--db-path=PATH`      | Override the SQLite file (`:memory:` for throwaway runs)                                                                                          |
-| `--backup-logs`       | Keep previous logs on restart (the default — rotate to `.1`, `.2`, …)                                                                             |
-| `--no-backup-logs`    | Wipe the log directory on start instead of rotating                                                                                               |
-| `--log-budget=N`      | Byte ceiling for the log directory (e.g. `200MB`; `0` = unlimited)                                                                                |
-| `--no-data-migrate`   | Skip moving a legacy data layout into `~/.<appId>`                                                                                                |
-| `--zero-port`         | No-op (accepted): zero TCP ports is already the default for a local electron app                                                                  |
-| `--open`              | Open the app in your browser after boot (default: OFF — the URL is printed)                                                                       |
-| `--isolate=a,b`       | Only activate the specified cells                                                                                                                 |
-| `--cdp[=N]`           | Open Chrome DevTools Protocol on the Electron window, `127.0.0.1` only (free port unless N; also `AIO_CDP=1\|N`) — enables `am shot`              |
-| `--aio-data-contract` | Print this build's persisted-schema promise (the data contract `deno task ship` publishes) as JSON and exit — see [updates](../deploy/updates.md) |
-| `--version`           | Print aio version and exit                                                                                                                        |
-| `--help`              | Show available CLI flags and exit                                                                                                                 |
+| Flag                  | Effect                                                                                                                                                                                                          |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--port=N`            | Override server port                                                                                                                                                                                            |
+| `--client=X`          | Client mode: `electron`, `browser`, `cli`, `server-only` (replaces `--no-electron` / `--headless`)                                                                                                              |
+| `--no-persist`        | Disable SQLite state persistence                                                                                                                                                                                |
+| `--keep-server`       | Keep server running after Electron window closes                                                                                                                                                                |
+| `--takeover`          | Kill the running instance and take its lock (use with `singleton: true`; the `aio.run()` key is `takeover: true`)                                                                                               |
+| `--title=X`           | Override window/page title                                                                                                                                                                                      |
+| `--verbose`           | Verbose logging — actions, state, effects, WS, HTTP, persistence                                                                                                                                                |
+| `--prod`              | Force prod mode — serve a pre-built `dist/app.js` (auto-detected in compiled binaries). A fleet build MOVES that file into the binary, so after `deno task build` there is none to serve and this warns at boot |
+| `--width=N`           | Override Electron window width (default: 800)                                                                                                                                                                   |
+| `--height=N`          | Override Electron window height (default: 600)                                                                                                                                                                  |
+| `--expose`            | Bind `0.0.0.0` + auto-HTTPS + a generated app key (the share link carries it; `key: false` opts out, per-user `auth` replaces it) — share on the LAN                                                            |
+| `--tls-cert=PATH`     | TLS certificate file (PEM) — used with `--expose` (auto-generated if omitted; `--cert` is a deprecated alias)                                                                                                   |
+| `--tls-key=PATH`      | TLS private key file (PEM) — used with `--expose` (auto-generated if omitted; `--key` is a deprecated alias)                                                                                                    |
+| `--transport=X`       | Transport mode: `uds`, `ws`, or `auto` (default: `auto` — `uds` for a local electron app, `ws` otherwise)                                                                                                       |
+| `--server-url=URL`    | Thin client mode — launch Electron connecting to remote aio server (no local server)                                                                                                                            |
+| `--host=ADDR`         | Bind ONE address instead of the expose default (`0.0.0.0` exposed, `127.0.0.1` not) — e.g. serve one interface only                                                                                             |
+| `--no-tls`            | With `--expose`: serve PLAIN HTTP/WS — everything on the wire is readable by the LAN; only behind a TLS-terminating proxy                                                                                       |
+| `--key=X`             | Deprecated alias of `--tls-key` (`--cert` = alias of `--tls-cert`)                                                                                                                                              |
+| `--connect`           | Open the Electron thin-client connect page (enter any server URL)                                                                                                                                               |
+| `--channel=X`         | Follow release channel X for updates (`dev`, `test`, `prod`, …)                                                                                                                                                 |
+| `--db-path=PATH`      | Override the SQLite file (`:memory:` for throwaway runs)                                                                                                                                                        |
+| `--no-backup-logs`    | Wipe the log directory on start instead of rotating (keeping previous logs — rotate to `.1`, `.2`, … — is the default)                                                                                          |
+| `--log-budget=N`      | Byte ceiling for the log directory (e.g. `200MB`; `0` = unlimited)                                                                                                                                              |
+| `--no-data-migrate`   | Skip moving a legacy data layout into `~/.<appId>`                                                                                                                                                              |
+| `--open`              | Open the app in your browser after boot (default: OFF — the URL is printed)                                                                                                                                     |
+| `--isolate=a,b`       | Only activate the specified cells                                                                                                                                                                               |
+| `--cdp[=N]`           | Open Chrome DevTools Protocol on the Electron window, `127.0.0.1` only (free port unless N; also `AIO_CDP=1\|N`) — enables `am shot`                                                                            |
+| `--aio-data-contract` | Print this build's persisted-schema promise (the data contract `deno task ship` publishes) as JSON and exit — see [updates](../deploy/updates.md)                                                               |
+| `--version`           | Print aio version and exit                                                                                                                                                                                      |
+| `--help`              | Show available CLI flags and exit                                                                                                                                                                               |
 
 **Precedence:** CLI flags > config object > defaults
 

@@ -145,7 +145,9 @@ Deno.test("snapshot HTTP: POST /__aio/snapshot loads state", async () => {
   await new Promise((r) => setTimeout(r, 50));
 
   try {
-    const snapshot = JSON.stringify({ count: 99, restored: true });
+    // `{ cellName: {…} }` — a cell's state is always an object, and both
+    // snapshot doors now refuse anything else (see snapshotShapeError).
+    const snapshot = JSON.stringify({ counter: { count: 99, restored: true } });
     const resp = await fetch(`http://127.0.0.1:${PORT}/__aio/snapshot`, {
       method: "POST",
       body: snapshot,
@@ -206,7 +208,7 @@ Deno.test("snapshot HTTP: clients receive broadcast after POST", async () => {
     "export function mount(){}",
   );
 
-  let state: Record<string, unknown> = { count: 0, pad: "" };
+  let state: Record<string, unknown> = { counter: { count: 0, pad: "" } };
   let broadcast: (() => void) | null = null;
 
   const server = createServer({
@@ -246,7 +248,7 @@ Deno.test("snapshot HTTP: clients receive broadcast after POST", async () => {
     // POST snapshot → client should receive broadcast
     const resp = await fetch(`http://127.0.0.1:${PORT}/__aio/snapshot`, {
       method: "POST",
-      body: JSON.stringify({ count: 77, pad: "restored" }),
+      body: JSON.stringify({ counter: { count: 77, pad: "restored" } }),
       headers: { "X-AIO": "1" },
     });
     assertEquals(resp.status, 200);
@@ -257,8 +259,8 @@ Deno.test("snapshot HTTP: clients receive broadcast after POST", async () => {
     // Could be a full "state" frame or a "patches" delta
     const count = update.t === "patches"
       ? (update.d as { path: unknown[]; value: unknown }[])
-        .find((op) => op.path[0] === "count")?.value
-      : update.d.count;
+        .find((op) => op.path[1] === "count")?.value
+      : update.d.counter.count;
     assertEquals(count, 77);
 
     ws.close();

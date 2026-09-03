@@ -487,6 +487,7 @@ Deno.test("updates: an app-supplied runtime and `updates:` cannot both win", asy
     kind: "manifest" as const,
     channel: "prod",
     current: "1.0.0",
+    currentUnknown: null,
     exposed: false,
     check: () => Promise.resolve({ kind: "current" as const, reason: "mine" }),
     apply: () => Promise.resolve(),

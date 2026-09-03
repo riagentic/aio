@@ -76,11 +76,16 @@ looks like it is.
 It **polls** rather than snapshots — a loader that clears in two seconds is a
 normal app starting, and only one still there at the deadline is a finding.
 
-`--expect="Some text"` adds an assertion that the screen contains something you
-know it should, which is what makes the lab useful against an arbitrary repo.
-`--interact` additionally clicks the first control and requires the screen to
-change (off by default: whether the UI is THERE and whether clicking works are
-different questions with different failure modes).
+Two `docker/verify-app.ts` flags sharpen that tier — they belong to the verifier
+you run **inside** the container
+(`deno run -A docker/verify-app.ts --port=8000
+--expect="…"`), not to
+`deno task lab`, which has its own flag list below. `--expect="Some text"` adds
+an assertion that the screen contains something you know it should, which is
+what makes the verifier useful against an arbitrary repo. `--interact`
+additionally clicks the first control and requires the screen to change — off by
+default, because whether the UI is THERE and whether clicking works are
+different questions with different failure modes.
 
 `no-errors` then reads the three places an error could be hiding: the server's
 own error channel (the endpoint `am errors` reads), `error.log` / `app.log` on
@@ -89,8 +94,22 @@ error survives even when nobody is watching the tab. An app that serves a page
 while logging errors is failing quietly, which is the failure this project
 treats as worse than a crash.
 
-`--no-interact` turns off the click for an app where clicking the first control
-is genuinely not supposed to change anything visible.
+## `deno task lab` flags
+
+| flag                 | default      | what it changes                                                                    |
+| -------------------- | ------------ | ---------------------------------------------------------------------------------- |
+| `--scenario=a,b`     | all of them  | run only these scenarios (see the table below)                                     |
+| `--source=github`    | `local`      | fetch `install.sh` / `run.sh` from the branch instead of this checkout             |
+| `--branch=<name>`    | `main`       | which branch `--source=github` fetches from                                        |
+| `--old-deno[=<ver>]` | current deno | preinstall a deliberately old deno (`2.1.4` bare) so the version gate is exercised |
+| `--browser`          | on           | the real-Chrome UI tier; `--no-browser` skips it (faster, and weaker)              |
+| `--electron`         | on           | the Xvfb desktop-window scenario; `--no-electron` drops it from the default run    |
+| `--runtime=<bin>`    | autodetected | force `docker` or `podman` instead of probing for whichever is present             |
+| `--keep`             | off          | leave the container running after the run                                          |
+| `--shell`            | off          | drop into a shell in the lab instead of running scenarios                          |
+
+The first non-flag argument is the target: a path (`../my-app`) or a
+`owner/repo` on GitHub. With no target the lab scaffolds a fresh app.
 
 ## Scenarios
 

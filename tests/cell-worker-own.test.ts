@@ -50,13 +50,13 @@ export const device = cell("device", {
     open(s: { opened: number }) {
       s.opened++;
       const n = s.opened;
-      return own.set("device:handle", () => {
+      s.$do(own.set("device:handle", () => {
         wlog().push("acquire:" + n);
         return () => wlog().push("dispose:" + n);
-      });
+      }));
     },
-    release() {
-      return own.dispose("device:handle");
+    release(s) {
+      s.$do(own.dispose("device:handle"));
     },
     // Reports from INSIDE the worker isolate.
     check(s: { report: string }) {
@@ -71,11 +71,11 @@ export const plain = cell("plain", {
   methods: {
     open(s: { opened: number }) {
       s.opened++;
-      return own.set("plain:handle", () => {
+      s.$do(own.set("plain:handle", () => {
         (globalThis as any).__mainLog ??= [];
         (globalThis as any).__mainLog.push("acquire");
         return () => (globalThis as any).__mainLog.push("dispose");
-      });
+      }));
     },
     check() {
       return ((globalThis as any).__mainLog ?? []).join(",");

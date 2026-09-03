@@ -134,9 +134,10 @@ const dashboard = cell("dashboard", {
 });
 ```
 
-> The pre-alpha52 spread signature (`fn: (s, counter, wallet) => …`) is
-> deprecated — it still works through beta with a one-time hint, and
-> `aiol --safe-fix` rewrites it to the tuple form.
+> The pre-alpha52 spread signature (`fn: (s, counter, wallet) => …`) was removed
+> in alpha76 — a dev boot or a test throws, production logs the removal line
+> once per selector and still spreads. `aiol --safe-fix` rewrites it to the
+> tuple form.
 
 Dep names are validated at `aio.run()` (composition time). An unknown dep throws
 a clear error like
@@ -156,16 +157,21 @@ Methods can be `async`. They get a "live" state proxy:
 ```ts
 methods: {
   async save(s) {
-    s.status = 'saving'              // Batched into mutation #1
-    const data = await fetch('/api')  // Pause here
-    s.status = 'done'                // Batched into mutation #2
-    s.data = await data.json()
+    s.status = 'saving'               // ┐ same await-gap →
+    s.error = ''                      // ┘ ONE batched action
+    const res = await fetch('/api')   // pause
+    const data = await res.json()     // pause again — nothing written between
+    s.status = 'done'                 // ┐ same await-gap →
+    s.data = data                     // ┘ ONE more batched action
   }
 }
 ```
 
-Each assignment after an `await` creates a separate batched action. The trigger
-action (`cell:save`) appears in time-travel.
+Writes batch **per await-gap**, not per assignment: everything assigned between
+two `await`s commits as a single action (the batch flushes on the next
+microtask, and later writes in the same tick join it). The method above writes
+four fields and produces **two** actions, not four. The trigger action
+(`cell:save`) appears in time-travel alongside them.
 
 ---
 

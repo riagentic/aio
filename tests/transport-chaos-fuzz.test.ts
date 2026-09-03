@@ -72,8 +72,18 @@ Deno.test({
           bump(s: { n: number }, by = 1) {
             s.n += by;
           },
+          // An ASYNC method, so this fuzzer can reach the executor-settled
+          // ack path — see the note in transport-exactly-once.test.ts.
+          async bumpAsync(s: { n: number }, by = 1) {
+            await Promise.resolve();
+            s.n += by;
+            return s.n;
+          },
         },
-      }) as unknown as CellDef & { bump: (by?: number) => Promise<unknown> };
+      }) as unknown as CellDef & {
+        bump: (by?: number) => Promise<unknown>;
+        bumpAsync: (by?: number) => Promise<unknown>;
+      };
       cli.bind(box);
       const calls: Call[] = [];
 
@@ -118,8 +128,15 @@ Deno.test({
           if (ws && ws.readyState === FakeWS.OPEN) serve(ws);
           if (chance(0.45)) {
             const cid = `call${calls.length}`;
-            calls.push({ cid, t: track(box.bump(1), now) });
-            log.push(`call ${calls.length - 1}`);
+            // Half the calls take the ASYNC door, which settles through the
+            // executor rather than the reduce result — the path this fuzzer
+            // could not reach while every call was `bump` (audit a21/F1).
+            const useAsync = chance(0.5);
+            calls.push({
+              cid,
+              t: track(useAsync ? box.bumpAsync(1) : box.bump(1), now),
+            });
+            log.push(`call ${calls.length - 1}${useAsync ? " async" : ""}`);
           }
           if (ws && ws.readyState === FakeWS.OPEN && chance(0.3)) {
             ws.close();

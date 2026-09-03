@@ -396,18 +396,19 @@ and a surprise on a desktop, so an Electron install with `auto: true` and no
 
 ## Cell state reference
 
-| Field                 | Meaning                                                                         |
-| --------------------- | ------------------------------------------------------------------------------- |
-| `enabled`             | `updates` was configured — true from boot, not from the first answer            |
-| `status`              | idle · checking · available · blocked · downloading · applying · staged · error |
-| `available`           | see below, or null                                                              |
-| `blocked`             | `{ version, blockers }` — newer, but unsafe here                                |
-| `progress`            | 0..1 while downloading                                                          |
-| `current` · `channel` | what is running, and what it follows                                            |
-| `lastChecked`         | ISO timestamp                                                                   |
-| `dismissed`           | the version the user said no to (persisted)                                     |
-| `backupPath`          | the pre-migration backup this install took, or null — set before the swap       |
-| `error`               | last failure, verbatim                                                          |
+| Field                 | Meaning                                                                                                                                 |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`             | `updates` was configured — true from boot, not from the first answer                                                                    |
+| `status`              | idle · checking · available · blocked · downloading · applying · staged · error                                                         |
+| `available`           | see below, or null                                                                                                                      |
+| `blocked`             | `{ version, blockers }` — newer, but unsafe here                                                                                        |
+| `progress`            | 0..1 while downloading                                                                                                                  |
+| `current` · `channel` | what is running, and what it follows. `current` is `null` when this build cannot say what version it is — render `current ?? "unknown"` |
+| `currentUnknown`      | why `current` is null (a sentence for a log or a dev banner, never a version); `null` when the version resolved                         |
+| `lastChecked`         | ISO timestamp                                                                                                                           |
+| `dismissed`           | the version the user said no to (persisted)                                                                                             |
+| `backupPath`          | the pre-migration backup this install took, or null — set before the swap                                                               |
+| `error`               | last failure, verbatim                                                                                                                  |
 
 `available` is
 `{ version, reason, notes, size, releasedAt, migrates, signed, keyFingerprint, warnings }`.
@@ -566,6 +567,10 @@ installUpdatesRuntime({
   kind: "manifest",
   channel: "prod",
   current: "1.0.0",
+  // `null` when this build cannot say what version it is; `currentUnknown`
+  // then says why (alpha76 — it used to be one `string` field that sometimes
+  // held the whole explanation).
+  currentUnknown: null,
   exposed: false,
   check: () =>
     Promise.resolve({

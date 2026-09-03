@@ -11,9 +11,7 @@ import { _DOM_PROPS } from "./vdom-types.ts";
 import type { ComponentFn, RenderCtx, VNode } from "./vdom.ts";
 import {
   _applyActions,
-  _bindSignalTextChildren,
-  _callRef,
-  _cleanupSignalTextChildren,
+  _bindSignalText,
   _ensureDelegation,
   _isDelegated,
   _LAZY_PENDING,
@@ -21,19 +19,31 @@ import {
   _render,
   _setDelegationRoot,
   _setWrapped,
+  _SignalText,
+  _sigText,
   _wrapHandler,
+  createDom,
   ErrorBoundary,
   Fragment,
   getDom,
   h,
+  Portal,
   Suspense,
   SVG_TAGS,
 } from "./vdom.ts";
-import { _registerLazyListeners, nullSlot } from "./vdom-create.ts";
+import {
+  _attachRef,
+  _enterCommit,
+  _leaveCommit,
+  _registerLazyListeners,
+  nullSlot,
+} from "./vdom-create.ts";
 import { _removeDomCleanup } from "./vdom-remove.ts";
 import { _cleanupActions } from "./vdom-helpers.ts";
 import { applyChildDependentProps } from "./vdom-props.ts";
-import { _devMode, _devWarn } from "./vdom-types.ts";
+import { _devWarn, _hasRawHtml } from "./vdom-types.ts";
+import { isDevMode } from "../state/dev-flag.ts";
+import type { Signal } from "../state/signal.ts";
 import { _getExitHandler } from "./transition-component.ts";
 import { _getGroupExitHandler } from "./transition-group.ts";
 import type { MountHandle, RootState } from "./renderer-types.ts";
@@ -133,19 +143,19 @@ export function hydrate(root: any, App: ComponentFn): MountHandle {
       // TWO subscribers per component (measured: 2 for 1 live component, a
       // double re-render on every change, and one subscription outliving
       // `_unmount`). `_removeDomCleanup` is the same teardown `removeDom` runs.
+      // It also disposes every signal child's effect and tears portal content
+      // out of its target.
       _removeDomCleanup(vnode, state.ctx);
-      // ...then release the signal-binding effects, signal-text bindings, and
-      // action cleanups for elements hydrated before the mismatch. Without
-      // this, those effects stay alive and keep mutating DOM nodes that
-      // innerHTML="" is about to detach (leak + stale writes).
+      // ...then release the signal-binding effects and action cleanups for
+      // elements hydrated before the mismatch. Without this, those effects
+      // stay alive and keep mutating DOM nodes that innerHTML="" is about to
+      // detach (leak + stale writes).
       cleanupSignalBindings(root);
-      _cleanupSignalTextChildren(root);
       if (typeof (root as HTMLElement).setAttribute === "function") {
         _cleanupActions(root as HTMLElement);
       }
       for (const el of root.querySelectorAll("*")) {
         cleanupSignalBindings(el);
-        _cleanupSignalTextChildren(el);
         if (typeof (el as HTMLElement).setAttribute === "function") {
           _cleanupActions(el as HTMLElement);
         }
@@ -175,40 +185,42 @@ export function _hydrateNode(
   isSvg: boolean,
   childIndex: number,
 ): number {
+  // The third reconciler entry point that opens a COMMIT (see `_enterCommit`);
+  // its own recursion nests. Hydration adopts server markup and attaches refs
+  // to it, and a hydrating boundary that falls back builds and tears down
+  // elements in the same pass — same two-phase rule as mount and diff.
+  _enterCommit();
+  try {
+    return _hydrateNodeInner(parent, vnode, ctx, isSvg, childIndex);
+  } finally {
+    _leaveCommit();
+  }
+}
+
+function _hydrateNodeInner(
+  parent: Node,
+  vnode: VNode | string | number,
+  ctx: RenderCtx,
+  isSvg: boolean,
+  childIndex: number,
+): number {
   if (typeof vnode === "string" || typeof vnode === "number") {
-    const want = String(vnode);
-    const domNode = parent.childNodes[childIndex];
-    // Two text children are two nodes in the client tree but ONE node in parsed
-    // HTML — the parser merges adjacent character data, and `renderToString`
-    // has no separator to stop it. That made `{"Hello "}{name}` — the single
-    // most ordinary thing a template does — unhydratable: the second child
-    // found no node of its own, the whole tree reported a mismatch, and
-    // `hydrate()` threw the server HTML away and re-rendered the page from
-    // scratch (a dev warning, and in prod nothing at all).
-    //
-    // The merge is undone HERE, where the boundary is known exactly: the vnode
-    // says how much of the run belongs to this child, so the node is split at
-    // that offset and the remainder is left for the next child. One decider —
-    // the SSR writer keeps emitting plain text, and nothing about the wire
-    // format changes.
-    if (!domNode || domNode.nodeType !== 3) {
-      // SSR emits NOTHING for an empty text child while `createDom` makes an
-      // empty text node, so the client tree has a slot the markup does not.
-      // Materialize it rather than failing the whole tree.
-      if (want !== "") return -1;
-      const empty = (parent.ownerDocument ?? document).createTextNode("");
-      if (domNode) parent.insertBefore(empty, domNode);
-      else parent.appendChild(empty);
-      return 1;
-    }
-    const have = domNode.textContent ?? "";
-    if (have !== want) {
-      if (have.length > want.length && have.startsWith(want)) {
-        (domNode as Text).splitText(want.length);
-      } else {
-        domNode.textContent = want;
-      }
-    }
+    return _hydrateText(parent, String(vnode), childIndex) ? 1 : -1;
+  }
+
+  // Signal child — one text node, claimed exactly like a text child (SSR
+  // emitted the signal's value as plain text), then bound so it follows the
+  // signal. It used to be bound by ARRAY index into the parent's childNodes,
+  // which is not its DOM index whenever a sibling spans several nodes or none.
+  if (vnode.tag === _SignalText) {
+    const text = _hydrateText(
+      parent,
+      _sigText((vnode._sig as Signal<unknown>).peek()),
+      childIndex,
+    );
+    if (!text) return -1;
+    vnode._dom = text;
+    _bindSignalText(vnode, text);
     return 1;
   }
 
@@ -219,10 +231,18 @@ export function _hydrateNode(
       vnode._dom = domNode;
       return 1;
     }
+    // SSR emits `<!---->` for a null slot, so anything else in this slot means
+    // the walk is out of step with the markup. It used to INSERT a comment and
+    // carry on: the foreign node stayed, owned by no vnode, and hydration
+    // reported success for a document the model does not describe. Every other
+    // branch answers a mismatch with -1 — one rule, and the caller's fallback
+    // (wipe and client-render, with the divergence warning in dev) produces the
+    // right page instead of a silently wrong one.
+    // The one legitimate absence is the END of the parent: `createDom` gives a
+    // null child a comment even when SSR wrote nothing after it.
+    if (domNode) return -1;
     const comment = (parent.ownerDocument ?? document).createComment("");
-    const anchor = parent.childNodes[childIndex];
-    if (anchor) parent.insertBefore(comment, anchor);
-    else parent.appendChild(comment);
+    parent.appendChild(comment);
     vnode._dom = comment;
     return 1;
   }
@@ -264,8 +284,14 @@ export function _hydrateNode(
     }
   }
 
-  // Portal — consumes 0 DOM nodes (renders elsewhere)
-  if (vnode.tag === Symbol.for("aio.Portal") as typeof vnode.tag) {
+  // Portal — consumes 0 DOM nodes of `parent`; its content lives in the
+  // TARGET, which the server never rendered into (`renderToString` emits
+  // nothing for a Portal). So there is nothing to claim — it must be CREATED,
+  // exactly as on mount. Returning 0 without creating anything left every
+  // portal on a hydrated page empty forever: the modal/toast/menu of an
+  // SSR'd app never appeared, and nothing said why.
+  if (vnode.tag === Portal) {
+    createDom(vnode, ctx, isSvg, parent);
     return 0;
   }
 
@@ -352,22 +378,21 @@ export function _hydrateNode(
   _hydrateProps(el, vnode.props);
 
   const nowSvg = isSvg || SVG_TAGS.has(el.tagName.toLowerCase());
-  let childIdx = 0;
-  for (let i = 0; i < vnode.children.length; i++) {
-    const consumed = _hydrateNode(
-      el,
-      vnode.children[i]!,
-      ctx,
-      nowSvg,
-      childIdx,
-    );
-    if (consumed < 0) return -1;
-    childIdx += consumed;
-  }
-
-  // AIO-249: bind signal text children during hydration
-  if (vnode._signalChildren) {
-    _bindSignalTextChildren(el, vnode._signalChildren);
+  // Raw html owns the content (see _hasRawHtml): the server emitted the html
+  // and no children, so there are no children to claim inside it.
+  if (!_hasRawHtml(vnode.props)) {
+    let childIdx = 0;
+    for (let i = 0; i < vnode.children.length; i++) {
+      const consumed = _hydrateNode(
+        el,
+        vnode.children[i]!,
+        ctx,
+        nowSvg,
+        childIdx,
+      );
+      if (consumed < 0) return -1;
+      childIdx += consumed;
+    }
   }
 
   // `<select value>` selects an <option>, so it can only be written once the
@@ -377,6 +402,51 @@ export function _hydrateNode(
   applyChildDependentProps(el, vnode.props, {});
 
   return 1;
+}
+
+/** Claim the text node at `childIndex` for a child whose text is `want`.
+ *
+ *  Two text children are two nodes in the client tree but ONE node in parsed
+ *  HTML — the parser merges adjacent character data, and `renderToString` has
+ *  no separator to stop it. That made `{"Hello "}{name}` — the single most
+ *  ordinary thing a template does — unhydratable: the second child found no
+ *  node of its own, the whole tree reported a mismatch, and `hydrate()` threw
+ *  the server HTML away and re-rendered the page from scratch (a dev warning,
+ *  and in prod nothing at all).
+ *
+ *  The merge is undone HERE, where the boundary is known exactly: the vnode
+ *  says how much of the run belongs to this child, so the node is split at
+ *  that offset and the remainder is left for the next child. One decider —
+ *  the SSR writer keeps emitting plain text, and nothing about the wire format
+ *  changes. Bare text and signal children share it: a signal child IS a text
+ *  node whose content happens to follow a signal.
+ *
+ *  Returns the claimed node, or null on a mismatch. */
+function _hydrateText(
+  parent: Node,
+  want: string,
+  childIndex: number,
+): Text | null {
+  const domNode = parent.childNodes[childIndex];
+  if (!domNode || domNode.nodeType !== 3) {
+    // SSR emits NOTHING for an empty text child while `createDom` makes an
+    // empty text node, so the client tree has a slot the markup does not.
+    // Materialize it rather than failing the whole tree.
+    if (want !== "") return null;
+    const empty = (parent.ownerDocument ?? document).createTextNode("");
+    if (domNode) parent.insertBefore(empty, domNode);
+    else parent.appendChild(empty);
+    return empty;
+  }
+  const have = domNode.textContent ?? "";
+  if (have !== want) {
+    if (have.length > want.length && have.startsWith(want)) {
+      (domNode as Text).splitText(want.length);
+    } else {
+      domNode.textContent = want;
+    }
+  }
+  return domNode as Text;
 }
 
 /** One scratch element per document, reused by `_canonStyle`. Dev-only path. */
@@ -477,11 +547,11 @@ function _hydrateProps(el: HTMLElement, props: Record<string, unknown>): void {
   //
   // Divergence is repaired in both dev and prod (prod must not render markup
   // the component does not describe); dev additionally says so.
-  const _before = _devMode ? _attrSnapshot(el) : null;
+  const _before = isDevMode() ? _attrSnapshot(el) : null;
   for (const [k, v] of Object.entries(props)) {
     if (_RESERVED_PROPS.has(k) || k.startsWith("on") || isSignal(v)) continue;
-    // The server already emitted this html and the children were hydrated out
-    // of it — rewriting innerHTML here would throw all of that away.
+    // The server already emitted this html — rewriting innerHTML here would
+    // throw the parsed nodes (and any state in them) away for nothing.
     if (k === "dangerouslySetInnerHTML") continue;
     // `<select>.value` needs its <option>s — applyChildDependentProps owns it
     // and runs after the children are hydrated.
@@ -504,7 +574,7 @@ function _hydrateProps(el: HTMLElement, props: Record<string, unknown>): void {
     }
   }
   bindSignalProps(el, props);
-  if (props.ref) _callRef(props.ref, el, el.tagName?.toLowerCase());
+  if (props.ref) _attachRef(props.ref, el, el.tagName?.toLowerCase());
   // AIO-89: apply action directives
   if (props.use) _applyActions(el, props.use);
 }

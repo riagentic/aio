@@ -7,12 +7,17 @@
 // is EXPLICIT and machine-checkable — aiol flags a server-only symbol reaching a
 // cell-shared file, and a client build can map this entry to a stub.
 //
-// (Additive today: these are still re-exported from the main `aio` entry for
-// back-compat. `aio/server` is the recommended path; a future major moves them
-// behind it exclusively and stubs the wrong side in each build.)
+// This IS the exclusive path, and has been since alpha37: `mod.ts` re-exports
+// none of them (it keeps the erased TYPES, which cannot poison a graph). The
+// note that used to sit here said they were "still re-exported from the main
+// `aio` entry for back-compat" — three alphas after they stopped being, which
+// is worse than no note: a reader trusts an entry module about its own
+// contents.
 
-// DB runtime values live HERE (alpha52 entry diet): `aio/db` is types +
-// pure helpers only — its value re-exports are deprecated through beta.
+// DB runtime values live HERE (alpha52 entry diet): `aio/db` is types + pure
+// helpers only. Its value re-exports were REMOVED in alpha70 — not deprecated,
+// gone (src/state/removals.ts, `import { createDB } from "aio/db"`); `aiol
+// --safe-fix` rewrites the import.
 export { createDB, DEFAULT_PRAGMAS } from "./db/async-db.ts";
 export { initSchema, loadTables, syncTables } from "./db/state-sync.ts";
 export { reactiveDB } from "./db/reactive.ts";

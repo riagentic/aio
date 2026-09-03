@@ -18,13 +18,10 @@ import { join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
 import { _exposeOf, exposeReason } from "../src/server/aio.ts";
 import { parseCli } from "../src/server/aio-cli.ts";
+import { childCoverageDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
-
-// Coverage profiles from spawned deno processes go to a throwaway temp dir —
-// never into the repo, never into the parent's coverage profile.
-const _childCovDir = Deno.env.get("DENO_COVERAGE_DIR") ??
-  Deno.makeTempDirSync({ prefix: "aio-child-cov-" });
+const _childCovDir = childCoverageDir();
 
 /** A throwaway app project. `entrySub` nests the entry module (the depth the
  *  version lookup used to fail at); `runOpts` is spliced into aio.run(). */
@@ -64,7 +61,7 @@ async function boot(
   flags: string[],
   entrySub = "src",
 ): Promise<{ out: string; code: number }> {
-  const home = await Deno.makeTempDir({ prefix: "aio-expose-home-" });
+  const home = await tempDir("aio-expose-home-");
   const r = await new Deno.Command(Deno.execPath(), {
     env: { DENO_COVERAGE_DIR: _childCovDir, AIO_APPS_DIR: home },
     args: ["run", "-A", join(dir, ...entrySub.split("/"), "app.ts"), ...flags],

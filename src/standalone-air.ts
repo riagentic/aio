@@ -978,3 +978,12 @@ export { schedule } from "./state/schedule.ts";
 // `aio` everywhere and vanishes on one target is an app that builds fine and
 // fails to BUNDLE only there (tests/android-air-surface.test.ts).
 export { bytes, count, dur } from "./diagnostics/fmt.ts";
+
+// ── Failure codes ─────────────────────────────────────────────────────
+// `errorCode(e)` is the ONE documented way to branch on WHY an awaited call
+// failed (mod.ts), and a standalone app catches rejections exactly like a
+// browser one. It reads a `.code` off the thrown value and imports nothing
+// but a type, so there is no reason for it to stop at the WebView — and every
+// reason not to: a `catch` block that compiles for three targets must not be
+// the thing that fails to bundle for the fourth.
+export { errorCode } from "./protocol/envelope.ts";

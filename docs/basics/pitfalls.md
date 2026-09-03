@@ -30,9 +30,10 @@ not the variable, keys the persisted state, the action prefix
 running apps in one process (tests boot/reset the runtime for you). Need the
 same shape twice? Use a factory returning `cell(name, …)`.
 
-**Sync methods mutate the draft; the return value is for effects.** Returning
-data from a sync method doesn't "set state" — mutate `s`. Return values are
-reserved for schedule/own effects (`return schedule.after(…)`).
+**Sync methods mutate the draft; the return value goes to the caller.**
+Returning data from a sync method doesn't "set state" — mutate `s`; the value
+resolves `await cell.method()`. Effects go through `s.$do(schedule.after(…))`,
+never `return` (removed in alpha76).
 
 **Async methods batch writes — but reads are read-your-writes.** `s.count++`
 inside an async method dispatches at the next microtask, and reads through `s`
@@ -85,10 +86,11 @@ against it.
 That's the feature (self-rescheduling pollers); it bites when you reuse an id
 accidentally. Boot warns on static/dynamic id collisions.
 
-**Self-referencing methods need a return annotation.**
-`poll(s): Promise<CellEffect>` when the method schedules itself
-(`metrics.poll.action()`) — otherwise TypeScript's self-inference guard (TS7022)
-fires.
+**Self-referencing methods use `self()`.**
+`s.$do(schedule.after("retry", 500,
+self("poll")))` when the method schedules
+itself — naming the cell inside its own initializer trips TypeScript's
+self-inference guard (TS7022).
 
 ## Sync (`sync: true`)
 

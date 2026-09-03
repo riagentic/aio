@@ -130,8 +130,8 @@ the server -- the browser gets a synced view via WebSocket.
 
 ### Quick example -- Redux slice -> aio cell
 
-```ts
-// BEFORE: Redux
+```ts no-check
+// BEFORE: Redux (not aio code — shown for contrast)
 const counterSlice = createSlice({
   name: "counter",
   initialState: { count: 0 },

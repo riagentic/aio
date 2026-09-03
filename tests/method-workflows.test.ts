@@ -75,11 +75,11 @@ const wf = cell("wf-demo", {
   cancelOn: { slowWork: ["wf-demo:stop"] },
   methods: {
     async slowWork(
-      s: { status: string; waited: boolean } & Partial<MethodDraftMeta>,
+      s: { status: string; waited: boolean } & MethodDraftMeta,
     ) {
       s.status = "working";
       await sleep(15);
-      if (s.$signal!.aborted) {
+      if (s.$signal.aborted) {
         s.status = "cancelled";
         return;
       }
@@ -96,10 +96,10 @@ const wf = cell("wf-demo", {
       s.waited = true;
     },
     syncSignalIsSafe(
-      s: { status: string; waited: boolean } & Partial<MethodDraftMeta>,
+      s: { status: string; waited: boolean } & MethodDraftMeta,
     ) {
       // Sync methods: $signal is undefined (atomic, nothing to abort).
-      return s.$signal?.aborted ?? false;
+      return s.$signal.aborted ?? false;
     },
   },
 });
@@ -158,14 +158,12 @@ const scanner = cell("wf-scan", {
     async open(
       s:
         & { current: string | null; done: string[]; aborted: number }
-        & Partial<
-          MethodDraftMeta
-        >,
+        & MethodDraftMeta,
       path: string,
     ) {
       s.current = path;
       await sleep(20);
-      if (s.$signal!.aborted) {
+      if (s.$signal.aborted) {
         s.aborted += 1;
         return;
       }
@@ -278,11 +276,11 @@ const queued = cell("wf-queued", {
   state: { done: [] as number[], stopped: false },
   methods: {
     async job(
-      s: { done: number[]; stopped: boolean } & Partial<MethodDraftMeta>,
+      s: { done: number[]; stopped: boolean } & MethodDraftMeta,
       n: number,
     ) {
       await sleep(10);
-      if (s.$signal!.aborted) return;
+      if (s.$signal.aborted) return;
       s.done = [...s.done, n];
     },
     stop(s: { stopped: boolean }) {
@@ -400,27 +398,27 @@ Deno.test("listensTo object form: async handler fails loud at definition", () =>
 //
 // The foreign path handed the handler's result back RAW, and compose-reduce
 // only reads an ARRAY as effects. So the SAME sync method ran its
-// `schedule.after(...)` when called directly and silently dropped it when
-// reached through listensTo (a dropped `own.set(...)` also leaked its factory
-// in pendingFactories for the process lifetime), while a returned DATA array
-// was mistaken for effects and blamed on the FOREIGN action.
+// `s.$do(schedule.after(...))` when called directly and silently dropped it
+// when reached through listensTo (a dropped `own.set(...)` also leaked its
+// factory in pendingFactories for the process lifetime), while a returned DATA
+// array was mistaken for effects and blamed on the FOREIGN action.
 
 const reactor = cell("wf-react", {
   state: { hits: 0, rows: [] as number[] },
   listensTo: { onEffect: cart2.clear, onData: cart2.add },
   methods: {
-    onEffect(s: { hits: number }) {
+    onEffect(s) {
       s.hits += 1;
-      return schedule.after("wf-react.retry", 1000, { type: "wf-react:later" });
+      s.$do(schedule.after("wf-react.retry", 1000, { type: "wf-react:later" }));
     },
-    onData(s: { rows: number[] }) {
+    onData(s) {
       s.rows = [1, 2, 3];
       return [1, 2, 3]; // DATA, not effects
     },
   },
 });
 
-Deno.test("listensTo: a single effect return reaches the effect queue", () => {
+Deno.test("listensTo: a $do'd effect reaches the effect queue", () => {
   const composed = composeCells([cart2, reactor]);
   const r = composed.reduce(composed.initialState, {
     type: "wf-cart:clear",
@@ -431,7 +429,7 @@ Deno.test("listensTo: a single effect return reaches the effect queue", () => {
   assertEquals(
     (r.effects[0] as { type: string }).type,
     "__schedule",
-    "…and it is the schedule effect the handler returned",
+    "…and it is the schedule effect the handler $do'd",
   );
 });
 

@@ -1,6 +1,6 @@
 // Memory Pressure Monitor — threshold alerts + trend detection
 import { teachableError } from "./error.ts";
-import { removalFor, removalMessage } from "../state/removals.ts";
+import { removalFor, removalMessage } from "../state/removals-core.ts";
 import { nearestOf } from "../state/cell-helpers.ts";
 
 /** Heap usage report — per-cell breakdown, trend, and WHY it fired. */

@@ -145,8 +145,8 @@ Deno.test("parseCli: --server-url alongside other flags", () => {
   assertEquals(r.title, "Remote");
 });
 
-Deno.test("parseCli: bare --server-url sets empty string", () => {
-  const r = parseCli(["--server-url"]);
+Deno.test("parseCli: bare --connect sets empty string", () => {
+  const r = parseCli(["--connect"]);
   assertEquals(r.serverUrl, "");
 });
 
@@ -408,45 +408,28 @@ Deno.test("parseCli: --width with a unit suffix is refused by name", () => {
   assertEquals(parseCli(["--width=1200"]).width, 1200);
 });
 
-Deno.test("parseCli: --kill-existing", () => {
-  const r = parseCli(["--kill-existing"]);
-  assertEquals(r.killExisting, true);
+Deno.test("parseCli: --takeover is the ONE spelling (--kill-existing is gone)", () => {
+  assertEquals(parseCli(["--takeover"]).takeover, true);
+  // The retired spelling is REFUSED, and the refusal names the new one.
+  const e = assertThrows(
+    () => parseCli(["--kill-existing"]),
+    Error,
+    "--kill-existing",
+  );
+  assertStringIncludes(String(e), "--takeover");
+  assertStringIncludes(String(e), "am pin v1.0.0-alpha75");
 });
 
-Deno.test("parseCli: --takeover is the preferred spelling of --kill-existing", () => {
-  const r = parseCli(["--takeover"]);
-  assertEquals(r.killExisting, true);
-});
-
-Deno.test("parseCli: --connect opens the connect page (bare --server-url is the alias)", () => {
-  // Both spell "thin client, no baked-in server" — serverUrl set but empty.
+Deno.test("parseCli: --connect opens the connect page (bare --server-url is gone)", () => {
+  // `--connect` spells "thin client, no baked-in server" — serverUrl set but empty.
   assertEquals(parseCli(["--connect"]).serverUrl, "");
-  assertEquals(parseCli(["--server-url"]).serverUrl, "");
+  const e = assertThrows(() => parseCli(["--server-url"]), Error);
+  assertStringIncludes(String(e), "--connect");
   // The VALUED form keeps its name — it really is a server URL.
   assertEquals(
     parseCli(["--server-url=http://h:1"]).serverUrl,
     "http://h:1",
   );
-});
-
-Deno.test("parseCli: the bare --server-url hint fires at most once per process", () => {
-  // parseCli runs several times in one boot (help, boot, electron probes) —
-  // the deprecation line printed 5× before the dedupe.
-  const lines: string[] = [];
-  const orig = console.log;
-  console.log = (...a: unknown[]) => lines.push(a.map(String).join(" "));
-  try {
-    parseCli(["--server-url"]);
-    parseCli(["--server-url"]);
-    parseCli(["--server-url"]);
-    const hints = lines.filter((l) => l.includes("now --connect"));
-    assert(
-      hints.length <= 1,
-      `hint printed ${hints.length}× across three parses — must be once`,
-    );
-  } finally {
-    console.log = orig;
-  }
 });
 
 // ── electronMainScriptUDS ──────────────────────────────────────────

@@ -120,7 +120,8 @@ export function entryExportKey(spec: string): string {
  *  used to carry hand-synced copies with a "keep in sync" comment and no
  *  gate. `initSchema`/`loadTables`/`syncTables`/`reactiveDB` joined in
  *  alpha52 when `aio/db` went types+pure-helpers (their values moved to
- *  `aio/server`; the `aio/db` re-exports are deprecated through beta). */
+ *  `aio/server`; the `aio/db` re-exports were REMOVED in alpha70 — see
+ *  src/state/removals.ts, `import { createDB } from "aio/db"`). */
 export const SERVER_ONLY_AIO_SYMBOLS: ReadonlySet<string> = new Set([
   "createDB",
   "DEFAULT_PRAGMAS",

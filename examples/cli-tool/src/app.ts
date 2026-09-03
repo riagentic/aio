@@ -3,14 +3,19 @@
 // to it over WS, dispatches a cell method, and prints — with `aio/cli` doing
 // the flags, the table, the live view, and the exit codes.
 //
-//   todo serve [--port=8000]         # the server
+//   todo serve [--port=N]            # the server (a free port unless named)
 //   todo add buy milk                # a command
 //   todo list --watch                # a live view: redraws on every change
 //   todo list --json | jq            # a script
 //
+// Commands find the server through its LOCK FILE — the same thing `am` reads
+// — so `todo serve` on a free port just works. `--url` overrides (a remote
+// server, or one behind a tunnel).
+//
 // Dev: deno task dev (= serve)   Build: deno task compile (a `cli` binary)
 import { aio } from "aio";
 import { connectCli } from "aio/server";
+import { instances, resolveAppId } from "aio/extras";
 import { args, EXIT, fail, style, table, watch } from "aio/cli";
 import { todos } from "./cell/todos.ts";
 
@@ -34,18 +39,28 @@ if (Deno.args[0] === "serve") {
     flags: {
       url: {
         type: "string",
-        default: "ws://localhost:8000/ws",
-        help: "the server to talk to",
+        help: "the server to talk to (default: the running `todo serve`)",
       },
       watch: { type: "boolean", short: "w", help: "list: redraw on change" },
       json: { type: "boolean", help: "machine-readable output" },
     },
   });
 
-  const app = connectCli(a.flags.url, { readyTimeoutMs: 3000 });
+  // WHERE the server is. `serve` binds a FREE port unless one is named, so a
+  // hard-coded ws://localhost:8000 was wrong on nearly every run: `todo list`
+  // said "no server" against a server that was running. The lock the app
+  // writes is the one place that knows, and it is what `am` reads too.
+  const live = instances(resolveAppId()).find((i) => i.alive && i.port > 0);
+  const url = a.flags.url ??
+    (live ? `ws://localhost:${live.port}/ws` : undefined);
+  if (!url) {
+    fail("no todo server running — start one: todo serve", { json: a.json });
+  }
+
+  const app = connectCli(url!, { readyTimeoutMs: 3000 });
   app.bind(todos);
   await app.ready.catch(() =>
-    fail(`no server at ${a.flags.url} — start one: todo serve`, {
+    fail(`no server at ${url} — start one: todo serve`, {
       json: a.json,
     })
   );

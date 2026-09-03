@@ -142,8 +142,15 @@ export type Timeline = {
  *  it wrote. Redacting the payload alone would have been theatre here: an
  *  `unlock` that stores its passphrase leaves the same secret in the diff, in
  *  the same ring, reachable by the same `am timeline`. */
+/** How many dispatches the live ring retains. Named because a READER has to be
+ *  able to say "this is the whole ring, not the whole history": `am timeline
+ *  --lines=20000` can only ever be answered with the last {@linkcode
+ *  TIMELINE_RING} of them, and silently returning 500 rows to a request for
+ *  20000 is indistinguishable from "there were only 500". */
+export const TIMELINE_RING = 500;
+
 export function createTimeline(
-  cap = 500,
+  cap = TIMELINE_RING,
   redact: Redactor = noRedaction,
 ): Timeline {
   let ring: TimelineEntry[] = [];

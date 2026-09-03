@@ -30,7 +30,7 @@ import {
   statusList,
   tally,
 } from "./am-output.ts";
-import { instancesInProject, projectRoot } from "./am-cmd-process.ts";
+import { instancesInProject, isUnder, projectRoot } from "./am-cmd-process.ts";
 import type { InstanceInfo } from "../server/single-instance-lock.ts";
 
 /** The newest file under a tree, by mtime. `null` for an empty/missing tree.
@@ -98,8 +98,19 @@ export type DoctorFinding = {
  *  product caller. */
 export async function checkRunningAio(
   projectDir: string,
-  inst: Pick<InstanceInfo, "appId" | "pid" | "startedAt">,
+  inst: Pick<InstanceInfo, "appId" | "pid" | "startedAt"> & { cwd?: string },
 ): Promise<DoctorFinding> {
+  // An instance of THIS app started from another checkout is still this app
+  // (one app id, one lock), but the framework it runs is that checkout's —
+  // comparing it against the dep/aio here would report drift that says
+  // nothing. Compare it where it lives, and say where that is.
+  const elsewhere = inst.cwd && !isUnder(projectDir, inst.cwd)
+    ? projectRoot(inst.cwd)
+    : null;
+  const from = elsewhere
+    ? `started from ${elsewhere}, not this checkout — checked there: `
+    : "";
+  projectDir = elsewhere ?? projectDir;
   const link = join(projectDir, "dep", "aio");
   const real = await Deno.realPath(link).catch(() => null);
   const base = { check: "running-aio-matches-disk" as const, ...inst };
@@ -107,7 +118,8 @@ export async function checkRunningAio(
     return {
       ...base,
       ok: true,
-      detail: "no dep/aio in this project (JSR pin or vendored) — not checked",
+      detail: from +
+        "no dep/aio in this project (JSR pin or vendored) — not checked",
     };
   }
   const candidates = await Promise.all([
@@ -125,7 +137,7 @@ export async function checkRunningAio(
     return {
       ...base,
       ok: true,
-      detail: `running aio is the one on disk (dep/aio → ${real})`,
+      detail: `${from}running aio is the one on disk (dep/aio → ${real})`,
     };
   }
   const rel = v.newest.startsWith(real)
@@ -134,7 +146,7 @@ export async function checkRunningAio(
   return {
     ...base,
     ok: false,
-    detail:
+    detail: from +
       `the running aio differs from dep/aio on disk: ${rel} was written ` +
       `at ${
         new Date(v.newestMtime).toISOString()

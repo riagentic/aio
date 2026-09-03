@@ -88,3 +88,63 @@ Deno.test("serializeReturn: returned value is a fresh clone (no proxy/alias leak
   );
   assertEquals(r.value, { a: 1 });
 });
+
+// A value the wire cannot carry at all must be said out loud, in production.
+//
+// The ack for it is `{ok:true}` with no `value` — on the wire, identical to a
+// method that returns nothing — so the client cannot tell either. The server
+// is the only place the fact exists. It used to be said at each ack site
+// instead of here: `uds.ts` warned always, `server-ws.ts` warned only when
+// `!prod`, so in production, over the transport every browser uses, a thrown-
+// away return value logged nothing at any level. Its sibling `warnLossy` had
+// already settled the question one line below — a corrupted return value is a
+// defect either way.
+async function warningsDuring(fn: () => void): Promise<string[]> {
+  const { getLogger, setLogger } = await import(
+    "../src/diagnostics/logger-api.ts"
+  );
+  const seen: string[] = [];
+  const prev = getLogger();
+  setLogger(
+    {
+      logDir: "",
+      pub: (lvl: string, _cat: string, msg: string) => {
+        if (lvl === "warn") seen.push(msg);
+      },
+      perf: () => {},
+      flush: () => Promise.resolve(),
+      // deno-lint-ignore no-explicit-any
+    } as any,
+  );
+  try {
+    fn();
+  } finally {
+    setLogger(prev);
+  }
+  return seen;
+}
+
+Deno.test("serializeReturn: a DROPPED value warns, and names the method", async () => {
+  const circular: Record<string, unknown> = {};
+  circular.self = circular;
+  for (const value of [() => 1, 10n, circular, Symbol("s")]) {
+    const seen = await warningsDuring(() => {
+      const r = serializeReturn(value, "cart:checkout");
+      assertEquals(r.dropped, true);
+      assertEquals(r.value, undefined);
+    });
+    assertEquals(seen.length, 1, `${String(value)} → ${JSON.stringify(seen)}`);
+    assert(seen[0]!.includes("cart:checkout"), seen[0]);
+    assert(seen[0]!.includes("resolves with"), seen[0]);
+  }
+});
+
+Deno.test("serializeReturn: a value that DOES cross says nothing", async () => {
+  // The instrument check: the same capture, on a clean value, must be empty —
+  // otherwise the assertion above would pass on any noisy logger.
+  const seen = await warningsDuring(() => {
+    assertEquals(serializeReturn({ ok: 1 }, "cart:checkout").dropped, false);
+    assertEquals(serializeReturn(undefined, "cart:checkout").dropped, false);
+  });
+  assertEquals(seen, []);
+});

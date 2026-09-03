@@ -16,12 +16,13 @@ import {
   resolveAppId,
   writeLock,
 } from "../server/single-instance-lock.ts";
-import { basename, join } from "@std/path";
+import { basename, join, resolve } from "@std/path";
 import { appDirs, registerAppDirs } from "../server/app-dirs.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, fail, out, outError } from "./am-output.ts";
 import { trojanGet, trojanPost } from "./am-http.ts";
 import { type Component, projectComponents } from "./am-components.ts";
+import { cwdIsProject, projectRoot } from "./am-project.ts";
 
 // ── Entry config cache ──────────────────────────────────────
 
@@ -63,7 +64,7 @@ export function readEntryConfig(): { appId?: string; port?: number } {
 /** This project's components, or none when it has none / cannot be read. */
 function components(): Component[] {
   try {
-    return projectComponents(Deno.cwd());
+    return projectComponents(projectRoot());
   } catch {
     return []; // unreadable project — the inference below is still honest
   }
@@ -119,7 +120,7 @@ export function resolveAmAppId(flag?: string): string {
     // JSONC-aware, like the server: a comment in deno.json made this throw
     // and `am` fell through to the directory name — a different app id from
     // the one the running app derived, so `am` addressed nothing.
-    const cfg = readDenoJsonSync(Deno.cwd())?.config as
+    const cfg = readDenoJsonSync(projectRoot())?.config as
       | { appId?: string }
       | undefined;
     if (cfg?.appId) return resolveAppId(cfg.appId);
@@ -129,7 +130,7 @@ export function resolveAmAppId(flag?: string): string {
   // Zero-config apps (aio.run() with no appId) — mirror the server's
   // inference chain: deno.json title/name, then the project directory name.
   try {
-    const cfg = readDenoJsonSync(Deno.cwd())?.config as
+    const cfg = readDenoJsonSync(projectRoot())?.config as
       | { title?: string; name?: string }
       | undefined;
     const fromCfg = cfg?.title ?? cfg?.name?.split("/").pop();
@@ -140,7 +141,12 @@ export function resolveAmAppId(flag?: string): string {
   // `C:\proj\app` — which `split("/")` returns WHOLE, so `am` computed the
   // appId `c-proj-app` for the app the runtime calls `app`. Two identities for
   // one project means two lock files, and `am` talking past its own app.
-  const dir = basename(Deno.cwd());
+  //
+  // `projectRoot()`, not the cwd, everywhere above and here: from a
+  // SUBDIRECTORY of the app the cwd has no deno.json and its basename is
+  // "src" — a different app id from the one the running app derived, so
+  // `cd src && am status` reported a stopped app called "src".
+  const dir = basename(projectRoot());
   if (dir) return resolveAppId(dir);
   throw new Error(
     '[am] missing appId — pass --app=X, add "appId" to deno.json, or set appId in aio.run()',
@@ -185,7 +191,7 @@ function _warnDenoJsonPort(): void {
   if (_warnedDenoJsonPort) return;
   try {
     const cfg = JSON.parse(
-      Deno.readTextFileSync(join(Deno.cwd(), "deno.json")),
+      Deno.readTextFileSync(join(projectRoot(), "deno.json")),
     ) as { port?: number };
     if (typeof cfg.port !== "number") return;
     _warnedDenoJsonPort = true;
@@ -213,10 +219,13 @@ export function resolveEntry(flagEntry?: string): string | null {
   // else src/app.ts. It read the same way already — which is exactly how a
   // duplicate survives until the day one copy is updated and the others are not.
   let cfg: Record<string, unknown> | null = null;
+  const root = projectRoot();
   try {
-    cfg = readDenoJsonSync(Deno.cwd())?.config ?? {};
+    cfg = readDenoJsonSync(root)?.config ?? {};
   } catch { /* no deno.json — the default still applies */ }
-  const entry = resolveEntryPath(cfg);
+  // Anchored at the PROJECT, so the entry resolves from a subdirectory too;
+  // absolute, so every reader (the launch, the config scan) agrees on it.
+  const entry = resolve(root, resolveEntryPath(cfg));
   try {
     Deno.statSync(entry);
     return entry;
@@ -400,6 +409,13 @@ export function _discoveredAppTarget(): string | undefined {
   return _discoveredTarget;
 }
 
+/** @internal — tests only: forget a fallback between cases. */
+// aio-ok: test seam — tests/am-verb-target.test.ts resets the guess between cases
+export function _resetTargetGuess(): void {
+  _discoveredTarget = undefined;
+  _targetNoted.clear();
+}
+
 export function resolvePort(
   flag?: number,
   appId?: string,
@@ -414,11 +430,17 @@ export function resolvePort(
   if (pf) return pf.port;
 
   const live = instances();
-  // The "one running instance" rung exists for a GUESSED id — the cwd's. An
-  // id the user typed (`--app=X`) is not a guess: when X is not running, the
-  // answer is "X is not running", never "so here is Y" — `am dispatch --app=X`
-  // must not mutate Y after a note on stderr.
-  if (live.length === 1 && !opts.explicit) {
+  // The "one running instance" rung exists for a GUESSED id — a cwd with no
+  // project in it, where the id came from a directory name. Two things are
+  // NOT a guess: an id the user typed (`--app=X`), and the id of the project
+  // the cwd sits in (its deno.json, its entry, its own name). When that app
+  // is not running, the answer is "it is not running", never "so here is Y" —
+  // measured: `am dispatch` typed in a real app's directory, with only some
+  // OTHER app up, dispatched into that other app after a note on stderr.
+  // The note is not consent. (am-http refuses a WRITE over a guess besides,
+  // so even the no-project case can only ever read through this rung.)
+  const explicit = opts.explicit === true || cwdIsProject();
+  if (live.length === 1 && !explicit) {
     const only = live[0]!;
     // Remember WHICH app this port was chosen for. The caller already resolved
     // an app id (from the cwd) before asking for a port, and it does not learn
@@ -804,7 +826,7 @@ export function defaultJournalPath(appId: string): string {
     Deno.statSync(current);
     return current;
   } catch { /* not there — try the pre-alpha38 location */ }
-  const legacy = join(Deno.cwd(), "data.db.journal");
+  const legacy = join(projectRoot(), "data.db.journal");
   try {
     Deno.statSync(legacy);
     return legacy;

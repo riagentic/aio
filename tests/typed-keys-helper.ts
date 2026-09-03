@@ -9,12 +9,8 @@
 // with the compiler's own view (`tsType.kind === "fnOrConstructor"`), so the
 // question is asked once, in one place.
 import { assert } from "@std/assert";
-
-// Coverage profiles from spawned deno processes go to a throwaway temp dir —
-// never into the repo (an empty DENO_COVERAGE_DIR means "cwd"), never into
-// the parent's coverage profile.
-const _childCovDir = Deno.env.get("DENO_COVERAGE_DIR") ??
-  Deno.makeTempDirSync({ prefix: "aio-child-cov-" });
+import { childCoverageDir } from "../src/testing/temp-dir.ts";
+const _childCovDir = childCoverageDir();
 
 export type TypedProp = { name: string; optional: boolean; isFn: boolean };
 

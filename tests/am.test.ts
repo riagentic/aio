@@ -1,5 +1,6 @@
-import { assertEquals, assertThrows } from "@std/assert";
+import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import {
+  _resetTargetGuess,
   parseGlobalFlags,
   parsePayload,
   readPid,
@@ -296,21 +297,42 @@ Deno.test("am: resolvePort — refuses rather than inventing 8000", () => {
 
 // `--app=X` is a statement, not a guess. When X is not running, falling back
 // to "the one that is" would aim `am dispatch --app=X` at Y — after a note.
-Deno.test("am: resolvePort — an explicit --app never falls back to another app", () => {
+//
+// So is the id of the project the cwd sits in: its deno.json named it. The
+// fallback rung serves exactly ONE case — a cwd with no project in it, where
+// the id came from a directory name — and this test drives both sides of that
+// line, because a refusal that fires everywhere is as wrong as one that never
+// fires. (This file runs from the aio repo, which IS a project, so the
+// guessed-form half has to stand somewhere else to be about the rung at all.)
+Deno.test("am: resolvePort — an explicit --app never falls back to another app", async () => {
   const other = TEST_APP + "-other";
+  const bare = await Deno.makeTempDir({ prefix: "aio-am-noproject-" });
+  const cwd = Deno.cwd();
   writePid(makePf({ appId: other, pid: Deno.pid, port: 3456, startedAt: 0 }));
   try {
     assertThrows(
       () => resolvePort(undefined, TEST_APP, { explicit: true }),
       Error,
       "does not know which app to target",
+      "--app=X is a statement: X is not running is the answer",
+    );
+    // Standing in a project — this repo — is a statement too.
+    assertThrows(
+      () => resolvePort(undefined, TEST_APP),
+      Error,
+      "does not know which app to target",
+      "the cwd's own project id is not a guess either",
     );
     // The guessed form still finds the sole instance — that rung is for it.
+    Deno.chdir(bare);
     if (instances().length === 1) {
       assertEquals(resolvePort(undefined, TEST_APP), 3456);
     }
   } finally {
+    Deno.chdir(cwd);
+    _resetTargetGuess();
     removePid(other);
+    await Deno.remove(bare, { recursive: true }).catch(() => {});
   }
 });
 
@@ -447,9 +469,15 @@ Deno.test("am: parseGlobalFlags — state --wait=5 parsed", () => {
 
 const AM_TEST_PORT = freePort();
 
+/** What the server's `loadSnapshot` was handed, or null when it was not called
+ *  — so `am snapshot load` can be proved to have DELIVERED the file, not just
+ *  to have printed "loaded". */
+let lastLoaded: string | null = null;
+
 async function withTrojanServer(
   fn: (url: string) => Promise<void>,
 ): Promise<void> {
+  lastLoaded = null;
   const dir = await Deno.makeTempDir();
   await Deno.writeTextFile(join(dir, "App.tsx"), "export default () => null");
   const appState = { count: 10, items: ["a", "b"] };
@@ -459,7 +487,9 @@ async function withTrojanServer(
     getUIState: () => ({ count: appState.count }),
     dispatch: () => {},
     getSnapshot: () => JSON.stringify(appState),
-    loadSnapshot: () => {},
+    loadSnapshot: (json: string) => {
+      lastLoaded = json;
+    },
     baseDir: dir,
     debug: () => {},
     prod: false,
@@ -870,15 +900,45 @@ Deno.test("am-cli: snapshot save — writes file", async () => {
   }
 });
 
+// A snapshot is `{ cellName: cellState }` — what `app.snapshot()` writes, and
+// the only shape every snapshot door now accepts (`snapshotShapeError`). This
+// fixture used to be `{ count: 99, items: [] }`, which is a CELL's state with
+// no cell around it: it could never have come out of `app.snapshot()`, and a
+// server that took it would have set the cell "count" to the number 99 and
+// thrown on the next dispatch. The test passed because nothing checked, and
+// "loaded" was the only thing asserted.
 Deno.test("am-cli: snapshot load — restores state from file", async () => {
   const tmp = await Deno.makeTempFile({ suffix: ".json" });
+  const snap = JSON.stringify({ counter: { count: 99, items: [] } });
   try {
-    await Deno.writeTextFile(tmp, JSON.stringify({ count: 99, items: [] }));
+    await Deno.writeTextFile(tmp, snap);
     await withTrojanServer(async () => {
       const r = await runAm(["snapshot", "load", tmp]);
-      assertEquals(r.code, 0);
+      assertEquals(r.code, 0, `am snapshot load failed: ${r.stdout}`);
       const data = r.json as { file: string; status: string };
       assertEquals(data.status, "loaded");
+      // "loaded" is a word; this is the delivery.
+      assertEquals(JSON.parse(lastLoaded ?? "null"), JSON.parse(snap));
+    });
+  } finally {
+    await Deno.remove(tmp).catch(() => {});
+  }
+});
+
+// The other half: a file that is NOT a snapshot is refused at the door and
+// never reaches the app. A cell's state is always an object, so a scalar under
+// a cell name loads today and breaks the next dispatch, far from the POST that
+// caused it — `am snapshot load` must not be the way that gets in.
+Deno.test("am-cli: snapshot load — a file that is not a snapshot is refused", async () => {
+  const tmp = await Deno.makeTempFile({ suffix: ".json" });
+  try {
+    await Deno.writeTextFile(tmp, JSON.stringify({ counter: 99 }));
+    await withTrojanServer(async () => {
+      const r = await runAm(["snapshot", "load", tmp]);
+      assertEquals(r.code, 1, "an ill-shaped snapshot is not loaded");
+      assertStringIncludes(r.stdout, "counter", "the refusal names the cell");
+      assertStringIncludes(r.stdout, "must be an object");
+      assertEquals(lastLoaded, null, "and it never reached the app");
     });
   } finally {
     await Deno.remove(tmp).catch(() => {});

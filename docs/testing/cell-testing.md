@@ -102,7 +102,8 @@ Two things behave the way they do in production, and both matter here:
 - A method's **state writes are batched** and commit on a microtask, so a sync
   action dispatched in the same tick commits _first_ and can then be overwritten
   by the async method's prefix. Don't build cancellation on a state flag you set
-  before the first `await` — use [`cancelOn`](../state/methods.md#cancelon) and
+  before the first `await` — use
+  [`cancelOn`](../state/methods.md#cancellation--cancelon--ssignal) and
   `s.$signal`, which abort at dispatch time.
 - Anything the method does that is **not** state — spawning a subprocess,
   opening a socket — has already happened when the call returns.
@@ -199,6 +200,18 @@ about failures:
 The preferred pattern is direct import + call — test it like any cell method:
 
 ```ts
+import { cell } from "aio";
+import { testCell } from "aio/testing";
+
+const inventory = cell("inventory", {
+  state: { reserved: [] as string[] },
+  methods: {
+    reserve(s, items: string[]) {
+      s.reserved.push(...items);
+    },
+  },
+});
+
 testCell(inventory, "reserve: updates reserved list", async (t) => {
   t.send.reserve(["widget"]); // dispatches as normal action
   await t.settle();

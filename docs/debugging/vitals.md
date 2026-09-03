@@ -38,6 +38,18 @@ Client (Browser/Electron)              Server
 Lifecycle: `healthy -> degraded -> warning -> frozen -> recovered -> healthy`.
 Any state can return directly to `healthy`.
 
+**Which signal gets which tiers.** `degraded` and `warning` need a measurement
+with a scale -- render staleness, reduce time, queue depth, RTT. The server's
+per-client liveness watchdog has no such measurement: all it knows is the age of
+the last heartbeat, and a heartbeat that arrives every second is between 0 and
+1000ms old whenever you look. So a client row in `/__aio/vitals` is only ever
+`healthy`, `frozen` (nothing heard for `transport.frozen`, default 2s -- the
+broadcaster skips these clients) or `recovered`. Grading it against the
+transport tiers reported _every live client_ as `degraded` (measured on a real
+tab: 83% degraded, 16% warning, 0.7% healthy), which is a field nobody can act
+on. `transport.degraded` / `transport.warning` are the **RTT** tiers, applied
+client-side to the `vitals-ping`/`vitals-pong` round trip.
+
 ## Configuration
 
 ```ts
@@ -146,8 +158,19 @@ meter runs but the server's client rows stay empty for it.
 
 Measures RTT via `vitals-ping`/`vitals-pong` frames over WebSocket. Client sends
 ping with `t1` (and `ms`, its render staleness — see above), server responds
-with `t2` and loop vitals. Server-side watchdog tracks `lastPing` per client,
-detects frozen clients.
+with `t2` and loop vitals.
+
+Two different measurements, on purpose:
+
+- **client** — RTT, `Date.now() - pong.t1`, both stamps from the browser's own
+  clock. Graded against `transport.degraded / warning / frozen`.
+- **server** — liveness only. It stamps `lastPing` with its OWN clock (a
+  cross-clock subtraction is a latency plus a constant offset, not an elapsed
+  time) and asks one question: has this client been silent for longer than
+  `transport.frozen`? Answer: `healthy` / `frozen` / `recovered`. The clock
+  starts at the WS upgrade, so a peer that connects and never says anything
+  freezes on its own. Frozen clients are skipped by the broadcaster
+  (`server-broadcast.ts`) and are what raises the `transport` alert.
 
 IPC keepalive (UDS mode): lightweight `__ping` every 60s over IPC bridge. Full
 vitals protocol runs over WebSocket only.
@@ -328,13 +351,18 @@ type VitalAlert = {
       "p95ReduceTime": 8.1
     }
   },
-  "clients": [{ "id": "abc123", "status": "healthy" }],
+  "clients": [{ "id": "abc123", "status": "healthy", "gap": 412 }],
   "payloadStats": {
     "abc123": { "lastPayloadBytes": 1234, "totalBytes": 56789 }
   },
   "cellSizes": { "counter": 128, "wallet": 4096 }
 }
 ```
+
+A client row is liveness, not latency: `status` is `healthy` / `frozen` /
+`recovered`, `gap` is ms since the server last heard from that client (0–1000 in
+normal operation, one heartbeat interval), and `frozenFor` is that same gap,
+present only while the row is frozen. RTT lives on the client that measured it.
 
 ## Key types
 

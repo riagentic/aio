@@ -2,14 +2,18 @@
 // Imports boundary logic and child diffing from sub-modules.
 
 import { bindSignalProps } from "./signal-binding.ts";
+import { isDevMode } from "../state/dev-flag.ts";
 import {
   _applyActions,
-  _bindSignalTextChildren,
+  _bindSignalText,
   _cleanupActions,
-  _cleanupSignalTextChildren,
+  _unbindSignalText,
 } from "./vdom-helpers.ts";
 import {
-  _callRef,
+  _attachRef,
+  _detachRef,
+  _enterCommit,
+  _leaveCommit,
   _staticEqual,
   _tagComponentError,
   nullSlot,
@@ -23,6 +27,7 @@ import {
 import {
   _advance,
   _firstLive,
+  _removeDomCleanup,
   getDom,
   isChildOf,
   removeDom,
@@ -30,11 +35,12 @@ import {
 import { createDom } from "./vdom-render.ts";
 import { _getActiveDelegationRoot, _setDelegationRoot } from "./vdom-events.ts";
 import {
-  _devMode,
   _devWarn,
   _domNodeCount,
+  _hasRawHtml,
   _LAZY_PENDING,
   _Null,
+  _SignalText,
   ErrorBoundary,
   Fragment,
   Portal,
@@ -129,6 +135,28 @@ export function _diff(
   isSvg = false,
   oldDom: Node | null = null,
 ): Node | null {
+  // One of the THREE reconciler entry points that open a COMMIT (see
+  // `_enterCommit`). Its own recursion re-enters here and merely nests: the
+  // OUTERMOST call is the commit, so every ref this diff detaches is nulled
+  // before any ref it attaches is set — the order React commits in, and the
+  // only order in which a ref that MOVES (retag, reorder, re-key, wrap) ends up
+  // holding its element instead of `null`.
+  _enterCommit();
+  try {
+    return _diffNode(parent, next, old, ctx, isSvg, oldDom);
+  } finally {
+    _leaveCommit();
+  }
+}
+
+function _diffNode(
+  parent: Node,
+  next: VNode | string | number | null,
+  old: VNode | string | number | null,
+  ctx: RenderCtx,
+  isSvg = false,
+  oldDom: Node | null = null,
+): Node | null {
   if (old === next) {
     return typeof next === "object" && next !== null
       ? (next._dom ?? null)
@@ -199,7 +227,22 @@ export function _diff(
     return dom;
   }
 
-  // Type mismatch (text vs vnode or different tags)
+  // Type mismatch (text vs vnode or different tags) — REPLACE.
+  //
+  // The replacement is BUILT and inserted before the old subtree is removed,
+  // and the order is load-bearing: the old node is the only positional handle
+  // this parent's other cursors have. Tearing down first moves every following
+  // sibling up, and the caller's cursors — a boundary replaying its region, a
+  // child loop holding pre-walked positions — then point one node off, so a
+  // bare-text sibling was left on the page and the replacement landed after it
+  // (a `<Suspense>` flipping to its fallback stranded `{"1"}` beside it).
+  //
+  // A `ref` shared by the departing and the arriving element (`<p ref={r}/>`
+  // retagged to `<i ref={r}/>`) is NOT what decides this order: refs attach at
+  // the END of the commit and detach at once (see `_enterCommit`), so the ref
+  // holds the new node whichever way round the DOM work happens. Ordering a
+  // commit around a ref would trade a silent DOM corruption for a tidier
+  // lifecycle, which is the wrong way round.
   if (
     typeof next !== typeof old ||
     (typeof next === "object" && typeof old === "object" &&
@@ -230,6 +273,32 @@ export function _diff(
   if (nv.tag === _Null) {
     nv._dom = ov._dom;
     return nv._dom ?? null;
+  }
+
+  // Signal child — the text node is kept; so is the effect when the signal is
+  // the same one (nothing to rebind, and no per-render dispose/re-subscribe
+  // churn). A different signal takes the node over.
+  if (nv.tag === _SignalText) {
+    const text = ov._dom as Text | undefined;
+    if (!text) {
+      _devWarn(
+        "diff-no-dom-signal-text",
+        `A signal child has no text node to diff against — it will stop ` +
+          `updating. The previous vnode was rendered without a _dom (partial ` +
+          `hydration, or an earlier reconciler failure). This is an aio bug; ` +
+          `please report the component's shape.`,
+      );
+      return null;
+    }
+    nv._dom = text;
+    if (nv._sig === ov._sig && ov._unbind) {
+      nv._unbind = ov._unbind;
+      ov._unbind = undefined;
+    } else {
+      _unbindSignalText(ov);
+      _bindSignalText(nv, text);
+    }
+    return text;
   }
 
   // Components
@@ -288,7 +357,7 @@ export function _diff(
     // fires when nothing is wrong is worse than none — it teaches the reader
     // to ignore the real one. `_rendered` is undefined exactly on the happy
     // path (Fragment never sets it).
-    if (_devMode && nv._rendered === undefined) {
+    if (isDevMode() && nv._rendered === undefined) {
       _assertRegionAlignment(nv, nv._dom ?? null, false);
     }
     return nv._dom ?? null;
@@ -372,6 +441,40 @@ function _diffComponent(
   }
 }
 
+/** Mount a portal's children into `target`, opening its region with the
+ *  anchor comment every portal gets (see `VNode._anchor`). */
+function _mountPortalContent(target: Node, vnode: VNode, ctx: RenderCtx): void {
+  const anchor = ctx.doc.createComment("");
+  target.appendChild(anchor);
+  vnode._anchor = anchor;
+  for (const child of vnode.children) {
+    const dom = createDom(child, ctx, false, target);
+    if (dom) target.appendChild(dom);
+  }
+}
+
+/** Tear a portal's content out of `target` — its children AND its region
+ *  anchor, walked from the anchor rather than from `target.firstChild`, which
+ *  is another portal's content whenever two portals share a target. */
+function _removePortalContent(
+  target: Node,
+  vnode: VNode,
+  ctx: RenderCtx,
+): void {
+  let cursor: Node | null = vnode._anchor
+    ? _advance(vnode._anchor, 1)
+    : target.firstChild;
+  for (const child of vnode.children) {
+    const at = getDom(child) ?? cursor;
+    cursor = _advance(at, _domNodeCount(child));
+    removeDom(target, child, ctx, at);
+  }
+  if (vnode._anchor && isChildOf(vnode._anchor, target)) {
+    target.removeChild(vnode._anchor);
+  }
+  vnode._anchor = undefined;
+}
+
 function _diffPortal(nv: VNode, ov: VNode, ctx: RenderCtx): void {
   const target = nv.props.target as Node;
   const oldTarget = ov.props.target as Node | undefined;
@@ -383,14 +486,7 @@ function _diffPortal(nv: VNode, ov: VNode, ctx: RenderCtx): void {
     // corruption tripwire fired ("has no DOM node to diff against… this is an
     // aio bug"). No target means no content: tear the old children down and
     // carry the link over so the node stays diffable.
-    if (oldTarget) {
-      let cursor: Node | null = oldTarget.firstChild;
-      for (const child of ov.children) {
-        const at = getDom(child) ?? cursor;
-        cursor = _advance(at, _domNodeCount(child));
-        removeDom(oldTarget, child, ctx, at);
-      }
-    }
+    if (oldTarget) _removePortalContent(oldTarget, ov, ctx);
     nv._dom = ov._dom;
     return;
   }
@@ -405,23 +501,19 @@ function _diffPortal(nv: VNode, ov: VNode, ctx: RenderCtx): void {
       // mounted anywhere — the branch above tore it down. Create; diffing here
       // would patch vnodes whose `_dom` is already detached and append
       // nothing, leaving the region permanently empty once a target came back.
-      for (const child of nv.children) {
-        const dom = createDom(child, ctx, false, target);
-        if (dom) target.appendChild(dom);
-      }
+      _mountPortalContent(target, nv, ctx);
     } else if (oldTarget !== target) {
-      let cursor: Node | null = oldTarget.firstChild;
-      for (const child of ov.children) {
-        const at = getDom(child) ?? cursor;
-        cursor = _advance(at, _domNodeCount(child));
-        removeDom(oldTarget, child, ctx, at);
-      }
-      for (const child of nv.children) {
-        const dom = createDom(child, ctx, false, target);
-        if (dom) target.appendChild(dom);
-      }
+      _removePortalContent(oldTarget, ov, ctx);
+      _mountPortalContent(target, nv, ctx);
     } else {
-      _diffChildren(target, nv.children, ov.children, ctx, false);
+      // The portal's region begins after its anchor (see `_anchor`), not at
+      // `target.firstChild` — which is another portal's content whenever two
+      // portals share a target.
+      nv._anchor = ov._anchor;
+      const anchor = nv._anchor && isChildOf(nv._anchor, target)
+        ? nv._anchor
+        : null;
+      _diffChildren(target, nv.children, ov.children, ctx, false, anchor);
     }
   } finally {
     _setDelegationRoot(prevDelegation);
@@ -527,8 +619,8 @@ function _diffElement(
   }
 
   if (nv.props.ref !== ov.props.ref) {
-    if (ov.props.ref) _callRef(ov.props.ref, null, _componentName(ov.tag));
-    if (nv.props.ref) _callRef(nv.props.ref, dom, _componentName(nv.tag));
+    if (ov.props.ref) _detachRef(ov.props.ref, null, _componentName(ov.tag));
+    if (nv.props.ref) _attachRef(nv.props.ref, dom, _componentName(nv.tag));
   }
 
   if (nv.props.use !== ov.props.use) {
@@ -536,7 +628,25 @@ function _diffElement(
     if (nv.props.use) _applyActions(dom, nv.props.use);
   }
 
-  _diffChildren(dom, nv.children, ov.children, ctx, nowSvg);
+  // Raw html owns the content (see _hasRawHtml). `applyProps` has already
+  // written the new html — or cleared it — so the children are reconciled
+  // against what the element ACTUALLY holds: nothing, when it held html.
+  // Diffing `[]` against the old children here used to walk the freshly
+  // injected html nodes as if they were the old children and delete them out
+  // of it (children → dih left `<u>a</u><u>b</u><u>c</u>` as `<u>c</u>`).
+  const rawNow = _hasRawHtml(nv.props);
+  const rawWas = _hasRawHtml(ov.props);
+  if (rawNow) {
+    // The old children's instances, effects and refs still need retiring —
+    // their nodes are already gone with the innerHTML write.
+    if (!rawWas) {
+      for (const c of ov.children) {
+        if (typeof c === "object") _removeDomCleanup(c, ctx);
+      }
+    }
+  } else {
+    _diffChildren(dom, nv.children, rawWas ? [] : ov.children, ctx, nowSvg);
+  }
 
   // Props that only take effect once the children exist (`<select value>`) —
   // after the child diff, so options created in THIS pass are selectable.
@@ -545,12 +655,5 @@ function _diffElement(
   // `_firstLive`, not `firstChild`: a node kept in the DOM for its exit
   // animation belongs to no vnode, so counting it made this tripwire cry
   // "this is an aio bug; please report" at a perfectly legitimate <Transition>.
-  if (_devMode) _assertRegionAlignment(nv, _firstLive(dom), true);
-
-  if (nv._signalChildren || ov._signalChildren) {
-    _cleanupSignalTextChildren(dom);
-    if (nv._signalChildren) {
-      _bindSignalTextChildren(dom, nv._signalChildren, nv.children);
-    }
-  }
+  if (isDevMode()) _assertRegionAlignment(nv, _firstLive(dom), true);
 }

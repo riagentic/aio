@@ -26,6 +26,7 @@
  */
 
 import { join, relative, resolve } from "@std/path";
+import { GIT_NO_PROMPT_ENV } from "./git-noninteractive.ts";
 import { DENO_JSON_NAMES } from "./deno-json.ts";
 
 /** The `major.minor` an app has before it writes one. */
@@ -245,6 +246,8 @@ async function git(root: string, args: string[]): Promise<string | null> {
       args: ["-C", root, ...args],
       stdout: "piped",
       stderr: "null",
+      stdin: "null",
+      env: GIT_NO_PROMPT_ENV,
     }).output();
     if (r.code !== 0) return null;
     return new TextDecoder().decode(r.stdout);
@@ -454,6 +457,27 @@ export function readBuildStamp(dirUrl: URL): BuildStamp | null {
  *     update check refuses BY NAME rather than compares as 0.0.0.
  *
  *  Pure over its inputs. */
+/** Every "could not resolve" answer this module produces starts here. A
+ *  version and an explanation of why there isn't one are different facts, and
+ *  a `string` that is sometimes one and sometimes the other cannot be rendered
+ *  safely — `examples/updates` printed the whole paragraph where its UI says
+ *  "Running <version>", and it crossed the wire as `updates.current`. */
+const UNRESOLVED = "unknown (";
+
+/** Split a runtime version into "the version, or null" and "why not".
+ *
+ *  `resolveRuntimeVersion` returns the explanation IN the string on purpose:
+ *  the boot report wants exactly that sentence on its `version` line. Anything
+ *  that renders the value as a version — or ships it to a client — wants the
+ *  two apart. */
+export function splitRuntimeVersion(
+  v: string,
+): { version: string | null; unresolved: string | null } {
+  return v.startsWith(UNRESOLVED)
+    ? { version: null, unresolved: v.slice(UNRESOLVED.length, -1) }
+    : { version: v, unresolved: null };
+}
+
 export function resolveRuntimeVersion(opts: {
   declared: unknown;
   compiled: boolean;

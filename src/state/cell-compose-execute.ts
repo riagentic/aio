@@ -9,6 +9,7 @@ import type { CellDef, Msg, ScopedApp } from "./cell-types.ts";
 import { tagSource } from "./cell-types.ts";
 import type { ReduceContext } from "./cell-compose-reduce.ts";
 import { routeEffect } from "./route-effect.ts";
+import { resolveCall } from "./cell-impl.ts";
 
 /** A framework effect reached the ROOT executor, which is not the thing that
  *  runs it.
@@ -121,6 +122,20 @@ export function buildRootExecutor(
     try {
       f.__aio.execute(scopedApp, effect);
     } catch (e) {
+      // The executor threw BEFORE the method could settle its call, so the
+      // one thing that ever settles it is gone. Without this the caller waited
+      // out the whole call ceiling and was then told the method "may still be
+      // running" — about a method that never started. Settling an id the
+      // executor already settled is a no-op (`resolveCall` looks it up), so
+      // this can only ever add an answer, never replace one.
+      resolveCall(
+        (effect as { payload?: { _callId?: string } }).payload?._callId,
+        undefined,
+        new Error(
+          `${(effect as { type: string }).type} failed before the method ` +
+            `could answer: ${e instanceof Error ? e.message : String(e)}`,
+        ),
+      );
       if (reportError) {
         reportError(
           createAioError("EFFECT_ERROR", e, {

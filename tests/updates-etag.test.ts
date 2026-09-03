@@ -14,6 +14,7 @@ import { resolveUpdates } from "../src/server/updates-core.ts";
 import { readTrust } from "../src/server/updates-check.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import type { Log } from "../src/diagnostics/logger.ts";
+import { tempDir } from "../src/testing/temp-dir.ts";
 
 const platform = { os: Deno.build.os, arch: Deno.build.arch };
 const silentLog = {
@@ -69,7 +70,7 @@ async function releaseHost(version: string) {
 }
 
 async function runtimeFor(source: string, appVersion: string) {
-  const root = await Deno.makeTempDir({ prefix: "aio-upd-etag-" });
+  const root = await tempDir("aio-upd-etag-");
   const dataDir = join(root, "data");
   await Deno.mkdir(dataDir, { recursive: true });
   const artifact = join(root, "app");
@@ -171,7 +172,7 @@ Deno.test("updates: a legacy poisoned `etag` is ignored, so a hidden offer reapp
 // never be offered again, on this boot or any future one. Only a genuine "there
 // is nothing newer" may be cached.
 Deno.test("updates: a dismissal never caches the ETag", async () => {
-  const dataDir = await Deno.makeTempDir({ prefix: "aio-upd-dismiss-" });
+  const dataDir = await tempDir("aio-upd-dismiss-");
   const { cacheCurrentEtag } = await import("../src/server/updates-check.ts");
 
   cacheCurrentEtag(dataDir, `"rel-2.0.0"`, { dismissed: true });

@@ -256,13 +256,34 @@ Triggers: `"viewport"` (IntersectionObserver), `"idle"` (requestIdleCallback),
 
 ## Accessibility (Dev Mode)
 
-```tsx
-import { setDevMode } from "aio/air";
-setDevMode(true);
-```
+**On by default in dev.** The renderer's warnings follow the same `__aioDev`
+flag every other aio diagnostic does -- the dev server sets it, `deno task dev`
+sets it, and the test harness sets it -- so you get them without asking, and
+production is silent. (They used to sit behind `setDevMode()`, which nothing in
+the framework called: a warning behind a flag nobody sets is a warning that does
+not exist.)
 
 Warns about: `<img>` without `alt`, `onClick` without keyboard handler,
-`<input>` without label. Dev mode only -- zero overhead in production.
+`<input>` without label, `<button>` with no `type` inside a form, `<a onClick>`
+with no `href`, a positive `tabIndex`, `aria-hidden` on something focusable,
+`aria-disabled` used as if it disabled -- plus missing and duplicate keys, hooks
+called in a different order than last render, a component re-rendering in a
+loop, `onMount` outside a render, and server/client markup divergence during
+hydration. Zero overhead in production.
+
+Override it when you need to:
+
+```tsx
+import { setDevMode } from "aio/air";
+setDevMode(true); // force on, e.g. in a production debugging session
+setDevMode(false); // force off
+setDevMode("auto"); // back to following __aioDev (the default)
+```
+
+`setDevMode(true)` additionally stamps `data-component="Name"` on each
+component's root element. That one is opt-in rather than ambient because it
+CHANGES the DOM, and SSR does not write it -- armed by default, every hydrated
+component would look like a server/client divergence.
 
 ---
 

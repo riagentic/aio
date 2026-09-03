@@ -63,11 +63,16 @@ cell("user", {
 When cells define a `dbSchema`, state maps to SQL tables:
 
 ```ts
-cell("todos", {
-  state: { items: [] },
-  dbSchema: {
-    items: table({ id: pk(), text: text(), done: integer() }),
-  },
+const todos = cell("todos", {
+  state: { items: [] as { id: number; text: string; done: number }[] },
+  methods: {/* … */},
+});
+
+// The schema is an `aio.run()` key — `db:` — not a cell key. It binds a table
+// to the array field of the cell that declares it.
+await aio.run({
+  cells: [todos],
+  db: { items: table({ id: pk(), text: text(), done: integer() }) },
 });
 ```
 
@@ -179,10 +184,18 @@ still possible by saying so (`PRAGMA foreign_keys = OFF`).
 
 ### What `journal: true` changes
 
-With `journal: true`, every committed action is appended to
-`<data>/state.db.journal` before the debounce window closes, and on the next
-boot the actions after the last persisted snapshot are replayed on top of it. So
-the debounce-window tail is recovered instead of lost.
+With `journal: true`, every committed action is appended to `<data>/journal`
+(next to `state.db`; with an explicit `dbPath` it is `<dbPath>.journal`) before
+the debounce window closes, and on the next boot the actions after the last
+persisted snapshot are replayed on top of it. So the debounce-window tail is
+recovered instead of lost.
+
+- The append is part of the promise, not a diagnostic. If it is refused
+  (permissions, a full disk) the action is still applied — every client has
+  already seen it — but the failure is reported as `PERSIST_ERROR` and the
+  debounce window is closed **immediately**, so the write lands in the snapshot
+  instead of waiting for the timer. Watch `onError` for it: a journal that
+  refuses every append means every action pays a full persist cycle.
 
 - Replay **re-reduces** the actions: state transitions only, effects discarded.
   No I/O is repeated, and no request is re-sent.

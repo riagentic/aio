@@ -201,15 +201,31 @@ export function renderData(info: DataInfo): string {
 
 // ── am backup ──────────────────────────────────────────────
 
+/** Where a backup goes when the user names no destination:
+ *  `<home>/backups/<appId>-backup-<stamp>` — inside the app's OWN home, beside
+ *  the data it copies.
+ *
+ *  It used to be `<cwd>/<appId>-backup-<stamp>`. The cwd of `am backup` is the
+ *  app's git checkout by definition, so the default dropped a full copy of the
+ *  app's data — auth.db, the app key, the TLS key — into the working tree,
+ *  where the scaffold's .gitignore does not cover it and `git status` shows it
+ *  as untracked the moment the command returns. A default must be somewhere it
+ *  is safe to forget about; a named destination still goes exactly where the
+ *  user says.
+ *  @internal exported for the test */
+export function defaultBackupDest(appId: string, at = stamp()): string {
+  return join(appDirs(appId).home, "backups", `${appId}-backup-${at}`);
+}
+
 /** `am backup [dest] [--force]` — copy `<data>/` to `dest`
- *  (default `./<appId>-backup-<stamp>`). */
+ *  (default {@linkcode defaultBackupDest}). */
 export function cmdBackup(args: string[], flags: GlobalFlags): void {
   const mode = detectMode(flags);
   const appId = resolveAmAppId(flags.app);
   const d = appDirs(appId);
   const force = args.includes("--force") || flags.force === true;
   const destArg = args.find((a) => !a.startsWith("--"));
-  const dest = resolve(destArg ?? `${appId}-backup-${stamp()}`);
+  const dest = resolve(destArg ?? defaultBackupDest(appId));
 
   try {
     Deno.statSync(d.data);
@@ -314,6 +330,36 @@ export function cmdRestore(args: string[], flags: GlobalFlags): void {
     // its in-memory pages over whatever we just restored.
     outError(
       `"${appId}" is running (pid ${pid}) — run "am stop ${appId}" first`,
+      mode,
+    );
+    Deno.exit(1);
+  }
+  // Is it a backup AT ALL? `meta.json` (every archive am writes) or `state.db`
+  // (a hand-made copy, or one from before meta.json) — one of the two must be
+  // there. Without this check a directory that is simply not an archive passed
+  // every guard below (a null meta is the "hand-made copy" case), the live data
+  // was moved aside, `copyTree` copied its zero files, and `am restore` said
+  // `{"files":0}` and exited 0 with the app's data directory EMPTY. Only the
+  // `.replaced-*` copy stood between that and total loss. `files: 0` is never
+  // a successful restore, and this is the honest place to say so: before
+  // anything has been moved.
+  const looksLikeArchive = ["meta.json", "state.db"].some((f) => {
+    try {
+      return Deno.statSync(join(src, f)).isFile;
+    } catch {
+      return false;
+    }
+  });
+  if (!looksLikeArchive) {
+    outError(
+      `${src} is not an aio backup — it holds neither meta.json nor ` +
+        `state.db, so there is nothing to restore from it. Restoring it ` +
+        `would empty ${d.data}.\n` +
+        `  a backup is what "am backup" writes: the whole of ${d.data}` +
+        (force
+          ? `\n  (--force does not apply: this is not "the wrong archive", ` +
+            `it is no archive)`
+          : ""),
       mode,
     );
     Deno.exit(1);

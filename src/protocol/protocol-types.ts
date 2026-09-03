@@ -32,6 +32,11 @@ export type AckMessage = { cid: string; ok: boolean; error?: string };
 export interface AioWindow {
   _aioDiag?: (ev: Record<string, unknown>) => void;
   __aioConfig?: {
+    /** The app's identity. `localStorage` is per ORIGIN, so the offline sync
+     *  queue scopes its key by this: without it two aio apps on one host:port
+     *  shared pending CRDT ops for any same-named cell, and one app's first
+     *  catch-up flushed the other's unsent mutations into its server. */
+    appId?: string;
     renderBudget?: { staleness?: number; pendingPatches?: number };
     /** Cells whose methods run locally and propagate as CRDT ops — the
      *  server's `localFirst` decision, which the browser cannot derive from

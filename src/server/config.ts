@@ -204,7 +204,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "client",
   "keepServer",
   "transport",
-  "killExisting",
+  "takeover",
   "serverUrl",
   "schedules",
   "db",
@@ -282,7 +282,7 @@ export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
   "client",
   "keepServer",
   "transport",
-  "killExisting",
+  "takeover",
   "serverUrl",
   "users",
   "key",
@@ -401,7 +401,7 @@ export const CONFIG_DOCS: Record<string, [string, string]> = {
   client: ['"electron"', '"electron" | "browser" | "cli" | "server-only"'],
   keepServer: ["false", "keep server running after client closes"],
   transport: ['"auto"', '"uds" | "ws" | "auto" — IPC transport'],
-  killExisting: ["false", "kill existing instance before starting"],
+  takeover: ["false", "kill the running instance and take its lock"],
   serverUrl: ["", "connect to remote server instead of starting one"],
   singleton: ["true", "refuse to start if already running"],
   syncIntervalMs: [
@@ -588,7 +588,7 @@ export const CONFIG_GROUPS: [string, string[]][] = [
     "client",
     "keepServer",
     "transport",
-    "killExisting",
+    "takeover",
     "serverUrl",
     "singleton",
     "libraryMode",
@@ -826,16 +826,46 @@ export function validateConfig(
   // feature being broken rather than the value being wrong.
   for (const [key, allowed] of Object.entries(ENUM_VALUES)) {
     const v = obj[key];
-    if (v !== undefined && !allowed.includes(v as string)) {
+    if (v === undefined) continue;
+    // A key the TYPE also accepts as a boolean is not a misspelled word.
+    // Without this, widening `perfCheck` to `boolean | "on" | "off"` would
+    // have produced the worst shape this repo has: a value the compiler
+    // accepts and the boot refuses — a type that lies.
+    if (typeof v === "boolean" && BOOLEAN_ALSO.has(key)) continue;
+    if (!allowed.includes(v as string)) {
       const near = typeof v === "string" ? nearestOf(v, allowed) : null;
+      const words = allowed.map((a) => JSON.stringify(a))
+        .concat(BOOLEAN_ALSO.has(key) ? ["true", "false"] : [])
+        .join(", ");
       log.error(
         teachMessage(
-          `${label}.${key} is ${JSON.stringify(v)}, which is not one of ${
-            allowed.map((a) => JSON.stringify(a)).join(", ")
-          }`,
+          `${label}.${key} is ${
+            JSON.stringify(v)
+          }, which is not one of ${words}`,
           near
             ? `did you mean ${JSON.stringify(near)}?`
-            : `use one of ${allowed.map((a) => JSON.stringify(a)).join(", ")}`,
+            : `use one of ${words}`,
+        ),
+      );
+      exit(1);
+    }
+  }
+  // Numeric VALUES, by type and range — the third question after "is this a
+  // key" and "is this one of the words". Every one of these booted silently:
+  // `maxConnections: 0` closed every client the moment it connected,
+  // `fullStateThreshold: "half"` compared a string against a ratio forever,
+  // `effectTimeoutMs: "abc"` made every timeout NaN, `persistDebounceMs: -5`
+  // was handed to a timer. A number the code cannot act on is refused at boot
+  // like a word it does not know.
+  for (const [key, spec] of Object.entries(NUMERIC_VALUES)) {
+    const v = obj[key];
+    if (v === undefined) continue;
+    const bad = numericRefusal(v, spec);
+    if (bad) {
+      log.error(
+        teachMessage(
+          `${label}.${key} is ${JSON.stringify(v)}, which is ${bad}`,
+          `use ${spec.what}`,
         ),
       );
       exit(1);
@@ -895,6 +925,76 @@ export const ENUM_VALUES: Record<string, readonly string[]> = {
   persistMode: ["single", "multi"],
   perfCheck: ["on", "off"],
 };
+
+/** Enum keys that ALSO take a plain boolean — `perfCheck: false` is the house
+ *  spelling (`logging`, `dispatchStorm` and ~14 other switches are booleans),
+ *  and `"on"`/`"off"` is what shipped first. Both are accepted; the reader is
+ *  `perfCheckOn` in state/dispatch.ts.
+ *
+ *  This set exists so the widening lands in ONE place. `ENUM_VALUES` is a
+ *  `readonly string[]` map on purpose — the validator's message enumerates the
+ *  words — so "and also a boolean" is a fact about the key, recorded beside
+ *  the words rather than smuggled into them as the strings "true"/"false". */
+export const BOOLEAN_ALSO: ReadonlySet<string> = new Set(["perfCheck"]);
+
+/** One numeric config key: its type and the range the code can act on. */
+export type NumericSpec = {
+  /** Lowest accepted value (inclusive). */
+  min: number;
+  /** Highest accepted value (inclusive); unbounded when absent. */
+  max?: number;
+  /** Whole numbers only. */
+  integer?: boolean;
+  /** What to write instead — the fix half of the refusal. */
+  what: string;
+};
+
+/** Config keys whose value is a number with a meaning, checked by
+ *  {@linkcode validateConfig} beside {@linkcode ENUM_VALUES}: the type, and
+ *  the range the reader of the key can actually act on. Top-level keys and
+ *  `ui` keys share the table — `validateConfig` runs on both objects. */
+export const NUMERIC_VALUES: Record<string, NumericSpec> = {
+  port: {
+    min: 0,
+    max: 65535,
+    integer: true,
+    what: "a port 1-65535, or 0 to let the runtime pick a free one",
+  },
+  // 0 would refuse every client on connect — `server-ws.ts` closes the
+  // socket the moment the count reaches the ceiling.
+  maxConnections: {
+    min: 1,
+    integer: true,
+    what: "a whole number of clients, at least 1",
+  },
+  fullStateThreshold: {
+    min: 0,
+    max: 1,
+    what: "a ratio between 0 and 1 (0.5 = half the keys changed)",
+  },
+  syncIntervalMs: {
+    min: 0,
+    what: "a number of milliseconds (0 = microtask coalescing only)",
+  },
+  persistDebounceMs: { min: 0, what: "a number of milliseconds, 0 or more" },
+  effectTimeoutMs: {
+    min: 0,
+    what: "a number of milliseconds (0 = wait forever)",
+  },
+  width: { min: 1, integer: true, what: "a whole number of pixels" },
+  height: { min: 1, integer: true, what: "a whole number of pixels" },
+};
+
+/** Why `v` is not a value `spec` accepts — or `null` when it is. Pure. */
+export function numericRefusal(v: unknown, spec: NumericSpec): string | null {
+  if (typeof v !== "number" || !Number.isFinite(v)) return "not a number";
+  if (spec.integer && !Number.isInteger(v)) return "not a whole number";
+  if (v < spec.min) return `below the minimum ${spec.min}`;
+  if (spec.max !== undefined && v > spec.max) {
+    return `above the maximum ${spec.max}`;
+  }
+  return null;
+}
 
 // ─── Couplings: keys that are each valid and wrong TOGETHER ──────────────────
 //
@@ -1062,24 +1162,24 @@ export function configConflicts(
     }
   }
 
-  // ── 6. killExisting with no lock to take over ────────────────────────
+  // ── 6. takeover with no lock to take over ────────────────────────────
   const singletonOff = cfg.singleton === false || cfg.libraryMode === true;
-  if (cfg.killExisting === true && singletonOff) {
+  if (cfg.takeover === true && singletonOff) {
     const why = cfg.singleton === false
       ? "singleton: false"
       : "libraryMode: true";
     out.push({
       level: "error",
       keys: [
-        "killExisting",
+        "takeover",
         cfg.singleton === false ? "singleton" : "libraryMode",
       ],
       what:
-        `killExisting asks to take over the running instance, but ${why} means no instance ` +
+        `takeover asks to take over the running instance, but ${why} means no instance ` +
         `lock is acquired at all — nothing is killed, nothing is taken over, and a second ` +
         `copy simply starts alongside the first`,
       fix:
-        `remove killExisting, or remove ${why} so there is a single instance to take over`,
+        `remove takeover, or remove ${why} so there is a single instance to take over`,
       doc: "docs/state/lifecycle.md",
     });
   }

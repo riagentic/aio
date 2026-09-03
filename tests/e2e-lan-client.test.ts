@@ -19,12 +19,11 @@ import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { childEnv } from "./e2e-app-harness.ts";
 import { stopChild } from "./stop-child.ts";
+import { childCoverageDir } from "../src/testing/temp-dir.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const dec = new TextDecoder();
-
-const _childCovDir = Deno.env.get("DENO_COVERAGE_DIR") ??
-  Deno.makeTempDirSync({ prefix: "aio-child-cov-" });
+const _childCovDir = childCoverageDir();
 
 function lanIP(): string | null {
   if (Deno.env.get("AIO_E2E") === "0") return null;

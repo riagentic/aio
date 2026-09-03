@@ -121,14 +121,26 @@ Deno.test("trojan dispatch: a bare type is only refused when the server can list
 // Without a correlation id `dispatch` resolves with the early reduce result,
 // so an async method that throws after its first `await` was logged as
 // EFFECT_ASYNC_ERROR while this route had already answered {"ok":true}.
-Deno.test("trojan dispatch: an ASYNC cell:method call carries a _callId, so the reply is the method's", async () => {
+Deno.test("trojan dispatch: the route forwards the payload and mints no id of its own", async () => {
+  // The correlation id that makes an async method's THROW (and its return
+  // value) reach the caller used to be stamped here, privately, by this route
+  // — which is why the operator's door answered honestly while the WS and UDS
+  // doors reported `{ok:true, value:undefined}` for a method that threw. It is
+  // minted in `dispatchNetwork` (aio-server.ts) as of alpha76, for all three
+  // doors at once, and a client-supplied one is stripped as forged.
+  //
+  // This test drives a FAKE dispatch, so the mint is out of its reach by
+  // construction. The real path is covered end to end by
+  // tests/trojan-async-rejection-reaches-caller.test.ts (this route) and
+  // tests/ack-async-bare-frame.test.ts (the WS door, with a bare documented
+  // frame), and the mutation ledger now points at the new line.
   const { deps, dispatched } = makeDeps();
   await dispatch(deps, { type: "counter:inc", payload: { args: [1] } });
   const pl =
     (dispatched[0] as { payload?: { _callId?: unknown; args?: unknown } })
       .payload;
-  assertEquals(typeof pl?._callId, "string");
   assertEquals(pl?.args, [1], "the caller's payload is kept");
+  assertEquals(pl?._callId, undefined, "this route mints nothing");
 });
 
 Deno.test("trojan dispatch: the nearest method is judged on the method half, within two edits", () => {

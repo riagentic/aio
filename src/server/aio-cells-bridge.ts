@@ -11,7 +11,9 @@ import {
   createAioError,
   reportError as reportAioError,
   type ReportErrorOpts,
+  teachableError,
 } from "../diagnostics/error.ts";
+import { nearestOf } from "../state/cell-helpers.ts";
 import { AioLogger, log, setLogger } from "../diagnostics/logger.ts";
 import { createStormDetector } from "../diagnostics/dispatch-storm.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
@@ -524,27 +526,35 @@ export function filterCellsByIsolate(
   isolate: string[] | undefined,
 ): NonNullable<CellsConfig["cells"]> {
   if (!isolate || isolate.length === 0) return cellEntries;
-  const isolateSet = new Set(isolate);
-  const filtered = cellEntries.filter((entry) => {
-    const f = "__aio" in entry
-      ? entry as CellDef
-      : (entry as { cell: CellDef }).cell;
-    return isolateSet.has(f.__aio.id);
-  });
-  if (filtered.length === 0) {
-    log.warn(
-      `isolate: no cells matched [${
-        [...isolateSet].join(", ")
-      }] — check spelling`,
-    );
-  } else {
-    log.info(
-      `isolate: ${
-        filtered.map((e) =>
-          ("__aio" in e ? e as CellDef : (e as { cell: CellDef }).cell).__aio.id
-        ).join(", ")
-      }`,
+  const idOf = (entry: (typeof cellEntries)[number]): string =>
+    ("__aio" in entry ? entry as CellDef : (entry as { cell: CellDef }).cell)
+      .__aio.id;
+  const ids = cellEntries.map(idOf);
+  // A name that matches no cell is REFUSED, dev and prod. `--isolate=setings`
+  // used to warn "no cells matched — check spelling" and boot ZERO cells —
+  // then the shape-drift check, seeing every persisted key undeclared,
+  // blamed the SCHEMA; and `--isolate=todo,setings` silently booted `todo`
+  // alone. Same class as an unknown flag or config key: a name aio cannot
+  // act on gets a did-you-mean, not a default.
+  const unknown = [...new Set(isolate)].filter((n) => !ids.includes(n));
+  if (unknown.length > 0) {
+    const near = unknown
+      .map((n) => [n, nearestOf(n, ids)] as const)
+      .filter((p): p is readonly [string, string] => p[1] !== null)
+      .map(([n, m]) => `${n} → ${m}`);
+    throw teachableError(
+      `isolate names ${
+        unknown.length === 1
+          ? "a cell this app does not have"
+          : "cells this app does not have"
+      }: ${unknown.join(", ")}`,
+      (near.length ? `did you mean ${near.join(", ")}? ` : "") +
+        `The cells here are: ${ids.join(", ")} (--isolate=a,b or ` +
+        `aio.run({ isolate: [...] }) picks from these).`,
     );
   }
+  const isolateSet = new Set(isolate);
+  const filtered = cellEntries.filter((entry) => isolateSet.has(idOf(entry)));
+  log.info(`isolate: ${filtered.map(idOf).join(", ")}`);
   return filtered;
 }

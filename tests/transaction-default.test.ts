@@ -190,10 +190,10 @@ Deno.test("transaction: true — the spinner idiom: s.busy = true; s.$commit() p
     state: { busy: false, result: "" },
     methods: {
       async work(
-        s: { busy: boolean; result: string } & Partial<MethodDraftMeta>,
+        s: { busy: boolean; result: string } & MethodDraftMeta,
       ) {
         s.busy = true;
-        s.$commit!(); // the transactional spinner idiom
+        s.$commit(); // the transactional spinner idiom
         await gate;
         s.result = "done";
         s.busy = false;
@@ -222,7 +222,7 @@ Deno.test("transaction: true — until(() => s.$live.flag) sees foreign commits 
       raise(s: { flag: boolean }) {
         s.flag = true;
       },
-      async wait(s: { flag: boolean; out: string } & Partial<MethodDraftMeta>) {
+      async wait(s: { flag: boolean; out: string } & MethodDraftMeta) {
         await until(() => (s.$live as Any).flag, {
           timeoutMs: 2000,
           intervalMs: 5,

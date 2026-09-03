@@ -384,7 +384,15 @@ Deno.test({
       );
     mount(root, App);
     assertEquals(root.innerHTML, "<span>main</span>");
-    assertEquals(portalTarget.innerHTML, "<div>portal content</div>");
+    // The leading comment is the portal's REGION ANCHOR in the target (see
+    // `VNode._anchor`): a portal's content is a region of the target, not the
+    // whole of it, and the marker is what keeps two portals sharing one target
+    // (a modal and a toast, both into `document.body`) out of each other's
+    // nodes. Written for every portal, and removed with its content.
+    assertEquals(
+      portalTarget.innerHTML,
+      "<!----><div>portal content</div>",
+    );
     await cleanup();
   },
 });
@@ -749,10 +757,11 @@ Deno.test({
         ? h(Portal, { target: portalTarget }, h("span", null, "portal"))
         : null;
     const handle = m(App);
-    assertEquals(portalTarget.innerHTML, "<span>portal</span>");
+    assertEquals(portalTarget.innerHTML, "<!----><span>portal</span>");
 
     show.set(false);
     handle._flush();
+    // The region anchor goes with the content — nothing of the portal is left.
     assertEquals(portalTarget.innerHTML, "");
     await cleanup();
   },

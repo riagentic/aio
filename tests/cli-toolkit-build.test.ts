@@ -5,7 +5,12 @@
 //
 // "It type-checks" proves nothing about a CLI. What is asserted here is what
 // the shell sees: exit codes, stdout vs stderr, and `--json` being parseable.
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertMatch,
+  assertStringIncludes,
+} from "@std/assert";
 import { join, resolve } from "@std/path";
 import {
   childEnv,
@@ -40,17 +45,97 @@ async function todo(
   return { code: p.code, out: dec.decode(p.stdout), err: dec.decode(p.stderr) };
 }
 
+// ── the spec, read from the source the program itself runs ───────────────────
+//
+// `--help` is GENERATED from the `args({ commands, flags })` declaration, so the
+// test reads that same declaration instead of pinning the rendered paragraph.
+// Rewording a description follows the spec; a `--help` that stops listing a
+// declared command, drops a flag, loses its `=<type>`, or prints someone else's
+// text goes red. (The old version pinned one flag's prose and broke the day the
+// example stopped hard-coding `ws://localhost:8000` as the server URL.)
+
+/** The `{ … }` body that follows `key: {` — brace-matched, so a nested object
+ *  inside it (`flags`' per-flag records) does not end the block early. */
+function specBlock(src: string, key: string): string {
+  const at = src.indexOf(`${key}: {`);
+  assert(at >= 0, `${key} is not declared in ${APP}`);
+  const open = src.indexOf("{", at);
+  let depth = 0;
+  for (let i = open; i < src.length; i++) {
+    if (src[i] === "{") depth++;
+    else if (src[i] === "}" && --depth === 0) return src.slice(open + 1, i);
+  }
+  throw new Error(`unbalanced ${key} block in ${APP}`);
+}
+
+/** A TS double-quoted literal → its value (the source uses plain escapes). */
+const literal = (raw: string) => JSON.parse(`"${raw}"`) as string;
+const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 Deno.test("cli-tool: --help from a foreign cwd, exit 0, generated from the spec", async () => {
+  const src = await Deno.readTextFile(APP);
+  const commands = [
+    ...specBlock(src, "commands").matchAll(/^\s*(\w+):\s*"(.*)",$/gm),
+  ].map((m) => ({ name: m[1]!, help: literal(m[2]!) }));
+  const flags = [
+    ...specBlock(src, "flags").matchAll(/(\w+):\s*\{([^}]*)\}/g),
+  ].map((m) => {
+    const body = m[2]!;
+    return {
+      name: m[1]!,
+      type: body.match(/type:\s*"(\w+)"/)?.[1] ?? "boolean",
+      short: body.match(/short:\s*"(\w)"/)?.[1],
+      help: literal(body.match(/help:\s*"((?:[^"\\]|\\.)*)"/)?.[1] ?? ""),
+    };
+  });
+  // A guard on the guard: a parse that found nothing would assert nothing.
+  // These names are the example's contract (one binary, two roles), not prose.
+  for (const must of ["serve", "list", "add", "done", "clear"]) {
+    assert(
+      commands.some((c) => c.name === must && c.help.length > 0),
+      `the spec in ${APP} no longer declares the "${must}" command: ${
+        JSON.stringify(commands)
+      }`,
+    );
+  }
+  for (const must of ["url", "watch", "json"]) {
+    assert(
+      flags.some((f) => f.name === must && f.help.length > 0),
+      `the spec in ${APP} no longer declares --${must}: ${
+        JSON.stringify(flags)
+      }`,
+    );
+  }
+
   const r = await todo(["--help"]);
   assertEquals(r.code, 0, r.err);
+  assertEquals(r.err, "", "help belongs on stdout, with nothing on stderr");
   assertStringIncludes(r.out, "usage: todo <command> [arg...] [flags]");
-  assertStringIncludes(r.out, "  serve  run the server");
-  assertStringIncludes(r.out, "  list   show the list");
-  assertStringIncludes(r.out, "-w, --watch");
-  assertStringIncludes(
-    r.out,
-    '--url=<string>  the server to talk to (default: "ws://localhost:8000/ws")',
-  );
+  for (const c of commands) {
+    assertMatch(
+      r.out,
+      new RegExp(`^\\s+${esc(c.name)}\\s+${esc(c.help)}[ ]*$`, "m"),
+      `--help does not list the "${c.name}" command as the spec declares it`,
+    );
+  }
+  for (const f of flags) {
+    const decl = f.type === "boolean"
+      ? `--${f.name}`
+      : `--${f.name}=<${f.type}>`;
+    assertMatch(
+      r.out,
+      new RegExp(
+        `^\\s+${f.short ? `-${esc(f.short)}, ` : ""}${esc(decl)}\\s+${
+          esc(f.help)
+        }[ ]*$`,
+        "m",
+      ),
+      `--help does not list ${decl} as the spec declares it`,
+    );
+  }
+  // The two flags `args()` adds for every CLI, spec or no spec.
+  assertMatch(r.out, /^\s+--help\s+\S/m);
+  assertMatch(r.out, /^\s+--version\s+\S/m);
 });
 
 Deno.test("cli-tool: a typo is refused with exit 2; no server is exit 1 on stderr — or {error} JSON on stdout", async () => {
@@ -172,6 +257,23 @@ Deno.test("cli-tool: serve + add/list/done/--json/--watch against the real serve
     const add2 = await todo(["add", `--url=${url}`, "walk", "dog"], { env });
     assertEquals(add2.code, 0, add2.err);
     await until(() => frames.includes("walk dog"), "redraw after a change");
+
+    // …and again AFTER the server's `frozen` threshold (2000 ms).
+    //
+    // This test used to add its second todo immediately, so it always acted
+    // inside that window and could not reach the bug: the server graded every
+    // client by the age of a `vitals-ping` this client never sent, and
+    // `server-broadcast.ts` skips a frozen client — so a watcher went silently
+    // dark two seconds after connecting, for the life of the socket, which is
+    // the one thing `--watch` exists to do. A test that cannot reach the bug
+    // passes forever.
+    await new Promise((r) => setTimeout(r, 3000));
+    const add3 = await todo(["add", `--url=${url}`, "feed", "cat"], { env });
+    assertEquals(add3.code, 0, add3.err);
+    await until(
+      () => frames.includes("feed cat"),
+      "redraw after the freeze window",
+    );
     assert(!frames.includes("\x1b"), `no escapes on a pipe:\n${frames}`);
     // SIGINT is the interactive stop this watcher exists to honour — bounded,
     // so a watcher that ignores it fails the test instead of hanging the suite.

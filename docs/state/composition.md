@@ -39,6 +39,7 @@ const cart = cell("cart", {
 
 ```ts
 const checkout = cell("checkout", {
+  state: { status: "idle" },
   cancelOn: { place: [cart.clear] }, // bound methods — refactor-safe
   methods: {
     async place(s, item: Item) {/* observes abort via s.$signal */},

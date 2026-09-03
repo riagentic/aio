@@ -21,13 +21,12 @@
 import { assert, assertEquals } from "@std/assert";
 import { join, relative } from "@std/path";
 import { stopChild } from "./stop-child.ts";
+import { childCoverageDir } from "../src/testing/temp-dir.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const dec = new TextDecoder();
 const APP_ID = "seam-probe";
-
-const _childCovDir = Deno.env.get("DENO_COVERAGE_DIR") ??
-  Deno.makeTempDirSync({ prefix: "aio-child-cov-" });
+const _childCovDir = childCoverageDir();
 
 /** The REAL module cache, resolved before we hand the child a fake $HOME —
  *  otherwise DENO_DIR follows it and Deno re-downloads the whole graph into the

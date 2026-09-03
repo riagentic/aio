@@ -12,13 +12,10 @@
 // Anything less (a boot throw, an exit, a hang) fails with the app's own
 // stderr, which is the message that would have caught the alpha45 blocker.
 import { assert } from "@std/assert";
+import { childCoverageDir } from "../src/testing/temp-dir.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
-
-// Coverage profiles from spawned deno processes go to a throwaway temp dir —
-// never into the repo, never into the parent's profile.
-const _childCovDir = Deno.env.get("DENO_COVERAGE_DIR") ??
-  Deno.makeTempDirSync({ prefix: "aio-child-cov-" });
+const _childCovDir = childCoverageDir();
 
 function freePort(): number {
   const l = Deno.listen({ port: 0 });

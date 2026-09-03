@@ -37,7 +37,7 @@ import {
   buildMethodsReducer,
 } from "./cell-methods-internals.ts";
 import { resolveSelfAction } from "./self.ts";
-import { refuseRetired, removalOf } from "./removals.ts";
+import { refuseRetired, removalOf } from "./removals-core.ts";
 
 /** @internal test seam. Retained as a no-op: the alpha52 transaction-default
  *  hint it reset is gone with the flip it announced (alpha57). */

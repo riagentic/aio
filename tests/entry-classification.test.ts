@@ -13,7 +13,10 @@
 // The existing doc-imports gate cannot catch either: it asks whether a symbol
 // EXISTS in the entry, which was true in both cases. This asks the other
 // question. Adding an entry to deno.json now forces a decision here.
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { resolveSpecifier } from "../src/server/graph-validator.ts";
+import { browserImportWarning } from "../src/server/lint.ts";
+import { classifyBrowserError } from "../src/server/server-html-classify.ts";
 import { parse } from "@std/jsonc";
 import { buildBrowserImportMap } from "../src/server/server-html-importmap.ts";
 import { SERVER_ONLY_SPECS } from "../src/server/server-only-specs.ts";
@@ -110,4 +113,58 @@ Deno.test("the entries the docs name for SQLite and shipping are refused in a pa
       `${spec} fell off the list`,
     );
   }
+});
+
+// ── the ACKNOWLEDGED middle still has to be told the truth ───────────
+//
+// Being outside SERVER_ONLY_SPECS meant falling through to the generic advice
+// — "Add \"aio/extras\": \"npm:aio/extras\" to deno.json imports" — which is
+// the exact advice server-only-specs.ts's own header calls actively harmful:
+// no such package exists, so the user edits deno.json, restarts, and lands on
+// the same blank page. Three deciders say this (the graph validator, the boot
+// lint, the browser overlay); all three are checked, because the last time a
+// fact lived in three places they agreed on one entry and nothing else.
+Deno.test("an acknowledged-gap entry is never advised to install an npm package", () => {
+  for (const spec of Object.keys(ACKNOWLEDGED)) {
+    const g = resolveSpecifier(spec, "/app/src/App.tsx", {});
+    assertEquals(g.kind, "error", `${spec} is unmapped, so this is an error`);
+    const fix = g.kind === "error" ? g.error.fix : "";
+    assertStringIncludes(fix, "aio's OWN entries");
+    // The harmful shape is the deno.json import-map PAIR — telling someone
+    // to add a package that does not exist. Saying "there is no npm:… " is
+    // the opposite and must stay allowed.
+    assert(
+      !fix.includes(`"${spec}": "npm:${spec}"`) &&
+        !fix.includes(`Add "${spec}"`),
+      `${spec}: no such package exists. Got: ${fix}`,
+    );
+
+    const l = browserImportWarning("src/App.tsx", spec);
+    assert(!l.includes(`"${spec}": "npm:${spec}"`), `boot lint: ${l}`);
+    assertStringIncludes(l, "aio's OWN entries");
+
+    const b = classifyBrowserError(
+      `Failed to resolve module specifier "${spec}"`,
+    );
+    assert(
+      !b.fix.includes(`"${spec}": "npm:${spec}"`) &&
+        !b.fix.includes(`Add "${spec}"`),
+      `browser overlay: ${b.fix}`,
+    );
+    assertStringIncludes(b.fix, "aio's OWN entries");
+  }
+});
+
+Deno.test("a genuinely missing npm package still gets the npm advice", () => {
+  // The fix above must not swallow the case the generic advice is right for.
+  const g = resolveSpecifier("lodash", "/app/src/App.tsx", {});
+  assertStringIncludes(g.kind === "error" ? g.error.fix : "", "npm:lodash");
+  assertStringIncludes(
+    browserImportWarning("src/App.tsx", "lodash"),
+    "npm:lodash",
+  );
+  assertStringIncludes(
+    classifyBrowserError(`Failed to resolve module specifier "lodash"`).fix,
+    "npm:lodash",
+  );
 });

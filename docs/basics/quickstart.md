@@ -18,7 +18,7 @@ irm https://raw.githubusercontent.com/riagentic/aio/main/install.ps1 | iex
 Then scaffold and run — a full app in two commands:
 
 ```sh
-am create my-app                 # counter (default) · or --template=todo
+am create my-app                 # counter (default) · --template=todo · --template=cli
 cd my-app
 deno task dev                    # prints the app's URL (pass --open to open a browser)
 ```

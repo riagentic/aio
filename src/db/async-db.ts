@@ -7,6 +7,7 @@ import type {
   WorkerMsg,
   WorkerResponse,
 } from "./types.ts";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { isCompiled } from "../server/paths.ts";
 import { log } from "../diagnostics/logger-api.ts";
 
@@ -135,10 +136,13 @@ export function countSqlStatements(sql: string): number {
 /** The message for a multi-statement `execute()`, or null when `sql` is one
  *  statement. Rejecting is the fix, not multi-exec: single-statement execution
  *  is a security property the `am sql` route depends on. */
-export function multiStatementRejection(sql: string): string | null {
+export function multiStatementRejection(
+  sql: string,
+  method = "db.execute()",
+): string | null {
   const n = countSqlStatements(sql);
   if (n <= 1) return null;
-  return `db.execute() runs exactly ONE statement — this SQL has ${n}. ` +
+  return `${method} runs exactly ONE statement — this SQL has ${n}. ` +
     `SQLite prepares the FIRST and discards the rest, so a pasted ` +
     `multi-statement migration applied partially, returned changes: 0, and ` +
     `raised no error. Run them atomically instead:\n` +
@@ -479,8 +483,16 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
   // Serial write lock — all writes (execute + transaction) queue through this so
   // standalone execute() calls can never interleave into an open transaction.
   let _writerLock: Promise<void> = Promise.resolve();
-  let _inTransaction = false;
   let _lastWriterError: Error | null = null;
+  // "Am I inside a transaction CALLBACK" — answered by the async context, not
+  // by an instance-wide flag. The flag said "some callback is open on this
+  // connection", which is a different question: two INDEPENDENT callback
+  // transactions started on the same tick (two requests, a method and the
+  // persistence loop) both saw it set and were refused as "nested" — while
+  // real nesting was the only case it was meant to catch. Only code running
+  // INSIDE a callback (through any number of awaits) sees the store; a
+  // sibling caller sees nothing and simply queues on the writer lock.
+  const _txScope = new AsyncLocalStorage<true>();
   function withWriterLock<T>(fn: () => Promise<T>): Promise<T> {
     const result: Promise<T> = _writerLock.then(fn);
     _writerLock = result.then(
@@ -499,6 +511,10 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
       sql: string,
       params?: unknown[],
     ): Promise<QueryResult<T>> {
+      // Same gate as execute(): `prepare()` compiles the FIRST statement and
+      // drops the rest, so `query("A; B")` answered A and nobody heard of B.
+      const bad = multiStatementRejection(sql, "db.query()");
+      if (bad) return Promise.reject(new Error(bad));
       return gate<QueryResult<T>>({ type: "query", sql, params }, false);
     },
     // Writes serialize through the lock so they can't sneak into an open transaction
@@ -516,7 +532,7 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
         | ((tx: Tx) => Promise<any>),
       // deno-lint-ignore no-explicit-any
     ): Promise<any> {
-      if (_inTransaction) {
+      if (_txScope.getStore()) {
         // The old text advised "use savepoints if needed". aio has no
         // savepoint API, so the one actionable-looking phrase in the message
         // pointed at nothing the reader could type.
@@ -539,20 +555,25 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
 
       // Callback form: acquire write lock, BEGIN/COMMIT wrapping the async callback
       return withWriterLock(async () => {
-        _inTransaction = true;
         try {
           await gate<QueryResult>({ type: "execute", sql: "BEGIN" });
           const tx: Tx = {
             // tx.query goes to writer — must see current transaction's own writes
-            query: <T>(sql: string, params?: unknown[]) =>
-              gate<QueryResult<T>>({ type: "query", sql, params }, true),
+            query: <T>(sql: string, params?: unknown[]) => {
+              const bad = multiStatementRejection(sql, "tx.query()");
+              if (bad) return Promise.reject(new Error(bad));
+              return gate<QueryResult<T>>({ type: "query", sql, params }, true);
+            },
             execute: (sql: string, params?: unknown[]) => {
-              const bad = multiStatementRejection(sql);
+              const bad = multiStatementRejection(sql, "tx.execute()");
               if (bad) return Promise.reject(new Error(bad));
               return gate<QueryResult>({ type: "execute", sql, params });
             },
           };
-          const result = await stmts_or_fn(tx);
+          // The callback — and everything it awaits — runs inside the scope,
+          // so a `db.transaction()` reached from within it is the real
+          // nesting the check above refuses.
+          const result = await _txScope.run(true, () => stmts_or_fn(tx));
           await gate<QueryResult>({ type: "execute", sql: "COMMIT" });
           return result;
         } catch (e) {
@@ -563,8 +584,6 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
             /* ROLLBACK may fail if BEGIN never succeeded — safe to ignore */
           }
           throw e;
-        } finally {
-          _inTransaction = false;
         }
       });
     },

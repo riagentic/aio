@@ -102,7 +102,13 @@ export type UpdatesRuntime = {
   /** True when the app is reachable from off this machine. */
   exposed: boolean;
   channel: string;
-  current: string;
+  /** The running version, or `null` when this build could not say what it is
+   *  (a hand-compiled binary with no stamp, a directory that is not a
+   *  project). `currentUnknown` then says why. */
+  current: string | null;
+  /** Why `current` is null — a sentence for a log or a dev banner, never a
+   *  version. */
+  currentUnknown: string | null;
   kind: "manifest" | "git";
 };
 
@@ -195,7 +201,19 @@ export type UpdatesState = {
   enabled: boolean;
   kind: "manifest" | "git";
   channel: string;
-  current: string;
+  /** The running version, or `null` when this build cannot say what it is.
+   *
+   *  It was `string`, and held the whole refusal PARAGRAPH when the version
+   *  could not be derived — `examples/updates` renders `Running {current}`, so
+   *  the app aio ships to teach the update UI printed 200 characters of
+   *  framework diagnostics where a version goes, and the paragraph crossed the
+   *  wire to every client. A field that is sometimes a version and sometimes
+   *  an essay cannot be rendered safely, so the two facts are now two fields.
+   *  Render `current ?? "unknown"`; `currentUnknown` says why, for a log or a
+   *  dev banner. */
+  current: string | null;
+  /** Why `current` is null. Empty when it is not. */
+  currentUnknown: string | null;
   status: UpdateStatus;
   available: AvailableUpdate | null;
   blocked: BlockedUpdate | null;
@@ -247,8 +265,9 @@ const NOT_CONFIGURED =
   "(or the object form, updates: { source, channel, auto }).";
 
 /** The draft an async method receives on a transactional cell: the state, plus
- *  the framework's own `$commit`/`$live` (see MethodDraftMeta). */
-type Draft = UpdatesState & Partial<MethodDraftMeta<UpdatesState>>;
+ *  the framework's own `$commit`/`$live` (see MethodDraftMeta). Not `Partial`
+ *  since alpha76 — the runtime has always served all four on every method. */
+type Draft = UpdatesState & MethodDraftMeta<UpdatesState>;
 
 let _updates: UpdatesCell | null = null;
 
@@ -284,7 +303,8 @@ export function createUpdatesCell(): UpdatesCell {
       /** The channel being followed — a directory, or a git ref. */
       channel: "",
       /** The version running right now. */
-      current: "",
+      current: null as string | null,
+      currentUnknown: null as string | null,
       status: "idle" as UpdateStatus,
       available: null as AvailableUpdate | null,
       blocked: null as BlockedUpdate | null,
@@ -361,6 +381,7 @@ export function createUpdatesCell(): UpdatesCell {
         s.kind = runtime.kind;
         s.channel = runtime.channel;
         s.current = runtime.current;
+        s.currentUnknown = runtime.currentUnknown;
       },
 
       /** Ask the source what it has. Safe to call at any time. */
@@ -374,7 +395,7 @@ export function createUpdatesCell(): UpdatesCell {
         // Never re-check while an install of this app is in flight. The poll
         // timer does not stop for an apply, and a check that lands mid-install
         // clears the runtime's `offered` manifest out from under the applier.
-        const busy = s.$live?.status ?? s.status;
+        const busy = s.$live.status ?? s.status;
         if (
           busy === "downloading" || busy === "applying" || busy === "staged"
         ) {
@@ -392,12 +413,13 @@ export function createUpdatesCell(): UpdatesCell {
         s.kind = runtime.kind;
         s.channel = runtime.channel;
         s.current = runtime.current;
+        s.currentUnknown = runtime.currentUnknown;
         // Publish NOW, mid-method. Without this the whole write-set commits
         // once at return (`transaction`), so `status: "checking"` existed only
         // inside this function: no client ever saw it, and a spinner bound to
         // it could never render. The type said the state existed; nothing could
         // observe it.
-        s.$commit?.();
+        s.$commit();
         // Guarded like `apply()` is. Without this a throwing `runtime.check()`
         // rolled the "checking" write back (transaction) and propagated to
         // the caller — so a UI that calls `updates.check()` without awaiting saw
@@ -453,7 +475,7 @@ export function createUpdatesCell(): UpdatesCell {
         // one staged path; the mutex (`serialize`) makes them sequential, and
         // this makes the second one a refusal instead of a second download of
         // something already installed.
-        const phase = s.$live?.status ?? s.status;
+        const phase = s.$live.status ?? s.status;
         if (
           phase === "downloading" || phase === "applying" || phase === "staged"
         ) {
@@ -486,7 +508,7 @@ export function createUpdatesCell(): UpdatesCell {
         // it was), `progress = 0` committed AFTER every `setProgress` the
         // applier had dispatched — so a failed apply visibly rewound the bar to
         // zero, and a successful one never showed a bar at all.
-        s.$commit?.();
+        s.$commit();
         try {
           await runtime.apply({ acceptDataLoss: accept });
           // Reached only when the swap is done and the handover is scheduled

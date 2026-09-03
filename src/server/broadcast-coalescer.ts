@@ -52,6 +52,19 @@ export function flushAllUrgent(): void {
 export function createCoalescer<T>(
   throttleMs: number,
   flush: (buffered: T[], force: boolean) => void,
+  opts?: {
+    /** Join the interactive-priority registry, so a client action drains this
+     *  coalescer immediately (default true).
+     *
+     *  `false` for a channel nothing user-facing waits on. The time-travel
+     *  channel joined it by default and its 250 ms throttle therefore never
+     *  engaged once: `flushAllUrgent()` runs after EVERY client action, and
+     *  the TT payload is the whole action log rather than a delta — 143 MB of
+     *  debug frames against 30 MB of state for 1000 commits, growing with the
+     *  history length (audit a2/W3). The registry exists to keep a keystroke
+     *  off the throttle; a debug panel is the opposite case. */
+    urgent?: boolean;
+  },
 ): Coalescer<T> {
   let buffer: T[] = [];
   let force = false;
@@ -98,7 +111,7 @@ export function createCoalescer<T>(
     }
     drain();
   };
-  urgentRegistry.add(flushUrgentImpl);
+  if (opts?.urgent !== false) urgentRegistry.add(flushUrgentImpl);
 
   return {
     add(items?: T[]) {

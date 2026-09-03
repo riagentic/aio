@@ -9,10 +9,44 @@ each release phase may change.
 The public surface is exactly what the CI-enforced snapshot locks
 (`docs/api-snapshot.json`, `deno task check:api`):
 
-- every export of every `deno.json` entry point (`aio`, `aio/air`,
-  `aio/air/compat`, `aio/jsx-runtime`, `aio/state-core`, `aio/db`, `aio/sync`,
-  `aio/testing`, `aio/schedule`, `aio/selectors`, `aio/build`, `aio/am`,
-  `aio/aiol`) — names, kinds, and signatures
+- every export of every `deno.json` entry point — names, kinds, and signatures.
+  The entries, in the order `src/entries.ts` lists them (the ONE list; the
+  `exports` map, this document and the snapshot are all checked against it):
+
+  | specifier              | what it carries                                    |
+  | ---------------------- | -------------------------------------------------- |
+  | `aio`                  | the framework core — `aio.run`, `cell`, `route`, … |
+  | `aio/air`              | the renderer (signals, JSX, router, hydration)     |
+  | `aio/air/compat`       | the React-shaped alias layer over `aio/air`        |
+  | `aio/ui`               | the component library                              |
+  | `aio/jsx-runtime`      | the JSX factory the compiler imports               |
+  | `aio/server`           | the server-only values (SQLite, CLI/UDS transport) |
+  | `aio/state-core`       | the cell registry / send / sync routing            |
+  | `aio/db`               | database types + pure schema helpers               |
+  | `aio/extras`           | deep detail types, `checkCells`, `parseCli`        |
+  | `aio/sync`             | the CRDT sync types and engine                     |
+  | `aio/testing`          | `testCell` / `testUI` / `testServer` and friends   |
+  | `aio/updates`          | the built-in updates cell (opt-in by import)       |
+  | `aio/cli`              | the CLI toolkit (args, prompt, table, spinner)     |
+  | `aio/feedback`         | the built-in feedback cell (opt-in by import)      |
+  | `aio/build`            | build helpers — also runnable                      |
+  | `aio/ship`             | release signing + verification — also runnable     |
+  | `aio/build-all`        | run-only                                           |
+  | `aio/dev-android`      | run-only                                           |
+  | `aio/android-install`  | run-only                                           |
+  | `aio/electron-install` | run-only                                           |
+  | `aio/am`               | run-only (the app manager CLI)                     |
+  | `aio/amui`             | run-only (the visual app manager)                  |
+  | `aio/doctor`           | run-only                                           |
+  | `aio/aiol`             | run-only (the project linter)                      |
+
+  Per-entry symbol counts are not repeated here — `docs/api-snapshot.json` is
+  the count, and a number copied into prose goes stale the first time anything
+  is added. (`aio/schedule` and `aio/selectors` were listed here for six alphas
+  after being DELETED in alpha52, while thirteen real entries — `aio/ui` among
+  them, the whole component library — were missing. A contract document that
+  names the wrong surface governs nothing; `tests/semver-policy-entries.test.ts`
+  now compares this table against `src/entries.ts`.)
 - the wire protocol as negotiated by the `proto` `{v,min}` handshake
 - the persistence schema as stamped by `<appId>:__schema`
 - documented CLI flags (`am create`, `--expose`, `--port`, …) and the six

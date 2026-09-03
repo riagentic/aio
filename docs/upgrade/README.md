@@ -12,6 +12,12 @@ reason to keep one (gated by `deno task check:docs`).
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha75 → alpha76](from-alpha75-to-alpha76.md) — **breaks**: the last release
+  before beta retires the six spellings still marked "deprecated through beta".
+  Effects leave the return channel for `s.$do(...)`, selector deps arrive as one
+  tuple, `killExisting` is `takeover` on both the flag and the config key, and
+  `--zero-port` / `--backup-logs` (which did nothing) are refused.
+  `aiol --safe-fix` rewrites all of it, tasks included
 - [alpha74 → alpha75](from-alpha74-to-alpha75.md) — nothing breaks: every build
   flag reaches the build (`--platform`, `--out`, `--android-dev-url` were parsed
   and then dropped), `dev:android` and `install:android` find the APK again, a

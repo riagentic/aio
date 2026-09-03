@@ -22,6 +22,7 @@ import { assert, assertEquals } from "@std/assert";
 import { fuzzEnvInt } from "./fuzz-seed.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import type { MethodDraftMeta } from "../src/state/cell-impl.ts";
+import { tempDir } from "../src/testing/temp-dir.ts";
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
@@ -68,9 +69,9 @@ async function defineCell(name: string) {
       },
       // Async, well-behaved: writes on both sides of an await, and takes its
       // documented cancellation path.
-      async slow(s: Doc & Partial<MethodDraftMeta>, id: string, steps: number) {
+      async slow(s: Doc & MethodDraftMeta, id: string, steps: number) {
         for (let i = 0; i < steps; i++) {
-          if (s.$signal?.aborted) {
+          if (s.$signal.aborted) {
             s.applied = [...s.applied, `${id}!`];
             return;
           }
@@ -111,7 +112,7 @@ const OPS = ["bumpAwait", "bumpFF", "slowAwait", "slowFF", "deafFF", "chainFF"];
 async function round(seed: number): Promise<{ ops: number; resolved: number }> {
   const r = rng(seed);
   const name = `fz${seed % 100000}`;
-  const dir = await Deno.makeTempDir({ prefix: "aio-shutdown-fuzz-" });
+  const dir = await tempDir("aio-shutdown-fuzz-");
   // Every call whose promise RESOLVED before shutdown started. These are the
   // receipts the persisted document must honour.
   const resolved = new Set<string>();

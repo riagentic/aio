@@ -13,13 +13,24 @@ Built-in CSS animation functions for `<Transition>` and `<TransitionGroup>`:
 import { fade, scale, slide } from "aio/air";
 ```
 
-| Preset  | Enter                  | Exit                  |
-| ------- | ---------------------- | --------------------- |
-| `fade`  | Opacity 0 -> 1         | Opacity 1 -> 0        |
-| `slide` | translateY(-20px) -> 0 | 0 -> translateY(20px) |
-| `scale` | scale(0.95) -> 1       | 1 -> scale(0.95)      |
+Every preset is one `css(t)` function keyframed from `t = 0` to `t = 1` on
+enter, and replayed backwards on exit — so the Exit column is always the Enter
+column read right to left. Each fades opacity alongside its transform:
 
-Each preset accepts `TransitionOptions`:
+| Preset  | `css(t)`                                        | Enter (`t` 0 → 1)                                                   |
+| ------- | ----------------------------------------------- | ------------------------------------------------------------------- |
+| `fade`  | `opacity: t`                                    | `opacity: 0` → `opacity: 1`                                         |
+| `slide` | `transform: translateY((1-t)*100%); opacity: t` | `translateY(100%)` + `opacity: 0` → `translateY(0%)` + `opacity: 1` |
+| `scale` | `transform: scale(t); opacity: t`               | `scale(0)` + `opacity: 0` → `scale(1)` + `opacity: 1`               |
+
+`slide` travels a full **element height** (`100%`), not a fixed pixel offset,
+and `scale` grows from **zero**, not from a near-1 value — both are deliberate:
+a preset that moves a fixed 20px looks wrong on anything but one row height. For
+a subtler entrance, write your own `TransitionFn` rather than expecting the
+preset to be gentle.
+
+Each preset accepts `TransitionOptions` — `duration` (default `300`), `delay`
+(default none) and `easing` (default CSS `ease`):
 
 ```ts
 fade(node, { duration: 300, delay: 100, easing: "ease-out" });

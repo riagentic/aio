@@ -30,6 +30,11 @@ export type VitalsPong = {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+/** Grade an RTT against the transport tiers. ROUND-TRIP TIME ONLY — one client,
+ *  one clock, one measurement of how long the wire took. `processPong` is the
+ *  only caller, and `thresholds.transport.degraded/warning` exist for it.
+ *
+ *  Do NOT reach for this from the server watchdog: see `evaluateLiveness`. */
 function evaluateStatus(
   measured: number,
   thresholds: { degraded: number; warning: number; frozen: number },
@@ -38,6 +43,41 @@ function evaluateStatus(
   if (measured >= thresholds.warning) return "warning";
   if (measured >= thresholds.degraded) return "degraded";
   return "healthy";
+}
+
+/** Grade a HEARTBEAT AGE. Two verdicts, because a heartbeat's age carries
+ *  exactly one bit of information: are we still hearing this client?
+ *
+ *  The server watchdog used to run the ping gap through `evaluateStatus`, i.e.
+ *  through RTT tiers (degraded 100ms / warning 500ms / frozen 2000ms). But the
+ *  quantity is not a round trip — it is the age of the last beat of a 1s
+ *  heartbeat (`DEFAULT_HEARTBEAT_INTERVAL`), sampled by an independent ~1s
+ *  grading tick, so for a perfectly healthy client it is uniform over roughly
+ *  0–1000ms and lands over the 100ms `degraded` line about 90% of the time.
+ *
+ *  Measured, real chromium tab on a plain app, 580 samples over 60s:
+ *    status  → degraded 83.3% · warning 16.0% · healthy 0.7%
+ *    gap(ms) → min 1 · p25 245 · p50 495 · p75 743 · p95 948 · max 999
+ *  A live tab was observed reporting `{"status":"degraded","gap":71}`.
+ *
+ *  Those tiers therefore graded the heartbeat's PHASE, not the client's health:
+ *  `am metrics`, `/__aio/vitals` and amui showed a fleet of permanently
+ *  degraded clients, which is a field an operator learns to ignore — and the
+ *  tiers drove nothing (backpressure reads the client-reported render
+ *  staleness; the only alerts fired are frozen/recovered).
+ *
+ *  Deriving heartbeat-shaped tiers instead ("missed one beat") was the other
+ *  option and is worse: it needs the client's beat interval, which the server
+ *  cannot know (config drift, a stale build, a throttled background tab), and
+ *  a client that missed one 1s beat is normal jitter that nothing acts on.
+ *
+ *  `frozen` keeps its exact meaning and threshold — `server-broadcast.ts` skips
+ *  frozen clients, and a peer that never beats at all must still reach it. */
+function evaluateLiveness(
+  gap: number,
+  frozenAfter: number,
+): VitalStatus {
+  return gap >= frozenAfter ? "frozen" : "healthy";
 }
 
 // ─── Client Probe ────────────────────────────────────────────────────────────
@@ -125,6 +165,13 @@ export type TransportProbeServerConfig = {
 
 /** Create a server-side transport probe that tracks per-client liveness and detects freezes.
  *
+ *  VOCABULARY. This probe answers ONE question — "are we still hearing this
+ *  client?" — so a liveness row is only ever `healthy`, `frozen`, or (for one
+ *  tick after a freeze ends) `recovered`. It reads `thresholds.transport.frozen`
+ *  and nothing else; `.degraded`/`.warning` are RTT tiers and belong to
+ *  `processPong` on the client, which measures an actual round trip. The two
+ *  signals are not interchangeable — `evaluateLiveness` has the measurement.
+ *
  *  ONE-CLOCK INVARIANT — load-bearing, do not weaken.
  *
  *  Every timestamp this probe stores and every timestamp it subtracts comes
@@ -151,6 +198,9 @@ export function createTransportProbeServer(config: TransportProbeServerConfig) {
   const now = config.now ?? (() => Date.now());
   const t = thresholds.transport;
   const clients = new Map<string, ClientLiveness>();
+  /** Clients that have sent at least one `vitals-ping`, and can therefore be
+   *  judged by the age of the last one. */
+  const heartbeats = new Set<string>();
 
   function ensureClient(clientId: string, at: number): ClientLiveness {
     let c = clients.get(clientId);
@@ -162,12 +212,46 @@ export function createTransportProbeServer(config: TransportProbeServerConfig) {
   }
 
   return {
+    /** A client CONNECTED. Registered here, at the upgrade, not on its first
+     *  `vitals-ping`.
+     *
+     *  Registering on the first ping made the watchdog opt-in by the very
+     *  behaviour it watches for: a peer that opens a socket and then never
+     *  sends anything — no ping, no action — was never in `clients`, so
+     *  `checkAllClients()` never evaluated it, `isFrozen()` answered false
+     *  forever, and `server-broadcast.ts` (which skips frozen clients) fed it
+     *  every round for the life of the socket. (audit a2/W2)
+     *
+     *  It is registered but NOT yet graded: see `heartbeats`. Grading a peer
+     *  that has never sent a heartbeat made the watchdog fire on clients that
+     *  simply do not speak the heartbeat protocol — `connectCli`, the dev
+     *  reload socket, any third-party client written against the documented
+     *  wire — each of which went dark two seconds after connecting and stayed
+     *  dark, because the gap only grows. The memory case that motivated
+     *  grading-from-connect is answered directly by the `bufferedAmount`
+     *  high-water check that now sits beside the frozen check in
+     *  `server-broadcast.ts`: that asks "is this peer draining", which is the
+     *  actual question about a silent socket. */
+    onClientConnected(clientId: string) {
+      ensureClient(clientId, now());
+    },
+
     /** A ping ARRIVED. Stamped with the server's clock — the frame's own `t1`
      *  belongs to the client and must never be stored here. */
     onClientPing(clientId: string) {
       const at = now();
       const c = ensureClient(clientId, at);
       c.lastPing = at;
+      heartbeats.add(clientId);
+    },
+
+    /** A frame of ANY kind arrived. A client that speaks is alive, so this
+     *  refreshes liveness exactly as a heartbeat does — but it does not enrol
+     *  the client in grading, because one frame at connect time says nothing
+     *  about whether more will follow. */
+    onClientActivity(clientId: string) {
+      const c = clients.get(clientId);
+      if (c) c.lastPing = now();
     },
 
     /** State was SENT to a client. Server clock, same invariant. */
@@ -179,11 +263,19 @@ export function createTransportProbeServer(config: TransportProbeServerConfig) {
     checkAllClients() {
       const at = now();
       for (const c of clients.values()) {
+        // Only a client that has ever sent a heartbeat can be judged by the
+        // age of its last one. For every other client the gap measures how
+        // long ago it CONNECTED, which is not a liveness signal at all — and
+        // grading it froze every non-heartbeat client after two seconds and
+        // silently stopped its state updates for the life of the socket.
+        if (!heartbeats.has(c.clientId)) continue;
         // Both operands are server-clock stamps, so this is an elapsed time and
         // can never be negative — see the one-clock invariant above.
         const gap = at - c.lastPing;
         const prev = c.status;
-        const next = evaluateStatus(gap, t);
+        // A heartbeat age, graded as liveness — NOT through the RTT tiers.
+        // See `evaluateLiveness` for the measurement that says why.
+        const next = evaluateLiveness(gap, t.frozen);
         c.status = next;
 
         if (next === "frozen" && prev !== "frozen") {
@@ -212,10 +304,12 @@ export function createTransportProbeServer(config: TransportProbeServerConfig) {
 
     removeClient(clientId: string) {
       clients.delete(clientId);
+      heartbeats.delete(clientId);
     },
 
     destroy() {
       clients.clear();
+      heartbeats.clear();
     },
   };
 }

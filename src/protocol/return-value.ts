@@ -85,11 +85,11 @@ export function serializeReturn(
     const json = JSON.stringify(value);
     if (json === undefined) {
       // A bare function/symbol stringifies to `undefined` without throwing.
-      return { value: undefined, dropped: true, lossy: [], truncated: false };
+      return dropValue(what);
     }
     round = JSON.parse(json);
   } catch {
-    return { value: undefined, dropped: true, lossy: [], truncated: false };
+    return dropValue(what);
   }
 
   const lossy: LossyConversion[] = [];
@@ -102,6 +102,30 @@ export function serializeReturn(
     lossy,
     truncated: budget.truncated === true,
   };
+}
+
+/** The value could not cross the wire at all — a function, a BigInt, a
+ *  circular reference. The caller resolves with `undefined`, and the ack is
+ *  `{ok:true}` with no value, which on the wire is indistinguishable from a
+ *  method that returns nothing. So the server is the only place this can be
+ *  said, and it says it ONCE, here, for every transport.
+ *
+ *  It used to be said at each ack site instead: the UDS path warned always,
+ *  the WS path warned only when `!prod` — so in production, over the transport
+ *  every browser uses, a method whose return value was thrown away logged
+ *  nothing at any level. Its sibling `warnLossy` had already settled the
+ *  question one line below: a corrupted return value is a defect either way.
+ *  Observe-only, so this is not a dev/prod behaviour fork. */
+function dropValue(what?: string): SerializedReturn {
+  const where = what ? `"${what}"` : "a method";
+  log.warn(
+    "ack",
+    `${where} returned a value JSON cannot carry AT ALL (a function, a ` +
+      `BigInt, or a circular reference) — the caller resolves with ` +
+      `undefined. Return JSON-safe data (plain objects/arrays/primitives) to ` +
+      `transport a value, or read it from synced state instead.`,
+  );
+  return { value: undefined, dropped: true, lossy: [], truncated: false };
 }
 
 /** Say exactly what changed. Loud in dev AND prod: a corrupted return value is

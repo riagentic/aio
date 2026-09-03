@@ -2,6 +2,7 @@
 // Provides: _scheduleComponentRender, _rerenderComponent, _subscribeComponentDeps, _createHooks.
 
 import { nullSlot } from "./vdom-create.ts";
+import { isDevMode, isDevModeExplicit } from "../state/dev-flag.ts";
 import {
   _computedCollectEnd,
   _computedCollectStart,
@@ -51,7 +52,7 @@ export function _scheduleComponentRender(inst: ComponentInstance): void {
     // strand to a one-tick delay instead of a permanent invisible freeze, and
     // makes it loud in dev so the real cause gets fixed.
     if (root.flushing || root.pendingComponents.has(inst)) return;
-    if (_devMode) {
+    if (isDevMode()) {
       const name = typeof inst.vnode.tag === "function"
         ? (inst.vnode.tag.name || "Anonymous")
         : "Component";
@@ -75,11 +76,6 @@ export function _scheduleComponentRender(inst: ComponentInstance): void {
 
 // ── Per-component re-render ───────────────────────────────────────────
 
-let _devMode = false;
-export function _setFlushDevMode(v: boolean): void {
-  _devMode = v;
-}
-
 const DEV_RENDER_LIMIT = 50;
 
 /** Dev tripwire: the state hooks (`useRef`/`useSignal`/`useId`) are matched
@@ -98,7 +94,7 @@ function _checkHookOrder(
   count: number,
   name: string,
 ): void {
-  if (!_devMode) return;
+  if (!isDevMode()) return;
   const prev = inst._hookCount;
   inst._hookCount = count;
   if (prev === undefined || prev === count) return;
@@ -115,7 +111,7 @@ function _checkHookOrder(
 export function _rerenderComponent(inst: ComponentInstance): void {
   if (inst.disposed) return;
 
-  if (_devMode) {
+  if (isDevMode()) {
     const now = performance.now();
     const window = inst._devRenderTimestamps ?? [];
     // Evict timestamps older than 1 second
@@ -264,12 +260,12 @@ export function _rerenderComponent(inst: ComponentInstance): void {
     _subscribeComponentDeps(inst, deps);
   }
 
-  if (_isDev() && typeof vnode.tag === "function") {
+  if (isDevMode() && typeof vnode.tag === "function") {
     _warnIfLostSubscription(vnode.tag as ComponentFn, inst, deps);
   }
 
   // AIO-167 diagnostic: warn if component has no signal deps after re-render
-  if (_devMode && deps.size === 0 && inst.unsubs.length === 0) {
+  if (isDevMode() && deps.size === 0 && inst.unsubs.length === 0) {
     const name = typeof vnode.tag === "function"
       ? (vnode.tag.name || "Anonymous")
       : "Component";
@@ -296,16 +292,12 @@ export function _rerenderComponent(inst: ComponentInstance): void {
 // component reads zero everywhere. So that comparison is the tell, and it costs
 // one number per component function. Dev only, observe-only.
 //
-// Gated on `__aioDev` — the flag the dev server and every test harness set —
-// rather than the renderer's own `_devMode`, which nothing in the framework
-// ever turns on (it is `setDevMode`, an app's opt-in). A warning behind a flag
-// nobody sets is a warning that does not exist; `memo.ts`, `form.ts` and
-// `renderer-flush.ts` already read `__aioDev` for exactly this reason.
+// Gated on `isDevMode()` — one flag for the whole runtime, defaulting to
+// `__aioDev` (the flag the dev server and every test harness set). This site
+// used to read `__aioDev` directly to escape the renderer's own `_devMode`,
+// which nothing in the framework ever turned on; that flag now follows
+// `__aioDev` too, so the escape hatch and the thing it escaped are one.
 const _maxDepsSeen = new WeakMap<ComponentFn, number>();
-
-function _isDev(): boolean {
-  return (globalThis as Record<string, unknown>).__aioDev === true;
-}
 
 function _warnIfLostSubscription(
   tag: ComponentFn,
@@ -345,7 +337,7 @@ export function _subscribeComponentDeps(
   // deno-lint-ignore no-explicit-any
   deps: Set<any>,
 ): void {
-  if (_devMode && inst.parent) {
+  if (isDevMode() && inst.parent) {
     const parentDeps = inst.parent.deps;
     for (const dep of deps) {
       if (parentDeps.has(dep)) continue;
@@ -550,7 +542,7 @@ export function _createHooks(rootState: RootState): VDomHooks {
         inst._dtLastMs = performance.now() - hs.dtStart;
       }
       _subscribeComponentDeps(inst, hs.deps!);
-      if (_isDev() && typeof vnode.tag === "function") {
+      if (isDevMode() && typeof vnode.tag === "function") {
         _warnIfLostSubscription(vnode.tag as ComponentFn, inst, hs.deps!);
       }
       _instanceStack.push(inst);
@@ -566,9 +558,13 @@ export function _createHooks(rootState: RootState): VDomHooks {
     },
 
     afterSubtree(vnode: VNode): void {
-      // Stamp data-component on root DOM element in dev mode
+      // Stamp data-component on the component's root element — an explicit
+      // opt-in, NOT ambient dev. It is the one dev feature here that changes
+      // the DOM rather than observing it, and SSR does not write it, so
+      // arming it with `__aioDev` made every hydrated component look like a
+      // server/client divergence.
       if (
-        _devMode && typeof vnode.tag === "function" && vnode._dom &&
+        isDevModeExplicit() && typeof vnode.tag === "function" && vnode._dom &&
         (vnode._dom as { nodeType?: number }).nodeType === 1
       ) {
         const el = vnode._dom as Element;

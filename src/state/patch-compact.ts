@@ -295,9 +295,16 @@ export function narrowPatches(prev: unknown, ops: Patch[]): WirePatch[] {
   return narrowStringPatches(prev, narrowArrayPatches(prev, ops));
 }
 
-/** Key for path identity — joined with NUL to avoid ambiguity */
-function pathKey(path: (string | number)[]): string {
-  return path.join("\0");
+/** Key for path identity — joined with NUL to avoid ambiguity.
+ *
+ *  `String(seg)`, never a bare `join`: an Immer patch path carries the KEY it
+ *  was written under, and a SYMBOL key made `join` throw "Cannot convert a
+ *  Symbol value to a string" — out of patch narrowing, through the reduce, and
+ *  onto the caller as `REDUCE_ERROR … fix: check action payload shape`. The
+ *  payload was fine; a symbol key in state is the actual problem, and saying
+ *  so is `warnWireLoss`'s job (wire-fidelity.ts), which never got to run. */
+function pathKey(path: readonly (string | number | symbol)[]): string {
+  return path.map((seg) => String(seg)).join("\0");
 }
 
 /**

@@ -179,10 +179,11 @@ initial-state curl proves nothing about whether a method actually runs.
   hand-reason about equivalence.
 - Test servers take their port from `freePort()`, never a constant or a
   pid-derived formula (a guard test enforces this).
-- The browser `schedule` stub in `src/browser/browser-shared.ts` is the ONE
-  hand-kept twin of `src/state/schedule.ts` (`msg`/`own` are real re-exports;
-  the real module pulls a Deno worker pool) — it must stay output-identical, and
-  `tests/browser-shared-inline-parity.test.ts` fuzzes exactly that.
+- The browser bundle's `msg`/`schedule`/`own` (`src/browser/browser-shared.ts`)
+  are RE-EXPORTS of `src/state/*` — no hand-kept twin exists since alpha70. The
+  fact that keeps it legal: `src/state/schedule.ts` stays Deno-free (the worker
+  pool lives in `blocking.ts`, which it must never import);
+  `tests/browser-shared-inline-parity.test.ts` pins identity and that fact.
 - Any per-method flag the browser branches on must be mirrored in the separate
   browser cell stub (`src/browser/protocol-cell.ts`), not just the server stub.
 - Lifecycle hooks are observe-only and error-guarded — they never break

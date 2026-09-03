@@ -26,7 +26,6 @@ export type AioErrorCode =
   | "HOOK_ERROR"
   | "INIT_ERROR"
   | "DESTROY_ERROR"
-  | "MACHINE_BLOCKED"
   | "QUEUE_OVERFLOW"
   | "DISPATCH_LOOP"
   | "DISPATCH_CLOSED"
@@ -39,8 +38,44 @@ export type AioErrorCode =
   | "PERSIST_ERROR"
   | "PERSIST_SCHEMA"
   | "TX_CONFLICT"
+  // ── The two NETWORK-facing codes (alpha76) ──────────────────────────────
+  // These are the ones an APP branches on, and they are the reason the wire
+  // carries a code at all: a call that crossed a transport can fail three
+  // ways — the gate refused it, the server took it and changed nothing, or
+  // the app's own method threw — and only the third is the app's own bug.
+  // Told apart by message text, they were not told apart at all.
+  /** The `access:` gate (cell) or `{ access }` (serverFn) refused this call
+   *  for this caller. Reaches the caller as `err.code`; read it with
+   *  `errorCode(err)` from `aio`. */
+  | "ACCESS_DENIED"
+  /** The action reached the server and applied NOTHING — a method the cell no
+   *  longer has, a cell that was never booted, a disabled cell, a `validate`
+   *  refusal. Distinct from `ACCESS_DENIED` (allowed, but did nothing) and
+   *  from an app throw (which carries no code). */
+  | "ACTION_REFUSED"
+  // ── Reserved: named by the union, not currently EMITTED ─────────────────
+  // Kept because removing a public union member is a breaking change and
+  // this union is frozen at beta1. `MACHINE_BLOCKED` belonged to the
+  // `machine:` cell key, removed in alpha27 (src/state/removals-core.ts) —
+  // a guarded action now reports as the `action-guarded` diagnostic event.
+  // The three vitals codes report through the diagnostic bus
+  // (`src/vitals/`), which is where a threshold breach belongs: it is an
+  // observation about the process, not a failure of one call. Nothing
+  // constructs any of the four; do not write a `catch` that waits for them.
+  // Pinned by tests/error-code-emission.test.ts, which fails the moment one
+  // of them gains (or loses) a call site, so this comment cannot go stale.
+  /** @deprecated Never emitted since alpha27 — the `machine:` cell key it
+   *  belonged to was removed. Kept only so the union stays source-compatible
+   *  to 1.0. */
+  | "MACHINE_BLOCKED"
+  /** @deprecated Never emitted — the UI-freeze threshold reports on the
+   *  diagnostic bus (`src/vitals/`), not as an `AioError`. */
   | "UI_FREEZE"
+  /** @deprecated Never emitted — transport stalls report on the diagnostic
+   *  bus (`src/vitals/`), not as an `AioError`. */
   | "TRANSPORT_STALL"
+  /** @deprecated Never emitted — loop saturation reports on the diagnostic
+   *  bus (`src/vitals/`), not as an `AioError`. */
   | "LOOP_SATURATED";
 
 /** Origin subsystem that raised the error — `'reduce'`, `'effect'`, `'vitals'`, etc. */
@@ -52,6 +87,10 @@ export type AioErrorSource =
   | "destroy"
   | "memory"
   | "dispatch"
+  /** The network-access gate — `ACCESS_DENIED`. */
+  | "access"
+  /** @deprecated The source of `MACHINE_BLOCKED`, never produced since
+   *  alpha27 (see {@linkcode AioErrorCode}). */
   | "machine"
   | "vitals"
   | "persist";
@@ -108,6 +147,8 @@ const CODE_TO_SOURCE: Record<AioErrorCode, AioErrorSource> = {
   HOOK_ERROR: "hook",
   INIT_ERROR: "init",
   DESTROY_ERROR: "destroy",
+  ACCESS_DENIED: "access",
+  ACTION_REFUSED: "dispatch",
   MACHINE_BLOCKED: "machine",
   QUEUE_OVERFLOW: "dispatch",
   DISPATCH_LOOP: "dispatch",
@@ -127,6 +168,10 @@ const CODE_TO_SOURCE: Record<AioErrorCode, AioErrorSource> = {
 };
 
 const WARN_CODES: Set<AioErrorCode> = new Set([
+  // A refused call is the gate WORKING. Logging it at error level made a
+  // correctly-enforced rule read like a server fault in every log scan.
+  "ACCESS_DENIED",
+  "ACTION_REFUSED",
   "MACHINE_BLOCKED",
   "MEMORY_PRESSURE",
   "BUDGET_REDUCE",
@@ -454,10 +499,27 @@ export function generateTip(err: AioError): string | undefined {
         err.context.actionType ?? "?"
       }" threw — check action payload shape and inspect state at crash.`;
     }
-    case "EFFECT_ERROR":
-      return `Tip: Sync effect "${
-        err.context.effectType ?? "?"
-      }" threw. If doing I/O, move to an async method or return a promise.`;
+    case "EFFECT_ERROR": {
+      const et = String(err.context.effectType ?? "?");
+      // `cell:__exec` / `__effects` / `__set` are the FRAMEWORK's own runners
+      // (an async method, the `s.$do` bridge, an async write-set), not an app
+      // effect. "Sync effect … threw. If doing I/O, move to an async method"
+      // told the author of an already-async method to make it async, and
+      // pointed away from the code that actually threw.
+      const i = et.indexOf(":__");
+      if (i !== -1) {
+        const runner = et.slice(i + 1);
+        return `Tip: the framework's "${runner}" runner for cell '${
+          et.slice(0, i)
+        }' threw — the error above comes from the method or write-set it was ` +
+          `running, not from an app effect. ${
+            runner === "__exec"
+              ? "Check the async method's own body and the arguments it was called with."
+              : "Check the effect or write-set the method produced."
+          }`;
+      }
+      return `Tip: Sync effect "${et}" threw. If doing I/O, move to an async method or return a promise.`;
+    }
     case "EFFECT_TIMEOUT":
       return `Tip: Effect "${err.context.effectType ?? "?"}" timed out after ${
         err.context.duration ?? "?"
@@ -489,6 +551,19 @@ export function generateTip(err: AioError): string | undefined {
       return `Tip: Cell "${
         err.context.cellName ?? "?"
       }" onDestroy threw. Cleanup should be best-effort — guard against already-cleaned resources.`;
+    case "ACCESS_DENIED":
+      return `Tip: the caller was refused by the \`access:\` rule on cell "${
+        err.context.cellName ?? "?"
+      }" (or the serverFn's \`{ access }\`). This is the gate working — sign the ` +
+        `user in, give them the required role, or widen the rule. In app code, ` +
+        `branch on it: \`if (errorCode(e) === "ACCESS_DENIED")\` — never on the ` +
+        `message text.`;
+    case "ACTION_REFUSED":
+      return `Tip: the action reached the server and changed nothing — a ` +
+        `renamed/removed method still called by an older client, a cell missing ` +
+        `from \`aio.run({ cells })\`, a disabled cell, or a \`validate\` refusal. ` +
+        `The message names which. Branch on it with ` +
+        `\`errorCode(e) === "ACTION_REFUSED"\`, not on the wording.`;
     case "MACHINE_BLOCKED":
       return `Tip: Machine in state "${
         err.context.machineState ?? "?"
@@ -528,8 +603,20 @@ export function generateTip(err: AioError): string | undefined {
       }ms). An effect must return immediately: kick off async I/O without ` +
         `awaiting it here, or hand CPU work to blocking("id", fn, ` +
         `arg).` + workerHint(err) + ` See docs/debugging/performance.md.`;
-    case "PERSIST_ERROR":
-      return "Tip: State persist failed — changes are in memory but will be lost on restart. Check disk space and file permissions.";
+    case "PERSIST_ERROR": {
+      // The disk advice only when the failure IS a disk-class failure: a
+      // planner refusal ("bound to a state value that is not an array"), a
+      // constraint, or a value the store cannot hold used to end with "check
+      // disk space and file permissions" — the one thing the reader would
+      // then check, and the one thing that was not wrong.
+      const cause = `${err.message} ${err.original?.message ?? ""}`;
+      const disk =
+        /os error|\bE(ACCES|NOSPC|ROFS|PERM|IO|BUSY|MFILE|DQUOT)\b|permission denied|no space|read-?only|SQLITE_(FULL|READONLY|CANTOPEN|IOERR|BUSY|LOCKED)|disk i\/o|database is locked|unable to open database/i
+          .test(cause);
+      return disk
+        ? "Tip: State persist failed — changes are in memory but will be lost on restart. Check disk space and file permissions."
+        : "Tip: State persist failed — changes are in memory but will be lost on restart. The message names what the store refused (a row shape, a constraint, a value it cannot hold) — fix that at its source; this does not look like a disk-space or permissions failure.";
+    }
     case "PERSIST_SCHEMA":
       return "Tip: Stored state and framework persistence-schema versions are incompatible. Upgrade aio (older store) or restore a backup (newer store); as a last resort clear the app's KV store.";
     case "UI_FREEZE":

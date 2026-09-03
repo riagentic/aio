@@ -78,17 +78,34 @@ export function until(
  *  ``` */
 export async function race<T extends Record<string, Promise<unknown> | number>>(
   branches: T,
-): Promise<{ winner: keyof T & string; value: unknown }> {
+): Promise<RaceResult<T>> {
   const entries = Object.entries(branches).map(([key, v]) =>
     typeof v === "number"
       ? sleep(v).then(() => ({ winner: key, value: undefined }))
       : (v as Promise<unknown>).then((value) => ({ winner: key, value }))
   );
-  return await Promise.race(entries) as {
-    winner: keyof T & string;
-    value: unknown;
-  };
+  return await Promise.race(entries) as RaceResult<T>;
 }
+
+/** What {@linkcode race} resolves to: ONE member per branch, so narrowing on
+ *  `winner` narrows `value` with it.
+ *
+ *  It used to be the flat `{ winner: keyof T & string; value: unknown }`, and
+ *  the whole point of naming the branches was lost at the return: every use of
+ *  the winner's value needed a cast, and `deno check` reported TS18046
+ *  ("'value' is of type 'unknown'") on the shape `mod.ts`'s own module example
+ *  teaches. A `sleep`-branch (`timeout: 30_000`) carries no value, so its
+ *  member is `undefined`; a branch whose type is not statically a promise
+ *  (a record annotated `Record<string, Promise<unknown> | number>`) keeps the
+ *  old `unknown` rather than being narrowed to a wrong answer. */
+export type RaceResult<T> = {
+  [K in keyof T & string]: {
+    winner: K;
+    value: T[K] extends Promise<infer V> ? V
+      : T[K] extends number ? undefined
+      : unknown;
+  };
+}[keyof T & string];
 
 /** Promise sleep — the method-native `yield* ctx.sleep`. */
 export function sleep(ms: number): Promise<void> {

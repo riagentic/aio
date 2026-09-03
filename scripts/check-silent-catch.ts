@@ -36,7 +36,18 @@ import { codeText } from "../src/diagnostics/code-mask.ts";
 // "silent catches" were the pattern quoted inside a string or a comment, so
 // the ratchet had been permitting 27 more real ones than anybody agreed to. A
 // ceiling measured on the wrong thing is a ceiling that rots upward.
-const CEILING = 339;
+// 339 → 337 when the six per-client `socket.send` swallows in the CRDT relay
+// (`sync/server-handler.ts`) became one `sendTo` that names the frame it could
+// not deliver, and the five harness swallows in `src/testing/` were either
+// made loud or justified in place.
+const CEILING = 335;
+
+/** The budget for the PROMISE spelling, counted separately.
+ *
+ *  Separately because the two are one rule but not one number: folding 102
+ *  pre-existing swallows into `CEILING` would move it upward, and this file's
+ *  own contract is that it only ever moves down. Two ratchets, both falling. */
+const HANDLER_CEILING = 95;
 
 const ROOT = new URL("../src/", import.meta.url).pathname;
 
@@ -53,19 +64,39 @@ async function walk(dir: string, out: string[]): Promise<string[]> {
  *  Bodies containing braces are skipped by construction (they hold code). */
 const SILENT_CATCH = /catch\s*(?:\([^)]*\))?\s*\{([^{}]*)\}/g;
 
+/** The SAME swallow, spelled as a promise handler: `.catch(() => {})`,
+ *  `.catch((e) => {})`, `.then(ok, () => {})`.
+ *
+ *  The block form's regex cannot see these at all — its optional `(...)` group
+ *  eats `(()` and then the required `{` lands on `=`. So 102 swallows in
+ *  `src/` were outside the budget entirely, concentrated exactly where they
+ *  hurt: `updates-apply.ts`, `electron-runtime-fetch.ts`, `blobs.ts`. This is
+ *  the class the CRDT relay recurred in — `browser-sync.ts` records that every
+ *  sync frame once ended in `.catch(() => {})`, which together meant "the CRDT
+ *  layer could fail continuously while the app showed a clean console and
+ *  stale data". A ratchet that cannot measure the spelling a bug came back in
+ *  is not measuring the rule. */
+const SILENT_HANDLER =
+  /\.(?:catch|then)\s*\(\s*(?:[A-Za-z_$][\w$]*\s*,\s*)?(?:\(\s*[\w$]*\s*\)|[\w$]+)\s*=>\s*\{([^{}]*)\}\s*\)/g;
+
 /** The acknowledgement marker, matched the way graph-validator matches its
  *  own: `aio-ok` followed by a reason. A bare `aio-ok` with nothing after it
  *  is not an acknowledgement, it is a mute button. */
 const JUSTIFIED = /\baio-ok\b\s*[:\-—]\s*\S/;
 
-type Hit = { file: string; line: number };
+export type Hit = { file: string; line: number };
 
-const files = (await walk(ROOT, [])).sort();
-const unjustified: Hit[] = [];
-let justified = 0;
-
-for (const file of files) {
-  const raw = await Deno.readTextFile(file);
+/** What one file contributes to the two budgets.
+ *
+ *  Exported and pure so the gate can be tested on text instead of only on the
+ *  repo: a scanner whose blind spot is exactly the thing it exists to find has
+ *  happened here once already — the block-form regex could not see
+ *  `.catch(() => {})` at all, so 102 swallows sat outside the budget. A gate
+ *  with no test of its own is the "verify the instrument" trap wearing a
+ *  ratchet. */
+export function scanSource(
+  raw: string,
+): { blocks: number[]; handlers: number[]; justified: number } {
   // MATCH on code only. Four of the counted "silent catches" were prose — one
   // of them a comment explaining why a bare `catch {}` had been a bug — so the
   // ceiling permitted four more real ones than anybody had agreed to. `aiol`
@@ -77,59 +108,122 @@ for (const file of files) {
   // `// aio-ok:` justification lives in a comment the mask blanks. Matching on
   // masked text while reading the original is what keeps both true.
   const src = codeText(raw);
-  SILENT_CATCH.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = SILENT_CATCH.exec(src))) {
-    // The body is the capture group; locate it by its own length from the
-    // match's end rather than by the first `{` — a destructured binding
-    // (`catch ({ message })`) puts a `{` before the body.
-    const end = m.index + m[0].length - 1;
-    const body = raw.slice(end - m[1]!.length, end);
-    const code = body
-      .replace(/\/\*[\s\S]*?\*\//g, "")
-      .replace(/\/\/[^\n]*/g, "")
-      .trim();
-    if (code !== "") continue; // it handles something
-    if (JUSTIFIED.test(body)) {
-      justified++;
-      continue;
+  const blocks: number[] = [];
+  const handlers: number[] = [];
+  let justified = 0;
+  for (
+    const [re, into] of [
+      [SILENT_CATCH, blocks],
+      [SILENT_HANDLER, handlers],
+    ] as [RegExp, number[]][]
+  ) {
+    re.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(src))) {
+      // The body is the capture group; locate it by its own length from the
+      // last `}` of the match rather than by the first `{` — a destructured
+      // binding (`catch ({ message })`) puts a `{` before the body, and the
+      // handler form ends in `})` rather than `}`.
+      const end = m.index + m[0].lastIndexOf("}");
+      const body = raw.slice(end - m[1]!.length, end);
+      const code = body
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/\/\/[^\n]*/g, "")
+        .trim();
+      if (code !== "") continue; // it handles something
+      if (JUSTIFIED.test(body)) {
+        justified++;
+        continue;
+      }
+      into.push(src.slice(0, m.index).split("\n").length);
     }
-    unjustified.push({
-      file: file.slice(ROOT.length),
-      line: src.slice(0, m.index).split("\n").length,
-    });
   }
+  return { blocks, handlers, justified };
 }
 
-const n = unjustified.length;
+const files = import.meta.main ? (await walk(ROOT, [])).sort() : [];
+const unjustified: Hit[] = [];
+const unjustifiedHandlers: Hit[] = [];
+let justified = 0;
+
+for (const file of files) {
+  const raw = await Deno.readTextFile(file);
+  const r = scanSource(raw);
+  const rel = file.slice(ROOT.length);
+  for (const line of r.blocks) unjustified.push({ file: rel, line });
+  for (const line of r.handlers) unjustifiedHandlers.push({ file: rel, line });
+  justified += r.justified;
+}
+
 const verbose = Deno.args.includes("--list");
-if (verbose) {
-  for (const h of unjustified) console.log(`  src/${h.file}:${h.line}`);
+
+/** Report one budget. Both directions are a failure: over the ceiling is a
+ *  regression, under it is ground gained that must be nailed down, because a
+ *  ratchet allowed to sit above the real count is just a ceiling, and a
+ *  ceiling rots. */
+function report(
+  hits: Hit[],
+  ceiling: number,
+  what: string,
+  name: string,
+  fix: string,
+): boolean {
+  const n = hits.length;
+  if (verbose) {
+    for (const h of hits) {
+      console.log(`  src/${h.file}:${h.line}`);
+    }
+  }
+  if (n > ceiling) {
+    console.error(
+      `✗ ${n} unjustified ${what} in src/ (ceiling ${ceiling}).\n` +
+        fix +
+        `  Run with --list to see all of them. Recently added, most likely:\n` +
+        hits.slice(-(n - ceiling)).map((h) => `      src/${h.file}:${h.line}`)
+          .join("\n"),
+    );
+    return false;
+  }
+  if (n < ceiling) {
+    console.error(
+      `✗ ${n} unjustified ${what} — below the ceiling of ${ceiling}.\n` +
+        `  Good. Lower ${name} to ${n} in scripts/check-silent-catch.ts so\n` +
+        `  the ground you just gained cannot be given back.`,
+    );
+    return false;
+  }
+  return true;
 }
 
-if (n > CEILING) {
-  const fresh = unjustified.slice(-(n - CEILING));
-  console.error(
-    `✗ ${n} unjustified silent catch blocks in src/ (ceiling ${CEILING}).\n` +
-      `  A catch that swallows an error must say why it is allowed to:\n` +
+if (import.meta.main) {
+  const blocksOk = report(
+    unjustified,
+    CEILING,
+    "silent catch blocks",
+    "CEILING",
+    `  A catch that swallows an error must say why it is allowed to:\n` +
       `      } catch {\n` +
       `        // aio-ok: <why this failure is uninteresting here>\n` +
       `      }\n` +
-      `  …or make the failure loud (log it with a level, or let it throw).\n` +
-      `  Run with --list to see all of them. Recently added, most likely:\n` +
-      fresh.map((h) => `      src/${h.file}:${h.line}`).join("\n"),
+      `  …or make the failure loud (log it with a level, or let it throw).\n`,
   );
-  Deno.exit(1);
-}
-if (n < CEILING) {
-  console.error(
-    `✗ ${n} unjustified silent catch blocks — below the ceiling of ${CEILING}.\n` +
-      `  Good. Lower CEILING to ${n} in scripts/check-silent-catch.ts so the\n` +
-      `  ground you just gained cannot be given back.`,
+  const handlersOk = report(
+    unjustifiedHandlers,
+    HANDLER_CEILING,
+    "silent promise handlers",
+    "HANDLER_CEILING",
+    `  \`.catch(() => {})\` swallows exactly as much as \`catch {}\` does:\n` +
+      `      .catch(() => {\n` +
+      `        // aio-ok: <why this failure is uninteresting here>\n` +
+      `      })\n` +
+      `  …or make the failure loud (log it with a level, or let it reject).\n`,
   );
-  Deno.exit(1);
+  if (!blocksOk || !handlersOk) Deno.exit(1);
+  console.log(
+    `✓ silent catches: ${unjustified.length} block${
+      unjustified.length === 1 ? "" : "s"
+    } (ceiling ${CEILING}) + ${unjustifiedHandlers.length} promise handler${
+      unjustifiedHandlers.length === 1 ? "" : "s"
+    } (ceiling ${HANDLER_CEILING}), ${justified} justified with \`aio-ok:\``,
+  );
 }
-console.log(
-  `✓ silent catches: ${n} unjustified (ceiling ${CEILING}), ` +
-    `${justified} justified with \`aio-ok:\``,
-);

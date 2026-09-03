@@ -22,9 +22,10 @@ import { freePort } from "../src/testing/server-test.ts";
 import { resolveSocketPath } from "../src/server/paths.ts";
 import { removePid, writePid } from "../src/am/am-utils.ts";
 import { trojanGet } from "../src/am/am-http.ts";
+import { tempDir } from "../src/testing/temp-dir.ts";
 
 async function socketDir(prefix: string): Promise<string> {
-  return join(await Deno.makeTempDir({ prefix }), "s.sock");
+  return join(await tempDir(prefix), "s.sock");
 }
 
 /** A stand-in for the server's `control` — records what it was handed, so the
@@ -328,7 +329,7 @@ Deno.test("uds control: a ctlr for a different id is skipped, not mistaken for o
 // plane's answer would depend on which wire you asked over — which is the one
 // property this design exists to guarantee it cannot.
 Deno.test("uds control: `am` reads real trojan state over the socket", async () => {
-  const dir = await Deno.makeTempDir({ prefix: "aio-ctl-e2e-" });
+  const dir = await tempDir("aio-ctl-e2e-");
   const socketPath = join(dir, "s.sock");
   const appState = { count: 7, note: "over the socket" };
   const server = createServer({
@@ -396,7 +397,7 @@ Deno.test("uds control: `am` reads real trojan state over the socket", async () 
 // call. Without this, adding the socket would have made `am` less reliable
 // than it was with one wire, which is not a trade worth making for a default.
 Deno.test("am: a dead socket falls through to the TCP wire, not to an error", async () => {
-  const dir = await Deno.makeTempDir({ prefix: "aio-ctl-fallback-" });
+  const dir = await tempDir("aio-ctl-fallback-");
   const appId = `ctl-fb-${Deno.pid}`;
   const port = await freePort();
   const appState = { count: 42 };

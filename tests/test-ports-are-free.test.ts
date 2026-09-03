@@ -16,19 +16,35 @@ const PORT_CONST = /^\s*const\s+\w*(?<![A-Za-z])PORT\w*\s*=\s*(.+?);/gm;
 // an env/config lookup. A bare literal or a pid formula is the bug.
 const OK = /freePort\(\)|PORT|Deno\.env|env\[|opts\.|config\./;
 
+/** Every `*.test.ts` under `dir`, RECURSIVELY. The guard used to read only
+ *  the top level, so `tests/sync/integration/multi-client-ws.test.ts` kept a
+ *  literal `const PORT = 8971` for a year — the exact class it exists to
+ *  refuse — while reporting the suite clean. */
+async function* testFiles(dir: string): AsyncGenerator<string> {
+  for await (const entry of Deno.readDir(dir)) {
+    const path = `${dir}/${entry.name}`;
+    if (entry.isDirectory) yield* testFiles(path);
+    else if (entry.isFile && entry.name.endsWith(".test.ts")) yield path;
+  }
+}
+
 Deno.test("tests: every port constant comes from freePort()", async () => {
   const offenders: string[] = [];
-  for await (const entry of Deno.readDir("tests")) {
-    if (!entry.isFile || !entry.name.endsWith(".test.ts")) continue;
-    if (entry.name === "test-ports-are-free.test.ts") continue;
-    const src = await Deno.readTextFile(`tests/${entry.name}`);
+  let seenNested = false;
+  for await (const path of testFiles("tests")) {
+    if (path === "tests/test-ports-are-free.test.ts") continue;
+    if (path.split("/").length > 2) seenNested = true;
+    const src = await Deno.readTextFile(path);
     for (const m of src.matchAll(PORT_CONST)) {
       const rhs = m[1]!;
       if (/Deno\.pid/.test(rhs) || !OK.test(rhs)) {
-        offenders.push(`${entry.name}: ${m[0]!.trim()}`);
+        offenders.push(`${path}: ${m[0]!.trim()}`);
       }
     }
   }
+  // The walk must actually descend — a guard that quietly stops scanning is
+  // the failure mode this test was found in.
+  assertEquals(seenNested, true, "the scan reached tests/**/ subdirectories");
   assertEquals(
     offenders,
     [],

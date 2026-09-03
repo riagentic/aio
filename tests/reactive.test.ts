@@ -708,13 +708,13 @@ testCell(
 
 // ── Sync methods returning schedule effects ──────────────────────────
 
-Deno.test("cell(methods): sync method returns schedule effect", () => {
+Deno.test("cell(methods): sync method $do's a schedule effect", () => {
   const timer = cell("timer", {
     state: { count: 0 },
     methods: {
       start(s) {
         s.count++;
-        return schedule.every("tick", 1000, { type: "Timer:Tick" });
+        s.$do(schedule.every("tick", 1000, { type: "Timer:Tick" }));
       },
       tick(s) {
         s.count++;
@@ -736,16 +736,16 @@ Deno.test("cell(methods): sync method returns schedule effect", () => {
   assertEquals((result.effects[0] as any).id, "tick");
 });
 
-Deno.test("cell(methods): sync method returns array of schedule effects", () => {
+Deno.test("cell(methods): sync method $do's several schedule effects", () => {
   const multi = cell("multi", {
     state: { v: 0 },
     methods: {
       setup(s) {
         s.v = 1;
-        return [
+        s.$do(
           schedule.every("a", 500, { type: "Multi:A" }),
           schedule.every("b", 1000, { type: "Multi:B" }),
-        ];
+        );
       },
     },
   });

@@ -1,6 +1,7 @@
 // skv-sqlite.ts — the SkvInstance interface on SQLite (perfect-aio D4:
 // SQLite-only persistence). Same surface Deno.Kv's wrapper had — callers
-// unchanged — backed by one table in the app's single data.db. Kills the
+// unchanged — backed by one table (`aio_kv`) in the app's single state.db
+// (`<data>/state.db`; `dbPath` relocates it). Kills the
 // unstable-KV flag and KV's 64KiB value limit (already hit in the field),
 // and gives `am sql` visibility into persisted state.
 //

@@ -34,6 +34,7 @@ import { meetsMinDeno, MIN_DENO } from "../server/deno-version.ts";
 import { parseDeclaredVersion } from "../server/app-version.ts";
 import { removalMessage, removalsInSource } from "../state/removals.ts";
 import { count } from "../diagnostics/fmt.ts";
+import { GIT_NO_PROMPT_ENV } from "../server/git-noninteractive.ts";
 
 // fixed/would-fix/ok = safe auto-repairs; advise = a suggestion we DON'T apply
 // (it touches committed source or app logic); manual = a hard blocker am fix
@@ -759,6 +760,8 @@ export async function cmdFix(
         cwd: dir,
         stdout: "piped",
         stderr: "null",
+        stdin: "null",
+        env: GIT_NO_PROMPT_ENV,
       }).output();
       uninit = o.code === 0 &&
         new TextDecoder().decode(o.stdout).split("\n").some((l) =>

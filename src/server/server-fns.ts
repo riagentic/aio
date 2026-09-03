@@ -21,6 +21,7 @@ import type { AioUser } from "./aio-types.ts";
 import type { Access } from "../state/cell-types.ts";
 import { serializeReturn } from "../protocol/return-value.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import type { AioErrorCode } from "../diagnostics/error.ts";
 import type { Remote } from "../protocol/protocol-types.ts";
 
 // deno-lint-ignore no-explicit-any
@@ -113,16 +114,30 @@ export async function invokeServerFn(
   name: string,
   args: unknown[],
   user?: AioUser,
-): Promise<{ ok: true; value: unknown } | { ok: false; error: string }> {
+): Promise<
+  { ok: true; value: unknown } | {
+    ok: false;
+    error: string;
+    /** {@linkcode AioErrorCode} when this failure has a classification — it
+     *  is spread straight into the `sfnr` frame, so the caller reads it with
+     *  `errorCode(err)`. Absent when the fn's own body threw: that error is
+     *  the APP's, and inventing a code for it would be a guess. */
+    code?: string;
+  }
+> {
   if (!serverFnAllowed(ns, user, name, args)) {
     log.warn(
       `[aio] auth: serverFn "${ns}.${name}" denied for ${
         user ? `user=${user.id} role=${user.role}` : "anonymous client"
       }`,
     );
+    // A DENIAL is not an app error. Without the code the caller had to match
+    // the wording "— access denied" to tell "sign in" from "your code threw",
+    // and the semver policy explicitly does not freeze wording.
     return {
       ok: false,
       error: `serverFn "${ns}.${name}" — access denied`,
+      code: "ACCESS_DENIED" satisfies AioErrorCode,
     };
   }
   const fns = _registry.get(ns);

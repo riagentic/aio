@@ -114,3 +114,28 @@ export function explainServerOnlyImport(
     `  • "${spec}" resolves in the browser build to the subset that CAN run ` +
     `there, which is why the file resolved and only the name did not.`;
 }
+
+/** Is `spec` one of aio's OWN entries? Broader than {@link SERVER_ONLY_SPECS}
+ *  on purpose: that set is the hard, named subset, while `aio/extras` and
+ *  `aio/sync` are deliberately outside it (a bundler may tree-shake an app
+ *  down to the part that works, and turning a working build into a refusal is
+ *  not a fix). Both families still share ONE fact — the browser import map
+ *  omits them and no npm package exists — so both must get the same truthful
+ *  advice when a browser file cannot resolve one. They did not: `aio/extras`
+ *  fell through to "add `npm:aio/extras` to deno.json", the exact advice this
+ *  module's header calls actively harmful. */
+export function isAioOwnSpec(spec: string): boolean {
+  return spec === "aio" || spec.startsWith("aio/");
+}
+
+/** What to tell someone whose browser file imports an `aio/*` entry the
+ *  browser import map does not carry. ONE wording, three call sites (the graph
+ *  validator, the boot lint, the browser overlay). */
+export function aioOwnSpecAdvice(spec: string): string {
+  return `"${spec}" is one of aio's OWN entries, and the browser import map ` +
+    `omits it deliberately (it pulls server code — the filesystem, workers, ` +
+    `SQLite, a terminal). This is NOT a missing dependency: there is no ` +
+    `\`npm:${spec}\` package, and editing deno.json will not help. Use it ` +
+    `from a cell METHOD (\`const { … } = await import("${spec}")\` — methods ` +
+    `run on the server), or from a *.server.ts module imported lazily.`;
+}

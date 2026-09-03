@@ -10,12 +10,8 @@ import type { ComponentFn } from "../src/air/vdom.ts";
 import { useLocal } from "../src/browser-air.ts";
 import { cell } from "../src/state/cell-create.ts";
 import { testUI } from "../src/testing/ui-test.ts";
-
-// Coverage profiles from spawned deno processes go to a throwaway temp dir —
-// never into the repo (an empty DENO_COVERAGE_DIR means "cwd"), never into
-// the parent's coverage profile.
-const _childCovDir = Deno.env.get("DENO_COVERAGE_DIR") ??
-  Deno.makeTempDirSync({ prefix: "aio-child-cov-" });
+import { childCoverageDir } from "../src/testing/temp-dir.ts";
+const _childCovDir = childCoverageDir();
 
 // ── Fixtures ──────────────────────────────────────────────────────────
 

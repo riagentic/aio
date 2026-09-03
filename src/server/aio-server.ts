@@ -9,7 +9,7 @@ import { createServer } from "./server.ts";
 import { parseCli, VERSION } from "./aio-cli.ts";
 import type { ServerHandle } from "./server-types.ts";
 import type { UiTheme } from "./aio-types.ts";
-import { _getCallTimeouts, registerCall } from "../state/cell-impl.ts";
+import { _getCallTimeouts, dispatchTracked } from "../state/cell-impl.ts";
 import { createUDSListener, type UDSHandle } from "./uds.ts";
 import { flushAllUrgent } from "./broadcast-coalescer.ts";
 import { appDirs } from "./app-dirs.ts";
@@ -30,6 +30,7 @@ import {
 } from "../diagnostics/degraded.ts";
 import { cellAccessAllowed } from "./server-auth.ts";
 import type { Access } from "../state/cell-types.ts";
+import { createAioError } from "../diagnostics/error.ts";
 
 /** The slice of `AioConfig` the transport layer reads — HOP 2 of the config
  *  bridge (`aio.run({…})` → `setupTransport`).
@@ -167,7 +168,9 @@ export interface ServerSetupDeps<S, A> {
   // UDS handle ref — assigned inside setupTransport
   udsHandle: { current: UDSHandle | null };
   // Persistence
-  schedulePersist: () => void;
+  /** Close the debounce window now; rejects when the cycle reported a
+   *  failure. Behind `am persist` / `POST /__aio/trojan/persist`. */
+  flushPersist: () => Promise<void>;
   shouldPersist: boolean;
   // Schedule + DB
   scheduleManager: { active: () => string[] };
@@ -323,7 +326,6 @@ export async function setupTransport<S, A>(
     syncBroadcastRef,
     shutdown,
     udsHandle: udsRef,
-    schedulePersist,
     shouldPersist,
     scheduleManager,
     asyncDb,
@@ -431,13 +433,6 @@ export async function setupTransport<S, A>(
   const canServeFromDisk = !!electronDistDir;
   const localElectronUds = transport === "uds" && useElectron && !expose;
   const routeCount = config.routes ? Object.keys(config.routes).length : 0;
-  if (parseCli().zeroPort) {
-    // Accepted, never an error: scripts pass it. It was the dev opt-in before
-    // zero became the default; the opt-OUT is a named port.
-    log.info(
-      "--zero-port: already the default for a local electron app (the flag is a no-op; --port=N keeps a TCP listener)",
-    );
-  }
   const zp = resolveZeroPort({
     prod,
     localElectronUds,
@@ -512,7 +507,13 @@ export async function setupTransport<S, A>(
           // an error frame; pre-caught so a fire-and-forget action without a
           // cid cannot become an unhandled rejection.
           const denial = Promise.reject(
-            new Error(
+            // An AioError, not a bare Error: `ACCESS_DENIED` is what crosses
+            // the wire beside the message (envelope's `errorFields`) and what
+            // the caller reads back with `errorCode(err)`. A bare Error left
+            // "the gate refused you" and "your method threw" identical to
+            // every client that did not regex the sentence.
+            createAioError(
+              "ACCESS_DENIED",
               `cell "${cellName}.${method}" — access denied` +
                 // Named HERE, at the moment it is needed. The operator hitting
                 // this from `am` is usually not being refused by mistake:
@@ -524,6 +525,7 @@ export async function setupTransport<S, A>(
                   ? ""
                   : `. From the CLI in dev: \`am dispatch ${cellName}:${method} ` +
                     `--as-server\` (loopback-only, logged, refused in prod)`),
+              { cellName, actionType: type },
             ),
           );
           denial.catch(() => {});
@@ -540,6 +542,28 @@ export async function setupTransport<S, A>(
     // (browser ack / trojan / CLI) resolves with the value — not the early
     // reduce result. SYNC/void methods have no `_callId`; `dispatch()` already
     // resolves with their value (or undefined), so return it directly.
+    // Minted HERE, for every door, because this is the only place that knows
+    // both which methods are async and that the action came off a network.
+    //
+    // It used to be the CLIENT's field: the trojan door stamped one when it was
+    // absent, the WS and UDS doors never did, and `ActionPayload` — the
+    // declared client-action wire type — has never mentioned it. So a client
+    // sending exactly the documented `{type, payload, cid}` frame got
+    // `{ok:true, value:undefined}` for an async method that THREW: 98 of 100
+    // concurrent transactional calls had their write-sets aborted with zero
+    // callers told, while the server logged "the caller that awaited it was
+    // rejected with this error". aio's own clients set it and were fine, which
+    // is exactly why it survived to the edge of a frozen wire.
+    const asyncMethods = deps.cellAsyncMethods ?? {};
+    const cellId = type.includes(":") ? type.slice(0, type.indexOf(":")) : "";
+    const methodName = type.slice(cellId.length + 1);
+    if (
+      cellId && (asyncMethods[cellId] ?? []).includes(methodName)
+    ) {
+      const pl = (tagged as { payload?: Record<string, unknown> }).payload;
+      const stamped = { ...(pl ?? {}), _callId: crypto.randomUUID() };
+      (tagged as Record<string, unknown>).payload = stamped;
+    }
     const callId = (tagged as { payload?: { _callId?: string } }).payload
       ?._callId;
     // Interactive priority: a client action's patches flush IMMEDIATELY
@@ -550,8 +574,18 @@ export async function setupTransport<S, A>(
     if (typeof callId === "string" && callId.length > 0) {
       // The action type IS "cell:method" — so a network-dispatched call picks
       // up the same per-method ceiling a direct call does.
-      const done = registerCall(callId, (tagged as { type?: string }).type);
-      void Promise.resolve(dispatch(tagged as A)).catch(() => {});
+      // `dispatchTracked`, not `registerCall` + a swallowed dispatch: a
+      // refusal at the dispatch door (time travel paused, closing) is the
+      // dispatch promise's rejection and NOTHING else — the method never ran,
+      // so the executor that settles the call never will. Swallowing it left
+      // an async caller waiting the full ceiling to be told the method "may
+      // still be running"; a sync caller heard the refusal instantly.
+      const done = dispatchTracked(
+        dispatch,
+        tagged as A,
+        callId,
+        (tagged as { type?: string }).type,
+      );
       queueMicrotask(flushAllUrgent);
       void done.then(
         () => flushAllUrgent(),
@@ -671,7 +705,13 @@ export async function setupTransport<S, A>(
       // process is not ours to replace.
       ...(prod || config.libraryMode ? {} : {
         onCellChange: (path: string) => {
-          void restartForCellChange(path, shutdown);
+          // The relaunched app binds the SAME port (dev-restart.ts,
+          // `supervisorEnv`): read when the restart fires — `livePort` is
+          // known only after the listener answered, below. No TCP port
+          // (zero-port electron) carries nothing, so the relaunch names none.
+          void restartForCellChange(path, shutdown, {
+            port: () => (zeroPort ? undefined : livePort),
+          });
         },
       }),
       getHealth: () => {
@@ -753,7 +793,13 @@ export async function setupTransport<S, A>(
         ...(deps.getTimeline ? { getTimeline: deps.getTimeline } : {}),
         ...(deps.migrations ? { getMigrations: () => deps.migrations } : {}),
         ...(tt ? { getTTHistory: tt.getTTBroadcast } : {}),
-        ...(shouldPersist ? { forcePersist: () => schedulePersist() } : {}),
+        // "Force persist" means the write is ON DISK when the reply comes
+        // back. This was `schedulePersist()` — it armed the debounce timer and
+        // returned, so `am persist` printed "persisted" with nothing written,
+        // and a SIGKILL inside the window lost a write the operator had just
+        // been told was safe. Now the flush itself, awaited, and a refused
+        // write rejects (the route turns it into a 500).
+        ...(shouldPersist ? { forcePersist: () => deps.flushPersist() } : {}),
         ...(asyncDb
           ? {
             sqlQuery: async (sql: string) => (await asyncDb!.query(sql)).rows,

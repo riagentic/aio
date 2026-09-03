@@ -6,11 +6,12 @@ import {
 import { log } from "../diagnostics/logger-api.ts";
 import { teachableError } from "../diagnostics/error.ts";
 import { nearestOf } from "../state/cell-helpers.ts";
+import { removalMessage, removalOf } from "../state/removals.ts";
 import { findFreePort } from "./paths.ts";
 import { BUILD_BOOL_FLAGS, BUILD_VALUE_FLAGS } from "../build/build-flags.ts";
 
 /** Framework version — printed by --version, checked in tests */
-export const VERSION = "1.0.0-alpha75";
+export const VERSION = "1.0.0-alpha76";
 
 /** What `--version` prints: what this artifact IS, and what it was built with.
  *
@@ -59,12 +60,11 @@ export type CliFlags = {
   cert?: string;
   key?: string;
   isolate?: string[];
-  transport?: "uds" | "ws";
-  /** `--zero-port`: accepted as a NO-OP. Zero TCP ports is the default for a
-   *  local electron app on a Unix socket (dev and prod); the flag was the
-   *  dev opt-in before that and scripts still pass it, so it prints one info
-   *  line and changes nothing. The opt-OUT is a named port (`--port=N`). */
-  zeroPort?: boolean;
+  /** `--transport=auto` is the same word config accepts (`ENUM_VALUES.
+   *  transport`) — one vocabulary, so the flag refuses nothing the key
+   *  takes. `resolveTransport` (aio-server.ts) is the one decider for what
+   *  `auto` means. */
+  transport?: "uds" | "ws" | "auto";
   /** `--open`: after boot, hand the app's URL to the desktop's browser.
    *
    *  OFF by default, and that is the whole point. A tab handed to an
@@ -73,7 +73,11 @@ export type CliFlags = {
    *  tabs, each having stolen focus as it appeared. Printing the URL costs a
    *  click and loses nothing. */
   open?: boolean;
-  killExisting?: boolean;
+  /** `--takeover`: kill the running instance and take its lock. Spelled
+   *  `killExisting` on both surfaces until alpha76 — one decision needs one
+   *  word, and a compiled service binary that can only write config was
+   *  forced to write the deprecated one. */
+  takeover?: boolean;
   /** Explicit bind address for the HTTP/WS listener — overrides the
    *  expose-derived default (0.0.0.0 exposed, 127.0.0.1 not). */
   host?: string;
@@ -89,21 +93,25 @@ export type CliFlags = {
   cdp?: number | true;
 };
 
-// Deprecation hints fire ONCE per process — parseCli is re-invoked several
-// times in one boot, and the same line five times reads as an error loop.
-let _hintedBareServerUrl = false;
-
-// The other accepted aliases warned about NOTHING. `--kill-existing` and
-// `--backup-logs` were documented as "kept so existing scripts don't break",
+// The four accepted aliases (`--kill-existing`, bare `--server-url`,
+// `--zero-port`, `--backup-logs`) were "kept so existing scripts don't break",
 // which is only half a deprecation: a script keeps working AND never learns
 // there is a current spelling, so the old one outlives every release that was
-// supposed to retire it. `--server-url` already had this hint; these are the
-// same rule, on the same one-per-process guard.
-const _hintedAliases = new Set<string>();
-function hintAlias(spelling: string, msg: string): void {
-  if (_hintedAliases.has(spelling)) return;
-  _hintedAliases.add(spelling);
-  log.warn(msg);
+// supposed to retire it. Two of them warned; two said nothing at all, and
+// `--zero-port`'s entire documented behaviour was "No-op (accepted)".
+//
+// Beta freezes the surface, so alpha76 retires all four through the registry
+// (src/state/removals.ts): the flag is REFUSED, and the refusal names the
+// current spelling and the `am pin` escape hatch. A flag is refused, never
+// degraded — argv is read before anything boots, so there is no half-started
+// app to protect, and an operator who typed the old word at 2am needs the new
+// one, not a warning that scrolls past.
+function refuseFlag(key: string): never {
+  const r = removalOf(key);
+  throw teachableError(
+    removalMessage(r),
+    r.now ? `spell it \`${r.now}\`` : r.hint,
+  );
 }
 
 // …and so does every other warning this function emits, for the same reason.
@@ -173,8 +181,6 @@ export function declareAppFlags(names: readonly string[] | undefined): void {
 export function _resetParsedCli(): void {
   _parsedDefault = null;
   _appFlags = [];
-  _hintedBareServerUrl = false;
-  _hintedAliases.clear();
   _cdpPort = undefined;
 }
 
@@ -238,6 +244,17 @@ function badValue(
   );
 }
 
+/** A whole number spelled in decimal digits, or NaN.
+ *
+ *  `--port=0x1F90`, `--port= 3000`, `--port=3000.0` and `--port=+3000` all
+ *  coerced to a port under `Number()` — four spellings nobody types on
+ *  purpose, each accepted without a word. A port or a pixel count is decimal
+ *  digits and nothing else; anything else is a value the operator did not
+ *  mean, and the same `badValue` names it. */
+function intArg(raw: string): number {
+  return /^\d+$/.test(raw) ? Number(raw) : NaN;
+}
+
 function _parseCliUncached(args: readonly string[]): CliFlags {
   const r: CliFlags = { verbose: false };
   // aio's own flags plus whatever the app declared — one vocabulary, so a
@@ -245,8 +262,28 @@ function _parseCliUncached(args: readonly string[]): CliFlags {
   const known = [...AIO_RUNTIME_FLAG_SPECS, ..._appFlags];
   for (const arg of args) {
     if (arg === "--") break; // everything after `--` belongs to the app
+    // ONE rule for an empty value. `--host=` was refused while `--title=`,
+    // `--db-path=` and `--port=` (`Number("")` is 0 — "pick a port") slid
+    // through as their defaults. A flag typed with `=` and nothing after it
+    // is a shell expansion that came up empty (`--port=$PORT`), and the
+    // operator needs to hear that, not boot on a value they did not choose.
+    // Checked against the value-flag vocabulary, so an app's own `--user=`
+    // gets the same refusal as aio's.
+    // …with one exception, and it earns it: `--server-url=` typed with nothing
+    // after it is almost always someone reaching for the BARE spelling, which
+    // was retired in alpha76 in favour of `--connect`. Its own branch below
+    // says that; this generic answer would bury it under "pass a value".
+    if (
+      arg.endsWith("=") && known.includes(arg) && arg !== "--server-url="
+    ) {
+      throw badValue(
+        arg.slice(0, -1),
+        "",
+        `a value: ${arg}<value> (run with --help for what it accepts)`,
+      );
+    }
     if (arg.startsWith("--port=")) {
-      const n = Number(arg.slice(7));
+      const n = intArg(arg.slice(7));
       // `--port=0` is the universal spelling for "let the OS pick one", and it
       // is what aio does by default — so it is ACCEPTED and leaves `port`
       // unset, not refused. Scripts and tests pass it deliberately; refusing it
@@ -293,39 +330,27 @@ function _parseCliUncached(args: readonly string[]): CliFlags {
     // reads like it needs a value and does something else without one. The
     // VALUED form `--server-url=X` keeps its name (it really is a server URL).
     else if (arg === "--connect") r.serverUrl = "";
-    else if (arg === "--server-url") {
-      // One-time: parseCli runs several times in one boot (help, boot,
-      // electron child probes) and the hint printed once per parse.
-      if (!_hintedBareServerUrl) {
-        _hintedBareServerUrl = true;
-        log.warn(
-          "bare --server-url is now --connect (the old spelling still works; " +
-            "--server-url=<url> is unchanged)",
+    else if (arg === "--server-url") refuseFlag("--server-url");
+    else if (arg.startsWith("--server-url=")) {
+      // Empty means "the connect page", and that has a spelling: --connect.
+      // `--server-url=$URL` with an unset URL should not quietly become it.
+      if (arg.length === 13) {
+        throw badValue(
+          "--server-url",
+          "",
+          "a server URL, e.g. --server-url=https://192.168.1.20:8443 — or " +
+            "--connect for the connect page",
         );
       }
-      r.serverUrl = "";
-    } else if (arg.startsWith("--server-url=")) r.serverUrl = arg.slice(13);
-    // `--takeover` is the preferred spelling; `--kill-existing` stays as the
-    // accepted alias so existing scripts don't break.
-    else if (arg === "--kill-existing" || arg === "--takeover") {
-      if (arg === "--kill-existing") {
-        hintAlias(
-          arg,
-          "--kill-existing is now --takeover (the old spelling still works)",
-        );
-      }
-      r.killExisting = true;
-    } else if (arg.startsWith("--db-path=")) r.dbPath = arg.slice(10);
-    // `--backup-logs` is now the DEFAULT, kept so existing scripts still parse;
-    // `--no-backup-logs` is the one that changes anything (wipe on start).
-    else if (arg === "--backup-logs") {
-      hintAlias(
-        arg,
-        "--backup-logs is the DEFAULT now and does nothing (the flag still " +
-          "parses); --no-backup-logs is the one that changes anything",
-      );
-      r.backupLogs = true;
-    } else if (arg === "--no-backup-logs") r.backupLogs = false;
+      r.serverUrl = arg.slice(13);
+    } else if (arg === "--takeover") r.takeover = true;
+    else if (arg === "--kill-existing") refuseFlag("--kill-existing");
+    else if (arg.startsWith("--db-path=")) r.dbPath = arg.slice(10);
+    // Keeping previous logs is the DEFAULT; `--no-backup-logs` is the one that
+    // changes anything (wipe on start). `--backup-logs` said so and did
+    // nothing — retired in alpha76.
+    else if (arg === "--backup-logs") refuseFlag("--backup-logs");
+    else if (arg === "--no-backup-logs") r.backupLogs = false;
     else if (arg.startsWith("--log-budget=")) {
       // Bytes, or a `<n>MB`/`<n>GB` suffix — a bare number in a flag about disk
       // is ambiguous enough that both spellings have to work.
@@ -356,7 +381,7 @@ function _parseCliUncached(args: readonly string[]): CliFlags {
       // `--width=1200px` used to match no branch at all: no assignment, no
       // warning, and an 800px window. A unit suffix is the obvious thing to
       // type, so it is the obvious thing to refuse BY NAME.
-      const n = Number(arg.slice(8));
+      const n = intArg(arg.slice(8));
       if (Number.isInteger(n) && n > 0) r.width = n;
       else {
         throw badValue(
@@ -366,7 +391,7 @@ function _parseCliUncached(args: readonly string[]): CliFlags {
         );
       }
     } else if (arg.startsWith("--height=")) {
-      const n = Number(arg.slice(9));
+      const n = intArg(arg.slice(9));
       if (Number.isInteger(n) && n > 0) r.height = n;
       else {
         throw badValue(
@@ -376,25 +401,39 @@ function _parseCliUncached(args: readonly string[]): CliFlags {
         );
       }
     } else if (arg.startsWith("--isolate=")) {
-      r.isolate = arg.slice(10).split(",").map((s) => s.trim()).filter(Boolean);
-    } else if (arg === "--zero-port") {
-      r.zeroPort = true;
-    } else if (arg === "--open") {
+      const names = arg.slice(10).split(",").map((s) => s.trim()).filter(
+        Boolean,
+      );
+      // `--isolate=,` (or `, ,`) named nothing after the commas were removed,
+      // and an empty list means "no isolate at all" downstream — the app would
+      // run EVERY cell for a flag whose whole purpose is to run fewer. The
+      // same refusal an empty value gets.
+      if (names.length === 0) {
+        throw badValue(
+          "--isolate",
+          arg.slice(10),
+          "one or more cell ids: --isolate=todo,notes",
+        );
+      }
+      r.isolate = names;
+    } else if (arg === "--zero-port") refuseFlag("--zero-port");
+    else if (arg === "--open") {
       r.open = true;
     } else if (arg.startsWith("--transport=")) {
       const v = arg.slice(12);
-      if (v === "uds" || v === "ws") r.transport = v;
+      if (v === "uds" || v === "ws" || v === "auto") r.transport = v;
       else {
         throw badValue(
           "--transport",
           v,
-          "'uds' (the local socket) or 'ws'",
-          nearestOf(v, ["uds", "ws"]),
+          "'uds' (the local socket), 'ws', or 'auto' (the default: uds for a " +
+            "local electron app)",
+          nearestOf(v, ["uds", "ws", "auto"]),
         );
       }
     } else if (arg === "--cdp") r.cdp = true;
     else if (arg.startsWith("--cdp=")) {
-      const n = Number(arg.slice(6));
+      const n = intArg(arg.slice(6));
       if (Number.isInteger(n) && n > 0 && n < 65536) r.cdp = n;
       else {throw badValue(
           "--cdp",
@@ -504,13 +543,15 @@ Flags:
                    (or via $AIO_PORT / aio.run({ port }))
   --no-persist     Disable persistence (SQLite <data>/state.db)
   --client=X       Client mode: electron|browser|cli|server-only (default: ${defaultClient})
-  --keep-server    Server survives Electron close (electron only)
+  --keep-server    Server survives Electron close (electron only — refused
+                   for any other client, as are --cdp, --width, --height,
+                   --connect and --server-url=)
   --title=X        Override window/page title
   --verbose        Verbose logging (actions, state, effects, WS, HTTP)
   --prod           Serve pre-built dist/app.js
   --expose         Bind 0.0.0.0 + HTTPS + generate auth token for LAN access
-  --channel=X      Follow release channel X for updates (dev|test|prod|…)
                    (also settable in code: aio.run({ expose: true }))
+  --channel=X      Follow release channel X for updates (dev|test|prod|…)
   --host=ADDR      Bind ONE address instead of the expose default (0.0.0.0
                    exposed, 127.0.0.1 not) — e.g. --host=192.168.1.20 serves
                    only that interface (also: aio.run({ host: "…" }))
@@ -521,22 +562,19 @@ Flags:
   --tls-key=PATH   TLS private key file (PEM) — used with --expose (auto-generated if omitted)
                    (--cert / --key are accepted as deprecated aliases)
   --connect        Open the Electron thin-client connect page (enter any server
-                   URL; bare --server-url is the deprecated alias)
+                   URL)
   --server-url=X   Connect to a specific remote aio server (Electron thin client)
   --takeover       Kill running instance and take over
-                   (--kill-existing is the deprecated alias)
   --db-path=PATH   Override the SQLite file (":memory:" for throwaway runs)
-  --backup-logs    Keep previous logs on restart (the default — rotate to .1, .2, …)
   --no-backup-logs Wipe the log directory on start instead of rotating
+                   (keeping previous logs — rotate to .1, .2, … — is the default)
   --log-budget=N   Byte ceiling for the log directory (e.g. 200MB, 0 = unlimited)
   --no-data-migrate Skip moving a legacy data layout into ~/.<appId>
   --width=N        Initial window width (default: 800)
   --height=N       Initial window height (default: 600)
   --transport=X    Transport: 'uds' (the local socket — a Unix socket, a named
-                   pipe on Windows) or 'ws' (default: auto — uds for a local electron app)
-  --zero-port      No-op (accepted): zero TCP ports is already the default for
-                   a local electron app — page, modules and routes go over the
-                   socket (a named pipe on Windows)
+                   pipe on Windows), 'ws', or 'auto' (the default — uds for a
+                   local electron app)
   --open           Open the app in your browser after boot (default: OFF — the
                    URL is printed; a tab aio opens is one it cannot close)
   --isolate=a,b    Only activate the specified cells
@@ -546,7 +584,82 @@ Flags:
   --version        Print version and exit
   --help           Show this help
 
-An unknown flag or an unusable value is REFUSED, not ignored — "--experse"
+An unknown "--flag" or an unusable value is REFUSED, not ignored — "--experse"
 used to bind loopback while its author believed the app was on the LAN.
+A single-dash flag ("-h", "-p 9") or a bare word ("serve") is NOT aio's: it
+passes through to the app untouched (args() from aio/cli reads it), so a
+short spelling of an aio flag does nothing — write --help, --port=9.
 Everything after a bare "--" is left for the app to parse: aio stops there.`);
+}
+
+/** The boot report's `cli:` line — what THIS process was actually started
+ *  with, as aio saw it. Pure.
+ *
+ *  It used to filter `Deno.args` for `--`-prefixed words, which told two lies
+ *  at once: a bare word or a short flag (`serve`, `-v`) vanished from the
+ *  line although it was on the command line, and an app's own arguments
+ *  after a bare `--` were listed as though aio had parsed them. The line now
+ *  prints aio's prefix verbatim and, when a `--` is present, the `--` and
+ *  what followed it — so the reader can see where aio stopped. */
+export function cliLine(args: readonly string[]): string {
+  const stop = args.indexOf("--");
+  const own = stop === -1 ? args : args.slice(0, stop);
+  const rest = stop === -1 ? [] : args.slice(stop);
+  return [...own, ...rest].join(" ");
+}
+
+/** Refuse a flag that only an Electron client can honour, when the client is
+ *  anything else. Pure; `null` means nothing to refuse.
+ *
+ *  ONE decider, in the SAME sentence shape, for the whole family. Before:
+ *  `--keep-server` on a browser client was refused — but from inside
+ *  `startLifecycle`, AFTER the success banner, as an unhandled rejection that
+ *  named the config key `keepServer` even when the operator had typed the
+ *  flag. `--connect` / `--server-url=` on `--client=browser` silently
+ *  overrode the client and started a ~100 MB Electron download. `--cdp` on a
+ *  browser app printed a `cdp` line for a port nothing would ever listen on.
+ *  `--width`/`--height` outside Electron assigned a window size no window
+ *  would read. Same mistake, four outcomes. Now: refused before anything
+ *  boots, naming what was typed (the flag when it was the flag, the config
+ *  key when it was the key) and the one client it applies to.
+ *
+ *  `serverUrl` as a config key beside `client: "browser"` is already a
+ *  `configConflicts` error; this catches the flag, and a client that came
+ *  from deno.json rather than config. */
+export function electronOnlyFlagRefusal(
+  cli: Pick<
+    CliFlags,
+    "serverUrl" | "keepServer" | "cdp" | "width" | "height"
+  >,
+  client: string,
+  config: { serverUrl?: string; keepServer?: boolean } = {},
+): Error | null {
+  if (client === "electron") return null;
+  /** [what was typed, how to undo it] — first match wins. */
+  const asked: [string, string][] = [];
+  if (cli.serverUrl !== undefined) {
+    asked.push([
+      cli.serverUrl === "" ? "--connect" : "--server-url=<url>",
+      "drop it",
+    ]);
+  } else if (config.serverUrl !== undefined) {
+    asked.push(["serverUrl (aio.run())", "remove serverUrl from aio.run()"]);
+  }
+  if (cli.keepServer) asked.push(["--keep-server", "drop it"]);
+  else if (config.keepServer) {
+    asked.push(["keepServer: true (aio.run())", "remove keepServer"]);
+  }
+  if (cli.cdp !== undefined) asked.push(["--cdp", "drop it"]);
+  if (cli.width !== undefined) asked.push(["--width", "drop it"]);
+  if (cli.height !== undefined) asked.push(["--height", "drop it"]);
+  const first = asked[0];
+  if (!first) return null;
+  const [what, undo] = first;
+  return teachableError(
+    `${what} only applies when client is electron (current client: "${client}")`,
+    `${undo}, or run with --client=electron. ` +
+      (what.startsWith("--width") || what.startsWith("--height")
+        ? `A browser page takes its size from aio.run({ ui: { width, height } }).`
+        : `A ${client} client has no Electron window for it to act on.`),
+  );
 }

@@ -18,7 +18,10 @@ import { createSyncEngine, type SyncEngine } from "../sync/sync-engine.ts";
 import { createOpBuffer, parseRetention } from "../sync/op-buffer.ts";
 import { REDUCER_FAILED, type SyncReducerResult } from "../sync/rebase.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
-import { createLocalStorageOpStorage } from "../sync/browser-storage.ts";
+import {
+  createLocalStorageOpStorage,
+  syncStoragePrefix,
+} from "../sync/browser-storage.ts";
 import type { SyncConfig } from "../sync/types.ts";
 import { resolveSyncCells } from "./sync-cells.ts";
 import { getRegisteredCells } from "../state/cell-reactive.ts";
@@ -98,7 +101,24 @@ function reportNoStorage(e: unknown): void {
   });
 }
 
-/** Stable per-browser client id (persisted — HLC identity must survive reloads). */
+/** Which app this page is — the server's `appId`, bridged in `__aioConfig`
+ *  (shell script or the `cfg` frame). `localStorage` is per ORIGIN, so this is
+ *  the ONLY thing separating two aio apps served from one host:port; without
+ *  it their offline queues are the same keys. Absent (a shell templated by a
+ *  build that predates the field, a client that never got a `cfg` frame) means
+ *  the unscoped legacy namespace — the previous behaviour, never a wrong
+ *  guess. */
+function appScope(): string | undefined {
+  const cfg = (globalThis as unknown as {
+    __aioConfig?: { appId?: unknown };
+  }).__aioConfig;
+  return typeof cfg?.appId === "string" && cfg.appId ? cfg.appId : undefined;
+}
+
+/** Stable per-browser client id (persisted — HLC identity must survive reloads).
+ *  Deliberately NOT app-scoped: the HLC node id identifies this BROWSER, and
+ *  two apps sharing it is harmless (their op logs live on different servers),
+ *  whereas scoping it would rotate every existing client's identity. */
 function clientId(): string {
   const KEY = "__aio_sync:clientId";
   try {
@@ -322,32 +342,35 @@ export function initBrowserSync(
     // ever passed it, so every drop (capacity, or a stale unconfirmed op
     // evicted under backpressure) was invisible to the app AND to the console
     //. Report it: loudly, once per op, with the cell and action.
-    buffer: createOpBuffer(createLocalStorageOpStorage(), {
-      // A cell's `sync: { offline: { retention } }` reaches the eviction rule
-      // HERE — it was normalized, typed and documented, and then read by
-      // nobody, so every cell evicted at the 4h default no matter what it
-      // asked for. Parsed per cell (the config is per cell), and a value the
-      // parser cannot read throws rather than silently becoming 4h.
-      staleAfterFor: (cell) => _retentionMsOf(cells, cell),
-      onDrop: (op, reason) => {
-        const what = `${op.cell}:${op.action}`;
-        console.error(
-          `[aio:sync] DROPPED an unsynced change (${reason}): ${what} — this ` +
-            `mutation never reached the server and is now gone. The offline ` +
-            `queue is full (or this op sat unconfirmed past its retention).`,
-        );
-        diagEmit({
-          type: "sync-op-dropped",
-          severity: "error",
-          source: "sync",
-          message: `Unsynced change dropped (${reason}): ${what}`,
-          detail: { cell: op.cell, action: op.action, opId: op.id, reason },
-          hint:
-            "The client could not reach the server long enough to flush its " +
-            "queue. Check connectivity/backpressure, or raise pendingCap.",
-        });
+    buffer: createOpBuffer(
+      createLocalStorageOpStorage(syncStoragePrefix(appScope())),
+      {
+        // A cell's `sync: { offline: { retention } }` reaches the eviction rule
+        // HERE — it was normalized, typed and documented, and then read by
+        // nobody, so every cell evicted at the 4h default no matter what it
+        // asked for. Parsed per cell (the config is per cell), and a value the
+        // parser cannot read throws rather than silently becoming 4h.
+        staleAfterFor: (cell) => _retentionMsOf(cells, cell),
+        onDrop: (op, reason) => {
+          const what = `${op.cell}:${op.action}`;
+          console.error(
+            `[aio:sync] DROPPED an unsynced change (${reason}): ${what} — this ` +
+              `mutation never reached the server and is now gone. The offline ` +
+              `queue is full (or this op sat unconfirmed past its retention).`,
+          );
+          diagEmit({
+            type: "sync-op-dropped",
+            severity: "error",
+            source: "sync",
+            message: `Unsynced change dropped (${reason}): ${what}`,
+            detail: { cell: op.cell, action: op.action, opId: op.id, reason },
+            hint:
+              "The client could not reach the server long enough to flush its " +
+              "queue. Check connectivity/backpressure, or raise pendingCap.",
+          });
+        },
       },
-    }),
+    ),
     send,
     reducer,
     getConfirmedState: () => confirmed,

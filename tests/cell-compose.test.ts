@@ -6,7 +6,6 @@ import {
 } from "@std/assert";
 import { schedule } from "../src/state/schedule.ts";
 import { until } from "../src/state/async-helpers.ts";
-import type { CellEffect } from "../src/state/cell-impl.ts";
 import { cell } from "../src/state/cell-create.ts";
 import { composeCells } from "../src/state/cell-compose.ts";
 import type { Msg } from "../src/state/cell-types.ts";
@@ -60,16 +59,14 @@ Deno.test("compose basic: reduce works and returns updated state", () => {
 });
 
 Deno.test("compose basic: reduce returns effects array", () => {
-  // Methods-style: a sync method returning a schedule effect surfaces it in
+  // Methods-style: a sync method's $do'd schedule effect surfaces in
   // composed.reduce's effects array (ported from Style-B effects, D1).
   const fx = cell("fx", {
     state: { x: 0 },
     methods: {
-      // CellEffect annotation breaks the self-referential inference cycle
-      // (documented TS trap for `return schedule.after(..., self.x.action())`).
-      go(s): CellEffect {
+      go(s) {
         s.x = 1;
-        return schedule.after("later", 1000, fx.go.action());
+        s.$do(schedule.after("later", 1000, fx.go.action()));
       },
     },
   });
@@ -536,19 +533,14 @@ Deno.test("reduce error includes cell name and method name in message", () => {
   }
 
   assertExists(caught, "should have thrown");
-  // Error message must include cell name and method name for DX
-  const msg = caught!.message;
-  assertEquals(
-    msg.includes("wallet") && msg.includes("withdraw"),
-    true,
-    `error message should include cell name 'wallet' and method name 'withdraw', got: "${msg}"`,
-  );
-  // Original error message must be preserved
-  assertEquals(
-    msg.includes("insufficient funds"),
-    true,
-    `original error message should be preserved, got: "${msg}"`,
-  );
+  // The MESSAGE is the method's own words — an app shows `e.message` to a
+  // user, so the framework naming itself there ended up in the UI (alpha76).
+  assertEquals(caught!.message, "insufficient funds");
+  // The identity is DATA on the error instead, which is what a caller can
+  // branch on without matching prose.
+  const id = caught as unknown as { cell?: string; method?: string };
+  assertEquals(id.cell, "wallet");
+  assertEquals(id.method, "withdraw");
 });
 
 Deno.test("reduce error includes context for guarded cells", () => {
@@ -580,17 +572,10 @@ Deno.test("reduce error includes context for guarded cells", () => {
   }
 
   assertExists(caught, "should have thrown");
-  const msg = caught!.message;
-  assertEquals(
-    msg.includes("door2") && msg.includes("open"),
-    true,
-    `error message should include cell 'door2' and method 'open', got: "${msg}"`,
-  );
-  assertEquals(
-    msg.includes("door is locked"),
-    true,
-    `original error preserved, got: "${msg}"`,
-  );
+  assertEquals(caught!.message, "door is locked");
+  const id2 = caught as unknown as { cell?: string; method?: string };
+  assertEquals(id2.cell, "door2");
+  assertEquals(id2.method, "open");
 });
 
 // ── A bad `cells:` entry names itself ────────────────────────────

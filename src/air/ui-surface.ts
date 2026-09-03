@@ -10,6 +10,9 @@
  * bookkeeping, zero production overhead).
  */
 import type { VNode } from "./vdom-types.ts";
+import { _SignalText } from "./vdom-types.ts";
+import { _sigText } from "./vdom-helpers.ts";
+import type { Signal } from "../state/signal.ts";
 
 /** An interactive element (has `on*` handlers) owned by a component.
  *  Named LABEL + ROLE, label by priority: `t` prop > `data-testid` >
@@ -128,10 +131,22 @@ export function findElementsDeep(
 const isVNode = (c: unknown): c is VNode =>
   !!c && typeof c === "object" && "tag" in (c as Record<string, unknown>);
 
+/** The text of a DIRECT child, or undefined when it is not text. A signal
+ *  child is text too — `<button>{label}</button>` names the button by the
+ *  signal's current value, exactly as it did when `h()` flattened it. */
+function childText(c: VNode | string | number): string | undefined {
+  if (typeof c === "string" || typeof c === "number") return String(c);
+  if (c.tag === _SignalText) {
+    return _sigText((c._sig as Signal<unknown>).peek());
+  }
+  return undefined;
+}
+
 function staticText(v: VNode): string | undefined {
   const parts: string[] = [];
   for (const c of v.children) {
-    if (typeof c === "string" || typeof c === "number") parts.push(String(c));
+    const t = childText(c);
+    if (t !== undefined) parts.push(t);
   }
   const s = parts.join("").trim();
   return s.length > 0 && s.length <= 60 ? s : undefined;
@@ -165,8 +180,9 @@ function labelSubtreeText(v: VNode, depth = 0): string {
   if (depth > 4) return "";
   const parts: string[] = [];
   for (const c of v.children) {
-    if (typeof c === "string" || typeof c === "number") {
-      parts.push(String(c));
+    const t = childText(c);
+    if (t !== undefined) {
+      parts.push(t);
     } else if (
       isVNode(c) && typeof c.tag === "string" && !LABELABLE.has(c.tag)
     ) {

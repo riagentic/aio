@@ -28,10 +28,10 @@
 // exported constant.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { isServerOnlyFile, SERVER_FILE_RE } from "../src/entries.ts";
+import { childCoverageDir } from "../src/testing/temp-dir.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
-const _childCovDir = Deno.env.get("DENO_COVERAGE_DIR") ??
-  Deno.makeTempDirSync({ prefix: "aio-child-cov-" });
+const _childCovDir = childCoverageDir();
 
 /** A minimal real app: deno.json + cell + App.tsx, bundled by the real
  *  `runBundle`. `imports` lets a test add an import-map ALIAS, which is the

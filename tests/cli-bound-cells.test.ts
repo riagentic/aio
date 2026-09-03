@@ -6,12 +6,8 @@ import { cell } from "../src/state/cell-create.ts";
 import { connectCli } from "../src/server/cli-client.ts";
 import type { CellDef } from "../src/state/cell-types.ts";
 import { stopChild } from "./stop-child.ts";
-
-// Coverage profiles from spawned deno processes go to a throwaway temp dir —
-// never into the repo (an empty DENO_COVERAGE_DIR means "cwd"), never into
-// the parent's coverage profile.
-const _childCovDir = Deno.env.get("DENO_COVERAGE_DIR") ??
-  Deno.makeTempDirSync({ prefix: "aio-child-cov-" });
+import { childCoverageDir } from "../src/testing/temp-dir.ts";
+const _childCovDir = childCoverageDir();
 
 function freePort(): number {
   const l = Deno.listen({ port: 0 });

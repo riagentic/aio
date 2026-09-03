@@ -8,7 +8,16 @@ import type { CellDef, Msg } from "./cell-types.ts";
 /** Cell status info for health/status reporting */
 export type CellStatus = {
   name: string;
-  status: string | undefined;
+  /** The cell's own `status` field, when it has one — app-defined, so a bare
+   *  `string`.
+   *
+   *  OPTIONAL, not `string | undefined`. The two spellings read the same to a
+   *  consumer and differently to a PRODUCER: the required-but-undefined form
+   *  made `{ name, enabled, errors }` a type error and forced every builder of
+   *  a `CellStatus` (a test double, a health report an app assembles itself)
+   *  to write `status: undefined` out loud. Optional accepts both, so this is
+   *  a widening — and one that can never be made after beta1. */
+  status?: string;
   enabled: boolean;
   errors: number;
   lastAction?: string;

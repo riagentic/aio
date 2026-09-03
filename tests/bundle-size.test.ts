@@ -119,7 +119,19 @@ Deno.test({
   ignore: !RUN,
   async fn() {
     const s = await sizes();
-    const measured = kb(s.appGzip);
+    // TWO legitimate figures: a page that renders a component (AIR + the
+    // client runtime) and that page plus one cell. A doc names one or the
+    // other, so a number is checked against the NEAREST — which is what makes
+    // a ±2 KB tolerance affordable. The old ±4 around a single figure spanned
+    // 8 KB: README's "57 KB" sat at the exact boundary and passed for a
+    // release while the artifact measured 61.
+    const gz = [kb(s.airGzip), kb(s.appGzip)];
+    const br = [kb(s.airBrotli), kb(s.appBrotli)];
+    /** KB off the nearest measured figure. */
+    const drift = (n: number, from: number[]) =>
+      Math.min(...from.map((m) => Math.abs(n - m)));
+    /** A doc rounds; it does not remember. */
+    const TOLERANCE = 2;
     const root = new URL("..", import.meta.url).pathname;
     // Every page that states a bundle size states the same one. The old
     // numbers ("~20 KB gzipped", "~50 KB gzipped") were copied between these
@@ -145,9 +157,19 @@ Deno.test({
       }
       for (const m of text.matchAll(/~?(\d+)\s*KB\s*\(?(?:min\+)?gz/gi)) {
         const n = Number(m[1]);
-        // ±4 KB: a doc rounds, and a one-KB drift is not worth a red gate.
-        if (Math.abs(n - measured) > 4) {
-          stale.push(`${page}: "${m[0]}" — measured ${measured} KB`);
+        if (drift(n, gz) > TOLERANCE) {
+          stale.push(`${page}: "${m[0]}" — measured ${gz.join(" or ")} KB gz`);
+        }
+      }
+      // …and BROTLI, which nothing checked at all. README promised "50 KB
+      // brotli" beside its wrong gzip number, and the gate that "keeps this
+      // sentence true" only ever read half the sentence.
+      for (const m of text.matchAll(/~?(\d+)\s*KB\s*\(?brotli/gi)) {
+        const n = Number(m[1]);
+        if (drift(n, br) > TOLERANCE) {
+          stale.push(
+            `${page}: "${m[0]}" — measured ${br.join(" or ")} KB brotli`,
+          );
         }
       }
       // …and a markdown row whose label starts "aio:" states a bundle size in
@@ -155,11 +177,23 @@ Deno.test({
       // number). air-comparison.md §14 tells the reader this test goes red if
       // that table stops matching — it did not, because the column header says
       // "gzip" and the regex above needs the letters next to the number.
-      for (const m of text.matchAll(/^\|\s*aio:[^|]*\|\s*~?(\d+)\s*KB/gim)) {
-        const n = Number(m[1]);
-        if (Math.abs(n - measured) > 4) {
+      for (
+        const m of text.matchAll(
+          /^\|\s*aio:[^|]*\|\s*~?(\d+)\s*KB[^|]*\|\s*~?(\d+)\s*KB/gim,
+        )
+      ) {
+        if (drift(Number(m[1]), gz) > TOLERANCE) {
           stale.push(
-            `${page}: "${m[0].trim()}" — measured ${measured} KB (gzip column)`,
+            `${page}: "${m[0].trim()}" — measured ${
+              gz.join(" or ")
+            } KB (gzip column)`,
+          );
+        }
+        if (drift(Number(m[2]), br) > TOLERANCE) {
+          stale.push(
+            `${page}: "${m[0].trim()}" — measured ${
+              br.join(" or ")
+            } KB (brotli column)`,
           );
         }
       }

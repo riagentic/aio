@@ -146,8 +146,37 @@ export function cloneState<T>(
   }
 }
 
-/** One-time-per-process notice that a Map/Set in state cannot be frozen. */
-let _warnedUnfreezable = false;
+/** One-time-per-process-per-KIND notice that a value in state cannot be
+ *  protected by freezing. One shared boolean used to cover Map/Set only, so
+ *  the FIRST unfreezable kind seen silenced every other kind for the rest of
+ *  the process. @internal — the test that proves the de-duplication resets it. */
+export const _unfreezableWarned = new Set<string>();
+
+/** Announce, once per kind, that freezing cannot protect this value — and what
+ *  that costs.
+ *
+ *  This is not a freeze detail, it is the reason a whole class of method is
+ *  silently broken: Immer does not draft a `Date`, a typed array or a class
+ *  instance, so `s.when.setTime(0)` / `s.bytes[0] = 1` / `s.acct.deposit(5)`
+ *  inside a SYNC method mutates the object in place, produces NO patch, and
+ *  therefore commits in this process while reaching no client and no
+ *  `state.db`. In-process `testCell`/`testUI` assertions still pass, which is
+ *  green-test-broken-prod by construction. Freezing is what normally makes
+ *  such a write throw at the site — and freezing is exactly what does not work
+ *  on these values (a Date's time and a typed array's bytes live in internal
+ *  slots and a typed array cannot be frozen at all), so the silence has to be
+ *  broken by saying so. */
+function noteUnfreezable(kind: string, what: string, fix: string): void {
+  if (_unfreezableWarned.has(kind)) return;
+  _unfreezableWarned.add(kind);
+  log.warn(
+    `[aio] a ${what} in cell state cannot be frozen — an in-place mutation ` +
+      `of it will NOT throw the way every other illegal write does, will ` +
+      `commit NO patch, and so will reach no client and no state.db while ` +
+      `looking correct in this process. Assign a NEW value instead of ` +
+      `mutating in place (${fix}) (logged once per kind).`,
+  );
+}
 
 /** THE deep freeze — one implementation for the three sites that had their own
  *  (declared initial state, the dispatch loop's `freezeState`, cell signal
@@ -170,7 +199,22 @@ export function deepFreeze<T>(
   // action's write with it). Skipping is what Immer already does, so this is
   // dev matching prod, not dev going soft — the buffer's CONTENTS were never
   // protected by freezing the view either way.
-  if (ArrayBuffer.isView(obj) || obj instanceof ArrayBuffer) return obj;
+  if (ArrayBuffer.isView(obj) || obj instanceof ArrayBuffer) {
+    noteUnfreezable(
+      "bytes",
+      "typed array / ArrayBuffer",
+      "s.bytes = new Uint8Array(next)",
+    );
+    return obj;
+  }
+  // A Date freezes without complaint and is not protected by it: `setTime`,
+  // `setHours` and friends write an internal slot, which `Object.freeze` does
+  // not cover. Immer does not draft one either, so the mutation is invisible
+  // to the patch stream as well.
+  if (obj instanceof Date) {
+    noteUnfreezable("Date", "Date", "s.when = new Date(next)");
+    return Object.freeze(obj);
+  }
   // A frozen Map/Set is a lie: `Object.freeze` seals the object's PROPERTIES
   // and leaves `set`/`add`/`delete`/`clear` fully working, so "it's frozen"
   // meant "mutation is silent" here — the opposite of what freezing is for.
@@ -178,22 +222,39 @@ export function deepFreeze<T>(
   // is not enabled either, so a Map/Set that reaches a producer already
   // throws — this is the other half of the same missing support.)
   if (obj instanceof Map || obj instanceof Set) {
-    if (!_warnedUnfreezable) {
-      _warnedUnfreezable = true;
-      log.warn(
-        `[aio] a ${
-          obj instanceof Map ? "Map" : "Set"
-        } in state cannot be frozen — JS freezing does not cover ` +
-          `set/add/delete/clear, so an in-place mutation of it will NOT throw ` +
-          `in dev the way every other illegal mutation does. Immer's MapSet ` +
-          `plugin is not enabled either. Use a plain object or array in cell ` +
-          `state (logged once).`,
-      );
-    }
+    const kind = obj instanceof Map ? "Map" : "Set";
+    noteUnfreezable(
+      kind,
+      `${kind} (JS freezing does not cover set/add/delete/clear, and Immer's ` +
+        `MapSet plugin is not enabled)`,
+      kind === "Map"
+        ? "s.byId = { ...s.byId, [k]: v } on a plain object"
+        : "s.tags = [...s.tags, t] on a plain array",
+    );
     for (const v of obj.values()) {
       if (v !== null && typeof v === "object") deepFreeze(v, seen);
     }
     return obj;
+  }
+  // A class instance DOES freeze, and freezing protects only what it can see:
+  // its own enumerable properties. Private fields (`#balance`) and internal
+  // slots stay writable, its methods keep mutating them, and Immer never
+  // drafted the instance — so `s.acct.deposit(5)` is a committed, patch-less,
+  // client-invisible change that a frozen plain object would have refused.
+  // Arrays and null-prototype bags are the only other prototypes state
+  // legitimately carries.
+  if (!Array.isArray(obj)) {
+    const proto = Object.getPrototypeOf(obj);
+    if (proto !== null && proto !== Object.prototype) {
+      const name =
+        (proto as { constructor?: { name?: string } } | null)?.constructor
+          ?.name ?? "non-plain";
+      noteUnfreezable(
+        name,
+        `${name} instance`,
+        `s.acct = { ...plain fields } — keep behaviour in methods`,
+      );
+    }
   }
   Object.freeze(obj);
   for (const v of Object.values(obj as Record<string, unknown>)) {

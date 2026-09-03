@@ -20,6 +20,8 @@ name, so the table cannot fall behind the code.
 | `AIO_UPDATE_CHANNEL` | update check     | Follow a different channel than the one stamped into the artifact                                                                                                                |
 | `AIO_PARENT_PID`     | Electron child   | The pid the window must not outlive — set by the launcher, not by hand                                                                                                           |
 | `AIO_NO_OPEN=1`      | `open-external`  | Never open a browser or a file manager. For any harness that must not spawn a UI                                                                                                 |
+| `AIO_DISCOVERY_PORT` | discovery        | UDP port apps broadcast and answer discovery probes on — server and client must match. Default `8099` (see [the Electron client](../clients/electron.md))                        |
+| `AIO_SUPERVISED=1`   | restart decision | "You are supervised: exit, do not spawn your own successor" — the generated systemd unit sets it (see [updates](../deploy/updates.md))                                           |
 
 ## Building
 

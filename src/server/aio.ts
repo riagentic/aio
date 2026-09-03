@@ -32,7 +32,11 @@ import { createOwnManager, isOwnEffect } from "../state/own.ts";
 import { getLogger, log, setLogger } from "../diagnostics/logger-api.ts";
 import type { LogSink } from "../diagnostics/logger-types.ts";
 import { timeTravelEnabled } from "../diagnostics/types.ts";
-import { teachableError } from "../diagnostics/error.ts";
+import {
+  createAioError,
+  reportError as reportAioError,
+  teachableError,
+} from "../diagnostics/error.ts";
 
 // Phase modules — extracted _run() logic
 import { bootStorage, isDevBoot, replaySyncOps } from "./aio-boot.ts";
@@ -111,6 +115,7 @@ import { createCostMeter } from "../vitals/cost-meter.ts";
 import {
   cdpPort,
   declareAppFlags,
+  electronOnlyFlagRefusal,
   parseCli,
   printHelp,
   VERSION,
@@ -595,6 +600,33 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
     printHelp(_helpFacts(typeof a === "object" && a ? a.client : undefined));
     Deno.exit(0);
   }
+  // ── …and `--version`, for the same reason and one of its own ──
+  //
+  // It sat three phases later, AFTER `resolveAppDirs` — so a compiled binary
+  // asked for its version with `$HOME` unset answered with a stack trace out
+  // of the directory resolver, and with `$HOME` set it printed two boot lines,
+  // ROTATED the app's log files and ended with a stray empty `detail=` field.
+  // Asking an artifact what it is must cost nothing and touch nothing.
+  //
+  // `console.log`, not `log.info`: this is the answer itself, and the logger
+  // would stamp it with a timestamp and a category — and installing the logger
+  // is the side effect being avoided.
+  if (parseCli().version) {
+    // An artifact has to be able to say what it IS and what it was built with
+    // — a binary found on a server months later is otherwise unidentifiable,
+    // and "which aio is this running?" is the first question when it
+    // misbehaves. Same sources the app itself uses for its identity
+    // (`resolveAppId` handles the compiled-binary case), so `--version` cannot
+    // describe a different app than the one that would boot.
+    // aio-ok: the answer itself — a log stamp would prefix what a script reads.
+    console.log(
+      versionLine(
+        resolveAppId(typeof a === "object" && a ? a.appId : undefined),
+        await _appVersion(),
+      ),
+    );
+    Deno.exit(0);
+  }
   // Fail fast on an unsupported Deno — aio uses ≥2.9 behavior directly.
   assertDenoVersion();
   if (b !== undefined) {
@@ -693,6 +725,18 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
   if ("appVersion" in fc) {
     refuseRetired(removalOf("aio.run({ appVersion })"), "aio.run");
     delete (fc as Record<string, unknown>).appVersion;
+  }
+  // `killExisting` is retired (alpha76): the flag has been `--takeover` since
+  // alpha52 and the key had not moved, so a COMPILED service binary — which
+  // cannot pass a flag — was forced to write the deprecated spelling. Dev
+  // refuses; prod logs the registry line and HONOURS the old key, because a
+  // service that silently stopped taking over its own lock would fail to boot
+  // rather than fail loudly.
+  if ("killExisting" in fc) {
+    refuseRetired(removalOf("aio.run({ killExisting })"), "aio.run");
+    const legacy = (fc as Record<string, unknown>).killExisting;
+    delete (fc as Record<string, unknown>).killExisting;
+    if (fc.takeover === undefined) fc.takeover = legacy as boolean;
   }
   validateConfig(
     fc as unknown as Record<string, unknown>,
@@ -1120,22 +1164,8 @@ async function _run<S, A, E>(
     printHelp(_helpFacts(config.client));
     Deno.exit(0);
   }
-  if (cli.version) {
-    // An artifact has to be able to say what it IS and what it was built with —
-    // a binary found on a server months later is otherwise unidentifiable, and
-    // "which aio is this running?" is the first question when it misbehaves.
-    // Same sources the app itself uses for its identity (resolveAppId handles
-    // the compiled-binary case), so --version cannot describe a different app
-    // than the one that would boot.
-    log.info(
-      versionLine(
-        resolveAppId(config.appId),
-        await _appVersion(),
-      ),
-      { detail: String() },
-    );
-    Deno.exit(0);
-  }
+  // `--version` is answered in `run()`, before anything resolves a directory
+  // or installs a logger — see the hoist there. Nothing to do here.
 
   if (cli.dataContract) {
     // What this build promises about data already on disk. Derived from the
@@ -1299,17 +1329,22 @@ async function _run<S, A, E>(
 
   // Singleton lock — libraryMode implies no lock (embeddable / testable).
   const singletonMode = config.libraryMode ? false : (config.singleton ?? true);
-  const killExisting = (config.killExisting ?? false) ||
-    (cli.killExisting ?? false);
+  const takeover = (config.takeover ?? false) || (cli.takeover ?? false);
   const appLock = await acquireSingletonLock(
     appId,
     appDirs(appId, config.appDir).home,
     port,
     singletonMode,
-    killExisting,
+    takeover,
     {
       aioVersion: VERSION,
       cdpPort: cdpPort(),
+      // The CLIENT, so `am` can answer "is there a window here at all?"
+      // without guessing. `am shot` used to tell the operator of a browser app
+      // to restart with `--cdp` and try again — a path that ends nowhere,
+      // because a browser app has no window to shoot. Same rule as the
+      // electron-only refusal below.
+      client: cli.client ?? defaultClientFor(config.client),
     },
   );
 
@@ -1324,6 +1359,22 @@ async function _run<S, A, E>(
   if (!config.libraryMode && await judgePendingUpdate(_dirs.data, log)) {
     appLock?.release();
     Deno.exit(1);
+  }
+
+  // Electron-only flags on a non-Electron client are refused HERE, before the
+  // thin-client path can act on one: `--connect` with `--client=browser` used
+  // to override the client and start a ~100 MB Electron download, while
+  // `--keep-server` was refused only after the banner. The client is resolved
+  // by the same rule as below (flag > config > deno.json > electron); one
+  // pure decider (aio-cli.ts) names what was typed and the client it needs.
+  const _electronOnly = electronOnlyFlagRefusal(
+    cli,
+    cli.client ?? defaultClientFor(config.client),
+    config,
+  );
+  if (_electronOnly) {
+    appLock?.release();
+    throw _electronOnly;
   }
 
   // Thin client mode
@@ -1459,6 +1510,36 @@ async function _run<S, A, E>(
     : "default";
   const useElectron = client === "electron";
   const isHeadless = client === "server-only" || client === "cli";
+
+  // ── `--prod` from SOURCE with no bundle to serve ──
+  //
+  // This is the NORMAL state after a fleet build: `deno task build` moves the
+  // bundle into the binary and deletes `dist/app.js`. Running the source with
+  // `--prod` afterwards booted with "running (prod, browser)" and printed
+  // "open http://localhost:PORT" — and every page there answered 503 with a
+  // body saying the server was built `--headless`, which it was not. The
+  // compiled-binary case has been guarded for a while (the `sawDistDir` warn
+  // above); the source case had only a `deps.debug` line, invisible at the
+  // default log level. A client with a PAGE and nothing to put on it must say
+  // so where the URL is printed, not in the browser.
+  if (prod && !isCompiled() && !isHeadless) {
+    let hasBundle = false;
+    try {
+      await Deno.stat(join(distDir, BUNDLE_JS));
+      hasBundle = true;
+    } catch { /* the case this exists for */ }
+    if (!hasBundle) {
+      log.warn(
+        `--prod, but there is no ${
+          join(distDir, BUNDLE_JS)
+        } to serve: every page will answer 503. \`deno task build\` moves the ` +
+          `bundle INTO the binary and removes dist/app.js, so this is the ` +
+          `normal state after a build — run the binary in dist/ instead, or ` +
+          `\`deno task dev\` for the dev server. (A headless run is fine: ` +
+          `--client=server-only / --client=cli serve no page.)`,
+      );
+    }
+  }
   const {
     reduce,
     execute,
@@ -1855,18 +1936,56 @@ async function _run<S, A, E>(
     const origin = isWriteSet ? actionOrigin(t, payload) : undefined;
     const ts = Date.now();
     const seq = journal
-      ? journal.append(
-        {
-          type: t,
-          payload,
-          origin,
-          user: (action as { _user?: AioUser })._user,
-        },
-        ts,
-      )
+      ? _journalAppend({
+        type: t,
+        payload,
+        origin,
+        user: (action as { _user?: AioUser })._user,
+      }, ts)
       : timeline.lastSeq() + 1;
     timeline.record(seq, t, payload, prev, next, ts, origin);
   };
+  // The journal append is NOT an observe-only hook — it is the durability
+  // promise `journal: true` makes ("every committed action is appended before
+  // the debounce window closes"). It rides in `afterAction`, which the
+  // dispatcher guards as observe-only: a refused append (EACCES, ENOSPC, a
+  // journal chmod'd read-only) was reported as HOOK_ERROR — "diagnostics for
+  // this action are lost" — the call was acked ok, and the write lived
+  // nowhere durable until the debounce timer fired. A SIGKILL in that window
+  // lost an acked write under the one option that exists to prevent exactly
+  // that.
+  //
+  // The state is already committed and broadcast when this runs, so
+  // rejecting the caller would tell one client "no" about a write every other
+  // client has already seen. The honest move is to keep the promise by the
+  // other mechanism: report it as what it is (PERSIST_ERROR — the durability
+  // path failed) and close the debounce window NOW, so the snapshot carries
+  // the write. One flush per burst: a second refusal while one is pending
+  // rides on it (the cycle reads state after this commit, or the batch-end
+  // schedulePersist re-arms the flush loop).
+  let _journalFlushPending = false;
+  function _journalAppend(
+    entry: Parameters<NonNullable<typeof journal>["append"]>[0],
+    ts: number,
+  ): number {
+    try {
+      return journal!.append(entry, ts);
+    } catch (e) {
+      reportAioError(
+        createAioError("PERSIST_ERROR", e, { actionType: entry.type }),
+        _reportOpts,
+      );
+      if (!_journalFlushPending) {
+        _journalFlushPending = true;
+        persistence.flushPersist().catch(() => {}).finally(() => {
+          _journalFlushPending = false;
+        });
+      }
+      // The counter already advanced; the timeline keeps the same seq so its
+      // entries and the journal's lines stay aligned for replay.
+      return journal!.currentSeq();
+    }
+  }
 
   const dispatch = setupDispatch<S, A, E>({
     reduce,
@@ -2400,7 +2519,18 @@ async function _run<S, A, E>(
     syncBroadcastRef,
     shutdown,
     udsHandle: udsRef,
-    schedulePersist: () => schedulePersist(),
+    // `am persist` / trojan `persist`: the reply is the claim "on disk", so
+    // this is the flush itself, awaited, and a cycle that reported a failure
+    // rejects (the manager never rejects on its own — it keeps the loop alive
+    // — so the verdict is read back from `lastCycleError`). Sync cells'
+    // server-origin writes debounce into their own snapshot; they ride too,
+    // exactly as on a clean exit.
+    flushPersist: async () => {
+      await persistence.flushPersist();
+      await syncHandler?.flushServerWrites();
+      const failed = persistence.lastCycleError();
+      if (failed) throw failed;
+    },
     shouldPersist,
     scheduleManager,
     // Cell id → method names — trojan `cells` route (amui run-method buttons).
@@ -2588,6 +2718,7 @@ async function _run<S, A, E>(
     shareUrl: transport.shareUrl,
     localUrl: transport.localUrl,
     advertiseHost: transport.advertiseHost,
+    bindHost: transport.bindHost,
     server,
     udsHandle,
     app,
@@ -2605,6 +2736,8 @@ async function _run<S, A, E>(
       height: cli.height,
       keepServer: cli.keepServer,
       open: cli.open,
+      // Read by the report only, to say when `--channel` can do nothing.
+      channel: cli.channel,
     },
     // The FULL head-shaped config, not just the window box: the dev Electron
     // aio:// shell is templated at launch and has no other way to learn

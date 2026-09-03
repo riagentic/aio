@@ -204,3 +204,56 @@ Deno.test({
     }
   },
 });
+
+// ── a client with no window ─────────────────────────────────────────
+//
+// `am shot` on a `--client=browser` app said "Restart with the flag:
+// am restart <app> --cdp … then am shot again", and the operator who did
+// exactly that got "recorded cdp 127.0.0.1:PORT but nothing answers there".
+// Two steps to the same dead end, when the first answer — this app has no
+// window — was knowable from the lock all along.
+Deno.test("am shot: a windowless client is refused up front, not sent to --cdp", async () => {
+  const appsDir = await Deno.makeTempDir({ prefix: "am-shot-nowin-" });
+  const prev = Deno.env.get("AIO_APPS_DIR");
+  Deno.env.set("AIO_APPS_DIR", appsDir);
+  const appId = "shot-browser";
+  try {
+    for (const client of ["browser", "server-only", "cli"]) {
+      writeLock({
+        appId,
+        pid: Deno.pid,
+        port: freePort(),
+        startedAt: Date.now(),
+        status: "started",
+        cwd: Deno.cwd(),
+        client,
+        // Even WITH a recorded cdp port: a port nothing listens on is the
+        // second dead end, not a second chance.
+        cdpPort: freePort(),
+      });
+      const r = await am(["shot", `--app=${appId}`], { AIO_APPS_DIR: appsDir });
+      const text = r.out + r.err;
+      assertEquals(r.code, 1);
+      assertStringIncludes(text, `--client=${client}`);
+      assertStringIncludes(text, "no desktop window");
+      assertStringIncludes(text, "am surface");
+      assert(
+        !/Restart with the flag/.test(text),
+        `a restart cannot give this app a window. Got: ${text}`,
+      );
+    }
+  } finally {
+    if (prev === undefined) Deno.env.delete("AIO_APPS_DIR");
+    else Deno.env.set("AIO_APPS_DIR", prev);
+    await Deno.remove(appsDir, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("noCdpMessage: an electron app still gets the --cdp remedy; an old lock hedges honestly", () => {
+  const el = noCdpMessage("app", "electron");
+  assertStringIncludes(el, "Restart with the flag");
+  // Pre-alpha76 lock: no client recorded. Never assert a window exists.
+  const old = noCdpMessage("app");
+  assertStringIncludes(old, "Restart with the flag");
+  assertStringIncludes(old, "no window to shoot at all");
+});

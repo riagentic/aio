@@ -10,7 +10,7 @@ import type { UDSHandle } from "./uds.ts";
 import type { TlsCert } from "./tls.ts";
 import type { AioUser } from "./aio.ts";
 import type { UiTheme } from "./aio-types.ts";
-import { cdpPort, VERSION } from "./aio-cli.ts";
+import { cdpPort, cliLine, VERSION } from "./aio-cli.ts";
 import { type BootExtras, bootLines, buildFacts } from "./boot-facts.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { discoverySupported, startDiscoveryResponder } from "./discovery.ts";
@@ -36,6 +36,90 @@ import { count } from "../diagnostics/fmt.ts";
 let _sighupGuarded = false;
 /** One parent watch per process — see `AIO_PARENT_PID` in startLifecycle. */
 let _parentWatched = false;
+
+// ── The bind address, in words ──────────────────────────────────────────────
+//
+// Three lines of the boot report are ABOUT the bound address: `bind`, the
+// exposure warning and the share link. All three used to be derived from
+// `expose` — a boolean that only implied the address — so `--host=192.168.1.20`
+// (not exposed, one LAN interface) printed "0.0.0.0 — every interface", and
+// `--expose --host=127.0.0.1` printed every interface, a network warning, and
+// a share link no other device could open. The comment beside the derivation
+// even said the opposite. These are pure so each shape is a unit test.
+
+/** Is this bind address reachable from THIS machine only? */
+export function isLoopbackBind(host: string): boolean {
+  const h = host.replace(/^\[|\]$/g, "");
+  return h.startsWith("127.") || h === "::1" || h === "localhost";
+}
+
+/** The wildcard binds — "every interface". */
+function isWildcardBind(host: string): boolean {
+  return host === "0.0.0.0" || host === "::" || host === "[::]";
+}
+
+/** The report's `bind` line: the address, and what binding it MEANS. */
+export function bindLabel(bindHost: string): string {
+  if (isWildcardBind(bindHost)) return `${bindHost} — every interface`;
+  if (isLoopbackBind(bindHost)) return `${bindHost} — loopback only`;
+  return `${bindHost} — that interface only`;
+}
+
+/** First non-loopback IPv4 among the machine's interfaces — the address a
+ *  device on the LAN would use. Pure over the list; the caller reads it. */
+export function firstLanIPv4(
+  ifaces: readonly { family: string; address: string }[],
+): string | undefined {
+  return ifaces.find((i) =>
+    i.family === "IPv4" && !i.address.startsWith("127.")
+  )?.address;
+}
+
+function networkInterfaces(): { family: string; address: string }[] {
+  try {
+    return Deno.networkInterfaces();
+  } catch {
+    return []; // no --allow-sys: the link keeps the wildcard and says so
+  }
+}
+
+/** The link to hand to another machine, and a note to print AFTER it.
+ *
+ *  A wildcard bind is not an address anyone can open — `https://0.0.0.0:8443`
+ *  was printed for years and the reader had to know to substitute their LAN
+ *  IP — so the machine's LAN address stands in, and when none is known the
+ *  note says what to substitute. A loopback bind is quoted as itself, with
+ *  the note saying it will not open anywhere else. The note goes after the
+ *  `?token=` so the link stays a copyable URL. */
+export function shareLink(
+  url: string,
+  bindHost: string,
+  lanIPv4: string | undefined,
+): { url: string; note: string } {
+  const host = (() => {
+    try {
+      return new URL(url).hostname;
+    } catch {
+      return "";
+    }
+  })();
+  if (isWildcardBind(bindHost)) {
+    if (lanIPv4 && host) {
+      return { url: url.replace(host, lanIPv4), note: "" };
+    }
+    return {
+      url,
+      note: `  (substitute this machine's LAN IP for ${host || bindHost})`,
+    };
+  }
+  if (isLoopbackBind(bindHost)) {
+    return {
+      url,
+      note: "  (loopback only — opens on this machine, nowhere else)",
+    };
+  }
+  return { url, note: "" };
+}
 
 /** Inputs for lifecycle startup */
 export interface LifecycleDeps<S, A> {
@@ -91,6 +175,13 @@ export interface LifecycleDeps<S, A> {
   /** How the bound address is NAMED (`setupTransport`'s one decider) — the
    *  boot report prints THIS, never a second derivation. */
   advertiseHost: string;
+  /** The address the listener is ACTUALLY on (`setupTransport.bindHost`).
+   *  The report's `bind` line, the exposure warning and the share link are
+   *  all derived from THIS — never from `expose`, which only implied it:
+   *  `--host=192.168.1.20` was reported as "0.0.0.0 — every interface", and
+   *  `--expose --host=127.0.0.1` as every interface plus a share link no
+   *  other device could open. */
+  bindHost: string;
   // Server & UDS
   server: ServerHandle;
   udsHandle: UDSHandle | null;
@@ -123,6 +214,9 @@ export interface LifecycleDeps<S, A> {
     keepServer?: boolean;
     /** `--open` — hand the URL to the desktop browser. Off by default. */
     open?: boolean;
+    /** `--channel=X` — read here only to say when it can do nothing (an app
+     *  with no `updates` config follows no channel). */
+    channel?: string;
   };
   // Not just the window box: the head-shaped keys travel to the templated
   // aio:// Electron shell, which has no other way to learn them.
@@ -178,6 +272,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     shareUrl,
     localUrl,
     advertiseHost,
+    bindHost,
     server,
     udsHandle,
     app,
@@ -279,8 +374,10 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
   // Startup logging
   const url = shareUrl;
   const useHttps = expose && !!tlsCert;
-  const cliFlags = Deno.args.filter((a) => a.startsWith("--") && a.length > 2);
-  if (cliFlags.length) log.info(`cli: ${cliFlags.join(" ")}`);
+  // Verbatim, positionals and short flags included, and `--` marking where
+  // aio stopped — see `cliLine`.
+  const cliFlags = cliLine(Deno.args);
+  if (cliFlags) log.info(`cli: ${cliFlags}`);
   else log.debug("run with --help to see available flags");
   const mode = prod ? "prod" : "dev";
   const shell = client;
@@ -351,18 +448,18 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
   // Two facts the lifecycle owns and the boot report could not derive: the
   // interface actually bound (0.0.0.0 and 127.0.0.1 are a different security
   // posture, and `expose: true` only implied it), and whether TLS is real.
+  const loopbackBind = !noPort && isLoopbackBind(bindHost);
   const _bootExtras = {
     ...deps.bootExtras,
     // What this process is actually reachable ON. A socket-only app is not
     // "loopback" — it is not on the network stack at all, and its door is the
-    // filesystem permission on a 0700 directory.
+    // filesystem permission on a 0700 directory. Otherwise: the address the
+    // listener REALLY bound (`bindHost`), never `expose` standing in for it.
     bind: noPort
       ? `${
         localKind === "pipe" ? "named pipe" : "unix socket"
       } only — no network interface`
-      : expose
-      ? "0.0.0.0 — every interface"
-      : "127.0.0.1 — loopback only",
+      : bindLabel(bindHost),
     tls: noPort
       ? undefined
       : useHttps
@@ -376,7 +473,14 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
   say("singleton", String(singletonMode));
   say("persist", shouldPersist ? persistMode : "false");
   if (asyncDb) say("sqlite", count(Object.keys(db ?? {}).length, "table"));
-  say("expose", String(expose));
+  // `--expose --host=127.0.0.1` asked for the exposed posture (key, TLS) on
+  // an address no other device can reach; say both halves, not just the ask.
+  say(
+    "expose",
+    expose && loopbackBind
+      ? "true (loopback bind — not reachable from the network)"
+      : String(expose),
+  );
   say(
     "auth",
     deps.authMode ??
@@ -389,6 +493,20 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
   if (schedules?.length) say("schedules", String(schedules.length));
   if (maxConnections !== undefined) say("maxconn", String(maxConnections));
   log.info(headline, facts);
+
+  // A flag that cannot act says so. `--channel=X` names the release channel to
+  // FOLLOW, and an app with no `updates` config follows nothing — the flag was
+  // read into a value nobody ever looked at, two lines under a report that
+  // said "updates not configured" without connecting the two. Warned rather
+  // than refused on purpose: `updates: prod ? {...} : undefined` is a real
+  // shape, and a dev run of that app is not a mistake.
+  if (cli.channel !== undefined && !_bootExtras.updates) {
+    log.warn(
+      `--channel=${cli.channel} does nothing here: this app configures no ` +
+        `updates, so there is no channel to follow. Add ` +
+        `aio.run({ updates: { source: "…" } }) — docs/deploy/updates.md.`,
+    );
+  }
 
   // Share URLs — shown separately so they're easy to copy.
   //
@@ -410,20 +528,30 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
   // exposed or not (server-ws.ts), and the Host gate now runs on every request
   // (server-auth.ts). Saying a defense is off when it is on is how an operator
   // opens a hole to fix a problem they do not have.
+  //
+  // The address in the warning and the link is the one actually BOUND: the
+  // wildcard is replaced by this machine's LAN address (nobody can open
+  // `https://0.0.0.0:8443`), a chosen interface is quoted as itself, and a
+  // loopback bind says so instead of inviting a phone to try it.
+  const reach = loopbackBind
+    ? `bound to ${bindHost} — reachable from this machine only, ` +
+      `other devices cannot connect (drop --host to serve the network)`
+    : `bound to ${bindHost} — reachable by anyone on this network`;
+  const share = shareLink(url, bindHost, firstLanIPv4(networkInterfaces()));
   if (expose && users) {
     log.warn(
-      `--expose: bound to 0.0.0.0 — reachable by anyone on this network; ` +
-        `per-user token auth is the only thing in front of it`,
+      `--expose: ${reach}; per-user token auth is the only thing in front of it`,
     );
     for (const [t, u] of Object.entries(users)) {
-      log.info(`share (${u.id}/${u.role}): ${url}?token=${t}`);
+      log.info(
+        `share (${u.id}/${u.role}): ${share.url}?token=${t}${share.note}`,
+      );
     }
   } else if (expose && token) {
     log.warn(
-      `--expose: bound to 0.0.0.0 — reachable by anyone on this network; ` +
-        `the app key is the only thing in front of it`,
+      `--expose: ${reach}; the app key is the only thing in front of it`,
     );
-    log.info(`share: ${url}?token=${token}`);
+    log.info(`share: ${share.url}?token=${token}${share.note}`);
     log.info(`key file: ${appKeyPath(appId)} (owner-only)`);
     // Friendly pairing: the aio client enters this code once to pull the
     // profile (cert + key) and connect forever — no file to hand over.
@@ -477,13 +605,11 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     deps.setDiscoveryStop(null);
   }
 
-  // Validate keepServer
+  // keepServer outside Electron is refused BEFORE boot — `electronOnlyFlagRefusal`
+  // (aio-cli.ts), one decider for the whole electron-only family. It used to
+  // be refused here: after the success banner, as an unhandled rejection that
+  // named the config key even when the operator had typed the flag.
   const keepServer = cli.keepServer ?? configKeepServer ?? false;
-  if (keepServer && client !== "electron") {
-    throw new Error(
-      `keepServer only applies when client is electron (current client: "${client}"). Remove keepServer from aio.run(), or set client: "electron".`,
-    );
-  }
 
   // Launch client
   if (isHeadless) {
@@ -797,6 +923,12 @@ export async function processFacts(): Promise<ProcessFacts> {
   };
 }
 
+/** What `aio.restart()` decided to do, and why it said so. `exit` hands the
+ *  decision to a supervisor that will start the successor; `reexec` replaces
+ *  this process with `artifact`; `refused` means neither is safe here, and
+ *  `manual` is the command to run instead. Every variant carries a `why` or a
+ *  `reason` because a restart that simply does not happen is the case an
+ *  operator cannot debug from the outside. */
 export type RestartPlan =
   | { kind: "exit"; code: number; why: string }
   | { kind: "reexec"; artifact: string; args: string[]; why: string }

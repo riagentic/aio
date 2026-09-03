@@ -62,47 +62,106 @@ In prod mode, errors are compact one-liners:
 
 ### Error codes reference
 
-| Code                 | Source      | What happened                                                                                |
-| -------------------- | ----------- | -------------------------------------------------------------------------------------------- |
-| `REDUCE_ERROR`       | Reducer     | Reducer threw or returned invalid shape                                                      |
-| `EFFECT_ERROR`       | Effect      | Sync effect (executor) threw                                                                 |
-| `EFFECT_TIMEOUT`     | Effect      | Async effect exceeded timeout (default 30s)                                                  |
-| `EFFECT_ASYNC_ERROR` | Effect      | Async effect promise rejected                                                                |
-| `HOOK_ERROR`         | Hook        | `beforeReduce`, `onAction`, or `onEffect` hook threw                                         |
-| `INIT_ERROR`         | Lifecycle   | Cell `onInit` callback threw                                                                 |
-| `DESTROY_ERROR`      | Lifecycle   | Cell `onDestroy` callback threw                                                              |
-| `MACHINE_BLOCKED`    | Routing     | Action blocked by internal routing guard (warn-level)                                        |
-| `QUEUE_OVERFLOW`     | Dispatch    | Dispatch queue exceeded 10,000 entries                                                       |
-| `DISPATCH_LOOP`      | Dispatch    | 1,000 iterations detected -- dispatch recovers after draining                                |
-| `DISPATCH_CLOSED`    | Dispatch    | Action dispatched after close() -- dropped, not applied                                      |
-| `DISPATCH_DRAINING`  | Dispatch    | Action dispatched while the app is closing -- new input refused; in-flight writes still land |
-| `DISPATCH_ABORTED`   | Dispatch    | Drain loop threw outside every guard -- queued actions dropped                               |
-| `MEMORY_PRESSURE`    | Memory      | Heap above warning threshold (default 75%)                                                   |
-| `MEMORY_CRITICAL`    | Memory      | Heap above critical threshold (default 90%)                                                  |
-| `BUDGET_REDUCE`      | Performance | Reducer exceeded time budget (default 100ms)                                                 |
-| `BUDGET_EFFECT`      | Performance | Effect exceeded time budget (default 5ms)                                                    |
-| `PERSIST_ERROR`      | Persistence | State persist to SQLite failed -- in memory, lost on exit                                    |
-| `PERSIST_SCHEMA`     | Persistence | Stored state's persistence-schema version is incompatible                                    |
-| `TX_CONFLICT`        | Effect      | Transactional method's reads went stale -- commit refused                                    |
-| `UI_FREEZE`          | Vitals      | UI/main thread stalled past the freeze threshold (warn)                                      |
-| `TRANSPORT_STALL`    | Vitals      | WS transport made no progress under backpressure (warn)                                      |
-| `LOOP_SATURATED`     | Vitals      | Event loop saturated -- work queued faster than it drains                                    |
+| Code                 | Source      | What happened                                                                                                     |
+| -------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------- |
+| `REDUCE_ERROR`       | Reducer     | Reducer threw or returned invalid shape                                                                           |
+| `EFFECT_ERROR`       | Effect      | Sync effect (executor) threw                                                                                      |
+| `EFFECT_TIMEOUT`     | Effect      | Async effect exceeded timeout (default 30s)                                                                       |
+| `EFFECT_ASYNC_ERROR` | Effect      | Async effect promise rejected                                                                                     |
+| `HOOK_ERROR`         | Hook        | `beforeReduce`, `onAction`, or `onEffect` hook threw                                                              |
+| `INIT_ERROR`         | Lifecycle   | Cell `onInit` callback threw                                                                                      |
+| `DESTROY_ERROR`      | Lifecycle   | Cell `onDestroy` callback threw                                                                                   |
+| `ACCESS_DENIED`      | Access      | The cell's `access:` rule (or a serverFn's `{ access }`) refused this caller                                      |
+| `ACTION_REFUSED`     | Dispatch    | The action reached the server and applied nothing (unknown method, unbooted or disabled cell, `validate` refusal) |
+| `QUEUE_OVERFLOW`     | Dispatch    | Dispatch queue exceeded 10,000 entries                                                                            |
+| `DISPATCH_LOOP`      | Dispatch    | 1,000 iterations detected -- dispatch recovers after draining                                                     |
+| `DISPATCH_CLOSED`    | Dispatch    | Action dispatched after close() -- dropped, not applied                                                           |
+| `DISPATCH_DRAINING`  | Dispatch    | Action dispatched while the app is closing -- new input refused; in-flight writes still land                      |
+| `DISPATCH_ABORTED`   | Dispatch    | Drain loop threw outside every guard -- queued actions dropped                                                    |
+| `MEMORY_PRESSURE`    | Memory      | Heap above warning threshold (default 75%)                                                                        |
+| `MEMORY_CRITICAL`    | Memory      | Heap above critical threshold (default 90%)                                                                       |
+| `BUDGET_REDUCE`      | Performance | Reducer exceeded time budget (default 100ms)                                                                      |
+| `BUDGET_EFFECT`      | Performance | Effect exceeded time budget (default 5ms)                                                                         |
+| `PERSIST_ERROR`      | Persistence | State persist to SQLite failed -- in memory, lost on exit                                                         |
+| `PERSIST_SCHEMA`     | Persistence | Stored state's persistence-schema version is incompatible                                                         |
+| `TX_CONFLICT`        | Effect      | Transactional method's reads went stale -- commit refused                                                         |
+
+#### Reserved codes -- named by the type, never emitted
+
+`AioErrorCode` is public and frozen from `1.0`, so a member can be added but
+never removed. Four are in the union and are produced by nothing. Do not write a
+`catch` that waits for them:
+
+| Code              | Why it is dead                                                                                                             |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `MACHINE_BLOCKED` | belonged to the `machine:` cell key, removed in alpha27. A guarded action reports as the `action-guarded` diagnostic event |
+| `UI_FREEZE`       | the UI-freeze threshold reports on the diagnostic bus, not as an error                                                     |
+| `TRANSPORT_STALL` | transport stalls report on the diagnostic bus                                                                              |
+| `LOOP_SATURATED`  | loop saturation reports on the diagnostic bus                                                                              |
+
+A threshold breach is an observation about the process, not the failure of one
+call, which is why the vitals three live on the bus
+(`docs/debugging/performance.md`). `tests/error-code-emission.test.ts` compares
+this list against the actual call sites, so the moment one of them gains a
+producer -- or another code silently loses its last one -- the table is wrong
+and CI says so.
+
+### Reading the code off a failed call: `errorCode(err)`
+
+A cell method or `serverFn` that fails **across a transport** rejects with an
+`Error` carrying the code, not with an `AioError` instance (the class does not
+cross the wire -- only the two fields do). `errorCode` from `aio` is the one
+reader, and it works on both sides:
+
+```ts
+import { cell, errorCode } from "aio";
+
+const todos = cell("todos", {
+  state: { items: [] as string[] },
+  access: "member",
+  methods: {
+    add(s, title: string) {
+      s.items.push(title);
+    },
+  },
+});
+
+async function addTodo(title: string): Promise<"ok" | "sign-in" | "stale"> {
+  try {
+    await todos.add(title);
+    return "ok";
+  } catch (e) {
+    if (errorCode(e) === "ACCESS_DENIED") return "sign-in";
+    if (errorCode(e) === "ACTION_REFUSED") return "stale";
+    throw e; // the app's own failure -- not ours to swallow
+  }
+}
+```
+
+Branch on the CODE, never on the message. Message wording is explicitly not
+public API (`docs/basics/semver-policy.md`) -- error _codes_ are. A code this
+build has never heard of (a newer server) is returned verbatim rather than
+erased, so compare against the codes you care about instead of `switch`ing
+exhaustively over the union.
+
+`undefined` means the failure carries no framework classification -- an error
+the app's own code threw and the framework only relayed.
 
 ### Error layer identification
 
 The error code prefix tells you which layer broke:
 
-| Prefix                   | Layer           | Where to look                          |
-| ------------------------ | --------------- | -------------------------------------- |
-| `REDUCE_*`               | Cell reducer    | Your sync `methods` code               |
-| `EFFECT_*`               | Cell executor   | Your async methods                     |
-| `HOOK_*`                 | Lifecycle hooks | `beforeReduce`, `onAction`, `onEffect` |
-| `INIT_*` / `DESTROY_*`   | Cell lifecycle  | `onInit`, `onDestroy` callbacks        |
-| `MACHINE_*`              | Action routing  | Internal routing guard (warn-level)    |
-| `QUEUE_*` / `DISPATCH_*` | Dispatch loop   | Infinite dispatch cycles               |
-| `MEMORY_*`               | Runtime         | Unbounded state growth                 |
-| `BUDGET_*`               | Performance     | Slow reducer or effect                 |
-| `PERSIST_*`              | Persistence     | SQLite write failures                  |
+| Prefix                   | Layer           | Where to look                                  |
+| ------------------------ | --------------- | ---------------------------------------------- |
+| `REDUCE_*`               | Cell reducer    | Your sync `methods` code                       |
+| `EFFECT_*`               | Cell executor   | Your async methods                             |
+| `HOOK_*`                 | Lifecycle hooks | `beforeReduce`, `onAction`, `onEffect`         |
+| `INIT_*` / `DESTROY_*`   | Cell lifecycle  | `onInit`, `onDestroy` callbacks                |
+| `ACCESS_*`               | Access gate     | A cell's `access:` / a serverFn's `{ access }` |
+| `QUEUE_*` / `DISPATCH_*` | Dispatch loop   | Infinite dispatch cycles                       |
+| `MEMORY_*`               | Runtime         | Unbounded state growth                         |
+| `BUDGET_*`               | Performance     | Slow reducer or effect                         |
+| `PERSIST_*`              | Persistence     | SQLite write failures                          |
 
 ### Action type prefix
 
@@ -154,16 +213,16 @@ await aio.run({
 
 ### AioError fields
 
-| Field           | Type                 | Description                                             |
-| --------------- | -------------------- | ------------------------------------------------------- |
-| `code`          | `AioErrorCode`       | Machine-readable error type                             |
-| `source`        | `AioErrorSource`     | Layer: `'reduce'`, `'effect'`, `'flow'`, `'hook'`, etc. |
-| `message`       | `string`             | Human-readable error message                            |
-| `context`       | `AioErrorContext`    | Structured metadata (cell, action, effect, flow, etc.)  |
-| `original`      | `Error \| undefined` | Original thrown Error with preserved `.stack`           |
-| `correlationId` | `string`             | 8-char UUID tracing the action lifecycle                |
-| `timestamp`     | `number`             | `Date.now()` at error creation                          |
-| `stateSnapshot` | `unknown`            | Cell state at time of error (when available)            |
+| Field           | Type                 | Description                                               |
+| --------------- | -------------------- | --------------------------------------------------------- |
+| `code`          | `AioErrorCode`       | Machine-readable error type                               |
+| `source`        | `AioErrorSource`     | Layer: `'reduce'`, `'effect'`, `'access'`, `'hook'`, etc. |
+| `message`       | `string`             | Human-readable error message                              |
+| `context`       | `AioErrorContext`    | Structured metadata (cell, action, effect, flow, etc.)    |
+| `original`      | `Error \| undefined` | Original thrown Error with preserved `.stack`             |
+| `correlationId` | `string`             | 8-char UUID tracing the action lifecycle                  |
+| `timestamp`     | `number`             | `Date.now()` at error creation                            |
+| `stateSnapshot` | `unknown`            | Cell state at time of error (when available)              |
 
 ---
 

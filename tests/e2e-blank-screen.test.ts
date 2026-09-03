@@ -6,10 +6,8 @@
 import { assert, assertStringIncludes } from "@std/assert";
 import { testDisplayEnv } from "../src/testing/test-display.ts";
 import { stopChild } from "./stop-child.ts";
-
-// Coverage profiles from spawned deno processes go to a throwaway temp dir.
-const _childCovDir = Deno.env.get("DENO_COVERAGE_DIR") ??
-  Deno.makeTempDirSync({ prefix: "aio-child-cov-" });
+import { childCoverageDir, tempDir } from "../src/testing/temp-dir.ts";
+const _childCovDir = childCoverageDir();
 
 const ROOT = new URL("..", import.meta.url).pathname;
 
@@ -136,7 +134,7 @@ async function renderBroken(appTsx: string): Promise<{
 }> {
   const { dir, port, proc, logRef } = await bootProbe(appTsx);
   try {
-    const profile = await Deno.makeTempDir({ prefix: "aio-blank-prof-" });
+    const profile = await tempDir("aio-blank-prof-");
     const chrome = await new Deno.Command(BROWSER!, {
       args: [
         "--headless=new",
@@ -227,7 +225,7 @@ Deno.test({
     const { dir, port, proc, logRef } = await bootProbe(
       "export default function App() { return null; }",
     );
-    const profile = await Deno.makeTempDir({ prefix: "aio-blank-prof-" });
+    const profile = await tempDir("aio-blank-prof-");
     const chrome = new Deno.Command(BROWSER!, {
       args: [
         "--headless=new",
@@ -270,7 +268,7 @@ Deno.test({
   return <button onClick={() => {}}>alive</button>;
 }`,
     );
-    const profile = await Deno.makeTempDir({ prefix: "aio-blank-prof-" });
+    const profile = await tempDir("aio-blank-prof-");
     const chrome = new Deno.Command(BROWSER!, {
       args: [
         "--headless=new",

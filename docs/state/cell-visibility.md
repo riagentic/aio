@@ -134,9 +134,18 @@ throws, so a misspelled opt-out can't silently fail to opt out.
 For multi-user apps where different users see different data:
 
 ```ts
+type Order = { id: string; userId: string; total: number };
+
 const orders = cell("orders", {
-  state: { items: [], total: 0 },
-  methods: {/* ... */},
+  // Type the array: `items: []` infers `never[]`, and `o.userId` inside the
+  // filter below is then a compile error, not a runtime one.
+  state: { items: [] as Order[], total: 0 },
+  methods: {
+    add(s, order: Order) {
+      s.items.push(order);
+      s.total += order.total;
+    },
+  },
   visible: {
     include: ["items", "total"],
     forUser: (filteredState, user) =>
