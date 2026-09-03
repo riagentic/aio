@@ -79,10 +79,10 @@ Deno.test({
         methods: {
           // The shape of every streaming reply: an open-ended loop that only
           // its abort signal can end.
-          async reply(s: StreamState & Partial<MethodDraftMeta>) {
+          async reply(s: StreamState & MethodDraftMeta) {
             s.status = "streaming";
             for (let i = 0; i < 500; i++) {
-              if (s.$signal?.aborted) {
+              if (s.$signal.aborted) {
                 // The write that used to be lost: what the stream produced
                 // before the window closed, plus how it ended.
                 s.status = "aborted";

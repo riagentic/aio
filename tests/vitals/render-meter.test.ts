@@ -223,6 +223,7 @@ function mockGauges(
   const g = (name: string, pct: number) => ({
     name,
     current: pct,
+    currentUnknown: null,
     capacity: 100,
     percent: pct,
   });

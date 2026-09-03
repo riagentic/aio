@@ -275,7 +275,7 @@ while it's already running, the second process detects the lock file
 (`/tmp/aio/aio-notes.lock`), sees the first process is alive, and exits. Stale
 locks from crashed processes are cleaned up automatically.
 
-Alternatives: `singleton: true, killExisting: true` kills the old instance and
+Alternatives: `singleton: true, takeover: true` kills the old instance and
 starts fresh. `singleton: false` allows multiple instances (useful during
 development).
 

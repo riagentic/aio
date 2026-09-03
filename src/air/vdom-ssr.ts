@@ -12,15 +12,20 @@ import {
   VOID_ELEMENTS,
 } from "./ssr-utils.ts";
 import { _propAttr, _RESERVED_PROPS } from "./prop-write.ts";
+import type { Signal } from "../state/signal.ts";
 import type { ComponentFn, VNode } from "./vdom-types.ts";
 import {
+  _hasRawHtml,
   _LAZY_PENDING,
   _Null,
+  _SignalText,
   ErrorBoundary,
   Fragment,
   Portal,
   Suspense,
 } from "./vdom-types.ts";
+import { _notANode } from "./vdom-create.ts";
+import { _sigText } from "./vdom-helpers.ts";
 
 // ── SSR start hook ─────────────────────────────────────────────────
 
@@ -162,6 +167,27 @@ export function _ssrTextareaText(vnode: VNode): string | null {
  *  and client DOM must be the same document. */
 const _EMPTY_ANCHOR = "<!---->";
 
+/** How many DOM nodes the markup written so far stands for — threaded through
+ *  every SSR writer so a region can tell "nothing here" from "here, but it
+ *  serializes to nothing". */
+export interface SsrNodes {
+  n: number;
+}
+
+/** The markup of a region (Fragment / ErrorBoundary / Suspense children) —
+ *  the ONE rule for when a region is empty and holds its slot with an anchor.
+ *
+ *  "Empty" means NO REALIZED NODE, not an empty string: `createDom` makes a
+ *  text node for `""` and none for a Portal, so `<>{""}</>` is a one-node
+ *  region and `<><Portal/></>` a zero-node one. The writers used to ask
+ *  `html === ""` instead, which is the wrong question on both counts — a
+ *  Fragment whose only child was `""` shipped an anchor the client never
+ *  builds, and hydration then claimed the comment for a text child and fell
+ *  out of step for the rest of the parent. */
+export function _regionHtml(html: string, nodes: number): string {
+  return nodes === 0 ? _EMPTY_ANCHOR : html;
+}
+
 // ── SSR depth counter ──────────────────────────────────────────────
 let _ssrDepth = 0;
 
@@ -175,95 +201,131 @@ export function renderToString(
   if (isTopLevel && _onSsrStart) _onSsrStart();
   _ssrDepth++;
   try {
-    if (vnode == null) return "";
-    if (typeof vnode === "string") return _escapeHtml(vnode);
-    if (typeof vnode === "number") return String(vnode);
-
-    // Component — execute and render output
-    if (typeof vnode.tag === "function") {
-      const rendered = (vnode.tag as ComponentFn)({
-        ...vnode.props,
-        children: vnode.children.length > 0
-          ? vnode.children
-          : (vnode.props.children ?? vnode.children),
-      });
-      // Nothing to render is still a POSITION, on the server exactly as on the
-      // client: `renderToString(null)` returns "", which would ship markup one
-      // node short of what the client builds — so hydration adopts the wrong
-      // node and a null-first component MOVES on its first re-render
-      // (R-10). The placeholder makes the two agree.
-      return rendered == null ? "<!---->" : renderToString(rendered);
-    }
-
-    // Null placeholder — comment node in HTML (AIO-107)
-    if (vnode.tag === _Null) return "<!---->";
-
-    // Portal — skip in SSR (no target DOM available)
-    if (vnode.tag === Portal) return "";
-
-    // Suspense — try to render children, show fallback if lazy throws
-    if (vnode.tag === Suspense) {
-      const fallback = vnode.props.fallback as
-        | VNode
-        | string
-        | number
-        | null
-        | undefined;
-      try {
-        const html = vnode.children.map((c) => renderToString(c)).join("");
-        return html === "" ? _EMPTY_ANCHOR : html;
-      } catch (thrown) {
-        if (thrown !== _LAZY_PENDING) throw thrown;
-        return renderToString(fallback ?? null);
-      }
-    }
-
-    // Fragment — render children
-    if (vnode.tag === Fragment) {
-      const html = vnode.children.map((c) => renderToString(c)).join("");
-      return html === "" ? _EMPTY_ANCHOR : html;
-    }
-
-    // ErrorBoundary — render children with error catching
-    if (vnode.tag === ErrorBoundary) {
-      const fallback = vnode.props.fallback as
-        | ((e: Error) => VNode | string | number | null)
-        | undefined;
-      try {
-        const html = vnode.children.map((c) => renderToString(c)).join("");
-        return html === "" ? _EMPTY_ANCHOR : html;
-      } catch (error) {
-        if (!fallback) throw error;
-        return renderToString(fallback(error as Error));
-      }
-    }
-
-    // Element
-    const tag = vnode.tag as string;
-    const selfClosing = VOID_ELEMENTS.has(tag);
-    let html = `<${tag}${_renderPropsHtml(vnode.props, tag)}`;
-
-    html += ">";
-    if (selfClosing) return html;
-
-    // dangerouslySetInnerHTML
-    const dih = vnode.props.dangerouslySetInnerHTML as
-      | { __html: string }
-      | undefined;
-    const areaText = _ssrTextareaText(vnode);
-    if (dih) {
-      html += dih.__html;
-    } else if (areaText !== null) {
-      html += areaText;
-    } else {
-      for (const child of vnode.children) {
-        html += renderToString(child);
-      }
-    }
-
-    html += `</${tag}>`;
-    return html;
+    return _rts(vnode, { n: 0 });
   } finally {
     _ssrDepth--;
   }
+}
+
+/** The recursive writer behind `renderToString`; `nodes` counts what it
+ *  emitted (see `_regionHtml`). */
+function _rts(
+  vnode: VNode | string | number | null,
+  nodes: SsrNodes,
+): string {
+  if (vnode == null) return "";
+  if (typeof vnode === "string") {
+    nodes.n++;
+    return _escapeHtml(vnode);
+  }
+  if (typeof vnode === "number") {
+    nodes.n++;
+    return String(vnode);
+  }
+  // Not a node — same check, same message as `createDom`. It used to fall
+  // into the element branch and die on `Object.entries(undefined)` with a bare
+  // TypeError naming nothing.
+  const bad = _notANode(vnode);
+  if (bad) throw new Error(bad);
+
+  // Component — execute and render output
+  if (typeof vnode.tag === "function") {
+    const rendered = (vnode.tag as ComponentFn)({
+      ...vnode.props,
+      children: vnode.children.length > 0
+        ? vnode.children
+        : (vnode.props.children ?? vnode.children),
+    });
+    // Nothing to render is still a POSITION, on the server exactly as on the
+    // client: `renderToString(null)` returns "", which would ship markup one
+    // node short of what the client builds — so hydration adopts the wrong
+    // node and a null-first component MOVES on its first re-render
+    // (R-10). The placeholder makes the two agree.
+    if (rendered == null) {
+      nodes.n++;
+      return "<!---->";
+    }
+    return _rts(rendered, nodes);
+  }
+
+  // Null placeholder — comment node in HTML (AIO-107)
+  if (vnode.tag === _Null) {
+    nodes.n++;
+    return "<!---->";
+  }
+
+  // Signal child — its current value, as the text the client will bind.
+  if (vnode.tag === _SignalText) {
+    nodes.n++;
+    return _escapeHtml(_sigText((vnode._sig as Signal<unknown>).peek()));
+  }
+
+  // Portal — skip in SSR (no target DOM available)
+  if (vnode.tag === Portal) return "";
+
+  // Suspense — try to render children, show fallback if lazy throws
+  if (vnode.tag === Suspense) {
+    const fallback = vnode.props.fallback as
+      | VNode
+      | string
+      | number
+      | null
+      | undefined;
+    try {
+      return _region(vnode, nodes);
+    } catch (thrown) {
+      if (thrown !== _LAZY_PENDING) throw thrown;
+      return _rts(fallback ?? null, nodes);
+    }
+  }
+
+  // Fragment — render children
+  if (vnode.tag === Fragment) return _region(vnode, nodes);
+
+  // ErrorBoundary — render children with error catching
+  if (vnode.tag === ErrorBoundary) {
+    const fallback = vnode.props.fallback as
+      | ((e: Error) => VNode | string | number | null)
+      | undefined;
+    try {
+      return _region(vnode, nodes);
+    } catch (error) {
+      if (!fallback) throw error;
+      return _rts(fallback(error as Error), nodes);
+    }
+  }
+
+  // Element
+  nodes.n++;
+  const tag = vnode.tag as string;
+  const selfClosing = VOID_ELEMENTS.has(tag);
+  let html = `<${tag}${_renderPropsHtml(vnode.props, tag)}`;
+
+  html += ">";
+  if (selfClosing) return html;
+
+  // Raw html owns the content (see _hasRawHtml); the children are not emitted.
+  const areaText = _ssrTextareaText(vnode);
+  if (_hasRawHtml(vnode.props)) {
+    html += (vnode.props.dangerouslySetInnerHTML as { __html: string }).__html;
+  } else if (areaText !== null) {
+    html += areaText;
+  } else {
+    const inner: SsrNodes = { n: 0 };
+    for (const child of vnode.children) {
+      html += _rts(child, inner);
+    }
+  }
+
+  html += `</${tag}>`;
+  return html;
+}
+
+/** A container's children as one region (see `_regionHtml`). A region always
+ *  occupies at least one node of its parent — its content or its anchor. */
+function _region(vnode: VNode, nodes: SsrNodes): string {
+  const inner: SsrNodes = { n: 0 };
+  const html = vnode.children.map((c) => _rts(c, inner)).join("");
+  nodes.n++;
+  return _regionHtml(html, inner.n);
 }

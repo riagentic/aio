@@ -29,7 +29,7 @@ export const disk = cell("disk", {
   // writes are discarded wholesale — no stale write can land, by construction,
   // instead of the "check the signal, then carefully un-write" dance.
   //
-  // It is also what makes `s.$commit!()` below real: without this line
+  // It is also what makes `s.$commit()` below real: without this line
   // `$commit` resolves to a no-op, and the spinner it publishes would never
   // reach the client.
   transaction: true,
@@ -64,14 +64,14 @@ export const disk = cell("disk", {
      *  cancelled or superseded call's buffered writes are discarded wholesale:
      *  no stale write can land, by construction, and the old "check the signal,
      *  then carefully un-write" dance is gone. */
-    async open(s: DiskState & Partial<MethodDraftMeta>, path?: string) {
+    async open(s: DiskState & MethodDraftMeta, path?: string) {
       const io = await import("./disk.server.ts");
       const target = path ?? io.homeDir();
 
       // Already cancelled or superseded during the import await? Then this
       // call owns nothing — publishing its spinner would overwrite the state
       // of whoever cancelled it.
-      if (s.$signal!.aborted) return;
+      if (s.$signal.aborted) return;
 
       // The spinner idiom: publish the "working" state NOW, mid-transaction —
       // without $commit the write-set would buffer until the scan finishes.
@@ -80,21 +80,21 @@ export const disk = cell("disk", {
       s.error = null;
       s.partial = false;
       s.scanning = true;
-      s.$commit!();
+      s.$commit();
 
       try {
-        const r = await io.scanFolders(target, s.$signal!);
+        const r = await io.scanFolders(target, s.$signal);
         // Superseded or cancelled while we were away? Just leave: the
         // transaction discards everything this call buffered after $commit —
         // the newer open() (or stop()) owns the state now.
-        if (s.$signal!.aborted) return;
+        if (s.$signal.aborted) return;
         s.entries = r.entries;
         // A capped scan reports that it was capped. The alternative — showing
         // a floor as if it were a total — is the quiet failure this whole
         // example is a lesson against.
         s.partial = r.partial;
       } catch (e) {
-        if (s.$signal!.aborted) return;
+        if (s.$signal.aborted) return;
         s.error = e instanceof Error ? e.message : String(e);
       }
       s.scanning = false;
@@ -108,7 +108,7 @@ export const disk = cell("disk", {
     },
 
     /** Up one level — a normal call, which supersedes any running scan. */
-    async up(s: DiskState & Partial<MethodDraftMeta>) {
+    async up(s: DiskState & MethodDraftMeta) {
       const parent = s.path.replace(/\/[^/]+\/?$/, "") || "/";
       if (parent !== s.path) await disk.open(parent);
     },

@@ -117,3 +117,51 @@ Deno.test("cfg apply: late syncCells adopt via the one resolver", () => {
     else g.__aioConfig = prev;
   }
 });
+
+// The app's IDENTITY, on both doors.
+//
+// `localStorage` is scoped to an ORIGIN, so the browser's offline sync queue
+// scopes its key by the app id — two aio apps on one host:port otherwise
+// shared pending CRDT ops for every cell name they had in common, and app B's
+// first catch-up flushed app A's unsent mutations into B's server
+// (tests/sync/offline-queue-app-scope.test.ts pins the client half). The
+// client reads the id off the bridged config, so the server has to send it —
+// in the SHELL as well as the frame, because a page can boot sync before the
+// frame arrives, which is the same reason `syncCells` is injected there.
+Deno.test("cfg: the app id reaches the browser through the shell AND the frame", async () => {
+  const c = cell("appid-cell", { state: { n: 0 }, methods: {} });
+  await using srv = await testServer({
+    cells: [c],
+    appId: "identity-under-test",
+  });
+
+  const html = await (await srv.fetch("/")).text();
+  const m = /window\.__aioConfig=(\{.*?\})<\/script>/.exec(html);
+  assert(m, `no injected config in the shell:\n${html.slice(0, 400)}`);
+  const injected = JSON.parse(m[1]!) as { appId?: string };
+  assertEquals(
+    injected.appId,
+    "identity-under-test",
+    "the shell must name the app — the queue is scoped before any frame lands",
+  );
+
+  const ws = new WebSocket(srv.url.replace("http", "ws") + "/ws");
+  const cfg = await new Promise<Record<string, unknown>>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("no cfg frame")), 5000);
+    ws.onmessage = (e) => {
+      const f = dec(String(e.data));
+      if (f?.t === "cfg") {
+        clearTimeout(timer);
+        resolve(f.d as Record<string, unknown>);
+      }
+    };
+    ws.onerror = (e) => reject(e);
+  });
+  ws.close();
+  await new Promise((r) => setTimeout(r, 50));
+  assertEquals(
+    cfg.appId,
+    "identity-under-test",
+    "…and so must the frame, for shells templated at build time (electron, android)",
+  );
+});

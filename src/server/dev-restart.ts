@@ -155,6 +155,49 @@ export async function relaunchArgs(): Promise<string[]> {
 
 let _restarting = false;
 
+/** What the restarted app must inherit from the one being torn down. */
+export interface RestartCarry {
+  /** The TCP port the app is bound to — read at restart time, after the
+   *  listener has answered (`undefined` = no TCP port: a zero-port electron
+   *  app, which the relaunch reproduces by naming none). */
+  port?: () => number | undefined;
+}
+
+/** The environment a supervised child is spawned with — pure, so the carry
+ *  is a unit test rather than a stopwatch.
+ *
+ *  `AIO_PORT` is THE port the relaunched app binds. A dev app that named no
+ *  port got a free one from the runtime — and the runtime picked a DIFFERENT
+ *  free one after every cell edit, so every open tab was orphaned on the old
+ *  port while the terminal said "restarting the app" as if nothing moved.
+ *  `--port=N` never had the problem (the flag is replayed in argv); an
+ *  unnamed port is carried the one way a process with no command line to
+ *  hang a flag on can be told its port: the env rung of the port chain
+ *  (`envPort()` in paths.ts — the same reader a service unit or a container
+ *  uses). A flag or an app-config port still wins over it or equals it, so
+ *  the carry can never move an app that named its port. */
+export function supervisorEnv(
+  supervisorPid: number,
+  port: number | undefined,
+): Record<string, string> {
+  return {
+    [CHILD_ENV]: "1",
+    // Die with the supervisor. Without this the child is a plain orphan:
+    // close the terminal (or `kill -9` the supervisor) and the supervisor
+    // goes while the CHILD survives — holding the port and the
+    // single-instance lock with nothing supervising it, so the next
+    // `deno task dev` is refused with "Already running" and the developer
+    // has to hunt the pid. Headless apps make it worse: they deliberately
+    // ignore SIGHUP so an unattended app survives a closed shell
+    // (aio-lifecycle.ts), which is right for `nohup` and exactly wrong
+    // here. `AIO_PARENT_PID` is the mechanism that already exists for this
+    // (electron-spawn.ts sets it for the same reason) — the supervised
+    // child is the case it was written for.
+    AIO_PARENT_PID: String(supervisorPid),
+    ...(port !== undefined && port > 0 ? { AIO_PORT: String(port) } : {}),
+  };
+}
+
 /** Restart the app process because `path` changed. Tears the app down first
  *  (releasing the port and flushing persistence), then either exits for the
  *  supervisor to respawn, or becomes the supervisor itself. Never returns —
@@ -163,6 +206,7 @@ let _restarting = false;
 export async function restartForCellChange(
   path: string,
   shutdown: () => Promise<void>,
+  carry: RestartCarry = {},
 ): Promise<void> {
   // Claimed synchronously: an editor save often produces two FS events, and
   // both would otherwise get past an await and restart twice.
@@ -182,6 +226,9 @@ export async function restartForCellChange(
     return;
   }
   log.info("watch", `cell file changed (${file}) — restarting the app`);
+  // Read BEFORE the shutdown releases the listener: afterwards there is no
+  // bound port to read.
+  const port = carry.port?.();
   try {
     await shutdown();
   } catch (e) {
@@ -190,12 +237,13 @@ export async function restartForCellChange(
   if (isSupervisedChild()) {
     Deno.exit(RESTART_EXIT_CODE); // the supervisor launches the next one
   }
-  await superviseForever();
+  await superviseForever(port);
 }
 
 /** Become the supervisor: launch the app as a child, relaunch it whenever it
- *  exits asking for a restart, and pass any other exit code through. */
-async function superviseForever(): Promise<never> {
+ *  exits asking for a restart, and pass any other exit code through. `port`
+ *  is the TCP port the first app was on — every child binds the same one. */
+async function superviseForever(port: number | undefined): Promise<never> {
   const real = await realArgv();
   const args = real ?? synthesizedArgs();
   if (!real) {
@@ -228,21 +276,7 @@ async function superviseForever(): Promise<never> {
     const spawnedAt = Date.now();
     const child = new Deno.Command(Deno.execPath(), {
       args,
-      env: {
-        [CHILD_ENV]: "1",
-        // Die with the supervisor. Without this the child is a plain orphan:
-        // close the terminal (or `kill -9` the supervisor) and the supervisor
-        // goes while the CHILD survives — holding the port and the
-        // single-instance lock with nothing supervising it, so the next
-        // `deno task dev` is refused with "Already running" and the developer
-        // has to hunt the pid. Headless apps make it worse: they deliberately
-        // ignore SIGHUP so an unattended app survives a closed shell
-        // (aio-lifecycle.ts), which is right for `nohup` and exactly wrong
-        // here. `AIO_PARENT_PID` is the mechanism that already exists for this
-        // (electron-spawn.ts sets it for the same reason) — the supervised
-        // child is the case it was written for.
-        AIO_PARENT_PID: String(Deno.pid),
-      },
+      env: supervisorEnv(Deno.pid, port),
       stdin: "inherit",
       stdout: "inherit",
       stderr: "inherit",

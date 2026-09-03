@@ -65,7 +65,7 @@ const checkout = cell("promise-checkout", {
         s.status = "expired";
         return;
       }
-      if (s.$signal?.aborted) return;
+      if (s.$signal.aborted) return;
       s.orderId = `order-${item}`;
       s.status = "placed";
     },

@@ -10,7 +10,7 @@
 import { WHERE_HINT } from "../diagnostics/contexts.ts";
 import type { Msg } from "./cell-types.ts";
 import { cloneState } from "./immutable.ts";
-import { removalMessage, removalOf } from "./removals.ts";
+import { removalMessage, removalOf } from "./removals-core.ts";
 import type { ScheduleEffect } from "./schedule.ts";
 import type { OwnEffect } from "./own.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
@@ -20,15 +20,15 @@ import { markInflight } from "./dispatch.ts";
 // Internal method types — `any` at spread args/return is unavoidable when
 // mapping over heterogeneous method signatures at the type-system boundary.
 
-/** Everything a method may return as an effect — a single schedule/own effect or
- *  an array of them. Use it as the return annotation when a method references its
- *  own cell (`return self.x.action()`), which otherwise trips TypeScript's
- *  self-referential-inference guard (TS7022/7023):
+/** An effect value — a single schedule/own effect, or an array of them. It is
+ *  what `s.$do(...)` takes; a helper that BUILDS an effect for a method to hand
+ *  to `$do` is the reason it stays exported.
  *
- *  ```ts
- *  skip(s): CellEffect { return schedule.after("next", 0, cycle.tick.action()); }
- *  // conditional: `: CellEffect | void` · async: `: Promise<CellEffect | void>`
- *  ``` */
+ *  It used to be the annotation for a method that RETURNED its effect. That
+ *  channel was retired in alpha76 (src/state/removals.ts): `return` carries
+ *  values, `s.$do(...)` carries effects. `self()` is the way out of the
+ *  self-referential-inference guard (TS7022/7023) that the annotation used to
+ *  work around. */
 export type CellEffect =
   | ScheduleEffect
   | OwnEffect
@@ -46,30 +46,45 @@ export type MethodDraftServed = {
   ) => void;
 };
 
-/** Synchronous cell method — mutates state; may return a `CellEffect` (to
- *  schedule work) OR a plain VALUE that `await cell.method()` resolves with
- *  (AIO-427). Effects are tagged (`type: "__schedule"/"__own"`), so a returned
- *  value is unambiguous at runtime. `unknown` keeps the constraint permissive;
- *  the caller-side return type is inferred precisely by DirectCalling. */
+/** Synchronous cell method — mutates state; returns a plain VALUE that
+ *  `await cell.method()` resolves with (AIO-427). Effects go through
+ *  `s.$do(...)`; returning one is refused (alpha76, src/state/removals.ts),
+ *  and effects stay tagged (`type: "__schedule"/"__own"`) so the refusal can
+ *  tell them from a value. `unknown` keeps the constraint permissive; the
+ *  caller-side return type is inferred precisely by DirectCalling. */
 export type SyncMethod<S> = (
-  s: S & Partial<MethodDraftMeta<S>> & MethodDraftServed,
+  s: S & MethodDraftMeta<S> & MethodDraftServed,
   // deno-lint-ignore no-explicit-any
   ...args: any[]
 ) => unknown;
 /** Async cell method — runs in executor, mutations batched via proxy */
 export type AsyncMethod<S> = (
-  s: S & Partial<MethodDraftMeta<S>> & MethodDraftServed,
+  s: S & MethodDraftMeta<S> & MethodDraftServed,
   // deno-lint-ignore no-explicit-any
   ...args: any[]
   // deno-lint-ignore no-explicit-any
 ) => Promise<any>;
 
 /** Opt-in draft annotation for cancellation-aware methods (perfect-aio D1):
- *  `async place(s: MyState & Partial<MethodDraftMeta>) { … s.$signal?.… }`.
- *  At runtime `s.$signal` is ALWAYS served on async methods (live proxy);
- *  the annotation is Partial because strict contravariance forbids a
- *  required-extra param on Method<S> — use `s.$signal?.aborted` (or `!` when
- *  you know the method is async). */
+ *  `async place(s: MyState & Partial<MethodDraftMeta>) { … s.$signal.… }`.
+ *  At runtime all four are served on EVERY method, sync and async alike (the
+ *  live proxy serves them on an async method, `withDraftDo` on a sync one:
+ *  a sync method is one atomic commit, so its `$commit` is a no-op, its
+ *  `$live` is `s`, and its `$signal` never aborts).
+ *
+ *  These were behind `Partial<>` until alpha76, on the stated grounds that
+ *  "strict contravariance forbids a required-extra param on Method<S>". That
+ *  is not true, and `$do` — required, sitting in `MethodDraftServed` right
+ *  beside them — was the standing disproof: contravariance runs the other way,
+ *  so a method that accepts FEWER properties is assignable where more are
+ *  supplied. What the `Partial` actually bought was `s.$signal.aborted` and
+ *  `s.$commit()` in every cancellable method aio ships or documents — 14 of
+ *  them across the tutorial, the methods guide, the big-data guide, the
+ *  checkout walkthrough and `examples/disk` — on its way to becoming the
+ *  permanent idiom for "a method that can be cancelled". Every previous
+ *  spelling still compiles (`!`, `?.`, a bare `(s: MyState)` annotation, and
+ *  an explicit `Partial<MethodDraftMeta>` one), which is what made this
+ *  cheap now and impossible after beta. */
 export type MethodDraftMeta<S = Record<string, unknown>> = {
   readonly $signal: AbortSignal;
   /** Transactional cells: publish the buffered write-set atomically
@@ -98,11 +113,12 @@ export type MethodDraftMeta<S = Record<string, unknown>> = {
    *  they never trip conflict detection. Off `transaction` it is just `s`. */
   readonly $live: S;
   /** Run effect(s) — `s.$do(schedule.after(...), own.set(...))` (alpha52).
-   *  The effect channel: `return` is for VALUES, `$do` is for effects, so a
+   *  THE effect channel: `return` is for VALUES, `$do` is for effects, so a
    *  method can do both in one call. Sync methods: captured and executed with
    *  the commit. Async methods: dispatched immediately (an `own.set` factory
-   *  registers in the same tick). Returning effects still works through beta,
-   *  with a one-time deprecation hint. */
+   *  registers in the same tick). Returning an effect instead was retired in
+   *  alpha76 (src/state/removals.ts) — it resolved the caller with
+   *  `undefined`, so the two meanings could never share one channel. */
   readonly $do: (
     effect: ScheduleEffect | OwnEffect,
     ...more: (ScheduleEffect | OwnEffect)[]
@@ -403,6 +419,20 @@ export function registerCall(
   callId: string,
   method?: string,
 ): Promise<unknown> {
+  // A duplicate id is a defect, never a race: ids are minted per call, by the
+  // server for a network call and by the binding for a direct one. The map
+  // used to be `set` blind, so a collision silently reassigned one caller's
+  // slot to another call — the first to finish resolved the WRONG caller and
+  // the loser hung past its ceiling, because expiry short-circuits on an id
+  // that now names a different call.
+  if (_pending.has(callId)) {
+    throw new Error(
+      `aio: duplicate call id ${callId}${
+        method ? ` for ${method}` : ""
+      } — a pending call already owns it. This is a framework defect; please ` +
+        `report it.`,
+    );
+  }
   const timeoutMs = callTimeoutFor(method);
   if (timeoutMs <= 0) {
     // Explicitly unbounded — the app said so.
@@ -501,6 +531,45 @@ export function resolveCall(
   else pending.resolve(value);
 }
 
+/** Dispatch an action whose result rides a registered call — the ONE way to
+ *  start an async method whose promise is settled by `resolveCall`.
+ *
+ *  Register, dispatch, and — the part every caller used to skip — settle the
+ *  registration with the dispatch's OWN rejection. A refusal at the dispatch
+ *  door (time travel paused, dispatch closed or draining, queue overflow,
+ *  a reducer throw) rejects the dispatch promise, and nothing else: the method
+ *  never ran, so the executor that normally settles the call never will.
+ *  Every site did `void dispatch(...).catch(() => {})` and returned the
+ *  registration, so a sync caller heard the refusal instantly while an async
+ *  caller waited the full call ceiling and was then told the method "may
+ *  still be running" — about a method that had never started. Pressing undo
+ *  in the debug panel put every async call in the app into that state.
+ *
+ *  A dispatch that RESOLVES has queued the method; the executor settles the
+ *  call with the return value or throw, exactly as before. Fire-and-forget
+ *  callers get a no-op catch (awaiters still receive the rejection). */
+export function dispatchTracked<A>(
+  dispatch: (action: A) => unknown,
+  action: A,
+  callId: string,
+  method?: string,
+): Promise<unknown> {
+  const done = registerCall(callId, method);
+  done.catch(() => {});
+  const refused = (e: unknown) =>
+    resolveCall(
+      callId,
+      undefined,
+      e instanceof Error ? e : new Error(String(e)),
+    );
+  try {
+    void Promise.resolve(dispatch(action)).catch(refused);
+  } catch (e) {
+    refused(e); // a synchronous throw is a refusal too
+  }
+  return done;
+}
+
 /** Clear all pending async call registrations — for test isolation between runs */
 export function resetPending(): void {
   _pending.clear();
@@ -564,12 +633,21 @@ export function pauseCallDeadlines(): () => void {
   };
 }
 
+/** A live reference recorded INSIDE a write: the object at state path `ref`
+ *  belongs at `at`, a path inside the recorded `value` (or `args`, where the
+ *  first segment is the argument index). Resolved when the write is applied —
+ *  see {@linkcode recordValue}. */
+export type LiveRef = { at: string[]; ref: string[] };
+
 /** Batched mutation — multiple property writes grouped into one action */
 export type Mutation = {
   path: string[];
   value?: unknown;
   op?: string;
   args?: unknown[];
+  /** Live references inside `value`/`args` — an alias of the object at that
+   *  path, never a copy of it. Absent when the write holds plain data only. */
+  refs?: LiveRef[];
 };
 
 // ── Helpers ────────────────────────────────────────────────────────
@@ -881,6 +959,105 @@ function ownedValue(v: unknown): unknown {
 /** Identity through which a live proxy exposes its current underlying value. */
 export const LIVE_RAW = Symbol("aio.liveRaw");
 
+/** The root-level pseudo-keys the live proxy SERVES rather than reads out of
+ *  state — kept in one place so the `get` trap that answers them and the `has`
+ *  trap that reports them exist cannot drift apart. */
+const ROOT_KEYS = new Set(["$do", "$commit", "$live", "$signal"]);
+
+/** Identity through which a live proxy exposes its PATH, so a write that
+ *  contains it can record an ALIAS of that path (see {@linkcode recordValue}).
+ *
+ *  Every live proxy answers it, `s.$live`'s included: a mutation in this
+ *  system is ADDRESSED (`Mutation.path`), never carried by object identity, so
+ *  an alias is the same kind of thing as any other write and is resolved
+ *  against the same tree at the same moment — including under a transaction,
+ *  where the read that produced the reference is watched and the conflict
+ *  detector validates it like every other path. */
+export const LIVE_PATH = Symbol("aio.livePath");
+
+/** Record a value for the write-set — the ONE way a proxy-derived value enters
+ *  a mutation. Plain subtrees are kept by reference (`ownedValue` clones at
+ *  apply time, so replays stay safe). A LIVE PROXY inside the value is not
+ *  copied: it becomes a placeholder plus a {@linkcode LiveRef} to its path,
+ *  and `resolveRefs` installs the object AT that path when the write is
+ *  applied — on the read-your-writes overlay and on the committing Immer
+ *  draft alike.
+ *
+ *  That is what makes a live reference an alias, which is what it is
+ *  everywhere else: `s.selected = s.items[0]; s.selected.done = true` writes
+ *  BOTH paths in plain JavaScript, on the Immer draft a sync method runs on
+ *  (a draft assigned into another slot is finalized once, shared), and now
+ *  here. Copying it — the previous behaviour — wrote only `selected`, and the
+ *  same method body committed two different states depending on whether it
+ *  was declared `async` (found by audit a8; the differential fuzzer's alias
+ *  kinds pin it now). The alias lives until the commit: Immer's structural
+ *  sharing separates the two paths the next time only one is written, on
+ *  both sides.
+ *
+ *  A live proxy leaves a `null` PLACEHOLDER in the recorded value plus one
+ *  {@linkcode LiveRef}; nothing about it is cloned, so an alias costs less
+ *  than the copy it replaced. */
+export function recordValue(v: unknown): { value: unknown; refs?: LiveRef[] } {
+  const refs: LiveRef[] = [];
+  const walk = (x: unknown, at: string[]): unknown => {
+    if (x === null || typeof x !== "object") return x;
+    const live = (x as Record<symbol, unknown>)[LIVE_PATH];
+    if (live !== undefined) {
+      refs.push({ at, ref: live as string[] });
+      return null;
+    }
+    if (Array.isArray(x)) {
+      let out: unknown[] | null = null;
+      for (let i = 0; i < x.length; i++) {
+        const m = walk(x[i], [...at, String(i)]);
+        if (m !== x[i] && out === null) out = x.slice();
+        if (out !== null) out[i] = m;
+      }
+      return out ?? x;
+    }
+    let outObj: Record<string, unknown> | null = null;
+    for (const k of Object.keys(x as Record<string, unknown>)) {
+      const cur = (x as Record<string, unknown>)[k];
+      const m = walk(cur, [...at, k]);
+      if (m !== cur && outObj === null) {
+        outObj = { ...(x as Record<string, unknown>) };
+      }
+      if (outObj !== null) outObj[k] = m;
+    }
+    return outObj ?? x;
+  };
+  const value = walk(v, []);
+  return refs.length > 0 ? { value, refs } : { value };
+}
+
+/** Install the live references of a recorded write into its OWNED container
+ *  (the clone `ownedValue` made — never the recording itself). Every target
+ *  is read from `root` before anything is installed, so `s.obj = { prev:
+ *  s.obj }` sees the object it replaces. Returns the container, or the
+ *  target itself when the whole value was one live reference. */
+function resolveRefs(
+  root: unknown,
+  container: unknown,
+  refs: LiveRef[] | undefined,
+): unknown {
+  if (!refs || refs.length === 0) return container;
+  const targets = refs.map((r) => getNestedValue(root, r.ref));
+  let out = container;
+  for (let i = 0; i < refs.length; i++) {
+    const at = refs[i]!.at;
+    if (at.length === 0) {
+      out = targets[i];
+      continue;
+    }
+    let cur = out as Record<string, unknown>;
+    for (let j = 0; j < at.length - 1; j++) {
+      cur = cur[at[j]!] as Record<string, unknown>;
+    }
+    cur[at[at.length - 1]!] = targets[i];
+  }
+  return out;
+}
+
 /** Turn a value that may CONTAIN live proxies into plain data, at record time.
  *
  *  `s.obj = { ...s.obj }` copies nested object fields as their nested PROXIES;
@@ -961,8 +1138,10 @@ function setNestedValue(
     _warnDroppedMutation(`null parent for set leaf`, m, strict);
     return;
   }
-  (current as Record<string, unknown>)[path[path.length - 1]!] = ownedValue(
-    m.value,
+  (current as Record<string, unknown>)[path[path.length - 1]!] = resolveRefs(
+    obj,
+    ownedValue(m.value),
+    m.refs,
   );
 }
 
@@ -982,9 +1161,17 @@ function applyArrayOp(
   }
   // Args cloned for the same reason as set values: a pushed object enters the
   // applied tree, and a later op addressing it by path would mutate the
-  // RECORDING, corrupting every subsequent replay.
+  // RECORDING, corrupting every subsequent replay. Live references inside them
+  // are installed from `obj` AFTER the clone, so an aliased push
+  // (`s.items.push(s.items[0])`) puts the tree's own object in, not a copy —
+  // see resolveRefs.
+  const args = resolveRefs(
+    obj,
+    (m.args ?? []).map(ownedValue),
+    m.refs,
+  ) as unknown[];
   // deno-lint-ignore no-explicit-any
-  (arr as any)[m.op as string](...(m.args ?? []).map(ownedValue));
+  (arr as any)[m.op as string](...args);
 }
 
 /** Apply a batch of mutations (set, delete, array ops) to a state object.
@@ -1016,6 +1203,26 @@ export function applyMutations(
         "path contains banned key (__proto__/constructor/prototype), non-string segment, or exceeds depth",
         m,
       );
+    }
+    // An alias carries TWO more paths — where the reference goes inside the
+    // written value, and where it is read from. They are addresses like any
+    // other, so they pass the same gate: `at: ["__proto__"]` would otherwise
+    // walk straight past a check that only ever looked at `path`.
+    if (m.refs !== undefined) {
+      if (!Array.isArray(m.refs)) {
+        _rejectUnsafeMutation("refs is not an array", m);
+      }
+      for (const r of m.refs) {
+        if (
+          !r || typeof r !== "object" || !isSafeMutationPath(r.at) ||
+          !isSafeMutationPath(r.ref)
+        ) {
+          _rejectUnsafeMutation(
+            "live-reference path contains banned key (__proto__/constructor/prototype), non-string segment, or exceeds depth",
+            m,
+          );
+        }
+      }
     }
     if (m.op === "delete") {
       deleteNestedKey(s, m, strict);
@@ -1363,14 +1570,54 @@ function throwStaleCapture(
   );
 }
 
-/** Throw the canonical "live async state" error. */
+/** The "copy it first" spelling that actually applies to THIS value.
+ *
+ *  One hint — `snapshot first: const items = [...s.items]` — was printed for
+ *  every refusal, including the ones where it is meaningless: spreading a
+ *  `Date`, a `RegExp` or a `Map` produces `{}` or `[]`, so the suggested fix
+ *  was a second, quieter bug. */
+function liveStateHint(v: unknown, at: string): string {
+  if (v instanceof Date) return `copy it first: const when = new Date(${at})`;
+  if (v instanceof RegExp) {
+    return `copy it first: const re = new RegExp(${at}.source, ${at}.flags)`;
+  }
+  if (v instanceof Map || v instanceof Set) {
+    const kind = v instanceof Map ? "Map" : "Set";
+    return `a ${kind} in cell state does not survive the wire either — keep ` +
+      `plain data in state (${
+        kind === "Map" ? "an object" : "an array"
+      }) and build the ${kind} where you use it`;
+  }
+  if (ArrayBuffer.isView(v) || v instanceof ArrayBuffer) {
+    return `copy it first: const bytes = [...new Uint8Array(${at})] — and ` +
+      `keep plain data in state, since a byte buffer does not survive the wire`;
+  }
+  if (Array.isArray(v)) return `snapshot first: const items = [...${at}]`;
+  if (v !== null && typeof v === "object") {
+    const ctor =
+      (Object.getPrototypeOf(v) as { constructor?: { name?: string } } | null)
+        ?.constructor?.name;
+    if (ctor && ctor !== "Object") {
+      return `a ${ctor} instance belongs in \`own\`, not in cell state — ` +
+        `state is plain JSON-shaped data; read the fields you need instead`;
+    }
+    return `snapshot first: const copy = { ...${at} }`;
+  }
+  return `snapshot first: const copy = { ...${at} }`;
+}
+
+/** Throw the canonical "live async state" error. `subject` is the value the
+ *  operation was attempted on, and decides the hint. */
 function throwLiveStateError(
   cellName: string,
   methodName: string,
   op: string,
+  at: string,
+  subject?: unknown,
 ): never {
   throw new Error(
-    `[${cellName}:${methodName}] ${op} is not supported on live async state — snapshot first: const items = [...s.items]`,
+    `[${cellName}:${methodName}] ${op} is not supported on live async state ` +
+      `(${at}) — ${liveStateHint(subject, at)}`,
   );
 }
 
@@ -1445,6 +1692,29 @@ export function createLiveProxy<S extends Record<string, unknown>>(
   _birth = 0,
 ): S {
   const pathKey = path.join(PATH_SEP);
+  /** This proxy's address as an app author writes it — `s`, `s.items.0`. */
+  const pathAt = (): string => path.length === 0 ? "s" : "s." + path.join(".");
+  /** A symbol-keyed write/delete/define, refused by name.
+   *
+   *  The bare `return false` these traps used to answer with became the
+   *  engine's own `'set' on proxy: trap returned falsish for property
+   *  'Symbol(k)'` — which names no cell, no method and no reason. A symbol key
+   *  cannot be carried by a mutation path (they are strings, by the same
+   *  prototype-pollution gate that vets every network-sourced write) and JSON
+   *  drops it on the way to every client and to state.db, so this is a
+   *  refusal, not an omission. */
+  const symbolKeyRefused: (prop: symbol, verb: string) => never = (
+    prop,
+    verb,
+  ) => {
+    throw new Error(
+      `[${cellName}:${methodName}] a symbol-keyed property (${
+        String(prop)
+      }) cannot be ${verb} in cell state (${pathAt()}) — state is broadcast ` +
+        `and persisted as JSON, which drops a symbol key entirely, so it ` +
+        `would exist in this process and nowhere else. Use a string key.`,
+    );
+  };
   const _liveArrays = (_stale.live ??= new Map());
   const noteRead = _watch ? (k: string) => _watch.reads.add(k) : undefined;
   const noteWrite = _watch ? (k: string) => _watch.writes.add(k) : undefined;
@@ -1552,6 +1822,14 @@ export function createLiveProxy<S extends Record<string, unknown>>(
           // wrong data — refuse at the write site.
           assertFresh();
           return effectiveAt();
+        }
+        // Alias hook (LIVE_PATH): the ADDRESS this proxy stands for, so a
+        // write that contains it records an alias of that path instead of a
+        // copy — see recordValue. Same freshness rule as LIVE_RAW: aliasing a
+        // stale reference would resolve to the new value at apply time.
+        if (prop === LIVE_PATH) {
+          assertFresh();
+          return path;
         }
         // Make arrays spreadable + iterable: `[...s.items]` and
         // `for (const x of s.items)`. The blanket symbol→undefined return used
@@ -1693,11 +1971,22 @@ export function createLiveProxy<S extends Record<string, unknown>>(
           // deno-lint-ignore no-explicit-any
           const result = (copy as any)[key](...args);
           noteWrite?.(pathKey);
-          batcher.add(methodName, {
+          // recordValue over the whole argument LIST: a live reference in an
+          // argument (`s.items.push(s.items[0])`) is recorded as an alias of
+          // its path, addressed by argument index — the same thing the sync
+          // draft does when a nested draft is pushed into its own array.
+          const rec = recordValue(args);
+          // The `refs` key exists only when there IS an alias: a mutation
+          // carrying `refs: undefined` is a different object to every
+          // structural comparison (and to structuredClone across a worker
+          // boundary) than the one this recorded before aliases existed.
+          const m: Mutation = {
             path: [...path],
             op: key,
-            args: args.map(materializeValue),
-          });
+            args: rec.value as unknown[],
+          };
+          if (rec.refs) m.refs = rec.refs;
+          batcher.add(methodName, m);
           // Index-moving mutators re-address existing elements — a captured
           // element proxy would silently read a DIFFERENT element afterwards.
           if (INDEX_MOVING_MUTATORS.has(key)) {
@@ -1745,7 +2034,7 @@ export function createLiveProxy<S extends Record<string, unknown>>(
       // don't support. Throw the canonical "live async state" error so
       // users get an actionable message rather than silent wrong data.
       if (typeof value === "function" && !Array.isArray(fresh)) {
-        throwLiveStateError(cellName, methodName, `${key}()`);
+        throwLiveStateError(cellName, methodName, `${key}()`, pathAt(), fresh);
       }
 
       // A leaf read — the value the method actually reasons about.
@@ -1754,20 +2043,24 @@ export function createLiveProxy<S extends Record<string, unknown>>(
     },
 
     set(_target, prop, value) {
-      if (typeof prop === "symbol") return false;
+      if (typeof prop === "symbol") symbolKeyRefused(prop, "written");
       assertFresh();
       noteWrite?.(path.length === 0 ? prop : pathKey + PATH_SEP + prop);
-      batcher.add(methodName, {
-        path: [...path, prop as string],
-        value: materializeValue(value),
-      });
+      // recordValue, not materializeValue: a LIVE reference inside the written
+      // value is recorded as an ALIAS of its path rather than copied, which is
+      // what the Immer draft a sync method runs on does with a nested draft
+      // assigned into another slot. See recordValue.
+      const rec = recordValue(value);
+      const m: Mutation = { path: [...path, prop as string], value: rec.value };
+      if (rec.refs) m.refs = rec.refs;
+      batcher.add(methodName, m);
       noteOverwrite(path.length === 0 ? prop : pathKey + PATH_SEP + prop);
       return true;
     },
 
     // AIO-240: intercept `delete` so property removal is batched as a mutation
     deleteProperty(_target, prop) {
-      if (typeof prop === "symbol") return false;
+      if (typeof prop === "symbol") symbolKeyRefused(prop, "deleted");
       assertFresh();
       noteWrite?.(path.length === 0 ? prop : pathKey + PATH_SEP + prop);
       batcher.add(methodName, {
@@ -1782,6 +2075,18 @@ export function createLiveProxy<S extends Record<string, unknown>>(
     has(_target, prop) {
       if (typeof prop === "symbol") return false;
       assertFresh();
+      // The root-level pseudo-keys the get trap SERVES (`s.$do`, `s.$commit`,
+      // `s.$live`, `s.$signal`) must also EXIST: `"$do" in s` was true in a
+      // sync method (its draft wrapper answers `has`) and false in the async
+      // twin, so the documented way to feature-detect the effect channel gave
+      // opposite answers for the same method body. A `has` that contradicts
+      // its own `get` is wrong on its own terms, too.
+      // Mirrors what the get trap actually SERVES: `$do` only exists when the
+      // executor wired the effect channel (it always does at runtime; a bare
+      // `createLiveProxy` in a unit test does not), the other three always do.
+      if (path.length === 0 && ROOT_KEYS.has(prop as string)) {
+        return prop !== "$do" || _do !== undefined;
+      }
       // `"x" in s` reads x's existence — record the probed path, not the whole
       // container, so only a change AT x conflicts.
       noteRead?.(
@@ -1850,6 +2155,40 @@ export function createLiveProxy<S extends Record<string, unknown>>(
       };
     },
 
+    // `Object.defineProperty(s.obj, k, d)` and `Object.setPrototypeOf(s.obj,
+    // p)` had NO traps, so they landed on the placeholder target — the write
+    // never reached state, the read back was `undefined`, and nothing was
+    // logged. The sync twin throws Immer's own error for both. A refusal that
+    // says which spelling to use instead is the parity fix; silence was not.
+    defineProperty(_target, prop, _desc) {
+      // Immer refuses EVERY descriptor on a draft ("[Immer]
+      // Object.defineProperty() cannot be used on an Immer draft"), plain data
+      // ones included, so accepting the plain-data case here would swap one
+      // divergence for another. Refuse both kinds, and name the spelling that
+      // works on both: a plain assignment.
+      throw new Error(
+        `[${cellName}:${methodName}] Object.defineProperty(…, '${
+          String(prop)
+        }', …) cannot be used on cell state (${pathAt()}) — a sync method's ` +
+          `draft refuses it too. Assign instead: ${pathAt()}.${
+            typeof prop === "symbol" ? "key" : String(prop)
+          } = value${
+            typeof prop === "symbol"
+              ? ` (and use a STRING key — a symbol key is dropped by JSON, so it would exist in this process and nowhere else)`
+              : ""
+          }.`,
+      );
+    },
+    setPrototypeOf() {
+      throwLiveStateError(
+        cellName,
+        methodName,
+        "Object.setPrototypeOf(…)",
+        pathAt(),
+        effectiveAt(),
+      );
+    },
+
     // Prevent Object.freeze/preventExtensions from locking the target
     preventExtensions() {
       return false;
@@ -1875,21 +2214,34 @@ export function createLiveProxy<S extends Record<string, unknown>>(
  *  to see it). @internal */
 export const DRAFT_DO_TARGET = Symbol("aio.draftDoTarget");
 
-/** Wrap a sync-method draft so `s.$do(...)` exists. @internal */
+/** Wrap a sync-method draft so the root pseudo-keys exist. @internal
+ *
+ *  `$do` was the only one served here, so `s.$commit`, `s.$live` and
+ *  `s.$signal` — all four documented with the SAME spelling — were a function,
+ *  a view and a signal in an async method and `undefined` in the sync twin:
+ *  `s.$signal.aborted` threw "cannot read properties of undefined" in a method
+ *  whose only sin was not being async. They mean, in a sync method, exactly
+ *  what they mean in a non-transactional async one: the method IS one commit
+ *  (`$commit` is a no-op there too), its view IS current (`$live` is the same
+ *  `s`), and nothing can abort between statements (a never-aborting signal). */
 export function withDraftDo<S extends object>(
   draft: S,
   doFn: (...effects: unknown[]) => void,
 ): S {
-  return new Proxy(draft, {
+  const wrapper: S = new Proxy(draft, {
     get(t, p, _r) {
       if (p === "$do") return doFn;
       if (p === DRAFT_DO_TARGET) return t;
+      if (p === "$commit") return _noCommit;
+      if (p === "$live") return wrapper;
+      if (p === "$signal") return _neverSignal();
       // Receiver = the draft itself: Immer's internal getters must see their
       // own proxy, never this wrapper.
       return Reflect.get(t, p, t);
     },
     set: (t, p, v) => Reflect.set(t, p, v, t),
-    has: (t, p) => p === "$do" || Reflect.has(t, p),
+    has: (t, p) =>
+      (typeof p === "string" && ROOT_KEYS.has(p)) || Reflect.has(t, p),
     deleteProperty: (t, p) => Reflect.deleteProperty(t, p),
     ownKeys: (t) => Reflect.ownKeys(t),
     getOwnPropertyDescriptor: (t, p) => Reflect.getOwnPropertyDescriptor(t, p),
@@ -1899,7 +2251,13 @@ export function withDraftDo<S extends object>(
     isExtensible: (t) => Reflect.isExtensible(t),
     preventExtensions: (t) => Reflect.preventExtensions(t),
   });
+  return wrapper;
 }
+
+/** `s.$commit()` in a sync method — the method is already one atomic commit,
+ *  which is what the async live proxy's own fallback says (`_commit ?? (() =>
+ *  {})`) for a non-transactional method. */
+function _noCommit(): void {}
 
 /** The draft behind a `withDraftDo` wrapper, or the value itself. @internal */
 export function unwrapDraftDo(v: unknown): unknown {

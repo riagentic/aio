@@ -21,6 +21,7 @@ import {
   type PatchEntry,
 } from "../protocol/broadcast-utils.ts";
 import { degraded } from "../diagnostics/degraded.ts";
+import { WS_BUFFER_HIGH_WATER, wsWriteBacklog } from "./write-backlog.ts";
 import type { ClientMeta } from "./server-ws.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
 import type { AioUser } from "./aio.ts";
@@ -192,6 +193,10 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
       if (connections.size > 0) {
         vitalsSystem?.pressureMonitor?.onBroadcastRound();
       }
+      /** Peers skipped THIS round because their socket buffer is not
+       *  draining — escalated once after the loop (see below). */
+      let backlogged = 0;
+      let worstBacklog = 0;
       for (const [ws, meta] of connections) {
         if (ws.readyState !== WebSocket.OPEN) continue;
         // A skipped round is a LOST round for this client: the patches in it
@@ -200,6 +205,26 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
         // ones landed. (Clearing `lastFullJson` alone did not do that — the
         // next round still took the patch branch first.)
         if (vitalsSystem?.serverTransport.isFrozen(meta.id)) {
+          if (patchesToSend.length > 0 || force) meta.needsFull = true;
+          continue;
+        }
+        // …and the peer the freeze watchdog cannot see. `isFrozen` answers
+        // about liveness — how long since this client last spoke — and it is
+        // the only thing that ever stopped a broadcast. A peer that upgrades
+        // and simply never reads its socket is perfectly live by that measure
+        // (it never had to say anything), so every round was written to it and
+        // held, in the runtime's outgoing buffer, on the SERVER's heap, until
+        // the socket closed: +23 MB per 1000 × 30 KB commits, linear, with
+        // `/__aio/health` green (audit a2/W2). `bufferedAmount` is the direct
+        // answer to "is this peer draining", so ask it — one policy for both
+        // transports, see write-backlog.ts.
+        if (ws.bufferedAmount > WS_BUFFER_HIGH_WATER) {
+          // Counted for the round, escalated after it: `degraded` measures
+          // CONSECUTIVE failures, so a fail() here and an ok() for the next
+          // healthy client in the same loop would cancel each other out and
+          // nothing would ever escalate.
+          backlogged++;
+          worstBacklog = Math.max(worstBacklog, ws.bufferedAmount);
           if (patchesToSend.length > 0 || force) meta.needsFull = true;
           continue;
         }
@@ -366,6 +391,24 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
         } catch { /* client disconnecting */ }
       }
 
+      // One verdict per ROUND, so the consecutive-failure counter measures
+      // rounds rather than clients: a peer that stops draining escalates to
+      // `/__aio/health` after a handful of rounds, and the first round in
+      // which every peer is keeping up clears it.
+      if (backlogged > 0) {
+        wsWriteBacklog.fail(
+          new Error(
+            `${backlogged} WebSocket client(s) are not draining their socket ` +
+              `(worst: ${
+                bytes(worstBacklog)
+              } of unread state held on the server). Broadcasts to them are ` +
+              `skipped until they do; each gets full state when it resumes.`,
+          ),
+        );
+      } else if (connections.size > 0) {
+        wsWriteBacklog.ok();
+      }
+
       // ── Attribution, once per round: where did those bytes come from ──
       //
       // The half no app can compute for itself — see `attributeRound`, which
@@ -393,7 +436,14 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
   // Same primitive as the patch stream, so TT can never grow a second throttle
   // with different semantics (the asymmetry broadcast-coalescer.ts exists to
   // prevent). Diagnostics pace slower than state: nobody is waiting on it.
-  const ttCoalescer = createCoalescer<never>(TT_THROTTLE_MS, flushTT);
+  // …and deliberately NOT in the interactive-priority registry: nothing
+  // user-facing waits on the debug panel (this file's own comment says so),
+  // and joining it meant `flushAllUrgent()` — which runs after every client
+  // action — drained TT on every single dispatch, so the throttle above never
+  // engaged once. See createCoalescer's `urgent` option.
+  const ttCoalescer = createCoalescer<never>(TT_THROTTLE_MS, flushTT, {
+    urgent: false,
+  });
 
   /** Coalesced + throttled broadcast — batches synchronous bursts and buffers
    *  across the throttle window (never drops a patch). No args = full state. */
@@ -404,7 +454,11 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
   /** Sends TT metadata to all connected clients.
    *
    *  COALESCED, because this is called once per dispatch and the payload is
-   *  the WHOLE action log (capped at 200 entries, ~15 KB) rather than a delta.
+   *  the WHOLE action log — every entry, capped at `MAX_ENTRIES` (2 000, see
+   *  diagnostics/time-travel.ts), so ~140 KB on a full history — rather than a
+   *  delta. (The comment here used to say "200 entries, ~15 KB"; the cap was
+   *  raised and this was not, which is how the channel's real cost stayed
+   *  invisible.)
    *  A burst of dispatches used to put one full copy on the wire each — on a
    *  quiet wallet that was 99% of everything sent, dwarfing the state patches
    *  the socket exists for. The panel only ever renders the LATEST snapshot,
@@ -426,12 +480,17 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
     if (connections.size === 0 && !deps.udsBroadcastRef?.fn) return;
     try {
       const ttData = enc("tt-state", getTTBroadcast());
-      for (const [ws] of connections) {
-        if (ws.readyState === WebSocket.OPEN) {
-          try {
-            ws.send(ttData);
-          } catch { /* client disconnecting */ }
-        }
+      for (const [ws, meta] of connections) {
+        if (ws.readyState !== WebSocket.OPEN) continue;
+        // The same two skips the STATE loop makes. This loop made neither, so
+        // the one channel that carries the whole history each time was the one
+        // channel that kept feeding a client that could not read it — a frozen
+        // peer got no state and every debug frame.
+        if (vitalsSystem?.serverTransport.isFrozen(meta.id)) continue;
+        if (ws.bufferedAmount > WS_BUFFER_HIGH_WATER) continue;
+        try {
+          ws.send(ttData);
+        } catch { /* client disconnecting */ }
       }
       try {
         deps.udsBroadcastRef?.fn?.(ttData);

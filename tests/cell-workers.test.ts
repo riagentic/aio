@@ -74,11 +74,11 @@ export const heavy = cell("heavy", {
       s.note = "peer:" + ticker.n;
       return s.note;
     },
-    // Returns a schedule effect — schedules live on the main isolate, so the
+    // $do's a schedule effect — schedules live on the main isolate, so the
     // worker has to hand it back rather than run it.
     later(s: { note: string }) {
       s.note = "scheduled";
-      return schedule.after("heavy:later", 40, heavy.mark.action());
+      s.$do(schedule.after("heavy:later", 40, heavy.mark.action()));
     },
     mark(s: { note: string }) {
       s.note = "fired";

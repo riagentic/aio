@@ -33,7 +33,7 @@ Deno.test("self() in a $do'd schedule resolves to THIS cell's method (no CellEff
     methods: {
       // NOTE: no `: CellEffect` return annotation, no cell self-reference —
       // the exact TS7022 shape this feature deletes.
-      tick(s: { n: number } & Partial<MethodDraftMeta>, by = 1) {
+      tick(s: { n: number } & MethodDraftMeta, by = 1) {
         s.n += by;
         if (s.n < 3) {
           s.$do!(schedule.after("selfcycle:next", 10, self("tick", 1)));
@@ -64,7 +64,7 @@ Deno.test("self() naming an UNKNOWN method throws at dispatch, naming cell + kno
   const c = cell("selfbad", {
     state: { n: 0 },
     methods: {
-      go(s: { n: number } & Partial<MethodDraftMeta>) {
+      go(s: { n: number } & MethodDraftMeta) {
         s.$do!(schedule.after("selfbad:t", 10, self("tikc"))); // typo
       },
     },
@@ -110,9 +110,9 @@ Deno.test("self() in cancelOn resolves and CANCELS the in-flight call", async ()
       clear(s: { n: number }) {
         s.n = 0;
       },
-      async search(s: { aborted: boolean } & Partial<MethodDraftMeta>) {
+      async search(s: { aborted: boolean } & MethodDraftMeta) {
         await new Promise<void>((r) => (release = r));
-        s.aborted = s.$signal!.aborted;
+        s.aborted = s.$signal.aborted;
       },
     },
   });

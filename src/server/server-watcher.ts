@@ -4,7 +4,7 @@
 import { UI_ENTRY } from "./app-files.ts";
 import { enc } from "../protocol/envelope.ts";
 import { basename, dirname, join } from "@std/path";
-import { DENO_JSON_NAMES } from "./deno-json.ts";
+import { DENO_JSON_NAMES, parseDenoJson } from "./deno-json.ts";
 import type { GraphResult } from "./graph-validator.ts";
 import { type ProdGraphCheck, validateGraph } from "./graph-validator.ts";
 import {
@@ -12,6 +12,7 @@ import {
   normPath,
   transpile,
 } from "./server-transpile.ts";
+import { setUiRootProbe } from "./server-html-classify.ts";
 import { lockDir } from "./single-instance-lock.ts";
 import { log } from "../diagnostics/logger-api.ts";
 
@@ -115,7 +116,38 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
   let graphWasRed = false;
   let graphGeneration = 0;
   let _saidGraphTimeout = false;
+  /** Said once per absence of the root component, reset when it comes back. */
+  let _saidRootMissing = false;
+  /** Has the UI entry ever existed at the configured path in this session?
+   *  "It was here and went away" is a beginner's deletion; "it was never
+   *  here" is a project that keeps its entry elsewhere. Only the first is
+   *  worth an error, and only the first lets the browser-error classifier
+   *  claim the root is missing. */
+  let _rootSeen = false;
   const graphTimeoutMs = deps.graphTimeoutMs ?? GRAPH_TIMEOUT_MS;
+
+  // Teach the browser-error classifier how to tell "App.tsx itself is gone"
+  // from "a module App.tsx imports is broken". Without it the overlay guesses,
+  // and the guess is wrong for exactly the case a beginner hits: they deleted
+  // or renamed the file. The watcher is the one place that already knows both
+  // the base dir and the UI entry, and it exists precisely in the mode this
+  // overlay runs in.
+  // Observed ONCE at boot, when the app is serving: that is what makes "it was
+  // here and went away" distinguishable from "it was never here" even when the
+  // very first watch event is the deletion.
+  _rootSeen = fileExists(join(absBaseDir, deps.uiEntry ?? UI_ENTRY));
+  setUiRootProbe(() => {
+    const at = join(absBaseDir, deps.uiEntry ?? UI_ENTRY);
+    if (fileExists(at)) {
+      _rootSeen = true;
+      return true;
+    }
+    // Never seen here = this project keeps its entry somewhere else, and the
+    // classifier must not turn that into "your root component is missing".
+    // `undefined` is the classifier's "cannot tell", which is the truth.
+    if (!_rootSeen) throw new Error("root never observed at " + at);
+    return false;
+  });
 
   // --- Watcher state ---
   let fsWatcher: Deno.FsWatcher | null = null;
@@ -147,17 +179,49 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
   }
 
   let _warnedImportMap = false;
+  /** Whether the project config was last seen unparseable. */
+  let _configBroken = false;
 
   function scheduleReload(path: string): void {
     // A changed deno.json can't take effect in this process.
     if (path.endsWith("deno.json") || path.endsWith("deno.jsonc")) {
+      // Does it still PARSE? A broken deno.json is not a harmless edit: every
+      // subsequent `deno task` dies on a deserialization error naming a byte
+      // offset, while the running server carries on with the map it read at
+      // boot. Calling that "harmless" is the lie; say it, every time it is
+      // broken (not once — you fix it by editing the file again).
+      let text: string | null = null;
+      try {
+        text = Deno.readTextFileSync(path);
+      } catch { /* removed mid-burst — the next event will say so */ }
+      if (text !== null) {
+        try {
+          parseDenoJson(text, path);
+          if (_configBroken) {
+            _configBroken = false;
+            log.info("watch", `${describeChanged([path])} parses again`);
+          }
+        } catch (e) {
+          _configBroken = true;
+          log.error(
+            "watch",
+            `${describeChanged([path])} does not parse — ${
+              e instanceof Error ? e.message.split("\n")[0] : String(e)
+            }. Every \`deno\` command (task, check, run) will now fail until ` +
+              `this is fixed; the running server keeps the config it read at ` +
+              `boot, so the terminal is the only place you will see it.`,
+          );
+          return;
+        }
+      }
       if (!_warnedImportMap) {
         _warnedImportMap = true;
         log.warn(
           "watch",
           `deno.json changed — the import map was read at boot, so a NEW ` +
-            `dependency will not resolve until you restart. (Edits to tasks ` +
-            `or unrelated keys are harmless.) Restart: stop and re-run ` +
+            `dependency will not resolve until you restart. (Other edits — ` +
+            `tasks, unrelated keys — take effect on the next \`deno\` ` +
+            `command, not in this process.) Restart: stop and re-run ` +
             `\`deno task dev\`.`,
         );
       }
@@ -214,9 +278,44 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
       changedInBurst.clear();
       const burstStartedAt = startedAt;
 
+      // What of this burst is GONE. Decided here, at flush time, rather than
+      // from the FS event kind: an editor that saves atomically emits
+      // remove+create within the debounce window, and calling that a deletion
+      // would be a lie in the far more common direction.
+      const gone = changed.filter((p) => !fileExists(p));
+
       (async () => {
         // Re-validate import graph on file change (dev mode only)
-        if (fileExists(join(absBaseDir, deps.uiEntry ?? UI_ENTRY))) {
+        const uiEntryAbs = join(absBaseDir, deps.uiEntry ?? UI_ENTRY);
+        const rootHere = fileExists(uiEntryAbs);
+        if (rootHere) {
+          _rootSeen = true;
+          _saidRootMissing = false;
+        } else if (_rootSeen && !_saidRootMissing) {
+          // The root component was HERE and is now gone. Only that direction:
+          // a project whose entry simply lives elsewhere has never had a file
+          // at this path, and telling it something was deleted would be an
+          // invention. This branch used to be silent either way — validation
+          // was skipped and the burst fell through to the success line, so
+          // deleting src/App.tsx printed `reloaded src/App.tsx` while the
+          // browser got a 404 overlay blaming an import that does not exist.
+          //
+          // The BROADCAST below is untouched: a css-only burst is still a
+          // style swap, deletion or not. Saying more than "reloaded" must not
+          // cost the thing hot reload is for.
+          _saidRootMissing = true;
+          log.error(
+            "watch",
+            `${
+              describeChanged([uiEntryAbs])
+            } is GONE — that file is the app's root component, so every ` +
+              `page will fail to load it and the browser shows a module ` +
+              `error, not your UI. Restore it (\`git checkout -- ${
+                describeChanged([uiEntryAbs])
+              }\`), or point \`ui.entry\` at the file that replaced it.`,
+          );
+        }
+        if (rootHere) {
           const gen = ++graphGeneration;
           const timeout = new Promise<null>((r) =>
             setTimeout(() => r(null), graphTimeoutMs)
@@ -292,9 +391,13 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
           // the browser. One line closes the loop.
           log.info(
             "watch",
-            `${signal === "css" ? "restyled" : "reloaded"} ${
-              describeChanged(changed)
-            } (${Date.now() - burstStartedAt}ms)`,
+            `${
+              gone.length === changed.length && changed.length > 0
+                ? "removed"
+                : signal === "css"
+                ? "restyled"
+                : "reloaded"
+            } ${describeChanged(changed)} (${Date.now() - burstStartedAt}ms)`,
           );
         }
       })().catch((err) => debug(`graph: unexpected error — ${err}`));
@@ -461,6 +564,7 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
   }
 
   function shutdown(): void {
+    setUiRootProbe(undefined); // a dead watcher must not answer for a live one
     if (reloadTimer) clearTimeout(reloadTimer);
     fsWatcher?.close();
     try {

@@ -167,7 +167,7 @@ browser tab beside the window — must say so explicitly: `--port=N` (or
 `AIO_PORT`, or `aio.run({ port })`). Boot then prints
 `port N named explicitly
 — keeping a TCP listener`, and the route is on that
-loopback port. `--zero-port` is accepted as a no-op.
+loopback port. (`--zero-port`, the pre-alpha66 opt-in, was removed in alpha76.)
 
 Custom `routes` do not bring the port back. An app that declares
 
@@ -230,13 +230,15 @@ such a page as well; the bridge already delivers `reload`/`css`/`boot`.
 ### Test what you ship — `AIO_ELECTRON_PROTOCOL=1`
 
 A packaged app's window loads `aio://app/`: a privileged custom scheme served by
-the Electron main process (dist/ from disk, the app's routes proxied to its
-socket), with the IPC preload bridge as the page's ONLY transport and the
-`<head>` config delivered by the server's `cfg` frame instead of the shell. In
-dev, the window takes that same path only when the app binds no TCP port; an app
-with a port (`--port`, `--expose`, `routes` you reach from a browser) loads
-`http://localhost:PORT` — so the shipped path was exercised by the artifact and
-by nothing else, and a renderer that died on it died in the field first.
+the Electron main process (dist/ from disk — with the same content types the
+server sends, so a font, a `.webp` or an `.mp4` behaves identically — and the
+app's routes proxied to its socket), with the IPC preload bridge as the page's
+ONLY transport and the `<head>` config delivered by the server's `cfg` frame
+instead of the shell. In dev, the window takes that same path only when the app
+binds no TCP port; an app with a port (`--port`, `--expose`, `routes` you reach
+from a browser) loads `http://localhost:PORT` — so the shipped path was
+exercised by the artifact and by nothing else, and a renderer that died on it
+died in the field first.
 
 ```sh
 AIO_ELECTRON_PROTOCOL=1 deno task dev --client=electron --port=8000
@@ -375,8 +377,8 @@ deno task dev --server-url=http://192.168.1.100:8000
 **What happens:**
 
 1. No local HTTP server starts
-2. Electron launches with a connect page (or directly navigates if
-   `--server-url` is provided)
+2. Electron launches with a connect page (`--connect`), or navigates directly
+   when `--server-url=<url>` names a server
 3. Fetches the remote server's HTML to extract metadata (`<title>`,
    `<meta aio:width>`, `<meta aio:height>`)
 4. Sets window icon from `icon.png` next to your entry — the app dir, the same
@@ -420,8 +422,8 @@ Its connect page does four things:
 - **Validates the target.** Before loading, it checks the page actually looks
   like an aio app — a friendly error beats a blank window on a wrong address.
 
-Manual entry always works too (type `192.168.1.100:8000`), and `--server-url`
-still connects directly for shortcuts.
+Manual entry always works too (type `192.168.1.100:8000`), and
+`--server-url=<url>` still connects directly for shortcuts.
 
 ### Finding apps from the CLI
 

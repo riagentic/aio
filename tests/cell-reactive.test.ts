@@ -349,7 +349,7 @@ Deno.test("bindCellReactive: deps-form selector reads another cell in browser", 
       // deps-form: reads the `users` cell's slice via full state
       overThreshold: {
         deps: ["users"],
-        fn: (s: { threshold: number }, u: unknown) =>
+        fn: (s: { threshold: number }, [u]: unknown[]) =>
           (u as { list: string[] }).list.length >= s.threshold,
       },
     },

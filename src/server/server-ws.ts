@@ -19,6 +19,7 @@ import {
   dec,
   enc,
   encRaw,
+  errorFields,
   isIgnorableKind,
   type SfnPayload,
 } from "../protocol/envelope.ts";
@@ -75,15 +76,12 @@ const CONSECUTIVE_DROP_THRESHOLD = 50;
  *  can amplify throughput by cycling connections. Denylist survives reconnects. */
 const ABUSE_DENYLIST_MS = 60_000;
 
-/** Action types that may only be dispatched from server-internal code paths.
- *  Match either a top-level `__name` or a cell-prefixed `cell:__name` form. */
-export function _isFrameworkInternalActionType(type: string): boolean {
-  if (type.startsWith("__")) return true;
-  const colon = type.indexOf(":");
-  if (colon === -1) return false;
-  return type.charCodeAt(colon + 1) === 0x5f /* "_" */ &&
-    type.charCodeAt(colon + 2) === 0x5f;
-}
+/** THE framework-internal action gate — defined in protocol/ (one spelling
+ *  for every door, the sync validator included), re-exported here for the
+ *  server-side callers. */
+export { _isFrameworkInternalActionType } from "../protocol/action-gate.ts";
+import { _isFrameworkInternalActionType } from "../protocol/action-gate.ts";
+import { _dispatchRefusal } from "./action-ack.ts";
 
 /** Strip client-set trusted provenance off a network action, loudly, and
  *  re-stamp it as what it IS: client input. ONE decider for all three network
@@ -138,6 +136,17 @@ export function sanitizeClientAction(
     if ((pl as Record<string, unknown>)._origin !== undefined) {
       forged.push("payload._origin");
       delete (pl as Record<string, unknown>)._origin;
+    }
+    // `_callId` is the key of a PROCESS-GLOBAL pending-call map, and
+    // `registerCall` used to `set` it blind. Two clients that sent the same id
+    // therefore collided: the first to finish resolved the OTHER one's caller
+    // with its return value, and the loser hung past its ceiling because the
+    // expiry check short-circuits on an id that now names a different call —
+    // reproduced, one caller receiving another's result. So the server mints
+    // it (`dispatchNetwork`), and a network value is never legitimate here.
+    if ((pl as Record<string, unknown>)._callId !== undefined) {
+      forged.push("payload._callId");
+      delete (pl as Record<string, unknown>)._callId;
     }
   }
   if (forged.length > 0) {
@@ -578,7 +587,34 @@ export function createWsManager(deps: WsDeps): WsManager {
     // Same reason: snapshot the request for serverRequest() BEFORE the upgrade
     // consumes it. Every frame on this socket carries the connection's facts.
     const request = makeServerRequest(req, clientKey, "ws");
-    const { socket, response } = Deno.upgradeWebSocket(req);
+    // A plain GET /ws (a crawler, a health probe, a curl) is not a handshake.
+    // `Deno.upgradeWebSocket` THROWS on it, and that throw was a 500 in every
+    // auth mode — the one status that reads as "the server is broken". The
+    // HTTP answer for "you must upgrade" exists: 426, naming the protocol.
+    if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+      return new Response(
+        "Upgrade Required — /ws speaks WebSocket only. Send `Upgrade: " +
+          "websocket` (a browser's `new WebSocket(url)` does), or use the " +
+          "HTTP endpoints for everything else.",
+        {
+          status: 426,
+          headers: { Upgrade: "websocket", Connection: "Upgrade" },
+        },
+      );
+    }
+    let socket: WebSocket, response: Response;
+    try {
+      ({ socket, response } = Deno.upgradeWebSocket(req));
+    } catch (e) {
+      // The header said websocket and the rest of the handshake did not
+      // (missing key/version) — the CLIENT's request is malformed.
+      return new Response(
+        `Bad Request — malformed WebSocket handshake: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+        { status: 400 },
+      );
+    }
     const clientId = crypto.randomUUID();
     // Meter the SOCKET, not the callers. Frames reach a client from several
     // places — the broadcaster, the handshake's first state, per-action acks,
@@ -674,6 +710,10 @@ export function createWsManager(deps: WsDeps): WsManager {
 
     socket.onopen = () => {
       connections.set(socket, meta);
+      // The freeze watchdog's clock starts HERE, not at this client's first
+      // vitals-ping — a peer that upgrades and then says nothing at all is
+      // exactly the one the watchdog exists for. See transport-probe.ts.
+      deps.vitalsSystem?.serverTransport.onClientConnected(meta.id);
       if (sessionToken) _startSessionSweep();
       meta.typeDetectTimer = setTimeout(() => {
         meta.typeDetectTimer = undefined;
@@ -796,6 +836,12 @@ export function createWsManager(deps: WsDeps): WsManager {
   ): void {
     // Before ANYTHING else: a socket whose session died acts zero more times.
     if (!_revalidate(socket, meta)) return;
+
+    // A client that speaks is alive. Liveness used to be refreshed ONLY by a
+    // `vitals-ping`, so a client mid-conversation — dispatching actions, being
+    // acked — could still be graded frozen and have its state updates silently
+    // dropped by `server-broadcast.ts`.
+    deps.vitalsSystem?.serverTransport.onClientActivity(meta.id);
 
     // Rate limiting — per-second counter (original behavior)
     meta.msgCount++;
@@ -1148,7 +1194,7 @@ export function createWsManager(deps: WsDeps): WsManager {
           .catch((e) => {
             log.error("ws", `sfn ${ns}.${name} failed — ${e}`);
             try {
-              socket.send(enc("sfnr", { cid, ok: false, error: String(e) }));
+              socket.send(enc("sfnr", { cid, ok: false, ...errorFields(e) }));
             } catch { /* client disconnected */ }
           });
         return;
@@ -1170,9 +1216,19 @@ export function createWsManager(deps: WsDeps): WsManager {
     }
 
     const parsed = (frame.d ?? {}) as ActionPayload;
-    if (!parsed || typeof parsed.type !== "string") {
-      const msg = "ws: invalid action — missing type field";
+    // A refused frame that carries a cid is TOLD. The client registered an
+    // ack for it, so a silent return left `await cell.method()` waiting to
+    // its ceiling for a method that was never dispatched — then blaming a
+    // server that "never confirmed the call".
+    const refuseAction = (msg: string): void => {
       log.warn("ws", msg);
+      const cid = (parsed as { cid?: unknown } | null)?.cid;
+      if (typeof cid === "string" && cid.length > 0) {
+        _sendAckErr(socket, cid, new Error(msg));
+      }
+    };
+    if (!parsed || typeof parsed.type !== "string") {
+      refuseAction("ws: invalid action — missing type field");
       return;
     }
     // Block framework-internal action types from network sources.
@@ -1182,11 +1238,11 @@ export function createWsManager(deps: WsDeps): WsManager {
     // clients is a remote-code-style vector — see audit F-1 (prototype pollution
     // via __setMethod with crafted mutation paths).
     if (_isFrameworkInternalActionType(parsed.type)) {
-      const msg =
+      refuseAction(
         `ws: rejected framework-internal action type "${parsed.type}" from client ${
           meta.id.slice(0, 8)
-        }`;
-      log.warn("ws", msg);
+        }`,
+      );
       return;
     }
     if (
@@ -1194,7 +1250,7 @@ export function createWsManager(deps: WsDeps): WsManager {
       (typeof parsed.payload !== "object" || parsed.payload === null ||
         Array.isArray(parsed.payload))
     ) {
-      deps.debug(`ws: invalid action — payload must be a plain object`);
+      refuseAction(`ws: invalid action — payload must be a plain object`);
       return;
     }
     // Strip client-set trusted provenance and re-stamp `_source:"UI"` — ONE
@@ -1218,7 +1274,7 @@ export function createWsManager(deps: WsDeps): WsManager {
       const cid = parsed.cid;
       const actionType = typeof parsed.type === "string" ? parsed.type : "?";
       Promise.resolve(result).then(
-        (value) => _sendAck(socket, cid, actionType, value),
+        (value) => _sendAck(socket, cid, parsed, actionType, value),
         (err) => _sendAckErr(socket, cid, err),
       );
     }
@@ -1228,19 +1284,27 @@ export function createWsManager(deps: WsDeps): WsManager {
   function _sendAck(
     socket: WebSocket,
     cid: string,
+    action: unknown,
     actionType: string,
     value: unknown,
   ): void {
-    // Pass the method name so a lossy-conversion warning names it (the UDS
-    // path already did) — "a method" is not a diagnosis.
-    const { value: safe, dropped } = serializeReturn(value, actionType);
-    if (dropped && !deps.prod) {
-      log.warn(
-        `[aio] method "${actionType}" returned a non-serializable value — ` +
-          `the caller resolves with undefined. Return JSON-safe data ` +
-          `(plain objects/arrays/primitives) to transport a value.`,
-      );
+    // …unless the reduce refused it. `dispatch` resolves whether or not
+    // anything ran, so this ack said `ok: true` for a method the cell no
+    // longer has, a cell that was never booted, a disabled cell and a
+    // `validate` refusal alike — an `await` that succeeds over a change that
+    // never happened. The reason was already recorded against this very
+    // action object; sending it is the whole fix (see action-ack.ts).
+    const refused = _dispatchRefusal(action);
+    if (refused) {
+      _sendAckErr(socket, cid, refused);
+      return;
     }
+    // Pass the method name so a lossy-conversion warning names it (the UDS
+    // path already did) — "a method" is not a diagnosis. Both the lossy and
+    // the DROPPED warning are `serializeReturn`'s own; this site used to keep
+    // a second copy of the dropped one, gated on `!prod`, so production was
+    // silent about a return value it had thrown away.
+    const { value: safe } = serializeReturn(value, actionType);
     try {
       if (socket.readyState === WebSocket.OPEN) {
         socket.send(enc("ack", { cid, ok: true, value: safe }));
@@ -1248,11 +1312,18 @@ export function createWsManager(deps: WsDeps): WsManager {
     } catch { /* client gone */ }
   }
 
-  /** Send a failure ack — the awaited method rejected server-side. */
+  /** Send a failure ack — the awaited method rejected, or was refused,
+   *  server-side. */
   function _sendAckErr(socket: WebSocket, cid: string, err: unknown): void {
     try {
       if (socket.readyState === WebSocket.OPEN) {
-        socket.send(enc("ack", { cid, ok: false, error: String(err) }));
+        // `errorFields`, not `String(err)`: it sends the message WITHOUT the
+        // "Error: " prefix `String` prepends (the client wraps the text in an
+        // Error again, so the prefix used to accumulate per hop) and carries
+        // the failure CODE alongside it — the only way an app can tell an
+        // access denial from its own method throwing without regexing a
+        // sentence the semver policy refuses to freeze.
+        socket.send(enc("ack", { cid, ok: false, ...errorFields(err) }));
       }
     } catch { /* client gone */ }
   }

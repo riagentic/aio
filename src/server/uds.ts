@@ -8,18 +8,16 @@
 import { compactPatches } from "../state/patch-compact.ts";
 import { writeClientLog } from "./client-log.ts";
 import { log } from "../diagnostics/logger-api.ts";
-import { degraded } from "../diagnostics/degraded.ts";
 import { warnBigFullState } from "./server-broadcast.ts";
-
-/** Queued-but-unwritten frames on ONE UDS connection before the app says so.
- *  Generous: a burst of state during a slow render is normal, a peer that has
- *  stopped reading is not, and only the second should be reported. */
-const WRITE_QUEUE_WARN = 64;
+import {
+  udsWriteBacklog as _writeBacklog,
+  WRITE_QUEUE_WARN,
+} from "./write-backlog.ts";
 
 /** A UDS peer that has stopped draining its socket. Module scope, like the
  *  broadcast trackers: one tracker for the transport, whatever listener the
  *  connection belongs to. */
-const _writeBacklog = degraded("uds:write-backlog");
+
 import {
   _recordClientDegraded,
   type DegradedChange,
@@ -28,6 +26,7 @@ import {
   _isFrameworkInternalActionType,
   sanitizeClientAction,
 } from "./server-ws.ts";
+import { _dispatchRefusal } from "./action-ack.ts";
 import { invokeServerFn } from "./server-fns.ts";
 import {
   type ActionPayload,
@@ -35,6 +34,7 @@ import {
   dec,
   enc,
   encRaw,
+  errorFields,
   isIgnorableKind,
   type SfnPayload,
   unsupportedOnUds,
@@ -240,8 +240,9 @@ export function createUDSListener(
   function sendTo(conn: LocalConn, msg: string, onSent?: () => void): void {
     const encoded = new TextEncoder().encode(msg + "\n");
     const prev = _writeQueues.get(conn) ?? Promise.resolve();
-    // Depth is OBSERVED, not capped. The WS transport throttles and freezes a
-    // slow client, and this one had neither — a peer that stops reading grows
+    // Depth is OBSERVED, not capped. The WS transport skips a peer whose
+    // socket buffer is not draining (one policy, `write-backlog.ts`); this
+    // one cannot — a peer that stops reading grows
     // an unbounded promise chain, each link holding an encoded frame, with
     // nothing anywhere saying so. Dropping frames instead would be worse: the
     // peer here is the app's OWN window, and a silently skipped state frame is
@@ -764,7 +765,7 @@ function _handleUDSConn(
                   try {
                     sendTo(
                       conn,
-                      enc("sfnr", { cid, ok: false, error: String(e) }),
+                      enc("sfnr", { cid, ok: false, ...errorFields(e) }),
                     );
                   } catch { /* peer gone */ }
                 });
@@ -862,18 +863,27 @@ function _handleUDSConn(
                   : "?";
                 Promise.resolve(result).then(
                   (value) => {
-                    const { value: safe, dropped } = serializeReturn(
-                      value,
-                      actionType,
-                    );
-                    if (dropped) {
-                      log.warn(
-                        "uds",
-                        `method "${actionType}" returned a non-serializable ` +
-                          `value — caller resolves with undefined. Return ` +
-                          `JSON-safe data to transport a value.`,
-                      );
+                    // Parity with the WS ack: `dispatch` resolves whether or
+                    // not anything ran, so a refused action (unknown method,
+                    // unbooted cell, disabled cell, `validate` refusal) was
+                    // acked `ok: true`. See server/action-ack.ts.
+                    const refused = _dispatchRefusal(action);
+                    if (refused) {
+                      try {
+                        sendTo(
+                          conn,
+                          enc("ack", {
+                            cid,
+                            ok: false,
+                            ...errorFields(refused),
+                          }),
+                        );
+                      } catch { /* client gone */ }
+                      return;
                     }
+                    // `serializeReturn` warns for both a dropped and a lossy
+                    // return, once, for every transport.
+                    const { value: safe } = serializeReturn(value, actionType);
                     try {
                       sendTo(conn, enc("ack", { cid, ok: true, value: safe }));
                     } catch { /* client gone */ }
@@ -882,7 +892,9 @@ function _handleUDSConn(
                     try {
                       sendTo(
                         conn,
-                        enc("ack", { cid, ok: false, error: String(err) }),
+                        // Message + CODE, never `String(err)` — see the WS
+                        // twin in server-ws.ts `_sendAckErr`.
+                        enc("ack", { cid, ok: false, ...errorFields(err) }),
                       );
                     } catch { /* client gone */ }
                   },

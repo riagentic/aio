@@ -484,6 +484,178 @@ export type PortProbe =
   | { kind: "listening" } // socket accepts, speaks neither
   | { kind: "closed" }; // nothing there
 
+/** How long the TLS question waits for an answer. A handshake reply is the
+ *  first thing a TLS server writes, so this is a round trip on loopback, not a
+ *  transfer. */
+const TLS_PROBE_TIMEOUT = 1500;
+
+/** True when `head` is the start of a TLS record: content type `handshake`
+ *  (0x16) or `alert` (0x15), then a `0x03 0xNN` legacy record version.
+ *
+ *  This is the classification, and it is made of BYTES. It used to be made of
+ *  prose — `/cert|tls|ssl|invaliddata|handshake/i` against the text of a failed
+ *  `fetch` — and on Deno 2.9 the runtime moved the detail into `error.cause`,
+ *  leaving `String(e)` as the bare "TypeError: fetch failed". The regex then
+ *  matched nothing and every TLS listener was reported as `listening`, so
+ *  `am stop --port=N` against an `--expose`d app pointed the operator at the
+ *  wrong remedy — silently, because a degraded classification looks exactly
+ *  like a correct one. A message-text match is not an instrument; it is a
+ *  guess that stops working when someone else edits a sentence.
+ *
+ *  Pure, and exported so the decider is testable without a socket. */
+export function isTlsRecord(head: Uint8Array): boolean {
+  if (head.length < 3) return false;
+  const type = head[0]!;
+  // handshake (ServerHello / HelloRetryRequest) or alert (a refusal that is
+  // still spoken in TLS — proof enough that the peer speaks it).
+  if (type !== 0x16 && type !== 0x15) return false;
+  // Legacy record version: 0x0300 (SSL3) … 0x0304 (TLS 1.3).
+  return head[1] === 0x03 && head[2]! <= 0x04;
+}
+
+/** A minimal but VALID TLS 1.2/1.3 ClientHello for `127.0.0.1`.
+ *
+ *  Asking in the protocol's own words is what makes the answer unambiguous: a
+ *  TLS server replies with a record (ServerHello, HelloRetryRequest, or a
+ *  fatal alert if it dislikes the offer — all of them TLS records), an HTTP
+ *  server replies with `HTTP/1.1 400 …`, and a socket that speaks neither
+ *  replies with nothing. No certificate is validated and no handshake is
+ *  completed: the question is only "do you speak TLS", and the first record
+ *  answers it. */
+export function tlsClientHello(): Uint8Array {
+  const u16 = (n: number) => [(n >> 8) & 0xff, n & 0xff];
+  const ext = (type: number, body: number[]) => [
+    ...u16(type),
+    ...u16(body.length),
+    ...body,
+  ];
+  const host = [...new TextEncoder().encode("localhost")];
+  const extensions = [
+    // server_name
+    ...ext(0x0000, [
+      ...u16(host.length + 3),
+      0x00,
+      ...u16(host.length),
+      ...host,
+    ]),
+    // supported_groups: x25519, secp256r1, secp384r1
+    ...ext(0x000a, [...u16(6), ...u16(0x001d), ...u16(0x0017), ...u16(0x0018)]),
+    // ec_point_formats: uncompressed
+    ...ext(0x000b, [0x01, 0x00]),
+    // signature_algorithms
+    ...ext(
+      0x000d,
+      [
+        ...u16(12),
+        ...u16(0x0403),
+        ...u16(0x0804),
+        ...u16(0x0401),
+        ...u16(0x0503),
+        ...u16(0x0805),
+        ...u16(0x0501),
+      ],
+    ),
+    // supported_versions: TLS 1.3, TLS 1.2
+    ...ext(0x002b, [0x04, ...u16(0x0304), ...u16(0x0303)]),
+    // key_share with no shares — a TLS 1.3 server answers HelloRetryRequest,
+    // which is a handshake record, which is the whole answer we need.
+    ...ext(0x0033, [...u16(0)]),
+  ];
+  const random = [...crypto.getRandomValues(new Uint8Array(32))];
+  const sessionId = [...crypto.getRandomValues(new Uint8Array(32))];
+  const ciphers = [
+    0x1301,
+    0x1302,
+    0x1303, // TLS 1.3
+    0xc02f,
+    0xc030,
+    0xc02b,
+    0xc02c,
+    0x009c,
+    0x009d, // TLS 1.2
+  ].flatMap(u16);
+  const body = [
+    ...u16(0x0303), // legacy_version TLS 1.2
+    ...random,
+    sessionId.length,
+    ...sessionId,
+    ...u16(ciphers.length),
+    ...ciphers,
+    0x01,
+    0x00, // compression: null
+    ...u16(extensions.length),
+    ...extensions,
+  ];
+  const handshake = [
+    0x01, // client_hello
+    (body.length >> 16) & 0xff,
+    (body.length >> 8) & 0xff,
+    body.length & 0xff,
+    ...body,
+  ];
+  return new Uint8Array([
+    0x16, // record: handshake
+    0x03,
+    0x01, // legacy record version TLS 1.0, as every client sends
+    ...u16(handshake.length),
+    ...handshake,
+  ]);
+}
+
+/** What a socket that is not answering plain HTTP actually is: `tls` when it
+ *  answers a ClientHello with a TLS record, `closed` when nothing is
+ *  listening, `listening` when something accepts but speaks neither.
+ *
+ *  Exported so the classification can be tested against a real listener of
+ *  each shape. */
+export async function probeTls(
+  port: number,
+  timeoutMs = TLS_PROBE_TIMEOUT,
+): Promise<
+  { kind: "tls" } | { kind: "listening" } | { kind: "closed" }
+> {
+  let conn: Deno.TcpConn;
+  try {
+    conn = await Deno.connect({ hostname: "127.0.0.1", port });
+  } catch {
+    return { kind: "closed" }; // refused: nothing is listening
+  }
+  // The deadline CLOSES the socket rather than racing the read: a `read`
+  // promise left pending behind a `Promise.race` outlives the function, and
+  // Deno's op sanitizer (and every test that follows) sees it.
+  let done = false;
+  const timer = setTimeout(() => {
+    if (!done) {
+      try {
+        conn.close();
+      } catch { /* already gone */ }
+    }
+  }, timeoutMs);
+  const head = new Uint8Array(5);
+  let filled = 0;
+  try {
+    await conn.write(tlsClientHello());
+    // Three bytes decide it — content type plus the record version.
+    while (filled < 3) {
+      const n = await conn.read(head.subarray(filled));
+      if (n === null || n === 0) break; // EOF: hung up without speaking TLS
+      filled += n;
+    }
+  } catch {
+    // Timed out (the socket was closed under us), or the peer reset — either
+    // way it accepted the connection, so what we have read is all there is.
+  } finally {
+    done = true;
+    clearTimeout(timer);
+    try {
+      conn.close();
+    } catch { /* closed by the deadline, or by the peer */ }
+  }
+  return isTlsRecord(head.subarray(0, filled))
+    ? { kind: "tls" }
+    : { kind: "listening" };
+}
+
 /** Ask a port what it is: identity first (`/__aio/health` appId), then protocol.
  *  Used by `am stop --port=N` so the port IDENTIFIES the app instead of the
  *  command assuming the cwd's app and shutting down the wrong one — or nothing. */
@@ -503,24 +675,7 @@ export async function probePort(port: number): Promise<PortProbe> {
   } catch {
     /* not plain HTTP — find out what IS there, rather than guessing */
   }
-  try {
-    const conn = await Deno.connect({ hostname: "127.0.0.1", port });
-    conn.close();
-  } catch {
-    return { kind: "closed" }; // refused: nothing is listening
-  }
-  try {
-    const r = await fetch(`https://127.0.0.1:${port}/__aio/health`, {
-      signal: AbortSignal.timeout(FETCH_TIMEOUT),
-    });
-    await r.body?.cancel();
-    return { kind: "tls" };
-  } catch (e) {
-    // A certificate complaint is still proof of a completed TLS handshake.
-    return /cert|tls|ssl|invaliddata|handshake/i.test(String(e))
-      ? { kind: "tls" }
-      : { kind: "listening" };
-  }
+  return await probeTls(port);
 }
 
 /** Map a fetch error to a Result with a descriptive message */
@@ -624,6 +779,24 @@ export async function trojanPost(
   appId?: string,
   timeout = FETCH_TIMEOUT,
 ): Promise<Result> {
+  // A GUESS may be read from; it may never be written to. `resolvePort` has a
+  // last rung that answers with "the one instance that is running" when the id
+  // am derived matches nothing — useful for a look (`am state`, `am health`),
+  // and measured to be dangerous for anything else: `am dispatch` typed with
+  // one app's id in hand mutated a DIFFERENT app after a note on stderr, and a
+  // note is not consent. The line is drawn once, here, where every mutation
+  // passes: POST is the mutating half of the trojan API, so no per-command
+  // table can drift out of step with it.
+  const guessed = _discoveredAppTarget();
+  if (guessed !== undefined && guessed !== appId) {
+    return {
+      ok: false,
+      error: `refusing to change "${guessed}": am resolved the app id ` +
+        `"${appId ?? "(none)"}" here and nothing by that name is running, so ` +
+        `the port came from the one instance that IS. A read may fall back ` +
+        `like that; a write may not. Name it: --app=${guessed}`,
+    };
+  }
   const ep = controlEndpoint(appId, port);
   if (ep.kind === "uds") {
     const r = await trojanOverUds(

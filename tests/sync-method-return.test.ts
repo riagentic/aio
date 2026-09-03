@@ -133,24 +133,29 @@ Deno.test("427: returning a slice of DRAFT state survives (no revoked proxy)", a
   );
 });
 
-Deno.test("427: returning a ScheduleEffect still schedules — value is undefined", async () => {
+Deno.test("427: $do schedules, and `return` still carries the value", async () => {
   // A schedule effect needs a runtime that owns a CLOCK. The bare composed
   // executor this file's `boot()` builds has none, and used to drop the effect
   // silently; it now refuses loudly and names `bootCells`, so this test uses
   // the runtime the effect actually requires.
+  //
+  // The two used to be exclusive: returning the effect scheduled it AND
+  // resolved the caller with `undefined`. Retired in alpha76 — one call now
+  // does both, which is the whole reason the channels are separate.
   const c = cell("sched", {
     state: { n: 0 },
     methods: {
       tick(s) {
         s.n += 1;
-        return schedule.after("tick", 50, { type: "sched:tick", payload: {} });
+        s.$do(schedule.after("tick", 50, { type: "sched:tick", payload: {} }));
+        return s.n;
       },
     },
   });
   const h = await bootCells([c as never]);
   try {
     const v = await (c as unknown as { tick: () => Promise<unknown> }).tick();
-    assertEquals(v, undefined, "an effect return is not a transported value");
+    assertEquals(v, 1, "the effect no longer eats the return value");
   } finally {
     h.dispose();
   }

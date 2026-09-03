@@ -27,25 +27,25 @@ const poll = cell("hpoll", {
   state: { n: 0, started: false },
   methods: {
     // Below the production floor for `every` (10ms) — must be refused HERE too.
-    startTooFast(s: { started: boolean }) {
+    startTooFast(s) {
       s.started = true;
-      return schedule.every("hpoll:fast", 5, { type: "hpoll:tick" });
+      s.$do(schedule.every("hpoll:fast", 5, { type: "hpoll:tick" }));
     },
     // An id production rejects (spaces).
-    startBadId(s: { started: boolean }) {
+    startBadId(s) {
       s.started = true;
-      return schedule.every("bad id!", 1000, { type: "hpoll:tick" });
+      s.$do(schedule.every("bad id!", 1000, { type: "hpoll:tick" }));
     },
-    startOk(s: { started: boolean }) {
+    startOk(s) {
       s.started = true;
-      return schedule.every("hpoll:ok", 100, { type: "hpoll:tick" });
+      s.$do(schedule.every("hpoll:ok", 100, { type: "hpoll:tick" }));
     },
     tick(s: { n: number }) {
       s.n++;
       fires.push("tick");
     },
-    stop() {
-      return schedule.cancel("hpoll:ok");
+    stop(s) {
+      s.$do(schedule.cancel("hpoll:ok"));
     },
   },
 });
@@ -93,14 +93,14 @@ Deno.test("harness: a valid schedule still fires on the virtual clock", async ()
 const timed = cell("htimed", {
   state: { fired: 0 },
   methods: {
-    atSoon(_s: { fired: number }) {
+    atSoon(s) {
       // The harness clock starts at the real Date.now(), so an absolute time
       // is expressed relative to it.
       const when = new Date(Date.now() + 60_000).toISOString();
-      return schedule.at("htimed:at", when, { type: "htimed:mark" });
+      s.$do(schedule.at("htimed:at", when, { type: "htimed:mark" }));
     },
-    everyMinute(_s: { fired: number }) {
-      return schedule.cron("htimed:cron", "* * * * *", { type: "htimed:mark" });
+    everyMinute(s) {
+      s.$do(schedule.cron("htimed:cron", "* * * * *", { type: "htimed:mark" }));
     },
     mark(s: { fired: number }) {
       s.fired++;

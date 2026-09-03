@@ -108,6 +108,13 @@ export function outError(
   // a failed command with exit 0. The guard cannot tell a definition from a
   // call site, and a gate that has to special-case its own subject is a weaker
   // gate — an `else` costs nothing and keeps it exact.
+  // ONE normalization, before the streams part: `outError(String(e))` is how
+  // a caught exception reaches here, and `String(e)` is `"Error: <message>"`.
+  // The pretty branch used to strip that prefix and the json branch did not,
+  // so a script read `{"error":"Error: am does not know which app…"}` — the
+  // class name of an exception nobody outside am can catch, glued to the
+  // sentence. The message is the error; the constructor's name is noise.
+  msg = msg.replace(/^\s*(?:[A-Z]\w*)?Error:\s*/, "");
   if (mode === "json") {
     console.log(JSON.stringify(fix ? { error: msg, fix } : { error: msg }));
   } else {
@@ -116,9 +123,6 @@ export function outError(
     // paragraph red made none of it stand out — the reader has to find the
     // first sentence before they can decide whether to keep reading. An
     // explicit newline wins; otherwise the first sentence-ending period does.
-    // `Error: ` at the head is what a caught exception carries; the glyph
-    // already says it, and printing both reads as a stutter.
-    msg = msg.replace(/^\s*(?:Error|TypeError|RangeError):\s*/, "");
     const nl = msg.indexOf("\n");
     const dot = /[.!?](?:\s|$)/.exec(msg);
     const cut = nl >= 0 && (!dot || nl < dot.index)

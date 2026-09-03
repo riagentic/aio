@@ -12,8 +12,18 @@
 // permissive `any`-typed stubs.
 //
 // A block is checked when it imports from "aio…" or a relative path and has
-// no ellipsis markers. Escape hatches (use SPARINGLY): fence info `no-check`,
-// or the literal first line `// snippet: fragment` for true fragments.
+// no ellipsis markers — OR when it is import-less but COMPLETE (it calls
+// `cell(`, `aio.run(`, `testCell(` or `testUI(`). Docs write those blocks
+// without an import line all the time, and that is exactly how three broken
+// samples shipped at once (a `schedule.every(ms, fn)` that neither compiles
+// nor schedules, a `catch (e) { e.message }` that is TS18046, a `state: {
+// items: [] }` filtered on `o.userId`). For those, ONE import line is
+// synthesized from the identifiers the block uses and the real export lists of
+// `aio`, `aio/testing`, `aio/air` and `aio/ui`, so the reader's copy is
+// checked against the same API their editor would resolve.
+//
+// Escape hatches (use SPARINGLY): fence info `no-check`, or the literal first
+// line `// snippet: fragment` for true fragments.
 import { assert } from "@std/assert";
 
 const ROOT = new URL("..", import.meta.url);
@@ -30,6 +40,131 @@ const BARE_IMPORT_RE =
 // `// cell/notes/index.ts` first-line convention naming a snippet's file.
 const DECL_PATH_RE = /^\/\/\s*([\w-][\w./-]*\.tsx?)\s*$/;
 
+/** An import-less block is still a whole program when it calls one of these —
+ *  a cell definition, an app boot, or a harness test. Anything smaller is a
+ *  fragment and stays out (the reader is not copying it wholesale). */
+const COMPLETE_RE =
+  /\b(?:cell|testCell|testUI)\s*\(|\baio\.run\s*\(|^try\s*\{/m;
+
+/** …and it is NOT a whole program when a line at column 0 is an object member
+ *  — a `methods:` block or a bare `async add(s) {` shorthand pasted next to a
+ *  complete cell ("// inside todos:"). Those do not parse, so checking them
+ *  would report a SyntaxError instead of the type error the gate is for. */
+const OBJECT_MEMBER_RE =
+  /^(?:(?:async|get|set|static)\s+)?[A-Za-z_$][\w$]*\s*(?:\([^)]*\)\s*\{|:\s*[^:=\n])/m;
+
+/** Entry modules whose exports a synthesized import line may draw on, in
+ *  priority order — the specifiers a doc reader would type. */
+const AUTO_MODULES: readonly (readonly [string, string])[] = [
+  ["aio", "mod.ts"],
+  ["aio/testing", "src/cell-test.ts"],
+  ["aio/air", "src/air.ts"],
+  ["aio/ui", "src/ui/mod.ts"],
+  ["aio/server", "src/server-entry.ts"],
+  ["aio/db", "src/db/mod.ts"],
+  ["aio/sync", "src/sync/mod.ts"],
+  ["aio/extras", "src/extras/mod.ts"],
+  ["aio/updates", "src/updates.ts"],
+  ["aio/feedback", "src/feedback.ts"],
+];
+
+/** VALUE exports of an entry module, following `export * from` — parsed from
+ *  source rather than imported, because `aio/air` and `aio/ui` are browser
+ *  modules and evaluating them here would need a DOM. A missed name only costs
+ *  a clearer error ("Cannot find name"), never a false pass. */
+async function valueExports(
+  file: URL,
+  seen = new Set<string>(),
+): Promise<Set<string>> {
+  const out = new Set<string>();
+  if (seen.has(file.href)) return out;
+  seen.add(file.href);
+  const src = await Deno.readTextFile(file);
+  for (const m of src.matchAll(/export\s+(type\s+)?\{([^}]*)\}/g)) {
+    if (m[1]) continue; // `export type { … }`
+    for (const part of m[2]!.split(",")) {
+      const t = part.trim();
+      if (!t || t.startsWith("type ")) continue;
+      const name = (t.split(/\s+as\s+/)[1] ?? t).trim();
+      if (/^[A-Za-z_$][\w$]*$/.test(name)) out.add(name);
+    }
+  }
+  for (
+    const m of src.matchAll(
+      /export\s+(?:async\s+)?(?:function\*?|const|let|var|class)\s+([\w$]+)/g,
+    )
+  ) out.add(m[1]!);
+  for (const m of src.matchAll(/export\s+\*\s+from\s*["'](\.[^"']+)["']/g)) {
+    for (const n of await valueExports(new URL(m[1]!, file), seen)) out.add(n);
+  }
+  return out;
+}
+
+/** name → the specifier that exports it; first module in AUTO_MODULES wins. */
+async function buildAutoIndex(): Promise<Map<string, string>> {
+  const index = new Map<string, string>();
+  for (const [spec, file] of AUTO_MODULES) {
+    for (const name of await valueExports(new URL(file, ROOT))) {
+      if (!index.has(name)) index.set(name, spec);
+    }
+  }
+  assert(
+    index.get("cell") === "aio" && index.get("testCell") === "aio/testing" &&
+      index.get("signal") === "aio/air",
+    "export scan lost its anchors — the parse broke; fix it rather than " +
+      "letting every import-less snippet silently go unchecked",
+  );
+  return index;
+}
+
+/** Names the snippet binds itself — never import over one of these. */
+function declaredNames(code: string): Set<string> {
+  const out = new Set<string>();
+  for (
+    const m of code.matchAll(
+      /(?:^|\n)\s*(?:export\s+)?(?:async\s+)?(?:function\*?|class|const|let|var)\s+([\w$]+)/g,
+    )
+  ) out.add(m[1]!);
+  // Destructured / array bindings, and every name in an import clause.
+  for (
+    const m of code.matchAll(
+      /(?:^|\n)\s*(?:export\s+)?(?:const|let|var)\s*[{[]([^}\]]*)[}\]]/g,
+    )
+  ) {
+    for (const part of m[1]!.split(",")) {
+      const n = (part.split(":").pop() ?? "").trim().replace(/^\.\.\./, "")
+        .split("=")[0]!.trim();
+      if (/^[A-Za-z_$][\w$]*$/.test(n)) out.add(n);
+    }
+  }
+  for (const m of code.matchAll(/import[^;\n]*from\s*["'][^"']+["']/g)) {
+    for (const n of m[0].matchAll(/[\w$]+/g)) out.add(n[0]);
+  }
+  return out;
+}
+
+/** The ONE import line an import-less snippet is checked with: every framework
+ *  name it uses and does not define, grouped by the specifier that exports it.
+ *  Empty when it uses none — the block is then checked as plain TypeScript. */
+function autoImportLine(code: string, index: Map<string, string>): string {
+  const declared = declaredNames(code);
+  const bySpec = new Map<string, Set<string>>();
+  for (const m of code.matchAll(/[A-Za-z_$][\w$]*/g)) {
+    const name = m[0];
+    if (declared.has(name)) continue;
+    if (code[m.index - 1] === ".") continue; // `x.cell` is a property
+    const spec = index.get(name);
+    if (!spec) continue;
+    let names = bySpec.get(spec);
+    if (!names) bySpec.set(spec, names = new Set());
+    names.add(name);
+  }
+  return [...bySpec]
+    .map(([spec, names]) =>
+      `import { ${[...names].sort().join(", ")} } from "${spec}";`
+    ).join(" ");
+}
+
 /** Snippets whose imports can't resolve without node_modules — react/vue
  * island samples. Checking them would need a real npm install; skipped. */
 const UNRESOLVABLE_OK = new Set(["react", "vue", "react-dom/client"]);
@@ -41,6 +176,11 @@ type Snippet = {
   code: string;
   declPath?: string; // `// path.ts` first-line file name, if present
   file?: string; // absolute path the snippet was written to
+  /** Import-less but complete — checked with a synthesized import line, so
+   *  file line N is doc line `line + N - 2`. */
+  auto?: boolean;
+  /** Pass 2 added two more preamble lines of `declare const … : any` stubs. */
+  stubbed?: boolean;
 };
 
 async function* markdownFiles(dir: URL): AsyncGenerator<URL> {
@@ -71,7 +211,9 @@ function extractSnippets(doc: string, text: string): Snippet[] {
   for (const m of text.matchAll(FENCE_RE)) {
     const [, lang, info, code] = m;
     if (info!.includes("no-check")) continue;
-    if (!/(?:import|export)[^\n]*from\s*["'](?:aio|\.)/.test(code!)) continue;
+    const imported = /(?:import|export)[^\n]*from\s*["'](?:aio|\.)/.test(code!);
+    if (!imported && !COMPLETE_RE.test(code!)) continue;
+    if (!imported && OBJECT_MEMBER_RE.test(code!)) continue;
     if (isFragment(code!)) continue;
     const first = code!.trimStart().split("\n", 1)[0]!.trim();
     out.push({
@@ -80,6 +222,7 @@ function extractSnippets(doc: string, text: string): Snippet[] {
       lang: lang as "ts" | "tsx",
       code: code!,
       declPath: first.match(DECL_PATH_RE)?.[1],
+      auto: !imported,
     });
   }
   return out;
@@ -159,6 +302,7 @@ Deno.test("doc ts/tsx code blocks type-check against the real API", async () => 
     assert(count > 50, `only ${count} snippets extracted — regex broke?`);
 
     const imports = buildImports();
+    const autoIndex = await buildAutoIndex();
     // resolved-but-missing relative import URL → stub requirements
     const stubs = new Map<
       string,
@@ -226,7 +370,10 @@ Deno.test("doc ts/tsx code blocks type-check against the real API", async () => 
         await Deno.mkdir(sn.file.slice(0, sn.file.lastIndexOf("/")), {
           recursive: true,
         });
-        await Deno.writeTextFile(sn.file, sn.code);
+        // An import-less complete block gets its imports synthesized on ONE
+        // line, so file line N is doc line `sn.line + N - 2`.
+        const head = sn.auto ? autoImportLine(sn.code, autoIndex) + "\n" : "";
+        await Deno.writeTextFile(sn.file, head + sn.code);
         byFile.set(sn.file, sn);
         checkFiles.push(sn.file);
       }
@@ -260,21 +407,91 @@ Deno.test("doc ts/tsx code blocks type-check against the real API", async () => 
       checkFiles.length > 50,
       `only ${checkFiles.length} snippets actually checked — skip logic broke?`,
     );
+    // The import-less half is the half that shipped broken samples, and it is
+    // the half a regex change can silently switch off. Counted separately so
+    // "the gate went quiet" fails instead of passing.
+    const autoCount = [...byFile.values()].filter((s) => s.auto).length;
+    assert(
+      autoCount > 60,
+      `only ${autoCount} import-less snippets checked — COMPLETE_RE / ` +
+        `OBJECT_MEMBER_RE / isFragment stopped seeing them?`,
+    );
+
+    const check = async () =>
+      await new Deno.Command(Deno.execPath(), {
+        args: ["check", "--config", `${tmp}/deno.json`, ...checkFiles],
+        // NO_COLOR: the report is remapped by regex, and ANSI escapes sit
+        // between the path and its `:line:col`.
+        env: { NO_COLOR: "1" },
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
 
     // ONE batched check — the aio graph is type-checked once for all snippets.
-    const out = await new Deno.Command(Deno.execPath(), {
-      args: ["check", "--config", `${tmp}/deno.json`, ...checkFiles],
-      stdout: "piped",
-      stderr: "piped",
-    }).output();
+    let out = await check();
+    let stderr = new TextDecoder().decode(out.stderr);
+
+    // Pass 2, for import-less snippets only: a doc block routinely uses a cell
+    // an EARLIER block defined (`counter`, `myCell`, `wallet`), or a helper the
+    // prose describes in words. Those are elided context, not a lie — so the
+    // names the compiler could not find are re-declared `any` (the same
+    // permissive-stub policy unresolved relative imports already get) and the
+    // batch is checked again. What survives is a claim about the aio API
+    // itself, which is the class this gate exists to catch.
+    if (!out.success) {
+      const unknown = new Map<string, Set<string>>();
+      for (
+        const m of stderr.matchAll(
+          /(?:Cannot find name '([\w$]+)'|No value exists in scope for the shorthand property '([\w$]+)')[\s\S]*?\n\s+at (file:\/\/[^\s:]+):\d+:\d+/g,
+        )
+      ) {
+        const file = new URL(m[3]!).pathname;
+        if (!byFile.get(file)?.auto) continue;
+        (unknown.get(file) ?? unknown.set(file, new Set()).get(file)!)
+          .add((m[1] ?? m[2])!);
+      }
+      if (unknown.size) {
+        for (const [file, names] of unknown) {
+          const sn = byFile.get(file)!;
+          sn.stubbed = true;
+          const body0 = await Deno.readTextFile(file);
+          const decl = [...names].sort().map((n) =>
+            // `connectCli<AppState>(…)` needs a stub with a type parameter —
+            // a type argument on an `any`-typed callee is TS2347. Everything
+            // else stays a plain `any`, which is assignable to the real
+            // parameter types the surrounding aio call expects.
+            new RegExp(`\\b${n}\\s*<[^<>()]*>\\s*\\(`).test(body0)
+              ? `declare function ${n}<T = unknown>(...a: any[]): any; ` +
+                `type ${n} = any;`
+              : `declare const ${n}: any; type ${n} = any;`
+          ).join(" ");
+          await Deno.writeTextFile(
+            file,
+            `// deno-lint-ignore-file no-explicit-any\n${decl}\n${body0}`,
+          );
+        }
+        out = await check();
+        stderr = new TextDecoder().decode(out.stderr);
+      }
+    }
 
     if (!out.success) {
-      // Remap temp snippet paths back to doc + fence line for the report.
-      let report = new TextDecoder().decode(out.stderr);
+      // Point at the DOC line, not the temp file's — a snippet's line N is
+      // doc line `sn.line + N - 1`, less the synthesized preamble lines.
+      let report = stderr;
       for (const [path, sn] of byFile) {
+        const off = (sn.auto ? 1 : 0) + (sn.stubbed ? 2 : 0);
+        report = report.replaceAll(
+          new RegExp(
+            `file://${path.replace(/[.*+?^$()|[\]\\]/g, "\\$&")}:(\\d+):(\\d+)`,
+            "g",
+          ),
+          (_m, l: string, c: string) =>
+            `${sn.doc}:${sn.line + Number(l) - 1 - off}:${c}`,
+        );
         report = report.replaceAll(
           `file://${path}`,
-          `${sn.doc} (snippet at line ${sn.line}; error line is relative)`,
+          `${sn.doc} (snippet at line ${sn.line})`,
         );
       }
       assert(

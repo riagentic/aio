@@ -1,7 +1,11 @@
 // Startup linter — validates config and src/ before running
 // Extracted from aio.ts. Checks state, config, App.tsx, imports, dependencies.
 import { UI_ENTRY } from "./app-files.ts";
-import { SERVER_ONLY_SPECS } from "./server-only-specs.ts";
+import {
+  aioOwnSpecAdvice,
+  isAioOwnSpec,
+  SERVER_ONLY_SPECS,
+} from "./server-only-specs.ts";
 import { ESBUILD_SPEC } from "../build/esbuild-shared.ts";
 
 import { join } from "@std/path";
@@ -35,6 +39,9 @@ export function browserImportWarning(file: string, spec: string): string {
       `(\`const { createDB } = await import("${spec}")\` — methods run on ` +
       `the server), or into a *.server.ts module imported lazily.`;
   }
+  // `aio/extras` / `aio/sync` sit outside SERVER_ONLY_SPECS on purpose, but
+  // they are still aio's own entries with no npm package behind them.
+  if (isAioOwnSpec(spec)) return `${file}: ${aioOwnSpecAdvice(spec)}`;
   return `${file}: import "${spec}" won't work in browser — dev mode ` +
     `transpiles but doesn't bundle. Map it for the browser ` +
     `(\`"${spec}": "npm:${spec}"\` in deno.json imports), or move the ` +
@@ -50,8 +57,12 @@ export type Lint = {
 };
 
 /** Checks state, config, App.tsx existence, and common mistakes.
- *  Public name (alpha52): `checkCells` — `lint` collided with aiol's project
- *  linter of the same name and is the deprecated alias through beta. */
+ *
+ *  The PUBLIC name is {@linkcode checkCells} (alpha52). `lint` was its alias
+ *  — it collided with aiol, the project linter — and that alias went OUT of
+ *  the public surface in alpha70 (src/state/removals.ts, `lint() from
+ *  "aio/extras"`). This name survives as the implementation only.
+ *  @internal */
 export async function lint(
   state: unknown,
   config: { reduce?: unknown; execute?: unknown },
@@ -346,6 +357,10 @@ export function printLint(r: Lint): void {
 }
 
 /** Validate cell defs / startup config without booting — the alpha52 name of
- *  {@linkcode lint} (renamed: extras' `lint` collided with aiol's project
- *  linter; `lint` stays a working deprecated alias through beta). */
+ *  {@linkcode lint}.
+ *
+ *  THE public name since alpha52, and the ONLY one since alpha70: the `lint`
+ *  spelling collided with aiol (the project linter) and was removed from the
+ *  public surface — `aiol --safe-fix` rewrites it, keeping a local name where
+ *  an app wants one (`import { checkCells as lint }`). */
 export const checkCells = lint;

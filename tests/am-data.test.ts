@@ -13,6 +13,7 @@ import {
   cmdBackup,
   cmdData,
   cmdRestore,
+  defaultBackupDest,
   renderData,
 } from "../src/am/am-cmd-data.ts";
 import {
@@ -322,5 +323,88 @@ Deno.test("am restore: a corrupt meta.json refuses (the wrong-app check is blind
   } finally {
     unpin();
     await Deno.remove(home, { recursive: true });
+  }
+});
+
+// A directory that is not an archive at all passed every guard: a null meta is
+// the legitimate "hand-made copy" case, so `am restore ~/Downloads` moved the
+// live data aside, copied zero files, and reported
+// `{"files":0,"replaced":"…/data.replaced-…"}` with exit 0 — the data dir left
+// EMPTY, with only the .replaced-* copy between the user and total loss.
+// `files: 0` is never a successful restore.
+Deno.test("am restore: refuses a directory that is not a backup", async () => {
+  const home = await Deno.makeTempDir({ prefix: "am-restore-notabackup-" });
+  pin(home);
+  try {
+    const d = seedApp("ntest", home);
+    const notAnArchive = join(home, "downloads");
+    Deno.mkdirSync(notAnArchive, { recursive: true });
+    Deno.writeTextFileSync(join(notAnArchive, "notes.txt"), "hello");
+
+    const r = run(cmdRestore, [notAnArchive], { app: "ntest" });
+    assertEquals(r.exited, 1, r.out);
+    assertStringIncludes(r.out, "is not an aio backup");
+    // The live data is where it was — nothing moved aside, nothing emptied.
+    assertEquals(Deno.readTextFileSync(d.stateDb), "STATE");
+    assertEquals(
+      [...Deno.readDirSync(appDirs("ntest").home)].some((e) =>
+        e.name.startsWith("data.replaced-")
+      ),
+      false,
+      "a refused restore must not have moved anything",
+    );
+    // --force is for "the wrong archive", not for "no archive".
+    const forced = run(cmdRestore, [notAnArchive, "--force"], { app: "ntest" });
+    assertEquals(forced.exited, 1);
+    assertEquals(Deno.readTextFileSync(d.stateDb), "STATE");
+
+    // A hand-made copy with no meta.json but a real state.db IS restorable —
+    // the guard must not turn into "only am's own archives".
+    const handMade = join(home, "handmade");
+    Deno.mkdirSync(handMade, { recursive: true });
+    Deno.writeTextFileSync(join(handMade, "state.db"), "OLDER");
+    const ok = run(cmdRestore, [handMade], { app: "ntest" });
+    assertEquals(ok.exited, null, ok.out);
+    assertEquals(Deno.readTextFileSync(d.stateDb), "OLDER");
+  } finally {
+    unpin();
+    await Deno.remove(home, { recursive: true });
+  }
+});
+
+// The default destination used to be `<cwd>/<app>-backup-<stamp>` — the cwd of
+// `am backup` is the app's git checkout, so the default dropped a copy of
+// auth.db, the app key and the TLS key into the working tree, uncovered by the
+// scaffold's .gitignore, and `git status` showed it the moment it returned.
+Deno.test("am backup: the default destination is not the user's checkout", async () => {
+  const home = await Deno.makeTempDir({ prefix: "am-backup-default-" });
+  const checkout = await Deno.makeTempDir({ prefix: "am-backup-cwd-" });
+  const prevCwd = Deno.cwd();
+  pin(home);
+  try {
+    seedApp("dfl", home);
+    Deno.chdir(checkout);
+    const r = run(cmdBackup, [], { app: "dfl" });
+    assertEquals(r.exited, null, r.out);
+    const dest = JSON.parse(r.out).dest as string;
+    assertEquals(
+      defaultBackupDest("dfl", "STAMP"),
+      join(appDirs("dfl").home, "backups", "dfl-backup-STAMP"),
+    );
+    assert(
+      dest.startsWith(join(appDirs("dfl").home, "backups")),
+      `the default backup went to ${dest}`,
+    );
+    assertEquals(
+      [...Deno.readDirSync(checkout)],
+      [],
+      "nothing may be written into the directory the command was typed in",
+    );
+    assertEquals(Deno.readTextFileSync(join(dest, "state.db")), "STATE");
+  } finally {
+    Deno.chdir(prevCwd);
+    unpin();
+    await Deno.remove(home, { recursive: true });
+    await Deno.remove(checkout, { recursive: true });
   }
 });

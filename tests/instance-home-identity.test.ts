@@ -35,6 +35,7 @@ import {
 } from "../src/server/uds.ts";
 import { cell } from "../src/state/cell-create.ts";
 import { testServer } from "../src/testing/server-test.ts";
+import { tempDir } from "../src/testing/temp-dir.ts";
 
 const uid = () => crypto.randomUUID().slice(0, 8);
 
@@ -56,8 +57,8 @@ Deno.test({
     "same appId, two homes: both locks acquire; same home refuses with ITS OWN coordinates",
   async fn() {
     const id = `two-homes-${uid()}`;
-    const homeA = join(await Deno.makeTempDir({ prefix: "aio-homeA-" }));
-    const homeB = join(await Deno.makeTempDir({ prefix: "aio-homeB-" }));
+    const homeA = join(await tempDir("aio-homeA-"));
+    const homeB = join(await tempDir("aio-homeB-"));
     const a = new AppLock(id, homeA);
     const b = new AppLock(id, homeB);
     try {
@@ -115,8 +116,8 @@ Deno.test({
     "acquireSingletonLock beside a foreign-home sibling: continues, and the info line names no port/pid",
   async fn() {
     const id = `foreign-home-${uid()}`;
-    const foreignHome = await Deno.makeTempDir({ prefix: "aio-foreign-" });
-    const myHome = await Deno.makeTempDir({ prefix: "aio-mine-" });
+    const foreignHome = await tempDir("aio-foreign-");
+    const myHome = await tempDir("aio-mine-");
     // An alive foreign instance (pid 1 counts as alive) on a real port.
     const l = Deno.listen({ port: 0, hostname: "127.0.0.1" });
     const fport = (l.addr as Deno.NetAddr).port;

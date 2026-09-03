@@ -410,6 +410,28 @@ const VIOLATIONS: Case[] = [
     }),
     expect: "aio.run({ appVersion }) was removed",
   },
+  {
+    // alpha76: the config key follows the flag — `--takeover` since alpha52,
+    // `takeover:` since here.
+    name: "killExisting still passed to aio.run()",
+    files: app({
+      "src/app.ts":
+        `import { aio } from "aio";\nimport { counter } from "./cell.ts";\nawait aio.run({ appId: "p", killExisting: true, cells: { counter } });\n`,
+    }),
+    expect: "aio.run({ killExisting }) was removed",
+  },
+  {
+    // alpha76: a removed runtime flag written into a deno.json task — the one
+    // place an app records a flag, and so the one place to catch it before
+    // `parseCli` refuses it at boot.
+    name: "a removed runtime flag in a deno.json task",
+    files: app({
+      "deno.json": denoJson({
+        tasks: { dev: "deno run -A src/app.ts --kill-existing", test: "y" },
+      }),
+    }),
+    expect: "`--kill-existing` was removed in alpha76",
+  },
   // cells
   {
     name: "no cells at all",
@@ -1058,7 +1080,7 @@ await aio.run({ perfBudget: { methods: { "models:scan": { timeout: 0 } } } });
         'import { cell, schedule } from "aio";',
       ),
     }),
-    expect: "returning effects from a method is deprecated",
+    expect: "return effect(s) from a method was removed in alpha76",
   },
   {
     name: "alpha52: return-ed effects ARRAY",
@@ -1078,7 +1100,7 @@ await aio.run({ perfBudget: { methods: { "models:scan": { timeout: 0 } } } });
         'import { cell, own, schedule } from "aio";',
       ),
     }),
-    expect: "returning an effects ARRAY is deprecated",
+    expect: "(an effects ARRAY)] return effect(s) from a method was removed",
   },
   // (The alpha52 transaction-MIGRATION fixture lived here. alpha57 returned
   //  `transaction` to opt-in and retired the rule; the cell shape it used is
@@ -1111,7 +1133,7 @@ await aio.run({ perfBudget: { methods: { "models:scan": { timeout: 0 } } } });
 }`,
       ),
     }),
-    expect: "selector deps now arrive as a TUPLE",
+    expect: "selector deps as a spread was removed in alpha76",
   },
   {
     name: "alpha52: schedule old argument order (opts 3rd)",

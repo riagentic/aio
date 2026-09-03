@@ -66,16 +66,116 @@ const AIO_SRC_BASE_URL = new URL("../", import.meta.url);
  *  ("reachable, unauthenticated, and used by nobody"), one file extension
  *  short: `.server.ts` was denied while `secrets.ts` next to it was not. */
 export function isProtectedPath(pathname: string, prod = false): boolean {
-  const rel = pathname.replace(/^\/+/, "");
-  if (!rel) return false;
-  const segments = rel.split("/");
+  // Decide on the path the FILESYSTEM will see, not the spelling the client
+  // chose. `resolve()` drops empty segments, so `/App.tsx/`, `/App.tsx//` and
+  // `/App.tsx/%2e` (the WHATWG parser folds `.`, `%2e` and `./` into a
+  // trailing slash) all opened the same file — while the rule looked at the
+  // last RAW segment, saw "", and matched nothing. A production server handed
+  // out `/App.tsx/` and `/secret.server.ts/` to anyone who typed the slash.
+  const segments = pathname.split("/").filter((seg) => seg !== "");
+  if (segments.length === 0) return false;
   for (const seg of segments) {
     if (seg === ".well-known") continue;
     if (seg.startsWith(".")) return true;
   }
-  const last = segments[segments.length - 1] ?? "";
+  const last = segments[segments.length - 1]!;
   if (prod && /\.tsx?$/.test(last)) return true;
   return SERVER_FILE_RE.test(last);
+}
+
+/** The longest file NAME any filesystem aio runs on accepts (ext4, APFS,
+ *  NTFS: 255 bytes/units). A longer segment cannot name a file, so the
+ *  answer is 404 — decided BEFORE the filesystem is asked, because asking
+ *  threw ENAMETOOLONG, which the text branch answered with a 500 and an
+ *  error line carrying the absolute path. */
+const MAX_SEGMENT_BYTES = 255;
+/** PATH_MAX on Linux; the same "cannot exist" reasoning as the segment cap. */
+const MAX_PATH_BYTES = 4096;
+const _utf8 = new TextEncoder();
+
+/** True when no filesystem could hold a file at `filepath` — a segment over
+ *  255 bytes or a path over PATH_MAX. Pure; exported for tests. */
+export function cannotExist(filepath: string): boolean {
+  if (_utf8.encode(filepath).byteLength > MAX_PATH_BYTES) return true;
+  return filepath.split(/[\\/]/).some((seg) =>
+    _utf8.encode(seg).byteLength > MAX_SEGMENT_BYTES
+  );
+}
+
+/** A filesystem error that means "there is no such file to serve" — the
+ *  request named something that does not exist, or names a path through a
+ *  file (`/app.js/x.txt` → ENOTDIR), or a symlink cycle. Anything else (EACCES,
+ *  EISDIR, EIO) is the server's problem and stays a 500. */
+export function isNotServable(e: unknown): boolean {
+  return e instanceof Deno.errors.NotFound ||
+    e instanceof Deno.errors.NotADirectory ||
+    e instanceof Deno.errors.FilesystemLoop;
+}
+
+/** THE method table for the framework's own HTTP endpoints. One place, so
+ *  `TRACE /__aio/health` cannot answer 200 on one route and 405 on the next:
+ *  every route here answered whatever method arrived (the handlers never
+ *  looked), `/__aio/snapshot` refused HEAD with a 405 while serving GET, and
+ *  `GET /__aio/client-error` fell through to a 404 that said the route did not
+ *  exist. Dev-only routes are listed too — in prod they are not mounted, and
+ *  a 404 (not a 405) is the truthful answer there, so `aioMethodDenial` takes
+ *  the mode. HEAD rides with GET, as HTTP says it must. */
+export const AIO_ROUTE_METHODS: Readonly<
+  Record<string, { methods: readonly string[]; devOnly?: true }>
+> = {
+  "/__aio/health": { methods: ["GET", "HEAD"] },
+  "/__aio/metrics": { methods: ["GET", "HEAD"] },
+  "/__aio/vitals": { methods: ["GET", "HEAD"] },
+  "/__aio/icon": { methods: ["GET", "HEAD"] },
+  "/__aio/snapshot": { methods: ["GET", "HEAD", "POST"] },
+  "/__aio/error": { methods: ["GET", "HEAD"], devOnly: true },
+  "/__aio/client-error": { methods: ["POST"], devOnly: true },
+};
+
+/** The 405 for a framework endpoint asked with a method it does not serve,
+ *  or null when the method is allowed (or the path is not in the table, or
+ *  the route is not mounted in this mode). Pure; exported for tests. */
+export function aioMethodDenial(
+  pathname: string,
+  method: string,
+  prod: boolean,
+): Response | null {
+  const entry = AIO_ROUTE_METHODS[pathname];
+  if (!entry) return null;
+  if (prod && entry.devOnly) return null;
+  if (entry.methods.includes(method.toUpperCase())) return null;
+  return new Response(
+    `Method Not Allowed — ${pathname} serves ${entry.methods.join(", ")}`,
+    { status: 405, headers: { Allow: entry.methods.join(", ") } },
+  );
+}
+
+/** Why a parsed snapshot body cannot be loaded, or null when its SHAPE is
+ *  right: a plain object of plain objects, one per cell. A cell's state is
+ *  always an object (`cell({ state: {…} })`), so a snapshot that puts a
+ *  number, a string, an array or null under a cell name loads today and
+ *  breaks the NEXT dispatch — `s.count++` on a state that is `7` throws
+ *  inside the method, far from the POST that caused it. Refuse it here,
+ *  naming the cell. Pure; shared by every snapshot door (the HTTP endpoint
+ *  and the trojan route) so they cannot disagree. */
+export function snapshotShapeError(parsed: unknown): string | null {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return "snapshot must be a JSON object — pass the exact string returned by app.snapshot()";
+  }
+  for (
+    const [cellName, v] of Object.entries(parsed as Record<string, unknown>)
+  ) {
+    if (!v || typeof v !== "object" || Array.isArray(v)) {
+      return `snapshot value for cell "${cellName}" must be an object (a cell's state is always an object), got ${
+        v === null ? "null" : Array.isArray(v) ? "an array" : typeof v
+      }`;
+    }
+    const proto = Object.getPrototypeOf(v);
+    if (proto !== Object.prototype && proto !== null) {
+      return `snapshot value for cell "${cellName}" must be a plain object`;
+    }
+  }
+  return null;
 }
 
 /** Resolve a `/__aio/<rel>` request to a framework source file, or null.
@@ -184,6 +284,10 @@ export interface StaticDeps {
   /** Identity the theme's accent hue is derived from — the appId, so the UI
    *  and the icon are the same colour. */
   themeName?: string;
+  /** The app's identity, injected into the page's `window.__aioConfig` — the
+   *  browser's offline sync queue scopes its per-origin `localStorage` key by
+   *  it. */
+  appId?: string;
   // Graph validation state — mutable ref from server.ts (dev only)
   getGraphResult: () => GraphResult | null;
   // Snapshot support
@@ -353,6 +457,7 @@ export function createStaticHandler(deps: StaticDeps): {
         themeName: deps.themeName,
         lang: deps.lang,
         dir: deps.dir,
+        appId: deps.appId,
       }),
       { headers: { "Content-Type": "text/html", ...deps.noCache } },
     );
@@ -407,6 +512,12 @@ export function createStaticHandler(deps: StaticDeps): {
         }
       }
       return appShell();
+    }
+
+    // ── Framework endpoints: the method table, before any handler ──
+    if (req) {
+      const denied = aioMethodDenial(pathname, req.method, prod);
+      if (denied) return denied;
     }
 
     // ── AIO virtual JS modules ──
@@ -748,7 +859,7 @@ export function createStaticHandler(deps: StaticDeps): {
 
   /** Handle GET/POST snapshot endpoint */
   function handleSnapshot(req?: Request): Response | Promise<Response> {
-    if (!req || req.method === "GET") {
+    if (!req || req.method === "GET" || req.method === "HEAD") {
       return new Response(deps.getSnapshot!(), {
         headers: {
           "Content-Type": "application/json",
@@ -777,7 +888,8 @@ export function createStaticHandler(deps: StaticDeps): {
               { status: 413 },
             );
           }
-          JSON.parse(json); // validate
+          const shape = snapshotShapeError(JSON.parse(json));
+          if (shape) return new Response(shape, { status: 400 });
           deps.loadSnapshot!(json);
           return new Response("OK", { status: 200 });
         } catch (e) {
@@ -1028,6 +1140,24 @@ export function createStaticHandler(deps: StaticDeps): {
     if (!filepath.startsWith(basePfx)) {
       return new Response("Forbidden", { status: 403 });
     }
+    // Names no filesystem can hold are 404 before any syscall — see
+    // `cannotExist` (ENAMETOOLONG used to be a 500 naming the absolute path).
+    if (cannotExist(filepath)) {
+      return new Response("Not Found", { status: 404 });
+    }
+    // A path that ENDS in a slash names a directory. `resolve()` dropped the
+    // slash, so `/app.js/` served the FILE app.js — the served path and the
+    // requested path must be the same path, or every rule above it (the deny
+    // list, an app's own routing) is checking a different name than the one
+    // that gets opened. Directories still fall through: an extensionless
+    // `/about/` is a SPA route, and a real directory 404s as it always did.
+    if (rel.endsWith("/")) {
+      try {
+        if ((await Deno.stat(filepath)).isFile) {
+          return new Response("Not Found", { status: 404 });
+        }
+      } catch { /* not there — the handlers below answer as before */ }
+    }
     // Symlinks inside the root must not escape it either
     try {
       const real = await Deno.realPath(filepath);
@@ -1084,7 +1214,7 @@ export function createStaticHandler(deps: StaticDeps): {
       // 404 is the answer for a file that is not there. A file that IS there
       // and cannot be read (EACCES, EISDIR) is a server problem, and saying
       // "Not Found" for it sent people checking their paths.
-      if (e instanceof Deno.errors.NotFound) {
+      if (isNotServable(e)) {
         return new Response("Not Found", { status: 404 });
       }
       log.error("server", `static: cannot read ${filepath} — ${e}`);

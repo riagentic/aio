@@ -21,10 +21,34 @@ export function shotOutPath(
   return `${appId}-${stamp}.png`;
 }
 
-/** Pure: the exact instruction when the running app opened no CDP port. */
-export function noCdpMessage(appId: string): string {
+/** Clients with a desktop window. Everything else has nothing to screenshot,
+ *  and no flag will give it one. */
+const WINDOWED = new Set(["electron"]);
+
+/** Pure: the exact instruction when the running app opened no CDP port.
+ *
+ *  `client` is what the instance recorded in its lock (absent on locks written
+ *  before alpha76 → the honest "if this is a desktop app" wording). Naming it
+ *  first is the whole point: a `--client=browser` app was told to restart with
+ *  `--cdp` and try again, and the operator who did got "recorded cdp
+ *  127.0.0.1:PORT but nothing answers there" — a two-step path to the same
+ *  dead end, when the first answer was knowable. */
+export function noCdpMessage(appId: string, client?: string): string {
+  if (client !== undefined && !WINDOWED.has(client)) {
+    return `${appId} runs with --client=${client}, which has no desktop ` +
+      `window — there is nothing for a screenshot to capture, and no flag ` +
+      `changes that (--cdp drives an Electron window). To see the live UI: ` +
+      `\`am surface ${appId} --json\` reads it as text, or open the page in ` +
+      `your own browser and screenshot it there. For a real window, run the ` +
+      `app with --client=electron.`;
+  }
   return `${appId} is running without the DevTools Protocol — a screenshot ` +
-    `needs it. Restart with the flag: am restart ${appId} --cdp ` +
+    `needs it.${
+      client === undefined
+        ? ` (If this app runs with --client=browser / cli / server-only there ` +
+          `is no window to shoot at all — use \`am surface\` instead.) `
+        : " "
+    }Restart with the flag: am restart ${appId} --cdp ` +
     `(or run the app with --cdp / AIO_CDP=1), then am shot again. ` +
     `Opt-in on purpose: --cdp binds a loopback port, and an app that did not ` +
     `ask binds none.`;
@@ -50,8 +74,14 @@ export async function cmdShot(
     outError(`${appId} is not running (no lock) — am start first`, mode);
     Deno.exit(1);
   }
+  // A client with no window is refused FIRST, cdp port or not: a recorded
+  // port that nothing listens on is the second dead end, not a second chance.
+  if (pf.client !== undefined && !WINDOWED.has(pf.client)) {
+    outError(noCdpMessage(appId, pf.client), mode);
+    Deno.exit(1);
+  }
   if (!pf.cdpPort) {
-    outError(noCdpMessage(appId), mode);
+    outError(noCdpMessage(appId, pf.client), mode);
     Deno.exit(1);
   }
   const idxRaw = args.find((a) => !a.startsWith("--"));

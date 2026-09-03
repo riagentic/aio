@@ -42,10 +42,10 @@ import { transpile } from "../src/server/server-transpile.ts";
 import { buildBrowserImportMap } from "../src/server/server-html-importmap.ts";
 import { ESBUILD_SPEC } from "../src/build/esbuild-shared.ts";
 import { BUNDLE_ENTRY_KEY } from "../src/build/client-bundle.ts";
+import { childCoverageDir } from "../src/testing/temp-dir.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
-const _childCovDir = Deno.env.get("DENO_COVERAGE_DIR") ??
-  Deno.makeTempDirSync({ prefix: "aio-child-cov-" });
+const _childCovDir = childCoverageDir();
 
 const IMPORTS = {
   "aio": `${ROOT}mod.ts`,

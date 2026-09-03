@@ -475,13 +475,26 @@ Deno.test("auth e2e: OIDC login — discovery, PKCE, RS256 JWKS verify, session"
         ["/\\evil.example", "/"],
         ["/\t/evil.example", "/"], // TAB the browser strips → protocol-relative
         ["/\n//evil", "/"],
+        // Non-Latin-1 paths: a Location header is a ByteString, so the path is
+        // percent-encoded (same origin) — never a 500 after the token exchange.
+        ["/漢", "/%E6%BC%A2"],
+        ["/文档/1", "/%E6%96%87%E6%A1%A3/1"],
+        ["/x?q=🚀#h", "/x?q=%F0%9F%9A%80#h"],
+        // Encoded slashes are not decoded by the browser's resolver: same origin.
+        ["/%2F%2Fevil.example", "/%2F%2Fevil.example"],
       ] as const
     ) {
       const cbr = await driveOidc(redirect);
+      assertEquals(cbr.status, 302, `redirect=${redirect}: status`);
       assertEquals(
         cbr.headers.get("location"),
         expected,
         `redirect=${redirect}`,
+      );
+      assertStringIncludes(
+        cbr.headers.get("set-cookie") ?? "",
+        "aio_session=",
+        `redirect=${redirect}: session cookie delivered`,
       );
       await cbr.body?.cancel();
     }

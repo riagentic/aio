@@ -124,7 +124,10 @@ export interface ServerConfig {
     getState: () => unknown; // raw unfiltered state
     getSchedules: () => string[]; // active schedule IDs
     getTTHistory?: () => unknown; // time-travel entries (wire format)
-    forcePersist?: () => void; // trigger immediate persist
+    /** Persist NOW and resolve once the write has landed; rejects when the
+     *  cycle reported a failure. Never a "schedule" — the reply is a promise
+     *  that the data is on disk. */
+    forcePersist?: () => Promise<void>;
     sqlQuery?: (sql: string) => Promise<unknown[]>; // read-only SQL query (async)
     shutdown?: () => Promise<void>; // graceful shutdown
     startedAt: number; // Date.now() at boot

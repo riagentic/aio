@@ -430,10 +430,19 @@ window title over a slugged binary (`"a field report Master"` vs
 deno task compile
 ```
 
-Bundles `src/App.tsx` + React + useAio into a fully self-contained `dist/app.js`
-(no CDN dependency), then runs `deno compile` to produce a standalone binary
-(~95MB). Dev-only packages (electron, esbuild, react, react-dom) are excluded
-automatically.
+Bundles `src/App.tsx` and everything it imports into a fully self-contained
+`dist/app.js` (no CDN dependency), then runs `deno compile` to produce a
+standalone binary (~95MB). Dev-only packages (electron, esbuild, react,
+react-dom) are excluded automatically.
+
+`dist/app.js` is an INTERMEDIATE file, not something to serve: `deno compile`
+embeds it, and the fleet then assembles a clean `dist/` holding the binaries and
+`manifest.json` — the bundle is gone by the time the build finishes. The build
+log says so
+(`built dist/app.js … goes into the binary; not in the final
+dist/`). Running
+the source with `--prod` afterwards has nothing to serve, and warns at boot; run
+the binary in `dist/`, or `deno task dev`.
 
 The binary name comes from deno.json `"title"` (lowercased, spaces to hyphens).
 
@@ -580,8 +589,10 @@ Does everything `compile` does, plus packages the binary with Electron:
 | macOS    | `<name>-mac-x64.zip` or `<name>-mac-arm64.zip`        | extract, run `./run.sh`                |
 | Windows  | `<name>-win-x64.zip`                                  | extract, run `run.bat` or `<name>.exe` |
 
-Build steps: bundle dist/app.js -> compile deno binary -> copy Electron ->
-generate launcher + icon -> package (AppImage on Linux, zip elsewhere).
+Build steps: bundle dist/app.js -> compile deno binary (which embeds it) -> copy
+Electron -> generate launcher + icon -> package (AppImage on Linux, zip
+elsewhere). The intermediate `dist/app.js` does not survive into the finished
+`dist/`.
 
 All launchers set `$ELECTRON_PATH` before starting the Deno binary. State is
 persisted to the OS user data directory.
@@ -687,7 +698,8 @@ promise mirrors a local call:
 try {
   const order = await orders.place("sku-1"); // ← the method's return value
 } catch (e) {
-  console.error(`refused: ${e.message}`); // ← the server's own reason
+  // `e` is `unknown` under strict TypeScript — narrow before reading it.
+  console.error(`refused: ${e instanceof Error ? e.message : String(e)}`);
 }
 ```
 

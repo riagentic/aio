@@ -43,6 +43,7 @@ function stub(version: string, asked: CheckOptions[]): UpdatesRuntime {
     kind: "manifest",
     channel: "prod",
     current: "1.0.0",
+    currentUnknown: null,
     exposed: false,
     check: (opts) => {
       asked.push(opts);
@@ -174,6 +175,7 @@ testCell(
       kind: "manifest",
       channel: "prod",
       current: "1.0.0",
+      currentUnknown: null,
       exposed: false,
       check: (opts) =>
         Promise.resolve(
@@ -215,6 +217,7 @@ testCell(
       kind: "manifest",
       channel: "prod",
       current: "1.0.0",
+      currentUnknown: null,
       exposed: false,
       check: async () => {
         inside++;
@@ -247,6 +250,7 @@ testCell(
       kind: "manifest",
       channel: "prod",
       current: "1.0.0",
+      currentUnknown: null,
       exposed: false,
       check: () =>
         Promise.resolve({ kind: "offer" as const, update: offer("2.0.0") }),
@@ -285,6 +289,7 @@ testCell(
       kind: "manifest",
       channel: "prod",
       current: "1.0.0",
+      currentUnknown: null,
       exposed: false,
       check: () => {
         checks++;
@@ -328,6 +333,7 @@ testCell(
       kind: "manifest",
       channel: "prod",
       current: "1.0.0",
+      currentUnknown: null,
       exposed: false,
       check: () =>
         Promise.resolve({
@@ -373,6 +379,7 @@ testCell(
       kind: "manifest",
       channel: "prod",
       current: "1.0.0",
+      currentUnknown: null,
       exposed: false,
       check: () =>
         Promise.resolve({ kind: "current" as const, reason: "latest" }),
@@ -440,6 +447,7 @@ testCell(
       kind: "manifest",
       channel: "stable",
       current: "1.0.0",
+      currentUnknown: null,
       exposed: false,
       check: async () => {
         await held;
@@ -480,6 +488,7 @@ testCell(
       kind: "manifest",
       channel: "prod",
       current: "1.0.0",
+      currentUnknown: null,
       exposed: false,
       check: () =>
         Promise.resolve({ kind: "offer" as const, update: offer("2.0.0") }),
@@ -520,6 +529,7 @@ testCell(
       kind: "git",
       channel: "main",
       current: "1.2.3",
+      currentUnknown: null,
       exposed: false,
       // An app with `check: false` never runs a boot check, so this must not
       // depend on one: without it such an app reported `enabled: false` —

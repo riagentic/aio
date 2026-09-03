@@ -12,10 +12,10 @@
 //
 // The usage path calls Deno.exit, so this drives the real CLI.
 import { assert } from "@std/assert";
+import { childCoverageDir } from "../src/testing/temp-dir.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
-const _covDir = Deno.env.get("DENO_COVERAGE_DIR") ??
-  Deno.makeTempDirSync({ prefix: "aio-child-cov-" });
+const _covDir = childCoverageDir();
 
 async function amTrigger(args: string[]): Promise<string> {
   const out = await new Deno.Command(Deno.execPath(), {

@@ -246,8 +246,10 @@ await aio.run({
 Add `forUser` for role-based state filtering:
 
 ```ts
+type Order = { id: string; ownerId: string };
+
 const orders = cell("orders", {
-  state: { items: [], internal: {} },
+  state: { items: [] as Order[], internal: {} },
   methods: {/* ... */},
   visible: {
     include: ["items"],

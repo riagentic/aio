@@ -28,6 +28,8 @@
 // tests/wire-serves.test.ts parses the routers' `case "…":` labels and pins
 // them against it, so a new kind cannot ship silently unrouted.
 
+import type { AioErrorCode } from "../diagnostics/error.ts";
+
 /** Every wire-frame kind, with direction (C→S / S→C / both). */
 export type Kind =
   | "proto" // both — version hello {v,min}
@@ -288,8 +290,24 @@ export type AckPayload = {
    *  the caller (serializable results only; non-serializable → omitted + a dev
    *  warning). Absent for void methods / older servers → resolves undefined. */
   value?: unknown;
-  /** Error message when ok:false — rejects the awaiting caller. */
+  /** Error message when ok:false — rejects the awaiting caller.
+   *
+   *  HUMAN text only. `docs/basics/semver-policy.md` says message wording is
+   *  not public API, so a caller must never branch on it — that is what
+   *  {@linkcode AckPayload.code} is for. */
   error?: string;
+  /** The MACHINE-READABLE half of the failure — an {@linkcode AioErrorCode}
+   *  when the server could name one (`"ACCESS_DENIED"` for a refused call,
+   *  `"ACTION_REFUSED"` when the action reached the server and changed
+   *  nothing), absent for an error the app itself threw.
+   *
+   *  Additive within protocol v3, exactly as `ProtoHello.app` is: a server
+   *  built before it existed simply omits it, and a client that does not read
+   *  it is unaffected. It reaches the caller as `err.code` — see
+   *  {@linkcode errorCode}. Typed `string` on the wire on purpose: a NEWER
+   *  server may name a code this build has never heard of, and erasing it
+   *  would be worse than passing it through. */
+  code?: string;
 };
 // The CRDT frames — "op", "sync-req", "sync-res", "sync-ack", "op-rejected",
 // "sync-err" — deliberately have NO payload type here. Their shapes live in
@@ -319,7 +337,13 @@ export type SfnrPayload = {
   cid: string;
   ok: boolean;
   value?: unknown;
+  /** Human text — never branch on it (see {@linkcode AckPayload.error}). */
   error?: string;
+  /** The machine-readable failure code — same contract, same reader
+   *  ({@linkcode errorCode}) as {@linkcode AckPayload.code}. The two reply
+   *  channels a call can come back on must answer "why did this fail?" the
+   *  same way, or an app ends up with two error vocabularies. */
+  code?: string;
 };
 /** A control-plane request, tunnelled over the socket.
  *
@@ -373,4 +397,70 @@ export function v1PeerReason(line: string): string | null {
     return "peer speaks wire protocol v1 — rebuild/update it";
   }
   return null;
+}
+
+// ── The error channel: ONE way to write a failure, ONE way to read it ───────
+//
+// A rejected call crosses the wire as two fields, and only two: `error` (text
+// for a human) and `code` (a token for a program). Before them there was only
+// the text, so an app that had to tell "the server REFUSED me" from "my own
+// method threw" had exactly one instrument — a regex over a sentence that
+// `docs/basics/semver-policy.md` explicitly refuses to freeze. The moment
+// apps do that, the wording becomes the API by accident.
+//
+// Both halves live here rather than at the five send/receive sites because
+// the sites had already drifted: two of them stringified with `String(err)`
+// (so `throw new Error("kaboom")` arrived as `"Error: kaboom"` and was then
+// re-wrapped into `"Error: Error: kaboom"` by the client), and one added a
+// third prefix of its own.
+
+/** The two wire fields for a thrown value.
+ *
+ *  `message`, never `String(err)`: `String` on an Error prepends its `name`,
+ *  and the receiving side wraps the text in an Error again — the prefix
+ *  accumulated once per hop. `code` is carried when the throw already knows
+ *  its classification (every {@linkcode AioError} does). */
+export function errorFields(err: unknown): { error: string; code?: string } {
+  const error = err instanceof Error ? err.message : String(err);
+  const code = (err as { code?: unknown } | null | undefined)?.code;
+  return typeof code === "string" && code.length > 0
+    ? { error, code }
+    : { error };
+}
+
+/** Rebuild a failed reply as the Error its caller is rejected with, `code`
+ *  attached. The caller reads it with {@linkcode errorCode}. */
+export function wireError(
+  payload: { error?: string; code?: string } | undefined,
+  fallback: string,
+): Error {
+  const err = new Error(payload?.error ?? fallback);
+  if (typeof payload?.code === "string" && payload.code.length > 0) {
+    (err as { code?: string }).code = payload.code;
+  }
+  return err;
+}
+
+/** The failure code carried by a rejected `await cell.method()` /
+ *  `await serverFn(...)`, or `undefined` when the failure has none (an error
+ *  the app's own code threw).
+ *
+ *  ```ts
+ *  import { errorCode } from "aio";
+ *  try { await todos.add("x") } catch (e) {
+ *    if (errorCode(e) === "ACCESS_DENIED") showSignIn();
+ *    else if (errorCode(e) === "ACTION_REFUSED") refetch();
+ *    else throw e;                       // the app's own failure
+ *  }
+ *  ```
+ *
+ *  Works on a locally thrown {@linkcode AioError} too — same reader on both
+ *  sides of the wire. A code a NEWER server names and this build does not
+ *  know is returned verbatim: compare against the codes you care about, never
+ *  `switch` exhaustively over the union. */
+export function errorCode(err: unknown): AioErrorCode | undefined {
+  const code = (err as { code?: unknown } | null | undefined)?.code;
+  return typeof code === "string" && code.length > 0
+    ? code as AioErrorCode
+    : undefined;
 }

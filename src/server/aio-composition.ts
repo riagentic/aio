@@ -20,6 +20,7 @@ import { reportError as reportAioError } from "../diagnostics/error.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { parseCli } from "./aio-cli.ts";
 import { isCompiled } from "./paths.ts";
+import { type PerfCheck, perfCheckOn } from "../state/dispatch.ts";
 import {
   applyCellDefaults,
   applyLocalFirst,
@@ -39,7 +40,7 @@ export type ComposeCellsInput = {
   /** Local-first execution (perfect-aio D3) — see applyLocalFirst. */
   localFirst?: boolean;
   circuitBreaker?: CircuitBreakerConfig;
-  perfCheck?: "on" | "off";
+  perfCheck?: PerfCheck;
   /** The app identity — scopes cancellation across apps in one process. */
   appId?: string;
   onError?: (error: AioError) => void;
@@ -445,7 +446,7 @@ export function composeCellsWiring(
   input: ComposeCellsInput,
 ): ComposeCellsResult {
   const cellReportOpts: ReportErrorOpts = { onError: input.onError };
-  const perfEnabled = input.perfCheck !== "off";
+  const perfEnabled = perfCheckOn(input.perfCheck);
 
   // AIO-5.1: client-scoped cells never register with the server store — one
   // `cells` array can hold both scopes; client cells are skipped here, not errored.

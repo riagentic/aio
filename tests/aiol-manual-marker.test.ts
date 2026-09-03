@@ -55,7 +55,7 @@ async function write(dir: string, files: Record<string, string>) {
 }
 
 const effectIssues = (r: Awaited<ReturnType<typeof lintProject>>) =>
-  r.issues.filter((i) => i.message.includes("returning effects from a method"));
+  r.issues.filter((i) => i.message.includes("return effect(s) from a method"));
 
 Deno.test("aiol: a declined-by-design site is [manual] with the reason; a fixable one converges to zero", async () => {
   const dir = await Deno.makeTempDir({ prefix: "aiol-manual-" });

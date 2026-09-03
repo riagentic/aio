@@ -203,7 +203,7 @@ export function parsePromMem(text: string): MemInfo | null {
 }
 
 const LOG_RE =
-  /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\s{2}(TRACE|DEBUG|INFO|WARN|ERROR|PERF)\s+(\S+)\s{2}(.*)$/;
+  /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}(?:[+-]\d{2}:\d{2})?)\s{2}(TRACE|DEBUG|INFO|WARN|ERROR|PERF)\s+(\S+)\s{2}(.*)$/;
 const CLIENT_LOG_RE = /^\[([^\]]+)\]\s\[(\w+)\s*\]\s\[client:(\d+)\]\s(.*)$/;
 
 /** Parse one (ANSI-stripped) log line into {ts, level, scope, msg}. Non-matching

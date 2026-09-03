@@ -8,6 +8,7 @@
   "imports": {
     "aio": "../../mod.ts",
     "aio/cli": "../../src/cli.ts",
+    "aio/extras": "../../src/extras/mod.ts",
     "aio/server": "../../src/server-entry.ts",
     "aio/jsx-runtime": "../../src/jsx-runtime.ts",
     "esbuild": "npm:esbuild@0.24.2",

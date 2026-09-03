@@ -451,7 +451,14 @@ export function fixTaskFlags(
         if (typeof cmd !== "string") continue;
         let next = cmd
           .replace(/(?<![\w-])--cert=/g, "--tls-cert=")
-          .replace(/(?<![\w-])--key=/g, "--tls-key=");
+          .replace(/(?<![\w-])--key=/g, "--tls-key=")
+          // alpha76 removals (src/state/removals.ts). Two are renames; two
+          // are deletions — a flag whose whole behaviour was "nothing" has
+          // no successor spelling, so the surrounding space goes with it.
+          .replace(/(?<![\w-])--kill-existing(?![\w=-])/g, "--takeover")
+          .replace(/(?<![\w-])--server-url(?![\w=-])/g, "--connect")
+          .replace(/\s*(?<![\w-])--zero-port(?![\w=-])/g, "")
+          .replace(/\s*(?<![\w-])--backup-logs(?![\w=-])/g, "");
         if (entry && next.includes(entry)) {
           next = next.replace(
             /(?<![\w-])--headless(?![\w=-])/g,
@@ -1230,6 +1237,77 @@ export function fixUiKeyToVisible(filePath: string): () => Promise<boolean> {
     for (const at of renames.sort((a, b) => a - b)) {
       out += src.slice(cursor, at) + "visible";
       cursor = at + 2; // past the raw "ui"
+    }
+    out += src.slice(cursor);
+    await Deno.writeTextFile(filePath, out);
+    return true;
+  };
+}
+
+/** Rename a TOP-LEVEL key inside `aio.run({ … })` — `killExisting` →
+ *  `takeover` (alpha76).
+ *
+ *  Structure is read off the MASKED source (`codeText`), so `aio.run(` inside
+ *  a comment or a template literal is not an anchor and a key spelled in a
+ *  string is not a key; the offsets are applied to the RAW text, which is
+ *  identical there because identifiers are code either way. Declines a block
+ *  that already sets the NEW key — two spellings of one decision is what the
+ *  rename exists to end, and picking a winner is the author's call.
+ *
+ *  Same shape as {@link fixUiKeyToVisible}; the anchor and the depth are what
+ *  differ (`aio.run({` opens at depth 1, and only that level is a config key). */
+export function fixRenameRunKey(
+  filePath: string,
+  from: string,
+  to: string,
+): () => Promise<boolean> {
+  const topLevelKeyOffsets = (masked: string): number[] => {
+    const offsets: number[] = [];
+    let depth = 0;
+    let hasNew = false;
+    for (let i = 0; i < masked.length; i++) {
+      const ch = masked[i]!;
+      if ("({[".includes(ch)) depth++;
+      else if (")}]".includes(ch)) depth--;
+      else if (depth === 1 && /[$\w]/.test(ch)) {
+        if (/[$\w.]/.test(masked[i - 1] ?? "")) continue;
+        const m = /^([$\w]+)\s*:/.exec(masked.slice(i));
+        if (m) {
+          if (m[1] === to) hasNew = true;
+          if (m[1] === from) offsets.push(i);
+        }
+        while (i + 1 < masked.length && /[$\w]/.test(masked[i + 1]!)) i++;
+      }
+    }
+    return hasNew ? [] : offsets;
+  };
+  return async () => {
+    let src: string;
+    try {
+      src = await Deno.readTextFile(filePath);
+    } catch {
+      return false;
+    }
+    const masked = codeText(src);
+    const renames: number[] = [];
+    const re = /\baio\s*\.\s*run\s*\(\s*\{/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(src)) !== null) {
+      if (!/[$\w]/.test(masked[m.index] ?? "")) continue; // comment/string
+      const open = m.index + m[0].length - 1;
+      const end = balancedEnd(src, open, masked);
+      if (end === -1) continue;
+      for (const off of topLevelKeyOffsets(masked.slice(open, end + 1))) {
+        renames.push(open + off);
+      }
+      re.lastIndex = end + 1;
+    }
+    if (renames.length === 0) return false;
+    let out = "";
+    let cursor = 0;
+    for (const at of renames.sort((a, b) => a - b)) {
+      out += src.slice(cursor, at) + to;
+      cursor = at + from.length;
     }
     out += src.slice(cursor);
     await Deno.writeTextFile(filePath, out);

@@ -7,6 +7,7 @@
 import { aio } from "../server/aio.ts";
 import { _armTestStrict } from "./test-strict.ts";
 import { testDisplayEnv } from "./test-display.ts";
+import { dropTempDir, tempDir } from "./temp-dir.ts";
 import type { AioApp, CellsConfig } from "../server/aio-types.ts";
 
 /** A booted test app — its URL, the app handle, and fetch/state/close helpers.
@@ -154,20 +155,27 @@ export async function testServer<S = unknown>(
   const { workers: _w, workerEntry: _we, ...runConfig } = config;
   const port = config.port ?? freePort();
   const madeDir = !config.baseDir;
-  const baseDir = config.baseDir ??
-    await Deno.makeTempDir({ prefix: "aio-test-srv-" });
-  const app = await aio.run({
-    client: "server-only",
-    persist: false,
-    appId: `test-${crypto.randomUUID().slice(0, 8)}`,
-    ...runConfig,
-    ...(workerEntryUrl ? { _workerEntry: workerEntryUrl } : {}),
-    // Forced — a test must never let aio.run() call Deno.exit(), and the port /
-    // dir are ours to manage.
-    libraryMode: true,
-    port,
-    baseDir,
-  }) as AioApp<S>;
+  const baseDir = config.baseDir ?? await tempDir("aio-test-srv-");
+  // A boot that THROWS never reaches close(), so the directory it made would
+  // outlive the run — the leak class `scripts/check-orphans.ts` counts.
+  let app: AioApp<S>;
+  try {
+    app = await aio.run({
+      client: "server-only",
+      persist: false,
+      appId: `test-${crypto.randomUUID().slice(0, 8)}`,
+      ...runConfig,
+      ...(workerEntryUrl ? { _workerEntry: workerEntryUrl } : {}),
+      // Forced — a test must never let aio.run() call Deno.exit(), and the
+      // port / dir are ours to manage.
+      libraryMode: true,
+      port,
+      baseDir,
+    }) as AioApp<S>;
+  } catch (e) {
+    if (madeDir) await dropTempDir(baseDir);
+    throw e;
+  }
   const url = `http://127.0.0.1:${port}`;
   const close = async () => {
     await app.close();
@@ -177,14 +185,24 @@ export async function testServer<S = unknown>(
       // hole — visible as a stream of "[logger] write failed for …/.aio/logs"
       // during unrelated tests, which is noise that trains people to ignore log
       // output. Flush what is pending, then detach before the directory goes.
+      const { getLogger, setLogger } = await import(
+        "../diagnostics/logger-api.ts"
+      );
       try {
-        const { getLogger, setLogger } = await import(
-          "../diagnostics/logger-api.ts"
-        );
         await getLogger()?.flush(200);
+      } catch (e) {
+        // A sink whose flush REJECTS is a real fault and gets said out loud.
+        // The old shape swallowed it AND skipped the detach below with it,
+        // which re-opened the exact hole this block exists to close.
+        console.error(
+          `[testServer] log flush failed during teardown: ${e} — the tail of ` +
+            `this app's log may be missing`,
+        );
+      } finally {
+        // ALWAYS detach, flush or no flush: the directory is about to go.
         setLogger(null);
-      } catch { /* no logger configured — nothing to detach */ }
-      await Deno.remove(baseDir, { recursive: true }).catch(() => {});
+      }
+      await dropTempDir(baseDir);
     }
   };
   return {
@@ -223,7 +241,13 @@ export function findChromium(): string | null {
     try {
       Deno.statSync(c);
       return c;
-    } catch { /* next */ }
+    } catch {
+      // aio-ok: this is a PROBE of a list of well-known install paths, and
+      // "not here" is the answer for all but one of them on every machine.
+      // The absence is the information; the caller's `null` (and the clear
+      // "no headless Chromium/Chrome found" throw above it) is where a real
+      // miss is reported.
+    }
   }
   return null;
 }
@@ -246,7 +270,7 @@ export function testBrowser(
     );
   }
   return (async () => {
-    const profile = await Deno.makeTempDir({ prefix: "aio-test-browser-" });
+    const profile = await tempDir("aio-test-browser-");
     const proc = new Deno.Command(bin, {
       args: [
         "--headless=new",
@@ -275,7 +299,19 @@ export function testBrowser(
       killed = true;
       try {
         proc.kill();
-      } catch { /* already exited */ }
+      } catch (e) {
+        // A browser that already exited is the ordinary case — `close()` runs
+        // after the tab may well have gone by itself, and Deno answers that
+        // with "child process has already terminated". ANY other failure
+        // means a live browser this harness did not kill, which is precisely
+        // the orphaned-chrome leak the `unload` backstop above exists to
+        // prevent — so it is never swallowed.
+        if (!/already terminated/i.test(String(e))) {
+          console.error(
+            `[testBrowser] could not kill the browser (pid ${proc.pid}): ${e}`,
+          );
+        }
+      }
     };
     // Backstop: if the Deno process unloads without close(), don't leak chrome.
     const onUnload = () => kill();
@@ -285,7 +321,7 @@ export function testBrowser(
       removeEventListener("unload", onUnload);
       kill();
       await proc.status;
-      await Deno.remove(profile, { recursive: true }).catch(() => {});
+      await dropTempDir(profile);
     };
     return { proc, close, [Symbol.asyncDispose]: close };
   })();

@@ -187,6 +187,16 @@ export type SyncResponse =
     lowWater: HLC | Record<string, HLC>;
     /** Per-cell server_ts cursor (see incremental). */
     lastServerTs?: Record<string, number>;
+    /** Cells whose request cursor this server NEVER issued (it sat above the
+     *  log's high-water mark): the client synced with a different history —
+     *  a restored backup, a wiped data dir, another app on the same port.
+     *  For each, the snapshot is authoritative and the client must adopt
+     *  `lastServerTs[cell]` as-is, bypassing its never-regress rule (which
+     *  exists for out-of-order responses in ONE history, and would otherwise
+     *  pin the foreign cursor forever). Absent from a server built before
+     *  the field; a client built before it ignores it (and stays divergent,
+     *  which the server logs). */
+    reset?: string[];
   };
 
 /** Default sync config values.

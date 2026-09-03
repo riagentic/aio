@@ -15,7 +15,7 @@ import { appIconPng, appIconSvg } from "./app-icon.ts";
 import { misplacedIconHint, resolveAppIcon } from "./build-helpers.ts";
 import { explainServerOnlyImport } from "../server/server-only-specs.ts";
 import { bytes } from "../diagnostics/fmt.ts";
-import { bad, ok, step, warn } from "./build-say.ts";
+import { bad, ok, staged, step, warn } from "./build-say.ts";
 import { HEY, NO } from "../diagnostics/fmt.ts";
 
 /** Where the bundle's REAL input list is recorded — esbuild's own metafile,
@@ -476,7 +476,7 @@ export async function runBundle(
 
   if (bundleFresh) {
     const s = await Deno.stat(out);
-    ok("dist/app.js", `cached, ${bytes(s.size)} — --force rebuilds it`);
+    staged("dist/app.js", `cached, ${bytes(s.size)} — --force rebuilds it`);
   } else {
     // Clean dist/ and rebuild
     try {
@@ -608,7 +608,7 @@ export async function runBundle(
     await writeBundleInputs(root, out, appDir, metaInputs);
 
     const stat = await Deno.stat(out);
-    ok("dist/app.js", bytes(stat.size));
+    staged("dist/app.js", bytes(stat.size));
   }
 
   // Copy style.css to dist/ -- from THE app dir (cfg.appDir), the same place
@@ -626,7 +626,7 @@ export async function runBundle(
   } catch { /* no style.css at the app dir; legacy src/ checked below */ }
   if (hasStyle) {
     await Deno.copyFile(styleSrc, join(dist, APP_STYLE));
-    ok("dist/style.css");
+    staged("dist/style.css");
   } else if (appDir !== join(root, "src")) {
     // The legacy trap, made loud: a style.css at src/ that the app-dir rule
     // does NOT cover was never served in dev; silently shipping it would make
@@ -663,7 +663,7 @@ export async function runBundle(
   if (iconSrc) {
     await Deno.copyFile(iconSrc, join(dist, APP_ICON));
     await Deno.remove(join(dist, "icon.svg")).catch(() => {});
-    ok("dist/icon.png");
+    staged("dist/icon.png");
   } else {
     // No app icon — GENERATE one rather than shipping none. `dist/icon.png` is
     // what the packaged Electron window, the AppImage and the favicon all read,
@@ -676,6 +676,6 @@ export async function runBundle(
     const label = appTitle ?? binaryName ?? basename(appDir);
     await Deno.writeFile(join(dist, APP_ICON), await appIconPng(label, 512));
     await Deno.writeTextFile(join(dist, "icon.svg"), appIconSvg(label));
-    ok("dist/icon.png", `generated monogram "${label}"`);
+    staged("dist/icon.png", `generated monogram "${label}"`);
   }
 }

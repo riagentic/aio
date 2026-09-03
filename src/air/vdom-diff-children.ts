@@ -1,7 +1,8 @@
 // AIO VDOM child diffing — keyed and unkeyed reconciliation.
 // Accepts diffFn callback to avoid circular imports with vdom-diff.ts.
 
-import { _devMode, _devWarn, _domNodeCount } from "./vdom-types.ts";
+import { _devWarn, _domNodeCount } from "./vdom-types.ts";
+import { isDevMode } from "../state/dev-flag.ts";
 import type { RenderCtx, VNode } from "./vdom-types.ts";
 import {
   _cancelExitFor,
@@ -53,7 +54,7 @@ export function diffChildren(
     (c) => typeof c === "object" && c.key !== undefined,
   );
 
-  if (_devMode && nextChildren.length > 1) {
+  if (isDevMode() && nextChildren.length > 1) {
     const someKeyed = hasKeys;
     const someUnkeyed = nextChildren.some(
       (c) => typeof c === "object" && c.key === undefined,
@@ -183,14 +184,25 @@ function diffUnkeyed(
   }
   const regionEnd: Node | null = cursor; // node after the region (or null = end)
 
-  const max = Math.max(nextChildren.length, oldChildren.length);
+  // Departures FIRST, as diffKeyed does — the surplus old children go before
+  // any new child is built. They used to go last, after the positional walk
+  // had already created the new nodes, and a `ref` shared by an old child at
+  // the tail and a new child near the head (the same element, moved deeper —
+  // `<A ref={r}/>` wrapped into `<><A ref={r}/></>`) was set to the new node
+  // and then NULLED by the tail removal, leaving `r` empty while its element
+  // was on screen. Unmount-then-mount is also the order every other commit
+  // path uses (`_diff` on a type mismatch, `diffKeyed`), so `onCleanup` of the
+  // departing runs before `onMount` of the arriving here too.
+  for (let i = nextChildren.length; i < oldChildren.length; i++) {
+    removeDom(parent, oldChildren[i]!, ctx, oldDoms[i] ?? null);
+  }
+
+  const max = nextChildren.length;
   for (let i = 0; i < max; i++) {
-    const nc = i < nextChildren.length ? nextChildren[i]! : null;
+    const nc = nextChildren[i]!;
     const oc = i < oldChildren.length ? oldChildren[i]! : null;
 
-    if (nc == null && oc != null) {
-      removeDom(parent, oc, ctx, oldDoms[i] ?? null);
-    } else if (nc != null && oc == null) {
+    if (oc == null) {
       const newDom = createDom(nc, ctx, isSvg, parent);
       if (newDom) parent.insertBefore(newDom, regionEnd);
     } else if (

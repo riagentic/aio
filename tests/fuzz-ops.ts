@@ -384,6 +384,36 @@ export function applyOp(s: { data: Data }, op: Op, log: unknown[]): void {
       log.push(n);
       break;
     }
+    // ── aliases: ONE object reachable at TWO paths ──────────────────
+    // Plain JavaScript, and the Immer draft a sync method runs on, both make
+    // `s.sel = s.items[0]` an ALIAS: a later write through either name is
+    // visible through the other, until the commit separates them. The live
+    // async proxy used to COPY at record time, so the identical method body
+    // committed two different states depending on whether it was declared
+    // `async` — silently (audit a8, G1). These pin the parity; see ALIAS_KINDS
+    // for why they are legal here and nowhere else.
+    case "alias_assign_write": {
+      if (!d.items.length) break;
+      d.obj.sel = d.items[0];
+      (d.obj.sel as { q: number }).q = op.v;
+      log.push(d.items[0]!.q);
+      break;
+    }
+    case "alias_push_self_write": {
+      if (!d.items.length) break;
+      d.items.push(d.items[0]!);
+      d.items[d.items.length - 1]!.q = op.v;
+      log.push(d.items[0]!.q);
+      break;
+    }
+    case "alias_deep_then_write": {
+      d.obj.dref = d.deep.l1;
+      d.deep.l1.l2.l3.push(op.v);
+      log.push(
+        (d.obj.dref as { l2: { l3: number[] } }).l2.l3.length,
+      );
+      break;
+    }
     // ── whole-root replacement ──────────────────────────────────────
     case "root_spread":
       s.data = { ...d, a: op.v };
@@ -495,6 +525,9 @@ export const KINDS = [
   "read_map_json",
   "read_indexof_self",
   "read_includes_self",
+  "alias_assign_write",
+  "alias_push_self_write",
+  "alias_deep_then_write",
 ];
 
 /** Ops that leave ONE object reachable at TWO paths.
@@ -511,4 +544,9 @@ export const KINDS = [
  *  `[67,68]`. `$commit`'s whole job is to MOVE a commit boundary, so with an
  *  alias in play it legitimately changes the outcome, and "transaction is
  *  observationally a no-op" cannot hold. */
-export const ALIAS_KINDS = ["arr_fill_object"];
+export const ALIAS_KINDS = [
+  "arr_fill_object",
+  "alias_assign_write",
+  "alias_push_self_write",
+  "alias_deep_then_write",
+];

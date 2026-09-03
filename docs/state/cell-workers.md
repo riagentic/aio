@@ -6,6 +6,9 @@ sync-only API) then stalls **only that cell**. Every other cell, every other
 client, and the socket loop that acks them keep running.
 
 ```ts
+import { cell } from "aio";
+import { crunch, type Row } from "./crunch.ts";
+
 export const reports = cell("reports", {
   worker: true, // ← the entire opt-in
   state: { status: "idle", rows: [] as Row[] },

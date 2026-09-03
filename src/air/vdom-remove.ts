@@ -2,12 +2,14 @@
 // Depends on vdom-helpers (leaf). No deps on vdom-render or vdom-diff.
 
 import { cleanupSignalBindings } from "./signal-binding.ts";
-import { _cleanupActions, _cleanupSignalTextChildren } from "./vdom-helpers.ts";
-import { _callRef } from "./vdom-create.ts";
+import { _cleanupActions, _unbindSignalText } from "./vdom-helpers.ts";
+import { _detachRef } from "./vdom-create.ts";
 import { _componentName, _reportHookError } from "./hook-error.ts";
 import {
   _devWarn,
   _domNodeCount,
+  _hasRawHtml,
+  _SignalText,
   ErrorBoundary,
   Fragment,
   Portal,
@@ -169,6 +171,14 @@ export function _cleanupChildren(
   ) {
     return [vnode._rendered];
   }
+  // …and an element with `dangerouslySetInnerHTML` has NO vnode subtree: the
+  // raw html owns its content, so `createDom` and both SSR writers skip the
+  // children entirely and they were never realized. Walking them on teardown
+  // asked never-mounted vnodes to give up DOM they never had — a bare text
+  // child warned "it will stay on the page forever. This is an aio bug", and a
+  // `<Portal>` sitting under one had `removeDom` run against its target for
+  // content that was never put there. One rule, all three teardown walkers.
+  if (typeof vnode.tag === "string" && _hasRawHtml(vnode.props)) return [];
   return vnode.children;
 }
 
@@ -178,19 +188,35 @@ export function _removeDomCleanup(
   ctx: RenderCtx,
 ): void {
   if (typeof vnode !== "object") return;
+  // A signal child owns an effect, nothing else.
+  if (vnode.tag === _SignalText) {
+    _unbindSignalText(vnode);
+    return;
+  }
+  // A Portal's content does not live under the ancestor being torn down — it
+  // lives in the TARGET, where "cleanup without removing DOM" leaves it on
+  // screen. Removing `<div>{open && <Portal>…</Portal>}</div>` by its `div`
+  // (or retagging an ancestor, or an exit animation finishing) went through
+  // here and the modal stayed in `document.body` forever, and the next open
+  // stacked a second copy next to it. The Portal branch of `removeDom` is the
+  // ONE teardown for portal content; it needs no parent (the target is the
+  // parent) — so this is that, not a copy of it.
+  if (vnode.tag === Portal) {
+    removeDom(vnode.props.target as Node, vnode, ctx);
+    return;
+  }
   if (typeof vnode.tag === "function") {
     ctx.hooks?.unmountComponent(vnode);
   }
   // Cleanup actions before nulling refs
   if (typeof vnode.tag === "string" && vnode._dom) {
     cleanupSignalBindings(vnode._dom as Element);
-    _cleanupSignalTextChildren(vnode._dom as Element);
     _cleanupActions(vnode._dom as HTMLElement);
   }
   // AIO-58: Null element refs on cleanup (was missing — ref callbacks never got
   // null on replace/unmount, leaking event listeners and DOM references)
   if (typeof vnode.tag === "string" && vnode.props.ref) {
-    _callRef(vnode.props.ref, null, _componentName(vnode.tag));
+    _detachRef(vnode.props.ref, vnode._dom, _componentName(vnode.tag));
   }
   for (const child of _cleanupChildren(vnode)) {
     if (typeof child === "object") _removeDomCleanup(child, ctx);
@@ -217,12 +243,21 @@ export function removeDom(
   if (typeof vnode === "object" && vnode.tag === Portal) {
     const target = vnode.props.target as Node;
     if (target) {
-      let cursor: Node | null = target.firstChild;
+      // Walk from the portal's own region anchor, not `target.firstChild` —
+      // that is the OTHER portal's content when two share a target, and
+      // removing this portal by it deleted their nodes instead of its own.
+      let cursor: Node | null = vnode._anchor
+        ? _advance(vnode._anchor, 1)
+        : target.firstChild;
       for (const child of vnode.children) {
         const at = getDom(child) ?? cursor;
         cursor = _advance(at, _domNodeCount(child));
         removeDom(target, child, ctx, at);
       }
+      if (vnode._anchor && isChildOf(vnode._anchor, target)) {
+        target.removeChild(vnode._anchor);
+      }
+      vnode._anchor = undefined;
     }
     return;
   }
@@ -271,7 +306,7 @@ export function removeDom(
     typeof vnode === "object" && typeof vnode.tag === "string" &&
     vnode.props.ref
   ) {
-    _callRef(vnode.props.ref, null, _componentName(vnode.tag));
+    _detachRef(vnode.props.ref, vnode._dom, _componentName(vnode.tag));
   }
   // Bare text is the ONE vnode kind with no `_dom` and exactly one node — its
   // position is its identity. Anything else that reaches here owns a `_dom`.
@@ -311,11 +346,10 @@ export function removeDom(
         let removed = false;
         const _cleanup = () => {
           cleanupSignalBindings(dom as Element);
-          _cleanupSignalTextChildren(dom as Element);
           _cleanupActions(dom as HTMLElement);
           // AIO-204: recurse into children for cleanup
           if (typeof vnode === "object") {
-            for (const child of vnode.children) {
+            for (const child of _cleanupChildren(vnode)) {
               if (typeof child === "object") _removeDomCleanup(child, ctx);
             }
           }
@@ -345,14 +379,16 @@ export function removeDom(
       }
     }
     // Immediate removal — cleanup first
+    if (typeof vnode === "object" && vnode.tag === _SignalText) {
+      _unbindSignalText(vnode);
+    }
     if (
       typeof vnode === "object" && typeof vnode.tag === "string" && vnode._dom
     ) {
       cleanupSignalBindings(vnode._dom as Element);
-      _cleanupSignalTextChildren(vnode._dom as Element);
       _cleanupActions(vnode._dom as HTMLElement);
       // AIO-204: recurse into children for cleanup
-      for (const child of vnode.children) {
+      for (const child of _cleanupChildren(vnode)) {
         if (typeof child === "object") _removeDomCleanup(child, ctx);
       }
     }

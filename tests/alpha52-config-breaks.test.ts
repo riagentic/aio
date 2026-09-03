@@ -4,10 +4,12 @@
 //   • listensTo: array form deprecated (works + one-time hint); object form
 //     accepts ARRAYS of sources
 //   • selector deps form takes a TUPLE (`fn: (s, [deps], ...args)`) so
-//     parameterized + deps compose; the old spread form works with a hint
+//     parameterized + deps compose; the old spread form was RETIRED in
+//     alpha76 (src/state/removals.ts)
 import {
   assert,
   assertEquals,
+  assertExists,
   assertStringIncludes,
   assertThrows,
 } from "@std/assert";
@@ -147,47 +149,29 @@ Deno.test("selector deps NEW tuple form: (s, [deps], ...args) — parameterized 
   }
 });
 
-Deno.test("selector deps OLD spread form: still works, hints once, names the tuple", async () => {
+Deno.test("selector deps OLD spread form: REFUSED by name (alpha76)", () => {
   _resetSelectorHints();
-  // The selector hint uses console.warn (browser-graph module — no logger).
-  const warns: string[] = [];
-  const origWarn = console.warn;
-  console.warn = (...args: unknown[]) => {
-    warns.push(args.map(String).join(" "));
-  };
-  await (async () => {
-    const other = cell("sel_other", {
-      state: { factor: 3 },
-      methods: {},
-    });
-    const legacy = cell("sel_legacy", {
-      state: { n: 7 },
-      methods: {},
-      selectors: {
-        // The pre-alpha52 spelling: dep slices SPREAD after s.
-        scaled: {
-          deps: ["sel_other"],
-          fn: (s: Any, otherSlice: Any) => s.n * (otherSlice?.factor ?? 1),
+  const other = cell("sel_other", { state: { factor: 3 }, methods: {} });
+  const e = assertThrows(
+    () =>
+      cell("sel_legacy", {
+        state: { n: 7 },
+        methods: {},
+        selectors: {
+          // The pre-alpha52 spelling: dep slices SPREAD after s.
+          scaled: {
+            deps: ["sel_other"],
+            fn: (s: Any, otherSlice: Any) => s.n * (otherSlice?.factor ?? 1),
+          },
         },
-      },
-    });
-    const h = await bootCells([other, legacy]);
-    try {
-      assertEquals(
-        (legacy as Any).scaled(),
-        21,
-        "old spread form still computes",
-      );
-    } finally {
-      h.dispose();
-    }
-  })().finally(() => {
-    console.warn = origWarn;
-  });
-  const hints = warns.filter((w) => w.includes("deps now arrive as a tuple"));
-  assertEquals(hints.length, 1, "one hint per selector");
-  assertStringIncludes(hints[0]!, "scaled");
-  assertStringIncludes(hints[0]!, "aiol --safe-fix");
+      }),
+    Error,
+  );
+  assertStringIncludes(String(e), "sel_legacy.scaled");
+  assertStringIncludes(String(e), "fn: (s, [dep1, dep2], ...args)");
+  assertStringIncludes(String(e), "removed in alpha76");
+  assertStringIncludes(String(e), "am pin v1.0.0-alpha75");
+  assertExists(other);
 });
 
 Deno.test("selector deps: zero-dep tuple form gets an empty tuple", async () => {

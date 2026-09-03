@@ -11,9 +11,8 @@
 // transport-faithful e2e — real server + real Chromium + a server scheduler.
 import { assert } from "@std/assert";
 import { stopChild } from "./stop-child.ts";
-
-const _childCovDir = Deno.env.get("DENO_COVERAGE_DIR") ??
-  Deno.makeTempDirSync({ prefix: "aio-child-cov-" });
+import { childCoverageDir } from "../src/testing/temp-dir.ts";
+const _childCovDir = childCoverageDir();
 const ROOT = new URL("..", import.meta.url).pathname;
 
 function findBrowser(): string | null {

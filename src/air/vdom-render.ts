@@ -2,9 +2,12 @@
 // Creates real DOM from VNode trees. Depends on helpers + remove (getDom).
 
 import { bindSignalProps } from "./signal-binding.ts";
-import { _applyActions, _bindSignalTextChildren } from "./vdom-helpers.ts";
+import { _applyActions, _bindSignalText } from "./vdom-helpers.ts";
 import {
-  _callRef,
+  _attachRef,
+  _enterCommit,
+  _leaveCommit,
+  _notANode,
   _registerLazyListeners,
   _tagComponentError,
   nullSlot,
@@ -15,8 +18,10 @@ import { getDom } from "./vdom-remove.ts";
 import { _getActiveDelegationRoot, _setDelegationRoot } from "./vdom-events.ts";
 import {
   _devA11yCheckFn,
+  _hasRawHtml,
   _LAZY_PENDING,
   _Null,
+  _SignalText,
   ErrorBoundary,
   Fragment,
   Portal,
@@ -61,6 +66,12 @@ function _anchorEmpty(ctx: RenderCtx, frag: Node, vnode: VNode): void {
   vnode._dom = anchor;
 }
 
+/** Mount a vnode under `parent`.
+ *
+ *  One of the THREE reconciler entry points (`_render`, `_diff`, `_hydrateNode`)
+ *  that open a COMMIT — see `_enterCommit`. Everything below them nests, so a
+ *  ref sees its node once the whole commit is in the document and a ref that
+ *  moves between elements is never left holding `null`. */
 export function _render(
   parent: Node,
   vnode: VNode | string | number | null,
@@ -69,8 +80,13 @@ export function _render(
   isSvg = false,
 ): void {
   if (vnode == null) return;
-  const dom = createDom(vnode, ctx, isSvg, parent);
-  if (dom) parent.appendChild(dom);
+  _enterCommit();
+  try {
+    const dom = createDom(vnode, ctx, isSvg, parent);
+    if (dom) parent.appendChild(dom);
+  } finally {
+    _leaveCommit();
+  }
 }
 
 /** Create real DOM nodes from a VNode tree — handles elements, text, fragments, and components. */
@@ -84,27 +100,27 @@ export function createDom(
     return ctx.doc.createTextNode(String(vnode));
   }
 
-  // Not a VNode at all — an array, a promise, a plain object. The most common
-  // cause is a component returning a LIST (`return items.map(…)`), which React
-  // allows and AIR does not. It used to die eleven frames deeper on
+  // Not a VNode at all — an array, a boolean, a promise, a plain object. The
+  // most common cause is a component returning a LIST (`return items.map(…)`),
+  // which React allows and AIR does not. It used to die eleven frames deeper on
   // `Cannot use 'in' operator to search for 'onInput' in undefined`, naming
   // nothing; `_tagComponentError` adds the component to this one.
-  if ((vnode as VNode).tag === undefined) {
-    throw new Error(
-      `A component returned ${
-        Array.isArray(vnode)
-          ? `an array of ${vnode.length}`
-          : `a ${typeof vnode}`
-      } where AIR expects a single node. Wrap the list in a fragment: ` +
-        `<>{items.map(…)}</> (or h(Fragment, null, ...items)).`,
-    );
-  }
+  const bad = _notANode(vnode);
+  if (bad) throw new Error(bad);
 
   // Null placeholder — comment node preserving child position (AIO-107)
   if (vnode.tag === _Null) {
     const comment = ctx.doc.createComment("");
     vnode._dom = comment;
     return comment;
+  }
+
+  // Signal child — one text node that follows the signal (see _SignalText)
+  if (vnode.tag === _SignalText) {
+    const text = ctx.doc.createTextNode("");
+    _bindSignalText(vnode, text);
+    vnode._dom = text;
+    return text;
   }
 
   // Component — call hooks, invoke function, recurse on output
@@ -234,6 +250,23 @@ export function createDom(
       _setDelegationRoot(target as Element);
     }
     try {
+      // A portal's content is a REGION of the target, not the whole of it.
+      // When the target already holds something — another portal (a modal and
+      // a toast both into `document.body`), or static markup — this region
+      // does not begin at `target.firstChild`, and every positional walk that
+      // assumed it did rewrote the OTHER content: a keyed reorder inside the
+      // second portal dragged its nodes to the FRONT of the target, over the
+      // first portal's, and the first portal's growth landed past them.
+      // `_anchor` is the comment this region begins after. It is written for
+      // EVERY portal, not only the ones that currently need it: a marker that
+      // appears only when a neighbour happens to be there is a marker whose
+      // presence depends on mount ORDER, so the same model reaches two
+      // different documents (mount one portal, mount a second, unmount the
+      // first — the survivor keeps an anchor a fresh render never writes).
+      // One comment per mounted portal, always.
+      const anchor = ctx.doc.createComment("");
+      target.appendChild(anchor);
+      vnode._anchor = anchor;
       for (const child of vnode.children) {
         const childDom = createDom(child, ctx, false, target);
         if (childDom) target.appendChild(childDom);
@@ -272,21 +305,22 @@ export function createDom(
   bindSignalProps(el as HTMLElement, vnode.props);
   if (_devA11yCheckFn) _devA11yCheckFn(tag, vnode.props);
 
-  for (let i = 0; i < vnode.children.length; i++) {
-    const childDom = createDom(vnode.children[i]!, ctx, nowSvg, el);
-    if (childDom) el.appendChild(childDom);
-  }
-
-  // Bind signal text children — direct text-node effects bypassing VDOM diff
-  if (vnode._signalChildren) {
-    _bindSignalTextChildren(el, vnode._signalChildren, vnode.children);
+  // Raw html owns the content (see _hasRawHtml) — `applyProps` wrote it, and
+  // children are not appended after it (SSR never emitted them either).
+  if (!_hasRawHtml(vnode.props)) {
+    for (let i = 0; i < vnode.children.length; i++) {
+      const childDom = createDom(vnode.children[i]!, ctx, nowSvg, el);
+      if (childDom) el.appendChild(childDom);
+    }
   }
 
   // Props that only take effect once the children exist (`<select value>`).
   applyChildDependentProps(el as HTMLElement, vnode.props, {});
 
   // Call ref after element + children are fully built
-  if (vnode.props.ref) _callRef(vnode.props.ref, el, _componentName(vnode.tag));
+  if (vnode.props.ref) {
+    _attachRef(vnode.props.ref, el, _componentName(vnode.tag));
+  }
   if (vnode.props.use) _applyActions(el as HTMLElement, vnode.props.use);
 
   vnode._dom = el;

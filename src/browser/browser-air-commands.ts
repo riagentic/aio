@@ -8,7 +8,12 @@ import { getSerializedSurfaces, runUITrigger } from "../air/ui-remote.ts";
 import { _vitalsTransportProbe, _w } from "./browser-protocol.ts";
 import { _rejectAck, _resolveAck } from "./browser-ack.ts";
 import { _deliverDiag } from "../protocol/protocol-diagnostics.ts";
-import { type AckPayload, enc, type Frame } from "../protocol/envelope.ts";
+import {
+  type AckPayload,
+  enc,
+  type Frame,
+  wireError,
+} from "../protocol/envelope.ts";
 import type { VitalsPong } from "../vitals/transport-probe.ts";
 
 /** Route server-initiated command frames. Returns true if consumed. */
@@ -60,10 +65,14 @@ export function routeCommand(
     // AIO-2.2: per-action ack — settles the Promise returned by an awaited
     // cell method (registered in browser-ack).
     case "ack": {
-      const { cid, ok, value, error } = (f.d ?? {}) as AckPayload;
+      const d = (f.d ?? {}) as AckPayload;
+      const { cid, ok, value } = d;
       if (typeof cid === "string") {
+        // `wireError` keeps the server's failure CODE on the rejection, so an
+        // app can branch with `errorCode(e) === "ACCESS_DENIED"` instead of
+        // matching a message the semver policy never promised to keep.
         if (ok) _resolveAck(cid, value);
-        else _rejectAck(cid, new Error(error ?? "server rejected action"));
+        else _rejectAck(cid, wireError(d, "server rejected action"));
       }
       return true;
     }

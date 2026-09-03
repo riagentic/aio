@@ -1,10 +1,21 @@
-// AIO-381: async methods can return schedule effects, same as sync methods.
-// The executor bridges the return value through an internal `__effects`
-// action so the effects flow down the standard reduce→effects path.
+// AIO-381: async methods run schedule effects, same as sync methods — the
+// executor bridges them through an internal `__effects` action so they flow
+// down the standard reduce→effects path.
+//
+// alpha76: the channel is `s.$do(...)`. Returning the effect instead was
+// retired (src/state/removals.ts) — it ran the effect AND resolved the caller
+// with `undefined`, so one channel silently carried two meanings and `return`
+// could never be taught to carry an effect-shaped value. The last test here is
+// the one that used to pin that swallow; it now pins the refusal, on BOTH
+// paths, because a removal that only bites the sync method is a new parity
+// break wearing the old one's clothes.
 
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { cell } from "../src/state/cell.ts";
-import { testCell } from "../src/testing/cell-test.ts";
+import { bootCells, testCell } from "../src/testing/cell-test.ts";
+
+// deno-lint-ignore no-explicit-any
+type Any = any;
 import {
   isScheduleEffect,
   schedule,
@@ -17,29 +28,30 @@ const poller = cell("poller381", {
     refresh(s) {
       s.tries += 1;
     },
-    async fetchData(s): Promise<ScheduleEffect | undefined> {
+    async fetchData(s) {
       await Promise.resolve();
       s.tries += 1;
       if (s.tries < 3) {
         // Retry with backoff — the documented pattern from scheduling.md,
-        // now actually supported from async methods.
-        return schedule.after("poller.retry", s.tries * 1000, {
+        // supported from async methods.
+        s.$do(schedule.after("poller.retry", s.tries * 1000, {
           type: "poller381:refresh",
           payload: { args: [] },
-        });
+        }));
+        return;
       }
       s.data = "ok";
     },
-    async fetchAll(s): Promise<ScheduleEffect[]> {
+    async fetchAll(s) {
       await Promise.resolve();
       s.tries += 1;
-      return [
+      s.$do(
         schedule.after("poller.retry", 500, {
           type: "poller381:refresh",
           payload: { args: [] },
         }),
         schedule.cancel("poller.stale"),
-      ];
+      );
     },
     async fetchValue(s) {
       await Promise.resolve();
@@ -59,46 +71,61 @@ const gated = cell("gated381", {
     done(s) {
       s.phase = "idle";
     },
-    async fetchOnce(s): Promise<ScheduleEffect | undefined> {
+    async fetchOnce(s) {
       if (s.phase !== "idle") return;
       s.phase = "busy";
       await Promise.resolve();
       s.ran = true;
-      return schedule.after("gated.next", 100, {
+      s.$do(schedule.after("gated.next", 100, {
         type: "gated381:done",
         payload: { args: [] },
-      });
+      }));
     },
   },
 });
 
-testCell(
-  poller,
-  "async method returning a schedule effect emits it",
-  async (t) => {
-    t.init();
-    await t.send.fetchData!();
-    t.expect.state((s) => s.tries === 1);
-    const effects = t.getEffects();
-    assertEquals(effects.length, 1);
-    assertEquals(isScheduleEffect(effects[0]), true);
-    assertEquals((effects[0] as { kind: string }).kind, "after");
-    assertEquals((effects[0] as { id: string }).id, "poller.retry");
-  },
-);
+// `$do` from an ASYNC method dispatches immediately, so it is observed the way
+// an app observes it — the effect FIRES — not by reading the last reduce's
+// effects array (which the method's own write batch has already replaced by
+// the time the call resolves).
+Deno.test("async method: s.$do(schedule.…) arms the effect, and it fires", async () => {
+  const h = await bootCells([poller]);
+  try {
+    await (poller as Any).fetchData();
+    assertEquals((poller as Any).tries, 1);
+    await h.advance(1100);
+    assertEquals((poller as Any).tries, 2, "the $do'd retry fired");
+  } finally {
+    h.dispose();
+  }
+});
 
-testCell(
-  poller,
-  "async method returning an effect array emits all of them",
-  async (t) => {
-    t.init();
-    await t.send.fetchAll!();
-    const effects = t.getEffects();
-    assertEquals(effects.length, 2);
-    assertEquals(effects.every(isScheduleEffect), true);
-    assertEquals((effects[1] as { kind: string }).kind, "cancel");
-  },
-);
+Deno.test("async method: s.$do(a, b) arms all of them", async () => {
+  const h = await bootCells([poller]);
+  try {
+    // The cancel targets an id nothing armed — it must be accepted, not throw,
+    // and the `after` next to it must still arm.
+    await (poller as Any).fetchAll();
+    assertEquals((poller as Any).tries, 1);
+    await h.advance(600);
+    assertEquals((poller as Any).tries, 2, "the first of the two $do'd fired");
+  } finally {
+    h.dispose();
+  }
+});
+
+Deno.test("guarded cell: $do from an async method still arms (__effects path)", async () => {
+  const h = await bootCells([gated]);
+  try {
+    await (gated as Any).fetchOnce();
+    assertEquals((gated as Any).phase, "busy");
+    assertEquals((gated as Any).ran, true);
+    await h.advance(150);
+    assertEquals((gated as Any).phase, "idle", "the $do'd done() ran");
+  } finally {
+    h.dispose();
+  }
+});
 
 testCell(poller, "plain data returns are not misread as effects", async (t) => {
   t.init();
@@ -108,37 +135,20 @@ testCell(poller, "plain data returns are not misread as effects", async (t) => {
   assertEquals(t.getEffects().length, 0);
 });
 
-testCell(
-  gated,
-  "guarded cell: async-returned effect still emitted (__effects path)",
-  async (t) => {
-    t.init();
-    await t.send.fetchOnce!();
-    t.expect.state((s) => s.phase === "busy");
-    t.expect.state((s) => s.ran === true);
-    const effects = t.getEffects();
-    assertEquals(effects.length, 1);
-    assertEquals((effects[0] as { id: string }).id, "gated.next");
-  },
-);
-
-// a method returning `schedule.after(...)` is SCHEDULING, not returning a
-// value: the docs (and the sync path) resolve `undefined`. The async path
-// resolved the effect object itself, so the same source line meant two
-// different things depending on whether the method was async.
-Deno.test("effect returns resolve undefined in sync AND async methods", async () => {
-  const { cell } = await import("../src/state/cell.ts");
-  const { schedule } = await import("../src/state/schedule.ts");
-  const { bootCells } = await import("../src/testing/cell-test.ts");
-
+// The retired channel: a method that returned `schedule.after(...)` scheduled
+// the effect and resolved its caller with `undefined`. Both meanings could not
+// live on `return`, so the effect one left in alpha76 — and it has to leave on
+// BOTH paths at once, or the sync/async parity this file exists for is broken
+// in the other direction.
+Deno.test("returning an effect is REFUSED in sync AND async methods", async () => {
   const parity = cell("effect-parity", {
     state: { n: 0 },
     methods: {
-      syncEff(s: { n: number }) {
+      syncEff(s: { n: number }): unknown {
         s.n++;
         return schedule.after("ep1", 10_000, { type: "effect-parity:noop" });
       },
-      async asyncEff(s: { n: number }) {
+      async asyncEff(s: { n: number }): Promise<unknown> {
         await Promise.resolve();
         s.n++;
         return schedule.after("ep2", 10_000, { type: "effect-parity:noop" });
@@ -153,13 +163,28 @@ Deno.test("effect returns resolve undefined in sync AND async methods", async ()
       syncEff: () => Promise<unknown>;
       asyncEff: () => Promise<unknown>;
     };
-    assertEquals(await api.syncEff(), undefined, "sync: effect is not a value");
-    assertEquals(
-      await api.asyncEff(),
-      undefined,
-      "async must agree — same source line, same meaning",
-    );
+    for (
+      const [name, call] of [
+        ["sync", api.syncEff],
+        ["async", api.asyncEff],
+      ] as const
+    ) {
+      const err = await call().then(() => null, (e: unknown) => e);
+      assert(err, `${name}: a returned effect must be refused, not swallowed`);
+      const msg = String(err);
+      assertStringIncludes(msg, "s.$do(effect)");
+      assertStringIncludes(msg, "removed in alpha76");
+      assertStringIncludes(msg, "am pin v1.0.0-alpha75");
+    }
   } finally {
     h.dispose();
   }
+});
+
+// A `ScheduleEffect` is still a value a helper may build and hand to `$do` —
+// the type did not go anywhere, only the channel did.
+Deno.test("an effect is still a value a helper can return", () => {
+  const build = (): ScheduleEffect =>
+    schedule.after("helper", 1, { type: "x:noop" });
+  assertEquals(isScheduleEffect(build()), true);
 });

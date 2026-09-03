@@ -369,3 +369,89 @@ Deno.test("blobs over HTTP: auth flows make the SHELL public — blob bytes stay
   assertEquals(anon.status, 401, "anonymous blob read on an auth: app");
   await anon.body?.cancel();
 });
+
+// An unreadable store must never look like an empty one.
+//
+// `stream()` learned this first: "it was never put(), or was deleted" is only
+// true for NotFound, and an EACCES saying it sent the reader looking for a
+// write that had happened. That lesson was applied to `stream()` and to
+// nothing else in the file, so `list()` answered `[]`, `info()` answered
+// `null`, and `delete()` answered `false` — "you have no blobs", "no such
+// blob", "there was nothing to delete" — for a store whose blobs were all
+// still sitting in it.
+Deno.test("blobs: an unreadable store throws — it does not read as empty", async () => {
+  if (Deno.build.os === "windows") return; // chmod is not the gate there
+  if ((Deno.uid?.() ?? -1) === 0) return; // root reads through 0o000
+  await withStore(async (store) => {
+    const a = await store.put(enc_.encode("alpha"), { name: "report.pdf" });
+    await store.put(enc_.encode("beta"), { name: "invoice.pdf" });
+    assertEquals((await store.list()).length, 2);
+
+    await Deno.chmod(store.dir, 0o000);
+    try {
+      // Each of the four answers a caller acts on, and each used to lie.
+      // Each message names its OWN subject, so a site that stopped throwing
+      // cannot hide behind a later one in the same call throwing instead.
+      await assertRejects(
+        () => store.list(),
+        Error,
+        "cannot read the blob store",
+      );
+      await assertRejects(
+        () => store.info(a.id),
+        Error,
+        `cannot read blob ${a.id}`,
+      );
+      await assertRejects(
+        () => store.delete(a.id),
+        Error,
+        `cannot read blob ${a.id}`,
+      );
+      await assertRejects(
+        () => store.stream(a.id),
+        Error,
+        `cannot open blob ${a.id}`,
+      );
+    } finally {
+      await Deno.chmod(store.dir, 0o755);
+    }
+
+    // The instrument check: the data was there the whole time, so an empty
+    // answer would have been a lie rather than a race.
+    assertEquals((await store.list()).length, 2);
+    assertEquals((await store.info(a.id))?.name, "report.pdf");
+  });
+});
+
+Deno.test("blobs: absent is still absent — an empty store is empty, not broken", async () => {
+  await withStore(async (store) => {
+    assertEquals(await store.list(), []);
+    assertEquals(await store.info("a".repeat(64)), null);
+    assertEquals(await store.delete("a".repeat(64)), false);
+  });
+});
+
+Deno.test("blobs: put does not claim a name it could not record", async () => {
+  if (Deno.build.os === "windows") return;
+  if ((Deno.uid?.() ?? -1) === 0) return;
+  await withStore(async (store) => {
+    // The bytes path needs a writable directory (tmp file + rename), so the
+    // metadata write is blocked at the FILE: a read-only `{}` records no name
+    // and cannot be replaced with one.
+    const bytes = enc_.encode("gamma");
+    const id = await sha256hex(bytes);
+    await Deno.mkdir(store.dir, { recursive: true });
+    const meta = join(store.dir, `${id}.json`);
+    await Deno.writeTextFile(meta, "{}");
+    await Deno.chmod(meta, 0o444);
+
+    const info = await store.put(bytes, { name: "invoice.pdf" });
+    assertEquals(info.id, id);
+    // The bytes landed, so this is not a failed put…
+    assertEquals(info.size, bytes.length);
+    // …but the name did NOT, and the return used to say it had.
+    assertEquals(info.name, undefined);
+    assertEquals((await store.info(id))?.name, undefined);
+    await Deno.chmod(meta, 0o644);
+  });
+});

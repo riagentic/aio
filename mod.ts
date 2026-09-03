@@ -55,8 +55,41 @@ export type {
   ResolveUserFn,
   UiConfig,
 } from "./src/server/aio.ts";
+/** The option types INSIDE that config. Each is the declared type of a key an
+ *  app writes, and none of them was exported: an app that lifted
+ *  `auth: {...}`, `ui: { theme }`, `wsLimits: {...}` or `dispatchStorm: {...}`
+ *  into a named constant (or a plugin's contribution) had to re-declare the
+ *  shape and keep it in sync by hand.
+ *
+ *  `UiTheme` is the sharp one — its own jsdoc says "ONE spelling: every shell
+ *  imports this type rather than re-typing the union", a rule the framework
+ *  kept internally and could not offer to an app. */
+export type { AuthOptions, UiTheme, WsLimits } from "./src/server/aio-types.ts";
+/** `security: { … }` — the HTTP hardening block (CSP, headers, limits). */
+export type { SecurityConfig } from "./src/server/security-config.ts";
+/** What `feedback:` / `updates:` accept — the shorthand and the full config as
+ *  one type each, so a value lifted out of `aio.run({ … })` can be named. */
+export type { FeedbackInput } from "./src/server/feedback-boot.ts";
+export type { UpdatesInput } from "./src/server/updates-core.ts";
+/** `dispatchStorm: { … }` — the storm detector's thresholds. */
+export type { StormConfig } from "./src/diagnostics/dispatch-storm.ts";
+/** What `app.restart()` resolves to — whether the process can restart itself,
+ *  and what to do when it cannot. */
+export type { RestartPlan } from "./src/server/aio-lifecycle.ts";
 /** Structured error code union (deep error detail types live in aio/extras) */
 export type { AioErrorCode } from "./src/diagnostics/error.ts";
+/** The failure CODE on a rejected `await cell.method()` / `await serverFn()`,
+ *  or `undefined` when the failure carries none (an error the app itself
+ *  threw). The ONE way to branch on WHY a call failed — the message text is
+ *  explicitly not public API (docs/basics/semver-policy.md):
+ *
+ *  ```ts
+ *  try { await todos.add(title) } catch (e) {
+ *    if (errorCode(e) === "ACCESS_DENIED") return showSignIn();
+ *    throw e;
+ *  }
+ *  ``` */
+export { errorCode } from "./src/protocol/envelope.ts";
 /** Memory monitor configuration and heap usage report types */
 export type { MemoryConfig } from "./src/diagnostics/memory-monitor.ts";
 /** Diagnostics configuration and checkpoint recovery types */
@@ -115,6 +148,22 @@ export type {
   ScopedApp,
   StateOf,
 } from "./src/state/cell.ts";
+/** The TYPES OF THE CELL KEYS themselves — the ones an app writes and then
+ *  has to name when it factors a config out into a variable, a helper or a
+ *  plugin. They were reachable from no entry point at all, so the only way to
+ *  annotate `visible:` / `persist:` / `selectors:` was to re-type the union
+ *  locally and let it drift.
+ *
+ *  - `CellVisibility` — the `visible:` option: `"all"`, a field list, a
+ *    per-user function, or `{ fields, forUser }`.
+ *  - `CellFieldFilter` — the field-list half of it, and the whole of
+ *    `persist:`: `true` / `false` / `string[]`.
+ *  - `SelectorDef` — one entry of `selectors: { … }`. */
+export type {
+  CellFieldFilter,
+  CellVisibility,
+} from "./src/state/cell-types.ts";
+export type { SelectorDef } from "./src/state/cell-config-types.ts";
 
 /**
  * Inter-cell coordination — async methods return Promises with the correct type.
@@ -176,6 +225,10 @@ export { serverFn, serverFns } from "./src/server/server-fns.ts";
 export { route } from "./src/server/route.ts";
 export type {
   CookieOptions,
+  /** What `routes: { "/x": … }` accepts BELOW `route()` — a bare
+   *  `(req, ctx) => Response`. Named so an app can type a handler it stores
+   *  in a map or hands to a plugin. */
+  RawRouteHandler,
   RouteContext,
   RouteOptions,
 } from "./src/server/route.ts";
@@ -213,6 +266,10 @@ export {
 } from "./src/server/auth-totp.ts";
 export {
   race,
+  /** What `race()` resolves to — one union member per branch, so narrowing on
+   *  `winner` narrows `value` with it. Named for a signature that passes the
+   *  result along. */
+  type RaceResult,
   sleep,
   until,
   type UntilOptions,
@@ -252,6 +309,9 @@ export { integer, pk, real, ref, table, text } from "./src/server/sql.ts";
 export type {
   ColumnDef,
   ColumnOpts,
+  /** The OTHER thing a `dbSchema: { … }` entry may be — a table plus how a
+   *  state value maps onto its rows (`{ table, path, shape }`). */
+  DbMapping,
   QueryOpts,
   TableDef,
   WhereClause,

@@ -15,7 +15,11 @@ import {
   SHIP_BOOL_FLAGS,
   SHIP_VALUE_FLAGS,
 } from "../src/build/build-flags.ts";
-import { HELP_TEXT } from "../src/am/am-cmd-meta.ts";
+import { HELP_TEXT } from "../src/am/am-help-text.ts";
+// ONE parser for "what is an `am` verb", shared with the surface lock in
+// scripts/api-snapshot.ts — a second copy here would let the docs gate and the
+// compat gate disagree about which verbs exist.
+import { helpEntryVerbs } from "../scripts/api-snapshot.ts";
 import { AIO_RUNTIME_FLAG_SPECS } from "../src/diagnostics/runtime-flags.ts";
 
 const ROOT = new URL("../", import.meta.url).pathname;
@@ -55,15 +59,6 @@ Deno.test("docs: every build/fleet/ship flag is in targets.md", async () => {
   ];
   assertEquals([...new Set(flags)].filter((f) => !documented(doc, f)), []);
 });
-
-/** The verbs `am help` lists: the first word of each two-space-indented entry
- *  line. Sub-words (`auth users`) belong to their verb; `help` is the help. */
-export function helpEntryVerbs(text: string): string[] {
-  const verbs = new Set<string>();
-  for (const m of text.matchAll(/^ {2}([a-z][\w-]*)/gm)) verbs.add(m[1]!);
-  verbs.delete("help");
-  return [...verbs];
-}
 
 Deno.test("docs: every `am` verb in HELP_TEXT is in app-manager.md", async () => {
   const verbs = helpEntryVerbs(HELP_TEXT);

@@ -4,7 +4,7 @@
 import type { Signal } from "../state/signal.ts";
 import { isSignal } from "./signal-binding.ts";
 import type { ComponentFn, RenderCtx, VChild, VNode } from "./vdom-types.ts";
-import { _Null } from "./vdom-types.ts";
+import { _devWarn, _hasRawHtml, _Null, _SignalText } from "./vdom-types.ts";
 // Symbols imported as types — used only in typeof expressions for h() tag union.
 import type {
   ErrorBoundary,
@@ -87,15 +87,27 @@ export function h(
   if (key !== undefined) delete p.key;
 
   const children: (VNode | string | number)[] = [];
-  const signalMap = new Map<number, Signal<unknown>>();
-  flattenChildren(rawChildren, children, signalMap);
+  flattenChildren(rawChildren, children);
+
+  // Raw html and children are two owners for one element's content, and the
+  // client and the server used to pick DIFFERENT ones (mount appended the
+  // children after the html, SSR dropped them). `_hasRawHtml` is the rule —
+  // raw html wins everywhere — and this is the one place to say so.
+  if (children.length > 0 && _hasRawHtml(p)) {
+    _devWarn(
+      `dih-children-${String(tag)}`,
+      `<${
+        String(tag)
+      }> has both dangerouslySetInnerHTML and children — the raw html wins ` +
+        `and the children are ignored (on the server and the client alike). ` +
+        `Use one or the other.`,
+    );
+  }
 
   const vnode: VNode = { tag, props: p, children, key };
-  if (signalMap.size > 0) vnode._signalChildren = signalMap;
 
   // Detect fully-static VNodes for diff short-circuit
   if (
-    !vnode._signalChildren &&
     typeof tag === "string" &&
     key === undefined &&
     !p.ref &&
@@ -137,7 +149,6 @@ export function nullSlot(): VNode {
 export function flattenChildren(
   raw: VChild[],
   out: (VNode | string | number)[],
-  signalMap?: Map<number, Signal<unknown>>,
 ): void {
   for (const c of raw) {
     if (c == null || typeof c === "boolean") {
@@ -147,19 +158,61 @@ export function flattenChildren(
       continue;
     }
     if (Array.isArray(c)) {
-      flattenChildren(c, out, signalMap);
+      flattenChildren(c, out);
     } else if (isSignal(c)) {
-      // Signal as child: resolve to current value for initial render,
-      // store reference for direct text-node binding in createDom.
-      const sig = c as Signal<unknown>;
-      const idx = out.length;
-      const val = sig.peek();
-      out.push(val == null ? "" : String(val));
-      if (signalMap) signalMap.set(idx, sig);
+      // A signal child is a node of its own (see `_SignalText`): one text node
+      // that follows the signal, wherever in the tree it sits.
+      out.push(signalText(c as Signal<unknown>));
     } else {
       out.push(c as VNode | string | number);
     }
   }
+}
+
+/** The vnode for a signal passed as a child. */
+export function signalText(sig: Signal<unknown>): VNode {
+  return {
+    tag: _SignalText,
+    props: {},
+    children: [],
+    key: undefined,
+    _sig: sig,
+  };
+}
+
+/** Why `v` is not something a component may return — or null when it is.
+ *
+ *  ONE message for every commit path. `createDom` had a good one ("returned an
+ *  array of 3 … wrap the list in a fragment") while `renderToString` fell into
+ *  the element branch and died on `Object.entries(undefined)` — a bare
+ *  `TypeError: Cannot convert undefined or null to object` naming nothing —
+ *  and the client's hint said "wrap the list in a fragment" for a boolean too.
+ *  The hint now matches the type. */
+export function _notANode(v: unknown): string | null {
+  if (v == null || typeof v === "string" || typeof v === "number") return null;
+  if (typeof v === "object" && (v as VNode).tag !== undefined) return null;
+  const lead = "A component returned ";
+  const tail = " where AIR expects a single node. ";
+  if (Array.isArray(v)) {
+    return `${lead}an array of ${v.length}${tail}Wrap the list in a fragment: ` +
+      `<>{items.map(…)}</> (or h(Fragment, null, ...items)).`;
+  }
+  if (typeof v === "boolean") {
+    return `${lead}${v}${tail}Return null to render nothing — \`cond && <X/>\` ` +
+      `is fine as a CHILD, but a component's return value must be a node or null.`;
+  }
+  if (isSignal(v)) {
+    return `${lead}a signal${tail}Render its value instead: return <>{sig}</> ` +
+      `to bind it as text, or read sig.value inside the component.`;
+  }
+  if (typeof v === "function") {
+    return `${lead}a function${tail}Did you return the component itself ` +
+      `instead of rendering it (<Comp/> or h(Comp, null))?`;
+  }
+  const kind = typeof (v as { then?: unknown }).then === "function"
+    ? "a promise (async components are not supported — use lazy() or a resource)"
+    : `a ${typeof v}`;
+  return `${lead}${kind}${tail}`;
 }
 
 // ── Static optimization helpers ───────────────────────────────────────
@@ -189,7 +242,7 @@ export function _isStaticProps(props: Record<string, unknown>): boolean {
  *
  *  A bare string/number child does NOT qualify. In AIR's direct-cell-access
  *  model a text child like `{sol.toFixed(9)}` is produced by evaluating the
- *  component body and carries no signal binding (`_signalChildren`) to mark it
+ *  component body and carries no signal binding (`_SignalText`) to mark it
  *  reactive — it is indistinguishable from a literal. Treating such text as
  *  static let the `_static` diff short-circuit (vdom-diff.ts) skip real updates:
  *  when a component re-rendered with a changed value, the whole subtree was
@@ -226,6 +279,11 @@ export function _staticEqual(a: VNode, b: VNode, depth = 0): boolean {
   const bk = Object.keys(b.props);
   if (ak.length !== bk.length) return false;
   for (const k of ak) {
+    // Same COUNT is not same KEYS: `{style:"…"}` vs `{"data-n":undefined}`
+    // compared equal (one key each, `undefined === undefined` on a's lookup
+    // of a key b never had) and the static short-circuit then kept the old
+    // element's attributes on screen forever.
+    if (!(k in b.props)) return false;
     const av = a.props[k];
     const bv = b.props[k];
     if (av !== bv) {
@@ -240,6 +298,7 @@ export function _staticEqual(a: VNode, b: VNode, depth = 0): boolean {
         if (asvk.length !== bsvk.length) return false;
         for (const sk of asvk) {
           if (
+            !(sk in (bv as Record<string, unknown>)) ||
             (av as Record<string, unknown>)[sk] !==
               (bv as Record<string, unknown>)[sk]
           ) return false;
@@ -309,6 +368,67 @@ export function _registerLazyListeners(
  *  contained and named, the commit stands.
  *
  *  `owner` is the element tag / component name used in that report. */
+/** ── Ref commit ──────────────────────────────────────────────────────
+ *
+ *  A ref is ATTACHED at the end of the commit and DETACHED at once. Refs used
+ *  to attach inline, the moment `createDom` built the element — and a commit
+ *  that both builds and tears down elements sharing one ref then ended in
+ *  whichever order it happened to visit them: `<p ref={r}/>` retagged to
+ *  `<i ref={r}/>`, `<A ref={r}/>` swapped with a sibling, wrapped into a
+ *  fragment, or its list switching to keys, all set `r` to the new node and
+ *  then NULLED it when the old one left, leaving `r` empty while its element
+ *  was on screen. Every reconciler that commits in two phases (detach in the
+ *  mutation pass, attach in the layout pass) is immune by construction; this
+ *  is that, at the granularity of one commit — the outermost `_render`,
+ *  `createDom`, `_diff` or `hydrate` entered from outside the reconciler.
+ *  A ref therefore also sees its node only once the whole tree is in the
+ *  document, which is what a ref that measures or focuses needs anyway. */
+let _commitDepth = 0;
+let _pendingRefs: { ref: unknown; node: Node; owner?: string }[] = [];
+
+/** Enter a commit. Nested entries (the reconciler recursing through its own
+ *  entry points) are the same commit. @internal */
+export function _enterCommit(): void {
+  _commitDepth++;
+}
+
+/** Leave a commit; the OUTERMOST leave attaches the refs it queued. Refs
+ *  attached from a ref callback are part of the same flush. @internal */
+export function _leaveCommit(): void {
+  if (--_commitDepth > 0) return;
+  _commitDepth = 0;
+  while (_pendingRefs.length > 0) {
+    const batch = _pendingRefs;
+    _pendingRefs = [];
+    for (const { ref, node, owner } of batch) _callRef(ref, node, owner);
+  }
+}
+
+/** Attach `ref` to `node` — at the end of the current commit, or now when no
+ *  commit is open (a direct `_hydrateNode` from a test). @internal */
+export function _attachRef(ref: unknown, node: Node, owner?: string): void {
+  if (!ref) return;
+  if (_commitDepth > 0) _pendingRefs.push({ ref, node, owner });
+  else _callRef(ref, node, owner);
+}
+
+/** Detach `ref` from `node` — now. A node built and torn down inside ONE
+ *  commit (a boundary child that threw, a lazy that resolved to something
+ *  else) must not come back to life at the flush, so its queued attach is
+ *  dropped; a queued attach to a DIFFERENT node (the same ref moving to a new
+ *  element) is exactly what the queue exists to keep. @internal */
+export function _detachRef(
+  ref: unknown,
+  node: Node | null | undefined,
+  owner?: string,
+): void {
+  if (!ref) return;
+  if (node && _pendingRefs.length > 0) {
+    _pendingRefs = _pendingRefs.filter((p) => p.node !== node);
+  }
+  _callRef(ref, null, owner);
+}
+
 export function _callRef(
   ref: unknown,
   value: Node | null,

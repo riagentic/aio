@@ -21,6 +21,7 @@ import {
   type LockData,
   writeLock,
 } from "../src/server/single-instance-lock.ts";
+import { tempDir } from "../src/testing/temp-dir.ts";
 
 async function withAppsDir<T>(fn: (root: string) => Promise<T>): Promise<T> {
   const prev = Deno.env.get("AIO_APPS_DIR");
@@ -87,7 +88,7 @@ Deno.test("projectRoot: no deno.json anywhere is the cwd itself", async () => {
 
 Deno.test("stop --all: another project's app is never in scope", async () => {
   await withAppsDir(async () => {
-    const mine = await Deno.makeTempDir({ prefix: "aio-mine-" });
+    const mine = await tempDir("aio-mine-");
     const theirs = await Deno.makeTempDir({ prefix: "aio-theirs-" });
     try {
       await Deno.writeTextFile(join(mine, "deno.json"), "{}");

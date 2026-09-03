@@ -621,7 +621,6 @@ export const LEDGER: readonly string[] = [
   "no-assertions|tests/aio33-state-integrity.test.ts|state integrity: skips non-object states",
   "no-assertions|tests/aio33-state-integrity.test.ts|state integrity: reset clears initial shape",
   "empty-loop|tests/air-conformance.test.ts|conformance: keyed list — 50 random rounds keep DOM order, count, and node identity",
-  "empty-loop|tests/alpha52-config-breaks.test.ts|selector deps OLD spread form: still works, hints once, names the tuple",
   "empty-loop|tests/alpha52-surface.test.ts|server-only symbols: ONE set drives the graph validator (incl. the alpha52 db additions)",
   "empty-loop|tests/am-pin-preflight.test.ts|preflight: every cell-config removal can be detected in real source",
   "empty-loop|tests/am-process-safety.test.ts|#7 kill --stale: every aio lock dir is read, not only this scope",

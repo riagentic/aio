@@ -397,24 +397,57 @@ export function createUdsBroadcastController(refs: {
  *  caller asked for a different home, and the other instance's coordinates
  *  are not its business (a field report, §2.1 — a harness killed the
  *  user's wallet with the pid the old refusal had just printed). */
+/** The refusal when the single-instance lock is already held.
+ *
+ *  It used to state the fact and stop — true, and a dead end for the person
+ *  who hit it on the FIRST run of a fresh scaffold. That case is the one worth
+ *  naming: the lock is keyed by appId and the data home is `~/.<appId>`, so
+ *  two unrelated projects both called `todo` are, to aio, the same app sharing
+ *  one database. Every escape is concrete and none of them is "read the docs".
+ *  Pure — the wording is a unit test, not a second running server. */
+export function _alreadyRunningMessage(o: {
+  appId: string;
+  port: number;
+  pid: number;
+  home: string;
+  takeover: boolean;
+}): string {
+  const where = o.port > 0 ? ` at http://localhost:${o.port}` : "";
+  const who = o.pid > 0 ? ` (pid ${o.pid})` : "";
+  const head = `[AIO] ${
+    o.takeover ? "Failed to take over" : "Already running"
+  }: ${o.appId}${where}${who} (home ${o.home})`;
+  if (o.takeover) return head; // --takeover already tried; the rest is noise
+  return head + `\n` +
+    `  Stop it: \`am stop ${o.appId}\`${
+      o.pid > 0 ? ` (or \`kill ${o.pid}\`)` : ""
+    }, or re-run with \`--takeover\`.\n` +
+    `  \`--port=N\` does NOT help: the lock is on the appId, not the port.\n` +
+    `  If that is a DIFFERENT project that happens to share this name — the ` +
+    `appId also picks the data home (${o.home}), so both would read and write ` +
+    `one database. Rename this one: \`aio.run({ appId: "…" })\`.`;
+}
+
 export async function acquireSingletonLock(
   appId: string,
   home: string | undefined,
   port: number,
   singletonMode: boolean,
-  killExisting: boolean,
+  takeover: boolean,
   meta: LockMeta = {},
 ): Promise<AppLock | null> {
   if (singletonMode === false) return null;
   const appLock = new AppLock(appId, home);
-  const result = await appLock.acquire(port, killExisting, meta);
+  const result = await appLock.acquire(port, takeover, meta);
   if (!result.ok) {
     const ex = result.existing;
-    const where = ex.port > 0 ? ` at http://localhost:${ex.port}` : "";
-    const who = ex.pid > 0 ? ` (pid ${ex.pid})` : "";
-    const msg = `[AIO] ${
-      killExisting ? "Failed to take over" : "Already running"
-    }: ${ex.appId}${where}${who} (home ${appLock.home})`;
+    const msg = _alreadyRunningMessage({
+      appId: ex.appId,
+      port: ex.port,
+      pid: ex.pid,
+      home: appLock.home,
+      takeover,
+    });
     // Alone in the process: the refusal IS the exit, and a clean one-line
     // error beats a stack trace. With a sibling app already running (D2 —
     // an app plus its admin panel), `Deno.exit(1)` would take THAT app down

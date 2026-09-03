@@ -281,13 +281,13 @@ export function resolveVisibility(
 // ── Selector helpers ──────────────────────────────────────────────────
 
 import type { SelectorDef } from "./cell-config-types.ts";
-import { log } from "../diagnostics/logger-api.ts";
-import { refuseRetired, removalOf } from "./removals.ts";
+import { refuseRetired, removalOf, removalsAreFatal } from "./removals-core.ts";
 
-/** One-time-per-selector hints for the deprecated spread deps signature.
- *  console.warn, not the diagnostics logger: this module is in the BROWSER
- *  graph (protocol-cell imports scopeSelectors), and the logger's rotation
- *  pulls @std/path into it (browser-deps gate). */
+/** One-time-per-selector PROD refusal for the retired spread deps signature.
+ *  Dev throws every time; prod logs the registry line once, through
+ *  `refuseRetired` — this module is in the BROWSER graph, so the log has to
+ *  come from removals-core (which the page already reaches) rather than from a
+ *  second logger import here. */
 const _selectorHinted = new Set<string>();
 /** @internal test seam. */
 export function _resetSelectorHints(): void {
@@ -337,7 +337,8 @@ function secondParamIsTuple(fn: (...a: never[]) => unknown): boolean {
  *  `{ deps: ["prices"], fn: (s, [prices], id) => … }` — so parameterized
  *  selectors and deps compose. The old spread signature `(s, ...depSlices)` is
  *  detected by shape (no destructured 2nd param + arity covering every dep)
- *  and still served through beta, with a one-time hint. */
+ *  and REFUSED (alpha76): dev throws, prod logs the registry line once and
+ *  still spreads, so no app renders the wrong number in silence. */
 export function scopeSelectors<S>(
   cellName: string,
   selectors: Record<string, SelectorDef<S>> | undefined,
@@ -368,14 +369,17 @@ export function scopeSelectors<S>(
     const legacy = deps.length > 0 && !secondParamIsTuple(fn) &&
       fn.length >= 1 + deps.length;
     if (legacy) {
+      // Retired in alpha76. Dev throws (scopeSelectors runs at cell creation,
+      // so a test or a dev boot fails at the definition); prod logs the
+      // registry line once and still spreads, because a selector silently
+      // handed a TUPLE where it expected a slice renders wrong data rather
+      // than failing — a silent divergence is the one thing this may not do.
       const hk = `${cellName}:${key}`;
-      if (!_selectorHinted.has(hk)) {
+      if (removalsAreFatal() || !_selectorHinted.has(hk)) {
         _selectorHinted.add(hk);
-        log.warn(
-          `[aio:cell:${cellName}] selector '${key}': the (s, ...depSlices) ` +
-            `signature is deprecated — deps now arrive as a tuple: ` +
-            `fn: (s, [${deps.join(", ")}], ...args) => …. ` +
-            `aiol --safe-fix rewrites this. (hinted once per selector)`,
+        refuseRetired(
+          removalOf("selector deps as a spread"),
+          `${cellName}.${key}`,
         );
       }
     }

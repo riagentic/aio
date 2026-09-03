@@ -512,7 +512,7 @@ change", which was not true of sync cells.)
 ## Persistence and snapshots
 
 ```sh
-deno task am persist                        # force flush to SQLite
+deno task am persist                        # flush to SQLite now; "persisted" = on disk (exit 1 if refused)
 deno task am snapshot                       # dump state to stdout
 deno task am snapshot save backup.json      # save to file
 deno task am snapshot load backup.json      # restore from file
@@ -631,7 +631,7 @@ am data                      # every path this app uses + sizes, by tier
 am data --json               # machine-readable
 
 am stop wallet               # a live SQLite file can copy mid-write
-am backup                    # → ./wallet-backup-<stamp>/  (a copy of data/)
+am backup                    # → ~/.wallet/backups/wallet-backup-<stamp>/
 am backup /mnt/usb/w1        # …or anywhere
 am restore /mnt/usb/w1       # put it back
 ```
@@ -647,6 +647,8 @@ the commands add over `cp -r` is two refusals:
 - **`am restore` refuses another app's archive** (`meta.json` records the appId)
   and refuses outright while the app runs — a running app would write its
   in-memory pages back over what you restored. There is no `--force` for that.
+  It also refuses a directory that is not an archive at all (no `meta.json` and
+  no `state.db`): restoring nothing over your data is not a restore.
 
 A restore **moves** the data it replaces to `data.replaced-<stamp>` rather than
 deleting it, so restoring the wrong archive is recoverable.
@@ -888,7 +890,9 @@ as "not running". Two instances of one id from two homes is a real ambiguity;
 | `/__aio/trojan/schedules`     | Active timer/cron IDs                                           |
 | `/__aio/trojan/metrics`       | Uptime, connections, schedule count                             |
 | `/__aio/trojan/config`        | Port, title, expose, authMode, prod                             |
-| `/__aio/trojan/health`        | Cell health: status, enabled, errors                            |
+| `/__aio/trojan/errors`        | Recent server errors                                            |
+| `/__aio/trojan/cells`         | Cells and their method names                                    |
+| `/__aio/health`               | Cell health: status, enabled, errors (**not** under `trojan/`)  |
 
 ### Control (POST)
 
@@ -912,10 +916,10 @@ curl -X POST localhost:8000/__aio/trojan/tt -H 'X-AIO: 1' -d '{"cmd":"goto","arg
 curl -X POST localhost:8000/__aio/trojan/sql -H 'X-AIO: 1' \
   -d '{"query":"SELECT * FROM users LIMIT 10"}'
 
-# Interact with client UI
-curl -X POST localhost:8000/__aio/trojan/interact/0 \
+# Drive the client UI — by semantic PATH, not a CSS selector
+curl -X POST localhost:8000/__aio/trojan/trigger/0 \
   -H 'X-AIO: 1' -H 'Content-Type: application/json' \
-  -d '{"action":"click","selector":"#submit"}'
+  -d '{"path":"SubmitButton","action":"click"}'
 ```
 
 ## HTTP endpoints

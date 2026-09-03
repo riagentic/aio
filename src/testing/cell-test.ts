@@ -516,7 +516,16 @@ export function testCell(
           if (key) {
             try {
               send[key]!();
-            } catch { /* invalid transitions are expected */ }
+            } catch {
+              // aio-ok: this IS the fuzzer. `randomActions` calls methods in
+              // random order, from whatever state the previous one left, and
+              // with no payload — a guard refusing the transition and a
+              // method reading a field off an absent payload are both the
+              // designed outcome, not a fault to report. What the caller
+              // asserts is the invariant AFTER the run (`t.invariant`), which
+              // a thrown-away action cannot make true; a throw here that
+              // stopped the run would only shorten the fuzz.
+            }
           }
         }
       },

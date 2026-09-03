@@ -355,7 +355,7 @@ Deno.test("torture: cancelOn fires from the method's OWN sync prefix — state s
         s.syncSteps += 1; // sync prefix begins
         canc.stop(); // re-entrant dispatch DURING the sync prefix
         await sleep(5); // first suspension — abort observable after here
-        if (s.$signal?.aborted) {
+        if (s.$signal.aborted) {
           s.outcome = "cancelled-sync-path";
           return;
         }
@@ -395,7 +395,7 @@ Deno.test("torture: cancelOn fires DURING an await — abort observed, no partia
       async work(s: any) {
         s.phase = "working";
         await sleep(25); // stop() lands inside this window
-        if (s.$signal?.aborted) {
+        if (s.$signal.aborted) {
           s.phase = "cancelled";
           return;
         }
@@ -439,9 +439,9 @@ Deno.test("torture: own.set + schedule churn 100× — every disposer runs, no t
     state: { cycles: 0 },
     methods: {
       noop(_s) {},
-      cycle(s): any[] {
+      cycle(s) {
         s.cycles += 1;
-        return [
+        s.$do(
           // Replace semantics: previous disposer must run before the new factory.
           own.set("t-res:slot", () => {
             acquired += 1;
@@ -454,10 +454,10 @@ Deno.test("torture: own.set + schedule churn 100× — every disposer runs, no t
             type: "t-res:noop",
             payload: { args: [] },
           }),
-        ];
+        );
       },
-      release(_s): any[] {
-        return [own.dispose("t-res:slot"), schedule.cancel("t-res:tick")];
+      release(s) {
+        s.$do(own.dispose("t-res:slot"), schedule.cancel("t-res:tick"));
       },
     },
   });

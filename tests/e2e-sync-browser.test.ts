@@ -6,10 +6,8 @@
 import { assert, assertEquals } from "@std/assert";
 import { testDisplayEnv } from "../src/testing/test-display.ts";
 import { stopChild } from "./stop-child.ts";
-
-// Coverage profiles from spawned deno processes go to a throwaway temp dir.
-const _childCovDir = Deno.env.get("DENO_COVERAGE_DIR") ??
-  Deno.makeTempDirSync({ prefix: "aio-child-cov-" });
+import { childCoverageDir } from "../src/testing/temp-dir.ts";
+const _childCovDir = childCoverageDir();
 
 const ROOT = new URL("..", import.meta.url).pathname;
 

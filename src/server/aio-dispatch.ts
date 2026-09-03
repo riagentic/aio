@@ -1,5 +1,9 @@
 // Dispatch wiring — hooks reduce/execute, time-travel, patches, persistence broadcast
-import { createDispatch, type PerfBudget } from "../state/dispatch.ts";
+import {
+  createDispatch,
+  type PerfBudget,
+  type PerfCheck,
+} from "../state/dispatch.ts";
 import {
   type CellPatchStrategy,
   filterPatchesByStrategy,
@@ -109,7 +113,7 @@ export type DispatchSetupDeps<S, A, E, App = any> = {
     budget: { reduce: number; effect: number };
     breakdown?: ReduceBreakdown;
   }) => void;
-  perfCheck?: "on" | "off";
+  perfCheck?: PerfCheck;
   perfBudget?: PerfBudget;
   perfLog?: (
     source: "reduce" | "effect",

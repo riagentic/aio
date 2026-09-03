@@ -73,13 +73,27 @@ In-process callers still receive the raw value — only the network boundary
 requires JSON. If you need to hand a browser something non-serializable, convert
 it to plain data first (`date.toISOString()`, `[...map]`, `n.toString()`).
 
-## Effects don't come back as values
+## Effects go through `s.$do`, values through `return`
 
-Returning a `schedule.*` / own-effect (or an array of them) **schedules** the
-effect server-side; it is not treated as a return value, so `await` resolves
-`undefined`. A method can't both schedule an effect and return a value in one
-call. See
-[Methods → Returning schedule effects](methods.md#returning-schedule-effects).
+`return` is for **values**; `s.$do(effect, ...)` is for effects (`schedule.*` /
+`own.*`). They are separate channels, so one method does both:
+
+```ts
+methods: {
+  stopPolling(s) {
+    s.polling = false;
+    s.$do(schedule.cancel("poll")); // an EFFECT — runs with the commit
+    return s.stoppedCount; // a VALUE — resolves the caller's await
+  },
+}
+```
+
+The old channel — `return schedule.after(...)` — **scheduled** the effect
+instead of resolving the caller, so `await` got `undefined` and the value you
+meant to return was lost. It was removed in alpha76: a dev boot or a test
+throws, production logs the removal line once per method and still runs the
+effect, and `aiol --safe-fix` rewrites it. See
+[Methods → Running effects: `s.$do(effect, ...)`](methods.md#running-effects-sdoeffect-).
 
 ## Prefer reactive state when the answer is already synced
 

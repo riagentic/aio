@@ -193,3 +193,119 @@ Deno.test("am create --json: absolute dir, and git as a reason — never a bare 
     await Deno.remove(tmp, { recursive: true });
   }
 });
+
+// ── the cli scaffold BOOTS ──────────────────────────────────────────
+//
+// `--template=cli` was dead on arrival on three counts, none of which any
+// test could see because none of them started it:
+//   • `deno task dev` ran `src/app.ts --client=cli`, and app.ts routes on a
+//     command word — it exited with "missing command — run `todo --help`";
+//   • every command defaulted to `ws://localhost:8000/ws` while `serve` binds
+//     a FREE port, so `todo list` reported "no server" against a running one;
+//   • the README documented both.
+// This scaffolds it, starts the server, and runs a command against it.
+Deno.test({
+  name: "--template=cli: `dev` starts the server and a command finds it",
+  ignore: Deno.build.os === "windows",
+  async fn() {
+    const cli = scaffold("clitool", "cli", true, "cli");
+    // The dev task must BE the server. `--client=cli` is not a command word.
+    const tasks = JSON.parse(cli["deno.json"]!).tasks as Record<string, string>;
+    assertStringIncludes(tasks.dev!, "src/app.ts serve");
+    assert(
+      !tasks.dev!.includes("--client=cli"),
+      `app.ts demands a command word. Got: ${tasks.dev}`,
+    );
+    // …and no hard-coded port anywhere in the scaffold. Name what must BE
+    // there first: an empty map would otherwise satisfy the loop below while
+    // proving nothing about the template this test exists to keep alive.
+    assertEquals(
+      Object.keys(cli).sort(),
+      [
+        ".gitignore",
+        "README.md",
+        "deno.json",
+        "src/app.ts",
+        "src/cell.ts",
+        "tests/cell.test.ts",
+      ],
+      "the cli scaffold's files",
+    );
+    // Commands resolve the RUNNING instance (the lock am reads), not a port.
+    assertStringIncludes(cli["src/app.ts"]!, "instances(resolveAppId())");
+    for (const [rel, content] of Object.entries(cli)) {
+      assert(
+        !/["'`]ws:\/\/localhost:8000/.test(content),
+        `${rel}: serve picks a free port — a hard-coded 8000 URL is a lie`,
+      );
+    }
+
+    const dir = await Deno.makeTempDir({ prefix: "aio-cli-boot-" });
+    const home = join(dir, "home");
+    await Deno.mkdir(home);
+    for (const [rel, content] of Object.entries(cli)) {
+      if (rel === "deno.json") continue;
+      const path = join(dir, rel);
+      await Deno.mkdir(join(path, ".."), { recursive: true });
+      await Deno.writeTextFile(path, content);
+    }
+    await Deno.writeTextFile(
+      join(dir, "deno.json"),
+      JSON.stringify({
+        // the scaffold's own identity keys, so resolveAppId() finds the lock
+        ...JSON.parse(cli["deno.json"]!),
+        imports: Object.fromEntries(
+          Object.entries(AIO_ENTRY_PATHS).map(([k, v]) => [k, `${ROOT}/${v}`]),
+        ),
+      }),
+    );
+    // An isolated HOME: the lock dir and ~/.<appId> must not touch the real one.
+    const env = { HOME: home, XDG_RUNTIME_DIR: home };
+    const serve = new Deno.Command(Deno.execPath(), {
+      args: ["run", "-A", "--no-check", "src/app.ts", "serve"],
+      cwd: dir,
+      env,
+      stdout: "piped",
+      stderr: "piped",
+    }).spawn();
+    const run = (args: string[]) =>
+      new Deno.Command(Deno.execPath(), {
+        args: ["run", "-A", "--no-check", "src/app.ts", ...args],
+        cwd: dir,
+        env,
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+
+    let out = { code: 1, text: "" };
+    try {
+      // Wait for the server to be reachable THROUGH the discovery the
+      // scaffold ships — no port passed anywhere.
+      for (let i = 0; i < 120; i++) {
+        const r = await run(["add", "buy milk"]);
+        out = {
+          code: r.code,
+          text: new TextDecoder().decode(r.stdout) +
+            new TextDecoder().decode(r.stderr),
+        };
+        if (r.code === 0) break;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      assertEquals(
+        out.code,
+        0,
+        `\`todo add\` must reach the server:\n${out.text}`,
+      );
+      const list = await run(["list", "--json"]);
+      const listed = new TextDecoder().decode(list.stdout);
+      assertEquals(list.code, 0, listed);
+      assertStringIncludes(listed, "buy milk");
+    } finally {
+      try {
+        serve.kill("SIGTERM");
+      } catch { /* gone */ }
+      await serve.output();
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});

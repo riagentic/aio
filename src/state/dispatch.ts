@@ -18,8 +18,26 @@ import {
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 export type { AioError } from "../diagnostics/error.ts";
 
-/** Performance check — on: warn on violations, off: silent */
-export type PerfCheck = "on" | "off";
+/** Performance check — warn on violations, or stay silent.
+ *
+ *  `boolean` is the spelling to write. `"on"`/`"off"` came first and still
+ *  work: this was the ONE string-boolean among ~14 boolean switches in
+ *  `aio.run()`, and internally it has always been a boolean anyway
+ *  (`composeCells([cell], { perfCheck: false })`). Widening accepts the house
+ *  spelling without taking the old one away — and after beta1 the union
+ *  freezes, so it was this release or never. */
+export type PerfCheck = boolean | "on" | "off";
+
+/** THE reader of {@linkcode PerfCheck}. Default ON: an absent key means the
+ *  perf reporting an app never asked to switch off.
+ *
+ *  One function rather than a `!== "off"` test at each site, because the two
+ *  sites that had it (`dispatch`, `composeCellsWiring`) are the two that would
+ *  have disagreed the moment a second spelling arrived — `false !== "off"` is
+ *  true, so a boolean would have read as ON at both. */
+export function perfCheckOn(v: PerfCheck | undefined): boolean {
+  return v !== "off" && v !== false;
+}
 
 /** Where the dispatch loop is in its life:
  *
@@ -314,7 +332,7 @@ export function createDispatch<S, A, E>(
   } = deps;
   const getBreakdown = deps.reduceBreakdown;
   const effectTimeout = deps.effectTimeout ?? 30_000; // 0 = disabled
-  const perfEnabled = perfCheck !== "off"; // default: on
+  const perfEnabled = perfCheckOn(perfCheck); // default: on
   const reduceBudget = perfBudget?.reduce ?? DEFAULT_REDUCE_BUDGET;
   const effectBudget = perfBudget?.effect ?? DEFAULT_EFFECT_BUDGET;
   let dispatching = false;

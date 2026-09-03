@@ -59,3 +59,26 @@ export function compiled(path: string, root: string): void {
   }
   step(`compiled ${rel}`, "staged — the summary below places it");
 }
+
+/** An INTERMEDIATE artifact: it exists now, and will not exist when the build
+ *  finishes.
+ *
+ *  `dist/app.js`, `dist/style.css`, `dist/icon.png` are inputs to the compile
+ *  step — the fleet moves what they become INTO the binary and then assembles
+ *  a clean `dist/` holding the binaries and `manifest.json`. So a build ended
+ *  with `✓ dist/app.js` on screen and no such file on disk, and the docs told
+ *  readers to serve it. Same rule `compiled()` already follows for the binary:
+ *  under the fleet these lines say what they are; standalone (no fleet moving
+ *  anything) `✓` is the truth and stays. */
+export function staged(what: string, detail?: string): void {
+  if (Deno.env.get(BUILD_VERSION_ENV) === undefined) {
+    ok(what, detail);
+    return;
+  }
+  step(
+    `built ${what}`,
+    `${
+      detail ? detail + " — " : ""
+    }goes into the binary; not in the final dist/`,
+  );
+}

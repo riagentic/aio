@@ -24,6 +24,7 @@ import { freePort, testServer } from "../src/testing/server-test.ts";
 import {
   _resetInstanceVerify,
   httpGet,
+  isTlsRecord,
   probePort,
   trojanGet,
   trojanPost,
@@ -235,6 +236,105 @@ Deno.test({
       } finally {
         ac.abort();
         await server.finished;
+      }
+    });
+  },
+});
+
+// ── 2b. what a port IS, decided in bytes ────────────────────────────
+//
+// `probePort` classified a TLS listener by matching the TEXT of a failed
+// `fetch` against /cert|tls|ssl|invaliddata|handshake/i. On Deno 2.9 the
+// runtime moved that detail into `error.cause` and left `String(e)` as the
+// bare "TypeError: fetch failed" — so every TLS listener came back
+// `listening`, and `am stop --port=N` against an `--expose`d app recommended
+// the remedy for the wrong diagnosis. Nothing failed; the instrument just
+// quietly stopped measuring. So the classification is made of protocol bytes
+// now, and this test drives all four shapes through it at once — a probe that
+// can only ever answer one of them cannot pass here.
+
+Deno.test("am: isTlsRecord — the decider is a record header, not a sentence", () => {
+  const rec = (...b: number[]) => new Uint8Array(b);
+  // handshake and alert, every legacy record version.
+  assertEquals(isTlsRecord(rec(0x16, 0x03, 0x03)), true, "ServerHello");
+  assertEquals(isTlsRecord(rec(0x15, 0x03, 0x03, 0x00, 0x02)), true, "alert");
+  assertEquals(isTlsRecord(rec(0x16, 0x03, 0x00)), true, "SSL3 record version");
+  assertEquals(isTlsRecord(rec(0x16, 0x03, 0x04)), true, "TLS 1.3");
+  // Not TLS: an HTTP reply, an unknown content type, a bad version, a short read.
+  assertEquals(isTlsRecord(new TextEncoder().encode("HTTP/1.1 400")), false);
+  assertEquals(
+    isTlsRecord(rec(0x17, 0x03, 0x03)),
+    false,
+    "app data, unsolicited",
+  );
+  assertEquals(isTlsRecord(rec(0x16, 0x02, 0x03)), false, "not a TLS version");
+  assertEquals(isTlsRecord(rec(0x16, 0x03, 0x05)), false, "past TLS 1.3");
+  assertEquals(isTlsRecord(rec(0x16, 0x03)), false, "nothing was read");
+  assertEquals(isTlsRecord(rec()), false, "nothing at all");
+});
+
+Deno.test({
+  name: "am: probePort tells the four shapes apart against REAL listeners",
+  ignore: !(() => {
+    try {
+      return new Deno.Command("openssl", {
+        args: ["version"],
+        stdout: "null",
+        stderr: "null",
+      }).outputSync().success;
+    } catch {
+      return false;
+    }
+  })(),
+  async fn() {
+    await withAppsDir(async (root) => {
+      const { loadOrCreateCert } = await import("../src/server/tls.ts");
+      const { cert, key } = await loadOrCreateCert(join(root, "tls"));
+
+      const tlsPort = freePort();
+      const tlsAc = new AbortController();
+      const tls = Deno.serve(
+        { port: tlsPort, cert, key, signal: tlsAc.signal, onListen: () => {} },
+        () => new Response("ok"),
+      );
+
+      // Plain HTTP, but not an aio app: /__aio/health is a 404 here.
+      const httpPort = freePort();
+      const httpAc = new AbortController();
+      const http = Deno.serve(
+        { port: httpPort, signal: httpAc.signal, onListen: () => {} },
+        () => new Response("not aio", { status: 404 }),
+      );
+
+      // A socket that accepts and says nothing — the shape a TLS listener was
+      // being confused WITH, so it has to stay distinguishable.
+      const mutePort = freePort();
+      const mute = Deno.listen({ port: mutePort });
+      const held: Deno.Conn[] = [];
+      const accepting = (async () => {
+        for await (const c of mute) held.push(c);
+      })().catch(() => {});
+
+      // Bound, then released: nothing is there.
+      const deadPort = freePort();
+
+      try {
+        assertEquals((await probePort(tlsPort)).kind, "tls");
+        assertEquals((await probePort(httpPort)).kind, "http");
+        assertEquals((await probePort(mutePort)).kind, "listening");
+        assertEquals((await probePort(deadPort)).kind, "closed");
+      } finally {
+        tlsAc.abort();
+        await tls.finished;
+        httpAc.abort();
+        await http.finished;
+        for (const c of held) {
+          try {
+            c.close();
+          } catch { /* already gone */ }
+        }
+        mute.close();
+        await accepting;
       }
     });
   },

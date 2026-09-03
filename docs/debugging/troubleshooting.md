@@ -46,21 +46,22 @@ Something wrong?
 
 ## S1 -- Error box in console
 
-| Code                 | What broke                                                                    | Fix                                                                                                  |
-| -------------------- | ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `REDUCE_ERROR`       | Reducer threw                                                                 | Check payload shape, guard undefined fields                                                          |
-| `EFFECT_ERROR`       | Sync effect threw                                                             | Move I/O to async, return promises                                                                   |
-| `EFFECT_TIMEOUT`     | Async method still running at the ceiling (default 30s) — it is NOT cancelled | Raise `effectTimeoutMs` / `perfBudget.methods[...].timeout`, or move the long work off the call path |
-| `EFFECT_ASYNC_ERROR` | Promise rejected                                                              | Add error handling in `execute`                                                                      |
-| `FLOW_STEP_ERROR`    | Workflow step threw (legacy)                                                  | Wrap steps in try/catch                                                                              |
-| `FLOW_UNCAUGHT`      | Flow threw without catch                                                      | Add try/catch, check step history in error                                                           |
-| `MACHINE_BLOCKED`    | Action blocked by routing guard                                               | Check the cell's `status` field and guards                                                           |
-| `QUEUE_OVERFLOW`     | Queue exceeded 10,000                                                         | Find dispatch loop -- see S4                                                                         |
-| `DISPATCH_LOOP`      | 1000+ iterations detected                                                     | Effect dispatching to itself -- break cycle                                                          |
-| `MEMORY_PRESSURE`    | Heap above 75%                                                                | See S5                                                                                               |
-| `MEMORY_CRITICAL`    | Heap above 90%                                                                | See S5 (urgent)                                                                                      |
-| `BUDGET_REDUCE`      | Reducer exceeded 100ms                                                        | Move heavy work to async effects                                                                     |
-| `BUDGET_EFFECT`      | Effect exceeded 5ms                                                           | Return immediately, work async                                                                       |
+| Code                 | What broke                                                                    | Fix                                                                                                                                          |
+| -------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `REDUCE_ERROR`       | Reducer threw                                                                 | Check payload shape, guard undefined fields                                                                                                  |
+| `EFFECT_ERROR`       | Sync effect threw                                                             | Move I/O to async, return promises                                                                                                           |
+| `EFFECT_TIMEOUT`     | Async method still running at the ceiling (default 30s) — it is NOT cancelled | Raise `effectTimeoutMs` / `perfBudget.methods[...].timeout`, or move the long work off the call path                                         |
+| `EFFECT_ASYNC_ERROR` | Promise rejected                                                              | Add error handling in `execute`                                                                                                              |
+| `FLOW_STEP_ERROR`    | Workflow step threw (legacy)                                                  | Wrap steps in try/catch                                                                                                                      |
+| `FLOW_UNCAUGHT`      | Flow threw without catch                                                      | Add try/catch, check step history in error                                                                                                   |
+| `ACCESS_DENIED`      | The cell's `access:` rule (or a serverFn's `{ access }`) refused the caller   | Sign the user in, give them the role the rule requires, or widen the rule. Branch with `errorCode(e)`                                        |
+| `ACTION_REFUSED`     | The action reached the server and applied nothing                             | A renamed/removed method still called by an older client, a cell missing from `aio.run({ cells })`, a disabled cell, or a `validate` refusal |
+| `QUEUE_OVERFLOW`     | Queue exceeded 10,000                                                         | Find dispatch loop -- see S4                                                                                                                 |
+| `DISPATCH_LOOP`      | 1000+ iterations detected                                                     | Effect dispatching to itself -- break cycle                                                                                                  |
+| `MEMORY_PRESSURE`    | Heap above 75%                                                                | See S5                                                                                                                                       |
+| `MEMORY_CRITICAL`    | Heap above 90%                                                                | See S5 (urgent)                                                                                                                              |
+| `BUDGET_REDUCE`      | Reducer exceeded 100ms                                                        | Move heavy work to async effects                                                                                                             |
+| `BUDGET_EFFECT`      | Effect exceeded 5ms                                                           | Return immediately, work async                                                                                                               |
 
 **Tracing:** Every error has a correlation ID. Grep logs:
 

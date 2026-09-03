@@ -2069,6 +2069,7 @@ async function round30(r: () => number): Promise<void> {
   // NEW flag, and the round says so rather than skipping it.
   const VALUES: Record<string, string> = {
     "--port=": "8123",
+    "--server-url=": "ws://127.0.0.1:8123/ws",
     "--client=": "browser",
     "--title=": "T",
     "--channel=": "beta",

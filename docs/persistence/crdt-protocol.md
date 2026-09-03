@@ -117,10 +117,18 @@ Server→client snapshot fallback (when ops have been compacted away):
     "mode": "snapshot",
     "snapshot": { "todos": { "items": [], "filter": "all" } },
     "ops": [],
-    "lowWater": [1712340000000, 0, "s"]
+    "lowWater": [1712340000000, 0, "s"],
+    "reset": ["todos"]
   }
 }
 ```
+
+`reset` (optional) names the cells whose request cursor this server never issued
+— it sat above the op-log's high-water mark, so the client synced with a
+different history (a restored backup, a wiped data dir, another app on the same
+address). For those cells the client adopts the snapshot and the server's cursor
+as-is, bypassing its never-regress rule, and keeps its unsent ops (they were
+re-sent as `pendingOps` and are acked by this server). Both sides log it once.
 
 ## Client-Side Flow
 
@@ -152,8 +160,10 @@ Server→client snapshot fallback (when ops have been compacted away):
 2. Server responds incremental (ops since lastHlc) or snapshot (full state)
 3. Apply to confirmed state, rebase, update optimistic
 
-Snapshot fallback triggers when `lastHlc < lowWater` (ops compacted) or > 500
-pending.
+Snapshot fallback triggers when `lastHlc < lowWater` (ops compacted), when the
+client's `server_ts` cursor sits below the compaction boundary, when it sits
+ABOVE the log's high-water mark (a cursor from another history — see `reset`),
+or > 500 pending.
 
 ## Server-Side Compaction
 

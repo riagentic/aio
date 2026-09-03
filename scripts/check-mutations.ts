@@ -272,8 +272,10 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "proxy-derived values are recorded by reference instead of materialized, so `s.x = { ...s.x }` stores live proxies in the mutation log",
     file: "src/state/cell-impl.ts",
-    find: "        value: materializeValue(value),",
-    replace: "        value: value,",
+    // `recordValue`'s own walk, not either call site: the set trap and the
+    // array-op args both record through it, so one entry covers both doors.
+    find: "  const value = walk(v, []);",
+    replace: "  const value = v;",
     test: "tests/proxy-write-loud.test.ts",
     filter:
       "async: spreading the live proxy back into state WORKS, same as sync",
@@ -505,11 +507,14 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "an async method that throws after its first await is logged while `am dispatch` has already answered {ok:true}",
-    file: "src/server/server-trojan.ts",
-    find:
-      '        if (asyncOnes.includes(method) && typeof pl._callId !== "string") {',
-    replace:
-      '        if (asyncOnes.includes(method) && typeof pl._callId === "number") {',
+    // The invariant MOVED in alpha76: the correlation id is minted in
+    // `dispatchNetwork`, for all three doors at once, instead of privately by
+    // the trojan route — which is why the WS and UDS doors were reporting
+    // `{ok:true, value:undefined}` for an async method that threw while the
+    // operator's door answered honestly.
+    file: "src/server/aio-server.ts",
+    find: "      cellId && (asyncMethods[cellId] ?? []).includes(methodName)",
+    replace: "      false && (asyncMethods[cellId] ?? []).includes(methodName)",
     test: "tests/trojan-async-rejection-reaches-caller.test.ts",
     filter:
       "trojan dispatch: a post-await throw is the route's answer, not a log line",

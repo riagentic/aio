@@ -21,6 +21,7 @@
 import { join } from "@std/path";
 import { createHash } from "node:crypto";
 import { appDirs } from "./app-dirs.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 /** What the store knows about one blob. */
 export type BlobInfo = {
@@ -52,14 +53,20 @@ export interface BlobStore {
     id: string,
     opts?: { start?: number; end?: number },
   ): Promise<ReadableStream<Uint8Array>>;
-  /** Metadata for one blob, or null when absent. */
+  /** Metadata for one blob, or null when absent. Throws — naming the path —
+   *  when the store exists but cannot be read: "absent" and "unreadable" are
+   *  different facts and only one of them is `null`. */
   info(id: string): Promise<BlobInfo | null>;
   /** The HTTP path this blob is served at (`/__aio/blobs/<id>`) — subject to
    *  the app's auth gate exactly like every other app resource. */
   url(id: string): string;
-  /** Remove a blob (+ its metadata). True when something was deleted. */
+  /** Remove a blob (+ its metadata). True when something was deleted; false
+   *  only when there was nothing there. A store that REFUSED the removal
+   *  throws rather than reporting false, which a caller reads as "already
+   *  gone". */
   delete(id: string): Promise<boolean>;
-  /** Every stored blob (unordered). */
+  /** Every stored blob (unordered). Empty means the store holds nothing —
+   *  never that it could not be read; an unreadable store throws. */
   list(): Promise<BlobInfo[]>;
   /** The directory blobs live in — inside `appDirs(appId).files`, i.e. inside
    *  THE backup unit. */
@@ -87,14 +94,47 @@ function assertBlobId(id: string): void {
 
 const metaPath = (dir: string, id: string) => join(dir, `${id}.json`);
 
+/** Is this the OS saying "there is nothing here"?
+ *
+ *  It is the ONLY error that means absence. Everything else — EACCES, EIO, a
+ *  full disk, a store on a dead mount — means the store could not be read,
+ *  which is a different fact and must never be reported as an empty result.
+ *  `stream()` learned this first (an EACCES read as "it was never put()" and
+ *  sent the reader looking for a write that had happened); the rest of the
+ *  store now shares the rule instead of each site deciding again. */
+function isAbsent(e: unknown): boolean {
+  return e instanceof Deno.errors.NotFound;
+}
+
+/** Rethrow a non-absence error, naming the path — a store that cannot be read
+ *  says so. */
+function rethrowUnreadable(e: unknown, what: string, dir: string): never {
+  throw new Error(`blobs: cannot read ${what} in ${dir} — ${e}`, { cause: e });
+}
+
 async function readName(dir: string, id: string): Promise<string | undefined> {
+  let text: string;
   try {
-    const meta = JSON.parse(await Deno.readTextFile(metaPath(dir, id))) as {
-      name?: unknown;
-    };
+    text = await Deno.readTextFile(metaPath(dir, id));
+  } catch (e) {
+    // No metadata file: the blob never recorded a name, and is fully valid.
+    if (isAbsent(e)) return undefined;
+    rethrowUnreadable(e, `metadata for blob ${id}`, dir);
+  }
+  try {
+    const meta = JSON.parse(text) as { name?: unknown };
     return typeof meta.name === "string" ? meta.name : undefined;
   } catch {
-    return undefined; // no metadata — the blob is still fully valid
+    // The file exists but says nothing usable. That is "no name recorded",
+    // not "the store is unreadable" — but it is still a damaged file, so it
+    // is said out loud rather than absorbed.
+    log.warn(
+      "blobs",
+      `metadata for blob ${id} is not readable JSON — the blob's bytes are ` +
+        `intact, its name is lost`,
+      { dir },
+    );
+    return undefined;
   }
 }
 
@@ -192,22 +232,42 @@ function makeStore(dir: string): BlobStore {
     // put with a different name must not rewrite what the first recorded).
     let name = await readName(dir, id);
     if (name === undefined && opts?.name !== undefined) {
-      name = opts.name;
-      await Deno.writeTextFile(metaPath(dir, id), JSON.stringify({ name }))
-        .catch(() => {/* metadata is best-effort; the bytes are landed */});
+      try {
+        await Deno.writeTextFile(
+          metaPath(dir, id),
+          JSON.stringify({ name: opts.name }),
+        );
+        name = opts.name;
+      } catch (e) {
+        // The bytes ARE landed, so this is not a failed put and must not
+        // throw. But the returned BlobInfo used to carry the name from the
+        // local variable rather than from what persisted, so a caller was
+        // told its name was recorded and `info()` disagreed a moment later.
+        // Report what actually happened: no name, and why.
+        log.warn(
+          "blobs",
+          `blob ${id} stored, but its name could not be recorded — ${e}`,
+          { dir, name: opts.name },
+        );
+      }
     }
     return { id, size, ...(name !== undefined ? { name } : {}) };
   }
 
   async function info(id: string): Promise<BlobInfo | null> {
     assertBlobId(id);
+    let st: Deno.FileInfo;
     try {
-      const st = await Deno.stat(join(dir, id));
-      const name = await readName(dir, id);
-      return { id, size: st.size, ...(name !== undefined ? { name } : {}) };
-    } catch {
-      return null;
+      st = await Deno.stat(join(dir, id));
+    } catch (e) {
+      // `null` means "no such blob". A store the OS refused to read is not
+      // an absent blob, and answering `null` for it told callers a blob they
+      // had stored was gone.
+      if (isAbsent(e)) return null;
+      rethrowUnreadable(e, `blob ${id}`, dir);
     }
+    const name = await readName(dir, id);
+    return { id, size: st.size, ...(name !== undefined ? { name } : {}) };
   }
 
   async function stream(
@@ -276,8 +336,17 @@ function makeStore(dir: string): BlobStore {
       try {
         await Deno.remove(join(dir, id));
         removed = true;
-      } catch { /* absent */ }
-      await Deno.remove(metaPath(dir, id)).catch(() => {});
+      } catch (e) {
+        // `false` means "there was nothing to delete" — which is exactly what
+        // a caller uses to decide the record is already gone. A store that
+        // refused the removal must not be able to say that.
+        if (!isAbsent(e)) rethrowUnreadable(e, `blob ${id}`, dir);
+      }
+      try {
+        await Deno.remove(metaPath(dir, id));
+      } catch (e) {
+        if (!isAbsent(e)) rethrowUnreadable(e, `metadata for blob ${id}`, dir);
+      }
       return removed;
     },
     list: async () => {
@@ -285,8 +354,15 @@ function makeStore(dir: string): BlobStore {
       try {
         for await (const e of Deno.readDir(dir)) {
           if (!e.isFile || !BLOB_ID_RE.test(e.name)) continue;
-          const st = await Deno.stat(join(dir, e.name)).catch(() => null);
-          if (!st) continue;
+          let st: Deno.FileInfo;
+          try {
+            st = await Deno.stat(join(dir, e.name));
+          } catch (err) {
+            // A blob deleted between readDir and stat is a real race and not
+            // an error; anything else means the store cannot be listed.
+            if (isAbsent(err)) continue;
+            rethrowUnreadable(err, `blob ${e.name}`, dir);
+          }
           const name = await readName(dir, e.name);
           out.push({
             id: e.name,
@@ -294,7 +370,12 @@ function makeStore(dir: string): BlobStore {
             ...(name !== undefined ? { name } : {}),
           });
         }
-      } catch { /* store never written — empty */ }
+      } catch (e) {
+        // An empty array is "you have no blobs". A store the OS refused to
+        // read said the same sentence, so an unreadable store looked like a
+        // fresh one — with every blob still sitting in it.
+        if (!isAbsent(e)) rethrowUnreadable(e, "the blob store", dir);
+      }
       return out;
     },
   };

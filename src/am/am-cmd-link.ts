@@ -9,7 +9,9 @@ import { join, resolve } from "@std/path";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
 import { repoRoot } from "./am-cmd-create.ts";
-import { ensureVersion, readPin } from "./am-versions.ts";
+import { ensureVersion } from "./am-versions.ts";
+import type { FrameworkPin } from "../server/deno-json.ts";
+import { LOCAL_PIN_FILE, readFrameworkPin } from "../server/deno-json.ts";
 
 /** Resolve the framework checkout to link against: --aio flag › $AIO_HOME ›
  *  the checkout am itself runs from › the default install location. Verified to
@@ -142,6 +144,27 @@ export async function linkDepAio(
   return "linked";
 }
 
+/** How `am link` names what it linked to. Pure, because the FILE it names is
+ *  the part people act on: a path pin lives in the git-ignored
+ *  `.aio/pin.local`, never in deno.json, and reporting "(pinned in deno.json)"
+ *  for one sent developers to edit a file that did not contain the pin.
+ *  `readFrameworkPin` decides the source; this only says it. */
+export function _linkTarget(o: {
+  pin: string | null;
+  pinSource: FrameworkPin["source"];
+  root: string;
+  explicitRoot: boolean;
+}): string {
+  if (o.pin) {
+    return `aio ${o.pin} (pinned in ${
+      o.pinSource === "local" ? LOCAL_PIN_FILE : "deno.json"
+    })`;
+  }
+  if (o.explicitRoot) return `${o.root} (--aio override)`;
+  return `${o.root}\n  ⚠ this app has no aioVersion pin, so a clone builds ` +
+    `against whatever aio is installed. Pin it: \`am pin latest\``;
+}
+
 export async function cmdLink(
   args: string[],
   flags: GlobalFlags,
@@ -195,9 +218,14 @@ export async function cmdLink(
   // escape hatch, and it says so in the output so nobody is misled.
   let root = install;
   let pin: string | null = null;
+  /** WHERE the pin lives. `readFrameworkPin` is THE reader (doctor uses the
+   *  same one): a path pin lives in the git-ignored `.aio/pin.local`, never in
+   *  deno.json. `am link` used to name deno.json for both, so a developer
+   *  following the line went and edited a file that did not contain the pin. */
+  let pinSource: FrameworkPin["source"] = null;
   const explicitRoot = aioFlagValue(args) !== undefined;
   if (!explicitRoot) {
-    pin = await readPin(dir);
+    ({ pin, source: pinSource } = await readFrameworkPin(dir));
     if (pin) {
       const res = await ensureVersion(install, pin);
       if (!res.ok) {
@@ -228,12 +256,7 @@ export async function cmdLink(
     );
     Deno.exit(1);
   }
-  const how = pin
-    ? `aio ${pin} (pinned in deno.json)`
-    : explicitRoot
-    ? `${root} (--aio override)`
-    : `${root}\n  ⚠ this app has no aioVersion pin, so a clone builds against ` +
-      `whatever aio is installed. Pin it: \`am pin latest\``;
+  const how = _linkTarget({ pin, pinSource, root, explicitRoot });
   out(
     mode === "pretty"
       ? (r === "ok"

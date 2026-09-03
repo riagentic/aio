@@ -374,7 +374,8 @@ export const one = cell("one", {
     }
     const final = await lintProject(dir);
     const stuck = final.issues.filter((i) =>
-      i.safeFix && i.area === "alpha52" && i.message.includes("returning")
+      i.safeFix && i.area === "alpha52" &&
+      i.message.includes("return effect(s) from a method")
     );
     assertEquals(
       stuck.map((i) => `${i.file}:${i.line} ${i.message}`),
@@ -382,7 +383,8 @@ export const one = cell("one", {
       "these wore [fixable] but --safe-fix never rewrites them",
     );
     const declined = final.issues.filter((i) =>
-      i.area === "alpha52" && i.message.includes("returning")
+      i.area === "alpha52" &&
+      i.message.includes("return effect(s) from a method")
     );
     assertEquals(declined.length, 2, "both sites are still REPORTED");
     for (const d of declined) {

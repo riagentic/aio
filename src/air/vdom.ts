@@ -15,6 +15,7 @@ export {
   _LAZY_PENDING,
   _Null,
   _setDevA11yCheck,
+  _SignalText,
   ErrorBoundary,
   Fragment,
   Portal,
@@ -24,7 +25,12 @@ export {
 } from "./vdom-types.ts";
 
 // ── Element creation (vdom-create.ts) ────────────────────────────────
-export { _callRef, h } from "./vdom-create.ts";
+// `_callRef` is deliberately NOT re-exported: a ref is delivered through
+// `_attachRef` / `_detachRef` (vdom-create.ts), which put the attach at the end
+// of the commit. A facade export of the raw delivery is an invitation to a
+// fourth path that attaches immediately, which is the bug those two exist to
+// make impossible.
+export { h } from "./vdom-create.ts";
 
 // ── Rendering (vdom-render.ts) ───────────────────────────────────────
 export { _render, createDom } from "./vdom-render.ts";
@@ -49,8 +55,9 @@ export {
 // ── Signal/action helpers (vdom-helpers.ts) ──────────────────────────
 export {
   _applyActions,
-  _bindSignalTextChildren,
-  _cleanupSignalTextChildren,
+  _bindSignalText,
+  _sigText,
+  _unbindSignalText,
 } from "./vdom-helpers.ts";
 
 // ── Lazy loading (vdom-lazy.ts) ──────────────────────────────────────

@@ -12,6 +12,7 @@
 import { assert, assertEquals } from "jsr:@std/assert@1.0.19";
 import { createServer } from "../../src/server/server.ts";
 import { createWsManager } from "../../src/server/server-ws.ts";
+import { tempDir } from "../../src/testing/temp-dir.ts";
 
 function wsRequest(origin: string | undefined, host: string): Request {
   const headers = new Headers({
@@ -66,7 +67,7 @@ Deno.test("b5: snapshot endpoint requires admin role in per-user mode", async ()
       dispatch: () => {},
       getSnapshot: () => JSON.stringify({ secret: "raw-state" }),
       loadSnapshot: () => {},
-      baseDir: await Deno.makeTempDir({ prefix: "aio-b5-" }),
+      baseDir: await tempDir("aio-b5-"),
       debug: () => {},
       prod: false,
       users: {

@@ -22,13 +22,21 @@
 // SCOPE — only values whose DATA is destroyed:
 //
 //   Map, Set          → `{}`; every entry lost
+//   RegExp            → `{}`; the pattern is lost
+//   ArrayBuffer/View  → `{}` / `{"0":…}`; the bytes are lost or unrecognisable
 //   function, symbol  → the key disappears entirely
+//   a SYMBOL KEY      → gone from full state; a patch for it addresses `null`
 //   bigint            → JSON.stringify THROWS
 //
 // `Date`, `NaN` and `Infinity` change form (a Date becomes its ISO string, the
 // others become `null`) but do not destroy data, and dates in state are far too
 // common for a warning about them to stay readable. They are deliberately out
 // of scope; the doc says so rather than leaving the omission to be discovered.
+// The OTHER hazard those types carry — an in-place mutation (`s.when.setTime`,
+// `s.bytes[0] = 1`) that Immer cannot see, so it commits no patch and reaches
+// no client — is named where state is frozen instead (`deepFreeze`,
+// immutable.ts), because that is the site that knows the value is unfreezable
+// and it is the MUTATION, not the assignment, that is lossy.
 
 import { log } from "../diagnostics/logger-api.ts";
 import { isDevMode } from "../diagnostics/logger-types.ts";
@@ -39,6 +47,11 @@ export type WireLoss = { path: string; kind: string; lost: string };
 const KIND = (v: unknown): string | null => {
   if (v instanceof Map) return "Map";
   if (v instanceof Set) return "Set";
+  if (v instanceof RegExp) return "RegExp";
+  if (v instanceof ArrayBuffer) return "ArrayBuffer";
+  if (ArrayBuffer.isView(v)) {
+    return v instanceof DataView ? "DataView" : "typed array";
+  }
   if (typeof v === "function") return "function";
   if (typeof v === "symbol") return "symbol";
   if (typeof v === "bigint") return "bigint";
@@ -48,8 +61,16 @@ const KIND = (v: unknown): string | null => {
 const LOST: Record<string, string> = {
   Map: "becomes {} — every entry is lost",
   Set: "becomes {} — every member is lost",
+  RegExp: "becomes {} — the pattern and flags are lost",
+  ArrayBuffer: "becomes {} — every byte is lost",
+  DataView: "becomes {} — every byte is lost",
+  "typed array":
+    'becomes a plain object ({"0":…}) — length/set/subarray and the type are lost',
   function: "the key disappears entirely",
   symbol: "the key disappears entirely",
+  "symbol key":
+    "the property vanishes from broadcast state entirely, and its PATCH " +
+    "arrives at every client with a null key instead",
   bigint: "JSON.stringify throws on it",
 };
 
@@ -71,6 +92,18 @@ export function findWireLoss(
   // legitimately share references; bail rather than loop.
   if (seen.has(root)) return null;
   seen.add(root);
+  // A SYMBOL-KEYED property is invisible to `Object.entries` — the walk below
+  // would step straight past it and report nothing, which is the same silence
+  // this module exists to break: `JSON.stringify({ [Symbol("k")]: 1 })` is
+  // `{}`, so the property is not "changed on the wire", it is absent.
+  const syms = Object.getOwnPropertySymbols(root);
+  if (syms.length > 0) {
+    return {
+      path: `${path}[${String(syms[0])}]`,
+      kind: "symbol key",
+      lost: LOST["symbol key"]!,
+    };
+  }
   if (Array.isArray(root)) {
     for (let i = 0; i < root.length; i++) {
       const hit = findWireLoss(root[i], `${path}[${i}]`, seen);
@@ -85,6 +118,27 @@ export function findWireLoss(
   return null;
 }
 
+/** The fix sentence for each kind. One generic "store plain data instead
+ *  (Object.fromEntries(map), [...set])" was printed for every kind, including
+ *  the ones it does not apply to — a symbol key has no `fromEntries` to reach
+ *  for, and a byte buffer is not a Map. */
+const FIX: Record<string, string> = {
+  Map: "Store plain data instead: Object.fromEntries(map).",
+  Set: "Store plain data instead: [...set].",
+  RegExp: "Store the source string (and flags) and rebuild the RegExp on use.",
+  ArrayBuffer:
+    "Store bytes as a base64 string, or keep them out of cell state.",
+  DataView: "Store bytes as a base64 string, or keep them out of cell state.",
+  "typed array":
+    "Store [...bytes] (a plain array) or a base64 string, and rebuild the view on use.",
+  function: "Move behaviour to a method; keep state to plain data.",
+  symbol: "Store a string instead — a symbol has no wire form.",
+  "symbol key":
+    "Key state by a STRING — a symbol key exists only in this process.",
+  bigint: "Store the number, or the digits as a string.",
+  default: "Store plain data instead.",
+};
+
 /** Once per cell+path+kind — a Map written every tick must not fill the log
  *  with the same line. Keyed by code positions, of which an app has finitely
  *  many. Exported for the test that proves the de-duplication. @internal */
@@ -98,7 +152,10 @@ export const _wireLossSeen = new Set<string>();
  *  this codebase keeps paying for. */
 export function warnWireLoss(
   cellName: string,
-  patches: readonly { path: readonly (string | number)[]; value?: unknown }[],
+  patches: readonly {
+    path: readonly (string | number | symbol)[];
+    value?: unknown;
+  }[],
 ): void {
   // Where a developer can act on it: the test harness and the browser set
   // `__aioDev`; a dev server running from source does not, and that is exactly
@@ -109,17 +166,31 @@ export function warnWireLoss(
     !(globalThis as Record<string, unknown>).__aioDev && !isDevMode()
   ) return;
   for (const p of patches) {
-    const loss = findWireLoss(p.value, p.path.join("."));
+    // `String(seg)`, never `join` — an Immer patch path carries the KEY, and a
+    // symbol key made `join(".")` throw "Cannot convert a Symbol value to a
+    // string" from inside the reporter. That throw escaped through the reduce,
+    // so the method failed with `REDUCE_ERROR … check action payload shape` —
+    // the wire-loss reporter killing the very write whose loss it exists to
+    // describe, under a message about something else entirely.
+    const where = p.path.map((seg) => String(seg)).join(".");
+    const symKey = p.path.find((seg) => typeof seg === "symbol");
+    const loss = symKey !== undefined
+      ? { path: where, kind: "symbol key", lost: LOST["symbol key"]! }
+      : findWireLoss(p.value, where);
     if (!loss) continue;
     const key = `${cellName}.${loss.path}:${loss.kind}`;
     if (_wireLossSeen.has(key)) continue;
     _wireLossSeen.add(key);
     log.warn(
       "cell",
-      `${cellName}: state.${loss.path} holds a ${loss.kind}, which the wire ` +
+      `${cellName}: state.${loss.path} ${
+        loss.kind === "symbol key"
+          ? "is keyed by a symbol"
+          : `holds a ${loss.kind}`
+      }, which the wire ` +
         `cannot carry — ${loss.lost}. State is broadcast and persisted as ` +
         `JSON, so this value is intact here and gone in every client and in ` +
-        `state.db. Store plain data instead (Object.fromEntries(map), [...set]).`,
+        `state.db. ${FIX[loss.kind] ?? FIX.default}`,
     );
   }
 }

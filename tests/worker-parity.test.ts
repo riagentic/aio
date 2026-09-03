@@ -62,9 +62,9 @@ export const wk = cell("wk", {
     // Schedules live on the MAIN isolate, so a worker has to hand the effect
     // back rather than run it. This is the path that once came home as an
     // action and vanished.
-    later(s: { note: string }) {
+    later(s) {
       s.note = "scheduled";
-      return schedule.after("wk:later", 30, wk.mark.action());
+      s.$do(schedule.after("wk:later", 30, wk.mark.action()));
     },
   },
 });
@@ -73,9 +73,9 @@ export const nw = cell("nw", {
   state: { got: null as unknown, n: 0, note: "" },
   methods: {
     ...methods,
-    later(s: { note: string }) {
+    later(s) {
       s.note = "scheduled";
-      return schedule.after("nw:later", 30, nw.mark.action());
+      s.$do(schedule.after("nw:later", 30, nw.mark.action()));
     },
   },
 });

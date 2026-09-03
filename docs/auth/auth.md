@@ -259,8 +259,10 @@ optional third parameter. Use this for per-user action authorization:
 ```ts
 await aio.run({
   cells: [myCell],
+  // `action` arrives as `unknown` — narrow it before reading `.type`.
   beforeReduce: (action, state, user?) => {
-    if (action.type.startsWith("admin:") && user?.role !== "admin") return null;
+    const { type } = action as { type: string };
+    if (type.startsWith("admin:") && user?.role !== "admin") return null;
     return action;
   },
 });
@@ -388,8 +390,9 @@ testCell(cart, "each user gets their own cart", async (t) => {
   await t.as({ id: "alice", role: "member" }, () => t.send.add("sku-1"));
   await t.as({ id: "bob", role: "member" }, () => t.send.add("sku-2"));
 
-  assertEquals(t.getState().items["alice"], ["sku-1"]);
-  assertEquals(t.getState().items["bob"], ["sku-2"]);
+  const items = t.getState().items as Record<string, string[]>;
+  assertEquals(items["alice"], ["sku-1"]);
+  assertEquals(items["bob"], ["sku-2"]);
 });
 ```
 
@@ -680,9 +683,13 @@ await aio.run({
 ```
 
 The callback verifies the ID token (issuer, audience, expiry, signature via the
-provider's JWKS), issues a session cookie, and redirects to `/`. The state
-parameter is a stored one-shot token carrying the PKCE verifier — replay is dead
-on arrival.
+provider's JWKS), issues a session cookie, and redirects to `/` — or to the
+same-origin path passed as `/__aio/auth/oidc/start?redirect=/orders/7`. That
+path is sanitized, not trusted: a non-ASCII path (`/文档`) is percent-encoded so
+the redirect header is always buildable, and anything that could leave the
+origin (an absolute URL, `//host`, `/\host`, a control character) falls back to
+`/`. The state parameter is a stored one-shot token carrying the PKCE verifier —
+replay is dead on arrival.
 
 **External identities live in their own namespace.** The account id is
 `oidc:<issuer-without-scheme>:<sub>` — never the bare `sub`:

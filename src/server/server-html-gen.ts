@@ -177,6 +177,12 @@ function headContent(
   /** Carry the full look, disabled, for a runtime that learns `ui.theme` only
    *  after the shell exists (the packaged android WebView). */
   deferTheme = false,
+  /** The app's identity. The browser's offline sync queue scopes its
+   *  `localStorage` key by it — `localStorage` is per ORIGIN, so without it
+   *  two aio apps on one host:port shared pending CRDT ops for any same-named
+   *  cell. Injected in the SHELL (not left to the `cfg` frame) for the same
+   *  reason `syncCells` is: a page can boot sync before the frame arrives. */
+  appId?: string,
 ): string {
   // THE baseline, on every target, always — before the app's stylesheet so
   // any of it can be overridden by a single rule.
@@ -253,6 +259,7 @@ function headContent(
   // the browser falls back to its own constant and gives up on calls the
   // server is still happily running.
   const clientConfig = {
+    ...(appId ? { appId } : {}),
     ...(renderBudget ? { renderBudget } : {}),
     ...(syncCells && syncCells.length ? { syncCells } : {}),
     ...(callTimeouts ? { callTimeouts } : {}),
@@ -329,6 +336,9 @@ export interface HtmlShellOptions {
   lang?: string;
   /** ui.dir — `<html dir>`. See `UiConfig.dir`. */
   dir?: import("./aio-types.ts").UiConfig["dir"];
+  /** The app's identity — injected into `window.__aioConfig` so the browser's
+   *  offline sync queue can scope its (per-origin) `localStorage` key. */
+  appId?: string;
 }
 
 export function generateHTML(o: HtmlShellOptions): string {
@@ -347,6 +357,9 @@ export function generateHTML(o: HtmlShellOptions): string {
     o.chrome,
     o.theme,
     o.themeName,
+    o.lang,
+    false, // deferTheme — a server-served shell always knows its ui.theme
+    o.appId,
   );
 
   if (o.prod) return prodHTML(head, o.lang);

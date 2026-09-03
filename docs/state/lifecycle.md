@@ -136,7 +136,7 @@ app can turn its own producers off — and a write from it is admitted _and_
 captured by the final persist.
 
 ```ts
-let poll: number | undefined;
+let poll: ReturnType<typeof setInterval> | undefined;
 
 await aio.run({
   cells: [sync],
@@ -262,8 +262,10 @@ nothing outlived the suite.
 ```ts
 await aio.run({
   cells: [counter, wallet],
+  // `action` arrives as `unknown` — narrow it before reading `.type`.
   beforeReduce: (action, state, user) => {
-    if (action.type.startsWith("admin:") && user?.role !== "admin") return null;
+    const { type } = action as { type: string };
+    if (type.startsWith("admin:") && user?.role !== "admin") return null;
     return action;
   },
 });

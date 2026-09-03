@@ -4,7 +4,7 @@ Nothing in your app code changes. If you run a `sync: true` cell, upgrade —
 alpha66 and alpha67 quarantined (prod) or refused (dev) any sync cell that
 restarted with uncompacted ops in its log; alpha68 fixes it, and the proof is
 `tests/sync-migration-e2e.test.ts`, described line by line in
-[crdt.md](../persistence/crdt.md#shape-changes).
+[crdt.md](../persistence/crdt.md#shape-changes-version--onmigrate).
 
 ## What to do
 

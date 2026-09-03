@@ -16,7 +16,7 @@ import {
   isServerOnlyFile,
   SERVER_ONLY_AIO_SYMBOLS,
 } from "../src/entries.ts";
-import { removalMessage, removalOf } from "../src/state/removals.ts";
+import { removalMessage, removalOf, REMOVALS } from "../src/state/removals.ts";
 import {
   linkSatisfiesPin,
   pinDisagreementHint,
@@ -43,6 +43,8 @@ const SITE_RULED_REMOVALS: ReadonlySet<string> = new Set([
   "schedule.backoff/poll(id, attempt, opts, action)",
   "cell({ ui })",
   "cellDefaults.ui",
+  "return effect(s) from a method",
+  "selector deps as a spread",
 ]);
 
 /** Is this finding suppressed?
@@ -501,6 +503,26 @@ export const checkStructure: Checker = async (ctx) => {
         "config",
         removalMessage(removalOf("aio.run({ appVersion })"), "aio.run"),
         { file: appEntry.relative },
+      );
+    }
+    // …and `killExisting` (alpha76): the flag has been `--takeover` since
+    // alpha52, so the key is `takeover` too. A compiled service binary can
+    // only write the key, which is why the rename had to happen before beta
+    // froze the surface.
+    if (setsInRun("killExisting")) {
+      report(
+        "error",
+        "config",
+        removalMessage(removalOf("aio.run({ killExisting })"), "aio.run"),
+        {
+          file: appEntry.relative,
+          fix: "takeover: true",
+          safeFix: fix.fixRenameRunKey(
+            appEntry.path,
+            "killExisting",
+            "takeover",
+          ),
+        },
       );
     }
     if (dj2.version) {
@@ -2650,6 +2672,24 @@ export const checkUpgrade: Checker = (ctx) => {
         },
       );
     }
+    // alpha76: four runtime flags left. A deno.json task is the one place an
+    // app writes a flag down, so it is the one place a removed flag can be
+    // found before the app boots and `parseCli` refuses it.
+    for (const r of REMOVALS) {
+      if (r.kind !== "cli-flag") continue;
+      if (!new RegExp(`(?<![\\w-])${r.key}(?![\\w=-])`).test(cmd)) continue;
+      found++;
+      report(
+        "error",
+        "upgrade",
+        removalMessage(r, `deno.json task "${name}"`),
+        {
+          file: "deno.json",
+          fix: r.now ?? `remove ${r.key} from the task`,
+          safeFix: fix.fixTaskFlags(entry),
+        },
+      );
+    }
     if (
       entry && cmd.includes(entry) && /(?<![\w-])--headless(?![\w=-])/.test(cmd)
     ) {
@@ -3018,13 +3058,17 @@ export const checkUseCell: Checker = (ctx) => {
 };
 
 // ══════════════════════════════════════════════════════════════════════
-// ALPHA52 — the effect channel (deprecations)
+// ALPHA52 — the effect channel (retired in alpha70/alpha76)
 // ══════════════════════════════════════════════════════════════════════
 
-/** alpha52 breaks, each with its migration:
+/** The alpha52-era spellings, each with its migration. Every one of them is a
+ *  removals-registry row now — the two that were still "deprecated through
+ *  beta" here (return-ed effects, spread selector deps) went out in alpha76,
+ *  because beta freezes the surface and a deprecation carried into it is
+ *  permanent:
  *  • effects off the return channel → `s.$do(...)` (safe-fix, conservative)
- *  • listensTo array form deprecated (report — the object form needs the
- *    author to pick a handler method)
+ *  • listensTo array form → the object form (report — it needs the author to
+ *    pick a handler method)
  *  • selector deps spread signature → tuple (safe-fix when untyped)
  *  • schedule.backoff/poll old arg order + poll `backoff` key → `factor` */
 export const checkAlpha52: Checker = (ctx) => {
@@ -3076,11 +3120,12 @@ export const checkAlpha52: Checker = (ctx) => {
       if (isSuppressed(file.lines, line - 1)) continue;
       found++;
       report(
-        "warn",
+        "error",
         "alpha52",
-        `${file.relative}:${line} — returning effects from a method is ` +
-          `deprecated (works through beta): call s.$do(effect) and use ` +
-          `\`return\` for values only`,
+        removalMessage(
+          removalOf("return effect(s) from a method"),
+          `${file.relative}:${line}`,
+        ),
         effectSiteOpts(m.index! + m[0].length, line),
       );
     }
@@ -3130,11 +3175,12 @@ export const checkAlpha52: Checker = (ctx) => {
       if (isSuppressed(file.lines, line - 1)) continue;
       found++;
       report(
-        "warn",
+        "error",
         "alpha52",
-        `${file.relative}:${line} — returning an effects ARRAY is deprecated ` +
-          `(works through beta): call s.$do(effect, ...) and use \`return\` ` +
-          `for values only`,
+        removalMessage(
+          removalOf("return effect(s) from a method"),
+          `${file.relative}:${line} (an effects ARRAY)`,
+        ),
         effectSiteOpts(m.index! + m[0].length, line),
       );
     }
@@ -3181,16 +3227,18 @@ export const checkAlpha52: Checker = (ctx) => {
       if (isSuppressed(file.lines, line - 1)) continue;
       found++;
       report(
-        "warn",
+        "error",
         "alpha52",
-        `${file.relative}:${line} — selector deps now arrive as a TUPLE: ` +
-          `fn: (s, [${
-            ps.slice(1).map((p) => p.split(":")[0]!.trim()).join(", ")
-          }], ...args) => … (the spread form works through beta with a hint)`,
+        removalMessage(
+          removalOf("selector deps as a spread"),
+          `${file.relative}:${line}`,
+        ),
         {
           file: file.relative,
           line,
-          fix: "fn: (s, [dep1, dep2], ...args) => …",
+          fix: `fn: (s, [${
+            ps.slice(1).map((p) => p.split(":")[0]!.trim()).join(", ")
+          }], ...args) => …`,
           safeFix: fix.fixSelectorDepsTuple(file.path),
         },
       );

@@ -3,7 +3,7 @@
 import type { CellDef, Creators, Msg } from "./cell-types.ts";
 import { checkReservedKeys } from "./cell-types.ts";
 import { randomUuid } from "../rand.ts";
-import { registerCall } from "./cell-impl.ts";
+import { dispatchTracked } from "./cell-impl.ts";
 import { settlesCalls } from "../protocol/ack-registry.ts";
 import { nameIsTaken } from "./cell-helpers.ts";
 
@@ -168,19 +168,24 @@ export function bindCell(
           remote.catch(() => {});
           return remote;
         }
-        const promise = registerCall(callId, `${f.__aio.id}:${key}`);
-        dispatch({
-          ...action,
-          payload: { args, _callId: callId },
-          _source: "Effect" as const,
-        });
-        // Attach a no-op catch so a fire-and-forget server-side call
-        // (`cell.asyncMethod()` without await) whose body throws can't escape as
-        // an unhandled rejection and kill the Deno process — the executor still
-        // logs + dispatches `__error`, and any awaiter still sees the rejection.
-        // Mirrors the browser twin in cell-reactive.ts.
-        promise.catch(() => {});
-        return promise;
+        // `dispatchTracked`: the registration is settled by the executor on
+        // completion — OR by the dispatch door's own refusal (paused, closed,
+        // draining), which is the only time nothing else ever will. Its no-op
+        // catch keeps a fire-and-forget call (`cell.asyncMethod()` without
+        // await) whose body throws from escaping as an unhandled rejection —
+        // the executor still logs + dispatches `__error`, and any awaiter
+        // still sees the rejection. Mirrors the browser twin in
+        // cell-reactive.ts.
+        return dispatchTracked(
+          dispatch,
+          {
+            ...action,
+            payload: { args, _callId: callId },
+            _source: "Effect" as const,
+          },
+          callId,
+          `${f.__aio.id}:${key}`,
+        );
       };
       attachMeta(fn, creator);
       (f as Record<string, unknown>)[key] = fn;

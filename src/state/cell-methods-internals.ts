@@ -27,28 +27,35 @@ import { materializeValue, withDraftDo } from "./cell-impl.ts";
 import { current, type Draft, isDraft } from "immer";
 import { type AioError, createAioError } from "../diagnostics/error.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { refuseRetired, removalOf, removalsAreFatal } from "./removals-core.ts";
 
 // ── The effect channel: s.$do (alpha52) ────────────────────────────────
 
 type Effect = ScheduleEffect | OwnEffect;
 
-/** One-time-per-method deprecation hints for the old return-effects channel. */
-const _returnHinted = new Set<string>();
-/** @internal test seam — re-arm the one-time hints. */
+/** Prod-only throttle for the retired return-effects channel: the refusal is
+ *  per CALL, not per boot, so an app that returns an effect in a loop would
+ *  otherwise turn one mistake into a log flood. Dev throws every time. */
+const _returnRefused = new Set<string>();
+/** @internal test seam — re-arm the once-per-method prod refusal. */
 export function _resetReturnEffectHints(): void {
-  _returnHinted.clear();
+  _returnRefused.clear();
 }
 
-function hintReturnedEffects(cellName: string, methodKey: string): void {
+/** Retired in alpha76: `return` carries VALUES, `s.$do(...)` carries effects.
+ *  The two could never share the channel — a method that returned an effect
+ *  resolved its caller with `undefined`, silently — so keeping it through beta
+ *  would have frozen `return` out of ever carrying an effect-shaped value.
+ *  Dev throws (the author is here); prod logs the registry line once per
+ *  method and still runs the effects, so an upgraded app says so on every
+ *  boot rather than silently dropping a timer. */
+function refuseReturnedEffects(cellName: string, methodKey: string): void {
   const k = `${cellName}:${methodKey}`;
-  if (_returnHinted.has(k)) return;
-  _returnHinted.add(k);
-  log.warn(
-    "cell",
-    `[${cellName}] method '${methodKey}' returned effect(s) — return-ed ` +
-      `effects are deprecated: call s.$do(effect) inside the method and use ` +
-      `\`return\` for values only. aiol --safe-fix rewrites this. ` +
-      `(hinted once per method)`,
+  if (!removalsAreFatal() && _returnRefused.has(k)) return;
+  _returnRefused.add(k);
+  refuseRetired(
+    removalOf("return effect(s) from a method"),
+    `${cellName}.${methodKey}`,
   );
 }
 
@@ -331,7 +338,7 @@ export function buildMethodsReducer(
       return captured.length > 0 ? captured : undefined;
     }
     if (isScheduleEffect(result) || isOwnEffect(result)) {
-      hintReturnedEffects(prefix, key);
+      refuseReturnedEffects(prefix, key);
       return [
         ...captured,
         detachDrafts(
@@ -343,7 +350,7 @@ export function buildMethodsReducer(
       Array.isArray(result) && result.length > 0 &&
       classifyReturnedArray(prefix, key, result) === "effects"
     ) {
-      hintReturnedEffects(prefix, key);
+      refuseReturnedEffects(prefix, key);
       return [
         ...captured,
         ...result.map((e) =>
@@ -352,6 +359,33 @@ export function buildMethodsReducer(
       ] as (Msg | ScheduleEffect | OwnEffect)[];
     }
     return markReturn(result, captured.length > 0 ? captured : undefined);
+  };
+  /** The positional argument list an action's payload carries, or a throw.
+   *
+   *  `args` is the framework's OWN envelope (`{ args: [...] }`, built by the
+   *  action creator and by every client binding), so anything else in that
+   *  slot is a malformed action, not an app value — and the reduce is the one
+   *  place both method kinds pass through, which is what makes the refusal
+   *  identical for both. Absent is legal (a no-argument method, and a
+   *  hand-dispatched `{ type }`); present-and-not-an-array is refused. */
+  const methodArgs = (
+    cell: string,
+    key: string,
+    payload: unknown,
+  ): unknown[] => {
+    const raw = (payload as Record<string, unknown> | undefined)?.args;
+    if (raw === undefined || raw === null) return [];
+    if (Array.isArray(raw)) return raw;
+    throw new Error(
+      `[${cell}:${key}] action payload.args must be an ARRAY of positional ` +
+        `arguments (got ${
+          typeof raw === "object" ? "an object" : `a ${typeof raw}`
+        }: ` +
+        `${JSON.stringify(raw)?.slice(0, 60) ?? String(raw)}). ` +
+        `Call the method (${cell}.${key}(a, b)) or dispatch ` +
+        `{ type: "${cell}:${key}", payload: { args: [a, b] } } — a non-array ` +
+        `here is spread character by character or throws mid-spread.`,
+    );
   };
   /** Run a sync method with `s.$do` served on its draft, then classify. */
   const runSync = (
@@ -445,10 +479,18 @@ export function buildMethodsReducer(
     // Method-style: call method directly on draft
     const method = methods[ownKey];
     if (method) {
+      // ONE decider for the positional envelope, BEFORE the sync/async split.
+      // Both halves used to write `(payload?.args as unknown[]) ?? []` and
+      // spread the result unchecked, so a payload from the network deciding
+      // what `...args` means: `args: "hi"` spread PER CHARACTER (`s.n += "n"`
+      // turned a number into `"0n"`, acked `ok: true`, and every later call
+      // appended another character), and a non-iterable object threw at the
+      // spread — answered `ok: false` by the sync half and, by the async half,
+      // an `EFFECT_ERROR` blaming the app's method while the client was still
+      // told `ok: true`. The envelope is the framework's own; a malformed one
+      // is refused here, identically for both kinds.
+      const args = methodArgs(prefix, ownKey, action.payload);
       if (syncMethods.has(ownKey)) {
-        const args =
-          ((action.payload as Record<string, unknown>)?.args as unknown[]) ??
-            [];
         return runSync(
           ownKey,
           method as SyncMethod<Record<string, unknown>>,
@@ -458,7 +500,6 @@ export function buildMethodsReducer(
       }
       if (asyncMethods.has(ownKey)) {
         const p = (action.payload ?? {}) as Record<string, unknown>;
-        const args = (p.args as unknown[]) ?? [];
         const _callId = p._callId as string | undefined;
         return [{
           type: `${prefix}:__exec`,
@@ -544,8 +585,30 @@ export function buildMethodsExecutor(
         _args: unknown[];
         _callId?: string;
       };
+      // "Is it defined" is a SHAPE question, and the index type cannot say
+      // `undefined` — so asking it of the looked-up value read as always-true
+      // to the compiler while the runtime hands back `undefined` for a name
+      // this cell does not have. Ask the map, and bind the value for the call.
+      const defined = Object.hasOwn(methods, _method);
       const method = methods[_method];
-      if (!method || !asyncMethods.has(_method)) return;
+      if (!defined || !asyncMethods.has(_method)) {
+        // A silent `return` here stranded the CALL: the registration this
+        // effect carries is settled by the method that runs, and no method
+        // ran — so an awaiting caller waited out the full ceiling and was
+        // then told the method "may still be running". Nothing started, and
+        // saying so costs one line.
+        resolveCall(
+          _callId,
+          undefined,
+          new Error(
+            `[${prefix}] no async method '${_method}' to run — the executor ` +
+              `was handed '${prefix}:__exec' for a method that is ${
+                defined ? "SYNC" : "not defined on this cell"
+              } (async methods: ${[...asyncMethods].join(", ") || "none"}).`,
+          ),
+        );
+        return;
+      }
 
       // Transactional methods: reads see a STABLE snapshot captured
       // at entry (an `await` never changes them), and writes buffer + commit
@@ -686,8 +749,8 @@ export function buildMethodsExecutor(
         //
         // The throttle exists because every long method hand-rolled it. One
         // report wrote the same shape twice in one app —
-        // `if (++ticks % 8 === 0) s.$commit!()` in a filesystem walk and
-        // `if (pct - published >= 0.01) s.$commit!()` in a hasher — which is
+        // `if (++ticks % 8 === 0) s.$commit()` in a filesystem walk and
+        // `if (pct - published >= 0.01) s.$commit()` in a hasher — which is
         // the counter, the threshold and the bookkeeping variable that the
         // framework can simply own. `long:` made "this runs for minutes" a
         // first-class category; publishing progress from one is what those
@@ -905,7 +968,7 @@ export function buildMethodsExecutor(
               // Deprecated channel (alpha52): still works through beta, with a
               // one-time hint — `s.$do(...)` is the way. self() descriptors in
               // it resolve here (same gate as $do), so they stay loud.
-              hintReturnedEffects(name, _method);
+              refuseReturnedEffects(name, _method);
               const resolved = retEffects.map((e) =>
                 materializeValue(toDoneEffect(
                   name,
