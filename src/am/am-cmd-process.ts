@@ -5,7 +5,8 @@
 
 import { readDenoJson } from "../server/deno-json.ts";
 import { KILL_POLL_MS } from "../server/single-instance-lock.ts";
-import { dirname, join, resolve, SEPARATOR as sep } from "@std/path";
+import { dirname, join } from "@std/path";
+import { isUnder, projectRoot } from "./am-project.ts";
 import { appDirs } from "../server/app-dirs.ts";
 import {
   DEFAULT_BACKUP_KEEP,
@@ -240,7 +241,7 @@ export async function ensureSingleton(
     } catch { /* not yet */ }
     if (responds) {
       // It's actually started — refuse
-      outError(`already running (pid ${pf.pid}, port ${pf.port})`, mode);
+      outError(alreadyRunningLine(pf), mode);
       Deno.exit(1);
     }
     // Not responding — stuck process, kill it and clean up
@@ -274,7 +275,7 @@ export async function ensureSingleton(
   }
 
   if (responds) {
-    outError(`already running (pid ${pf.pid}, port ${pf.port})`, mode);
+    outError(alreadyRunningLine(pf), mode);
     Deno.exit(1);
   }
 
@@ -399,6 +400,12 @@ export async function cmdUi(
   );
   const proc = new Deno.Command(spec.cmd, {
     args: spec.args,
+    // amui is its OWN project: Deno discovers `deno.json` from the working
+    // directory, so launching it from the user's app directory hands it the
+    // APP's config — the app's import map, the app's lock file — for a program
+    // that is not the app. `am ui` is typed inside an app by definition, so
+    // that is the normal case, not the corner one. Run it where it lives.
+    cwd: dirname(dirname(entry)),
     stdin: "null",
     stdout: "piped",
     stderr: "null",
@@ -497,11 +504,7 @@ export async function cmdStart(
   const lock = new AppLock(appId, home);
   const result = await lock.acquire(port);
   if (!result.ok) {
-    const ex = result.existing;
-    outError(
-      `already running: ${ex.appId} (pid ${ex.pid}, port ${ex.port})`,
-      mode,
-    );
+    outError(alreadyRunningLine(result.existing), mode);
     Deno.exit(1);
   }
 
@@ -578,7 +581,7 @@ export async function cmdStart(
     let effective = clientArg;
     if (!effective) {
       try {
-        const dj = ((await readDenoJson(Deno.cwd()))?.config ?? {}) as {
+        const dj = ((await readDenoJson(projectRoot()))?.config ?? {}) as {
           client?: string;
         };
         effective = dj.client;
@@ -611,7 +614,10 @@ export async function cmdStart(
 
   // Record the launch so `am restart` can replay it — the running app can't
   // recover deno-runtime flags (esp. --env-file) from its own Deno.args.
-  writeLaunchInfo(appId, { flags: passthrough, entry, cwd: Deno.cwd() });
+  // The PROJECT root, not the cwd: `am start` from a subdirectory launches
+  // the app the way `deno task dev` at the root would, and records that.
+  const cwd = projectRoot();
+  writeLaunchInfo(appId, { flags: passthrough, entry, cwd });
 
   // Detached background spawn — the child must survive am's exit, its output
   // must land in the log file, and its real PID must come back on stdout. The
@@ -699,7 +705,7 @@ export async function cmdStart(
     port,
     startedAt: Date.now(),
     status: "starting",
-    cwd: Deno.cwd(),
+    cwd,
     // `writeLock` keys by (appId, home) — omitting it filed this under the
     // DEFAULT instance's name. See the note on `home` above.
     home,
@@ -842,9 +848,33 @@ export function noLockMessage(appId: string): string {
  *  (and every refusal message) is testable without the process-exiting shell. */
 export type StopTarget = { appId: string; port: number; pf: LockData | null };
 
-export async function resolveStopTarget(
-  flags: GlobalFlags,
-): Promise<{ ok: true; target: StopTarget } | { ok: false; error: string }> {
+/** The running instance holding `port`, from the LOCK FILES — whichever app
+ *  it belongs to. `--port=N` is documented as a way to point at a listener, so
+ *  it has to be able to name an app other than the cwd's. */
+export function lockOnPort(port: number): LockData | null {
+  return instances().find((i) => i.port === port) ?? null;
+}
+
+/** WHICH instance a process verb is about, decided from the lock files alone —
+ *  ONE resolver for `stop`, `kill` and `restart`.
+ *
+ *  There used to be two. `stop` honoured `--port=N` (it identifies the app),
+ *  while `kill` read `flags.port` only under `--stale` and otherwise resolved
+ *  the cwd's app id — so `am kill --port=<another app's port>` killed the cwd's
+ *  app, and `am kill --port=1`, a port nobody holds, killed it too. A flag the
+ *  help lists as global, silently ignored by one verb of three, is worse than a
+ *  flag that does not exist: it reads as a targeted command and acts as an
+ *  untargeted one.
+ *
+ *  `probe` is not a failure — it means `--port=N` names no lock, which `stop`
+ *  can still resolve by asking the port itself (an app started outside `am`
+ *  holds no lock). `kill` cannot: it signals a pid, and only a lock has one. */
+export type LockTarget =
+  | { kind: "target"; target: StopTarget }
+  | { kind: "probe"; port: number }
+  | { kind: "none"; error: string };
+
+export function resolveLockTarget(flags: GlobalFlags): LockTarget {
   const cwdAppId = resolveAmAppId(flags.app);
   // Wherever the instance's home is — `am stop` must stop the app
   // `am instances` lists, including one booted from its own `appDir`.
@@ -853,28 +883,69 @@ export async function resolveStopTarget(
   // No --port: the lock file is the only decider.
   if (flags.port === undefined) {
     return pf
-      ? { ok: true, target: { appId: cwdAppId, port: pf.port, pf } }
-      : { ok: false, error: noLockMessage(cwdAppId) };
+      ? { kind: "target", target: { appId: cwdAppId, port: pf.port, pf } }
+      : { kind: "none", error: noLockMessage(cwdAppId) };
   }
 
   // --port that matches our own lock — nothing to discover.
   if (pf && pf.port === flags.port) {
-    return { ok: true, target: { appId: cwdAppId, port: flags.port, pf } };
+    return {
+      kind: "target",
+      target: { appId: cwdAppId, port: flags.port, pf },
+    };
   }
+
+  // Some OTHER app's lock holds it: that app is the target, and `--app=X`
+  // disagreeing with it is a refusal rather than a silent choice of one.
+  const other = lockOnPort(flags.port);
+  if (other) {
+    const wanted = flags.app ? resolveAppId(flags.app) : undefined;
+    if (wanted && wanted !== other.appId) {
+      return {
+        kind: "none",
+        error: `port ${flags.port} belongs to app "${other.appId}", not ` +
+          `"${wanted}" (--app) — refusing to act on a different app`,
+      };
+    }
+    return {
+      kind: "target",
+      target: { appId: other.appId, port: flags.port, pf: other },
+    };
+  }
+  return { kind: "probe", port: flags.port };
+}
+
+/** What a verb that can only act on a LOCK says when `--port=N` names none. */
+export function noLockOnPortMessage(port: number): string {
+  const live = instances();
+  return `no running app holds port ${port} — refusing to act on a ` +
+    `different app than the one you named.\n` +
+    (live.length
+      ? `  running: ${live.map((i) => `${i.appId} @ :${i.port}`).join(", ")}\n`
+      : `  nothing is running (lock dir: ${lockDir()})\n`) +
+    `  an orphan SERVING with no lock is what \`am kill --stale --port=${port}\` reaps`;
+}
+
+export async function resolveStopTarget(
+  flags: GlobalFlags,
+): Promise<{ ok: true; target: StopTarget } | { ok: false; error: string }> {
+  const first = resolveLockTarget(flags);
+  if (first.kind === "target") return { ok: true, target: first.target };
+  if (first.kind === "none") return { ok: false, error: first.error };
 
   // `--port=N` IDENTIFIES the app; it never merely overrides the port of a
   // cwd-derived one. In a two-app repo the cwd's deno.json named the OTHER
   // app, so `am stop --port=N` addressed a lock that did not exist, fell back
   // to the main port, and reported the bare "app not running" — while the app
   // on N kept running.
-  const probe = await probePort(flags.port);
+  const probe = await probePort(first.port);
   switch (probe.kind) {
     case "aio": {
       const wanted = flags.app ? resolveAppId(flags.app) : undefined;
       if (wanted && wanted !== probe.appId) {
         return {
           ok: false,
-          error: `port ${flags.port} answers as app "${probe.appId}", not ` +
+          error: `port ${first.port} answers as app "${probe.appId}", not ` +
             `"${wanted}" (--app) — refusing to stop a different app`,
         };
       }
@@ -882,7 +953,7 @@ export async function resolveStopTarget(
         ok: true,
         target: {
           appId: probe.appId,
-          port: flags.port,
+          port: first.port,
           pf: liveLock(probe.appId),
         },
       };
@@ -890,7 +961,7 @@ export async function resolveStopTarget(
     case "tls":
       return {
         ok: false,
-        error: `port ${flags.port} speaks TLS (https) — under --expose the ` +
+        error: `port ${first.port} speaks TLS (https) — under --expose the ` +
           `control endpoint is plain HTTP on a SEPARATE port, recorded only ` +
           `in the lock file, so no port on the TLS side can reach it. Target ` +
           `the app by id instead: am stop --app=<id> (ids: am instances; ` +
@@ -899,63 +970,92 @@ export async function resolveStopTarget(
     case "listening":
       return {
         ok: false,
-        error: `port ${flags.port} has a listener that answers neither HTTP ` +
+        error: `port ${first.port} has a listener that answers neither HTTP ` +
           `nor TLS — not an aio app`,
       };
     case "http":
       return {
         ok: false,
-        error: `port ${flags.port} answers HTTP but is not an aio app ` +
+        error: `port ${first.port} answers HTTP but is not an aio app ` +
           `(no /__aio/health) — wrong port?`,
       };
     case "closed":
       return {
         ok: false,
-        error: `nothing is listening on port ${flags.port} — no app to stop ` +
+        error: `nothing is listening on port ${first.port} — no app to stop ` +
           `there (running instances: am instances)`,
       };
   }
 }
 
-/** The project this `am` invocation is about: the nearest ancestor of the cwd
- *  holding a `deno.json`, or the cwd when there is none.
+// THE project-root resolver lives in am-project.ts (one decider, shared with
+// every reader of the project's config); re-exported here for its callers.
+export { isUnder, projectRoot };
+
+/** The checkout a running instance was started from, when it is NOT this
+ *  project — or null when it is (or when the lock predates the field).
  *
- *  This is what scopes `--all`, and the walk UP is the point. A compiled app is
- *  routinely launched from somewhere inside its own project rather than the
- *  root — `dist/<app>/./<app>` is the normal way to run a built server — and
- *  its lock records THAT directory. Comparing against the bare cwd would leave
- *  exactly those instances running while reporting that everything stopped. */
-export function projectRoot(from = Deno.cwd()): string {
-  let dir = resolve(from);
-  for (;;) {
-    try {
-      if (Deno.statSync(join(dir, "deno.json")).isFile) return dir;
-    } catch { /* keep walking */ }
-    const up = dirname(dir);
-    if (up === dir) return resolve(from);
-    dir = up;
-  }
+ *  The same app checked out twice (a worktree, a second clone) is one identity
+ *  with one lock, and the lock records its cwd. Every command that names the
+ *  instance used to say "pid, port" and nothing else, so `am start` refused
+ *  with "already running" in a checkout where nothing was, `am status` said
+ *  started, `am doctor` said nothing of this project was up, and `am restart`
+ *  quietly relaunched the OTHER checkout's app from this one's tree. One
+ *  predicate, read by all four, so they answer with the same fact. */
+export function foreignCheckout(
+  pf: Pick<LockData, "cwd">,
+  root = projectRoot(),
+): string | null {
+  if (!pf.cwd) return null;
+  return isUnder(root, pf.cwd) ? null : pf.cwd;
 }
 
-/** Is `path` inside `root` (or root itself)? Compared as path SEGMENTS, so
- *  `/home/u/remote-old` is not treated as living inside `/home/u/remote`. */
-export function isUnder(root: string, path: string): boolean {
-  const a = resolve(root);
-  const b = resolve(path);
-  return b === a || b.startsWith(a.endsWith(sep) ? a : a + sep);
+/** The "already running" sentence, naming the other checkout when the
+ *  instance was started from one. Pure. */
+export function alreadyRunningLine(
+  pf: Pick<LockData, "appId" | "pid" | "port" | "cwd">,
+  root = projectRoot(),
+): string {
+  const other = foreignCheckout(pf, root);
+  return `already running: ${pf.appId} (pid ${pf.pid}, port ${pf.port})` +
+    (other
+      ? ` — started from ${other}, not this checkout (${root}). ` +
+        `am restart --force relaunches it from here; am stop ends it.`
+      : "");
 }
 
-/** The running instances `--all` is allowed to stop: this project's, and only
- *  this project's.
+/** THE definition of "an instance of this project" — read by `stop --all`,
+ *  `doctor` and `status`, so they cannot answer differently.
  *
- *  Scoped rather than global on purpose. `am instances` is machine-wide, so a
+ *  Two facts make an instance this project's, and it needs only one of them:
+ *  it was LAUNCHED from under the project root, or it holds this project's own
+ *  app id. The second half is not a nicety — an app id is a singleton across
+ *  the machine, so the same app checked out twice has ONE lock, and the running
+ *  process may well be the other checkout's. With the cwd test alone,
+ *  `am status` called it started (it resolves by id) while `am doctor` said
+ *  "no running instance of this project" and `stop --all` left it up.
+ *
+ *  Scoped rather than global either way. `am instances` is machine-wide, so a
  *  literal "stop all" would reach into every other aio app the developer has
  *  running — a different project's server going down because someone tidied up
  *  in this one is not a tidy-up, it is an outage with no obvious cause. */
-export function instancesInProject(root = projectRoot()): InstanceInfo[] {
+export function instancesInProject(
+  root = projectRoot(),
+  appId = thisProjectAppId(),
+): InstanceInfo[] {
   return instances()
-    .filter((i) => i.cwd && isUnder(root, i.cwd))
+    .filter((i) => (i.cwd && isUnder(root, i.cwd)) || i.appId === appId)
     .sort((a, b) => a.appId < b.appId ? -1 : a.appId > b.appId ? 1 : 0);
+}
+
+/** This project's own app id, or undefined when the cwd resolves to none
+ *  (`resolveAmAppId` throws rather than guessing, and a listing must not). */
+export function thisProjectAppId(): string | undefined {
+  try {
+    return resolveAmAppId();
+  } catch {
+    return undefined;
+  }
 }
 
 /** Stop one app. Returns what happened instead of exiting, so `--all` can carry
@@ -1167,8 +1267,44 @@ export async function cmdRestart(
     );
     Deno.exit(1);
   }
-  const appId = resolveAmAppId(flags.app);
-  const pf = liveLock(appId); // wherever the instance's home is
+  // Same target resolver as `stop` and `kill` — `--port=N` names the app.
+  const t = resolveLockTarget(flags);
+  if (t.kind === "probe") {
+    outError(noLockOnPortMessage(t.port), mode);
+    Deno.exit(1);
+  }
+  const appId = t.kind === "target"
+    ? t.target.appId
+    : resolveAmAppId(flags.app);
+  const pf = t.kind === "target" ? t.target.pf : null;
+  const running = pf !== null && isProcessAlive(pf.pid);
+
+  // Restarting an instance started from ANOTHER checkout of this app relaunches
+  // it from HERE — a different tree, possibly a different framework pin. It
+  // used to do that silently: `am restart` in checkout B stopped A's process
+  // and started B's, and nothing in the output said so. One lock per app id
+  // means this is a real, reachable state (a worktree, a second clone).
+  const elsewhere = pf && running ? foreignCheckout(pf) : null;
+  if (elsewhere && !flags.force) {
+    outError(
+      `${appId} is running from ${elsewhere}, not this checkout ` +
+        `(${projectRoot()}) — restarting here would stop that process and ` +
+        `relaunch the app from this tree.\n` +
+        `  am restart --force does exactly that, deliberately; ` +
+        `am stop ends the running one; cd ${elsewhere} && am restart ` +
+        `restarts it where it lives`,
+      mode,
+    );
+    Deno.exit(1);
+  }
+  if (elsewhere) {
+    out(
+      mode === "pretty"
+        ? `restart --force: switching checkouts — ${elsewhere} → ${projectRoot()}`
+        : { restart: "switch-checkout", from: elsewhere, to: projectRoot() },
+      mode,
+    );
+  }
 
   // Preserve the original launch across restart (a field report:
   // restart dropped --env-file → the vault stopped auto-unlocking). Explicit
@@ -1185,19 +1321,26 @@ export async function cmdRestart(
           : { restart: "replay", flags: recorded.flags },
         mode,
       );
-    } else if (!recorded) {
-      // Started outside am (e.g. `deno task dev`) → we never captured its flags.
-      outError(
-        `restart can't recover the original launch flags (e.g. --env-file) — ` +
-          `this instance wasn't started by \`am start\`. Relaunching with ` +
-          `defaults; re-run your original command, or pass the flags to ` +
-          `\`am restart …\` to record them.`,
+    } else if (!recorded && running) {
+      // Started outside am (e.g. `deno task dev`) → we never captured its
+      // flags. A NOTE, on the same channel as the replay note above it — not
+      // `{error}`: nothing has failed, and this used to print an error
+      // document AND then the real one, so `am restart --json` on a stopped
+      // app emitted two JSON documents. It is also said only when there IS an
+      // instance: with nothing running there is no launch to have missed.
+      out(
+        mode === "pretty"
+          ? `restart: can't recover the original launch flags (e.g. ` +
+            `--env-file) — this instance wasn't started by \`am start\`. ` +
+            `Relaunching with defaults; pass the flags to \`am restart …\` ` +
+            `to record them.`
+          : { restart: "defaults", why: "not started by am start" },
         mode,
       );
     }
   }
 
-  if (pf && isProcessAlive(pf.pid)) {
+  if (pf && running) {
     const port = pf.port;
     // Stop must complete before start — force --wait internally
     const stopFlags = {
@@ -1649,8 +1792,24 @@ export async function cmdKill(
 
   if (!flags.stale) {
     // The blunt form: end THIS app now. `am stop` is the polite one.
-    const appId = resolveAmAppId(flags.app);
-    const pf = liveLock(appId); // wherever the instance's home is
+    // Same target resolver as `stop` and `restart`: `--port=N` names the app,
+    // and a `--port` that names no lock is refused rather than quietly
+    // ignored — `am kill --port=1` used to SIGTERM the cwd's app.
+    const t = resolveLockTarget(flags);
+    if (t.kind === "probe") {
+      outError(noLockOnPortMessage(t.port), mode);
+      Deno.exit(1);
+    }
+    if (t.kind === "none") {
+      const appId = resolveAmAppId(flags.app);
+      out(
+        mode === "pretty" ? `${appId}: not running` : { appId, killed: false },
+        mode,
+      );
+      Deno.exit(1);
+    }
+    const appId = t.target.appId;
+    const pf = t.target.pf; // wherever the instance's home is
     if (!pf || !isLockOwnerAlive(pf)) {
       out(
         mode === "pretty" ? `${appId}: not running` : { appId, killed: false },

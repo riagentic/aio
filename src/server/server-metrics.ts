@@ -15,7 +15,8 @@ export interface MetricsInput {
   clients?: number;
   /** Per-cell health: errors + enabled flag */
   cells?: Record<string, { errors: number; enabled: boolean }>;
-  /** Broadcast payload stats per kind */
+  /** Broadcast payload stats, keyed by CONNECTION id. Summed into two
+   *  unlabelled totals — the id is an identity, never a metric dimension. */
   payloads?: Map<
     string,
     { lastPayloadBytes: number; totalBytes: number; count: number }
@@ -66,24 +67,34 @@ export function formatPrometheus(m: MetricsInput): string {
   }
 
   if (m.payloads && m.payloads.size > 0) {
+    // ONE unlabelled sum per metric.
+    //
+    // These carried `kind="<value>"`, and the value was `meta.id` — a
+    // per-CONNECTION uuid, not a kind. Three things were wrong at once: the
+    // label name and the HELP text described something the series did not
+    // contain; every reconnect (including the dev reload socket's 2 s retry)
+    // minted a brand-new Prometheus series, so a scraped `/__aio/metrics` grew
+    // its time-series cardinality without bound; and the counter was unusable
+    // anyway, because a series vanishes the moment its client disconnects —
+    // a counter you cannot sum over time is not a counter.
+    //
+    // Per-client detail already exists, in `/__aio/vitals`, where it belongs:
+    // it is a snapshot of who is connected right now, not a monotonic series.
+    let bytes = 0, count = 0;
+    for (const p of m.payloads.values()) {
+      bytes += p.totalBytes;
+      count += p.count;
+    }
     lines.push(
-      "# HELP aio_broadcast_bytes_total Total broadcast payload bytes per kind",
+      "# HELP aio_broadcast_bytes_total Total broadcast payload bytes sent to clients",
     );
     lines.push("# TYPE aio_broadcast_bytes_total counter");
-    for (const [kind, p] of m.payloads) {
-      lines.push(
-        `aio_broadcast_bytes_total{kind="${esc(kind)}"} ${p.totalBytes}`,
-      );
-    }
+    lines.push(`aio_broadcast_bytes_total ${bytes}`);
     lines.push(
-      "# HELP aio_broadcast_messages_total Broadcast message count per kind",
+      "# HELP aio_broadcast_messages_total Total broadcast messages sent to clients",
     );
     lines.push("# TYPE aio_broadcast_messages_total counter");
-    for (const [kind, p] of m.payloads) {
-      lines.push(
-        `aio_broadcast_messages_total{kind="${esc(kind)}"} ${p.count}`,
-      );
-    }
+    lines.push(`aio_broadcast_messages_total ${count}`);
   }
 
   return lines.join("\n") + "\n";

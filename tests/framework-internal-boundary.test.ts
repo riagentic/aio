@@ -320,18 +320,28 @@ Deno.test("internal actions: no network entry point dispatches without the gate"
   // dispatch call, this fails until it either uses the shared decider or is
   // deliberately listed. It cannot replace the behavioural tests (it would pass
   // on a call whose result is ignored) — it catches the door nobody thought of.
-  const files = ["server-ws.ts", "uds.ts", "server-trojan.ts"];
+  // The predicate itself lives in protocol/action-gate.ts (one spelling, a
+  // leaf every folder may read); these are its CALL sites. The sync validator
+  // is the sixth door: `sync-req.pendingOps` reaches dispatch through
+  // `isValidSyncOp` from WS and UDS alike, and gating only the routers' `op`
+  // frames left it open (audit, 2026-09-02).
+  const files = [
+    "server/server-ws.ts",
+    "server/uds.ts",
+    "server/server-trojan.ts",
+    "sync/server-handler.ts",
+  ];
   let sites = 0;
   for (const f of files) {
     const src = await Deno.readTextFile(
       new URL(
-        `../src/server/${f}`,
+        `../src/${f}`,
         import.meta.url,
       ),
     );
     sites += src.split("_isFrameworkInternalActionType(").length - 1;
   }
-  // 1 definition + 5 call sites (ws action, ws op, uds action, uds op, trojan).
+  // 6 call sites: ws action, ws op, uds action, uds op, trojan, sync validator.
   assertEquals(
     sites,
     6,

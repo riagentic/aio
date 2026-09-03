@@ -13,6 +13,7 @@ import { assertEquals } from "@std/assert";
 
 /** key → the file that reads `__aioConfig.<key>` (a claim checked below). */
 const READERS: Record<string, string> = {
+  appId: "src/browser/browser-sync.ts",
   renderBudget: "src/browser/browser-vitals.ts",
   syncCells: "src/browser/sync-cells.ts",
   callTimeouts: "src/browser/browser-ack.ts",

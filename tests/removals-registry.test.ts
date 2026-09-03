@@ -24,7 +24,6 @@ import {
   removalOf,
   REMOVALS,
   removalsUsedBy,
-  REMOVED_CELL_KEYS,
 } from "../src/state/removals.ts";
 import { cell } from "../src/state/cell-create.ts";
 import { buildContext } from "../aiol/context.ts";
@@ -148,7 +147,6 @@ Deno.test("removalsUsedBy reports cell-config rows only, in registry order", () 
     "an API-shape removal is not a cell config key",
   );
   assertEquals(removalsUsedBy({ state: {}, methods: {} }).length, 0);
-  assertEquals(REMOVED_CELL_KEYS, cellRows.map((r) => r.key));
 });
 
 // ── surface parity: the linter ───────────────────────────────────────
@@ -279,6 +277,15 @@ const EVER_REMOVED: readonly string[] = [
   "testgen()",
   "memory.gcStressRatio",
   "aio.run({ appVersion })",
+  // alpha76 — the pre-beta sweep: every "deprecated through beta" spelling
+  // that beta would otherwise have frozen as permanent public surface.
+  "return effect(s) from a method",
+  "selector deps as a spread",
+  "--kill-existing",
+  "--server-url",
+  "--zero-port",
+  "--backup-logs",
+  "aio.run({ killExisting })",
 ];
 
 Deno.test("removals: no row is ever deleted — the record is append-only", () => {

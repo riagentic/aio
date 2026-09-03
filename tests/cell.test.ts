@@ -296,18 +296,18 @@ testCell(counter, "full lifecycle", (t) => {
   t.expect.state((s) => s.status === "idle");
 });
 
-// ── Fix A: ScheduleEffect returned from a sync method ──
+// ── Fix A: a ScheduleEffect $do'd from a sync method ──
 
-Deno.test("methods: sync method returning a ScheduleEffect surfaces it", () => {
+Deno.test("methods: a sync method's $do'd ScheduleEffect surfaces it", () => {
   const f = cell("sched", {
     state: { count: 0 },
     methods: {
       tick(s) {
         s.count += 1;
-        return schedule.after("sched:retry", 1000, {
+        s.$do(schedule.after("sched:retry", 1000, {
           type: "sched:tick",
           payload: { args: [] },
-        });
+        }));
       },
     },
   });
@@ -630,16 +630,24 @@ Deno.test("cell with empty methods map is a valid state-only cell (thin-client s
 });
 
 Deno.test("validateConfig: every typed UiConfig key is accepted (ui.entry regression)", async () => {
-  const { validateConfig, VALID_UI_KEYS } = await import(
+  const { validateConfig, VALID_UI_KEYS, NUMERIC_VALUES } = await import(
     "../src/server/config.ts"
   );
   // Every key the UiConfig type documents must validate — a typed option that
   // exits the process at boot is the worst kind of bug.
+  //
+  // The sample VALUE has to suit the key: `width` and `height` are numbers and
+  // are range-checked (`NUMERIC_VALUES`), so handing them a string would test
+  // the opposite of this test's claim — it would assert that a nonsense value
+  // is ACCEPTED. The one table that knows which keys are numeric decides here
+  // too, so a key that becomes numeric later cannot quietly re-lenient this.
   const typedUiKeys = ["title", "width", "height", "showStatus", "entry"];
+  const sample = (k: string): unknown =>
+    k in NUMERIC_VALUES ? (NUMERIC_VALUES[k]?.min ?? 0) + 1 : "x";
   for (const k of typedUiKeys) {
     let exited = false;
     validateConfig(
-      { [k]: "x" },
+      { [k]: sample(k) },
       VALID_UI_KEYS,
       "ui",
       ((_c: number) => {

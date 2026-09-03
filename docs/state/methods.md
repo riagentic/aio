@@ -172,16 +172,18 @@ method they dispatch **immediately** (an `own.set` factory registers in the same
 tick). Payloads may reference `s` freely — they are snapshotted to plain data at
 capture.
 
-> **Deprecated:** `return schedule.after(...)` (the pre-alpha52 effect channel)
-> still works through beta and prints a one-time hint per method.
-> `aiol --safe-fix` rewrites it to `s.$do(...)`.
+> **Removed in alpha76:** `return schedule.after(...)` (the pre-alpha52 effect
+> channel). It ran the effect **and** resolved the caller with `undefined`, so
+> one channel silently carried two meanings. A dev boot or a test throws;
+> production logs the removal line once per method and still runs the effect.
+> `aiol --safe-fix` rewrites it to `s.$do(...)` — see
+> [the alpha76 upgrade guide](../upgrade/from-alpha75-to-alpha76.md).
 
 ### Referencing the cell inside its own methods: `self()`
 
 When a method schedules an action on **its own cell**, naming the cell inside
 its own initializer used to trip TypeScript's self-referential-inference guard
-(TS7022/7023) and require a `: CellEffect` return annotation. `self()` removes
-the self-reference entirely:
+(TS7022/7023). `self()` removes the self-reference entirely:
 
 ```ts
 import { cell, schedule, self } from "aio";
@@ -214,8 +216,9 @@ statically present (`cancelOn: { search: [self("clear")] }`), else at dispatch �
 loud both ways. Scheduling **another** cell's action keeps using
 `otherCell.method.action(...)`.
 
-(The `CellEffect` type is still exported for code on the deprecated
-return-effects channel.)
+(The `CellEffect` type is still exported: it is the type of an effect VALUE,
+which is what `s.$do(...)` takes — a helper that BUILDS an effect for a method
+to hand over annotates its return with it.)
 
 ---
 
@@ -358,12 +361,13 @@ For anything that isn't covered (function-valued properties on the state,
 unusual array methods), the live proxy throws:
 
 ```
-[mycell:myMethod] doSomething() is not supported on live async state — snapshot first: const items = [...s.items]
+[mycell:myMethod] doSomething() is not supported on live async state (s.config) — snapshot first: const copy = { ...s.config }
 ```
 
-The fix is to take a plain snapshot of what you need before calling the
-unsupported op: `const items = [...s.items]`, `const config = { ...s.config }`,
-then call the op on the snapshot.
+The message names the value it refused and the copy that fits it: an array gets
+`[...s.items]`, a plain object `{ ...s.config }`, a `Date` `new Date(s.when)`, a
+`RegExp` its `source`/`flags`. Take that snapshot before calling the unsupported
+op, then call the op on the snapshot.
 
 ### Pitfall: a captured reference does not survive overwriting its container
 
@@ -623,6 +627,7 @@ For a method that is long-running **by nature**, say so on the cell:
 
 ```ts
 cell("wallet", {
+  state: { balance: 0 },
   long: ["refresh"], // ← checked against the method list at cell() time
   methods: { async refresh(s) {/* minutes; still cancellable */} },
 });
@@ -679,6 +684,8 @@ state, and commit the result through a sync method — a pure reducer that canno
 time out, cannot hold a mutex, and replays deterministically:
 
 ```ts
+const RPC = "https://rpc.example";
+
 const wallet = cell("wallet", {
   state: { balance: 0, fetchedAt: 0, error: "" },
   methods: {
@@ -691,6 +698,15 @@ const wallet = cell("wallet", {
     setError(s, message: string) {
       s.error = message;
     },
+    // Arm the poller. `own.set` gives the timer an owner: re-arming under the
+    // same id disposes the previous one, and cell disable / app shutdown
+    // dispose it too — which a module-scope `setInterval` never gets.
+    watch(s, address: string) {
+      s.$do(own.set("wallet:poll", () => {
+        const t = setInterval(() => refreshBalance(address), 30_000);
+        return () => clearInterval(t);
+      }));
+    },
   },
 });
 
@@ -699,14 +715,19 @@ export async function refreshBalance(address: string): Promise<void> {
   try {
     const res = await fetch(`${RPC}/balance/${address}`);
     const { lamports } = await res.json();
-    wallet.setBalance(lamports, Date.now());
+    await wallet.setBalance(lamports, Date.now());
   } catch (e) {
-    wallet.setError(String(e));
+    await wallet.setError(String(e));
   }
 }
-
-schedule.every(30_000, () => refreshBalance(current));
 ```
+
+> **Why `own.set` and not `schedule.every`?** `schedule.*` re-dispatches an
+> **action** (`schedule.every(id, ms, action)` — an id, then the interval, then
+> the action). Reach for it when the tick IS a method of a cell. Here the tick
+> is a plain function that must not go through dispatch at all, so the timer is
+> an owned resource instead. Either way the timer has an id and an owner — never
+> a bare `setInterval` in module scope.
 
 What it buys: the ceiling never fires (nothing awaits the network through a
 method), `serialize` has nothing to hold, the write is one atomic commit, and
@@ -793,7 +814,7 @@ async settle(s) {
 
 Declare which foreign actions abort a running async method. The method observes
 the abort through `s.$signal` (an `AbortSignal`) — annotate the draft with
-`& Partial<MethodDraftMeta>` (from `aio`) to type it:
+`& MethodDraftMeta` (from `aio`) to type it:
 
 ```ts
 import { cell, type MethodDraftMeta } from "aio";
@@ -807,10 +828,10 @@ const checkout = cell("checkout", {
   state: { status: "idle" as string },
   cancelOn: { place: [cart.clear] }, // cart.clear aborts a running place()
   methods: {
-    async place(s: CheckoutState & Partial<MethodDraftMeta>, item: Item) {
+    async place(s: CheckoutState & MethodDraftMeta, item: Item) {
       s.status = "placing";
       const r = await fetch(url, { signal: s.$signal }); // abortable IO
-      if (s.$signal!.aborted) {
+      if (s.$signal.aborted) {
         s.status = "cancelled";
         return;
       }
@@ -822,8 +843,11 @@ const checkout = cell("checkout", {
 
 - `cancelOn: { methodKey: [triggers] }` — triggers are bound methods
   (`cart.clear`, preferred) or `.type` strings.
-- `s.$signal` is always present at runtime in async methods; the annotation is
-  `Partial` for TS variance reasons, so use `s.$signal?.aborted` or `!`.
+- `s.$signal` is always present at runtime, in sync and async methods alike, and
+  the type says so — plain `s.$signal.aborted`, no `!` and no `?.`. (It was
+  `Partial` until alpha76 on the stated grounds of TS variance; that was wrong,
+  and `s.$signal!` was on its way to being the permanent idiom. Code that still
+  writes `!` or `?.` keeps compiling.)
 - Pass it to every abortable API (`fetch`, `until({ signal })`) and check
   `aborted` after each `await` before writing terminal state.
 - Naming a method that is missing or sync throws at `cell()` — a `cancelOn` that
@@ -840,10 +864,10 @@ const disk = cell("disk", {
   state: { path: null as string | null, entries: [] as string[] },
   cancelOn: { open: "self" }, // a new open() aborts the ones still running
   methods: {
-    async open(s: DiskState & Partial<MethodDraftMeta>, path: string) {
+    async open(s: DiskState & MethodDraftMeta, path: string) {
       s.path = path;
       const entries = await scanFolders(path, s.$signal);
-      if (s.$signal!.aborted) return; // superseded — drop the stale results
+      if (s.$signal.aborted) return; // superseded — drop the stale results
       s.entries = entries;
     },
   },
@@ -870,7 +894,7 @@ not a special construct. Four things make it behave:
 | Network I/O            | Don't await it in a method — [fetch outside, commit with a sync reducer](#network-io-fetch-outside-commit-with-a-sync-reducer) |
 | A cancel path          | `cancelOn` (`"self"` for supersession, a `stop` method for an explicit cancel button)                                          |
 | A "still working" sign | Write a state field before the first `await` — clients see it on the next commit                                               |
-| Don't clobber          | After every `await`, check `s.$signal!.aborted` **before** writing terminal state                                              |
+| Don't clobber          | After every `await`, check `s.$signal.aborted` **before** writing terminal state                                               |
 
 The last row is the one that bites. A method that resumes after an `await` is
 writing into state that other calls and other actions have moved on from, so a

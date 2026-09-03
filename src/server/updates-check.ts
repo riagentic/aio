@@ -18,6 +18,7 @@ import {
   verifyManifestClaims,
 } from "../build/ship.ts";
 import type { GitHead } from "./updates-core.ts";
+import { GIT_NO_PROMPT_ENV } from "./git-noninteractive.ts";
 
 /** What an install remembers between runs. Lives beside the app's data,
  *  inside the backup unit, because losing it silently downgrades security. */
@@ -738,6 +739,8 @@ export async function gitLsRemote(
       args: ["ls-remote", "--exit-code", "--", source, ref, `${ref}^{}`],
       stdout: "piped",
       stderr: "piped",
+      stdin: "null",
+      env: GIT_NO_PROMPT_ENV,
     });
     const out = await cmd.output();
     if (!out.success) {

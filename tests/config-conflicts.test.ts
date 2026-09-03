@@ -145,21 +145,21 @@ Deno.test("a `long` method given an explicit per-method timeout is refused", () 
   );
 });
 
-Deno.test("killExisting with no lock to take over is refused", () => {
-  assertEquals(one({ killExisting: true, singleton: false }).keys, [
-    "killExisting",
+Deno.test("takeover with no lock to take over is refused", () => {
+  assertEquals(one({ takeover: true, singleton: false }).keys, [
+    "takeover",
     "singleton",
   ]);
-  assertEquals(one({ killExisting: true, libraryMode: true }).keys, [
-    "killExisting",
+  assertEquals(one({ takeover: true, libraryMode: true }).keys, [
+    "takeover",
     "libraryMode",
   ]);
   assertStringIncludes(
-    one({ killExisting: true, singleton: false }).what,
+    one({ takeover: true, singleton: false }).what,
     "nothing is killed",
   );
-  assertEquals(configConflicts({ killExisting: true }), []);
-  assertEquals(configConflicts({ killExisting: true, singleton: true }), []);
+  assertEquals(configConflicts({ takeover: true }), []);
+  assertEquals(configConflicts({ takeover: true, singleton: true }), []);
 });
 
 Deno.test("singleton: true under libraryMode is refused — libraryMode silently wins", () => {
@@ -296,7 +296,7 @@ Deno.test("every conflict names a cause and an actionable fix", () => {
       cells: [{ __aio: { id: "c", longMethods: ["m"] } }],
       perfBudget: { methods: { "c:m": { timeout: 1 } } },
     },
-    { killExisting: true, singleton: false },
+    { takeover: true, singleton: false },
     { singleton: true, libraryMode: true },
     { transport: "uds", client: "browser" },
     { transport: "uds", expose: true },

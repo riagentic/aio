@@ -1,9 +1,9 @@
 # Scheduling
 
 aio has a built-in scheduler for timers, intervals, daily triggers, and cron
-jobs. Schedules are **pure effects** — returned from methods (sync or async,
-AIO-381), handled by the runtime. No side effects in sync methods, no external
-cron daemons.
+jobs. Schedules are **pure effects** — dispatched from methods (sync or async)
+through `s.$do`, handled by the runtime. No side effects in sync methods, no
+external cron daemons.
 
 > Timers are one kind of owned resource. For disposables — file watchers,
 > sockets, subprocesses — the same keyed replace semantics exist as
@@ -13,18 +13,17 @@ cron daemons.
 
 ### 1. Dynamic — from a method
 
-Return a `ScheduleEffect` from any method (sync or async):
+Run a `ScheduleEffect` from any method (sync or async) through `s.$do`:
 
 ```ts
-import { cell, schedule } from "aio";
-import type { ScheduleEffect } from "aio";
+import { cell, schedule, self } from "aio";
 
 const notifications = cell("notifications", {
   state: { pending: 0 },
   methods: {
-    queue(s): ScheduleEffect {
+    queue(s) {
       s.pending += 1;
-      return schedule.after("flush", 2000, notifications.flush.action());
+      s.$do(schedule.after("flush", 2000, self("flush")));
     },
     flush(s) {
       s.pending = 0;
@@ -44,15 +43,13 @@ previous timer and sets a new one.
 > (`cell.method.type` is also available as the bare type string for
 > `waitFor`/`listensTo`/`cancelOn`.)
 >
-> **Self-reference needs a return-type annotation.** When a method schedules an
-> action on its _own_ cell (`notifications.flush` referenced inside
-> `notifications`), TypeScript hits a circular-inference error (TS7022/TS7023 —
-> _"implicitly has type any … referenced in its own initializer"_). Annotating
-> the return breaks the cycle — use `CellEffect` (the union of every effect a
-> method may return), or `CellEffect | void` / `Promise<CellEffect | void>` for
-> conditional/async methods. Scheduling **another** cell's action needs no
-> annotation. See
-> [Referencing the cell inside its own methods](methods.md#referencing-the-cell-inside-its-own-methods-the-celleffect-annotation).
+> **Own cell: use `self("method")`.** Naming the cell inside its own initializer
+> (`notifications.flush` referenced inside `notifications`) trips TypeScript's
+> circular-inference guard (TS7022/TS7023 — _"implicitly has type any …
+> referenced in its own initializer"_). `self("flush")` builds the same
+> descriptor without the self-reference, so the cycle never forms. Scheduling
+> **another** cell's action keeps using `otherCell.method.action(...)`. See
+> [Referencing the cell inside its own methods: `self()`](methods.md#referencing-the-cell-inside-its-own-methods-self).
 
 ### 2. Static — always-on at startup
 
@@ -107,9 +104,9 @@ same `id`.
 ```ts
 // Save 3 seconds after last keystroke (debounce pattern)
 methods: {
-  type(s, text: string): ScheduleEffect {
+  type(s, text: string) {
     s.draft = text
-    return schedule.after('autosave', 3000, draft.save.action())
+    s.$do(schedule.after('autosave', 3000, draft.save.action()))
   },
 }
 ```
@@ -120,7 +117,7 @@ Fires `action` every `ms` milliseconds until cancelled.
 
 ```ts
 // Poll every 30 seconds
-return schedule.every("sync", 30_000, data.sync.action());
+s.$do(schedule.every("sync", 30_000, data.sync.action()));
 ```
 
 > Intervals fire on a fixed clock and can't be deferred per-tick. If the poller
@@ -132,7 +129,7 @@ return schedule.every("sync", 30_000, data.sync.action());
 
 ```ts
 // A tick is dropped while the previous one is still in flight.
-return schedule.every("hw", 1000, hw.poll.action(), { skipIfRunning: true });
+s.$do(schedule.every("hw", 1000, hw.poll.action(), { skipIfRunning: true }));
 ```
 
 Without it, a poll that takes longer than its interval runs concurrently with
@@ -165,8 +162,11 @@ nothing to overlap.
 > **Delays longer than 24.85 days are handled for you.** `setTimeout` stores its
 > delay in a 32-bit int, so a raw 35-day timer fires on the _next tick_ instead.
 > `after`, `at` and `cron` all arm long deadlines with 24-hour re-checks and
-> warn once when they do. Timers still do not survive a restart — if the
-> deadline must, persist it and re-arm on boot.
+> warn once when they do. `every` is the exception: an interval has no deadline
+> to re-check, and `setInterval` would truncate it to a 1ms hot loop, so an
+> `every` past 24.85 days is **refused** — at config time and at the call site.
+> A monthly cadence is `cron` (`"0 9 1 * *"`). Timers still do not survive a
+> restart — if the deadline must, persist it and re-arm on boot.
 
 ### `schedule.at(id, isoTime, action)` — one-shot at absolute time
 
@@ -174,7 +174,7 @@ Fires once at a specific UTC datetime. `isoTime` is any string parseable by
 `new Date()`.
 
 ```ts
-return schedule.at("promo-end", "2025-12-31T23:59:00Z", promo.expire.action());
+s.$do(schedule.at("promo-end", "2025-12-31T23:59:00Z", promo.expire.action()));
 ```
 
 A time that has already passed does **not** fire and is **not** registered — the
@@ -186,7 +186,7 @@ is a UTC/local mix-up or a deadline restored from disk.
 Fires on a standard 5-field cron schedule (UTC).
 
 ```ts
-return schedule.cron("daily-report", "0 8 * * 1-5", reports.generate.action());
+s.$do(schedule.cron("daily-report", "0 8 * * 1-5", reports.generate.action()));
 //                                    ^ ^ ^ ^ ^
 //                                    | | | | └── day of week (Mon-Fri)
 //                                    | | | └──── month (*)
@@ -284,13 +284,13 @@ s.$do(schedule.next("recalc", totals.recalc.action()));
 
 ```ts
 methods: {
-  startSync(s): ScheduleEffect {
+  startSync(s) {
     s.syncing = true
-    return schedule.every('sync', 5000, data.sync.action())
+    s.$do(schedule.every('sync', 5000, data.sync.action()))
   },
-  stopSync(s): ScheduleEffect {
+  stopSync(s) {
     s.syncing = false
-    return schedule.cancel('sync')
+    s.$do(schedule.cancel('sync'))
   },
 }
 ```
@@ -350,9 +350,9 @@ Returning a schedule effect with an existing ID **replaces** the previous timer
 
 ```ts
 methods: {
-  search(s, query: string): ScheduleEffect {
+  search(s, query: string) {
     s.query = query
-    return schedule.after('search.debounce', 300, search.execute.action())
+    s.$do(schedule.after('search.debounce', 300, search.execute.action()))
   },
 }
 ```
@@ -361,12 +361,12 @@ methods: {
 
 ```ts
 methods: {
-  async fetchData(s): Promise<ScheduleEffect | void> {
+  async fetchData(s) {
     try {
       s.data = await call(() => api.getData())
     } catch {
       s.retries += 1
-      return schedule.after('fetch.retry', s.retries * 2000, data.fetchData.action())
+      s.$do(schedule.after('fetch.retry', s.retries * 2000, data.fetchData.action()))
     }
   },
 }
@@ -377,7 +377,7 @@ methods: {
 A static `every` schedule fires on a fixed clock — it cannot be deferred
 per-tick, so a rate-limited API forces you to hand-roll `backoffUntil` state and
 waste wakeups. Instead, own the loop: seed one `after` and let the method
-schedule its own next run. Replace-by-ID means each return sets the next delay
+schedule its own next run. Replace-by-ID means each `$do` sets the next delay
 dynamically — no clock state in the cell, no wasted ticks.
 
 ```ts
@@ -387,19 +387,21 @@ dynamically — no clock state in the cell, no wasted ticks.
 
 // ✅ schedule.backoff owns the exponential arithmetic — track `attempt` in state
 methods: {
-  async refresh(s): Promise<ScheduleEffect> {
+  async refresh(s) {
     try {
       s.byId = await call(() => api.prices())
       s.attempt = 0 // success → reset the backoff
-      return schedule.after('prices:refresh', 30_000, prices.refresh.action())
+      s.$do(schedule.after('prices:refresh', 30_000, prices.refresh.action()))
     } catch {
       s.attempt = (s.attempt ?? 0) + 1 // failure → grow the delay
-      return schedule.backoff(
+      // (id, attempt, ACTION, opts) — the action is 3rd, as in after/every/at/
+      // cron. The old order is refused BY NAME at runtime.
+      s.$do(schedule.backoff(
         'prices:refresh',
         s.attempt,
-        { base: 5_000, max: 60_000 },
         prices.refresh.action(),
-      )
+        { base: 5_000, max: 60_000 },
+      ))
     }
   },
 }
@@ -414,13 +416,13 @@ schedules: [
 
 ```ts
 methods: {
-  enablePolling(s): ScheduleEffect {
+  enablePolling(s) {
     s.polling = true
-    return schedule.every('prices.poll', 5000, prices.refresh.action())
+    s.$do(schedule.every('prices.poll', 5000, prices.refresh.action()))
   },
-  disablePolling(s): ScheduleEffect {
+  disablePolling(s) {
     s.polling = false
-    return schedule.cancel('prices.poll')
+    s.$do(schedule.cancel('prices.poll'))
   },
 }
 ```
@@ -429,9 +431,9 @@ methods: {
 
 ```ts
 methods: {
-  activity(s): ScheduleEffect {
+  activity(s) {
     s.lastActive = Date.now()
-    return schedule.after('session.timeout', 30 * 60_000, auth.logout.action())
+    s.$do(schedule.after('session.timeout', 30 * 60_000, auth.logout.action()))
   },
 }
 ```

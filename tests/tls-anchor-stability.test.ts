@@ -22,6 +22,7 @@ import {
   loadOrCreateCert,
   sansCover,
 } from "../src/server/tls.ts";
+import { tempDir } from "../src/testing/temp-dir.ts";
 
 // The machine-wide root is MACHINE-wide, so a test that does not relocate it
 // writes trust material into the developer's real home — and would then be
@@ -29,7 +30,7 @@ import {
 // is the one variable that moves the whole data root, root CA included; the
 // suite sets it, and these tests set it too so they are isolated however they
 // are run, not only under `deno task test`.
-const SANDBOX = await Deno.makeTempDir({ prefix: "aio-tls-sandbox-" });
+const SANDBOX = await tempDir("aio-tls-sandbox-");
 Deno.env.set("AIO_APPS_DIR", SANDBOX);
 
 /** openssl is how certs are written here, so it is how they are read back.

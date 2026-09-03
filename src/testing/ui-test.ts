@@ -46,6 +46,9 @@ import {
   type UISurfaceNode,
 } from "../air/ui-surface.ts";
 import type { KeyModifiers } from "../air/ui-trigger.ts";
+import type { CellDef } from "../state/cell-types.ts";
+import { cellAccessAllowed } from "../server/server-auth.ts";
+import { createAioError } from "../diagnostics/error.ts";
 import {
   assertOperable,
   triggerAction,
@@ -109,6 +112,19 @@ export interface TestUIOptions {
    *  Omit for today's behaviour (identity stays unresolved). Reset on
    *  dispose, so the next mount cannot inherit this test's user. */
   user?: AioUser | null;
+  /** Enforce each cell's declarative `access` rule on interactions, as the
+   *  server does for a real client. Default `true` since alpha76.
+   *
+   *  It used to be unenforced, so a `customer` clicking an admin-only Delete
+   *  DELETED the product under `testUI` while the identical click over a real
+   *  socket answered `ACCESS_DENIED`. That is the harness being MORE permissive
+   *  than production, with authorization as the thing it was lenient about —
+   *  the exact inversion of "tests are the strictest environment".
+   *
+   *  `access` is a rule about network callers, and a `testUI` click stands in
+   *  for one. Set `false` only to drive a gated method deliberately (seeding a
+   *  fixture, or testing the method itself rather than the button). */
+  enforceAccess?: boolean;
   /** Auth features the mount advertises — what a real `/me` would return
    *  (`<SignIn/>` adapts to them). Defaults all-false; only read when
    *  `user` is set. */
@@ -558,6 +574,71 @@ export type TestableComponent = (props?: any) => unknown;
  * — disposed at scope end. Options only when you need control:
  * `{ document, cells, persist, settleIterations }`.
  */
+/** Apply each cell's declarative `access` rule to its bound methods, the way
+ *  `dispatchNetwork` does for a real client. Returns a restore function.
+ *
+ *  `testUI` boots on the standalone runtime, which has no network and so never
+ *  passed through the server's gate: a `customer` clicking an admin-only
+ *  Delete deleted the product under the harness while the identical click over
+ *  a real socket answered `ACCESS_DENIED`. A harness more permissive than
+ *  production manufactures green-test-broken-prod, and doing it about
+ *  AUTHORIZATION is the worst possible subject for it.
+ *
+ *  The rule is read off the cell def — the same `__aio.access` the server
+ *  bridge collects into `config._cellAccess` — so there is no second copy of
+ *  "what this cell allows", and the verdict comes from `cellAccessAllowed`,
+ *  the same one decider serverFns and the WS door use. */
+function _enforceCellAccess(
+  cells: CellDef[],
+  user: AioUser | undefined,
+): () => void {
+  const undo: (() => void)[] = [];
+  for (const def of cells) {
+    const rule = def.__aio?.access;
+    if (rule === undefined) continue;
+    const cellId = def.__aio.id;
+    const target = def as unknown as Record<string, unknown>;
+    for (const key of def.__aio.actionKeys ?? []) {
+      if (key.startsWith("__")) continue;
+      const bound = target[key];
+      if (typeof bound !== "function") continue;
+      const original = bound as (...a: unknown[]) => unknown;
+      target[key] = (...args: unknown[]) => {
+        if (!cellAccessAllowed(rule, user, key, args)) {
+          const denial = Promise.reject(
+            createAioError(
+              "ACCESS_DENIED",
+              `cell "${cellId}.${key}" — access denied for ${
+                user ? `user=${user.id} role=${user.role}` : "an anonymous UI"
+              }. This is the same rule the server applies to a real client; ` +
+                `pass { user } to testUI, or { enforceAccess: false } to ` +
+                `drive the method deliberately.`,
+              { cellName: cellId, actionType: `${cellId}:${key}` },
+            ),
+          );
+          // Pre-caught, exactly as the server does for the same refusal
+          // (`aio-server.ts`): an `onClick={() => cell.method()}` is
+          // fire-and-forget, and a denial must not become an unhandled
+          // rejection that kills the test module. A caller that DOES await it
+          // still gets the rejection.
+          denial.catch(() => {
+            // aio-ok: pre-catching the refusal is the point — a caller that
+            // awaits still gets it; nobody else needs to.
+          });
+          return denial;
+        }
+        return original(...args);
+      };
+      undo.push(() => {
+        target[key] = original;
+      });
+    }
+  }
+  return () => {
+    for (const f of undo) f();
+  };
+}
+
 export function testUI(
   App: TestableComponent,
   name: string,
@@ -1096,6 +1177,14 @@ async function _buildTestUI(
     // harness and fail the other (see test-strict.ts). `onClick={() =>
     // todo.add()}` is exactly this shape. Installed after the boot, because it
     // wraps the bound methods the boot just installed.
+    // The server's `access` gate, applied to interactions. Installed after the
+    // boot (it wraps the bound methods the boot just installed) and BEFORE the
+    // ledger, so a denied call is just "an async method that rejected" and is
+    // reported the harness's way — through `settle()` — instead of escaping as
+    // an unhandled rejection that kills the whole test module.
+    if (opts.enforceAccess !== false) {
+      partial.restore.push(_enforceCellAccess(cells, opts.user ?? undefined));
+    }
     ledger = _watchUnobservedCalls(cells);
     partial.restore.push(() => ledger?.restore());
     // A throw AFTER the cells booted (the seed, the first render) must not

@@ -1,8 +1,8 @@
 // `s.$commit(minMs)` — the progress throttle every long method hand-rolled.
 //
 // One field report wrote the same shape twice in one app: `if (++ticks % 8 ===
-// 0) s.$commit!()` in a filesystem walk and `if (pct - published >= 0.01)
-// s.$commit!()` in a hasher. That is a counter, a threshold and a bookkeeping
+// 0) s.$commit()` in a filesystem walk and `if (pct - published >= 0.01)
+// s.$commit()` in a hasher. That is a counter, a threshold and a bookkeeping
 // variable per method, all encoding one decision the framework can own —
 // especially now that `long:` makes "runs for minutes" a first-class category,
 // and publishing progress is what those methods all then have to do.
@@ -19,14 +19,14 @@ const job = cell("throttled", {
     async run(s, steps: number, minMs: number) {
       for (let i = 0; i < steps; i++) {
         s.done = i + 1;
-        s.$commit!(minMs);
+        s.$commit(minMs);
         await new Promise((r) => setTimeout(r, 2));
       }
     },
     async unthrottled(s, steps: number) {
       for (let i = 0; i < steps; i++) {
         s.done = i + 1;
-        s.$commit!();
+        s.$commit();
         await new Promise((r) => setTimeout(r, 2));
       }
     },

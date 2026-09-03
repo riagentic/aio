@@ -14,6 +14,7 @@ import { envelopePayload } from "../src/am/am-cmd-state.ts";
 import { removeLock, writeLock } from "../src/server/single-instance-lock.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { _resetInstanceVerify } from "../src/am/am-http.ts";
+import { join, resolve } from "@std/path";
 
 /** A throwaway aio-shaped project on disk (deno.json importing aio). */
 async function makeProject(
@@ -246,24 +247,48 @@ testCell(
 
 // ── entry resolution: ONE decider, shared with `am start` ────────────────────
 //
-// `am start` resolves `deno.json`'s `"entry"` first (src/am/am-utils.ts). amui
-// probed four hard-coded filenames instead, so on any app that renamed its
-// entry the two disagreed: `am start` ran it, amui refused it — and with a
-// stale `src/app.ts` still on disk, amui launched the WRONG file.
+// `am start` resolves `deno.json`'s `"entry"` first (src/am/am-utils.ts, which
+// calls `resolveEntryPath` in src/server/paths.ts — the framework's one answer,
+// shared with the build). amui probed four hard-coded filenames instead, so on
+// any app that renamed its entry the two disagreed: `am start` ran it, amui
+// refused it — and with a stale `src/app.ts` still on disk, amui launched the
+// WRONG file.
+//
+// The pair drifted a SECOND time when `am`'s resolver started answering with an
+// absolute path: the two still named the same file and this test still failed,
+// because it compared the spellings rather than the files. So it compares
+// resolved ABSOLUTE paths now, and the fixtures include the case a re-stated
+// probe list gets wrong (`main.ts` and nothing else) — the two cannot agree
+// there by accident, only by sharing the rule.
 Deno.test("amui resolves an app's entry exactly like `am start` does", async () => {
   const { resolveEntry } = await import("../amui/src/server/proc.server.ts");
   const { resolveEntry: amResolveEntry } = await import(
     "../src/am/am-utils.ts"
   );
   // `am`'s resolver is cwd-relative; run it inside each fixture and restore.
+  // It answers with an absolute path (or null); amui answers project-relative,
+  // because it spawns with `cwd: dir`. Both are normalised to the FILE.
   const amAnswer = (dir: string): string | null => {
     const cwd = Deno.cwd();
     try {
       Deno.chdir(dir);
-      return amResolveEntry();
+      const e = amResolveEntry();
+      return e === null ? null : resolve(dir, e);
     } finally {
       Deno.chdir(cwd);
     }
+  };
+  const amuiAnswer = async (dir: string): Promise<string | null> => {
+    const r = await resolveEntry(dir);
+    return r.ok ? resolve(dir, r.entry) : null;
+  };
+  /** The whole point: for any project, both name the same file — or both
+   *  refuse. Asserted as one value so a future divergence cannot hide in
+   *  "one of them is null". */
+  const agree = async (dir: string, why: string): Promise<string | null> => {
+    const mine = await amuiAnswer(dir);
+    assertEquals(mine, amAnswer(dir), `am and amui must agree: ${why}`);
+    return mine;
   };
 
   // 1. A declared entry wins, even with a stale src/app.ts alongside it.
@@ -275,6 +300,9 @@ Deno.test("amui resolves an app's entry exactly like `am start` does", async () 
   const broken = await makeProject({ "src/app.ts": "// leftover\n" });
   // 3. No declaration → the convention.
   const conventional = await makeProject({ "src/app.ts": "// entry\n" });
+  // 4. No declaration and no src/app.ts. amui's own probe list accepted
+  //    `main.ts` here and `am` never did — the exact shape of the drift.
+  const mainOnly = await makeProject({ "main.ts": "// not the convention\n" });
   const declare = async (dir: string, entry: string) => {
     const cfg = JSON.parse(await Deno.readTextFile(`${dir}/deno.json`));
     await Deno.writeTextFile(
@@ -288,7 +316,10 @@ Deno.test("amui resolves an app's entry exactly like `am start` does", async () 
 
     const r1 = await resolveEntry(renamed);
     assertEquals(r1, { ok: true, entry: "src/server.ts" });
-    assertEquals(amAnswer(renamed), "src/server.ts", "am agrees");
+    assertEquals(
+      await agree(renamed, "a declared entry beats a stale src/app.ts"),
+      join(renamed, "src/server.ts"),
+    );
 
     const r2 = await resolveEntry(broken);
     assertEquals(r2.ok, false, "a declared-but-missing entry is refused");
@@ -297,13 +328,23 @@ Deno.test("amui resolves an app's entry exactly like `am start` does", async () 
       "src/gone.ts",
       "the refusal names the entry that is missing",
     );
-    assertEquals(amAnswer(broken), null, "am refuses it too");
+    assertEquals(await agree(broken, "am refuses it too"), null);
 
     const r3 = await resolveEntry(conventional);
     assertEquals(r3, { ok: true, entry: "src/app.ts" });
-    assertEquals(amAnswer(conventional), "src/app.ts", "am agrees");
+    assertEquals(
+      await agree(conventional, "the convention"),
+      join(conventional, "src/app.ts"),
+    );
+
+    const r4 = await resolveEntry(mainOnly);
+    assertEquals(r4.ok, false, "main.ts is not an entry the framework knows");
+    assertEquals(
+      await agree(mainOnly, "an undeclared main.ts is nobody's entry"),
+      null,
+    );
   } finally {
-    for (const d of [renamed, broken, conventional]) {
+    for (const d of [renamed, broken, conventional, mainOnly]) {
       await Deno.remove(d, { recursive: true });
     }
   }

@@ -11,11 +11,11 @@ import { bootCells, testUI } from "../src/testing/cell-test.ts";
 const toast = cell("toast", {
   state: { msg: "" },
   methods: {
-    push(s: { msg: string }, m: string) {
+    push(s, m: string) {
       s.msg = m;
-      return [
+      s.$do(
         schedule.after("dismiss", 3000, { type: "toast:clear", payload: {} }),
-      ];
+      );
     },
     clear(s: { msg: string }) {
       s.msg = "";

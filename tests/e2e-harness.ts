@@ -6,17 +6,22 @@
 //
 // Skips cleanly when no Chromium is present (BROWSER === null → set `ignore`).
 
+import { testDisplayEnv } from "../src/testing/test-display.ts";
+import { aioTestDir } from "../src/testing/test-strict.ts";
+import {
+  childCoverageDir,
+  dropTempDir,
+  tempDir,
+} from "../src/testing/temp-dir.ts";
+import { stopChild } from "./stop-child.ts";
+
 // Route the spawned server's coverage into the parent's coverage dir when the
 // suite runs under `--coverage` (DENO_COVERAGE_DIR is set by `deno test
 // --coverage`). This is what makes e2e tests actually COUNT toward src/
 // coverage — they exercise the real server (server-ws, broadcast, protocol,
 // subscription filtering) that the in-process harness never touches. Outside a
 // coverage run the var is unset, so we use a throwaway.
-const _childCovDir = Deno.env.get("DENO_COVERAGE_DIR") ??
-  Deno.makeTempDirSync({ prefix: "aio-e2e-cov-" });
-import { testDisplayEnv } from "../src/testing/test-display.ts";
-import { aioTestDir } from "../src/testing/test-strict.ts";
-import { stopChild } from "./stop-child.ts";
+const _childCovDir = childCoverageDir();
 
 const ROOT = new URL("..", import.meta.url).pathname;
 
@@ -363,7 +368,7 @@ export function spawnServer(dir: string, port: number): Deno.ChildProcess {
 /** Open a real headless-Chromium tab against the server and resolve when its
  *  app client has registered. */
 export async function openTab(server: Server): Promise<Tab> {
-  const profile = await Deno.makeTempDir({ prefix: "aio-e2e-prof-" });
+  const profile = await tempDir("aio-e2e-prof-");
   const proc = new Deno.Command(BROWSER!, {
     args: [
       "--headless=new",
@@ -400,7 +405,7 @@ export async function openTab(server: Server): Promise<Tab> {
     proc,
     async close() {
       await stopChild(proc, { quiet: true });
-      await Deno.remove(profile, { recursive: true }).catch(() => {});
+      await dropTempDir(profile);
     },
     surface,
     async text(name: string) {

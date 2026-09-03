@@ -157,7 +157,16 @@ export function manifestReport(caps: Capabilities): string {
     sys: "system info",
   };
   const lines = [
-    `least-privilege run flags: ${flags.length ? flags.join(" ") : "(none)"}`,
+    // WHICH artifact these flags describe is load-bearing. They are scanned
+    // for the COMPILED binary, which carries its own pre-built bundle and
+    // never transpiles. `deno task dev` does: it transpiles every .tsx through
+    // esbuild, which spawns its native binary. Running dev with exactly this
+    // list therefore died inside esbuild — and the server reported it as a
+    // syntax error in an untouched scaffold. The list was true; it just never
+    // said what it was true OF.
+    `least-privilege run flags (the compiled binary in dist/): ${
+      flags.length ? flags.join(" ") : "(none)"
+    }`,
     "  (replaces -A; review + path/host-scope before shipping)",
   ];
   for (
@@ -173,6 +182,13 @@ export function manifestReport(caps: Capabilities): string {
         }`,
       );
     }
+  }
+  if (!caps.run) {
+    lines.push(
+      `\`deno task dev\` needs those PLUS --allow-run: the dev server ` +
+        `transpiles with esbuild, which runs its native binary as a ` +
+        `subprocess. The compiled binary above does not.`,
+    );
   }
   return lines.join("\n");
 }

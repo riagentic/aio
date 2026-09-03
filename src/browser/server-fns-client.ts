@@ -3,7 +3,7 @@
 // transport: an "sfn" envelope out, an "sfnr" envelope back (B4b v2).
 // Fail-loud: server errors reject with the server's message; 30s timeout.
 
-import { enc, type SfnrPayload } from "../protocol/envelope.ts";
+import { enc, type SfnrPayload, wireError } from "../protocol/envelope.ts";
 import { serializeArgs } from "../protocol/wire-value.ts";
 import type { Remote } from "../protocol/protocol-types.ts";
 import { getConnectedSignal } from "../state-core.ts";
@@ -74,7 +74,16 @@ export function handleSfnResult(data: unknown): boolean {
   _pending.delete(r.cid);
   clearTimeout(p.timer);
   if (r.ok) p.resolve(r.value);
-  else p.reject(new Error(`[server] ${r.error ?? "serverFn failed"}`));
+  else {
+    // `[server] ` says WHERE it failed, which a bare message cannot — but it
+    // is the only prefix now (the send side stopped stringifying with
+    // `String(e)`, which prepended a second "Error: " that the client then
+    // wrapped into a third). The classification travels beside the text, not
+    // inside it: `wireError` puts the server's `code` on the rejection.
+    const e = wireError(r, "serverFn failed");
+    e.message = `[server] ${e.message}`;
+    p.reject(e);
+  }
   return true;
 }
 

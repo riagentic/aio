@@ -2,6 +2,7 @@
 // Provides: onMount, onCleanup, useRef, useSignal, useId, _resetSsrIdCounter, useOptimistic.
 
 import { type Signal, signal } from "../state/signal.ts";
+import { isDevMode } from "../state/dev-flag.ts";
 import type { ComponentInstance } from "./renderer-types.ts";
 import {
   _activeRoot,
@@ -10,18 +11,13 @@ import {
   _setCurrentCollector,
 } from "./renderer-state.ts";
 
-let _devMode = false;
-export function _setLifecycleDevMode(v: boolean): void {
-  _devMode = v;
-}
-
 /** `onMount`/`onCleanup` outside a render were dropped in SILENCE, while
  *  `afterRender`, `useRef` and `useSignal` all say so for the identical
  *  mistake. The symptom was "my subscription never runs" with nothing to
  *  search for. Observe-only, so dev and prod behave identically — prod drops
  *  it exactly as before, dev additionally names it. */
 function _warnOutsideRender(hook: string): void {
-  if (!_devMode) return;
+  if (!isDevMode()) return;
   console.warn(
     `[aio-dev] ${hook}() called outside a component render — there is no ` +
       `component to attach it to, so the callback was DROPPED. It only works ` +
@@ -159,7 +155,7 @@ export function onGlobalKey(
  */
 export function useRef<T>(initial: T): { current: T } {
   if (!_currentCollector) {
-    if (_devMode) {
+    if (isDevMode()) {
       console.warn(
         "[aio-dev] useRef() called outside a component render. The ref will not persist across re-renders.",
       );
@@ -197,7 +193,7 @@ export function useRef<T>(initial: T): { current: T } {
  */
 export function useSignal<T>(initial: T): Signal<T> {
   if (!_currentCollector) {
-    if (_devMode) {
+    if (isDevMode()) {
       console.warn(
         "[aio-dev] useSignal() called outside a component render. The signal will not persist across re-renders.",
       );

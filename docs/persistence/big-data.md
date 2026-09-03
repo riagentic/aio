@@ -225,10 +225,10 @@ const importer = cell("importer", {
       const pipe = await import("./import-pipeline.server.ts");
       // s.$signal aborts when the call is cancelled — the pipeline stops
       // between batches instead of orphaning a half-import.
-      await pipe.importDump(path, (done, total) => {
+      await pipe.importDump(path, (done: number, total: number) => {
         s.done = done; // tiny writes — each syncs as a tiny patch
         s.total = total;
-      }, s.$signal!);
+      }, s.$signal);
       s.running = false;
     },
   },

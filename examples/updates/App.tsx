@@ -132,9 +132,23 @@ export default function App() {
       </button>
 
       <p style={{ color: "#868e96", fontSize: "0.9rem", marginTop: "2rem" }}>
-        Running {updates.current || "?"} on the{" "}
+        {
+          /* `current` is null when this build cannot say what version it is;
+            `currentUnknown` says why. They used to be ONE string field, so
+            this line printed the whole 200-character explanation where a
+            version goes. */
+        }
+        Running {updates.current ?? "an unknown version"} on the{" "}
         <strong>{updates.channel || "?"}</strong> channel
         {updates.lastChecked ? ` · checked ${updates.lastChecked}` : ""}
+        {updates.currentUnknown
+          ? (
+            <span title={updates.currentUnknown}>
+              {" · why: "}
+              {updates.currentUnknown}
+            </span>
+          )
+          : ""}
         {" · "}
         {/* A manual check button is the whole feature. */}
         <button type="button" onClick={() => updates.check()}>Check now</button>

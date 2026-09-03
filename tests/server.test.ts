@@ -564,7 +564,7 @@ Deno.test("server: POST /__aio/snapshot without X-AIO header returns 403", async
     // POST without X-AIO header → 403
     const resp = await fetch(`http://127.0.0.1:${CSRF_PORT}/__aio/snapshot`, {
       method: "POST",
-      body: '{"count":1}',
+      body: '{"count":{"n":1}}',
       headers: { "Content-Type": "application/json" },
     });
     assertEquals(resp.status, 403);
@@ -574,7 +574,7 @@ Deno.test("server: POST /__aio/snapshot without X-AIO header returns 403", async
     // POST with X-AIO header → 200
     const resp2 = await fetch(`http://127.0.0.1:${CSRF_PORT}/__aio/snapshot`, {
       method: "POST",
-      body: '{"count":1}',
+      body: '{"count":{"n":1}}',
       headers: { "Content-Type": "application/json", "X-AIO": "1" },
     });
     assertEquals(resp2.status, 200);
@@ -730,7 +730,7 @@ async function withTrojanServer(
         index: 0,
         paused: false,
       }),
-      forcePersist: () => {},
+      forcePersist: () => Promise.resolve(),
       startedAt: Date.now() - 5000,
     },
   });
@@ -932,14 +932,38 @@ Deno.test("trojan: POST /dispatch rejects missing type", async () => {
 
 Deno.test("trojan: POST /snapshot replaces state", async () => {
   await withTrojanServer(async (url) => {
+    // A snapshot is `{ cellName: {…state} }` — a cell's state is always an
+    // object. (This used to post `{ count: 99 }`, i.e. a cell called "count"
+    // whose whole state is the number 99, which no app can produce.)
     const resp = await fetch(`${url}/__aio/trojan/snapshot`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-AIO": "1" },
-      body: JSON.stringify({ count: 99 }),
+      body: JSON.stringify({ count: { n: 99 } }),
     });
     assertEquals(resp.status, 200);
     const data = await resp.json();
     assertEquals(data.ok, true);
+    const after = await (await fetch(`${url}/__aio/trojan/state`)).json();
+    assertEquals(after, { count: { n: 99 } }, "…and it really replaced state");
+  });
+});
+
+// Both snapshot doors — `/__aio/snapshot` and the trojan's — call the same
+// `loadSnapshot`, so they must refuse the same shapes. The trojan's only
+// check was `JSON.parse`, so `{"counter": 1}` loaded here and broke the NEXT
+// dispatch on that cell, far from the request that caused it. (audit a3/H6)
+Deno.test("trojan: POST /snapshot refuses a non-object cell value", async () => {
+  await withTrojanServer(async (url) => {
+    for (const bad of ['{"count":1}', '{"count":null}', '{"count":[]}', "[]"]) {
+      const resp = await fetch(`${url}/__aio/trojan/snapshot`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-AIO": "1" },
+        body: bad,
+      });
+      const data = await resp.json();
+      assertEquals(resp.status, 400, `${bad} → ${resp.status}`);
+      assertEquals(typeof data.error, "string");
+    }
   });
 });
 

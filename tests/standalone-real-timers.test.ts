@@ -33,10 +33,10 @@ Deno.test({
           s.n += 1;
           fired++;
         },
-        start(_s: unknown) {
-          return schedule.after("probe:tick", 20, {
+        start(s) {
+          s.$do(schedule.after("probe:tick", 20, {
             type: "real-timer-probe:tick",
-          });
+          }));
         },
       },
     });

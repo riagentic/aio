@@ -1,6 +1,6 @@
 // Pure type definitions for aio.run() — no runtime code
 import type { AioError, ReportErrorOpts } from "../diagnostics/error.ts";
-import type { PerfBudget } from "../state/dispatch.ts";
+import type { PerfBudget, PerfCheck } from "../state/dispatch.ts";
 import type {
   CellPatchStrategy,
   PatchFilterFields,
@@ -380,11 +380,17 @@ export type AioConfig<S, A, E> = {
   client?: "electron" | "browser" | "cli" | "server-only"; // default: 'electron'
   keepServer?: boolean; // default: false — keep server running after client closes (moved from ui.keepAlive)
   transport?: "uds" | "ws" | "auto"; // default: 'auto' — UDS on linux/mac+electron, WS otherwise (moved from ui.transport)
-  killExisting?: boolean; // default: false
+  /** Kill the running instance and take its singleton lock (default: false).
+   *  Spelled `killExisting` until alpha76 — the flag has been `--takeover`
+   *  since alpha52, and a compiled service binary that can only write config
+   *  had no way to say the current word. */
+  takeover?: boolean;
   serverUrl?: string;
   schedules?: ScheduleDef[]; // static scheduled effects — started on boot
   db?: Record<string, TableDef | DbMapping>; // SQLite table definitions — arrays auto-sync
-  perfCheck?: "on" | "off"; // default: 'on' — enable/disable performance violation reporting
+  /** Report performance-budget violations (default: on). `false` / `"off"`
+   *  silences them. Both spellings work — see {@linkcode PerfCheck}. */
+  perfCheck?: PerfCheck;
   perfBudget?: PerfBudget; // override default budgets (reduce: 100, effect: 5)
   renderBudget?: RenderBudget; // override render staleness/patch thresholds (sent to browser)
   /** How long an async method may run before the framework stops waiting for
@@ -564,7 +570,16 @@ export type AioApp<S = unknown, A = unknown> = {
    *  admins: `app.auth.create("root", pw, "admin")`. */
   auth?: import("./auth-users.ts").UserStore;
   close: () => Promise<void>;
-  mode?: string; // 'standalone' in Android WebView builds — branch effects accordingly
+  /** `"standalone"` inside an Android WebView build (the only value there has
+   *  ever been — `src/standalone-air.ts` is the one place it is set), absent
+   *  everywhere else. Branch effects on it: `if (app.mode === "standalone")`.
+   *
+   *  Typed as the union rather than `string`, because at beta1 it freezes and
+   *  `string` would freeze with it — leaving the one fact this key carries
+   *  (which of a CLOSED set of runtimes am I in?) unable to autocomplete, and
+   *  a typo in the comparison unable to fail. Widening a union later is
+   *  additive; narrowing `string` later is not. */
+  mode?: "standalone";
   port?: number; // server port — available after aio.run(), useful for connectCli()
   /** v0.5 cell control API — only available when using cells-based config */
   cells?: {
@@ -695,7 +710,8 @@ export type CellsConfig = {
   client?: "electron" | "browser" | "cli" | "server-only";
   keepServer?: boolean;
   transport?: "uds" | "ws" | "auto";
-  killExisting?: boolean;
+  /** See {@link CellsConfig.takeover} (`killExisting` until alpha76). */
+  takeover?: boolean;
   serverUrl?: string;
   users?: Record<string, AioUser>;
   /** --expose auth (see CellsConfig.key). */
@@ -706,7 +722,8 @@ export type CellsConfig = {
   /** AUTH-2/3: built-in password auth (see AioConfig.auth). */
   auth?: boolean | AuthOptions;
   db?: Record<string, TableDef | DbMapping>;
-  perfCheck?: "on" | "off";
+  /** See {@linkcode CellsConfig.perfCheck}. */
+  perfCheck?: PerfCheck;
   perfBudget?: PerfBudget;
   /** Client render-staleness / pending-patch thresholds — sent to the browser
    *  (page shell + `cfg` frame). Was accepted by the option validator but

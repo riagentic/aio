@@ -29,11 +29,10 @@
 // `serveDirs`) and tests/cfg-handshake.test.ts (`bootedCells` on the frame).
 import { assert, assertEquals } from "@std/assert";
 import { VALID_AIO_CONFIG_KEYS } from "../src/server/config.ts";
+import { childCoverageDir } from "../src/testing/temp-dir.ts";
 
 const REPO = new URL("..", import.meta.url).pathname;
-// Child `deno doc` coverage profiles go to a throwaway dir — never the repo.
-const _childCovDir = Deno.env.get("DENO_COVERAGE_DIR") ??
-  Deno.makeTempDirSync({ prefix: "aio-child-cov-" });
+const _childCovDir = childCoverageDir();
 
 /** Property names of an exported interface/type alias, via `deno doc --json`
  *  (the real type, not a source-text guess). Underscore keys included — the

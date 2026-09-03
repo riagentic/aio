@@ -1,8 +1,10 @@
+import { tempDir } from "../src/testing/temp-dir.ts";
+
 // The aio root is MACHINE-wide, so a test that does not relocate it writes
 // trust material into the developer's real home and then asserts against
 // whatever their machine already had. `AIO_APPS_DIR` moves the whole data
 // root, root CA included.
-const _TLS_SANDBOX = await Deno.makeTempDir({ prefix: "aio-tls-test-" });
+const _TLS_SANDBOX = await tempDir("aio-tls-test-");
 Deno.env.set("AIO_APPS_DIR", _TLS_SANDBOX);
 import {
   assert,
@@ -15,7 +17,6 @@ import {
   DEFAULT_CERT_CN,
   loadOrCreateCert,
 } from "../src/server/tls.ts";
-
 const PEM_CERT_PREFIX = "-----BEGIN CERTIFICATE-----";
 const PEM_KEY_PREFIX = "-----BEGIN";
 

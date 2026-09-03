@@ -22,6 +22,8 @@ import { resolveAppDir } from "../build/build-config.ts";
 import { resolveEntryPath } from "../server/paths.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import { VERSION } from "../server/aio-cli.ts";
+import { detectMode, fail, out } from "./am-output.ts";
+import { projectRoot } from "./am-project.ts";
 
 const THEME_FILE = "aio-theme.css";
 const IMPORT_LINE = `@import "./${THEME_FILE}";`;
@@ -60,19 +62,27 @@ export async function cmdTheme(
   args: string[],
   flags: GlobalFlags,
 ): Promise<void> {
+  // `am theme` is an `am` command like every other one: its refusals are
+  // `{"error":…}` on STDOUT under --json, and its result is a document. It used
+  // to write console.error + exit(1) — an empty stdout and prose on stderr, so
+  // the one contract every scripted caller relies on ("--json always answers
+  // with a JSON object") had a hole in it exactly here.
+  const mode = detectMode(flags);
   const sub = args[0];
   if (sub !== "adopt") {
-    console.error(
-      `✗ am theme: unknown subcommand ${
+    fail(
+      `am theme: unknown subcommand ${
         sub ? `"${sub}"` : "(none)"
       } — the only one is:\n` +
         `  am theme adopt    take aio's stylesheet into this app as ${THEME_FILE}\n` +
         `                    (--force overwrites an existing one)`,
+      mode,
     );
-    Deno.exit(1);
   }
 
-  const root = Deno.cwd();
+  // The PROJECT root, not the cwd — one decider (am-project.ts), so
+  // `am theme adopt` from `src/` adopts into the app rather than refusing.
+  const root = projectRoot();
   // A file that is ABSENT and a file that does not PARSE are different facts,
   // and collapsing them is how a skipped repair still printed "Now run: deno
   // task dev" — the reader throws for the second, naming the file and the
@@ -81,15 +91,17 @@ export async function cmdTheme(
   try {
     found = await readDenoJson(root);
   } catch (e) {
-    console.error(`✗ am theme adopt: ${e instanceof Error ? e.message : e}`);
-    Deno.exit(1);
+    fail(
+      `am theme adopt: ${e instanceof Error ? e.message : String(e)}`,
+      mode,
+    );
   }
   if (!found) {
-    console.error(
-      `✗ am theme adopt: no deno.json in ${root} — run it from the app's root ` +
-        `(the directory holding deno.json).`,
+    fail(
+      `am theme adopt: no deno.json in ${root} — run it from inside the app ` +
+        `(any directory under the one holding deno.json).`,
+      mode,
     );
-    Deno.exit(1);
   }
   const cfg = found.config;
   // THE app-dir decider: assets live beside the entry, wherever that is. A
@@ -98,20 +110,20 @@ export async function cmdTheme(
   const appDir = resolveAppDir(root, resolveEntryPath(cfg));
   const themePath = join(appDir, THEME_FILE);
   const stylePath = join(appDir, "style.css");
-  const force = Deno.args.includes("--force") || flags.force === true;
+  const force = args.includes("--force") || flags.force === true;
 
   // Never silently overwrite: once adopted, the file is the app's, and the
   // developer's edits are the whole point of having it.
   try {
     await Deno.stat(themePath);
     if (!force) {
-      console.error(
-        `✗ am theme adopt: ${themePath} already exists — it is YOURS now, and ` +
+      fail(
+        `am theme adopt: ${themePath} already exists — it is YOURS now, and ` +
           `overwriting it would discard your edits.\n` +
           `  Keep it, or pass --force to replace it with aio ${VERSION}'s ` +
           `current theme (diff it first: git diff after the run).`,
+        mode,
       );
-      Deno.exit(1);
     }
   } catch { /* not there — the normal path */ }
 
@@ -142,8 +154,16 @@ export async function cmdTheme(
   }
 
   const rel = (p: string) => p.startsWith(root) ? p.slice(root.length + 1) : p;
-  console.log(
-    `✓ adopted aio ${VERSION}'s theme → ${rel(themePath)}\n` +
+  out(
+    {
+      adopted: rel(themePath),
+      appId,
+      aio: VERSION,
+      style: styleNote,
+    },
+    mode,
+    () =>
+      `✓ adopted aio ${VERSION}'s theme → ${rel(themePath)}\n` +
       `  ${styleNote}\n` +
       `\n` +
       `  It is a normal stylesheet now: yours to edit, in your git history, ` +

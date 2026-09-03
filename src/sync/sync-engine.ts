@@ -73,6 +73,9 @@ export interface SyncEngine {
     lowWater: HLC | Record<string, HLC>;
     /** Per-cell server_ts cursor echoed by the server. */
     lastServerTs?: Record<string, number>;
+    /** Cells whose cursor the server never issued — adopt the snapshot and
+     *  its cursor unconditionally (see `SyncResponse.reset`). */
+    reset?: string[];
   }): Promise<void>;
   setOnline(online: boolean): void;
   getStatus(cell: string): SyncStatus;
@@ -758,6 +761,27 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
       // "any response opens the gate", which is what it always did.
       const rid = response.reqId;
       const answersLatest = rid === undefined || rid >= _reqSeq;
+      // Cells the server says we hold a FOREIGN cursor for: it never issued
+      // that position, so this client synced with a different history (the
+      // server restarted on a restored backup, a wiped data dir, or another
+      // app answers on this port). Every "never regress" rule below exists
+      // for out-of-order responses within ONE history and would pin the
+      // stale cursor forever — the server's snapshot and cursor replace ours.
+      // Unconfirmed ops are untouched: they were re-sent as pendingOps and
+      // are acked (or rejected) by the server we are actually talking to.
+      const resetCells = new Set(response.reset ?? []);
+      for (const cell of resetCells) {
+        _confirmedTs.delete(cell);
+        _snapshotTs.delete(cell);
+        // The app's channel (browser-sync wires console.warn here), same as
+        // every other engine-level warning the app is meant to see.
+        deps.log?.warn(
+          `[sync] ${cell}: the server never issued this client's sync ` +
+            `cursor — it synced with a different history (restored backup, ` +
+            `wiped data dir, or another app on this address). Adopting the ` +
+            `server's snapshot; unsent changes are kept and re-sent.`,
+        );
+      }
       const held = new Map(_deferred);
       _deferred.clear();
       if (answersLatest) _catchup.clear();
@@ -801,11 +825,12 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
               _snapshotTs.set(cell, snapTs);
               noteConfirmedTs(cell, snapTs);
             }
-            await deps.buffer.saveSnapshot(cell, {
-              state: snap,
-              hlc: getLW(cell),
-              ...(typeof snapTs === "number" ? { serverTs: snapTs } : {}),
-            });
+            // NOT written to the buffer: confirmed state is re-seeded from the
+            // cell's initial state on every boot and no code path ever loaded
+            // a stored snapshot back, so `buffer.saveSnapshot` here was a copy
+            // of the whole cell state into localStorage on every catch-up —
+            // paid against the same quota the offline queue needs and never
+            // read (audit a5, 2026-09-02).
           }
           let newLastHlc: HLC | null = null;
           if (snap) newLastHlc = getLW(cell);
@@ -917,10 +942,10 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
                 ? prev.lastHlc
                 : newLastHlc;
             const respTs = response.lastServerTs?.[cell];
-            const lastServerTs =
-              respTs != null && respTs > (prev?.lastServerTs ?? 0)
-                ? respTs
-                : prev?.lastServerTs;
+            const lastServerTs = respTs != null &&
+                (resetCells.has(cell) || respTs > (prev?.lastServerTs ?? 0))
+              ? respTs
+              : prev?.lastServerTs;
             await deps.buffer.saveMeta(cell, { lastHlc, lastServerTs });
             cursorSaved.add(cell);
           }
@@ -977,7 +1002,7 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         try {
           await withLock(cell, async () => {
             const prev = await deps.buffer.getMeta(cell);
-            if (ts > (prev?.lastServerTs ?? 0)) {
+            if (resetCells.has(cell) || ts > (prev?.lastServerTs ?? 0)) {
               await deps.buffer.saveMeta(cell, {
                 lastHlc: prev?.lastHlc ?? null,
                 lastServerTs: ts,

@@ -25,6 +25,7 @@ import { resolve } from "@std/path";
 import { colorEnabled } from "../diagnostics/color.ts";
 import { styleWith } from "../diagnostics/fmt.ts";
 import { PATH_PIN_PREFIX } from "../server/framework-pin.ts";
+import { GIT_NO_PROMPT_ENV } from "../server/git-noninteractive.ts";
 import {
   ensureVersion,
   latestTag,
@@ -32,10 +33,14 @@ import {
   syncFrameworkDeps,
   writePin,
 } from "./am-versions.ts";
+import { type Template, TEMPLATES } from "./am-help-text.ts";
 
 const PKG = "@riagentic/aio";
-const TEMPLATES = ["counter", "todo", "cli"] as const;
-export type Template = (typeof TEMPLATES)[number];
+/** THE scaffold templates — declared once in `am-help-text.ts`, which is also
+ *  where `am help` reads them, and re-exported here because this is the
+ *  command that accepts them. */
+export { TEMPLATES };
+export type { Template };
 
 /** Build target — what `deno task dev` / `deno task compile` produce by
  *  default. Other shells stay one flag away (`deno task dev --client=X`,
@@ -225,6 +230,12 @@ export function frameworkSpecs(source: boolean): {
 export function standardTasks(
   source: boolean,
   target: Target = DEFAULT_TARGET,
+  /** The scaffold this task set is for. Only `cli` changes anything: its
+   *  `src/app.ts` is ONE binary with two roles and demands a command word, so
+   *  `deno run -A src/app.ts --client=cli` — which is what the target alone
+   *  produces — exited with "missing command" on the very first
+   *  `deno task dev` of a fresh `--template=cli` scaffold. */
+  template: Template = "counter",
 ): Record<string, string> {
   const fw = frameworkSpecs(source);
   // The `--client=X` arg is omitted for the default browser target (matches
@@ -234,7 +245,11 @@ export function standardTasks(
   // (alpha52 "one vocabulary" diet).
   // `android` has no client flag — its dev default IS the emulator
   // orchestrator (boots an AVD, builds+installs+launches; needs the SDK).
-  const devDefault = target === "android"
+  const devDefault = template === "cli"
+    // The cli scaffold's dev loop IS its server: `todo serve`. Its app.ts
+    // routes on the command word, and `--client=cli` is not one.
+    ? "deno run -A src/app.ts serve"
+    : target === "android"
     ? `deno run -A ${fw.devAndroid}`
     : `deno run -A src/app.ts${
       target === "browser" ? "" : ` --client=${clientFlagFor(target)}`
@@ -392,11 +407,12 @@ export function denoJson(
   name: string,
   source: boolean,
   target: Target = DEFAULT_TARGET,
+  template: Template = "counter",
 ): string {
   const fw = frameworkSpecs(source);
   // The task diet keeps `install:electron` an electron-only convenience —
   // scaffolding it into a browser/cli/server app is the noise the diet removed.
-  const tasks = standardTasks(source, target);
+  const tasks = standardTasks(source, target, template);
   if (target !== "electron") delete tasks["install:electron"];
   if (target !== "android") delete tasks["install:android"];
   const obj = {
@@ -498,7 +514,7 @@ export function scaffold(
   // UI: no src/App.tsx, no separate src/client.ts — its app.ts IS the client.
   if (template === "cli") {
     return {
-      "deno.json": denoJson(name, source, target),
+      "deno.json": denoJson(name, source, target, template),
       ".gitignore": GITIGNORE,
       "src/app.ts": CLI_APP,
       "src/cell.ts": CLI_CELL,
@@ -786,6 +802,8 @@ async function tryGitInit(dir: string): Promise<GitInit> {
       cwd: dir,
       stdout: "piped",
       stderr: "null",
+      stdin: "null",
+      env: GIT_NO_PROMPT_ENV,
     }).output();
     if (inside.success) {
       const top = new TextDecoder().decode(inside.stdout).trim();
@@ -797,6 +815,8 @@ async function tryGitInit(dir: string): Promise<GitInit> {
         cwd: dir,
         stdout: "null",
         stderr: "null",
+        stdin: "null",
+        env: GIT_NO_PROMPT_ENV,
       })
         .output();
     if (!(await run(["init"])).success) return "skipped: git init failed";
@@ -845,7 +865,11 @@ An [aio](https://github.com/riagentic/aio) app (${template} template).
 > script) to repair them, then \`deno task dev\` works.
 
 \`\`\`sh
-deno task dev              # run — ${target} (flags pass through, see below)
+deno task dev              # ${
+    template === "cli"
+      ? `run the server (\`${name} serve\`) — commands find it by themselves`
+      : `run — ${target} (flags pass through, see below)`
+  }
 deno task test             # run the starter test
 deno task compile          # build the default target (${target})
 deno task build            # build every target in deno.json build.targets → dist/
@@ -857,7 +881,21 @@ build number is derived from the commit count, so every artifact is named
 \`${name}-0.1.<build>…\` and reports that version (\`-dirty.<hash>\` when
 built from uncommitted changes).
 
-**\`dev\` flags pass through** — one task, any shell:
+${
+    template === "cli"
+      ? `**One binary, two roles.** \`deno task dev\` is the server; every other
+command connects to it and prints. Commands find the running server through its
+lock file — the same thing \`am\` reads — so a free port needs no configuration:
+
+\`\`\`sh
+deno task dev                       # the server (a free port; --port=N to name one)
+deno run -A src/app.ts list         # a command, against the running server
+deno run -A src/app.ts list --watch # a live view
+deno run -A src/app.ts list --json  # for a script
+deno task dev --expose              # reachable on the LAN (prints pair PIN)
+\`\`\`
+`
+      : `**\`dev\` flags pass through** — one task, any shell:
 
 \`\`\`sh
 deno task dev --client=electron     # desktop window (auto-installs Electron)
@@ -865,7 +903,8 @@ deno task dev --client=cli          # terminal client
 deno task dev --client=server-only  # headless server
 deno task dev --expose              # reachable on the LAN (prints pair PIN)
 \`\`\`
-
+`
+  }
 **Ship more targets** by listing them in deno.json —
 \`"build": { "targets": ["${target}", "electron", "android"] }\` — then
 \`deno task build\` (or one-off: \`deno task build --targets=electron\`).
@@ -1094,14 +1133,19 @@ const CLI_APP =
 // to it over WS, dispatches a cell method, and prints — with \`aio/cli\` doing
 // the flags, the table, the live view, and the exit codes.
 //
-//   todo serve [--port=8000]         # the server
+//   todo serve [--port=N]            # the server (a free port unless named)
 //   todo add buy milk                # a command
 //   todo list --watch                # a live view: redraws on every change
 //   todo list --json | jq            # a script
 //
+// Commands find the server through its LOCK FILE — the same thing \`am\` reads
+// — so \`todo serve\` on a free port just works. \`--url\` overrides (a remote
+// server, or one behind a tunnel).
+//
 // Dev: deno task dev (= serve)   Build: deno task compile (a \`cli\` binary)
 import { aio } from "aio";
 import { connectCli } from "aio/server";
+import { instances, resolveAppId } from "aio/extras";
 import { args, EXIT, fail, style, table, watch } from "aio/cli";
 import { todos } from "./cell.ts";
 
@@ -1125,18 +1169,28 @@ if (Deno.args[0] === "serve") {
     flags: {
       url: {
         type: "string",
-        default: "ws://localhost:8000/ws",
-        help: "the server to talk to",
+        help: "the server to talk to (default: the running \`todo serve\`)",
       },
       watch: { type: "boolean", short: "w", help: "list: redraw on change" },
       json: { type: "boolean", help: "machine-readable output" },
     },
   });
 
-  const app = connectCli(a.flags.url, { readyTimeoutMs: 3000 });
+  // WHERE the server is. \`serve\` binds a FREE port unless one is named, so a
+  // hard-coded ws://localhost:8000 was wrong on nearly every run: \`todo list\`
+  // said "no server" against a server that was running. The lock the app
+  // writes is the one place that knows, and it is what \`am\` reads too.
+  const live = instances(resolveAppId()).find((i) => i.alive && i.port > 0);
+  const url = a.flags.url ??
+    (live ? \`ws://localhost:\${live.port}/ws\` : undefined);
+  if (!url) {
+    fail("no todo server running — start one: todo serve", { json: a.json });
+  }
+
+  const app = connectCli(url!, { readyTimeoutMs: 3000 });
   app.bind(todos);
   await app.ready.catch(() =>
-    fail(\`no server at \${a.flags.url} — start one: todo serve\`, {
+    fail(\`no server at \${url} — start one: todo serve\`, {
       json: a.json,
     })
   );

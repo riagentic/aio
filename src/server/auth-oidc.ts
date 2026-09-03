@@ -213,21 +213,37 @@ function oidcBinderFromCookie(req: Request): string | null {
 }
 
 /** Same-site path only ("/orders/7") — anything else (absolute URLs,
- *  protocol-relative "//evil") would be an open redirect. */
-const safePath = (p: string | null): string => {
+ *  protocol-relative "//evil") would be an open redirect. The result is
+ *  ALWAYS a valid header value (printable ASCII): anything outside 0x21–0x7E
+ *  is UTF-8 percent-encoded, so a non-Latin-1 path ("/文档") redirects to its
+ *  encoded self instead of throwing when the `Location` header is built. */
+export const _safeReturnPath = (p: string | null): string => {
   // Same-site absolute path only. A browser's URL parser STRIPS ASCII control
   // chars (tab/newline/etc.) and rewrites "\"→"/" BEFORE resolving a Location
   // header, so "/\evil", "//evil", AND "/\t/evil" all normalize to a
   // protocol-relative URL → https://evil (open redirect). Require: starts with
   // "/", second char is not "/" or "\", and NO control char anywhere (which a
-  // browser could delete to expose "//"). Anything else → "/".
+  // browser could delete to expose "//"). Anything else → "/". The checks run
+  // on the RAW string: "%2F%2F" / "%09" are not decoded by a browser's URL
+  // resolver, so they stay a same-origin path and are left as they are.
   if (!p || p[0] !== "/") return "/";
   if (p[1] === "/" || p[1] === "\\") return "/";
   for (let i = 0; i < p.length; i++) {
     const code = p.charCodeAt(i);
     if (code <= 0x1f || code === 0x7f) return "/"; // C0 controls + DEL
   }
-  return p;
+  // A header value is a ByteString: `new Headers({ Location })` throws on any
+  // code point > 0xFF, and 0x80–0xFF would be sent as raw Latin-1 bytes. Emit
+  // printable ASCII only — every other byte of the UTF-8 form is %XX-encoded
+  // ("%" itself passes through, so an already-encoded path is a fixed point),
+  // and "\" becomes the "/" the browser would rewrite it to anyway.
+  let out = "";
+  for (const b of new TextEncoder().encode(p)) {
+    if (b === 0x5c) out += "/";
+    else if (b >= 0x21 && b <= 0x7e) out += String.fromCharCode(b);
+    else out += "%" + b.toString(16).toUpperCase().padStart(2, "0");
+  }
+  return out;
 };
 
 export async function oidcStart(
@@ -261,7 +277,7 @@ export async function oidcStart(
     10 * 60_000,
     JSON.stringify({
       v: verifier,
-      r: safePath(self.searchParams.get("redirect")),
+      r: _safeReturnPath(self.searchParams.get("redirect")),
       b: await sha256hex(binder),
       n: nonce,
     }),
@@ -401,12 +417,14 @@ export async function oidcCallback(
       return new Response("invalid id_token", { status: 401 });
     }
   }
-  const token = deps.sessions.issue(user, { ttlMs: deps.ttlMs });
+  // Build the redirect BEFORE minting the session: if this response could not
+  // be constructed, no session row may exist that no browser will ever hold.
   const headers = new Headers({
-    Location: safePath(returnTo),
+    Location: _safeReturnPath(returnTo),
     // Identity-bearing (it hands out a session cookie) — never cached.
     "Cache-Control": "no-store",
   });
+  const token = deps.sessions.issue(user, { ttlMs: deps.ttlMs });
   headers.append("Set-Cookie", deps.cookie(token));
   // Clear the one-shot binder cookie.
   headers.append(

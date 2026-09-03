@@ -192,6 +192,30 @@ async function main(): Promise<void> {
       symIssues.length ? `${symIssues.length} do not resolve` : "all resolve"
     }`,
   );
+  // Structure the docs promise about EACH OTHER (a `page.md#heading` link),
+  // about the SERVER (a `/__aio/…` path), and about a SCRIPT (a `--flag`).
+  const anchorIss = anchorIssues(await readAllDocs());
+  console.log(
+    `Anchors (page.md#heading): ${
+      anchorIss.length ? `${anchorIss.length} dangling` : "all land"
+    }`,
+  );
+  const routeIss = routeIssues(docs, await loadRoutes());
+  console.log(
+    `Server routes (/__aio/…) in docs: ${
+      routeIss.length ? `${routeIss.length} not mounted` : "all mounted"
+    }`,
+  );
+  const flagIss = flagIssues(
+    docs,
+    await loadTaskScripts(),
+    await loadScriptFlags(),
+  );
+  console.log(
+    `Script flags in docs: ${
+      flagIss.length ? `${flagIss.length} do not parse` : "all parse"
+    }`,
+  );
 
   // Version-string drift is ADVISORY: docs legitimately reference historical
   // versions (migration notes) and example CLI output, so it warns but never
@@ -250,13 +274,31 @@ async function main(): Promise<void> {
         `export them, or stop documenting them):\n${symIssues.join("\n")}`,
     );
   }
+  if (anchorIss.length) {
+    fatal.push(
+      `\nLinks to headings that do not exist (must fix — the reader clicks ` +
+        `these; anchors follow GitHub's slug rule):\n${anchorIss.join("\n")}`,
+    );
+  }
+  if (routeIss.length) {
+    fatal.push(
+      `\n/__aio/ paths the server does not mount (must fix — the reader ` +
+        `curls these and gets a 404):\n${routeIss.join("\n")}`,
+    );
+  }
+  if (flagIss.length) {
+    fatal.push(
+      `\nScript flags the docs teach but the script does not parse (must ` +
+        `fix — the script exits on an unknown flag):\n${flagIss.join("\n")}`,
+    );
+  }
   if (fatal.length) {
     console.log(fatal.join("\n"));
     Deno.exit(1);
   }
   console.log(
     "\n✓ Docs check green: error codes, doc refs, vocabulary, " +
-      "commands, symbols.",
+      "commands, symbols, anchors, routes, script flags.",
   );
 }
 
@@ -919,4 +961,399 @@ export function symbolIssues(
     }
   }
   return issues;
+}
+
+// ── Check: every `page.md#anchor` link lands on a heading ─────────────
+//
+// docs/state/the-bridge.md linked `methods.md#returning-schedule-effects`
+// after that heading had been rewritten, and three more pages linked three
+// more headings that no longer exist. A link is a promise about another
+// page's structure; GitHub's slug rule is mechanical, so the promise is
+// checkable. Every page is covered — an upgrade guide's links must land too.
+
+/** GitHub's heading → anchor rule: lowercase, strip everything but letters,
+ *  digits, spaces, `-` and `_`, then spaces → `-`. A repeated slug in one
+ *  page gets `-1`, `-2`, … (see `headingSlugs`). */
+export function slugOf(heading: string): string {
+  return heading
+    .trim()
+    .toLowerCase()
+    .replace(/<[^>]+>/g, "")
+    .replace(/[^\p{L}\p{N} _-]/gu, "")
+    .replace(/ /g, "-");
+}
+
+/** The anchors one page offers: its ATX headings outside code fences. */
+export function headingSlugs(lines: string[]): Set<string> {
+  const out = new Set<string>();
+  const seen = new Map<string, number>();
+  let fenced = false;
+  for (const line of lines) {
+    if (/^\s*(```|~~~)/.test(line)) {
+      fenced = !fenced;
+      continue;
+    }
+    if (fenced) continue;
+    const m = /^#{1,6}\s+(.*?)\s*#*\s*$/.exec(line);
+    if (!m) continue;
+    const base = slugOf(m[1]!);
+    const n = seen.get(base) ?? 0;
+    seen.set(base, n + 1);
+    out.add(n ? `${base}-${n}` : base);
+  }
+  return out;
+}
+
+/** `[text](page.md#anchor)` / `[text](#anchor)` — the target and the anchor. */
+const ANCHOR_LINK = /\]\(<?([^)\s#>]*)#([^)\s>]+)>?\)/g;
+
+/** `docs` are REPO-relative here (`docs/state/methods.md`, `README.md`) so a
+ *  `../README.md#x` from inside docs/ resolves. */
+export function anchorIssues(docs: DocFile[]): string[] {
+  const byRel = new Map(docs.map((d) => [d.rel, d]));
+  const slugs = new Map<string, Set<string>>();
+  const slugsOf = (rel: string): Set<string> => {
+    let s = slugs.get(rel);
+    if (!s) {
+      s = headingSlugs(byRel.get(rel)!.lines);
+      slugs.set(rel, s);
+    }
+    return s;
+  };
+  const out: string[] = [];
+  for (const { rel, lines } of docs) {
+    let fenced = false;
+    lines.forEach((line, i) => {
+      if (/^\s*(```|~~~)/.test(line)) {
+        fenced = !fenced;
+        return;
+      }
+      if (fenced) return;
+      for (const m of line.matchAll(ANCHOR_LINK)) {
+        const [, file, anchor] = m as unknown as [string, string, string];
+        if (/^[a-z][a-z0-9+.-]*:/i.test(file)) continue; // http(s)://…
+        const target = file
+          ? new URL(file, `file:///${rel}`).pathname.slice(1)
+          : rel;
+        if (!target.endsWith(".md")) continue;
+        const loc = `  ${rel}:${i + 1}`;
+        if (!byRel.has(target)) {
+          out.push(`${loc}  links ${file}#${anchor} — no such page`);
+          continue;
+        }
+        const want = decodeURIComponent(anchor).toLowerCase();
+        const have = slugsOf(target);
+        if (have.has(want)) continue;
+        const stem = want.split("-")[0]!;
+        const near = [...have].filter((s) => s.includes(stem)).slice(0, 4);
+        out.push(
+          `${loc}  #${anchor} is not a heading in ${target}` +
+            (near.length
+              ? ` (near: ${near.map((s) => `#${s}`).join(", ")})`
+              : ""),
+        );
+      }
+    });
+  }
+  return out;
+}
+
+/** EVERY page, historical dirs included, keyed repo-relative. */
+export async function readAllDocs(): Promise<DocFile[]> {
+  const out: DocFile[] = [];
+  for await (
+    const entry of walk(DOCS_DIR, { exts: [".md"], includeDirs: false })
+  ) {
+    const rel = entry.path.replace(DOCS_DIR, "");
+    if (rel === "content.md") continue; // generated index — mirrors sources
+    out.push({
+      rel: `docs/${rel}`,
+      lines: (await Deno.readTextFile(entry.path)).split("\n"),
+    });
+  }
+  for (const rel of ["README.md", "CLAUDE.md"]) {
+    out.push({ rel, lines: (await Deno.readTextFile(SRC(rel))).split("\n") });
+  }
+  return out.sort((a, b) => a.rel.localeCompare(b.rel));
+}
+
+// ── Check: every `/__aio/…` path the docs spell is a route the server mounts ─
+//
+// docs/clients/app-manager.md tabled `/__aio/trojan/health` (the real route is
+// `/__aio/health`) and taught `POST /__aio/trojan/interact/0` — retired when
+// `trigger/<n>` replaced it — and both 404 for anyone who copies them. The
+// route list is not a table anywhere; it is the `pathname === "…"` and
+// `route === "…"` comparisons in four server files. So those are what is read.
+
+export type Routes = {
+  /** Fully spelled routes: `/__aio/health`, `/__aio/trojan/state`, … */
+  exact: Set<string>;
+  /** Routes that take a trailing segment: `/__aio/blobs/`, `/__aio/trojan/surface/` */
+  prefixes: string[];
+  /** Namespaces a doc may wildcard (`/__aio/trojan/*`) or name bare. */
+  namespaces: Set<string>;
+};
+
+export async function loadRoutes(): Promise<Routes> {
+  const exact = new Set<string>();
+  const prefixes = new Set<string>();
+  const namespaces = new Set<string>(["/__aio/"]);
+  for (const f of ["src/server/server.ts", "src/server/server-static.ts"]) {
+    const src = await Deno.readTextFile(SRC(f));
+    for (const m of src.matchAll(/pathname\s*===\s*"(\/__aio\/[^"]+)"/g)) {
+      exact.add(m[1]!);
+    }
+    for (
+      const m of src.matchAll(/pathname\.startsWith\("(\/__aio\/[^"]+\/)"\)/g)
+    ) {
+      prefixes.add(m[1]!);
+      namespaces.add(m[1]!);
+    }
+  }
+  const auth = await Deno.readTextFile(SRC("src/server/server-auth.ts"));
+  const trojanPrefix = /TROJAN_PREFIX\s*=\s*"(\/__aio\/[^"]+\/)"/.exec(auth)
+    ?.[1];
+  if (!trojanPrefix) {
+    throw new Error(
+      "check-docs: could not read TROJAN_PREFIX from src/server/server-auth.ts" +
+        " — fix the parse, do not delete the check",
+    );
+  }
+  namespaces.add(trojanPrefix);
+  const trojan = await Deno.readTextFile(SRC("src/server/server-trojan.ts"));
+  for (const m of trojan.matchAll(/\broute\s*===\s*"([\w-]+)"/g)) {
+    exact.add(trojanPrefix + m[1]);
+  }
+  for (const m of trojan.matchAll(/\broute\.startsWith\("([\w-]+)\/"\)/g)) {
+    prefixes.add(`${trojanPrefix}${m[1]}/`);
+  }
+  const flows = await Deno.readTextFile(SRC("src/server/auth-flows.ts"));
+  const authPrefix = /pathname\.startsWith\("(\/__aio\/auth\/)"\)/.exec(flows)
+    ?.[1];
+  if (!authPrefix) {
+    throw new Error(
+      "check-docs: could not read the auth route prefix from " +
+        "src/server/auth-flows.ts — fix the parse, do not delete the check",
+    );
+  }
+  namespaces.add(authPrefix);
+  for (const m of flows.matchAll(/\broute\s*===\s*"[A-Z]+ ([\w/-]+)"/g)) {
+    exact.add(authPrefix + m[1]);
+  }
+  for (const m of flows.matchAll(/^\s*case "([\w/-]+)":/gm)) {
+    exact.add(authPrefix + m[1]);
+  }
+  if (exact.size < 20) {
+    throw new Error(
+      `check-docs: parsed only ${exact.size} /__aio routes — the parse went ` +
+        "blind; fix it rather than deleting the check",
+    );
+  }
+  return { exact, prefixes: [...prefixes], namespaces };
+}
+
+/** A `/__aio/…` token as a doc spells it, trimmed of prose punctuation and
+ *  of a query string. */
+const AIO_PATH = /\/__aio\/[^\s`'")\]|,]*/g;
+
+export function routeIssues(docs: DocFile[], routes: Routes): string[] {
+  const ok = (p: string): boolean =>
+    routes.exact.has(p) ||
+    routes.namespaces.has(p) ||
+    (p.endsWith("/*") && routes.namespaces.has(p.slice(0, -1))) ||
+    routes.prefixes.some((px) => p.startsWith(px) && p.length > px.length) ||
+    /\.tsx?$/.test(p); // dev serves framework source under /__aio/<rel>.ts
+  const out: string[] = [];
+  for (const { rel, lines } of docs) {
+    lines.forEach((line, i) => {
+      if (retirementWindow(lines, i)) return;
+      for (const m of line.matchAll(AIO_PATH)) {
+        const p = m[0].replace(/\?.*$/, "").replace(/[.:;…]+$/, "");
+        if (ok(p)) continue;
+        out.push(
+          `  ${rel}:${i + 1}  ${m[0]} is not a route the server mounts ` +
+            `(src/server/server.ts, server-static.ts, server-trojan.ts, ` +
+            `auth-flows.ts)`,
+        );
+      }
+    });
+  }
+  return out;
+}
+
+// ── Check: every flag a doc hands to a scripts/*.ts is one it parses ──
+//
+// docs/testing/onboarding-lab.md taught `--expect`, `--interact` and
+// `--no-interact` as `deno task lab` flags; scripts/lab.ts exits 2 on the
+// first two (`unknown flag`) and nothing anywhere parses the third. A flag is
+// a string literal in the parser, so "does the script accept it" is a fact the
+// source states.
+
+export type ScriptFlags = {
+  /** Every `--flag` the script's source spells in a string — the flags it
+   *  parses plus those it hands to programs it spawns. An over-approximation
+   *  that can only miss, never cry wolf. */
+  accepted: Set<string>;
+  /** The flags a USER may pass: the literals inside `function parse(…)`.
+   *  Null when the script has no parse() — then there is no reverse check. */
+  user: Set<string> | null;
+};
+
+/** The page that teaches a script's flags, so BOTH directions are checked
+ *  there: every flag it spells must parse, every user flag must be spelled.
+ *  (Same shape as tests/docs-flags-are-documented.test.ts for the runtime,
+ *  build and `am` flags.) */
+export const SCRIPT_PAGES: Record<string, string> = {
+  "scripts/lab.ts": "testing/onboarding-lab.md",
+};
+
+const FLAG_LITERAL = /["'`](--[a-z][a-z0-9-]*)/g;
+
+export async function loadScriptFlags(): Promise<Map<string, ScriptFlags>> {
+  const out = new Map<string, ScriptFlags>();
+  for (const dir of ["scripts", "docker"]) {
+    for await (const e of Deno.readDir(SRC(dir))) {
+      if (!e.isFile || !e.name.endsWith(".ts")) continue;
+      const src = await Deno.readTextFile(SRC(`${dir}/${e.name}`));
+      const accepted = new Set<string>();
+      for (const m of src.matchAll(FLAG_LITERAL)) accepted.add(m[1]!);
+      for (
+        const m of src.matchAll(/args\.(?:get|has)\("([a-z][a-z0-9-]*)"\)/g)
+      ) {
+        accepted.add(`--${m[1]}`);
+      }
+      const parse = /\nfunction parse\([\s\S]*?\n\}/.exec(src)?.[0];
+      const user = parse
+        ? new Set([...parse.matchAll(FLAG_LITERAL)].map((m) => m[1]!))
+        : null;
+      out.set(`${dir}/${e.name}`, { accepted, user });
+    }
+  }
+  for (const script of Object.keys(SCRIPT_PAGES)) {
+    if (!out.get(script)?.user?.size) {
+      throw new Error(
+        `check-docs: ${script} has no parse() with --flag literals — ` +
+          "fix the parse, do not delete the check",
+      );
+    }
+  }
+  return out;
+}
+
+/** `deno task X` → `scripts/Y.ts` for every task that IS one script run
+ *  (a chained task like `test` runs several programs; its flags are theirs). */
+export async function loadTaskScripts(): Promise<Map<string, string>> {
+  const repo = JSON.parse(await Deno.readTextFile(SRC("deno.json"))) as {
+    tasks?: Record<string, string>;
+  };
+  const out = new Map<string, string>();
+  for (const [name, cmd] of Object.entries(repo.tasks ?? {})) {
+    if (/&&|\|\||;/.test(cmd)) continue;
+    const m = /^deno run\b[^\n]*?\s((?:scripts|docker)\/[\w-]+\.ts)/.exec(cmd);
+    if (m) out.set(name, m[1]!);
+  }
+  if (!out.has("lab")) {
+    throw new Error(
+      "check-docs: deno.json's `lab` task no longer maps to scripts/lab.ts — " +
+        "fix the parse, do not delete the check",
+    );
+  }
+  return out;
+}
+
+/** The strings a reader would copy as a command: every backticked span, and —
+ *  inside a shell fence — the line itself. */
+function* commandCandidates(
+  lines: string[],
+): Generator<[number, string]> {
+  let inFence = false;
+  let fenceInfo = "";
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    const fence = /^```(.*)$/.exec(line);
+    if (fence) {
+      inFence = !inFence;
+      fenceInfo = inFence ? fence[1]!.trim() : "";
+      continue;
+    }
+    for (const m of line.matchAll(/`([^`]+)`/g)) yield [i, m[1]!];
+    if (inFence && /^(sh|bash|shell|console|zsh)$/.test(fenceInfo)) {
+      yield [i, line.replace(/^\s*\$\s*/, "").replace(/\s*#.*$/, "")];
+    }
+  }
+}
+
+export function flagIssues(
+  docs: DocFile[],
+  taskScripts: Map<string, string>,
+  scriptFlags: Map<string, ScriptFlags>,
+): string[] {
+  const out: string[] = [];
+  const flagName = (tok: string) => tok.replace(/=.*$/, "");
+  for (const { rel, lines } of docs) {
+    // 1. A command line handing flags to a script: `deno task lab --x`,
+    //    `deno run -A scripts/lab.ts --x`, `deno run -A docker/verify-app.ts --x`.
+    for (const [i, raw] of commandCandidates(lines)) {
+      const parts = raw.trim().replace(/^\$\s*/, "").split(/\s+/);
+      if (parts[0] !== "deno") continue;
+      let script: string | undefined;
+      let from = 0;
+      if (parts[1] === "task" && parts[2] && taskScripts.has(parts[2])) {
+        script = taskScripts.get(parts[2]);
+        from = 3;
+      } else if (parts[1] === "run") {
+        from = parts.findIndex((p) =>
+          /^(?:scripts|docker)\/[\w-]+\.ts$/.test(p)
+        );
+        if (from < 0) continue;
+        script = parts[from++];
+      }
+      const flags = script ? scriptFlags.get(script) : undefined;
+      if (!script || !flags) continue;
+      for (const tok of parts.slice(from)) {
+        if (!/^--[a-z]/.test(tok)) continue;
+        const name = flagName(tok);
+        if (flags.accepted.has(name)) continue;
+        out.push(
+          `  ${rel}:${i + 1}  \`${tok}\` — ${script} does not parse ${name} ` +
+            `(it accepts: ${
+              [...flags.user ?? flags.accepted].sort().join(" ")
+            })`,
+        );
+      }
+    }
+    // 2. The page that teaches a script: every bare `--flag` span on it must
+    //    parse (in that script, or in a script the page names), and every
+    //    user flag the script parses must be on the page.
+    const owner = Object.entries(SCRIPT_PAGES).find(([, page]) => page === rel)
+      ?.[0];
+    if (!owner) continue;
+    const text = lines.join("\n");
+    const named = new Set<string>([owner]);
+    for (const m of text.matchAll(/\b((?:scripts|docker)\/[\w-]+\.ts)\b/g)) {
+      named.add(m[1]!);
+    }
+    const accepted = new Set<string>();
+    for (const s of named) {
+      for (const f of scriptFlags.get(s)?.accepted ?? []) accepted.add(f);
+    }
+    lines.forEach((line, i) => {
+      for (const m of line.matchAll(/`(--[a-z][a-z0-9-]*)/g)) {
+        if (accepted.has(m[1]!)) continue;
+        out.push(
+          `  ${rel}:${i + 1}  \`${m[1]}\` — no script this page names ` +
+            `(${[...named].join(", ")}) parses it`,
+        );
+      }
+    });
+    for (const f of scriptFlags.get(owner)!.user!) {
+      if (new RegExp(`${f.replace(/-/g, "\\-")}(?![a-z0-9-])`).test(text)) {
+        continue;
+      }
+      out.push(
+        `  ${rel}  ${owner} parses \`${f}\` but this page never spells it`,
+      );
+    }
+  }
+  return out;
 }

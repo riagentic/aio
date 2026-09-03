@@ -27,6 +27,7 @@ import {
   RESTART_STORM_COOLDOWN_MS,
   RESTART_STORM_LIMIT,
   restartThrottleDelay,
+  supervisorEnv,
 } from "../src/server/dev-restart.ts";
 import {
   _configPaths,
@@ -95,18 +96,23 @@ Deno.test("dev supervisor: the child is told who its parent is", async () => {
   // without this a closed terminal leaves the app holding the port and the
   // single-instance lock and the next `deno task dev` is refused with
   // "Already running".
+  // The child's env is now a pure function, so this is the value itself
+  // rather than a grep over the spawn site.
+  assertEquals(
+    supervisorEnv(4242, undefined).AIO_PARENT_PID,
+    "4242",
+    "the supervised child must die with its supervisor",
+  );
   const src = await Deno.readTextFile(
     join(AIO_ROOT, "src/server/dev-restart.ts"),
   );
   const spawn = src.indexOf("new Deno.Command(Deno.execPath()");
   assert(spawn > 0, "the supervisor still spawns the child here");
-  const block = src.slice(spawn, spawn + 1200);
   assertStringIncludes(
-    block,
-    "AIO_PARENT_PID",
-    "the supervised child must die with its supervisor",
+    src.slice(spawn, spawn + 1200),
+    "supervisorEnv(Deno.pid",
+    "…and the spawn must actually USE that env, with this process's pid",
   );
-  assertStringIncludes(block, "String(Deno.pid)");
   // …and the mechanism has to be the one the runtime actually reads.
   const lifecycle = await Deno.readTextFile(
     join(AIO_ROOT, "src/server/aio-lifecycle.ts"),

@@ -16,22 +16,22 @@ const events: string[] = [];
 const srv = cell("own-harness", {
   state: { started: 0 },
   methods: {
-    start(s: { started: number }) {
+    start(s) {
       s.started++;
       const id = `srv-${s.started}`;
-      return own.set("server", () => {
+      s.$do(own.set("server", () => {
         events.push(`acquire:${id}`);
         return () => events.push(`dispose:${id}`);
-      });
+      }));
     },
     // Same key on purpose — this is the shape that SIGTERMed a freshly started
     // server in the field report.
-    restartSameKey(s: { started: number }) {
+    restartSameKey(s) {
       s.started++;
-      return own.set("server", () => {
+      s.$do(own.set("server", () => {
         events.push("acquire:second");
         return () => events.push("dispose:second");
-      });
+      }));
     },
   },
 });

@@ -13,7 +13,7 @@
  * ```
  */
 import { readDenoJson } from "./server/deno-json.ts";
-import { ok } from "./build/build-say.ts";
+import { staged } from "./build/build-say.ts";
 import { NO } from "./diagnostics/fmt.ts";
 import { fromFileUrl, join } from "@std/path";
 import {
@@ -98,7 +98,7 @@ export async function build(cfg?: BuildConfig): Promise<void> {
   // versionName instead (build-android.ts). Written for every packaging path,
   // never for a bundle-only build.
   await writeBuildStamp(root, cfg.version, VERSION);
-  ok(BUILD_STAMP_FILE, cfg.version.version);
+  staged(BUILD_STAMP_FILE, cfg.version.version);
 
   // ── Bake the Electron version into dist/ ────────────────────────────────
   // A plain compiled binary (`--compile`, not the AppImage) whose client is
@@ -115,7 +115,7 @@ export async function build(cfg?: BuildConfig): Promise<void> {
       join(dist, ELECTRON_VERSION_FILE),
       JSON.stringify({ version }) + "\n",
     );
-    ok(`dist/${ELECTRON_VERSION_FILE}`, `electron ${version}`);
+    staged(`dist/${ELECTRON_VERSION_FILE}`, `electron ${version}`);
   }
 
   // ── aio-client: standalone Electron connect-page AppImage ───────────────

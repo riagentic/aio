@@ -13,8 +13,6 @@
 
 import type { ComponentFn, RenderCtx, VNode } from "./vdom.ts";
 import {
-  _callRef,
-  _cleanupSignalTextChildren,
   _render,
   _setDelegationRoot,
   _setDevA11yCheck,
@@ -23,10 +21,11 @@ import {
   h,
   setDevMode as _setDevModeVdom,
 } from "./vdom.ts";
-import { _cleanupActions } from "./vdom-helpers.ts";
+import { _detachRef } from "./vdom-create.ts";
+import { _cleanupActions, _unbindSignalText } from "./vdom-helpers.ts";
 import { _componentName } from "./hook-error.ts";
 import { _cleanupChildren, removeDom } from "./vdom-remove.ts";
-import { Portal } from "./vdom-types.ts";
+import { _SignalText, Portal } from "./vdom-types.ts";
 import { cleanupSignalBindings } from "./signal-binding.ts";
 import { _getExitHandler, _setLifecycleHooks } from "./transition-component.ts";
 import {
@@ -42,7 +41,6 @@ import {
 } from "./renderer-state.ts";
 import {
   _resetSsrIdCounter,
-  _setLifecycleDevMode,
   onCleanup,
   onMount,
   useRef,
@@ -53,8 +51,8 @@ import {
   _rerenderRoot,
   afterRender,
 } from "./renderer-flush.ts";
-import { _createHooks, _setFlushDevMode } from "./renderer-rerender.ts";
-import { _setSignalDevMode } from "../state/signal.ts";
+import { _createHooks } from "./renderer-rerender.ts";
+import { isDevMode } from "../state/dev-flag.ts";
 /** Re-export the reactive `signal` primitive so air consumers (e.g. the ui kit)
  *  get it through the air surface without reaching into `state` directly. */
 export { signal } from "../state/signal.ts";
@@ -122,6 +120,10 @@ function _warnA11yOnce(msg: string): void {
 
 /** @internal Dev-mode a11y checks on element creation. */
 function _devA11yCheck(tag: string, props: Record<string, unknown>): void {
+  // The check is installed once at module load rather than by `setDevMode()`,
+  // so it asks the flag here. Wired only from `setDevMode()`, the whole a11y
+  // layer was dark for every app that never called it — which was every app.
+  if (!isDevMode()) return;
   if (tag === "img" && !("alt" in props)) {
     _warnA11yOnce(
       '[aio-dev] <img> missing "alt" attribute. Add alt="" for decorative images or descriptive text for meaningful ones.',
@@ -229,14 +231,18 @@ function _devA11yCheck(tag: string, props: Record<string, unknown>): void {
 }
 
 /** Enable dev-mode warnings (excessive re-renders, also enables VDOM key warnings). */
-export function setDevMode(enabled: boolean): void {
-  _setFlushDevMode(enabled);
+export function setDevMode(enabled: boolean | "auto"): void {
+  // One flag for the whole runtime now (src/state/dev-flag.ts), so this no
+  // longer fans out to five copies that could disagree — it forces the one,
+  // and re-arms the caches that are this module's own.
   _setDevModeVdom(enabled);
-  _setSignalDevMode(enabled);
-  _setLifecycleDevMode(enabled);
   _warnedA11y.clear(); // re-arm a11y warnings for the (re)enabled session
-  _setDevA11yCheck(enabled ? _devA11yCheck : null);
 }
+
+// The a11y check is ALWAYS wired; `_devA11yCheck` itself asks `isDevMode()`.
+// Installing it from `setDevMode()` meant an app that never called that ran
+// with no a11y warnings at all, in dev, forever.
+_setDevA11yCheck(_devA11yCheck);
 
 // -- Wire lifecycle hooks ----------------------------------------------
 
@@ -345,7 +351,9 @@ function _unmountTree(
   ctx: RenderCtx,
 ): void {
   if (vnode == null || typeof vnode !== "object") return;
-  if (typeof vnode.tag === "function") {
+  if (vnode.tag === _SignalText) {
+    _unbindSignalText(vnode);
+  } else if (typeof vnode.tag === "function") {
     ctx.hooks?.unmountComponent(vnode);
     for (const child of _cleanupChildren(vnode)) _unmountTree(child, ctx);
   } else if (vnode.tag === Portal) {
@@ -356,7 +364,11 @@ function _unmountTree(
     // the nodes from the target.
     const target = vnode.props.target as Node | undefined;
     if (target) {
-      for (const child of vnode.children) removeDom(target, child, ctx);
+      // The Portal branch of `removeDom` is THE teardown for portal content —
+      // it walks from the portal's own region anchor and takes that anchor
+      // with it. Re-implementing the child loop here took `target.firstChild`
+      // as the start, which is another portal's content when two share one.
+      removeDom(target, vnode, ctx);
     } else {
       for (const child of vnode.children) _unmountTree(child, ctx);
     }
@@ -365,7 +377,6 @@ function _unmountTree(
       const dom = vnode._dom as Element;
       // AIO-78: dispose signal binding effects on element
       cleanupSignalBindings(dom);
-      _cleanupSignalTextChildren(dom);
       // Mirror _removeDomCleanup (vdom-remove.ts): run action cleanups so
       // custom directives (window listeners, observers) release, and null out
       // ref callbacks so callers see the element is gone. Without this the
@@ -376,7 +387,7 @@ function _unmountTree(
       if (typeof (dom as HTMLElement).setAttribute === "function") {
         _cleanupActions(dom as HTMLElement);
       }
-      _callRef(vnode.props.ref, null, _componentName(vnode.tag));
+      _detachRef(vnode.props.ref, dom, _componentName(vnode.tag));
     }
     // `_cleanupChildren` (vdom-remove.ts) is THE rule for what lives under a
     // vnode — an ErrorBoundary/Suspense in FALLBACK state has its `_rendered`

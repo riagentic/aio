@@ -54,6 +54,7 @@ function advertised(auth: {
     shareUrl: "http://127.0.0.1:0",
     localUrl: "http://127.0.0.1:0",
     advertiseHost: "127.0.0.1",
+    bindHost: "127.0.0.1",
     // deno-lint-ignore no-explicit-any
     server: { close: () => {} } as any,
     udsHandle: null,

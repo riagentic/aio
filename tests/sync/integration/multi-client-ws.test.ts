@@ -9,8 +9,9 @@ import { createDB } from "../../../src/server-entry.ts";
 import { SYNC_SCHEMA } from "../../../src/sync/compact.ts";
 import { createServerSyncHandler } from "../../../src/sync/server-handler.ts";
 import type { HLC } from "../../../src/sync/types.ts";
+import { freePort } from "../../../src/testing/server-test.ts";
 
-const PORT = 8971;
+const PORT = freePort();
 const OPS_PER_CLIENT = 25;
 
 type WireOp = {

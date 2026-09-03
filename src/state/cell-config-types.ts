@@ -6,9 +6,10 @@ import type { Method } from "./cell-impl.ts";
  *  receives the cell's own slice plus a TUPLE of the named dep cells' current
  *  slices (alpha52): `{ deps: ["prices"], fn: (s, [prices], ...args) => … }` —
  *  so parameterized selectors and deps compose. The old spread signature
- *  `(s, ...deps)` is detected by shape and still works through beta, with a
- *  one-time hint. The cell slice is passed to the selector fresh on every
- *  read — `bindCell` re-evaluates whenever a dep cell changes. */
+ *  `(s, ...deps)` is detected by shape and REFUSED (alpha76 —
+ *  src/state/removals.ts; `aiol --safe-fix` rewrites it). The cell slice is
+ *  passed to the selector fresh on every read — `bindCell` re-evaluates
+ *  whenever a dep cell changes. */
 export type SelectorDef<S> =
   // Plain form may take extra ARGS after the slice — a parameterized selector
   // (`byId: (s, id) => …`) surfaces as `cell.byId(id)`.
@@ -32,8 +33,8 @@ export type SelectorReturn<D> = D extends (s: infer _S, ...a: any[]) => infer R
  *  params (beyond the state slice) become the accessor's args —
  *  `byId: (s, id: string) => T` → `cell.byId(id)`; `total: (s) => n` →
  *  `cell.total()`. Deps-form selectors take the args after `(s, [deps])`
- *  (alpha52 tuple form) — typed loosely so the deprecated spread form keeps
- *  compiling through beta. */
+ *  (alpha52 tuple form) — typed loosely because a dep tuple's element types
+ *  are not knowable from the dep NAMES alone. */
 export type SelectorAccessors<Sel> = {
   [K in keyof Sel]: SelectorAccessorFn<Sel[K]>;
 };
@@ -61,7 +62,11 @@ export type MethodsCellConfig<
   Sel extends Record<string, SelectorDef<S>> = Record<string, SelectorDef<S>>,
 > = {
   state: S;
-  methods: M;
+  /** Optional: `cell-create.ts` accepts an empty OR omitted methods map —
+   *  state-only cells (thin-client stubs, selectors-only read models) are a
+   *  supported shape, and a required `methods` here made the type refuse what
+   *  the runtime runs. */
+  methods?: M;
   /** Cell scope. `"client"` cells live in the browser only — never registered
    *  with the server, never synced, never server-persisted. Methods are bound
    *  locally against a signal-backed slice; each tab has its own copy. Sync
@@ -118,8 +123,9 @@ export type MethodsCellConfig<
   long?: (keyof M & string)[];
   /** Selectors — derived values, auto-scoped to cell state.
    *  Plain form: `(s) => R` receives the cell's own slice.
-   *  Deps form: `{ deps: readonly string[]; fn: (s, ...depSlices) => R }` — deps are
-   *  other cells' current slices in the order listed. Dep names are validated at
+   *  Deps form: `{ deps: readonly string[]; fn: (s, [a, b], ...args) => R }` — the
+   *  tuple holds the other cells' current slices in the order listed (the old
+   *  `(s, ...depSlices)` spread was retired in alpha76). Dep names are validated at
    *  aio.run() (composition time); an unknown dep throws with a clear message.
    *  The `& Record<…>` intersection supplies CONTEXTUAL typing for `s` while
    *  `Sel` still infers the literal shape (its default is an EMPTY record so
@@ -246,6 +252,11 @@ export type MethodsCellConfig<
    *  lifecycle hook: a throw is reported and boot continues with the restored
    *  state unchanged — a repair that fails must not cost you the app. */
   onRestore?: (state: NoInfer<S>) => NoInfer<S> | void;
-  onInit?: (app: ScopedApp<NoInfer<S>>) => void;
+  /** `initState` is the cell's DECLARED default state — the registry passes it
+   *  (`cell-compose-registry.ts`) because `app.getState()` may not yet reflect
+   *  `__init` when the hook runs. It was passed at runtime and missing from
+   *  this type, so `onInit(app, initState)` — the shape the docs teach — was a
+   *  compile error for every app that wrote it. */
+  onInit?: (app: ScopedApp<NoInfer<S>>, initState: NoInfer<S>) => void;
   onDestroy?: (app: ScopedApp<NoInfer<S>>) => void;
 };

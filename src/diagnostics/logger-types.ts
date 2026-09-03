@@ -119,8 +119,26 @@ export function callerFile(): string | undefined {
   }
 }
 
-export function now(): string {
-  return new Date().toISOString().replace("T", " ").slice(0, 23);
+/** THE timestamp on every aio log line — console and file, one spelling.
+ *
+ *  It used to be `toISOString()` with the `T` swapped for a space and the `Z`
+ *  sliced off: UTC, wearing no marker at all. So the terminal read `21:11`
+ *  while the clock on the wall said `23:11`, and a line pasted into an issue
+ *  carried no way to tell which it was. Both halves of that are fixed by the
+ *  same choice — LOCAL time, with the offset attached: it matches the wall
+ *  clock of whoever is watching, and it still says exactly which instant it
+ *  means to a reader in another zone. UTC hosts print `+00:00`, which is the
+ *  honest way to say Z. */
+export function now(d: Date = new Date()): string {
+  const p = (n: number, w = 2) => String(n).padStart(w, "0");
+  // getTimezoneOffset is minutes to ADD to local to get UTC — the sign a
+  // human writes is the other one.
+  const offset = -d.getTimezoneOffset();
+  const abs = Math.abs(offset);
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+    `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.` +
+    `${p(d.getMilliseconds(), 3)}` +
+    `${offset < 0 ? "-" : "+"}${p(Math.floor(abs / 60))}:${p(abs % 60)}`;
 }
 
 export function elapsed(start?: number): number | undefined {

@@ -27,9 +27,8 @@ import { connectCli } from "../src/server/cli-client.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import type { CellDef } from "../src/state/cell-types.ts";
 import { stopChild } from "./stop-child.ts";
-
-const _childCovDir = Deno.env.get("DENO_COVERAGE_DIR") ??
-  Deno.makeTempDirSync({ prefix: "aio-child-cov-" });
+import { childCoverageDir } from "../src/testing/temp-dir.ts";
+const _childCovDir = childCoverageDir();
 
 async function waitFor<T>(fn: () => T | null, timeoutMs = 20_000): Promise<T> {
   const deadline = Date.now() + timeoutMs;

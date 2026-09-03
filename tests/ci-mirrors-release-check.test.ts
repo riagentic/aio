@@ -6,6 +6,7 @@
 // and requires every gate on it to be a `run:` step somewhere in CI. A gate
 // added to the release check without a CI step is red here, on the same push.
 import { assertEquals } from "@std/assert";
+import { MIN_DENO } from "../src/server/deno-version.ts";
 
 const REPO = new URL("../", import.meta.url).pathname;
 
@@ -52,5 +53,26 @@ Deno.test("ci: the heavy tier is scheduled AND on demand, and says it is not on 
     /heavy:[\s\S]*?if:.*schedule.*workflow_dispatch/.test(ci),
     true,
     "the heavy job is gated on those two events",
+  );
+});
+
+Deno.test("ci: the test matrix pins the SUPPORTED FLOOR, not a number", async () => {
+  // `MIN_DENO` is what aio refuses to boot below; the matrix's extra
+  // `include:` entry is what proves the suite actually passes there. Two
+  // hand-kept numbers in two files, and ci.yml already claimed "a guard test
+  // pins the two to each other" — it did not exist, so raising MIN_DENO would
+  // have left CI proving the wrong floor, silently and indefinitely.
+  const ci = await Deno.readTextFile(REPO + ".github/workflows/ci.yml");
+  const include = ci.match(/^\s*include:\n([\s\S]*?)\n\s*runs-on:/m);
+  assertEquals(!!include, true, "the test job must keep its `include:` block");
+  const pinned = [...include![1]!.matchAll(/deno:\s*"?([\w.\-]+)"?/g)]
+    .map((m) => m[1]!)
+    .filter((v) => v !== "v2.x");
+  assertEquals(
+    pinned.includes(MIN_DENO),
+    true,
+    `.github/workflows/ci.yml must run the suite on the supported floor ` +
+      `(MIN_DENO = ${MIN_DENO} in src/server/deno-version.ts); its matrix ` +
+      `pins ${JSON.stringify(pinned)}. Raise both together.`,
   );
 });

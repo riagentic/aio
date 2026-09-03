@@ -112,6 +112,15 @@ const OWNERS: Record<string, [Owner, string]> = {
     "so one boot sees every conflict twice. Only a test that asserts the " +
     "reporting half needs to forget it",
   ],
+  _resetTargetGuess: [
+    "MANUAL",
+    "the `am` target guess (`_discoveredTarget`) plus the once-per-target " +
+    "stderr echo. Lives in src/am, which src/state's one call may not import " +
+    "(boundaries) — and the memo is what it is FOR: one `am` invocation says " +
+    "where it is pointing ONCE, so clearing it per command would echo the " +
+    "same resolution on every port lookup. Only tests/am-verb-target.test.ts, " +
+    "which re-points AIO_APPS_DIR between cases, needs to forget it",
+  ],
   _resetPendingFactories: ["MANUAL", "own-effect factories; lifecycle-shaped"],
   _resetServerOnlyStatic: [
     "MANUAL",

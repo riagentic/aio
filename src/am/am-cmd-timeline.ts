@@ -17,6 +17,7 @@ import {
   parseJournalEntries,
 } from "./record.ts";
 import type { DiffEntry, TimelineEntry } from "../server/timeline.ts";
+import { TIMELINE_RING } from "../server/timeline.ts";
 import { count } from "../diagnostics/fmt.ts";
 
 /** hh:mm:ss for a ms timestamp (local time). */
@@ -83,6 +84,16 @@ function renderJournalRows(rows: JournalRow[]): string {
   }).join("\n");
 }
 
+/** Did the RING decide the answer, rather than the history? True only when
+ *  more was asked for than came back AND what came back is the whole ring —
+ *  three dispatches are three dispatches, not a truncation. Pure. */
+export function timelineCapped(
+  limit: number | undefined,
+  returned: number,
+): boolean {
+  return limit !== undefined && limit > returned && returned >= TIMELINE_RING;
+}
+
 /** `am timeline [--from=<journal>] [--lines=N] [--json]`. */
 export async function cmdTimeline(
   args: string[],
@@ -121,7 +132,31 @@ export async function cmdTimeline(
     Deno.exit(1);
   }
   const entries = (r.data as { entries?: TimelineEntry[] })?.entries ?? [];
-  out(mode === "pretty" ? renderTimeline(entries) : { entries }, mode);
+  // A request for more than the ring holds is answered with the ring, and used
+  // to be answered SILENTLY: `--lines=20000` returned 500 rows with nothing to
+  // say they were the last 500 of an unknown number. "Everything there is" and
+  // "as much as I keep" are different answers, and only one of them means you
+  // can stop looking. The journal is the unbounded history; name it.
+  const capped = timelineCapped(limit, entries.length);
+  out(
+    capped
+      ? {
+        entries,
+        requested: limit,
+        returned: entries.length,
+        capped,
+        ring: TIMELINE_RING,
+      }
+      : { entries },
+    mode,
+    () =>
+      renderTimeline(entries) +
+      (capped
+        ? `\n\n${entries.length} of the ${limit} asked for — the live ` +
+          `timeline keeps the last ${TIMELINE_RING} dispatches. The full ` +
+          `history is the journal: am timeline --from=<journal>`
+        : ""),
+  );
 }
 
 /** Parse a range spec: `5..12` (inclusive), `5` (single), or absent (all). */

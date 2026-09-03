@@ -38,6 +38,42 @@ async function getTransform() {
   }
   return transformFn!;
 }
+/** Is `--allow-run` actually granted? `undefined` when nothing can tell (a
+ *  worker without the permissions API). */
+function _runGranted(): boolean | undefined {
+  try {
+    return Deno.permissions.querySync({ name: "run" }).state === "granted";
+  } catch {
+    return undefined;
+  }
+}
+
+/** Re-label an esbuild failure that is really a MISSING PERMISSION.
+ *
+ *  esbuild transpiles by spawning its native binary. Without `--allow-run` the
+ *  spawn fails inside esbuild's own Deno shim and surfaces as
+ *  `TypeError: Cannot read properties of undefined (reading 'unref')` — which
+ *  the dev server then reported as `FIX: Transpile failed … Check syntax`, on
+ *  a freshly scaffolded app the user had not touched. The advice that produced
+ *  those flags (`doctor`'s least-privilege list) describes the COMPILED
+ *  binary, which never transpiles. Blaming the user's syntax for the
+ *  framework's unmet requirement is the exact failure this file must not have.
+ *  Consulted only on FAILURE, so a scoped `--allow-run=…` that works is never
+ *  second-guessed. Exported for the test that pins it. */
+export function _explainTranspileFailure(e: unknown): unknown {
+  if (_runGranted() !== false) return e;
+  return new Error(
+    `dev transpile needs --allow-run (esbuild runs its native binary as a ` +
+      `subprocess) — this is NOT a syntax error in your file. Add ` +
+      `--allow-run, or run with -A. \`doctor\`'s least-privilege flags ` +
+      `describe the COMPILED binary in dist/, which carries a pre-built ` +
+      `bundle and never transpiles. Underlying error: ${
+        e instanceof Error ? e.message : String(e)
+      }`,
+    { cause: e },
+  );
+}
+
 /** Stop esbuild subprocess — call on server shutdown to avoid resource leaks */
 export async function stopEsbuild() {
   if (esbuildStop) {
@@ -127,15 +163,20 @@ export async function transpile(
     transpileCache.set(npath, cached);
     return cached.code;
   }
-  const transform = await getTransform();
   const loader = filepath.endsWith(".tsx") ? "tsx" as const : "ts" as const;
   const jsxOpts = ESBUILD_JSX; // shared dev==prod JSX config
-  const result = await transform(source, {
-    loader,
-    format: "esm",
-    target: "esnext",
-    ...jsxOpts,
-  });
+  let result: TransformResult;
+  try {
+    const transform = await getTransform();
+    result = await transform(source, {
+      loader,
+      format: "esm",
+      target: "esnext",
+      ...jsxOpts,
+    });
+  } catch (e) {
+    throw _explainTranspileFailure(e);
+  }
   if (result.warnings?.length && log) {
     for (const w of result.warnings) {
       log(`esbuild warning: ${fmtEsbuildMsg(w, filepath)}`);

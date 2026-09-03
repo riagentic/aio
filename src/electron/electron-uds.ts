@@ -2,6 +2,7 @@
 // Dev mode: page from HTTP, state via UDS+IPC
 // Prod mode: page from disk via aio:// protocol, state via UDS+IPC
 
+import { MIME } from "../server/server-html-constants.ts";
 import {
   BACKOFF_BASE_MS,
   BACKOFF_MAX_MS,
@@ -176,11 +177,12 @@ function socketFetch(reqPath, method, headers, body) {
   });
 }
 
-const MIME = {
-  '.html': 'text/html', '.js': 'application/javascript', '.mjs': 'application/javascript',
-  '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml',
-  '.png': 'image/png', '.jpg': 'image/jpeg', '.ico': 'image/x-icon', '.wasm': 'application/wasm',
-};
+// THE server's table, not a copy of it. A hand-kept subset here served every
+// font, .webp, .mp4 and .pdf in dist/ as application/octet-stream in the
+// packaged app while dev (which goes through the server) served them
+// correctly — a silent dev/prod divergence with nothing gating the pair.
+// tests/electron-uds-mime.test.ts pins the generated table to this import.
+const MIME = ${JSON.stringify(MIME)};
 
 const PROD_HTML = ${
     JSON.stringify(udsProdHTML(title, hasCSS, shell)).replace(/\n/g, "\\n")

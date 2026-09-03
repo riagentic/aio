@@ -18,6 +18,7 @@ import {
   enc,
   type Frame,
   v1PeerReason,
+  wireError,
 } from "../protocol/envelope.ts";
 import { bindCell } from "../state/cell-catalog.ts";
 import { _releaseCellBindings } from "../state/cell-reactive.ts";
@@ -51,6 +52,11 @@ import {
 
 import { log } from "../diagnostics/logger-api.ts";
 import { count } from "../diagnostics/fmt.ts";
+
+/** How often a CLI client says "still here". Matches the browser's heartbeat
+ *  interval; the server's `frozen` threshold is 2000 ms, so this has to be
+ *  comfortably inside it. */
+const CLI_HEARTBEAT_MS = 1000;
 
 enablePatches();
 
@@ -288,11 +294,37 @@ export function connectCli<S>(
 
     const socket = new WebSocket(wsUrl);
 
+    // The heartbeat the browser client has always sent. Without it the server
+    // graded this client by the age of a `vitals-ping` that never arrived, and
+    // `server-broadcast.ts` skips a client graded frozen — so `watch()` and
+    // `subscribe()` stopped receiving state two seconds after connecting, for
+    // the life of the socket, with no error anywhere. The server no longer
+    // grades a client that has never pinged, and this makes THIS client one
+    // that does, so a real drop is still detected.
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    const stopHeartbeat = () => {
+      if (heartbeat !== undefined) clearInterval(heartbeat);
+      heartbeat = undefined;
+    };
+
     socket.onopen = () => {
       retry = 0;
       wasConnected = true;
       // A3: announce our wire-protocol version before anything else.
       socket.send(enc("proto", protoHello(VERSION, stampedAppVersion())));
+      stopHeartbeat();
+      heartbeat = setInterval(() => {
+        if (socket.readyState !== WebSocket.OPEN) return;
+        // No render meter on a CLI client, so nothing is ever "unpainted".
+        try {
+          socket.send(enc("vitals-ping", { t1: Date.now(), ms: 0 }));
+        } catch {
+          /* aio-ok: the socket closed between the check and the send */
+        }
+      }, CLI_HEARTBEAT_MS);
+      // A heartbeat must never be the reason a CLI process refuses to exit.
+      if (heartbeat !== undefined) Deno.unrefTimer?.(heartbeat);
+
       // Drain queued actions. Each frame's ack clock starts HERE, when it is
       // actually written — not at dispatch time, or an action queued for
       // longer than the ceiling times out while still sitting in the queue and
@@ -340,12 +372,16 @@ export function connectCli<S>(
         // ~150 lines — because a promise could not reject). The browser
         // clients have always branched on `ok`; this is that same contract.
         case "ack": {
-          const { cid, ok, value, error } = (frame.d ?? {}) as AckPayload;
+          const d = (frame.d ?? {}) as AckPayload;
+          const { cid, ok, value } = d;
           if (typeof cid !== "string") return;
           if (ok === false) {
+            // `wireError`, not `new Error(error)`: it carries the server's
+            // `code` through onto `err.code`, so `errorCode(err)` tells an
+            // access denial from the app's own throw without matching text.
             _pending.reject(
               cid,
-              new Error(error ?? "the server refused the action"),
+              wireError(d, "the server refused the action"),
             );
           } else {
             _pending.resolve(cid, value);
@@ -398,6 +434,7 @@ export function connectCli<S>(
     socket.onerror = () => {};
 
     socket.onclose = (ev) => {
+      stopHeartbeat();
       // A dropped connection can never ack. These calls did NOT demonstrably
       // succeed, so they must not resolve: resolving them reported success for
       // work whose fate is unknown, and an app that awaited one carried on as
@@ -697,13 +734,14 @@ export function connectCliUDS<S>(
                     // Branch on `ok` — parity with the WS client and the
                     // browser transports. Dropping it resolved a refused
                     // call exactly like a successful one.
-                    const { cid, ok, value, error } = (frame.d ??
-                      {}) as AckPayload;
+                    const d = (frame.d ?? {}) as AckPayload;
+                    const { cid, ok, value } = d;
                     if (typeof cid !== "string") continue;
                     if (ok === false) {
+                      // Carries `code` through — see the WS twin above.
                       _udsPending.reject(
                         cid,
-                        new Error(error ?? "the server refused the action"),
+                        wireError(d, "the server refused the action"),
                       );
                     } else {
                       _udsPending.resolve(cid, value);

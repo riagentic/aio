@@ -2,6 +2,7 @@
 // Receives ops from clients, persists to op-log, broadcasts to other clients, sends acks.
 
 import { enc } from "../protocol/envelope.ts";
+import { _isFrameworkInternalActionType } from "../protocol/action-gate.ts";
 import type { DB } from "../db/types.ts";
 import { takeRejectionFor } from "../state/rejection-tracker.ts";
 import type { HLC, SyncOp } from "./types.ts";
@@ -113,8 +114,34 @@ export interface ServerSyncHandler {
 
 const FORBIDDEN = ["__proto__", "constructor", "prototype"];
 
+/** One cell's cursor in a `sync-req`. The twin of {@link isValidSyncOp} for
+ *  the OTHER half of the request — the map of what the client already has. */
+function isValidCellCursor(
+  v: unknown,
+): v is { lastHlc: HLC | null; lastServerTs?: number } {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return false;
+  const c = v as { lastHlc?: unknown; lastServerTs?: unknown };
+  const hlcOk = c.lastHlc === null || c.lastHlc === undefined ||
+    (Array.isArray(c.lastHlc) && c.lastHlc.length === 3 &&
+      typeof c.lastHlc[0] === "number" && typeof c.lastHlc[1] === "number" &&
+      typeof c.lastHlc[2] === "string");
+  const tsOk = c.lastServerTs === undefined ||
+    (typeof c.lastServerTs === "number" && Number.isFinite(c.lastServerTs));
+  return hlcOk && tsOk;
+}
+
 /**
- * Validate a sync op has required fields and no proto-pollution vectors.
+ * Validate a sync op has required fields and no proto-pollution vectors —
+ * and does not name a framework-internal action.
+ *
+ * This is the ONE decider for every op that reaches the sync layer: the `op`
+ * frame (WS and UDS) AND every entry of `sync-req.pendingOps` (WS and UDS)
+ * pass through it. The transport routers gate `op` frames with the same
+ * predicate, but `pendingOps` — a reconnect's whole offline queue — was
+ * forwarded unchecked, and a `cell:__setRefresh` in it dispatched through
+ * `applyMutations` (any path, any value), was persisted, acked, broadcast to
+ * every peer and replayed at the next boot. The gate belongs where all four
+ * doors converge, not in each router.
 
  *  @internal Engine/framework wiring (alpha52 sweep) — not public API.
  */
@@ -133,6 +160,7 @@ export function isValidSyncOp(
     typeof o.id === "string" && o.id.length > 0 &&
     typeof o.cell === "string" && !FORBIDDEN.includes(o.cell) &&
     typeof o.action === "string" && !FORBIDDEN.includes(o.action) &&
+    !_isFrameworkInternalActionType(o.action) &&
     Array.isArray(o.hlc) && o.hlc.length === 3 &&
     typeof o.hlc[0] === "number" && typeof o.hlc[1] === "number" &&
     typeof o.hlc[2] === "string"
@@ -149,6 +177,40 @@ export function createServerSyncHandler(
 ): ServerSyncHandler {
   const clock: HLClock = createHLC("server");
   const syncCells = new Set(deps.syncCellIds);
+
+  /** Send ONE already-encoded frame to ONE client, and never lose the reason
+   *  it did not arrive.
+   *
+   *  Every per-client reply in this file used to wrap `socket.send(enc(…))`
+   *  in an empty catch labelled "client disconnected", which is only half
+   *  true. `send` throws for one uninteresting reason — the peer
+   *  went away between the last read and this write — and for interesting ones
+   *  the same empty catch ate: a socket THIS server closed, a frame that could
+   *  not be encoded at all. On a CRDT relay that is the worst possible place
+   *  to guess: an ack that never goes out means the client resends the op
+   *  forever, and nothing anywhere said so.
+   *
+   *  So the frame is encoded by the CALLER (an encode failure propagates to
+   *  the caller's error path instead of masquerading as a disconnect), and the
+   *  socket's own `readyState` decides which failure this was: a peer that is
+   *  already gone is a debug line, anything else is a warning naming the frame
+   *  that was lost. */
+  const sendTo = (socket: WebSocket, frame: string, what: string): void => {
+    const gone = socket.readyState !== WebSocket.OPEN;
+    try {
+      socket.send(frame);
+    } catch (e) {
+      if (gone) {
+        deps.log.debug(
+          `[sync:server] ${what} not delivered — client already disconnected`,
+        );
+      } else {
+        deps.log.warn(
+          `[sync:server] ${what} could not be sent on an open socket: ${e}`,
+        );
+      }
+    }
+  };
 
   // Per-cell async mutex — serializes handleOp + compact to prevent
   // race where an op is persisted between state capture and DELETE in compact.
@@ -343,6 +405,11 @@ export function createServerSyncHandler(
     );
   }
 
+  // Clients already told their cursor is foreign (see `foreign` in
+  // handleSync) — a client built before `reset` keeps re-sending the same
+  // stale cursor every round, and the warning is one per client, not per round.
+  const _foreignWarned = new WeakSet<object>();
+
   return {
     noteServerWrite,
     flushServerWrites,
@@ -474,13 +541,15 @@ export function createServerSyncHandler(
         }
 
         if (rejectedReason !== null) {
-          try {
-            socket.send(enc("op-rejected", {
+          sendTo(
+            socket,
+            enc("op-rejected", {
               opId: op.id,
               cell: op.cell,
               reason: rejectedReason,
-            }));
-          } catch { /* client disconnected */ }
+            }),
+            `op-rejected for ${op.id}`,
+          );
           deps.log.warn(
             `[sync:server] op ${op.id} (${op.cell}:${op.action}) rejected: ${rejectedReason}`,
           );
@@ -496,16 +565,16 @@ export function createServerSyncHandler(
         // re-ack used to go out bare — precisely the ack most likely to follow
         // a snapshot, since it means the first ack was lost.
         const ackTs = await ackServerTs(op.id, serverTs);
-        try {
-          socket.send(
-            enc("sync-ack", {
-              cell: op.cell,
-              opId: op.id,
-              serverHlc,
-              ...(ackTs !== null ? { serverTs: ackTs } : {}),
-            }),
-          );
-        } catch { /* client disconnected */ }
+        sendTo(
+          socket,
+          enc("sync-ack", {
+            cell: op.cell,
+            opId: op.id,
+            serverHlc,
+            ...(ackTs !== null ? { serverTs: ackTs } : {}),
+          }),
+          `sync-ack for ${op.id}`,
+        );
 
         if (serverTs !== null) {
           // ONE frame, identical for every peer — and that is only sound
@@ -554,6 +623,27 @@ export function createServerSyncHandler(
         deps.log.warn("[sync:server] handleSync: invalid envelope — dropping");
         return;
       }
+      // …and every ENTRY of `cells`, here, where the envelope is checked —
+      // not in the loop that reads them. The loop destructures
+      // `{ lastHlc, lastServerTs }` straight off the value, so a null entry
+      // (`cells: { todos: null }`) threw `Cannot read properties of null` out
+      // of the async body: an ERROR line blaming the server, and the raw
+      // TypeError shipped BACK to the client as the sync failure. A cursor is
+      // `{ lastHlc: HLC|null, lastServerTs?: number }` and nothing else — a
+      // string `lastServerTs` compares wrong rather than throwing, which is
+      // worse. One shape check at the door, naming what was wrong.
+      const badCell = Object.entries(
+        (r.cells ?? {}) as Record<string, unknown>,
+      ).find(([, v]) => !isValidCellCursor(v));
+      if (badCell) {
+        deps.log.warn(
+          `[sync:server] handleSync: invalid cursor for cell "${
+            badCell[0]
+          }" — dropping the request. A cell entry must be ` +
+            `{ lastHlc: [number, number, string] | null, lastServerTs?: number }.`,
+        );
+        return;
+      }
       const sync = r as {
         clientId: string;
         /** Monotonic id of THIS request, echoed on the response so the client
@@ -580,6 +670,15 @@ export function createServerSyncHandler(
           : o.hlc[2] === sync.clientId;
 
       (async () => {
+        // The log's durable high-water mark BEFORE this request writes
+        // anything — the reference for `foreign` below. Every cursor this log
+        // ever issued was ≤ its high-water at the time, so a cursor above
+        // THIS value was not issued here. Measured after the pending ops are
+        // persisted it is not: a reconnect's own offline queue stamps above
+        // the client's cursor, the mark moves over it, and a client holding a
+        // different history's cursor is served "incrementally" — it keeps
+        // every op the other history had (tests/sync/foreign-cursor.test.ts).
+        const highWaterBefore = await reserveServerTs(deps.db);
         // Persist pending ops under per-cell lock (prevents compact race)
         for (const pending of sync.pendingOps ?? []) {
           if (!isValidSyncOp(pending)) {
@@ -702,13 +801,15 @@ export function createServerSyncHandler(
               }
             }
             if (rejectedReason !== null) {
-              try {
-                socket.send(enc("op-rejected", {
+              sendTo(
+                socket,
+                enc("op-rejected", {
                   opId: pending.id,
                   cell: pending.cell,
                   reason: rejectedReason,
-                }));
-              } catch { /* client disconnected */ }
+                }),
+                `op-rejected for pending op ${pending.id}`,
+              );
               deps.log.warn(
                 `[sync:server] pending op ${pending.id} (${pending.cell}:${pending.action}) rejected: ${rejectedReason}`,
               );
@@ -719,16 +820,16 @@ export function createServerSyncHandler(
             // them forever and keeps rebasing them on top of confirmed state
             // that already includes them (permanent double-apply in the UI).
             const ackTs = await ackServerTs(pending.id, serverTs);
-            try {
-              socket.send(
-                enc("sync-ack", {
-                  cell: pending.cell,
-                  opId: pending.id,
-                  serverHlc,
-                  ...(ackTs !== null ? { serverTs: ackTs } : {}), // see handleOp
-                }),
-              );
-            } catch { /* client disconnected */ }
+            sendTo(
+              socket,
+              enc("sync-ack", {
+                cell: pending.cell,
+                opId: pending.id,
+                serverHlc,
+                ...(ackTs !== null ? { serverTs: ackTs } : {}), // see handleOp
+              }),
+              `sync-ack for pending op ${pending.id}`,
+            );
           });
         }
 
@@ -738,6 +839,8 @@ export function createServerSyncHandler(
         const snapshot: Record<string, Record<string, unknown>> = {};
         const lowWaterMap: Record<string, HLC> = {};
         const serverTsMap: Record<string, number> = {};
+        // Cells whose cursor this server has never issued — see `foreign`.
+        const resetCells: string[] = [];
 
         for (
           const [cell, { lastHlc, lastServerTs }] of Object.entries(
@@ -804,9 +907,44 @@ export function createServerSyncHandler(
             const cursorBelowCompaction = compactedTs > 0 &&
               (lastServerTs ?? 0) < compactedTs;
 
+            // A cursor ABOVE this log's high-water mark (as it stood before
+            // this request wrote anything — `highWaterBefore`) was never
+            // issued by this log: `reserveServerTs` IS the durable maximum,
+            // and every position a client can hold — an echoed cursor, an
+            // ack, a broadcast stamp — was taken from it. So the client synced
+            // with a different history: the server restarted on a restored
+            // backup, a wiped data dir, or another app now answering on the
+            // same port. Its cursor is meaningless here, and serving it
+            // "incrementally" sent nothing (no op is above a position that
+            // does not exist) while the client kept its stale cursor under
+            // the never-regress rule — silent, permanent divergence, with no
+            // line in any log. Send a snapshot and tell the client to RESET
+            // its cursor (see `reset` in the response): the client cannot
+            // tell a foreign cursor from an out-of-order response, the server
+            // can. (A foreign cursor BELOW this mark — the other history was
+            // older than a write this log has since taken — is not
+            // detectable from positions alone; the client then folds this
+            // log's newer ops onto the other history's state. Known gap; a
+            // history identity on the log would close it.)
+            const foreign = (lastServerTs ?? 0) > highWaterBefore;
+            if (foreign) {
+              resetCells.push(cell);
+              if (!_foreignWarned.has(socket)) {
+                _foreignWarned.add(socket);
+                deps.log.warn(
+                  `[sync:server] client ${meta.id} holds a cursor for "${cell}" ` +
+                    `(${lastServerTs}) above this log's high-water mark ` +
+                    `(${highWaterBefore}) — it synced with a different ` +
+                    `history (restored backup, wiped data dir, or another app ` +
+                    `on this port). Sending a snapshot and resetting its ` +
+                    `cursor; its unsent changes are kept. (Once per client.)`,
+                );
+              }
+            }
+
             // Client's lastHlc older than low_water → compacted, send snapshot
             if (
-              cursorBelowCompaction ||
+              cursorBelowCompaction || foreign ||
               (cellLW && lastHlc &&
                 (lastHlc[0] < cellLW[0] ||
                   (lastHlc[0] === cellLW[0] && lastHlc[1] < cellLW[1])))
@@ -841,6 +979,8 @@ export function createServerSyncHandler(
                 // data it was standing for.
                 delete serverTsMap[cell];
                 delete lowWaterMap[cell];
+                const i = resetCells.indexOf(cell);
+                if (i !== -1) resetCells.splice(i, 1);
                 return;
               }
               useSnapshot = true;
@@ -892,6 +1032,7 @@ export function createServerSyncHandler(
             ops: responseOps,
             lowWater: lowWaterMap,
             lastServerTs: serverTsMap,
+            ...(resetCells.length ? { reset: resetCells } : {}),
             ...reqId,
           }
           : {
@@ -902,9 +1043,7 @@ export function createServerSyncHandler(
             ...reqId,
           };
 
-        try {
-          socket.send(enc("sync-res", response));
-        } catch { /* client disconnected */ }
+        sendTo(socket, enc("sync-res", response), "sync-res");
 
         deps.log.debug(
           `[sync:server] sync response: ${response.mode}, ${responseOps.length} ops`,
@@ -912,9 +1051,7 @@ export function createServerSyncHandler(
       })().catch((e) => {
         deps.log.error(`[sync:server] handleSync failed: ${e}`);
         // Notify client so it can back off and retry instead of hanging in "syncing"
-        try {
-          socket.send(enc("sync-err", { reason: String(e) }));
-        } catch { /* client disconnected */ }
+        sendTo(socket, enc("sync-err", { reason: String(e) }), "sync-err");
       });
     },
   };

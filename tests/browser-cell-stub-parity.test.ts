@@ -90,7 +90,7 @@ function makeConfig() {
       plain: (s: { n: number }) => s.n + 1,
       withDeps: {
         deps: ["parity-dep"],
-        fn: (s: { n: number }, d: { rate: number }) => s.n * d.rate,
+        fn: (s: { n: number }, [d]: [{ rate: number }]) => s.n * d.rate,
       },
     },
     visible: { exclude: ["secret"] },

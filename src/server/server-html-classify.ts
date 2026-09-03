@@ -1,6 +1,35 @@
 // Browser error classification — actionable fix suggestions for common dev errors.
 
-import { SERVER_ONLY_SPECS } from "./server-only-specs.ts";
+import {
+  aioOwnSpecAdvice,
+  isAioOwnSpec,
+  SERVER_ONLY_SPECS,
+} from "./server-only-specs.ts";
+
+/** Does the app's ROOT component still exist on disk? Registered by the dev
+ *  watcher (`createFileWatcher`), which is the one place that already knows
+ *  both the base dir and the UI entry, and which runs in exactly the mode this
+ *  classifier serves. Unregistered (prod, no watcher) means "cannot tell" —
+ *  and the classifier then says so instead of guessing. */
+let _uiRootProbe: (() => boolean) | undefined;
+
+/** Tell the classifier how to check the root component's existence. Pass
+ *  `undefined` to unregister (watcher shutdown). */
+export function setUiRootProbe(probe: (() => boolean) | undefined): void {
+  _uiRootProbe = probe;
+}
+
+/** `true`/`false` when a probe is registered and answers, `undefined` when
+ *  nothing can tell. Never throws — a broken probe must not turn an error
+ *  report into a second error. */
+function uiRootExists(): boolean | undefined {
+  if (!_uiRootProbe) return undefined;
+  try {
+    return _uiRootProbe();
+  } catch {
+    return undefined;
+  }
+}
 
 /** Classifies browser errors and returns actionable fix suggestions */
 export function classifyBrowserError(
@@ -11,14 +40,24 @@ export function classifyBrowserError(
     // Extract the URL that failed, if present
     const failedUrl = message.match(/module:\s*(https?:\/\/\S+)/)?.[1];
     const isAppRoot = failedUrl && /\/App\.tsx/.test(failedUrl);
+    // The browser names the module IT asked for, not the one that 404'd, so an
+    // App.tsx failure is genuinely ambiguous: either the root itself is gone,
+    // or something it imports is. Only the root's existence separates the two
+    // — and asserting "a sub-import failed" sent everyone who deleted or
+    // renamed App.tsx hunting a broken import that was never there.
+    const rootExists = isAppRoot ? uiRootExists() : undefined;
     return {
-      classification: "dynamic-import-failed",
+      classification: rootExists === false
+        ? "missing-ui-root"
+        : "dynamic-import-failed",
       label: "Module Load Error",
-      fix: isAppRoot
-        ? "A sub-import inside App.tsx failed to load. Open DevTools → Network tab and look for red (failed) requests to find the broken import. Check the terminal for transpile errors."
-        : `Module failed to load${
+      fix: !isAppRoot
+        ? `Module failed to load${
           failedUrl ? ": " + failedUrl : ""
-        }. Open DevTools → Network tab to find the failing request. Check the terminal for transpile errors.`,
+        }. Open DevTools → Network tab to find the failing request. Check the terminal for transpile errors.`
+        : rootExists === false
+        ? "App.tsx does not exist — the app's root component is missing, so there is no sub-import to hunt. Restore the file (`git checkout -- src/App.tsx`), or point `ui.entry` at the file that replaced it."
+        : "App.tsx, or a module it imports, failed to load. Open DevTools → Network tab and look for red (failed) requests — the red one names the file that is actually missing. Check the terminal for transpile errors.",
     };
   }
   const missingModule = message.match(
@@ -45,6 +84,17 @@ export function classifyBrowserError(
           `(\`const { createDB } = await import("${pkg}")\` — methods run ` +
           `on the server), or into a *.server.ts module imported lazily. ` +
           `\`deno task lint\` names the exact file:line.`,
+      };
+    }
+    // An `aio/*` entry that is not in the hard set above (`aio/extras`,
+    // `aio/sync`) is STILL never a missing npm package — it used to fall
+    // through to the generic advice this module refuses to give.
+    if (isAioOwnSpec(pkg)) {
+      return {
+        classification: "server-only-import",
+        label: "Server-Only Import",
+        fix: aioOwnSpecAdvice(pkg) +
+          " `deno task lint` names the exact file:line.",
       };
     }
     return {

@@ -39,10 +39,22 @@ function counterCell() {
       bump(s: { n: number }, by = 1) {
         s.n += by;
       },
+      // An ASYNC method, so these suites can reach the ack path that settles a
+      // call through the executor. Both suites fuzzed only `bump` — a SYNC
+      // method, whose value comes straight back from the reduce — so the two
+      // files that exist to prove call settlement structurally could not see
+      // the async door reporting `{ok:true, value:undefined}` for a method
+      // that threw (audit a21/F1).
+      async bumpAsync(s: { n: number }, by = 1) {
+        await Promise.resolve();
+        s.n += by;
+        return s.n;
+      },
     },
   });
   return def as unknown as CellDef & {
     bump: (by?: number) => Promise<unknown>;
+    bumpAsync: (by?: number) => Promise<unknown>;
   };
 }
 
@@ -306,6 +318,50 @@ Deno.test({
       } catch { /* already closed */ }
       await served.catch(() => {});
       await Deno.remove(path).catch(() => {});
+    }
+  },
+});
+
+// The same guarantee for an ASYNC method.
+//
+// Every case above calls `bump` — a SYNC method, whose value comes straight
+// back from the reduce. So the two suites that exist to prove call settlement
+// structurally could not reach the door that settles a call through the
+// executor, which is exactly where `{ok:true, value:undefined}` was being
+// reported for an async method that threw (audit a21/F1).
+Deno.test({
+  name:
+    "exactly-once (WS): an ASYNC call queues, flushes once, and carries its value",
+  async fn() {
+    const restoreWS = installFakeWS();
+    const restoreT = fastBackoff();
+    const cli = connectCli<{ n: number }>("http://localhost:1/x");
+    const box = counterCell();
+    try {
+      const s1 = await waitFor(() => FakeWS.live[0], "first socket");
+      s1.open();
+      s1.close();
+
+      cli.bind(box);
+      const call = track(box.bumpAsync(1));
+      await tick(20);
+      assertEquals(call.done, false, "a queued async call must not settle yet");
+
+      const s2 = await waitFor(() => FakeWS.live[1], "reconnect socket");
+      s2.open();
+      const written = s2.actions();
+      assertEquals(written.length, 1, "the queued frame flushes exactly once");
+      s2.deliver(enc("ack", { cid: written[0]!.cid, ok: true, value: 11 }));
+      await tick(10);
+      assert(
+        call.done && call.ok,
+        "the flushed async call resolves on its ack",
+      );
+      assertEquals(call.value, 11, "and carries the server's return value");
+    } finally {
+      cli.close();
+      restoreT();
+      restoreWS();
     }
   },
 });

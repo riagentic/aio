@@ -23,62 +23,25 @@
 // `tests/removals-registry.test.ts` fails if a removal is announced anywhere in
 // `src/` or `aiol/` by a message that did not come from here.
 import { codeText } from "../diagnostics/code-mask.ts";
-import { log } from "../diagnostics/logger-api.ts";
 
-/** What kind of thing was removed — decides how the message reads. */
-export type RemovalKind =
-  /** A `cell({ … })` config key. `key` is the bare name, no colon. */
-  | "cell-config"
-  /** A top-level `deno.json` key. `key` is the bare name. */
-  | "deno-json"
-  /** An `am` verb. `key` is the verb as typed (`"new"`). */
-  | "am-verb"
-  /** Any other public API shape. `key` is the call as a user would write it. */
-  | "api";
+import {
+  ALPHA70,
+  ALPHA76,
+  CORE_REMOVALS,
+  type Removal,
+  RESTRUCTURE,
+} from "./removals-core.ts";
 
-/** One removed API, and everything a user needs to act on it. */
-export interface Removal {
-  /** `"machine"` for a config key; `"aio.run(initialState, config)"` for an API. */
-  readonly key: string;
-  readonly kind: RemovalKind;
-  /** Release that removed it — the bare series name, e.g. `"alpha27"`. */
-  readonly removedIn: string;
-  /** Last tag that still accepted it — a pin that runs the app unchanged. */
-  readonly lastGood: string;
-  /** The migration, in one line. Present tense, imperative, copy-pasteable. */
-  readonly hint: string;
-  /** Guide with the full recipe, relative to the repo root. */
-  readonly guide: string;
-  /** How the removed spelling is found in an app's SOURCE (code only — see
-   *  `removalsInSource`). A cell-config key needs none (`key:` is the
-   *  pattern); an API shape names its own. Absent = not textually findable
-   *  (the type-checker or the CLI refuses it instead). */
-  readonly pattern?: RegExp;
-  /** The spelling that replaced it — set when the removal is a RENAME, so a
-   *  surface can say "spelled `x` now" in five words. */
-  readonly now?: string;
-}
+// The runtime half — types, the rows a running app can trip, and the message
+// every surface prints — lives in removals-core.ts so a browser bundle can
+// reach it without the tooling table (see that file's header). Re-exported
+// here so THIS module stays the one import path every tool already uses.
+export * from "./removals-core.ts";
 
-const RESTRUCTURE = {
-  removedIn: "alpha27",
-  lastGood: "v1.0.0-alpha26",
-  guide: "docs/upgrade/restructure.md",
-} as const;
-
-const ALPHA70 = {
-  removedIn: "alpha70",
-  lastGood: "v1.0.0-alpha69",
-  guide: "docs/upgrade/from-alpha69-to-alpha70.md",
-} as const;
-
-/**
- * Every removal in 1.x, oldest release first.
- *
- * perfect-aio D1/D9: `methods` is the ONE style, so the Style-B layer
- * (actions/reduce/execute/machine/generators) and the 2-arg `aio.run` overload
- * went out together in alpha27.
- */
-export const REMOVALS: readonly Removal[] = [
+/** The rows only TOOLING reads: `am` verbs, deno.json keys, and the import
+ *  moves `aiol --safe-fix` rewrites. Nothing a page can reach looks these up,
+ *  which is what keeps them out of the browser bundle. */
+const TOOLING_REMOVALS: readonly Removal[] = [
   {
     key: "aio.run(initialState, config)",
     kind: "api",
@@ -86,50 +49,8 @@ export const REMOVALS: readonly Removal[] = [
       "define cells with cell() and call aio.run({ cells: [...] }) — or zero-config aio.run()",
     ...RESTRUCTURE,
   },
-  {
-    key: "actions",
-    kind: "cell-config",
-    hint:
-      "actions+reduce pairs are one method — `increment(s, by) { s.count += by }`",
-    ...RESTRUCTURE,
-  },
-  {
-    key: "reduce",
-    kind: "cell-config",
-    hint: "reduce: handlers are method bodies now — mutate `s` in the method",
-    ...RESTRUCTURE,
-  },
-  {
-    key: "execute",
-    kind: "cell-config",
-    hint: "side-effects run inside the (async) method itself",
-    ...RESTRUCTURE,
-  },
-  {
-    key: "machine",
-    kind: "cell-config",
-    hint: 'guards are a guard line — `if (s.status !== "idle") return;`',
-    ...RESTRUCTURE,
-  },
-  {
-    key: "generators",
-    kind: "cell-config",
-    hint:
-      "generators are plain async methods — use until()/race()/sleep() from aio, " +
-      "cancelOn + s.$signal for cancellation",
-    ...RESTRUCTURE,
-  },
   // alpha52 — the surface diet: two aliases deprecated for multiple alphas
   // went out with loud throws (call) / a compile error (useCell).
-  {
-    key: "call({ timeout })",
-    kind: "api",
-    removedIn: "alpha52",
-    lastGood: "v1.0.0-alpha51",
-    hint:
-      "rename the option: call({ timeoutMs: 5000 }, fn) — aiol --safe-fix does it",
-    guide: "docs/upgrade/from-alpha51-to-alpha52.md",
-  },
   {
     key: "useCell()",
     kind: "api",
@@ -177,55 +98,6 @@ export const REMOVALS: readonly Removal[] = [
     // The import form only (`type Action,` / `type Action }`) — an app's own
     // `type Action = …` is its own business.
     pattern: /\btype\s+Action\s*[,}]/,
-    ...ALPHA70,
-  },
-  {
-    key: "schedule.poll({ backoff })",
-    kind: "api",
-    now: "factor",
-    hint:
-      "rename the option key: { every, backoff: 2 } → { every, factor: 2 } (same meaning)",
-    pattern: /\bevery\s*:[^}]*\bbackoff\s*:/,
-    ...ALPHA70,
-  },
-  {
-    key: "schedule.backoff/poll(id, attempt, opts, action)",
-    kind: "api",
-    now: "schedule.backoff(id, attempt, action, opts)",
-    hint:
-      "swap the last two arguments: the action is 3rd and the options 4th, like after/every",
-    pattern: /schedule\.(?:backoff|poll)\([^,()]+,[^,()]+,\s*\{/,
-    ...ALPHA70,
-  },
-  {
-    key: "cell({ ui })",
-    kind: "api",
-    now: "visible",
-    hint:
-      "rename the cell config key: ui: → visible: (access gates calls, visible gates reads) — aiol --safe-fix does it",
-    // A CELL's `ui:` takes "all"/"none" or a filter object; the app-level
-    // `aio.run({ ui: { width } })` window config never takes a string and
-    // never those filter keys — so this matches the cell key alone.
-    pattern:
-      /(?:^|[{,\s])ui\s*:\s*(?:["']|\{\s*(?:include|exclude|forUser|publicFields)\b)/,
-    ...ALPHA70,
-  },
-  {
-    key: "cellDefaults.ui",
-    kind: "api",
-    now: "cellDefaults.visible",
-    hint:
-      "rename the app-level default: cellDefaults: { ui } → cellDefaults: { visible }",
-    pattern: /\bcellDefaults\s*:\s*\{[^}]*\bui\s*:/,
-    ...ALPHA70,
-  },
-  {
-    key: "listensTo: [...]",
-    kind: "api",
-    now: "listensTo: { handler: other.method }",
-    hint:
-      "use the object form, which names the sync method that reacts: listensTo: { onThing: other.method }",
-    pattern: /\blistensTo\s*:\s*\[/,
     ...ALPHA70,
   },
   {
@@ -362,6 +234,49 @@ export const REMOVALS: readonly Removal[] = [
       "rename: checkCells(cells) (the alias collided with aiol's project linter) — aiol --safe-fix keeps the local name: import { checkCells as lint }",
     ...ALPHA70,
   },
+  // alpha76 — the pre-beta sweep. Four runtime flags and one `aio.run()` key
+  // that had been "accepted aliases" with no removal date; beta freezes the
+  // surface, so an alias carried into it is permanent. The flags are refused
+  // by `parseCli` (aio-cli.ts), which is why they carry no source `pattern`:
+  // a flag lives in a shell line or a deno.json task, not in TypeScript.
+  {
+    key: "--kill-existing",
+    kind: "cli-flag",
+    now: "--takeover",
+    hint: "spell it `--takeover` (same behaviour), and the aio.run() key too",
+    ...ALPHA76,
+  },
+  {
+    key: "--server-url",
+    kind: "cli-flag",
+    now: "--connect",
+    hint:
+      "the BARE flag opens the connect page, so it is spelled `--connect`; the valued form `--server-url=<url>` is unchanged",
+    ...ALPHA76,
+  },
+  {
+    key: "--zero-port",
+    kind: "cli-flag",
+    hint:
+      "delete the flag — zero TCP ports is already the default for a local electron app; `--port=N` is the opt-OUT",
+    ...ALPHA76,
+  },
+  {
+    key: "--backup-logs",
+    kind: "cli-flag",
+    hint:
+      "delete the flag — keeping previous logs is the default; `--no-backup-logs` is the one that changes anything",
+    ...ALPHA76,
+  },
+  {
+    key: "aio.run({ killExisting })",
+    kind: "api",
+    now: "aio.run({ takeover })",
+    hint:
+      "rename the config key: killExisting: true → takeover: true — one word for the key and the `--takeover` flag, so a compiled service binary can write the current spelling",
+    pattern: /\bkillExisting\s*:/,
+    ...ALPHA76,
+  },
   {
     key: "testgen()",
     kind: "api",
@@ -370,16 +285,19 @@ export const REMOVALS: readonly Removal[] = [
       "rename: testGen (camelCase, like testUI/testCell) — aiol --safe-fix keeps the local name: import { testGen as testgen }",
     ...ALPHA70,
   },
-  {
-    key: "memory.gcStressRatio",
-    kind: "api",
-    hint:
-      "delete the key — it was accepted and never read; heap pressure is reported by warnThreshold, criticalThreshold, machineWarnFraction and growthReportRatio",
-    ...ALPHA70,
-  },
 ] as const;
 
-/** Look a key up. Returns null for anything still supported. */
+/**
+ * Every removal in 1.x — THE record. The runtime rows first (removals-core.ts,
+ * which a page can reach), then the tooling-only ones.
+ */
+export const REMOVALS: readonly Removal[] = [
+  ...CORE_REMOVALS,
+  ...TOOLING_REMOVALS,
+];
+
+/** Look a key up across the WHOLE record. Overrides the core-only lookup this
+ *  module re-exports: `aiol` and `am` ask about tooling rows too. */
 export function removalFor(key: string): Removal | null {
   return REMOVALS.find((r) => r.key === key) ?? null;
 }
@@ -396,20 +314,6 @@ export function removalOf(key: string): Removal {
     );
   }
   return r;
-}
-
-/** The config keys a cell may no longer declare. */
-export const REMOVED_CELL_KEYS: readonly string[] = REMOVALS
-  .filter((r) => r.kind === "cell-config")
-  .map((r) => r.key);
-
-/** Which removed keys does this cell config use? Order follows REMOVALS. */
-export function removalsUsedBy(
-  config: Record<string, unknown>,
-): readonly Removal[] {
-  return REMOVALS.filter((r) =>
-    r.kind === "cell-config" && config[r.key] !== undefined
-  );
 }
 
 /** A removed key found in source, with the line it sits on (1-based) and
@@ -482,75 +386,4 @@ export function removalsInDenoJson(
 /** The removal row for an `am` verb that no longer exists, or null. */
 export function removedAmVerb(verb: string): Removal | null {
   return REMOVALS.find((r) => r.kind === "am-verb" && r.key === verb) ?? null;
-}
-
-/** The one-line refusal a dropped spelling answers with: "`x` is spelled `y`
- *  now" first, the full removal message after. Never silent, never a
- *  silent forward. */
-export function retiredSpellingLine(r: Removal, subject?: string): string {
-  const what = r.kind === "am-verb" ? `\`am ${r.key}\`` : `\`${r.key}\``;
-  const now = r.now
-    ? `${what} is spelled \`${
-      r.kind === "am-verb" ? `am ${r.now}` : r.now
-    }\` now — `
-    : "";
-  return `${now}${removalMessage(r, subject)}`;
-}
-
-/** Retired spellings a `cell()` CONFIG OBJECT is carrying.
- *
- *  `removalsUsedBy` answers the same question for `kind: "cell-config"` rows —
- *  keys whose removal is total. This answers it for the `kind: "api"` rows
- *  whose key IS a config key written as a call shape (`cell({ ui })`), which
- *  the source scanner matches by pattern and which nothing checked at runtime.
- *  `cell({ ui })` therefore passed `cell()` silently for eight releases while
- *  the TYPE had already dropped it — the app worked and its types died.
- *
- *  Keyed off the row's own `key`, so adding a row is all it takes to enforce
- *  one: no second list to keep in step. */
-export function retiredCellConfigKeys(
-  config: Record<string, unknown>,
-): readonly Removal[] {
-  return REMOVALS.filter((r) => {
-    const m = /^cell\(\{\s*(\w+)\s*\}\)$/.exec(r.key);
-    return m !== null && config[m[1]!] !== undefined;
-  });
-}
-
-/** THE dev/prod split for a removed spelling that is READ FROM CONFIG and so
- *  cannot simply cease to exist (`cell({ ui })`, `cellDefaults.ui`,
- *  `listensTo: […]`, deno.json `target`): dev (`__aioDev`) THROWS with the
- *  registry message — a test or a dev boot is where the app's author is —
- *  and prod logs the same line at error level and honours the old spelling,
- *  because a running app that silently DROPPED its visibility filter would
- *  be a data leak dressed as a cleanup. Category (b) of the dev==prod rule:
- *  dev stricter, never a silent divergence. */
-export function refuseRetired(r: Removal, subject?: string): void {
-  const line = retiredSpellingLine(r, subject);
-  if ((globalThis as Record<string, unknown>).__aioDev === true) {
-    throw new Error(line);
-  }
-  log.error("removals", line);
-}
-
-/**
- * The message every surface prints for a removal.
- *
- * It carries BOTH exits, because a user who hits this has two legitimate ones
- * and the framework does not get to pick: migrate the code, or pin the
- * framework the code was written for and keep shipping. `subject` names where
- * it was found (a cell name) when the surface knows it.
- */
-export function removalMessage(r: Removal, subject?: string): string {
-  const where = subject ? `[${subject}] ` : "";
-  const what = r.kind === "cell-config"
-    ? `cell config key '${r.key}:'`
-    : r.kind === "deno-json"
-    ? `deno.json key "${r.key}"`
-    : r.kind === "am-verb"
-    ? `\`am ${r.key}\``
-    : r.key;
-  return `${where}${what} was removed in ${r.removedIn} — ${r.hint}. ` +
-    `Migrate: ${r.guide} — or run it unchanged on the version it was written ` +
-    `for: \`am pin ${r.lastGood} && am fix\`.`;
 }

@@ -26,7 +26,7 @@ const counter = cell("counter", {
       }, 5);
     },
     async bumpLive(s) {
-      const view = s.$live!;
+      const view = s.$live;
       await new Promise((r) => setTimeout(r, 1));
       setTimeout(() => {
         try {

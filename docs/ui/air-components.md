@@ -189,6 +189,14 @@ Callback refs receive `null` when the element is removed.
 
 Style diffing is incremental — only changed properties are updated.
 
+### `false` removes an attribute
+
+`false` is treated as "no attribute", including for `aria-*` and `data-*`:
+`<button aria-pressed={false}>` renders `<button>`, not `aria-pressed="false"`
+(React writes the string for `aria-*`). Pass the string when the false state is
+meaningful — `aria-pressed={pressed ? "true" : "false"}` — and note that `""`
+and `0` are values, so they are kept.
+
 ### Reactive styles
 
 An object style updates reactively **as long as the signal read happens inside

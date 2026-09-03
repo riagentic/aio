@@ -52,8 +52,15 @@ aio_memory_heap_used_bytes    V8 heap used (also heap_total)
 aio_clients_connected         connected WebSocket clients
 aio_cell_errors_total{cell}   errors observed per cell
 aio_cell_enabled{cell}        cell enabled flag (circuit breaker)
-aio_broadcast_bytes_total{kind} / aio_broadcast_messages_total{kind}
+aio_broadcast_bytes_total     broadcast payload bytes sent to clients
+aio_broadcast_messages_total  broadcast messages sent to clients
 ```
+
+The two broadcast counters are unlabelled server totals. They carried a `kind`
+label until alpha76, whose value was a per-CONNECTION id rather than a kind — so
+every reconnect minted a new time series, and each one disappeared the moment
+its client left. Per-client detail lives in `/__aio/vitals`, which is a snapshot
+of who is connected now rather than a monotonic series.
 
 Pairs with `/__aio/health` (JSON, per-cell detail) and `am metrics` (CLI).
 

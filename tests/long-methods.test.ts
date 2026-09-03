@@ -190,8 +190,8 @@ Deno.test("long: removes a deadline, not the ability to cancel", () => {
     long: ["forever"],
     cancelOn: { forever: "self" },
     methods: {
-      async forever(s: { stopped: boolean; $signal?: AbortSignal }) {
-        while (!s.$signal?.aborted) await sleep(10);
+      async forever(s: { stopped: boolean; $signal: AbortSignal }) {
+        while (!s.$signal.aborted) await sleep(10);
         s.stopped = true;
       },
     },

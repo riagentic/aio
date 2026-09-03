@@ -20,6 +20,7 @@ import {
   _clearClientDegraded,
   clientDegradedReport,
 } from "../src/diagnostics/degraded.ts";
+import { tempDir } from "../src/testing/temp-dir.ts";
 
 /** Every `case "<kind>":` label in `text` that names a known frame kind (or a
  *  reserved-ignorable one) — the same tokens the routers switch on. */
@@ -150,7 +151,7 @@ Deno.test("ignorable kinds never appear in SERVES (skipped, not routed)", () => 
 
 Deno.test("uds: cdiag frame records a client degradation", async () => {
   const socketPath = join(
-    await Deno.makeTempDir({ prefix: "aio-uds-cdiag-" }),
+    await tempDir("aio-uds-cdiag-"),
     "s.sock",
   );
   const uds = createUDSListener(
@@ -197,7 +198,7 @@ Deno.test("uds: cdiag frame records a client degradation", async () => {
 
 Deno.test("uds: an ignorable extension frame is skipped without killing the connection", async () => {
   const socketPath = join(
-    await Deno.makeTempDir({ prefix: "aio-uds-x-" }),
+    await tempDir("aio-uds-x-"),
     "s.sock",
   );
   let dispatched: unknown = null;

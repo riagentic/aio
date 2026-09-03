@@ -17,7 +17,7 @@ import {
   removalMessage,
   removalsUsedBy,
   retiredCellConfigKeys,
-} from "./removals.ts";
+} from "./removals-core.ts";
 import { nearestOf } from "./cell-helpers.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import type {

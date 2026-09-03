@@ -537,6 +537,21 @@ function checkOrder(
   }
 }
 
+/** The shape gate alone — is `raw` something this table's binding can hold
+ *  rows in? — for a caller that wants the answer at BOOT rather than on the
+ *  first debounce window. `planTablesIncremental` runs the same check per
+ *  window and throws by name; the persistence manager runs this once at
+ *  construction so a table whose bound value can never be planned refuses the
+ *  boot instead of failing every window while the snapshot half keeps
+ *  committing and the app looks healthy. */
+export function checkTableShape(
+  name: string,
+  raw: unknown,
+  def: TableDef,
+): void {
+  rowsOf(name, raw, pkColumn(def), def.shape);
+}
+
 /** The gate every bound array passes before a single statement is built —
  *  the whole-table form, kept for callers that diff without an index. */
 function checkRows(

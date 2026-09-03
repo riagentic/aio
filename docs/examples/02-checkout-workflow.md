@@ -155,7 +155,7 @@ export const payment = cell("payment", {
       s.error = null;
     },
     async process(
-      s: PaymentState & Partial<MethodDraftMeta>,
+      s: PaymentState & MethodDraftMeta,
       items: CartItem[],
       total: number,
     ) {
@@ -174,7 +174,7 @@ export const payment = cell("payment", {
       // Step 2: Charge the card
       try {
         const { chargeId } = await chargeCard(total);
-        if (s.$signal?.aborted) {
+        if (s.$signal.aborted) {
           // cart.clear fired mid-charge -- release and stop
           await inventory.release(items);
           s.status = "idle";
@@ -201,10 +201,10 @@ Each `await` boundary commits a batch: the trigger `payment:process` plus one
 
 > **`cancelOn: { process: [cart.clear] }`** -- if the user clears their cart
 > mid-payment, the in-flight method's `s.$signal` aborts. Check
-> `s.$signal?.aborted` after awaits before writing terminal state (and pass the
+> `s.$signal.aborted` after awaits before writing terminal state (and pass the
 > signal to abortable IO like `fetch`). Pass bound methods (not strings) for
-> refactor safety. The `& Partial<MethodDraftMeta>` annotation (from `aio`)
-> types `s.$signal`.
+> refactor safety. The `& MethodDraftMeta` annotation (from `aio`) types
+> `s.$signal`.
 
 ---
 

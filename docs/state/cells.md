@@ -197,9 +197,9 @@ selectors: {
 **Can:** read own cell state; take runtime arguments (parameterized form above);
 read other cells via the **deps form** — deps arrive as a TUPLE, so
 parameterized + deps compose: `{ deps: ["prices"], fn: (s, [prices], id) => … }`
-→ `cell.cost(id)`. (The old spread signature `(s, ...deps)` works through beta
-with a one-time hint; `aiol --safe-fix` rewrites it.) **Cannot:** mutate,
-dispatch, or run async.
+→ `cell.cost(id)`. (The old spread signature `(s, ...deps)` was removed in
+alpha76 — dev throws, prod logs and still spreads; `aiol --safe-fix` rewrites
+it.) **Cannot:** mutate, dispatch, or run async.
 
 ### Lifecycle hooks
 
@@ -300,7 +300,9 @@ Anything that flattens the methods object into a `Record<…>` breaks it.
 
 **Fix — inline the methods object at the call site:**
 
-```ts
+<!-- three variants of the same declaration side by side: not one program -->
+
+```ts no-check
 // ❌ Widens — `methods` is `Record<string, (s) => void>`, literal shape lost
 const methods: Record<string, (s: State) => void> = {
   navigate(s, route: string) {

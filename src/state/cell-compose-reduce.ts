@@ -28,6 +28,59 @@ import {
 } from "./cell-types.ts";
 import type { ReduceBreakdown } from "../diagnostics/time-travel.ts";
 
+/** A method threw. The error a CALLER receives keeps the method's own message.
+ *
+ *  It used to be rewritten as `Cell '<cell>' method '<m>' threw: <original>`.
+ *  That prefix is the framework talking about itself, and a caller's `message`
+ *  is what an app shows a user: `examples/contacts` — the "read this first"
+ *  example — does `setError(e.message)` on a validation refusal, so a shopper
+ *  saw "Cell 'contacts' method 'create' threw: not an email address: nope".
+ *  `docs/state/the-bridge.md` promised the opposite ("the client await rejects
+ *  with the message"), and the original was reachable only through
+ *  `e.cause.message`, which no doc mentioned.
+ *
+ *  Nothing is lost by dropping it. `dispatch` already wraps this in an
+ *  `AioError` whose `context` carries `cellName` and `actionType`, so the
+ *  identity reaches the caller as DATA it can branch on rather than prose it
+ *  would have to match — and the log line has always named the cell and the
+ *  method itself (`cell  <name> <method>() threw: …`). `cause` still carries
+ *  the original error object. */
+function methodThrew(
+  cellName: string,
+  methodName: string,
+  e: unknown,
+  hint = "",
+): Error {
+  const orig = e instanceof Error ? e.message : String(e);
+  // ONE voice for the two paths. Immer refuses `Object.defineProperty` and
+  // `Object.setPrototypeOf` on a draft with a message that names neither the
+  // cell, the method, nor the spelling that works — it was only ever readable
+  // because the framework's generic prefix happened to be glued in front of
+  // it. The async twin has a purpose-built sentence for the identical refusal
+  // (`cell-impl.ts`'s live proxy), so the sync side says the same thing rather
+  // than depending on a prefix that had to go.
+  const immer = /^\[Immer\] (Object\.\w+)\(\) cannot be used on an Immer draft/
+    .exec(orig);
+  const message = immer
+    ? `[${cellName}:${methodName}] ${immer[1]}(…) cannot be used on cell ` +
+      `state — an async method's live state refuses it too. Assign instead: ` +
+      `s.field = value.`
+    : `${orig}${hint}`;
+  // The hint is guidance about THIS failure (an illegal cross-cell write), so
+  // it belongs with the message; the framework's own name does not.
+  const err = new Error(message, { cause: e }) as Error & {
+    cell?: string;
+    method?: string;
+  };
+  // The identity as DATA. `dispatch` also carries it on the `AioError` it
+  // wraps this in (`context.cellName` / `context.actionType`), but a caller
+  // that reduces directly — `composeCells(...).reduce(...)` — has only this,
+  // and an anonymous throw there is a worse answer than a prefixed message.
+  err.cell = cellName;
+  err.method = methodName;
+  return err;
+}
+
 type CellPatches = { cell: string; ops: WirePatch[] };
 
 /** Internal action carrying a worker cell's committed patches into the main
@@ -42,6 +95,15 @@ export type ReduceResult = {
    *  method returned void/effects). Threaded to `entry.resolve()` so
    *  `await cell.method()` resolves with it, like an async method. */
   ret?: unknown;
+  /** Did the cell's method actually run and commit? `false`/absent means the
+   *  action reached the cell and was REFUSED (machine guard, failed validate)
+   *  or never addressed a method at all. A registered `call()` is answered
+   *  from this — see the `_callId` block in the root reducer. */
+  ran?: boolean;
+  /** Why it did not run, in the refusing branch's own words — the same
+   *  sentence `recordRejection` gets, so the caller and the op path cannot
+   *  disagree about the reason. */
+  refusal?: string;
   _bd?: { produce: number; clone: number; spread: number };
 };
 
@@ -74,7 +136,14 @@ export function reduceCell(
   if (machine !== false) {
     const currentStatus = (cellState.__aio_status ?? machine.initial) as string;
     const stateConfig = machine.states[currentStatus];
-    if (!stateConfig) return { state: fullState, effects: [] };
+    if (!stateConfig) {
+      return {
+        state: fullState,
+        effects: [],
+        refusal:
+          `machine of cell '${cellName}' is in state '${currentStatus}', which the machine does not declare — nothing ran`,
+      };
+    }
 
     const lookupKey = ownKey ?? action.type;
     const transitions = stateConfig;
@@ -132,7 +201,7 @@ export function reduceCell(
         },
         hint,
       });
-      return { state: fullState, effects: [] };
+      return { state: fullState, effects: [], refusal: msg };
     }
 
     const targetSpec = transitions[lookupKey];
@@ -200,12 +269,7 @@ export function reduceCell(
         },
       );
     } catch (e) {
-      const methodName = ownKey ?? action.type;
-      const orig = e instanceof Error ? e.message : String(e);
-      throw new Error(
-        `Cell '${cellName}' method '${methodName}' threw: ${orig}`,
-        { cause: e },
-      );
+      throw methodThrew(cellName, ownKey ?? action.type, e);
     }
     // A list the method appended to travels as its appends, not as the whole
     // list again, and a string that grew as its suffix (see narrowPatches).
@@ -241,18 +305,23 @@ export function reduceCell(
         // to THIS action: the handler reads it after an await, and a global
         // slot would be cleared/overwritten by any dispatch that interleaves.
         recordRejection(action, { cell: cellName, reason: String(result) });
-        return { state: fullState, effects: [] };
+        return {
+          state: fullState,
+          effects: [],
+          refusal: `state validation failed: ${result}`,
+        };
       }
     }
 
     const t2 = _perfCheck ? performance.now() : 0;
-    const returnObj = {
+    const returnObj: ReduceResult = {
       state: { ...fullState, [cellName]: nextSlice },
       effects,
       patches: cellPatches.length > 0
         ? { cell: cellName, ops: cellPatches }
         : undefined,
       ret: methodReturn,
+      ran: ownKey !== undefined,
     };
     const tSpread = _perfCheck ? performance.now() - t2 : 0;
 
@@ -314,10 +383,7 @@ export function reduceCell(
         `\`s.arr\`), snapshot it to a plain copy first: ` +
         `\`const y = JSON.parse(JSON.stringify(s.y))\`.`
       : "";
-    throw new Error(
-      `Cell '${cellName}' method '${methodName}' threw: ${orig}${hint}`,
-      { cause: e },
-    );
+    throw methodThrew(cellName, methodName, e, hint);
   }
   // Same narrowing as the guarded path above — both paths produce patches, so
   // both must, or the optimisation would apply only to cells that happen to
@@ -344,7 +410,11 @@ export function reduceCell(
       }
       // D11: explainable rejection (see above).
       recordRejection(action, { cell: cellName, reason: String(result) });
-      return { state: fullState, effects: [] };
+      return {
+        state: fullState,
+        effects: [],
+        refusal: `state validation failed: ${result}`,
+      };
     }
   }
 
@@ -355,6 +425,10 @@ export function reduceCell(
       ? { cell: cellName, ops: cellPatches }
       : undefined,
     ret: methodReturn,
+    // `ownKey` is the decider everywhere else in this file for "this action
+    // addresses one of the cell's own methods"; a foreign LISTENER reduce that
+    // happens to reach here is not the call's method and must not answer it.
+    ran: ownKey !== undefined,
   };
   return _perfCheck
     ? {
@@ -369,9 +443,52 @@ export function reduceCell(
  *  back an Immer draft proxy that is REVOKED the instant produceWithPatches
  *  returns — reading it later throws. `current()` deep-copies the draft into a
  *  plain, detached value. Non-draft returns (primitives, freshly-built objects)
- *  pass through untouched. */
+ *  pass through untouched.
+ *
+ *  NESTED drafts count. Only a TOP-LEVEL draft used to be unwrapped, so the
+ *  overwhelmingly common shape — `return { row: s.items[i], all:
+ *  s.items.filter(…) }` — handed the caller a plain object whose MEMBERS were
+ *  revoked proxies: an in-process caller (and `testCell`) got "Cannot perform
+ *  'get' on a proxy that has been revoked", naming neither cell nor method,
+ *  and over the wire the ack carried no value plus a warning telling the
+ *  author to "return plain objects" — which is exactly what they had returned.
+ *  The async twin returns plain data for the same body, so this was also a
+ *  sync/async divergence. Walked like `materializeValue` walks live proxies:
+ *  copy-on-change (an all-plain return keeps its identity), memoised by object
+ *  so a cycle terminates and one object reached twice stays one object. */
 function snapshotReturn(r: unknown): unknown {
-  return isDraft(r) ? current(r as Draft<unknown>) : r;
+  const seen = new Set<object>();
+  const walk = (x: unknown): unknown => {
+    if (isDraft(x)) return current(x as Draft<unknown>);
+    if (x === null || typeof x !== "object") return x;
+    if (seen.has(x)) return x; // cycle — leave it as the author built it
+    // A Date/class instance/Map holds no drafts to unwrap and copying its own
+    // keys onto a bare object would destroy it (see immutable.ts).
+    if (!Array.isArray(x) && Object.getPrototypeOf(x) !== Object.prototype) {
+      return x;
+    }
+    seen.add(x);
+    if (Array.isArray(x)) {
+      let out: unknown[] | null = null;
+      for (let i = 0; i < x.length; i++) {
+        const m = walk(x[i]);
+        if (m !== x[i] && out === null) out = x.slice();
+        if (out !== null) out[i] = m;
+      }
+      return out ?? x;
+    }
+    let outObj: Record<string, unknown> | null = null;
+    for (const k of Object.keys(x as Record<string, unknown>)) {
+      const cur = (x as Record<string, unknown>)[k];
+      const m = walk(cur);
+      if (m !== cur && outObj === null) {
+        outObj = { ...(x as Record<string, unknown>) };
+      }
+      if (outObj !== null) outObj[k] = m;
+    }
+    return outObj ?? x;
+  };
+  return walk(r);
 }
 
 /** Clone effects array to detach from Immer draft (AIO-146).
@@ -556,6 +673,13 @@ export function buildRootReducer(
     let ownerBd: { produce: number; clone: number; spread: number } | undefined;
     // AIO-427: the owning cell's transported return value (the action's cell).
     let ownerReturn: unknown;
+    // Did the owning cell actually RUN this action's method, and if not, why?
+    // A registered `call()` is answered from these two (see the `_callId`
+    // block below) — the answer used to be one fixed sentence that named three
+    // possible causes and was wrong about all of them for a sync method, which
+    // runs right here.
+    let ownerRan = false;
+    let ownerRefusal: string | undefined;
     if (!isLifecycle) {
       const colonIdx = (action.type as string).indexOf(":");
       if (colonIdx !== -1) {
@@ -567,10 +691,11 @@ export function buildRootReducer(
           // land as `op-rejected` instead of an ack for a change the server
           // never took. The breaker's own trip is logged elsewhere; this is the
           // per-action fact the op path needs.
+          ownerRefusal =
+            `cell '${owner.__aio.id}' is disabled — '${action.type}' was not applied`;
           recordRejection(action, {
             cell: owner.__aio.id,
-            reason:
-              `cell '${owner.__aio.id}' is disabled — '${action.type}' was not applied`,
+            reason: ownerRefusal,
           });
         } else if (owner) {
           // A cell's reducer only ever handles its OWN action types by prefix
@@ -584,6 +709,8 @@ export function buildRootReducer(
             const result = reduceCell(owner, currentState, action, ctx);
             currentState = result.state;
             ownerReturn = result.ret;
+            ownerRan = result.ran === true;
+            ownerRefusal = result.refusal;
             allEffects.push(...result.effects);
             if (result.patches) {
               if (Array.isArray(result.patches)) {
@@ -610,6 +737,7 @@ export function buildRootReducer(
             }
             // D11 — see the disabled-cell branch: the op path needs the refusal
             // recorded, not just logged.
+            ownerRefusal = msg;
             recordRejection(action, { cell: owner.__aio.id, reason: msg });
           }
         }
@@ -629,15 +757,23 @@ export function buildRootReducer(
       const ci = t.indexOf(":");
       if (ci > 0 && !t.startsWith("__")) {
         const prefix = t.slice(0, ci);
-        if (!ownByPrefix.has(prefix) && !warnedUnknownCells.has(prefix)) {
-          warnedUnknownCells.add(prefix);
-          log.warn(
+        if (!ownByPrefix.has(prefix)) {
+          const msg =
             `dispatch to unregistered cell '${prefix}' (action '${t}') does ` +
-              `NOTHING — no booted cell or listener handles it. Did you ` +
-              `forget it in aio.run({ cells: [...] })? The client can still ` +
-              `render and call an imported cell the server never booted. ` +
-              `(warned once per cell)`,
-          );
+            `NOTHING — no booted cell or listener handles it. Did you ` +
+            `forget it in aio.run({ cells: [...] })? The client can still ` +
+            `render and call an imported cell the server never booted.`;
+          if (!warnedUnknownCells.has(prefix)) {
+            warnedUnknownCells.add(prefix);
+            log.warn(`${msg} (warned once per cell)`);
+          }
+          // …and a registered `call()` is answered with the same sentence,
+          // rather than the old catch-all that guessed at three causes.
+          ownerRefusal = msg;
+          // D11 — recorded per ACTION, not once per cell: the WS/UDS ack reads
+          // it (server/action-ack.ts) to answer the caller `ok: false`. Without
+          // it, `await ghost.bump()` resolved successfully forever.
+          recordRejection(action, { cell: prefix, reason: msg });
         }
       }
     }
@@ -683,13 +819,28 @@ export function buildRootReducer(
         ((e as Msg).payload as Record<string, unknown>)?._callId === callId
       );
       if (!forwarded) {
-        resolveCall(
-          callId,
-          undefined,
-          new Error(
-            `call('${action.type}'): blocked — machine guard, cell disabled, or not found`,
-          ),
-        );
+        // Not forwarded means no `__exec` effect carries this call — either
+        // the method is SYNC (it ran right here, in the reduce) or nothing ran
+        // at all. Both used to be answered with the same sentence: "blocked —
+        // machine guard, cell disabled, or not found". For a sync method that
+        // was false three times over — the method HAD run, its patch was
+        // broadcast and its state kept — and the caller (a trojan POST, an
+        // `am dispatch`, a paired client's `call()`) was told its change had
+        // been refused. The reduce knows which of the two happened, so it says
+        // which, with the refusing branch's OWN words.
+        if (ownerRan) resolveCall(callId, ownerReturn);
+        else {
+          resolveCall(
+            callId,
+            undefined,
+            new Error(
+              `call('${action.type}'): ${
+                ownerRefusal ??
+                  `no booted cell handled it — check the cell is listed in aio.run({ cells })`
+              }`,
+            ),
+          );
+        }
       }
     }
 

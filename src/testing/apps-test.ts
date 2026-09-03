@@ -123,15 +123,39 @@ export async function testApps(
   };
 
   const close = async () => {
+    // Teardown that eats its own failures is how a harness manufactures a
+    // green test. A link whose `close()` throws leaves its reconnect timer
+    // running and its cell bindings held; an app whose `close()` rejects
+    // leaves a port bound and a temp directory on disk — and the next test in
+    // the file inherits both with nothing said. Tests are the STRICTEST
+    // environment, so neither may be silent.
+    //
+    // Every step still RUNS regardless (the world must come down, and stopping
+    // at the first failure would leak everything after it); the failures are
+    // collected and reported together once the teardown is complete.
+    const failures: unknown[] = [];
     // Links first: a client whose server vanished mid-test reconnects on a
     // backoff timer, and that timer outlives the test as a leaked op.
     for (const l of links.reverse()) {
       try {
         l.close();
-      } catch { /* already closed */ }
+      } catch (e) {
+        failures.push(e);
+      }
     }
     links.length = 0;
-    for (const srv of [...apps].reverse()) await srv.close().catch(() => {});
+    for (const srv of [...apps].reverse()) {
+      await srv.close().catch((e: unknown) => {
+        failures.push(e);
+      });
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        `testApps.close: ${failures.length} teardown step(s) failed — the ` +
+          `world came down, but something in it could not be closed cleanly`,
+      );
+    }
   };
 
   return {

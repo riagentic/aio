@@ -65,6 +65,7 @@ import { dataCompatibility } from "./updates-core.ts";
 import { rebuildFromGit } from "./updates-rebuild.ts";
 import { retireProfile } from "./updates-retire.ts";
 import { isServiceSupervised } from "./aio-lifecycle.ts";
+import { splitRuntimeVersion } from "./app-version.ts";
 
 /** How many superseded artifacts to keep so a manual rollback is a rename. */
 const KEEP_OLD = 3;
@@ -796,8 +797,17 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
     get channel() {
       return channel;
     },
+    // Split at the boundary the client can see. `deps.appVersion` carries the
+    // WHOLE refusal paragraph when the version could not be derived (the boot
+    // report's `version` line wants exactly that sentence) — and it used to
+    // reach the client verbatim as `updates.current`, so `examples/updates`
+    // rendered 200 characters of framework diagnostics where its UI says
+    // "Running <version>".
     get current() {
-      return deps.appVersion;
+      return splitRuntimeVersion(deps.appVersion).version;
+    },
+    get currentUnknown() {
+      return splitRuntimeVersion(deps.appVersion).unresolved;
     },
     /** The scheduled restart, for a caller that must observe it (tests, and the
      *  boot path when it wants to know the handover ran). Null until an apply

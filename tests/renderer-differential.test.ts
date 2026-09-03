@@ -33,6 +33,7 @@ import {
   ErrorBoundary,
   Fragment,
   h,
+  Portal,
   renderToString,
   Suspense,
   type VNode,
@@ -40,8 +41,9 @@ import {
 import { _diff, _render } from "../src/air/vdom.ts";
 import { setDevMode } from "../src/air/aio-renderer.ts";
 import { _hydrateNode } from "../src/air/renderer-hydrate.ts";
+import { _removeDomCleanup } from "../src/air/vdom-remove.ts";
 import { renderToStream } from "../src/air/ssr-stream.ts";
-import { signal } from "../src/state/signal.ts";
+import { type Signal, signal } from "../src/state/signal.ts";
 import { lazy } from "../src/air/vdom-lazy.ts";
 
 // The seed is FIXED by default — CI must explore the same programs on every
@@ -1630,6 +1632,913 @@ Deno.test("differential: a boundary that falls back removes its own region and n
           `was not part of its region`,
       );
     }
+  } finally {
+    win.happyDOM.close();
+  }
+});
+
+// ══ the EXTENDED alphabet ═════════════════════════════════════════════════
+//
+// Everything above drives one host element with one oracle: `innerHTML`. That
+// leaves an entire half of the renderer unfuzzed, and the half where a defect
+// is INVISIBLE to markup — a `<Portal>` writes into a node the host does not
+// contain, a `ref` and an event handler are live JS state, a signal child owns
+// an effect, and `dangerouslySetInnerHTML` decides whether an element HAS a
+// vnode subtree at all. Four verified bugs came out of exactly that gap:
+//
+//  · a signal text child under a Fragment / Portal / component-returning-
+//    Fragment was never bound — frozen at its initial value, forever, silently
+//    (only the ELEMENT branch bound them, and `h()` puts them on any tag);
+//  · portal content LEAKED in its target when an ancestor ELEMENT was removed,
+//    and reopening the modal stacked a second copy beside the first;
+//  · a callback ref went `null` on a retag/reorder/re-key because the new
+//    element attached before the old one detached — the element on screen, the
+//    ref empty;
+//  · `_staticEqual` compared prop COUNT and only `a`'s values, so
+//    `{style:"color:red"}` and `{"data-n":undefined}` read "equal" and the
+//    static short-circuit kept stale attributes on screen.
+//
+// So this is a second alphabet with a WIDER world and stricter oracles: the
+// snapshot spans the host AND every portal target, and after every step the
+// live ref set, the live listener count and the dev tripwires must match the
+// model too — then, after teardown, nothing may be left anywhere: no node, no
+// ref, no signal subscriber.
+//
+// It is deliberately a SEPARATE model rather than more cases in the one above.
+// Five tests up there build their expectations from `fresh()`, whose whole
+// meaning is "the document a mount of this model produces"; a world with
+// portal targets, live refs and signal subscriptions is a different oracle
+// that has to tear itself down between rounds, and folding it in would quietly
+// change what those five tests measure.
+
+/** The signals a `g` (signal child) node can carry. Module-level and reset per
+ *  round: a signal's SUBSCRIBER COUNT after teardown is one of the oracles, and
+ *  that is only meaningful for a fixed set. */
+const X_SIGS: Signal<unknown>[] = [signal("s0"), signal("s1"), signal("s2")];
+
+/** Raw html bodies. `""` is here because `_hasRawHtml` must treat it as raw
+ *  html that owns the element (it is a value, not an absence) — an element with
+ *  `dangerouslySetInnerHTML={{__html:""}}` has NO vnode subtree, and every
+ *  commit path plus every teardown walk has to agree about that. The multi-node
+ *  body is the shape that caught the children→dih transition deleting nodes out
+ *  of freshly injected html. */
+const X_DIH = ["<b>x</b>", "<u>a</u><u>b</u><u>c</u>", "", "plain"];
+
+/** Keys drawn from a pool with DUPLICATES and TYPE FLIPS (`1` vs `"1"`) — an
+ *  app bug the reconciler only promises to degrade gracefully on, which is
+ *  precisely why it must be driven: the document must still come out right. */
+const X_KEYS: (string | number)[] = [1, "1", 2, "2", 3];
+
+/** Two distinct handler identities per event, so a mutation can SWAP a handler
+ *  (a different function on the same element) as well as add or remove one. */
+const X_CLICKS = [() => {}, () => {}];
+const X_FOCUS = [() => {}, () => {}];
+
+/** Prop shapes chosen for the ones with no attribute at all on one side:
+ *  `undefined`/`null`/`false` must REMOVE, `""` and `0` must KEEP. A prop set
+ *  swap between two of these is what exposed `_staticEqual` reading only `a`'s
+ *  keys. */
+const X_PROPS: Record<string, unknown>[] = [
+  {},
+  { id: "i" },
+  { className: "c1 c2" },
+  { className: { c1: true, c2: false } },
+  { style: "color:red" },
+  { style: { color: "red", marginTop: 2 } },
+  { style: { color: undefined, marginTop: 2 } },
+  { style: null },
+  { hidden: true },
+  { hidden: "" },
+  { hidden: false },
+  { "aria-pressed": false },
+  { "aria-pressed": true },
+  { "aria-label": null },
+  { "data-n": "" },
+  { "data-n": undefined },
+  { "data-n": 0 },
+  { title: "t", tabIndex: 0 },
+];
+
+const X_TEXTS = ["a", "a", "b", " ", "1", "1", "x", ""];
+const X_TAGS = ["div", "p", "i", "span"];
+
+type XBase = { id: number; kk?: string | number };
+type XSpec =
+  | (XBase & { k: "t"; v: string })
+  | (XBase & { k: "x" })
+  /** a SIGNAL passed as a child — `<b>{count}</b>` */
+  | (XBase & { k: "g"; si: number })
+  | (XBase & {
+    k: "e";
+    tag: string;
+    pi: number;
+    km: number;
+    kids: XSpec[];
+    dih?: number;
+    ref: boolean;
+    ev: number;
+    fo: number;
+  })
+  | (XBase & { k: "f"; km: number; kids: XSpec[] })
+  | (XBase & { k: "b"; km: number; kids: XSpec[] })
+  | (XBase & { k: "p"; ti: number; kids: XSpec[] })
+  | (XBase & { k: "c"; c: number; km: number; kids: XSpec[]; rv: string });
+
+const X_NONE = 0, X_STABLE = 1, X_INDEX = 2, X_DUP = 3;
+
+// deno-lint-ignore no-explicit-any
+type XP = any;
+const XText = (p: XP) => String(p.v);
+const XWrap = (p: XP) => h("span", null, ...(p.children ?? []));
+const XFrag = (p: XP) => h(Fragment, null, ...(p.children ?? []));
+const XNull = () => null;
+/** `0` is FALSY but a node — the classic `{count && …}` footgun in reverse:
+ *  a component returning it must render "0", not nothing. */
+const XZero = () => 0;
+/** `""` is a node too — one empty text node. It is the shape that made SSR and
+ *  mount disagree about whether a container was "empty" (SSR wrote the
+ *  empty-container comment anchor, mount wrote a text node), so hydration left
+ *  a stray `<!---->` or fell back with a misleading warning. */
+const XEmpty = () => "";
+/** Writes a signal DURING its own render — a re-entrant update in the middle of
+ *  a commit, and then renders that signal as a child. */
+const XReent = (p: XP) => {
+  X_SIGS[0]!.set(p.rv);
+  return h(
+    Fragment,
+    null,
+    X_SIGS[0] as unknown as VNode,
+    ...(p.children ?? []),
+  );
+};
+const X_COMPS = [XText, XWrap, XFrag, XNull, XZero, XEmpty, XReent];
+/** Which component indices actually render their children — the model needs it
+ *  to say which elements are MOUNTED (and so which refs must be live). */
+const X_RENDERS_KIDS = new Set([1, 2, 6]);
+
+/** Live callback refs, by spec id: a ref holding a node is in the set. This is
+ *  the oracle innerHTML cannot express — the whole point of the ref bug is that
+ *  the DOM is right and the ref is empty. */
+const xRefLive = new Set<number>();
+/** Every ref delivery, counted — the run's own evidence that the ref oracle
+ *  had anything to look at. */
+let xRefCalls = 0;
+const xRefFns = new Map<number, (n: Node | null) => void>();
+const xRefFor = (id: number) => {
+  let f = xRefFns.get(id);
+  if (!f) {
+    f = (n) => {
+      xRefCalls++;
+      if (n) xRefLive.add(id);
+      else xRefLive.delete(id);
+    };
+    xRefFns.set(id, f);
+  }
+  return f;
+};
+/** The reference world uses refs that record nothing — a fresh render must not
+ *  disturb the live set it is being compared against. */
+const xNoRef = (_n: Node | null) => {};
+
+/** One round's world: the portal targets, created on demand and keyed by
+ *  `<spec id>:<slot>` so the incremental world and the reference world agree on
+ *  which target is which.
+ *
+ *  Every portal gets its OWN targets. Two portals sharing one target is a
+ *  supported shape — and its content order is MOUNT order, not tree order (a
+ *  portal appends to its container; that is what a portal IS) — so a fresh
+ *  render is not a valid oracle for it. It has its own test, below. */
+type XWorld = { targets: Map<string, Element>; track: boolean; doc: Document };
+function xTargetOf(w: XWorld, id: number, ti: number): Element | null {
+  if (ti >= 2) return null; // `<Portal target={null}>`
+  const key = `${id}:${ti}`;
+  let el = w.targets.get(key);
+  if (!el) {
+    el = w.doc.createElement("aside") as unknown as Element;
+    w.targets.set(key, el);
+  }
+  return el;
+}
+
+function xBuild(s: XSpec, w: XWorld): VNode | string | number | null {
+  const kp = s.kk !== undefined ? { key: s.kk } : {};
+  switch (s.k) {
+    case "t":
+      return s.v;
+    case "x":
+      return null;
+    case "g":
+      return X_SIGS[s.si] as unknown as VNode;
+    case "e": {
+      const props: Record<string, unknown> = {
+        ...X_PROPS[s.pi % X_PROPS.length],
+        ...kp,
+      };
+      if (s.dih !== undefined) {
+        props.dangerouslySetInnerHTML = { __html: X_DIH[s.dih] };
+      }
+      if (s.ref) props.ref = w.track ? xRefFor(s.id) : xNoRef;
+      if (s.ev) props.onClick = X_CLICKS[s.ev - 1];
+      if (s.fo) props.onFocus = X_FOCUS[s.fo - 1];
+      return h(s.tag, props, ...s.kids.map((k) => xBuild(k, w)));
+    }
+    case "f":
+      return h(
+        Fragment,
+        s.kk !== undefined ? kp : null,
+        ...s.kids.map((k) => xBuild(k, w)),
+      );
+    case "b":
+      return h(
+        ErrorBoundary as never,
+        { fallback: () => "!", ...kp },
+        ...s.kids.map((k) => xBuild(k, w)),
+      );
+    case "p":
+      return h(
+        Portal as never,
+        { target: xTargetOf(w, s.id, s.ti), ...kp },
+        ...s.kids.map((k) => xBuild(k, w)),
+      );
+    case "c": {
+      const C = X_COMPS[s.c]!;
+      const props: Record<string, unknown> = { ...kp, rv: s.rv };
+      if (C === XText) {
+        props.v = s.kids.map((k) => k.k === "t" ? k.v : "").join("") || "t";
+      }
+      return h(C as never, props, ...s.kids.map((k) => xBuild(k, w)));
+    }
+  }
+}
+
+// ── generation ───────────────────────────────────────────────────────────
+
+let _xNextId = 1;
+const xEl = (r: Rnd, kids: XSpec[]): XSpec => ({
+  k: "e",
+  id: _xNextId++,
+  tag: r.of(X_TAGS),
+  pi: r.pick(X_PROPS.length),
+  km: X_NONE,
+  kids,
+  // Raw html is generated only on a leaf; a MUTATION then adds children to it,
+  // which is how the "both, and the html wins" shape gets driven.
+  dih: kids.length === 0 && r.pick(5) === 0 ? r.pick(X_DIH.length) : undefined,
+  ref: r.pick(4) === 0,
+  ev: r.pick(3),
+  fo: r.pick(3),
+});
+
+function xLeaf(r: Rnd): XSpec {
+  const roll = r.pick(14);
+  if (roll < 4) return { k: "t", id: _xNextId++, v: r.of(X_TEXTS) };
+  if (roll < 5) return { k: "x", id: _xNextId++ };
+  if (roll < 8) return { k: "g", id: _xNextId++, si: r.pick(X_SIGS.length) };
+  if (roll < 10) {
+    return {
+      k: "c",
+      id: _xNextId++,
+      c: r.pick(X_COMPS.length),
+      km: X_NONE,
+      kids: [],
+      rv: r.of(X_TEXTS),
+    };
+  }
+  return xEl(r, []);
+}
+
+function xGen(r: Rnd, depth: number): XSpec {
+  if (depth <= 0) return xLeaf(r);
+  const kids = Array.from({ length: r.pick(4) }, () => xGen(r, depth - 1));
+  const roll = r.pick(12);
+  if (roll < 4) return xEl(r, kids);
+  if (roll < 6) return { k: "f", id: _xNextId++, km: X_NONE, kids };
+  if (roll < 7) return { k: "b", id: _xNextId++, km: X_NONE, kids };
+  if (roll < 8) return { k: "p", id: _xNextId++, ti: r.pick(3), kids };
+  if (roll < 10) {
+    return {
+      k: "c",
+      id: _xNextId++,
+      c: r.pick(X_COMPS.length),
+      km: X_NONE,
+      kids,
+      rv: r.of(X_TEXTS),
+    };
+  }
+  return xLeaf(r);
+}
+
+function xGenRoot(r: Rnd): XSpec {
+  const kids = Array.from({ length: 1 + r.pick(4) }, () => xGen(r, 2));
+  return r.pick(2) === 0
+    ? { ...xEl(r, kids), tag: "div", dih: undefined } as XSpec
+    : { k: "f", id: _xNextId++, km: X_NONE, kids };
+}
+
+type XContainer = Extract<XSpec, { kids: XSpec[] }>;
+const xIsC = (s: XSpec): s is XContainer => "kids" in s;
+const xClone = (s: XSpec): XSpec =>
+  xIsC(s) ? { ...s, kids: s.kids.map(xClone) } : { ...s };
+function xWalk(s: XSpec, f: (s: XSpec) => void) {
+  f(s);
+  if (xIsC(s)) { for (const k of s.kids) xWalk(k, f); }
+}
+function xCollect<K extends XSpec["k"]>(s: XSpec, k: K) {
+  const out: Extract<XSpec, { k: K }>[] = [];
+  xWalk(s, (n) => {
+    if (n.k === k) out.push(n as Extract<XSpec, { k: K }>);
+  });
+  return out;
+}
+
+/** One random edit. Beyond the structural ops the base fuzzer has, every op
+ *  here changes something the DOM does not show: which target a portal writes
+ *  to, which signal a child follows, which handler an element carries, whether
+ *  it has a ref, whether its content is raw html. */
+function xMutate(root: XSpec, r: Rnd): XSpec {
+  const next = xClone(root);
+  const cs = [
+    ...xCollect(next, "e"),
+    ...xCollect(next, "f"),
+    ...xCollect(next, "b"),
+    ...xCollect(next, "p"),
+    ...xCollect(next, "c"),
+  ] as XContainer[];
+  const c = r.of(cs);
+  switch (r.pick(20)) {
+    case 0: { // text edit (values collide by design, and `""` is one of them)
+      const ts = xCollect(next, "t");
+      if (ts.length) r.of(ts).v = r.of(X_TEXTS);
+      break;
+    }
+    case 1: // swap two siblings
+      if (c.kids.length >= 2) {
+        const i = r.pick(c.kids.length), j = r.pick(c.kids.length);
+        [c.kids[i], c.kids[j]] = [c.kids[j]!, c.kids[i]!];
+      }
+      break;
+    case 2: // rotate
+      if (c.kids.length >= 2) c.kids.push(c.kids.shift()!);
+      break;
+    case 3: // insert
+      c.kids.splice(r.pick(c.kids.length + 1), 0, xGen(r, 1));
+      break;
+    case 4: // remove
+      if (c.kids.length) c.kids.splice(r.pick(c.kids.length), 1);
+      break;
+    case 5: // replace wholesale
+      if (c.kids.length) c.kids[r.pick(c.kids.length)] = xGen(r, 1);
+      break;
+    case 6: // empty it out
+      c.kids = [];
+      break;
+    case 7: // fill an empty one
+      if (!c.kids.length) {
+        c.kids = Array.from({ length: 1 + r.pick(2) }, () => xLeaf(r));
+      }
+      break;
+    case 8: // re-key: none / stable / by index / from a DUPLICATING pool
+      if (c.k !== "p") c.km = r.pick(4);
+      break;
+    case 9: // retag
+      if (c.k === "e") c.tag = r.of(X_TAGS);
+      break;
+    case 10: // swap the whole prop set
+      if (c.k === "e") c.pi = r.pick(X_PROPS.length);
+      break;
+    case 11: { // the same component starts/stops rendering nothing / "" / 0
+      const cn = xCollect(next, "c");
+      if (cn.length) {
+        const t = r.of(cn);
+        t.c = (t.c + 1 + r.pick(X_COMPS.length - 1)) % X_COMPS.length;
+      }
+      break;
+    }
+    case 12: // wrap a child in a fragment (a new region mid-list)
+      if (c.kids.length) {
+        const i = r.pick(c.kids.length);
+        c.kids[i] = { k: "f", id: _xNextId++, km: X_NONE, kids: [c.kids[i]!] };
+      }
+      break;
+    case 13: { // a portal's TARGET moves — to its other target, or to null
+      const ps = xCollect(next, "p");
+      if (ps.length) r.of(ps).ti = r.pick(3);
+      break;
+    }
+    case 14: // a signal is written with NO re-render — the binding must carry it
+      X_SIGS[r.pick(X_SIGS.length)]!.set(r.of(X_TEXTS) + r.pick(3));
+      break;
+    case 15: { // a signal child starts following a DIFFERENT signal
+      const gs = xCollect(next, "g");
+      if (gs.length) r.of(gs).si = r.pick(X_SIGS.length);
+      break;
+    }
+    case 16: // handlers added / removed / swapped for a different identity
+      if (c.k === "e") {
+        c.ev = r.pick(3);
+        c.fo = r.pick(3);
+      }
+      break;
+    case 17: // a ref appears or disappears on an element that stays
+      if (c.k === "e") c.ref = !c.ref;
+      break;
+    case 18: // children ⇄ dangerouslySetInnerHTML, and html ⇄ html
+      if (c.k === "e" && c.kids.length === 0) {
+        c.dih = r.pick(3) === 0 ? undefined : r.pick(X_DIH.length);
+      }
+      break;
+    case 19: { // the value a re-entrant component writes mid-render
+      const cn = xCollect(next, "c");
+      if (cn.length) r.of(cn).rv = r.of(X_TEXTS) + "r";
+      break;
+    }
+  }
+  return next;
+}
+
+function xApplyKeys(s: XSpec, key?: string | number): void {
+  s.kk = key;
+  if (xIsC(s)) {
+    // A Portal's children are a region of the TARGET; keys on them are the
+    // ordinary child-list contract, but the portal itself is never keyed by
+    // its parent's mode here (it occupies no node among its siblings).
+    const km = s.k === "p" ? X_NONE : s.km;
+    s.kids.forEach((k, i) =>
+      xApplyKeys(
+        k,
+        km === X_STABLE
+          ? `k${k.id}`
+          : km === X_INDEX
+          ? `i${i}`
+          : km === X_DUP
+          ? X_KEYS[k.id % X_KEYS.length]
+          : undefined,
+      )
+    );
+  }
+}
+function xToVNode(s: XSpec, w: XWorld): VNode {
+  const c = xClone(s);
+  xApplyKeys(c);
+  return xBuild(c, w) as VNode;
+}
+
+/** The spec ids whose ELEMENT is actually in a document — the model's answer to
+ *  "which refs must be live". Three things make an element unmounted while it
+ *  is still in the model: a portal with no target, a component that does not
+ *  render its children, and an element whose content is RAW HTML (its vnode
+ *  children are not its subtree at all: mount ignores them, SSR never emits
+ *  them, and no teardown walk may touch them). */
+function xMounted(s: XSpec, out = new Set<number>(), on = true): Set<number> {
+  if (on && s.k === "e") out.add(s.id);
+  if (xIsC(s)) {
+    let childOn = on;
+    if (s.k === "p") childOn = on && s.ti < 2;
+    if (s.k === "c") childOn = on && X_RENDERS_KIDS.has(s.c);
+    if (s.k === "e" && s.dih !== undefined) childOn = false;
+    for (const k of s.kids) xMounted(k, out, childOn);
+  }
+  return out;
+}
+function xExpectedRefs(s: XSpec): number[] {
+  const m = xMounted(s);
+  return xCollect(s, "e").filter((e) => e.ref && m.has(e.id)).map((e) => e.id)
+    .sort((a, b) => a - b);
+}
+function xExpectedFocus(s: XSpec): number {
+  const m = xMounted(s);
+  return xCollect(s, "e").filter((e) => e.fo && m.has(e.id)).length;
+}
+
+/** The whole world as one string: the host, then every non-empty portal target
+ *  in a key order both worlds agree on. A portal target left holding content it
+ *  should not (the leak) and a portal target missing content it should have are
+ *  the same assertion. */
+function xSnap(host: Element, w: XWorld): string {
+  const parts = [...w.targets.entries()]
+    .filter(([, el]) => el.innerHTML !== "")
+    .sort((a, b) => a[0] < b[0] ? -1 : 1)
+    .map(([k, el]) => ` ||${k}: ${xNormStyle(el.innerHTML)}`);
+  return xNormStyle(host.innerHTML) + parts.join("");
+}
+
+/** `normStyle`, plus the declaration ORDER.
+ *
+ *  A style object is a SET of declarations: `{color, marginTop}` and
+ *  `{marginTop, color}` are the same element, and the two routes to it write
+ *  them in different orders — a hydrated element keeps the server's order and
+ *  then patches in place, a fresh mount writes the new object's. Order is only
+ *  semantic for a duplicated property, which a style OBJECT cannot express.
+ *  Nothing else is normalized here; every other difference is a real one. */
+function xNormStyle(html: string): string {
+  return html.replace(
+    /style="([^"]*)"/g,
+    (_m, css: string) =>
+      `style="${
+        css.split(";").map((d) => d.trim().replace(/:\s+/, ":")).filter(Boolean)
+          .sort().join(";")
+      }"`,
+  );
+}
+
+// deno-lint-ignore no-explicit-any
+function xStrip(s: XSpec): any {
+  const { kk: _k, ...rest } = s as XP;
+  if (rest.kids) rest.kids = rest.kids.map(xStrip);
+  return rest;
+}
+
+/** Patch `focus` listener bookkeeping onto the window's element prototype and
+ *  return a reader plus an undo. A listener that is never removed is a leak the
+ *  DOM does not show; a listener that is removed twice is a handler that stops
+ *  firing. Both are silent. */
+function xListenerCounter(win: Window, doc: Document) {
+  const live = new WeakMap<Node, number>();
+  // deno-lint-ignore no-explicit-any
+  let proto: any = doc.createElement("div");
+  while (
+    proto && !Object.prototype.hasOwnProperty.call(proto, "addEventListener")
+  ) proto = Object.getPrototypeOf(proto);
+  const add = proto.addEventListener, rem = proto.removeEventListener;
+  proto.addEventListener = function (t: string, l: unknown, o?: unknown) {
+    if (t === "focus") live.set(this, (live.get(this) ?? 0) + 1);
+    return add.call(this, t, l, o);
+  };
+  proto.removeEventListener = function (t: string, l: unknown, o?: unknown) {
+    if (t === "focus") live.set(this, (live.get(this) ?? 0) - 1);
+    return rem.call(this, t, l, o);
+  };
+  const count = (root: Node): number => {
+    let n = live.get(root) ?? 0;
+    for (const c of Array.from(root.childNodes)) n += count(c);
+    return n;
+  };
+  return {
+    count,
+    restore: () => {
+      proto.addEventListener = add;
+      proto.removeEventListener = rem;
+    },
+    _win: win,
+  };
+}
+
+/** Drive the extended alphabet through `mount` or through `SSR + hydrate`, and
+ *  after every step compare the whole world against a fresh render of the same
+ *  model — plus the live refs, the live listeners and the dev tripwires. Then
+ *  unmount and require that NOTHING is left: no node in the host or any target,
+ *  no ref holding an element, no signal subscriber. */
+/** What one run actually exercised. A fuzzer whose generator quietly stops
+ *  producing a shape goes green forever while testing nothing, so the run
+ *  reports its own coverage and the caller asserts it. */
+type XRun = {
+  rounds: number;
+  checks: number;
+  distinct: number;
+  hydrated: number;
+  fellBack: number;
+  refCalls: number;
+  refsLiveSeen: number;
+  portalTargetsFilled: number;
+  signalChildren: number;
+  rawHtmlElements: number;
+};
+
+function runExtended(mode: "diff" | "hydrate"): XRun {
+  const win = new Window({ url: "https://localhost" });
+  const doc = win.document as unknown as Document;
+  const listeners = xListenerCounter(win, doc);
+  const warnings: string[] = [];
+  const origWarn = console.warn;
+  console.warn = (...a: unknown[]) => {
+    const s = a.map(String).join(" ");
+    // The reconciler's own corruption tripwires. They are part of the contract:
+    // they must fire on a desync AND stay silent on every correct render.
+    if (
+      /desync|wrong slot|no position|leftover|ran out|no DOM node|stay on the page/
+        .test(s)
+    ) warnings.push(s.slice(0, 160));
+  };
+  const newWorld = (track: boolean): XWorld => ({
+    targets: new Map(),
+    track,
+    doc,
+  });
+  /** A mount of the model with nothing before it — then torn down, so the
+   *  reference render leaves no ref, no effect and no subscriber behind. */
+  const xFresh = (s: XSpec): string => {
+    const w = newWorld(false);
+    const host = doc.createElement("main");
+    const v = xToVNode(s, w);
+    _render(host, v, null, { doc });
+    const out = xSnap(host as unknown as Element, w);
+    _diff(host, null, v, { doc });
+    return out;
+  };
+
+  const distinct = new Set<string>();
+  let hydrated = 0, fellBack = 0, checks = 0, rounds = 0;
+  let refsLiveSeen = 0, portalTargetsFilled = 0, signalChildren = 0;
+  let rawHtmlElements = 0;
+  xRefCalls = 0;
+  try {
+    for (let round = 0; round < ROUNDS; round++) {
+      setDevMode(false); // reset the once-per-id warning dedup
+      setDevMode(true);
+      const r = makeRnd(
+        (SEED + round * 7919 + (mode === "hydrate" ? 1 : 0)) & 0x7fffffff,
+      );
+      _xNextId = 1;
+      xRefLive.clear();
+      for (let i = 0; i < X_SIGS.length; i++) X_SIGS[i]!.set("s" + i);
+      let spec = xGenRoot(r);
+      const history: XSpec[] = [xClone(spec)];
+      const w = newWorld(true);
+      const host = doc.createElement("main");
+      let prev = xToVNode(spec, w);
+      const repro = (step: number, why: string) =>
+        `FUZZ_SEED=${SEED} (${mode}) round ${round} step ${step}: ${why}\n` +
+        `  models: ${JSON.stringify(history.map(xStrip))}`;
+
+      if (mode === "hydrate") {
+        host.innerHTML = renderToString(prev);
+        const consumed = _hydrateNode(host, prev, { doc }, false, 0);
+        if (consumed < 0) {
+          // The same recovery the public `hydrate()` performs on a mismatch —
+          // INCLUDING `_removeDomCleanup`, which is not decoration here: a
+          // partial hydration may already have mounted a portal's content in
+          // its target, and `root.innerHTML = ""` cannot reach it. Without the
+          // cleanup the client render that follows mounts it a SECOND time and
+          // the modal appears twice.
+          fellBack++;
+          _removeDomCleanup(prev, { doc });
+          host.innerHTML = "";
+          _render(host, prev, null, { doc });
+        } else hydrated++;
+      } else {
+        _render(host, prev, null, { doc });
+      }
+
+      const check = (step: number, why: string) => {
+        const got = xSnap(host as unknown as Element, w);
+        const liveRefs = [...xRefLive].sort((a, b) => a - b);
+        const liveFocus = listeners.count(host) +
+          [...w.targets.values()].reduce((n, el) => n + listeners.count(el), 0);
+        assertEquals(got, xFresh(spec), repro(step, why));
+        assertEquals(
+          warnings,
+          [],
+          repro(step, `dev tripwire fired: ${warnings.join(" | ")}`),
+        );
+        assertEquals(
+          liveRefs,
+          xExpectedRefs(spec),
+          repro(
+            step,
+            "the live REF set is not the one the model describes — an element " +
+              "is on screen with an empty ref, or a ref still holds an " +
+              "element that is gone",
+          ),
+        );
+        assertEquals(
+          liveFocus,
+          xExpectedFocus(spec),
+          repro(
+            step,
+            "the live LISTENER count is not the one the model describes — a " +
+              "handler leaked past its element, or stopped firing while its " +
+              "element is still on screen",
+          ),
+        );
+        distinct.add(got);
+        checks++;
+        refsLiveSeen += liveRefs.length;
+        signalChildren += xCollect(spec, "g").length;
+        rawHtmlElements += xCollect(spec, "e").filter((e) =>
+          e.dih !== undefined
+        ).length;
+        for (const el of w.targets.values()) {
+          if (el.innerHTML !== "") portalTargetsFilled++;
+        }
+      };
+
+      // A signal write right after mount/hydrate must land: the binding, not
+      // the render, is what carries it.
+      X_SIGS[1]!.set("w1");
+      check(
+        0,
+        mode === "hydrate" ? "hydrated world ≠ mounted world" : "initial mount",
+      );
+
+      for (let step = 1; step <= STEPS; step++) {
+        spec = xMutate(spec, r);
+        history.push(xClone(spec));
+        const nextV = xToVNode(spec, w);
+        _diff(host, nextV, prev, { doc });
+        prev = nextV;
+        check(step, "incremental world ≠ fresh render");
+      }
+
+      // Teardown: everything must go, everywhere.
+      _diff(host, null, prev, { doc });
+      assertEquals(
+        host.innerHTML,
+        "",
+        repro(99, "the host is not empty after unmount"),
+      );
+      for (const [k, el] of w.targets) {
+        assertEquals(
+          el.innerHTML,
+          "",
+          repro(99, `portal target ${k} still holds content after unmount`),
+        );
+      }
+      assertEquals(
+        [...xRefLive],
+        [],
+        repro(99, "a ref still holds an element after unmount"),
+      );
+      assertEquals(
+        X_SIGS.map((s) =>
+          (s as unknown as { _subscribers: Set<unknown> })._subscribers.size
+        ),
+        [0, 0, 0],
+        repro(
+          99,
+          "a signal still has subscribers after unmount — the effect behind a " +
+            "signal child outlived its node, so the cell keeps a torn-down " +
+            "page alive",
+        ),
+      );
+      warnings.length = 0;
+      rounds++;
+    }
+  } finally {
+    setDevMode(false);
+    console.warn = origWarn;
+    listeners.restore();
+    win.happyDOM.close();
+  }
+  return {
+    rounds,
+    checks,
+    distinct: distinct.size,
+    hydrated,
+    fellBack,
+    refCalls: xRefCalls,
+    refsLiveSeen,
+    portalTargetsFilled,
+    signalChildren,
+    rawHtmlElements,
+  };
+}
+
+/** Every oracle in `runExtended` throws on a mismatch, which is the strongest
+ *  shape a differential can have and the weakest thing a reader can verify: a
+ *  generator that quietly stopped producing portals, refs or signal children
+ *  would go green forever while testing none of them. So the run reports what
+ *  it exercised and that is asserted here — the coverage claim is checked, not
+ *  assumed. */
+function assertExercised(run: XRun, mode: "diff" | "hydrate"): void {
+  assertEquals(run.rounds, ROUNDS, "the fuzzer did not run every round");
+  assertEquals(
+    run.checks,
+    ROUNDS * (STEPS + 1),
+    "a round skipped a step — every mutation must be checked",
+  );
+  assert(
+    run.distinct > ROUNDS / 2,
+    `only ${run.distinct} distinct worlds over ${run.rounds} rounds — the ` +
+      `generator collapsed`,
+  );
+  assert(
+    run.portalTargetsFilled > ROUNDS / 4,
+    `only ${run.portalTargetsFilled} portal targets held content across ` +
+      `${run.checks} checks — the portal half of the world is not being ` +
+      `exercised`,
+  );
+  assert(
+    run.refCalls > ROUNDS,
+    `only ${run.refCalls} ref deliveries — the ref oracle saw nothing`,
+  );
+  assert(
+    run.refsLiveSeen > ROUNDS,
+    `only ${run.refsLiveSeen} live refs observed across ${run.checks} checks`,
+  );
+  assert(
+    run.signalChildren > ROUNDS,
+    `only ${run.signalChildren} signal children in the models — the binding ` +
+      `path is not being exercised`,
+  );
+  assert(
+    run.rawHtmlElements > ROUNDS / 10,
+    `only ${run.rawHtmlElements} dangerouslySetInnerHTML elements — the ` +
+      `raw-html path is not being exercised`,
+  );
+  if (mode === "hydrate") {
+    assert(
+      run.hydrated > ROUNDS / 2,
+      `only ${run.hydrated}/${run.hydrated + run.fellBack} rounds hydrated ` +
+        `without falling back — the hydrate path is not being exercised`,
+    );
+  }
+}
+
+Deno.test("extended differential: portals, signal children, refs, handlers and raw html", () => {
+  assertExercised(runExtended("diff"), "diff");
+});
+
+Deno.test("extended differential: the same alphabet through SSR + hydrate", () => {
+  assertExercised(runExtended("hydrate"), "hydrate");
+});
+
+// The extended alphabet checks itself, for the same reason the base one does:
+// a kind that can be GENERATED but never MUTATED is a transition nothing tests,
+// and every one of the four bugs above is a transition.
+Deno.test("extended differential: every node kind the generator makes, a mutation can change", () => {
+  const KINDS = ["t", "g", "e", "f", "b", "p", "c"] as const;
+  const touched = new Set<string>();
+  const index = (s: XSpec, out = new Map<number, XSpec>()) => {
+    out.set(s.id, s);
+    if (xIsC(s)) { for (const k of s.kids) index(k, out); }
+    return out;
+  };
+  const r = makeRnd(0x5eed);
+  for (let round = 0; round < 4000; round++) {
+    const before = xGenRoot(r);
+    const after = xMutate(before, r);
+    const bi = index(before), ai = index(after);
+    for (const [id, b] of bi) {
+      const a = ai.get(id);
+      if (!a || a.k !== b.k) continue;
+      if (JSON.stringify(a) !== JSON.stringify(b)) touched.add(b.k);
+    }
+  }
+  // `x` (a null child) carries no mutable field; op 5 replaces it wholesale.
+  assertEquals(
+    KINDS.filter((k) => !touched.has(k)),
+    [],
+    `these node kinds can be GENERATED but never MUTATED, so no transition ` +
+      `into or out of them is ever tested. Add an op in xMutate().`,
+  );
+});
+
+// ── two portals into ONE target ──────────────────────────────────────────
+//
+// The fuzzer gives every portal its own target because content order in a
+// SHARED target is mount order, not tree order — a portal appends to its
+// container, which is what a portal is. What must still hold there is that the
+// two regions do not touch each other, and it did not: a portal's diff walked
+// the target from `target.firstChild`, so a keyed reorder inside the second
+// portal dragged its nodes to the FRONT of the target, over the first portal's
+// content, and closing one could delete the other's text. Each portal now opens
+// its region with an anchor comment in the target (see `VNode._anchor`).
+Deno.test("a portal shares a target without touching the other portal's nodes", () => {
+  const win = new Window({ url: "https://localhost" });
+  const doc = win.document as unknown as Document;
+  try {
+    const target = doc.createElement("aside");
+    const host = doc.createElement("main");
+    const tree = (swapped: boolean) =>
+      h(
+        "div",
+        null,
+        h(Portal as never, { target }, h("p", null, "modal")),
+        h(
+          Portal as never,
+          { target },
+          ...(swapped
+            ? [h("i", { key: "i" }, "2"), h("b", { key: "b" }, "1")]
+            : [h("b", { key: "b" }, "1"), h("i", { key: "i" }, "2")]),
+        ),
+      );
+    const v1 = tree(false);
+    _render(host, v1, null, { doc });
+    const modal = target.querySelector("p");
+    assert(modal, "the first portal's content is missing");
+
+    const v2 = tree(true);
+    _diff(host, v2, v1, { doc });
+    assertEquals(
+      target.querySelector("p")?.textContent,
+      "modal",
+      "a keyed reorder inside the SECOND portal moved the FIRST portal's " +
+        "content — the two regions of a shared target are not separated",
+    );
+    assert(
+      target.querySelector("p") === modal,
+      "the first portal's node was re-created by the second portal's diff",
+    );
+    assertEquals(
+      target.textContent,
+      "modal21",
+      "the shared target does not hold both regions in mount order",
+    );
+
+    // …and tearing the whole thing down leaves the target empty — anchors
+    // included.
+    _diff(host, null, v2, { doc });
+    assertEquals(target.innerHTML, "", "portal content leaked in the target");
   } finally {
     win.happyDOM.close();
   }

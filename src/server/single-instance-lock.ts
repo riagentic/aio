@@ -48,6 +48,12 @@ export type LockData = {
   /** Chrome DevTools Protocol port of the instance's desktop window, when
    *  one is open and debuggable. Reserved: written as undefined for now. */
   cdpPort?: number;
+  /** The CLIENT this instance runs — "electron" | "browser" | "cli" |
+   *  "server-only". Only an electron app has a WINDOW, and `am shot` had no
+   *  way to know that: it told the operator of a browser app to restart with
+   *  `--cdp`, which for a browser app either is refused or records a port
+   *  nothing will ever listen on. Absent on locks written before alpha76. */
+  client?: string;
   /** A kernel stamp that changes when a pid is REUSED — see
    *  {@linkcode processStartToken}.
    *
@@ -65,7 +71,11 @@ export type LockData = {
 };
 
 /** What a boot records about itself beyond identity — see {@linkcode LockData}. */
-export type LockMeta = { aioVersion?: string; cdpPort?: number };
+export type LockMeta = {
+  aioVersion?: string;
+  cdpPort?: number;
+  client?: string;
+};
 
 /** Instance info returned by instances() — lock data + liveness */
 export type InstanceInfo = LockData & { alive: boolean };
@@ -773,6 +783,7 @@ export class AppLock {
         : {}),
       ...(meta.aioVersion !== undefined ? { aioVersion: meta.aioVersion } : {}),
       ...(meta.cdpPort !== undefined ? { cdpPort: meta.cdpPort } : {}),
+      ...(meta.client !== undefined ? { client: meta.client } : {}),
     });
 
     for (let i = 0; i < maxRetries; i++) {

@@ -62,7 +62,7 @@ Deno.test(
         summary: {
           deps: ["counter", "wallet"],
           // deno-lint-ignore no-explicit-any
-          fn: (s: any, counter: any, wallet: any) =>
+          fn: (s: any, [counter, wallet]: any[]) =>
             `Count: ${counter.count}, Balance: ${wallet.balance}, theme=${s.theme}`,
         },
       },
@@ -93,7 +93,7 @@ Deno.test(
         // deno-lint-ignore no-explicit-any
         summary: {
           deps: ["walet" as any], // intentional typo
-          fn: (_s: unknown, _c: unknown, _w: unknown) => "never",
+          fn: (_s: { theme: string }, _deps: unknown[]) => "never",
         },
       },
     });
@@ -139,7 +139,8 @@ Deno.test(
         summary: {
           deps: ["counter"],
           // deno-lint-ignore no-explicit-any
-          fn: (s: any, counter: any) => `note=${s.note} count=${counter.count}`,
+          fn: (s: any, [counter]: any[]) =>
+            `note=${s.note} count=${counter.count}`,
         },
       },
     });

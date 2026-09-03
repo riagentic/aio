@@ -61,10 +61,10 @@ Deno.test({
       state: { chunks: [] as string[], status: "idle" } as Doc,
       methods: {
         // The shape of every streaming reply: only its abort signal ends it.
-        async reply(s: Doc & { $signal?: AbortSignal }) {
+        async reply(s: Doc & { $signal: AbortSignal }) {
           s.status = "streaming";
           for (let i = 0; i < 500; i++) {
-            if (s.$signal?.aborted) {
+            if (s.$signal.aborted) {
               s.status = "aborted";
               return;
             }

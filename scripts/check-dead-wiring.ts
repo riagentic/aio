@@ -509,7 +509,6 @@ export const LEDGER: readonly string[] = [
   "src/state/method-cancel.ts|pendingCalls",
   "src/state/own.ts|_resetPendingFactories",
   "src/state/own.ts|_pendingFactoryCount",
-  "src/state/removals.ts|REMOVED_CELL_KEYS",
   "src/state/signal.ts|_openScopeDepth",
   "src/sync/op-buffer.ts|createMemoryStorage",
   "src/sync/server-store.ts|_resetServerTsForTest",

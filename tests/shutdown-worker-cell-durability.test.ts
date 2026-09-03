@@ -40,7 +40,7 @@ export const stream = cell("stream", {
     async reply(s) {
       s.status = "streaming";
       for (let i = 0; i < 2000; i++) {
-        if (s.$signal?.aborted) {
+        if (s.$signal.aborted) {
           // THE WRITE UNDER TEST: what the stream produced before the app was
           // told to stop, plus how it ended. It is written INSIDE the worker,
           // after the abort, and has to cross the thread boundary and reach

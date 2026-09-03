@@ -1,5 +1,6 @@
 import { log } from "../diagnostics/logger-api.ts";
 import { count } from "../diagnostics/fmt.ts";
+import { isDevMode } from "./dev-flag.ts";
 
 // Reactive signal system for AIO renderer.
 // Provides: signal, computed, effect, batch — auto-tracked dependencies.
@@ -158,11 +159,7 @@ function _currentTracker(): Set<SignalImpl<unknown>> | undefined {
 
 // ── Dev mode ────────────────────────────────────────────────────────
 
-let _devMode = false;
-/** Enable dev-mode signal tracing (console warnings for skipped updates). */
-export function _setSignalDevMode(v: boolean): void {
-  _devMode = v;
-}
+/** Dev-mode signal tracing follows the one runtime flag — see dev-flag.ts. */
 
 // ── Batching ────────────────────────────────────────────────────────
 
@@ -382,7 +379,7 @@ class SignalImpl<T> implements Omit<Signal<T>, never> {
   set(next: T, opts?: { force?: boolean }): void {
     const resolved = next;
     if (!opts?.force && Object.is(this._value, resolved)) {
-      if (this._name && _devMode) {
+      if (this._name && isDevMode()) {
         log.warn(
           `[aio] signal "${this._name}" update skipped (identical reference)`,
         );
@@ -397,7 +394,7 @@ class SignalImpl<T> implements Omit<Signal<T>, never> {
       resolved !== null && typeof resolved === "object" &&
       _shallowEq(this._value, resolved)
     ) {
-      if (this._name && _devMode) {
+      if (this._name && isDevMode()) {
         log.warn(
           `signal "${this._name}" update skipped (shallow-equal)`,
         );
@@ -530,9 +527,17 @@ class ComputedImpl<T> {
   private _fn: () => T;
   private _cached: T | undefined;
   private _dirty = true;
+  /** The last recompute THREW. A dirty computed ignores invalidation (it is
+   *  already dirty), which is right after a clean run and wrong after a failed
+   *  one: nothing downstream was told the value it read is now obtainable. */
+  private _errored = false;
   private _deps = new Set<SignalImpl<unknown>>();
   private _unsubs: CleanupFn[] = [];
   readonly _subscribers = new Set<Subscriber>();
+  /** Bumped when a recompute produces a different value — the same freshness
+   *  stamp a signal carries, so a `trackedMemo` whose read set contains a
+   *  computed can tell a moved dependency from an unmoved one. */
+  _version = 0;
   private _disposed = false;
 
   constructor(fn: () => T) {
@@ -582,26 +587,47 @@ class ComputedImpl<T> {
     this._deps.clear();
 
     const deps = _trackStart();
+    let ok = false;
     try {
-      this._cached = this._fn();
+      const next = this._fn();
+      ok = true;
+      if (!Object.is(this._cached, next) || this._version === 0) {
+        this._version++;
+      }
+      this._cached = next;
     } finally {
       // AIO-258: delete first — if _trackEnd throws, _computing must still be cleaned
       _computing.delete(this as unknown as ComputedImpl<unknown>);
       _trackEnd(deps);
+      // Link on EVERY exit path, the throw included — the same rule `effect`
+      // follows. The links used to be made only after a successful compute,
+      // so a computed whose fn threw once (a guard on a not-yet-loaded value,
+      // say) had already dropped every old link and took no new one: it sat
+      // dirty with ZERO upstream edges, and when its source recovered nothing
+      // reached it, so no effect downstream ever re-ran. The reads collected
+      // before the throw are exactly the signals whose change could make it
+      // succeed; keeping them means the next write retries it.
+      this._dirty = !ok;
+      this._errored = !ok;
+      this._link(deps);
     }
+  }
 
-    this._dirty = false;
+  /** Eager dependency link: when a dep changes, mark this computed dirty and
+   *  propagate *synchronously* — recursing into dependent computeds and
+   *  queueing dependent effects. This guarantees a same-batch read after the
+   *  write never sees a stale-clean computed (B-2). Recompute stays lazy. */
+  private _link(deps: Set<SignalImpl<unknown>>): void {
     this._deps = deps;
-
-    // Eager dependency link: when a dep changes, mark this computed dirty and
-    // propagate *synchronously* — recursing into dependent computeds and
-    // queueing dependent effects. This guarantees a same-batch read after the
-    // write never sees a stale-clean computed (B-2). Recompute stays lazy.
     const link: Subscriber = {
       execute: () => {}, // never queued — invalidation is eager
       invalidate: () => {
-        if (!this._dirty) {
+        // An errored computed is dirty already, and still has to propagate:
+        // its dependents hold a THROW, not a stale value, and this write is
+        // what may turn the throw into a value.
+        if (!this._dirty || this._errored) {
           this._dirty = true;
+          this._errored = false;
           _propagate(this._subscribers);
         }
       },
@@ -763,32 +789,55 @@ export function effect(fn: () => void | CleanupFn): CleanupFn {
       for (const unsub of unsubs) unsub();
       unsubs = [];
 
-      const deps = _trackStart();
-      try {
-        cleanup = fn();
-      } finally {
-        _trackEnd(deps);
-        // Re-subscribe on EVERY exit path, including the throw. This used to
-        // sit after the try, so an effect body that threw once had already
-        // dropped every old subscription and never took a new one: it was
-        // silently unlinked from the graph and could not run again for the
-        // life of the page (the throw itself is reported by `_flush`, which
-        // made it look survivable). The deps collected before the throw are
-        // the ones it read; keeping them means the next change re-runs it.
-        // AIO-188: fn() may have called dispose() (self-dispose) — an effect
-        // that disposed itself must not re-subscribe.
-        if (!disposed) {
-          for (const dep of deps) {
-            dep._subscribers.add(sub);
-            unsubs.push(() => dep._subscribers.delete(sub));
+      // The body runs inside a batch — ONE rule for the first run and every
+      // re-run. A re-run already sits inside `_flush`, where a write it makes
+      // is queued until the flush loop comes round again. The first run had
+      // no such shelter: outside a batch, its first write flushed
+      // SYNCHRONOUSLY, mid-body, before this effect had subscribed to
+      // anything — so an effect that ran in that nested flush and wrote one
+      // of THIS effect's dependencies wrote to a subscriber list this effect
+      // was not on yet. It finished holding the old value, subscribed too
+      // late to hear about the new one, and no later write would fix it
+      // unless that dependency happened to move again. The batch defers the
+      // flush to just after the subscriptions below are in place, which is
+      // exactly when a re-run's writes are seen.
+      batch(() => {
+        const deps = _trackStart();
+        try {
+          cleanup = fn();
+          // AIO-188: fn() may have called dispose() on itself — and then
+          // RETURNED a cleanup. `dispose()` ran before that cleanup existed,
+          // so it was stored into a dead effect and never invoked: a
+          // subscription, a timer, a listener leaked by the one effect that
+          // asked to be torn down. Nothing will ever call it later; call it
+          // now.
+          if (disposed && cleanup) {
+            const c = cleanup;
+            cleanup = undefined;
+            c();
+          }
+        } finally {
+          _trackEnd(deps);
+          // Re-subscribe on EVERY exit path, including the throw. This used
+          // to sit after the try, so an effect body that threw once had
+          // already dropped every old subscription and never took a new one:
+          // it was silently unlinked from the graph and could not run again
+          // for the life of the page (the throw itself is reported by
+          // `_flush`, which made it look survivable). The deps collected
+          // before the throw are the ones it read; keeping them means the
+          // next change re-runs it.
+          // AIO-188: fn() may have called dispose() (self-dispose) — an
+          // effect that disposed itself must not re-subscribe.
+          if (!disposed) {
+            for (const dep of deps) {
+              dep._subscribers.add(sub);
+              unsubs.push(() => dep._subscribers.delete(sub));
+            }
           }
         }
-      }
+      });
     },
   };
-
-  // Initial run (no prepare needed)
-  sub.execute();
 
   const dispose = () => {
     if (disposed) return; // idempotent
@@ -807,6 +856,20 @@ export function effect(fn: () => void | CleanupFn): CleanupFn {
       unsubs = [];
     }
   };
+
+  // Initial run (no prepare needed). A body that throws HERE throws out of
+  // `effect()` itself, so the caller never receives a dispose handle and the
+  // collector never sees one — yet the `finally` above had already subscribed
+  // it to everything it read before throwing. That was a zombie: no handle
+  // anywhere, re-running on every write for the life of the page, and the
+  // renderer's teardown of the failed render could not reach it. An effect
+  // nobody can dispose must not outlive the call that failed to create it.
+  try {
+    sub.execute();
+  } catch (e) {
+    dispose();
+    throw e;
+  }
 
   // Register with effect collector if active (renderer auto-dispose)
   if (_effectCollectors.length > 0) {
@@ -867,7 +930,16 @@ export function trackedMemo<K, V>(
 
   const fresh = (e: Entry): boolean => {
     for (let i = 0; i < e.deps.length; i++) {
-      if (e.deps[i]!._version !== e.versions[i]) return false;
+      const d = e.deps[i]!;
+      // A computed's stamp moves only when it RECOMPUTES, and recompute is
+      // lazy: a dirty one still carries the stamp of the value it last
+      // produced. Settle it first (an untracked read — the caller's scope
+      // must see the recorded set, not the computed's inputs), so the
+      // comparison is against the value a miss would read now. Without this
+      // — and before a computed carried a stamp at all — a hit over a
+      // computed compared `undefined` to `undefined` and was fresh forever.
+      if (d instanceof ComputedImpl) d.peek();
+      if (d._version !== e.versions[i]) return false;
     }
     return true;
   };

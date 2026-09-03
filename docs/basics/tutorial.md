@@ -149,7 +149,7 @@ const order = cell("order", {
   // reset aborts a running place() — string form avoids self-reference (TS7022)
   cancelOn: { place: ["order:reset"] },
   methods: {
-    async place(s: OrderState & Partial<MethodDraftMeta>, item: string) {
+    async place(s: OrderState & MethodDraftMeta, item: string) {
       s.status = "processing";
       const price = await getPrice(item);
       if (price > 1000) {
@@ -158,7 +158,7 @@ const order = cell("order", {
         return;
       }
       const id = await submitOrder(item, price);
-      if (s.$signal?.aborted) return; // reset fired mid-flight
+      if (s.$signal.aborted) return; // reset fired mid-flight
       s.orderId = id;
       s.status = "done";
     },
@@ -234,7 +234,7 @@ const upload = cell("upload", {
       if (s.status !== "idle") return; // no double-start
       s.status = "uploading";
       try {
-        await uploadFile(file, (p) => {
+        await uploadFile(file, (p: number) => {
           s.progress = p;
         });
         s.status = "idle";

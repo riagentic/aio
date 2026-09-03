@@ -26,7 +26,7 @@ import { deepMerge } from "../state/deep-merge.ts";
 import { isCompiled, resolveKvPath } from "./paths.ts";
 import { parseCli } from "./aio-cli.ts";
 import { SYNC_VERSION_UNKNOWN } from "../sync/compact.ts";
-import { resolve } from "@std/path";
+import { dirname, resolve } from "@std/path";
 import { appDirs } from "./app-dirs.ts";
 import {
   AioError,
@@ -935,6 +935,26 @@ export async function bootStorage<S>(
   const boundPaths = dbBindings.filter((b) => b.path.length > 0).map((b) =>
     b.path
   );
+  // THE ONE DECIDER for "which tables does the persistence loop mirror": the
+  // bindings that resolved to a state path. `sqlSchema` is every `db:` table
+  // (all of them are CREATED); `syncSchema` is the subset that is loaded into
+  // state at boot and diffed back on every window. An SQL-only table is in the
+  // first and never in the second.
+  //
+  // It used to be the full schema in both places, while `getTableState` below
+  // (correctly) reported only the bound arrays — so the planner met a table
+  // whose bound value was `undefined`, threw by name on every window, and the
+  // ENTIRE SQLite half stopped: rows pushed into the bound tables were written
+  // nowhere, the snapshot half kept committing, and the app looked healthy.
+  // One documented SQL-only table silently disabled all bound-table
+  // persistence. The persistence manager now refuses at construction any
+  // planned table the bindings do not vouch for, so this cannot regress
+  // quietly.
+  const syncSchema: Record<string, TableDef> = {};
+  for (const b of dbBindings) {
+    if (b.path.length > 0) syncSchema[b.table] = sqlSchema[b.table]!;
+  }
+  const syncKeys = Object.keys(syncSchema);
 
   let asyncDb: DB | null = null;
 
@@ -955,6 +975,22 @@ export async function bootStorage<S>(
   // replaced from a snapshot) the handle is dead — reopen on what is there
   // now, which may be the restored snapshot or an empty database.
   const openAppDb = async (dbPath: string): Promise<DB> => {
+    // The file's directory is aio's to create, like the data dir it defaults
+    // to. `--db-path=/srv/app/data/state.db` into a directory that did not
+    // exist yet failed as "unable to open database file" with advice to fix
+    // PERMISSIONS — a cause that was not the cause. Recursive and idempotent;
+    // when even this fails the error names the directory, the real fault.
+    if (dbPath !== ":memory:") {
+      const dir = dirname(resolve(dbPath));
+      try {
+        Deno.mkdirSync(dir, { recursive: true });
+      } catch (e) {
+        throw new Error(
+          `cannot create ${dir} for the database ${dbPath}: ${e}`,
+          { cause: e },
+        );
+      }
+    }
     const open = () =>
       createDB(dbPath, dbPragmas ? { pragmas: dbPragmas } : {});
     const db = open();
@@ -1259,8 +1295,19 @@ export async function bootStorage<S>(
       // module. Classified by the db module's own predicate (one decider).
       const workerHint = dbWorkerMissingHint(e);
       if (workerHint) throw new Error(workerHint, { cause: e });
+      // The advice names the fixes that exist for the causes that reach here.
+      // "Fix permissions or set persist: false" was attached to a malformed
+      // or unreadable database as well — where neither is a fix, and the
+      // second silently discards the data the reader is trying to keep.
       throw new Error(
-        `persistence unavailable: ${e}\nFix permissions or set persist: false to disable persistence.`,
+        `persistence unavailable: ${e}\n` +
+          `If the file is malformed or corrupt: boot with ` +
+          `checkIntegrityOnBoot: true (quarantines it and restores from ` +
+          `<db>.snapshot when one exists — docs/persistence/sqlite.md), or ` +
+          `put a backup back with \`am restore <dir>\`. If it is a ` +
+          `permissions error: make the data directory and the db file ` +
+          `writable by this user. persist: false disables persistence ` +
+          `entirely — it does not repair anything.`,
       );
     }
   }
@@ -1469,9 +1516,11 @@ export async function bootStorage<S>(
   // ── 7. Load SQLite table data ─────────────────────────────────────
   // Rows land at the bound state path (a cell's array field), never as a
   // top-level key nothing owns.
+  // Only the BOUND tables are read: an SQL-only table has no state home, so
+  // reading it whole at boot was O(rows) of wasted I/O per start.
   let loadedTables: Record<string, unknown[]> | undefined;
-  if (asyncDb && dbKeys.length > 0) {
-    const loaded = await loadTables(asyncDb, sqlSchema);
+  if (asyncDb && syncKeys.length > 0) {
+    const loaded = await loadTables(asyncDb, syncSchema);
     loadedTables = loaded;
     state = placeLoadedTables(
       state as Record<string, unknown>,
@@ -1551,7 +1600,10 @@ export async function bootStorage<S>(
   const persistence = createPersistenceManager({
     kvDb,
     asyncDb,
-    dbSchema: dbKeys.length > 0 ? sqlSchema : undefined,
+    // The BOUND schema (see `syncSchema`) — the same decider that feeds
+    // `getTableState` below, so the planner never meets a table the view
+    // omits.
+    dbSchema: syncKeys.length > 0 ? syncSchema : undefined,
     // The diff input for `db:` tables: each bound state array, keyed by its
     // SQL table name. SQL-only tables are absent — nothing in state mirrors
     // them, so nothing may overwrite their rows.

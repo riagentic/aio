@@ -67,7 +67,7 @@ import {
 } from "./server-auth.ts";
 import { handleAuthFlow } from "./auth-flows.ts";
 import { stopEsbuild } from "./server-transpile.ts";
-import { createWsManager } from "./server-ws.ts";
+import { createWsManager, isPeerGone } from "./server-ws.ts";
 import { createBroadcaster } from "./server-broadcast.ts";
 import { createStaticHandler } from "./server-static.ts";
 import { createFileWatcher } from "./server-watcher.ts";
@@ -177,6 +177,43 @@ export function _isLoopbackAddr(hostname: string): boolean {
   return parts.every((n) => n <= 255) && parts[0] === 127;
 }
 
+/** `req.url`, or null when it does not parse. The runtime synthesises the URL
+ *  from the client's Host header, so this is the client's input, not ours —
+ *  and `new URL` throwing on it was a 500 on every listener. One reader. */
+export function parseRequestUrl(req: Request): URL | null {
+  try {
+    return new URL(req.url);
+  } catch {
+    return null;
+  }
+}
+
+/** True when a handler's throw is the CLIENT leaving mid-request — the body
+ *  stream ended before the declared bytes arrived, or the socket reset. Deno
+ *  surfaces these as body-read errors inside `req.json()`/`req.text()`, i.e.
+ *  inside app code, which is why the route used to take the blame. Kept
+ *  narrow: a real handler bug must still be an error. Pure; exported for
+ *  tests. */
+export function isClientAbort(e: unknown): boolean {
+  if (e instanceof Deno.errors.BadResource) return true;
+  if (e instanceof Deno.errors.ConnectionReset) return true;
+  if (e instanceof Deno.errors.UnexpectedEof) return true;
+  if (e instanceof Deno.errors.BrokenPipe) return true;
+  const msg = e instanceof Error ? e.message : String(e);
+  return isPeerGone(msg) ||
+    /error reading a body from connection|body stream|request body was aborted|unexpected end of file|incomplete body/i
+      .test(msg);
+}
+
+/** The 400 for a request whose Host header does not form a URL. */
+function malformedHost(req: Request): Response {
+  return new Response(
+    `Bad Request — the Host header "${
+      req.headers.get("host") ?? ""
+    }" does not form a valid URL`,
+    { status: 400, headers: { "Content-Type": "text/plain; charset=utf-8" } },
+  );
+}
 /** True when a request originates from the SAME MACHINE — loopback TCP or a
  *  Unix socket. The trojan control plane uses this to stay off the network
  *  entirely: it is never reachable remotely, even under `--expose`. Unknown or
@@ -552,6 +589,12 @@ export function createServer(config: ServerConfig): ServerHandle {
     // The same values the page shell embeds — the shell covers first paint,
     // this frame covers shells the build templated before compose time.
     clientConfig: {
+      // The app's identity. `localStorage` is per ORIGIN, so the browser's
+      // offline sync queue needs it to scope its key: without it two aio apps
+      // on one host:port shared pending CRDT ops for any same-named cell, and
+      // app B's first catch-up flushed app A's unsent mutations into B's
+      // server. The client half of that fix reads this field.
+      ...(config.appId ? { appId: config.appId } : {}),
       ...(config.renderBudget ? { renderBudget: config.renderBudget } : {}),
       ...(config.syncCells && config.syncCells.length
         ? { syncCells: config.syncCells }
@@ -621,6 +664,10 @@ export function createServer(config: ServerConfig): ServerHandle {
     lang: config.lang,
     dir: config.dir,
     themeName: config.themeName,
+    // Injected into the page's `window.__aioConfig` — see `clientConfig`
+    // above. The shell carries it as well as the `cfg` frame because a page
+    // can boot sync before the frame lands.
+    appId: config.appId,
     width: config.width,
     height: config.height,
     renderBudget: config.renderBudget,
@@ -760,8 +807,6 @@ export function createServer(config: ServerConfig): ServerHandle {
     req: Request,
     info?: Deno.ServeHandlerInfo,
   ): Promise<Response> => {
-    const url = new URL(req.url);
-    const { pathname } = url;
     // ── THE Host gate — DNS-rebinding defense, one decider ──
     // FIRST, ahead of every other rule, because it answers a question the
     // rules below all assume: "is this request even addressed to this app?".
@@ -777,6 +822,12 @@ export function createServer(config: ServerConfig): ServerHandle {
       allowedOrigins: config.allowedOrigins,
     });
     if (hostDenied) return hostDenied;
+    // Only now is the URL parsed: `req.url` is built FROM the Host header, so
+    // a malformed one (`Host: [::1`, a space, a bare colon) made `new URL`
+    // throw — a 500, before the gate above had even looked at it.
+    const url = parseRequestUrl(req);
+    if (!url) return malformedHost(req);
+    const { pathname } = url;
     // F-4: derive a stable client key for cross-connection abuse tracking
     // (denylist, per-IP auth-fail budget, lockout bucketing).
     // TCP: remote hostname (IP). UDS: no key — in-process trust, skip denylist.
@@ -883,7 +934,17 @@ export function createServer(config: ServerConfig): ServerHandle {
       }
       try {
         const body = JSON.parse(raw) as { pin?: unknown };
-        if (!verifyPin(body?.pin, clientKey)) {
+        // A pin that is not a string is a malformed REQUEST, not a wrong
+        // guess: 400 naming the field, and no charge to the PIN budget — the
+        // "invalid or expired" reply it used to get sent people to `am pair`
+        // for a new code when the fix was in their JSON.
+        if (typeof body?.pin !== "string") {
+          return new Response(
+            JSON.stringify({ error: "pin must be a string" }),
+            { status: 400, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (!verifyPin(body.pin, clientKey)) {
           return new Response(
             JSON.stringify({
               error: "invalid or expired pairing code",
@@ -1042,6 +1103,25 @@ export function createServer(config: ServerConfig): ServerHandle {
         // ANONYMOUS on every `auth: true` app.
         const denied = trojanDenialForUserMode(pathname, undefined);
         if (denied) return denied;
+        // Nor to an app ROUTE. This branch never called `tryRoutes`, so an
+        // anonymous `POST /api/webhook` on an `auth: true` app got the SPA
+        // shell — 200, text/html, the handler never ran, nothing logged — while
+        // the same request on a `users:` app was refused with 401. One rule
+        // for both per-user modes: a route answers to a signed-in user. Said
+        // in the reply, because the caller here is usually a machine (a
+        // webhook sender) whose operator is reading its delivery log.
+        const anonRoute = findRoute(pathname);
+        if (anonRoute) {
+          return new Response(
+            `Unauthorized — ${pathname} is an app route (${anonRoute.pattern}) ` +
+              `on an app with per-user auth, and routes run for signed-in ` +
+              `users only. Send a session cookie or a Bearer token. A route ` +
+              `that must accept anonymous callers (a webhook receiver) ` +
+              `belongs on an app without \`auth\`, or behind its own ` +
+              `signature check on a public app.`,
+            { status: 401, headers: extra },
+          );
+        }
         const anonResp = await staticHandler.serveStatic(pathname, req);
         anonResp.headers.set("X-Content-Type-Options", "nosniff");
         if (extra) anonResp.headers.set("Set-Cookie", extra["Set-Cookie"]);
@@ -1200,6 +1280,21 @@ export function createServer(config: ServerConfig): ServerHandle {
       try {
         res = await run(() => handler(req, match));
       } catch (e) {
+        // A client that hangs up mid-body makes `req.json()` throw INSIDE the
+        // handler. That is the peer leaving, not the route's bug — logging it
+        // as "route threw" at ERROR (with a stack into the app's code) sent
+        // people debugging a handler that was never wrong. Info, named for
+        // what it is; no one is left to receive the 500 anyway.
+        if (isClientAbort(e)) {
+          log.info(
+            "http",
+            `route "${pattern}" (${req.method} ${pathname}): the client ` +
+              `closed the connection before its request body arrived — ${
+                e instanceof Error ? e.message : String(e)
+              }`,
+          );
+          return new Response("Bad Request", { status: 400 });
+        }
         log.error(
           "http",
           `route "${pattern}" (${req.method} ${pathname}) threw — ${
@@ -1220,13 +1315,34 @@ export function createServer(config: ServerConfig): ServerHandle {
       }
       return res;
     }
-    // Exact literal match first (fast + unambiguous).
+    const hit = findRoute(pathname);
+    if (!hit) return null;
+    return await invoke(hit.pattern, hit.handler, {
+      params: hit.params,
+      user,
+      ip,
+    });
+  }
+
+  /** THE route matcher — which `config.routes` entry claims `pathname`, or
+   *  null. Exact literal first (fast + unambiguous), then patterns. Separate
+   *  from `tryRoutes` so a caller can ask "is this a route?" without running
+   *  it (the anonymous branch of per-user auth refuses routes by name). */
+  function findRoute(
+    pathname: string,
+  ): {
+    pattern: string;
+    handler: RawRouteHandler;
+    params: Record<string, string>;
+  } | null {
+    if (!config.routes) return null;
+    if (isReservedRoutePath(pathname)) return null;
     const exact = config.routes[pathname];
-    if (exact) return await invoke(pathname, exact, { params: {}, user, ip });
+    if (exact) return { pattern: pathname, handler: exact, params: {} };
     for (const [pattern, handler] of Object.entries(config.routes)) {
       if (!pattern.includes(":") && !pattern.includes("*")) continue;
       const params = matchRoute(pattern, pathname);
-      if (params) return await invoke(pattern, handler, { params, user, ip });
+      if (params) return { pattern, handler, params };
     }
     return null;
   }
@@ -1306,9 +1422,12 @@ export function createServer(config: ServerConfig): ServerHandle {
           allowedOrigins: config.allowedOrigins,
         });
         if (denied) return denied;
+        // Same rule as the main listener: a Host that does not parse is the
+        // client's 400, never this server's 500.
+        const url = parseRequestUrl(req);
+        if (!url) return malformedHost(req);
         // Authenticate trojan requests on localhost — same rules as main server
         if (config.token) {
-          const url = new URL(req.url);
           const qToken = url.searchParams.get("token");
           // THE reader — "same rules as main server" has to mean the same
           // code, or this listener quietly grows its own. It did: this spelled
@@ -1325,7 +1444,6 @@ export function createServer(config: ServerConfig): ServerHandle {
         } else if (_userResolver) {
           // users/resolveUser mode: config.token is unset — still require a
           // valid user token, and gate snapshot to admins like the main server
-          const url = new URL(req.url);
           const { token, fromUrl, source } = _extractTokenWithSource(url, req);
           // Same cookie clamp as the main listener: a cookie carries a
           // session, never a static `users:`/`resolveUser` token.
@@ -1344,7 +1462,7 @@ export function createServer(config: ServerConfig): ServerHandle {
           const denied = trojanDenialForUserMode(url.pathname, user);
           if (denied) return denied;
         }
-        const { pathname } = new URL(req.url);
+        const { pathname } = url;
         if (pathname.startsWith("/__aio/")) {
           return staticHandler.serveStatic(pathname, req);
         }

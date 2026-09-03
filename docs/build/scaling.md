@@ -56,8 +56,10 @@ Use `forUser` to filter per-client. See
 [Cell Visibility](../state/cell-visibility.md):
 
 ```ts
+type Order = { id: string; userId: string };
+
 const orders = cell("orders", {
-  state: { page: "", orders: [], internal: [] },
+  state: { page: "", orders: [] as Order[], internal: [] as string[] },
   visible: {
     include: ["page", "orders"],
     forUser: (exposed, user) => {

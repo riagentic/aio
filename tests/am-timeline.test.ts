@@ -8,7 +8,9 @@ import {
   cmdReplay,
   cmdTimeline,
   parseRange,
+  timelineCapped,
 } from "../src/am/am-cmd-timeline.ts";
+import { createTimeline, TIMELINE_RING } from "../src/server/timeline.ts";
 import { parseJournalEntries } from "../src/am/record.ts";
 import type { GlobalFlags } from "../src/am/am-types.ts";
 
@@ -141,4 +143,30 @@ Deno.test("cmdReplay --dry: a single-seq range selects one action", async () => 
     assertEquals(res.count, 1);
     assertEquals(res.entries[0]!.type, "c:b");
   });
+});
+
+// `am timeline --lines=20000` returned 500 rows and said nothing: the live ring
+// holds the last TIMELINE_RING dispatches, so "everything there is" and "as
+// much as I keep" were the same answer. `am actions` caps too; the fix is to
+// SAY it, not to pick a different silent number.
+Deno.test("am timeline: the ring being the limit is stated, never implied", () => {
+  // More asked for than the ring can hold, and the ring came back full.
+  assert(timelineCapped(20000, TIMELINE_RING));
+  assert(timelineCapped(TIMELINE_RING + 1, TIMELINE_RING));
+  // Three dispatches are three dispatches — not a truncation.
+  assert(!timelineCapped(20000, 3));
+  // Exactly what was asked for, and no --lines at all: nothing to say.
+  assert(!timelineCapped(TIMELINE_RING, TIMELINE_RING));
+  assert(!timelineCapped(undefined, TIMELINE_RING));
+});
+
+// …and the constant is the ring's REAL capacity, not a number that agrees with
+// it today. A cap the reader quotes and the ring does not honour is the same
+// bug wearing a label.
+Deno.test("am timeline: TIMELINE_RING is what the ring actually keeps", () => {
+  const t = createTimeline();
+  for (let i = 1; i <= TIMELINE_RING + 25; i++) t.record(i, "x", {}, {}, {}, i);
+  assertEquals(t.size(), TIMELINE_RING);
+  assertEquals(t.entries().length, TIMELINE_RING);
+  assertEquals(t.entries()[0]!.seq, 26, "the OLDEST are the ones dropped");
 });

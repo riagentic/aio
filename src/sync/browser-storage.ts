@@ -16,13 +16,78 @@ type CellDoc = {
   snapshot?: { state: unknown; hlc: HLC; serverTs?: number };
 };
 
+/** The unscoped namespace every build before app-scoping wrote under, and the
+ *  fallback for a client that was never told which app it is. */
+export const SYNC_STORAGE_PREFIX = "__aio_sync";
+
+/** The localStorage namespace for ONE app's offline queue.
+ *
+ *  `localStorage` is per ORIGIN, and an app id is not part of an origin: two
+ *  aio apps served from the same host:port (a pinned port, a shared host, or
+ *  simply one app replacing another on the dev port) shared the queue of every
+ *  cell whose NAME they had in common — app B's first `requestSync` flushed
+ *  app A's unsent ops into B's server, as B's user, silently. The app id is
+ *  the only thing that separates them, so it is part of the key. */
+export function syncStoragePrefix(appId?: string | null): string {
+  if (!appId) return SYNC_STORAGE_PREFIX;
+  // The key format is `<prefix>:<cell>`; an id carrying the separator (or
+  // anything else exotic) must not be able to reshape a key into another
+  // app's. Slugified server-side already — this is the belt.
+  return `${SYNC_STORAGE_PREFIX}.${appId.replace(/[^A-Za-z0-9._-]/g, "_")}`;
+}
+
+/** One-time adoption of a queue written under the unscoped prefix by a build
+ *  from before {@linkcode syncStoragePrefix} existed.
+ *
+ *  The alternative — ignoring it — loses real unsent mutations for every
+ *  single-app origin (the overwhelming case) at the one moment the queue
+ *  exists to survive: an upgrade while offline. So it is MOVED, loudly, and
+ *  exactly once: the legacy key is removed, so a second app on the same origin
+ *  finds nothing to adopt and the two are isolated from then on. It can only
+ *  ever be adopted by whichever app boots first — which is strictly better
+ *  than the permanent, silent sharing it replaces, and it is announced rather
+ *  than guessed at. Never duplicated: a scoped document already present wins
+ *  and the legacy key is left untouched (write-then-remove, so a crash between
+ *  the two leaves a stale copy, never two live queues). */
+function adoptLegacyQueue(prefix: string): void {
+  if (prefix === SYNC_STORAGE_PREFIX) return; // unscoped: it IS the legacy one
+  try {
+    const cells: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k?.startsWith(`${SYNC_STORAGE_PREFIX}:`)) continue;
+      const cell = k.slice(SYNC_STORAGE_PREFIX.length + 1);
+      // `clientId` is the sync identity, not a cell document, and `.corrupt`
+      // keys are forensic copies — neither is a queue.
+      if (cell === "clientId" || cell.includes(".corrupt")) continue;
+      cells.push(cell);
+    }
+    for (const cell of cells) {
+      const from = `${SYNC_STORAGE_PREFIX}:${cell}`;
+      const to = `${prefix}:${cell}`;
+      if (localStorage.getItem(to) !== null) continue; // this app already has one
+      const raw = localStorage.getItem(from);
+      if (raw === null) continue;
+      localStorage.setItem(to, raw);
+      localStorage.removeItem(from);
+      log.warn(
+        "sync",
+        `adopted the offline queue at "${from}" (written by a build that did ` +
+          `not scope the queue per app) into "${to}". If more than one aio ` +
+          `app is served from this origin, those pending changes may have ` +
+          `belonged to the other one — check before they flush. Happens once.`,
+      );
+    }
+  } catch { /* storage unavailable (private mode) — nothing to adopt */ }
+}
+
 /**
  * OpBufferStorage persisted in `localStorage` — the browser counterpart of
- * {@linkcode createMemoryStorage}. Namespaced by `prefix` so several apps on
- * one origin don't collide.
+ * {@linkcode createMemoryStorage}. Namespaced by `prefix` (see
+ * {@linkcode syncStoragePrefix}) so several apps on one origin don't collide.
  */
 export function createLocalStorageOpStorage(
-  prefix = "__aio_sync",
+  prefix: string = SYNC_STORAGE_PREFIX,
 ): OpBufferStorage {
   const key = (cell: string) => `${prefix}:${cell}`;
   // This page load. The catch-up cursor may be exactly as durable as the state
@@ -53,6 +118,7 @@ export function createLocalStorageOpStorage(
     }
     for (const k of junk) localStorage.removeItem(k);
   } catch { /* storage unavailable (private mode) — nothing to sweep */ }
+  adoptLegacyQueue(prefix);
   const read = (cell: string): CellDoc => {
     let raw: string | null = null;
     try {

@@ -2,6 +2,7 @@
 // Zero-dependency module — no runtime imports, pure type/constant definitions.
 
 import type { Signal } from "../state/signal.ts";
+import { isDevMode, setDevModeOverride } from "../state/dev-flag.ts";
 
 // ── SVG tag set ────────────────────────────────────────────────────
 // The runtime namespace switch. jsx-runtime.ts lists these same tags in
@@ -86,6 +87,20 @@ export const Portal = Symbol.for("aio.Portal");
 export const Suspense = Symbol.for("aio.Suspense");
 /** Sentinel thrown by lazy components to signal "still loading" to Suspense. */
 export const _LAZY_PENDING = Symbol.for("aio.LazyPending");
+/** A signal passed as a CHILD — `<b>{count}</b>` where `count` is a signal.
+ *
+ *  It is a NODE KIND, not a side table on its parent. It used to be flattened
+ *  to its current value with the signal recorded in the parent's
+ *  `_signalChildren` map by array index, and only the ELEMENT branch of
+ *  `createDom` ever read that map — so the same `{count}` under a Fragment, a
+ *  Portal, a boundary, or a component that returns a Fragment rendered its
+ *  initial value and never moved again, with no warning anywhere. And where it
+ *  WAS read, index-to-DOM mapping had to be re-derived at every site
+ *  (mount/diff/hydrate each had its own walk, and hydrate's was wrong). As a
+ *  vnode it owns exactly one text node and its own effect, and every commit
+ *  path treats it like any other one-node child: created, diffed, hydrated,
+ *  removed and counted by position, with nothing to map. */
+export const _SignalText = Symbol.for("aio.SignalText");
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -112,6 +127,7 @@ export interface VNode {
     | typeof Portal
     | typeof Suspense
     | typeof _Null
+    | typeof _SignalText
     | ComponentFn;
   props: Record<string, unknown>;
   children: (VNode | string | number)[];
@@ -122,8 +138,32 @@ export interface VNode {
   _instance?: unknown;
   /** True when the VNode is fully static (no event handlers, refs, keys, or component children). */
   _static?: true;
-  /** Signal text children: maps child index → Signal for direct text-node binding. */
-  _signalChildren?: Map<number, Signal<unknown>>;
+  /** `_SignalText` only: the signal whose value is this node's text. */
+  _sig?: Signal<unknown>;
+  /** `_SignalText` only: disposes the effect that writes the text node. */
+  _unbind?: () => void;
+  /** `Portal` only: the comment in the TARGET that begins this portal's
+   *  region there. Written for every portal while its content is mounted, and
+   *  removed with it.
+   *
+   *  A Portal occupies no node of its parent, so `_dom` cannot serve — every
+   *  positional walk reads `_dom` as "a node among my siblings". Its content
+   *  is a REGION of the target, and two portals into one target (a modal and
+   *  a toast, both into `document.body`) are two consecutive regions. Without
+   *  an anchor every walk over the second one started at `target.firstChild`
+   *  — the FIRST portal's nodes — so a reorder in the toast rewrote the modal
+   *  and closing the toast could delete the modal's text. */
+  _anchor?: Node;
+}
+
+/** True when an element's content is RAW HTML (`dangerouslySetInnerHTML`) —
+ *  the one decider for "does this element own vnode children". An element with
+ *  raw html owns none: mount ignores them, the diff never reconciles them
+ *  against the injected nodes, SSR emits only the html, hydrate does not walk
+ *  them. `h()` warns (dev) when both are given. */
+export function _hasRawHtml(props: Record<string, unknown>): boolean {
+  const v = props.dangerouslySetInnerHTML;
+  return v != null && v !== false;
 }
 
 /** DOM nodes a realized child occupies among its siblings — the single source of
@@ -161,7 +201,7 @@ export function _domNodeCount(child: VNode | string | number): number {
     return n || (child._dom ? 1 : 0);
   }
   if (tag === Portal) return 0; // renders into a different parent
-  return 1; // element or _Null placeholder
+  return 1; // element, _Null placeholder, or _SignalText (one text node)
 }
 
 /** Hooks for per-component lifecycle — injected by the renderer, opaque to VDOM. */
@@ -209,13 +249,19 @@ export type NodeAction = (node: HTMLElement) => { cleanup?(): void } | void;
 
 // ── Dev mode ───────────────────────────────────────────────────────
 
-export let _devMode = false;
 const _devWarned = new Set<string>();
 
-/** Enable/disable dev-mode warnings (missing keys, duplicate keys, excessive re-renders). */
-export function setDevMode(enabled: boolean): void {
-  _devMode = enabled;
-  if (!enabled) _devWarned.clear();
+/** Enable/disable dev-mode warnings (missing keys, duplicate keys, excessive
+ *  re-renders). Pass `"auto"` to follow `__aioDev` again — which is now the
+ *  DEFAULT, so an app that never calls this gets the warnings in dev and
+ *  silence in production, the way every other aio diagnostic behaves.
+ *
+ *  `"auto"` exists because the boolean alone could not say "unset": once the
+ *  flag defaults from `__aioDev`, an app that never called this and one that
+ *  called `setDevMode(false)` would otherwise be indistinguishable. */
+export function setDevMode(enabled: boolean | "auto"): void {
+  setDevModeOverride(enabled === "auto" ? null : enabled);
+  if (!isDevMode()) _devWarned.clear();
 }
 
 export let _devA11yCheckFn:
@@ -236,7 +282,7 @@ export function _setDevA11yCheck(
 const _DEV_WARN_CAP = 500;
 
 export function _devWarn(id: string, msg: string): void {
-  if (!_devMode || _devWarned.has(id)) return;
+  if (!isDevMode() || _devWarned.has(id)) return;
   if (_devWarned.size >= _DEV_WARN_CAP) _devWarned.clear();
   _devWarned.add(id);
   console.warn(`[aio-dev] ${msg}`);

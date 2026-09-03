@@ -3,6 +3,8 @@
 // are detached so a started app survives amui, and outputs are size-capped.
 import { isAbsolute, join, normalize, relative } from "@std/path";
 import { appDirs } from "aio/server";
+// THE entry rule, imported rather than restated — see `resolveEntry` below.
+import { resolveEntryPath } from "../../../src/server/paths.ts";
 import { readProjectMeta } from "./scan.server.ts";
 
 const LOG_MAX = 200_000; // cap captured task output
@@ -16,44 +18,47 @@ function safeJoin(root: string, rel: string): string | null {
   return abs;
 }
 
-/** Resolve a project's dev entry — the SAME rule `am start` applies
- *  (`resolveEntry` in src/am/am-utils.ts): the app's DECLARED `deno.json`
- *  `"entry"` wins, then the conventional filenames.
+/** Resolve a project's dev entry — literally the rule `am start` applies, by
+ *  CALLING it: `resolveEntryPath` (src/server/paths.ts) is the framework's one
+ *  answer to "where does this app start", read by `am start`, `am fix` and the
+ *  build alike.
  *
- *  amui used to probe the four filenames only, so the two disagreed on any app
- *  that renamed its entry: `am start` ran it, amui's Start button answered "no
- *  entry (src/app.ts) found" — and where a stale `src/app.ts` was still lying
- *  around, amui launched the WRONG file. A declared-but-missing entry is a
- *  refusal, never a silent fallback, for exactly that reason.
+ *  amui used to restate the rule: it probed four filenames
+ *  (`src/app.ts`, `src/main.ts`, `app.ts`, `main.ts`) and ignored the app's
+ *  DECLARED `deno.json` `"entry"`, so the two disagreed on any app that
+ *  renamed its entry — `am start` ran it, amui's Start button answered "no
+ *  entry (src/app.ts) found", and where a stale `src/app.ts` was still lying
+ *  around amui launched the WRONG file. Restating it a second time (declared
+ *  first, THEN the four names) only moved the disagreement to an app whose
+ *  entry is `main.ts`: still two lists, still able to drift. There is one list
+ *  now, and it lives in the framework.
+ *
+ *  A declared-but-missing entry is a refusal, never a silent fallback: guessing
+ *  is what launched the stale file.
+ *
+ *  Returns a PROJECT-RELATIVE path — the spawn below runs with `cwd: dir`.
+ *  `am`'s own `resolveEntry` returns the same file resolved against the project
+ *  root; `tests/amui-manager.test.ts` pins the two against each other as
+ *  absolute paths, so neither can move alone.
  *
  *  Exported so the agreement with `am` is testable rather than asserted. */
 export async function resolveEntry(
   dir: string,
 ): Promise<{ ok: true; entry: string } | { ok: false; error: string }> {
   const declared = (await readProjectMeta(dir)).entry;
-  if (declared) {
-    try {
-      await Deno.stat(join(dir, declared));
-      return { ok: true, entry: declared };
-    } catch {
-      return {
-        ok: false,
-        error:
-          `deno.json declares "entry": "${declared}", but that file does ` +
-          `not exist — fix the entry (amui will not guess another file)`,
-      };
-    }
+  const entry = resolveEntryPath({ entry: declared ?? undefined });
+  try {
+    await Deno.stat(join(dir, entry));
+    return { ok: true, entry };
+  } catch {
+    return {
+      ok: false,
+      error: declared
+        ? `deno.json declares "entry": "${declared}", but that file does ` +
+          `not exist — fix the entry (amui will not guess another file)`
+        : `no entry found — add "entry" to deno.json, or create ${entry}`,
+    };
   }
-  for (const e of ["src/app.ts", "src/main.ts", "app.ts", "main.ts"]) {
-    try {
-      await Deno.stat(join(dir, e));
-      return { ok: true, entry: e };
-    } catch { /* next */ }
-  }
-  return {
-    ok: false,
-    error: 'no entry found — add "entry" to deno.json, or create src/app.ts',
-  };
 }
 
 /** amui's OWN launcher artifact for `dir`, deliberately still project-local:

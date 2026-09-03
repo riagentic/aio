@@ -80,8 +80,9 @@ port was named: `--port=N`, `AIO_PORT`, or `aio.run({ port })`. A route that
 browser tab beside the window) is exactly the case for naming the port, and boot
 says so: `port N named explicitly — keeping a TCP listener`.
 
-`--zero-port` (the dev opt-in before this was the default) is still accepted as
-a no-op — scripts pass it — and prints one info line.
+`--zero-port` was the dev opt-in before this became the default. It has been a
+no-op since alpha66 and is REFUSED as of alpha76 (src/state/removals.ts) —
+delete it from any script that still passes it.
 
 ## Windows: a named pipe, the same protocol
 

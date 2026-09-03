@@ -373,11 +373,11 @@ const cancellable = cell("cancellable", {
   methods: {
     stop(_s) {},
     async start(
-      s: { running: boolean; finished: boolean } & Partial<MethodDraftMeta>,
+      s: { running: boolean; finished: boolean } & MethodDraftMeta,
     ) {
       s.running = true;
       await sleep(100);
-      if (s.$signal!.aborted) {
+      if (s.$signal.aborted) {
         s.running = false;
         return;
       }
@@ -576,9 +576,9 @@ const cancelMidAll = cell("cancelMidAll", {
   cancelOn: { start: ["cancelMidAll:abort"] },
   methods: {
     abort(_s) {},
-    async start(s: { done: boolean } & Partial<MethodDraftMeta>) {
+    async start(s: { done: boolean } & MethodDraftMeta) {
       await Promise.all([Promise.resolve(1), sleep(200)]);
-      if (s.$signal!.aborted) return;
+      if (s.$signal.aborted) return;
       s.done = true;
     },
   },
@@ -755,7 +755,7 @@ const whenCancelled = cell("whenCancelled", {
   cancelOn: { start: ["whenCancelled:stop"] },
   methods: {
     stop(_s) {},
-    async start(s: { done: boolean } & Partial<MethodDraftMeta>) {
+    async start(s: { done: boolean } & MethodDraftMeta) {
       try {
         // never true — the abort signal is the only way out
         await until(() => false, {

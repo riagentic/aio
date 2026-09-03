@@ -93,3 +93,29 @@ export { totpCode } from "./server/auth-totp.ts";
 //   installUpdatesRuntime({ kind: "manifest", channel: "prod", current: "1.0.0",
 //     exposed: false, check: async () => ({ kind: "offer", update: { … } }),
 //     apply: async () => {}, setChannel: async () => {} });
+
+// ── The types these harnesses' OWN signatures are written in ────────────────
+//
+// Every one of these appears in a public `aio/testing` signature and was
+// exported from no entry point, so a test that wanted to name what it was
+// holding — a `bootCells` options bag lifted into a fixture, a patch collected
+// off `TestClient.patches`, the component `testUI` takes — had to re-declare
+// the shape locally and let it drift from the framework's.
+
+/** One immer patch, as `TestClient.patches` collects them and `onPatch`
+ *  delivers them. */
+export type { Patch } from "./testing/multi-client-test.ts";
+/** `bootCells`'s own options bag — the harness's boot knobs (`cellDefaults`,
+ *  refusal behaviour), also embedded in `testUI`'s options. */
+export type { HarnessBootOptions } from "./testing/boot-refusals.ts";
+/** `testUI`'s FIRST parameter — the component under test — and the
+ *  element-vs-component discriminator its queries take. */
+export type { TestableComponent, UIKind } from "./testing/ui-test.ts";
+/** The semantic UI surface: what `am surface` returns and what the harness
+ *  walks — one node per component, with its elements' live text/value/checked.
+ *  A test that walks the tree itself needs to name both. */
+export type { UIElementInfo, UISurfaceNode } from "./air/ui-surface.ts";
+/** The modifier keys a triggered click/keypress may carry. */
+export type { KeyModifiers } from "./air/ui-trigger.ts";
+/** The client-graph validation `smoke()` reports back (`SmokeResult.graph`). */
+export type { GraphResult } from "./server/graph-validator.ts";

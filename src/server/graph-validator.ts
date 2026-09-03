@@ -9,7 +9,11 @@ import {
   type EsbuildModule,
   judgeClientBundle,
 } from "../build/client-bundle.ts";
-import { SERVER_ONLY_SPECS } from "./server-only-specs.ts";
+import {
+  aioOwnSpecAdvice,
+  isAioOwnSpec,
+  SERVER_ONLY_SPECS,
+} from "./server-only-specs.ts";
 import { SERVER_FILE_RE } from "../entries.ts";
 import { WHERE_HINT } from "../diagnostics/contexts.ts";
 
@@ -150,7 +154,13 @@ export function resolveSpecifier(
         file: importerPath,
         category: "missing-import-map",
         message: `"${spec}" is not in the import map`,
-        fix: `Add "${spec}": "npm:${spec}" to deno.json imports.`,
+        // An `aio/*` entry is never a missing npm package. `SERVER_ONLY_SPECS`
+        // above catches the named subset; `aio/extras` and `aio/sync` sit
+        // OUTSIDE it on purpose and used to land here, getting told to add
+        // `npm:aio/extras` — a package that does not exist.
+        fix: isAioOwnSpec(spec)
+          ? aioOwnSpecAdvice(spec)
+          : `Add "${spec}": "npm:${spec}" to deno.json imports.`,
       },
     };
   }

@@ -25,8 +25,10 @@ See also: [Wire protocol & internals](crdt-protocol.md)
 ## Quick Start
 
 ```ts
+type Todo = { id: string; text: string };
+
 const todos = cell("todos", {
-  state: { items: [], filter: "all" },
+  state: { items: [] as Todo[], filter: "all" },
   sync: true, // all fields LWW, 4h retention
   methods: {
     add(s, text: string) {

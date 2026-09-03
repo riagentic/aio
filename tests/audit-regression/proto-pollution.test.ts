@@ -170,3 +170,39 @@ Deno.test(
     assertEquals(_isFrameworkInternalActionType("plain"), false);
   },
 );
+
+// An ALIAS carries two more paths than `path` — `at` (where the reference goes
+// inside the written value) and `ref` (where it is read from). They arrived
+// with the write-set as `refs` and were not vetted at all, so a check that only
+// ever looked at `path` could be walked straight past.
+Deno.test("F-1: applyMutations rejects a banned key in a live-reference path", () => {
+  const state: Record<string, unknown> = { a: { x: 1 }, b: {} };
+  for (
+    const refs of [
+      [{ at: ["__proto__"], ref: ["a"] }],
+      [{ at: ["ok"], ref: ["constructor", "prototype"] }],
+      [{ at: ["ok"], ref: "notapath" as unknown as string[] }],
+    ]
+  ) {
+    assertThrows(
+      () => applyMutations(state, [{ path: ["b"], value: {}, refs }]),
+      Error,
+      "blocked unsafe mutation",
+    );
+  }
+  // deno-lint-ignore no-explicit-any
+  assertEquals(({} as any).x, undefined);
+});
+
+Deno.test("F-1: applyMutations rejects a refs payload that is not an array", () => {
+  const state: Record<string, unknown> = { a: 1, b: {} };
+  assertThrows(
+    () =>
+      applyMutations(state, [
+        // deno-lint-ignore no-explicit-any
+        { path: ["b"], value: {}, refs: "nope" as any },
+      ]),
+    Error,
+    "blocked unsafe mutation",
+  );
+});
