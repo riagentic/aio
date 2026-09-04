@@ -17,7 +17,13 @@ const _pending = new Map<string, {
   what: string;
 }>();
 
-let _send: ((raw: string) => void) | null = null;
+// Returns whether the frame actually LEFT. `_sendRaw` has answered that
+// question since it stopped swallowing a refused write, and this module threw
+// the answer away: a dropped `sfn` frame then waited the full 30 s to be told
+// "the server never replied (the function may still be running)" — a wrong
+// diagnosis, in the module whose own comment says OFFLINE IS AN ANSWER, NOT A
+// WAIT.
+let _send: ((raw: string) => boolean) | null = null;
 let _cid = 0;
 
 /** Settle every in-flight call as failed. A serverFn call is NOT queued —
@@ -60,7 +66,9 @@ function _watchConnection(): void {
 }
 
 /** Wire the transport's raw send (called by browser-air-transport at boot). */
-export function _registerSfnTransport(send: (raw: string) => void): void {
+export function _registerSfnTransport(
+  send: (raw: string) => boolean,
+): void {
   _send = send;
   _watchConnection();
 }
@@ -96,6 +104,16 @@ export function serverFn<T extends FnMap>(ns: string): Remote<T> {
   return new Proxy({} as Remote<T>, {
     get(_t, prop) {
       if (typeof prop !== "string") return undefined;
+      // NOT a thenable. The trap returns a callable for ANY string prop, so
+      // `await getApi()` (a normal shape — resolving the proxy inside an async
+      // function, or during boot) invoked `then(resolve, reject)`, which
+      // returned a rejected promise and called NEITHER callback: the await
+      // never settled AND an unhandled rejection was raised naming a
+      // namespace that is registered perfectly well. Boot-time rejections are
+      // fatal, so the hang came with a crash and a misleading message.
+      if (prop === "then" || prop === "catch" || prop === "finally") {
+        return undefined;
+      }
       return (...args: unknown[]) =>
         new Promise((resolve, reject) => {
           if (!_send) {
@@ -153,7 +171,17 @@ export function serverFn<T extends FnMap>(ns: string): Remote<T> {
             );
           }, SFN_TIMEOUT_MS);
           _pending.set(cid, { resolve, reject, timer, what });
-          _send(enc("sfn", { cid, ns, name: prop, args: safeArgs }));
+          if (!_send(enc("sfn", { cid, ns, name: prop, args: safeArgs }))) {
+            _pending.delete(cid);
+            clearTimeout(timer);
+            reject(
+              new Error(
+                `${what} was never sent — the transport refused the write. ` +
+                  `The call did not reach the server, so nothing is running: ` +
+                  `retry once the connection is back (useAio().ready).`,
+              ),
+            );
+          }
         });
     },
   });

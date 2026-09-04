@@ -270,10 +270,18 @@ carries two lines the app relies on, and a hand-written unit must carry them
 too:
 
 ```ini
-Restart=always                 # an update or aio.restart() exits 0 to come back
-RestartPreventExitStatus=143   # aio.stop() exits 143 to STAY down
-Environment=AIO_SUPERVISED=1   # "exit; do not spawn your own successor"
+# an update or aio.restart() exits 0 to come back
+Restart=always
+# aio.stop() exits 143 to STAY down
+RestartPreventExitStatus=143
+# "exit; do not spawn your own successor"
+Environment=AIO_SUPERVISED=1
 ```
+
+Comments go on their own lines: systemd has no trailing-comment syntax, so a `#`
+after a directive is part of its value — `Restart=always # …` is refused as
+unparsable and leaves the service with NO restart policy, and the same text
+after `ExecStart=` reaches the binary as extra arguments.
 
 `Restart=on-failure` is the classic mistake: a successful update exits cleanly
 and the service stays down until somebody notices.

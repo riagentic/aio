@@ -14,6 +14,7 @@ import {
   removeDom,
 } from "./vdom-remove.ts";
 import { createDom } from "./vdom-render.ts";
+import { _isFromArray } from "./vdom-create.ts";
 
 /** Diff function signature — injected from vdom-diff.ts to break circular dep.
  *
@@ -37,6 +38,43 @@ export type DiffFn = (
  *  after the mutations yields the region's first node exactly, with no scan and
  *  no guess. Container vnodes (Fragment/EB/Suspense) need it because their
  *  `_dom` must be their first node even when that node is bare text. */
+/** Where a keys warning points. The warning used to name a TAG and nothing
+ *  else — "4 <div> children without keys" — which in any real app is a grep
+ *  through every component for a parent with four divs; the visual app
+ *  manager has dozens, and the one that fired was found by elimination over
+ *  three boots. The parent DOM node is right here, and so are the children:
+ *  name the parent (`tag#id.class`), then the first text each child renders,
+ *  which is how the reader will recognise the spot on screen. Dev-only,
+ *  observe-only — this string is never read by anything but a person. */
+function _whereInTree(
+  parent: Node,
+  children: (VNode | string | number)[],
+): string {
+  const el = parent as Partial<Element> & Node;
+  const tag = String(el.nodeName ?? "?").toLowerCase();
+  const id = typeof el.id === "string" && el.id ? `#${el.id}` : "";
+  const cls = typeof el.className === "string" && el.className
+    ? `.${el.className.split(/\s+/)[0]}`
+    : "";
+  const firstText = (c: VNode | string | number): string => {
+    if (typeof c !== "object") return String(c);
+    for (const k of c.children ?? []) {
+      if (typeof k === "string" || typeof k === "number") return String(k);
+      const t = firstText(k);
+      if (t) return t;
+    }
+    return "";
+  };
+  const samples = children.slice(0, 4).map((c) => {
+    const t = firstText(c).trim().replace(/\s+/g, " ").slice(0, 24);
+    return t ? JSON.stringify(t) : "(no text)";
+  });
+  return ` — inside <${tag}${id}${cls}>, children start: ${
+    samples.join(", ")
+  }` +
+    (children.length > 4 ? `, … (${children.length} total)` : "");
+}
+
 export function diffChildren(
   parent: Node,
   nextChildren: (VNode | string | number)[],
@@ -59,27 +97,44 @@ export function diffChildren(
     const someUnkeyed = nextChildren.some(
       (c) => typeof c === "object" && c.key === undefined,
     );
-    // AIO-69: Warn when multiple element children have no keys at all
+    // AIO-69: Warn when multiple element children have no keys at all — but
+    // only for children that came out of an ARRAY EXPRESSION (a `.map`
+    // result, or any nested array the runtime flattened; see `_isFromArray`).
+    // Positional reconciliation of siblings written out by hand is always
+    // right and no key would change it, yet the check counted them too: a
+    // sidebar of four literal `<div>` panes warned on every boot of the
+    // visual app manager, and the reader learned to skip the channel.
     if (!someKeyed && someUnkeyed && nextChildren.length > 2) {
       const vnodeChildren = nextChildren.filter(
-        (c) => typeof c === "object" && typeof c.tag !== "undefined",
+        (c) =>
+          typeof c === "object" && typeof c.tag !== "undefined" &&
+          _isFromArray(c),
       );
       if (vnodeChildren.length > 2) {
         const tags = new Set(vnodeChildren.map((c) => (c as VNode).tag));
         if (tags.size === 1) {
+          // Deduped per SITE, not per kind: on a fixed id a page with three
+          // offending parents reported the first and the next surfaced only
+          // once that one was fixed (measured on the visual app manager —
+          // fix one, reboot, a different one appears). The location suffix
+          // IS the site, so it is the id; each distinct one warns once, and
+          // all of them show up on the first boot.
+          const where = _whereInTree(parent, nextChildren);
           _devWarn(
-            "missing-keys",
+            `missing-keys${where}`,
             `${vnodeChildren.length} <${
               String([...tags][0])
-            }> children without keys. Add key props for correct reconciliation.`,
+            }> children without keys. Add key props for correct reconciliation.${where}`,
           );
         }
       }
     }
     if (someKeyed && someUnkeyed) {
+      const where = _whereInTree(parent, nextChildren);
       _devWarn(
-        "mixed-keys",
-        "Mixed keyed and unkeyed children — all siblings should have keys or none.",
+        `mixed-keys${where}`,
+        "Mixed keyed and unkeyed children — all siblings should have keys or none." +
+          where,
       );
     }
     if (hasKeys) {

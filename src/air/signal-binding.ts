@@ -5,7 +5,7 @@ import { effect } from "../state/signal.ts";
 import type { Signal } from "../state/signal.ts";
 import { styleValue } from "./ssr-utils.ts";
 // The prop→DOM rule is shared with `applyProps`. It used to be copied here, and
-// the copy had no `svgAttrName` mapping and no `k in el` guard: `strokeWidth`
+// the copy had no `attrNameOf` mapping and no `k in el` guard: `strokeWidth`
 // landed as a literal attribute SVG ignores, and `disabled` on a non-form
 // element became an invisible JS expando. Same prop, different DOM, purely
 // because the value was a signal.
@@ -126,12 +126,31 @@ export function reassertControlledSignalProps(
  *  answers for an element, this is the key set to LOOK for. */
 const _CONTROLLED_PROPS = ["value", "checked"] as const;
 
-/** Dispose all signal-binding effects for an element. */
+/** Dispose all signal-binding effects for an element.
+ *
+ *  Every cleanup runs, and the registry entry goes, even when one throws. An
+ *  unguarded loop left the REMAINING bindings of a removed element live — each
+ *  still subscribed, each still writing to a node that is no longer in the
+ *  document — and skipped the `delete`, so the element and its whole closure
+ *  chain stayed reachable from the map for the life of the page. A leak and a
+ *  set of writes into nowhere, from one throwing disposer. */
 export function cleanupSignalBindings(el: Element): void {
   const cleanups = _signalBindingCleanups.get(el);
   if (cleanups) {
-    for (const fn of cleanups) fn();
+    // Deleted FIRST: whatever happens below, this element is not coming back,
+    // and a re-entrant cleanup must not find the same list again.
     _signalBindingCleanups.delete(el);
+    for (const fn of cleanups) {
+      try {
+        fn();
+      } catch (e) {
+        console.error(
+          "[aio-renderer] a signal binding threw while being disposed (the " +
+            "element's other bindings were still disposed):",
+          e,
+        );
+      }
+    }
   }
 }
 

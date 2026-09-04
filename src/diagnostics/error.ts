@@ -611,7 +611,14 @@ export function generateTip(err: AioError): string | undefined {
       // then check, and the one thing that was not wrong.
       const cause = `${err.message} ${err.original?.message ?? ""}`;
       const disk =
-        /os error|\bE(ACCES|NOSPC|ROFS|PERM|IO|BUSY|MFILE|DQUOT)\b|permission denied|no space|read-?only|SQLITE_(FULL|READONLY|CANTOPEN|IOERR|BUSY|LOCKED)|disk i\/o|database is locked|unable to open database/i
+        // The DRIVER's words, not SQLite's symbol names. node:sqlite surfaces
+        // SQLITE_FULL as the string "database or disk is full", which matched
+        // nothing here — so the one message that means "you are out of disk"
+        // was answered with "this does not look like a disk-space failure".
+        // Measured on a real app with a page-count cap. The symbols stay
+        // because a wrapper may pass them through; the strings are what
+        // actually arrives.
+        /os error|\bE(ACCES|NOSPC|ROFS|PERM|IO|BUSY|MFILE|DQUOT)\b|permission denied|no space|disk is full|read-?only|SQLITE_(FULL|READONLY|CANTOPEN|IOERR|BUSY|LOCKED)|disk i\/o|database is locked|unable to open database/i
           .test(cause);
       return disk
         ? "Tip: State persist failed — changes are in memory but will be lost on restart. Check disk space and file permissions."

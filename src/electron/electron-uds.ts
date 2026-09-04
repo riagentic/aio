@@ -294,6 +294,18 @@ ${tmplRendererDiagnostics(true)}
   const backoffDelay = ${backoffDelay.toString()};
   const SOCK = ${JSON.stringify(socketPath)};
   let buf = '', retry = 0, lastFullState = null;
+  // The connection's \`proto\` hello and \`cfg\` frame, cached like the snapshot.
+  // The server writes both ONCE, at accept (uds.ts) — and this socket belongs
+  // to the main process, so it outlives every document the window shows. A
+  // reload (Ctrl+R, Ctrl+Shift+Del, the app's own location.reload()) never
+  // reaches the server as a new connection, and the re-seed below used to
+  // hand the fresh document the last snapshot and nothing else. On the
+  // packaged aio:// shell \`cfg\` is the ONLY carrier of syncCells (localFirst
+  // adoption), callTimeouts and renderBudget — udsProdHTML embeds none of
+  // them — so one Ctrl+R silently turned every localFirst cell back into a
+  // round-trip and every awaited call onto the default ceiling. Dev never
+  // showed it: its shell embeds the same keys.
+  let lastProto = null, lastCfg = null;
   // ONE decider for "the renderer can receive frames": its own __aio:ready
   // signal. Readiness used to be decided TWICE — did-finish-load gated every
   // relayed frame while __aio:ready gated a replay that carried only the last
@@ -321,6 +333,29 @@ ${tmplRendererDiagnostics(true)}
   // relayed straight past this queue — one path in, one path out, so a frame
   // cannot overtake an older one that is still waiting.
   const _pending = [], PENDING_MAX = 500;
+  // When readiness was cleared, and whether the stall has been reported. A
+  // relay that stops delivering is INVISIBLE by construction: the socket is
+  // open, the uplink works, connected stays true, and the only symptom is a
+  // screen that does not change. The old queue said nothing until it had
+  // dropped 500 frames — which for a quiet app is never. Fail loud instead:
+  // one line naming the stall, and the window is told too, so a dev sees it in
+  // the app rather than in a terminal they are not reading. (cc §5.1.)
+  let _notReadySince = 0, _stallReported = false;
+  // A stall needs a VICTIM: a document that was alive and listening when the
+  // gate closed, and that nothing has replaced since. Without this the
+  // detector fired on the FIRST load — the gate closes on loadURL's own
+  // navigation, no document has ever signalled ready, a busy app's frames
+  // arrive for 5 s while a large bundle parses — and reported "down" to
+  // /__aio/health and sent the dropped-socket signal to a page that had not
+  // registered a listener yet, then "up" when the page simply arrived. An
+  // instrument saying "down" for a client that is provably loading is a
+  // false reading, not noise. A reload is the same case once its navigation
+  // COMMITS (did-navigate): the old document is gone and the new one will
+  // announce itself, or did-fail-load restores the old one — neither is a
+  // stall. The stall is the gap in between: gate closed on a ready document,
+  // no commit, no veto, no failure — cc §5.1's frozen page.
+  let _stallCandidate = false, _slowLoadNoted = false;
+  const STALL_MS = 5000;
   function _queue(k, line) {
     // A full snapshot supersedes every state/patches frame queued before it —
     // that keeps the state stream O(1) here without dropping anything else.
@@ -331,6 +366,39 @@ ${tmplRendererDiagnostics(true)}
       }
     }
     _pending.push({ k: k, line: line });
+    const gatedMs = (!rendererReady && _notReadySince)
+      ? Date.now() - _notReadySince
+      : 0;
+    if (gatedMs > STALL_MS && !_stallCandidate && !_slowLoadNoted) {
+      // A slow load, said once, as what it is — observe-only, no signal to
+      // the window, nothing to the server: the mount watchdog
+      // (tmplRendererDiagnostics) is the instrument for a page that never
+      // arrives at all.
+      _slowLoadNoted = true;
+      _rlog('info', 'the document is still loading after ' +
+        Math.round(gatedMs / 1000) + 's — ' + _pending.length +
+        ' frame(s) wait for it to signal ready (a large bundle or a slow ' +
+        'disk is the usual cause; not a relay stall: no document was ' +
+        'listening when this load began)');
+    }
+    if (gatedMs > STALL_MS && _stallCandidate && !_stallReported) {
+      _stallReported = true;
+      const why = 'the renderer has not signalled ready for ' +
+        Math.round((Date.now() - _notReadySince) / 1000) + 's and ' +
+        _pending.length + ' frame(s) are undelivered — the window is CONNECTED ' +
+        'but receiving nothing. A new document sends __aio:ready; a navigation ' +
+        'that never loaded one leaves the relay stalled here.';
+      console.warn('[aio:electron] ' + why);
+      // Said where it can be SEEN, not only in a terminal nobody is reading:
+      // the window gets the same signal a dropped socket gives it, so its
+      // connection banner shows instead of a frozen page that claims to be
+      // connected (cc §5.3, ask 2) — and the server hears it as a client
+      // degradation, so /__aio/health and am status stop saying "healthy"
+      // (ask 3). Reopened by whatever restores the relay: the new document's
+      // __aio:ready, did-fail-load, or a vetoed navigation.
+      if (!closing && !win.isDestroyed()) win.webContents.send('__aio:close');
+      _relayHealth('down', why);
+    }
     if (_pending.length > PENDING_MAX) {
       const lost = _pending.splice(0, _pending.length - PENDING_MAX);
       console.warn('[aio:electron] renderer has not signalled ready — dropped ' +
@@ -341,25 +409,115 @@ ${tmplRendererDiagnostics(true)}
     if (!rendererReady || closing || win.isDestroyed()) return;
     while (_pending.length > 0) win.webContents.send('__aio:msg', _pending.shift().line);
   }
-  // MAIN-FRAME navigations only: a <webview> guest attaching/navigating also
-  // fires did-start-navigation on the embedder's webContents — clearing
-  // readiness on that would strand the relay forever (only a NEW document
-  // sends __aio:ready), silently freezing every server→renderer frame the
-  // moment a webview attached. Handles both Electron signatures: new
-  // (event-details object with isMainFrame) and legacy positional (4th arg).
+  // THE NAVIGATION CONTRACT — from measurement, not from the docs.
+  //
+  // What real Electron (44) emits, in order, and the shape of each:
+  //
+  //   a vetoed in-app <a> click:   did-start-navigation {sameDoc:false}
+  //                                will-navigate {vetoed}
+  //                                did-stop-loading            — nothing else
+  //   history.pushState / a hash:  did-start-navigation {sameDoc:TRUE}
+  //                                did-navigate-in-page
+  //   location.reload():           did-start-navigation {sameDoc:false}
+  //                                will-navigate  (with the CURRENT url)
+  //                                did-navigate … dom-ready … did-finish-load
+  //   an allowed navigation:       did-start-navigation {sameDoc:false}
+  //                                will-navigate  did-navigate … did-finish-load
+  //
+  // Two facts in there decide everything below. did-start-navigation fires
+  // BEFORE will-navigate, as a cross-document navigation, even when the veto
+  // is about to happen — so at that moment the shell cannot know whether a
+  // new document is coming. And a vetoed navigation emits NO did-fail-load,
+  // so nothing after the veto will ever reopen what was closed.
+  //
+  // That is the whole of field report cc §5.1/§5.2/§5.3: clearing readiness
+  // here on every cross-document navigation closed the relay on every link
+  // click, the veto kept the old document, and the relay stayed closed for its
+  // life — frames queued, none delivered, uplink fine, screen frozen,
+  // connected still true. A first fix guarded on isSameDocument and passed
+  // a stub that had guessed the order; real Electron does not emit that flag
+  // on the event that matters. So:
+  //
+  //   • did-start-navigation only GATES (readiness off, nothing destroyed);
+  //   • will-navigate's in-app veto REOPENS it (_onInAppNavVetoed) — the
+  //     veto is the one moment the shell knows the document is staying, and
+  //     it always runs after the gate closed;
+  //   • did-navigate — the new document's COMMIT, which a vetoed navigation
+  //     never reaches — does the destructive half: drop queued deltas (they
+  //     assume a base the new document does not have) and seed the snapshot.
+  //
+  // Same-document navigations (pushState, hash) are skipped outright: the
+  // document, and its listeners, are not going anywhere. <webview> guests fire
+  // this on the embedder's webContents with isMainFrame false and are skipped
+  // for the same reason. Both signatures handled: modern (details object) and
+  // legacy positional (event, url, isInPlace, isMainFrame).
   win.webContents.on('did-start-navigation', (e, _url, _inPlace, isMainFrame) => {
     const main = (e && typeof e.isMainFrame === 'boolean') ? e.isMainFrame: isMainFrame;
     if (main === false) return;
-    // A new document starts with no base state, so a queued DELTA is
-    // meaningless to it — replace the queued state stream with the latest
-    // snapshot. Connection-scoped frames (proto/cfg/…) still apply and stay.
+    const sameDoc = (e && typeof e.isSameDocument === 'boolean')
+      ? e.isSameDocument
+      : _inPlace;
+    if (sameDoc === true) return;
+    _stallCandidate = rendererReady; // only a listening document can be stalled
+    _slowLoadNoted = false;
     rendererReady = false;
+    _notReadySince = Date.now();
+  });
+  // The document REALLY changed. Only now is a queued DELTA meaningless — it
+  // assumes a base state the new document does not have — so the queued
+  // state stream is replaced with the latest snapshot. Connection-scoped
+  // frames (proto/cfg/…) still apply and stay. (Doing this at
+  // did-start-navigation destroyed the queue of a document that then turned
+  // out to be staying.)
+  win.webContents.on('did-navigate', () => {
+    // The old document is gone; the new one announces itself when it is
+    // ready. Waiting for that is a load, not a stall.
+    _stallCandidate = false;
     for (let i = _pending.length - 1; i >= 0; i--) {
       const pk = _pending[i].k;
       if (pk === 'state' || pk === 'patches') _pending.splice(i, 1);
     }
     if (lastFullState) _pending.push({ k: 'state', line: lastFullState });
+    // …and the connection-scoped frames it never saw, FIRST, in accept order
+    // (proto, cfg, then the snapshot) — unless one of that kind is still in
+    // the queue, in which case the queued one is newer or the same and is
+    // delivered once, not twice.
+    const queued = new Set(_pending.map((p) => p.k));
+    if (lastCfg && !queued.has('cfg')) _pending.unshift({ k: 'cfg', line: lastCfg });
+    if (lastProto && !queued.has('proto')) _pending.unshift({ k: 'proto', line: lastProto });
   });
+  // will-navigate vetoed an in-app navigation (tmplWillNavigate calls this):
+  // the document stays, so everything queued for it is still valid — reopen
+  // the relay and deliver. Idempotent: a veto that arrives with the relay
+  // already open (an older Electron that orders the events differently) is a
+  // no-op, never a double pump.
+  function _onInAppNavVetoed(navUrl) {
+    if (rendererReady) return;
+    rendererReady = true;
+    _notReadySince = 0;
+    if (_stallReported) {
+      _stallReported = false;
+      _relayHealth('up', 'the relay reopened on the vetoed navigation to ' + navUrl);
+    }
+    _pump();
+  }
+  // The relay's health, as the SERVER sees it. A renderer that receives
+  // nothing is invisible from the server side by construction — the socket it
+  // reads is this process's, and this process is reading it fine — so the
+  // shell reports on its behalf through the same cdiag frame a browser's
+  // own degraded() escalation travels on. It lands in /__aio/health as
+  // clientDegraded, which is what am status and am health read: the
+  // field report's "connected for minutes, received nothing, and every
+  // instrument said fine" (cc §5.3, ask 3).
+  function _relayHealth(kind, lastError) {
+    if (!sock || sock.destroyed) return;
+    try {
+      sock.write(JSON.stringify({ v: 2, t: 'cdiag', d: {
+        name: 'electron:relay', kind: kind, failures: kind === 'down' ? 1 : 0,
+        since: _notReadySince || Date.now(), lastError: lastError,
+      } }) + '\\n');
+    } catch (e) { console.warn('[aio:electron] could not report relay health: ' + e); }
+  }
 
   // A main-frame navigation that FAILS leaves the old document in place — and
   // that document already signalled ready once; it will not do so again. Give
@@ -370,6 +528,11 @@ ${tmplRendererDiagnostics(true)}
   win.webContents.on('did-fail-load', (e, code, desc, failedUrl, isMainFrame) => {
     if (isMainFrame === false || rendererReady) return;
     rendererReady = true;
+    _notReadySince = 0;
+    if (_stallReported) {
+      _stallReported = false;
+      _relayHealth('up', 'the failed navigation left the old document in place');
+    }
     _pump();
     console.warn('[aio:electron] navigation to ' + failedUrl + ' failed (' + code + ' ' + desc +
       ') — the previous document stays and keeps its bridge');
@@ -378,6 +541,11 @@ ${tmplRendererDiagnostics(true)}
   ipcMain.on('__aio:ready', () => {
     if (closing) return;
     rendererReady = true;
+    _notReadySince = 0;
+    if (_stallReported) {
+      _stallReported = false;
+      _relayHealth('up', 'a document signalled ready');
+    }
     if (sock) {
       win.webContents.send('__aio:open');
       _pump();
@@ -401,6 +569,7 @@ ${tmplRendererDiagnostics(true)}
     sock.on('connect', () => {
       if (down) { console.info("[aio:electron] backend connection restored (" + SOCK + ")"); down = false; }
       retry = 0; lastErrCode = null; lastFullState = null;
+      lastProto = null; lastCfg = null; // a new connection speaks its own hello
       while (_ipcQueue.length > 0 && sock && !sock.destroyed) sock.write(_ipcQueue.shift() + '\\n');
       if (!closing && rendererReady) { win.webContents.send('__aio:open'); _pump(); }
     });
@@ -418,6 +587,8 @@ ${tmplRendererDiagnostics(true)}
         // if it were a snapshot. dec()-then-switch removes the whole class.
         const kind = frameKind(line);
         if (kind === 'state') lastFullState = line;
+        else if (kind === 'proto') lastProto = line;
+        else if (kind === 'cfg') lastCfg = line;
         _queue(kind, line);
       }
       _pump();
@@ -551,7 +722,7 @@ ${tmplKeyboardShortcuts()}
   const _appOrigin = USE_PROTOCOL ? 'aio://app': (u => u.protocol + '//' + u.host)(new URL(${
     JSON.stringify(url)
   }));
-${tmplWillNavigate("_appOrigin")}
+${tmplWillNavigate("_appOrigin", "_onInAppNavVetoed")}
 });
 
 app.on('window-all-closed', () => {

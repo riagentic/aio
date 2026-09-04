@@ -31,7 +31,15 @@ import type { HLC } from "../../src/sync/types.ts";
 import { createTestDb, recordingSocket, until } from "./_test-db.ts";
 
 const CELL = "vault";
-const hlc = (phys: number, cnt = 0, node = "n1"): HLC => [phys, cnt, node];
+// Stamped relative to NOW: an UNKNOWN op stamped older than the server's
+// tombstone window is refused by name (`STALE_OP_REASON`), and an epoch-era
+// literal is an ordering label, not "an op from 1970". Offsets keep order.
+const T0 = Date.now();
+const hlc = (phys: number, cnt = 0, node = "n1"): HLC => [
+  T0 + phys,
+  cnt,
+  node,
+];
 
 type Log = {
   info: string[];

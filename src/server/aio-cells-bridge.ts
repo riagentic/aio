@@ -14,6 +14,9 @@ import {
   teachableError,
 } from "../diagnostics/error.ts";
 import { nearestOf } from "../state/cell-helpers.ts";
+import { parseRetention } from "../sync/op-buffer.ts";
+import { resolveOptions } from "../diagnostics/types.ts";
+import { isLockOwnerAlive, lockKey, readLock } from "./single-instance-lock.ts";
 import { AioLogger, log, setLogger } from "../diagnostics/logger.ts";
 import { createStormDetector } from "../diagnostics/dispatch-storm.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
@@ -90,7 +93,11 @@ export function buildLegacyConfig(
     // `true`/omitted → defaults; object → tuned; false → disabled (above).
     ...(typeof fc.dispatchStorm === "object" ? fc.dispatchStorm : {}),
     onStorm: (info) => {
-      if (info.rate === 0) {
+      // `ended`, not a guess from the rate. A storm that stops by dropping
+      // back UNDER the threshold ends at a non-zero rate, so this branch never
+      // fired for it and the recovery was reported as a fresh storm — with a
+      // rate below the threshold that triggers one.
+      if (info.ended) {
         log.info(
           "storm",
           `${info.type} storm ended after ${info.seconds}s above threshold`,
@@ -287,6 +294,15 @@ export function buildLegacyConfig(
         c,
       ) => [c.__aio.id, [...(c.__aio.asyncMethods ?? [])]]),
     ),
+    // Cell id → method name → REQUIRED argument count. A short call (`am
+    // dispatch todo:add` with no text) reached the method as
+    // `add(s, undefined)` and wrote a row whose declared field was gone, under
+    // a green `{"ok":true}`; the trojan refuses it by name now, the way it
+    // already refuses an unknown method. Empty for actions-form cells, where a
+    // positional count is not the calling convention.
+    _cellMethodArity: Object.fromEntries(
+      composed.cells.map((c) => [c.__aio.id, c.__aio.methodArity ?? {}]),
+    ),
     // Cell id → per-field { persisted, ui } flags — trojan `fields` route (amui
     // State overview). Answers "what survives a restart" (persist) and "what
     // ships to the browser" (ui) for every top-level state key.
@@ -329,6 +345,22 @@ export function buildLegacyConfig(
     _syncCellIds: composed.cells
       .filter((f) => f.__aio.syncConfig)
       .map((f) => f.__aio.id),
+    // How long a client may hold an unacked op for this cell. The SERVER
+    // needs it: compaction deletes op rows and tombstones their ids so the
+    // `INSERT OR IGNORE` dedup survives, and it swept those tombstones on a
+    // fixed 24h — justified by a comment claiming client-side eviction made
+    // older resends impossible. It does not (that eviction only runs when the
+    // buffer is at `pendingCap`), and `offline.retention` is per-cell with
+    // `"7d"` as the docs' own example. A resend after the sweep is a
+    // server-side DOUBLE APPLY. One declaration, both ends.
+    _syncRetentionMs: (() => {
+      const out: Record<string, number> = {};
+      for (const f of composed.cells) {
+        const r = f.__aio.syncConfig?.offline?.retention;
+        if (r) out[f.__aio.id] = parseRetention(r);
+      }
+      return out;
+    })(),
     // Everything that is not explicitly `persist: "none"` reaches the store.
     _persistingCellIds: composed.cells
       .filter((f) => f.__aio.persist !== "none")
@@ -416,7 +448,22 @@ export async function initLogger(
       redact: makeRedactor(fc.redactActions),
     })
     : null;
-  if (logger) await logger.init();
+  // Do NOT rotate the logs of an app that is already running. `logger.init()`
+  // happens long before `acquireSingletonLock`, so a start that was about to
+  // be REFUSED ("Already running", or a taken port) renamed the LIVE
+  // instance's `app.log` to `app.log.1` and exited — the running process kept
+  // appending to the renamed inode, and `am logs` then answered "no log file
+  // at …/stdout.log" for a perfectly healthy app. Same bug as the one already
+  // closed for `--help`/`--version`; the common case was left in.
+  //
+  // Read, never acquire: this is only "is someone else there", and the real
+  // decision still belongs to `acquireSingletonLock`.
+  if (logger) {
+    const held = readLock(lockKey(appId, dirs.home));
+    const live = held !== null && isLockOwnerAlive(held) &&
+      held.pid !== Deno.pid;
+    await logger.init({ rotate: !live });
+  }
   setLogger(logger);
   return logger;
 }
@@ -436,11 +483,28 @@ export async function wrapAppWithCells(
       .heap_size_limit;
   } catch { /* node:v8 unavailable — fall back to heapTotal in monitor */ }
 
+  // `diagnostics.{dev,prod}.memoryMonitor` is DECLARED, defaulted (`false` in
+  // prod), snapshotted in the public API — and was read by nobody: `grep -rn
+  // "\.memoryMonitor" src/` found zero consumers, so the monitor ran every
+  // 10 s in production, doing a full recursive `sizeof()` over all cell state,
+  // while the documented default said it was off. Third instance of a class
+  // this repo has already fixed twice (`timeTravel`, `vitals.backpressure`);
+  // `check:dead-wiring` cannot see it because it scans exports, not config
+  // keys. Both switches now have to agree — the diagnostics option says
+  // whether the FEATURE is on, `memory.enabled` is the app's own override.
+  const _diagOpts = resolveOptions(
+    fc.diagnostics ?? true,
+    _cellReportOpts.prod === true,
+  );
+  const _memoryOpt = _diagOpts === false ? false : _diagOpts.memoryMonitor;
+  const _memoryCfg = typeof _memoryOpt === "object" ? _memoryOpt : undefined;
   const memoryMonitor = createMemoryMonitor({
-    enabled: fc.memory?.enabled ?? true,
-    interval: fc.memory?.interval ?? 10_000,
-    warnThreshold: fc.memory?.warnThreshold ?? 0.75,
-    criticalThreshold: fc.memory?.criticalThreshold ?? 0.90,
+    enabled: _memoryOpt !== false && (fc.memory?.enabled ?? true),
+    interval: fc.memory?.interval ?? _memoryCfg?.interval ?? 10_000,
+    warnThreshold: fc.memory?.warnThreshold ?? _memoryCfg?.warnThreshold ??
+      0.75,
+    criticalThreshold: fc.memory?.criticalThreshold ??
+      _memoryCfg?.criticalThreshold ?? 0.90,
     onReport: (report) => {
       const code = report.level === "critical"
         ? "MEMORY_CRITICAL"
@@ -448,9 +512,15 @@ export async function wrapAppWithCells(
       const topCell = report.cellStates[0];
       const err = createAioError(
         code as import("../diagnostics/error.ts").AioErrorCode,
-        `heap at ${(report.heapPct * 100).toFixed(0)}% (${
-          (report.heapUsed / 1e6).toFixed(0)
-        } MB / ${(report.heapLimit / 1e6).toFixed(0)} MB)`,
+        // A pressure alarm whose one number reads "0%" says nothing — the
+        // same defect as the "unreachable for 0.0s" already fixed in vitals.
+        `heap at ${
+          report.heapPct < 0.01
+            ? (report.heapPct * 100).toFixed(2)
+            : (report.heapPct * 100).toFixed(0)
+        }% (${(report.heapUsed / 1e6).toFixed(0)} MB / ${
+          (report.heapLimit / 1e6).toFixed(0)
+        } MB)`,
         { cellName: topCell?.name },
       );
       reportAioError(err, _cellReportOpts);

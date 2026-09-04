@@ -77,6 +77,14 @@ async function install(
   const dataDir = appDirs(name).home;
   if (what.program) {
     await Deno.mkdir(dir, { recursive: true });
+    // The STABLE LAUNCHER a real install writes (`installedAppPaths().stable`
+    // — `<dir>/<name>`), not just some file in the directory. `am remove` now
+    // requires evidence that the directory is aio's before it runs a recursive
+    // delete: `installRoot()` is a plain folder a person keeps other things
+    // in, and "a directory exists there" was enough to list it in
+    // `am installed` and delete it with exit 0. A fixture that a real install
+    // would not produce cannot stand in for one.
+    await Deno.writeTextFile(join(dir, name), "#!/bin/sh\n");
     await Deno.writeTextFile(join(dir, "the-binary"), "#!/bin/sh\n");
   }
   if (what.data) {

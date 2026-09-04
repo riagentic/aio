@@ -19,6 +19,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
+import { childEnv } from "./e2e-app-harness.ts";
 
 const REPO = new URL("../", import.meta.url).pathname;
 
@@ -106,6 +107,10 @@ async function boot(dir: string, port: number) {
   const child = new Deno.Command(Deno.execPath(), {
     args: ["run", "-A", join(dir, "app.ts")],
     cwd: dir,
+    // The floor every spawned test app gets: a home under AIO_APPS_DIR, never
+    // `~/.<appId>` — this file left `~/.cell-worker-e2e` behind on every direct
+    // run until check:home-clean named it.
+    env: childEnv(),
     stdout: "piped",
     stderr: "piped",
   }).spawn();

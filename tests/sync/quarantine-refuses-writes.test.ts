@@ -42,7 +42,9 @@ function makeHandler(db: ReturnType<typeof createTestDb>["db"], opts: {
 
 const op = (id: string) => ({
   id,
-  hlc: [1000, 0, "c1"] as HLC,
+  // Stamped NOW — an unknown op stamped older than the tombstone window is
+  // refused by name (`STALE_OP_REASON`), and this fixture is not about age.
+  hlc: [Date.now(), 0, "c1"] as HLC,
   cell: CELL,
   action: "add",
   payload: { text: "hi" },

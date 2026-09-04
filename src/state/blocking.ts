@@ -38,6 +38,9 @@ export type BlockingPool = {
   /** Terminate IDLE workers when nothing is running or queued; keeps the pool
    *  usable (it respawns on demand). Returns false when work is in flight. */
   disposeIdle(): boolean;
+  /** The ids of the tasks holding the pool open — what a refused
+   *  `disposeIdle()` is waiting for. Empty when nothing is in flight. */
+  inFlight(): string[];
   /** Max concurrent workers. */
   readonly size: number;
 };
@@ -170,7 +173,33 @@ export function createBlockingPool(opts?: { size?: number }): BlockingPool {
 
   function assign(w: Worker, task: Task): void {
     active.set(w, task);
-    w.postMessage({ n: task.n, src: task.src, arg: task.arg });
+    try {
+      w.postMessage({ n: task.n, src: task.src, arg: task.arg });
+    } catch (e) {
+      // `postMessage` refuses an uncloneable `arg` SYNCHRONOUSLY. The throw
+      // used to unwind out of `pump()` and out of the caller's promise
+      // executor — so the caller was rejected (fine) and the worker was left
+      // in `active` FOREVER: never released, never retired, capacity
+      // permanently one lower. On a 2-core box (`DEFAULT_SIZE` = hw-1 = 1)
+      // that means every later `blocking()` call returns a promise that never
+      // settles, and `disposeIdle()` returns false at shutdown so the process
+      // cannot exit — a silent hang, from one bad argument.
+      //
+      // Same words as the worker-cell boundary (`cell-worker.ts`), because it
+      // is the same mistake: one message, one clone, one explanation.
+      active.delete(w);
+      retire(w);
+      task.reject(
+        new Error(
+          `blocking("${task.id}") argument cannot cross a worker boundary: ${
+            e instanceof Error ? e.message : String(e)
+          }.\nIt is reached by postMessage, so the argument is ` +
+            `structured-cloned. Pass plain data (no functions, class ` +
+            `instances, or live cell proxies); \`{ ...obj }\` off a proxy is ` +
+            `already materialised.`,
+        ),
+      );
+    }
   }
 
   // Backpressure: only `size` workers ever run at once; the rest wait in queue.
@@ -251,6 +280,12 @@ export function createBlockingPool(opts?: { size?: number }): BlockingPool {
       if (cancelled) pump();
       return cancelled;
     },
+    inFlight(): string[] {
+      return [
+        ...[...active.values()].map((t) => t.id),
+        ...queue.map((t) => t.id),
+      ];
+    },
     disposeIdle(): boolean {
       // An app shutting down must not leave worker threads alive (they keep
       // the process — and a `testServer()` test run — from exiting), but the
@@ -312,6 +347,13 @@ blocking.cancel = (id: string): boolean => (_pool ? _pool.cancel(id) : false);
  *  outlive the app that spawned them, but the pool is process-global and a
  *  co-hosted app may still be using it. */
 blocking.disposeIdle = (): boolean => (_pool ? _pool.disposeIdle() : true);
+/** The task ids holding the global pool open — what a refused `disposeIdle()`
+ *  is waiting for. NOT on the `blocking` facade: that is public surface and
+ *  this is a shutdown diagnostic. @internal */
+export function _blockingInFlight(): string[] {
+  return _pool ? _pool.inFlight() : [];
+}
+
 /** Tear down the global pool (terminate workers) — call on shutdown/in tests. */
 blocking.dispose = async (): Promise<void> => {
   if (_pool) {

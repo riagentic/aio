@@ -951,6 +951,19 @@ export function buildMethodsExecutor(
             // .catch below, which rejects the caller and reports the error —
             // identical in dev, prod and every test harness.
             await batcher.settled();
+            // SEAL HERE, not in the trailing `.finally`.
+            //
+            // The write-set is in and accepted; from this instant a write
+            // through `s` (or `s.$live`) can only come from a callback that
+            // outlived the method. Closing in the `.finally` put that instant
+            // two microtask turns AFTER the caller's promise resolved — so a
+            // write in that window was still ACCEPTED, which is exactly the
+            // behaviour `close()`'s own comment describes as the bug
+            // ("persisted, broadcast, ok: true, not a line in any log"), and
+            // it happened after `await cell.method()` had already returned.
+            // `close()` is idempotent; the `.finally` still calls it for the
+            // paths that never reach here.
+            batcher.close();
             // AIO-381/382: async methods can return schedule + own effects,
             // same as sync methods. Detection is conservative — only
             // `__schedule`/`__own`-typed values count, so data returns to
@@ -1018,6 +1031,9 @@ export function buildMethodsExecutor(
             // Transactional abort: a throw/cancel discards the whole
             // buffered write-set — no partial commit.
             if (transactional) batcher.discard();
+            // Same instant, the failing way out: the call is over, so the
+            // view is sealed before its caller hears about it.
+            batcher.close();
             resolveCall(_callId, undefined, e);
             const _onError = (app as Record<string, unknown>)._onError as
               | ((err: AioError) => void)

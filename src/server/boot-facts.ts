@@ -93,6 +93,13 @@ export type BootExtras = {
   serverFns?: string[];
   /** Where everything this app owns lives — the one directory to back up. */
   dataDir?: string;
+  /** The resolved SQLite file, when `--db-path`/`dbPath` moved it out of the
+   *  data dir. Without this the report's `data` line named a directory the
+   *  state was NOT in — and a relative `--db-path` resolves against CWD, so a
+   *  systemd unit with `WorkingDirectory=/` wrote `/rel.db` while the report
+   *  pointed at `~/.<appId>`. The one line an operator reads for "where does
+   *  this app keep its data" has to name the file actually opened. */
+  dbFile?: string;
   /** Wire protocol version this build speaks. */
   protocol?: number;
   /** Cell ids, in registration order. */
@@ -164,6 +171,7 @@ export function bootLines(
   }
   if (extra.heap) lines.push(["heap", extra.heap]);
   if (extra.dataDir) lines.push(["data", extra.dataDir]);
+  if (extra.dbFile) lines.push(["db", extra.dbFile]);
   if (extra.logs) {
     lines.push(["logs", `${extra.logs.dir} · ${extra.logs.level}`]);
   }

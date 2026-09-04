@@ -3,6 +3,7 @@
  * State and dispatch commands for am — state, ui, dispatch, actions, tt, persist, snapshot.
  */
 
+import { CELL_METHOD_SEP } from "../state/cell-helpers.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import {
   describe,
@@ -288,7 +289,12 @@ export function envelopePayload(
   type: string,
   named: Record<string, unknown>,
 ): Record<string, unknown> {
-  const isCellMethod = type.includes(":");
+  // The SHARED rule — `cell:method` and `cell.method` alike. This tested only
+  // `:`, while the trojan route it posts to normalises both, so the dot form
+  // reached the method with NO arguments: the named pairs were sent as a bare
+  // payload, the method's parameter was `undefined`, the key was deleted from
+  // state, and `am` reported `{"ok":true}`.
+  const isCellMethod = CELL_METHOD_SEP.test(type);
   return isCellMethod ? { args: [named] } : named;
 }
 
@@ -488,9 +494,33 @@ export async function cmdTT(args: string[], flags: GlobalFlags): Promise<void> {
     outError("usage: am timetravel <undo|redo|goto N|pause|resume>", mode);
     Deno.exit(1);
   }
+  // The subcommand set is CLOSED and printed in the usage line — and an
+  // unknown one answered `{"ok":true}` and did nothing, because the trojan
+  // route acks any `cmd` string. `am tt puase` reported success and left the
+  // app paused=false; the trojan-dispatch route two functions away refuses an
+  // unknown method precisely because "ok:true must mean EXECUTED".
+  const TT_COMMANDS = ["undo", "redo", "goto", "pause", "resume"];
+  if (!TT_COMMANDS.includes(cmd)) {
+    outError(
+      `am timetravel: unknown subcommand "${cmd}" — ${
+        TT_COMMANDS.join(", ")
+      }. It would have been acknowledged and done nothing.`,
+      mode,
+    );
+    Deno.exit(1);
+  }
   const arg = cmd === "goto" ? Number(args[1]) : undefined;
   if (cmd === "goto" && (arg === undefined || isNaN(arg))) {
     outError("usage: am tt goto <index>", mode);
+    Deno.exit(1);
+  }
+  if (cmd === "goto" && (!Number.isInteger(arg) || (arg as number) < 0)) {
+    outError(
+      `am tt goto: ${args[1]} is not a history index — indices are whole ` +
+        `numbers from 0. (An out-of-range one used to answer ok:true and ` +
+        `leave the app exactly where it was.)`,
+      mode,
+    );
     Deno.exit(1);
   }
   const result = await trojanPost(port, "tt", { cmd, arg }, appId);
@@ -641,7 +671,15 @@ export async function cmdSnapshot(
       Deno.exit(1);
       return;
     }
-    const result = await trojanPost(port, "snapshot", JSON.parse(json), appId);
+    // A snapshot REPLACES the whole state. The app refuses one whose cell set
+    // does not match its own (loading another app's file used to wipe every
+    // cell and exit 0); `--force` is how an operator says they meant it.
+    const result = await trojanPost(
+      port,
+      flags.force ? "snapshot/force" : "snapshot",
+      JSON.parse(json),
+      appId,
+    );
     if (!result.ok) {
       outError(result.error, mode);
       Deno.exit(1);

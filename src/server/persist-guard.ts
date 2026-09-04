@@ -16,8 +16,21 @@
 //
 // This closes it at the one place state is written, using the SAME stringify
 // pass persistence already performs (the scan is a replacer, so it costs one
-// traversal, not two). Dev throws, prod reports and continues — the sanctioned
-// direction for a dev/prod difference: dev is stricter, never more lenient.
+// traversal, not two).
+//
+// It behaves IDENTICALLY in dev and prod: it reports and the write still
+// happens. There is no `isDev`/`__aioDev` here or in `persistence.ts`, and
+// there should not be — refusing the write would turn one corrupted field
+// into total data loss, and killing a running app over a `Date` in state is
+// not a service to anyone. (This header used to claim "dev throws, prod
+// reports and continues", on the project's most load-bearing rule, for a
+// tripwire that has never existed. A reader auditing dev/prod parity would
+// have taken this file as already settled. 50audits §12.)
+//
+// The half that IS a verdict lives next door: a value JSON refuses outright (a
+// BigInt, a cycle) throws `PersistSerializeError`, because then nothing is
+// written and saying "persisted" would be the lie. Round-trip LOSS is
+// observe-only; a REFUSED write is reported on every cycle it happens.
 
 /** One value in a state tree that JSON cannot faithfully round-trip. */
 

@@ -146,9 +146,45 @@ export function nullSlot(): VNode {
   } as unknown as VNode;
 }
 
+/** Vnodes that reached their parent through a NESTED array — a `.map` result,
+ *  or any array the runtime flattens out of `children` — and vnodes first seen
+ *  as LITERAL siblings. Two sets, because the same vnode can be both, and the
+ *  order decides:
+ *
+ *  The "missing keys" warning (vdom-diff-children.ts) is only meaningful for
+ *  a list that came from an expression: keys are how the reconciler follows
+ *  rows that move, and rows written out by hand never move. Warned for every
+ *  parent with three same-tag children, it fired on every boot of the visual
+ *  app manager — a sidebar of four `<div>` panes written literally in the TSX
+ *  — pointing at a "fix" (keys on static siblings) that changes nothing. A
+ *  warning that is wrong the first time it is read is one that will not be
+ *  read the second time.
+ *
+ *  So a child is an "array child" when the runtime flattened it out of a
+ *  nested array. A vnode ALREADY seen as a literal sibling stays literal when
+ *  it is later handed on through an expression — `<Panel><a/><b/><c/></Panel>`
+ *  becomes `<section>{children}</section>` inside `Panel`, and those are still
+ *  the author's hand-written siblings (React: an element validated once as a
+ *  static child is never warned for). A vnode first seen inside a nested
+ *  array stays an array child even when a wrapper spreads it later.
+ *
+ *  Kept OFF the vnode — a WeakSet, not a field — so the mark is internal:
+ *  nothing on the `VNode` type, nothing enumerable, nothing on the wire. */
+const _fromArray = new WeakSet<object>();
+const _literal = new WeakSet<object>();
+
+/** True when `v` was flattened out of a nested child array (see `_fromArray`).
+ *  @internal */
+export function _isFromArray(v: VNode | string | number): boolean {
+  return typeof v === "object" && v !== null && _fromArray.has(v);
+}
+
 export function flattenChildren(
   raw: VChild[],
   out: (VNode | string | number)[],
+  /** True while inside a nested array — every vnode pushed from here on came
+   *  out of an expression, not out of the JSX's own child list. */
+  nested = false,
 ): void {
   for (const c of raw) {
     if (c == null || typeof c === "boolean") {
@@ -158,12 +194,19 @@ export function flattenChildren(
       continue;
     }
     if (Array.isArray(c)) {
-      flattenChildren(c, out);
+      flattenChildren(c, out, true);
     } else if (isSignal(c)) {
       // A signal child is a node of its own (see `_SignalText`): one text node
       // that follows the signal, wherever in the tree it sits.
       out.push(signalText(c as Signal<unknown>));
     } else {
+      if (typeof c === "object") {
+        if (nested) {
+          if (!_literal.has(c)) _fromArray.add(c);
+        } else {
+          _literal.add(c);
+        }
+      }
       out.push(c as VNode | string | number);
     }
   }

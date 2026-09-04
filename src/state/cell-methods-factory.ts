@@ -439,6 +439,19 @@ export function createCellFromMethods<
     onDestroy: config.onDestroy as ((app: ScopedApp) => void) | undefined,
     scope,
     asyncMethods,
+    // `fn.length` counts the parameters BEFORE the first default or rest one,
+    // so minus the state draft this is exactly "arguments a caller must
+    // supply". Clamped at 0 for a method declared `(s)` — and for the
+    // pathological `(...a)`, where `fn.length` is 0.
+    methodArity: Object.fromEntries(
+      methodNames.map((k) => [
+        k,
+        Math.max(
+          0,
+          ((methods as Record<string, { length: number }>)[k]?.length ?? 1) - 1,
+        ),
+      ]),
+    ),
     // Cancellation triggers (perfect-aio D1) — DEF data; the runtime registry
     // is (re)built from this at compose time, so a runtime reset + fresh
     // compose (the testCell pattern) re-registers naturally. self()
@@ -557,6 +570,7 @@ const CELL_AIO_KEYS: ReadonlySet<string> = new Set([
   "onInit",
   "onDestroy",
   "asyncMethods",
+  "methodArity",
   "cancelTriggers",
   "longMethods",
   "validate",

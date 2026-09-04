@@ -13,6 +13,7 @@
 // no entry here, is a red test — not a value nobody checks.
 import { assert, assertEquals } from "@std/assert";
 import {
+  NESTED_CONFIGS,
   NUMERIC_VALUES,
   numericRefusal,
   VALID_UI_KEYS,
@@ -53,6 +54,22 @@ function check(key: string, value: unknown): number | null {
   return f.result.code;
 }
 
+/** Same, for a key that lives inside a nested config object. */
+function checkNested(
+  parent: string,
+  key: string,
+  value: unknown,
+): number | null {
+  const f = fakeExit();
+  validateConfig(
+    { [parent]: { [key]: value } },
+    VALID_AIO_CONFIG_KEYS,
+    "AioConfig",
+    f.exit,
+  );
+  return f.result.code;
+}
+
 // ── The completeness gate ─────────────────────────────────────────────
 
 Deno.test("NUMERIC_VALUES covers every numeric key validateConfig sees", async () => {
@@ -61,6 +78,14 @@ Deno.test("NUMERIC_VALUES covers every numeric key validateConfig sees", async (
     ...numericFields(src, "export type UiConfig = {"),
     ...numericFields(src, "export type AioConfig<S, A, E> = {"),
     ...numericFields(src, "export type CellsConfig = {"),
+    // Nested config objects are configs too — `validateConfig` recurses into
+    // every key of `NESTED_CONFIGS`, so their numeric fields need a range for
+    // the same reason. `wsLimits`' three keys had none and were unreachable:
+    // `maxMessageBytes: NaN` (what `Number(Deno.env.get(…))` produces when the
+    // env is unset, and fully type-legal) makes `len > NaN` false, so the
+    // frame cap, the message-rate cap and the byte-rate cap were all simply
+    // off, with not one log line.
+    ...numericFields(src, "export type WsLimits = {"),
   ]);
   const missing = [...declared].filter((k) => !(k in NUMERIC_VALUES));
   assertEquals(
@@ -166,4 +191,48 @@ Deno.test("validateConfig: an absent numeric key is not a refusal", () => {
   const f = fakeExit();
   validateConfig({ appId: "x" }, VALID_AIO_CONFIG_KEYS, "AioConfig", f.exit);
   assertEquals(f.result.code, null);
+});
+
+// ── Nested config objects ─────────────────────────────────────────────
+//
+// `validateConfig` used to check only the TOP level, and `ui` was recursed
+// into by each CALLER. `wsLimits` — three numeric guards, every one of which a
+// bad value turns OFF rather than tightens — was validated by nobody.
+
+Deno.test("NESTED_CONFIGS: every nested object is validated by validateConfig itself", () => {
+  assert("wsLimits" in NESTED_CONFIGS, "wsLimits lost its nested validation");
+  assert("ui" in NESTED_CONFIGS, "ui lost its nested validation");
+  const nested = Object.entries(NESTED_CONFIGS);
+  assert(
+    nested.length >= 2,
+    "NESTED_CONFIGS emptied — the loop below would " +
+      "prove nothing",
+  );
+  for (const [key, keysOf] of nested) {
+    assert(
+      VALID_AIO_CONFIG_KEYS.has(key),
+      `${key} is not a config key at all`,
+    );
+    assert(keysOf().size > 0, `${key} has an empty key allowlist`);
+  }
+});
+
+Deno.test("wsLimits: a value that DISABLES the guard is refused at boot", () => {
+  for (const key of ["maxMessageBytes", "messagesPerSec", "bytesPerSec"]) {
+    // The one an env var produces when it is unset.
+    assertEquals(checkNested("wsLimits", key, NaN), 1, `${key}: NaN accepted`);
+    assertEquals(checkNested("wsLimits", key, 0), 1, `${key}: 0 accepted`);
+    assertEquals(checkNested("wsLimits", key, -1), 1, `${key}: -1 accepted`);
+    assertEquals(
+      checkNested("wsLimits", key, "1000"),
+      1,
+      `${key}: a string accepted`,
+    );
+    assertEquals(checkNested("wsLimits", key, 1000), null, `${key}: refused`);
+  }
+});
+
+Deno.test("wsLimits: an unknown key inside it is named, not ignored", () => {
+  assertEquals(checkNested("wsLimits", "maxMessageBytez", 1000), 1);
+  assertEquals(checkNested("wsLimits", "messagesPerSec", 50), null);
 });

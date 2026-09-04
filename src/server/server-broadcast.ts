@@ -77,6 +77,9 @@ export interface Broadcaster {
   /** Interactive priority: drain the coalescer NOW (client-action latency —
    *  see Coalescer.flushUrgent). */
   flushUrgent: () => void;
+  /** Broadcast bytes/messages since this process started — monotonic, which
+   *  is what a Prometheus counter has to be (`server-metrics.ts`). */
+  lifetimeBroadcast: () => { bytes: number; count: number };
   shutdown: () => void;
 }
 
@@ -111,10 +114,29 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
    *  `/__aio/health` (status: "degraded") once it stops being a blip. */
   const _stateSerialization = degraded("broadcast:state");
   /** Whole-round failures — a throw anywhere in the flush loop. */
+  /** Monotonic for the life of the PROCESS — what a Prometheus counter has to
+   *  be. The per-connection map beside it stays: it answers "who is connected
+   *  right now", which is a different question and a different endpoint. */
+  const _lifetime = { bytes: 0, count: 0 };
   const _broadcastRound = degraded("broadcast:round");
 
-  /** Get filtered full-state JSON for a client (respects subscriptions) */
-  function _getFilteredFullJson(meta: ClientMeta): string | undefined {
+  /** The snapshot verdict of ONE round — settled after the client loop, not
+   *  inside it. `degraded()` counts CONSECUTIVE failures and `ok()` ends the
+   *  episode, so a per-client verdict went fail, ok, fail, ok… whenever one
+   *  view failed and another did not: a `forUser` view that throws for one
+   *  user (their record missing) starved that user forever with
+   *  `/__aio/health` green, for as long as anyone else was connected. The
+   *  write-backlog check beside it already counted per round for exactly this
+   *  reason. Pinned by tests/broadcast-degraded-per-round.test.ts. */
+  type SnapshotVerdict = { attempted: boolean; failed: boolean; err: unknown };
+
+  /** Get filtered full-state JSON for a client (respects subscriptions).
+   *  Records the outcome on `verdict`; the caller settles it once per round. */
+  function _getFilteredFullJson(
+    meta: ClientMeta,
+    verdict: SnapshotVerdict,
+  ): string | undefined {
+    verdict.attempted = true;
     try {
       const uiState = filterStateBySubs(
         getUIState(meta.user),
@@ -127,9 +149,21 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
       // `/__aio/health` still answering "healthy". A frozen UI whose server
       // believes it is fine is the exact unnoticeable failure `degraded()`
       // exists for, and this path was the one place that never used it.
-      _stateSerialization.fail(e);
+      verdict.failed = true;
+      verdict.err = e;
       return undefined;
     }
+  }
+
+  /** One verdict per ROUND (see `SnapshotVerdict`). A round that built at
+   *  least one snapshot and lost none ends the episode: `degraded()` reports
+   *  recovery from `ok()`, and with only `fail()` wired five failures spread
+   *  across a process lifetime counted as consecutive and the app reported
+   *  itself degraded forever — a false alarm that outlives its cause is how a
+   *  real one stops being believed. */
+  function _settleSnapshotVerdict(v: SnapshotVerdict): void {
+    if (v.failed) _stateSerialization.fail(v.err);
+    else if (v.attempted) _stateSerialization.ok();
   }
 
   // Both the WS and UDS broadcasters coalesce through the SAME primitive
@@ -172,13 +206,18 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
       // copy (217 MB for 100 clients on 2.2 MB). Sharing the string shares
       // the memory too.
       const fullByView = new Map<string, string | undefined>();
+      const snapshot: SnapshotVerdict = {
+        attempted: false,
+        failed: false,
+        err: undefined,
+      };
       const fullFor = (meta: ClientMeta): string | undefined => {
         const subs = meta.subscriptions
           ? [...meta.subscriptions].sort().join(",")
           : "*";
         const key = `${JSON.stringify(meta.user ?? null)}|${subs}`;
         if (fullByView.has(key)) return fullByView.get(key);
-        const json = _getFilteredFullJson(meta);
+        const json = _getFilteredFullJson(meta, snapshot);
         fullByView.set(key, json);
         return json;
       };
@@ -319,7 +358,19 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
           // re-serializing per-client (N clients → N full serializations
           // per broadcast otherwise).
           fullJsonForTracking ??= fullFor(meta);
-          if (!fullJsonForTracking) continue;
+          if (!fullJsonForTracking) {
+            // A snapshot that could not be built is a LOST round for this
+            // client, exactly like a skipped or a thrown one — and a force
+            // round's change (a "full"-strategy cell) exists in no patch. So
+            // the debt is recorded here too, or a transient failure (a view
+            // that threw once, a BigInt that was removed next tick) left the
+            // client applying later patches on top of a state that never saw
+            // this round, diverged with health green until the next unrelated
+            // force round. Pinned by
+            // tests/broadcast-failed-snapshot-owes-full.test.ts.
+            if (patchesToSend.length > 0 || force) meta.needsFull = true;
+            continue;
+          }
           // Same freshness rule as the threshold path above: a stale memo is
           // not proof the client has this state.
           if (
@@ -386,6 +437,16 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
                 count: 1,
               });
             }
+            // …and the PROCESS-LIFETIME totals, beside the per-connection map.
+            // `payloadStats` is deleted when a client disconnects, so the
+            // Prometheus counters summed from it reset to zero — and the whole
+            // series vanished — on every browser reload. `rate()`/`increase()`
+            // over a resetting counter is garbage, which is exactly what the
+            // comment above these lines argues ("a counter you cannot sum over
+            // time is not a counter"): the `kind=<uuid>` label was removed,
+            // the monotonicity was not fixed.
+            _lifetime.bytes += _bytes;
+            _lifetime.count++;
             vitalsSystem.pressureMonitor?.onBroadcast(meta.id, _bytes);
           }
         } catch { /* client disconnecting */ }
@@ -408,6 +469,8 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
       } else if (connections.size > 0) {
         wsWriteBacklog.ok();
       }
+      // …and the snapshot verdict, same rule, same reason.
+      _settleSnapshotVerdict(snapshot);
 
       // ── Attribution, once per round: where did those bytes come from ──
       //
@@ -428,6 +491,27 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
       // there kills the round for every client, and at `debug` it reached no
       // sink at all under the default log level: the app just stopped updating,
       // silently, with health still green.
+      //
+      // A THROWN round is a LOST round, exactly like a skipped one — the
+      // coalescer emptied its buffer before calling us, so those patches exist
+      // nowhere else. The skip paths above already know this and set
+      // `needsFull`; this path did not, so every client kept applying later
+      // patches on top of state that is missing the lost round's writes. And
+      // nothing downstream catches it: Immer's out-of-range array `add`
+      // SPLICES rather than throwing, so the client's own resync safety net
+      // never fires and the list is merely wrong, forever. (Measured: one
+      // method doing `s.items.push(v); s.big = 1n;` — the BigInt takes
+      // `JSON.stringify` down and the whole round with it — left two clients
+      // holding ["one","three"] against a server holding
+      // ["one","two","three"], permanently, with `degraded()` needing 5
+      // CONSECUTIVE failures to say a word and the wire-loss warning
+      // dev-gated, i.e. silent in production.)
+      if (patchesToSend.length > 0 || force) {
+        for (const [, meta] of connections) {
+          meta.needsFull = true;
+          meta.lastFullJsonStale = true;
+        }
+      }
       _broadcastRound.fail(e);
     }
   };
@@ -520,6 +604,8 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
     broadcastTT,
     broadcastRaw,
     flushUrgent: () => coalescer.flushUrgent(),
+    /** Broadcast bytes/messages since this process started — see `_lifetime`. */
+    lifetimeBroadcast: () => ({ ..._lifetime }),
     shutdown,
   };
 }

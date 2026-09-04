@@ -69,20 +69,26 @@ export function AreaChart(
           display: "block",
         }}
       >
-        {grid.map((y, i) => (
-          <line
-            key={i}
-            {...svgAttrs({
-              x1: P,
-              y1: y,
-              x2: W - P,
-              y2: y,
-              stroke: C.border,
-              "stroke-width": "0.5",
-              "stroke-dasharray": "2 3",
-            })}
-          />
-        ))}
+        {
+          /* The keyed grid lines in a group of their own — beside the literal
+            area/line paths they were a keyed list with unkeyed siblings. */
+        }
+        <g>
+          {grid.map((y, i) => (
+            <line
+              key={i}
+              {...svgAttrs({
+                x1: P,
+                y1: y,
+                x2: W - P,
+                y2: y,
+                stroke: C.border,
+                "stroke-width": "0.5",
+                "stroke-dasharray": "2 3",
+              })}
+            />
+          ))}
+        </g>
         {area && (
           <path
             {...svgAttrs({ d: area, fill: color, "fill-opacity": "0.16" })}

@@ -23,7 +23,9 @@ const silentLog = { debug: () => {}, warn: () => {}, error: () => {} };
 
 const OP = {
   id: "op-1",
-  hlc: [1000, 0, "c1"] as HLC,
+  // Stamped NOW — an unknown op stamped older than the tombstone window is
+  // refused by name (`STALE_OP_REASON`); this fixture is not about age.
+  hlc: [Date.now(), 0, "c1"] as HLC,
   cell: CELL,
   action: "add",
   payload: "hello",

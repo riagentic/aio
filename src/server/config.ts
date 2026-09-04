@@ -243,6 +243,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "_reduceBreakdown",
   "_onReportOptsReady",
   "_syncCellIds",
+  "_syncRetentionMs",
   "_persistingCellIds",
   "_getDBState",
   "_getUIState",
@@ -251,6 +252,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "_cellAccess",
   "_cellMethods",
   "_cellAsyncMethods",
+  "_cellMethodArity",
   "_cellFields",
   "_cellMigrations",
   "_cellRestores",
@@ -873,10 +875,27 @@ export function validateConfig(
   }
   // ── Couplings between keys that are each individually valid ──────────
   //
+  // ── Nested objects, validated as configs in their own right ─────────
+  //
+  // From the top-level pass only — a nested pass has no nested objects of its
+  // own, and re-entering would loop.
+  if (!(label in NESTED_CONFIGS)) {
+    for (const [key, keysOf] of Object.entries(NESTED_CONFIGS)) {
+      const nested = obj[key];
+      if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+        validateConfig(
+          nested as Record<string, unknown>,
+          keysOf(),
+          key,
+          exit,
+        );
+      }
+    }
+  }
   // Only from the TOP-LEVEL pass: the `ui` pass sees `{ width, height }` with
   // no `client` beside it, and half a config cannot answer a question about
   // two keys.
-  if (label === "ui") return;
+  if (label in NESTED_CONFIGS) return;
   for (const c of configConflicts(obj)) {
     // Deduped by text: `aio.run()` validates the CellsConfig on the way in and
     // the composed AioConfig on the way through, so every conflict is seen
@@ -983,7 +1002,55 @@ export const NUMERIC_VALUES: Record<string, NumericSpec> = {
   },
   width: { min: 1, integer: true, what: "a whole number of pixels" },
   height: { min: 1, integer: true, what: "a whole number of pixels" },
+  // ── wsLimits.* — the WS DoS guard stack ──────────────────────────────
+  //
+  // These live in the SAME table as the top-level keys and are reached by the
+  // nested pass below. They were unreachable before, and each one is a guard
+  // that a bad value turns OFF rather than tightens: `maxMessageBytes: NaN`
+  // makes `e.data.length > NaN` false, so the frame cap, the message-rate cap
+  // and the byte-rate cap (whose global fuse derives from the rate) are all
+  // simply gone, with not one log line. And a `NaN` is fully type-legal —
+  // `Number(Deno.env.get(…))` with the variable unset produces one.
+  // The other direction is just as quiet: `messagesPerSec: 0` boots fine and
+  // refuses every frame from every client — an app dead on arrival, found at
+  // fire.
+  maxMessageBytes: {
+    min: 1,
+    integer: true,
+    what: "a whole number of bytes, at least 1",
+  },
+  messagesPerSec: {
+    min: 1,
+    integer: true,
+    what: "a whole number of messages per second, at least 1",
+  },
+  bytesPerSec: {
+    min: 1,
+    integer: true,
+    what: "a whole number of bytes per second, at least 1",
+  },
 };
+
+/** Config keys whose value is an object validated in its own right, and the
+ *  key allowlist for each.
+ *
+ *  `validateConfig` walks these itself. `ui` used to be recursed into by each
+ *  CALLER (`aio.ts`, twice) — so `wsLimits`, a nested object with three
+ *  numeric guards in it, was never validated at all, by anyone. A nested
+ *  config is validated because it IS one, not because a call site remembered.
+ *  `tests/config-numeric-values.test.ts` pins this map and the ranges its
+ *  nested keys are checked against. */
+export const NESTED_CONFIGS: Record<string, () => Set<string>> = {
+  ui: () => VALID_UI_KEYS,
+  wsLimits: () => VALID_WS_LIMITS_KEYS,
+};
+
+/** Every key of `WsLimits` (aio-types.ts). */
+export const VALID_WS_LIMITS_KEYS: Set<string> = new Set([
+  "maxMessageBytes",
+  "messagesPerSec",
+  "bytesPerSec",
+]);
 
 /** Why `v` is not a value `spec` accepts — or `null` when it is. Pure. */
 export function numericRefusal(v: unknown, spec: NumericSpec): string | null {

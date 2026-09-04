@@ -9,7 +9,7 @@
 
 import { WHERE_HINT } from "../diagnostics/contexts.ts";
 import type { Msg } from "./cell-types.ts";
-import { cloneState } from "./immutable.ts";
+import { cloneState, noteMaterialized } from "./immutable.ts";
 import { removalMessage, removalOf } from "./removals-core.ts";
 import type { ScheduleEffect } from "./schedule.ts";
 import type { OwnEffect } from "./own.ts";
@@ -953,7 +953,11 @@ function deleteNestedKey(
  *  per replay and committed garbage (found by the sync/async differential
  *  fuzzer). Deep-clone on install; primitives pass through. */
 function ownedValue(v: unknown): unknown {
-  return v !== null && typeof v === "object" ? cloneState(v, "shallow") : v;
+  if (v === null || typeof v !== "object") return v;
+  // Say what the clone below is about to LOSE — the same notice the sync
+  // path's `deepFreeze` gives. See `noteMaterialized`.
+  noteMaterialized(v);
+  return cloneState(v, "shallow");
 }
 
 /** Identity through which a live proxy exposes its current underlying value. */
@@ -999,6 +1003,11 @@ export const LIVE_PATH = Symbol("aio.livePath");
  *  than the copy it replaced. */
 export function recordValue(v: unknown): { value: unknown; refs?: LiveRef[] } {
   const refs: LiveRef[] = [];
+  // A cyclic value used to take this walk down with "Maximum call stack size
+  // exceeded" — after ~330 ms of recursion, long enough to trip the effect
+  // budget on the way — where the SYNC twin refuses immediately and by name
+  // (`[Immer] Immer forbids circular references`). Same refusal, same words.
+  const visiting = new Set<object>();
   const walk = (x: unknown, at: string[]): unknown => {
     if (x === null || typeof x !== "object") return x;
     const live = (x as Record<symbol, unknown>)[LIVE_PATH];
@@ -1006,25 +1015,33 @@ export function recordValue(v: unknown): { value: unknown; refs?: LiveRef[] } {
       refs.push({ at, ref: live as string[] });
       return null;
     }
-    if (Array.isArray(x)) {
-      let out: unknown[] | null = null;
-      for (let i = 0; i < x.length; i++) {
-        const m = walk(x[i], [...at, String(i)]);
-        if (m !== x[i] && out === null) out = x.slice();
-        if (out !== null) out[i] = m;
-      }
-      return out ?? x;
+    if (visiting.has(x as object)) {
+      throw new Error("[Immer] Immer forbids circular references");
     }
-    let outObj: Record<string, unknown> | null = null;
-    for (const k of Object.keys(x as Record<string, unknown>)) {
-      const cur = (x as Record<string, unknown>)[k];
-      const m = walk(cur, [...at, k]);
-      if (m !== cur && outObj === null) {
-        outObj = { ...(x as Record<string, unknown>) };
+    visiting.add(x as object);
+    try {
+      if (Array.isArray(x)) {
+        let out: unknown[] | null = null;
+        for (let i = 0; i < x.length; i++) {
+          const m = walk(x[i], [...at, String(i)]);
+          if (m !== x[i] && out === null) out = x.slice();
+          if (out !== null) out[i] = m;
+        }
+        return out ?? x;
       }
-      if (outObj !== null) outObj[k] = m;
+      let outObj: Record<string, unknown> | null = null;
+      for (const k of Object.keys(x as Record<string, unknown>)) {
+        const cur = (x as Record<string, unknown>)[k];
+        const m = walk(cur, [...at, k]);
+        if (m !== cur && outObj === null) {
+          outObj = { ...(x as Record<string, unknown>) };
+        }
+        if (outObj !== null) outObj[k] = m;
+      }
+      return outObj ?? x;
+    } finally {
+      visiting.delete(x as object);
     }
-    return outObj ?? x;
   };
   const value = walk(v, []);
   return refs.length > 0 ? { value, refs } : { value };
@@ -1080,8 +1097,16 @@ export function materializeValue(v: unknown): unknown {
   // structuredClone at apply time preserves internal aliasing too. Allocated
   // lazily: a write with no proxy inside it costs nothing.
   let memo: Map<object, unknown> | null = null;
+  // A cyclic object took `walk` down with "Maximum call stack size exceeded"
+  // after ~50 ms of recursion (long enough to trip the effect budget on the
+  // way), where the SYNC twin says `[Immer] Immer forbids circular
+  // references`. Same refusal, immediately, and by name.
+  const visiting = new Set<object>();
   const walk = (x: unknown): unknown => {
     if (x === null || typeof x !== "object") return x;
+    if (visiting.has(x as object)) {
+      throw new Error("[Immer] Immer forbids circular references");
+    }
     const raw = (x as Record<symbol, unknown>)[LIVE_RAW];
     if (raw !== undefined) {
       if (raw === null || typeof raw !== "object") return raw;
@@ -1092,25 +1117,30 @@ export function materializeValue(v: unknown): unknown {
       memo.set(raw as object, clone);
       return clone;
     }
-    if (Array.isArray(x)) {
-      let out: unknown[] | null = null;
-      for (let i = 0; i < x.length; i++) {
-        const m = walk(x[i]);
-        if (m !== x[i] && out === null) out = x.slice();
-        if (out !== null) out[i] = m;
+    visiting.add(x as object);
+    try {
+      if (Array.isArray(x)) {
+        let out: unknown[] | null = null;
+        for (let i = 0; i < x.length; i++) {
+          const m = walk(x[i]);
+          if (m !== x[i] && out === null) out = x.slice();
+          if (out !== null) out[i] = m;
+        }
+        return out ?? x;
       }
-      return out ?? x;
-    }
-    let outObj: Record<string, unknown> | null = null;
-    for (const k of Object.keys(x as Record<string, unknown>)) {
-      const cur = (x as Record<string, unknown>)[k];
-      const m = walk(cur);
-      if (m !== cur && outObj === null) {
-        outObj = { ...(x as Record<string, unknown>) };
+      let outObj: Record<string, unknown> | null = null;
+      for (const k of Object.keys(x as Record<string, unknown>)) {
+        const cur = (x as Record<string, unknown>)[k];
+        const m = walk(cur);
+        if (m !== cur && outObj === null) {
+          outObj = { ...(x as Record<string, unknown>) };
+        }
+        if (outObj !== null) outObj[k] = m;
       }
-      if (outObj !== null) outObj[k] = m;
+      return outObj ?? x;
+    } finally {
+      visiting.delete(x as object);
     }
-    return outObj ?? x;
   };
   return walk(v);
 }
@@ -2170,7 +2200,9 @@ export function createLiveProxy<S extends Record<string, unknown>>(
         `[${cellName}:${methodName}] Object.defineProperty(…, '${
           String(prop)
         }', …) cannot be used on cell state (${pathAt()}) — a sync method's ` +
-          `draft refuses it too. Assign instead: ${pathAt()}.${
+          `DRAFT refuses it too (a plain object that method assigned into ` +
+          `state a moment earlier is not a draft, so there it lands and is ` +
+          `only warned about at freeze time). Assign instead: ${pathAt()}.${
             typeof prop === "symbol" ? "key" : String(prop)
           } = value${
             typeof prop === "symbol"

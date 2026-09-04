@@ -2,7 +2,7 @@
 // Extracted from aio.ts. Order is critical: persist → diag → vitals → hooks → services → DB.
 
 import type { Log } from "../diagnostics/logger-api.ts";
-import { blocking } from "../state/blocking.ts";
+import { _blockingInFlight, blocking } from "../state/blocking.ts";
 import { _setUserStopHookActive } from "../state/dispatch.ts";
 import {
   abortAllInflight,
@@ -473,7 +473,23 @@ export function createShutdownOrchestrator(
     // was the one piece nothing ever tore down: its idle threads outlived the
     // app in libraryMode, `testServer()` and any multi-app host. Idle-only,
     // because the pool is process-global (see blocking.disposeIdle).
-    await phase(log, "blocking pool", tLeft, () => blocking.disposeIdle());
+    await phase(log, "blocking pool", tLeft, () => {
+      // The BOOLEAN, not just the call. `disposeIdle()` refuses whenever
+      // anything is still in flight, and the answer was thrown away — so the
+      // phase silently no-op'd and the process was then killed by the exit
+      // watchdog seconds later, dragging every phase after it past its budget.
+      // A phase that could not do its job says so.
+      if (!blocking.disposeIdle()) {
+        log.warn(
+          "shutdown",
+          `the blocking pool still has work in flight (${
+            _blockingInFlight().join(", ") || "unnamed task"
+          }) — its threads are left running and this process will not exit ` +
+            `on its own. A blocking() task must return; cancel it by id, or ` +
+            `give it a deadline of its own.`,
+        );
+      }
+    });
     try {
       refs.getDiscoveryStop?.()?.();
     } catch { /* responder already gone */ }

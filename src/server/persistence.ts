@@ -147,6 +147,10 @@ export interface PersistenceManager {
   lastCycleError(): Error | null;
   setShuttingDown(): void;
   resetPrevState(): void;
+  /** @internal test probe — per-table pass counts (`hinted` = the O(change)
+   *  row-set pass, `full` = a whole-table walk) across every window planned.
+   *  Optional so a stand-in manager need not carry it. */
+  _windowStats?: () => { hinted: number; full: number };
 }
 
 /** Create a persistence manager that debounces state writes to Deno KV and/or SQLite. */
@@ -201,6 +205,12 @@ export function createPersistenceManager(
   // `null` once a window saw a schedulePersist() that carried no patches —
   // then nothing is known and every changed table takes the full pass.
   let _dirty: Record<string, DirtyHint> | null = {};
+  // Per-table pass counts across every window this manager planned: `hinted`
+  // took the O(change) row-set pass, `full` walked the table. Internal — the
+  // probe a test reads to see that a hint SURVIVED to the planner, which is
+  // the only way to tell "correct and fast" from "correct because it walked
+  // everything" (both write the same rows).
+  const _passes = { hinted: 0, full: 0 };
   const _bindingsByCell = new Map<
     string,
     { table: string; field: readonly string[] }[]
@@ -307,6 +317,13 @@ export function createPersistenceManager(
 
   // One report per offending path — a persist runs every debounce window, and
   // the same bad field would otherwise log on every one of them.
+  //
+  // Safe to dedupe HERE and nowhere else in this file: a round-trip issue is
+  // reported `fatal: false`, so this Set gates a log line and an error report
+  // and touches no verdict. `_refusedReported` is the twin that must NOT be
+  // read this way — there the write did not happen, and the dedupe once ate
+  // `lastCycleError()` along with the log line. Log dedupe, never verdict
+  // dedupe.
   const _warnedPersistPaths = new Set<string>();
 
   // Size guardrail bookkeeping: one WARN per cell per process; the HARD
@@ -369,15 +386,23 @@ export function createPersistenceManager(
   const NO_STORED = Symbol("no stored value");
   const _refusedReported = new Set<string>();
 
-  /** A cell whose value JSON refuses — named by cell AND path, with the fix,
-   *  once per distinct (path, kind). */
+  /** A cell whose value JSON refuses — named by cell AND path, with the fix.
+   *
+   *  The dedupe covers the LOG LINE AND THE ERROR STREAM ONLY — never the
+   *  VERDICT. One `Set` used to gate all three: the refusal repeats on every
+   *  persist window (the message says so), but `_reportPersistError` ran once,
+   *  so `lastCycleError()` was null on every cycle after the first and
+   *  `am persist` — whose entire contract is "ok:true means it is on disk" —
+   *  answered `{"ok":true}` for a write that was refused, forever, while the
+   *  data since the first refusal was gone. The console is spared the
+   *  repetition; the caller asking "did it land?" is told the truth every
+   *  single time. */
   function _reportRefusedCell(cellName: string, e: unknown): void {
     const se = e instanceof PersistSerializeError
       ? e.withPrefix(cellName)
       : null;
     const key = se ? `${se.path}|${se.kind}` : `${cellName}|unknown`;
-    if (_refusedReported.has(key)) return;
-    _refusedReported.add(key);
+    const first = !_refusedReported.has(key);
     const err = new Error(
       `persist: cell "${cellName}" was NOT written — ${
         se ? se.message : e instanceof Error ? e.message : String(e)
@@ -386,8 +411,11 @@ export function createPersistenceManager(
         `window until the value is fixed.`,
       { cause: e },
     );
-    log.error(err.message);
-    _reportPersistError(err);
+    if (first) {
+      _refusedReported.add(key);
+      log.error(err.message);
+    }
+    _reportPersistError(err, { report: first });
   }
 
   /** Thrown out of `_planKv` when single mode cannot write the document
@@ -432,10 +460,23 @@ export function createPersistenceManager(
   // The failure the current/most recent cycle reported — see
   // `lastCycleError()`. Cleared when a cycle starts, set by every report.
   let _cycleError: Error | null = null;
-  function _reportPersistError(e: unknown): void {
+  function _reportPersistError(
+    e: unknown,
+    opts: { fatal?: boolean; report?: boolean } = {},
+  ): void {
     const err = createAioError("PERSIST_ERROR", e, {});
-    _cycleError = err;
-    reportAioError(err, getReportOpts());
+    // `_cycleError` is what `flushPersist()` rethrows and what the `persist`
+    // route answers 500 with — so it must mean "the write did NOT happen".
+    // A wire-fidelity issue (a Date, a Map, a NaN in state) is OBSERVE-ONLY
+    // by design: the row is written anyway, because refusing it would be the
+    // data loss. Setting the cycle error for it made `am persist` answer
+    // `500 persist failed` for a write that landed, and say "changes are in
+    // memory but will be lost on restart" while state.db held them.
+    if (opts.fatal !== false) _cycleError = err;
+    // `report: false` suppresses the OUTBOUND report (onError, `am errors`)
+    // for a failure that repeats every window — never the `_cycleError`
+    // assignment above, which is the durability verdict itself.
+    if (opts.report !== false) reportAioError(err, getReportOpts());
   }
 
   // A4: stamp schema + cell versions AFTER a successful state write — never
@@ -578,6 +619,16 @@ export function createPersistenceManager(
     }
     const dirty = _dirty ?? undefined;
     _dirty = {};
+    // The pass shape this window takes, per changed table — a test probe (see
+    // `_windowStats`). A `Set` hint is the O(change) pass; anything else (no
+    // hint, `"all"`) walks the whole table. Counted here because this is the
+    // one place the hint is handed over, so it sees exactly what the planner
+    // sees.
+    for (const name of Object.keys(live)) {
+      if (stateSnapshot[name] === prevDbState[name]) continue;
+      if (dirty?.[name] instanceof Set) _passes.hinted++;
+      else _passes.full++;
+    }
     const plan = planTablesIncremental(
       dbSchema,
       stateSnapshot,
@@ -689,7 +740,9 @@ export function createPersistenceManager(
         for (const i of fresh) _warnedPersistPaths.add(i.path);
         const err = new Error(`persist: ${describeIssues(fresh)}`);
         log.error(err.message);
-        _reportPersistError(err);
+        // Observe-only: the write below still happens, and it is the write
+        // that matters. See `_reportPersistError`.
+        _reportPersistError(err, { fatal: false });
       }
     }
 
@@ -808,6 +861,33 @@ export function createPersistenceManager(
    *
    *  One read makes the two halves describe the same instant; one transaction
    *  makes them land together or not at all. */
+  /** The next window walks the tables WHOLE.
+   *
+   *  `_planSqlite` consumes the immer dirty hint and clears it at PLAN time.
+   *  When the plan then throws, or the transaction rolls back, the baselines
+   *  are correctly left un-advanced — but the hint saying WHICH ROWS moved is
+   *  gone. The next window supplies a NARROWER hint, `diffDirty` walks only
+   *  those indices, its "nothing left" guard passes, and `plan.commit()`
+   *  advances the baseline: the earlier row is never written, permanently, and
+   *  nothing is logged again. Measured on a real app with an ordinary UNIQUE
+   *  collision — the state held `CHANGED-0`, SQLite held `a0`, `lastCycleError`
+   *  was null, and a restart silently undid the accepted change.
+   *
+   *  Reachable from every transient refusal SQLite has: UNIQUE, NOT NULL, a
+   *  dangling `ref()`, "too many SQL variables", "database is locked",
+   *  "database or disk is full". And it is exactly the failure the comment
+   *  below claims to have closed ("the table half — whose baseline is
+   *  deliberately NOT advanced — is retried WHOLE on the next window"). It was
+   *  not retried whole; a full pass is what makes that sentence true.
+   *
+   *  The two tests named for this could not see it: `db-dirty-tracking.test.ts`
+   *  ("a refused window is retried whole") calls the planner with NO dirty
+   *  argument, and `persist-bad-row-isolation.test.ts` drives the manager with
+   *  no patches — so both were already taking the full pass. */
+  function _forceFullTablePass(): void {
+    _dirty = null;
+  }
+
   async function _persistOnce(): Promise<void> {
     _cycleError = null;
     // Before anything is planned: the version stamp rides in the SAME
@@ -822,6 +902,7 @@ export function createPersistenceManager(
       // A row SQLite refuses must not take the state snapshot down with it —
       // the table half fails alone and is retried, exactly as before.
       log.error(`persist: sqlite sync failed — ${e}`);
+      _forceFullTablePass();
       _reportPersistError(e);
     }
 
@@ -856,8 +937,10 @@ export function createPersistenceManager(
         return;
       } catch (e) {
         // Nothing advanced: both baselines still describe the last COMMITTED
-        // state, so the next cycle retries the whole thing.
+        // state, so the next cycle retries the whole thing — which it can only
+        // do with the hint cleared. See `_forceFullTablePass`.
         log.error(`persist: failed to save — ${e}`);
+        _forceFullTablePass();
         _reportPersistError(e);
       }
       // Rejected as a unit — and a shared transaction shares its failures.
@@ -898,6 +981,7 @@ export function createPersistenceManager(
         sql.commit();
       } catch (e) {
         log.error(`persist: sqlite sync failed — ${e}`);
+        _forceFullTablePass();
         _reportPersistError(e);
       }
     }
@@ -933,21 +1017,23 @@ export function createPersistenceManager(
       inFlight = null;
       if (persistNeeded && !shuttingDown) {
         persistNeeded = false;
-        schedulePersist();
+        // Re-ARM only. This was `schedulePersist()` — no patches, which is
+        // the spelling for "an unhinted commit: take the full pass" and sets
+        // `_dirty = null`. But the commit that set `persistNeeded` had ALREADY
+        // folded its patches into `_dirty` when it arrived (the in-flight
+        // branch of `schedulePersist` marks first), so the re-arm threw that
+        // hint away and the next window walked every bound table by
+        // identity — correct, and exactly the cost the dirty tracking exists
+        // to avoid, paid on every window that overlaps a commit, which under
+        // any steady write rate is every other window.
+        _arm();
       }
     }
   }
 
-  function schedulePersist(patches?: CellPatches): void {
-    if ((!kvDb && !asyncDb) || shuttingDown) {
-      return;
-    }
-    if (patches) _markDirty(patches);
-    else _dirty = null; // an unhinted commit: this window takes the full pass
-    if (inFlight) {
-      persistNeeded = true;
-      return;
-    }
+  /** Arm the debounce timer if it is not already armed. Touches nothing
+   *  else — what moved is `_dirty`'s business, decided by the caller. */
+  function _arm(): void {
     if (persistTimer) return;
     persistTimer = setTimeout(() => {
       persistTimer = null;
@@ -957,6 +1043,29 @@ export function createPersistenceManager(
       }
       inFlight = _runPersistCycle();
     }, persistMs);
+  }
+
+  function schedulePersist(patches?: CellPatches): void {
+    if (!kvDb && !asyncDb) return;
+    // The hint is folded BEFORE the shutdown gate. Shutdown marks this flag
+    // and THEN drains the in-flight methods (shutdown.ts Phase 1), so their
+    // commits arrive here while `shuttingDown` is already true — and the
+    // final flush that follows is exactly the write meant to capture them.
+    // Returning above this line left `_dirty` holding whatever the last
+    // un-flushed window had marked: a NARROW hint naming other rows.
+    // `diffDirty` walked only those, its count guard passed (an in-place
+    // update changes no length), and the drained row's update was never
+    // written — state said the new value, SQLite the old, `lastCycleError`
+    // null, and the next boot read the old value back. Only the TIMER is
+    // shutdown's business; what moved is a fact the flush must still know.
+    if (patches) _markDirty(patches);
+    else _dirty = null; // an unhinted commit: this window takes the full pass
+    if (shuttingDown) return;
+    if (inFlight) {
+      persistNeeded = true;
+      return;
+    }
+    _arm();
   }
 
   // Flushes are SERIALIZED. Two callers that both passed the "await the
@@ -1049,5 +1158,6 @@ export function createPersistenceManager(
     lastCycleError: () => _cycleError,
     setShuttingDown,
     resetPrevState,
+    _windowStats: () => ({ ..._passes }),
   };
 }

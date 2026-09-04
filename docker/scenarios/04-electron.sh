@@ -167,7 +167,11 @@ STABLE=$(dirname "$(dirname "$(dirname "$APPIMG")")")/$(basename "$(dirname "$(d
 ok "stable name $STABLE"
 DESK="$HOME/.local/share/applications/$(basename "$PWD").desktop"
 if [ -f "$DESK" ]; then
-  grep -q "^Exec=$INST" "$DESK" || die "$DESK does not point into $INST"
+  # Since alpha73 the Exec line wraps the artifact in `sh -c` to hand the
+  # AppImage a private TMPDIR before it unpacks — so the install path is
+  # INSIDE the line, not at its start. What matters is that the entry
+  # launches the installed artifact, wherever the wrapper puts it.
+  grep -q "^Exec=.*$INST" "$DESK" || die "$DESK does not point into $INST"
   grep -q "^Icon=" "$DESK" || note "no Icon= line (the AppImage carried none)"
   ok "menu entry $DESK"
 else

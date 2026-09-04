@@ -39,7 +39,7 @@
 
 ## UI — AIR renderer — components, signals, routing, forms
 
-- [Rendering & UI](ui/README.md) — AIO uses AIR — a built-in signal-based renderer (60 KB gzipped with the
+- [Rendering & UI](ui/README.md) — AIO uses AIR — a built-in signal-based renderer (63 KB gzipped with the
 - [AIR Advanced Patterns](ui/air-advanced.md) — SSR, portals, islands, code splitting, virtual scrolling, dimensions, deferred
 - [AIR Animation](ui/air-animation.md) — CSS-first declarative transitions for enter/exit animations, imperative spring
 - [AIR vs React vs Best-in-Class — Full Comparison](ui/air-comparison.md) — Reference frameworks: React 19, Solid.js 1.9 (signal pioneer), Svelte
@@ -199,6 +199,7 @@
 - [Upgrading from alpha73 to alpha74](upgrade/from-alpha73-to-alpha74.md) — end to end plus the hunt that followed them: fixes to what aio serves, what it
 - [Upgrading from alpha74 to alpha75](upgrade/from-alpha74-to-alpha75.md) — snapshot moved by exactly one hash, the version string.
 - [Upgrading from alpha75 to alpha76](upgrade/from-alpha75-to-alpha76.md) — compatibility.
+- [Upgrading from alpha76 to alpha77](upgrade/from-alpha76-to-alpha77.md) — (docs/basics/semver-policy.md): every export, signature, flag, config key and
 - [Upgrade from v1.0.0-alpha8 to v1.0.0-alpha9](upgrade/from-alpha8-to-alpha9.md) — The internal machine state field is renamed.
 - [Upgrade from v1.0.0-alpha9 to v1.0.0-alpha10](upgrade/from-alpha9-to-alpha10.md) — Alpha10 is fully additive.
 - [Upgrade from v0.1 to v0.2](upgrade/from-v0.1-to-v0.2.md) — preserved)

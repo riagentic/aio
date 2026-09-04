@@ -5,6 +5,7 @@ import { assert, assertEquals } from "@std/assert";
 import { runDoctor } from "../src/server/doctor.ts";
 import { extractAioVersion } from "../src/testing/internal.ts";
 import { VERSION } from "../src/server/aio-cli.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 async function withConfig<T>(
   config: unknown,
@@ -286,5 +287,76 @@ Deno.test("doctor: a stale pin surfaces a drift note (still advisory)", async ()
     assert(v!.name.includes("app pins 0.0.1-alpha1"), v!.name);
     assert(v!.name.includes("docs/upgrade"), "points at the upgrade guide");
     assert(v!.ok, "drift is advisory, not a failure");
+  });
+});
+
+// ── the config the doctor reads is the config Deno reads ─────────────────────
+//
+// `runDoctor` used a raw `JSON.parse` of `${dir}/deno.json` and nothing else.
+// A `deno.jsonc` app, or a `deno.json` holding one `//` comment — both of
+// which Deno, the scaffold, `am` and every other aio reader accept — was
+// answered "deno.json readable: FAIL — create <dir>/deno.json — see
+// quickstart", exit 1, every other check skipped: the tool whose job is to say
+// whether the config is right said the config did not exist. Measured on a
+// valid deno.jsonc before the fix. `readDenoJson` is THE reader now.
+async function withConfigText<T>(
+  name: "deno.json" | "deno.jsonc",
+  text: string,
+  fn: (dir: string) => Promise<T>,
+): Promise<T> {
+  const dir = await tempDir("aio-doctor-jsonc-");
+  try {
+    await Deno.writeTextFile(`${dir}/${name}`, text);
+    return await fn(dir);
+  } finally {
+    await dropTempDir(dir);
+  }
+}
+
+const GOOD_JSONC = `{
+  // the scaffold's own layout, with the one thing JSON.parse refuses
+  "compilerOptions": { "jsx": "react-jsx", "jsxImportSource": "aio" },
+  "imports": {
+    "aio": "jsr:@riagentic/aio",
+    "aio/air": "jsr:@riagentic/aio/air",
+    "aio/jsx-runtime": "jsr:@riagentic/aio/jsx-runtime",
+  },
+}
+`;
+
+Deno.test("doctor: a deno.jsonc app is a readable config, not a missing one", async () => {
+  await withConfigText("deno.jsonc", GOOD_JSONC, async (dir) => {
+    const { checks, ok } = await runDoctor(dir);
+    assertEquals(named(checks, "deno.json readable")!.ok, true);
+    assert(
+      ok,
+      `a valid deno.jsonc fails doctor: ${
+        checks.filter((c) => !c.ok).map((c) => `${c.name}: ${c.fix}`).join("; ")
+      }`,
+    );
+    // Every check ran — this was a one-check "file missing" verdict before.
+    assert(checks.length >= 7, `only ${checks.length} checks ran`);
+  });
+});
+
+Deno.test("doctor: a deno.json with a comment is read the way Deno reads it", async () => {
+  await withConfigText("deno.json", GOOD_JSONC, async (dir) => {
+    const { checks, ok } = await runDoctor(dir);
+    assertEquals(named(checks, "deno.json readable")!.ok, true);
+    assert(ok, checks.filter((c) => !c.ok).map((c) => c.name).join(", "));
+  });
+});
+
+Deno.test("doctor: a config that does not parse is named as such — never as absent", async () => {
+  await withConfigText("deno.json", '{ "imports": { "aio": ', async (dir) => {
+    const { checks, ok } = await runDoctor(dir);
+    assertEquals(ok, false);
+    const c = named(checks, "deno.json readable")!;
+    assertEquals(c.ok, false);
+    assert(
+      !c.fix.startsWith("create "),
+      `a file that EXISTS must not be reported as missing: ${c.fix}`,
+    );
+    assert(c.fix.includes("deno.json"), `the fix names the file: ${c.fix}`);
   });
 });

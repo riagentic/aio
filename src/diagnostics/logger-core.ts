@@ -68,14 +68,27 @@ export class AioLogger {
     this.redact = config.redact ?? noRedaction;
   }
 
-  async init(): Promise<void> {
+  /** @param opts.rotate — archive the previous run's logs. FALSE when the
+   *   caller knows this process is not the one that owns them: a start that is
+   *   about to be REFUSED (another instance already holds the singleton lock,
+   *   or the port is taken) must not touch the live instance's files. It did:
+   *   the refused process renamed `app.log` to `app.log.1` and exited, the
+   *   running app kept appending to the renamed inode, and `am logs` then
+   *   answered "no log file at …/stdout.log" for a healthy app — the exact
+   *   failure `logPathFor`'s own doc comment says was fixed. The same bug was
+   *   already closed for `--help`/`--version`; the far more common case, a
+   *   duplicate start, was left in. */
+  async init(opts: { rotate?: boolean } = {}): Promise<void> {
+    const wantRotate = opts.rotate !== false;
     try {
       // 0700, like the recovery path below and `ensureAppDirs`: 0600 files
       // inside a world-readable directory still hand every local account the
       // file names, sizes and write times of the app's whole diagnostic trail.
       await Deno.mkdir(this.dir, { recursive: true, mode: 0o700 });
       const pathFn = this.path.bind(this);
-      const rotated = this.cfg.backupLogs
+      const rotated = !wantRotate
+        ? []
+        : this.cfg.backupLogs
         ? await rotateOnStart(pathFn, this.cfg.backupKeep)
         : (await wipeOnStart(pathFn), []);
       // AFTER rotation, so the run that just ended is inside the bound like

@@ -22,6 +22,7 @@ import {
   _LAZY_PENDING,
   _Null,
   _SignalText,
+  childSvgMode,
   ErrorBoundary,
   Fragment,
   Portal,
@@ -297,6 +298,7 @@ export function createDom(
   // Element
   const tag = vnode.tag as string;
   const nowSvg = isSvg || SVG_TAGS.has(tag);
+  const childSvg = childSvgMode(tag, nowSvg);
   const el = nowSvg
     ? ctx.doc.createElementNS(SVG_NS, tag)
     : ctx.doc.createElement(tag);
@@ -309,7 +311,7 @@ export function createDom(
   // children are not appended after it (SSR never emitted them either).
   if (!_hasRawHtml(vnode.props)) {
     for (let i = 0; i < vnode.children.length; i++) {
-      const childDom = createDom(vnode.children[i]!, ctx, nowSvg, el);
+      const childDom = createDom(vnode.children[i]!, ctx, childSvg, el);
       if (childDom) el.appendChild(childDom);
     }
   }

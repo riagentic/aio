@@ -209,7 +209,16 @@ export function tmplKeyboardShortcuts(): string {
 
 /** will-navigate interception — blocks cross-origin nav, relays via IPC.
  *  @param originExpr JS expression that evaluates to the app origin string */
-export function tmplWillNavigate(originExpr: string): string {
+export function tmplWillNavigate(
+  originExpr: string,
+  /** Name of an in-scope function to call with the URL when an IN-APP
+   *  navigation is vetoed here. The UDS shell passes its relay's restore:
+   *  `did-start-navigation` fires BEFORE `will-navigate` (measured, Electron
+   *  44) and has already closed the relay by the time the veto runs — so the
+   *  veto is the one moment the shell KNOWS the document is staying. Omitted
+   *  by shells that gate nothing on a document change. */
+  onInAppVeto?: string,
+): string {
   return `  // AIO-54: Electron swallows <a> clicks before DOM dispatch — relay via IPC.
   // only SAME-APP links are in-app navigation. A cross-origin
   // (external) link must never be fed to navigate() — for a routerless app that
@@ -230,9 +239,35 @@ export function tmplWillNavigate(originExpr: string): string {
       return;
     }
     if (_sameApp(u)) {
-      if (u.pathname === '/' || u.pathname === '') return; // full reload of root
+      // A RELOAD of the document already showing must proceed: it is the dev
+      // live-reload, and the only way a page ever gets a new document.
+      // location.reload() reaches will-navigate carrying the CURRENT url
+      // (measured on Electron 44), so "same url as the one on screen" is what
+      // a reload looks like from here. Everything else same-app is a ROUTE
+      // CHANGE and is handled in-app.
+      //
+      // This used to exempt the ROOT PATH instead — right for one case (a
+      // reload while on /) and wrong for two. A reload on any other route was
+      // vetoed, so dev reload silently did nothing off the home page, and
+      // worse, it stalled the relay (did-start-navigation had already closed
+      // it and no document came to reopen it). And every navigation TO / from
+      // elsewhere reloaded the whole window: a white flash, a re-mounted tree
+      // and a new connection on every app's most frequent navigation. A field
+      // report renamed its home page to /chat to escape it (cc §5.3).
+      let cur = null;
+      try { cur = new URL(win.webContents.getURL()); } catch {}
+      const noHash = (x) => x.protocol + '//' + x.host + x.pathname + x.search;
+      const isReload = cur && cur.href
+        ? noHash(cur) === noHash(u)
+        : (u.pathname === '/' || u.pathname === ''); // no document yet: the old rule
+      if (isReload) return; // a real load — the document is being replaced
       event.preventDefault();
-      win.webContents.send('__aio:navigate', navUrl); // in-app route
+${
+    onInAppVeto
+      ? `      ${onInAppVeto}(navUrl); // the document stays — reopen what did-start-navigation closed
+`
+      : ""
+  }      win.webContents.send('__aio:navigate', navUrl); // in-app route
       return;
     }
     event.preventDefault(); // external — never route it into the app

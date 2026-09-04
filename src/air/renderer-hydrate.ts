@@ -6,7 +6,8 @@ import {
   cleanupSignalBindings,
   isSignal,
 } from "./signal-binding.ts";
-import { _RESERVED_PROPS, _writeProp } from "./prop-write.ts";
+import { _propAttr, _RESERVED_PROPS, _writeProp } from "./prop-write.ts";
+import { attrNameOf as _attrName } from "./ssr-utils.ts";
 import { _DOM_PROPS } from "./vdom-types.ts";
 import type { ComponentFn, RenderCtx, VNode } from "./vdom.ts";
 import {
@@ -22,6 +23,7 @@ import {
   _SignalText,
   _sigText,
   _wrapHandler,
+  childSvgMode,
   createDom,
   ErrorBoundary,
   Fragment,
@@ -377,7 +379,8 @@ function _hydrateNodeInner(
   vnode._dom = el;
   _hydrateProps(el, vnode.props);
 
-  const nowSvg = isSvg || SVG_TAGS.has(el.tagName.toLowerCase());
+  const tagName = el.tagName.toLowerCase();
+  const nowSvg = childSvgMode(tagName, isSvg || SVG_TAGS.has(tagName));
   // Raw html owns the content (see _hasRawHtml): the server emitted the html
   // and no children, so there are no children to claim inside it.
   if (!_hasRawHtml(vnode.props)) {
@@ -504,12 +507,47 @@ function _attrDiff(
   return out.sort();
 }
 
+/** The attribute names — lowercased — that `props` DESCRIBE on `el`.
+ *
+ *  The exact mirror of `_renderPropsHtml` (SSR) and `_writeProp` (client),
+ *  asked in reverse: not "what does this prop write" but "which attributes may
+ *  legitimately be on this element". Anything else in the server markup is an
+ *  attribute the component does not describe.
+ *
+ *  Signal-valued props count: `bindSignalProps` writes them, so their attribute
+ *  is implied even though the re-apply loop skips them. */
+function _impliedAttrs(
+  el: HTMLElement,
+  props: Record<string, unknown>,
+): Set<string> {
+  const tag = el.tagName.toLowerCase();
+  const out = new Set<string>();
+  for (const k of Object.keys(props)) {
+    if (_RESERVED_PROPS.has(k) || k.startsWith("on")) continue;
+    if (k === "dangerouslySetInnerHTML") continue;
+    if (k === "className" || k === "class") {
+      out.add("class");
+      continue;
+    }
+    if (k === "style") {
+      out.add("style");
+      continue;
+    }
+    const mapped = _propAttr(tag, k);
+    if (mapped === null) continue; // no content attribute exists for it
+    out.add((mapped ?? _attrName(k)).toLowerCase());
+  }
+  return out;
+}
+
 /** Apply event listeners, signal bindings, and refs during hydration. */
 function _hydrateProps(el: HTMLElement, props: Record<string, unknown>): void {
   // AIO-166: detect onChange+onInput collision on form elements
   const _isFormEl = el.tagName === "INPUT" || el.tagName === "TEXTAREA" ||
     el.tagName === "SELECT";
-  const _hasOnInput = "onInput" in props && _isFormEl;
+  // A FUNCTION, not a key — the same rule as `applyProps`, so a hydrated
+  // `<input onChange={f} onInput={undefined}>` listens where a mounted one does.
+  const _hasOnInput = typeof props.onInput === "function" && _isFormEl;
   for (const [k, v] of Object.entries(props)) {
     if (k === "key" || k === "children" || k === "ref" || k === "use") continue;
     if (k.startsWith("on") && typeof v === "function") {
@@ -558,6 +596,17 @@ function _hydrateProps(el: HTMLElement, props: Record<string, unknown>): void {
     if (k === "value" && el.tagName === "SELECT") continue;
     if (_DOM_PROPS.has(k) && !(k in el)) continue; // not a property here
     _writeProp(el, k, v);
+  }
+  // The other half of the same divergence: an attribute the server markup has
+  // and the component does NOT. The re-apply loop above can only fix props the
+  // component names, so a server-only `disabled` / `hidden` / `class` was kept
+  // FOREVER — never rewritten, never warned about, and invisible to the later
+  // diff (which compares new props against old props, and it is in neither).
+  // A permanently disabled button, or an invisible one, from markup the
+  // component never asked for. Now it converges on what mount produces.
+  const _implied = _impliedAttrs(el, props);
+  for (const name of el.getAttributeNames?.() ?? []) {
+    if (!_implied.has(name.toLowerCase())) el.removeAttribute(name);
   }
   if (_before) {
     const diverged = _attrDiff(_before, _attrSnapshot(el));

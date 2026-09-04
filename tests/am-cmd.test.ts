@@ -92,6 +92,16 @@ function fakeControlServer(state: { errorsBody: string }) {
           headers: { "content-type": "application/json" },
         });
       if (p === "/") return new Response("ok");
+      // A REAL app answers this, and `am health` asks it now: a raw fetch to
+      // `/` reported a foreign `Deno.serve` as this app being healthy, and
+      // could not reach a socket-only app at all. A fixture that does not
+      // answer what the product asks is not standing in for the product.
+      if (p === "/__aio/health") {
+        // No `appId`: this one fixture stands in for every test's app id, and
+        // `am-http`'s identity gate compares them — naming a fixed one here
+        // makes the fixture refuse the very tests it serves.
+        return json({ status: "healthy" });
+      }
       if (p === "/__aio/error") return new Response(state.errorsBody);
       if (p === "/__aio/trojan/clients") {
         return json([{ index: 0, type: "browser" }]);

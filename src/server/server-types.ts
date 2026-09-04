@@ -27,7 +27,7 @@ export interface ServerConfig {
   getUIState: GetUIStateFn; // optional user for per-user filtering
   dispatch: DispatchFn;
   getSnapshot?: () => string;
-  loadSnapshot?: (json: string) => void;
+  loadSnapshot?: (json: string, opts?: { force?: boolean }) => void;
   /** Content-addressed blob store — served at /__aio/blobs/<id> (GET/HEAD,
    *  Range). Gated by the app's auth exactly like app state: key mode gates
    *  every path already; per-user mode 401s anonymous blob reads even when
@@ -135,6 +135,9 @@ export interface ServerConfig {
     cellMethods?: () => Record<string, string[]>;
     /** Cell id → async method names — the calls a `_callId` can correlate. */
     cellAsyncMethods?: () => Record<string, string[]>;
+    /** Cell id → method name → required argument count — the `dispatch` route
+     *  refuses a short call with it. */
+    cellMethodArity?: () => Record<string, Record<string, number>>;
     cellFields?: () => import("./aio-types.ts").CellFieldFlags;
     /** UDS clients (Electron IPC) — for am client command */
     udsClients?: () => { index: number; id: string }[];

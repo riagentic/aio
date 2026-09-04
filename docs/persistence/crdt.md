@@ -263,24 +263,29 @@ interface SyncConfig {
 }
 ```
 
-| Setting             | Default            | Description                                                                                                                                                                                                                                                                     |
-| ------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `merge`             | `{}` (all LWW)     | Per-field merge strategy                                                                                                                                                                                                                                                        |
-| `identity`          | `{}` (auto `"id"`) | Identity field for set merges                                                                                                                                                                                                                                                   |
-| `offline.retention` | `"4h"`             | How long to keep offline ops — digits + `ms`/`s`/`m`/`h`/`d` (e.g. `"7d"`). A value this cannot read throws at boot rather than falling back to the default                                                                                                                     |
-| `pendingCap`        | `500`              | Max unconfirmed ops before blocking                                                                                                                                                                                                                                             |
-| `maxDrift`          | `60000`            | Max clock skew (ms). An op stamped further **ahead** than this is refused by the server with an `op-rejected` naming the skew — it would win every last-write-wins comparison until the clocks meet. Ops stamped in the **past** are always accepted: that is the offline queue |
-| `compactOps`        | `1000`             | Server compacts after N ops                                                                                                                                                                                                                                                     |
+| Setting             | Default            | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `merge`             | `{}` (all LWW)     | Per-field merge strategy                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `identity`          | `{}` (auto `"id"`) | Identity field for set merges                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `offline.retention` | `"4h"`             | How long to keep offline ops — digits + `ms`/`s`/`m`/`h`/`d` (e.g. `"7d"`). A value this cannot read throws at boot rather than falling back to the default. An UNKNOWN change stamped older than `max(24h, retention)` is refused as `stale-beyond-retention` and dropped from the client's queue (`onDrop` / `onRejected`) instead of being applied a second time after its tombstone was swept — raise `retention` if clients may stay offline that long |
+| `pendingCap`        | `500`              | Max unconfirmed ops before blocking                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `maxDrift`          | `60000`            | Max clock skew (ms). An op stamped further **ahead** than this is refused by the server with an `op-rejected` naming the skew — it would win every last-write-wins comparison until the clocks meet. Ops stamped in the **past** are always accepted: that is the offline queue                                                                                                                                                                             |
+| `compactOps`        | `1000`             | Server compacts after N ops                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 
 ## Sync Status
 
-Per sync-enabled cell:
+Per sync-enabled cell. It reaches the app through `onSync`, which fires once per
+cell each time a catch-up lands:
 
 ```ts
-interface SyncStatus {
-  status: "online" | "offline" | "syncing" | "blocked";
-  pending: number; // unconfirmed op count
-  lastSync: number; // timestamp of last sync
+sync: {
+  onSync(stats) {
+    // stats.status  — "online" | "offline" | "syncing" | "blocked"
+    // stats.pending — ops still waiting for an ack
+    // stats.merged  — ops this catch-up folded in
+    // stats.conflicts, stats.elapsed
+    console.log(`${stats.status}, ${stats.pending} pending`);
+  },
 }
 ```
 

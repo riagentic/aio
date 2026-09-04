@@ -65,7 +65,7 @@ function mouseEv(
  *  happy-dom and true of real browsers too). An `[hidden]` attribute is read
  *  directly for the same reason — happy-dom does not apply the UA stylesheet
  *  rule that turns it into `display:none`. */
-function hiddenReason(el: AnyEl): string | null {
+export function hiddenReason(el: AnyEl): string | null {
   if (String(el?.type ?? "").toLowerCase() === "hidden") {
     return `it is an <input type="hidden"> — it has no box and no keyboard focus`;
   }

@@ -219,7 +219,13 @@ function mergeLWWPerKey(
   const [l, r] = records("lww-per-key", local, remote);
   local = l;
   remote = r;
-  const allKeys = new Set([...Object.keys(local), ...Object.keys(remote)]);
+  // SORTED, so both peers emit the same key order. Local-then-remote made the
+  // merged record's key order depend on which side you were standing on —
+  // semantically the same object, a different one on the wire and in any
+  // byte-level convergence check.
+  const allKeys = [
+    ...new Set([...Object.keys(local), ...Object.keys(remote)]),
+  ].sort();
   const merged: Record<string, unknown> = {};
   let conflict = false;
 
@@ -297,18 +303,29 @@ function mergeSetAdd(
   const getId = _getId(idField);
   const merged = new Map<string, unknown>();
   let conflict = false;
-  for (const item of safeLocal) merged.set(getId(item), item);
-  for (const item of safeRemote) {
+  // LOSER first, then the winner's new ids — the one order BOTH peers compute.
+  //
+  // The loop used to run local-then-remote, which is a different order on each
+  // side of the same merge: peer A ended with [x, y] and peer B with [y, x]
+  // from the identical inputs. `docs/persistence/crdt.md` lists this strategy
+  // as "Conflict-free: Yes" and only `text` carried a both-peers-agree
+  // property test. `compareHLC` is TOTAL (it tie-breaks on the node id), so
+  // "who is older" is a fact both peers agree on and can order by.
+  const [first, second] = compareHLC(localHlc, remoteHlc) <= 0
+    ? [safeLocal, safeRemote]
+    : [safeRemote, safeLocal];
+  for (const item of first) merged.set(getId(item), item);
+  for (const item of second) {
     const id = getId(item);
     if (!merged.has(id)) {
       merged.set(id, item);
     } else {
-      // Both sides added same id — LWW on content divergence
+      // Both sides added the same id — LWW on content divergence, and by
+      // construction `second` IS the newer side, so it wins.
       const existing = merged.get(id);
       if (stableJSONStringify(existing) !== stableJSONStringify(item)) {
         conflict = true;
-        // Remote wins if its HLC is newer
-        if (compareHLC(remoteHlc, localHlc) > 0) merged.set(id, item);
+        merged.set(id, item);
       }
     }
   }
@@ -345,7 +362,12 @@ function mergeSetRemove(
   const baseMap = new Map(safeBase.map((i) => [getId(i), i]));
 
   const result: unknown[] = [];
-  const allIds = new Set([...localIds, ...remoteIds]);
+  // Same canonical order as set-add, and for the same reason: iterating
+  // local-then-remote is a different order on each peer, so the identical
+  // inputs produced [x, z, y] on one side and [y, z, x] on the other.
+  const allIds = compareHLC(localHlc, remoteHlc) <= 0
+    ? new Set([...localIds, ...remoteIds])
+    : new Set([...remoteIds, ...localIds]);
   let conflict = false;
   const remoteWins = compareHLC(remoteHlc, localHlc) > 0;
 

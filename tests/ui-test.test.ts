@@ -651,3 +651,30 @@ Deno.test("press: modifiers reach the handler (Ctrl+Enter shortcut)", async () =
   await ui.App.editor.press("a", { shiftKey: true });
   assertEquals(seen.at(-1), { key: "a", ctrl: false, shift: true });
 });
+
+// ── present/absent mean SHOWING, not "in the tree" ────────────────────
+//
+// Two deciders for one question: `ui.X.click()` refuses an element it can
+// prove a user cannot see (`hiddenReason` walks the ancestor chain for
+// `hidden` / `display:none` / `visibility:hidden`), while `present`/`absent`
+// only asked whether the element was in the surface tree. So the same toast
+// was un-clickable AND `present`, and `waitFor(() => ui.absent("Toast"))`
+// never fired for a CSS-hidden toast — a green wait for a screen state that
+// was not on screen.
+testUI(
+  () =>
+    h("div", { t: "Screen" }, [
+      h("div", { t: "Shown" }, "here"),
+      h("div", { t: "Toast", style: { display: "none" } }, "gone"),
+      h("div", { t: "Attr", hidden: true }, "gone too"),
+      h("div", { style: { display: "none" } }, h("div", { t: "Nested" }, "x")),
+    ]),
+  "present/absent follow visibility, the same rule click() enforces",
+  (ui) => {
+    assertEquals(ui.present("Shown"), true);
+    for (const name of ["Toast", "Attr", "Nested"]) {
+      assertEquals(ui.present(name), false, `${name} reported present`);
+      assertEquals(ui.absent(name), true, `${name} reported not absent`);
+    }
+  },
+);

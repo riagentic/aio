@@ -6,9 +6,13 @@ import { artifactName } from "./platforms.ts";
 import { join } from "@std/path";
 import {
   assetIncludes,
+  compileArgs,
   dbWorkerInclude,
+  smokeRunArtifact,
+  v8FlagsArg,
   withDevExcluded,
 } from "./build-compile.ts";
+import { BUILD_STAMP_FILE } from "./build-version.ts";
 import type { BuildConfig } from "./build-config.ts";
 import { NO } from "../diagnostics/fmt.ts";
 import { compiled } from "./build-say.ts";
@@ -32,6 +36,41 @@ export function cliEntryFor(
 ): string {
   if (opts.entryOverride?.trim()) return opts.entryOverride.trim();
   return opts.doRemote ? REMOTE_CLI_DEFAULT : opts.configEntry;
+}
+
+/** The `deno compile` argv for a CLI target — THE SAME assembly every other
+ *  compiled target uses (`compileArgs`), narrowed to what a CLI has.
+ *
+ *  It used to be a second, hand-written argv, and the two had drifted in the
+ *  way copies do: this one embedded no build stamp and passed no `--v8-flags`.
+ *  So a `cli` target built by `deno task build` answered `--version` with
+ *  "unknown (compiled binary carries no build stamp — rebuild it with aio's
+ *  builder, `deno task build`…)" — advice to run the exact command that had
+ *  just produced it — while the `browser` target of the same commit printed
+ *  `0.1.2`; and an app's `build.v8Flags` (the ONLY channel into a compiled
+ *  binary's heap ceiling, see `v8FlagsArg`) silently did not apply to its CLI.
+ *  Pure, so the wiring is a unit test rather than a claim. */
+export function cliCompileArgs(opts: {
+  doRemote: boolean;
+  out: string;
+  entry: string;
+  assets: string[];
+  excludes: string[];
+  v8Flags: string[];
+  target?: string;
+}): string[] {
+  return compileArgs({
+    hasDist: false, // a CLI serves no browser bundle
+    // A remote CLI client talks to a server and opens no database of its own.
+    workerInclude: opts.doRemote ? [] : dbWorkerInclude(),
+    assets: opts.assets,
+    v8Flags: opts.v8Flags,
+    excludes: opts.excludes,
+    stamp: BUILD_STAMP_FILE,
+    out: opts.out,
+    entry: opts.entry,
+    target: opts.target,
+  });
 }
 
 /** Compile a CLI binary. Exits process on completion or error. */
@@ -80,26 +119,46 @@ export async function buildCli(cfg: BuildConfig): Promise<void> {
   // Embed app data assets (.wasm + declared compile.include) — a CLI app can
   // load WASM server-side too, and deno compile can't trace those reads.
   const assets = await assetIncludes(root);
+  const v8Flags = await v8FlagsArg(root);
+  if (v8Flags.length) console.log(`${v8Flags[0]}`);
 
   const ok = await withDevExcluded(nmDir, async (excludes) => {
     const result = await new Deno.Command("deno", {
-      args: [
-        "compile",
-        "-q", // the module tree, not diagnostics — see compileArgs()
-        "-A",
-        ...(cfg.targetTriple ? ["--target", cfg.targetTriple] : []),
-        ...(doRemote ? [] : dbWorkerInclude()),
-        ...assets,
-        ...excludes.flatMap((e) => ["--exclude", e]),
-        "-o",
-        cliTarget,
-        cliEntry,
-      ],
+      args: cliCompileArgs({
+        doRemote,
+        out: cliTarget,
+        entry: cliEntry,
+        assets,
+        excludes,
+        v8Flags,
+        target: cfg.targetTriple,
+      }),
       stdout: "inherit",
       stderr: "inherit",
     }).output();
-    if (result.code === 0) compiled(cliTarget, root);
-    return result.code === 0;
+    if (result.code !== 0) return false;
+    // …and then RUN IT — the same rule `runDenoCompile` applies to every other
+    // compiled target, and for the same reason: `deno compile` exiting 0 says
+    // nothing about whether the artifact boots. A project path with a space
+    // makes the embedded npm paths percent-encoded twice, so the binary dies
+    // with ERR_MODULE_NOT_FOUND on every flag, and this target alone still
+    // printed ✓ for it. `--help` is the probe (see `smokeRunArtifact`): the
+    // `cli` target's entry is the app's own program, and `--help` is the one
+    // flag both `aio.run()` and `aio/cli`'s `args()` answer unconditionally.
+    // A `cli-client` is skipped — its entry is a program of the app's own
+    // design with no flag aio can promise it answers, and a 60 s hang on a
+    // client that dials a server is a worse build than an unprobed one.
+    if (!doRemote) {
+      const smoke = await smokeRunArtifact(cliTarget, cfg.targetTriple, [
+        "--help",
+      ]);
+      if (smoke) {
+        console.error(smoke);
+        return false;
+      }
+    }
+    compiled(cliTarget, root);
+    return true;
   });
 
   if (!ok) {

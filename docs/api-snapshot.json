@@ -149,7 +149,7 @@
         },
         "CellAio": {
           "kind": "typeAlias",
-          "sig": "a83f66a818d2bcfb",
+          "sig": "15168801ebf45164",
           "members": {
             "typeParams": "req:b4d1afd901b76a44",
             "state": "req:754ca6fcde94b4a0",
@@ -172,6 +172,7 @@
             "onInit": "opt:2b406982ef5a0461",
             "onDestroy": "opt:a81c0f06daa96f6d",
             "asyncMethods": "opt:0cf28175dd53b68c",
+            "methodArity": "opt:84053a645d20d23d",
             "cancelTriggers": "opt:33e9cb0c3adffeeb",
             "longMethods": "opt:6941c580c10685fb",
             "validate": "opt:476d97494be409fa",
@@ -1199,7 +1200,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "2117be39f9b2e2d0"
+          "sig": "6ad5fcbca2cfebd1"
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -4008,11 +4009,13 @@
         },
         "SyncStats": {
           "kind": "interface",
-          "sig": "f73312d75b3a8e36",
+          "sig": "7f392d0ffad593aa",
           "members": {
             "merged": "req:f6522636230fa080",
             "conflicts": "req:f6522636230fa080",
-            "elapsed": "req:f6522636230fa080"
+            "elapsed": "req:f6522636230fa080",
+            "status": "opt:88bf3f3186ccd874",
+            "pending": "opt:f6522636230fa080"
           }
         },
         "SyncStatus": {

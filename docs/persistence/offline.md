@@ -250,8 +250,8 @@ second knob to remember and no per-subsystem path to override.
 1. **Check vitals**: `curl http://localhost:8000/__aio/vitals | jq .` — look for
    frozen clients, high staleness, payload warnings
 2. **Console backpressure**: look for `[aio:vitals]` escalation messages
-3. **Payload sizes**: `grep "pressure" log/perf.log` — >500KB means state too
-   large or cell `ui` config not filtering enough
+3. **Payload sizes**: `grep -i "pressure" logs/warning.log` — >500KB means state
+   too large or cell `ui` config not filtering enough
 4. **Browser DevTools**: Network → WS filter. Watch message sizes vs
    `syncIntervalMs`
 5. **Re-renders**: Use direct cell access (`counter.count`) to scope re-renders

@@ -19,12 +19,12 @@
 // patcher and the signal binder can reach it without a cycle.
 
 import {
+  attrNameOf as _attrName,
   camelToKebab as _camelToKebab,
   resolveClassName as _resolveClassName,
   styleValue as _styleValue,
-  svgAttrName as _attrName,
 } from "./ssr-utils.ts";
-import { _DOM_PROPS } from "./vdom-types.ts";
+import { _devWarn, _DOM_PROPS } from "./vdom-types.ts";
 
 // SVG namespaced attribute prefixes — require setAttributeNS/removeAttributeNS
 // so the attr lands in the correct namespace. Plain setAttribute puts it in the
@@ -48,6 +48,38 @@ export const _RESERVED_PROPS: ReadonlySet<string> = new Set([
   "use",
   "t",
 ]);
+
+/** Which of `class` / `className` owns the element's class, or `null` when the
+ *  props have neither.
+ *
+ *  They are ONE DOM fact spelled two ways, and the two render paths disagreed
+ *  about it: `_writeProp` is last-write-wins (the later key in insertion order
+ *  wins), while the SSR writer emitted BOTH — invalid HTML, where the parser
+ *  keeps the FIRST. So `<div {...rest} className={cx}>` with a `class` in
+ *  `rest` shipped one class from SSR and the opposite one from mount, for the
+ *  same vnode, with nothing said about it. Two props owning one fact is
+ *  exactly what rule #1 (fail loud) exists for: dev now names it. */
+export function _classProp(
+  props: Record<string, unknown>,
+): "class" | "className" | null {
+  let winner: "class" | "className" | null = null;
+  let both = 0;
+  for (const k of Object.keys(props)) {
+    if (k === "class" || k === "className") {
+      winner = k;
+      both++;
+    }
+  }
+  if (both > 1) {
+    _devWarn(
+      "dual-class-prop",
+      `A component passes BOTH \`class\` and \`className\` — they are the same ` +
+        `DOM attribute, so \`${winner}\` (the later one) wins and the other is ` +
+        `dropped. Pass one.`,
+    );
+  }
+  return winner;
+}
 
 /** The CONTENT ATTRIBUTE that expresses a `_DOM_PROPS` prop on a given tag:
  *  the attribute's name, `null` when markup has no way to express it, or
@@ -228,5 +260,30 @@ export function _controlDrifted(
   const cur = (el as unknown as Record<string, unknown>)[k];
   // `_writeProp` assigns `v ?? ""`, so that is the value the DOM would hold.
   if (k === "checked") return Boolean(cur) !== Boolean(rv ?? "");
-  return String(cur ?? "") !== String(rv ?? "");
+  const have = String(cur ?? "");
+  const want = String(rv ?? "");
+  if (have === want) return false;
+  // A NUMERIC input is compared as a number, not as a string.
+  //
+  // The element holds what the user TYPED and the state holds what the
+  // handler PARSED, and for a number those are legitimately different
+  // strings on the way to the same value: typing "1.5" passes through "1."
+  // — `.value` is "1.", the handler stores `parseFloat("1.") === 1`, the
+  // re-render compares "1." to "1", calls it drift and writes "1" back. The
+  // decimal point vanished under the user's finger, on every controlled
+  // number field there is; "1.05" could not be typed at all ("1.0" → 1 →
+  // "1"). Before the drift check the vnode comparison (`1 === 1`) skipped
+  // the write, so this is the regression the check introduced. Same rule
+  // React uses (`node.value != value`) for the same reason. An unparsable
+  // string ("abc", "1e") is still drift — the state has a value and the
+  // element does not show it.
+  const type = (el as { type?: string }).type;
+  if (
+    el.tagName === "INPUT" && (type === "number" || type === "range") &&
+    have !== "" && want !== ""
+  ) {
+    const a = Number(have);
+    return !(Number.isFinite(a) && a === Number(want));
+  }
+  return true;
 }

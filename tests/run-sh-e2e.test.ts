@@ -172,7 +172,11 @@ Deno.test({
         "the repo was cloned",
       );
       // The built artifact is named in the output and exists + is executable.
-      const m = out.match(/built (\S+)/);
+      // The FINAL line (`✓ built ./dist/<artifact>`), not the first word
+      // "built" in the log: the build also says `· built dist/app.js — goes
+      // into the binary; not in the final dist/` for every file it embeds
+      // and then removes, and a bare /built (\S+)/ named one of those.
+      const m = out.match(/✓ built (\S+)/);
       assert(m, `no 'built <artifact>' line in output:\n${out.slice(-2000)}`);
       const artifact = join(clone, m[1]!.replace(/^\.\//, ""));
       const st = await Deno.stat(artifact);
@@ -294,7 +298,11 @@ Deno.test({
         (await Deno.stat(join(link, "mod.ts"))).isFile,
         "the pinned version is a real checkout",
       );
-      const m = out.match(/built (\S+)/);
+      // The FINAL line (`✓ built ./dist/<artifact>`), not the first word
+      // "built" in the log: the build also says `· built dist/app.js — goes
+      // into the binary; not in the final dist/` for every file it embeds
+      // and then removes, and a bare /built (\S+)/ named one of those.
+      const m = out.match(/✓ built (\S+)/);
       assert(m, `no 'built <artifact>' line:\n${out.slice(-2000)}`);
       const st = await Deno.stat(join(dir, m[1]!.replace(/^\.\//, "")));
       assert(st.isFile && (st.mode! & 0o111) !== 0, "artifact is executable");

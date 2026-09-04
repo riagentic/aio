@@ -344,18 +344,47 @@ import { _installReadOnlyHint } from "../air/dev-readonly-hint.ts";
 let _ensured = false;
 export function ensureConnected(): void {
   if (_ensured) return;
+  // The latch is claimed FIRST and deliberately: `bindAllCellsReactive` must
+  // not run twice. But that made every step below load-bearing for the
+  // connection itself — one throw in setup and `_callConnectFn()` never ran,
+  // with `_ensured` already true so nothing ever called it again. The result
+  // is the worst shape there is: an app that renders its shell, opens no
+  // socket, retries nothing, and reports no error. Setup is app-reachable
+  // (binding walks every registered cell), so this is not hypothetical.
+  //
+  // The connection now happens in a `finally` — it is the one thing that must
+  // survive a bad cell — and a setup failure is said out loud instead of
+  // disappearing with the socket.
   _ensured = true;
-  // AIO-4.4: install the read-only dev hint on first connect.
-  _installReadOnlyHint();
-  // Sync cells route method calls through the CRDT engine (HLC op + offline
-  // queue) instead of the plain action path; everything else is unchanged.
-  // The engine boots lazily (dynamic import) below. A sync-cell method called
-  // in that boot window is BUFFERED — never leaked to a plain send, which would
-  // skip HLC stamping + the offline queue and silently diverge the op-log.
-  const plainSend = _clientSend ?? undefined;
-  bindAllCellsReactive(plainSend ? _makeSendWrapper(plainSend) : undefined);
-  _initSyncIfNeeded();
-  _callConnectFn();
+  try {
+    // AIO-4.4: install the read-only dev hint on first connect.
+    _installReadOnlyHint();
+    // Sync cells route method calls through the CRDT engine (HLC op + offline
+    // queue) instead of the plain action path; everything else is unchanged.
+    // The engine boots lazily (dynamic import) below. A sync-cell method called
+    // in that boot window is BUFFERED — never leaked to a plain send, which would
+    // skip HLC stamping + the offline queue and silently diverge the op-log.
+    const plainSend = _clientSend ?? undefined;
+    bindAllCellsReactive(plainSend ? _makeSendWrapper(plainSend) : undefined);
+    _initSyncIfNeeded();
+  } catch (e) {
+    console.error(
+      "[aio] client setup failed — the cell bindings may be incomplete, so " +
+        "some methods will not dispatch. The connection is still opened " +
+        "below, so state still arrives:",
+      e,
+    );
+    _diagEmit({
+      type: "client-setup-failed",
+      severity: "error",
+      source: "browser-protocol",
+      message: `client setup threw: ${e}`,
+      hint: "a cell binding threw while connecting; the socket is opened " +
+        "anyway — fix the cell, then reload",
+    });
+  } finally {
+    _callConnectFn();
+  }
 }
 
 /** The send the cell bindings actually get: the client transport, with

@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <code>v1.0.0-alpha76</code> · <a href="LICENSE">MIT</a> ·
+  <code>v1.0.0-alpha77</code> · <a href="LICENSE">MIT</a> ·
   <a href="docs/content.md">Docs</a> ·
   <a href="docs/basics/quickstart.md">Quickstart</a> ·
   <a href="CHANGELOG.md">Changelog</a>
@@ -89,8 +89,8 @@ is aio's whole job.
 | 🚚 **Ship**    | browser · Electron · Android · CLI · systemd service · signed updates  |
 | 🛠️ **Operate** | `am` — status, health, logs, state, dispatch, pins, installs           |
 
-A whole client — renderer, protocol, offline queue, CRDT merge — is **60 KB
-gzipped**, 52 KB brotli. `deno task bench:bundle` prints it, and
+A whole client — renderer, protocol, offline queue, CRDT merge — is **63 KB
+gzipped**, 55 KB brotli. `deno task bench:bundle` prints it, and
 `tests/bundle-size.test.ts` keeps this sentence true — both numbers.
 
 ## 🏃 Run any aio app, from its repo

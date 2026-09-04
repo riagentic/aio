@@ -97,11 +97,25 @@ Deno.test("am auth: the generated password draws from a uniform alphabet", () =>
   assertEquals(counts.size, 62, "some characters never appear");
 
   const expected = (N * 16) / 62;
-  // A biased draw puts 'a'–'h' at 1.25× the rest. The band below is far wider
-  // than sampling noise at this N (σ ≈ 0.4% of expected) and far tighter than
-  // the bias it rejects.
+  // A biased draw puts 'a'–'h' at 1.25× the rest. The band has to sit between
+  // sampling noise and that bias — and it was ±12% under a comment claiming
+  // "σ ≈ 0.4% of expected", which is off by an order of magnitude.
+  //
+  // The real figure: each draw is Bernoulli(p = 1/62) over N*16 = 64,000
+  // draws, so σ/expected = √((1-p)/(N·16·p)) = √(61/64000) ≈ 3.1%. ±12% was
+  // therefore a 3.9σ band, checked 62 times per run — a false failure roughly
+  // once in every 160 runs, and one duly arrived (`g:0.88×`, at the exact
+  // edge). A gate that cries wolf once a week teaches people to re-run it,
+  // which is how a real regression gets re-run away.
+  //
+  // 5σ instead, DERIVED rather than picked: false failures ~1 in 57,000 runs,
+  // while the 25% bias it exists to reject is 8σ and cannot hide inside it.
+  // (The pooled 'a'–'h' check below is the sharper instrument for that bias —
+  // eight characters together, so its own σ is √8 smaller.)
+  const sigma = Math.sqrt(61 / (N * 16)); // as a FRACTION of `expected`
+  const band = 5 * sigma;
   const biased = [...counts.entries()].filter(([, n]) =>
-    n > expected * 1.12 || n < expected * 0.88
+    Math.abs(n / expected - 1) > band
   );
   assertEquals(
     biased.map(([c, n]) => `${c}:${(n / expected).toFixed(2)}×`),

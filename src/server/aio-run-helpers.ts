@@ -24,6 +24,8 @@ import { resolve } from "@std/path";
 import { runtimeCount } from "./shutdown.ts";
 import { launchElectronClient } from "../electron/electron.ts";
 import { getLogger, log } from "../diagnostics/logger-api.ts";
+import { snapshotCellsError } from "./server-static.ts";
+import { findUnserializable, PersistSerializeError } from "./persist-guard.ts";
 
 /** Cache key for a user — a STABLE serialization of everything `ui.forUser`
  *  can observe, not just the id.
@@ -182,6 +184,20 @@ export function startVitalsCheck(opts: {
   }, opts.heartbeatInterval);
 }
 
+/** The app object as the server holds it INTERNALLY.
+ *
+ *  The same object at runtime. The difference is the type: `loadSnapshot` here
+ *  takes the `force` option that the public {@linkcode AioApp} deliberately
+ *  does not promise. Surface compatibility is absolute — `AioApp` is a type an
+ *  app may already hold, and reshaping its signatures is not something a fix
+ *  is allowed to cost — so the option reaches the operator doors through this
+ *  internal seam instead. Assignable to `AioApp` in both directions (an
+ *  optional trailing parameter is transparent to every caller and every
+ *  assignment), which is what makes the seam free. */
+export type InternalApp<S, A> =
+  & Omit<AioApp<S, A>, "loadSnapshot">
+  & { loadSnapshot?: (json: string, opts?: { force?: boolean }) => void };
+
 /** Build the AioApp object — dispatch, getState, snapshot/loadSnapshot, close */
 export function buildAppObject<S, A>(refs: {
   dispatch: (action: A) => Promise<unknown>;
@@ -203,7 +219,7 @@ export function buildAppObject<S, A>(refs: {
   sessionStore?: import("./sessions.ts").SessionStore | null;
   userStore?: import("./auth-users.ts").UserStore | null;
   blobs?: import("./blobs.ts").BlobStore;
-}): AioApp<S, A> {
+}): InternalApp<S, A> {
   return {
     dispatch: refs.dispatch,
     getState: refs.getState,
@@ -212,21 +228,37 @@ export function buildAppObject<S, A>(refs: {
     auth: refs.userStore ?? undefined,
     db: (refs.asyncDb ?? undefined) as AioApp<S, A>["db"],
     blobs: refs.blobs,
-    snapshot: () => JSON.stringify(refs.getState()),
-    loadSnapshot: (json: string) => {
+    // Named, not bare. `JSON.stringify` THROWS on a BigInt or a cycle
+    // anywhere in state, and every door that calls this — `app.snapshot()`,
+    // `GET /__aio/snapshot`, `am snapshot` — answered `500 Internal Server
+    // Error` with nothing to act on, while the persist log one screen away
+    // named the field exactly. Same walk, same error class, one place.
+    snapshot: () => {
+      try {
+        return JSON.stringify(refs.getState());
+      } catch (e) {
+        const at = findUnserializable(refs.getState());
+        throw at ? new PersistSerializeError(at.path, at.kind, e) : e;
+      }
+    },
+    loadSnapshot: (json: string, opts?: { force?: boolean }) => {
       const parsed = JSON.parse(json);
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
         throw new Error(
           "loadSnapshot: snapshot must be a JSON object — pass the exact string returned by app.snapshot()",
         );
       }
-      const initKeys = new Set(
-        Object.keys(refs.initialState as Record<string, unknown>),
-      );
-      const snapKeys = Object.keys(parsed as Record<string, unknown>);
-      const unknown = snapKeys.filter((k) => !initKeys.has(k));
-      if (unknown.length) {
-        log.warn(`snapshot: unknown keys present: ${unknown.join(", ")}`);
+      // The cell set is checked BEFORE the swap and REFUSED, not warned about.
+      // `setState` replaces the whole state object: a snapshot missing a
+      // declared cell deletes that cell's data, and the old code said so with
+      // a `log.warn` for unknown keys only — a level `am errors` does not
+      // collect — then loaded anyway. See `snapshotCellsError`.
+      if (!opts?.force) {
+        const mismatch = snapshotCellsError(
+          parsed,
+          Object.keys(refs.initialState as Record<string, unknown>),
+        );
+        if (mismatch) throw new Error(mismatch);
       }
       refs.setState(parsed as S);
       // Worker cells hold their own copy of their slice — a wholesale swap has

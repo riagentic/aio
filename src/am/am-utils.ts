@@ -629,8 +629,22 @@ export function parseGlobalFlags(
   // one wins) and `am` exits loud on it — `--lines=1O0` silently printing
   // the default line count is the same NaN bug class `parseNumArg` exists
   // for, and these flags predate it.
-  const num = (raw: string, label: string): number | undefined => {
-    const r = parseNumArg(raw, label);
+  // …WITH BOUNDS. `parseNumArg` takes `{ min, max, integer }` and every call
+  // site here omitted them, so only NaN was refused and every out-of-range
+  // value flowed through to something that could not act on it:
+  // `--wait=-5` reached `setTimeout(-5000)` (Node's "Timeout duration was set
+  // to 1" — a 1 ms poll, forever), `--lines=0` printed EVERY line because
+  // `slice(-0)` is the whole array while the JSON said `"shown":0`,
+  // `--lines=-5` reported `"shown":-5`, `--lines=1.5` produced
+  // `"lines":[""]`, and `--port=0`/`--port=-1` leaked a raw Deno internal
+  // ("Requests to port 0 are blocked", "Invalid URL") — which is exactly the
+  // leak `cmdStart`'s comment says was fixed.
+  const num = (
+    raw: string,
+    label: string,
+    opts?: { min?: number; max?: number; integer?: boolean },
+  ): number | undefined => {
+    const r = parseNumArg(raw, label, opts);
     if (r.ok) return r.value;
     flags.error ??= r.error;
     return undefined;
@@ -645,13 +659,20 @@ export function parseGlobalFlags(
     else if (a === "--long" || a === "-l") flags.long = true;
     else if (a === "--as-server") flags.asServer = true;
     else if (a === "--quiet") flags.quiet = true;
-    else if (a.startsWith("--port=")) flags.port = num(a.slice(7), "--port");
-    else if (a.startsWith("--body=")) flags.jsonBody = a.slice(7);
+    else if (a.startsWith("--port=")) {
+      flags.port = num(a.slice(7), "--port", {
+        min: 0, // 0 is real: `--port=0` means "pick a free one"
+        max: 65535,
+        integer: true,
+      });
+    } else if (a.startsWith("--body=")) flags.jsonBody = a.slice(7);
     else if (a.startsWith("--args=")) flags.jsonArgs = a.slice(7);
     else if (a.startsWith("--filter=")) flags.filter = a.slice(9);
-    else if (a.startsWith("--lines=")) flags.lines = num(a.slice(8), "--lines");
-    else if (a.startsWith("--wait=")) flags.wait = num(a.slice(7), "--wait");
-    else if (a === "--wait") flags.wait = 0; // bare --wait = use default
+    else if (a.startsWith("--lines=")) {
+      flags.lines = num(a.slice(8), "--lines", { min: 1, integer: true });
+    } else if (a.startsWith("--wait=")) {
+      flags.wait = num(a.slice(7), "--wait", { min: 0 });
+    } else if (a === "--wait") flags.wait = 0; // bare --wait = use default
     // `am start` waits by default; this is the opt-out for a script that only
     // wants the process spawned (see cmdStart).
     else if (a === "--no-wait") flags.noWait = true;
@@ -661,13 +682,19 @@ export function parseGlobalFlags(
     else if (a.startsWith("--app=")) flags.app = a.slice(6);
     else if (a.startsWith("--home=")) flags.home = a.slice(7);
     else if (a.startsWith("--timeout=")) {
-      flags.timeout = num(a.slice(10), "--timeout");
+      flags.timeout = num(a.slice(10), "--timeout", { min: 1, integer: true });
     } else if (a.startsWith("--client-index=")) {
-      flags.client = num(a.slice(15), "--client-index");
+      flags.client = num(a.slice(15), "--client-index", {
+        min: 0,
+        integer: true,
+      });
     } else if (a === "--client-index") flags.client = 0;
     else if (a.startsWith("-i") && a.length > 2) {
       // `-i2` — attached short form of `--client-index=2`.
-      flags.client = num(a.slice(2), "-i (client index)");
+      flags.client = num(a.slice(2), "-i (client index)", {
+        min: 0,
+        integer: true,
+      });
     } // ── deprecated spellings of the client INDEX (renamed in alpha52:
     // `--client=N` collides with the runtime's `--client=<kind>`, so an
     // `am`-vs-app confusion read as a valid flag on both sides). Accepted

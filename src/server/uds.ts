@@ -13,6 +13,21 @@ import {
   udsWriteBacklog as _writeBacklog,
   WRITE_QUEUE_WARN,
 } from "./write-backlog.ts";
+import { degraded } from "../diagnostics/degraded.ts";
+
+/** The state snapshot this transport could not serialize. Module scope, like
+ *  `_writeBacklog` above: one tracker for the transport. Its WS twin is
+ *  `degraded("broadcast:state")` in server-broadcast.ts — two transports, two
+ *  names, one rule: a client that has silently stopped receiving state must
+ *  appear at `/__aio/health`. */
+const _stateSerialization = degraded("uds:broadcast-state");
+
+/** A broadcast ROUND this transport could not deliver. Distinct from
+ *  `_stateSerialization` (which is the snapshot builder): this one fires when
+ *  the send itself throws — a patch payload that JSON refuses, a compaction
+ *  that failed — and a lost round is unrecoverable data divergence, not just a
+ *  missed frame, because the coalescer already discarded the patches. */
+const _broadcastRound = degraded("uds:broadcast-round");
 
 /** A UDS peer that has stopped draining its socket. Module scope, like the
  *  broadcast trackers: one tracker for the transport, whatever listener the
@@ -49,6 +64,12 @@ import {
 } from "../protocol/protocol-version.ts";
 import type { ServerSyncHandler } from "../sync/server-handler.ts";
 import { isPipePath, listenLocal, type LocalConn } from "./local-listen.ts";
+import { flushAllUrgent } from "./broadcast-coalescer.ts";
+import {
+  filterPatchesBySubs,
+  filterStateBySubs,
+  parseSubs,
+} from "../protocol/broadcast-utils.ts";
 
 /** How long the server waits for a live client to answer a control request
  *  (`am surface N`, `am trigger N …`, `am client N`) — THE one decider for both
@@ -89,12 +110,62 @@ export type UDSClient = {
   id: string;
   subscriptions: Set<string> | null;
   lastFullJson?: string;
+  /** The full-state text this client will hold once its write queue drains —
+   *  the SYNCHRONOUS twin of `lastFullJson`, which is stamped only when the
+   *  write lands. Every site that queues a state or a patch records the
+   *  state the peer holds after it, in queue order, so "does the peer already
+   *  hold exactly this text?" can be answered at the moment a `subs` frame
+   *  arrives — which is before the accept-time write has necessarily landed.
+   *  Needed because the first `subs` of every window used to be answered
+   *  with a second, identical full state (the biggest frame this transport
+   *  sends, twice, before the app rendered once). `undefined` = unknown,
+   *  never dedup. */
+  queuedJson?: string;
+  /** This client MISSED a round, so the next send must be a whole state
+   *  rather than a patch that assumes the missed one landed.
+   *
+   *  `lastFullJson` cannot express this: it records what was last SENT as a
+   *  full state, and the patch path never consults it — so clearing it alone
+   *  leaves the next round still choosing a patch. The WS twin has carried
+   *  exactly this flag (`meta.needsFull`) since a thrown round was measured to
+   *  strand clients permanently; this transport had neither half. */
+  needsFull?: boolean;
+  /** What the peer SAID it is, from its `proto` hello — the same fact
+   *  `server-ws.ts` records as `meta.peer` and `am clients` reports. The UDS
+   *  router negotiated the hello and threw it away, so on the desktop path
+   *  (where every client lives) nothing knew which build it was talking to. */
+  peer?: { aio?: string; app?: string };
 };
 
 type PatchEntry = {
   cell: string;
   ops: import("../protocol/patch-ops.ts").WirePatch[];
 };
+
+/** A peer is gone: answer the control request still waiting on it NOW, with
+ *  the reason. Left alone, the entry ran out `CLIENT_REPLY_TIMEOUT_MS` and
+ *  then handed the caller the timeout's diagnosis — "the window is not
+ *  VISIBLE / its main thread is busy / a headless client" — for a window that
+ *  had simply closed. A field report lost two debugging passes to that text
+ *  when it was RIGHT; sending someone down it for a client that no longer
+ *  exists is worse. Same rule on WS (`_settlePending`, server-ws.ts). Pinned
+ *  by tests/pending-reply-settles-on-disconnect.test.ts. */
+function _settlePendingForGone(
+  pendingState: Map<
+    string,
+    { resolve: (v: unknown) => void; timer: ReturnType<typeof setTimeout> }
+  >,
+  client: UDSClient | undefined,
+): void {
+  if (!client) return;
+  const pending = pendingState.get(client.id);
+  if (!pending) return;
+  pendingState.delete(client.id);
+  clearTimeout(pending.timer);
+  pending.resolve({
+    error: `client ${client.index} disconnected before answering`,
+  });
+}
 
 export type UDSHandle = {
   broadcast: (msg: string) => void;
@@ -146,7 +217,30 @@ export function createUDSListener(
    *  503 rather than dropped: a control client that gets silence cannot tell
    *  "refused" from "this build has no control plane". */
   control?: (req: Request) => Promise<Response>,
+  /** The app's `fullStateThreshold` — the ratio of full-state size above
+   *  which a patch frame is not worth sending. The WS path stopped comparing
+   *  against 100% of full state releases ago ("so the user-set
+   *  `fullStateThreshold` had no effect"); that fix landed on WS only, so a
+   *  documented public knob did nothing on the transport where every desktop
+   *  client lives. Default 0.5, the same default `server.ts` resolves. */
+  fullStateThreshold?: number,
+  /** Wire meter behind `am cost`. Metered at `sendTo` — the ONE place every
+   *  UDS frame passes through — for the same reason the WS path wraps
+   *  `socket.send` rather than instrumenting each caller: frames reach a
+   *  client from the broadcaster, the handshake, per-action acks and
+   *  diagnostics, and a per-caller count drifts the day a new sender is added.
+   *
+   *  Without it `am cost` reported `bytes/s 0` for every cell on the DEFAULT
+   *  desktop transport — a measured zero and an unmeasured one printing the
+   *  same. A field report hunted a suspected re-render storm with it, was told
+   *  the server was quiet, and the server was not: a 5-second poller was
+   *  reassigning a ~100 KB array on every tick. */
+  costMeter?: import("../vitals/cost-meter.ts").CostMeter,
 ): UDSHandle {
+  const fullThreshold = typeof fullStateThreshold === "number" &&
+      Number.isFinite(fullStateThreshold)
+    ? fullStateThreshold
+    : 0.5;
   // A stale socket FILE from a crashed instance is unlinked; a pipe is a
   // kernel name that vanished with that process — nothing to remove.
   if (!isPipePath(socketPath)) {
@@ -182,6 +276,14 @@ export function createUDSListener(
           id: crypto.randomUUID(),
           subscriptions: null,
         };
+        // Same rule as the WS handshake (`drainBeforeSnapshot`, server-ws.ts):
+        // the patches still buffered in a throttle window go out to the peers
+        // whose base they describe BEFORE this peer joins the roster, because
+        // its accept-time snapshot already holds their writes — sent after
+        // it, they were applied a second time (a server-side `push` landed
+        // twice on the window that opened mid-window). Both transports, one
+        // registry, so neither can drift back.
+        flushAllUrgent();
         clientMap.set(conn, client);
         debug(`uds: client connected #${client.index} (${connSet.size} total)`);
 
@@ -196,6 +298,7 @@ export function createUDSListener(
         // (or crash where) the broadcast-time state does.
         const initial = _fullJsonFor(client);
         if (initial !== undefined) {
+          client.queuedJson = initial;
           sendTo(conn, encRaw("state", initial), () => {
             client.lastFullJson = initial;
           });
@@ -239,6 +342,26 @@ export function createUDSListener(
 
   function sendTo(conn: LocalConn, msg: string, onSent?: () => void): void {
     const encoded = new TextEncoder().encode(msg + "\n");
+    if (costMeter) {
+      try {
+        // The envelope's kind read EXACTLY — `{"v":2,"t":"<kind>",…}` — never
+        // by substring: a patch payload can contain the literal `"t":"state"`
+        // in its own data. Acks, diagnostics and tt frames are `other`, not
+        // full resends; counting a wall of 40-byte acks as "the whole state
+        // went out" is a plausible headline that is wrong. Same classifier as
+        // server-ws.ts, on purpose.
+        const envKind = /^\{"v":\d+,"t":"([^"]+)"/.exec(msg)?.[1];
+        costMeter.recordSend(
+          encoded.byteLength,
+          clientMap.get(conn)?.id ?? "uds",
+          envKind === "patches"
+            ? "patch"
+            : envKind === "state"
+            ? "full"
+            : "other",
+        );
+      } catch { /* aio-ok: metering must never break a send */ }
+    }
     const prev = _writeQueues.get(conn) ?? Promise.resolve();
     // Depth is OBSERVED, not capped. The WS transport skips a peer whose
     // socket buffer is not draining (one policy, `write-backlog.ts`); this
@@ -271,6 +394,7 @@ export function createUDSListener(
       _writeQueues.delete(conn);
       _writeDepth.delete(conn);
       connSet.delete(conn);
+      _settlePendingForGone(pendingState, clientMap.get(conn));
       clientMap.delete(conn);
       try {
         conn.close();
@@ -293,20 +417,31 @@ export function createUDSListener(
    *  BigInt, a cycle). Serializing is INSIDE the guard: the stringify is where
    *  that actually throws, and it used to sit outside — so the guard caught the
    *  rarer failure and let the common one through. */
-  function _fullJsonFor(
+  /** The snapshot verdict of ONE broadcast round — settled after the client
+   *  loop, never inside it. `degraded()` counts CONSECUTIVE failures and
+   *  `ok()` ends the episode, so a per-client verdict went fail, ok, fail,
+   *  ok… whenever one window's slice failed (a BigInt in the one cell it
+   *  subscribes to) and another's did not: that window received no state
+   *  again, ever, with `/__aio/health` green for as long as any other window
+   *  was open. Same shape as the WS broadcaster's `SnapshotVerdict`. Pinned by
+   *  tests/broadcast-degraded-per-round.test.ts. */
+  type SnapshotVerdict = { attempted: boolean; failed: boolean; err: unknown };
+
+  /** Build the snapshot and record the outcome on `verdict` — the caller
+   *  decides when that verdict is settled (once per round in the broadcast
+   *  loop; immediately for a single-client door, see `_fullJsonFor`). */
+  function _snapshot(
     client: Pick<UDSClient, "subscriptions">,
+    verdict: SnapshotVerdict,
   ): string | undefined {
+    verdict.attempted = true;
     try {
-      let uiState: unknown = getUIState();
-      if (client.subscriptions) {
-        const filtered: Record<string, unknown> = {};
-        const src = uiState as Record<string, unknown>;
-        for (const sub of client.subscriptions) {
-          const feat = sub.includes(".") ? sub.slice(0, sub.indexOf(".")) : sub;
-          if (feat in src && !(feat in filtered)) filtered[feat] = src[feat];
-        }
-        uiState = filtered;
-      }
+      // One filter, both transports (broadcast-utils.ts) — a hand-inlined
+      // copy here is how the two drifted in the first place.
+      const uiState: unknown = filterStateBySubs(
+        getUIState(),
+        client.subscriptions,
+      );
       const json = JSON.stringify(uiState);
       // The same guardrail the WS path has had. It used to live INSIDE the WS
       // broadcaster, so a desktop app — every client on this socket, no TCP
@@ -318,9 +453,43 @@ export function createUDSListener(
       warnBigFullState(json, () => snapshot);
       return json;
     } catch (e) {
+      // NOT a log line only. The caller's response to `undefined` is
+      // `continue`, i.e. THIS client silently stops receiving state —
+      // permanently — while `/__aio/health` keeps answering "healthy". That is
+      // the exact unnoticeable failure `degraded()` exists for, and the WS
+      // twin (`_getFilteredFullJson` in server-broadcast.ts) already says so
+      // in its own comment and escalates. This path is the DESKTOP default,
+      // where every client lives, and it only logged.
       log.error("uds", `state snapshot failed — ${e}`);
+      verdict.failed = true;
+      verdict.err = e;
       return undefined;
     }
+  }
+
+  /** A serialization that WORKED ends the episode. `degraded()` escalates on
+   *  N CONSECUTIVE failures and reports recovery from `ok()` — without this,
+   *  five failures spread across a whole process lifetime escalate as if they
+   *  were consecutive, and once escalated the app reports itself degraded
+   *  forever even after the offending value is gone. */
+  function _settleSnapshotVerdict(v: SnapshotVerdict): void {
+    if (v.failed) _stateSerialization.fail(v.err);
+    else if (v.attempted) _stateSerialization.ok();
+  }
+
+  /** The single-client doors (accept, `subs`, `resync`): one snapshot IS the
+   *  round, so its verdict is settled on the spot. */
+  function _fullJsonFor(
+    client: Pick<UDSClient, "subscriptions">,
+  ): string | undefined {
+    const verdict: SnapshotVerdict = {
+      attempted: false,
+      failed: false,
+      err: undefined,
+    };
+    const json = _snapshot(client, verdict);
+    _settleSnapshotVerdict(verdict);
+    return json;
   }
 
   return {
@@ -338,75 +507,150 @@ export function createUDSListener(
         ? forceOrPatches
         : undefined;
 
+      // A THROWN ROUND IS A LOST ROUND, and this loop had no catch.
+      //
+      // The coalescer empties its buffer BEFORE calling here
+      // (`broadcast-coalescer.ts` — `drain()` takes the items, then flushes),
+      // so a throw anywhere below means those patches exist nowhere else: the
+      // clients keep applying LATER patches on top of state that is missing
+      // this round's writes, forever. Nothing downstream notices, because
+      // Immer's out-of-range array `add` splices rather than throwing, so the
+      // client's own resync safety net never fires and the list is merely
+      // wrong.
+      //
+      // Reachable with nothing exotic: `JSON.stringify(allOps)` below throws
+      // on a patch carrying a BigInt, which is exactly the measured case the
+      // WS twin documents (`s.items.push(v); s.big = 1n`). The WS flush has
+      // wrapped its whole loop and marked clients `needsFull` since that
+      // measurement; this path — the transport every DESKTOP client is on —
+      // never got it.
+      //
+      // Per client, not per round: one client's bad frame must not cost the
+      // others their update (the same rule persistence applies per cell). A
+      // client whose send failed is marked for a FULL state next round, which
+      // is what actually repairs a divergence.
+      const failed: UDSClient[] = [];
+      // ONE snapshot verdict for the round — see `SnapshotVerdict`.
+      const verdict: SnapshotVerdict = {
+        attempted: false,
+        failed: false,
+        err: undefined,
+      };
       for (const [conn, client] of clientMap) {
-        if (force) {
-          client.lastFullJson = undefined;
-        }
+        try {
+          if (force) {
+            client.lastFullJson = undefined;
+          }
 
-        // Patch-based path: filter patches by client subscriptions and send $patches
-        if (patches && patches.length > 0 && !force) {
-          const clientPatches = client.subscriptions
-            ? patches.filter((p) => {
-              for (const sub of client.subscriptions!) {
-                if (
-                  sub === p.cell || sub.startsWith(p.cell + ".")
-                ) return true;
-              }
-              return false;
-            })
-            : patches;
+          // Patch-based path: filter patches by client subscriptions and send $patches
+          // NEVER a patch for a client that missed a round: its base state no
+          // longer matches what a patch assumes.
+          if (patches && patches.length > 0 && !force && !client.needsFull) {
+            const clientPatches = filterPatchesBySubs(
+              patches,
+              client.subscriptions,
+            );
 
-          const allOps = compactPatches(
-            clientPatches.flatMap((p) =>
-              p.ops.map((op) => ({
-                ...op,
-                path: [p.cell, ...op.path],
-              }))
-            ),
-          );
+            const allOps = compactPatches(
+              clientPatches.flatMap((p) =>
+                p.ops.map((op) => ({
+                  ...op,
+                  path: [p.cell, ...op.path],
+                }))
+              ),
+            );
 
-          if (allOps.length > 0) {
-            const patchJson = JSON.stringify(allOps);
-            // Size guard: if patches exceed full state, send full state instead
-            const fullJson = _fullJsonFor(client);
-            if (fullJson && patchJson.length > fullJson.length) {
-              debug(
-                `uds: patch payload (${patchJson.length}B) > full state (${fullJson.length}B) — sending full state`,
-              );
-              if (fullJson !== client.lastFullJson) {
-                const fj = fullJson;
-                full++;
-                sendTo(conn, encRaw("state", fullJson), () => {
-                  client.lastFullJson = fj;
-                });
-              }
-            } else {
-              const fj = fullJson;
-              patch++;
-              sendTo(
-                conn,
-                encRaw("patches", patchJson),
-                fj
-                  ? () => {
+            if (allOps.length > 0) {
+              const patchJson = JSON.stringify(allOps);
+              // Size guard: if patches exceed full state, send full state instead
+              const fullJson = _snapshot(client, verdict);
+              if (
+                fullJson && patchJson.length > fullJson.length * fullThreshold
+              ) {
+                debug(
+                  `uds: patch payload (${patchJson.length}B) > ${
+                    Math.round(fullThreshold * 100)
+                  }% of full state (${fullJson.length}B) — sending full state`,
+                );
+                if (fullJson !== client.lastFullJson) {
+                  const fj = fullJson;
+                  full++;
+                  client.queuedJson = fj;
+                  sendTo(conn, encRaw("state", fullJson), () => {
                     client.lastFullJson = fj;
-                  }
-                  : undefined,
-              );
+                    client.needsFull = false; // paid once it is written
+                  });
+                }
+              } else {
+                const fj = fullJson;
+                patch++;
+                client.queuedJson = fj; // undefined when the snapshot failed
+                sendTo(
+                  conn,
+                  encRaw("patches", patchJson),
+                  fj
+                    ? () => {
+                      client.lastFullJson = fj;
+                    }
+                    : undefined,
+                );
+              }
+              continue;
+            }
+          }
+
+          // Fallback: force-full, trailing flush, or no patches — send full state
+          const json = _snapshot(client, verdict);
+          if (!json) {
+            // A snapshot that could not be built is a LOST round for this
+            // client, like a thrown one below — and a force round's change (a
+            // "full"-strategy cell) exists in no patch. Record the debt, or a
+            // transient failure left the window applying later patches on top
+            // of a state that never saw this round. Same rule as the WS
+            // fallback; pinned by
+            // tests/broadcast-failed-snapshot-owes-full.test.ts.
+            if (force || (patches && patches.length > 0)) {
+              client.needsFull = true;
             }
             continue;
           }
+          if (json === client.lastFullJson) continue; // no change
+          const j = json;
+          full++;
+          client.queuedJson = j;
+          sendTo(conn, encRaw("state", json), () => {
+            client.lastFullJson = j;
+            client.needsFull = false; // the debt is paid once it is written
+          });
+        } catch (e) {
+          // This client's round is lost. Say so, and arrange for the NEXT one
+          // to carry a whole state rather than a patch that assumes the lost
+          // one landed.
+          log.error(
+            "uds",
+            `broadcast failed for client ${client.index} — ${e}. Its patches ` +
+              `for this round are gone (the coalescer already drained them), ` +
+              `so it is marked for a full state on the next round. A patch ` +
+              `carrying a value JSON cannot represent (a BigInt, a cycle) is ` +
+              `the usual cause; fix it at its source.`,
+          );
+          _broadcastRound.fail(e);
+          failed.push(client);
         }
-
-        // Fallback: force-full, trailing flush, or no patches — send full state
-        const json = _fullJsonFor(client);
-        if (!json) continue;
-        if (json === client.lastFullJson) continue; // no change
-        const j = json;
-        full++;
-        sendTo(conn, encRaw("state", json), () => {
-          client.lastFullJson = j;
-        });
       }
+      // Marked AFTER the loop: clearing `lastFullJson` mid-iteration would
+      // change what a later client in the same round is compared against.
+      // BOTH halves. `needsFull` makes the next round choose a whole state
+      // instead of a patch; clearing `lastFullJson` stops the fallback's
+      // "same as last time" check from then skipping that state, which it
+      // would whenever the visible value happens to match what was last sent.
+      for (const c of failed) {
+        c.needsFull = true;
+        c.lastFullJson = undefined;
+        c.queuedJson = undefined;
+      }
+      if (failed.length === 0) _broadcastRound.ok();
+      _settleSnapshotVerdict(verdict);
       return { full, patch };
     },
     clients: () => [...clientMap.values()],
@@ -514,9 +758,28 @@ function _handleUDSConn(
     return sink;
   }
 
-  function _sendFilteredState(conn: LocalConn, client: UDSClient): void {
+  /** `dedup`: skip the send when the peer already holds EXACTLY this text
+   *  (`queuedJson`). True for a `subs` reply — the first one of every window
+   *  arrives right after the accept-time state and, for the usual wildcard
+   *  or all-cells subscription, serializes to the same bytes, so the biggest
+   *  frame this transport sends went out twice before the app rendered once
+   *  (measured on real Electron; the cost meter and the transport probe
+   *  counted it twice too). False for `resync`: the peer is TELLING us its
+   *  state is wrong, and our memo of what it holds is the thing in question.
+   *  Same rule as the WS `subs` reply. Pinned by
+   *  tests/initial-state-sent-once.test.ts. */
+  function _sendFilteredState(
+    conn: LocalConn,
+    client: UDSClient,
+    dedup: boolean,
+  ): void {
     const msg = fullJsonFor(client);
     if (msg === undefined) return; // already reported by the snapshot builder
+    if (dedup && msg === client.queuedJson) {
+      client.needsFull = false; // it holds the current state — no debt
+      return;
+    }
+    client.queuedJson = msg;
     sendTo(conn, encRaw("state", msg), () => {
       client.lastFullJson = msg;
     });
@@ -593,8 +856,16 @@ function _handleUDSConn(
                 continue;
               }
               const result = negotiateProtocol(protoHello(VERSION), theirs);
-              if (!result.ok) {
+              if (result.ok) {
+                const c = clientMap.get(conn);
+                if (c) c.peer = { aio: theirs.ver, app: theirs.app };
+              } else {
                 log.error("uds", `protocol mismatch — ${result.reason}`);
+                // The v2 frame for a v2 peer (`cli-client.ts` routes it),
+                // and the legacy string for the readers that only know that
+                // one (`am-uds.ts`). `proto-err` was declared and routed on
+                // both and sent by neither.
+                sendTo(conn, enc("proto-err", { reason: result.reason }));
                 sendTo(conn, "__proto-err:" + result.reason);
                 // Close after the error message flushes through the write queue.
                 sendTo(conn, "", () => {
@@ -657,22 +928,29 @@ function _handleUDSConn(
               const client = clientMap.get(conn);
               if (!client) continue;
               const paths = (frame.d as { subs?: unknown } | undefined)?.subs;
-              if (Array.isArray(paths)) {
-                if (paths.includes("*")) {
-                  client.subscriptions = null;
-                } else {
-                  client.subscriptions = new Set(
-                    paths.filter((p: unknown) => typeof p === "string"),
-                  );
-                }
-                _sendFilteredState(conn, client);
+              // `parseSubs`, not an inline `new Set(...)`: the count and
+              // length caps exist because the parsed Set is held PER
+              // CONNECTION and walked on EVERY broadcast. This router had no
+              // bound at all, behind a frame ceiling ten times the WS one.
+              const parsed = parseSubs(paths, "uds");
+              if (parsed !== undefined) {
+                // Buffered patches first, under the OLD subscriptions — they
+                // describe the base this peer holds (see the accept path).
+                flushAllUrgent();
+                client.subscriptions = parsed;
+                _sendFilteredState(conn, client, true);
               }
               continue;
             }
             case "resync": {
-              // Client detected patch desync — send full state.
+              // Client detected patch desync — send full state. Buffered
+              // patches first, or the repair re-creates the desync (see the
+              // accept path).
               const client = clientMap.get(conn);
-              if (client) _sendFilteredState(conn, client);
+              if (client) {
+                flushAllUrgent();
+                _sendFilteredState(conn, client, false);
+              }
               continue;
             }
             // ── v2 parity: sync + serverFns over UDS ────────────────────
@@ -923,6 +1201,7 @@ function _handleUDSConn(
       reader.releaseLock();
     } catch { /* stream may be errored (AIO-149) */ }
     connections.delete(conn);
+    _settlePendingForGone(pendingState, clientMap.get(conn));
     clientMap.delete(conn);
     try {
       conn.close();

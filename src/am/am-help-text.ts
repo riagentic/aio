@@ -104,7 +104,8 @@ Persistence:
   persist                 Force immediate persist
   snapshot                Dump state JSON to stdout
   snapshot save [file]    Save snapshot to file
-  snapshot load <file>    Load snapshot from file
+  snapshot load <file>    Load snapshot from file (replaces ALL state;
+                          --force to accept a different cell set)
   migrations              Cell versions (declared vs stored) + shape drift
 
 Framework version:
@@ -200,7 +201,10 @@ Auth (apps running with auth: true) — run "am auth" for all of them:
   auth passwd <id>        Set a password (also clears the lockout + sessions)
   auth unlock <id>        Clear a lockout
   auth totp <id> off      Clear the second factor (lost device)
+  auth role <id> <role>   Change a user's role
+  auth verify <id>        Mark an account's email verified
   auth revoke <id>        Revoke every session of a user
+  auth rm <id>            DELETE a user and everything it holds
 
 Feedback:
   report                  Collect a problem report (logs + versions + state

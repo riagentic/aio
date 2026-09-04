@@ -15,6 +15,29 @@ is frozen — additive only, bugfix-only through beta; 1.0.0 = boring.
 
 ---
 
+## Open work
+
+### The leak sanitizers are off (found 2026-09-04, audit round)
+
+Deno 2.9 made `--sanitize-ops` / `--sanitize-resources` opt-**in**; they used to
+be on by default and no aio task passes them. So `deno task test` has no leak
+floor at all: a test can leave a timer, a socket, a file or a child process
+behind and stay green, and `check:sanitizers` — which freezes the count of
+unexplained opt-outs at zero — has been ratcheting a mechanism that does not
+run. `docs/testing/README.md` said "Sanitizers stay on"; it now says what is
+true, and the gate prints the same thing on every run.
+
+Measured over the whole suite with both flags on: **702 failures of 7009**,
+dominated by one shape — a booted test app (`aio.run({ libraryMode: true })`)
+that leaves its live-reload file watcher and timers running, plus `testUI`'s
+fire-and-forget happy-dom close. Both are fixable in the harness rather than in
+702 test files, which is what makes this tractable at all.
+
+The work: close the watcher on `app.close()` (or make the harness own it), make
+`_teardownPartialMount`/`unmount()` await the window close, then add
+`--sanitize-ops --sanitize-resources` to `test`, `test:core` and
+`check:coverage` and delete the warning branch in `scripts/check-sanitizers.ts`.
+
 ## The gate to beta (user rule, 2026-07-19)
 
 Ten consecutive alpha releases with **no major/critical/blocker bug and no
