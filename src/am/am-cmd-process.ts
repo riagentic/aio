@@ -843,9 +843,13 @@ export async function cmdStart(
     );
     Deno.exit(1);
   } else {
-    // Timed out but process alive — leave lock at 'starting'
+    // Timed out but process alive — leave lock at 'starting'.
+    // Name the door we actually knocked on. `port` is am's own placeholder and
+    // reads 0 for the socket-only desktop shape, so the old wording — "not
+    // responding on port 0" — sent a reader looking for a port that never
+    // existed, and said nothing about the socket that did.
     outError(
-      `not responding on port ${port} after ${
+      `not responding ${waitedAt(readPid(appId), livePort)} after ${
         timeout / 1000
       }s — check am status`,
       mode,
@@ -853,6 +857,19 @@ export async function cmdStart(
     Deno.exit(1);
   }
 }
+
+/** How to name the door `am start` waited at, for the message when the wait
+ *  runs out. Reads the child's OWN lock first: it is the only record of what
+ *  the process actually bound, and for a `--client=electron` app that is a
+ *  unix socket and no port at all. */
+export const waitedAt = (
+  lock: Pick<LockData, "port" | "socketPath"> | null,
+  probed: number | undefined,
+): string => {
+  if (lock?.socketPath && !lock.port) return `on socket ${lock.socketPath}`;
+  const p = lock?.port || probed;
+  return p ? `on port ${p}` : "— it recorded neither a port nor a socket";
+};
 
 /** Where am looked for the lock, and the one env var that decides it.
  *
@@ -1321,35 +1338,67 @@ export async function cmdRestart(
   args: string[],
   flags: GlobalFlags,
 ): Promise<void> {
+  const lost = await restartAll(args, flags);
+  // The app is back up either way — from the state that IS on disk. The exit
+  // code stops claiming that the state before the restart went with it: this
+  // used to route through `cmdStop` with `quiet: true`, whose own exit 1 on a
+  // refused final write fired INSIDE the restart — the app was stopped, the
+  // NOT SAVED line was swallowed by quiet, the start never ran, and `am
+  // watch` (which calls this) died with it. Silent, and half done.
+  if (lost.length) Deno.exit(1);
+}
+
+/** Restart what `args`/`flags` name — one app, a component, or a declared
+ *  fleet — and return the ids whose FINAL write was refused. The exit code
+ *  is the caller's decision: `am restart` exits 1 on any of them, `am watch`
+ *  keeps watching (the next save is the fix, and a dead watcher fixes
+ *  nothing). Every app restarts before the verdict is returned: a fleet half
+ *  up because the first one's write was refused is worse than the refusal. */
+async function restartAll(
+  args: string[],
+  flags: GlobalFlags,
+): Promise<string[]> {
   const mode = detectMode(flags);
 
   // A DECLARED project can be restarted whole, because the declaration is
   // exactly what `--all` lacked: each component's entry and identity. That is
-  // why the refusal below still stands for undeclared fleets and does not
-  // stand here.
-  {
-    const plan = processPlan(args, { app: flags.app, port: flags.port });
-    if (plan.kind === "error") {
-      outError(plan.message, mode);
-      Deno.exit(1);
-    }
-    if (plan.kind === "one" || plan.kind === "all") {
-      const list = plan.kind === "one" ? [plan.component] : plan.components;
-      for (const c of list) {
-        const port = componentPort(c);
-        await cmdRestart(
-          args.filter((a) => a.startsWith("-")),
-          {
-            ...flags,
-            app: c.appId,
-            ...(port !== undefined ? { port } : {}),
-            entry: c.entry,
-          },
-        );
-      }
-      return;
-    }
+  // why the refusal in `restartApp` still stands for undeclared fleets and
+  // does not stand here.
+  const plan = processPlan(args, { app: flags.app, port: flags.port });
+  if (plan.kind === "error") {
+    outError(plan.message, mode);
+    Deno.exit(1);
   }
+  if (plan.kind === "one" || plan.kind === "all") {
+    const list = plan.kind === "one" ? [plan.component] : plan.components;
+    const lost: string[] = [];
+    for (const c of list) {
+      const port = componentPort(c);
+      const r = await restartApp(
+        args.filter((a) => a.startsWith("-")),
+        {
+          ...flags,
+          app: c.appId,
+          ...(port !== undefined ? { port } : {}),
+          entry: c.entry,
+        },
+      );
+      if (r.unsaved) lost.push(r.appId);
+    }
+    return lost;
+  }
+  const r = await restartApp(args, flags);
+  return r.unsaved ? [r.appId] : [];
+}
+
+/** One app's restart: stop it, taking the durability verdict the way `am
+ *  stop` does, wait for the port, start it again. Returns the verdict; it
+ *  never exits on it (see {@linkcode restartAll}). */
+async function restartApp(
+  args: string[],
+  flags: GlobalFlags,
+): Promise<{ appId: string; unsaved?: string }> {
+  const mode = detectMode(flags);
 
   // Refused rather than ignored. `stop --all` exists, so `restart --all` is a
   // reasonable thing to type, and silently restarting ONE app while reporting
@@ -1440,15 +1489,34 @@ export async function cmdRestart(
     }
   }
 
-  if (pf && running) {
+  let unsaved: string | undefined;
+  if (pf && running && t.kind === "target") {
     const port = pf.port;
-    // Stop must complete before start — force --wait internally
-    const stopFlags = {
+    // Stop must complete before start — force --wait internally. `stopOne`
+    // directly, not `cmdStop`: the verdict it takes (`finalPersistVerdict`,
+    // BEFORE the door closes) has to come back HERE, where the restart goes
+    // on and the exit code is decided last — `cmdStop` decides its own and
+    // exits, and under `quiet` it said nothing first.
+    const stopped = await stopOne(t.target, {
       ...flags,
-      quiet: true,
       wait: flags.wait ?? STOP_WAIT_DEFAULT_S,
-    };
-    await cmdStop([], stopFlags);
+    });
+    if (!stopped.ok) {
+      outError(stopped.error, mode);
+      Deno.exit(1);
+    }
+    unsaved = stopped.unsaved;
+    // Said NOW, in every mode that prints, and then the restart proceeds —
+    // the new process boots from the state that IS on disk, and the operator
+    // has to hear that it is not the state they were just looking at.
+    if (unsaved) {
+      out(
+        mode === "pretty"
+          ? `stopped ${appId}\n  ⚠ NOT SAVED — ${unsaved}`
+          : { appId, status: "stopped", unsaved },
+        mode,
+      );
+    }
     // Wait until port is free
     const deadline = Date.now() + SINGLETON_WAIT_MS;
     while (Date.now() < deadline) {
@@ -1465,6 +1533,7 @@ export async function cmdRestart(
     }
   }
   await cmdStart(launchArgs, flags);
+  return unsaved === undefined ? { appId } : { appId, unsaved };
 }
 
 /** Which directory `am watch` watches — the first POSITIONAL argument.
@@ -1538,7 +1607,10 @@ export async function cmdWatch(
     try {
       do {
         again = false;
-        await cmdRestart([], flags);
+        // `restartAll`, not `cmdRestart`: a refused final write is printed
+        // (NOT SAVED) and the app still comes back up — but it must not end
+        // the watch, which is what `cmdRestart`'s exit 1 would do.
+        await restartAll([], flags);
       } while (again);
     } catch (e) {
       // A failed restart leaves the OLD app running (or none) — either way the

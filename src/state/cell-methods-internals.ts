@@ -266,6 +266,59 @@ export function classifyReturnedArray(
 
 // ── Reducer builder ────────────────────────────────────────────────────
 
+/** A call that supplies FEWER arguments than the method declares.
+ *
+ *  Measured, on a running app: `{"type":"ar:addTwo","payload":{"args":["one"]}}`
+ *  for `addTwo(s, a, b)` answered `{"ok":true}` and wrote `{"a":"one"}` — the
+ *  declared field simply absent from the row, on every client's screen, with
+ *  the persist guard naming the damage one window later. TypeScript catches
+ *  this for an in-process call; nothing did for a call that arrives as DATA
+ *  (`am dispatch`, the trojan route, a stale client after a signature change).
+ *
+ *  A WARNING, not a refusal, and the reason is exact: `fn.length` stops at the
+ *  first parameter with a default, so a method that defaults in its BODY
+ *  (`reset(s, to) { to ??= 0 }`) reports as requiring an argument it does not,
+ *  and refusing on the count would break a call that works today. The warning
+ *  names that fix too — moving the default into the signature makes the
+ *  optionality visible to everything, this check included.
+ *
+ *  Said once per method+count: a stale client repeats the same short call on
+ *  every action, and one line per action is how a real signal gets scrolled
+ *  away.
+ *
+ *  It lives at `methodArgs`, "the one place both method kinds pass through",
+ *  so sync and async and every transport get the identical answer. */
+const _shortCallWarned = new Set<string>();
+/** @internal Test seam — the dedupe must not leak between test cases. */
+export function _resetShortCallWarnings(): void {
+  _shortCallWarned.clear();
+}
+function _warnShortCall(
+  cell: string,
+  key: string,
+  fn: unknown,
+  supplied: number,
+): void {
+  if (typeof fn !== "function") return;
+  const required = Math.max(0, fn.length - 1); // minus the state draft
+  if (supplied >= required) return;
+  const id = `${cell}:${key}|${supplied}`;
+  if (_shortCallWarned.has(id)) return;
+  _shortCallWarned.add(id);
+  log.warn(
+    "cell",
+    `${cell}:${key} declares ${required} argument${
+      required === 1 ? "" : "s"
+    } and this call passed ${supplied} — the missing one${
+      required - supplied === 1 ? " is" : "s are"
+    } \`undefined\` inside the method, which writes a row whose declared ` +
+      `field is simply gone rather than failing. Pass them ` +
+      `(\`payload.args\`), or — if the method fills its own in — give the ` +
+      `parameter a default in the SIGNATURE (\`${key}(s, x = 0)\`), which is ` +
+      `what makes its optionality visible here. Said once per method and count.`,
+  );
+}
+
 /** Build the CellReduceFn for a methods-based cell. */
 export function buildMethodsReducer(
   actionTypeToKey: Map<string, string>,
@@ -375,7 +428,10 @@ export function buildMethodsReducer(
   ): unknown[] => {
     const raw = (payload as Record<string, unknown> | undefined)?.args;
     if (raw === undefined || raw === null) return [];
-    if (Array.isArray(raw)) return raw;
+    if (Array.isArray(raw)) {
+      _warnShortCall(cell, key, methods[key], raw.length);
+      return raw;
+    }
     throw new Error(
       `[${cell}:${key}] action payload.args must be an ARRAY of positional ` +
         `arguments (got ${

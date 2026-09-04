@@ -7,6 +7,7 @@
 //
 // This file is the executable statement of the fix: a selector read inside a
 // render scope subscribes exactly like a property read.
+import { _resetSubs } from "../src/state/state-subs.ts";
 import { assert, assertEquals } from "@std/assert";
 import { bindCell, cell } from "../mod.ts";
 import { bindCellReactive } from "../src/state/cell-reactive.ts";
@@ -108,4 +109,5 @@ Deno.test("selector: the standalone/Electron double-bind stays signal-backed", (
       "otherwise a selector-only component in standalone/Electron renders once " +
       "and freezes, which is exactly what the field report hit",
   );
+  _resetSubs(); // the reactive read armed the subscription sync
 });

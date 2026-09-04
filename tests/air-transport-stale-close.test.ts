@@ -13,6 +13,7 @@
 //
 // Driven through the live module with a fake WebSocket whose `close()` does
 // what a real one does: nothing synchronous.
+import { _teardownNow } from "../src/browser/protocol-subscription.ts";
 import { assert, assertEquals } from "@std/assert";
 
 class FakeWS {
@@ -111,6 +112,7 @@ Deno.test("air transport: a stale socket's onclose does not tear down its succes
     );
     assertEquals(ws2.readyState, 1, "ws2 is still open");
   } finally {
+    _teardownNow(); // ws2's vitals sampler and any retry are the client's
     console.warn = origWarn;
     if (prevWS === undefined) delete g.WebSocket;
     else g.WebSocket = prevWS;

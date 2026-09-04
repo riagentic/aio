@@ -10,7 +10,7 @@ import { DEFAULT_LOG_DIR } from "./logger-types.ts";
 import {
   callerFile,
   fmtUptime,
-  isDevMode,
+  isRunningFromSource,
   LEVELS,
   now,
 } from "./logger-types.ts";
@@ -56,7 +56,7 @@ export class AioLogger {
     this.cfg = {
       level: config.level ?? "info",
       dir: config.dir ?? DEFAULT_LOG_DIR,
-      console: config.console ?? isDevMode(),
+      console: config.console ?? isRunningFromSource(),
       heartbeat: config.heartbeat ?? 3600,
       suppressTypes: config.suppressTypes ?? [],
       backupLogs: config.backupLogs ?? true,

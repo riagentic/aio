@@ -247,24 +247,29 @@ function shellDoc(opts: { appCss?: boolean } = {}) {
   win.document.write(
     androidLocalHTML("probe", opts.appCss ?? false, { themeName: "probe" }),
   );
-  return win.document;
+  return { doc: win.document, close: () => win.happyDOM.close() };
 }
 
-Deno.test("android shell: the default look ships disabled, not applied", () => {
-  const doc = shellDoc();
-  const deferred = doc.querySelector("style[data-aio-theme-deferred]");
-  assert(deferred, "the packaged shell must carry the sheet");
-  assertEquals(
-    deferred!.getAttribute("media"),
-    "not all",
-    "…and it must be inert until the app asks for it",
-  );
+Deno.test("android shell: the default look ships disabled, not applied", async () => {
+  const { doc, close } = shellDoc();
+  try {
+    const deferred = doc.querySelector("style[data-aio-theme-deferred]");
+    assert(deferred, "the packaged shell must carry the sheet");
+    assertEquals(
+      deferred!.getAttribute("media"),
+      "not all",
+      "…and it must be inert until the app asks for it",
+    );
+  } finally {
+    await close();
+  }
 });
 
-Deno.test('android runtime: ui.theme "auto" enables it; nothing else does', () => {
+Deno.test('android runtime: ui.theme "auto" enables it; nothing else does', async () => {
   // deno-lint-ignore no-explicit-any
   const g = globalThis as any;
   const prevDoc = g.document;
+  const opened: Array<() => Promise<void>> = [];
   try {
     for (
       const [theme, want] of [
@@ -275,7 +280,8 @@ Deno.test('android runtime: ui.theme "auto" enables it; nothing else does', () =
         ["full", null],
       ] as [string | undefined, string | null][]
     ) {
-      const doc = shellDoc();
+      const { doc, close } = shellDoc();
+      opened.push(close);
       g.document = doc;
       _applyShellUi({ theme });
       assertEquals(
@@ -287,7 +293,8 @@ Deno.test('android runtime: ui.theme "auto" enables it; nothing else does', () =
       );
     }
     // "auto" still steps aside for an app that ships its own stylesheet.
-    const styled = shellDoc({ appCss: true });
+    const { doc: styled, close: closeStyled } = shellDoc({ appCss: true });
+    opened.push(closeStyled);
     g.document = styled;
     _applyShellUi({ theme: "auto" });
     assertEquals(
@@ -298,11 +305,13 @@ Deno.test('android runtime: ui.theme "auto" enables it; nothing else does', () =
       "auto + style.css → the app owns the stage, on android too",
     );
     // ui.lang travels the same way.
-    const langDoc = shellDoc();
+    const { doc: langDoc, close: closeLang } = shellDoc();
+    opened.push(closeLang);
     g.document = langDoc;
     _applyShellUi({ lang: "pt-BR" });
     assertEquals(langDoc.documentElement.lang, "pt-BR");
   } finally {
+    for (const close of opened) await close();
     g.document = prevDoc;
   }
 });

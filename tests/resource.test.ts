@@ -255,12 +255,17 @@ Deno.test({
 // continuations early-return on `disposed`, so nothing would ever clear it.
 // Every `{r.loading.value ? <Spinner/> : …}` in the app then spun for good.
 Deno.test("resource: dispose() clears loading", async () => {
+  let slow: ReturnType<typeof setTimeout> | undefined;
   const r = resource(
     () => 1,
-    () => new Promise<number>((res) => setTimeout(() => res(1), 1000)),
+    () =>
+      new Promise<number>((res) => {
+        slow = setTimeout(() => res(1), 1000);
+      }),
   );
   assertEquals(r.loading.value, true);
   r.dispose();
+  clearTimeout(slow); // the abandoned fetch is the test's to stop
   assertEquals(r.loading.value, false, "a torn-down resource is not loading");
   await Promise.resolve();
 });

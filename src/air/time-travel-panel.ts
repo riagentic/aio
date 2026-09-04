@@ -251,7 +251,11 @@ export function handleTTMessage(data: string | object): void {
   }
 }
 
-/** Reset all time-travel panel state — called from browser.ts _reset() and teardown. */
+/** Reset all time-travel panel state — the DOM node AND the `keydown`
+ *  listener it puts on `document`, so a torn-down client leaves neither.
+ *  Called from the client teardown (`_setTeardownFn` in
+ *  browser-air-transport.ts). It used to name `browser.ts`, a file that has
+ *  not existed since alpha52, and nothing called it at all. */
 export function resetTT(): void {
   _ttState = null;
   _ttListeners.clear();
@@ -259,7 +263,18 @@ export function resetTT(): void {
   _ttPanel = null;
   _ttPanelVisible = false;
   if (_ttKeyHandler) {
-    document.removeEventListener("keydown", _ttKeyHandler);
+    // The document may already be GONE. Teardown runs from a 300 ms grace
+    // TIMER (protocol-subscription.ts), and the document can be replaced or
+    // removed between that timer arming and firing — a window closing, an
+    // Electron re-mount, a test tearing its DOM down first. A bare `document`
+    // reference then throws `ReferenceError` out of a timer callback, which is
+    // an uncaught error nothing can catch. Dropping our own reference is the
+    // half that matters anyway: a listener on a document nobody holds any more
+    // keeps nothing alive.
+    (globalThis as { document?: Document }).document?.removeEventListener(
+      "keydown",
+      _ttKeyHandler,
+    );
     _ttKeyHandler = null;
     _ttKeyBound = false;
   }

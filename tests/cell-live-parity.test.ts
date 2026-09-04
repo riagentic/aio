@@ -519,10 +519,14 @@ Deno.test("call(): an __exec the executor cannot run answers the caller at once"
       type: "execprobe:__exec",
       payload: { ...payload, _callId: id },
     } as Msg);
+    let noAnswer: ReturnType<typeof setTimeout> | undefined;
     const outcome = await Promise.race([
       done.then(() => "resolved", (e: unknown) => String((e as Error).message)),
-      new Promise<string>((r) => setTimeout(() => r("NO ANSWER"), 200)),
+      new Promise<string>((r) => {
+        noAnswer = setTimeout(() => r("NO ANSWER"), 200);
+      }),
     ]);
+    clearTimeout(noAnswer); // the losing branch must not outlive the test
     assert(expect.test(outcome), `${label}: got ${outcome}`);
   }
 });

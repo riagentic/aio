@@ -128,6 +128,9 @@ export interface ServerSetupDeps<S, A> {
    *  invocation. A message naming a mechanism the reader did not use costs
    *  them a search. */
   noTlsSource?: "flag" | "config";
+  /** Which spelling supplied the cert pair — the warning names what was
+   *  actually written, exactly as `noTlsSource` does. */
+  certSource?: "flag" | "config";
   cliTransport?: "uds" | "ws" | "auto";
   // UI
   ui: {
@@ -263,6 +266,30 @@ export function _noTlsWarning(
     `TLS-terminating proxy fronts this port. ${undo} for HTTPS.`;
 }
 
+/** A cert pair that will not be used, said out loud.
+ *
+ *  The twin of {@linkcode _noTlsWarning}, and the reasoning is that function's
+ *  own, word for word: something that does nothing must say so. TLS is only
+ *  consulted when a server is EXPOSED, so `--tls-cert=… --tls-key=…` on a
+ *  loopback app is read by nothing at all — the files are never opened, so not
+ *  even a path typo or a missing file is noticed. There is no wrong outcome
+ *  (loopback is plain HTTP either way), but someone who passed a cert believes
+ *  they are serving it, and the next step in that belief is trusting the same
+ *  command line when it does reach a network.
+ *
+ *  A warning, not a refusal: a launcher that always passes the pair and adds
+ *  `--expose` conditionally is a legitimate script, and refusing would break
+ *  it. `--no-tls` has warned here since it was written; this is the other half
+ *  of the same question. */
+export function _unusedCertWarning(source: "flag" | "config"): string {
+  const said = source === "flag"
+    ? "--tls-cert/--tls-key"
+    : "`tls: { cert, key }`";
+  return `tls: ${said} has no effect without --expose — a loopback server is ` +
+    `plain HTTP already, so the cert is never even read (a wrong path would ` +
+    `not be noticed here). It only matters when exposing to a network.`;
+}
+
 /** Zero TCP ports — THE decision, as one pure function (tested as a table).
  *
  *  A local desktop app that serves nothing to a browser or another service
@@ -323,6 +350,7 @@ export async function setupTransport<S, A>(
     cliKey,
     cliNoTls,
     noTlsSource,
+    certSource,
     cliTransport,
     ui,
     title,
@@ -376,6 +404,8 @@ export async function setupTransport<S, A>(
   let tlsCert: TlsCert | null = null;
   if (cliNoTls) {
     log.warn(_noTlsWarning(expose, noTlsSource ?? "flag"));
+  } else if (!expose && (cliCert || cliKey)) {
+    log.warn(_unusedCertWarning(certSource ?? "flag"));
   } else if (expose) {
     // Tier ① — a private key belongs in the backup unit, and in ONE place
     // whether or not this is a compiled binary (it used to be ./.aio-tls in dev
@@ -728,6 +758,7 @@ export async function setupTransport<S, A>(
           });
         },
       }),
+      lastPersistError: deps.lastPersistError,
       getHealth: () => {
         const composed = (globalThis as Record<string, unknown>)
           .__aioCells as ComposedCells | undefined;

@@ -10,6 +10,7 @@
 // The existing browser-sync tests call `handleSyncLocalAction` directly, which
 // is precisely the path that CANNOT see this: the bug lives between the bound
 // method and the route. These tests go through the bound method.
+import { within as raceWithin } from "./within.ts";
 import { assert, assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
 import { cell } from "aio";
@@ -52,10 +53,7 @@ function shimLocalStorage(): void {
 /** Settle-or-hang: a call that does not settle within `ms` reports "HUNG"
  *  instead of stalling the suite — the failure mode under test. */
 function within<T>(p: Promise<T>, ms: number): Promise<string> {
-  return Promise.race([
-    p.then(() => "ok", (e) => `rejected: ${e}`),
-    new Promise<string>((r) => setTimeout(() => r("HUNG"), ms)),
-  ]);
+  return raceWithin(p.then(() => "ok", (e) => `rejected: ${e}`), ms, "HUNG");
 }
 
 const tick = () => new Promise((r) => setTimeout(r, 30));

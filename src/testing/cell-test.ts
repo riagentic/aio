@@ -17,6 +17,7 @@ import {
   _pendingCallPromises,
 } from "../state/method-cancel.ts";
 import { _resetAioRuntime } from "../state/runtime-reset.ts";
+import { routeEffect } from "../state/route-effect.ts";
 import { assertionFailure, formatCellState } from "./test-format.ts";
 import { frozenWriteMessage, isFrozenWriteError } from "../state/immutable.ts";
 import { _armTestStrict, _watchUnobservedCalls } from "./test-strict.ts";
@@ -261,6 +262,62 @@ export function testCell(
       unobserved.length = 0;
       throw first.err;
     };
+    // EFFECTS NOBODY RAN.
+    //
+    // Same rule as `unobserved`, for the other half of a dispatch. `testCell`
+    // drives `composed.execute` directly, so a framework effect
+    // (`schedule.*`, `own()`) has no clock and no resource table here — the
+    // root executor throws and names `bootCells`/`testUI`. But it only throws
+    // when something EXECUTES the effect, and a test that asserts on state and
+    // never calls `settle()` executes nothing: `s.$do(schedule.after(…))` then
+    // passed GREEN having armed no timer, which is the harness being more
+    // permissive than production, the one direction this project forbids.
+    //
+    // Observed-or-raised, exactly like a failure: a test that READ the effects
+    // (`t.getEffects()`) is asserting on the shape and is left alone.
+    const observedEffects = new WeakSet<object>();
+    const isFrameworkEffect = (e: unknown): boolean => {
+      let fw = false;
+      routeEffect(e as never, {
+        schedule: () => {
+          fw = true;
+        },
+        own: () => {
+          fw = true;
+        },
+        app: () => {},
+      });
+      return fw;
+    };
+    /** Framework effects emitted by ANY dispatch, not just the last.
+     *  `lastEffects` is overwritten every dispatch, so
+     *  `t.send.increment(); t.send.reset();` — a method that schedules
+     *  followed by one that does not — dropped the schedule effect out of
+     *  view before the end-of-test check could see it. That is the ordinary
+     *  multi-dispatch test, so it was most of them. Measured on a scaffolded
+     *  app: the starter test passed with a `schedule.after` that never armed.
+     */
+    const emittedFramework: (Msg | ScheduleEffect | OwnEffect)[] = [];
+    /** THE effects accessor. Every door a test can read effects through marks
+     *  them here — `getEffects()`, `expect.effects`, `expect.effectCount` —
+     *  so "the test looked at it" is one fact with one definition, not three.
+     *  Per EFFECT, not per test: an early read must not silence a LATER
+     *  dispatch's dropped effect, the same rule `unobserved` uses. */
+    const readEffects = (): (Msg | ScheduleEffect | OwnEffect)[] => {
+      for (const e of lastEffects) observedEffects.add(e);
+      return lastEffects;
+    };
+    /** Hand the first un-run framework effect to the executor, whose refusal
+     *  is the ONE place that message lives. No-op when there is none. */
+    const raiseUnrunFrameworkEffect = (): void => {
+      const eff = emittedFramework.find((e) =>
+        !executed.has(e) && !observedEffects.has(e)
+      );
+      if (!eff) return;
+      executed.add(eff);
+      composed.execute(app, eff as { type: string; payload: unknown });
+    };
+
     const prefix = f.__aio.id;
     const execType = `${prefix}:__exec`;
     const asyncMethods: Set<string> = f.__aio.asyncMethods ?? new Set();
@@ -305,6 +362,9 @@ export function testCell(
       const result = composed.reduce(state, action);
       state = { ...result.state };
       lastEffects = result.effects;
+      for (const e of result.effects) {
+        if (isFrameworkEffect(e)) emittedFramework.push(e);
+      }
       // AIO-427: surface the sync method's transported return value.
       return (result as { ret?: unknown }).ret;
     }
@@ -447,6 +507,7 @@ export function testCell(
           (state as Record<string, unknown>)[prefix] = { ...known, ...seed };
         }
         lastEffects = [];
+        emittedFramework.length = 0;
       },
       destroy: () => {
         const base = machine === false
@@ -454,6 +515,7 @@ export function testCell(
           : { ...f.__aio.state, __aio_status: machine.initial };
         state = { [f.__aio.id]: base };
         lastEffects = [];
+        emittedFramework.length = 0;
       },
       send,
       expect: {
@@ -475,7 +537,7 @@ export function testCell(
           }
         },
         effects: (types) => {
-          const actual = lastEffects.map((e) => e.type as string).sort();
+          const actual = readEffects().map((e) => e.type as string).sort();
           const expected = [...types].sort();
           if (JSON.stringify(expected) !== JSON.stringify(actual)) {
             throw assertionFailure(
@@ -484,7 +546,7 @@ export function testCell(
           }
         },
         effectCount: (n) => {
-          if (lastEffects.length !== n) {
+          if (readEffects().length !== n) {
             throw assertionFailure(
               `expected ${n} effects, got ${lastEffects.length}`,
             );
@@ -508,7 +570,7 @@ export function testCell(
         return state[f.__aio.id] as Record<string, unknown>;
       },
       getState: () => state[f.__aio.id] as Record<string, unknown>,
-      getEffects: () => lastEffects,
+      getEffects: readEffects,
       randomActions: (n) => {
         const keys = f.__aio.actionKeys;
         for (let i = 0; i < n; i++) {
@@ -599,6 +661,7 @@ export function testCell(
       }
       await drainMicrotasks();
       raiseUnobserved();
+      raiseUnrunFrameworkEffect();
     } finally {
       // Cells are module singletons: leave the def exactly as it was found, so
       // a later `bootCells`/`testUI` in the same file binds its own selectors.

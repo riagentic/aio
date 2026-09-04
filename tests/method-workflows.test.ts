@@ -1,5 +1,6 @@
 // perfect-aio D1 — the method-native workflow capabilities that replace
 // generators: until/race/sleep helpers + cancelOn/$signal cancellation.
+import { sleepFor } from "./within.ts";
 import {
   assert,
   assertEquals,
@@ -53,14 +54,18 @@ Deno.test("until: honors an AbortSignal", async () => {
 });
 
 Deno.test("race: first branch wins; timeout sugar works", async () => {
+  const slow = sleepFor(200);
   const fast = await race({
     a: sleep(5).then(() => "A"),
-    b: sleep(200).then(() => "B"),
+    b: slow.then(() => "B"),
   });
+  slow.cancel(); // the loser is the test's to stop
   assertEquals(fast.winner, "a");
   assertEquals(fast.value, "A");
 
-  const timed = await race({ work: sleep(500), timeout: 20 });
+  const work = sleepFor(500);
+  const timed = await race({ work, timeout: 20 });
+  work.cancel(); // the loser is the test's to stop
   assertEquals(timed.winner, "timeout");
 });
 

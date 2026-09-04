@@ -452,11 +452,34 @@ export async function cmdDispatch(
     outError(result.error, mode);
     Deno.exit(1);
   }
-  const data = result.data as { result?: unknown; resultDropped?: boolean };
+  const data = result.data as {
+    result?: unknown;
+    resultDropped?: boolean;
+    unsaved?: string | null;
+  };
+  // `ok: true` means APPLIED — the method ran, the commit is broadcast — and
+  // says nothing about the disk: the write reaches SQLite with the next
+  // persist window, by design (a flush per CLI call would be a second write
+  // pattern nobody asked for). What CAN be said without forcing anything is
+  // whether the write path is refusing right now — the last cycle's verdict,
+  // the one `/__aio/health` and `am stop` already speak — and saying nothing
+  // there is how an agent reads `{"ok":true}` as "on disk" while every write
+  // since some poisoned field is in RAM only.
+  // The reply carries the verdict itself when the server is new enough to
+  // send it (`unsaved`: a refusal, or `null` for "consulted, none"); an older
+  // server says nothing, and then health is asked — one extra request, never
+  // a wrong answer.
+  const unsaved = "unsaved" in data
+    ? (typeof data.unsaved === "string" ? data.unsaved : null)
+    : await persistRefusal(port, appId);
+  const notSaved = unsaved ? `\n  ⚠ NOT SAVED — ${unsaved}` : "";
   if (mode === "pretty") {
     const label = flags.asServer ? "dispatched (as server)" : "dispatched";
     if (data?.resultDropped) {
-      out(`${label} — the method returned a value JSON cannot carry`, mode);
+      out(
+        `${label} — the method returned a value JSON cannot carry${notSaved}`,
+        mode,
+      );
     } else if (data && "result" in data) {
       // The RETURN VALUE, in the house style rather than as raw JSON with
       // braces and quotes. `--json` still carries it verbatim — this is the
@@ -466,12 +489,52 @@ export async function cmdDispatch(
         { message: label, result: data.result },
         mode,
         () =>
-          typeof data.result === "object" && data.result !== null
+          (typeof data.result === "object" && data.result !== null
             ? stack(style.dim(label), describe(data.result))
-            : `${style.dim(label)} ${String(data.result)}`,
+            : `${style.dim(label)} ${String(data.result)}`) + notSaved,
       );
-    } else out(label, mode);
-  } else out(result.data, mode);
+    } else out(label + notSaved, mode);
+  } else {
+    // Additive: the reply object verbatim, plus `unsaved` only when there is
+    // a refusal to carry — a healthy app's `am dispatch --json` is byte-for-
+    // byte what it was.
+    out(
+      unsaved && data && typeof data === "object"
+        ? { ...data, unsaved }
+        : result.data,
+      mode,
+    );
+  }
+}
+
+/** Is this app's persistence REFUSING writes right now?
+ *
+ *  The verdict of the most recent persist cycle, read from `/__aio/health`
+ *  (`persist: { ok, error }`) — the same `lastCycleError()` that `am persist`
+ *  rejects on and `am stop` exits 1 for — worded the way the trojan words it
+ *  (`persist failed: …`, see `PERSIST_REFUSED` in server-trojan.ts) so the
+ *  NOT SAVED line reads the same at every door. Asked WITHOUT forcing a
+ *  flush: a dispatch is acked when it is applied, and this must not turn it
+ *  into something else. `null` when the write path is fine, and when the
+ *  question could not be put (no health route, a transport that is gone): "I
+ *  could not ask" is not data loss and is never reported as it. */
+async function persistRefusal(
+  port: number,
+  appId: string,
+): Promise<string | null> {
+  const r = await httpGet(port, "/__aio/health", appId);
+  if (!r.ok) return null;
+  type Health = { persist?: { ok?: boolean; error?: string } };
+  let health: Health | null = null;
+  try {
+    health = JSON.parse(r.data) as Health;
+  } catch {
+    // aio-ok: not an aio health document — the dispatch already succeeded
+    // against this port, so this is "could not ask", not a verdict.
+  }
+  return health?.persist?.ok === false
+    ? `persist failed: ${health.persist.error ?? "(no reason given)"}`
+    : null;
 }
 
 export async function cmdActions(
@@ -516,9 +579,12 @@ export async function cmdTT(args: string[], flags: GlobalFlags): Promise<void> {
   }
   if (cmd === "goto" && (!Number.isInteger(arg) || (arg as number) < 0)) {
     outError(
-      `am tt goto: ${args[1]} is not a history index — indices are whole ` +
-        `numbers from 0. (An out-of-range one used to answer ok:true and ` +
-        `leave the app exactly where it was.)`,
+      `am tt goto: ${args[1]} is not a history id — ids are whole numbers ` +
+        `from 0, and \`am actions\` lists the ones this app holds. They are ` +
+        `IDS, not positions in that list: the window rolls and \`resume\` ` +
+        `truncates, so the two stop matching after any real session. (A ` +
+        `number matching no entry used to answer ok:true and leave the app ` +
+        `exactly where it was — the server refuses it now.)`,
       mode,
     );
     Deno.exit(1);
@@ -684,10 +750,20 @@ export async function cmdSnapshot(
       outError(result.error, mode);
       Deno.exit(1);
     }
+    // The route closes the persist window before it answers, and a refused
+    // write rides back as `unsaved` — the restore IS in memory and on every
+    // screen, so the reply is not an error, but "loaded" over a store that
+    // still holds the pre-restore rows is the alpha76 shape exactly. Same
+    // field, same line, same exit code as `am stop`.
+    const unsaved = (result.data as { unsaved?: string } | null)?.unsaved;
     out(
-      mode === "pretty" ? `loaded from ${file}` : { file, status: "loaded" },
+      mode === "pretty"
+        ? `loaded from ${file}` +
+          (unsaved ? `\n  ⚠ NOT SAVED — ${unsaved}` : "")
+        : { file, status: "loaded", ...(unsaved ? { unsaved } : {}) },
       mode,
     );
+    if (unsaved) Deno.exit(1);
     return;
   }
 

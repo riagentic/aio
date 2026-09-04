@@ -37,6 +37,9 @@ export function composeCells(
     perfCheck?: boolean;
     /** The app identity — scopes cancellation (see method-cancel.ts). */
     appId?: string;
+    /** See `ReduceContext.refusalsReject` — align the in-process caller with
+     *  the wire when a write is refused. */
+    refusalsReject?: boolean;
   },
 ): import("./cell-compose-types.ts").ComposedCells {
   if (entries.length === 0) {
@@ -128,6 +131,7 @@ export function composeCells(
     cellLastAction,
     reportError: _reportError,
     perfCheck: _perfCheck,
+    refusalsReject: opts?.refusalsReject === true,
   };
 
   // ── Cancellation triggers (D1): rebuild the runtime registry from defs ──

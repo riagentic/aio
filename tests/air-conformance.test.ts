@@ -115,7 +115,7 @@ Deno.test("conformance: keyed list — 50 random rounds keep DOM order, count, a
     }
   }
   t.unmount();
-  win.happyDOM.close();
+  await win.happyDOM.close();
 });
 
 Deno.test("conformance: keyed list — duplicate keys don't crash, count stays consistent", async () => {
@@ -143,7 +143,7 @@ Deno.test("conformance: keyed list — duplicate keys don't crash, count stays c
   assertEquals(ul.children.length, 4);
   assertEquals(ul.textContent, "3333");
   t.unmount();
-  win.happyDOM.close();
+  await win.happyDOM.close();
 });
 
 // ── 2. Conditional structure churn — lifecycle pairing ──────────────
@@ -206,7 +206,7 @@ Deno.test("conformance: conditional churn — onMount/onCleanup balance over 100
     cleanups,
     "after unmount every onMount has its onCleanup",
   );
-  win.happyDOM.close();
+  await win.happyDOM.close();
 });
 
 // ── 3. Deep signal graphs ───────────────────────────────────────────
@@ -351,7 +351,7 @@ Deno.test("conformance: falsy children — null/undefined/false skipped, 0 and '
   const r = (doc as any).querySelector("#r");
   assertEquals(r.textContent, "0x");
   t.unmount();
-  win.happyDOM.close();
+  await win.happyDOM.close();
   await tick();
 });
 
@@ -377,7 +377,7 @@ Deno.test("conformance: dynamic child flipping through 0/''/null/false keeps pos
     assertEquals(r.textContent, want, `child value ${String(val)}`);
   }
   t.unmount();
-  win.happyDOM.close();
+  await win.happyDOM.close();
 });
 
 Deno.test("conformance: attribute edges — null/false removal, 0 and '' kept, boolean props", async () => {
@@ -414,7 +414,7 @@ Deno.test("conformance: attribute edges — null/false removal, 0 and '' kept, b
   await tick();
   assertEquals(b.getAttribute("title"), "", "empty string is a real value");
   t.unmount();
-  win.happyDOM.close();
+  await win.happyDOM.close();
 });
 
 Deno.test("conformance: style flips object→string→object without stale properties", async () => {
@@ -444,10 +444,10 @@ Deno.test("conformance: style flips object→string→object without stale prope
   assertEquals(r.style.fontWeight, "bold");
   assertEquals(r.style.color, "", "string styles cleared on object flip");
   t.unmount();
-  win.happyDOM.close();
+  await win.happyDOM.close();
 });
 
-Deno.test("conformance: svg elements get the SVG namespace, children inherit it", () => {
+Deno.test("conformance: svg elements get the SVG namespace, children inherit it", async () => {
   const { win, doc } = harness();
   const App = () =>
     h(
@@ -463,12 +463,12 @@ Deno.test("conformance: svg elements get the SVG namespace, children inherit it"
   assertEquals(svg.getAttribute("viewBox"), "0 0 10 10", "case preserved");
   assertEquals(circle.getAttribute("cx"), "5");
   t.unmount();
-  win.happyDOM.close();
+  await win.happyDOM.close();
 });
 
 // ── 6. Error boundaries ─────────────────────────────────────────────
 
-Deno.test("conformance: ErrorBoundary catches a throw during INITIAL render, siblings survive", () => {
+Deno.test("conformance: ErrorBoundary catches a throw during INITIAL render, siblings survive", async () => {
   const { win, doc } = harness();
   const Bomb = () => {
     throw new Error("boom-initial");
@@ -490,7 +490,7 @@ Deno.test("conformance: ErrorBoundary catches a throw during INITIAL render, sib
   assertEquals((doc as any).querySelector("#f").textContent, "boom-initial");
   assertEquals(r.textContent, "beforeboom-initialafter", "siblings intact");
   t.unmount();
-  win.happyDOM.close();
+  await win.happyDOM.close();
 });
 
 Deno.test("conformance: ErrorBoundary catches a throw during UPDATE (via parent re-render), then recovers", async () => {
@@ -536,7 +536,7 @@ Deno.test("conformance: ErrorBoundary catches a throw during UPDATE (via parent 
   assertEquals((doc as any).querySelector("#f"), null, "fallback removed");
   assertEquals((doc as any).querySelector("#ok").textContent, "ok");
   t.unmount();
-  win.happyDOM.close();
+  await win.happyDOM.close();
 });
 
 Deno.test("conformance: component-LOCAL re-render throw keeps old output, siblings survive (AIO-138 pin)", async () => {
@@ -581,7 +581,7 @@ Deno.test("conformance: component-LOCAL re-render throw keeps old output, siblin
     "sibling keeps updating after the contained throw",
   );
   t.unmount();
-  win.happyDOM.close();
+  await win.happyDOM.close();
 });
 
 // ── 7. Fragment / Portal reconciliation ─────────────────────────────
@@ -613,7 +613,7 @@ Deno.test("conformance: keyed fragments — 25 random shuffles keep multi-node g
     assertEquals(r.children.length, cur.length * 2, "2 nodes per fragment");
   }
   t.unmount();
-  win.happyDOM.close();
+  await win.happyDOM.close();
 });
 
 // `<Portal target={cond ? el : null}>` — the target itself going away, which
@@ -659,7 +659,7 @@ Deno.test("conformance: Portal — a target that becomes null tears its content 
 
   t.unmount();
   assertEquals(target.querySelectorAll("p").length, 0);
-  win.happyDOM.close();
+  await win.happyDOM.close();
 });
 
 Deno.test("conformance: Portal — keyed children reconcile in the target, cleanup empties it", async () => {
@@ -703,5 +703,5 @@ Deno.test("conformance: Portal — keyed children reconcile in the target, clean
 
   t.unmount();
   assertEquals(target.querySelectorAll("p").length, 0, "unmount clears target");
-  win.happyDOM.close();
+  await win.happyDOM.close();
 });

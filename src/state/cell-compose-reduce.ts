@@ -1,6 +1,7 @@
 // cell-compose-reduce.ts — per-cell reducer and root reduce function
 
 import { notifyMethodCancel } from "./method-cancel.ts";
+import { isDevMode } from "./dev-flag.ts";
 import { recordRejection } from "./rejection-tracker.ts";
 import {
   current,
@@ -131,7 +132,82 @@ export type ReduceContext = {
   cellLastAction: Map<string, { type: string; at: number }>;
   reportError: ((err: AioError) => void) | undefined;
   perfCheck: boolean;
+  /** Align the in-process caller with the wire: a write the reduce REFUSED
+   *  rejects `await cell.method()` instead of resolving.
+   *
+   *  Measured on one app, one cell, one method: over the wire the ack is
+   *  `{ ok: false, code: "ACTION_REFUSED" }` and the await rejects; in process
+   *  the same call resolved `undefined` with the state unchanged. `ownerRan`
+   *  is true — the method DID run — and the refusal came after it, so the
+   *  branch that rejects was skipped. Same app code, two answers to "did my
+   *  write land".
+   *
+   *  Opt-in, because the aligned behaviour cannot be the default in 1.x: an
+   *  app doing `await c.method(); if (c.x !== want) …` in process would get a
+   *  rejection where it had a value. Dev warns whenever a refusal is swallowed
+   *  here, so the divergence is discoverable rather than surprising. */
+  refusalsReject?: boolean;
 };
+
+/** Said once per method+reason: an in-process caller was told a refused write
+ *  succeeded, while the same call over the wire is answered ACTION_REFUSED. */
+const _swallowedRefusals = new Set<string>();
+/** @internal Test seam — the dedupe must not leak between test cases. */
+export function _resetSwallowedRefusals(): void {
+  _swallowedRefusals.clear();
+}
+function _warnSwallowedRefusal(actionType: string, reason: string): void {
+  const key = `${actionType}|${reason}`;
+  if (_swallowedRefusals.has(key)) return;
+  _swallowedRefusals.add(key);
+  log.warn(
+    "cell",
+    `${actionType} was REFUSED (${reason}) and the in-process caller was ` +
+      `resolved anyway — over the wire the same call is answered ` +
+      `ACTION_REFUSED and its \`await\` rejects, so the same code gets two ` +
+      `answers about whether the write landed. Set ` +
+      `\`refusalsReject: true\` in aio.run() to make them agree (it will ` +
+      `become the default in a future major). Said once per method.`,
+  );
+}
+
+/** THE validate refusal — one path, because there were two.
+ *
+ *  Both reduce shapes (methods-form and machine/reduce-form) ran their own
+ *  copy of "report, record, return unchanged", and only one of them learned
+ *  about `refusalsReject`: the flag worked for one kind of cell and did
+ *  nothing for the other, which is the drift this file keeps closing
+ *  elsewhere. Reports, records, and then either THROWS (so dispatch rejects
+ *  the caller and leaves the state untouched — what the wire already answers)
+ *  or returns the unchanged state with the refusal attached, saying so in dev.
+ */
+function refuseValidation(
+  cellName: string,
+  action: Msg,
+  fullState: Record<string, unknown>,
+  result: unknown,
+  ctx: ReduceContext,
+): ReduceResult {
+  const reason = `state validation failed: ${result}`;
+  if (ctx.reportError) {
+    ctx.reportError(
+      createAioError("REDUCE_ERROR", reason, {
+        cellName,
+        actionType: action.type,
+      }),
+    );
+  } else {
+    log.error("cell", `${cellName} ${reason}`);
+  }
+  // D11: explainable rejection — the sync handler reads this and tells the
+  // op's origin client WHY its optimistic change snapped back. Keyed to THIS
+  // action: the handler reads it after an await, and a global slot would be
+  // cleared or overwritten by any dispatch that interleaves.
+  recordRejection(action, { cell: cellName, reason: String(result) });
+  if (ctx.refusalsReject) throw new Error(reason);
+  if (isDevMode()) _warnSwallowedRefusal(action.type, reason);
+  return { state: fullState, effects: [], refusal: reason };
+}
 
 /** Reduce a single cell's slice for a given action */
 export function reduceCell(
@@ -300,30 +376,7 @@ export function reduceCell(
     if (f.__aio.validate) {
       const result = f.__aio.validate(nextSlice);
       if (result !== true) {
-        if (_reportError) {
-          _reportError(
-            createAioError(
-              "REDUCE_ERROR",
-              `state validation failed: ${result}`,
-              {
-                cellName,
-                actionType: action.type,
-              },
-            ),
-          );
-        } else {
-          log.error("cell", `${cellName} state validation failed: ${result}`);
-        }
-        // D11: explainable rejection — the sync handler reads this and tells
-        // the op's origin client WHY its optimistic change snapped back. Keyed
-        // to THIS action: the handler reads it after an await, and a global
-        // slot would be cleared/overwritten by any dispatch that interleaves.
-        recordRejection(action, { cell: cellName, reason: String(result) });
-        return {
-          state: fullState,
-          effects: [],
-          refusal: `state validation failed: ${result}`,
-        };
+        return refuseValidation(cellName, action, fullState, result, ctx);
       }
     }
 
@@ -412,23 +465,7 @@ export function reduceCell(
   if (f.__aio.validate) {
     const result = f.__aio.validate(nextSlice);
     if (result !== true) {
-      if (_reportError) {
-        _reportError(
-          createAioError("REDUCE_ERROR", `state validation failed: ${result}`, {
-            cellName,
-            actionType: action.type,
-          }),
-        );
-      } else {
-        log.error("cell", `${cellName} state validation failed: ${result}`);
-      }
-      // D11: explainable rejection (see above).
-      recordRejection(action, { cell: cellName, reason: String(result) });
-      return {
-        state: fullState,
-        effects: [],
-        refusal: `state validation failed: ${result}`,
-      };
+      return refuseValidation(cellName, action, fullState, result, ctx);
     }
   }
 

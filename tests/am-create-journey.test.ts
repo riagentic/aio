@@ -11,6 +11,9 @@ import {
 } from "../src/am/am-cmd-create.ts";
 import { AIO_ENTRY_PATHS } from "../src/entries.ts";
 import type { GlobalFlags } from "../src/am/am-types.ts";
+import { h } from "../src/air/vdom.ts";
+import type { ComponentFn } from "../src/air/vdom.ts";
+import { testUI } from "../src/testing/ui-test.ts";
 
 const ROOT = new URL("../", import.meta.url).pathname.replace(/\/$/, "");
 const files = scaffold("demo", "counter", true);
@@ -22,10 +25,46 @@ Deno.test("scaffold .gitignore ignores .env (the README promises it) but not .en
   assertStringIncludes(files["README.md"]!, "`.env`");
 });
 
-Deno.test("counter buttons carry t= names, so they surface as MinusButton/PlusButton", () => {
+// The name of this test used to say the buttons surface as
+// "MinusButton"/"PlusButton", and it asserted only that the TSX contains the
+// `t=` attributes — so the sentence a reader trusted was never checked, and it
+// was FALSE: a `t=` name is taken VERBATIM (docs/testing/ui-testing.md), which
+// is the whole point of writing one. MEASURED against a scaffolded app running
+// under `am surface`: minus, ResetButton, plus. Those three strings are what a
+// user types into `am trigger` and `ui.App.*`, so they are what this pins —
+// through a real render, not a substring.
+Deno.test("counter buttons surface as minus/ResetButton/plus", async () => {
   const ui = files["src/App.tsx"]!;
   assertStringIncludes(ui, 't="minus"');
   assertStringIncludes(ui, 't="plus"');
+
+  const clicked: string[] = [];
+  // the scaffold's own three buttons: two named by `t=`, one left to LABEL+ROLE
+  function App() {
+    return h("div", null, [
+      h("button", {
+        type: "button",
+        t: "minus",
+        onClick: () => clicked.push("minus"),
+      }, "−"),
+      h("button", {
+        type: "button",
+        class: "ghost",
+        onClick: () => clicked.push("reset"),
+      }, "Reset"),
+      h("button", {
+        type: "button",
+        t: "plus",
+        class: "primary",
+        onClick: () => clicked.push("plus"),
+      }, "+"),
+    ]);
+  }
+  await using surface = await testUI(App as ComponentFn);
+  await surface.App.minus.click();
+  await surface.App.ResetButton.click();
+  await surface.App.plus.click();
+  assertEquals(clicked, ["minus", "reset", "plus"]);
 });
 
 Deno.test("src/client.ts: no default URL, usage + exit 2 without one, bounded ready", async () => {

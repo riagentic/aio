@@ -811,6 +811,42 @@ export function formatErrorCompact(err: AioError): string {
 
 // ─── reportError — single exit point ────────────────────────────────────────
 
+/** Bytes of `stateSnapshot` a single log record may carry. Big enough for a
+ *  real app's state to arrive whole (the common case, and the useful one),
+ *  small enough that a repeating error cannot fill a disk. */
+const SNAPSHOT_LOG_MAX = 4096;
+
+/** What the LOGGER gets: the snapshot itself when it fits, and otherwise the
+ *  question a reader actually asks of a snapshot too big to read — which cells
+ *  are in it and how big each one is. The `onError` hook and the feedback
+ *  capture still receive `err.stateSnapshot` whole; only the file is bounded. */
+function boundSnapshot(
+  snap: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!snap) return undefined;
+  let json: string;
+  try {
+    json = JSON.stringify(snap) ?? "";
+  } catch {
+    return { _omitted: "unserializable (BigInt or circular structure)" };
+  }
+  if (json.length <= SNAPSHOT_LOG_MAX) return snap;
+  const sizes: Record<string, number | string> = {};
+  for (const [k, v] of Object.entries(snap)) {
+    try {
+      sizes[k] = (JSON.stringify(v) ?? "").length;
+    } catch {
+      sizes[k] = "unserializable";
+    }
+  }
+  return {
+    _omitted: `the state snapshot is ${json.length} bytes, over the ` +
+      `${SNAPSHOT_LOG_MAX}-byte log budget — cell sizes below; the whole ` +
+      `snapshot is on the error object (onError, feedback reports)`,
+    _bytesByCell: sizes,
+  };
+}
+
 export function reportError(err: AioError, opts: ReportErrorOpts = {}): void {
   try {
     const { onError, logger, tt, countError, prod } = opts;
@@ -841,6 +877,14 @@ export function reportError(err: AioError, opts: ReportErrorOpts = {}): void {
     // suppressed while throttled so the structured log doesn't flood either.
     if (logger && !suppress) {
       const payload = err.toJSON() as Record<string, unknown>;
+      // The snapshot goes to a FILE. `formatErrorBox` above already caps what
+      // it prints at 200 characters; this half carried the same snapshot
+      // uncapped, so one report answered the same question two ways and the
+      // unbounded half was the one nobody watches. An app holding ten thousand
+      // rows wrote megabytes per error, and an error that repeats (a bad row
+      // that throws on every dispatch, a payload a client can craft) fills the
+      // disk while the console stays tidy. Nothing reports a log eating a disk.
+      payload.stateSnapshot = boundSnapshot(err.stateSnapshot);
       const write = isWarn && logger.warn ? logger.warn : logger.error;
       write(formatErrorCompact(err), payload);
     }

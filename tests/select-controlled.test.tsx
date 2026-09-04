@@ -101,7 +101,7 @@ const select = (value: string, opts: string[]) =>
     ...opts.map((o) => h("option", { value: o }, o)),
   );
 
-Deno.test("select: mount selects the option the value names, not the first one", () => {
+Deno.test("select: mount selects the option the value names, not the first one", async () => {
   const { ctx, host, cleanup } = env();
   try {
     _render(host, select("b", ["a", "b", "c"]), null, ctx);
@@ -110,11 +110,11 @@ Deno.test("select: mount selects the option the value names, not the first one",
     assertEquals(sel.value, "b");
     assertEquals(sel.selectedIndex, 1);
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
-Deno.test("select: a diff that creates the options AND sets the value in one pass lands", () => {
+Deno.test("select: a diff that creates the options AND sets the value in one pass lands", async () => {
   const { ctx, host, cleanup } = env();
   try {
     // Starts with no options at all — the list arrives with the value, which is
@@ -131,11 +131,11 @@ Deno.test("select: a diff that creates the options AND sets the value in one pas
     );
     assertEquals(sel.selectedIndex, 2);
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
-Deno.test("select: a hydrated select shows the state's option (SSR ≡ mount)", () => {
+Deno.test("select: a hydrated select shows the state's option (SSR ≡ mount)", async () => {
   const { ctx, host, cleanup } = env();
   try {
     const v = select("c", ["a", "b", "c"]);
@@ -159,6 +159,6 @@ Deno.test("select: a hydrated select shows the state's option (SSR ≡ mount)", 
     );
     assertEquals(sel.selectedIndex, 2);
   } finally {
-    cleanup();
+    await cleanup();
   }
 });

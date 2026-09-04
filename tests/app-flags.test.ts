@@ -151,3 +151,61 @@ Deno.test("appFlags: an UNDECLARED flag is still refused — the strictness is t
   assertStringIncludes(out, "unknown flag: --nope");
   assert(code !== 0, "an unknown flag must not boot the app");
 });
+
+// …and a REAL app says it the way every other refusal is said.
+//
+// The message above is carefully teachable — it names the flag, offers
+// `appFlags`, and explains why `--` cannot help a compiled binary. A user saw
+// it wrapped in `error: Uncaught (in promise)` with five frames of aio
+// internals stacked on top, which is the exact shape quoted at the head of
+// this file from the field report. Every other refusal at this stage — "Already
+// running", a bad config — prints one line and exits; only the commonest
+// mistake anyone makes with a CLI, a typo, crashed.
+//
+// `libraryMode` keeps the throw, because an embedding host (and `bootWithArgs`
+// above) wants the exception rather than an exit.
+async function bootRealApp(args: string[]) {
+  const probe = `${ROOT}tests/.app-flags-real.tmp.ts`;
+  await Deno.writeTextFile(
+    probe,
+    `import { aio } from "../mod.ts";\n` +
+      `import { cell } from "../src/state/cell.ts";\n` +
+      `const c = cell("appflagreal", { state: { n: 0 }, methods: {} });\n` +
+      `await aio.run({ cells: [c], appId: "appflagreal", ` +
+      `client: "server-only", persist: false, singleton: false, port: 0, ` +
+      `baseDir: Deno.makeTempDirSync(), dbPath: ":memory:" } as never);\n` +
+      `console.log("BOOTED");\n`,
+  );
+  try {
+    const r = await new Deno.Command(Deno.execPath(), {
+      args: ["run", "-A", probe, ...args],
+      cwd: ROOT,
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    return {
+      out: new TextDecoder().decode(r.stdout) +
+        new TextDecoder().decode(r.stderr),
+      code: r.code,
+    };
+  } finally {
+    await Deno.remove(probe).catch(() => {});
+  }
+}
+
+Deno.test("appFlags: a typo is answered, not crashed into", async () => {
+  const { out, code } = await bootRealApp(["--wibble"]);
+  assert(code !== 0, "an unknown flag must not boot the app");
+  assertStringIncludes(out, "unknown flag: --wibble");
+  assertStringIncludes(out, "appFlags", "the fix has to travel with the news");
+  assert(
+    !/Uncaught/.test(out),
+    `a typo must not read as a framework crash:\n${out.slice(0, 600)}`,
+  );
+  assert(
+    !/\bat .*aio-cli\.ts:/.test(out),
+    `no stack frames of aio internals over a usage error:\n${
+      out.slice(0, 600)
+    }`,
+  );
+});

@@ -493,9 +493,11 @@ export function registerCall(
       }, Math.ceil(timeoutMs * CEILING_HEARTBEAT_FRACTION));
     };
     const settle = () => {
+      // The deadline armed at registration. A pause/resume re-arms a FRESH
+      // one on the entry, and the entry is what `resolveCall` disarms (see
+      // `disarm`) — this covers the `expire`→reject path, where the entry
+      // is already gone and only the original handles are left to clear.
       clearTimeout(timer);
-      const e = _pending.get(callId);
-      if (e?.heartbeat !== undefined) clearTimeout(e.heartbeat);
     };
     _pending.set(callId, {
       // The timer is kept so a HUMAN WAIT can cancel it — see
@@ -527,8 +529,34 @@ export function resolveCall(
   const pending = _pending.get(callId);
   if (!pending) return;
   _pending.delete(callId);
+  disarm(pending);
   if (error) pending.reject(error);
   else pending.resolve(value);
+}
+
+/** Clear a registration's timers — the deadline AND the heartbeat — from the
+ *  entry that holds them.
+ *
+ *  `settle()` used to look the heartbeat up by id, one line AFTER
+ *  `resolveCall` had deleted the id: the lookup found nothing, and every
+ *  completed async call left its half-way heartbeat armed until it fired —
+ *  15 s of a 30 s ceiling. In a process that is done (`app.close()`, the end
+ *  of a CLI command, a test) that timer is the one thing still keeping the
+ *  event loop alive, so "the app cannot exit" for up to half a ceiling after
+ *  its last call. The op sanitizer named it in every `testCell` with an
+ *  async method. The entry is disarmed HERE, where the entry is in hand, and
+ *  the same disarm covers a deadline a pause/resume re-armed (a fresh handle
+ *  the registration closure never saw). */
+function disarm(
+  p: {
+    timer?: ReturnType<typeof setTimeout>;
+    heartbeat?: ReturnType<typeof setTimeout>;
+  },
+): void {
+  if (p.timer !== undefined) clearTimeout(p.timer);
+  if (p.heartbeat !== undefined) clearTimeout(p.heartbeat);
+  p.timer = undefined;
+  p.heartbeat = undefined;
 }
 
 /** Dispatch an action whose result rides a registered call — the ONE way to
@@ -570,8 +598,12 @@ export function dispatchTracked<A>(
   return done;
 }
 
-/** Clear all pending async call registrations — for test isolation between runs */
+/** Clear all pending async call registrations — for test isolation between
+ *  runs. Their timers go with them: a registration dropped with its deadline
+ *  still armed is a wakeup for a call nobody remembers, and the process (or
+ *  the test) is kept alive until it fires. */
 export function resetPending(): void {
+  for (const p of _pending.values()) disarm(p);
   _pending.clear();
 }
 

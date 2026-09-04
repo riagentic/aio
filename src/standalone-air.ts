@@ -502,6 +502,12 @@ export function initStandalone<S, A, E>(
       console.warn("[aio] flush failed:", e);
     }
   }
+  _cancelPersist = () => {
+    if (persistTimer) {
+      clearTimeout(persistTimer);
+      persistTimer = null;
+    }
+  };
 
   const standaloneLog = {
     debug: (_: string) => {},
@@ -672,6 +678,14 @@ export function _resetState(): void {
   const destroyCells = _destroyCells;
   _destroyCells = null;
   destroyCells?.();
+  // …then the persist debounce: a pending timer outliving the app it
+  // persisted for was a wakeup with nothing to do and the reason a finished
+  // test (or a torn-down page) was still running. Cancelled, never flushed —
+  // a test seeds localStorage and THEN resets, and a flush here would write
+  // the previous app's state over the seed.
+  const cancelPersist = _cancelPersist;
+  _cancelPersist = null;
+  cancelPersist?.();
   _state = null;
   _app = null;
   _cellApp = null;
@@ -720,6 +734,11 @@ let _seed: ((partial: Record<string, unknown>) => void) | null = null;
 // `_resetState()` (the harness dispose/re-mount path). Null when no cell
 // runtime is up.
 let _destroyCells: (() => void) | null = null;
+/** The running app's persist-debounce cancel — a reset that drops the app
+ *  drops the write its debounce still held (a reset is a discard, `close()`
+ *  is the flush) instead of leaving the timer to fire into a runtime that no
+ *  longer exists. Set per boot, cleared by `_resetState`. */
+let _cancelPersist: (() => void) | null = null;
 
 /** Install a starting state for the booted cells — harness only.
  *

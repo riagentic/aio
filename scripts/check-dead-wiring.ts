@@ -566,6 +566,57 @@ export function report(v: Verdict): string {
   return lines.join("\n");
 }
 
+/** Every source file under ROOTS, read and masked — the input the aliased
+ *  import scan needs and `scan()` keeps to itself. */
+async function readSources(root: string): Promise<File[]> {
+  const out: File[] = [];
+  for (const r of ROOTS) {
+    for await (const p of walk(`${root}${r}`)) {
+      const rel = p.slice(root.length);
+      out.push(readFile(rel, await Deno.readTextFile(p)));
+    }
+  }
+  return out;
+}
+
+/** An `_`-aliased import that is never used — the one dead wiring the LANGUAGE
+ *  tools cannot see.
+ *
+ *  `deno lint`'s `no-unused-vars` deliberately ignores identifiers that start
+ *  with `_`, and its own hint teaches the alias as the way to keep a binding it
+ *  would otherwise flag. So `import { resetTT as _resetTT } from …` is an
+ *  unused import that type-checks, lints clean, and reads as deliberate.
+ *
+ *  Measured when this landed: exactly one, and it mattered — the time-travel
+ *  panel's reset, whose doc comment named a caller in a file deleted three
+ *  releases earlier. Nothing called it, so every client teardown left a
+ *  `keydown` listener on `document` and a node in the DOM. Six other aliased
+ *  imports in `src/` were all genuinely used; the class was empty except for
+ *  the one, and nothing was keeping it that way. */
+export function aliasedDeadImports(files: readonly File[]): Offender[] {
+  const out: Offender[] = [];
+  for (const f of files) {
+    // The MASKED copy: a name that appears only inside a comment or a string
+    // is not a use, and this scan exists precisely because such a mention is
+    // what made the dead one look alive.
+    const code = f.masked;
+    const path = f.path;
+    for (const m of code.matchAll(/\bimport\s+(?:type\s+)?\{([^}]*)\}/g)) {
+      const block = m[1] ?? "";
+      for (const a of block.matchAll(/\bas\s+(_[A-Za-z0-9_$]*)/g)) {
+        const name = a[1]!;
+        // Every occurrence of the local name: the import itself is one, so a
+        // total of one means nothing else in the file mentions it.
+        const uses = code.split(new RegExp(`\\b${name}\\b`)).length - 1;
+        if (uses > 1) continue;
+        const line = code.slice(0, m.index ?? 0).split("\n").length;
+        out.push({ file: path, line, kind: "import", name });
+      }
+    }
+  }
+  return out;
+}
+
 if (import.meta.main) {
   const root = new URL("../", import.meta.url).pathname;
   const all = await scan(root);
@@ -583,6 +634,17 @@ if (import.meta.main) {
   const text = report(v);
   if (text) {
     console.error(text);
+    Deno.exit(1);
+  }
+  const aliased = aliasedDeadImports(await readSources(root));
+  if (aliased.length) {
+    console.error(
+      `\n${aliased.length} \`_\`-aliased import(s) that nothing uses — the ` +
+        `alias is what silences \`no-unused-vars\`, so these look deliberate ` +
+        `and are dead:\n` +
+        aliased.map((o) => `  ${o.file}:${o.line}  ${o.name}`).join("\n") +
+        `\n\nWire it, or delete the import.`,
+    );
     Deno.exit(1);
   }
   console.log(

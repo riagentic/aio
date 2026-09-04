@@ -31,6 +31,52 @@ function esc(label: string): string {
 
 /** Render a metrics snapshot as Prometheus text exposition format. Pure —
  *  unit-testable without a server. */
+/** The cells map inside whatever `getHealth` returned.
+ *
+ *  `ServerConfig.getHealth` is typed `() => unknown` and TWO shapes are
+ *  accepted: the full health document (`{ status, version, pid, cells, … }`)
+ *  and a bare cells map (a host that supplies its own). Telling them apart was
+ *  a guess on a KEY NAME, and both spellings of that guess have been wrong:
+ *
+ *    • keyed on `cells` — a health document for an app with no composed cells
+ *      has no `cells` key, so the document itself was read as the map and
+ *      `status`/`version`/`pid` became cell rows;
+ *    • keyed on `status` — a bare cells map for an app with a cell NAMED
+ *      `status` (an entirely ordinary name) is read as a document, `doc.cells`
+ *      is undefined, and EVERY cell row vanishes from the scrape. Silently: a
+ *      Prometheus target with no cell series looks like an app with no cells.
+ *
+ *  So it is decided STRUCTURALLY instead, on the values rather than the names:
+ *  a cells map's values are all cell rows (`{ enabled, errors }`), and a health
+ *  document's top-level values — a string, a number, a nested object without
+ *  those keys — never are. No cell name can fool it, because no cell name is
+ *  consulted. */
+export function healthCells(
+  health: unknown,
+): Record<string, { errors: number; enabled: boolean }> | undefined {
+  if (!health || typeof health !== "object" || Array.isArray(health)) {
+    return undefined;
+  }
+  const doc = health as Record<string, unknown>;
+  // An explicit `cells` key is unambiguous — a cell may not be named `cells`
+  // and hold a row at the same time, because a row is not a cells map.
+  const inner = doc.cells;
+  if (inner && typeof inner === "object" && !Array.isArray(inner)) {
+    return inner as Record<string, { errors: number; enabled: boolean }>;
+  }
+  const isRow = (v: unknown): boolean =>
+    !!v && typeof v === "object" && !Array.isArray(v) &&
+    "enabled" in (v as Record<string, unknown>) &&
+    "errors" in (v as Record<string, unknown>);
+  const entries = Object.entries(doc);
+  // An EMPTY object is a document with no cells and a map with no cells at
+  // once; both mean "no rows", so it needs no decision.
+  if (entries.length > 0 && entries.every(([, v]) => isRow(v))) {
+    return doc as Record<string, { errors: number; enabled: boolean }>;
+  }
+  return undefined;
+}
+
 export function formatPrometheus(m: MetricsInput): string {
   const lines: string[] = [];
   const gauge = (name: string, help: string, value: number, labels = "") => {

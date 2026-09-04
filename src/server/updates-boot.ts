@@ -115,10 +115,16 @@ export async function judgePendingUpdate(
       ...pending!,
       rollbackFailed: e instanceof Error ? e.message : String(e),
     });
+    // `restoreArtifact` says where every artifact is NOW and which command
+    // puts one back; that is repeated verbatim, never paraphrased. This line
+    // used to add its own account — "`current` still holds <to>, mv <previous>
+    // back" — which was false the one time it mattered most: both renames had
+    // failed, the stable path was EMPTY, and the failed build sat at
+    // `<current>.failed-<ts>`, unmentioned. One decider for "where is the
+    // artifact": the error that watched it move.
     log.error(
-      `ROLLBACK FAILED (${e}) — ${current} still holds ${pending!.to}, and ` +
-        `the version that worked is at ${verdict.previous}. Put it back with:` +
-        `\n  mv ${verdict.previous} ${current}\n` +
+      `ROLLBACK FAILED of update ${pending!.from} → ${pending!.to}: ` +
+        `${e instanceof Error ? e.message : String(e)}\n` +
         `The marker is KEPT, so this is retried (and said) on every boot until ` +
         `it succeeds or the app comes up healthy.`,
     );

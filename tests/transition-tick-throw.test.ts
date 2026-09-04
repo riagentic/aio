@@ -45,7 +45,7 @@ async function run(direction: "in" | "out"): Promise<{
     }, direction);
   } finally {
     console.error = orig;
-    cleanup();
+    await cleanup();
   }
   return { errors, seen };
 }

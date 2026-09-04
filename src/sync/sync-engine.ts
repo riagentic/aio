@@ -1,4 +1,5 @@
 // src/sync/sync-engine.ts — Client-side CRDT sync orchestrator
+import { vetWirePayload } from "../state/action-encode.ts";
 import { enc } from "../protocol/envelope.ts";
 import { randomUuid } from "../rand.ts";
 import type { HLC, SyncConfig, SyncOp, SyncStatus } from "./types.ts";
@@ -633,6 +634,14 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
   const engine: SyncEngine = {
     handleLocalAction(cell, action, payload) {
       return withLock(cell, async () => {
+        // VET BEFORE THE OP EXISTS. An op JSON cannot carry poisons everything
+        // downstream of here: `saveOp` fails its localStorage write with a
+        // quota-shaped message that blames the browser, `enc` throws on the
+        // send, and the buffered op is retried on every reconnect forever.
+        // Refusing here rejects the caller's promise, which
+        // `handleSyncLocalAction` already turns into a warning plus an ack
+        // rejection — the channel this failure should have used all along.
+        vetWirePayload(`${cell}:${action}`, payload);
         const hlc = clock.tick();
         const id = `${deps.clientId}-${_session}-${
           (++_opCounter).toString(36)

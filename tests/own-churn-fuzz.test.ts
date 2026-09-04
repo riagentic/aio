@@ -58,7 +58,7 @@ const occupies = (k: Kind) => k !== "void" && k !== "throwFactory";
 
 Deno.test("fuzz: own survives acquire/replace/dispose churn", () => {
   const rnd = mulberry32(SEED);
-  let ops = 0, disposals = 0;
+  let ops = 0, disposals = 0, reported = 0;
 
   for (let program = 0; program < PROGRAMS; program++) {
     _resetPendingFactories();
@@ -187,13 +187,16 @@ Deno.test("fuzz: own survives acquire/replace/dispose churn", () => {
 
     // EXACTLY ONCE: no resource is torn down twice, and every resource that
     // was ever acquired (and holds a disposer) is torn down by the end.
+    // aio-ok: the `disposals` assertion below refuses a run that never enters here.
     for (const [instance, n] of disposeCount) {
       assertEquals(n, 1, `resource #${instance} was disposed ${n} times`);
       disposals++;
     }
     // A throwing/rejecting disposer is reported, never swallowed and never
     // allowed to take the process down.
+    // aio-ok: the `reported` assertion below refuses a run that never enters here.
     for (const e of errors) {
+      reported++;
       assert(
         /threw|failed/.test(e),
         `unexpected own error: ${e}`,
@@ -203,6 +206,29 @@ Deno.test("fuzz: own survives acquire/replace/dispose churn", () => {
 
   console.log(
     `[own-fuzz] seed=${SEED} programs=${PROGRAMS} ops=${ops} disposals=${disposals}`,
+  );
+  // A COUNT THAT IS ONLY LOGGED IS NOT A CLAIM. `disposals` counts the
+  // "torn down exactly once" assertion — which sits inside
+  // `for (const [instance, n] of disposeCount)`, so if the op mix ever stopped
+  // producing disposals that loop would run zero times, the invariant this
+  // fuzzer exists for would be checked never, and the run would still pass
+  // with `disposals=0` printed where nobody reads it. Measured at this seed:
+  // 24000 ops, 7686 disposals. The bound is deliberately far below that — it
+  // asks "did the fuzz still do the thing", not "did it do exactly as much".
+  // The same question for the OTHER loop: `throwFactory` and `throwDisposer`
+  // are two of the generated kinds, so a run that reports no error at all did
+  // not generate them — and "a throwing disposer is contained, never
+  // swallowed" is the whole point of this file.
+  assert(
+    reported > 0,
+    `no own error was reported over ${ops} ops — the fuzz stopped generating ` +
+      `throwFactory/throwDisposer, so containment was never exercised`,
+  );
+  assert(
+    disposals > PROGRAMS,
+    `only ${disposals} disposal(s) over ${PROGRAMS} programs — the ` +
+      `exactly-once invariant was checked almost never, so a green run says ` +
+      `nothing about it`,
   );
 });
 

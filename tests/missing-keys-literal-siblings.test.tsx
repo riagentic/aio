@@ -12,16 +12,18 @@ import { h, setDevMode } from "../src/air/vdom.ts";
 import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
 import { signal } from "../src/state/signal.ts";
 
-function withDom<T>(fn: (doc: Document, root: HTMLElement) => T): T {
+async function withDom<T>(
+  fn: (doc: Document, root: HTMLElement) => T,
+): Promise<T> {
   const win = new Window({ url: "https://localhost" });
   const doc = win.document as unknown as Document;
   const root = doc.createElement("div");
   doc.body.appendChild(root);
   _setDocument(doc);
   try {
-    return fn(doc, root);
+    return await fn(doc, root);
   } finally {
-    win.happyDOM.close();
+    await win.happyDOM.close();
   }
 }
 
@@ -30,8 +32,11 @@ function withDom<T>(fn: (doc: Document, root: HTMLElement) => T): T {
  *  "warns on every boot" because state arrives right after), collect the
  *  dev warnings, unmount. `setDevMode` is toggled so the once-per-id warning
  *  cache starts empty for every case. */
-function warningsOf(App: () => unknown, rerenders = 1): string[] {
-  return withDom((_doc, root) => {
+async function warningsOf(
+  App: () => unknown,
+  rerenders = 1,
+): Promise<string[]> {
+  return await withDom((_doc, root) => {
     const warns: string[] = [];
     const orig = console.warn;
     console.warn = (...a: unknown[]) =>
@@ -61,7 +66,7 @@ function warningsOf(App: () => unknown, rerenders = 1): string[] {
 const missing = (w: string[]) => w.filter((m) => m.includes("without keys"));
 const mixed = (w: string[]) => w.filter((m) => m.includes("Mixed keyed"));
 
-Deno.test("(a) four literal <div> siblings do not warn about keys", () => {
+Deno.test("(a) four literal <div> siblings do not warn about keys", async () => {
   const App = () => (
     <div id="sidebar">
       <div>Files</div>
@@ -70,12 +75,12 @@ Deno.test("(a) four literal <div> siblings do not warn about keys", () => {
       <div>Debug</div>
     </div>
   );
-  const w = warningsOf(App, 2);
+  const w = await warningsOf(App, 2);
   assertEquals(missing(w), [], `literal siblings: ${JSON.stringify(w)}`);
   assertEquals(mixed(w), []);
 });
 
-Deno.test("(a') literal siblings handed on through a wrapper's {children} stay literal", () => {
+Deno.test("(a') literal siblings handed on through a wrapper's {children} stay literal", async () => {
   const Panel = (p: { children?: unknown }) => (
     <section class="panel">{p.children}</section>
   );
@@ -86,30 +91,30 @@ Deno.test("(a') literal siblings handed on through a wrapper's {children} stay l
       <div>Git</div>
     </Panel>
   );
-  assertEquals(missing(warningsOf(App, 2)), []);
+  assertEquals(missing(await warningsOf(App, 2)), []);
 });
 
-Deno.test("(a'') classic h(): literal rest-argument siblings do not warn", () => {
+Deno.test("(a'') classic h(): literal rest-argument siblings do not warn", async () => {
   const App = () =>
     h("div", null, h("p", null, "a"), h("p", null, "b"), h("p", null, "c"));
-  assertEquals(missing(warningsOf(App, 2)), []);
+  assertEquals(missing(await warningsOf(App, 2)), []);
 });
 
-Deno.test("(b) an unkeyed .map list warns, and names the parent", () => {
+Deno.test("(b) an unkeyed .map list warns, and names the parent", async () => {
   const items = ["Files", "Search", "Git"];
   const App = () => (
     <ul id="tabs">
       {items.map((i) => <li>{i}</li>)}
     </ul>
   );
-  const w = missing(warningsOf(App));
+  const w = missing(await warningsOf(App));
   assertEquals(w.length, 1, JSON.stringify(w));
   assert(w[0]!.includes("3 <li> children without keys"), w[0]);
   assert(w[0]!.includes("inside <ul#tabs>"), `names the parent: ${w[0]}`);
   assert(w[0]!.includes('"Files"'), `samples the rows: ${w[0]}`);
 });
 
-Deno.test("(b') a .map list beside a literal sibling still warns (nested array)", () => {
+Deno.test("(b') a .map list beside a literal sibling still warns (nested array)", async () => {
   const items = ["a", "b", "c"];
   const App = () => (
     <ul>
@@ -117,15 +122,15 @@ Deno.test("(b') a .map list beside a literal sibling still warns (nested array)"
       {items.map((i) => <li>{i}</li>)}
     </ul>
   );
-  assertEquals(missing(warningsOf(App)).length, 1);
+  assertEquals(missing(await warningsOf(App)).length, 1);
 });
 
-Deno.test("(b'') classic h(): a nested array argument warns", () => {
+Deno.test("(b'') classic h(): a nested array argument warns", async () => {
   const App = () => h("ul", null, ["a", "b", "c"].map((i) => h("li", null, i)));
-  assertEquals(missing(warningsOf(App)).length, 1);
+  assertEquals(missing(await warningsOf(App)).length, 1);
 });
 
-Deno.test("(c) a literal sibling next to a KEYED .map list is still mixed-keys", () => {
+Deno.test("(c) a literal sibling next to a KEYED .map list is still mixed-keys", async () => {
   const items = ["a", "b", "c"];
   const App = () => (
     <ul id="mixed">
@@ -133,19 +138,19 @@ Deno.test("(c) a literal sibling next to a KEYED .map list is still mixed-keys",
       {items.map((i) => <li key={i}>{i}</li>)}
     </ul>
   );
-  const w = warningsOf(App);
+  const w = await warningsOf(App);
   assertEquals(mixed(w).length, 1, JSON.stringify(w));
   assert(mixed(w)[0]!.includes("inside <ul#mixed>"));
   assertEquals(missing(w), [], "keyed rows are not 'missing keys'");
 });
 
-Deno.test("dup-key is unchanged", () => {
+Deno.test("dup-key is unchanged", async () => {
   const App = () => (
     <ul>
       {["a", "a", "b"].map((i) => <li key={i}>{i}</li>)}
     </ul>
   );
-  const w = warningsOf(App);
+  const w = await warningsOf(App);
   assertEquals(w.filter((m) => m.includes('Duplicate key "a"')).length, 1);
 });
 
@@ -153,7 +158,7 @@ Deno.test("dup-key is unchanged", () => {
 // offending parents reported the first and the second surfaced only once the
 // first was fixed. The id is the SITE now: every distinct one warns once, and
 // all of them on the first boot.
-Deno.test("dedupe is per site: two parents both warn, one parent warns once", () => {
+Deno.test("dedupe is per site: two parents both warn, one parent warns once", async () => {
   const items = ["a", "b", "c"];
   const Two = () => (
     <div>
@@ -161,7 +166,7 @@ Deno.test("dedupe is per site: two parents both warn, one parent warns once", ()
       <ol id="two">{items.map((i) => <li>{i}</li>)}</ol>
     </div>
   );
-  const w = missing(warningsOf(Two, 3)); // three re-renders of the same page
+  const w = missing(await warningsOf(Two, 3)); // three re-renders of the same page
   assertEquals(w.length, 2, JSON.stringify(w));
   assert(w[0]!.includes("inside <ul#one>"), w[0]);
   assert(w[1]!.includes("inside <ol#two>"), w[1]);
@@ -178,7 +183,7 @@ Deno.test("dedupe is per site: two parents both warn, one parent warns once", ()
       </ul>
     </div>
   );
-  const m = mixed(warningsOf(MixedTwo, 3));
+  const m = mixed(await warningsOf(MixedTwo, 3));
   assertEquals(m.length, 2, JSON.stringify(m));
   assert(m[0]!.includes("inside <ul#m1>") && m[1]!.includes("inside <ul#m2>"));
 });

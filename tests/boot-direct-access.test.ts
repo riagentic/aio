@@ -10,6 +10,7 @@
 // reactively bound, a no-hook component rendering counter.count shows the
 // initial state and updates when state changes.
 
+import { _resetSubs } from "../src/state/state-subs.ts";
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
 import { cell } from "aio";
@@ -39,6 +40,7 @@ function setup() {
       await win.happyDOM.close();
       _resetCellRegistry();
       _resetSignals();
+      _resetSubs(); // the reactive reads armed the subscription sync
     },
   };
 }

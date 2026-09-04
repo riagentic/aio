@@ -9,6 +9,7 @@ import {
   createFileWatcher,
   DEBOUNCE_MS,
 } from "../src/server/server-watcher.ts";
+import { stopEsbuild } from "../src/server/server-transpile.ts";
 import {
   classifyBrowserError,
   setUiRootProbe,
@@ -80,7 +81,12 @@ Deno.test("watcher: deleting the root component is an ERROR, never a 'reloaded' 
   }
 });
 
-Deno.test("watcher: a removed (non-root) file is 'removed', not 'reloaded'", async () => {
+Deno.test("watcher: a removed (non-root) file is 'removed', not 'reloaded'", {
+  // esbuild transpiles through a native child that `stopEsbuild()` kills;
+  // esbuild owns the handle, so its exit cannot be awaited from here.
+  sanitizeOps: false, // aio-ok: esbuild's service child — exit not awaitable
+  sanitizeResources: false, // aio-ok: same esbuild child
+}, async () => {
   const tmp = await Deno.makeTempDir({ prefix: "aio-watch-rm-" });
   try {
     await Deno.writeTextFile(
@@ -101,6 +107,7 @@ Deno.test("watcher: a removed (non-root) file is 'removed', not 'reloaded'", asy
       await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 300));
     });
     watcher?.shutdown();
+    await stopEsbuild(); // the graph validation spawned it; no server stops it
     assert(
       out.info.some((l) => l.includes("removed") && l.includes("Gone.tsx")),
       `Got: ${JSON.stringify(out.info)}`,

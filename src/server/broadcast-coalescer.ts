@@ -82,12 +82,17 @@ export function createCoalescer<T>(
     flush(b, f);
   };
 
+  // Set by `dispose()`. A round queued as a microtask BEFORE the dispose used
+  // to run after it and arm a fresh throttle timer on a coalescer nobody
+  // owned — `shutdown()` had already cleared the one it knew about.
+  let disposed = false;
   const schedule = (): void => {
-    if (queued) return; // a leading flush is already pending
+    if (disposed || queued) return; // a leading flush is already pending
     if (throttleMs > 0 && throttle) return; // in the throttle window — buffered, flushed on the tail
     queued = true;
     queueMicrotask(() => {
       queued = false;
+      if (disposed) return; // disposed while this round was queued
       // Leading edge — unless an urgent flush already drained the buffer
       // (an empty, unforced drain would read as the full-state signal).
       if (force || buffer.length > 0) drain();
@@ -125,6 +130,7 @@ export function createCoalescer<T>(
     },
     flushUrgent: flushUrgentImpl,
     dispose() {
+      disposed = true;
       urgentRegistry.delete(flushUrgentImpl);
       if (throttle) {
         clearTimeout(throttle);

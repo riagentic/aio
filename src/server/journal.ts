@@ -353,9 +353,23 @@ export function createJournal(
       // snapshot. It matters wherever `dbPath` puts the journal outside the
       // 0700 app directory.
       try {
-        const keep = parseJournal(Deno.readTextFileSync(path)).filter((e) =>
-          e.seq > s
-        );
+        let text: string;
+        try {
+          text = Deno.readTextFileSync(path);
+        } catch (e) {
+          // NOT A FAILURE. A journal that has never been appended to has no
+          // file, and "compact nothing" is already done — but this fell into
+          // the catch below and warned `could not compact … the file keeps
+          // growing until this succeeds` about a file that does not exist and
+          // is not growing. It fired TWICE on the first boot of every
+          // journaling app, so a developer's first sight of the feature was a
+          // durability warning about data they did not have. A warning that
+          // fires when nothing is wrong is how the ones that matter come to be
+          // ignored, and this one lives in the durability path.
+          if (e instanceof Deno.errors.NotFound) return;
+          throw e;
+        }
+        const keep = parseJournal(text).filter((e) => e.seq > s);
         const tmp = path + ".tmp";
         // A leftover tmp from an earlier crash may exist with looser
         // permissions; `mode` only applies at CREATE time, so remove it first.

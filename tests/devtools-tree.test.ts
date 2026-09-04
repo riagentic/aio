@@ -38,7 +38,7 @@ function find(nodes: ComponentTreeNode[], name: string): ComponentTreeNode {
   return undefined as unknown as ComponentTreeNode;
 }
 
-Deno.test("devtools.tree reports the mounted component hierarchy", () => {
+Deno.test("devtools.tree reports the mounted component hierarchy", async () => {
   const { doc, cleanup } = env();
   const dt = connectAioDevTools();
   try {
@@ -88,11 +88,11 @@ Deno.test("devtools.tree reports the mounted component hierarchy", () => {
     assertEquals(dt.tree, [], "an unmounted root contributes no components");
   } finally {
     dt.disconnect();
-    cleanup();
+    await cleanup();
   }
 });
 
-Deno.test("devtools.tree does not feed back into the render loop", () => {
+Deno.test("devtools.tree does not feed back into the render loop", async () => {
   const { doc, cleanup } = env();
   const dt = connectAioDevTools();
   try {
@@ -114,6 +114,6 @@ Deno.test("devtools.tree does not feed back into the render loop", () => {
     _unmount(handle);
   } finally {
     dt.disconnect();
-    cleanup();
+    await cleanup();
   }
 });

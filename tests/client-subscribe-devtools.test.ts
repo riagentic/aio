@@ -11,6 +11,7 @@
 // Both are now driven from the ONE place a state is applied
 // (`_incStateVersion`, the transport's state seam) — the same shape as the
 // standalone renderer's twin (`src/standalone-air.ts`).
+import { _teardownNow } from "../src/browser/protocol-subscription.ts";
 import { assert, assertEquals } from "@std/assert";
 import {
   _coreReset,
@@ -72,6 +73,7 @@ Deno.test("client.subscribe fires on a full state frame and on a patch", () => {
     assertEquals(client.getCellState("counter"), { n: 2 });
   } finally {
     off();
+    _teardownNow(); // the grace timer `off()` armed — a test owns its client
   }
 });
 
@@ -87,6 +89,7 @@ Deno.test("client.subscribe returns a working unsubscribe", () => {
   handleMessage({ $patches: [{ op: "replace", path: ["a", "v"], value: 2 }] });
   _incStateVersion();
   assertEquals(calls, 1, "an unsubscribed listener must stop being called");
+  _teardownNow(); // the grace timer `off()` armed — a test owns its client
 });
 
 Deno.test("connectReduxDevTools streams every state change, not just init", () => {

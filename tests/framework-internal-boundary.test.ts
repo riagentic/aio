@@ -26,7 +26,11 @@ import { dec, enc } from "../src/protocol/envelope.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { createWsManager } from "../src/server/server-ws.ts";
 import { createUDSListener } from "../src/server/aio.ts";
-import { handleTrojan, type TrojanDeps } from "../src/server/server-trojan.ts";
+import {
+  handleTrojan,
+  resetTrojanRateLimit,
+  type TrojanDeps,
+} from "../src/server/server-trojan.ts";
 
 /** Every shape the rule covers, each carrying the payload that makes it worth
  *  blocking. `n: 999` is the tell: the cell's only method adds ONE. */
@@ -286,6 +290,7 @@ async function trojanDispatch(deps: TrojanDeps, body: unknown) {
     body: JSON.stringify(body),
   });
   const res = await handleTrojan("/__aio/trojan/dispatch", req, deps)!;
+  resetTrojanRateLimit(); // a direct call has no server shutdown to disarm it
   return {
     status: res.status,
     body: await res.json() as Record<string, unknown>,

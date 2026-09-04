@@ -9,6 +9,7 @@
 // The tests therefore assert on the GRANDCHILD, not the child. A kill-the-tree
 // test that only checks the process it started passes on code that has never
 // worked.
+import { within } from "./within.ts";
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { sessionLeaderSpec, spawn } from "../src/server/spawn.ts";
 
@@ -110,10 +111,7 @@ Deno.test({
     h.pause();
     await sleep(50);
 
-    const status = await Promise.race([
-      h.kill(),
-      sleep(5000).then(() => "TIMED OUT" as const),
-    ]);
+    const status = await within(h.kill(), 5000, "TIMED OUT" as const);
     assertEquals(status === "TIMED OUT", false, "kill() hung on a paused tree");
     await sleep(100);
     assertEquals(alive(pids.grandchild!), false);

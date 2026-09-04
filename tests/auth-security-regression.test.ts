@@ -1,5 +1,6 @@
 // Regression tests for the alpha31 adversarial-review findings — each pins a
 // concrete exploit closed, so a refactor can't silently reopen it.
+import { within } from "./within.ts";
 import { assert, assertEquals } from "@std/assert";
 import { _resetAuthFails } from "../src/server/server-auth.ts";
 import { freePort } from "../src/testing/server-test.ts";
@@ -461,12 +462,9 @@ Deno.test({
     );
     // …and the socket that was already open is disarmed, not left running
     // until it happens to reconnect.
-    await Promise.race([
-      closed,
-      new Promise((_, rej) =>
-        setTimeout(() => rej(new Error("socket survived the deletion")), 4000)
-      ),
-    ]);
+    if ((await within(closed, 4000, "SURVIVED" as const)) === "SURVIVED") {
+      throw new Error("socket survived the deletion");
+    }
     // The reset token issued above must be GONE — 0 left to purge. Without
     // the burn this is 1: a token that mints a session for a deleted account.
     assertEquals(

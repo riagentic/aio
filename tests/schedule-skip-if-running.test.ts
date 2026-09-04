@@ -28,9 +28,12 @@ function manager(dispatch: (a: { type: string }) => unknown) {
 
 Deno.test("every: overlapping ticks stack by default (unchanged behaviour)", async () => {
   let started = 0;
+  const ticks: Promise<unknown>[] = [];
   const m = manager(() => {
     started++;
-    return sleep(120); // slower than the interval
+    const t = sleep(120); // slower than the interval
+    ticks.push(t);
+    return t;
   });
   m.handle(schedule.every("poll", 20, { type: "x:tick" }));
   await sleep(110);
@@ -39,13 +42,17 @@ Deno.test("every: overlapping ticks stack by default (unchanged behaviour)", asy
     started >= 3,
     `default must not silently change: ticks kept firing (${started})`,
   );
+  await Promise.all(ticks); // the stacked ticks finish inside the test
 });
 
 Deno.test("every: skipIfRunning drops a tick while the previous is in flight", async () => {
   let started = 0;
+  const ticks: Promise<unknown>[] = [];
   const m = manager(() => {
     started++;
-    return sleep(120);
+    const t = sleep(120);
+    ticks.push(t);
+    return t;
   });
   m.handle(
     schedule.every("poll", 20, { type: "x:tick" }, { skipIfRunning: true }),
@@ -57,13 +64,17 @@ Deno.test("every: skipIfRunning drops a tick while the previous is in flight", a
     1,
     "one slow tick must not stack five copies of the same poll on top of itself",
   );
+  await Promise.all(ticks);
 });
 
 Deno.test("every: the next tick runs once the previous settles", async () => {
   let started = 0;
+  const ticks: Promise<unknown>[] = [];
   const m = manager(() => {
     started++;
-    return sleep(40);
+    const t = sleep(40);
+    ticks.push(t);
+    return t;
   });
   m.handle(
     schedule.every("poll", 20, { type: "x:tick" }, { skipIfRunning: true }),
@@ -72,6 +83,7 @@ Deno.test("every: the next tick runs once the previous settles", async () => {
   m.cancelAll();
   assert(started >= 2, `polling must continue, not stop (${started})`);
   assert(started <= 5, `and must not stack (${started})`);
+  await Promise.all(ticks);
 });
 
 Deno.test("every: a tick that REJECTS still clears the guard", async () => {

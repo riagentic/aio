@@ -6,10 +6,10 @@
  */
 
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
-import { enc } from "../protocol/envelope.ts";
 import { _BLOCKED_KEYS } from "./state-array-utils.ts";
 import { _setSubsSendFn, trackPath } from "./state-subs.ts";
 import { offlineQueue, type QueuedEntry } from "./offline-queue.ts";
+import { encodeAction } from "./action-encode.ts";
 import { log } from "../diagnostics/logger-api.ts";
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -130,8 +130,33 @@ export function setTransport(
  *  @internal Cross-module wiring — not public API, stripped from the snapshot. */
 export function flushOfflineQueue(): void {
   if (!_transport) return;
-  for (const action of _offlineQueue.drain()) {
-    _transport.send(enc("action", action));
+  // DRAIN LAST, NOT FIRST. This used to `drain()` into the for-loop head, so a
+  // transport that refused ONE write (a socket that reports OPEN and throws —
+  // the case its browser twin `_flushPending` exists for) lost that action AND
+  // every action queued behind it, with no caller told: the flush runs inside
+  // `setTransport`'s onConnected, so the throw escaped the reconnect path too.
+  // The queue contract forbids exactly that outcome — an action is delivered,
+  // or it waits for the next open, or its caller hears why.
+  const pending = _offlineQueue.drainEntries();
+  for (let i = 0; i < pending.length; i++) {
+    const entry = pending[i]!;
+    try {
+      _transport.send(encodeAction(entry.action));
+    } catch (err) {
+      // Hand the remainder back at the place in line it already had.
+      for (const rest of pending.slice(i)) {
+        _offlineQueue.push(rest.action, rest.seq);
+      }
+      log.warn(
+        "transport",
+        `offline flush stopped after ${i} of ${pending.length} ` +
+          `action(s) — the transport refused the write (${
+            err instanceof Error ? err.message : String(err)
+          }). The remaining ${pending.length - i} are back in the queue, in ` +
+          `order, and replay on the next connection; none were lost.`,
+      );
+      return;
+    }
   }
 }
 
@@ -159,8 +184,16 @@ export function send(action: { type: string; payload?: any }): boolean {
 
   const tagged = { ...action, _source: "UI" };
 
+  // ENCODE BEFORE DECIDING WHERE IT GOES. Only the online branch used to
+  // encode, so a value JSON cannot carry (a BigInt, a cycle) threw at the call
+  // site when connected and was accepted in silence when not — the same call,
+  // two answers. The queued one was a poison pill: the next flush threw on it
+  // and took the rest of the queue with it. A frame that cannot be built is
+  // refused here, by `encodeAction`, naming the action and the reason.
+  const json = encodeAction(tagged);
+
   if (_transport) {
-    _transport.send(enc("action", tagged));
+    _transport.send(json);
     return true;
   }
   // Queue for later — the drop policy + diagnostics live in the shared queue.

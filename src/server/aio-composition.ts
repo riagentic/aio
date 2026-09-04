@@ -41,6 +41,9 @@ export type ComposeCellsInput = {
   localFirst?: boolean;
   circuitBreaker?: CircuitBreakerConfig;
   perfCheck?: PerfCheck;
+  /** Align the in-process caller with the wire on a refused write — see
+   *  `ReduceContext.refusalsReject`. */
+  refusalsReject?: boolean;
   /** The app identity — scopes cancellation across apps in one process. */
   appId?: string;
   onError?: (error: AioError) => void;
@@ -466,6 +469,7 @@ export function composeCellsWiring(
     circuitBreaker: input.circuitBreaker,
     perfCheck: perfEnabled,
     appId: input.appId,
+    refusalsReject: input.refusalsReject === true,
   });
 
   applyCellDefaults(composed, input.cellDefaults);

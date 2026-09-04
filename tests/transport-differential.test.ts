@@ -257,17 +257,19 @@ async function returnBothWays(
     ws.onopen = () => res();
     ws.onerror = () => rej(new Error("ws never opened"));
   });
+  let noAck: ReturnType<typeof setTimeout> | undefined;
   const acked = new Promise<unknown>((res) => {
     ws.onmessage = (ev) => {
       const f = JSON.parse(String(ev.data)) as { t: string; d?: unknown };
       if (f.t === "ack") res((f.d as { value?: unknown })?.value);
     };
-    setTimeout(() => res("<no ack>"), 2_000);
+    noAck = setTimeout(() => res("<no ack>"), 2_000);
   });
   ws.send(
     enc("action", { type: "xretb:give", payload: { args: [] }, cid: "c1" }),
   );
   const wire = show(await acked);
+  clearTimeout(noAck); // the ack won — its deadline goes too
   ws.close();
   setLogger(prevLog);
   await handle.close();
@@ -372,13 +374,14 @@ Deno.test("async differential: state lands the same, and the ack waits for it", 
     ws.onopen = () => res();
     ws.onerror = () => rej(new Error("ws never opened"));
   });
+  let noAck: ReturnType<typeof setTimeout> | undefined;
   const ack = new Promise<{ ok?: boolean; value?: unknown }>((res) => {
     ws.onmessage = (ev) => {
       const f = JSON.parse(String(ev.data)) as { t: string; d?: unknown };
       if (f.t === "ack") res(f.d as { ok?: boolean; value?: unknown });
     };
-    setTimeout(() => res({}), 3_000);
-  });
+    noAck = setTimeout(() => res({}), 3_000);
+  }).finally(() => clearTimeout(noAck));
   ws.send(
     enc("action", {
       type: "xasyncb:work",
@@ -451,13 +454,14 @@ Deno.test("async differential: a throw reaches both callers, by their own means"
     ws.onopen = () => res();
     ws.onerror = () => rej(new Error("ws never opened"));
   });
+  let noAck: ReturnType<typeof setTimeout> | undefined;
   const ack = new Promise<{ ok?: boolean; error?: string }>((res) => {
     ws.onmessage = (ev) => {
       const f = JSON.parse(String(ev.data)) as { t: string; d?: unknown };
       if (f.t === "ack") res(f.d as { ok?: boolean; error?: string });
     };
-    setTimeout(() => res({}), 3_000);
-  });
+    noAck = setTimeout(() => res({}), 3_000);
+  }).finally(() => clearTimeout(noAck));
   ws.send(
     enc("action", {
       type: "xthrowb:boom",

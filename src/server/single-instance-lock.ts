@@ -850,7 +850,27 @@ export class AppLock {
       // would make this refuse to boot on account of a stranger's process, or
       // — with killExisting — kill it).
       if (!isLockOwnerAlive(existing)) {
-        // Dead process — clean stale lock and retry
+        // Dead process — clean stale lock and retry.
+        //
+        // …and SAY SO. A graceful shutdown removes this file (see the note on
+        // `release`), so a lock whose owner is dead is proof the last run
+        // ended abruptly: SIGKILL, an OOM kill, a power cut. Persistence is
+        // debounced, so whatever was committed inside the last window died
+        // with the process — and the app then comes back looking perfectly
+        // healthy, quietly older than it was. MEASURED on a scaffolded
+        // counter: `-9` at kill time, `-8` after the restart, not one line
+        // logged. The two sibling reclaim paths in this same function — an
+        // unreadable lock above, a zombie listener below — both speak; this
+        // one, the commonest of the three, was the only mute one.
+        log.warn(
+          "lock",
+          `the previous run of "${this.appId}" (pid ${existing.pid}) did not ` +
+            `shut down cleanly — a graceful stop removes its lock, so that ` +
+            `process was killed, crashed, or lost power. Persistence is ` +
+            `debounced: state committed inside the last window is replayed on ` +
+            `boot only with \`journal: true\`, and is otherwise gone. ` +
+            `See docs/persistence/auto-persist.md`,
+        );
         removeLock(this.key);
         await delay(100);
         continue;

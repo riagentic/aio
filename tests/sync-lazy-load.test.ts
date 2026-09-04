@@ -9,6 +9,7 @@
 //      statically, which is what would put it back into every page.
 import { assert, assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { cell } from "aio";
 import { _resetCellRegistry } from "../src/state/cell-reactive.ts";
 import { _resetSignals } from "../src/state/state-signals.ts";
@@ -33,7 +34,7 @@ function fresh(): void {
 
 Deno.test("sync lazy: a plain app never loads the engine", async () => {
   fresh();
-  new Window({ url: "https://localhost" });
+  const win = new Window({ url: "https://localhost" });
   let loads = 0;
   _setSyncLoaderForTest(() => {
     loads++;
@@ -53,6 +54,7 @@ Deno.test("sync lazy: a plain app never loads the engine", async () => {
     await new Promise((r) => setTimeout(r, 30));
     assertEquals(loads, 0, "no sync cell → the engine import never runs");
   } finally {
+    await closeWindow(win);
     _setSyncLoaderForTest(null);
     fresh();
   }
@@ -60,7 +62,7 @@ Deno.test("sync lazy: a plain app never loads the engine", async () => {
 
 Deno.test("sync lazy: a sync app loads the engine exactly once", async () => {
   fresh();
-  new Window({ url: "https://localhost" });
+  const win = new Window({ url: "https://localhost" });
   let loads = 0;
   _setSyncLoaderForTest(() => {
     loads++;
@@ -82,6 +84,7 @@ Deno.test("sync lazy: a sync app loads the engine exactly once", async () => {
     await new Promise((r) => setTimeout(r, 30));
     assertEquals(loads, 1, "one sync cell → one engine import");
   } finally {
+    await closeWindow(win);
     _setSyncLoaderForTest(null);
     fresh();
   }

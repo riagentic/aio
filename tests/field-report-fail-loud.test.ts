@@ -116,9 +116,10 @@ Deno.test("fail-loud: foreign-action listeners do not warn", () => {
 
 // ── 2. render errors name the component ──────────────────────
 
-Deno.test("fail-loud: render error names the failing component", () => {
+Deno.test("fail-loud: render error names the failing component", async () => {
+  const win = new Window();
   // deno-lint-ignore no-explicit-any
-  const document = new Window().document as any;
+  const document = win.document as any;
   const host = document.createElement("div");
   const NetworkPanel = () => {
     const edition = undefined as unknown as { label: string };
@@ -138,6 +139,7 @@ Deno.test("fail-loud: render error names the failing component", () => {
     !err.message.includes("<NetworkPanel>"),
     "e.message is untouched — ErrorBoundary fallbacks render it to users",
   );
+  await win.happyDOM.close();
 });
 
 // ── 3. dispatch-after-close warns once per type ──────────────

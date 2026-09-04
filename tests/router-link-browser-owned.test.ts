@@ -21,17 +21,24 @@ import { h } from "../src/air/vdom.ts";
 import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
 import { Link } from "../src/browser/browser-air-router.ts";
 import { navigate, routePath } from "../src/browser/browser-protocol.ts";
+import { closeWindow } from "../src/testing/close-window.ts";
 
 type Env = {
   win: Window;
   doc: Document;
-  restore: () => void;
+  restore: () => Promise<void>;
 };
 
 const HOME = "https://app.test/home";
 
 function env(url = HOME): Env {
-  const win = new Window({ url });
+  // Main-frame navigation OFF, URL fallback ON (the default): a browser-owned
+  // click and the `location.href = HOME` reset move `location` without
+  // happy-dom fetching app.test for real — a DNS lookup no close could cancel.
+  const win = new Window({
+    url,
+    settings: { navigation: { disableMainFrameNavigation: true } },
+  });
   const doc = win.document as unknown as Document;
   const g = globalThis as Record<string, unknown>;
   const prevLoc = g.location, prevHist = g.history;
@@ -41,10 +48,16 @@ function env(url = HOME): Env {
   return {
     win,
     doc,
-    restore: () => {
+    restore: async () => {
       g.location = prevLoc;
       g.history = prevHist;
-      win.happyDOM.close();
+      // Awaited: the browser-owned cases navigated this window, and the
+      // navigation (a real DNS lookup for app.test) is aborted by close.
+      // `closeWindow` is the ONE window teardown: `close()` resolving is not
+      // the end of happy-dom's work — an Immediate can run after it and re-arm
+      // the async-task manager's settle timer, which then outlives the test.
+      // That made this file flaky-red on its own in ~2 runs of 5.
+      await closeWindow(win);
     },
   };
 }
@@ -82,7 +95,7 @@ function clickLink(
   return { claimed, threw };
 }
 
-Deno.test("Link claims an in-app click and nothing else", () => {
+Deno.test("Link claims an in-app click and nothing else", async () => {
   const e = env();
   try {
     // [description, props, click modifiers, Link should claim it]
@@ -131,11 +144,11 @@ Deno.test("Link claims an in-app click and nothing else", () => {
       );
     }
   } finally {
-    e.restore();
+    await e.restore();
   }
 });
 
-Deno.test("Link still routes in-app: the path signal moves", () => {
+Deno.test("Link still routes in-app: the path signal moves", async () => {
   const e = env();
   try {
     const before = routePath.peek();
@@ -145,11 +158,11 @@ Deno.test("Link still routes in-app: the path signal moves", () => {
       `an in-app Link must update the route signal — was ${before}, now ${routePath.peek()}`,
     );
   } finally {
-    e.restore();
+    await e.restore();
   }
 });
 
-Deno.test("navigate() to another origin leaves the app instead of throwing", () => {
+Deno.test("navigate() to another origin leaves the app instead of throwing", async () => {
   const e = env();
   try {
     // `history.pushState` REFUSES a cross-origin URL by spec, so this used to
@@ -163,6 +176,6 @@ Deno.test("navigate() to another origin leaves the app instead of throwing", () 
         "history entry the browser will refuse",
     );
   } finally {
-    e.restore();
+    await e.restore();
   }
 });

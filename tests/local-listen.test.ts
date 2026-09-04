@@ -63,10 +63,13 @@ Deno.test("unix: listener.close() stops accepting; open conns unaffected", async
   const got = (await conns) as { readable: ReadableStream<Uint8Array> }[];
   assertEquals(got.length, 1);
   await w.write(new Uint8Array([1, 2, 3])); // still open
-  const { value } = await got[0]!.readable.getReader().read();
+  const reader = got[0]!.readable.getReader();
+  const { value } = await reader.read();
+  reader.releaseLock();
   assertEquals([...value!], [1, 2, 3]);
   await assertRejects(() => connectLocal(path));
   client.close();
+  (got[0] as unknown as Deno.Conn).close(); // the accepted side is ours too
   await Deno.remove(dir, { recursive: true });
 });
 

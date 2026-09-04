@@ -424,7 +424,8 @@ Deno.test({
 
       // A wedged method must not hold shutdown hostage: start a 5s burn, then
       // stop the app immediately and require a prompt exit.
-      void fetch(`${app.url}/burn-bg?ms=5000`).catch(() => {});
+      void fetch(`${app.url}/burn-bg?ms=5000`).then((r) => r.body?.cancel())
+        .catch(() => {});
       await new Promise((r) => setTimeout(r, 150));
       const t0 = performance.now();
       stopped = await app.stop();
