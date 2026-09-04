@@ -8,6 +8,7 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import {
   _nearestMethod,
   handleTrojan,
+  resetTrojanRateLimit,
   type TrojanDeps,
 } from "../src/server/server-trojan.ts";
 
@@ -53,6 +54,7 @@ async function dispatch(deps: TrojanDeps, body: unknown) {
     body: JSON.stringify(body),
   });
   const resp = await handleTrojan("/__aio/trojan/dispatch", req, deps)!;
+  resetTrojanRateLimit(); // a direct call has no server shutdown to disarm it
   return {
     status: resp.status,
     body: await resp.json() as Record<string, unknown>,

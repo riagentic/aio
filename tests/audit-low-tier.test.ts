@@ -53,7 +53,7 @@ Deno.test("L9: patch() on non-object local state throws instead of doing nothing
     for (const s of seen) assert(!s.includes("SILENT"), s);
   } finally {
     _unmount(handle);
-    win.happyDOM.close();
+    await win.happyDOM.close();
   }
 });
 
@@ -117,6 +117,9 @@ Deno.test("L8: dismissing a toast by hand clears its auto-dismiss timer", async 
   } finally {
     globalThis.setTimeout = realSet;
     globalThis.clearTimeout = realClear;
+    // The zero-delay real timers the stub armed "to keep the loop honest"
+    // complete on the next turn — let them, so the test ends with none armed.
+    await new Promise((r) => realSet(r, 5));
   }
 });
 
@@ -288,7 +291,7 @@ Deno.test("L9: patch() still merges object state", async () => {
     assertEquals(after, { a: 1, b: 3 });
   } finally {
     _unmount(handle);
-    win.happyDOM.close();
+    await win.happyDOM.close();
   }
 });
 

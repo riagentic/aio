@@ -8,6 +8,20 @@
 import { assertEquals, assertExists } from "@std/assert";
 import { bindCell, cell, composeCells } from "../src/state/cell.ts";
 import { race, sleep, until } from "../src/state/async-helpers.ts";
+import { sleepFor } from "./within.ts";
+
+/** The losing branches of the races below — 500 ms sleeps a test does not
+ *  wait for. `race()` leaves a promise branch running by contract, so the
+ *  test that started one stops it. */
+const losers: Array<{ cancel(): void }> = [];
+const loser = (ms: number) => {
+  const s = sleepFor(ms);
+  losers.push(s);
+  return s;
+};
+const cancelLosers = () => {
+  for (const l of losers.splice(0)) l.cancel();
+};
 import { call, type MethodDraftMeta } from "../src/state/cell-impl.ts";
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -239,7 +253,7 @@ const racer = cell("racer", {
     async start(s) {
       const result = await race({
         fast: Promise.resolve("fast-wins"),
-        slow: sleep(500).then(() => "slow-wins"),
+        slow: loser(500).then(() => "slow-wins"),
       });
       s.winner = result.winner;
     },
@@ -256,6 +270,7 @@ Deno.test({
 
   const s = app.getState().racer as { winner: string };
   assertEquals(s.winner, "fast");
+  cancelLosers();
 });
 
 // ── Multiple staged writes execute in order ──────────────────────────
@@ -445,7 +460,7 @@ const raceSyncAsync = cell("raceSyncAsync", {
     async start(s) {
       const result = await race({
         sync: Promise.resolve("instant"),
-        slow: sleep(500).then(() => "delayed"),
+        slow: loser(500).then(() => "delayed"),
       });
       s.winner = result.winner;
     },
@@ -461,6 +476,7 @@ Deno.test({
 
   const s = app.getState().raceSyncAsync as { winner: string };
   assertEquals(s.winner, "sync");
+  cancelLosers();
 });
 
 // ── until with timeoutMs=0 — times out on first poll ─────────────────
@@ -495,7 +511,7 @@ const callTimeout = cell("callTimeout", {
   state: { result: "" },
   methods: {
     async start(s) {
-      const r = await race({ work: sleep(500), timeout: 20 });
+      const r = await race({ work: loser(500), timeout: 20 });
       s.result = r.winner === "timeout" ? "timed-out" : "completed";
     },
   },
@@ -512,6 +528,7 @@ Deno.test({
     (app.getState().callTimeout as { result: string }).result,
     "timed-out",
   );
+  cancelLosers();
 });
 
 // ── call() with retries — retries then succeeds ──────────────────────

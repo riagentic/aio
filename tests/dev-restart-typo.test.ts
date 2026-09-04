@@ -99,8 +99,10 @@ Deno.test({
     const drain = async (s: ReadableStream<Uint8Array>) => {
       for await (const c of s) text += new TextDecoder().decode(c);
     };
-    drain(child.stdout).catch(() => {});
-    drain(child.stderr).catch(() => {});
+    const drained = Promise.allSettled([
+      drain(child.stdout),
+      drain(child.stderr),
+    ]);
     try {
       assertEquals(await waitFor(() => servedMark(url), 30_000), "v1", text);
       // A good edit first, so the process is in supervisor mode.
@@ -144,6 +146,7 @@ Deno.test({
       );
     } finally {
       await kill(child);
+      await drained; // the pipes end with the process; wait for that end
       await Deno.remove(dir, { recursive: true }).catch(() => {});
     }
   },

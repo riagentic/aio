@@ -50,7 +50,7 @@ import {
 } from "../src/ui/mod.ts";
 
 /** Mount `make` in dev mode and return every `[aio-dev]` line it printed. */
-function devWarnings(make: () => unknown): string[] {
+async function devWarnings(make: () => unknown): Promise<string[]> {
   const win = new Window({ url: "https://app.test/" });
   const doc = win.document as unknown as Document;
   _setDocument(doc);
@@ -72,7 +72,7 @@ function devWarnings(make: () => unknown): string[] {
   } finally {
     setDevMode(false);
     console.warn = orig;
-    win.happyDOM.close();
+    await win.happyDOM.close();
   }
   return warns;
 }
@@ -138,10 +138,10 @@ const KIT: Array<[string, () => unknown]> = [
   ["Markdown", () => h(Markdown, { source: "# t\n\n![a](/i.png)\n\n[l](/x)" })],
 ];
 
-Deno.test("aio/ui: no kit component trips a framework dev warning", () => {
+Deno.test("aio/ui: no kit component trips a framework dev warning", async () => {
   const offenders: string[] = [];
   for (const [name, make] of KIT) {
-    const warns = devWarnings(make);
+    const warns = await devWarnings(make);
     if (warns.length > 0) offenders.push(`${name}: ${warns.join(" | ")}`);
   }
   assertEquals(
@@ -152,10 +152,10 @@ Deno.test("aio/ui: no kit component trips a framework dev warning", () => {
   );
 });
 
-Deno.test("the a11y check still speaks when the APP left a control unnamed", () => {
+Deno.test("the a11y check still speaks when the APP left a control unnamed", async () => {
   // The control: silence above must come from the kit being correct, not from
   // the check having been defanged.
-  const warns = devWarnings(() => h(Input, { value: "" }));
+  const warns = await devWarnings(() => h(Input, { value: "" }));
   assertEquals(warns.length, 1, warns.join("\n"));
   assert(
     warns[0]!.includes("no label association"),
@@ -164,7 +164,7 @@ Deno.test("the a11y check still speaks when the APP left a control unnamed", () 
   );
 });
 
-Deno.test("a clickable table row is operable from the keyboard", () => {
+Deno.test("a clickable table row is operable from the keyboard", async () => {
   // Not just quiet — actually reachable. The warning was RIGHT about <Table>.
   const win = new Window({ url: "https://app.test/" });
   const doc = win.document as unknown as Document;
@@ -206,6 +206,6 @@ Deno.test("a clickable table row is operable from the keyboard", () => {
     assertEquals(hits, [1, 1], "Enter and Space both activate the row");
     _unmount(handle);
   } finally {
-    win.happyDOM.close();
+    await win.happyDOM.close();
   }
 });

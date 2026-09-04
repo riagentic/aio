@@ -239,11 +239,16 @@ Deno.test("an AWAITED failure is not reported twice", async () => {
 
 // ── 5. settle() must never confuse "quiesced" with "gave up" ──
 
+/** The crawl's own timer — a deliberately-hung method outlives the test that
+ *  wedges it, so the test clears what it started. */
+let slowTimer: ReturnType<typeof setTimeout> | undefined;
 const slowCell = cell("hspSlow", {
   state: { n: 0 },
   methods: {
     async crawl(s: { n: number }) {
-      await new Promise((r) => setTimeout(r, 5000));
+      await new Promise((r) => {
+        slowTimer = setTimeout(r, 5000);
+      });
       s.n = 1;
     },
   },
@@ -268,6 +273,7 @@ Deno.test("bootCells: settle() that gives up SAYS so, and names the method", asy
   } finally {
     console.warn = w;
     h1.dispose();
+    clearTimeout(slowTimer);
   }
 });
 
@@ -308,7 +314,9 @@ const slowUi = cell("hspSlowUi", {
   state: { n: 0 },
   methods: {
     async crawl(s: { n: number }) {
-      await new Promise((r) => setTimeout(r, 5000));
+      await new Promise((r) => {
+        slowTimer = setTimeout(r, 5000);
+      });
       s.n = 1;
     },
   },
@@ -346,6 +354,7 @@ Deno.test("testUI: settle() that gives up names what is still running", async ()
       // aio-ok: teardown of a deliberately-wedged app; the assertion above is
       // the test's claim.
     });
+    clearTimeout(slowTimer);
   }
 });
 

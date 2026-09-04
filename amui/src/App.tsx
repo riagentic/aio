@@ -42,6 +42,28 @@ const TABS: { id: Tab; label: string }[] = [
 ];
 const activeTab = signal<Tab>("overview");
 const search = signal("");
+// The sidebar's default is the apps that are RUNNING — a machine that has
+// built forty aio apps over a year shows forty stopped entries otherwise, and
+// the two that matter are somewhere in the middle. "all" is one click away
+// (Start, Tasks and Codebase act on stopped apps, so they stay reachable), a
+// search always looks at every app, and the selected one stays visible
+// either way. Remembered per browser: users differ on this.
+const SHOW_ALL_KEY = "amui.showAll";
+const showAll = signal<boolean>((() => {
+  try {
+    return globalThis.localStorage?.getItem(SHOW_ALL_KEY) === "1";
+  } catch {
+    return false;
+  }
+})());
+function setShowAll(v: boolean) {
+  showAll.set(v);
+  try {
+    globalThis.localStorage?.setItem(SHOW_ALL_KEY, v ? "1" : "0");
+  } catch {
+    // no storage (a private window, SSR) — the choice lasts the session
+  }
+}
 // The file tree is EXPANDED by default (browse the whole codebase at a glance);
 // `collapsedDirs` holds the dirs the user has folded away.
 const collapsedDirs = signal<Set<string>>(new Set());
@@ -132,10 +154,15 @@ function StatusChip(
 // ── sidebar ──────────────────────────────────────────────────────────────────
 function Sidebar() {
   const q = search.value.toLowerCase();
-  const projects = manager.projects.filter((p) =>
-    !q || p.name.toLowerCase().includes(q) || p.path.toLowerCase().includes(q)
-  );
   const selected = manager.selectedPath;
+  const all = manager.projects;
+  const running = all.filter((p) => p.running).length;
+  const projects = all.filter((
+    p,
+  ) => (q
+    ? p.name.toLowerCase().includes(q) || p.path.toLowerCase().includes(q)
+    : showAll.value || p.running || p.path === selected)
+  );
   return (
     <div
       style={{
@@ -233,10 +260,45 @@ function Sidebar() {
             {manager.createMsg}
           </div>
         )}
+        <div
+          role="radiogroup"
+          aria-label="which apps to list"
+          style={{ display: "flex", gap: "6px", fontSize: "11px" }}
+        >
+          {([false, true] as const).map((v) => (
+            <span
+              key={v ? "all" : "running"}
+              {...press(() => setShowAll(v))}
+              aria-checked={showAll.value === v}
+              style={{
+                ...chip,
+                cursor: "pointer",
+                flex: "1",
+                textAlign: "center",
+                border: `1px solid ${showAll.value === v ? C.blue : C.border}`,
+                color: showAll.value === v ? C.blue : C.dim,
+              }}
+            >
+              {v ? `all (${all.length})` : `running (${running})`}
+            </span>
+          ))}
+        </div>
       </div>
 
       <div style={{ overflowY: "auto", flex: "1", padding: "4px 8px" }}>
-        {projects.length === 0
+        {projects.length === 0 && !q && !showAll.value && all.length > 0
+          ? (
+            <div style={{ padding: "12px", color: C.dim, fontSize: "12px" }}>
+              no running apps ·{" "}
+              <span
+                {...press(() => setShowAll(true))}
+                style={{ color: C.blue, cursor: "pointer" }}
+              >
+                show all {all.length}
+              </span>
+            </div>
+          )
+          : projects.length === 0
           ? (
             <div style={{ padding: "12px", color: C.dim, fontSize: "12px" }}>
               {manager.scanning ? "scanning…" : (

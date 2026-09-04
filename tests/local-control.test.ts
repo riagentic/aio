@@ -25,7 +25,10 @@ import {
   localControlAuthorized,
   trojanDenialForUserMode,
 } from "../src/server/server-auth.ts";
-import { handleTrojan } from "../src/server/server-trojan.ts";
+import {
+  handleTrojan,
+  resetTrojanRateLimit,
+} from "../src/server/server-trojan.ts";
 import { clearPairing, currentPin } from "../src/server/pairing.ts";
 import {
   _resetInstanceVerify,
@@ -463,6 +466,7 @@ Deno.test("am pair: a running keyed app issues a fresh single-use PIN", async ()
   )!;
   const body2 = await again.json() as { pin: string };
   assertEquals(currentPin(), body2.pin);
+  resetTrojanRateLimit(); // a direct call has no server shutdown to disarm it
 });
 
 Deno.test("am pair: an app with no shared key says what to do instead", async () => {
@@ -480,6 +484,7 @@ Deno.test("am pair: an app with no shared key says what to do instead", async ()
   assertStringIncludes(body.error, "nothing to pair");
   assertStringIncludes(body.error, "auth: true");
   assertEquals(currentPin(), null, "no PIN was minted");
+  resetTrojanRateLimit(); // a direct call has no server shutdown to disarm it
 });
 
 // ── End to end, through a real server ────────────────────────────────────────

@@ -32,6 +32,12 @@ rest:
 - 📦 **One binary** — `deno task compile`
 - 🪟 **Windows** — install with `irm …/install.ps1 | iex`
 
+Proven where: every release is gate-built and booted on Linux — server, browser,
+Electron AppImage, and the one-line install on a fresh Ubuntu container — and
+its Windows scripts run under Wine. A real Windows or macOS machine, an Android
+device and iOS are not yet release gates; `deno task check:proof` prints what
+has actually been measured.
+
 ## 🧠 The idea
 
 State lives in a `cell`. You never write a store, an endpoint, a query, a

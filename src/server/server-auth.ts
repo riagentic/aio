@@ -743,6 +743,49 @@ export function hostAllowed(
   });
 }
 
+/** Entries of `allowedOrigins` that NO request can ever match.
+ *
+ *  The matcher below accepts four spellings — `"*"`, a bare hostname, a
+ *  `host:port`, or a full origin — and anything else simply never compares
+ *  equal to anything. So a typo'd entry is inert: the operator believes they
+ *  widened access, the app refuses their client anyway, and the refusal points
+ *  at "the same list the WebSocket origin check reads" — a list whose entry
+ *  does nothing. Fail-closed, and silent, which is the half that costs an
+ *  afternoon.
+ *
+ *  It lives HERE, beside `allowlistAdmits`, because a second copy of that
+ *  grammar somewhere else is how the two would come to disagree — which is the
+ *  drift that function's own header records between the Host and WS checks.
+ *  Reported as a boot warning (`configConflicts`), never a refusal: an app
+ *  with a stale junk entry boots today and must keep booting. */
+export function inertAllowlistEntries(
+  entries: readonly string[] | undefined,
+): string[] {
+  const HOSTISH =
+    /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:\d{1,5})?$/;
+  const out: string[] = [];
+  for (const raw of entries ?? []) {
+    const e = raw.trim().toLowerCase();
+    if (e === "*") continue;
+    if (e === "") {
+      out.push(raw);
+      continue;
+    }
+    if (e.includes("://")) {
+      try {
+        if (new URL(e).hostname !== "") continue;
+      } catch {
+        // aio-ok: an entry that does not parse as a URL IS the finding — it
+        // is reported two lines down, which is the opposite of swallowed.
+      }
+      out.push(raw);
+      continue;
+    }
+    if (!HOSTISH.test(e)) out.push(raw);
+  }
+  return out;
+}
+
 /** Does `allowedOrigins` admit this caller? THE reader of that config key.
  *
  *  One decider because the key has two consumers — the `Host` check above and

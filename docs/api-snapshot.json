@@ -219,7 +219,7 @@
         },
         "CellsConfig": {
           "kind": "typeAlias",
-          "sig": "eb1a699e561ccb10",
+          "sig": "3f4f147c1fec07c3",
           "members": {
             "appId": "opt:2fb40568533c1a6d",
             "cells": "opt:58dbae2820cab862",
@@ -263,6 +263,7 @@
             "singleton": "opt:0ecca0fe3beba89b",
             "strictCells": "opt:0ecca0fe3beba89b",
             "guardDispatches": "opt:0ecca0fe3beba89b",
+            "refusalsReject": "opt:0ecca0fe3beba89b",
             "journal": "opt:0ecca0fe3beba89b",
             "redactActions": "opt:1a1f5c423a7cdab2",
             "childWindows": "opt:0ecca0fe3beba89b",
@@ -357,10 +358,10 @@
         },
         "composeCells": {
           "kind": "function",
-          "sig": "4133fa24dc453166",
+          "sig": "0b6a7969000ecaf1",
           "members": {
             "param0": "req:70315651f3ed72de|c142763d8effe77e~array",
-            "param1": "opt:52c9f2688e69f557|60c6ce4622633d58~typeLiteral",
+            "param1": "opt:b23e40dc2716d043|18ab6917e2283081~typeLiteral",
             "return": "req:3ef5969610274a3e"
           }
         },

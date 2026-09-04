@@ -48,11 +48,11 @@ export async function scan(
 /** Do the test tasks actually RUN the sanitizers this gate ratchets?
  *
  *  Deno 2.9 made `--sanitize-ops` / `--sanitize-resources` OPT-IN (they were
- *  on by default before), and no aio task passes them — so the mechanism this
- *  gate freezes the opt-outs of does not run at all, and
- *  `docs/testing/README.md`'s "Sanitizers stay on" is false. A ratchet on
- *  nothing is the exact shape this repo calls a checker that cannot see what
- *  it claims to check, so the gate says so about ITSELF.
+ *  on by default before). For one release no aio task passed them, so the
+ *  mechanism this gate freezes the opt-outs of did not run at all — a ratchet
+ *  on nothing, the exact shape this repo calls a checker that cannot see what
+ *  it claims to check. The flags are on the leak-floor tasks now, and THIS
+ *  gate is what keeps them there: a task that drops them goes red here.
  *
  *  Returns the task names that run `deno test` without the flags. */
 export async function tasksWithoutSanitizers(): Promise<string[]> {
@@ -77,26 +77,22 @@ if (import.meta.main) {
   const { unjustified, justified } = await scan();
   const blind = await tasksWithoutSanitizers();
   if (blind.length > 0) {
-    // WARNS, does not fail — and that is a decision, not an oversight. Turning
-    // the flags on today reds 702 of 7009 tests at once (measured over the
-    // whole suite on 2026-09-04): mostly booted test apps that leave their
-    // file watcher and timers behind. A gate that goes red on a backlog
-    // nobody has worked through is not a gate, it is a blocked repo. So this
-    // says the truth every run, loudly, and `todo.md` carries the work.
-    // Delete this branch the moment the tasks pass the flags.
-    console.warn(
-      `⚠ the sanitizers this gate ratchets are NOT RUN by: ${
+    // RED. The suite was brought to a clean leak floor on 2026-09-04 (729
+    // of 7210 failed with the flags on before; the harnesses and the
+    // framework's own teardown were the bulk of it), and a task that runs
+    // without the flags puts the floor back to nothing: a test can leave a
+    // timer, a socket, a file or a child process behind and stay green, and
+    // the opt-out ratchet below freezes the count of something that is not
+    // running.
+    console.error(
+      `✗ the sanitizers this gate ratchets are NOT RUN by: ${
         blind.join(", ")
       }.\n` +
-        `  Deno 2.9 made --sanitize-ops / --sanitize-resources opt-IN, so a\n` +
-        `  suite that does not pass them has no leak floor at all: a test can\n` +
-        `  leave a timer, a socket, a file or a child process behind and stay\n` +
-        `  green. docs/testing/README.md says "Sanitizers stay on" and\n` +
-        `  freezing the opt-out count is meaningless while they are off.\n` +
-        `  Fix: add \`--sanitize-ops --sanitize-resources\` to those tasks and\n` +
-        `  fix what they surface (702 of 7009 as of 2026-09-04, mostly booted\n` +
-        `  apps leaving a file watcher behind) — tracked in todo.md.`,
+        `  Deno 2.9 made --sanitize-ops / --sanitize-resources opt-IN; the\n` +
+        `  leak-floor tasks (test, test:core, check:coverage) pass them, and\n` +
+        `  that is what makes the opt-out ratchet mean anything. Put them back.`,
     );
+    Deno.exit(1);
   }
   const n = unjustified.length;
   if (n > CEILING) {
@@ -108,7 +104,9 @@ if (import.meta.main) {
     Deno.exit(1);
   }
   console.log(
-    `✓ sanitizer opt-outs: ${n} unjustified (ceiling ${CEILING}), ${justified} justified with \`aio-ok:\`` +
+    `✓ sanitizers run (--sanitize-ops --sanitize-resources on test, ` +
+      `test:core, check:coverage); opt-outs: ${n} unjustified (ceiling ` +
+      `${CEILING}), ${justified} justified with \`aio-ok:\`` +
       (n < CEILING
         ? ` — lower the CEILING in scripts/check-sanitizers.ts to ${n}`
         : ""),

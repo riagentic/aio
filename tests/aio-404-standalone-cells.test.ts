@@ -5,6 +5,7 @@
 // compose → local dispatch → bound methods → localStorage persistence.
 import { assertEquals } from "@std/assert";
 import { _reset, aio, cell, ensureConnected } from "../src/standalone-air.ts";
+import { _resetAioRuntime } from "../src/state/runtime-reset.ts";
 
 // Mock localStorage (same pattern as standalone-air.test.ts)
 const storage = new Map<string, string>();
@@ -39,6 +40,10 @@ Deno.test("aio-404: ensureConnected auto-boots the cell registry (no aio.run in 
   ensureConnected(); // must bind reg from the registry
   await (reg as unknown as { bump(): Promise<void> }).bump();
   assertEquals((reg as unknown as { n: number }).n, 1); // reactive getter reflects it
+  // What was booted is torn down: the subscription-sync timer the reactive
+  // read armed, and the runtime the boot created.
+  _resetAioRuntime();
+  _reset();
 });
 
 Deno.test("aio-404: standalone aio.run binds cells to the local loop", async () => {
@@ -66,6 +71,8 @@ Deno.test("aio-404: standalone aio.run binds cells to the local loop", async () 
   await app.close(); // flushes persistence
   const persisted = JSON.parse(storage.get("aio:aio404")!);
   assertEquals(persisted.sacounter.count, 7);
+  _resetAioRuntime(); // the reactive reads above armed the subscription sync
+  _reset();
 });
 
 Deno.test("aio-404: standalone restore from localStorage on next run", async () => {
@@ -86,4 +93,6 @@ Deno.test("aio-404: standalone restore from localStorage on next run", async () 
   const state = app.getState() as { sacounter2: { count: number } };
   assertEquals(state.sacounter2.count, 42);
   await app.close();
+  _resetAioRuntime();
+  _reset();
 });

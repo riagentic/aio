@@ -71,7 +71,12 @@ function handlerFor(
   } as any);
 }
 
-Deno.test("serveDirs: a module outside baseDir is served under its prefix", async () => {
+Deno.test("serveDirs: a module outside baseDir is served under its prefix", {
+  // esbuild transpiles through a native child that `stopEsbuild()` kills;
+  // esbuild owns the handle, so its exit cannot be awaited from here.
+  sanitizeOps: false, // aio-ok: esbuild's service child — exit not awaitable
+  sanitizeResources: false, // aio-ok: same esbuild child
+}, async () => {
   const f = await fixture();
   try {
     const h = handlerFor(f.base, { "/shared": f.shared });

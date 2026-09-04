@@ -209,6 +209,7 @@ Deno.test("logger: backupLogs rotates instead of wiping", async () => {
   // Old log should be renamed to app.log.1
   const rotated = await Deno.readTextFile(`${dir}/app.log.1`);
   assertEquals(rotated, "old content\n");
+  await l.flush(); // init() queued its own line
 });
 
 // Was "observe skips internal actions", and asserted NOTHING — it stat'ed
@@ -247,6 +248,7 @@ Deno.test("logger: suppress types filters specified actions", async () => {
   const lines = await readLines(`${dir}/debug.log`);
   assertEquals(lines.length, 1);
   assertStringIncludes(lines[0]!, "increment");
+  await l.flush();
 });
 
 Deno.test("logger: onStop logs shutdown with uptime", async () => {
@@ -332,6 +334,7 @@ Deno.test("logger: write failure logs to console (first 3 only)", async () => {
   l.pub("info", "test", "msg3");
   l.pub("info", "test", "msg4"); // should be suppressed
   await new Promise((r) => setTimeout(r, 200));
+  await l.flush().catch(() => {}); // the 4th line's flush timer — it fails too
   console.error = origError;
   assertEquals(
     errors.filter((e) => e.includes("[logger] write failed")).length <= 3,
@@ -388,4 +391,5 @@ Deno.test("logger: client.log rotates with backupLogs, like every other log", as
     undefined,
     "the live client.log starts empty after a rotate",
   );
+  await l.flush();
 });

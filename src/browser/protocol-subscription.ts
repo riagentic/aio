@@ -166,6 +166,26 @@ export function _setSubscribeTriggers(
   _subscribeTriggerPopstate = popstate;
 }
 
+/** Run with NO transport: `ensureConnected()` and `client.subscribe()` open
+ *  nothing until the returned restore runs. The in-process UI harness mounts
+ *  on the standalone runtime — its cells are local — but a component calling
+ *  `useAio()` still reached the browser client's connect, which opened a real
+ *  WebSocket to the happy-dom origin, watched it be refused, and armed a
+ *  reconnect: a socket and a timer per test, for a server that does not
+ *  exist. The harness owns the transport for the length of a mount.
+ *  @internal harness seam — production always connects. */
+// aio-ok: harness-only seam — a page that never connects is the bug
+export function _withoutTransport(): () => void {
+  const prevConnect = _connectFn;
+  const prevTrigger = _subscribeTriggerConnect;
+  _connectFn = () => {};
+  _subscribeTriggerConnect = () => {};
+  return () => {
+    _connectFn = prevConnect;
+    _subscribeTriggerConnect = prevTrigger;
+  };
+}
+
 export function _subscribe(onStoreChange: () => void): () => void {
   const unsub = _listeners.add(() => {
     onStoreChange();
@@ -216,4 +236,21 @@ export function _subscribe(onStoreChange: () => void): () => void {
 let _teardownFn: (() => void) | null = null;
 export function _setTeardownFn(fn: () => void): void {
   _teardownFn = fn;
+}
+
+/** Run the full teardown NOW — what the 300 ms grace timer above does once
+ *  the last listener is gone, without the wait. The one path a transport
+ *  test tears down through: the transport's own teardown (registered via
+ *  `_setTeardownFn`) clears its reconnect timer, its IPC watchdog, its
+ *  vitals sampler and its socket, so nothing of a test's client outlives
+ *  the test. Same code as production teardown; only the timing is the
+ *  test's.
+ *  @internal test seam — the grace timer is the product path. */
+// aio-ok: test-only seam — the 300 ms grace timer is the product path
+export function _teardownNow(): void {
+  if (_cleanupTimer) {
+    clearTimeout(_cleanupTimer);
+    _cleanupTimer = null;
+  }
+  _teardownFn?.();
 }

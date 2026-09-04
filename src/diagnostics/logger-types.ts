@@ -176,6 +176,16 @@ export function filterInternal(
   return Object.keys(out).length ? out : null;
 }
 
-export function isDevMode(): boolean {
+/** Is this build RUNNING FROM SOURCE (a `deno run` off the filesystem) rather
+ *  than from a compiled binary or a remote `jsr:` import?
+ *
+ *  NOT "are dev diagnostics on" — that is `state/dev-flag.ts`'s `isDevMode()`,
+ *  which reads `__aioDev`. The two answered different questions under the SAME
+ *  name, and the whole point of dev-flag.ts is that "are we in dev?" has ONE
+ *  decider; a second function called `isDevMode` sitting one import away is how
+ *  a later edit picks the wrong one without noticing. Two questions, two
+ *  names. This one decides whether the logger MIRRORS to the console by
+ *  default: a binary in a service unit should not, a source checkout should. */
+export function isRunningFromSource(): boolean {
   return import.meta.url.startsWith("file:///");
 }

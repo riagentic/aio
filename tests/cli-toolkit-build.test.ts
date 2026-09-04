@@ -183,8 +183,10 @@ Deno.test("cli-tool: serve + add/list/done/--json/--watch against the real serve
   const drain = async (s: ReadableStream<Uint8Array>) => {
     for await (const c of s) log += dec.decode(c);
   };
-  drain(server.stderr).catch(() => {});
-  drain(server.stdout).catch(() => {});
+  const drained = Promise.allSettled([
+    drain(server.stderr),
+    drain(server.stdout),
+  ]);
   try {
     await waitForHttp(`http://127.0.0.1:${port}/__aio/health`, 60_000).catch(
       (e) => {
@@ -282,8 +284,10 @@ Deno.test("cli-tool: serve + add/list/done/--json/--watch against the real serve
       graceMs: 10_000,
     });
     await reader.catch(() => {});
+    await watcher.stderr.cancel(); // never read — closed, not leaked
   } finally {
     await kill(server);
+    await drained; // the pipes end with the process; wait for that end
     await Deno.remove(home, { recursive: true }).catch(() => {});
   }
 });

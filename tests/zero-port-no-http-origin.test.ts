@@ -11,6 +11,7 @@
 //   2. the dev reload script — skipped entirely without an HTTP origin or
 //      with an IPC bridge (which already delivers reload/css/boot).
 
+import { _teardownNow } from "../src/browser/protocol-subscription.ts";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { Window } from "happy-dom";
 import { devWsScript } from "../src/server/server-html-scripts.ts";
@@ -104,6 +105,7 @@ Deno.test("air transport: aio:// page WITH the IPC bridge uses it, never WS", as
     assert(page.readyCalls() >= 1, "the bridge was armed (ipc.ready)");
     assertEquals(page.wsUrls, [], "no WebSocket on an aio:// page");
   } finally {
+    _teardownNow(); // the IPC open watchdog is the client's to clear
     await page.restore();
   }
 });
@@ -122,7 +124,7 @@ Deno.test("air transport: http:// page without IPC still opens the WebSocket (un
 // ── the dev reload script ─────────────────────────────────────────────────
 
 /** Runs the generated script with the page globals it reads. */
-function runDevWs(url: string, ipc: boolean): string[] {
+async function runDevWs(url: string, ipc: boolean): Promise<string[]> {
   const wsUrls: string[] = [];
   const win = new Window({ url });
   const w = win as unknown as Record<string, unknown>;
@@ -145,28 +147,28 @@ function runDevWs(url: string, ipc: boolean): string[] {
     debug: () => {},
     warn: () => {},
   });
-  win.happyDOM.close();
+  await win.happyDOM.close();
   return wsUrls;
 }
 
-Deno.test("dev reload script: skipped on a page with no HTTP origin or with an IPC bridge", () => {
+Deno.test("dev reload script: skipped on a page with no HTTP origin or with an IPC bridge", async () => {
   assertEquals(
-    runDevWs("aio://app/", false),
+    await runDevWs("aio://app/", false),
     [],
     "aio:// origin → no reload WS",
   );
   assertEquals(
-    runDevWs("http://localhost:1234/", true),
+    await runDevWs("http://localhost:1234/", true),
     [],
     "IPC bridge → it delivers reload; no WS",
   );
   assertEquals(
-    runDevWs("http://localhost:1234/", false),
+    await runDevWs("http://localhost:1234/", false),
     ["ws://localhost:1234/ws"],
     "plain http:// dev page → reload WS as before",
   );
   assertEquals(
-    runDevWs("https://localhost:1234/?token=abc", false),
+    await runDevWs("https://localhost:1234/?token=abc", false),
     ["wss://localhost:1234/ws?token=abc"],
   );
 });

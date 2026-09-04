@@ -97,7 +97,7 @@ Time-travel:
   timeline [--from=J]     Recent dispatches + payload + state diff (--lines=N)
   replay [N..M] [--dry]   Re-dispatch a journal range for repro (--from=J)
   timetravel undo|redo    Step back/forward
-  timetravel goto <N>     Jump to index
+  timetravel goto <id>    Jump to one entry — the id am actions lists
   timetravel pause|resume Freeze/unfreeze state
 
 Persistence:

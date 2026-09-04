@@ -34,5 +34,5 @@ Deno.test("fragment-in-map keeps DOM order across re-renders", async () => {
   console.log("after rerender:", t.html());
   assertEquals(order(), "L0,IL1,DL2,D");
   t.unmount();
-  win.happyDOM.close();
+  await win.happyDOM.close();
 });

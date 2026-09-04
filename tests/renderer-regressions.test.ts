@@ -22,12 +22,14 @@ import { _hydrateNode } from "../src/air/renderer-hydrate.ts";
 import { renderToStream } from "../src/air/ssr-stream.ts";
 import { signal } from "../src/state/signal.ts";
 
-function withDoc<T>(fn: (doc: Document, win: Window) => T): T {
+async function withDoc<T>(
+  fn: (doc: Document, win: Window) => T,
+): Promise<T> {
   const win = new Window({ url: "https://localhost" });
   try {
-    return fn(win.document as unknown as Document, win);
+    return await fn(win.document as unknown as Document, win);
   } finally {
-    win.happyDOM.close();
+    await win.happyDOM.close();
   }
 }
 
@@ -53,8 +55,8 @@ function withWarnings<T>(fn: (warns: string[]) => T): T {
 // Portal, a boundary, or a component that returns a Fragment, the text showed
 // the signal's value at mount and never moved again — no error, no warning, a
 // number frozen on screen.
-Deno.test("a signal child updates under a Fragment, a Portal, a boundary and a component", () => {
-  withDoc((doc) => {
+Deno.test("a signal child updates under a Fragment, a Portal, a boundary and a component", async () => {
+  await withDoc((doc) => {
     const n = signal(1);
     const CFrag = () => h(Fragment, null, "n=", n as unknown as VNode);
     const target = doc.createElement("aside");
@@ -125,8 +127,8 @@ Deno.test("a signal child updates under a Fragment, a Portal, a boundary and a c
 // `childNodes`, which is not the child's DOM index whenever a sibling spans
 // several nodes or none. A signal after a multi-node sibling bound the WRONG
 // text node: the page updated a neighbour's text and left its own frozen.
-Deno.test("hydration binds a signal child to its own node, after a multi-node sibling", () => {
-  withDoc((doc) => {
+Deno.test("hydration binds a signal child to its own node, after a multi-node sibling", async () => {
+  await withDoc((doc) => {
     const s = signal(0);
     const tree = () =>
       h(
@@ -160,8 +162,8 @@ Deno.test("hydration binds a signal child to its own node, after a multi-node si
 // the target stayed empty forever, and the next re-render tried to diff vnodes
 // with no `_dom` and printed the reconciler's own "this is an aio bug" warning
 // at a perfectly ordinary modal.
-Deno.test("hydrate mounts a Portal's content, and the next update patches it", () => {
-  withDoc((doc) => {
+Deno.test("hydrate mounts a Portal's content, and the next update patches it", async () => {
+  await withDoc((doc) => {
     withWarnings((warns) => {
       const label = signal("modal");
       const target = doc.createElement("aside");
@@ -214,8 +216,8 @@ Deno.test("hydrate mounts a Portal's content, and the next update patches it", (
 // stroke (an ancestor element replaced, or removed by its parent) — had no
 // Portal branch, so the modal stayed in `document.body` forever and reopening
 // it stacked a second copy beside the first.
-Deno.test("removing a Portal's ancestor empties the target, and reopening does not stack", () => {
-  withDoc((doc) => {
+Deno.test("removing a Portal's ancestor empties the target, and reopening does not stack", async () => {
+  await withDoc((doc) => {
     const target = doc.createElement("aside");
     const open = signal(true);
     const tree = () =>
@@ -268,8 +270,8 @@ Deno.test("removing a Portal's ancestor empties the target, and reopening does n
 // children and deleted them out of it (`<u>a</u><u>b</u><u>c</u>` came out as
 // `<u>c</u>`); and a teardown walked children that were never realized, warning
 // that a text child "will stay on the page forever. This is an aio bug".
-Deno.test("dangerouslySetInnerHTML owns the element on every path", () => {
-  withDoc((doc) => {
+Deno.test("dangerouslySetInnerHTML owns the element on every path", async () => {
+  await withDoc((doc) => {
     withWarnings((warns) => {
       const RAW = "<u>a</u><u>b</u><u>c</u>";
       // BARE TEXT children as well as elements: a text child carries no `_dom`,
@@ -337,8 +339,8 @@ Deno.test("dangerouslySetInnerHTML owns the element on every path", () => {
   });
 });
 
-Deno.test("a Portal under a raw-html element is never mounted — and never torn down", () => {
-  withDoc((doc) => {
+Deno.test("a Portal under a raw-html element is never mounted — and never torn down", async () => {
+  await withDoc((doc) => {
     withWarnings((warns) => {
       const target = doc.createElement("aside");
       // The element's content is raw html, so its vnode children — the portal
@@ -378,8 +380,8 @@ Deno.test("a Portal under a raw-html element is never mounted — and never torn
 // set `r` to the `<i>` and then NULLED it when the `<p>` left, leaving `r`
 // empty while its element was on screen. Refs now attach at the END of the
 // commit and detach at once, so the order of the DOM work cannot decide it.
-Deno.test("a ref survives a retag, a reorder, a re-key and a fragment wrap", () => {
-  withDoc((doc) => {
+Deno.test("a ref survives a retag, a reorder, a re-key and a fragment wrap", async () => {
+  await withDoc((doc) => {
     const shapes: Array<[string, (b: boolean) => VNode]> = [
       ["retag", (b) => h("div", null, h(b ? "i" : "p", { ref: R }, "x"))],
       [
@@ -438,8 +440,8 @@ Deno.test("a ref survives a retag, a reorder, a re-key and a fragment wrap", () 
 // while mount wrote the text node, so hydration met markup the model does not
 // describe — a stray `<!---->`, or a full fallback with a warning that blamed
 // `Date`/`random`/`window` in a render that has none.
-Deno.test("a container holding only an empty string renders the same through SSR, mount and hydrate", () => {
-  withDoc((doc) => {
+Deno.test("a container holding only an empty string renders the same through SSR, mount and hydrate", async () => {
+  await withDoc((doc) => {
     withWarnings((warns) => {
       const CEmpty = (() => "") as unknown as () => VNode;
       const CFragEmpty = () => h(Fragment, null, "");
@@ -499,8 +501,8 @@ Deno.test("a container holding only an empty string renders the same through SSR
 // `b`, so `{style:"color:red"}` and `{"data-n":undefined}` compared EQUAL (one
 // key each, `undefined === undefined`) and the static short-circuit kept the
 // old element's attributes on screen for a model that no longer has them.
-Deno.test("a static element with the same number of DIFFERENT props is not equal", () => {
-  withDoc((doc) => {
+Deno.test("a static element with the same number of DIFFERENT props is not equal", async () => {
+  await withDoc((doc) => {
     const pairs: Array<[Record<string, unknown>, Record<string, unknown>]> = [
       [{ style: "color:red" }, { "data-n": undefined }],
       [{ className: "x" }, { title: undefined }],
@@ -537,8 +539,8 @@ Deno.test("a static element with the same number of DIFFERENT props is not equal
 // The client threw a written explanation and `renderToString` threw
 // `TypeError: Cannot convert undefined or null to object` eleven frames deeper.
 // Same mistake, same author, two experiences — and the SSR one names nothing.
-Deno.test("a component returning a non-node says the same thing on the server as on the client", () => {
-  withDoc((doc) => {
+Deno.test("a component returning a non-node says the same thing on the server as on the client", async () => {
+  await withDoc((doc) => {
     const cases: Array<[string, () => unknown, string]> = [
       ["boolean", () => false, "Return null to render nothing"],
       [
@@ -595,8 +597,8 @@ Deno.test("a component returning a non-node says the same thing on the server as
 });
 
 // ── P2. a signal child renders as TEXT, and says so ───────────────────────
-Deno.test("a signal child holding an object or an array warns once, naming the fix", () => {
-  withDoc((doc) => {
+Deno.test("a signal child holding an object or an array warns once, naming the fix", async () => {
+  await withDoc((doc) => {
     withWarnings((warns) => {
       for (const value of [{ a: 1 }, [1, 2], h("b", null, "x")]) {
         const s = signal<unknown>("ok");

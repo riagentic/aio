@@ -18,8 +18,9 @@ Deno.test("logger: a deleted log directory is recreated, not endlessly reported"
   const errors: string[] = [];
   const origError = console.error;
   console.error = (...a: unknown[]) => errors.push(a.map(String).join(" "));
+  let logger: AioLogger | null = null;
   try {
-    const logger = new AioLogger({ dir, console: false, level: "info" });
+    logger = new AioLogger({ dir, console: false, level: "info" });
     await logger.init();
     logger.pub("info", "app", "before");
     await logger.flush(500);
@@ -47,6 +48,8 @@ Deno.test("logger: a deleted log directory is recreated, not endlessly reported"
         "log is worse than one that just fixes it",
     );
   } finally {
+    logger?.onStop(); // the heartbeat interval is the logger's
+    await logger?.flush();
     console.error = origError;
     await Deno.remove(base, { recursive: true }).catch(() => {});
   }

@@ -5,6 +5,7 @@
 // idempotent, so an Immer array `add` applied twice inserted the item twice.
 // One reconnect was enough to double every new todo in the UI.
 
+import { _teardownNow } from "../src/browser/protocol-subscription.ts";
 import { assert, assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
 
@@ -60,6 +61,7 @@ Deno.test("air transport: IPC handlers bind once across reconnects", async () =>
     assertEquals(closes.length, 1, "close handler bound once");
     assert(readyCalls >= 2, "the reconnect still re-armed the bridge");
   } finally {
+    _teardownNow(); // the reconnect timer and IPC watchdog are the client's
     if (prevWindow === undefined) delete g.window;
     else g.window = prevWindow;
     if (prevLocation === undefined) delete g.location;

@@ -8,6 +8,7 @@
 // was rejected once per subscriber, for a page whose only remedy is a reload.
 // Meanwhile an action dispatched after the gap went into the offline queue —
 // which nothing will ever flush — with a promise that never settled.
+import { _teardownNow } from "../src/browser/protocol-subscription.ts";
 import { assert, assertEquals } from "@std/assert";
 import { enc } from "../src/protocol/envelope.ts";
 
@@ -114,6 +115,7 @@ Deno.test("air transport: a protocol mismatch is terminal — no subscriber reop
     );
     assertEquals(_pendingAckCount(), 0, "nothing is left waiting forever");
     unsub();
+    _teardownNow(); // the grace timer `unsub()` armed — a test owns its client
   } finally {
     console.warn = origWarn;
     console.error = origErr;

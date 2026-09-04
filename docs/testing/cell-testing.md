@@ -153,6 +153,13 @@ testCell(poller, "arms the poll", async (t) => {
 });
 ```
 
+The refusal does not depend on `settle()`. A test that asserts on state and
+never settles ran nothing, so nothing could throw — and that is the shape most
+tests have, so it was the shape that stayed silent. An emitted framework effect
+that the test neither ran nor **read** is now refused at the end of the test
+too. Reading it is asserting on it, so `t.getEffects()`, `t.expect.effects` and
+`t.expect.effectCount` all leave it alone.
+
 Test the reduce/method logic that EMITS the effect with `testCell`
 (`t.expect.effects([...])` sees it without running it), and test the firing with
 `bootCells` — it boots the standalone runtime, so `await h.advance(ms)` fires

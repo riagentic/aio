@@ -154,13 +154,34 @@ export function cell(name: string, config: any): any {
   // Immer can draft it and reducers can mutate fields. A primitive, null, or
   // array would crash inside produce() at first dispatch with a cryptic error.
   if (
-    config.state != null &&
-    (typeof config.state !== "object" || Array.isArray(config.state))
+    config.state == null ||
+    typeof config.state !== "object" ||
+    Array.isArray(config.state)
   ) {
+    // `null` and `undefined` used to be EXEMPT here, and they are the two the
+    // guard is most needed for: `state` is required (docs/state/cells.md says
+    // so, and the type enforces it for TypeScript), so reaching this with
+    // nothing means the value evaluated to nothing — a `state: INITIAL` whose
+    // module has not finished initialising is the everyday way that happens,
+    // and a circular import produces exactly it. What the author got instead
+    // was `TypeError: Cannot convert undefined or null to object` from inside
+    // `installDefaultStateGetters`, naming neither the cell nor the cause.
+    const got = config.state === undefined
+      ? "undefined"
+      : config.state === null
+      ? "null"
+      : Array.isArray(config.state)
+      ? "array"
+      : typeof config.state;
     throw new Error(
-      `[${name}] cell state must be a plain object, got ${
-        Array.isArray(config.state) ? "array" : typeof config.state
-      } — reducers rely on Immer drafting an object shape.`,
+      `[${name}] cell state must be a plain object, got ${got} — reducers ` +
+        `rely on Immer drafting an object shape.` +
+        (config.state == null
+          ? ` A \`state\` that is ${got} usually means the value was read ` +
+            `before its module finished initialising (a circular import), or ` +
+            `that the key was omitted — it is required, and \`{}\` is the ` +
+            `way to say "no fields yet".`
+          : ""),
     );
   }
 

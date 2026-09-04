@@ -165,7 +165,7 @@ Deno.test("cycle detector: a heavy burst across many yields is not a cycle", asy
   } finally {
     console.error = realError;
     _setFlushBudget();
-    cleanup();
+    await cleanup();
   }
 });
 
@@ -207,6 +207,6 @@ Deno.test("cycle detector: a signal written during render is still caught", asyn
     _unmount(handle);
   } finally {
     console.error = realError;
-    cleanup();
+    await cleanup();
   }
 });

@@ -4,7 +4,10 @@
 import { assert, assertEquals } from "@std/assert";
 import { join, toFileUrl } from "@std/path";
 import { renderHeadlessSurface } from "../src/server/server-surface.ts";
-import { handleTrojan } from "../src/server/server-trojan.ts";
+import {
+  handleTrojan,
+  resetTrojanRateLimit,
+} from "../src/server/server-trojan.ts";
 
 const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
@@ -110,4 +113,5 @@ Deno.test("trojan: surface/server routes to the headless renderer", async () => 
     deps(undefined),
   );
   assertEquals(noneResp!.status, 404);
+  resetTrojanRateLimit(); // direct calls have no server shutdown to disarm it
 });

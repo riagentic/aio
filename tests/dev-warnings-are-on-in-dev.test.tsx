@@ -29,7 +29,9 @@ import { Window } from "happy-dom";
 (globalThis as Record<string, unknown>).__aioDev = true;
 
 /** Warnings emitted while `fn` renders. */
-function warningsDuring(fn: (root: HTMLElement) => void): string[] {
+async function warningsDuring(
+  fn: (root: HTMLElement) => void,
+): Promise<string[]> {
   const win = new Window();
   // deno-lint-ignore no-explicit-any
   _setDocument(win.document as any);
@@ -45,11 +47,14 @@ function warningsDuring(fn: (root: HTMLElement) => void): string[] {
     console.warn = realWarn;
     console.error = realError;
     _setDocument(undefined);
+    // The window this probe opened is its own to close — happy-dom keeps
+    // timers behind an open window, and the sanitizer names every one.
+    await win.happyDOM.close();
   }
   return seen;
 }
 
-Deno.test("dev warnings: no setDevMode() call is needed — __aioDev is enough", () => {
+Deno.test("dev warnings: no setDevMode() call is needed — __aioDev is enough", async () => {
   // The harness arms `__aioDev`, exactly as the dev server does for a browser.
   assertEquals((globalThis as Record<string, unknown>).__aioDev, true);
   assertEquals(isDevMode(), true);
@@ -57,7 +62,7 @@ Deno.test("dev warnings: no setDevMode() call is needed — __aioDev is enough",
   assertEquals(isDevModeExplicit(), false);
 
   const NoAlt = () => <img src="/x.png" />;
-  const seen = warningsDuring((root) => mount(root, NoAlt));
+  const seen = await warningsDuring((root) => mount(root, NoAlt));
   assert(
     seen.some((m) => m.includes("alt")),
     `expected an a11y warning without calling setDevMode; got ${
@@ -100,17 +105,17 @@ Deno.test('dev warnings: setDevMode("auto") returns to following __aioDev', () =
   }
 });
 
-Deno.test("dev warnings: forced off means silent, even in dev", () => {
+Deno.test("dev warnings: forced off means silent, even in dev", async () => {
   try {
     setDevMode(false);
     const NoAlt = () => <img src="/x.png" />;
-    assertEquals(warningsDuring((root) => mount(root, NoAlt)), []);
+    assertEquals(await warningsDuring((root) => mount(root, NoAlt)), []);
   } finally {
     setDevMode("auto");
   }
 });
 
-Deno.test("dev warnings: data-component is opt-in, not ambient", () => {
+Deno.test("dev warnings: data-component is opt-in, not ambient", async () => {
   // It is the one dev feature that CHANGES the DOM, and SSR does not write
   // it — armed by default, every hydrated component would read as a
   // server/client divergence.
@@ -132,5 +137,6 @@ Deno.test("dev warnings: data-component is opt-in, not ambient", () => {
   } finally {
     setDevMode("auto");
     _setDocument(undefined);
+    await win.happyDOM.close();
   }
 });

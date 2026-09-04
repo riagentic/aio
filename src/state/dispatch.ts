@@ -346,6 +346,11 @@ export function createDispatch<S, A, E>(
   let depth = 0; // global re-entrant depth counter (survives across dispatch calls)
   let effectsInFlight = 0;
   const effectPromises = new Set<Promise<void>>();
+  /** The hard-timeout timer of every tracked effect. Cleared with the effect
+   *  when it settles; cleared en bloc when `drain()` seals with effects still
+   *  running — a timer for an effect the shutdown has already given up on
+   *  would fire into a sealed dispatch and keep the process alive to do it. */
+  const effectTimers = new Set<ReturnType<typeof setTimeout>>();
   // Per-dispatch-instance set: a reducer that returns an invalid effect does
   // so for every dispatch of that action — warn once per action type instead
   // of flooding the log. Moved off the module level so a second aio.run() in
@@ -990,19 +995,27 @@ export function createDispatch<S, A, E>(
                     // nobody is waiting for. Two words, two behaviours, one of
                     // them silent.
                     if (_trackedRef) effectPromises.delete(_trackedRef);
+                    if (tid !== null) effectTimers.delete(tid);
                   }, thisEffectTimeout)
                   : null;
+                if (tid !== null) effectTimers.add(tid);
                 // Assigned immediately below; the timeout closure needs the same
                 // reference the set holds.
                 let _trackedRef: Promise<void> | null = null;
                 const tracked = promise
                   .then(() => {
-                    if (tid !== null) clearTimeout(tid);
+                    if (tid !== null) {
+                      clearTimeout(tid);
+                      effectTimers.delete(tid);
+                    }
                     if (!settled) effectsInFlight--;
                     settled = true;
                   })
                   .catch((e) => {
-                    if (tid !== null) clearTimeout(tid);
+                    if (tid !== null) {
+                      clearTimeout(tid);
+                      effectTimers.delete(tid);
+                    }
                     if (!settled) effectsInFlight--;
                     if (settled) { // AIO-235: log real error even after timeout
                       log.warn(
@@ -1128,6 +1141,9 @@ export function createDispatch<S, A, E>(
             } still running after ` +
               `${timeoutMs}ms — sealing the queue; their writes are lost`,
           );
+          // Abandoned means abandoned: their hard-timeout timers go too.
+          for (const t of effectTimers) clearTimeout(t);
+          effectTimers.clear();
           break;
         }
         let t: ReturnType<typeof setTimeout> | undefined;

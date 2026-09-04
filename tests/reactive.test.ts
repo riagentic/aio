@@ -1153,9 +1153,7 @@ Deno.test("direct calling: await sync method from async method (cross-cell)", as
   assertEquals((app.state.orch as { result: number }).result, 42);
 });
 
-Deno.test("direct calling: call(opts, fn) callback form with timeout", {
-  // sanitizers disabled: call() with 20ms timeout intentionally leaves a 500ms dangling promise
-}, async () => {
+Deno.test("direct calling: call(opts, fn) callback form with timeout", async () => {
   const slow = cell("slowf", {
     state: { done: false },
     methods: {
@@ -1180,6 +1178,9 @@ Deno.test("direct calling: call(opts, fn) callback form with timeout", {
     if (e instanceof Error && e.message.includes("timeout")) timedOut = true;
   }
   assertEquals(timedOut, true);
+  // The ceiling abandoned the method, not the test: its 500 ms delay and its
+  // own call registration settle inside the test, not after it.
+  await delay(500);
 });
 
 Deno.test("direct calling: call(fn) callback form — passthrough to cell.method", async () => {

@@ -263,9 +263,11 @@ export function createServerSyncHandler(
   ): boolean {
     if (!deps.isQuarantined?.(cell)) return false;
     const reason = quarantineReason(cell);
-    try {
-      socket.send(enc("op-rejected", { opId, cell, reason }));
-    } catch { /* client gone */ }
+    sendTo(
+      socket,
+      enc("op-rejected", { opId, cell, reason }),
+      `op-rejected (${opId}, quarantined)`,
+    );
     deps.log.warn(`[sync:server] op ${opId} refused — ${reason}`);
     return true;
   }
@@ -333,9 +335,11 @@ export function createServerSyncHandler(
         `the clocks meet. Correct this device's system clock (turn on ` +
         `automatic time sync) and the change can be made again.`;
     rememberRefusal(opId, reason);
-    try {
-      socket.send(enc("op-rejected", { opId, cell, reason }));
-    } catch { /* client gone */ }
+    sendTo(
+      socket,
+      enc("op-rejected", { opId, cell, reason }),
+      `op-rejected (${opId}, clock drift)`,
+    );
     deps.log.warn(`[sync:server] op ${opId} (${cell}) refused — ${reason}`);
     return true;
   }
@@ -523,13 +527,15 @@ export function createServerSyncHandler(
             (meta.user as { id?: string })?.id ?? "anonymous client"
           } — dropping`,
         );
-        try {
-          socket.send(enc("op-rejected", {
+        sendTo(
+          socket,
+          enc("op-rejected", {
             opId: op.id,
             cell: op.cell,
             reason: "access denied",
-          }));
-        } catch { /* client gone */ }
+          }),
+          `op-rejected (${op.id}, access denied)`,
+        );
         return;
       }
 

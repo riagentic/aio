@@ -114,6 +114,11 @@ export interface ServerConfig {
   getTTBroadcast?: () => unknown;
   // Health endpoint — GET /__aio/health
   getHealth?: () => unknown;
+  /** The persistence verdict without forcing a flush — `lastCycleError()` as
+   *  health reads it. Handed to the trojan so a dispatch/time-travel reply can
+   *  carry `unsaved` from the server's own memory instead of the caller
+   *  making a second request to `/__aio/health` to learn it. */
+  lastPersistError?: () => Error | null;
   /** Custom HTTP routes — exact path or "/prefix/*" wildcard → handler.
    *  Matched after /ws and /__aio/* (which are reserved) and before static
    *  serving. The escape hatch for uploads, webhooks, and API endpoints that

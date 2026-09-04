@@ -457,7 +457,10 @@ await h.advance(15_000); // three 5s ticks, instantly and deterministically
 
 `testCell` lets you assert on the schedule effects a method returns — `t.send.*`
 dispatches, `t.getEffects()` returns what it emitted. (testCell does not run a
-live scheduler, so it checks the _effect_, not the eventual timer fire.)
+live scheduler, so it checks the _effect_, not the eventual timer fire.) Read it
+or run it: a schedule effect a `testCell` test never looks at is refused at the
+end of the test rather than dropped in silence — see
+[what `testCell` will not run](../testing/cell-testing.md).
 
 ```ts
 import { assertEquals } from "@std/assert";

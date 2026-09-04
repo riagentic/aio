@@ -63,7 +63,16 @@ export type StormDetector = {
 };
 
 /** Creates a per-action-type dispatch-rate tracker with 1-second buckets.
- *  `onStorm` fires once when a storm starts and once when it ends (rate 0).
+ *  `onStorm` fires once when a storm STARTS and once when it ENDS — and the
+ *  end carries `ended: true` rather than a rate the caller has to interpret
+ *  (a storm that recovers by dropping under the threshold ends at a NON-zero
+ *  rate, so "rate 0" was never the discriminator this line used to claim).
+ *
+ *  The detector is dispatch-driven: no timer is armed per app. A storm whose
+ *  source goes SILENT is therefore closed on the next dispatch of ANY type, or
+ *  the next `storming()` — both are clock reads. Without that sweep it was
+ *  closed by nothing at all: `onStorm` never fired its end, `storming()` went
+ *  on naming the type, and the last word in the log was the warning.
  *  `now` is injectable for tests. */
 export function createStormDetector(
   cfg: StormConfig & {
@@ -76,6 +85,24 @@ export function createStormDetector(
   const breaker = cfg.breaker ?? false;
   const now = cfg.now ?? Date.now;
   const types = new Map<string, TypeState>();
+  /** How many types are mid-storm. The sweep below runs only when this is
+   *  non-zero, so an app that never storms pays one integer test per
+   *  dispatch — which is what lets the sweep sit on the hot path at all. */
+  let storming = 0;
+
+  /** Close the bucket of every STORMING type whose clock has run on.
+   *
+   *  `roll` only ever ran for the type being dispatched, so a storm whose
+   *  source went quiet was ended by nothing: the commonest real recovery — the
+   *  feedback loop is fixed, the watcher stops — produced no end event and
+   *  left `storming()` naming it forever. Every dispatch, of any type, and
+   *  every `storming()` is a clock read; this is what makes them count. */
+  function sweep(nowMs: number): void {
+    if (storming === 0) return;
+    for (const [t, st] of [...types.entries()]) {
+      if (st.storming) roll(st, t, nowMs);
+    }
+  }
 
   function roll(s: TypeState, type: string, nowMs: number): void {
     const elapsed = nowMs - s.bucketStart;
@@ -87,6 +114,7 @@ export function createStormDetector(
       s.hotSeconds++;
       if (!s.storming && s.hotSeconds >= sustain) {
         s.storming = true;
+        storming++;
         cfg.onStorm?.({
           type,
           rate: s.lastRate,
@@ -96,6 +124,7 @@ export function createStormDetector(
       }
     } else {
       if (s.storming) {
+        storming--;
         cfg.onStorm?.({
           type,
           rate: s.lastRate,
@@ -135,6 +164,8 @@ export function createStormDetector(
         types.set(type, s);
       }
       roll(s, type, nowMs);
+      // …and close any OTHER storm whose source has gone quiet. See `sweep`.
+      sweep(nowMs);
       s.count++;
       if (breaker && s.storming) {
         s.dropped++;
@@ -143,6 +174,10 @@ export function createStormDetector(
       return true;
     },
     storming(): string[] {
+      // Asking is a clock read too: a status surface must not be told a storm
+      // is raging because nothing happens to have been dispatched since it
+      // stopped.
+      sweep(now());
       return [...types.entries()].filter(([, s]) => s.storming).map((
         [t],
       ) => t);

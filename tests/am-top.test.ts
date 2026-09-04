@@ -6,7 +6,11 @@ import {
   renderTopFrame,
   type TopMetrics,
 } from "../src/am/am-cmd-inspect.ts";
-import { handleTrojan, type TrojanDeps } from "../src/server/server-trojan.ts";
+import {
+  handleTrojan,
+  resetTrojanRateLimit,
+  type TrojanDeps,
+} from "../src/server/server-trojan.ts";
 
 Deno.test("fmtBytes: human units + the unserializable sentinel", () => {
   assertEquals(fmtBytes(0), "0 B");
@@ -60,4 +64,7 @@ Deno.test("metrics route: reports per-cell serialized state sizes", async () => 
   assert(body.uptime >= 5, `uptime ~5s; got ${body.uptime}`);
   assertEquals(body.cells.nav, JSON.stringify(state.nav).length);
   assertEquals(body.cells.big, JSON.stringify(state.big).length);
+  // A direct call bypasses the server whose shutdown disarms the 1 s
+  // rate-limit window; this test disarms it itself.
+  resetTrojanRateLimit();
 });

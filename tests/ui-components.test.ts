@@ -278,7 +278,7 @@ Deno.test("ui: Modal Escape-to-close listens on the render document", async () =
 // Driven through `mount()` rather than `testUI`: the harness re-renders via a
 // path that masks this, and a test that passes with the bug restored is worse
 // than no test at all (verified by putting the defect back).
-Deno.test("ui: Modal opened AFTER its first render still closes on Escape", () => {
+Deno.test("ui: Modal opened AFTER its first render still closes on Escape", async () => {
   const win = new Window({ url: "https://localhost" });
   _setDocument(win.document as unknown as Document);
   const doc = win.document as unknown as Document;
@@ -303,7 +303,7 @@ Deno.test("ui: Modal opened AFTER its first render still closes on Escape", () =
     _unmount(handle);
     host.remove();
   } finally {
-    win.happyDOM.close();
+    await win.happyDOM.close();
   }
 });
 

@@ -11,6 +11,30 @@ import {
   writeLock,
 } from "../src/server/single-instance-lock.ts";
 import { stopChild } from "./stop-child.ts";
+import { getLogger, setLogger } from "../src/diagnostics/logger-api.ts";
+
+/** Collect the warnings an async body produces. */
+async function warningsOf(body: () => Promise<void>): Promise<string[]> {
+  const out: string[] = [];
+  const prev = getLogger();
+  setLogger(
+    {
+      logDir: "",
+      pub: (lvl: string, cat: string, msg?: string) => {
+        if (lvl === "warn") out.push(`${cat} ${msg ?? ""}`);
+      },
+      perf: () => {},
+      flush: () => Promise.resolve(),
+      // deno-lint-ignore no-explicit-any
+    } as any,
+  );
+  try {
+    await body();
+  } finally {
+    setLogger(prev);
+  }
+  return out;
+}
 
 const TEST_APP = "aio-test-lock-" + Deno.pid; // unique per test run to avoid collisions
 
@@ -110,6 +134,64 @@ Deno.test("AppLock: acquire cleans dead process lock", async () => {
   try {
     const result = await lock.acquire(19999);
     assertEquals(result.ok, true);
+  } finally {
+    lock.release();
+    await cleanup();
+  }
+});
+
+// A graceful shutdown REMOVES this lock, so a lock whose owner is dead is
+// proof the last run ended abruptly — and persistence is debounced, so what
+// was committed inside the last window died with the process. The app then
+// comes back looking healthy, quietly older than it was. MEASURED on a
+// scaffolded counter app: -9 at SIGKILL, -8 after the restart, not one line
+// logged. The two sibling reclaim paths (an unreadable lock, a zombie
+// listener) both spoke; this one — the commonest — was mute.
+Deno.test("AppLock: reclaiming a DEAD owner's lock says the run crashed", async () => {
+  await cleanup();
+  writeLock({
+    appId: TEST_APP,
+    pid: 999999,
+    port: 19998,
+    startedAt: Date.now(),
+    status: "started",
+    cwd: "/tmp",
+  });
+  const lock = new AppLock(TEST_APP);
+  const warns = await warningsOf(async () => {
+    const result = await lock.acquire(19998);
+    assertEquals(result.ok, true);
+  });
+  try {
+    const hit = warns.find((w) => w.includes("did not shut down cleanly"));
+    assertEquals(
+      typeof hit,
+      "string",
+      `no crash warning; warnings were:\n${warns.join("\n") || "(none)"}`,
+    );
+    // it must name the dead owner and the fix that closes the window
+    assertEquals(hit!.includes("999999"), true, hit);
+    assertEquals(hit!.includes("journal: true"), true, hit);
+  } finally {
+    lock.release();
+    await cleanup();
+  }
+});
+
+// …and it must stay quiet when nothing crashed, or it is noise that teaches
+// people to ignore it.
+Deno.test("AppLock: a first, uncontended acquire warns about nothing", async () => {
+  await cleanup();
+  const lock = new AppLock(TEST_APP);
+  const warns = await warningsOf(async () => {
+    const result = await lock.acquire(19997);
+    assertEquals(result.ok, true);
+  });
+  try {
+    assertEquals(
+      warns.filter((w) => w.includes("did not shut down cleanly")),
+      [],
+    );
   } finally {
     lock.release();
     await cleanup();
@@ -283,7 +365,7 @@ Deno.test("zombie reclaim: UDS instance with dead socket is reclaimed", async ()
       true,
       "UDS instance with dead socket must be reclaimed",
     );
-    removeLock(appId);
+    lock.release(); // ours now — release it, and the signal handlers with it
   } finally {
     await stopChild(sleeper, { quiet: true });
   }

@@ -13,6 +13,7 @@
 // unanswered, the one outcome the queue contract exists to forbid.
 //
 // Driven through the live module with a fake WebSocket, not a source grep.
+import { _teardownNow } from "../src/browser/protocol-subscription.ts";
 import { assert, assertEquals } from "@std/assert";
 
 const sent: string[] = [];
@@ -111,6 +112,7 @@ Deno.test("air offline queue: both halves replay in the order the user acted", (
   );
   FakeWS.last?.onclose?.();
   coreSetTransport(null);
+  _teardownNow(); // the close above scheduled a reconnect — a test owns its client
 });
 
 Deno.test("air offline queue: a flush that throws part-way re-queues the rest, in order", () => {
@@ -140,6 +142,7 @@ Deno.test("air offline queue: a flush that throws part-way re-queues the rest, i
   );
   FakeWS.last?.onclose?.();
   coreSetTransport(null);
+  _teardownNow(); // the close above scheduled a reconnect — a test owns its client
 });
 
 addEventListener("unload", () => {

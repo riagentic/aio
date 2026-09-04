@@ -2,6 +2,7 @@
 // Bug 1: wss:// URLs were downgraded to ws: (only https: mapped to wss:).
 // Bug 2: ?token= in the URL was silently dropped (only opts.token was read),
 //        while the server's own share link uses the ?token= form.
+import { within } from "./within.ts";
 import { assert, assertEquals } from "@std/assert";
 import { connectCli } from "../src/server/cli-client.ts";
 
@@ -25,15 +26,10 @@ Deno.test("aio-403: connectCli preserves ?token= from the share-link URL", async
   const app = connectCli<{ counter: { count: number } }>(
     `ws://127.0.0.1:${server.addr.port}/ws?token=sesame`,
   );
-  const state = await Promise.race([
-    app.ready,
-    new Promise<never>((_, rej) =>
-      setTimeout(
-        () => rej(new Error("ready timed out — token was dropped")),
-        3000,
-      )
-    ),
-  ]);
+  const state = await within(app.ready, 3000, "TIMED OUT" as const);
+  if (state === "TIMED OUT") {
+    throw new Error("ready timed out — token was dropped");
+  }
 
   assertEquals(seenToken, "sesame");
   assertEquals(state.counter.count, 3);
@@ -59,12 +55,9 @@ Deno.test("aio-403: connectCli opts.token wins over URL token", async () => {
       token: "explicit",
     },
   );
-  await Promise.race([
-    app.ready,
-    new Promise<never>((_, rej) =>
-      setTimeout(() => rej(new Error("ready timed out")), 3000)
-    ),
-  ]);
+  if ((await within(app.ready, 3000, "TIMED OUT" as const)) === "TIMED OUT") {
+    throw new Error("ready timed out");
+  }
 
   assertEquals(seenToken, "explicit");
 

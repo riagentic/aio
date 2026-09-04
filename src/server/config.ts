@@ -1,4 +1,5 @@
 import { log } from "../diagnostics/logger-api.ts";
+import { inertAllowlistEntries } from "./server-auth.ts";
 import { teachMessage } from "../diagnostics/error.ts";
 import { hasBothFilterModes, nearestOf } from "../state/cell-helpers.ts";
 import { classifySource } from "./updates-core.ts";
@@ -220,6 +221,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "strictCells",
   "guardDispatches",
   "journal",
+  "refusalsReject",
   "redactActions",
   "childWindows",
   "onAction",
@@ -303,6 +305,7 @@ export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
   "strictCells",
   "guardDispatches",
   "journal",
+  "refusalsReject",
   "redactActions",
   "childWindows",
   "libraryMode",
@@ -470,6 +473,10 @@ export const CONFIG_DOCS: Record<string, [string, string]> = {
     "false",
     "durable action journal — replay the persist-debounce tail after SIGKILL/power cut",
   ],
+  refusalsReject: [
+    "false",
+    "a write the reduce REFUSED rejects `await cell.method()` in process, the way the wire already answers it (ACTION_REFUSED)",
+  ],
   redactActions: [
     "",
     'action types whose payload is "[redacted]" in journal/diagnostics/timeline (trailing * = prefix match)',
@@ -631,6 +638,7 @@ export const CONFIG_GROUPS: [string, string[]][] = [
     "persistDebounceMs",
     "persistMode",
     "journal",
+    "refusalsReject",
     "redactActions",
     "onRestore",
     "db",
@@ -1133,6 +1141,34 @@ export function configConflicts(
         `auth.requireVerified until you have one`,
       doc: "docs/auth/auth.md",
     });
+  }
+
+  // ── 1b. an allowedOrigins entry no request can ever match ────────────
+  const origins = cfg.allowedOrigins;
+  if (Array.isArray(origins)) {
+    const inert = inertAllowlistEntries(
+      origins.filter((o): o is string => typeof o === "string"),
+    );
+    if (inert.length > 0) {
+      out.push({
+        level: "warn",
+        keys: ["allowedOrigins"],
+        what: `allowedOrigins ${
+          inert.map((e) => JSON.stringify(e)).join(", ")
+        } ${
+          inert.length === 1
+            ? "matches"
+            : "match"
+        } nothing — the entry is read by both the WebSocket Origin check and ` +
+          `the Host (DNS-rebinding) gate, and neither can ever compare equal ` +
+          `to it, so access was NOT widened`,
+        fix:
+          `write one of the four spellings the allowlist reads: "*", a bare ` +
+          `hostname (app.example.com), a host:port (app.example.com:8443), or ` +
+          `a full origin (https://app.example.com)`,
+        doc: "docs/basics/positioning.md",
+      });
+    }
   }
 
   // ── 2. journal without a file to journal INTO ────────────────────────

@@ -253,6 +253,8 @@ Deno.test("logger observe: __exec is noise, __set is the payload", async () => {
       `the logger's action observer dropped the write-set:\n${text}`,
     );
     assert(!text.includes("__exec"), `__exec is a pure marker:\n${text}`);
+    l.onStop(); // the heartbeat interval is the logger's
+    await l.flush();
   } finally {
     await Deno.remove(dir, { recursive: true }).catch(() => {});
   }

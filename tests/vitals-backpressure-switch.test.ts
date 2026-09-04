@@ -49,12 +49,14 @@ async function multiplierAfterStalePing(
       ws.send(enc("vitals-ping", { t1: Date.now(), ms: 500 }));
       // The server answers every ping with a pong; wait for that rather than
       // for a fixed delay, so the read below cannot race the handler.
+      let pongDeadline: ReturnType<typeof setTimeout> | undefined;
       const ponged = await new Promise<boolean>((res) => {
         ws.onmessage = (e) => {
           if (typeof e.data === "string" && e.data.includes("pong")) res(true);
         };
-        setTimeout(() => res(false), 2000);
+        pongDeadline = setTimeout(() => res(false), 2000);
       });
+      clearTimeout(pongDeadline); // the pong won — its deadline goes too
       // Without this, a ping that never landed reads exactly like a client
       // that was never throttled — the "off" case would pass for the wrong
       // reason.

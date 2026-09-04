@@ -38,6 +38,9 @@ function advertised(auth: {
     baseDir: Deno.cwd(),
     distDir: Deno.cwd(),
     expose: true, // discovery only runs for an exposed app
+    // An in-process probe, not a process this lifecycle owns: no SIGHUP
+    // listener, no parent watch — exactly what an embedding host gets.
+    libraryMode: true,
     singletonMode: false,
     childWindows: false,
     client: "server-only",

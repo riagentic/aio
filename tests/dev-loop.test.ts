@@ -36,6 +36,7 @@ import {
   DEBOUNCE_MAX_MS,
   DEBOUNCE_MS,
 } from "../src/server/server-watcher.ts";
+import { stopEsbuild } from "../src/server/server-transpile.ts";
 
 const AIO_ROOT = join(import.meta.dirname ?? ".", "..");
 
@@ -204,6 +205,9 @@ Deno.test("watcher: a graph validation that times out still reloads, and SAYS SO
     } finally {
       console.warn = origWarn;
       watcher?.shutdown();
+      // The graph validation spawned esbuild's service; a bare watcher has no
+      // server shutdown to stop it for it.
+      await stopEsbuild();
     }
     assertEquals(
       reloads,

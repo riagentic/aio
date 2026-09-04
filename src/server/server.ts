@@ -795,6 +795,7 @@ export function createServer(config: ServerConfig): ServerHandle {
         })),
       sendToWsClient: (idx, msg) => wsMgr.sendToWsClient(idx, msg),
       getRecentErrors: () => staticHandler.getRecentErrors(),
+      lastPersistError: config.lastPersistError,
       getGraphStatus: () =>
         graphValidation
           ? {
@@ -1476,6 +1477,25 @@ export function createServer(config: ServerConfig): ServerHandle {
             `copy of this app). Refusing to start: a second cell runtime on ` +
             `shared persistence could corrupt it. Free the port, or use ` +
             `--port=N.`,
+        );
+      }
+      // A HOST THIS MACHINE CANNOT BIND is user input too, and it arrived as a
+      // raw `URIError: invalid host 'not..a..host': empty label found in FQDN`
+      // out of Deno's TLS internals, with eight stack frames of aio above it —
+      // the same shape a CLI typo used to have (`aio.ts`, the parseCli guard).
+      // The port-in-use case beside this one has been teachable for releases;
+      // this is the other way the same call fails.
+      if (e instanceof Deno.errors.AddrNotAvailable || e instanceof URIError) {
+        const why = e instanceof URIError
+          ? `it is not a valid address or hostname`
+          : `no interface on this machine answers on it`;
+        throw new Error(
+          `cannot bind ${hostname}:${port} — ${why} (${
+            e instanceof Error ? e.message : String(e)
+          }). \`--host=\` takes an address THIS machine already answers on: an ` +
+            `interface IP, 127.0.0.1 for loopback, or 0.0.0.0 for every ` +
+            `interface. It is not a name to advertise, and a NON-loopback ` +
+            `value is treated as \`--expose\`.`,
         );
       }
       throw e;

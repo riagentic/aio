@@ -38,7 +38,10 @@ import {
   readDenoJsonSync,
   readFrameworkPin,
 } from "../server/deno-json.ts";
-import { compareVersions as compareRawVersions } from "../server/updates-core.ts";
+import {
+  compareVersions as compareRawVersions,
+  isComparableVersion,
+} from "../server/updates-core.ts";
 import { join } from "@std/path";
 
 /** The moving pin — `origin/main`, refreshed on every link. */
@@ -170,16 +173,35 @@ export type Semver = {
   raw: string;
 };
 
-/** Parse `v1.2.3`, `v1.0.0-alpha38`, `v2.0.0-rc1`. Null when unparseable. */
+/** Parse `v1.2.3`, `v1.0.0-alpha38`, `v2.0.0-rc1`, `v1.2.3+build1`. Null when
+ *  the tag cannot be ORDERED at all.
+ *
+ *  ONE DECIDER for orderability, the same one the in-app updater uses. This
+ *  used to be a second regex and it was STRICTER — measured, it dropped
+ *  `v1.2.3+build1`, `v1.2.3-rc.1+abc`, `v2.0.0-RC1` and `v1.0.0-alpha77.1`,
+ *  every one of which `updates-core` orders without complaint. Build metadata
+ *  is the one that bites: a publisher stamping the commit into the version
+ *  (the exact case `updates-core`'s own parser was fixed for) got
+ *  `am pin latest` answering "already on the newest" from a tag list whose
+ *  newest entry the app's own updater was offering — two answers, no error,
+ *  and the ordering had already been unified while the FILTER was left behind.
+ *
+ *  `pre`/`preNum` stay best-effort display fields: the ORDER comes from
+ *  `compareVersions` below, which delegates, so nothing depends on them. */
 export function parseVersion(tag: string): Semver | null {
-  const m = /^v?(\d+)\.(\d+)\.(\d+)(?:-([a-z]+)\.?(\d*))?$/.exec(tag.trim());
-  if (!m) return null;
+  const t = tag.trim();
+  if (!isComparableVersion(t)) return null;
+  const core = t.replace(/^v/, "").split("+", 1)[0]!;
+  const dash = core.indexOf("-");
+  const nums = (dash === -1 ? core : core.slice(0, dash)).split(".");
+  const pre = dash === -1 ? "" : core.slice(dash + 1);
+  const m = /^([A-Za-z]+)\.?(\d*)/.exec(pre);
   return {
-    major: Number(m[1]),
-    minor: Number(m[2]),
-    patch: Number(m[3]),
-    pre: m[4] ?? "",
-    preNum: m[5] ? Number(m[5]) : 0,
+    major: Number(nums[0] ?? 0),
+    minor: Number(nums[1] ?? 0),
+    patch: Number(nums[2] ?? 0),
+    pre: (m?.[1] ?? "").toLowerCase(),
+    preNum: m?.[2] ? Number(m[2]) : 0,
     raw: tag,
   };
 }

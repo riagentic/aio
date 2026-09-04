@@ -10,6 +10,7 @@
 // thread really is busy … a headless client") and not the one that happened.
 // A field report lost two debugging passes to that very message; sending
 // someone down it for a client that no longer exists is worse.
+import { within } from "./within.ts";
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { enc } from "../src/protocol/envelope.ts";
@@ -53,10 +54,11 @@ Deno.test("ws: a pending control reply settles when its client disconnects", asy
     assert(r.found);
     const started = Date.now();
     ws.close();
-    const res = await Promise.race([
+    const res = await within(
       r.promise.then((resp) => resp.json()),
-      wait(PROMPT_MS).then(() => "still waiting"),
-    ]);
+      PROMPT_MS,
+      "still waiting",
+    );
     assert(
       res !== "still waiting",
       `the reply was still pending ${PROMPT_MS}ms after the client closed — ` +
@@ -101,10 +103,7 @@ Deno.test("uds: a pending control reply settles when its client disconnects", as
     const p = uds.requestClientState(idx);
     const started = Date.now();
     conn.close();
-    const res = await Promise.race([
-      p,
-      wait(PROMPT_MS).then(() => "still waiting"),
-    ]);
+    const res = await within(p, PROMPT_MS, "still waiting");
     assert(
       res !== "still waiting",
       `the reply was still pending ${PROMPT_MS}ms after the peer closed`,

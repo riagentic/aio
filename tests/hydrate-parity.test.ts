@@ -52,7 +52,7 @@ function mounted(doc: Document, App: any): string {
   return html;
 }
 
-Deno.test("hydrate: an ErrorBoundary catches a render throw, exactly like mount", () => {
+Deno.test("hydrate: an ErrorBoundary catches a render throw, exactly like mount", async () => {
   const { doc, cleanup } = env();
   try {
     const Boom = () => {
@@ -90,11 +90,11 @@ Deno.test("hydrate: an ErrorBoundary catches a render throw, exactly like mount"
       _unmount(handle);
     }
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
-Deno.test("hydrate: an ErrorBoundary keeps its siblings interactive", () => {
+Deno.test("hydrate: an ErrorBoundary keeps its siblings interactive", async () => {
   const { win, doc, cleanup } = env();
   try {
     let clicks = 0;
@@ -134,11 +134,11 @@ Deno.test("hydrate: an ErrorBoundary keeps its siblings interactive", () => {
       _unmount(handle);
     }
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
-Deno.test("hydrate: a boundary with no fallback still reports its error", () => {
+Deno.test("hydrate: a boundary with no fallback still reports its error", async () => {
   const { doc, cleanup } = env();
   try {
     const Boom = () => {
@@ -160,7 +160,7 @@ Deno.test("hydrate: a boundary with no fallback still reports its error", () => 
       `a fallback-less boundary must rethrow, got ${String(thrown)}`,
     );
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
@@ -208,7 +208,7 @@ Deno.test("hydrate: Suspense adopts its server fallback and resolves onto it", a
       _unmount(handle);
     }
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
@@ -250,7 +250,7 @@ Deno.test("lazy: resolves when it is nested inside a wrapper, not a direct Suspe
     _unmount(handle);
     host.remove();
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
@@ -284,7 +284,7 @@ Deno.test("hydrate: a throwing subtree does not leak the component instance stac
     );
     host.remove();
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
@@ -297,7 +297,7 @@ Deno.test("hydrate: a throwing subtree does not leak the component instance stac
 // way). Measured before the fix: 2 subscribers for 1 live component.
 Deno.test({
   name: "hydrate: a mismatch does not leak the instances created before it",
-  fn() {
+  async fn() {
     const { doc, cleanup } = env();
     const count = signal(0);
     let cleanups = 0;
@@ -326,7 +326,7 @@ Deno.test({
 
     _unmount(handle);
     assertEquals(subs(), 0, "no subscription outlives the unmount");
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -338,7 +338,7 @@ Deno.test({
 // half of the same rule.
 Deno.test({
   name: "hydrate: a server/client attribute divergence is repaired, not kept",
-  fn() {
+  async fn() {
     const { doc, cleanup } = env();
     const App: ComponentFn = () =>
       h("div", { class: "client", "data-x": "2", title: "t" }, "hi");
@@ -356,6 +356,6 @@ Deno.test({
     // of hydrating): the text node survived.
     assertEquals(div.textContent, "hi");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });

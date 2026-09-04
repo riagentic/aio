@@ -3,6 +3,8 @@
 // Tests that ensureConnected wiring works and AIR hooks interact correctly
 // with protocol layer. No actual WebSocket — we test the wiring, not the network.
 
+import { FakeWS, installFakeWS } from "./fake-ws.ts";
+import { _teardownNow } from "../src/browser/protocol-subscription.ts";
 import { assert, assertEquals, assertExists } from "@std/assert";
 import {
   ensureConnected,
@@ -164,18 +166,22 @@ Deno.test("browser-air: useNavigate is a function", () => {
 
 Deno.test({
   name: "browser-air: ensureConnected is idempotent",
-  // Sanitizers disabled: ensureConnected() creates a WebSocket stub internally
-  // that cannot be fully torn down without a real browser environment
   fn() {
+    // A fake socket, so the connect is observable and owns no real op; the
+    // client is torn down through the same path production uses.
+    const restoreWS = installFakeWS();
     stubLocation();
     try {
       resetAll();
       // First call triggers connect — second is no-op (idempotent)
       ensureConnected();
       ensureConnected();
+      assertEquals(FakeWS.live.length, 1, "one socket, not two");
     } finally {
+      _teardownNow();
       resetAll();
       restoreLocation();
+      restoreWS();
     }
   },
 });

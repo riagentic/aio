@@ -60,9 +60,15 @@ function shouldSkip(): string | null {
 
 type CdpTarget = { type: string; webSocketDebuggerUrl: string };
 
+/** The bug this guards is an Electron that NEVER exposes a page — so the
+ *  ceiling only has to be long enough that a slow start is never mistaken for
+ *  that. 15 s was not: in `check:release` this gate runs right after
+ *  `test:build` has compiled four binaries, and one cold Electron start took
+ *  longer than that on an otherwise idle box, failing a release check whose
+ *  every other gate was green. 60 s proves the same thing. */
 async function waitForCdpPage(
   port: number,
-  timeoutMs = 15_000,
+  timeoutMs = 60_000,
 ): Promise<CdpTarget> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {

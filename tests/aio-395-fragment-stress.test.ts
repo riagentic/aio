@@ -28,7 +28,7 @@ Deno.test("frag: keyed list reorder keeps order", async () => {
   await new Promise((r) => setTimeout(r, 5));
   assertEquals(txt(doc), "33110022");
   t.unmount();
-  win.happyDOM.close();
+  await win.happyDOM.close();
 });
 
 // add + remove fragments from a keyed list
@@ -54,7 +54,7 @@ Deno.test("frag: add/remove in keyed list", async () => {
   await new Promise((r) => setTimeout(r, 5)); // reorder
   assertEquals(txt(doc), "4023");
   t.unmount();
-  win.happyDOM.close();
+  await win.happyDOM.close();
 });
 
 // nested fragments in a map
@@ -81,7 +81,7 @@ Deno.test("frag: nested fragments interleave correctly", async () => {
   await new Promise((r) => setTimeout(r, 5));
   assertEquals(txt(doc), "0a0b-91a1b-9");
   t.unmount();
-  win.happyDOM.close();
+  await win.happyDOM.close();
 });
 
 // fragment with a conditional (variable child count)
@@ -110,5 +110,5 @@ Deno.test("frag: variable child count via conditional", async () => {
   await new Promise((r) => setTimeout(r, 5));
   assertEquals(txt(doc), "xyz");
   t.unmount();
-  win.happyDOM.close();
+  await win.happyDOM.close();
 });

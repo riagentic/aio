@@ -22,6 +22,7 @@
 //   deno task check:release          # everything (fast, then heavy)
 //   deno task check:release --fast   # static gates + surfaces only
 import { VERSION } from "../src/server/aio-cli.ts";
+import { STAMP_PATH, writeStamp } from "./release-stamp.ts";
 import { descendantPids } from "../src/server/single-instance-lock.ts";
 
 const root = new URL("../", import.meta.url).pathname;
@@ -52,6 +53,16 @@ function keepTail(buf: string, add: string): string {
   return s.length > 64_000 ? s.slice(-64_000) : s;
 }
 
+/** Where every gate's FULL output goes, one file per gate, streamed as it
+ *  arrives (so a gate that hangs and is killed still left its log). The
+ *  report keeps a tail; the tail of an 18-minute suite is type-check chatter,
+ *  and the test that failed is 12,000 lines up. Gitignored (`.aio/`). */
+const GATE_LOG_DIR = `${root}.aio/release-check/`;
+function gateLogPath(name: string): string {
+  return GATE_LOG_DIR + name.replace(/[^a-z0-9]+/gi, "-").toLowerCase() +
+    ".log";
+}
+
 async function run(name: string, cmd: string[]): Promise<Result> {
   const t0 = Date.now();
   const child = new Deno.Command(cmd[0]!, {
@@ -62,16 +73,51 @@ async function run(name: string, cmd: string[]): Promise<Result> {
   }).spawn();
   let out = "", err = "";
   const dec = new TextDecoder();
+  await Deno.mkdir(GATE_LOG_DIR, { recursive: true });
+  const logPath = gateLogPath(name);
+  const log = await Deno.open(logPath, {
+    write: true,
+    create: true,
+    truncate: true,
+  });
+  // The NAMES of the tests that failed, harvested from the stream as it goes
+  // by — the one thing a person re-runs the whole gate by hand to learn.
+  const failedTests: string[] = [];
+  const FAILED_LINE = /^(.*?) \.\.\. .*FAILED/;
+  let partial = "";
+  const harvest = (t: string) => {
+    partial += t;
+    const lines = partial.split("\n");
+    partial = lines.pop() ?? "";
+    for (const l of lines) {
+      const m = FAILED_LINE.exec(l.replace(/\x1b\[[0-9;]*m/g, ""));
+      if (m && failedTests.length < 40) failedTests.push(m[1]!.trim());
+    }
+  };
   const pump = async (
     s: ReadableStream<Uint8Array>,
     sink: (t: string) => void,
   ) => {
-    for await (const c of s) sink(dec.decode(c));
+    for await (const c of s) {
+      const t = dec.decode(c);
+      sink(t);
+      harvest(t);
+      await log.write(c).catch(() => {
+        // aio-ok: the log is a convenience beside the report; a full disk
+        // must not turn a passing gate into a failing one
+      });
+    }
   };
   const pumps = Promise.all([
     pump(child.stdout, (t) => out = keepTail(out, t)).catch(() => {}),
     pump(child.stderr, (t) => err = keepTail(err, t)).catch(() => {}),
-  ]);
+  ]).finally(() => log.close());
+  const failedList = () =>
+    failedTests.length
+      ? `\n      failed tests (${failedTests.length}):\n      ` +
+        failedTests.map((t) => `✗ ${t}`).join("\n      ")
+      : "";
+  const where = () => `\n      full log: ${logPath.slice(root.length)}`;
   const ceilingMs = (CEILING_MIN[name] ?? DEFAULT_CEILING_MIN) * 60_000;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const status = await Promise.race([
@@ -121,13 +167,20 @@ async function run(name: string, cmd: string[]): Promise<Result> {
       ok: false,
       detail: `${secs}s — HUNG: no result within ${
         ceilingMs / 60_000
-      }m, killed.\n      last output:\n      ${lastLines(3)}`,
+      }m, killed.\n      last output:\n      ${
+        lastLines(3)
+      }${failedList()}${where()}`,
     };
   }
   await pumps;
   if (status.success) return { name, ok: true, detail: `${secs}s` };
-  // The last few lines of a failing gate are the part that says why.
-  return { name, ok: false, detail: `${secs}s\n      ${lastLines(8)}` };
+  // The last few lines of a failing gate are the part that says why — and
+  // for a test gate, the NAMES, which the tail never carries.
+  return {
+    name,
+    ok: false,
+    detail: `${secs}s\n      ${lastLines(8)}${failedList()}${where()}`,
+  };
 }
 
 /** A release SURFACE — the checks no command covers, which is exactly why they
@@ -361,8 +414,20 @@ if (failed.length > 0) {
   );
   Deno.exit(1);
 }
+if (!FAST_ONLY) {
+  // The stamp: the one thing that turns "every gate passed" from a sentence
+  // in a release note into a fact about THIS tree. `deno task check:release-stamp`
+  // reads it back before a tag is cut; an edit after this line invalidates it.
+  const stamp = await writeStamp(VERSION, root);
+  console.log(
+    `  ✓ release stamp                          tree ${
+      stamp.tree.slice(0, 12)
+    } (${STAMP_PATH})`,
+  );
+}
 console.log(
   FAST_ONLY
     ? "\n✓ fast gates + surfaces pass — run without --fast before pushing\n"
-    : "\n✓ releasable — every gate and surface in .katana/release.md passes\n",
+    : "\n✓ releasable — every gate and surface in .katana/release.md passes; " +
+      "`deno task check:release-stamp` confirms the tree before you tag\n",
 );

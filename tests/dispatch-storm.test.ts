@@ -112,3 +112,99 @@ Deno.test("storm: rates are tracked per action type independently", () => {
   }
   assertEquals(d.storming(), ["hot:type"]);
 });
+
+// ── the end of a storm, which is the part nobody was told about ─────────
+//
+// `createStormDetector`'s own doc promises "`onStorm` fires once when a storm
+// starts and once when it ends (rate 0)". Measured, it did neither of the two
+// endings correctly:
+//
+//   • ends by dropping UNDER the threshold (non-zero rate) — reported as a
+//     fresh storm, with a rate below the one that triggers one. Fixed earlier
+//     by the `ended` flag… which then had no test at all, so deleting it went
+//     unnoticed. That is the trap the flag's own comment names: "a claim with
+//     no test".
+//   • ends by going SILENT — the promised `rate 0` case — emitted NOTHING.
+//     `roll` runs only inside `track(type)`, so a type nobody dispatches again
+//     never closes its bucket: `onStorm` never fired, `storming()` kept naming
+//     it, and the operator's last word in the log was the WARNING. A storm that
+//     stopped read as one still raging.
+//
+// The detector is dispatch-driven on purpose (no timer per app), so the end is
+// delivered on the next dispatch of ANYTHING, or the next time someone asks
+// `storming()` — both are clock reads, and neither costs an app that is not
+// storming more than an integer check.
+
+Deno.test("storm: ending by dropping under the threshold says ENDED", () => {
+  const c = clock();
+  const seen: StormInfo[] = [];
+  const d = createStormDetector({
+    rate: 3,
+    sustain: 1,
+    onStorm: (i) => seen.push(i),
+    now: c.now,
+  });
+  for (let i = 0; i < 4; i++) d.track("a:b");
+  c.tick(1000);
+  d.track("a:b"); // closes the hot bucket → storm starts
+  assertEquals(seen.length, 1);
+  assertEquals(seen[0]!.ended, undefined);
+
+  c.tick(1000);
+  d.track("a:b"); // one dispatch in that second — under the threshold
+  assertEquals(seen.length, 2, "the end must be reported");
+  assertEquals(seen[1]!.ended, true, "…as an END, not as a fresh storm");
+  assertEquals(d.storming(), []);
+});
+
+Deno.test("storm: ending by going SILENT says ENDED too", () => {
+  const c = clock();
+  const seen: StormInfo[] = [];
+  const d = createStormDetector({
+    rate: 3,
+    sustain: 1,
+    onStorm: (i) => seen.push(i),
+    now: c.now,
+  });
+  for (let i = 0; i < 4; i++) d.track("a:b");
+  c.tick(1000);
+  d.track("a:b");
+  assertEquals(seen.length, 1, "storm started");
+
+  // The noisy source stops. Any OTHER dispatch is a clock read.
+  c.tick(3000);
+  d.track("unrelated:x");
+  assertEquals(
+    seen.length,
+    2,
+    `a storm whose source went silent must still end: ${JSON.stringify(seen)}`,
+  );
+  assertEquals(seen[1]!.ended, true);
+  assertEquals(seen[1]!.type, "a:b", "and it must name the type that ended");
+  assertEquals(d.storming(), []);
+});
+
+Deno.test("storm: asking storming() is a clock read as well", () => {
+  const c = clock();
+  const seen: StormInfo[] = [];
+  const d = createStormDetector({
+    rate: 3,
+    sustain: 1,
+    onStorm: (i) => seen.push(i),
+    now: c.now,
+  });
+  for (let i = 0; i < 4; i++) d.track("a:b");
+  c.tick(1000);
+  d.track("a:b");
+  assertEquals(d.storming(), ["a:b"]);
+
+  // Nothing is dispatched at all — a status surface asks instead.
+  c.tick(3000);
+  assertEquals(
+    d.storming(),
+    [],
+    "a storm that stopped must not be reported as ongoing",
+  );
+  assertEquals(seen.length, 2, "and its end reaches onStorm");
+  assertEquals(seen[1]!.ended, true);
+});

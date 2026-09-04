@@ -2,7 +2,11 @@
 // and the trojan `timeline` route that surfaces them to `am timeline`.
 import { assert, assertEquals } from "@std/assert";
 import { createTimeline, diffState } from "../src/server/timeline.ts";
-import { handleTrojan, type TrojanDeps } from "../src/server/server-trojan.ts";
+import {
+  handleTrojan,
+  resetTrojanRateLimit,
+  type TrojanDeps,
+} from "../src/server/server-trojan.ts";
 
 // ── diffState ──────────────────────────────────────────────────────────────
 
@@ -123,6 +127,7 @@ async function getRoute(deps: TrojanDeps, route: string) {
     req,
     deps,
   )!;
+  resetTrojanRateLimit(); // a direct call has no server shutdown to disarm it
   return {
     status: resp.status,
     body: await resp.json() as Record<string, unknown>,

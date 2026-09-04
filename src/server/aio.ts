@@ -43,6 +43,7 @@ import { bootStorage, isDevBoot, replaySyncOps } from "./aio-boot.ts";
 import { replayJournal } from "./journal.ts";
 import { createTimeline } from "./timeline.ts";
 import { makeRedactor } from "../diagnostics/redact.ts";
+import { degraded } from "../diagnostics/degraded.ts";
 import { actionOrigin, isWriteSetAction } from "../diagnostics/action-kind.ts";
 import { setupDispatch } from "./aio-dispatch.ts";
 import { hostedCellName, startCellWorkerHost } from "./cell-worker-host.ts";
@@ -150,7 +151,10 @@ import { basename, dirname, fromFileUrl, join, resolve } from "@std/path";
 import { lint, printLint } from "./lint.ts";
 import { composeAsyncHooks, composeHooks, resolvePlugins } from "./plugin.ts";
 import { setFallbackLogDir } from "../diagnostics/logger-api.ts";
-import { installProcessSignals } from "./shutdown.ts";
+import {
+  installProcessSignals,
+  releaseProcessListenersIfIdle,
+} from "./shutdown.ts";
 
 // ── Re-exports: public API surface ────────────────────────────────────
 export { VERSION } from "./aio-cli.ts";
@@ -596,6 +600,39 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
   // every time someone asked what the flags were. Asking a binary for its usage
   // is the safest thing anyone does with it; it must have no side effects at
   // all. Same reasoning as `--aio-data-contract` below, one step earlier.
+  // A TYPO IS THE COMMONEST THING ANYONE GETS WRONG AT A CLI, and it got the
+  // ugliest answer in the framework. The message `parseCli` throws is
+  // carefully teachable — it names the flag, offers `appFlags`, and explains
+  // why a bare `--` cannot help a compiled binary — and it reached the user
+  // wrapped in `error: Uncaught (in promise)` with five frames of aio
+  // internals above it (the shape a field report quoted, verbatim, in
+  // tests/app-flags.test.ts's header). Every other refusal at this stage
+  // ("Already running", a bad config) prints one line and exits.
+  //
+  // `console.error`, not the logger: installing the logger is a side effect
+  // this phase deliberately avoids (see `--help` just below), and it would
+  // stamp a timestamp and a category on the answer to "what did I type
+  // wrong". `libraryMode` keeps the throw — an embedding host and the test
+  // harness want the exception, not an exit, and `libraryMode` is the
+  // documented flag for exactly that ("no Deno.exit, no SIGINT handlers, no
+  // singleton lock"). Exiting when it is OFF follows the precedent already in
+  // this file: `judgePendingUpdate` below ends the process the same way, under
+  // the same `!config.libraryMode` guard, for the same kind of fatal pre-boot
+  // condition.
+  try {
+    parseCli();
+  } catch (e) {
+    const cfg = typeof a === "object" && a !== null
+      ? a as { libraryMode?: boolean }
+      : null;
+    if (cfg?.libraryMode) throw e;
+    // aio-ok: the logger is not installed yet, and installing it is the side
+    // effect this phase exists to avoid — `--help` and `--version` below take
+    // the same exemption for the same reason. A levelled line would also stamp
+    // a timestamp and a category on the answer to "what did I type wrong".
+    console.error(e instanceof Error ? e.message : String(e));
+    Deno.exit(1);
+  }
   if (parseCli().help) {
     printHelp(_helpFacts(typeof a === "object" && a ? a.client : undefined));
     Deno.exit(0);
@@ -771,6 +808,12 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
   // lock, and zero-config auto-cells only work for the FIRST app (later apps
   // must pass explicit disjoint `cells:` lists — the bind error says so).
 
+  // Hoisted out of the `try` so a boot that REFUSES can put back what it had
+  // already started — see the catch below.
+  let logger: Awaited<ReturnType<typeof initLogger>> = null;
+  const appRef = {
+    current: null as AioApp<Record<string, unknown>, unknown> | null,
+  };
   try {
     // Configuring `updates` registers the built-in cell — BEFORE the registry
     // is read below, because a cell that registers afterwards is never composed
@@ -970,6 +1013,7 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
       localFirst: fc.localFirst,
       circuitBreaker: fc.circuitBreaker,
       perfCheck: fc.perfCheck,
+      refusalsReject: fc.refusalsReject,
       onError: fc.onError,
       beforeReduce: fc.beforeReduce,
       onRestore: fc.onRestore,
@@ -1095,13 +1139,8 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
     // Logger — skipped in `--aio-data-contract` mode: installing it would
     // replace the stderr-only sink (putting boot lines back on the parsed
     // stdout) and rotate the app's log files for what is only a query.
-    const logger = _contractMode ? null : await initLogger(fc);
+    logger = _contractMode ? null : await initLogger(fc);
     (globalThis as Record<string, unknown>).__aioCells = composed;
-
-    // Mutable app ref for closures
-    const appRef = {
-      current: null as AioApp<Record<string, unknown>, unknown> | null,
-    };
 
     // Bridge to legacy _run() config
     const config = buildLegacyConfig({
@@ -1148,15 +1187,102 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
     }
     return app;
   } catch (e) {
+    // A BOOT THAT REFUSES LEAVES NOTHING BEHIND.
+    //
+    // The logger is installed before `_run()` and torn down by the app's
+    // shutdown — which a refusal (a lint error, a config conflict, a
+    // persistence that will not open) never reaches. So a refused boot left
+    // the heartbeat interval and the pending flush of its own refusal line
+    // armed: the caller got a correct error and a process that would not
+    // exit — the "worst of both" shape `logger-core.ts` describes, answered
+    // there with an unref that only hides it from the event loop. The op
+    // sanitizer named it in every test that asserts a refusal. Torn down
+    // HERE, the same way shutdown does it: stop, drain, detach — and an app
+    // that did come up before the throw (a hook after `_run`) closes fully.
+    // The refusal itself is what the caller sees; a teardown fault is said
+    // out loud beside it, never instead of it.
+    try {
+      if (appRef.current) await appRef.current.close();
+      else if (logger) {
+        logger.onStop();
+        await logger.flush();
+        setLogger(null);
+      }
+      // The SIGINT/SIGTERM listeners go in before `_run()`; with no runtime
+      // ever registered, nothing else would take them out again.
+      releaseProcessListenersIfIdle();
+    } catch (teardown) {
+      log.error(
+        `boot refused, and the teardown after it failed too: ${teardown}`,
+      );
+    }
     throw e;
   }
 }
 
 // ── _run: thin orchestrator calling phase modules ─────────────────────
 
+/** What a boot has started so far — undone in REVERSE when a later step
+ *  refuses. `replace` hands the whole list to the app's own shutdown once
+ *  that exists (it covers everything registered before it, and more). */
+interface BootUndo {
+  push(name: string, fn: () => void | Promise<void>): void;
+  replace(shutdown: () => Promise<void>): void;
+  unwind(): Promise<void>;
+}
+
+function createBootUndo(): BootUndo {
+  let steps: Array<[string, () => void | Promise<void>]> = [];
+  return {
+    push: (name, fn) => void steps.push([name, fn]),
+    replace: (shutdown) => {
+      steps = [["shutdown", shutdown]];
+    },
+    async unwind() {
+      const pending = steps.reverse();
+      steps = [];
+      for (const [name, fn] of pending) {
+        try {
+          await fn();
+        } catch (e) {
+          // Loud, never fatal: the refusal that started this is the error the
+          // caller gets; a step that cannot be undone is said beside it.
+          log.warn("boot", `refused boot: undoing "${name}" failed — ${e}`);
+        }
+      }
+    },
+  };
+}
+
+/** A BOOT THAT REFUSES LEAVES NOTHING BEHIND.
+ *
+ *  `_runPhases` is one long straight line — lock, diagnostics, vitals,
+ *  storage, dispatch, workers, then the server — and any step on it can
+ *  refuse: a lint error, a route with a wildcard in the middle, a store that
+ *  will not open. The refusal reached the caller as a clean error while
+ *  everything started before it kept running: the vitals sampler, the
+ *  heartbeat, the SQLite worker, the lock. Measured as "a correct error and a
+ *  process that never exits" (`logger-core.ts` names the corrupt-`state.db`
+ *  case), and by the op sanitizer as an interval left behind by every test
+ *  that asserts a refusal. Each step registers its undo as it starts, and a
+ *  throw runs them in reverse — dev and prod alike. */
 async function _run<S, A, E>(
   initialState: S,
   config: AioConfig<S, A, E>,
+): Promise<AioApp<S, A>> {
+  const bootUndo = createBootUndo();
+  try {
+    return await _runPhases(initialState, config, bootUndo);
+  } catch (e) {
+    await bootUndo.unwind();
+    throw e;
+  }
+}
+
+async function _runPhases<S, A, E>(
+  initialState: S,
+  config: AioConfig<S, A, E>,
+  bootUndo: BootUndo,
 ): Promise<AioApp<S, A>> {
   // --- Phase 1: resolve CLI, env, config validation, lint ---
   const cli = parseCli();
@@ -1347,6 +1473,7 @@ async function _run<S, A, E>(
       client: cli.client ?? defaultClientFor(config.client),
     },
   );
+  bootUndo.push("lock", () => appLock?.release());
 
   // Did the last boot install something? Count this attempt, or — having spent
   // them — put the old artifact back and let the supervisor start it. Runs in
@@ -1493,6 +1620,11 @@ async function _run<S, A, E>(
     config.guardDispatches ?? true,
     redact,
   );
+  bootUndo.push("vitals", () => vitalsSystem?.destroy());
+  bootUndo.push("diagnostics", async () => {
+    await diagHooks?.onStop();
+    diagHooks?.uninstallCrashHandler?.();
+  });
 
   // Client mode: CLI flag > aio.run config > app deno.json `target` >
   // electron. The deno.json step is what makes `am create --target=X` +
@@ -1666,6 +1798,8 @@ async function _run<S, A, E>(
   state = boot.state as S;
   const { kvDb, asyncDb, persistence, journal, syncHandler, syncBroadcastRef } =
     boot;
+  bootUndo.push("sqlite", () => asyncDb?.close());
+  bootUndo.push("kv", () => kvDb?.close());
   const migrationSummary = boot.migrations;
   const _syncDispatchRef = boot.syncDispatchRef;
   const { schedulePersist } = persistence;
@@ -1794,7 +1928,9 @@ async function _run<S, A, E>(
     (action) => dispatch(action as A),
     log,
   );
+  bootUndo.push("schedules", () => scheduleManager.cancelAll());
   const ownManager = createOwnManager(log);
+  bootUndo.push("own processes", () => ownManager.disposeAll());
   if (config._onScheduleReady) {
     config._onScheduleReady((prefix) => {
       scheduleManager.cancelByPrefix(prefix);
@@ -1822,6 +1958,7 @@ async function _run<S, A, E>(
     // binding this closure reads at send time, not a value captured now.
     getUIState: () => getUIState(state) as Record<string, unknown> | undefined,
   });
+  bootUndo.push("uds dispose", () => udsCtrl.dispose());
   // A GETTER, not the value: `record()` swaps in a new TTState per action.
   const onPerf = buildOnPerf(() => tt, vitalsSystem, costMeter);
 
@@ -1965,20 +2102,44 @@ async function _run<S, A, E>(
   // rides on it (the cycle reads state after this commit, or the batch-end
   // schedulePersist re-arms the flush loop).
   let _journalFlushPending = false;
+  // The journal's own health, for `/__aio/health`. The compensating flush
+  // keeps the STATE on disk, so `persist.ok` stays true and is right to — but
+  // a `journal: true` app whose every append is refused is paying a full
+  // flush per action and has lost the promise the option was set for, and
+  // nothing in the health document said so: an uptime monitor stayed green
+  // through it. `after: 1` because there is no retry here — each refusal IS
+  // a missing line, and the first one already broke the promise. Recovers
+  // (and says so) on the next append that lands.
+  const _journalHealth = degraded(`journal:${resolveAppId(config.appId)}`, {
+    after: 1,
+  });
   function _journalAppend(
     entry: Parameters<NonNullable<typeof journal>["append"]>[0],
     ts: number,
   ): number {
     try {
-      return journal!.append(entry, ts);
+      const seq = journal!.append(entry, ts);
+      _journalHealth.ok();
+      return seq;
     } catch (e) {
+      _journalHealth.fail(e);
       reportAioError(
         createAioError("PERSIST_ERROR", e, { actionType: entry.type }),
         _reportOpts,
       );
       if (!_journalFlushPending) {
         _journalFlushPending = true;
-        persistence.flushPersist().catch(() => {}).finally(() => {
+        // `flushPersist()` never rejects by contract — a refused cycle is
+        // reported inside it and read back through `lastCycleError()`, which
+        // is what `am persist` and `/__aio/health` answer with. So a
+        // rejection HERE is a broken contract, not a refused write, and the
+        // one thing it must not be is silent.
+        persistence.flushPersist().catch((err) => {
+          log.error(
+            `journal: the compensating flush itself threw — ${err}. The ` +
+              `verdict is still lastCycleError(); ask \`am persist\`.`,
+          );
+        }).finally(() => {
           _journalFlushPending = false;
         });
       }
@@ -2035,6 +2196,7 @@ async function _run<S, A, E>(
     log,
     debug: VERBOSE,
   });
+  bootUndo.push("close dispatch", () => dispatch.close());
   // ONE ceiling for "how long may this async method run" — the effect side and
   // the `await cell.method()` side resolve from the same numbers. They used to
   // be two 30s timers with opposite semantics, so raising effectTimeoutMs left
@@ -2076,6 +2238,9 @@ async function _run<S, A, E>(
       getState: () => state,
     });
   }
+  bootUndo.push("vitals check", () => {
+    if (_vitalsCheckTimer) clearInterval(_vitalsCheckTimer);
+  });
 
   // LAN discovery responder — late-bound (started in startLifecycle when
   // exposed), stopped by the shutdown orchestrator.
@@ -2109,6 +2274,8 @@ async function _run<S, A, E>(
       { roleOf: (id) => userStore?.get(id)?.role ?? null },
     )
     : null;
+  bootUndo.push("sessions", () => sessionStore?.close());
+  bootUndo.push("users", () => userStore?.close());
 
   // Shutdown orchestrator
   // ── Cell workers ──
@@ -2178,6 +2345,7 @@ async function _run<S, A, E>(
       void dispatch(effect as unknown as A); // cross-cell action
     },
   });
+  bootUndo.push("workers", () => workerPool.close());
   /** Cells that WOULD run in a worker but are running in this isolate because a
    *  test owns the entry module. Empty in production. */
   const _inIsolateWorkerCells = new Set(
@@ -2379,6 +2547,12 @@ async function _run<S, A, E>(
     blobs: blobStore,
   });
 
+  // From here the orchestrator above owns every step so far AND whatever
+  // Phase 4 starts (it reads the server, the UDS handle, the watcher and the
+  // Electron child through getters), so a refusal past this point is an
+  // ordinary shutdown.
+  bootUndo.replace(shutdown);
+
   // --- Phase 4: start transport + lifecycle ---
   // ONE decider — same function the ui:"all" privacy warning uses, so a
   // config-exposed app can never be exposed-but-unwarned (see `_exposeOf`).
@@ -2502,6 +2676,9 @@ async function _run<S, A, E>(
     cliNoTls: cli.noTls ?? _tls.noTls,
     // Which of the two said so — the warning names what was actually written.
     noTlsSource: cli.noTls !== undefined ? "flag" : "config",
+    certSource: cli.cert !== undefined || cli.key !== undefined
+      ? "flag" as const
+      : "config" as const,
     cliTransport: cli.transport,
     ui,
     title,

@@ -17,23 +17,46 @@ export function createActionLog(path: string, max: number) {
   // Serialize all file operations to prevent interleaved writes/truncation
   let _queue: Promise<void> = Promise.resolve();
 
-  // Initialize lineCount from existing file (best-effort)
-  _queue = _queue.then(async () => {
+  // The existing file's line count is read on the FIRST APPEND, not here.
+  //
+  // Creating the log used to start a `Deno.readTextFile` immediately and put
+  // it on `_queue`, where nothing awaits it until someone appends or flushes —
+  // so a process (or a test) that made a log and wrote nothing left a file
+  // read in flight at exit. `--sanitize-ops` reported it against whichever
+  // test ran next, which is how it was found: two files that each pass alone
+  // and fail together. It is the same shape as the post-`final` write two
+  // comments down — "a file write nobody would wait for, landing in the next
+  // process's — or the next test's — time" — and that one was already fixed.
+  //
+  // Lazy is also simply correct: the count exists to enforce `max` on append,
+  // so nothing needs it until an append happens, and the first append chains
+  // through the same `_enqueue` and therefore awaits it.
+  let counted = false;
+  const countExisting = async (): Promise<void> => {
+    if (counted) return;
+    counted = true;
     try {
       const text = await Deno.readTextFile(path);
       lineCount = text.trim().split("\n").filter((l) => l.length > 0).length;
     } catch {
       lineCount = 0;
     }
-  });
+  };
 
   function _enqueue(fn: () => Promise<void>): Promise<void> {
     _queue = _queue.then(fn, fn);
     return _queue;
   }
 
+  // Set by `flush()` — the shutdown flush. An append after it (Phase 5's
+  // `onStop` → `onDestroy` dispatches) is teardown, not history: it used to
+  // start a file write nobody would wait for, landing in the next process's
+  // — or the next test's — time.
+  let final = false;
+
   async function append(type: string, payload: unknown): Promise<void> {
-    if (isActionNoise(type)) return;
+    if (isActionNoise(type) || final) return;
+    await _enqueue(countExisting);
     await _enqueue(async () => {
       let line: string;
       try {
@@ -117,6 +140,18 @@ export function createActionLog(path: string, max: number) {
   }
 
   async function flush(): Promise<void> {
+    final = true;
+    // The count is needed HERE too, not only on append: a log opened over a
+    // file an earlier run left oversized must still come back under `max` at
+    // shutdown, and with nothing appended in between this is the only place
+    // that learns how many lines are already there. (Counting lazily is what
+    // stopped the constructor leaving a file read nobody awaited; forgetting
+    // this half turned that fix into a silently unbounded log.)
+    await _enqueue(countExisting);
+    // The appends are queued writes; the shutdown flush waits for the ones
+    // still in flight, or the last lines of a run land in the NEXT process's
+    // (or the next test's) time — and a SIGKILLed successor never sees them.
+    await _queue;
     await truncateIfNeeded();
   }
 

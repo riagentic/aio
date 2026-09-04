@@ -14,6 +14,7 @@
 // connected, threw straight out of `broadcastState` into the broadcaster.
 // There is now ONE snapshot builder, and it reports instead of throwing.
 
+import { within } from "./within.ts";
 import { assert, assertEquals } from "@std/assert";
 import { createUDSListener } from "../src/server/aio.ts";
 import { join } from "@std/path";
@@ -33,12 +34,7 @@ async function readLines(
   const deadline = Date.now() + ms;
   try {
     while (!pred(lines) && Date.now() < deadline) {
-      const race = await Promise.race([
-        reader.read(),
-        new Promise<null>((r) =>
-          setTimeout(() => r(null), deadline - Date.now())
-        ),
-      ]);
+      const race = await within(reader.read(), deadline - Date.now(), null);
       if (!race || race.done) break;
       buf += dec.decode(race.value, { stream: true });
       const parts = buf.split("\n");

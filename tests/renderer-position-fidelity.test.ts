@@ -44,7 +44,7 @@ function env() {
 
 // ── position, not content ────────────────────────────────────────────────
 
-Deno.test("text and element siblings swap places (equal text on both sides)", () => {
+Deno.test("text and element siblings swap places (equal text on both sides)", async () => {
   const { doc, ctx, host, cleanup } = env();
   try {
     const a = h(Fragment, null, h("div", null), "a");
@@ -57,11 +57,11 @@ Deno.test("text and element siblings swap places (equal text on both sides)", ()
     assertEquals(host.innerHTML, "a<div></div>");
     void doc;
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
-Deno.test("two identical text siblings keep their slots around an element", () => {
+Deno.test("two identical text siblings keep their slots around an element", async () => {
   const { ctx, host, cleanup } = env();
   try {
     const a = h(Fragment, null, "a", h("i", null), "a");
@@ -71,11 +71,11 @@ Deno.test("two identical text siblings keep their slots around an element", () =
     _diff(host, b, a, ctx);
     assertEquals(host.innerHTML, "aa<i></i>");
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
-Deno.test("a component rendering bare text patches ITS node, not a sibling's", () => {
+Deno.test("a component rendering bare text patches ITS node, not a sibling's", async () => {
   const { ctx, host, cleanup } = env();
   try {
     const C = (p: { v: string }) => p.v;
@@ -87,7 +87,7 @@ Deno.test("a component rendering bare text patches ITS node, not a sibling's", (
     // Was "<div>yx</div>": the component wrote into the sibling's text node.
     assertEquals(host.innerHTML, "<div>xy</div>");
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
@@ -114,7 +114,7 @@ Deno.test("a signal re-render of a text-only component finds its own node", asyn
 
 // ── removal ──────────────────────────────────────────────────────────────
 
-Deno.test("a Fragment's bare-text child is removed with the Fragment", () => {
+Deno.test("a Fragment's bare-text child is removed with the Fragment", async () => {
   const { ctx, host, cleanup } = env();
   try {
     const a = h("div", null, h(Fragment, null, "aaa"));
@@ -126,11 +126,11 @@ Deno.test("a Fragment's bare-text child is removed with the Fragment", () => {
     // the removal was a NO-OP and the text accumulated on every toggle.
     assertEquals(host.innerHTML, "<div><i>I</i></div>");
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
-Deno.test("a component's bare text is replaced, not left behind", () => {
+Deno.test("a component's bare text is replaced, not left behind", async () => {
   const { ctx, host, cleanup } = env();
   try {
     const C = (p: { v: string }) => p.v;
@@ -141,13 +141,13 @@ Deno.test("a component's bare text is replaced, not left behind", () => {
     _diff(host, b, a, ctx);
     assertEquals(host.innerHTML, "<div><!----></div>");
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
 // ── anchors: a container must hold its slot ──────────────────────────────
 
-Deno.test("a Fragment that empties keeps an anchor IN the document", () => {
+Deno.test("a Fragment that empties keeps an anchor IN the document", async () => {
   const { ctx, host, cleanup } = env();
   try {
     const a = h("div", null, h(Fragment, null, null));
@@ -160,11 +160,11 @@ Deno.test("a Fragment that empties keeps an anchor IN the document", () => {
     // DETACHED node, so it had no position at all.
     assertEquals(host.innerHTML, "<div><!----></div>");
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
-Deno.test("an empty Fragment's anchor sits in the Fragment's slot, not at the end", () => {
+Deno.test("an empty Fragment's anchor sits in the Fragment's slot, not at the end", async () => {
   const { ctx, host, cleanup } = env();
   try {
     const a = h("div", null, h(Fragment, null, h("b", null)), h("p", null));
@@ -178,11 +178,11 @@ Deno.test("an empty Fragment's anchor sits in the Fragment's slot, not at the en
     _diff(host, c, b, ctx);
     assertEquals(host.innerHTML, "<div><b></b><p></p></div>");
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
-Deno.test("a nested Fragment gives its parent a LIVE first node", () => {
+Deno.test("a nested Fragment gives its parent a LIVE first node", async () => {
   const { ctx, host, cleanup } = env();
   try {
     const outer = h(Fragment, null, h(Fragment, null, h("b", null, "B")));
@@ -195,11 +195,11 @@ Deno.test("a nested Fragment gives its parent a LIVE first node", () => {
     assert(dom && dom.parentNode === host, "fragment _dom must be a live node");
     assertEquals((dom as Element).nodeName, "B");
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
-Deno.test("a `_Null` placeholder survives its container gaining a keyed sibling", () => {
+Deno.test("a `_Null` placeholder survives its container gaining a keyed sibling", async () => {
   const { ctx, host, cleanup } = env();
   try {
     const a = h(Fragment, null, null, "1");
@@ -211,11 +211,11 @@ Deno.test("a `_Null` placeholder survives its container gaining a keyed sibling"
     // real `null` child. Removing it deleted a child of the model.
     assertEquals(host.innerHTML, "<div></div><!---->1");
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
-Deno.test("a keyed Fragment moves its bare text along with its elements", () => {
+Deno.test("a keyed Fragment moves its bare text along with its elements", async () => {
   const { ctx, host, cleanup } = env();
   try {
     const frag = (k: string) => h(Fragment, { key: k }, "t", h("b", null));
@@ -228,20 +228,20 @@ Deno.test("a keyed Fragment moves its bare text along with its elements", () => 
     // bare text — the "t" was stranded where the fragment used to be.
     assertEquals(host.innerHTML, "<div><i></i>t<b></b></div>");
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
 // ── SSR / hydrate parity ─────────────────────────────────────────────────
 
-Deno.test("SSR emits an anchor for an empty Fragment, exactly like mount", () => {
+Deno.test("SSR emits an anchor for an empty Fragment, exactly like mount", async () => {
   const { ctx, host, cleanup } = env();
   try {
     _render(host, h(Fragment, null), null, ctx);
     assertEquals(renderToString(h(Fragment, null)), host.innerHTML);
     assertEquals(host.innerHTML, "<!---->");
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
@@ -258,7 +258,7 @@ Deno.test("renderToStream emits the same empty-Fragment anchor as renderToString
   assertEquals(chunks.join(""), "<div><!----><p></p></div>");
 });
 
-Deno.test("a hydrated empty list fills BELOW its header (SSR ≡ mount)", () => {
+Deno.test("a hydrated empty list fills BELOW its header (SSR ≡ mount)", async () => {
   const { ctx, host, cleanup } = env();
   try {
     const view = (rows: string[]) =>
@@ -284,13 +284,13 @@ Deno.test("a hydrated empty list fills BELOW its header (SSR ≡ mount)", () => 
       "<div><h1>Header</h1><p>r1</p><p>r2</p></div>",
     );
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
 // ── the tripwire itself ──────────────────────────────────────────────────
 
-Deno.test("dev tripwire fires on an ORDER defect at a correct node count", () => {
+Deno.test("dev tripwire fires on an ORDER defect at a correct node count", async () => {
   const { ctx, host, cleanup } = env();
   const warnings: string[] = [];
   const origWarn = console.warn;
@@ -315,7 +315,7 @@ Deno.test("dev tripwire fires on an ORDER defect at a correct node count", () =>
   } finally {
     setDevMode(false);
     console.warn = origWarn;
-    cleanup();
+    await cleanup();
   }
 });
 
@@ -332,7 +332,7 @@ Deno.test("dev tripwire fires on an ORDER defect at a correct node count", () =>
 // how much of the run is its own — so the SSR format is unchanged and the two
 // text children get their own nodes back.
 
-Deno.test("hydrate: two adjacent text children hydrate into two nodes", () => {
+Deno.test("hydrate: two adjacent text children hydrate into two nodes", async () => {
   const { ctx, host, cleanup } = env();
   try {
     const v = h("div", null, "Hello ", "world");
@@ -354,11 +354,11 @@ Deno.test("hydrate: two adjacent text children hydrate into two nodes", () => {
     _diff(host, next, v, ctx);
     assertEquals(host.innerHTML, "<div>Bye world</div>");
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
-Deno.test("hydrate: a run of text children around elements splits at the right offsets", () => {
+Deno.test("hydrate: a run of text children around elements splits at the right offsets", async () => {
   const { ctx, host, cleanup } = env();
   try {
     const v = h(
@@ -378,11 +378,11 @@ Deno.test("hydrate: a run of text children around elements splits at the right o
     );
     assertEquals(kids, ["a", "b", "<I>", "c", "d", "e", "f"]);
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
-Deno.test("hydrate: an EMPTY text child gets the node SSR could not emit", () => {
+Deno.test("hydrate: an EMPTY text child gets the node SSR could not emit", async () => {
   const { ctx, host, cleanup } = env();
   try {
     // `{cond ? "!" : ""}` — SSR writes nothing for the empty branch while
@@ -399,11 +399,11 @@ Deno.test("hydrate: an EMPTY text child gets the node SSR could not emit", () =>
       "the empty child must own a node, or its first update lands elsewhere",
     );
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
-Deno.test("hydrate: delegated handlers are live on adopted markup", () => {
+Deno.test("hydrate: delegated handlers are live on adopted markup", async () => {
   const { doc, host, cleanup } = env();
   try {
     let clicks = 0;
@@ -435,7 +435,7 @@ Deno.test("hydrate: delegated handlers are live on adopted markup", () => {
       _unmount(handle);
     }
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
@@ -456,7 +456,7 @@ Deno.test("renderToStream drops the `t` semantic marker, exactly like renderToSt
   })();
 });
 
-Deno.test("a boolean-ish prop on a non-form element serializes the same on both sides", () => {
+Deno.test("a boolean-ish prop on a non-form element serializes the same on both sides", async () => {
   const { ctx, host, cleanup } = env();
   try {
     // `applyProps` asks the ELEMENT whether it owns the property; on a <div> it
@@ -482,7 +482,7 @@ Deno.test("a boolean-ish prop on a non-form element serializes the same on both 
     _render(host, inp(), null, ctx);
     assertEquals(parsed(renderToString(inp())), host.innerHTML);
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
@@ -511,7 +511,7 @@ for (
     );
   const FILLED = "<div><h1>Header</h1><p>r1</p><p>r2</p></div>";
 
-  Deno.test(`an empty ${name} fills BELOW its header (mount)`, () => {
+  Deno.test(`an empty ${name} fills BELOW its header (mount)`, async () => {
     const { ctx, host, cleanup } = env();
     try {
       const empty = view([]);
@@ -519,11 +519,11 @@ for (
       _diff(host, view(["r1", "r2"]), empty, ctx);
       assertEquals(host.innerHTML, FILLED);
     } finally {
-      cleanup();
+      await cleanup();
     }
   });
 
-  Deno.test(`an empty ${name} fills BELOW its header (SSR ≡ mount)`, () => {
+  Deno.test(`an empty ${name} fills BELOW its header (SSR ≡ mount)`, async () => {
     const { ctx, host, cleanup } = env();
     try {
       const empty = view([]);
@@ -539,11 +539,11 @@ for (
       _diff(host, view(["r1", "r2"]), empty, ctx);
       assertEquals(host.innerHTML, FILLED);
     } finally {
-      cleanup();
+      await cleanup();
     }
   });
 
-  Deno.test(`an empty ${name} re-renders to the same DOM it mounted to`, () => {
+  Deno.test(`an empty ${name} re-renders to the same DOM it mounted to`, async () => {
     const { ctx, host, cleanup } = env();
     try {
       const a = view([]);
@@ -557,7 +557,7 @@ for (
         "an unchanged empty boundary grew a node on re-render",
       );
     } finally {
-      cleanup();
+      await cleanup();
     }
   });
 }

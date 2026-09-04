@@ -118,6 +118,9 @@ export function registerRuntime(shutdown: () => Promise<void>): () => void {
   _runtimes.add(shutdown);
   return () => {
     _runtimes.delete(shutdown);
+    // The last app out takes the process-wide listeners with it — see
+    // `installProcessListener`.
+    if (_runtimes.size === 0) _uninstallProcessListeners();
   };
 }
 
@@ -142,6 +145,55 @@ let _exiting: Promise<never> | null = null;
 
 /** Installed once per process, by the FIRST app to boot. */
 let _signalsInstalled = false;
+
+/** Every process-wide signal listener installed on the apps' behalf — ONE per
+ *  signal, however many apps boot — so the LAST app to leave can take them
+ *  with it (`registerRuntime`'s unregister). The install was always guarded,
+ *  so a host that boots and closes an app a hundred times held one listener,
+ *  not a hundred; but that one outlived every app it was installed for. A
+ *  process with no aio app in it still owned SIGINT and SIGTERM, and a test
+ *  that booted a non-libraryMode app could never be leak-clean. */
+const _processListeners: Array<[Deno.Signal, () => void]> = [];
+
+/** Add a process-wide signal listener that is removed with the last runtime.
+ *  Returns false where the platform has no such signal (Windows, SIGHUP). */
+export function installProcessListener(
+  sig: Deno.Signal,
+  handler: () => void,
+): boolean {
+  try {
+    Deno.addSignalListener(sig, handler);
+  } catch {
+    // aio-ok: a platform without this signal simply has no handler for it;
+    // an absent capability is not a swallowed failure.
+    return false;
+  }
+  _processListeners.push([sig, handler]);
+  return true;
+}
+
+/** Is a listener for `sig` installed through `installProcessListener`? */
+export function hasProcessListener(sig: Deno.Signal): boolean {
+  return _processListeners.some(([s]) => s === sig);
+}
+
+/** Drop the process-wide listeners when NO runtime is registered — the
+ *  refused-boot path: `installProcessSignals()` runs before `_run()`, and a
+ *  boot that never registers a runtime has no unregister to take them out. */
+export function releaseProcessListenersIfIdle(): void {
+  if (_runtimes.size === 0) _uninstallProcessListeners();
+}
+
+function _uninstallProcessListeners(): void {
+  for (const [sig, handler] of _processListeners.splice(0)) {
+    try {
+      Deno.removeSignalListener(sig, handler);
+    } catch {
+      // aio-ok: the platform never had it (see `installProcessListener`).
+    }
+  }
+  _signalsInstalled = false;
+}
 
 /**
  * Install SIGINT/SIGTERM handling — as EARLY in boot as possible.
@@ -171,24 +223,17 @@ export function installProcessSignals(): void {
   if (_signalsInstalled) return;
   _signalsInstalled = true;
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
-    try {
-      Deno.addSignalListener(sig, () => {
-        // EVERY app in the process, not just this one — see
-        // `shutdownAllRuntimes`. One handler for all of them: each app's
-        // shutdown is memoised, and so is the exit.
-        stopProcess(0);
-      });
-    } catch {
-      // aio-ok: a platform without this signal simply has no handler for it;
-      // an absent capability is not a swallowed failure.
-    }
+    // EVERY app in the process, not just this one — see
+    // `shutdownAllRuntimes`. One handler for all of them: each app's
+    // shutdown is memoised, and so is the exit.
+    installProcessListener(sig, () => void stopProcess(0));
   }
 }
 
 /** @internal test seam — forget the install so a test can re-arm it. */
 // aio-ok: test-only seam — a second install in one process is the bug
 export function _resetProcessSignals(): void {
-  _signalsInstalled = false;
+  _uninstallProcessListeners();
 }
 
 /** Injectable exit, for the test that proves the watchdog fires. */

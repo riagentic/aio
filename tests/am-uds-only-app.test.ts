@@ -21,6 +21,7 @@
 // command routes through it. These tests pin it end to end — a REAL `aio.run`
 // with a REAL UI client connected over the socket — and unit-pin the decider
 // so a revert is red without spawning anything.
+import { within } from "./within.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import { controlEndpoint, trojanGet } from "../src/am/am-http.ts";
@@ -312,10 +313,7 @@ await new Promise(() => {});
       try {
         child.kill("SIGTERM");
       } catch { /* already gone */ }
-      const exited = await Promise.race([
-        child.status.then(() => true),
-        new Promise<false>((r) => setTimeout(() => r(false), 15_000)),
-      ]);
+      const exited = await within(child.status.then(() => true), 15_000, false);
       if (!exited) {
         try {
           child.kill("SIGKILL");

@@ -57,7 +57,7 @@ Deno.test("SVG: SSR renderToString agrees with the client", () => {
 // deleted an attribute that never existed and left the real one on the element
 // — an incremental diff that does not converge on what a fresh render makes,
 // silently, for all 41 mapped SVG names.
-Deno.test("svg: a removed camelCase attribute really leaves the DOM", () => {
+Deno.test("svg: a removed camelCase attribute really leaves the DOM", async () => {
   const win = new Window({ url: "https://localhost" });
   _setDocument(win.document as unknown as Document);
   const doc = win.document as unknown as Document;
@@ -109,6 +109,6 @@ Deno.test("svg: a removed camelCase attribute really leaves the DOM", () => {
       `a diff must converge on a fresh render (had: ${before})`,
     );
   } finally {
-    win.happyDOM.close();
+    await win.happyDOM.close();
   }
 });

@@ -88,6 +88,11 @@ function describeValue(v: unknown): string {
   if (v === null) return "null";
   if (v === undefined) return "missing";
   if (Array.isArray(v)) return "an array";
+  // JSON.stringify(NaN) and JSON.stringify(Infinity) are BOTH `null`, so the
+  // two likeliest bad durations — an arithmetic slip and a missing cap — both
+  // read "number null", a sentence naming neither the value nor the type of
+  // mistake. They are the values this validator exists to catch.
+  if (typeof v === "number" && !Number.isFinite(v)) return `number ${v}`;
   return `${typeof v} ${JSON.stringify(v)}`;
 }
 
@@ -387,16 +392,48 @@ function _refuseOldOrder(fn: "backoff" | "poll", id: string): never {
   );
 }
 
+/** ONE duration check for the imperative retry helpers.
+ *
+ *  The declarative config (`aio.run({ schedules })`) refuses a non-number by
+ *  name and teaches the fix. `backoff`/`poll` did the arithmetic FIRST, so the
+ *  same typo — an unset config value, a CLI-style `"5m"` — became `NaN` and
+ *  travelled: it surfaced much later as `schedule.after '<id>': ms must be
+ *  finite`, naming an API the app never called and a key it never wrote.
+ *  Non-finite always threw; it just threw the wrong sentence, somewhere else.
+ *  Same mistake, same words, at the site that made it. */
+function _requireDuration(
+  fn: "backoff" | "poll",
+  id: string,
+  key: string,
+  v: unknown,
+): number {
+  if (typeof v !== "number" || !Number.isFinite(v)) {
+    throw teachableError(
+      `schedule.${fn} '${id}': ${key} is ${describeValue(v)}, not a number ` +
+        `of milliseconds`,
+      'durations are plain numbers: write 300_000, not "5m" — aio\'s CLI ' +
+        "takes 60s spellings, the options object does not",
+      SCHEDULE_DOC,
+    );
+  }
+  return v;
+}
+
 function _backoffEffect(
   id: string,
   attempt: number,
   opts: BackoffOpts,
   action: ScheduleAction,
 ): ScheduleEffect {
-  const factor = opts.factor ?? 2;
-  const max = opts.max ?? MAX_TIMER_DELAY;
+  const base = _requireDuration("backoff", id, "base", opts.base);
+  const factor = opts.factor === undefined
+    ? 2
+    : _requireDuration("backoff", id, "factor", opts.factor);
+  const max = opts.max === undefined
+    ? MAX_TIMER_DELAY
+    : _requireDuration("backoff", id, "max", opts.max);
   const ms = Math.min(
-    opts.base * Math.pow(factor, Math.max(0, attempt)),
+    base * Math.pow(factor, Math.max(0, attempt)),
     max,
   );
   return {
@@ -422,11 +459,16 @@ function _pollEffect(
       ),
     );
   }
-  const factor = opts.factor ?? 1;
-  const max = opts.max ?? MAX_TIMER_DELAY;
+  const every = _requireDuration("poll", id, "every", opts.every);
+  const factor = opts.factor === undefined
+    ? 1
+    : _requireDuration("poll", id, "factor", opts.factor);
+  const max = opts.max === undefined
+    ? MAX_TIMER_DELAY
+    : _requireDuration("poll", id, "max", opts.max);
   const ms = attempt <= 0
-    ? opts.every
-    : Math.min(opts.every * Math.pow(factor, attempt), max);
+    ? every
+    : Math.min(every * Math.pow(factor, attempt), max);
   return {
     type: "__schedule",
     kind: "after",

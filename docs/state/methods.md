@@ -141,6 +141,25 @@ const id = await cart.addItem({ name: "Book", price: 12 })
   Return JSON-safe data across the wire (ISO strings for dates, arrays for
   `Map`/`Set`, plain objects for class instances).
 
+- **ARGUMENTS cross the same wire, and the same table applies to them.**
+  `todo.due(new Date())` called from a browser reaches the method as an ISO
+  **string**; called in a test (or from server code) it arrives as a `Date`,
+  because nothing crossed a wire. That difference is the one shape this project
+  treats as worse than a missing feature, so both halves are said out loud:
+
+  - A value JSON cannot carry at all — a `BigInt`, a circular structure —
+    **refuses the call**, naming it: nothing is sent, nothing is queued, and the
+    caller's `await` rejects. (An action that cannot be encoded must never enter
+    an offline queue: it would stop that queue on every reconnect.)
+  - A value JSON **changes** is named in dev, by path and conversion —
+    `todos:due.args[0].at: Date → string` — once per shape. Production behaves
+    exactly as before; only the warning is new, and the in-process harness that
+    cannot see the loss is where you get told about it.
+
+  The same guard covers `serverFn` arguments and CRDT ops in a `sync: true` cell
+  — where it matters most, because the local method already ran with the real
+  value while the op that survives a reload carries the converted one.
+
 - **`null` is a value, `undefined` is "nothing".** A method returning `null`
   resolves its caller with `null` — sync and async alike, in process and over
   the wire — so it works as a "not found" sentinel. Only `undefined` (or no

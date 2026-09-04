@@ -13,12 +13,32 @@
 // suite on this machine is mid-run, and its apps are its business.
 //
 //   deno task check:orphans          report (exit 1 if any)
+//   …--clean-stale                   sweep finished runs' lock dirs only —
+//                                    no process signalled, no temp home
+//                                    removed. `deno task test` runs this right
+//                                    after the test-home reset, because
+//                                    nothing else ever did: they accumulated
+//                                    across every run (664 against a ceiling
+//                                    of 400 when this landed) and turned this
+//                                    gate red at no defect.
 //   deno task clean:tmp              also SIGTERM them, remove ownerless
 //                                    /tmp/aio-* dirs, stale lock dirs and
 //                                    stale watcher sentinels
 import { join } from "@std/path";
 
 const clean = Deno.args.includes("--clean");
+/** Sweep only the DEBRIS a finished run leaves: scoped lock dirs with no live
+ *  lock in them. No process is signalled and no temp home is removed, so this
+ *  is safe to run at the START of a suite — which is where it belongs.
+ *
+ *  Without it nothing ever cleared them. `deno task test` resets
+ *  `.aio-test-home` so "no run inherits another's" holds for app DATA, and the
+ *  per-run lock dirs beside it accumulated across every run ever made:
+ *  measured at 664 on this machine, against a ceiling of 400. The gate then
+ *  goes red at no defect, which is the one thing a gate must not do — a real
+ *  orphan (the 5-hour ghost app this file exists for) would be reported among
+ *  six hundred false ones and read as more of the same. */
+const staleOnly = Deno.args.includes("--clean-stale");
 const dec = new TextDecoder();
 
 function alive(pid: number): boolean {
@@ -63,6 +83,33 @@ function lockRoots(): string[] {
   return [...roots].filter(Boolean);
 }
 
+/** Temp roots a leftover app's cwd/home can sit under. */
+function tempRoots(): string[] {
+  const out = ["/tmp", "/var/tmp"];
+  for (const v of ["TMPDIR", "TEMP", "TMP"]) {
+    const p = Deno.env.get(v);
+    if (p) out.push(p.replace(/\/+$/, ""));
+  }
+  return out;
+}
+const TEMP_ROOTS = tempRoots();
+
+/** How long "another suite is mid-run" stays a believable reason to skip an
+ *  app. The longest gate in this repo (`test:onboard`) is minutes; four hours
+ *  is generous by two orders of magnitude and still catches a ghost that has
+ *  been holding a port since the day before yesterday. */
+const PARENT_GRACE_MS = 4 * 60 * 60_000;
+
+/** True when this lock's app was started from a temp directory — the shape of
+ *  a test or a session leftover, never of an app someone installed. */
+function tempRooted(lock: { cwd?: string; home?: string } | null): boolean {
+  for (const p of [lock?.cwd, lock?.home]) {
+    if (typeof p !== "string" || p === "") continue;
+    if (TEMP_ROOTS.some((r) => p === r || p.startsWith(`${r}/`))) return true;
+  }
+  return false;
+}
+
 type Orphan = { pid: number; appId: string; port: number; dir: string };
 const orphans: Orphan[] = [];
 const staleDirs: string[] = [];
@@ -89,16 +136,48 @@ for (const root of lockRoots()) {
       if (!f.isFile) continue;
       const path = join(dir, f.name);
       if (f.name.endsWith(".lock")) {
-        let lock: { pid?: number; appId?: string; port?: number } | null = null;
+        let lock:
+          | {
+            pid?: number;
+            appId?: string;
+            port?: number;
+            cwd?: string;
+            home?: string;
+            startedAt?: number;
+          }
+          | null = null;
         try {
           lock = JSON.parse(Deno.readTextFileSync(path));
         } catch { /* corrupt — stale */ }
         const pid = lock?.pid ?? 0;
         if (pid > 0 && alive(pid)) {
           live++;
-          if (!scoped) continue; // the machine's real apps
+          // The SHARED dir holds the machine's real apps — reporting those
+          // would be wrong, and skipping it wholesale was the hole.
+          //
+          // A test or a session that spawns an app WITHOUT `childEnv()` gets
+          // the default app home, so its lock lands here beside them and the
+          // gate could never see it. Measured on this machine: two apps from a
+          // scratch session tree had been holding ports for two days and
+          // eighteen hours while this said "no orphaned aio processes" — the
+          // five-hour ghost in this file's own header, twice over and older.
+          //
+          // A real app does not live in a temp directory. That is the whole
+          // rule: a shared-dir lock whose recorded cwd or home is under a temp
+          // root is a leftover, everything else here is the user's.
+          if (!scoped && !tempRooted(lock)) continue;
+          // "Another suite is mid-run, and its apps are its business" — but
+          // only while that is still plausibly TRUE. A suite runs for minutes;
+          // this exemption had no clock, so a ghost whose PARENT was also a
+          // ghost stayed invisible for as long as both survived. Measured
+          // here: an app two days and eighteen hours old, exempt because its
+          // equally abandoned parent was still running. Past the window, a
+          // live app in a scoped or temp-rooted lock dir is a leftover no
+          // matter who started it.
+          const started = Number(lock?.startedAt ?? 0);
+          const fresh = started > 0 && Date.now() - started < PARENT_GRACE_MS;
           const parent = Number(envOf(pid)?.AIO_PARENT_PID ?? "");
-          if (parent > 0 && alive(parent)) continue; // another suite, mid-run
+          if (parent > 0 && alive(parent) && fresh) continue;
           // A lock whose "owner" is a test RUNNER (or this very process) is a
           // fixture a test wrote with its own pid, not an app — the am
           // stop-all tests do exactly that, and a suite running right now
@@ -171,6 +250,22 @@ for (const o of orphans) {
       `        ${cmdlineOf(o.pid)}\n        lock: ${o.dir}`,
   );
 }
+if (staleOnly) {
+  let swept = 0;
+  for (const d of staleDirs) {
+    try {
+      Deno.removeSync(d, { recursive: true });
+      swept++;
+    } catch { /* aio-ok: in use by a run that started while we scanned */ }
+  }
+  console.log(
+    `clean-stale: ${swept} of ${staleDirs.length} stale lock dir(s) removed` +
+      (orphans.length
+        ? ` (${orphans.length} live orphan(s) left alone — \`deno task check:orphans\` reports them)`
+        : ""),
+  );
+  Deno.exit(0);
+}
 if (clean) {
   for (const o of orphans) {
     try {
@@ -231,7 +326,11 @@ console.log(
 // WHOLE machine (a colleague's suite, a container's leftovers), not just what
 // this run made; the job of the number is to catch a new leak class, not to
 // police a tidy /tmp.
-const LEFTOVER_CEILING = 400;
+// 400 → 200 once `--clean-stale` ran at the start of every suite: a run leaves
+// ~90 (measured, twice), and 400 was chosen when nothing swept them and the
+// number climbed by a couple of hundred per run. A ceiling far above the real
+// count is a ceiling that rots — the win has to be locked in or it is not one.
+const LEFTOVER_CEILING = 200;
 const leftovers = staleDirs.length + tmpDirs.length;
 if (leftovers > LEFTOVER_CEILING) {
   console.error(

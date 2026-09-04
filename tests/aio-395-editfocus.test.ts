@@ -25,7 +25,7 @@ Deno.test("mixed keyed/unkeyed: input node identity survives re-render", () => {
   name.set("H"); // typing fires onInput → state change → re-render
   // flush microtasks
   return new Promise<void>((resolve) => {
-    setTimeout(() => {
+    setTimeout(async () => {
       const after = doc.querySelectorAll("input")[0];
       assertEquals(
         after === before,
@@ -34,7 +34,7 @@ Deno.test("mixed keyed/unkeyed: input node identity survives re-render", () => {
       );
       assertEquals((after as HTMLInputElement).value, "H");
       t.unmount();
-      win.happyDOM.close();
+      await win.happyDOM.close();
       resolve();
     }, 10);
   });

@@ -53,7 +53,7 @@ function Fine() {
   return h("i", null, String(sig.value));
 }
 
-Deno.test("scope isolation: mount leaves no scope open, throw or not", () => {
+Deno.test("scope isolation: mount leaves no scope open, throw or not", async () => {
   const { doc, cleanup } = env();
   try {
     assert(clean(), "precondition: no scope open before the test");
@@ -76,11 +76,11 @@ Deno.test("scope isolation: mount leaves no scope open, throw or not", () => {
     _unmount(caught);
     assert(clean(), "unmount after a throw left a scope open");
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
-Deno.test("scope isolation: a signal re-render leaves no scope open", () => {
+Deno.test("scope isolation: a signal re-render leaves no scope open", async () => {
   const { doc, cleanup } = env();
   try {
     const s = signal(0);
@@ -93,11 +93,11 @@ Deno.test("scope isolation: a signal re-render leaves no scope open", () => {
     _unmount(handle);
     assert(clean());
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
-Deno.test("scope isolation: hydrate leaves no scope open, throw or not", () => {
+Deno.test("scope isolation: hydrate leaves no scope open, throw or not", async () => {
   const { doc, cleanup } = env();
   try {
     const App = () => h("div", null, h(Fine, null));
@@ -126,7 +126,7 @@ Deno.test("scope isolation: hydrate leaves no scope open, throw or not", () => {
     assert(clean(), "hydrating a thrown-past boundary left a scope open");
     _unmount(hy2);
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
@@ -151,11 +151,11 @@ Deno.test("scope isolation: the SSR streamer leaves no scope open", async () => 
     assertStringIncludes(out, "<p>e</p>");
     assert(clean(), "renderToStream left a scope open");
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
-Deno.test("scope isolation: one component's reads never land in another's deps", () => {
+Deno.test("scope isolation: one component's reads never land in another's deps", async () => {
   const { doc, cleanup } = env();
   try {
     // The consequence a leaked scope actually has: B reads `b` only, so a
@@ -191,6 +191,6 @@ Deno.test("scope isolation: one component's reads never land in another's deps",
     assert(clean());
     _unmount(handle);
   } finally {
-    cleanup();
+    await cleanup();
   }
 });

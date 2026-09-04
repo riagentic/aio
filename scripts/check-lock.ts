@@ -17,6 +17,7 @@
 //
 // Usage: deno run --allow-read scripts/check-lock.ts
 import { fromFileUrl, join } from "@std/path";
+import { codeMask } from "../src/diagnostics/code-mask.ts";
 
 const ROOT = fromFileUrl(new URL("../", import.meta.url));
 
@@ -70,22 +71,23 @@ export function unpinnedImports(src: string): string[] {
     /\bimport\s*\(\s*["'`]((?:jsr|npm):[^"'`]+)["'`]/g,
     /\bimport\s*["'`]((?:jsr|npm):[^"'`]+)["'`]/g,
   ];
-  // …and a REGEX LITERAL matching import statements (`/from "npm:[^"]+"/`)
-  // reads as one of those positions. A package specifier cannot contain regex
-  // metacharacters, so requiring a legal specifier is both the narrower test
-  // and the honest one — it excludes nothing that could be a real import.
-  const LEGAL = /^(?:jsr|npm):[@\w][\w.@/-]*$/;
-  // A commented import is not an import — including the one in the comment
-  // above this gate's own test explaining what it looks for. Line-at-a-time,
-  // because the only failure mode of over-stripping here is a MISSED hit on a
-  // line where an import shares space with a comment, and an import statement
-  // does not.
-  const code = src.split("\n")
-    .filter((l) => !/^\s*(?:\/\/|\*|\/\*)/.test(l))
-    .map((l) => l.replace(/\/\/.*$/, ""))
-    .join("\n");
+  // A package specifier cannot contain regex metacharacters; requiring a legal
+  // one is a cheap second guard.
+  const LEGAL =
+    /^(?:jsr|npm):@?[\w.-]+(?:\/[\w.-]+)*(?:@[^\s"'`/]*)?(?:\/[^\s"'`]*)?$/;
+  // The keyword must sit at a CODE offset. This scanner used to strip comment
+  // LINES and trailing `//` by regex, which is what every scanner in this repo
+  // did until the dev graph validator read `await import('/app.js')` inside
+  // an HTML template literal as a real import and served the app manager the
+  // diagnostic page for two releases. `codeMask` is THE decider for "is this
+  // offset code": a specifier the code talks ABOUT — in a comment, a string,
+  // a template the linter builds, a regex literal matching import statements
+  // — is not an import position, and a real one on a line that shares space
+  // with a comment still is.
+  const mask = codeMask(src);
   for (const re of positions) {
-    for (const m of code.matchAll(re)) {
+    for (const m of src.matchAll(re)) {
+      if (mask[m.index!] !== 1) continue;
       const spec = m[1]!;
       if (LEGAL.test(spec) && isUnpinned(spec)) out.push(spec);
     }

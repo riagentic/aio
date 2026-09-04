@@ -205,7 +205,26 @@ export async function cmdReplay(
     r.seq >= lo && r.seq <= hi
   );
   if (rows.length === 0) {
-    outError(`no journal entries in range`, mode);
+    // WHY it is empty is the part worth saying. The journal is the
+    // crash-recovery TAIL, not a history: every snapshot compacts away
+    // everything at or below the watermark, so a healthy app's live journal is
+    // empty almost all of the time and this refusal is what `am replay` says
+    // to anyone who points it at one. Accurate, and it taught nothing.
+    const total = parseJournalEntries(text).length;
+    outError(
+      total === 0
+        ? `the journal at "${path}" is empty — it holds only the actions ` +
+          `NOT yet in a snapshot (every persist compacts the rest away), so a ` +
+          `healthy app's live journal is empty nearly always. Replay a journal ` +
+          `captured from a crashed run with --from=<path>, or run the app with ` +
+          `persist: false so nothing is compacted.`
+        : `no journal entries in range — the journal holds ${total} entr${
+          total === 1 ? "y" : "ies"
+        }, seq ${parseJournalEntries(text)[0]?.seq} to ${
+          parseJournalEntries(text)[total - 1]?.seq
+        }`,
+      mode,
+    );
     Deno.exit(1);
   }
 

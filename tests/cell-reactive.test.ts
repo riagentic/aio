@@ -1,4 +1,5 @@
 // tests/cell-reactive.test.ts — direct reactive state access on cells
+import { _resetSubs } from "../src/state/state-subs.ts";
 import { assertEquals } from "@std/assert";
 import { bindCell, cell } from "aio";
 import {
@@ -156,6 +157,7 @@ Deno.test("bindCellReactive installs signal-backed getters", () => {
 
   _resetCellRegistry();
   _resetSignals();
+  _resetSubs(); // the reactive reads armed the subscription sync
 });
 
 Deno.test("bindCellReactive is idempotent", () => {
@@ -175,6 +177,7 @@ Deno.test("bindCellReactive is idempotent", () => {
 
   _resetCellRegistry();
   _resetSignals();
+  _resetSubs(); // the reactive reads armed the subscription sync
 });
 
 Deno.test("bindCellReactive does not override methods", () => {
@@ -198,6 +201,7 @@ Deno.test("bindCellReactive does not override methods", () => {
 
   _resetCellRegistry();
   _resetSignals();
+  _resetSubs(); // the reactive reads armed the subscription sync
 });
 
 // ── AIO-NEW-4: action methods dispatch via sendFn ────────────────────
@@ -281,6 +285,7 @@ Deno.test("bindCellReactive without sendFn leaves method as unbound guard", () =
 
   _resetCellRegistry();
   _resetSignals();
+  _resetSubs(); // the reactive reads armed the subscription sync
 });
 
 // ── Actions-based cell — overlapping state/action name ────────────────
@@ -336,6 +341,7 @@ Deno.test("bindCellReactive binds selectors (own-slice) callable in browser", ()
   assertEquals(cc.sum(), 10);
   _resetCellRegistry();
   _resetSignals();
+  _resetSubs(); // the reactive reads armed the subscription sync
 });
 
 Deno.test("bindCellReactive: deps-form selector reads another cell in browser", () => {
@@ -367,4 +373,5 @@ Deno.test("bindCellReactive: deps-form selector reads another cell in browser", 
   );
   _resetCellRegistry();
   _resetSignals();
+  _resetSubs(); // the reactive reads armed the subscription sync
 });

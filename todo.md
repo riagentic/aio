@@ -17,7 +17,24 @@ is frozen — additive only, bugfix-only through beta; 1.0.0 = boring.
 
 ## Open work
 
-### The leak sanitizers are off (found 2026-09-04, audit round)
+### The leak sanitizers are off (found 2026-09-04, audit round) — DONE 2026-09-04
+
+Done: the flags are on `test`, `test:core` and `check:coverage`;
+`check:sanitizers` is red if they go missing; the full suite is green with them.
+Measured before the fix: **729 of 7210** failed with the flags on. The bulk was
+the framework's own teardown, fixed at the source (dev == prod): a completed
+async call left its half-way heartbeat timer armed (`cell-impl.ts`); an app's
+Phase 5 `onStop` re-armed the diagnostics checkpoint debounce after the final
+flush (`checkpoint.ts`); a boot that REFUSED left the lock, the vitals sampler,
+the logger heartbeat, SQLite and the worker pool running (`aio.ts` unwinds them
+now); `race({ timeout })` kept the losing timer (`async-helpers.ts`); a throwing
+`onStop` skipped the logger teardown (`aio-cells-bridge.ts`); process-wide
+signal listeners outlived the last app (`shutdown.ts`); the AIR transport's
+reconnect timer was untracked (`browser-air-transport.ts`); `testUI`'s
+refused-mount teardown closed its window fire-and-forget (`ui-test.ts`). The
+rest was tests closing what they opened. `tests/sanitizer-leak-floor.test.ts`
+pins each one with the sanitizers on regardless of flags. The original entry,
+for the record:
 
 Deno 2.9 made `--sanitize-ops` / `--sanitize-resources` opt-**in**; they used to
 be on by default and no aio task passes them. So `deno task test` has no leak
@@ -129,6 +146,55 @@ fine, 17 ms at 50k is not.
 
 Numbers are from one machine and one shape (a flat array of small objects);
 re-measure before designing against them.
+
+## Known gap: a handful of tests fail NON-DETERMINISTICALLY, in one shape
+
+Measured 2026-09-06, five full runs on one tree (bar the fixes each prompted),
+on a machine also running the developer's own apps:
+
+| 15-min load | result                        |
+| ----------- | ----------------------------- |
+| 9.49        | 16 failed                     |
+| ~7          | 2 failed (a different pair)   |
+| 6.35        | 0 failed                      |
+| ~6          | 1 failed (a gate, not a leak) |
+| 9.69        | 0 failed                      |
+
+**Load is suggestive, not established.** The last run was GREEN at a 15-minute
+load of 9.69 — higher than the run that failed sixteen — so "the machine was
+busy" does not predict it. What is established: the failures are
+non-deterministic on an unchanged tree, and every one is resource-leak shaped
+rather than a wrong answer.
+
+Every one of those failures was a RESOURCE LEAK, never a wrong answer: 15 in
+`tests/am.test.ts` ("a child process was started during the test, but not
+closed"), one in `tests/spawn.test.ts` (child stdout/stderr not closed), and
+earlier `tests/examples.test.ts` sat on one test for ten minutes because a
+spawned child had already died. Both files pass 86/86 and 11/11 alone,
+repeatedly, at the same load.
+
+The shape is always the same: a child process that does not exit inside the
+teardown's window leaves its handle open, and the sanitizer reports it against
+whichever test runs next — so the failure names a file that did nothing wrong.
+WHY the child is late — CPU contention, disk, or a race in the teardown itself —
+is not known, and anyone picking this up should find out before assuming: a fix
+aimed at the wrong cause will look like it worked, on a suite whose failures
+already come and go.
+
+This matters beyond a developer's busy laptop: a CI runner is a busy machine by
+definition, and a suite that goes red at no defect teaches its readers to re-run
+rather than read (the same argument as the orphan-directory ceiling).
+
+What would close it, in rough order of value:
+
+- `stopChild` (tests/stop-child.ts) is the one teardown; the leaking sites do
+  not all go through it. Route them through it and give it a deadline that
+  ESCALATES (SIGTERM, wait, SIGKILL, wait) rather than one flat wait.
+- Failures should say what the child did — `tests/examples.test.ts` now keeps
+  the child's stderr and names its exit code; the am/spawn sites still do not.
+- A load-sensitive bound is a bound measured on the wrong machine. Where a test
+  waits for a child, wait for an OBSERVABLE (a port answering, a line in the
+  log), never a duration.
 
 ## Known gap: the harness cannot cross a transport boundary
 

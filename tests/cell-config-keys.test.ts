@@ -9,7 +9,12 @@
 // resolved every conflict last-write-wins instead of the strategy the app
 // declared. Each of those is a feature the author configured and never got,
 // with no error at any point.
-import { assert, assertEquals, assertThrows } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
 import { cell } from "../src/state/cell-create.ts";
 import { normalizeSyncConfig } from "../src/sync/types.ts";
 
@@ -114,4 +119,50 @@ Deno.test("sync: a misspelled merge key is refused, not ignored", () => {
     normalizeSyncConfig({ merge: { count: "counter" } }).merge,
     { count: "counter" },
   );
+});
+
+// ── `state` that evaluated to nothing ────────────────────────────────────
+//
+// `state` is required (docs/state/cells.md, and the type says so for
+// TypeScript), yet `null` and `undefined` were EXEMPT from the plain-object
+// guard beside them — the two values the guard is most needed for. What the
+// author got was `TypeError: Cannot convert undefined or null to object`,
+// thrown from inside `installDefaultStateGetters`, naming neither the cell nor
+// the cause.
+//
+// It is not a hypothetical mistake: `state: INITIAL` where `INITIAL` comes from
+// a module that has not finished initialising evaluates to `undefined`, and a
+// circular import produces exactly that.
+Deno.test("cell(): a state that is nothing names the cell and the likely cause", () => {
+  for (
+    const [label, value] of [["undefined", undefined], ["null", null]] as const
+  ) {
+    const e = assertThrows(
+      // deno-lint-ignore no-explicit-any
+      () => cell(`nostate-${label}`, { state: value as any, methods: {} }),
+      Error,
+    ) as Error;
+    assertStringIncludes(e.message, `nostate-${label}`);
+    assertStringIncludes(e.message, `got ${label}`);
+    assertStringIncludes(e.message, "circular import");
+    assertStringIncludes(e.message, "{}");
+  }
+});
+
+Deno.test("cell(): the plain-object guard still names array and primitive", () => {
+  // The two it always caught keep their wording — this is a widening, not a
+  // rewrite.
+  // deno-lint-ignore no-explicit-any
+  const arr = assertThrows(
+    () => cell("badarr", { state: [] as any, methods: {} }),
+    Error,
+  ) as Error;
+  assertStringIncludes(arr.message, "got array");
+  // deno-lint-ignore no-explicit-any
+  const num = assertThrows(
+    () => cell("badnum", { state: 5 as any, methods: {} }),
+    Error,
+  ) as Error;
+  assertStringIncludes(num.message, "got number");
+  assert(!num.message.includes("circular"), "only the nothing case says that");
 });

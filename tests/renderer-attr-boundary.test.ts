@@ -51,7 +51,7 @@ function devWarnings(fn: () => void): string[] {
 // about, and invisible to every later diff (which compares new props against
 // old props, and it is in neither). A `disabled` in the markup left the button
 // permanently dead; a `hidden` left it permanently invisible.
-Deno.test("hydrate: a server-only attribute is removed, not kept forever", () => {
+Deno.test("hydrate: a server-only attribute is removed, not kept forever", async () => {
   const { doc, cleanup } = env();
   try {
     const App = () => h("button", { type: "button" }, "Save") as VNode;
@@ -77,11 +77,11 @@ Deno.test("hydrate: a server-only attribute is removed, not kept forever", () =>
       `expected a hydrate divergence warning, got ${JSON.stringify(warns)}`,
     );
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
-Deno.test("hydrate: attributes the component DOES describe survive", () => {
+Deno.test("hydrate: attributes the component DOES describe survive", async () => {
   const { doc, cleanup } = env();
   try {
     const App = () =>
@@ -104,7 +104,7 @@ Deno.test("hydrate: attributes the component DOES describe survive", () => {
       assert(el.hasAttribute(a), `${a} was dropped: ${el.outerHTML}`);
     }
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
@@ -115,7 +115,7 @@ Deno.test("hydrate: attributes the component DOES describe survive", () => {
 // `htmlfor=` and `htmlFor=`, two spellings of an attribute no browser reads.
 // Every label/control association was silently dead — and aio's own a11y
 // warning recommends the shape.
-Deno.test("htmlFor renders as for= on both paths", () => {
+Deno.test("htmlFor renders as for= on both paths", async () => {
   const { doc, cleanup } = env();
   try {
     const App = () => h("label", { htmlFor: "fld" }, "Name") as VNode;
@@ -129,7 +129,7 @@ Deno.test("htmlFor renders as for= on both paths", () => {
     assertEquals(lbl.getAttribute("for"), "fld");
     assertEquals(lbl.getAttribute("htmlfor"), null);
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
@@ -139,7 +139,7 @@ Deno.test("htmlFor renders as for= on both paths", () => {
 // <div> inside a <foreignObject> was built with createElementNS(SVG_NS, "div")
 // — an element with no HTML box and no HTMLElement API. The one thing
 // foreignObject exists for rendered nothing, in every real browser.
-Deno.test("foreignObject children are created in the HTML namespace", () => {
+Deno.test("foreignObject children are created in the HTML namespace", async () => {
   const { doc, cleanup } = env();
   try {
     const App = () =>
@@ -160,11 +160,11 @@ Deno.test("foreignObject children are created in the HTML namespace", () => {
     assertEquals(fo.namespaceURI, SVG_NS, "foreignObject itself stays SVG");
     assertEquals(fo.firstElementChild!.namespaceURI, HTML_NS);
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
-Deno.test("plain SVG children still inherit the SVG namespace", () => {
+Deno.test("plain SVG children still inherit the SVG namespace", async () => {
   const { doc, cleanup } = env();
   try {
     const App = () => h("svg", {}, h("g", {}, h("circle", { r: 1 }))) as VNode;
@@ -173,7 +173,7 @@ Deno.test("plain SVG children still inherit the SVG namespace", () => {
     const circle = h1.firstElementChild!.firstElementChild!.firstElementChild!;
     assertEquals(circle.namespaceURI, SVG_NS);
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
@@ -182,7 +182,7 @@ Deno.test("plain SVG children still inherit the SVG namespace", () => {
 // `_writeProp` is last-write-wins; the SSR writer appended BOTH — invalid HTML
 // whose parser keeps the FIRST, so SSR and mount picked OPPOSITE classes for
 // the same vnode, with nothing said about it.
-Deno.test("class and className: SSR and mount agree, dev names the collision", () => {
+Deno.test("class and className: SSR and mount agree, dev names the collision", async () => {
   const { doc, cleanup } = env();
   try {
     for (
@@ -215,6 +215,6 @@ Deno.test("class and className: SSR and mount agree, dev names the collision", (
       );
     }
   } finally {
-    cleanup();
+    await cleanup();
   }
 });

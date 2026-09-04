@@ -15,6 +15,9 @@ import { _resetTransactionHints } from "./cell-methods-factory.ts";
 import { _resetReturnEffectHints } from "./cell-methods-internals.ts";
 import { _resetArrayRefStats } from "./state-array-utils.ts";
 import { _resetPerfThrottle } from "../diagnostics/error.ts";
+import { _resetActionWarnings } from "./action-encode.ts";
+import { _resetSwallowedRefusals } from "./cell-compose-reduce.ts";
+import { _resetShortCallWarnings } from "./cell-methods-internals.ts";
 
 /** Reset every module-scoped piece of the cell RUNTIME — bindings, pending
  *  async calls, cancellation registry, subscriptions. Test isolation in one
@@ -61,4 +64,13 @@ export function _resetAioRuntime(): void {
   _resetReturnEffectHints();
   _resetArrayRefStats();
   _resetPerfThrottle();
+  // "which wire conversions have I already named?" — the same class as the
+  // hint sets above. Its key carries the CHANGED PATHS, so it is also the one
+  // that could grow without a bound in a long-lived client; the cap lives with
+  // the set itself.
+  _resetActionWarnings();
+  // "have I already said this method's refusal was swallowed?" — the same
+  // order-dependent memory as the hint sets above.
+  _resetSwallowedRefusals();
+  _resetShortCallWarnings();
 }

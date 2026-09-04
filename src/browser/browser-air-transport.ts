@@ -57,6 +57,8 @@ import { backoffDelay } from "../protocol/transport-shared.ts";
 import { _showStatus } from "../protocol/protocol-status.ts";
 import { _setDegradedRelay, degradedReport } from "../diagnostics/degraded.ts";
 import { offlineQueue, type QueuedEntry } from "../state/offline-queue.ts";
+import { encodeAction } from "../state/action-encode.ts";
+import { resetTT } from "../air/time-travel-panel.ts";
 import {
   _noteClientPatch,
   _pauseClientVitals,
@@ -423,8 +425,17 @@ function _scheduleReconnect() {
   // prevent.
   const delay = backoffDelay(_retry);
   _retry++;
-  setTimeout(() => _connect(), delay);
+  // Tracked, so a teardown can cancel it. Untracked, a client torn down
+  // between a close and its retry still reconnected — to a server it had
+  // just been told to leave — and the timer was the one thing keeping a
+  // finished page (or a test) alive for the whole backoff.
+  if (_reconnectTimer !== null) clearTimeout(_reconnectTimer);
+  _reconnectTimer = setTimeout(() => {
+    _reconnectTimer = null;
+    _connect();
+  }, delay);
 }
+let _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
 // If the Electron bridge answers neither onOpen nor onClose, the flags set
 // below stay true forever: `_tryConnect` sees a live attempt, never retries,
@@ -641,8 +652,27 @@ function _enqueue(tagged: { type: string; payload?: unknown }): void {
 
 function _send(action: { type: string; payload?: unknown }) {
   const tagged = { ...action, _source: "UI" };
-  const json = enc("action", tagged);
   const cid = (tagged as { cid?: string }).cid;
+  // The frame is built through the ONE action door (state/action-encode.ts):
+  // it names the action when JSON cannot carry the payload, and in dev it says
+  // which argument the wire is about to change (a Date into a string, a Map
+  // into `{}`) — the loss an in-process test cannot see, and the one
+  // `serverFn` arguments have been warned about since alpha76.
+  //
+  // A refusal here used to throw out of `enc` with `Do not know how to
+  // serialize a BigInt` — no method named — while the ack registered for this
+  // call was left pending with no timer armed, so `await cell.method(1n)`
+  // never settled. Reject it first, then throw: the caller hears it once,
+  // through the channel it is already waiting on.
+  let json: string;
+  try {
+    json = encodeAction(tagged);
+  } catch (err) {
+    if (cid) {
+      _rejectAck(cid, err instanceof Error ? err : new Error(String(err)));
+    }
+    throw err;
+  }
   if (_terminal) {
     // Nothing will ever flush the queue after a version gap (`_dropQueue`
     // said so when it emptied it), so queueing here is a silent drop with a
@@ -721,6 +751,10 @@ _setSubscribeTriggers(_tryConnect, () => {});
 _setTeardownFn(() => {
   _closed = true;
   _clearIpcWatchdog();
+  if (_reconnectTimer !== null) {
+    clearTimeout(_reconnectTimer);
+    _reconnectTimer = null;
+  }
   _ws?.close();
   _ws = null;
   _ipcConnected = false;
@@ -737,6 +771,15 @@ _setTeardownFn(() => {
   _dropQueue("the client was torn down");
   _rejectAllPending(new Error("client torn down before the server confirmed"));
   _retry = 0;
+  // The time-travel panel is part of "nothing of this client outlives it": it
+  // holds a `keydown` listener on `document` and a node in the DOM, and both
+  // survived every teardown. `resetTT`'s own doc comment said it was "called
+  // from browser.ts _reset() and teardown" — browser.ts has not existed since
+  // alpha52, and the one import of it (in browser-protocol.ts) was aliased to
+  // `_resetTT`, which is exactly the spelling that silences the unused-import
+  // lint. Three layers of looking wired, and one leaked document listener per
+  // teardown.
+  resetTT();
 });
 
 // Arms ack clocks itself: on write in `_send`, and on flush for queued actions.

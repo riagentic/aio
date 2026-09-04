@@ -8,7 +8,11 @@
 // (`~/.<appId>/logs/client.log`).
 import { assert, assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
-import { initClientLog, writeClientLog } from "../src/server/client-log.ts";
+import {
+  disposeClientLog,
+  initClientLog,
+  writeClientLog,
+} from "../src/server/client-log.ts";
 
 const SRC = join(dirname(fromFileUrl(import.meta.url)), "..", "src");
 
@@ -32,6 +36,7 @@ Deno.test("client log: writes land in the directory it was initialised with", as
       `client.log did not receive the entry: ${text}`,
     );
   } finally {
+    disposeClientLog(); // the rate-limit reset timer is the module's, not the app's
     await Deno.remove(dir, { recursive: true }).catch(() => {});
   }
 });

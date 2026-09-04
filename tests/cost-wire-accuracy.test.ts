@@ -216,6 +216,7 @@ Deno.test("cost: --window and --cell narrow the report", async () => {
 
     const bad = await fetch(`${srv.url}/__aio/trojan/cost?window=nonsense`);
     assertEquals(bad.status, 400, "a bad window is refused, not silently 60s");
+    await bad.body?.cancel();
   } finally {
     client.close();
   }

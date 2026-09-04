@@ -106,7 +106,7 @@
     ]
   },
   "tasks": {
-    "test": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno run --allow-read --allow-write --allow-env scripts/reset-test-home.ts && AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno test -A tests/ amui/src/ && deno run -A scripts/check-orphans.ts",
+    "test": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno run --allow-read --allow-write --allow-env scripts/reset-test-home.ts && deno run -A scripts/check-orphans.ts --clean-stale && AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno test -A --sanitize-ops --sanitize-resources tests/ amui/src/ && deno run -A scripts/check-orphans.ts",
     "check:orphans": "deno run -A scripts/check-orphans.ts",
     "clean:tmp": "deno run -A scripts/check-orphans.ts --clean",
     "test:onboard": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home AIO_ONBOARD_E2E=1 deno test -A --no-check=remote tests/onboarding-e2e.test.ts tests/run-sh-e2e.test.ts",
@@ -119,8 +119,8 @@
     "lab:github": "deno run -A scripts/lab.ts --source=github --browser",
     "ship": "deno run -A src/build/ship.ts",
     "test:e2e": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno run --allow-read --allow-write --allow-env scripts/reset-test-home.ts && AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno test -A --no-check=remote tests/e2e-direct-subscription.test.ts tests/e2e-subscription.test.ts tests/e2e-dispatch-ack.test.ts tests/e2e-ui-chromium.test.ts tests/e2e-blank-screen.test.ts tests/e2e-sync-browser.test.ts",
-    "check:coverage": "rm -rf coverage && AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno run --allow-read --allow-write --allow-env scripts/reset-test-home.ts && AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno test -A --coverage=coverage tests/ && deno cache mod.ts src/air.ts src/browser-air.ts src/standalone-air.ts src/cell-test.ts src/am.ts src/build.ts aiol/mod.ts && deno coverage coverage --lcov --output=coverage/lcov.info && deno run --allow-read scripts/check-coverage.ts",
-    "test:core": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno test -A --ignore=tests/am.test.ts,tests/build.test.ts,tests/server.test.ts,tests/tls.test.ts,tests/single-instance-lock.test.ts,tests/cli.test.ts,tests/cli-client.test.ts,tests/electron-ipc.test.ts,tests/app-modes.test.ts,tests/examples.test.ts,tests/e2e-ui-chromium.test.ts,tests/e2e-remote-lan.test.ts,tests/zero-config.test.ts,tests/cli-bound-cells.test.ts,tests/e2e-blank-screen.test.ts,tests/e2e-bundle-smoke.test.ts,tests/e2e-sync-browser.test.ts tests/",
+    "check:coverage": "rm -rf coverage && AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno run --allow-read --allow-write --allow-env scripts/reset-test-home.ts && AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno test -A --sanitize-ops --sanitize-resources --coverage=coverage tests/ && deno cache mod.ts src/air.ts src/browser-air.ts src/standalone-air.ts src/cell-test.ts src/am.ts src/build.ts aiol/mod.ts && deno coverage coverage --lcov --output=coverage/lcov.info && deno run --allow-read scripts/check-coverage.ts",
+    "test:core": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno test -A --sanitize-ops --sanitize-resources --ignore=tests/am.test.ts,tests/build.test.ts,tests/server.test.ts,tests/tls.test.ts,tests/single-instance-lock.test.ts,tests/cli.test.ts,tests/cli-client.test.ts,tests/electron-ipc.test.ts,tests/app-modes.test.ts,tests/examples.test.ts,tests/e2e-ui-chromium.test.ts,tests/e2e-remote-lan.test.ts,tests/zero-config.test.ts,tests/cli-bound-cells.test.ts,tests/e2e-blank-screen.test.ts,tests/e2e-bundle-smoke.test.ts,tests/e2e-sync-browser.test.ts tests/",
     "check": "deno check src/ mod.ts aiol/mod.ts examples/ tests/ && deno check -c amui/deno.json amui/src/",
     "lint": "deno lint src/ amui/src/",
     "lint:aio": "deno run -A aiol/mod.ts",
@@ -141,6 +141,7 @@
     "check:mutations": "deno run -A scripts/check-mutations.ts",
     "check:log-prefix": "deno run --allow-read scripts/check-log-prefix.ts",
     "check:release": "deno run -A scripts/release-check.ts",
+    "check:release-stamp": "deno run -A scripts/release-stamp.ts",
     "check:graph": "deno run --allow-read scripts/check-graph.ts",
     "preflight": "deno run -A scripts/preflight.ts",
     "bench:bundle": "deno run -A scripts/bundle-size.ts",

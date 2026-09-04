@@ -12,6 +12,7 @@
 //  • a worker error carried no SQL and no parameter count, which is how
 //    finding #1 reached an operator as a bare `too many SQL variables`.
 
+import { within } from "./within.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { createDB, DEFAULT_PRAGMAS } from "../src/server-entry.ts";
@@ -165,9 +166,6 @@ Deno.test("db worker: a request that can never answer fails instead of hanging",
     assertStringIncludes(msg!, "requestTimeoutMs");
   } finally {
     // The worker is wedged on the runaway query; terminate rather than drain.
-    await Promise.race([
-      db.close(),
-      new Promise((r) => setTimeout(r, 8000)),
-    ]);
+    await within(db.close(), 8000, undefined);
   }
 });

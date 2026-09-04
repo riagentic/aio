@@ -10,7 +10,7 @@ import { TROJAN_PREFIX } from "./server-auth.ts";
 import { SERVER_FILE_RE } from "../entries.ts";
 import type { CallTimeouts } from "../protocol/protocol-types.ts";
 import { extname, join, resolve, SEPARATOR } from "@std/path";
-import { formatPrometheus } from "./server-metrics.ts";
+import { formatPrometheus, healthCells } from "./server-metrics.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import type { RenderBudget } from "../vitals/types.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
@@ -1157,23 +1157,11 @@ export function createStaticHandler(deps: StaticDeps): {
   function handleMetrics(): Response {
     try {
       const extra = deps.getVitalsExtra();
-      const health = deps.getHealth?.() as
-        | { cells?: Record<string, { errors: number; enabled: boolean }> }
-        | Record<string, { errors: number; enabled: boolean }>
-        | undefined;
-      // Two accepted shapes: the full health document (`{ status, cells }`)
-      // and a bare cells map (a host that supplies its own `getHealth`).
-      // Keyed on `status`, not on `cells`: a health document for an app with
-      // no composed cells has no `cells` key, and reading THAT as the map
-      // turned `status`/`version`/`pid`/`persist` into cell rows.
-      const doc = health as Record<string, unknown> | undefined;
-      const cells = (doc && "status" in doc
-        ? (doc as {
-          cells?: Record<string, { errors: number; enabled: boolean }>;
-        }).cells
-        : doc as
-          | Record<string, { errors: number; enabled: boolean }>
-          | undefined) ?? undefined;
+      // Two accepted shapes (a full health document, or a bare cells map from
+      // a host that supplies its own `getHealth`), told apart on their VALUES
+      // rather than on a key name — see `healthCells` for the two ways the
+      // name guess was wrong.
+      const cells = healthCells(deps.getHealth?.());
       const body = formatPrometheus({
         uptimeSeconds: Math.round((Date.now() - _startedAt) / 1000),
         memory: Deno.memoryUsage(),

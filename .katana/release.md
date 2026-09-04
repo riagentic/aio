@@ -26,6 +26,11 @@ Gates (must pass):
   under a ceiling that only goes down, AND every doc that quotes a size still
   quotes the measured one
 - `deno publish --dry-run` succeeds
+- `deno task check:release-stamp` passes — the tag is cut only from the exact tree
+  `check:release` stamped (`.aio/release-stamp.json`, keyed by the working-tree
+  hash, so the release squash keeps it valid and one edit after the check does
+  not). Four gates were red at the alpha76 tag while every note said "green":
+  a stale green reads like a current one until the tree itself is the key
 - `deno task lab` passes — the onboarding lab: the REAL one-liners
   (`install.sh`, `run.sh`) on a fresh ubuntu container with no deno, no unzip
   and a non-root user, ending in an app whose UI actually renders. Every other

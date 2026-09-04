@@ -269,7 +269,7 @@ deno task am kill --stale         # reap ORPHANS — processes still serving wit
                                   # lock: the ones that answer `am state` with old
                                   # numbers while `am status` says stopped.
                                   # --port=N for an orphan on an unrecorded port
-deno task am restart              # stop + start
+deno task am restart              # stop + start — exit 1 + NOT SAVED if the final write was refused (the app still restarts)
 deno task am status               # stopped|starting|started|stopping
 deno task am open                 # open THIS app in a browser (--print writes the URL)
 ```
@@ -473,6 +473,15 @@ therefore has no `key=value` spelling — that is what `--args` is for.
 `--body` is the whole envelope (`{type, payload}`) when it stands alone, and the
 PAYLOAD of the action when a type is given positionally.
 
+**`dispatched` / `ok: true` means APPLIED, not on disk.** The method ran and its
+commit is broadcast to every client; the write reaches SQLite with the next
+persist window (`persistDebounceMs`, 100 ms by default — `journal: true` appends
+it at once). `am persist` is the door that answers for durability. What
+`am dispatch` does say, without forcing a flush, is whether persistence is
+ALREADY refusing writes: the reply then carries `unsaved` (`⚠ NOT SAVED — …`),
+the same verdict `/__aio/health`'s `persist.ok` and `am stop` report. Its exit
+code is about the method; the disk has its own verb.
+
 ## Time-travel
 
 In browser (dev mode): press **Ctrl+.** to toggle the time-travel panel. Shows
@@ -486,7 +495,7 @@ deno task am timeline                       # recent dispatches + payload + stat
 deno task am timeline --lines=50            # last 50
 deno task am timeline --from=<data>/journal  # offline, from a durable journal file
 deno task am timetravel undo|redo           # step back/forward
-deno task am timetravel goto <N>            # jump to index
+deno task am timetravel goto <id>          # jump to one entry (the id `am actions` lists)
 deno task am timetravel pause|resume        # freeze/unfreeze state
 deno task am replay 5..12                   # re-dispatch journal seq 5..12 for repro
 deno task am replay 5..12 --dry             # show what would replay, dispatch nothing
@@ -500,6 +509,11 @@ deno task am record flow.test.ts --from=J   # turn a journal into a bootCells te
   not diffs). It prints **payloads**, so an action called with a secret shows
   that secret here: list it in `redactActions`
   ([where files live](../persistence/where-files-live.md#secrets-in-recorded-actions)).
+- **`am timetravel`** moves state in memory only — persistence pauses during
+  time-travel
+  ([how it works](../persistence/how-it-works.md#concurrency--safety)), so an
+  undo reaches disk with the next persist cycle (`am persist` forces one), never
+  on its own.
 - **`am replay <range>`** re-dispatches a journal range against the running app,
   in order, stopping at the first failure — deterministic repro for the "froze
   in the client but the test passed" class. Point it at a fresh instance to
@@ -521,8 +535,8 @@ change", which was not true of sync cells.)
 deno task am persist                        # flush to SQLite now; "persisted" = on disk (exit 1 if refused)
 deno task am snapshot                       # dump state to stdout
 deno task am snapshot save backup.json      # save to file
-deno task am snapshot load backup.json      # restore from file (refuses a file whose
-                                            # cell set is not this app's)
+deno task am snapshot load backup.json      # restore from file — "loaded" = restored AND written
+                                            # (refuses a file whose cell set is not this app's)
 deno task am snapshot load other.json --force   # …load it anyway, replacing ALL state
 deno task am migrations                     # cell versions + shape drift
 ```
@@ -530,10 +544,17 @@ deno task am migrations                     # cell versions + shape drift
 `am persist` is the one honest answer to "is my data safe?": `ok: true` means
 the write is on disk, and a refused cycle is a 500 **on every cycle it
 happens**, not only the first. `am stop` asks the same question before it closes
-the door, so a shutdown that could not save exits 1 and says which cell.
+the door, so a shutdown that could not save exits 1 and says which cell;
+`am restart` takes the same verdict on its way down — the app still comes back
+up, from what IS on disk, and the command says `NOT SAVED` and exits 1.
+`am snapshot load` closes the persist window before it answers: `loaded` means
+restored and written, or the reply carries `unsaved` and the command exits 1.
 `/__aio/health` carries the same verdict as `persist: { ok }` — `status` is
 `degraded` while a write is being refused, so a monitor sees it without polling
-a CLI.
+a CLI. A `journal: true` app whose journal cannot be appended to shows up there
+too (`degraded: [{ name: "journal:<appId>" }]`): its state still reaches disk —
+every refused append closes the persist window at once — but the promise the
+option was set for is broken, and health says so from the first refusal.
 
 **`am snapshot load` replaces the WHOLE state.** A file whose cell set is not
 this app's is refused by name — both the cells it would destroy (missing from

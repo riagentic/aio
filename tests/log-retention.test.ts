@@ -38,7 +38,9 @@ Deno.test("logs: history is kept by default — the previous run becomes .1", as
     await Deno.writeTextFile(join(dir, "app.log"), "the crash you restarted\n");
     await Deno.writeTextFile(join(dir, "client.log"), "the page's console\n");
 
-    await mk(dir).init(); // no backupLogs — the DEFAULT is what is under test
+    const l = mk(dir); // no backupLogs — the DEFAULT is what is under test
+    await l.init();
+    await l.flush(); // init() queued its own line
 
     assertEquals(
       (await Deno.readTextFile(join(dir, "app.log.1"))).trim(),
@@ -185,10 +187,12 @@ Deno.test("logs: the budget runs at boot, so a fresh run starts inside it", asyn
 
     // 4 KB fits the rotation result (the just-rotated .1 and .2) and nothing
     // older — .3 (was .2) has to go.
-    await mk(dir, { logBudget: 4096 }).init();
+    const l = mk(dir, { logBudget: 4096 });
+    await l.init();
+    await l.flush(); // init() queued its own line
 
     assertEquals(
-      names(dir).filter((n) => n.startsWith("app.log")).sort(),
+      names(dir).filter((n) => n.startsWith("app.log.")).sort(),
       ["app.log.1", "app.log.2"],
       "rotate first, then bound — the oldest archive is the one dropped",
     );

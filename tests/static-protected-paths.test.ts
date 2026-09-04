@@ -97,7 +97,12 @@ Deno.test("static: a PROD server never serves TypeScript source", async () => {
   }
 });
 
-Deno.test("static: DEV still transpiles and serves app modules", async () => {
+Deno.test("static: DEV still transpiles and serves app modules", {
+  // esbuild transpiles through a native child that `stopEsbuild()` kills;
+  // esbuild owns the handle, so its exit cannot be awaited from here.
+  sanitizeOps: false, // aio-ok: esbuild's service child — exit not awaitable
+  sanitizeResources: false, // aio-ok: same esbuild child
+}, async () => {
   const f = await fixture();
   try {
     const h = handlerFor(f.dir, false);

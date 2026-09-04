@@ -61,11 +61,14 @@ Deno.test("health + state + snapshot tell the truth about a refused write", asyn
     });
     return { status: r.status, text: await r.text() };
   };
-  const persist = () =>
-    fetch(`http://127.0.0.1:${port}/__aio/trojan/persist`, {
+  const persist = async () => {
+    const r = await fetch(`http://127.0.0.1:${port}/__aio/trojan/persist`, {
       method: "POST",
       headers: { "X-AIO": "1" },
     });
+    await r.body?.cancel(); // the status is the answer; the body is a resource
+    return r;
+  };
   try {
     // ── healthy, and it says so positively ────────────────────────────
     await api.add(1);

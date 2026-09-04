@@ -1,3 +1,4 @@
+import { within } from "./within.ts";
 import { assertEquals, assertRejects } from "@std/assert";
 import {
   createDispatch,
@@ -1512,10 +1513,11 @@ Deno.test("dispatch: a queued action stranded by a throw rejects instead of hang
     dispatch({ type: "first" });
   } catch { /* loud, expected */ }
   assertEquals(queued !== null, true);
-  const outcome = await Promise.race([
+  const outcome = await within(
     queued!.then(() => "resolved", (e) => `rejected:${(e as AioError).code}`),
-    new Promise((r) => setTimeout(() => r("HUNG"), 300)),
-  ]);
+    300,
+    "HUNG",
+  );
   assertEquals(outcome, "rejected:DISPATCH_ABORTED");
 });
 

@@ -8,10 +8,16 @@ import { freePort } from "../src/testing/server-test.ts";
 Deno.test("call: timeoutMs is the canonical key; bare timeout still works", async () => {
   // timeoutMs fires the timeout.
   let msg = "";
+  let slow: ReturnType<typeof setTimeout> | undefined;
   try {
-    await call({ timeoutMs: 20 }, () => new Promise((r) => setTimeout(r, 200)));
+    await call({ timeoutMs: 20 }, () =>
+      new Promise((r) => {
+        slow = setTimeout(r, 200);
+      }));
   } catch (e) {
     msg = (e as Error).message;
+  } finally {
+    clearTimeout(slow); // the slow work outlived the ceiling that cut it off
   }
   assert(msg.includes("timeout after 20ms"), msg);
 

@@ -36,50 +36,68 @@ Deno.test("smoke: a healthy app — every eager module answers 200", async () =>
   }
 });
 
-Deno.test("smoke: a static *.server.ts import fails BEFORE boot, naming file:line", async () => {
-  const dir = await fixture({
-    "App.tsx": APP,
-    "lib/label.ts":
-      `import { secret } from "./vault.server.ts";\nexport const label = secret;`,
-    "lib/vault.server.ts": `export const secret = "s";`,
-  });
-  try {
-    const err = await assertRejects(
-      () => smoke({ baseDir: dir, cells: [probe] }),
-      Error,
-    );
-    assert(err.message.includes("blocking module error"), err.message);
-    assert(err.message.includes("lib/label.ts:1"), err.message);
-    assert(err.message.includes("vault.server.ts"), err.message);
-  } finally {
-    await Deno.remove(dir, { recursive: true });
-  }
-});
+Deno.test(
+  "smoke: a static *.server.ts import fails BEFORE boot, naming file:line",
+  {
+    // esbuild transpiles through a native child that `stopEsbuild()` kills;
+    // esbuild owns the handle, so its exit cannot be awaited from here.
+    sanitizeOps: false, // aio-ok: esbuild's service child — exit not awaitable
+    sanitizeResources: false, // aio-ok: same esbuild child
+  },
+  async () => {
+    const dir = await fixture({
+      "App.tsx": APP,
+      "lib/label.ts":
+        `import { secret } from "./vault.server.ts";\nexport const label = secret;`,
+      "lib/vault.server.ts": `export const secret = "s";`,
+    });
+    try {
+      const err = await assertRejects(
+        () => smoke({ baseDir: dir, cells: [probe] }),
+        Error,
+      );
+      assert(err.message.includes("blocking module error"), err.message);
+      assert(err.message.includes("lib/label.ts:1"), err.message);
+      assert(err.message.includes("vault.server.ts"), err.message);
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
+);
 
-Deno.test("smoke: a module the dev server refuses to serve fails with its importer chain", async () => {
-  // A dotfile directory passes the static validator (the file exists) and is
-  // 404'd by the dev server's protected-path rule — exactly the class of
-  // "green everywhere, blank in the window" the boot smoke exists for.
-  const dir = await fixture({
-    "App.tsx": APP,
-    "lib/label.ts":
-      `import { v } from "./.private/v.ts";\nexport const label = v;`,
-    "lib/.private/v.ts": `export const v = "hidden";`,
-  });
-  try {
-    const err = await assertRejects(
-      () => smoke({ baseDir: dir, cells: [probe] }),
-      Error,
-    );
-    assert(err.message.includes("HTTP 404"), err.message);
-    assert(
-      err.message.includes("App.tsx → lib/label.ts → lib/.private/v.ts"),
-      err.message,
-    );
-  } finally {
-    await Deno.remove(dir, { recursive: true });
-  }
-});
+Deno.test(
+  "smoke: a module the dev server refuses to serve fails with its importer chain",
+  {
+    // esbuild transpiles through a native child that `stopEsbuild()` kills;
+    // esbuild owns the handle, so its exit cannot be awaited from here.
+    sanitizeOps: false, // aio-ok: esbuild's service child — exit not awaitable
+    sanitizeResources: false, // aio-ok: same esbuild child
+  },
+  async () => {
+    // A dotfile directory passes the static validator (the file exists) and is
+    // 404'd by the dev server's protected-path rule — exactly the class of
+    // "green everywhere, blank in the window" the boot smoke exists for.
+    const dir = await fixture({
+      "App.tsx": APP,
+      "lib/label.ts":
+        `import { v } from "./.private/v.ts";\nexport const label = v;`,
+      "lib/.private/v.ts": `export const v = "hidden";`,
+    });
+    try {
+      const err = await assertRejects(
+        () => smoke({ baseDir: dir, cells: [probe] }),
+        Error,
+      );
+      assert(err.message.includes("HTTP 404"), err.message);
+      assert(
+        err.message.includes("App.tsx → lib/label.ts → lib/.private/v.ts"),
+        err.message,
+      );
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
+);
 
 Deno.test("smoke: no entry is a loud refusal, not a vacuous pass", async () => {
   const dir = await Deno.makeTempDir({ prefix: "aio-smoke-empty-" });

@@ -658,9 +658,17 @@ export async function swapArtifact(opts: {
  *      why this path failed on every single attempt.
  *    • flat binary — the plain case.
  *
- *  Throws with the paths named when it cannot finish. The caller must NOT
- *  swallow that: a rollback that failed and said nothing is the worst of the
- *  three possible outcomes. */
+ *  Throws with EVERY path named when it cannot finish — the stable one, the
+ *  version that worked, and wherever the build that failed now sits — plus the
+ *  one command that puts something back. The caller must NOT swallow that, and
+ *  must not paraphrase it either: a rollback that failed and said nothing is
+ *  the worst of the possible outcomes, and a rollback that failed and did not
+ *  say WHERE the artifact went is the second worst. The flat layout has a
+ *  moment with nothing at the stable path (the failed build moved aside, the
+ *  good one not yet in); when the second rename fails, the put-back fails for
+ *  the same reason more often than not — a mount gone read-only, an install
+ *  dir locked down — and the user is left with neither. That error used to
+ *  name only the second rename. */
 export async function restoreArtifact(
   current: string,
   previous: string,
@@ -679,9 +687,52 @@ export async function restoreArtifact(
   const layout = await versionedInstall(current);
   if (layout) {
     const tmpLink = `${current}.rollback`;
-    await Deno.remove(tmpLink).catch(() => {});
-    await Deno.symlink(previous, tmpLink);
-    await Deno.rename(tmpLink, current);
+    const untouched =
+      `nothing was changed: ${current} still points at ${layout.target}, ` +
+      `the build that failed, and ${previous} is untouched`;
+    // A leftover from a rollback interrupted between its two steps is OUR
+    // symlink and goes quietly. Anything else wearing that name — a directory,
+    // a file we lack the permission for — is not removed recursively behind
+    // the user's back; it is named, because it is exactly what would make the
+    // symlink below fail with a bare `File exists`.
+    try {
+      await Deno.remove(tmpLink);
+    } catch (e) {
+      if (!(e instanceof Deno.errors.NotFound)) {
+        throw new Error(
+          `${tmpLink} is in the way of the rollback and could not be ` +
+            `removed (${e}) — ${untouched}. Clear it and retry:\n` +
+            `  rm -rf ${tmpLink}`,
+          { cause: e },
+        );
+      }
+    }
+    try {
+      await Deno.symlink(previous, tmpLink);
+    } catch (e) {
+      throw new Error(
+        `could not create the link ${tmpLink} → ${previous} (${e}) — ` +
+          `${untouched}. Re-point the link by hand:\n` +
+          `  ln -sfn ${previous} ${current}`,
+        { cause: e },
+      );
+    }
+    try {
+      await Deno.rename(tmpLink, current);
+    } catch (e) {
+      // The link was made but never moved into place: `current` is unchanged
+      // and `<current>.rollback` is left behind, pointing at `previous`.
+      // `ln -sfn`, not `mv`: on the electron-zip layout the target is a
+      // DIRECTORY, and `mv` of a link onto a link-to-a-directory moves it
+      // INSIDE.
+      throw new Error(
+        `could not re-point ${current} at ${previous} (${e}) — it still ` +
+          `points at ${layout.target}, the build that failed, and the link ` +
+          `${tmpLink} → ${previous} was left behind. Finish the rollback ` +
+          `by hand:\n  ln -sfn ${previous} ${current} && rm ${tmpLink}`,
+        { cause: e },
+      );
+    }
     return;
   }
   // Move whatever is at the stable path aside FIRST. A directory cannot be
@@ -690,13 +741,56 @@ export async function restoreArtifact(
   let aside: string | null = null;
   if (await lexists(current)) {
     aside = `${current}.failed-${Date.now()}`;
-    await Deno.rename(current, aside);
+    try {
+      await Deno.rename(current, aside);
+    } catch (e) {
+      throw new Error(
+        `could not move the build that failed aside (${e}) — nothing was ` +
+          `changed: ${current} still holds it, and ${previous} is untouched. ` +
+          `Put the version that worked back by hand:\n` +
+          `  mv ${previous} ${current}`,
+        { cause: e },
+      );
+    }
   }
   try {
     await Deno.rename(previous, current);
   } catch (e) {
-    if (aside) await Deno.rename(aside, current).catch(() => {});
-    throw e;
+    if (!aside) {
+      throw new Error(
+        `could not move ${previous} to ${current} (${e}) — nothing was ` +
+          `changed: there was no artifact at ${current}, and ${previous} is ` +
+          `untouched. Put it back by hand:\n  mv ${previous} ${current}`,
+        { cause: e },
+      );
+    }
+    // The name is vacant and the version that worked did not go in. Put the
+    // build that failed back so SOMETHING launches — and when that fails too
+    // (the same read-only mount, the same permission), the artifact's
+    // whereabouts ARE the message. Rethrowing the first error here used to
+    // leave the user with an empty stable path, a `.failed-` copy nobody had
+    // named, and an error about a rename of `previous`.
+    try {
+      await Deno.rename(aside, current);
+    } catch (e2) {
+      throw new Error(
+        `could not move ${previous} to ${current} (${e}), and could not put ` +
+          `the build that failed back either (${e2}). NOTHING is at ` +
+          `${current} now: the build that failed is at ${aside}, and the ` +
+          `version that worked is still at ${previous}. Put one of them ` +
+          `back by hand:\n` +
+          `  mv ${previous} ${current}   (the rollback)\n` +
+          `  mv ${aside} ${current}   (the build that failed)`,
+        { cause: e },
+      );
+    }
+    throw new Error(
+      `could not move ${previous} to ${current} (${e}) — the build that ` +
+        `failed was put back, so ${current} still holds it and ${previous} ` +
+        `is untouched. Put the version that worked back by hand:\n` +
+        `  mv ${previous} ${current}`,
+      { cause: e },
+    );
   }
   if (aside) {
     await Deno.remove(aside, { recursive: true }).catch(() => {});
