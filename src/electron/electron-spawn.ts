@@ -369,6 +369,87 @@ function forwardStderr(proc: Deno.ChildProcess): void {
   })();
 }
 
+/** The project root a `node_modules/.bin/electron` launcher belongs to, or
+ *  null when `bin` is not that launcher (a real binary: $ELECTRON_PATH, the
+ *  shipped `./electron/`, the fetched runtime). Pure — both path separators,
+ *  the Windows `.cmd` spelling, relative and absolute. */
+export function electronShimRoot(bin: string): string | null {
+  const m = /^(.*?)node_modules[\/\\]\.bin[\/\\]electron(?:\.cmd)?$/.exec(bin);
+  if (!m) return null;
+  const root = m[1]!.replace(/[\/\\]+$/, "");
+  return root === "" || root === "." ? "." : root;
+}
+
+/** The executable `bin` actually RUNS. The dev launcher is a Node shim
+ *  (`cli.js`) that spawns `<pkg>/dist/<path.txt>` — the same file
+ *  `electronBinReady` checks for — and everything that judges the runtime by
+ *  its neighbours (the sandbox helper, below) has to look there, not beside
+ *  the shim. A real binary, or a shim whose package names no binary, is
+ *  returned as given. */
+export async function realElectronBin(bin: string): Promise<string> {
+  const root = electronShimRoot(bin);
+  if (root === null) return bin;
+  for (const pkg of await electronPkgDirs(root)) {
+    try {
+      const rel = (await Deno.readTextFile(`${pkg}/path.txt`)).trim();
+      const real = `${pkg}/dist/${rel}`;
+      if ((await Deno.stat(real)).isFile) return real;
+    } catch { /* not this layout — try the next */ }
+  }
+  return bin;
+}
+
+/** Chromium's SUID helper lives beside the REAL binary. Pure. */
+export function chromeSandboxPath(realBin: string): string {
+  return realBin.replace(/\/[^/]+$/, "/chrome-sandbox");
+}
+
+/** Can THIS process create an unprivileged user namespace — the sandbox
+ *  Chromium prefers, and the one it silently uses whenever it can, without
+ *  ever looking at the SUID helper?
+ *
+ *  Decided the way Chromium decides it, not the way a distro is named:
+ *  restricted when a sysctl says so (Ubuntu 23.10+'s
+ *  `apparmor_restrict_unprivileged_userns`, Debian's
+ *  `unprivileged_userns_clone`, a `max_user_namespaces` of 0), or when the
+ *  syscall itself is refused — a container's seccomp profile blocks
+ *  CLONE_NEWUSER while every sysctl reads "allowed". The AppArmor sysctl is
+ *  read BEFORE the probe on purpose: Ubuntu confines `unshare` under a profile
+ *  that is allowed namespaces, so the probe passes there while an unconfined
+ *  Electron is refused. `read`/`probe` are injected so the decision table is
+ *  a unit test, not a fleet of VMs. */
+export async function usernsAvailable(
+  read: (p: string) => Promise<string> = (p) => Deno.readTextFile(p),
+  probe: () => Promise<boolean> = unshareProbe,
+): Promise<boolean> {
+  const sysctl = async (p: string) => (await read(p).catch(() => "")).trim();
+  if (
+    await sysctl("/proc/sys/kernel/apparmor_restrict_unprivileged_userns") ===
+      "1"
+  ) return false;
+  if (await sysctl("/proc/sys/kernel/unprivileged_userns_clone") === "0") {
+    return false;
+  }
+  if (await sysctl("/proc/sys/user/max_user_namespaces") === "0") return false;
+  return await probe();
+}
+
+/** `unshare -U true`: the same clone(CLONE_NEWUSER) Chromium's zygote tries.
+ *  No `unshare` on this box says nothing about the kernel — assume allowed,
+ *  which is the pre-existing behaviour. */
+async function unshareProbe(): Promise<boolean> {
+  try {
+    const r = await new Deno.Command("unshare", {
+      args: ["-U", "--", "true"],
+      stdout: "null",
+      stderr: "null",
+    }).output();
+    return r.success;
+  } catch {
+    return true;
+  }
+}
+
 /** Can Chromium's SUID sandbox helper actually be used here?
  *
  *  Electron's `chrome-sandbox` must be owned by root with mode 4755. An
@@ -396,10 +477,25 @@ function forwardStderr(proc: Deno.ChildProcess): void {
 export async function sandboxUsable(
   bin: string,
   stat: (p: string) => Promise<Deno.FileInfo> = Deno.stat,
+  /** Injected in tests — see `usernsAvailable`. */
+  userns: () => Promise<boolean> = usernsAvailable,
 ): Promise<boolean> {
   if (Deno.build.os !== "linux") return true; // only Linux has this helper
   if (Deno.env.get("AIO_ELECTRON_SANDBOX") === "1") return true;
-  const helper = bin.replace(/\/[^/]+$/, "/chrome-sandbox");
+  // With user namespaces available Chromium sandboxes through THEM and never
+  // consults the helper, whatever its mode — that is every stock Debian,
+  // Fedora, Arch and Ubuntu ≤ 23.04, and it is why this problem "historically
+  // did not bite". `--no-sandbox` there would be a real loss of isolation for
+  // nothing; the helper only decides once the namespace route is closed.
+  if (await userns()) return true;
+  // Beside the binary Chromium RUNS. In dev `bin` is `node_modules/.bin/
+  // electron` — a Node shim — and the helper derived from it was
+  // `node_modules/.bin/chrome-sandbox`, which does not exist. "No helper,
+  // nothing to misconfigure" was the verdict, no `--no-sandbox` went out, and
+  // on exactly the machines this check was written for (Ubuntu 24.04+,
+  // containers) `deno task dev` opened no window: FATAL:setuid_sandbox_host
+  // … SIGTRAP. The packaged binary, a real path, was handled all along.
+  const helper = chromeSandboxPath(await realElectronBin(bin));
   try {
     const info = await stat(helper);
     // uid 0 AND the setuid bit — anything else and Chromium aborts.
@@ -422,14 +518,16 @@ async function spawnElectron(
   await Deno.writeTextFile(tmpFile, script);
   const sandboxArgs: string[] = [];
   if (!(await sandboxUsable(bin))) {
+    // Name the helper that IS there — through the dev shim that is
+    // `<pkg>/dist/chrome-sandbox`, not a file beside `.bin/electron`.
+    const helper = chromeSandboxPath(await realElectronBin(bin));
     log.warn(
-      "[aio] electron: chrome-sandbox is not setuid-root (an npm install " +
-        "cannot make it so), and this kernel restricts unprivileged user " +
-        "namespaces — Chromium would abort instead of starting. Launching " +
-        "with --no-sandbox. To use the sandbox instead:\n" +
-        `      sudo chown root:root ${
-          bin.replace(/\/[^/]+$/, "/chrome-sandbox")
-        } && sudo chmod 4755 ${bin.replace(/\/[^/]+$/, "/chrome-sandbox")}\n` +
+      "[aio] electron: this kernel restricts unprivileged user namespaces " +
+        "(measured: the sysctls / a clone(CLONE_NEWUSER) probe), and " +
+        "chrome-sandbox is not setuid-root (an npm install cannot make it " +
+        "so) — Chromium would abort instead of starting. Launching with " +
+        "--no-sandbox. To use the sandbox instead:\n" +
+        `      sudo chown root:root ${helper} && sudo chmod 4755 ${helper}\n` +
         "      then set AIO_ELECTRON_SANDBOX=1",
     );
     sandboxArgs.push("--no-sandbox");

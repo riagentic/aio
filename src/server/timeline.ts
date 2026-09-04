@@ -161,19 +161,36 @@ export function createTimeline(
       last = Math.max(last, seq);
       const hide = isRedactedAction(redact, type, origin);
       const diff = diffState(prev, next);
+      // A redacted CELL's values, not just a redacted ACTION's. `hide` was
+      // decided per action, so the obvious companion method leaked what the
+      // redacted one stored: `unlockWith(secret)` is redacted and `lock()` is
+      // not, and `lock()`'s diff printed `before: "hunter2-SUPERSECRET"` in
+      // cleartext to `am timeline` and the `tt`/`diag` frames. `unlock`/`lock`
+      // is the canonical pair, so that is the DEFAULT shape of the leak.
+      //
+      // The two sibling sinks already withhold by cell for exactly this reason
+      // (`checkpoint.ts`'s `_redactCheckpointState`, and the state-diff in
+      // `diagnostics/mod.ts`), and this file's own header promises the
+      // stronger thing: "no value it carried is retained: not the payload, and
+      // not the before/after of the state it wrote".
+      const hidePath = (path: string): boolean => {
+        if (hide) return true;
+        const dot = path.indexOf(".");
+        return redact.cells.has(dot === -1 ? path : path.slice(0, dot));
+      };
       ring.push({
         seq,
         ts,
         type,
         ...(origin !== undefined ? { origin } : {}),
         payload: hide ? REDACTED : payload,
-        diff: hide
-          ? diff.map((d) => ({
-            path: d.path,
-            before: REDACTED,
-            after: REDACTED,
-          }))
-          : diff,
+        diff: redact.cells.size === 0 && !hide
+          ? diff
+          : diff.map((d) =>
+            hidePath(d.path)
+              ? { path: d.path, before: REDACTED, after: REDACTED }
+              : d
+          ),
       });
       if (ring.length > cap) ring = ring.slice(ring.length - cap);
     },

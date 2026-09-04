@@ -12,12 +12,13 @@
 // the process is alpha61 plus uncommitted work. A lint the developer must
 // remember to run is not the same as the runtime saying so.
 import { assert, assertEquals } from "@std/assert";
+import { tempDir } from "../src/testing/temp-dir.ts";
 import { VERSION } from "../src/server/aio-cli.ts";
 
 const AIO = new URL("..", import.meta.url).pathname;
 
 async function boot(aioVersion: string | null): Promise<string> {
-  const dir = await Deno.makeTempDir({ prefix: "aio-pin-" });
+  const dir = await tempDir("aio-pin-");
   try {
     await Deno.mkdir(`${dir}/src`, { recursive: true });
     await Deno.writeTextFile(

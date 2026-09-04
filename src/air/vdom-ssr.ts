@@ -3,15 +3,15 @@
 
 import { resolveSignalProp } from "./signal-binding.ts";
 import {
+  attrNameOf,
   camelToKebab as _camelToKebab,
   escapeAttr as _escapeAttr,
   escapeHtml as _escapeHtml,
   resolveClassName as _resolveClassName,
   styleValue as _styleValue,
-  svgAttrName,
   VOID_ELEMENTS,
 } from "./ssr-utils.ts";
-import { _propAttr, _RESERVED_PROPS } from "./prop-write.ts";
+import { _classProp, _propAttr, _RESERVED_PROPS } from "./prop-write.ts";
 import type { Signal } from "../state/signal.ts";
 import type { ComponentFn, VNode } from "./vdom-types.ts";
 import {
@@ -92,7 +92,12 @@ export function _renderPropsHtml(
   tag?: string,
 ): string {
   let html = "";
+  // `class` and `className` are ONE attribute — the later key wins, exactly as
+  // `_writeProp` resolves it on the client. Emitting both produced invalid
+  // markup whose parser kept the FIRST, i.e. the opposite class from mount.
+  const classKey = _classProp(props);
   for (const [k, rawV] of Object.entries(props)) {
+    if ((k === "class" || k === "className") && k !== classKey) continue;
     if (
       // Framework metadata — the same set the client renderer refuses to write,
       // `t` (the semantic marker) included.
@@ -133,7 +138,7 @@ export function _renderPropsHtml(
     } else if (v !== false && v != null) {
       // AIO-187: render all non-boolean attrs with explicit value
       // (known boolean attrs like checked/disabled handled above)
-      html += ` ${svgAttrName(name)}="${_escapeAttr(String(v))}"`;
+      html += ` ${attrNameOf(name)}="${_escapeAttr(String(v))}"`;
     }
   }
   return html;

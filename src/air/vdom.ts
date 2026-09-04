@@ -16,6 +16,7 @@ export {
   _Null,
   _setDevA11yCheck,
   _SignalText,
+  childSvgMode,
   ErrorBoundary,
   Fragment,
   Portal,

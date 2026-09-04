@@ -6,13 +6,14 @@
 // when dep/aio is a symlink to that checkout — re-exec'd the SAME am as a new
 // process, which read it again (line 2), plus a hand-off note every time.
 import { assert, assertEquals } from "@std/assert";
+import { tempDir } from "../src/testing/temp-dir.ts";
 import { join } from "@std/path";
 import { readPinQuiet, sameFile } from "../src/am.ts";
 
 const ROOT = new URL("../", import.meta.url).pathname.replace(/\/$/, "");
 
 async function app(): Promise<string> {
-  const dir = await Deno.makeTempDir({ prefix: "aio-pin-once-" });
+  const dir = await tempDir("aio-pin-once-");
   await Deno.mkdir(join(dir, ".aio"));
   await Deno.mkdir(join(dir, "dep"));
   await Deno.symlink(ROOT, join(dir, "dep", "aio"));

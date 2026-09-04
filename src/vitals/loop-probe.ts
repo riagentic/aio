@@ -44,6 +44,14 @@ function computeP95(sorted: number[]): number {
 }
 
 /** Create a loop probe that tracks dispatch health metrics */
+/** How long a reduce measurement keeps grading the loop.
+ *
+ *  `lastReduceTime` is a single sample, not a window, so without an expiry one
+ *  slow dispatch graded the loop for the life of the process. Several
+ *  heartbeats: long enough that a real problem is still degraded while it is
+ *  happening, short enough that an idle app returns to healthy. */
+export const REDUCE_MEASUREMENT_TTL_MS = 10_000;
+
 export function createLoopProbe(thresholds: VitalThresholds): LoopProbeAPI {
   // Sliding window of reduce durations for p95
   let reduceTimes: number[] = [];
@@ -54,6 +62,16 @@ export function createLoopProbe(thresholds: VitalThresholds): LoopProbeAPI {
   let queueDepth = 0;
   let effectBacklog = 0;
   let lastReduceTime = 0;
+  /** When that measurement was taken. Without it, `lastReduceTime` is the last
+   *  reduce EVER — never decayed, never windowed — so ONE slow dispatch made
+   *  the loop "degraded" for the life of the process: an idle app fired the
+   *  same alert every 5 s indefinitely (measured: identical message, ts +5004,
+   *  +5002, …, four minutes after the app had gone quiet), `onVitalAlert` and
+   *  `reporter.onAlert` ran once per SECOND behind the bus's dedup, each
+   *  preceded by a full snapshot + hint evaluation, and hint rule 3 — which
+   *  requires a healthy loop — could never fire again, so a later genuine
+   *  freeze reported `hint: null` forever. */
+  let lastReduceAt = 0;
   let lastReduceAction = "";
   let lastReduceCell = "";
   let p95ReduceTime = 0;
@@ -102,11 +120,17 @@ export function createLoopProbe(thresholds: VitalThresholds): LoopProbeAPI {
       : queueDepth >= qt.degraded
       ? "degraded"
       : "healthy";
-    const loop: VitalStatus = lastReduceTime >= lt.frozen
+    // A measurement older than the grading window says nothing about NOW.
+    // Kept generous — several heartbeats — so a real problem still grades
+    // while it is happening, and a finished one stops grading.
+    const fresh = lastReduceAt !== 0 &&
+      Date.now() - lastReduceAt <= REDUCE_MEASUREMENT_TTL_MS;
+    const reduceNow = fresh ? lastReduceTime : 0;
+    const loop: VitalStatus = reduceNow >= lt.frozen
       ? "frozen"
-      : lastReduceTime >= lt.warning
+      : reduceNow >= lt.warning
       ? "warning"
-      : lastReduceTime >= lt.degraded
+      : reduceNow >= lt.degraded
       ? "degraded"
       : "healthy";
 
@@ -121,6 +145,7 @@ export function createLoopProbe(thresholds: VitalThresholds): LoopProbeAPI {
 
   function onPerf(timing: PerfTiming): void {
     lastReduceTime = timing.reduce;
+    lastReduceAt = Date.now();
     lastReduceAction = timing.actionType;
     lastReduceCell = extractCell(timing.actionType);
 
@@ -204,6 +229,7 @@ export function createLoopProbe(thresholds: VitalThresholds): LoopProbeAPI {
     queueDepth = 0;
     effectBacklog = 0;
     lastReduceTime = 0;
+    lastReduceAt = 0;
     lastReduceAction = "";
     lastReduceCell = "";
     p95ReduceTime = 0;

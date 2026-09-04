@@ -64,8 +64,11 @@ export type ProtoHello = {
   ver?: string;
   /** The peer's APP version (`major.minor.build`, docs/build/versioning.md)
    *  — diagnostic, never negotiated. A server sends its own so a client can
-   *  say which build it talks to; a compiled client sends the stamp it
-   *  carries. Additive within protocol v3: a peer without it omits it. */
+   *  say which build it talks to; a COMPILED client (`cli-client.ts`, the
+   *  only client with a stamp to send) sends its own. A browser bundle
+   *  carries no app-version stamp, so it omits this and `am clients` shows
+   *  `app` for the CLI and not for a window — by construction, not by
+   *  oversight. Additive within protocol v3: a peer without it omits it. */
   app?: string;
 };
 
@@ -82,7 +85,12 @@ export function protoHello(ver?: string, app?: string): ProtoHello {
 }
 
 /** Global the peer's hello is remembered in, so a client can say which build
- *  it talks to (`peerHello().app`) — set by every transport's proto handler. */
+ *  it talks to (`peerHello().app`).
+ *
+ *  Set by every CLIENT transport's proto handler — a client has ONE peer, so a
+ *  global is the right shape for it. A SERVER has many, and records the same
+ *  fact per connection instead (`meta.peer` in `server-ws.ts`, `client.peer`
+ *  in `uds.ts`), which is what `am clients` reports. */
 const PEER_HELLO = "__aioPeerHello";
 
 export function rememberPeerHello(h: ProtoHello): void {

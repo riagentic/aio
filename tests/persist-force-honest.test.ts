@@ -7,6 +7,9 @@
 // Now `forcePersist` IS the flush, awaited: the reply comes back once the
 // cycle has landed, and a cycle that reported a failure is a 500.
 import { assert, assertEquals } from "@std/assert";
+import { SKV_SCHEMA, sqliteKv } from "../src/server/skv-sqlite.ts";
+import { createDB } from "../src/server-entry.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 // @ts-ignore node:sqlite types unavailable when an old @types/node shadows them
 import { DatabaseSync } from "node:sqlite";
 import { join } from "@std/path";
@@ -128,6 +131,88 @@ Deno.test("persistence manager: flushPersist() resolves, lastCycleError() carrie
   const err = p.lastCycleError();
   assert(err, "a refused cycle must be readable after the flush");
   assert(/disk is full/.test(err.message), err.message);
+});
+
+// 50audits §1 + §2 (RED, silent data loss): the three tests above could not
+// see the bug they were written for. Two of them inject their own
+// `forcePersist`, and the manager one picks `transaction()` throwing — the one
+// failure mode that reaches `_reportPersistError` DIRECTLY. The refusal that
+// actually happens in the field goes through `_reportRefusedCell`, which
+// deduped the verdict along with the log line: cycle 1 reported, cycle 2 and
+// every cycle after it reported NOTHING, so `am persist` answered
+// `{"ok":true}` forever while nothing reached disk.
+//
+// The only place the bug lives is the SECOND cycle against the same refused
+// cell. That is what this test is.
+Deno.test("persistence manager: a cell refused TWICE reports on the second cycle too", async () => {
+  const dir = await tempDir("persist-verdict-");
+  const db = createDB(join(dir, "state.db"));
+  await db.execute(SKV_SCHEMA);
+  const kv = sqliteKv(db);
+  const errorLines: string[] = [];
+  // A BigInt is what a real app produces — `JSON.stringify` throws on it, and
+  // that throw is the per-cell refusal path.
+  const state = {
+    todo: { items: [{ id: 1 }], scratch: 0n as unknown },
+  } as Record<string, unknown>;
+  const p = createPersistenceManager({
+    appId: "verdict",
+    persistKey: "verdict",
+    persistMode: "single",
+    persistMs: 5,
+    log: {
+      debug() {},
+      info() {},
+      warn() {},
+      error(m: string) {
+        errorLines.push(m);
+      },
+    },
+    getState: () => state,
+    getDBState: (s: Record<string, unknown>) => s,
+    kvDb: kv,
+    asyncDb: db,
+    dbSchema: undefined,
+    getReportOpts: () => ({ onError: () => {} }),
+    // deno-lint-ignore no-explicit-any
+  } as any);
+  try {
+    await p.flushPersist();
+    assert(p.lastCycleError(), "cycle 1 must report the refusal");
+
+    // A real change the operator then asks to flush.
+    (state.todo as { items: { id: number }[] }).items.push({ id: 2 });
+    await p.flushPersist();
+    const second = p.lastCycleError();
+    assert(
+      second,
+      "cycle 2 refused the same cell and answered `ok` — this is the lie " +
+        "`am persist` told forever",
+    );
+    assert(/was NOT written/.test(second.message), second.message);
+
+    // A third, to pin that it is not an off-by-one.
+    (state.todo as { items: { id: number }[] }).items.push({ id: 3 });
+    await p.flushPersist();
+    assert(p.lastCycleError(), "cycle 3 must report too");
+
+    // The dedupe still does its ONE job: the console is not spammed.
+    const refusals = errorLines.filter((m) => /was NOT written/.test(m));
+    assertEquals(
+      refusals.length,
+      1,
+      `the log line must stay deduped, got ${refusals.length}`,
+    );
+
+    // And the verdict clears when the value is fixed — a stuck `true` would
+    // be the same defect wearing the other mask.
+    (state.todo as Record<string, unknown>).scratch = null;
+    await p.flushPersist();
+    assertEquals(p.lastCycleError(), null, "a clean cycle must clear it");
+  } finally {
+    await db.close();
+    await dropTempDir(dir);
+  }
 });
 
 Deno.test("end to end: after POST /persist the write is on disk while the app still runs", async () => {

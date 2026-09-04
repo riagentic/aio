@@ -51,6 +51,11 @@ function boot(clientId: string, storage = createMemoryStorage()) {
   return { engine, sent, confirmed: () => confirmed };
 }
 
+// Stamped relative to NOW: an UNKNOWN op stamped older than the server's
+// tombstone window is refused by name (`STALE_OP_REASON`), and an epoch-era
+// literal is an ordering label, not "an op from 1970". Offsets keep order.
+const T0 = Date.now();
+
 Deno.test("a reloaded client gets its own past edits back, not just its peers'", async () => {
   _resetServerTsForTest();
   const { db, close } = createTestDb();
@@ -74,7 +79,7 @@ Deno.test("a reloaded client gets its own past edits back, not just its peers'",
     await handler.handleOp(
       {
         id: "m1",
-        hlc: [1000, 0, "me"] as HLC,
+        hlc: [T0 + 0, 0, "me"] as HLC,
         cell: CELL,
         action: "add",
         payload: "mine-1",
@@ -85,7 +90,7 @@ Deno.test("a reloaded client gets its own past edits back, not just its peers'",
     await handler.handleOp(
       {
         id: "p1",
-        hlc: [1001, 0, "peer"] as HLC,
+        hlc: [T0 + 1, 0, "peer"] as HLC,
         cell: CELL,
         action: "add",
         payload: "peer-1",
@@ -96,7 +101,7 @@ Deno.test("a reloaded client gets its own past edits back, not just its peers'",
     await handler.handleOp(
       {
         id: "m2",
-        hlc: [1002, 0, "me"] as HLC,
+        hlc: [T0 + 2, 0, "me"] as HLC,
         cell: CELL,
         action: "add",
         payload: "mine-2",
@@ -148,7 +153,7 @@ Deno.test("a reload with a still-unsent op applies it exactly once", async () =>
     await handler.handleOp(
       {
         id: "p1",
-        hlc: [1000, 0, "peer"] as HLC,
+        hlc: [T0 + 0, 0, "peer"] as HLC,
         cell: CELL,
         action: "add",
         payload: "peer-1",
@@ -165,7 +170,7 @@ Deno.test("a reload with a still-unsent op applies it exactly once", async () =>
       cell: CELL,
       action: "add",
       payload: "mine-offline",
-      hlc: [1001, 0, "me"],
+      hlc: [T0 + 1, 0, "me"],
       confirmed: false,
       _clientTs: Date.now(),
     });

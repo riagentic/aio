@@ -190,6 +190,16 @@ export function _rerenderComponent(inst: ComponentInstance): void {
       `[aio-renderer] Component render error in <${failedName}>:`,
       error,
     );
+    // …and TELL THE HARNESS. A throw on the FIRST render propagates out of
+    // mount and fails the test; every render error after that was
+    // `console.error`'d and dropped, so `testUI` showed stale content and an
+    // assertion on the OLD value passed "correctly". Prod keeps its graceful
+    // degradation (keep the last good output) — this is dev-stricter-only,
+    // category (b).
+    _renderErrorSink?.(
+      error instanceof Error ? error : new Error(String(error)),
+      failedName,
+    );
     _subscribeComponentDeps(inst, deps);
     inst.deps = deps;
     return;
@@ -377,6 +387,20 @@ export function _subscribeComponentDeps(
 }
 
 // ── Hooks factory ─────────────────────────────────────────────────────
+
+/** Where a re-render throw is reported, on top of the console line.
+ *
+ *  `testUI` installs this: a render error after the first render used to be
+ *  logged and dropped, so the harness could not see it and a test asserting
+ *  the STALE value passed. @internal */
+let _renderErrorSink: ((e: Error, component: string) => void) | null = null;
+
+/** Install (or clear, with `null`) the render-error sink. @internal */
+export function _setRenderErrorSink(
+  fn: ((e: Error, component: string) => void) | null,
+): void {
+  _renderErrorSink = fn;
+}
 
 export function _createHooks(rootState: RootState): VDomHooks {
   return {

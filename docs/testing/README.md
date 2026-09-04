@@ -38,7 +38,7 @@ onboarding lab drives the built app over CDP. If a project's own task promises
 more than its gate proves — a "browser check" that is a static walk — the doc
 lies; fix the wording or add the gate.
 
-## Sanitizers stay on
+## Sanitizers
 
 Deno's leak sanitizers (`sanitizeOps`, `sanitizeResources`, `sanitizeExit`) are
 the one thing that tells a test it left a timer, a socket, a file or a child
@@ -49,7 +49,15 @@ count of unexplained opt-outs at zero: an opt-out must carry
 names the resource the test cannot reach (a real browser driven over CDP, a
 compiled binary that re-execs itself, a Wine or VM child). Everything else
 cleans up — await what you started, close what you opened, `await using` what
-has a disposer — and proves it by running green with the sanitizers on.
+has a disposer.
+
+**They are currently OFF, and that is the honest state.** Deno 2.9 made
+`--sanitize-ops` / `--sanitize-resources` opt-**in** (they used to be on by
+default) and no aio task passes them, so the suite has no leak floor right now:
+measured on 2026-09-04, turning them on reds **702 of 7009** tests, mostly
+booted test apps that leave their file watcher behind. `check:sanitizers` says
+so on every run and `todo.md` carries the work. Until it is done, the ratchet
+above freezes opt-outs from a mechanism that is not running.
 
 ## Driving the app you are running
 

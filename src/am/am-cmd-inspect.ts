@@ -18,11 +18,10 @@ import {
   clientTimeout,
   FETCH_TIMEOUT,
   httpGet,
-  resolveControlPort,
   trojanGet,
   trojanPost,
 } from "./am-http.ts";
-import { bytes } from "../diagnostics/fmt.ts";
+import { bytesOrUnserializable, HEY } from "../diagnostics/fmt.ts";
 
 // ── Constants ───────────────────────────────────────────────
 
@@ -560,12 +559,12 @@ export type TopMetrics = {
   cells: Record<string, number>;
 };
 
-/** Human-readable bytes; -1 = an unserializable (cyclic) cell slice. The
- *  SENTINEL is this command's; the arithmetic is the framework's one spelling
- *  (`fmt.bytes`), so a size reads the same here as in a build or a log. */
-export function fmtBytes(n: number): string {
-  return n < 0 ? "(cyclic)" : bytes(n);
-}
+/** Human-readable bytes; the framework's one spelling (`fmt`), so a size reads
+ *  the same here as in a build or a log — INCLUDING the unserializable
+ *  sentinel, which used to be this command's private `(cyclic)` and was
+ *  printed as a plain `-1` by `am status` and as `—` by `am cost`. It is not
+ *  usually cyclic (a BigInt is the common case) and it is never a size. */
+export const fmtBytes: (n: number) => string = bytesOrUnserializable;
 
 /** Render ONE `am top` frame — pure (no I/O), so it's unit-testable. Cells are
  *  sorted by serialized state size, descending (the "what's heavy" signal). */
@@ -652,22 +651,53 @@ export async function cmdHealth(
   const port = resolvePort(flags.port, appId, {
     explicit: flags.app !== undefined,
   });
-  const ctrlPort = resolveControlPort(port, appId);
-  try {
-    const resp = await fetch(`http://127.0.0.1:${ctrlPort}/`, {
-      signal: AbortSignal.timeout(FETCH_TIMEOUT),
-    });
-    await resp.body?.cancel();
+  // Through `httpGet`, which knows about the SOCKET — and asking
+  // `/__aio/health`, which only an aio app answers.
+  //
+  // A raw `fetch` to a TCP port was blind and credulous at once: a socket-only
+  // app (the default `--client=electron` shape) reported `{"healthy":false}`
+  // and exit 1 while `am state`/`am surface`/`am dispatch` all reached it,
+  // and an unrelated `Deno.serve` on the same port reported
+  // `{"healthy":true,"status":200}` and exit 0. `httpGet`'s own comment says
+  // why it exists — "without this `am state` would work on a socket-only app
+  // while `am health` reported it unreachable: one app, two verdicts" — and
+  // `am health` was the one command it was written for and the one that did
+  // not call it.
+  const r = await httpGet(port, "/__aio/health", appId);
+  if (!r.ok) {
     out(
-      mode === "pretty"
-        ? `healthy (${resp.status})`
-        : { healthy: true, status: resp.status },
+      mode === "pretty" ? `unreachable — ${r.error}` : {
+        healthy: false,
+        error: r.error,
+      },
       mode,
     );
-  } catch {
-    out(mode === "pretty" ? "unreachable" : { healthy: false }, mode);
     Deno.exit(1);
   }
+  let body: { status?: string; appId?: string } | null = null;
+  try {
+    body = JSON.parse(r.data) as { status?: string; appId?: string };
+  } catch {
+    // Something answered, and it is not an aio app. `am stop --port=N`
+    // already says this sentence; a health check must not report a stranger's
+    // web server as this app being up.
+    out(
+      mode === "pretty" ? "not an aio app" : {
+        healthy: false,
+        error:
+          `something answers there but it is not an aio app (no /__aio/health) ` +
+          `— wrong port?`,
+      },
+      mode,
+    );
+    Deno.exit(1);
+  }
+  out(
+    mode === "pretty"
+      ? `healthy (${body?.status ?? "ok"})`
+      : { healthy: true, status: body?.status ?? "ok", appId: body?.appId },
+    mode,
+  );
 }
 
 /** `am discover [--timeout=ms]` — list exposed aio apps on the LAN via UDP
@@ -735,6 +765,16 @@ export async function cmdProfile(
       mode,
     );
     Deno.exit(1);
+  }
+  // A profile is "one file, use forever" — for a LOOPBACK-only app it is one
+  // file that works on THIS MACHINE only, and that is worth saying before
+  // someone mails it to a colleague. `host` names the truth either way.
+  if (profile.host === "127.0.0.1") {
+    console.error(
+      `${HEY} am profile: "${appId}" is bound to 127.0.0.1 (no --expose), so this ` +
+        `profile only connects from this machine. Restart it with --expose ` +
+        `to make a profile another device can use.`,
+    );
   }
   const outArg = args.find((a) => a.startsWith("--out="));
   if (outArg) {

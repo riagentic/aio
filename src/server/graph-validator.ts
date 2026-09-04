@@ -135,6 +135,16 @@ export function resolveSpecifier(
     return { kind: "external", url: spec };
   }
 
+  // A specifier that names its own scheme is resolved by that scheme, not by
+  // the import map: a URL import loads from the URL, `npm:`/`jsr:` are Deno's
+  // to resolve on the server and esbuild's to judge in the prod bundle. None
+  // of them is a missing MAPPING, which is the one thing this branch reports.
+  // `node:` deliberately falls through — it is the browser's guaranteed break
+  // and has its own category below.
+  if (/^(?:https?:\/\/|data:|blob:|npm:|jsr:)/.test(spec)) {
+    return { kind: "external", url: spec };
+  }
+
   // The framework's own SERVER entry is deliberately absent from the browser
   // import map (loading SQLite/Worker code in a browser is the bug this map
   // prevents). An app reaches it the documented way — a dynamic
@@ -208,7 +218,7 @@ export function resolveSpecifier(
 // THE list lives in src/entries.ts (alpha52 one-decider; aiol imports the
 // same set, so the dev-server diagnostic and the linter can never disagree).
 import { SERVER_ONLY_AIO_SYMBOLS } from "../entries.ts";
-import { codeText } from "../diagnostics/code-mask.ts";
+import { codeMask, codeText } from "../diagnostics/code-mask.ts";
 import { count } from "../diagnostics/fmt.ts";
 
 /** Detect server-only APIs in browser-bound code.
@@ -779,6 +789,21 @@ export async function validateGraph(
       ) {
         e.category = "server-only-api";
         if (isDeferred) e.deferred = true;
+      } else if (isDeferred) {
+        // The same escape hatch as the two branches above, applied to the
+        // mapping check itself. A chunk the browser never eagerly loads is
+        // resolved by whoever DOES load it — the server, through deno.json —
+        // so holding it to the BROWSER import map is a category error, and a
+        // blocking one: the visual app manager (`amui`) was served the
+        // diagnostic page for an `import('/app.js')` that lives in the
+        // framework's own HTML template, reached through a `*.server.ts`
+        // re-export. A lazily-loaded BROWSER chunk with a genuinely missing
+        // package is still refused — by the prod-bundle judge below, which
+        // follows dynamic imports exactly as `deno task build` does.
+        e.category = "server-only-api";
+        e.deferred = true;
+        e.message +=
+          " (reached only via dynamic import — resolved by the server through deno.json, not by the browser import map; deferred, not blocking)";
       }
     } else if (e.category === "server-only-api" && isDeferred) {
       // `Deno.*`/`@std` USAGE inside a dynamic-only module — same escape hatch,
@@ -852,110 +877,144 @@ async function sha16(text: string): Promise<string> {
     .join("").slice(0, 16);
 }
 
-/** Extract import specifiers from transpiled JS, split by kind. STATIC imports
- *  form the EAGER graph (linked at load — a server-only static import is a
- *  guaranteed browser break). DYNAMIC `import()` is a code-split boundary —
- *  deferred/conditional, the legitimate server-only escape hatch. */
-export function extractImportsByKind(
-  code: string,
-): { static: string[]; dynamic: string[] } {
-  // Strip comments to avoid false positives (esbuild output is clean ESM)
-  const cleaned = code
-    .replace(/\/\/.*$/gm, "") // single-line comments
-    .replace(/\/\*[\s\S]*?\*\//g, ""); // multi-line comments
+/** One import found in source text: the specifier, whether the edge is
+ *  eager (`import … from` / `export … from` / bare `import "x"`) or a
+ *  code-split boundary (`import("x")`), and the 1-based line the reader will
+ *  find it on. */
+export type FoundImport = {
+  spec: string;
+  kind: "static" | "dynamic";
+  line: number;
+};
 
-  // AIO-425: a BARE `from "..."` must NOT be matched — JSX text like
-  // `"More from "` transpiles to a string literal containing `from "`, and the
-  // old regex captured garbage from it, returning a "Module Errors" page for a
-  // perfectly valid app (any string with "from" before a quote — "Recover from
-  // backup", a blog title "Recovering from Disaster"…). Real ESM specifiers only
-  // appear (a) after an `import`/`export` keyword at a statement boundary, or
-  // (b) inside `import(...)`. Require that context.
-  const STATIC_RE =
-    /(?:^|[;\n}])\s*(?:import|export)\b[^;\n]*?\bfrom\s*["']([^"']+)["']/g;
-  // Bare side-effect imports (`import "./x.ts";`) have no `from`, so the
-  // regex above cannot see them — yet they are eagerly linked exactly like a
-  // named import, and an invisible one let a server-only file into a client
-  // graph with a green gate. Statement-boundary anchored
-  // for the same AIO-425 reason.
-  const BARE_STATIC_RE = /(?:^|[;\n}])\s*import\s*["']([^"']+)["']/g;
-  const DYNAMIC_RE = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g;
-
-  // A module specifier never contains whitespace or JS punctuation — a final
-  // guard against any residual garbage capture (belt-and-suspenders).
-  const isSpecifier = (s: string) =>
-    s.length > 0 && !/[\s,;(){}\[\]<>`]/.test(s);
-
-  const staticSpecs: string[] = [];
-  const dynamicSpecs: string[] = [];
-  let m;
-  while ((m = STATIC_RE.exec(cleaned)) !== null) {
-    if (m[1] && isSpecifier(m[1])) staticSpecs.push(m[1]);
-  }
-  while ((m = BARE_STATIC_RE.exec(cleaned)) !== null) {
-    if (m[1] && isSpecifier(m[1])) staticSpecs.push(m[1]);
-  }
-  while ((m = DYNAMIC_RE.exec(cleaned)) !== null) {
-    if (m[1] && isSpecifier(m[1])) dynamicSpecs.push(m[1]);
-  }
-  return { static: staticSpecs, dynamic: dynamicSpecs };
-}
-
-/** Every import written in the SOURCE, with the line it is written on.
+/** THE import scanner — every graph edge the validator walks comes from here.
  *
- *  {@link extractImportsByKind} reads esbuild's OUTPUT, and esbuild has already
- *  elided any import whose bindings are unused — so a typo'd path in a source
- *  file nobody reads a symbol from was invisible to the whole validator: no
- *  terminal error, no overlay, an unchanged page, while `deno check` failed.
- *  Dev was LENIENT where the type-checker was strict, which is backwards.
+ *  It reads the ORIGINAL text through {@link codeMask}, so a match counts only
+ *  when its `import`/`export` keyword, its `from`, and the specifier's opening
+ *  quote all sit at CODE offsets. That is what makes the three false
+ *  positives this scanner used to produce impossible by construction:
  *
- *  Type-only imports are skipped (erased before runtime; they may legally name
- *  a `.d.ts` or a types-only package), and so are non-JS assets — the dev
- *  transpiler strips `import "./style.css"` on purpose. */
-export function extractSourceImports(
-  source: string,
-): Array<{ spec: string; kind: "static" | "dynamic"; line: number }> {
-  const cleaned = source
-    .replace(/\/\/.*$/gm, "")
-    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "));
-  const out: Array<{ spec: string; kind: "static" | "dynamic"; line: number }> =
-    [];
-  const lineAt = (i: number) => cleaned.slice(0, i).split("\n").length;
+ *  - `await import('/app.js')` inside a template literal — the framework's own
+ *    HTML template in `server-html-gen.ts` — was read as a real dynamic import
+ *    of `/app.js`, which is in no import map, so the dev server served the
+ *    diagnostic page instead of the visual app manager. The old scanner
+ *    stripped comments and nothing else; a string is not a comment.
+ *  - JSX text such as `More from "us"` (AIO-425) — the keyword-at-boundary
+ *    anchor caught most of it; the mask catches all of it.
+ *  - `import x from "https://…"` — the old `//`-to-end-of-line comment strip
+ *    ate the URL's own `//`, so a URL import was silently NOT validated.
+ *
+ *  Comments are blanked (offsets and line breaks preserved) BEFORE the regex
+ *  runs, rather than tolerated inside it: an alternation that admits a comment
+ *  body can be backtracked INTO by the engine, and a rejected bogus match
+ *  advances `lastIndex` past the real statement that follows it.
+ *
+ *  The clause between the keyword and `from` is an ALLOWLIST — identifiers,
+ *  whitespace, braces, commas, `*` — instead of "anything but `;`". Import
+ *  clauses contain nothing else, and the allowlist is what lets the clause
+ *  span LINES (a multi-line `import {\n a,\n b\n} from "x"` was invisible to
+ *  the single-line scanner, and esbuild elides it when the bindings are unused,
+ *  so a typo'd path in such an import reached nobody) without ever reaching
+ *  from an `export const s = …` into a `from "…"` written later. */
+export function scanImports(text: string): FoundImport[] {
+  const mask = codeMask(text);
+  const isCode = (i: number) => mask[i] === 1;
+  // Blank comment BODIES and their delimiters. A comment is the one non-code
+  // span that opens with `//` or `/*` at code offsets; a string's opens with
+  // its quote. Same length, same line breaks — every index below is an index
+  // into `text`.
+  const chars = text.split("");
+  for (let i = 0; i < text.length; i++) {
+    if (!isCode(i) || text[i] !== "/") continue;
+    const n = text[i + 1];
+    if (n !== "/" && n !== "*") continue;
+    // A comment with no body (`//` before a newline, `/**/`) has nothing to
+    // blank, and its delimiters are outside every allowlist below.
+    if (i + 2 < text.length && isCode(i + 2)) continue;
+    let j = i;
+    chars[j] = chars[j + 1] = " ";
+    j += 2;
+    while (j < text.length && !isCode(j)) {
+      if (text[j] !== "\n") chars[j] = " ";
+      j++;
+    }
+    if (n === "*" && text[j] === "*" && text[j + 1] === "/") {
+      chars[j] = chars[j + 1] = " ";
+      j += 2;
+    }
+    i = j - 1;
+  }
+  const scan = chars.join("");
+  const out: FoundImport[] = [];
+  const lineAt = (i: number) => {
+    let n = 1;
+    for (let k = 0; k < i; k++) if (text.charCodeAt(k) === 10) n++;
+    return n;
+  };
   const isSpecifier = (s: string) =>
     s.length > 0 && !/[\s,;(){}\[\]<>`]/.test(s);
   // Non-JS assets the transpiler handles or strips — never module-resolved.
   const ASSET_RE =
     /\.(css|scss|sass|less|styl|png|jpe?g|gif|svg|webp|avif|ico|woff2?|ttf|otf|mp[34]|wav|webm)$/i;
-  const push = (
-    spec: string | undefined,
-    kind: "static" | "dynamic",
-    idx: number,
-  ) => {
-    if (!spec || !isSpecifier(spec) || ASSET_RE.test(spec)) return;
-    out.push({ spec, kind, line: lineAt(idx) });
+  const push = (spec: string, kind: "static" | "dynamic", quoteIdx: number) => {
+    if (!isSpecifier(spec) || ASSET_RE.test(spec)) return;
+    out.push({ spec, kind, line: lineAt(quoteIdx) });
   };
   let m: RegExpExecArray | null;
-  // `import ... from "x"` / `export ... from "x"`. The `type` keyword right
-  // after import/export marks an erased import — skipped.
+  // `import ... from "x"` / `export ... from "x"`. `type` right after the
+  // keyword marks an erased import — skipped. (`import { type A } from` is
+  // still a value import of the module; only `import type {…}` erases it.)
   const FROM_RE =
-    /(?:^|[;\n}])\s*(import|export)\s+(type\s+)?([^;\n]*?)\bfrom\s*["']([^"']+)["']/g;
-  while ((m = FROM_RE.exec(cleaned)) !== null) {
-    // `import { type A, type B } from` is still a value import of the module;
-    // only `import type {…}` / `export type {…}` erase it entirely.
+    /(?:^|[;\n}])\s*(import|export)(\s+type)?(?:\s+|(?=[{*]))((?:(?!\b(?:import|export)\b)[\w$\s{},*])*?)\bfrom\s*(["'])([^"'\n]+)\4/g;
+  while ((m = FROM_RE.exec(scan)) !== null) {
+    const kwIdx = m.index + m[0].indexOf(m[1]!);
+    const quoteIdx = m.index + m[0].length - m[5]!.length - 2;
+    let f = quoteIdx - 1;
+    while (f >= 0 && /\s/.test(scan[f]!)) f--;
+    const fromIdx = f - 3;
+    if (!isCode(kwIdx) || !isCode(fromIdx) || !isCode(quoteIdx)) continue;
     if (m[2]) continue;
-    // lastIndex, not m.index: the match STARTS at the statement boundary (the
-    // newline before `import`), which reports the previous line.
-    push(m[4], "static", FROM_RE.lastIndex);
+    push(m[5]!, "static", quoteIdx);
   }
-  const BARE_RE = /(?:^|[;\n}])\s*import\s*["']([^"']+)["']/g;
-  while ((m = BARE_RE.exec(cleaned)) !== null) {
-    push(m[1], "static", BARE_RE.lastIndex);
+  // Bare side-effect imports (`import "./x.ts";`) — eagerly linked exactly
+  // like a named import, and invisible to the `from` scan.
+  const BARE_RE = /(?:^|[;\n}])\s*import\s*(["'])([^"'\n]+)\1/g;
+  while ((m = BARE_RE.exec(scan)) !== null) {
+    const kwIdx = m.index + m[0].indexOf("import");
+    const quoteIdx = m.index + m[0].length - m[2]!.length - 2;
+    if (!isCode(kwIdx) || !isCode(quoteIdx)) continue;
+    push(m[2]!, "static", quoteIdx);
   }
-  const DYNAMIC_RE = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g;
-  while ((m = DYNAMIC_RE.exec(cleaned)) !== null) {
-    push(m[1], "dynamic", DYNAMIC_RE.lastIndex);
+  const DYNAMIC_RE = /\bimport\s*\(\s*(["'])([^"'\n]+)\1\s*\)/g;
+  while ((m = DYNAMIC_RE.exec(scan)) !== null) {
+    const quoteIdx = m.index + m[0].indexOf(m[1]!);
+    if (!isCode(m.index) || !isCode(quoteIdx)) continue;
+    push(m[2]!, "dynamic", quoteIdx);
   }
   return out;
+}
+
+/** Extract import specifiers from transpiled JS, split by kind. STATIC imports
+ *  form the EAGER graph (linked at load — a server-only static import is a
+ *  guaranteed browser break). DYNAMIC `import()` is a code-split boundary —
+ *  deferred/conditional, the legitimate server-only escape hatch.
+ *  {@link scanImports} is the decider; this is its shape for callers that
+ *  want the two sets. */
+export function extractImportsByKind(
+  code: string,
+): { static: string[]; dynamic: string[] } {
+  const found = scanImports(code);
+  return {
+    static: found.filter((i) => i.kind === "static").map((i) => i.spec),
+    dynamic: found.filter((i) => i.kind === "dynamic").map((i) => i.spec),
+  };
+}
+
+/** Every import the SOURCE wrote, with the line it was written on — the
+ *  transpiler elides an import whose bindings are unused, so the walk reads
+ *  the author's text, not esbuild's. {@link scanImports} is the decider. */
+export function extractSourceImports(source: string): FoundImport[] {
+  return scanImports(source);
 }
 
 /** All import specifiers (static + dynamic) from transpiled JS output. */

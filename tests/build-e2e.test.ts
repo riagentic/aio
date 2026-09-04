@@ -333,6 +333,60 @@ Deno.test({
   },
 });
 
+// A GREEN BUILD MUST NOT SHIP A BINARY THAT CANNOT BOOT.
+//
+// The gate above proves artifacts boot from a foreign CWD — but every temp dir
+// it builds in is space-free, and the one place that DOES use a spaced
+// directory (`build.test.ts`) deliberately makes the compile fail and only
+// checks the chosen binary NAME. So this held: a project path containing a
+// space made `deno compile` embed the npm module paths percent-encoded TWICE
+// (`%2520` where the importer says `%20`), nothing resolved, and every flag —
+// `--version` included — died with ERR_MODULE_NOT_FOUND. 100% dud, never
+// intermittent. `deno task dev` in the same directory worked fine, the build
+// printed ✓ with an exit code of 0, and `deno task doctor` said "15 checks
+// passed, 0 failed".
+//
+// The assertion is the INVARIANT, not the failure: either the build refuses,
+// or what it produced runs. That stays true if a future Deno fixes the
+// encoding — the build simply starts passing this from the other side.
+Deno.test({
+  name:
+    "artifact: a build in a path with a space either FAILS or produces a binary that runs",
+  ignore: !GATE,
+  fn: async () => {
+    // NB: no word here that the assertion below could match — the refusal
+    // must be recognised by what it SAYS, not by the path echoed back in it.
+    const dir = await makeApp("counter", "build e2e gap ");
+    assert(dir.includes(" "), `temp dir has no space: ${dir}`);
+    try {
+      const r = await buildFlags(dir, "--compile");
+      if (r.code !== 0) {
+        // Refused — which is the whole point. It must say WHY, not just fail.
+        assert(
+          /compiled, but does not run|BROKEN BUILD/.test(r.out + r.err),
+          `the build failed without naming the reason:\n${r.out}\n${r.err}`,
+        );
+        return;
+      }
+      const bin = findBinary(dir);
+      await Deno.chmod(bin, 0o755);
+      const out = await new Deno.Command(bin, {
+        args: ["--version"],
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+      assertEquals(
+        out.code,
+        0,
+        `the build reported success and shipped a binary that cannot run:\n` +
+          new TextDecoder().decode(out.stderr),
+      );
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
 // ── 1. every server-ish compile target ships a binary that boots elsewhere ────
 
 const SERVER_TARGETS = [

@@ -416,6 +416,19 @@ export function bytes(n: number): string {
   return `${v.toFixed(1)} ${units[i]}`;
 }
 
+/** The value a byte count takes when the thing being measured cannot be
+ *  serialized at all (a BigInt or a cycle in a cell's slice). It is a
+ *  SENTINEL, never a size — `bytesOrUnserializable` is how it is read, and
+ *  nothing may format it with {@linkcode bytes}, which would print `-1 B`. */
+export const UNSERIALIZABLE_BYTES = -1;
+
+/** {@linkcode bytes}, except that {@linkcode UNSERIALIZABLE_BYTES} renders as
+ *  the WORD. `-1` printed as a size is how an app whose every write is being
+ *  refused looked like an app with a very small cell. */
+export function bytesOrUnserializable(n: number): string {
+  return n === UNSERIALIZABLE_BYTES ? "unserializable" : bytes(n);
+}
+
 /** A duration a human can compare at a glance: `840ms`, `8.4s`, `2m 03s`,
  *  `13h 33m`, `4d 6h`. Never `0.13333333333h`. */
 export function dur(ms: number): string {

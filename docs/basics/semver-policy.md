@@ -105,36 +105,58 @@ match documented behavior are patch — even when someone depended on the bug.
    `--tls-cert`/`--tls-key`, a build-only `--headless` on a run task →
    `--client=server-only`). Upgrading is a command, not a diff review.
 3. Keep: deprecated APIs stay functional for at least the rest of the current
-   major — removal happens at the next major, never in a minor/patch.
+   major — removal happens at the next major, never in a minor/patch. Since the
+   alpha77 freeze (below) that is the whole lifecycle in practice: a deprecation
+   is now a RECOMMENDATION, and the old spelling keeps working. Nothing on the
+   1.x surface is scheduled for removal.
 4. Exception: `aio/air/compat` is **permanent** (decision 2026-07-06) — the
    React-compat shims are not scheduled for removal.
 
 ## Release phases
 
-| Phase  | May break                                                                                                                        | Gate                                           |
-| ------ | -------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
-| alpha  | anything, flagged BREAKING in the CHANGELOG                                                                                      | all CI gates green                             |
-| beta   | very rarely — an isolated break when quality demands it (upgrade guide + `am fix`/codemod mandatory); never a broad API refactor | api-snapshot diff reviewed per release         |
-| 1.0.0  | —                                                                                                                                | exit criteria in todo.md (field reports, soak) |
-| 1.x    | additive only (1.1.0) / fixes only (1.0.1)                                                                                       | api:check + this policy                        |
-| 2.0.0+ | breaking allowed, with upgrade guide + deprecation cycle honored                                                                 | docs/upgrade/ guide mandatory                  |
+**The surface is frozen as of alpha77 (decision 2026-09-04).** An app that
+compiles and runs against v1.0.0-alpha76 compiles and runs against every later
+alpha, every beta, and 1.0.0. Not "with one or two exceptions", not "unless
+quality demands it" — none.
 
-Beta is a **quality** statement, not a stability freeze (decision 2026-08-07):
-it means the physical gates passed and adversarial hunts come back clean — not
-that the API stopped moving. But the moving is bounded: **one or two isolated
-breaks across the whole beta phase is the budget** — wild API refactoring is
-alpha behaviour and stays there.
+| Phase      | May break                                                        | Gate                                           |
+| ---------- | ---------------------------------------------------------------- | ---------------------------------------------- |
+| alpha ≤ 76 | (history)                                                        | the seven retirements in alpha76 were the last |
+| alpha ≥ 77 | —                                                                | `check:api`: additive only, no approval path   |
+| beta       | —                                                                | same                                           |
+| 1.0.0      | —                                                                | exit criteria in todo.md (field reports, soak) |
+| 1.x        | additive only (1.1.0) / fixes only (1.0.1)                       | api:check + this policy                        |
+| 2.0.0+     | breaking allowed, with upgrade guide + deprecation cycle honored | docs/upgrade/ guide mandatory                  |
 
-**The beta promise: an app that worked will work — or will work after
-`am fix`.** Every beta-phase break ships with its migration, in this order of
-preference: (1) `aiol --safe-fix`/`am fix` rewrites it automatically — the
-default expectation; (2) where automation genuinely can't, a precise
-step-by-step upgrade-guide recipe. In BOTH cases the running app must say what
-is going on: a loud, actionable message at the old spelling naming the change
-and pointing at the fix — a break a developer discovers by debugging is a broken
-promise regardless of what the guide says. Stability hardens progressively: the
-last two betas before 1.0.0 must be break-free (that is C1), and from 1.0.0 the
-table above is a promise.
+This supersedes the earlier "beta is a quality statement, not a stability
+freeze" position (2026-08-07), which budgeted one or two isolated breaks across
+beta. The budget is now zero, and it starts before beta rather than at it —
+because the point of a compatibility promise is that it has no exceptions. The
+first exception is what makes the second one arguable, and every "safe" break is
+safe by somebody's judgement.
+
+**What that costs, and why it is worth paying.** Some things aio would spell
+differently today keep their current spelling forever. That is the deal: a
+framework whose surface moves is a framework nobody can build on for more than
+one release, and aio's whole claim is that an app is two files' worth of
+decisions — decisions that should still be true next year.
+
+**What it does not freeze.** Behaviour that was silently WRONG is still fixed,
+and a fix may turn a silent wrong answer into a loud refusal — that is the
+project's first rule ("fail loud, never silent"), and code whose observable
+outcome is data loss was never working code. But the bar is exact: before a door
+refuses something it used to accept, the question is _what did working code do
+through it_. (Worked example: refusing a short `am dispatch` on argument COUNT
+would have broken methods that fill in their own defaults, because `fn.length`
+stops at the first defaulted parameter. The line moved to "the call stated no
+argument list at all" — which still catches the reported bug and breaks nobody.)
+
+**How a capability ships now that a signature cannot change.** As a new door. A
+new route, a new flag, a new optional field, an internal type the public one
+does not mention. Adding an optional trailing parameter to a public function is
+provably source-compatible in TypeScript in both directions — and is still
+refused, because "provably safe" is a judgement call and this policy does not
+have one in it.
 
 ## Experimental surface
 

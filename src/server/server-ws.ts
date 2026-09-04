@@ -41,6 +41,25 @@ import {
   protoHello,
 } from "../protocol/protocol-version.ts";
 import { count } from "../diagnostics/fmt.ts";
+import { flushAllUrgent } from "./broadcast-coalescer.ts";
+import { WS_BUFFER_HIGH_WATER, wsWriteBacklog } from "./write-backlog.ts";
+
+/** A whole state is about to be sent to ONE client outside the broadcast
+ *  loop (connect, `subs`, `resync`). It will be serialized from the CURRENT
+ *  state — which already contains the write of every patch still sitting in
+ *  a coalescer's throttle window. Those patches must go out FIRST, to the
+ *  base they describe, or the trailing edge sends them after the snapshot
+ *  and the client applies them a second time: Immer splices an `add`, so a
+ *  server-side `push` that landed in the window arrived twice — server
+ *  ["one","two"], client ["one","two","two"], in range for every guard, no
+ *  error anywhere, and `resync` (the client's own repair) re-creating it.
+ *  `flushAllUrgent` is what client actions already do to skip the window;
+ *  the throttle exists to pace background churn, not to reorder a snapshot
+ *  against the deltas it contains. Pinned by
+ *  tests/full-state-drains-buffered-patches.test.ts, both transports. */
+function drainBeforeSnapshot(): void {
+  flushAllUrgent();
+}
 
 /** Is this socket "error" just the peer going away?
  *
@@ -143,9 +162,18 @@ export function sanitizeClientAction(
     // with its return value, and the loser hung past its ceiling because the
     // expiry check short-circuits on an id that now names a different call —
     // reproduced, one caller receiving another's result. So the server mints
-    // it (`dispatchNetwork`), and a network value is never legitimate here.
+    // it (`dispatchNetwork`), and the network value is discarded.
+    //
+    // Discarded QUIETLY, unlike the fields above: aio's OWN client sends it on
+    // every async call (`bindCellReactive` tags `payload._callId` alongside
+    // the envelope `cid`), so naming it here reported the framework's own
+    // browser and Electron shells as attackers once per `await cell.method()`
+    // — measured on amui, one WARN every 9 s, forever, on both transports.
+    // A warning that fires on correct use trains people to skim warnings,
+    // which is how the one that matters gets missed. The value has no effect
+    // either way (it is always re-minted), so it is expected input, not a
+    // forgery; the fields that WOULD change what the server does stay loud.
     if ((pl as Record<string, unknown>)._callId !== undefined) {
-      forged.push("payload._callId");
       delete (pl as Record<string, unknown>)._callId;
     }
   }
@@ -698,6 +726,8 @@ export function createWsManager(deps: WsDeps): WsManager {
       connections.delete(socket);
       _clearTimers(meta);
       _cleanupVitals(meta);
+      _settlePending(meta);
+      _recheckBacklog();
       if (!meta.disconnected && deps.onDisconnect) {
         meta.disconnected = true;
         try {
@@ -709,6 +739,10 @@ export function createWsManager(deps: WsDeps): WsManager {
     };
 
     socket.onopen = () => {
+      // BEFORE this socket joins `connections`: the buffered patches go to
+      // the peers whose base they describe; this one gets a snapshot that
+      // already holds them (see drainBeforeSnapshot).
+      drainBeforeSnapshot();
       connections.set(socket, meta);
       // The freeze watchdog's clock starts HERE, not at this client's first
       // vitals-ping — a peer that upgrades and then says nothing at all is
@@ -792,6 +826,8 @@ export function createWsManager(deps: WsDeps): WsManager {
         } (${connections.size} total)`,
       );
       _cleanupVitals(meta);
+      _settlePending(meta);
+      _recheckBacklog();
       if (!meta.disconnected && deps.onDisconnect) {
         meta.disconnected = true;
         try {
@@ -802,6 +838,46 @@ export function createWsManager(deps: WsDeps): WsManager {
       }
     };
     return response;
+  }
+
+  /** The connection is gone: answer every control request still waiting on
+   *  it NOW, with the reason. Left alone, the entry ran out its
+   *  `CLIENT_REPLY_TIMEOUT_MS` and then handed the caller the timeout's
+   *  diagnosis — "the window is not VISIBLE / its main thread is busy / a
+   *  headless client" — for a window that had simply closed. A field report
+   *  lost two debugging passes to that text when it was RIGHT; sending someone
+   *  down it for a client that no longer exists is worse. Same rule on UDS
+   *  (`_settlePendingForGone`). Pinned by
+   *  tests/pending-reply-settles-on-disconnect.test.ts. */
+  function _settlePending(meta: ClientMeta): void {
+    const prefix = `${meta.id}:`;
+    for (const [key, pending] of pendingClientState) {
+      if (!key.startsWith(prefix)) continue;
+      pendingClientState.delete(key);
+      clearTimeout(pending.timer);
+      pending.resolve({
+        error: `client ${meta.index} disconnected before answering`,
+      });
+    }
+  }
+
+  /** A socket just left. If no REMAINING peer is over the high-water mark,
+   *  the "a WebSocket client is not draining" alarm has lost its cause.
+   *
+   *  The alarm is raised and lowered per broadcast ROUND
+   *  (server-broadcast.ts), and a round only runs when state changes — so
+   *  after the one wedged tab closed, `/__aio/health` went on reporting a
+   *  peer that was not draining for as long as the app stayed idle, and for
+   *  ever when that tab had been the only client (a round with zero
+   *  connections never says `ok()`). The UDS half clears itself the moment a
+   *  queue drains or dies; this is the WS half of the same rule. `ok()` on a
+   *  tracker that never escalated only resets its counters. Pinned by
+   *  tests/ws-backlog-clears-on-disconnect.test.ts. */
+  function _recheckBacklog(): void {
+    for (const ws of connections.keys()) {
+      if (ws.bufferedAmount > WS_BUFFER_HIGH_WATER) return;
+    }
+    wsWriteBacklog.ok();
   }
 
   function _clearTimers(meta: ClientMeta): void {
@@ -1115,6 +1191,12 @@ export function createWsManager(deps: WsDeps): WsManager {
             source: "server-ws",
           });
           try {
+            // BOTH spellings, on purpose. This peer sent a v2 hello, so it can
+            // read the v2 frame — and `proto-err` was a fully declared,
+            // fully ROUTED frame kind that nothing ever sent, because every
+            // refusal went out as the legacy string alone. The string stays
+            // for the v1 readers that only know it (`am`'s UDS client).
+            socket.send(enc("proto-err", { reason: result.reason }));
             socket.send("__proto-err:" + result.reason);
             socket.close(PROTOCOL_MISMATCH_CLOSE_CODE, "protocol mismatch");
           } catch { /* already closed */ }
@@ -1429,14 +1511,37 @@ export function createWsManager(deps: WsDeps): WsManager {
       log.warn("ws", "bad subs frame");
       return;
     }
+    // Under the OLD subscriptions — the buffered patches describe the base
+    // this client holds, filtered the way it was filtered then.
+    drainBeforeSnapshot();
     meta.subscriptions = subs;
     try {
       const msg = JSON.stringify(
         filterStateBySubs(deps.getUIState(meta.user), meta.subscriptions),
       );
+      // Not sent when the client already holds EXACTLY this text. The first
+      // `subs` of every page arrives right after the connect-time state and,
+      // for the usual wildcard or all-cells subscription, serializes to the
+      // same bytes — so the biggest frame this transport sends went out twice
+      // before the app rendered once, and every per-frame meter counted it
+      // twice. The memo is proof only while it is FRESH (`lastFullJsonStale`,
+      // see server-broadcast.ts); a `resync` is never deduplicated — the
+      // client is telling us its state is wrong, and the memo is the thing in
+      // question. Same rule on UDS. Pinned by
+      // tests/initial-state-sent-once.test.ts.
+      if (!meta.lastFullJsonStale && msg === meta.lastFullJson) {
+        meta.needsFull = false; // it holds the current state — no debt
+        return;
+      }
       socket.send(encRaw("state", msg));
       meta.lastFullJson = msg;
       meta.lastFullJsonStale = false; // exact again: the client holds this text
+      // …and the debt is PAID. `needsFull` is set by the broadcaster when a
+      // round is lost for this client, and was cleared only there — so a
+      // subs/resync that followed a lost round sent the whole state and then
+      // the next round sent it AGAIN. The state just went out; whoever owes it
+      // owes it no longer, whichever path delivered it.
+      meta.needsFull = false;
       meta.bpLastSentAt = Date.now();
     } catch (err) {
       log.warn("ws", `filtered state send error — ${err}`);
@@ -1445,6 +1550,7 @@ export function createWsManager(deps: WsDeps): WsManager {
 
   function _handleResync(socket: WebSocket, meta: ClientMeta): void {
     deps.debug(`ws: client ${meta.id} requested resync`);
+    drainBeforeSnapshot();
     try {
       const msg = JSON.stringify(
         filterStateBySubs(deps.getUIState(meta.user), meta.subscriptions),
@@ -1452,6 +1558,12 @@ export function createWsManager(deps: WsDeps): WsManager {
       socket.send(encRaw("state", msg));
       meta.lastFullJson = msg;
       meta.lastFullJsonStale = false; // exact again: the client holds this text
+      // …and the debt is PAID. `needsFull` is set by the broadcaster when a
+      // round is lost for this client, and was cleared only there — so a
+      // subs/resync that followed a lost round sent the whole state and then
+      // the next round sent it AGAIN. The state just went out; whoever owes it
+      // owes it no longer, whichever path delivered it.
+      meta.needsFull = false;
       meta.bpLastSentAt = Date.now();
     } catch (err) {
       log.warn("ws", `resync send error — ${err}`);

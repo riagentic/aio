@@ -493,6 +493,16 @@ async function withTrojanServer(
     baseDir: dir,
     debug: () => {},
     prod: false,
+    // Every REAL app mounts this (`aio-server.ts` always supplies it), and
+    // `am health` asks it now instead of a bare `GET /` — which reported a
+    // stranger's web server as this app being healthy and could not reach a
+    // socket-only app at all. A fixture that does not answer what the product
+    // asks is not standing in for the product.
+    // No `appId`: `am` runs from the repo cwd and resolves a different one,
+    // and the identity gate compares them — naming one here makes the fixture
+    // refuse the very test it serves (which is the gate working, on a fixture
+    // that is not a real instance).
+    getHealth: () => ({ status: "healthy" }),
     trojan: {
       getState: () => appState,
       getSchedules: () => ["tick"],

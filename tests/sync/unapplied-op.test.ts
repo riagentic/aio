@@ -20,8 +20,13 @@ import { createServerSyncHandler } from "../../src/sync/server-handler.ts";
 import type { HLC } from "../../src/sync/types.ts";
 import { createTestDb, recordingSocket } from "./_test-db.ts";
 
+// Stamped relative to NOW: the server refuses an UNKNOWN op stamped older
+// than its tombstone window (`STALE_OP_REASON`), and a fixture at epoch+100ms
+// is not "an op from 1970", it is an ordering label. The offsets keep their
+// order.
+const T0 = Date.now();
 const hlc = (phys: number, cnt = 0, node = "client-a"): HLC => [
-  phys,
+  T0 + phys,
   cnt,
   node,
 ];

@@ -5,7 +5,16 @@
 // the method and resolves when all its writes are applied. settle() tracks
 // async method triggers to real completion instead of guessing microtasks.
 
-import { assertEquals, assertRejects } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+} from "@std/assert";
+import { childCoverageDir } from "../src/testing/temp-dir.ts";
+
+const ROOT = new URL("..", import.meta.url).pathname;
+const _childCovDir = childCoverageDir();
 import { cell } from "../src/state/cell.ts";
 import { testCell } from "../src/testing/cell-test.ts";
 
@@ -187,24 +196,49 @@ testCell(
   },
 );
 
-testCell(
-  loader,
-  "a failure nobody awaited fails the test even without settle()",
-  async (t) => {
-    t.init();
-    // No settle, no await: the check runs when the test body returns. Proven
-    // by driving the harness's own end-of-test path in the test below.
-    const seen: unknown[] = [];
-    try {
-      t.send.boom!();
-      await new Promise((r) => setTimeout(r, 20)); // let it reject
-      await t.settle();
-    } catch (e) {
-      seen.push(e);
-    }
-    assertEquals(seen.length, 1, "the failure surfaced");
-  },
-);
+// A FAILURE NOBODY AWAITED FAILS THE TEST — even with no settle() at all.
+//
+// This cannot be asserted from inside a `testCell` block: the harness's check
+// runs after the body returns, so a test that proves it must observe ANOTHER
+// test run failing. The version this replaces was a `testCell` block titled
+// exactly this, whose body called `await t.settle()` on its third line — so
+// the claim ("even without settle()") was never exercised. It was also false:
+// the ledger entry is pushed from a `.catch` microtask that had not run when
+// the synchronous end-of-test check executed, so a fire-and-forget failure
+// passed GREEN — including one that threw synchronously on entry.
+Deno.test("a failure nobody awaited fails the test even without settle()", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "testcell-unobserved-" });
+  try {
+    const file = `${dir}/leak.test.ts`;
+    await Deno.writeTextFile(
+      file,
+      `import { cell } from "${ROOT}src/state/cell.ts";\n` +
+        `import { testCell } from "${ROOT}src/testing/cell-test.ts";\n` +
+        `const c = cell("unobserved", {\n` +
+        `  state: { n: 0 },\n` +
+        `  methods: { async boom() { throw new Error("BOOM-UNOBSERVED"); } },\n` +
+        `});\n` +
+        // No await, no settle: the call is started and abandoned.
+        `testCell(c, "leaks a failing call", (t) => { t.send.boom(); });\n`,
+    );
+    const out = await new Deno.Command(Deno.execPath(), {
+      args: ["test", "-A", "--no-check", file],
+      env: { ...Deno.env.toObject(), DENO_COVERAGE_DIR: _childCovDir },
+      cwd: ROOT,
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    const text = new TextDecoder().decode(out.stdout) +
+      new TextDecoder().decode(out.stderr);
+    assert(
+      !out.success,
+      `the child test PASSED while leaking a failing call:\n${text}`,
+    );
+    assertStringIncludes(text, "BOOM-UNOBSERVED");
+  } finally {
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
+  }
+});
 
 // the harness must order calls the way production does: a call
 // STARTS when it is made, so a second action lands while the first is still in

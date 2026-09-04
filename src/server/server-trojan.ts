@@ -17,6 +17,7 @@
 // was not: with the login flows on, the anonymous fall-through reached
 // serveStatic — and this file — with no credential at all.
 // CSRF-protected (X-AIO header on POST), rate-limited.
+import { CELL_METHOD_SEP } from "../state/cell-helpers.ts";
 import { serializeReturn } from "../protocol/return-value.ts";
 import {
   CONTROL_MAX_BODY,
@@ -26,6 +27,8 @@ import {
 } from "./read-body.ts";
 import { enc } from "../protocol/envelope.ts";
 import { snapshotShapeError } from "./server-static.ts";
+import { findUnserializable, PersistSerializeError } from "./persist-guard.ts";
+import { UNSERIALIZABLE_BYTES } from "../diagnostics/fmt.ts";
 import type { AioUser } from "./aio.ts";
 import {
   _isFrameworkInternalActionType,
@@ -91,6 +94,8 @@ export interface TrojanDeps {
     cellMethods?: () => Record<string, string[]>;
     /** Cell id → async method names — the calls a `_callId` can correlate. */
     cellAsyncMethods?: () => Record<string, string[]>;
+    /** Cell id → method name → required argument count (methods-form cells). */
+    cellMethodArity?: () => Record<string, Record<string, number>>;
     cellFields?: () => import("./aio-types.ts").CellFieldFlags;
     udsClients?: () => { index: number; id: string }[];
     requestUdsClientState?: (index: number, msg?: string) => Promise<unknown>;
@@ -98,7 +103,7 @@ export interface TrojanDeps {
   /** Auth mode info for config endpoint */
   authInfo: { mode: string; expose: boolean };
   /** Snapshot support */
-  loadSnapshot?: (json: string) => void;
+  loadSnapshot?: (json: string, opts?: { force?: boolean }) => void;
   /** Time-travel command handler */
   onTTCommand?: (cmd: string, arg?: number) => void;
   /** List connected WS clients (read-only view) */
@@ -110,6 +115,14 @@ export interface TrojanDeps {
   ) => { found: true; promise: Promise<Response> } | { found: false };
   /** Recent transpile errors (dev mode) */
   getRecentErrors: () => unknown[];
+  /** The dev server's import-graph verdict — what decides whether `/` is the
+   *  app or the diagnostic page. `pending` while the boot validation is still
+   *  running (the page is served as the app meanwhile), `null` in prod and
+   *  when there is no UI entry. Dev only, like the diagnostic page itself. */
+  getGraphStatus?: () => {
+    pending: boolean;
+    result: import("./graph-validator.ts").GraphResult | null;
+  } | null;
   /** Find user by ID (trojan ui endpoint) — returns AioUser from users map, or undefined */
   findUserById?: (id: string) => AioUser | undefined;
   /** Headless server-side surface render (`surface/server`) — lets
@@ -185,15 +198,38 @@ export function handleTrojan(
   const route = pathname.slice(TROJAN_PREFIX.length);
   const method = req?.method ?? "GET";
 
-  const json = (data: unknown) =>
-    new Response(JSON.stringify(data, null, 2), {
-      headers: { "Content-Type": "application/json" },
-    });
   const err = (msg: string, status = 400) =>
     new Response(JSON.stringify({ error: msg }), {
       status,
       headers: { "Content-Type": "application/json" },
     });
+  /** Every trojan reply's body.
+   *
+   *  `JSON.stringify` THROWS on a BigInt or a cycle anywhere in state, and the
+   *  throw escaped to the server's generic handler: `am state` and
+   *  `am snapshot` answered a bare `Internal Server Error` at exactly the
+   *  moment an operator most needs a diagnosis — while the persist log, one
+   *  screen away, named the field exactly. `persist-guard` already owns the
+   *  walk that finds it; this is the same answer at the other door. */
+  const json = (data: unknown) => {
+    let body: string;
+    try {
+      body = JSON.stringify(data, null, 2);
+    } catch (e) {
+      const at = findUnserializable(data);
+      return err(
+        at
+          ? new PersistSerializeError(at.path, at.kind, e).message
+          : `this app's state cannot be serialized: ${
+            e instanceof Error ? e.message : String(e)
+          }`,
+        500,
+      );
+    }
+    return new Response(body, {
+      headers: { "Content-Type": "application/json" },
+    });
+  };
 
   // Defense-in-depth: the trojan is dev-only. server-static gates it off in
   // prod (single source of truth); this backstop refuses even if it is ever
@@ -275,6 +311,31 @@ function handleGet(
   const { trojan } = deps;
 
   if (route === "state") return json(trojan.getState());
+
+  // The import-graph verdict, for whoever wants to know whether `/` is the
+  // app or the diagnostic page WITHOUT fetching `/` and guessing from HTML —
+  // `am`, a test, an agent. `pending` is the boot race made visible: the
+  // validation is async, and until it lands the page is served as the app.
+  if (route === "graph") {
+    const g = deps.getGraphStatus?.() ?? null;
+    if (!g) return json({ pending: false, valid: true, errors: [] });
+    if (g.pending || !g.result) {
+      return json({ pending: true, valid: null, errors: [] });
+    }
+    return json({
+      pending: false,
+      valid: g.result.valid,
+      modules: g.result.modules.size,
+      errors: g.result.errors.map((e) => ({
+        file: e.file,
+        line: e.line,
+        category: e.category,
+        message: e.message,
+        fix: e.fix,
+        deferred: e.deferred ?? false,
+      })),
+    });
+  }
 
   if (route === "ui") {
     const userId = new URL(req!.url).searchParams.get("user") ?? undefined;
@@ -388,13 +449,20 @@ function handleGet(
     // Per-cell serialized state size — the "why is it slow / heavy" signal
     // `am top` renders. Cheap: one JSON pass over the authoritative store.
     const cellSizes: Record<string, number> = {};
+    // A `-1` in a byte column is not a signal anyone reads — it was printed as
+    // a size by `am status`, `am metrics` and `am cost`, sitting next to the
+    // one condition that costs an app its data. The sentinel stays (callers
+    // depend on the numeric shape) and is NAMED alongside it, so a reader has
+    // something to key on that is not a magic number.
+    const unserializable: string[] = [];
     const state = trojan.getState();
     if (state && typeof state === "object") {
       for (const [name, slice] of Object.entries(state)) {
         try {
           cellSizes[name] = JSON.stringify(slice)?.length ?? 0;
         } catch {
-          cellSizes[name] = -1; // unserializable (cyclic) — flag, don't throw
+          cellSizes[name] = UNSERIALIZABLE_BYTES; // flag, don't throw
+          unserializable.push(name);
         }
       }
     }
@@ -409,6 +477,9 @@ function handleGet(
         (trojan.udsClients?.() ?? []).length,
       schedules: trojan.getSchedules().length,
       cells: cellSizes,
+      // Only when there IS one — an empty array in every reply is noise, and
+      // its presence is the whole point.
+      ...(unserializable.length ? { unserializable } : {}),
     });
   }
 
@@ -435,7 +506,7 @@ function handleGet(
         try {
           sizes[name] = JSON.stringify(slice)?.length ?? 0;
         } catch {
-          sizes[name] = -1;
+          sizes[name] = UNSERIALIZABLE_BYTES;
         }
       }
     }
@@ -522,7 +593,7 @@ async function handlePost(
       // "ok". Validate a method-form type against the booted cells, normalize the
       // separator, then AWAIT so a rejecting method surfaces as an error.
       const methods = trojan.cellMethods?.() ?? {};
-      const sepIdx = action.type.search(/[:.]/);
+      const sepIdx = action.type.search(CELL_METHOD_SEP);
       // An ALL-DIGITS type is never a valid action — no cell method and no
       // actions-form creator is named `0` — so it can only ever no-op, and it
       // used to do that under a green "ok". The shape that produces it is
@@ -568,6 +639,52 @@ async function handlePost(
             }). Dispatch does nothing.`,
             404,
           );
+        }
+        // ARITY. The route refuses an unknown cell and an unknown method by
+        // name; the number of arguments a KNOWN method needs was never
+        // checked, though the count is right here. `am dispatch todo:add`
+        // (zero args for `add(s, text: string)`) answered `{"ok":true}`, ran
+        // `add(s, undefined)`, and put a row whose declared `text` is gone
+        // into state and onto the screen — the persist guard names the damage
+        // one window later, which is a diagnosis, not a refusal.
+        //
+        // Required arguments only. A default or a rest parameter ends
+        // `fn.length`, so "too many" is not knowably wrong and stays allowed.
+        const required = trojan.cellMethodArity?.()[cell]?.[method];
+        if (required !== undefined && required > 0) {
+          const p = action.payload as { args?: unknown } | undefined;
+          // ONLY a call that supplies NO argument list at all is refused.
+          //
+          // An `args` ARRAY — even an empty one — is the caller STATING their
+          // arguments, and is taken at its word however short it is. That is
+          // not laxity, it is the compatibility line: `fn.length` stops at the
+          // first parameter with a default, so a method that fills its own in
+          // (`reset(s, to) { to ??= 0 }`) reads as requiring an argument it
+          // does not, and refusing on count alone would break a call that
+          // works today. Absent-versus-stated is a fact about the CALL, not a
+          // guess about the method.
+          //
+          // Both shapes the audit measured are still refused: `am dispatch
+          // todo:add` sends no payload at all, and `am dispatch todo:add
+          // text=x` sends a NAMED payload, which a methods-form cell reads as
+          // zero positional arguments.
+          if (!Array.isArray(p?.args)) {
+            return err(
+              `${cell}:${method} takes ${required} argument${
+                required === 1 ? "" : "s"
+              } and this call passes none. They would be \`undefined\` inside ` +
+                `the method, which writes a broken row rather than failing — ` +
+                `so this is refused instead. Dispatch does nothing. Pass them ` +
+                `positionally (\`am dispatch ${cell}:${method} <arg>\`) or as ` +
+                `JSON (\`--args='[…]'\`); if the method really does fill in ` +
+                `its own defaults, say so with an explicit \`--args='[]'\`.` +
+                (p !== undefined
+                  ? ` (\`key=value\` builds a NAMED payload; a methods-form ` +
+                    `cell takes positional arguments.)`
+                  : ""),
+              400,
+            );
+          }
         }
         action.type = `${cell}:${method}`; // normalize dot → colon
         // Correlate the call, so the answer below is the METHOD's answer.
@@ -672,7 +789,10 @@ async function handlePost(
     }
   }
 
-  if (route === "snapshot") {
+  // `snapshot/force` is the same door with the cell-set refusal waived — a
+  // separate ROUTE rather than a query string so both transports (HTTP and the
+  // unix socket, which carries a path and no URL) reach it identically.
+  if (route === "snapshot" || route === "snapshot/force") {
     if (!deps.loadSnapshot) return err("snapshots not available", 501);
     try {
       // Bounded by bytes received. The Content-Length requirement that used
@@ -692,7 +812,14 @@ async function handlePost(
       // number` far away from the POST that caused it.
       const shape = snapshotShapeError(JSON.parse(body));
       if (shape) return err(shape);
-      deps.loadSnapshot(body);
+      try {
+        deps.loadSnapshot(body, { force: route === "snapshot/force" });
+      } catch (e) {
+        // A REFUSAL is not "invalid JSON". The catch below used to swallow
+        // every throw from `loadSnapshot` under that one word, which is how
+        // a load that destroys the state had no other reason to give.
+        return err(e instanceof Error ? e.message : String(e));
+      }
       return json({ ok: true });
     } catch {
       return err("invalid JSON");
@@ -706,7 +833,27 @@ async function handlePost(
       if (body === null) return err("time-travel body too large", 413);
       const { cmd, arg } = JSON.parse(body);
       if (!cmd || typeof cmd !== "string") return err("missing cmd field");
-      if (cmd === "goto" && typeof arg === "number") {
+      // A CLOSED vocabulary, refused by name. This acked any string, so
+      // `am tt puase` answered `{"ok":true}` and paused nothing — while the
+      // dispatch route in this same file refuses an unknown method precisely
+      // because "ok:true must mean EXECUTED".
+      const TT_COMMANDS = ["undo", "redo", "goto", "pause", "resume"];
+      if (!TT_COMMANDS.includes(cmd)) {
+        return err(
+          `unknown time-travel command "${cmd}" — ${TT_COMMANDS.join(", ")}`,
+          404,
+        );
+      }
+      if (cmd === "goto") {
+        if (typeof arg !== "number" || !Number.isInteger(arg) || arg < 0) {
+          return err(
+            `goto takes a whole history index from 0, got ${
+              JSON.stringify(
+                arg,
+              )
+            }`,
+          );
+        }
         deps.onTTCommand("goto", arg);
       } else deps.onTTCommand(cmd);
       return json({ ok: true });

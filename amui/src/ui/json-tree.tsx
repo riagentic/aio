@@ -2,7 +2,7 @@
 // signal of expanded node paths drives it (click a node to toggle). Primitives
 // are type-colored; large containers show a count when collapsed.
 import { signal } from "aio/air";
-import { C, mono } from "./style.ts";
+import { C, mono, press } from "./style.ts";
 
 const expanded = signal<Set<string>>(new Set([""]));
 
@@ -69,7 +69,7 @@ function Node(
     <div>
       <div
         style={{ ...rowStyle, cursor: "pointer" }}
-        onClick={() => toggle(path)}
+        {...press(() => toggle(path))}
       >
         <span style={{ color: C.dim, width: "12px", display: "inline-block" }}>
           {open ? "▾" : "▸"}

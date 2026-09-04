@@ -35,6 +35,7 @@ import { getRegisteredCells } from "../state/cell-reactive.ts";
 import type { ComponentFn } from "../air/vdom-types.ts";
 import type { MountHandle, RootState } from "../air/renderer-types.ts";
 import { _rootStateMap } from "../air/renderer-state.ts";
+import { _setRenderErrorSink } from "../air/renderer-rerender.ts";
 import {
   _isForwardedHandle,
   _resetSurfaceWarnings,
@@ -51,6 +52,7 @@ import { cellAccessAllowed } from "../server/server-auth.ts";
 import { createAioError } from "../diagnostics/error.ts";
 import {
   assertOperable,
+  hiddenReason as _hiddenReason,
   triggerAction,
   triggerChar,
   triggerClear,
@@ -1033,6 +1035,20 @@ async function _buildTestUI(
   // logged and kept, which is exactly the silence field report §4.1 reported.
   // The fix is named: `ui.window.addEventListener`, or `onGlobalKey`.
   const _globalListenerFailures: Error[] = [];
+  // …and the renderer's own failures. A component that throws on its FIRST
+  // render fails the test (mount propagates); every render error AFTER that
+  // was `console.error`'d and dropped, so the UI silently kept stale content
+  // and an assertion on the old value passed. Same channel, same delivery
+  // point: the next observation raises it.
+  _setRenderErrorSink((err, component) => {
+    _globalListenerFailures.push(
+      new Error(
+        `[aio:testUI] <${component}> threw while re-rendering, so the UI is ` +
+          `showing STALE content: ${err.message}`,
+        { cause: err },
+      ),
+    );
+  });
   globalThis.addEventListener = function (
     this: unknown,
     type: string,
@@ -1890,7 +1906,17 @@ async function _buildTestUI(
    *  that names nothing else is unambiguous and must stay silent. */
   function showing(name: string, kind?: UIKind): boolean {
     const scope = currentSurface();
-    if (kind !== "component" && liveElements(scope, name).length > 0) {
+    // "Showing" means a USER can see it, which is the definition
+    // `hiddenReason` already owns and `ui.X.click()` already enforces (it
+    // refuses to click a `display:none` element). `present`/`absent` used to
+    // ask a weaker question — "is it in the surface tree" — so the same toast
+    // was both un-clickable and `present`, and
+    // `waitFor(() => ui.absent("Toast"))` never fired for a CSS-hidden toast:
+    // a green wait for a screen state that was not on screen. One decider.
+    if (
+      kind !== "component" &&
+      liveElements(scope, name).some((e) => _hiddenReason(e._el) === null)
+    ) {
       return true;
     }
     if (kind === "element") return false;

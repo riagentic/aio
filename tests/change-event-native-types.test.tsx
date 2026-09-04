@@ -61,3 +61,32 @@ testUI(App, "a text input keeps React's per-keystroke onChange", async (ui) => {
   await ui.settle();
   assertEquals(fired(), ["text", "text"]);
 });
+
+// The same element, its props in the OTHER order. `applyProps` walks props in
+// source order and asked the ELEMENT for its type when it mapped `onChange` —
+// with `onChange` written before `type="file"` the element still said
+// `type="text"`, so the handler was wired to `input` and the picker's `change`
+// went nowhere. Two spellings of one component, two different elements.
+function OrderApp() {
+  return (
+    <div>
+      <input t="early" onChange={() => note("early")} type="file" />
+    </div>
+  );
+}
+
+testUI(
+  OrderApp,
+  'onChange written BEFORE type="file" still listens to `change`',
+  async (ui) => {
+    fired.set([]);
+    const el = ui.early.info._el as unknown as HTMLElement;
+    const Ev = el.ownerDocument!.defaultView!.Event;
+    el.dispatchEvent(new Ev("change", { bubbles: true }));
+    await ui.settle();
+    assertEquals(fired(), ["early"], "`change` reaches the handler");
+    el.dispatchEvent(new Ev("input", { bubbles: true }));
+    await ui.settle();
+    assertEquals(fired(), ["early"], "…and `input` is not what it listens to");
+  },
+);

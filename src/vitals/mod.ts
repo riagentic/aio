@@ -1,7 +1,7 @@
 // ─── Vital Signs — Public API ────────────────────────────────────────────────
 // Wires all probes together into a single VitalsSystem.
 
-import { log } from "../diagnostics/logger-api.ts";
+import { getLogger, log } from "../diagnostics/logger-api.ts";
 import type {
   VitalAlert,
   VitalLayer,
@@ -155,6 +155,22 @@ export function createVitalsSystem(config: VitalsConfig): VitalsSystem {
       hint,
       ts: Date.now(),
     };
+    // The STRUCTURED LOG, first — `logger.vitals()` is the only writer of a
+    // vitals measurement into `perf.log`/`debug.log`, and it had no caller:
+    // the whole `vitals:<layer>` category was dead, so `perf.log` carried only
+    // `perf:reduce` budget lines and never a vitals one. It is also the sink
+    // that survives when the diagnostic bus is a no-op (prod).
+    try {
+      getLogger()?.vitals?.(
+        layer,
+        status,
+        measured,
+        threshold,
+        hint ?? undefined,
+      );
+    } catch (e) {
+      log.error("vitals", `writing the vitals line threw — ${e}`);
+    }
     // User callbacks run on the heartbeat timer: a throwing hook here was an
     // unhandled exception in a bare timer callback → server down. Report and
     // keep the heartbeat alive; a broken hook must not take the app with it.

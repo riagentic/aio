@@ -45,20 +45,69 @@ export function lazy<P extends Record<string, unknown>>(
   /** Listeners notified when lazy resolves — Suspense boundaries register here. */
   const _listeners = new Set<() => void>();
 
+  /** Tell every waiting Suspense boundary to re-render, then forget them.
+   *
+   *  Each listener is isolated: they are DIFFERENT boundaries, and one that
+   *  throws used to abandon the loop — every boundary after it never heard
+   *  that the component had arrived and kept its fallback on screen
+   *  permanently, with `_listeners` left uncleared so nothing could recover. */
+  function _notify(): void {
+    const waiting = [..._listeners];
+    _listeners.clear();
+    for (const fn of waiting) {
+      try {
+        fn();
+      } catch (e) {
+        console.error(
+          "[aio:lazy] a <Suspense> boundary threw while being told its " +
+            "component had loaded (the other boundaries were still told):",
+          e,
+        );
+      }
+    }
+  }
+
   /** Start the import, at most once at a time. Hoisted so a Suspense boundary
    *  can START a sibling lazy it has not rendered yet (see `_preloadLazy`). */
   function startLoad(): void {
     if (resolved || loading || error) return;
     loading = true;
     loader().then((mod) => {
+      // A module that RESOLVED but has no component in it is not a success.
+      //
+      // `resolved` would be `undefined`, so `LazyWrapper` falls through to
+      // `startLoad()` on every render — which returns immediately, because
+      // `loading` is still true and nothing ever clears it. The Suspense
+      // fallback then spins forever with a clean console and no retry: the
+      // import worked, so the catch below never runs. It is reached by the
+      // commonest mistake there is, `export function Panel` instead of
+      // `export default`, and by any interop shape that hands back a namespace
+      // without a default.
+      //
+      // Routed into the SAME failure path as a rejected import, so it gets the
+      // loud message, the backoff and the ErrorBoundary throw that path
+      // already provides.
+      if (typeof mod?.default !== "function") {
+        throw new Error(
+          `lazy(): the module loaded but its \`default\` export is ` +
+            `${mod?.default === undefined ? "missing" : typeof mod.default}, ` +
+            `not a component. \`lazy(() => import("./X.tsx"))\` renders ` +
+            `X's DEFAULT export — add \`export default\`, or point the ` +
+            `loader at a module that has one.`,
+        );
+      }
       resolved = mod.default;
       // Surface the real component name (semantic UI surface / devtools
       // address lazy components by it, not by "LazyWrapper").
       (LazyWrapper as unknown as { _lazyName?: string })._lazyName =
         mod.default.name || undefined;
-      // Notify all registered Suspense boundaries to re-render
-      for (const fn of _listeners) fn();
-      _listeners.clear();
+      // Notify all registered Suspense boundaries to re-render.
+      //
+      // One listener that throws must not strand the others: they are separate
+      // Suspense boundaries, and a boundary that is never notified keeps its
+      // fallback on screen for good. (`_listeners.clear()` was also unreachable
+      // on that path, so even a later resolve could not fix it.)
+      _notify();
     }).catch((e) => {
       error = e instanceof Error ? e : new Error(String(e));
       loading = false;
@@ -78,8 +127,7 @@ export function lazy<P extends Record<string, unknown>>(
           `${wait}ms:`,
         error,
       );
-      for (const fn of _listeners) fn();
-      _listeners.clear();
+      _notify();
     });
   }
 

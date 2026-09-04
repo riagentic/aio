@@ -19,7 +19,8 @@ export interface AioProfile {
   key: string | null; // auth key (null = no framework auth: open / app-level)
 }
 
-/** First non-loopback IPv4 — the address a client on the LAN would use. */
+/** First non-loopback IPv4 — the address a client on the LAN would use.
+ *  Only ever the right answer for an app that is actually listening on it. */
 function lanIP(): string | undefined {
   try {
     return Deno.networkInterfaces()
@@ -66,7 +67,15 @@ export function buildLocalProfile(
     aio: 1,
     name: appId,
     title: lock.discovery?.title,
-    host: lanIP(),
+    // The address a client can actually REACH.
+    //
+    // This was `lanIP()` unconditionally, so a loopback-only app (the default
+    // — the server binds 127.0.0.1 unless `--expose`) produced a `.aioapp`
+    // naming an address nothing is listening on: the profile could not
+    // connect, and handing it to someone else also handed them this machine's
+    // LAN address. `discovery` is written ONLY for an `--expose`d instance
+    // (single-instance-lock.ts), so the lock already knows which it is.
+    host: lock.discovery ? lanIP() : "127.0.0.1",
     port: lock.port,
     tls,
     cert,

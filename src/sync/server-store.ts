@@ -185,25 +185,13 @@ export async function persistOp(
   cellVersion = 0,
 ): Promise<number | null> {
   await seedServerTs(db);
-  // Known-id check, both halves in one round trip (both are PK lookups):
-  //  - sync_compacted_ids: compaction DELETEs op rows, so INSERT OR IGNORE
-  //    alone forgets ids the log rolled over — a client re-sending such an op
-  //    (ack lost → resend after compaction) would be re-inserted and
-  //    re-dispatched (server double-apply). Tombstones keep dedup sound.
-  //  - sync_ops: a duplicate reaching the INSERT would still have CONSUMED a
-  //    server_ts that no row ever carries, pushing the in-memory issuer above
-  //    anything the store can prove after a restart. Duplicates are routine
-  //    (every reconnect re-sends its pending buffer), so this was the main
-  //    engine of issuer/log drift. Checking first makes the sequence advance
-  //    only for ops that actually get a row.
-  const { rows: known } = await db.query<{ id: string }>(
-    `SELECT id FROM sync_compacted_ids WHERE id = ?
-     UNION ALL
-     SELECT id FROM sync_ops WHERE id = ?
-     LIMIT 1`,
-    [op.id, op.id],
-  );
-  if (known.length > 0) return null;
+  // Known-id check first (see `isKnownOpId`): a duplicate reaching the INSERT
+  // would still have CONSUMED a server_ts that no row ever carries, pushing
+  // the in-memory issuer above anything the store can prove after a restart.
+  // Duplicates are routine (every reconnect re-sends its pending buffer), so
+  // this was the main engine of issuer/log drift. Checking first makes the
+  // sequence advance only for ops that actually get a row.
+  if (await isKnownOpId(db, op.id)) return null;
   const [hlcPhys, hlcCnt, hlcNode] = op.hlc;
   // INSERT OR IGNORE stays the authority (`changes === 0` ⇒ duplicate): the
   // check above is an optimization, not the correctness boundary.
@@ -224,6 +212,31 @@ export async function persistOp(
     ],
   );
   return changes > 0 ? serverTs : null;
+}
+
+/** Does the store still KNOW this op id — a live row in `sync_ops`, or the
+ *  compaction tombstone that replaced it?
+ *
+ *  Both halves in one round trip (both are PK lookups). The tombstone half is
+ *  what keeps dedup sound across compaction: compaction DELETEs op rows, so
+ *  `INSERT OR IGNORE` alone forgets ids the log rolled over, and a client
+ *  re-sending such an op (ack lost → resend after compaction) would be
+ *  re-inserted and re-dispatched — a server double-apply.
+ *
+ *  ONE decider, shared by `persistOp` (skip the INSERT for a known id) and the
+ *  handler's staleness gate (an UNKNOWN id stamped older than the tombstone
+ *  window is a resend this store can no longer recognise — see
+ *  `STALE_OP_REASON`). Two spellings of "known" would drift exactly where a
+ *  drift is a double application. */
+export async function isKnownOpId(db: DB, id: string): Promise<boolean> {
+  const { rows } = await db.query<{ id: string }>(
+    `SELECT id FROM sync_compacted_ids WHERE id = ?
+     UNION ALL
+     SELECT id FROM sync_ops WHERE id = ?
+     LIMIT 1`,
+    [id, id],
+  );
+  return rows.length > 0;
 }
 
 /** The `server_ts` an op was stamped with, wherever that fact still lives —
@@ -347,6 +360,31 @@ export async function loadSnapshot(
       `snapshot for "${cell}" is corrupt (${e}) — cannot restore compacted state`,
     );
     return null;
+  }
+}
+
+/** Does a base snapshot exist for this cell at all?
+ *
+ *  Distinct from `getCompactedTs`, which answers "at WHICH server_ts is the
+ *  snapshot", and answers 0 for three different situations: no snapshot, a
+ *  SEEDED snapshot (`seedSyncSnapshot` deliberately leaves the meta row
+ *  alone), and a row that predates the `compacted_ts` column (the migration
+ *  adds it `DEFAULT 0`). The last two are "a snapshot exists at a position
+ *  this log cannot name" — and the catch-up branch read 0 as "no snapshot",
+ *  so a client with no cursor was served ops alone and rebuilt the cell from
+ *  its own declared `initialState`. For a `localFirst` cell adopted with
+ *  existing KV data, that data then vanished from the client on its first
+ *  local edit; after an upgrade from a pre-`compacted_ts` aio, every reloaded
+ *  client rebuilt from a base the server had already compacted away. */
+export async function hasSyncSnapshot(db: DB, cell: string): Promise<boolean> {
+  try {
+    const { rows } = await db.query<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM sync_snapshots WHERE cell = ?",
+      [cell],
+    );
+    return (rows[0]?.n ?? 0) > 0;
+  } catch {
+    return false; // no table yet — nothing to be missing
   }
 }
 

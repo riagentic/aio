@@ -158,13 +158,13 @@ Deno.test("ack: a forged _callId cannot steal another caller's value", async () 
   }
 });
 
-Deno.test("sanitize: `_callId` is a trusted field, stripped and NAMED", async () => {
+Deno.test("sanitize: `_callId` is stripped before dispatch", async () => {
   // The strip is not what makes the collision test above pass — the
   // server-minted id overwrites the client's either way. It is here so the
-  // field can never be read as trusted by some later path, and so a client
-  // that sends it is reported rather than quietly corrected. Tested on its own
+  // field can never be read as trusted by some later path. Tested on its own
   // terms, because a belt-and-braces guard nothing can see is a guard that
-  // rots.
+  // rots. It is stripped QUIETLY: aio's own client sends it on every async
+  // call (tests/sanitize-own-client-quiet.test.ts pins the silence).
   const { sanitizeClientAction } = await import("../src/server/server-ws.ts");
   const action: Record<string, unknown> = {
     type: "bare:ok",

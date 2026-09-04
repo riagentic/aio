@@ -11,6 +11,7 @@
 // drive the real thing — a real clone, real tags, real worktrees — because the
 // whole value is that it works on a machine that has never seen the app.
 import { assert, assertEquals } from "@std/assert";
+import { tempDir } from "../src/testing/temp-dir.ts";
 import { join } from "@std/path";
 import {
   compareVersions,
@@ -40,7 +41,7 @@ async function sandbox(): Promise<{
   app: string;
   cleanup: () => Promise<void>;
 }> {
-  const base = await Deno.makeTempDir({ prefix: "aio-pin-" });
+  const base = await tempDir("aio-pin-");
   const root = join(base, "install");
   const versions = join(base, "versions");
   const app = join(base, "app");

@@ -168,6 +168,8 @@ export async function cmdPublish(
   }[] = [];
   const skipped: string[] = [];
   const only = flag("target");
+  /** An explicitly supplied data contract — see the spread in `shipApp` below. */
+  const dataFlag = flag("data");
   for (const t of built) {
     if (only && t.target !== only) continue;
     for (const a of t.artifacts ?? []) {
@@ -280,8 +282,18 @@ export async function cmdPublish(
         // SAME build already answered. Only when there is no host artifact at all
         // does the release go out without a contract, and that is said out loud
         // below rather than left to a message on the user's machine months later.
+        // …and `--data=<contract.json>` is the hatch the warning below tells
+        // people to use. It was named in that message and read by NOBODY:
+        // `flag("data")` appears nowhere in this file, and `publish` is in
+        // PASSTHROUGH so an unknown flag is not refused either. A publisher
+        // did exactly what the message said, saw no error, and every install
+        // holding data refused the release forever — the precise failure this
+        // command exists to eliminate. An explicit contract outranks the
+        // derived one: it is the operator stating the fact.
         ...(p.host
           ? {}
+          : dataFlag
+          ? { dataPath: dataFlag }
           : hostContract
           ? { data: hostContract }
           : { noData: true }),

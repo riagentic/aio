@@ -116,6 +116,7 @@ Deno.test("browser proxy: request/response over a fake transport, errors + parit
     invokeServerFn(d.ns, d.name, d.args).then((result) => {
       handleSfnResult({ cid: d.cid, ...result });
     });
+    return true;
   });
 
   const api = clientServerFn<{ greet: (n: string) => Promise<string> }>("t-rt");
@@ -212,6 +213,7 @@ Deno.test("browser proxy: an unencodable ARGUMENT is refused by name, before any
     invokeServerFn(d.ns, d.name, d.args).then((r) =>
       handleSfnResult({ cid: d.cid, ...r })
     );
+    return true;
   });
   const api = clientServerFn<{ take: (...a: unknown[]) => Promise<number> }>(
     "t-args",
@@ -253,6 +255,7 @@ Deno.test("browser proxy: lossy ARGUMENTS warn loudly — the other direction of
     invokeServerFn(d.ns, d.name, d.args).then((r) =>
       handleSfnResult({ cid: d.cid, ...r })
     );
+    return true;
   });
   const warnings: string[] = [];
   const orig = console.warn;
@@ -302,7 +305,7 @@ Deno.test("browser proxy: a disconnect settles in-flight calls at once", async (
   _resetServerFns();
   setConnected(true);
   _registerSfnTransport(
-    () => {/* frame goes nowhere — the server never replies */},
+    () => true, // the frame leaves; the server just never replies
   );
   const api = clientServerFn<{ slow: () => Promise<void> }>("t-drop");
   const call = api.slow();
@@ -324,7 +327,10 @@ Deno.test("browser proxy: a call made while offline fails immediately, not in 30
   _resetServerFns();
   const sent: string[] = [];
   setConnected(false);
-  _registerSfnTransport((raw) => void sent.push(raw));
+  _registerSfnTransport((raw) => {
+    sent.push(raw);
+    return true;
+  });
   const api = clientServerFn<{ go: () => Promise<void> }>("t-off");
   const started = Date.now();
   const err = await assertRejects(() => api.go(), Error);
@@ -340,7 +346,7 @@ Deno.test("browser proxy: resetting the client settles what it drops", async () 
   _resetSfnClient();
   _resetServerFns();
   setConnected(true);
-  _registerSfnTransport(() => {});
+  _registerSfnTransport(() => true);
   const api = clientServerFn<{ hang: () => Promise<void> }>("t-reset");
   const call = api.hang();
   _resetSfnClient(); // teardown: the pending entry is discarded…

@@ -207,10 +207,22 @@ export function route(
       m.toUpperCase()
     );
   return async (req: Request, match?: RouteMatch): Promise<Response> => {
-    if (methods && !methods.includes(req.method.toUpperCase())) {
+    // HEAD rides with GET, as HTTP says it must. `{ method: "GET" }` answered
+    // 405 to HEAD, so every uptime monitor, link checker and `curl -I`
+    // reported the endpoint down — and Deno strips a HEAD body anyway, so the
+    // handler could always have run.
+    const asked = req.method.toUpperCase();
+    const effective = asked === "HEAD" && methods?.includes("GET")
+      ? "GET"
+      : asked;
+    if (methods && !methods.includes(effective)) {
       return new Response("Method Not Allowed", {
         status: 405,
-        headers: { Allow: methods.join(", ") },
+        headers: {
+          Allow: methods.includes("GET") && !methods.includes("HEAD")
+            ? [...methods, "HEAD"].join(", ")
+            : methods.join(", "),
+        },
       });
     }
     const url = new URL(req.url);
@@ -231,7 +243,13 @@ export function route(
         for (const c of pending) headers.append("Set-Cookie", c);
         pending.length = 0;
         return new Response(res.body, {
-          status: res.status === 0 ? 302 : res.status,
+          // `Response.error()` has status 0 and no Location. Turning it into a
+          // 302 invented a redirect to nowhere — a wrong-but-plausible answer
+          // where 500 is the honest one. (The input is nonsense server-side;
+          // the reply should say so rather than guess.)
+          status: res.status === 0
+            ? (res.type === "error" ? 500 : 302)
+            : res.status,
           statusText: res.statusText,
           headers,
         });

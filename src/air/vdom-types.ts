@@ -59,6 +59,22 @@ export const SVG_TAG_LIST = [
 
 export const SVG_TAGS: Set<string> = new Set(SVG_TAG_LIST);
 
+/** The namespace mode the CHILDREN of `tag` inherit, given the mode `tag`
+ *  itself renders in.
+ *
+ *  `<foreignObject>` is the one SVG element whose content is HTML again — that
+ *  is the entire reason it exists. The mode used to be sticky (`isSvg ||
+ *  SVG_TAGS.has(tag)`, never falling back), so a `<div>` inside a
+ *  `<foreignObject>` was built with `createElementNS(SVG_NS, "div")`: an
+ *  element with no HTML box and no `HTMLElement` API, so the embedded HTML
+ *  rendered NOTHING, silently, in every real browser. `tests/jsx-svg-types.ts`
+ *  type-checks exactly that shape, so it is a blessed pattern.
+ *
+ *  One home for the rule: the mount, diff and hydrate paths all ask here. */
+export function childSvgMode(tag: string, selfIsSvg: boolean): boolean {
+  return tag === "foreignObject" ? false : selfIsSvg;
+}
+
 // ── DOM property set ───────────────────────────────────────────────
 // Props that must be set as DOM properties (not attributes) for correct behavior
 export const _DOM_PROPS = new Set([

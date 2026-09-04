@@ -26,10 +26,40 @@ import { type BundleSizes, kb, measure } from "../scripts/bundle-size.ts";
  *  30% slack notices nothing. */
 const CEILING_GZ = {
   /** What a page downloads to render an aio component: AIR, the client
-   *  runtime, the protocol and the offline queue. */
-  air: 60,
+   *  runtime, the protocol and the offline queue.
+   *
+   *  Raised 60 → 62 in the alpha77 audit round. It was ALREADY over: the
+   *  alpha76 tag measures 61 KB against a ceiling of 60, so this gate has
+   *  been red since before that release and nobody re-ran it. The audit
+   *  round then added ~1.2 KB of client-side correctness, deliberately and
+   *  itemised:
+   *    · `_impossibleOp` (patch-ops.ts, ~350 B) — refuses a delta the state
+   *      cannot describe, so a lost broadcast round ends in a RESYNC instead
+   *      of Immer splicing the op into a plausible, permanently wrong list;
+   *    · the graph-error overlay (browser-shared.ts, ~150 B) — the frame's
+   *      payload had no reader, and the page reloaded into the broken build;
+   *    · the rest: a terminal v1-protocol refusal that actually stops the
+   *      reconnect loop, and a `serverFn` that rejects on a refused write
+   *      instead of waiting out its 30 s ceiling.
+   *  Every one of those trades bytes for a failure that used to be silent.
+   *
+   *  Raised 62 → 64 in alpha77 (measured 63.5 KB gz). Five parallel hunts
+   *  over the client put ~1.5 KB of correctness on the page, itemised:
+   *    · a stale WebSocket `onclose` no longer tears down its successor
+   *      (patches were applied twice through two live sockets), and a
+   *      protocol mismatch is terminal — no subscriber reopens the loop;
+   *    · `<input type="number">` keeps a half-typed decimal; `onChange` keeps
+   *      firing when `onInput` is added or removed beside it; the `use`
+   *      directive honours every documented shape and cleans up on unmount;
+   *    · the missing-keys warning now knows which children came from an
+   *      array (a WeakSet mark in `flattenChildren`) and names the parent it
+   *      fired in, so it stops accusing hand-written siblings;
+   *    · the sync engine drops an op the server refuses as older than the
+   *      tombstone window instead of re-sending it forever.
+   *  Still nothing on the page that a user did not ask for. */
+  air: 64,
   /** The same, plus one cell — measured 2 KB, which is what a cell costs. */
-  app: 62,
+  app: 66,
 };
 
 const RUN = Deno.env.get("AIO_BUNDLE_SIZE") === "1";
@@ -130,8 +160,15 @@ Deno.test({
     /** KB off the nearest measured figure. */
     const drift = (n: number, from: number[]) =>
       Math.min(...from.map((m) => Math.abs(n - m)));
-    /** A doc rounds; it does not remember. */
-    const TOLERANCE = 2;
+    /** A doc rounds; it does not remember.
+     *
+     *  1, not 2. The two legitimate figures are themselves 2 KB apart, so a
+     *  ±2 window around the NEAREST of them accepted a 6 KB span — and
+     *  README's "52 KB brotli" sat at its exact edge and passed for a release
+     *  while `bench:bundle`, the command README names in the same sentence,
+     *  printed 54. That is the same "boundary passes" defect the ±4 window
+     *  had, one size smaller. (50audits §13.) */
+    const TOLERANCE = 1;
     const root = new URL("..", import.meta.url).pathname;
     // Every page that states a bundle size states the same one. The old
     // numbers ("~20 KB gzipped", "~50 KB gzipped") were copied between these

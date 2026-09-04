@@ -14,6 +14,7 @@ import {
   fmtUptime,
   label,
   mono,
+  press,
 } from "./ui/style.ts";
 import { resetTree } from "./ui/json-tree.tsx";
 import { resetStateView, StateOverview } from "./ui/state-view.tsx";
@@ -164,6 +165,7 @@ function Sidebar() {
         }}
       >
         <input
+          aria-label="search projects"
           value={search.value}
           onInput={(e: Event) =>
             search.set((e.currentTarget as HTMLInputElement).value)}
@@ -199,6 +201,7 @@ function Sidebar() {
             }}
           >
             <input
+              aria-label="new app"
               name="nn"
               placeholder="new app"
               disabled={manager.createBusy}
@@ -278,7 +281,7 @@ function Sidebar() {
             return (
               <div
                 key={p.path}
-                onClick={() => reselect(p.path)}
+                {...press(() => reselect(p.path))}
                 title={p.path}
                 style={{
                   padding: "9px 10px",
@@ -638,39 +641,49 @@ function Overview({ d }: { d: ProjectDetail }) {
           }}
         >
           <div style={{ ...label, marginBottom: "8px" }}>cell health</div>
-          {health && Object.keys(health.cells ?? {}).length
-            ? Object.entries(health.cells ?? {}).map(([name, h]) => (
-              <div
-                key={name}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "8px",
-                  padding: "3px 0",
-                  fontSize: "13px",
-                }}
-              >
-                <span
+          {
+            /* The keyed rows get a parent of their own: beside the static label
+              they were a keyed list with an unkeyed sibling, which the renderer
+              (rightly) flags — a keyed move across a literal sibling is
+              undefined. */
+          }
+          <div>
+            {health && Object.keys(health.cells ?? {}).length
+              ? Object.entries(health.cells ?? {}).map(([name, h]) => (
+                <div
+                  key={name}
                   style={{
-                    color: h.enabled ? C.green : C.red,
-                    fontSize: "10px",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "8px",
+                    padding: "3px 0",
+                    fontSize: "13px",
                   }}
                 >
-                  ●
-                </span>
-                <span style={{ color: C.blue, minWidth: "100px" }}>{name}</span>
-                <span style={{ color: C.dim, fontSize: "11px" }}>
-                  {h.status}
-                  {h.errors ? ` · ${h.errors} err` : ""}
-                  {h.lastAction ? ` · ${h.lastAction}` : ""}
-                </span>
-              </div>
-            ))
-            : (
-              <div style={{ color: C.dim, fontSize: "13px" }}>
-                {d.running ? "no cell health reported" : "app not running"}
-              </div>
-            )}
+                  <span
+                    style={{
+                      color: h.enabled ? C.green : C.red,
+                      fontSize: "10px",
+                    }}
+                  >
+                    ●
+                  </span>
+                  <span style={{ color: C.blue, minWidth: "100px" }}>
+                    {name}
+                  </span>
+                  <span style={{ color: C.dim, fontSize: "11px" }}>
+                    {h.status}
+                    {h.errors ? ` · ${h.errors} err` : ""}
+                    {h.lastAction ? ` · ${h.lastAction}` : ""}
+                  </span>
+                </div>
+              ))
+              : (
+                <div style={{ color: C.dim, fontSize: "13px" }}>
+                  {d.running ? "no cell health reported" : "app not running"}
+                </div>
+              )}
+          </div>
         </div>
       </div>
       <div style={{ display: "flex", gap: "14px", flexWrap: "wrap" }}>
@@ -829,105 +842,119 @@ function CellsTab({ d }: { d: ProjectDetail }) {
           {manager.dispatchMsg}
         </div>
       )}
-      {names.length === 0 ? <Empty msg="no cells" /> : names.map((name) => (
-        <div
-          key={name}
-          style={{ ...card, padding: "12px 14px", marginBottom: "8px" }}
-        >
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "12px",
-              flexWrap: "wrap",
-            }}
-          >
-            <span
-              style={{
-                fontWeight: 700,
-                color: C.blue,
-                minWidth: "120px",
-                display: "flex",
-                alignItems: "center",
-                gap: "8px",
-              }}
+      {
+        /* Own parent for the keyed cards — the dispatch message above is a
+          literal sibling, and a keyed list beside a literal sibling is the
+          shape the renderer flags. */
+      }
+      <div>
+        {names.length === 0
+          ? <Empty msg="no cells" />
+          : names.map((name) => (
+            <div
+              key={name}
+              style={{ ...card, padding: "12px 14px", marginBottom: "8px" }}
             >
-              {name}
-              {hasSource && (
-                <button
-                  type="button"
-                  title={`Open ${name}'s source code`}
-                  onClick={() => openSource(name)}
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "12px",
+                  flexWrap: "wrap",
+                }}
+              >
+                <span
                   style={{
-                    ...btnGhost,
-                    padding: "2px 7px",
-                    fontSize: "11px",
-                    fontWeight: 500,
-                    color: C.dim,
+                    fontWeight: 700,
+                    color: C.blue,
+                    minWidth: "120px",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "8px",
                   }}
                 >
-                  {"</> source"}
-                </button>
-              )}
-            </span>
-            <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
-              {(cells[name] ?? []).length === 0
-                ? (
-                  <span style={{ color: C.dim, fontSize: "12px" }}>
-                    state-only cell
-                  </span>
-                )
-                : (cells[name] ?? []).map((m) => (
-                  <button
-                    key={m}
-                    type="button"
-                    title={`Run ${name}:${m}(${args(name) || ""})`}
-                    onClick={() => run(d, name, m)}
-                    style={{ ...btn, padding: "4px 10px", fontSize: "12px" }}
+                  {name}
+                  {hasSource && (
+                    <button
+                      type="button"
+                      title={`Open ${name}'s source code`}
+                      onClick={() => openSource(name)}
+                      style={{
+                        ...btnGhost,
+                        padding: "2px 7px",
+                        fontSize: "11px",
+                        fontWeight: 500,
+                        color: C.dim,
+                      }}
+                    >
+                      {"</> source"}
+                    </button>
+                  )}
+                </span>
+                <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                  {(cells[name] ?? []).length === 0
+                    ? (
+                      <span style={{ color: C.dim, fontSize: "12px" }}>
+                        state-only cell
+                      </span>
+                    )
+                    : (cells[name] ?? []).map((m) => (
+                      <button
+                        key={m}
+                        type="button"
+                        title={`Run ${name}:${m}(${args(name) || ""})`}
+                        onClick={() => run(d, name, m)}
+                        style={{
+                          ...btn,
+                          padding: "4px 10px",
+                          fontSize: "12px",
+                        }}
+                      >
+                        ▶ {m}
+                      </button>
+                    ))}
+                </div>
+              </div>
+              {(cells[name] ?? []).length > 0 && (
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "8px",
+                    marginTop: "8px",
+                  }}
+                >
+                  <span
+                    style={{ color: C.dim, fontSize: "11px", fontFamily: mono }}
                   >
-                    ▶ {m}
-                  </button>
-                ))}
+                    args
+                  </span>
+                  <input
+                    aria-label="JSON arguments"
+                    t={`args-${name}`}
+                    value={args(name)}
+                    placeholder='[] — JSON arguments, e.g. ["ada@example.com"]'
+                    onInput={(e) =>
+                      dispatchArgs.set({
+                        ...dispatchArgs.value,
+                        [name]: (e.target as HTMLInputElement).value,
+                      })}
+                    style={{
+                      flex: 1,
+                      fontFamily: mono,
+                      fontSize: "11px",
+                      padding: "3px 6px",
+                      background: C.bg,
+                      color: C.text,
+                      border: `1px solid ${C.border}`,
+                      borderRadius: "3px",
+                    }}
+                  />
+                </div>
+              )}
             </div>
-          </div>
-          {(cells[name] ?? []).length > 0 && (
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: "8px",
-                marginTop: "8px",
-              }}
-            >
-              <span
-                style={{ color: C.dim, fontSize: "11px", fontFamily: mono }}
-              >
-                args
-              </span>
-              <input
-                t={`args-${name}`}
-                value={args(name)}
-                placeholder='[] — JSON arguments, e.g. ["ada@example.com"]'
-                onInput={(e) =>
-                  dispatchArgs.set({
-                    ...dispatchArgs.value,
-                    [name]: (e.target as HTMLInputElement).value,
-                  })}
-                style={{
-                  flex: 1,
-                  fontFamily: mono,
-                  fontSize: "11px",
-                  padding: "3px 6px",
-                  background: C.bg,
-                  color: C.text,
-                  border: `1px solid ${C.border}`,
-                  borderRadius: "3px",
-                }}
-              />
-            </div>
-          )}
-        </div>
-      ))}
+          ))}
+      </div>
     </div>
   );
 }
@@ -1228,6 +1255,7 @@ function FileBrowser(
           }}
         >
           <input
+            aria-label="filter files"
             value={fileFilter.value}
             onInput={(e: Event) =>
               fileFilter.set((e.currentTarget as HTMLInputElement).value)}
@@ -1252,14 +1280,14 @@ function FileBrowser(
             }}
           >
             <span
-              onClick={expandAll}
+              {...press(expandAll)}
               style={{ cursor: "pointer", color: C.blue }}
             >
               expand all
             </span>
             <span>·</span>
             <span
-              onClick={collapseAll}
+              {...press(collapseAll)}
               style={{ cursor: "pointer", color: C.blue }}
             >
               collapse all
@@ -1282,7 +1310,7 @@ function FileBrowser(
                 }
                 {!q && (
                   <div
-                    onClick={() => toggleDir(ROOT)}
+                    {...press(() => toggleDir(ROOT))}
                     title={baseDir}
                     style={{
                       padding: "3px 6px",
@@ -1313,10 +1341,11 @@ function FileBrowser(
                     return (
                       <div
                         key={f.path}
-                        onClick={() =>
+                        {...press(() =>
                           f.dir
                             ? toggleDir(f.path)
-                            : manager.openFile(baseDir, f.path)}
+                            : manager.openFile(baseDir, f.path)
+                        )}
                         title={f.path}
                         style={{
                           padding: "3px 6px",
@@ -1396,7 +1425,8 @@ function FileBrowser(
                   )}
                 </span>
                 <span
-                  onClick={() => manager.closeFile()}
+                  {...press(() => manager.closeFile())}
+                  aria-label="close file"
                   style={{ cursor: "pointer" }}
                 >
                   ✕
@@ -1481,7 +1511,7 @@ function CodebaseTab({ d }: { d: ProjectDetail }) {
 
   const srcPill = (id: "app" | "repo", text: string) => (
     <span
-      onClick={() => codebaseSrc.set(id)}
+      {...press(() => codebaseSrc.set(id))}
       style={{
         ...chip,
         cursor: "pointer",

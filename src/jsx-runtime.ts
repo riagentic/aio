@@ -20,8 +20,34 @@ import type { VNode } from "./air/vdom.ts";
 /** VDOM fragment — groups children without a wrapper element. */
 export { Fragment };
 
-/** Automatic JSX transform — called by esbuild for single-child elements */
+/** Automatic JSX transform — called by esbuild for single-child elements.
+ *
+ *  ONE child. When that child is an array it is the result of an EXPRESSION
+ *  (`<ul>{items.map(…)}</ul>`), so it is handed to `h()` as one nested array
+ *  and not spread: the runtime marks what it flattens out of a nested array
+ *  as "array children" (vdom-create.ts `_isFromArray`), which is the only
+ *  case the missing-keys warning is about. Spreading it here — as this and
+ *  `jsxs` both used to — made a `.map` list indistinguishable from siblings
+ *  written out by hand, so the warning fired for both. */
 export function jsx(
+  tag: string | typeof Fragment | ((props: Record<string, unknown>) => unknown),
+  props: Record<string, unknown> | null,
+  key?: string | number,
+): ReturnType<typeof h> {
+  const { children, ...rest } = props ?? {};
+  if (key !== undefined) rest.key = key;
+  return children == null
+    ? h(tag as string, rest)
+    : h(tag as string, rest, children as VNode);
+}
+
+/** Automatic JSX transform — called by esbuild for multi-child elements.
+ *
+ *  The children array here is the JSX's OWN child list — literal siblings —
+ *  so it is spread. An array sitting inside it (`<ul><li/>{items.map(…)}</ul>`)
+ *  is still nested, and the runtime marks it as such. Same signature as `jsx`
+ *  (it used to be an alias). */
+export function jsxs(
   tag: string | typeof Fragment | ((props: Record<string, unknown>) => unknown),
   props: Record<string, unknown> | null,
   key?: string | number,
@@ -35,9 +61,6 @@ export function jsx(
     : [children];
   return h(tag as string, rest, ...kids);
 }
-
-/** Automatic JSX transform — called by esbuild for multi-child elements */
-export const jsxs = jsx;
 
 // ── JSX types ────────────────────────────────────────────────────────
 // AIO-62: Native DOM event types. When jsxImportSource is "aio",

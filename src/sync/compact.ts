@@ -19,6 +19,9 @@ export interface CompactDeps {
   /** The cell's declared shape `version` — stamped on the snapshot so the boot
    *  replay knows which shape the snapshot was written under. Default 0. */
   cellVersion?: number;
+  /** `sync.offline.retention` for this cell, in ms — the longest a client may
+   *  hold an op before re-sending it. Sizes the id-tombstone window. */
+  retentionMs?: number;
   log: {
     debug: (msg: string, data?: Record<string, unknown>) => void;
     warn: (msg: string, data?: Record<string, unknown>) => void;
@@ -26,14 +29,35 @@ export interface CompactDeps {
   };
 }
 
-/** How long compacted op ids stay tombstoned for duplicate detection.
+/** The FLOOR for how long compacted op ids stay tombstoned for duplicate
+ *  detection.
+ *
  *  Compaction DELETEs op rows, which would silently void the INSERT OR IGNORE
  *  dedup in persistOp — a client re-sending an op after a lost ack would then
  *  be re-applied (server-side double-apply). Tombstoning the deleted ids keeps
- *  dedup sound across compaction. 24h bounds the table: clients re-send only
- *  until acked, and client-side stale eviction (default 4h) makes older
- *  resends effectively impossible. */
+ *  dedup sound across compaction.
+ *
+ *  This used to be the whole answer, on a claim that turned out to be false:
+ *  "client-side stale eviction (default 4h) makes older resends effectively
+ *  impossible". That eviction runs ONLY when the buffer reaches `pendingCap`
+ *  (`op-buffer.ts`), so a three-day-old unacked op below the cap is never
+ *  evicted and is re-sent on the next `requestSync` — and `offline.retention`
+ *  is per-cell, with `"7d"` as the docs' own example. One fact, two homes,
+ *  and the shorter one won. The real window is `max(this, the cell's
+ *  retention)`, passed in by the caller. */
 export const COMPACTED_ID_RETENTION_MS = 24 * 3600_000;
+
+/** How long tombstones must outlive the ops they stand for, for a cell whose
+ *  clients may hold an unacked op for `retentionMs`. */
+export function tombstoneWindowMs(retentionMs?: number): number {
+  return Math.max(
+    COMPACTED_ID_RETENTION_MS,
+    typeof retentionMs === "number" && Number.isFinite(retentionMs) &&
+      retentionMs > 0
+      ? retentionMs
+      : 0,
+  );
+}
 
 /**
  * Compact sync_ops into a snapshot when op count exceeds threshold.
@@ -116,9 +140,10 @@ export async function compactSyncOps(deps: CompactDeps): Promise<void> {
       params: [deps.cell, compactedTs],
     },
     {
-      // Bound the tombstone table (see COMPACTED_ID_RETENTION_MS).
+      // Bound the tombstone table — never below the window in which a client
+      // may still re-send the op (see tombstoneWindowMs).
       sql: `DELETE FROM sync_compacted_ids WHERE compacted_at < ?`,
-      params: [now - COMPACTED_ID_RETENTION_MS],
+      params: [now - tombstoneWindowMs(deps.retentionMs)],
     },
     {
       sql:

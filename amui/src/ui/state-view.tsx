@@ -3,7 +3,7 @@
 // whether it's exposed to the UI (synced to browser clients). Nested values
 // expand into a JSON tree on click.
 import { signal } from "aio/air";
-import { C, mono } from "./style.ts";
+import { C, fmtBytes, mono, press } from "./style.ts";
 import { JsonTree } from "./json-tree.tsx";
 import type { CellFieldFlags } from "../manager.ts";
 
@@ -57,6 +57,79 @@ function preview(v: unknown): string {
   return String(v);
 }
 
+/** The JSON-encoded size of a value — the bytes the wire carries and SQLite
+ *  stores for it, not V8's in-memory footprint. `-1` when it cannot be
+ *  encoded at all (a BigInt, a cycle): that is a fact worth showing, since
+ *  the framework refuses to persist or sync exactly those values. */
+export function sizeOf(v: unknown): number {
+  try {
+    const json = JSON.stringify(v);
+    return json === undefined ? 0 : new TextEncoder().encode(json).length;
+  } catch {
+    return -1;
+  }
+}
+
+/** A slim bar plus the number, right-aligned — the bar is relative to `max`
+ *  (the largest sibling), so within one cell the eye finds the heavy field
+ *  without reading every number. */
+function SizeBar(
+  { bytes, max, color, what }: {
+    bytes: number;
+    max: number;
+    color: string;
+    what: string;
+  },
+) {
+  const pct = bytes < 0 || max <= 0
+    ? 0
+    : Math.max(2, Math.round((bytes / max) * 100));
+  const text = bytes < 0 ? "unserializable" : fmtBytes(bytes);
+  return (
+    <span
+      title={`${what}: ${text} as JSON — what the wire and SQLite carry`}
+      style={{
+        marginLeft: "auto",
+        display: "inline-flex",
+        alignItems: "center",
+        gap: "6px",
+        flexShrink: 0,
+      }}
+    >
+      <span
+        style={{
+          display: "inline-block",
+          width: "64px",
+          height: "4px",
+          borderRadius: "2px",
+          background: C.panel2,
+          overflow: "hidden",
+        }}
+      >
+        <span
+          style={{
+            display: "block",
+            width: `${pct}%`,
+            height: "100%",
+            background: bytes < 0 ? C.red : color,
+          }}
+        />
+      </span>
+      <span
+        style={{
+          color: bytes < 0 ? C.red : C.dim,
+          fontSize: "11px",
+          fontFamily: mono,
+          minWidth: "60px",
+          textAlign: "right",
+        }}
+      >
+        {text}
+      </span>
+    </span>
+  );
+}
+
 function primColor(v: unknown): string {
   if (v === null) return C.dim;
   if (typeof v === "string") return C.green;
@@ -66,11 +139,14 @@ function primColor(v: unknown): string {
 }
 
 function Field(
-  { cellId, k, v, flags }: {
+  { cellId, k, v, flags, bytes, max }: {
     cellId: string;
     k: string;
     v: unknown;
     flags?: { persisted: boolean; ui: boolean };
+    /** JSON size of `v`, and the largest field in the same cell. */
+    bytes: number;
+    max: number;
   },
 ) {
   const isObj = v !== null && typeof v === "object";
@@ -81,7 +157,7 @@ function Field(
   return (
     <div style={{ borderTop: `1px solid ${C.border}` }}>
       <div
-        onClick={() => isObj && toggle(path)}
+        {...(isObj ? press(() => toggle(path)) : {})}
         style={{
           display: "flex",
           alignItems: "center",
@@ -120,10 +196,13 @@ function Field(
             whiteSpace: "nowrap",
             overflow: "hidden",
             textOverflow: "ellipsis",
+            flex: "1",
+            minWidth: "0",
           }}
         >
           {open ? "" : preview(v)}
         </span>
+        <SizeBar bytes={bytes} max={max} color={C.blueDim} what={k} />
       </div>
       {open && (
         <div style={{ padding: "0 10px 8px 40px" }}>
@@ -145,6 +224,22 @@ export function StateOverview(
     );
   }
   const cells = Object.entries(state as Record<string, unknown>);
+  // Per-field sizes, once per render: a field's JSON is encoded a single
+  // time and each bar is scaled against its siblings in the same cell, so the
+  // heavy field in a cell is found by eye. (Per-CELL totals live on the
+  // Metrics tab already — not repeated here.)
+  const sized = cells.map(([cellId, cellState]) => {
+    const entries = cellState && typeof cellState === "object"
+      ? Object.entries(cellState as Record<string, unknown>)
+      : [];
+    const fieldBytes = entries.map(([, v]) => sizeOf(v));
+    return {
+      cellId,
+      entries,
+      fieldBytes,
+      maxField: Math.max(0, ...fieldBytes),
+    };
+  });
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
       <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
@@ -154,11 +249,8 @@ export function StateOverview(
         <Badge on label="ui" color={C.blue} title="synced to clients" />
         <span style={{ color: C.dim, fontSize: "11px" }}>exposed to UI</span>
       </div>
-      {cells.map(([cellId, cellState]) => {
+      {sized.map(({ cellId, entries, fieldBytes, maxField }) => {
         const cf = fields?.[cellId] ?? {};
-        const entries = cellState && typeof cellState === "object"
-          ? Object.entries(cellState as Record<string, unknown>)
-          : [];
         const nPersist =
           entries.filter(([k]) => (cf[k]?.persisted ?? true)).length;
         const nUi = entries.filter(([k]) => (cf[k]?.ui ?? true)).length;
@@ -202,8 +294,16 @@ export function StateOverview(
                   (empty)
                 </div>
               )
-              : entries.map(([k, v]) => (
-                <Field key={k} cellId={cellId} k={k} v={v} flags={cf[k]} />
+              : entries.map(([k, v], i) => (
+                <Field
+                  key={k}
+                  cellId={cellId}
+                  k={k}
+                  v={v}
+                  flags={cf[k]}
+                  bytes={fieldBytes[i] ?? 0}
+                  max={maxField}
+                />
               ))}
           </div>
         );

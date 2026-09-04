@@ -286,6 +286,14 @@ loop ends (client disconnect or error), the connection is explicitly closed via
 `conn.close()`, which propagates to the Electron main process as a socket
 `close` event, then to the renderer as `__aio:close`.
 
+The socket belongs to the main process, so a **reload keeps the connection**
+(Ctrl+R, Ctrl+Shift+Del, the app's own `location.reload()`) and the server never
+hears about the new document. The shell therefore hands that document the
+connection's `proto` hello and its `cfg` frame again, then the latest snapshot —
+in accept order. On the packaged `aio://` shell `cfg` is the only carrier of
+`syncCells`, `callTimeouts` and `renderBudget`, so without the re-seed one
+Ctrl+R silently turned every localFirst cell back into a server round-trip.
+
 **IPC keepalive:** The browser sends a `__ping` message every 60 seconds over
 the IPC bridge as defense-in-depth. The server silently ignores these messages.
 This ensures the connection stays visibly alive even during purely passive
@@ -294,6 +302,41 @@ viewing (dashboards, monitoring screens).
 **Write error handling:** If `sock.write()` in the Electron main process fails
 (broken pipe, destroyed socket), the socket is destroyed and the renderer is
 notified via `__aio:close`, triggering the reconnection UI.
+
+### Links, routes and reloads in the shell
+
+Chromium hands an `<a>` click to the shell as a **navigation** before the page
+sees it, so the main process decides what a same-app link is. Measured on
+Electron 44 (`tests/electron-route-change-e2e.test.ts` drives the real shell;
+`tests/electron-main-relay.test.ts` replays the measured event order against a
+stub):
+
+| You do                                  | The shell does                                                        |
+| --------------------------------------- | --------------------------------------------------------------------- |
+| click `<a href="/settings">`            | vetoes the load, hands the URL to the router — an in-app route change |
+| `navigate("/x")`, `history.pushState`   | nothing to decide: a same-document navigation, the page stays         |
+| `location.reload()` (or the dev reload) | lets it through — the url is the one on screen, so it is a **reload** |
+| click `<a href="https://…">`            | opens it in the system browser; the window stays on the app           |
+
+The rule for a same-app URL is **"the url already on screen = a reload; any
+other = a route change"**. It used to be "the root path = a reload", which meant
+every navigation _to_ `/` reloaded the whole window (a white flash, a re-mounted
+tree, a new connection — on most apps' most frequent navigation), and a reload
+on any other route was silently vetoed, so the dev live-reload did nothing off
+the home page.
+
+The relay behind this is stateful — a new document must announce itself before
+frames are delivered to it — and one link click used to close it for the life of
+the page (the uplink still worked, so actions landed and state changed while the
+screen stayed frozen and `connected` stayed `true`). Now a vetoed navigation
+reopens the relay at the veto, and a relay that stalls anyway is loud in three
+places: the shell's log, the window's own connection banner (it is sent the
+dropped-socket signal), and `/__aio/health` / `am status` as an `electron:relay`
+client degradation — with the heal reported the same way. The banner is not only
+a message: the renderer answers the dropped-socket signal the way it answers a
+real drop — by reconnecting and re-announcing itself — and that re-announcement
+reopens the relay. A stall on an Electron whose event order nobody has measured
+yet therefore heals itself within the reconnect backoff, out loud.
 
 ## Window chrome (`ui.chrome`)
 

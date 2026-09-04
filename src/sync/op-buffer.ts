@@ -173,6 +173,16 @@ export interface OpBuffer {
   pruneConfirmed(cell: string): Promise<void>;
   /** Drop a single op (D11 rejection rollback). */
   pruneStale(cell: string, opId: string): Promise<void>;
+  /** Drop a single op the server refused as STALE, and tell the app
+   *  (`onDrop`, reason `stale-beyond-retention`). `pruneStale` is the silent
+   *  rollback of a rejection the app already hears through `onRejected`; this
+   *  is for the one rejection that is also an abandoned local change — the
+   *  server could no longer recognise the op as a resend (`STALE_OP_REASON`)
+   *  — so the drop must reach the same channel every other abandoned change
+   *  reaches. The reason is the buffer's, not the caller's: every reason a
+   *  handler can be written for is emitted here, by name (a gate reads them).
+   *  Optional: additive on the interface. */
+  dropStale?(cell: string, opId: string): Promise<void>;
   getMeta(
     cell: string,
   ): Promise<{ lastHlc: HLC | null; lastServerTs?: number } | undefined>;
@@ -202,10 +212,16 @@ export interface OpBufferDropCallback {
      *  `prune-failed`: the buffer was over its cap and pruning could not free a
      *  slot, so the NEW op was refused.
      *
-     *  There is no third reason. `"buffer-full"` was listed here and never
+     *  `stale-beyond-retention`: the SERVER refused the op because it was
+     *  stamped older than its tombstone window and it could no longer tell a
+     *  resend (after a lost ack) from a new change — see `STALE_OP_REASON`.
+     *  The op is dropped so it is never re-sent; `sync.onRejected` fires
+     *  too, with the server's full sentence.
+     *
+     *  There is no fourth reason. `"buffer-full"` was listed here and never
      *  emitted — a handler could switch on it forever and be dead code, and a
      *  reader would reasonably conclude aio distinguishes a case it does not. */
-    reason: "prune-failed" | "stale-evicted",
+    reason: "prune-failed" | "stale-evicted" | "stale-beyond-retention",
   ): void;
 }
 
@@ -321,6 +337,16 @@ export function createOpBuffer(
 
     pruneConfirmed: (cell) => storage.pruneConfirmed(cell),
     pruneStale: (cell, opId) => storage.pruneStale(cell, opId),
+
+    async dropStale(cell, opId) {
+      // Read before prune: `onDrop` names the op (cell, action, id), and the
+      // storage forgets it on prune. An op the buffer no longer holds (already
+      // pruned by a duplicate rejection) is nothing to report.
+      const op = (await storage.loadOps(cell)).find((o) => o.id === opId);
+      if (!op) return;
+      await storage.pruneStale(cell, opId);
+      onDrop?.(op, "stale-beyond-retention");
+    },
     getMeta: (cell) => storage.loadMeta(cell),
     saveSnapshot: (cell, data) => storage.saveSnapshot(cell, data),
     loadSnapshot: (cell) => storage.loadSnapshot(cell),

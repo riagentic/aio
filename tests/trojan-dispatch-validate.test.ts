@@ -28,6 +28,11 @@ function makeDeps() {
         counter: ["inc", "tick"],
       }),
       cellAsyncMethods: () => ({ counter: ["inc"] }),
+      cellMethodArity: () => ({
+        // setStatusBarMessage(s, msg) · inc(s, by) · tick(s)
+        nav: { setStatusBarMessage: 1 },
+        counter: { inc: 1, tick: 0 },
+      }),
       getState: () => ({}),
       startedAt: Date.now(),
     },
@@ -58,7 +63,7 @@ Deno.test("trojan dispatch: a known cell:method executes (ok means executed)", a
   const { deps, dispatched } = makeDeps();
   const r = await dispatch(deps, {
     type: "nav:setStatusBarMessage",
-    payload: {},
+    payload: { args: ["hi"] },
   });
   assertEquals(r.status, 200);
   assertEquals(r.body.ok, true);
@@ -67,7 +72,10 @@ Deno.test("trojan dispatch: a known cell:method executes (ok means executed)", a
 
 Deno.test("trojan dispatch: the cell.method (dot) form is normalized and runs", async () => {
   const { deps, dispatched } = makeDeps();
-  const r = await dispatch(deps, { type: "nav.setStatusBarMessage" });
+  const r = await dispatch(deps, {
+    type: "nav.setStatusBarMessage",
+    payload: { args: ["hi"] },
+  });
   assertEquals(r.body.ok, true);
   assertEquals(dispatched[0]!.type, "nav:setStatusBarMessage"); // normalized
 });
@@ -91,7 +99,10 @@ Deno.test("trojan dispatch: an unknown cell is a 404 ERROR", async () => {
 Deno.test("trojan dispatch: a rejecting method surfaces as an error", async () => {
   const { deps, failNext } = makeDeps();
   failNext(() => Promise.reject(new Error("method blew up")));
-  const r = await dispatch(deps, { type: "counter:inc" });
+  const r = await dispatch(deps, {
+    type: "counter:inc",
+    payload: { args: [1] },
+  });
   assertEquals(r.body.ok, undefined);
   assert(
     String(r.body.error).includes("method blew up"),
@@ -169,17 +180,26 @@ Deno.test("trojan dispatch: a client index as the type is refused, not acked", a
 Deno.test("trojan dispatch: the method's return value is in the reply (`result`), absent when undefined", async () => {
   const { deps, failNext } = makeDeps();
   failNext(() => Promise.resolve({ balance: 42, tags: ["a"] }));
-  const r = await dispatch(deps, { type: "counter:inc" });
+  const r = await dispatch(deps, {
+    type: "counter:inc",
+    payload: { args: [1] },
+  });
   assertEquals(r.status, 200);
   assertEquals(r.body, { ok: true, result: { balance: 42, tags: ["a"] } });
 
   failNext(() => Promise.resolve(undefined));
-  const none = await dispatch(deps, { type: "counter:inc" });
+  const none = await dispatch(deps, {
+    type: "counter:inc",
+    payload: { args: [1] },
+  });
   assertEquals(none.body, { ok: true });
 
   // A value JSON cannot carry is flagged, never silently turned into null.
   failNext(() => Promise.resolve(() => 1));
-  const fn = await dispatch(deps, { type: "counter:inc" });
+  const fn = await dispatch(deps, {
+    type: "counter:inc",
+    payload: { args: [1] },
+  });
   assertEquals(fn.body, { ok: true, resultDropped: true });
 });
 
@@ -195,4 +215,105 @@ Deno.test("trojan dispatch: a SYNC cell:method call carries no _callId", async (
   assertEquals(r.body.ok, true);
   const pl = (dispatched[0] as { payload?: { _callId?: unknown } }).payload;
   assertEquals(pl?._callId, undefined);
+});
+
+// 50audits §7: the route refused an unknown CELL and an unknown METHOD by
+// name, and never asked how many arguments a KNOWN method takes — though the
+// count was right there. `am dispatch todo:add` (for `add(s, text: string)`)
+// answered `{"ok":true}`, ran `add(s, undefined)`, and put a row whose declared
+// field is gone into state and onto the screen.
+Deno.test("trojan dispatch: a SHORT call is refused by name, not acked", async () => {
+  const { deps, dispatched } = makeDeps();
+  const r = await dispatch(deps, { type: "nav:setStatusBarMessage" });
+  assertEquals(r.status, 400);
+  assertStringIncludes(String(r.body.error), "takes 1 argument");
+  assertStringIncludes(String(r.body.error), "passes none");
+  assertStringIncludes(String(r.body.error), "Dispatch does nothing");
+  assertEquals(dispatched.length, 0, "nothing may reach the reducer");
+});
+
+Deno.test("trojan dispatch: a NAMED payload for a methods cell states no arguments", async () => {
+  const { deps, dispatched } = makeDeps();
+  // Not what `am dispatch nav:setStatusBarMessage msg=hi` sends — `am` wraps
+  // named pairs into `{ args: [{…}] }` for a `cell:method` type
+  // (`envelopePayload`), which is a stated argument list and passes. This is
+  // the RAW shape: a direct POST (or another client) putting the named pairs
+  // in the payload itself. `methodArgs` reads `payload.args`, so the method
+  // receives NOTHING and the named keys are silently dropped.
+  const r = await dispatch(deps, {
+    type: "nav:setStatusBarMessage",
+    payload: { msg: "hi" },
+  });
+  assertEquals(r.status, 400);
+  assertStringIncludes(String(r.body.error), "positional");
+  assertEquals(dispatched.length, 0);
+});
+
+// The spelling `am` actually produces for named pairs, which must keep working
+// — it is in `DISPATCH_USAGE` and in docs/clients/app-manager.md.
+Deno.test("trojan dispatch: `am`'s named-pair envelope still runs", async () => {
+  const { deps, dispatched } = makeDeps();
+  const r = await dispatch(deps, {
+    type: "nav:setStatusBarMessage",
+    payload: { args: [{ msg: "hi" }] }, // what envelopePayload builds
+  });
+  assertEquals(r.status, 200);
+  assertEquals(dispatched.length, 1);
+});
+
+Deno.test("trojan dispatch: a full call and a zero-arg method still run", async () => {
+  const { deps, dispatched } = makeDeps();
+  assertEquals(
+    (await dispatch(deps, {
+      type: "nav:setStatusBarMessage",
+      payload: { args: ["hi"] },
+    })).status,
+    200,
+  );
+  assertEquals((await dispatch(deps, { type: "counter:tick" })).status, 200);
+  assertEquals(dispatched.length, 2);
+});
+
+Deno.test("trojan dispatch: EXTRA arguments are allowed — a default or rest ends fn.length", async () => {
+  const { deps } = makeDeps();
+  const r = await dispatch(deps, {
+    type: "counter:inc",
+    payload: { args: [1, 2, 3] },
+  });
+  assertEquals(r.status, 200);
+});
+
+// The compatibility line. `fn.length` stops at the first parameter with a
+// default, so a method that fills its own in (`reset(s, to) { to ??= 0 }`)
+// reads as requiring an argument it does not — and refusing on COUNT would
+// break a call that works today. An `args` array is the caller stating their
+// arguments, and is taken at its word however short.
+Deno.test("trojan dispatch: a STATED argument list is never second-guessed", async () => {
+  const { deps, dispatched } = makeDeps();
+  // Explicitly empty: "this method fills in its own defaults."
+  assertEquals(
+    (await dispatch(deps, {
+      type: "nav:setStatusBarMessage",
+      payload: { args: [] },
+    })).status,
+    200,
+  );
+  // Short but stated, for a method whose later parameters have defaults.
+  assertEquals(
+    (await dispatch(deps, { type: "counter:inc", payload: { args: [] } }))
+      .status,
+    200,
+  );
+  assertEquals(dispatched.length, 2);
+});
+
+Deno.test("trojan dispatch: an app that publishes no arity map is unchanged", async () => {
+  const { deps, dispatched } = makeDeps();
+  (deps as unknown as { trojan: { cellMethodArity?: unknown } }).trojan
+    .cellMethodArity = undefined;
+  assertEquals(
+    (await dispatch(deps, { type: "nav:setStatusBarMessage" })).status,
+    200,
+  );
+  assertEquals(dispatched.length, 1);
 });

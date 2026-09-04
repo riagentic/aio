@@ -76,7 +76,14 @@ ${htmlOpen()}
     ws.onmessage = function(ev) {
       var f; try { f = JSON.parse(ev.data); } catch (_) { return; }
       if (!f || f.v !== 2) return;
-      if (f.t === 'reload' || f.t === 'graph-clear' || f.t === 'graph-error') location.reload();
+      // graph-error suppresses the reload on purpose — the build is red.
+      if (f.t === 'graph-error') {
+        var errs = Array.isArray(f.d) ? f.d : [];
+        for (var i = 0; i < errs.length; i++) console.error('[aio:graph] ' + (errs[i].file || '?') + (errs[i].line ? ':' + errs[i].line : '') + ' — ' + (errs[i].message || ''));
+        if (!errs.length) console.error('[aio:graph] the import graph is invalid — not reloading');
+        return;
+      }
+      if (f.t === 'reload' || f.t === 'graph-clear') location.reload();
     };
     ws.onclose = function() { setTimeout(function() { location.reload(); }, 2000); };
   </script>

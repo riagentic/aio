@@ -126,6 +126,26 @@ export async function checkAndRecover(opts: {
   await opts.db.close().catch(() => {});
 
   const quarantine = quarantinePathFor(opts.dbPath, opts.now);
+  // The SIDECARS travel with it, and any leftover is removed after.
+  //
+  // Two problems, one cause: this moved `state.db` and left `-wal`/`-shm`
+  // where they were. So the module's promise — "the damaged file kept at …,
+  // nothing deleted", "a human still has every byte" — was not kept (a
+  // crash-left WAL of committed frames was 8 KB before boot and 0 after,
+  // because a failed open deletes it), and an orphaned WAL that DOES survive
+  // is replayed by SQLite onto the restored snapshot: same lineage, quick
+  // check ok, and the corrupt database's rows come back over the recovery.
+  const moveSidecars = async (suffix: string) => {
+    try {
+      await fs.rename(opts.dbPath + suffix, quarantine + suffix);
+    } catch {
+      // aio-ok: a sidecar that is not there is the ordinary case (a clean
+      // shutdown checkpoints and removes them). The rename below is what
+      // must succeed.
+    }
+  };
+  await moveSidecars("-wal");
+  await moveSidecars("-shm");
   try {
     await fs.rename(opts.dbPath, quarantine);
   } catch (e) {
@@ -136,7 +156,19 @@ export async function checkAndRecover(opts: {
     );
     return { action: "unavailable", problems };
   }
-  opts.log.error(`db: damaged file kept at ${quarantine} — nothing deleted`);
+  // …and NOTHING of the old database is left at the live path. A `-wal` that
+  // outlived the move is not a leftover, it is a replay: SQLite would apply it
+  // over whatever is installed next.
+  for (const suffix of ["-wal", "-shm"]) {
+    await fs.remove(opts.dbPath + suffix).catch(() => {
+      // aio-ok: it is normally already gone (moved above, or never existed);
+      // failing to remove it is reported by the snapshot check that follows.
+    });
+  }
+  opts.log.error(
+    `db: damaged file kept at ${quarantine} (with its -wal/-shm, if any) — ` +
+      `nothing deleted`,
+  );
 
   const snapshot = snapshotPathFor(opts.dbPath);
   try {

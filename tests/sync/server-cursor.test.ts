@@ -68,8 +68,12 @@ function createTestDb(): DB {
   return { query, execute, transaction, close: () => Promise.resolve() };
 }
 
+// Stamped relative to NOW: an UNKNOWN op stamped older than the server's
+// tombstone window is refused by name (`STALE_OP_REASON`), and an epoch-era
+// literal is an ordering label, not "an op from 1970". Offsets keep order.
+const T0 = Date.now();
 const hlc = (phys: number, cnt: number, node = "client-a"): HLC => [
-  phys,
+  T0 + phys,
   cnt,
   node,
 ];

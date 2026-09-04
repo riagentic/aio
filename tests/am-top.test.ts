@@ -8,12 +8,16 @@ import {
 } from "../src/am/am-cmd-inspect.ts";
 import { handleTrojan, type TrojanDeps } from "../src/server/server-trojan.ts";
 
-Deno.test("fmtBytes: human units + cyclic sentinel", () => {
+Deno.test("fmtBytes: human units + the unserializable sentinel", () => {
   assertEquals(fmtBytes(0), "0 B");
   assertEquals(fmtBytes(512), "512 B");
   assertEquals(fmtBytes(2048), "2.0 KB");
   assertEquals(fmtBytes(3_145_728), "3.0 MB");
-  assertEquals(fmtBytes(-1), "(cyclic)");
+  // The sentinel says the cell's slice cannot be serialized AT ALL — which
+  // means it is not reaching disk, on every window. It used to read
+  // "(cyclic)" here (a BigInt is the commoner cause), a plain `-1` in
+  // `am status`, and `—` in `am cost`. One word, one spelling, all three.
+  assertEquals(fmtBytes(-1), "unserializable");
 });
 
 Deno.test("renderTopFrame: cells sorted by size desc, with header + total", () => {

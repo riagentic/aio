@@ -149,7 +149,10 @@ export interface ServerSetupDeps<S, A> {
   getState: () => S;
   getUIState: (s: S, user?: AioUser) => unknown;
   dispatch: (action: A) => Promise<unknown> | void;
-  app: { snapshot: () => string; loadSnapshot: (json: string) => void };
+  app: {
+    snapshot: () => string;
+    loadSnapshot: (json: string, opts?: { force?: boolean }) => void;
+  };
   /** Content-addressed blob store (`app.blobs`) — served at /__aio/blobs/. */
   blobs?: import("./blobs.ts").BlobStore;
   // Server features
@@ -171,6 +174,13 @@ export interface ServerSetupDeps<S, A> {
   /** Close the debounce window now; rejects when the cycle reported a
    *  failure. Behind `am persist` / `POST /__aio/trojan/persist`. */
   flushPersist: () => Promise<void>;
+  /** The verdict of the most recent persist cycle — null when it landed.
+   *
+   *  `/__aio/health` had NO persistence signal at all: an app whose every
+   *  write was being refused answered `"status":"healthy"` with `errors: 0`
+   *  on the very cell that was not reaching disk, so an uptime monitor stayed
+   *  green through unbounded data loss. The same value `am persist` reads. */
+  lastPersistError?: () => Error | null;
   shouldPersist: boolean;
   // Schedule + DB
   scheduleManager: { active: () => string[] };
@@ -178,6 +188,9 @@ export interface ServerSetupDeps<S, A> {
   cellMethods?: Record<string, string[]>;
   /** Cell id → async method names — which calls a `_callId` can correlate. */
   cellAsyncMethods?: Record<string, string[]>;
+  /** Cell id → method name → required argument count — the trojan `dispatch`
+   *  route refuses a short call with it. */
+  cellMethodArity?: Record<string, Record<string, number>>;
   /** Cell id → per-field persist/ui flags — for the trojan `fields` route. */
   cellFields?: import("./aio-types.ts").CellFieldFlags;
   asyncDb: { query: (sql: string) => Promise<{ rows: unknown[] }> } | null;
@@ -641,7 +654,8 @@ export async function setupTransport<S, A>(
       // and audit-logged, exactly like the rest of the trojan.
       dispatchAsServer: (action: unknown) => dispatch(action as A),
       getSnapshot: () => app.snapshot(),
-      loadSnapshot: (json: string) => app.loadSnapshot(json),
+      loadSnapshot: (json: string, opts?: { force?: boolean }) =>
+        app.loadSnapshot(json, opts),
       blobs: deps.blobs,
       baseDir,
       baseDirFallbacks,
@@ -722,57 +736,58 @@ export async function setupTransport<S, A>(
             ((globalThis as Record<string, unknown>).__aioStartedAt as number ??
               Date.now())) / 1000,
         );
-        if (composed) {
-          const cellsHealth: Record<string, unknown> = {};
-          for (
-            const fs of composed.registry.health(
-              getState() as Record<string, unknown>,
-            )
-          ) {
-            cellsHealth[fs.name] = {
-              status: fs.status ?? "active",
-              enabled: fs.enabled,
-              errors: fs.errors,
-              lastAction: fs.lastAction,
-            };
-          }
-          // W4.1: include the framework version so operators can confirm which
-          // build is live (deploy verification, rolling-restart checks).
-          // "healthy" is a claim, so anything that has been failing on repeat
-          // has to appear here — an app reporting healthy while a subsystem is
-          // permanently dead is precisely the failure this endpoint invites.
-          const dead = degradedReport();
-          const clientDead = clientDegradedReport();
-          return {
-            status: dead.length > 0 || clientDead.length > 0
-              ? "degraded"
-              : "healthy",
-            version: VERSION,
-            appVersion,
-            appId,
-            // WHICH process answered. Without it, an orphan holding the port —
-            // a run whose lock is gone but whose process kept serving — is
-            // indistinguishable from the app you meant, and a field report
-            // read five-hour-old numbers out of one for a whole session. The
-            // pid is how `am kill --stale` can end it.
-            pid: Deno.pid,
-            uptime,
-            cells: cellsHealth,
-            ...(dead.length > 0 ? { degraded: dead } : {}),
-            ...(clientDead.length > 0 ? { clientDegraded: clientDead } : {}),
-          };
-        }
+        // ONE document, built once. This used to be two near-identical object
+        // literals (with and without `cells`), which is how a signal added to
+        // the health endpoint reaches one caller and not the other.
+        const cellsHealth = composed
+          ? Object.fromEntries(
+            composed.registry.health(getState() as Record<string, unknown>)
+              .map((fs) => [fs.name, {
+                status: fs.status ?? "active",
+                enabled: fs.enabled,
+                errors: fs.errors,
+                lastAction: fs.lastAction,
+              }]),
+          )
+          : null;
+        // W4.1: include the framework version so operators can confirm which
+        // build is live (deploy verification, rolling-restart checks).
+        // "healthy" is a claim, so anything that has been failing on repeat
+        // has to appear here — an app reporting healthy while a subsystem is
+        // permanently dead is precisely the failure this endpoint invites.
         const dead = degradedReport();
         const clientDead = clientDegradedReport();
+        // DURABILITY is part of that claim. A refused persist cycle means the
+        // app is running on state that is not on disk — the loudest thing an
+        // operator's monitor can be told, and until now the only thing it was
+        // never told. `ok: true` is stated positively so a monitor can alert
+        // on its absence as well as on `degraded`.
+        const persistErr = deps.lastPersistError?.() ?? null;
+        const persist = persistErr
+          ? {
+            ok: false,
+            // First line only: the manager's message carries a multi-line
+            // remediation hint that belongs in the log, not in a JSON field
+            // an alert renders.
+            error: String(persistErr.message ?? persistErr).split("\n")[0],
+          }
+          : { ok: true };
         return {
-          status: dead.length > 0 || clientDead.length > 0
+          status: dead.length > 0 || clientDead.length > 0 || persistErr
             ? "degraded"
             : "healthy",
           version: VERSION,
           appVersion,
           appId,
+          // WHICH process answered. Without it, an orphan holding the port —
+          // a run whose lock is gone but whose process kept serving — is
+          // indistinguishable from the app you meant, and a field report
+          // read five-hour-old numbers out of one for a whole session. The
+          // pid is how `am kill --stale` can end it.
           pid: Deno.pid,
           uptime,
+          ...(cellsHealth ? { cells: cellsHealth } : {}),
+          persist,
           ...(dead.length > 0 ? { degraded: dead } : {}),
           ...(clientDead.length > 0 ? { clientDegraded: clientDead } : {}),
         };
@@ -789,6 +804,7 @@ export async function setupTransport<S, A>(
         getSchedules: () => scheduleManager.active(),
         cellMethods: () => deps.cellMethods ?? {},
         cellAsyncMethods: () => deps.cellAsyncMethods ?? {},
+        cellMethodArity: () => deps.cellMethodArity ?? {},
         cellFields: () => deps.cellFields ?? {},
         ...(deps.getTimeline ? { getTimeline: deps.getTimeline } : {}),
         ...(deps.migrations ? { getMigrations: () => deps.migrations } : {}),
@@ -882,6 +898,12 @@ export async function setupTransport<S, A>(
       // Absent on the skipHttp stub, which is correct: that path is prod, and
       // the trojan does not exist in prod at all.
       server.control,
+      // The same knob the WS path honours — see uds.ts. It was inert here.
+      config.fullStateThreshold,
+      // `am cost` on the desktop transport. WS metered its socket from the
+      // start; this one was never wired, so every desktop app's wire totals
+      // read zero.
+      costMeter,
     );
     udsRef.current = uds;
     const u = uds;

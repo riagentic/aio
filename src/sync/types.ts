@@ -38,14 +38,29 @@ export interface SyncConflict {
   resolution: MergeStrategy;
 }
 
-/** Stats passed to onSync callback */
+/** What one completed catch-up did for one cell — the argument `onSync` gets.
+ *
+ *  Carries the cell's SyncStatus too, because that is the only reader it has:
+ *  the type was documented as "exposed to UI via useCell()" and no code path
+ *  outside the engine ever read it. */
 export interface SyncStats {
+  /** Ops (and the snapshot, if any) this catch-up folded into confirmed state. */
   merged: number;
+  /** Field conflicts seen since this cell's previous catch-up. */
   conflicts: number;
+  /** Milliseconds from the sync request going out to this fold finishing. */
   elapsed: number;
+  /** The cell's status now that the catch-up has landed.
+   *
+   *  Optional only because aio's public surface is additive-only — the engine
+   *  always supplies it. */
+  status?: SyncStatus["status"];
+  /** Ops still waiting for an ack. Always supplied — see `status`. */
+  pending?: number;
 }
 
-/** Sync status exposed to UI via useCell() */
+/** A sync cell's live status. Reaching the app through `onSync` (SyncStats
+ *  carries it) — the engine keeps the record, and this is how it is read. */
 export interface SyncStatus {
   status: "online" | "offline" | "syncing" | "blocked";
   pending: number;
@@ -198,6 +213,22 @@ export type SyncResponse =
      *  which the server logs). */
     reset?: string[];
   };
+
+/** The `op-rejected` reason PREFIX for a change the server could no longer
+ *  recognise as a resend.
+ *
+ *  Compaction tombstones the ids of the ops it deletes so a resend after a
+ *  lost ack still dedups; the tombstones are swept after the tombstone window
+ *  (24h, or the cell's `offline.retention` when longer — `compact.ts`). Past
+ *  it, an UNKNOWN op stamped older than the window is a resend the server
+ *  cannot tell from a new change, and applying it would apply it TWICE if it
+ *  was one. So it is refused, with a reason that starts with this token: the
+ *  client matches the prefix, drops the op from its pending buffer under the
+ *  same reason (`onDrop`) and stops re-sending it. A prefix, not the whole
+ *  string, so the human half of the reason can name the age and the knob
+ *  without the machine half changing. Additive on the wire: a rejection
+ *  reason was always a free-form string. */
+export const STALE_OP_REASON = "stale-beyond-retention";
 
 /** Default sync config values.
  *

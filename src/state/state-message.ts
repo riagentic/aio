@@ -79,12 +79,40 @@ export function handleMessage(data: any): HandleResult {
     return "full";
   }
 
+  /** Ask the server for a full state frame.
+   *
+   *  THE one thing every "this delta was not applied" path must do. A dropped
+   *  delta means the client and the server no longer agree about the state, and
+   *  nothing after it can put them back: later patches apply to a base that is
+   *  already wrong, so the UI renders confidently stale data with no error
+   *  anywhere. Three paths reach that condition (a non-array `$patches`, a
+   *  reserved path segment, an applier that threw) and only one of them used to
+   *  ask for the fix.
+   *
+   *  Best effort by construction: with no transport there is nothing to ask, and
+   *  the reconnect path sends a full state anyway. */
+  function _requestResync(): void {
+    const transport = _getTransport();
+    if (transport) transport.send(enc("resync"));
+  }
+
   // Immer patches: { $patches: [{op, path, value}, ...] }
   if (data.$patches) {
     if (!Array.isArray(data.$patches)) {
       // Safety: a message carrying $patches as a non-array is malformed wire
       // protocol — never fall through to full-state replacement with it.
-      log.warn("malformed $patches (not an array) — dropped");
+      //
+      // Dropped AND RESYNCED. A delta the client refuses is a delta the server
+      // believes it delivered: from here on the two disagree about the state,
+      // and every later patch applies to a base that is already wrong. This
+      // used to warn and return, leaving a UI that renders confidently stale
+      // data until some unrelated full-state frame happens along — the exact
+      // "looks like it works" failure the applyPatches catch below already
+      // resyncs for. One rule for every path that does not apply a delta.
+      log.warn(
+        "malformed $patches (not an array) — dropped, requesting resync",
+      );
+      _requestResync();
       return "dropped";
     }
     const prev = _stateSignal.peek();
@@ -99,9 +127,14 @@ export function handleMessage(data: any): HandleResult {
     for (const p of patches) {
       for (const seg of p.path) {
         if (typeof seg === "string" && _BLOCKED_KEYS.has(seg)) {
+          // Refused, and resynced for the same reason as above: whatever the
+          // server meant to send, this client did not apply it and is now
+          // behind. (The refusal itself stands — a reserved prototype key is
+          // never applied, however it got here.)
           log.warn(
-            `dropped $patches with reserved path segment "${seg}"`,
+            `dropped $patches with reserved path segment "${seg}" — requesting resync`,
           );
+          _requestResync();
           return "dropped";
         }
       }
@@ -134,8 +167,7 @@ export function handleMessage(data: any): HandleResult {
       log.warn("applyPatches failed, requesting resync:", {
         detail: String(e),
       });
-      const transport = _getTransport();
-      if (transport) transport.send(enc("resync"));
+      _requestResync();
       return "noop";
     }
   }

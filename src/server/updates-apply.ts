@@ -563,10 +563,36 @@ export async function swapArtifact(opts: {
     // needed — and the symlink swap is atomic (rename over a temporary link),
     // so a crash mid-update leaves the app pointing at a real binary either
     // way.
-    mark(layout.target);
     const nextDir = `${layout.dir}/versions/${opts.toVersion}`;
     await Deno.mkdir(nextDir, { recursive: true });
     const next = `${nextDir}/${layout.base}${layout.ext}`;
+    // A SAME-VERSION REBUILD lands in the directory the old artifact already
+    // occupies — `decide()` offers one on purpose ("same version, new build")
+    // — so `rename(staged, next)` wrote the new bytes straight over the very
+    // file the marker had just recorded as the rollback. `restoreArtifact`
+    // then "succeeded", logged `rolled back the artifact → <version>`, and
+    // pointed the app at the build that had just failed: a crash loop with a
+    // log claiming a good rollback, and the last known-good copy gone. This is
+    // the layout the one-liner installer produces.
+    //
+    // So vacate the name first, and let the marker name where the old copy
+    // WILL be. Marker still goes down before any rename that could lose it: a
+    // crash before the aside leaves the target untouched (rollback fails
+    // loudly, app intact); a crash after it leaves `previous` real and the
+    // marker pointing at it.
+    const sameSlot = next === layout.target;
+    const previousPath = sameSlot
+      ? `${nextDir}/${layout.base}.previous${layout.ext}`
+      : layout.target;
+    mark(previousPath);
+    if (sameSlot) {
+      await Deno.remove(previousPath).catch(() => {
+        // aio-ok: clearing a leftover from an earlier interrupted swap. If it
+        // is not there, there is nothing to clear; if it cannot be removed,
+        // the rename below fails loudly with the real reason.
+      });
+      await Deno.rename(layout.target, previousPath);
+    }
     if (Deno.build.os !== "windows") await Deno.chmod(opts.staged, 0o755);
     await Deno.rename(opts.staged, next);
     const tmpLink = `${layout.link}.new-${opts.toVersion}`;
@@ -591,7 +617,7 @@ export async function swapArtifact(opts: {
       keep: Math.max(2, opts.keepVersions ?? 3),
       current: nextDir,
     }).catch(() => []);
-    return { previous: layout.target };
+    return { previous: previousPath };
   }
   const previous = `${opts.current}.old-${opts.fromVersion}`;
   mark(previous);

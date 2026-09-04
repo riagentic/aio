@@ -7,11 +7,26 @@ workarounds an app may still carry for bugs that are now fixed, each with the
 version that fixed it — so "nothing told us we could delete it" stops being a
 reason to keep one (gated by `deno task check:docs`).
 
+**Nothing after alpha76 breaks.** The surface was frozen on 2026-09-04
+(`docs/basics/semver-policy.md`): an app that compiles and runs against
+v1.0.0-alpha76 compiles and runs against every later alpha, every beta, and
+1.0.0. The retirements in the alpha75 → alpha76 guide below were the last ones,
+and every guide from alpha77 on is a `## Retire` section and a list of what got
+better — never a migration you have to perform. If a later upgrade breaks your
+app, that is a bug in aio, not a step you missed.
+
 ## restructure (alpha27+)
 
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha76 → alpha77](from-alpha76-to-alpha77.md) — nothing breaks, and nothing
+  ever will again: the surface is frozen. The visual app manager is served its
+  app again (the validator read the framework's own HTML template as browser
+  code), buffered patches are no longer applied twice after a snapshot, a write
+  drained at shutdown reaches SQLite, a packaged Electron window keeps its
+  config across a reload, and twenty-odd more — every one with a test that is
+  red on alpha76
 - [alpha75 → alpha76](from-alpha75-to-alpha76.md) — **breaks**: the last release
   before beta retires the six spellings still marked "deprecated through beta".
   Effects leave the return channel for `s.$do(...)`, selector deps arrive as one
@@ -45,7 +60,7 @@ reason to keep one (gated by `deno task check:docs`).
   installed file keeps the app's own name under `versions/<version>/`; a
   CommonJS dependency no longer fails a bundle that works; dev evaluates the
   prod client graph; a packaged renderer's errors reach the log.
-- **[alpha69 → alpha70](from-alpha69-to-alpha70.md) — THE last compat break:**
+- **[alpha69 → alpha70](from-alpha69-to-alpha70.md) — the alpha52-era cleanup:**
   every alpha52-era alias and duplicate import path retired (`aiol --safe-fix`
   rewrites them all), `memory.gcStressRatio` removed, shape drift refuses in
   dev, sanitizers on in every test; plus `aio/cli`, `ios-client`, the router on

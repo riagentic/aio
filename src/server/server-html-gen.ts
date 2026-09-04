@@ -509,7 +509,7 @@ ${head}
       _overlay(stage, msg) // render immediately — never race the report
       fetch('/__aio/client-error', {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', 'x-aio': '1' },
         body: JSON.stringify({ blankScreen: stage, message: String(err && err.message || err) + chain, stack: msg }),
       }).then(r => r.json())
         .then(c => { if (c && c.fix) _overlay(stage, msg, c.fix) })

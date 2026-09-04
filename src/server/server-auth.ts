@@ -3,6 +3,7 @@ const _encoder = new TextEncoder();
 // Authentication helpers — timing-safe comparison, token extraction, user resolution.
 // Extracted from server.ts — no side effects, pure functions.
 import type { AioUser } from "./aio.ts";
+import { parseCookies } from "./route.ts";
 
 // Constant-time string comparison — prevents timing attacks on token auth
 // Compares full length even on mismatch to avoid leaking token length
@@ -39,15 +40,17 @@ export function bearerToken(req: Request): string | null {
 /** Session cookie name (AUTH-2 browser flow). */
 export const SESSION_COOKIE = "aio_session";
 
-/** Read the session token from the Cookie header (browser flow). */
+/** Read the session token from the Cookie header (browser flow).
+ *
+ *  Through `parseCookies`, not a second hand-rolled parse. There were two
+ *  readers of the same header with two different answers: this one returned
+ *  the FIRST duplicate and did not percent-decode; `parseCookies` (route.ts,
+ *  what an app's own handler sees) returns the LAST and decodes. Same header,
+ *  two answers — and a browser sending two `aio_session` cookies (one set on
+ *  the host, one on a parent domain) is ordinary, not exotic. Last-wins is the
+ *  rule that survives, because it is the one an app's handler already gets. */
 export function sessionTokenFromCookie(req: Request): string | null {
-  const cookies = req.headers.get("cookie");
-  if (!cookies) return null;
-  for (const part of cookies.split(";")) {
-    const [k, ...v] = part.trim().split("=");
-    if (k === SESSION_COOKIE) return v.join("=") || null;
-  }
-  return null;
+  return parseCookies(req.headers.get("cookie"))[SESSION_COOKIE] || null;
 }
 
 /** Extract token from query param, Authorization header, or session cookie.
@@ -517,9 +520,102 @@ export function recordAuthFail(
   );
 }
 
+// ── Expensive-work budget: the OTHER thing a credential route must bound ────
+//
+// The failure budget answers "is this client guessing". It cannot answer "is
+// this client making me do work", and the two are not the same question:
+//
+//   * a SUCCESSFUL signup records no failure, so nothing ever throttled it.
+//     60 anonymous signups landed in 665 ms — 60 PBKDF2-600k runs (~51 ms of
+//     CPU each), 60 permanent `users` rows, and 60 real sessions, i.e.
+//     anonymous → `role:"user"` at will, reaching every `access: true` cell.
+//     `signup: true` is the default. Every OTHER verifying route carries a
+//     budget explicitly "so it is not an unthrottled PBKDF2 pump"; the one
+//     route reachable with no credential at all did not.
+//
+//   * and the failure budget was being used as a stand-in for this one, at the
+//     cost of the invariant `docs/auth/auth.md` states: "The budget throttles
+//     failed authentication, never service. A request that presents a VALID
+//     credential is served regardless of the budget." True at the HTTP gate,
+//     false at `/__aio/auth/*`, which checked the budget BEFORE verifying
+//     anything — so 12 failed logins for a nonexistent id took the whole app's
+//     login and signup offline for five minutes. Behind the reverse proxy the
+//     docs prescribe WITHOUT `trustProxyHeader`, every client shares one
+//     bucket, so those 12 requests are an outage for everyone, renewably.
+//
+// So: work is metered on its own, valid or not, and the failure budget goes
+// back to deciding only what a FAILED verification is answered with.
+const AUTH_WORK_MAX = 30;
+const AUTH_WORK_WINDOW_MS = 60_000;
+/** Accounts one client key may create in a window. A person signs up once. */
+const SIGNUP_MAX = 10;
+const SIGNUP_WINDOW_MS = 60 * 60_000;
+
+const _authWork = new Map<string, number[]>();
+const _signups = new Map<string, number[]>();
+
+/** Charge one unit against `map` and report whether it stayed within `max`.
+ *  Bounded the same way `_authFails` is: newest `max` stamps per key, and the
+ *  oldest keys evicted at the ceiling — the map is fed by remote input. */
+function _charge(
+  map: Map<string, number[]>,
+  key: string,
+  max: number,
+  windowMs: number,
+  now: number,
+): boolean {
+  if (map.size >= AUTH_FAIL_MAX_KEYS && !map.has(key)) {
+    for (const [k, ts] of map) {
+      const newest = ts[ts.length - 1];
+      if (newest === undefined || now - newest >= windowMs) map.delete(k);
+    }
+    const target = Math.floor(AUTH_FAIL_MAX_KEYS * 0.9);
+    for (const k of map.keys()) {
+      if (map.size <= target) break;
+      map.delete(k);
+    }
+  }
+  const fresh = (map.get(key) ?? []).filter((t) => now - t < windowMs);
+  fresh.push(now);
+  if (fresh.length > max + 1) fresh.splice(0, fresh.length - (max + 1));
+  map.set(key, fresh);
+  return fresh.length <= max;
+}
+
+/** Charge one EXPENSIVE verification (PBKDF2-class) to this client key.
+ *  `false` ⇒ over budget: answer 429 without doing the work. */
+export function chargeAuthWork(
+  clientKey: string | undefined,
+  now = Date.now(),
+): boolean {
+  return _charge(
+    _authWork,
+    clientKey ?? "*",
+    AUTH_WORK_MAX,
+    AUTH_WORK_WINDOW_MS,
+    now,
+  );
+}
+
+/** Charge one ACCOUNT CREATION to this client key. `false` ⇒ over budget. */
+export function chargeSignup(
+  clientKey: string | undefined,
+  now = Date.now(),
+): boolean {
+  return _charge(
+    _signups,
+    clientKey ?? "*",
+    SIGNUP_MAX,
+    SIGNUP_WINDOW_MS,
+    now,
+  );
+}
+
 /** Test isolation. */
 export function _resetAuthFails(): void {
   _authFails.clear();
+  _authWork.clear();
+  _signups.clear();
 }
 
 // ── Host gate — DNS-rebinding defense (ONE decider) ──────────────────────────

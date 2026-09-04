@@ -21,7 +21,20 @@ export function devWsScript(): string {
         if (typeof ev.data !== 'string' || ev.data[0] !== '{') return
         let f; try { f = JSON.parse(ev.data) } catch { return }
         if (!f || f.v !== 2) return
-        if (f.t === 'graph-error' || f.t === 'graph-clear') { ws.close(); location.reload(); return }
+        // graph-error is sent INSTEAD of a reload: the graph is red, so the
+        // build a reload would fetch is the broken one. Reloading here defeated
+        // that and hid the reason. The bundle's own handler paints the overlay;
+        // this pre-bundle socket just refuses to reload and says why.
+        if (f.t === 'graph-error') {
+          const errs = Array.isArray(f.d) ? f.d : []
+          for (const e of errs) {
+            console.error('[aio:graph] ' + (e.file || '?') + (e.line ? ':' + e.line : '') + ' — ' + (e.message || ''))
+            if (e.fix) console.error('[aio:graph] FIX: ' + e.fix)
+          }
+          if (!errs.length) console.error('[aio:graph] the import graph is invalid — not reloading')
+          return
+        }
+        if (f.t === 'graph-clear') { ws.close(); location.reload(); return }
         if (f.t === 'reload') { ws.close(); location.reload() }
         else if (f.t === 'css') {
           document.querySelectorAll('link[rel="stylesheet"]').forEach(link => {

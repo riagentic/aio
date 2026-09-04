@@ -752,6 +752,11 @@ export function connectCliUDS<S>(
                   case "proto": {
                     const theirs = parseProtoHello(frame.d);
                     if (!theirs) continue;
+                    // Which build this connection talks to — `peerHello()`.
+                    // The WS client and the TCP CLI client both recorded it;
+                    // this one negotiated and threw it away, so on the socket
+                    // path nothing could answer the question.
+                    rememberPeerHello(theirs);
                     const result = negotiateProtocol(
                       protoHello(VERSION),
                       theirs,

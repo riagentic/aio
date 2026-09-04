@@ -43,12 +43,27 @@ export function camelToKebab(s: string): string {
   return s.replace(/[A-Z]/g, (m) => "-" + m.toLowerCase());
 }
 
-// SVG attributes whose JSX camelCase name differs from the DOM attribute name
-//. SVG is mixed-case: presentation/text attrs are kebab-case
-// (`stop-color`), but structural attrs like `viewBox`/`preserveAspectRatio`
-// stay camelCase — so a blanket camel→kebab is WRONG. This curated map converts
+// JSX prop names whose DOM ATTRIBUTE name is spelled differently.
+//
+// Mostly SVG: it is mixed-case, so presentation/text attrs are kebab-case
+// (`stop-color`) while structural attrs like `viewBox`/`preserveAspectRatio`
+// stay camelCase — a blanket camel→kebab is WRONG. This curated map converts
 // only the ones that need it; anything else passes through verbatim.
-const _SVG_ATTR: Readonly<Record<string, string>> = {
+//
+// `htmlFor` is here for the same reason and was the HTML half nobody had
+// filled in: it is not a `_DOM_PROPS` entry, so it fell through to
+// `setAttribute("htmlFor")` on the client and was emitted verbatim by SSR —
+// `htmlfor=` and `htmlFor=`, two spellings of an attribute NO browser reads,
+// so every `<label htmlFor>`/control association was silently dead. aio's own
+// a11y warning recommends the shape, and `docs/ui/air-lifecycle.md` ships it.
+const _ATTR_NAME: Readonly<Record<string, string>> = {
+  htmlFor: "for",
+  // `<form nativeSubmit>` opts out of the SPA submit interception
+  // (vdom-events.ts reads `data-native-submit` off the element). The prop was
+  // promised in that comment and never mapped, so it landed as a
+  // `nativesubmit` attribute nothing reads — the form was still intercepted,
+  // silently. The `data-native-submit` spelling keeps working unchanged.
+  nativeSubmit: "data-native-submit",
   stopColor: "stop-color",
   stopOpacity: "stop-opacity",
   strokeWidth: "stroke-width",
@@ -88,11 +103,12 @@ const _SVG_ATTR: Readonly<Record<string, string>> = {
 };
 
 /** Map a JSX prop name to its DOM attribute name — converts the known
- *  camelCase SVG attrs (stopColor → stop-color) so gradients/strokes render,
- *  and leaves everything else (viewBox, data-*, aria-*) untouched. Shared by
- *  the client patcher and both SSR emitters so all render paths agree. */
-export function svgAttrName(k: string): string {
-  return _SVG_ATTR[k] ?? k;
+ *  camelCase SVG attrs (stopColor → stop-color) so gradients/strokes render
+ *  and `htmlFor` → `for`, and leaves everything else (viewBox, data-*, aria-*)
+ *  untouched. Shared by the client patcher and both SSR emitters so all render
+ *  paths agree: ONE table, no per-path variant. */
+export function attrNameOf(k: string): string {
+  return _ATTR_NAME[k] ?? k;
 }
 
 // CSS properties that accept unitless numeric values — all others get "px" auto-appended

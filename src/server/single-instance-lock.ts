@@ -549,6 +549,20 @@ export async function isSocketAlive(socketPath: string): Promise<boolean> {
 
 // ── Lock File CRUD ───────────────────────────────────────────
 
+/** Is there a FILE at this lock's path, whatever its contents?
+ *
+ *  `readLock` answers "is there a lock I can reason about"; this answers "is
+ *  the name taken". They differ for exactly one input — an unreadable file —
+ *  and that difference is what bricked an app. */
+export function lockFileExists(key: string): boolean {
+  try {
+    Deno.lstatSync(lockPath(key));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Read a lock file, return null if missing or corrupt */
 /** Read a lock by its key — the plain appId for a default-home app, or the
  *  `<appId>@<hash8(home)>` key {@linkcode lockKey} builds for any other home. */
@@ -796,7 +810,30 @@ export class AppLock {
           this._registerCleanupHandlers();
           return { ok: true };
         }
-        // Race — someone else created it between our read and write. Retry.
+        // The create failed, so a FILE is there. Either someone won the race
+        // (retry) or the file is UNREADABLE — 0 bytes or truncated JSON, which
+        // is exactly what a crash or power cut mid-`writeLock` leaves, since
+        // that write is not atomic.
+        //
+        // An unreadable lock names no owner, so it cannot be protecting one,
+        // and it bricked the app permanently: `readLock` said "no lock" while
+        // `acquire` synthesised `pid: 0` and refused with "already running
+        // (pid 0, port 0)" — a pid no process has — while `am status` said
+        // "stopped", `am kill` said "killed: false" and `am kill --stale`
+        // found nothing. Two readers of one file, two answers, and the only
+        // way out was deleting a file in a runtime directory nobody has reason
+        // to know about. `readLock`'s own docstring calls that failure by
+        // name. Reclaim it, loudly.
+        if (lockFileExists(this.key)) {
+          log.warn(
+            "lock",
+            `unreadable lock at ${
+              lockPath(this.key)
+            } (empty or truncated — a crash mid-write leaves exactly this) — ` +
+              `it names no owner, so it is being reclaimed`,
+          );
+          removeLock(this.key);
+        }
         await delay(100);
         continue;
       }

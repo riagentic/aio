@@ -791,6 +791,9 @@ export interface BootConfig<S> {
   persistDebounceMs: number;
   dbSchema: Record<string, TableDef | DbMapping> | undefined;
   syncCellIds: string[];
+  /** Per-cell `sync.offline.retention` in ms — sizes compaction's id-tombstone
+   *  window so a resend after a long offline stretch still hits the dedup. */
+  syncRetentionMs?: Record<string, number>;
   /** Per-cell declarative access rules — enforced on the sync-op path (AUTH-1
    *  parity with the action-dispatch gate in aio-server.ts). */
   cellAccess?: Map<string, import("../state/cell-types.ts").Access>;
@@ -1162,6 +1165,7 @@ export async function bootStorage<S>(
           (getState() as Record<string, Record<string, unknown>>)[cell] ?? {},
         cellVersion: declaredVersion,
         isQuarantined: (cell: string) => syncQuarantined.has(cell),
+        opRetentionMs: (cell: string) => cfg.syncRetentionMs?.[cell],
         // Client-facing — the same projection every other wire uses. A cell
         // hidden by `ui: "none"` is absent from it, and `null` here means
         // "must not be sent", which the handler honours by sending nothing.

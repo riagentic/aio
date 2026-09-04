@@ -266,6 +266,14 @@ export async function cmdAuth(
       }
       case "revoke": {
         need("");
+        // The user must EXIST — its siblings (`unlock`, `rm`) already refuse a
+        // name that is not there. `revoke` is the incident command: a typo'd
+        // id reporting `{"sessionsRevoked":0}` and exit 0 reads as "done"
+        // while the real account's sessions are still live.
+        if (!users.get(id!)) {
+          outError(`no such user: ${id}`, mode);
+          Deno.exit(1);
+        }
         const n = sessionStore().revokeUser(id!);
         // Sessions are not the only thing that authenticates: a reset token or
         // a TOTP `pending` captured before the revocation would mint a BRAND

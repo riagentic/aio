@@ -99,8 +99,117 @@ export function expandAppends(
   return out ?? (ops as Patch[]);
 }
 
+/** The first op in `ops` that cannot describe `base`, or null when they all
+ *  can. ARRAY INDICES only — the one place Immer answers an impossible op with
+ *  a plausible wrong one instead of a throw.
+ *
+ *  `applyPatches` SPLICES an out-of-range array `add` at the end rather than
+ *  refusing it, so a peer that lost a round applies the next one and ends up
+ *  with a list that is merely wrong: server `["one","two","three"]`, client
+ *  `["one","three"]`, no error anywhere, forever. Every other desync already
+ *  ends in a throw, and every caller of `applyWirePatches` treats a throw as
+ *  "request a full resync" — so this makes the one silent case join them.
+ *
+ *  Sound by construction: a length is only ever CHECKED while it is known
+ *  exactly. It is seeded from `base`, updated across the ops that shift it,
+ *  and set to "unknown" (never checked again) the moment an op writes at or
+ *  above the container it describes. A correct patch stream can therefore
+ *  never trip it — Immer emits `add` at most at `length`. */
+function _impossibleOp(
+  base: unknown,
+  ops: readonly WirePatch[],
+): string | null {
+  const SEP = "\u0000";
+  const key = (p: readonly (string | number)[]) => p.join(SEP);
+  // Lengths we know EXACTLY, and the containers we no longer know anything
+  // under. A length is seeded lazily from `base`, so it is only trustworthy
+  // while nothing has written at or above it — `dirty` is what makes that
+  // lazy read sound.
+  const lens = new Map<string, number>();
+  const dirty = new Set<string>();
+
+  const isDirty = (k: string) => {
+    for (const d of dirty) if (k === d || k.startsWith(d + SEP)) return true;
+    return false;
+  };
+  const lengthOf = (parent: readonly (string | number)[]): number | null => {
+    const k = key(parent);
+    const known = lens.get(k);
+    if (known !== undefined) return known;
+    if (isDirty(k)) return null;
+    const v = valueAt(base, parent);
+    if (!Array.isArray(v)) return null;
+    lens.set(k, v.length);
+    return v.length;
+  };
+  /** Everything under `path` is no longer knowable — its own length included
+   *  unless the caller re-states it. */
+  const soil = (path: readonly (string | number)[]) => {
+    const k = key(path);
+    dirty.add(k);
+    for (const t of [...lens.keys()]) {
+      if (t === k || t.startsWith(k + SEP)) lens.delete(t);
+    }
+  };
+
+  for (const p of ops) {
+    if (p.path.length === 0) {
+      lens.clear();
+      dirty.clear();
+      dirty.add("");
+      continue;
+    }
+    const parent = p.path.slice(0, -1);
+    const last = p.path[p.path.length - 1];
+    const idx = typeof last === "number"
+      ? last
+      : /^\d+$/.test(String(last))
+      ? Number(last)
+      : null;
+    const len = idx === null ? null : lengthOf(parent);
+
+    if (idx !== null && len !== null) {
+      const held = `the array at /${parent.join("/")} holds ${len} item(s)`;
+      // An index write shifts (add/remove) or replaces the rows below it, so
+      // nothing under this array survives as knowledge — but its LENGTH does,
+      // and it is the only thing being checked.
+      if (p.op === "add") {
+        if (idx < 0 || idx > len) return `add at index ${idx} — ${held}`;
+        soil(parent);
+        lens.set(key(parent), len + 1);
+        continue;
+      }
+      if (p.op === "remove") {
+        if (idx < 0 || idx >= len) return `remove at index ${idx} — ${held}`;
+        soil(parent);
+        lens.set(key(parent), len - 1);
+        continue;
+      }
+      if (p.op === "replace") {
+        // `replace` AT `len` is a legal extend-by-one and the compactor emits
+        // it, so only an index past the end is impossible.
+        if (idx < 0 || idx > len) return `replace at index ${idx} — ${held}`;
+        soil(p.path);
+        if (idx === len) lens.set(key(parent), len + 1);
+        continue;
+      }
+    }
+    // A write at this path replaces whatever was under it.
+    soil(p.path);
+    if (Array.isArray(p.value)) lens.set(key(p.path), p.value.length);
+  }
+  return null;
+}
+
 /** Apply a `patches` frame — Immer ops and `append` alike — to `base`.
  *  The one function every consumer of a delta goes through. */
 export function applyWirePatches<T>(base: T, ops: readonly WirePatch[]): T {
+  const impossible = _impossibleOp(base, ops);
+  if (impossible) {
+    throw new Error(
+      `Cannot apply patches: ${impossible}. The two sides disagree about the ` +
+        `state — a delta was lost. Requesting full state.`,
+    );
+  }
   return applyPatches(base as object, expandAppends(base, ops)) as T;
 }

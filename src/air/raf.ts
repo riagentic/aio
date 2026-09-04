@@ -1,4 +1,42 @@
 import { onCleanup, onMount, useRef } from "./aio-renderer.ts";
+import { _reportHookError } from "./hook-error.ts";
+
+/** Report a throw from a REPEATING callback: loud on the first one, then at
+ *  most one line every {@linkcode LOOP_ERROR_SUMMARY_MS} carrying the count.
+ *
+ *  `_reportHookError` logs on every call, which is right for a hook that runs
+ *  once per render and wrong at 60 Hz: a `useRaf` callback that throws every
+ *  frame would write 60 stack traces a second, and a console nobody can read
+ *  is as silent as no console at all. The first failure is what a developer
+ *  needs; the count is what tells them it is still happening.
+ *
+ *  One reporter per LOOP INSTANCE (created inside the start function), so a
+ *  remount reports afresh rather than inheriting a suppressed state. */
+const LOOP_ERROR_SUMMARY_MS = 5000;
+function _loopErrorReporter(kind: string): (e: unknown) => void {
+  let since = 0, suppressed = 0;
+  return (e: unknown) => {
+    const now = Date.now();
+    if (since === 0) {
+      since = now;
+      _reportHookError(kind, e);
+      return;
+    }
+    suppressed++;
+    if (now - since >= LOOP_ERROR_SUMMARY_MS) {
+      console.error(
+        `[aio-renderer] ${kind} callback has thrown ${suppressed} more time(s) ` +
+          `in the last ${
+            Math.round((now - since) / 1000)
+          }s — the loop is still ` +
+          `running and still failing. Latest:`,
+        e,
+      );
+      since = now;
+      suppressed = 0;
+    }
+  };
+}
 
 /**
  * The `active` flag of {@linkcode useRaf} / {@linkcode useInterval}: start the
@@ -90,12 +128,35 @@ export function useRaf(
     let id = 0;
     let prev = 0;
     let first = true;
+    const report = _loopErrorReporter("useRaf");
     const loop = (t: number) => {
       const delta = first ? 0 : t - prev;
       first = false;
       prev = t;
-      cbRef.current(t, delta);
+      // RE-ARM FIRST, and contain the callback's throw.
+      //
+      // This used to call `cb` and then schedule the next frame on the line
+      // after it. A self-rescheduling loop that re-arms LAST dies on the first
+      // exception: the next `requestAnimationFrame` never runs, and nothing
+      // ever restarts it. The component stays mounted, `active` stays true,
+      // `onCleanup` never fires — the animation simply stops, forever, with
+      // one line in the console that reads like a transient error. A canvas
+      // game, a sequencer, a chart that stops redrawing after one bad frame is
+      // exactly the silent-broken-UI class this project treats as disqualifying.
+      //
+      // `setInterval` (useInterval below) self-heals here because the platform
+      // re-arms it; this loop is the one that had to do it itself.
+      //
+      // Contained the same way every other user callback in the render
+      // pipeline is (`_reportHookError`): logged loudly and NAMED, and then
+      // the loop stands. Continuing on a callback that throws every frame is
+      // the deliberate choice — the alternative is a frozen surface.
       id = requestAnimationFrame(loop);
+      try {
+        cbRef.current(t, delta);
+      } catch (e) {
+        report(e);
+      }
     };
     id = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(id);
@@ -136,7 +197,18 @@ export function useInterval(
   cbRef.current = cb;
 
   useActiveLoop(active, () => {
-    const id = setInterval(() => cbRef.current(), ms);
+    // `setInterval` keeps firing after a throwing tick, so the loop cannot die
+    // the way `useRaf`'s could — but an uncaught throw here still surfaces as
+    // a bare "Uncaught (in ...)" with no component and no hook name, 1/ms
+    // apart. Same reporter as every other user callback in the pipeline.
+    const report = _loopErrorReporter("useInterval");
+    const id = setInterval(() => {
+      try {
+        cbRef.current();
+      } catch (e) {
+        report(e);
+      }
+    }, ms);
     return () => clearInterval(id);
   });
 }

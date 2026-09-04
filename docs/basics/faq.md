@@ -102,7 +102,7 @@ state channel is for state — heavy I/O happens outside it.
 
 ### Why only AIR — what about Vue / Svelte / Solid?
 
-aio ships **AIR** — a built-in, signal-based renderer (60 KB gzipped with the
+aio ships **AIR** — a built-in, signal-based renderer (63 KB gzipped with the
 full client runtime — protocol, offline queue and sync included). Zero
 dependencies, automatic memoization, built-in forms/animation/SSR. AIR provides
 React-style compat hooks (`useState`, `useEffect`, `useMemo`, `useCallback`) for

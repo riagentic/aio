@@ -585,6 +585,19 @@ export function testCell(
       }
       // A test may never call settle() at all — a method that failed with
       // nobody watching still must not pass for silence.
+      //
+      // DRAIN FIRST. The ledger entry is pushed from `started.catch(...)`, a
+      // microtask that has not run when a synchronous `raiseUnobserved()`
+      // executes — so a fire-and-forget failure passed GREEN whenever the test
+      // never called `settle()`, and it passed even for a method that threw
+      // SYNCHRONOUSLY on entry. The one test named for this claim
+      // (`tests/testcell-async.test.ts`, "a failure nobody awaited fails the
+      // test even without settle()") calls `await t.settle()` in its body, so
+      // nothing covered it.
+      while (inFlight.length > 0) {
+        await Promise.allSettled(inFlight.splice(0));
+      }
+      await drainMicrotasks();
       raiseUnobserved();
     } finally {
       // Cells are module singletons: leave the def exactly as it was found, so
