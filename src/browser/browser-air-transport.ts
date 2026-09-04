@@ -232,8 +232,17 @@ function _route(line: string): void {
   if (!f) {
     // The one v1 shim: a v1 server's hello/refusal is still readable.
     const v1 = v1PeerReason(line);
-    if (v1) console.error(`[aio:air] protocol version mismatch: ${v1}`);
-    else console.warn("[aio:air] undecodable frame — dropped");
+    if (v1) {
+      // TERMINAL, exactly like the v2 `proto-err` path — the two sides cannot
+      // read each other's frames, so retrying cannot fix it. This branch only
+      // logged: it did not stop the reconnect loop, drop the queue, or reject
+      // the pending calls. It looked harmless only because `negotiateProtocol`
+      // is symmetric, so the client usually reached the same verdict from the
+      // server's own hello — two deciders for "terminally refused", one of
+      // them inert.
+      console.error(`[aio:air] protocol version mismatch: ${v1}`);
+      _protoMismatch(v1);
+    } else console.warn("[aio:air] undecodable frame — dropped");
     return;
   }
   if (handleControlFrame(f, _bootId, _protoMismatch)) return;
@@ -287,6 +296,7 @@ function _route(line: string): void {
 function _protoMismatch(reason: string) {
   _status("Protocol mismatch — reload/update the app");
   _closed = true; // stop the reconnect loop
+  _terminal = true; // …and keep it stopped: see `_tryConnect`
   // Terminal: nothing will ever flush this queue, so the queued frames are
   // gone — say so, and reject their callers TOO (rejectAll, not
   // rejectInFlight). A rejection is only honest when the frame is really dead.
@@ -583,6 +593,16 @@ function _connect() {
     _route(e.data);
   };
   ws.onclose = () => {
+    // A socket that is no longer THE socket has nothing to say about the
+    // connection. `close()` is asynchronous — `onclose` lands after the
+    // handshake — so a teardown (`_closed = true; _ws = null`) followed by a
+    // reconnect before that lands (`_tryConnect` resets `_closed` and opens
+    // ws2) had the OLD socket's `onclose` arrive against the new one: it
+    // nulled `_ws` (ws2's only handle), tore the transport down and scheduled
+    // a reconnect that opened ws3 while ws2 was still open. Two live sockets
+    // on one page, each receiving every broadcast — and a patch frame applied
+    // twice inserts twice.
+    if (_ws !== null && _ws !== ws) return;
     _ws = null;
     _pauseClientVitals();
     // In-flight only — the queue survives and flushes on reconnect (see the
@@ -623,6 +643,20 @@ function _send(action: { type: string; payload?: unknown }) {
   const tagged = { ...action, _source: "UI" };
   const json = enc("action", tagged);
   const cid = (tagged as { cid?: string }).cid;
+  if (_terminal) {
+    // Nothing will ever flush the queue after a version gap (`_dropQueue`
+    // said so when it emptied it), so queueing here is a silent drop with a
+    // promise that never settles. The caller hears the same verdict the
+    // queued callers heard, now.
+    if (cid) {
+      _rejectAck(
+        cid,
+        new Error("action was never sent — protocol version mismatch"),
+      );
+    }
+    _noteTerminalDrop(tagged.type);
+    return;
+  }
   if (_ws && _ws.readyState === WebSocket.OPEN) {
     try {
       _ws.send(json);
@@ -653,7 +687,27 @@ function _send(action: { type: string; payload?: unknown }) {
 
 // ── Wire transport into protocol layer ──────────────────────────────
 
+/** Set once a version gap has been diagnosed and never cleared: the two sides
+ *  cannot read each other's frames, and no reconnect can change what either
+ *  side is running. `_closed` alone did not hold — `_tryConnect` resets it for
+ *  every new subscriber (`client.subscribe`, `_waitForState`), so each one
+ *  re-opened a socket the server refused again, and each refusal re-ran
+ *  `_protoMismatch`: the queue emptied and every pending call rejected once
+ *  per subscriber, for a page whose only remedy is a reload. */
+let _terminal = false;
+let _terminalDropWarned = false;
+function _noteTerminalDrop(type: string): void {
+  if (_terminalDropWarned) return;
+  _terminalDropWarned = true;
+  console.warn(
+    `[aio:air] "${type}" was not sent — the connection is terminally closed ` +
+      `(protocol version mismatch). Reload/update the app. Further drops ` +
+      `are not repeated.`,
+  );
+}
+
 function _tryConnect() {
+  if (_terminal) return; // a version gap has no reconnect
   if (!_ws && !_ipcConnected && !_connecting) {
     _closed = false;
     _connecting = true;

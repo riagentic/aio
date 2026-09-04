@@ -262,7 +262,7 @@ deno task am start                # start app (kills zombies, refuses if running
 deno task am start --wait         # start and block until healthy (default 10s timeout)
 deno task am start --wait=30      # start with 30s timeout
 deno task am start --port=9000    # start on specific port
-deno task am stop                 # graceful shutdown
+deno task am stop                 # graceful shutdown — exit 1 if state did NOT reach disk
 deno task am stop --wait          # stop and block until dead (default 9s — the graceful budget)
 deno task am kill                 # end it now, no asking (SIGTERM + drop the lock)
 deno task am kill --stale         # reap ORPHANS — processes still serving with no
@@ -443,6 +443,12 @@ deno task am dispatch conn:configure --args='[{"host":"h","port":8000}]'
 # One object argument, spelled as named pairs: configure({host, port})
 deno task am dispatch conn:configure host=h port=8000
 
+# A method that TAKES arguments, called with none, is refused rather than run
+# with `undefined` (which writes a broken row and used to answer ok:true). If
+# the method really does fill in its own defaults, say so: --args='[]'
+deno task am dispatch conn:setHost                           # ✗ refused, names the method
+deno task am dispatch counter:reset --args='[]'              # ✓ "I meant no arguments"
+
 # Plain (non-cell) actions — named payload
 deno task am dispatch BulkUpdate items='[1,2]'               # payload { items: [1,2] }
 
@@ -515,9 +521,25 @@ change", which was not true of sync cells.)
 deno task am persist                        # flush to SQLite now; "persisted" = on disk (exit 1 if refused)
 deno task am snapshot                       # dump state to stdout
 deno task am snapshot save backup.json      # save to file
-deno task am snapshot load backup.json      # restore from file
+deno task am snapshot load backup.json      # restore from file (refuses a file whose
+                                            # cell set is not this app's)
+deno task am snapshot load other.json --force   # …load it anyway, replacing ALL state
 deno task am migrations                     # cell versions + shape drift
 ```
+
+`am persist` is the one honest answer to "is my data safe?": `ok: true` means
+the write is on disk, and a refused cycle is a 500 **on every cycle it
+happens**, not only the first. `am stop` asks the same question before it closes
+the door, so a shutdown that could not save exits 1 and says which cell.
+`/__aio/health` carries the same verdict as `persist: { ok }` — `status` is
+`degraded` while a write is being refused, so a monitor sees it without polling
+a CLI.
+
+**`am snapshot load` replaces the WHOLE state.** A file whose cell set is not
+this app's is refused by name — both the cells it would destroy (missing from
+the file) and the ones this app does not declare. Loading another app's snapshot
+used to wipe everything and report `"status":"loaded"`. `--force` is how you say
+you meant it.
 
 **`am migrations`** shows each cell's declared vs stored `version`, what the
 last boot's migration pass did, and any **shape drift** — a field still in
@@ -827,7 +849,8 @@ deno task am logs --filter=ERROR   # filter log lines
 deno task am logs --follow         # stream (like tail -f), also: -f
 deno task am logs --client         # tail client log (~/.<appId>/logs/client.log)
 deno task am errors               # last transpile error (dev mode)
-deno task am watch                # hot-restart on file change in src/
+deno task am watch                # restart the app on a .ts/.tsx change under src/
+deno task am watch lib            # …watch another directory (refuses one that isn't there)
 deno task am add cell payments    # scaffold src/cell/payments.ts
 deno task am report               # collect a problem report (logs + versions + state shape) for an app with feedback: true
 deno task am version              # print version
@@ -892,7 +915,8 @@ as "not running". Two instances of one id from two homes is a real ambiguity;
 | `/__aio/trojan/config`        | Port, title, expose, authMode, prod                             |
 | `/__aio/trojan/errors`        | Recent server errors                                            |
 | `/__aio/trojan/cells`         | Cells and their method names                                    |
-| `/__aio/health`               | Cell health: status, enabled, errors (**not** under `trojan/`)  |
+| `/__aio/trojan/graph`         | Dev import-graph verdict: `pending`, `valid`, `errors[]` (dev)  |
+| `/__aio/health`               | Cell health + `persist: { ok }` (**not** under `trojan/`)       |
 
 ### Control (POST)
 

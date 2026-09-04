@@ -163,6 +163,25 @@ const ALLOWED: Record<string, string[]> = {
 // would be a matrix violation spelled in a way a relative-path-only scanner
 // cannot see. src/ uses none today; this is what keeps that true.
 const SPEC = /(?:from\s*|import\s*\(?\s*)["'](\.\.?\/[^"']+?\.tsx?)["']/g;
+/** The OTHER two ways `src/` names a module, and neither carries an import
+ *  keyword: `new Worker(new URL("./x.ts", import.meta.url))` and
+ *  `import.meta.resolve("./x.ts")`.
+ *
+ *  Both are real module edges — the repo already treats them as such
+ *  (`tests/worker-includes.test.ts` enumerates the worker entries for
+ *  `deno compile`) — and the scanner could not see either, so
+ *  `build → db`, `build → state` and `am → src/electron-install.ts` were
+ *  invisible to a gate whose whole job is "adding a cross-folder import that
+ *  isn't in the matrix is a red gate". A checker that cannot see what it
+ *  claims to check. */
+//
+//  Narrow on purpose: a BARE `new URL("./x.ts", import.meta.url)` is also how
+//  this repo locates a file to READ (server-static serves framework source
+//  over /__aio/, the build reads its own templates), and that is a path, not
+//  a module edge. `new Worker(new URL(…))` and `import.meta.resolve(…)` are
+//  the two spellings that really load a module.
+const INDIRECT =
+  /(?:new\s+Worker\s*\(\s*new\s+URL|import\.meta\.resolve)\s*\(\s*["'](\.\.?\/[^"']+?\.tsx?)["']/g;
 const BARE = /(?:from\s*|import\s*\(?\s*)["'](aio(?:\/[^"']+)?)["']/g;
 
 const IMPORT_MAP: Record<string, string> = (() => {
@@ -199,6 +218,17 @@ async function importsOf(file: string): Promise<string[]> {
       await Deno.stat(target);
     } catch {
       continue; // template/example string, not a real module — typecheck owns those
+    }
+    out.push(target);
+  }
+  for (const m of code.matchAll(INDIRECT)) {
+    if (!isCode(m)) continue;
+    const target = normalize(dirname(file) + "/" + m[1]!);
+    if (!target.startsWith("src/")) continue;
+    try {
+      await Deno.stat(target);
+    } catch {
+      continue; // not a real module — same rule as the import scan above
     }
     out.push(target);
   }

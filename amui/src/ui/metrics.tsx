@@ -99,7 +99,12 @@ function Card(
         <span style={label}>{title}</span>
         {right as never}
       </div>
-      {children as never}
+      {
+        /* The body gets a parent of its own: several cards pass a keyed list,
+          and a keyed list beside the literal title row is the shape the
+          renderer flags. */
+      }
+      <div>{children as never}</div>
     </div>
   );
 }

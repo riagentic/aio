@@ -361,16 +361,62 @@ export function isFixturePath(path: string): boolean {
 export function removalsInSource(text: string): RemovalHit[] {
   const hits: RemovalHit[] = [];
   const raw = text.split("\n");
-  const lines = codeText(text).split("\n");
+  const code = codeText(text);
+  const lines = code.split("\n");
+  // A cell-config key is a key of the object handed to `cell(...)` — and
+  // nowhere else. `machine: {` is also a perfectly ordinary key in a UI
+  // scope-label map, and matching it anywhere in a file that happens to call
+  // `cell(` somewhere refused `am pin` on a false positive with `--force` as
+  // the only way past (cc §5.2). When the text contains cell() calls, only
+  // lines inside their argument lists count; when it contains none — aiol
+  // hands over one cell's config BLOCK, already extracted — every line does.
+  const spans = _cellCallSpans(code);
+  const lineStart: number[] = [0];
+  for (let i = 0; i < lines.length - 1; i++) {
+    lineStart.push(lineStart[i]! + lines[i]!.length + 1);
+  }
+  // Judged at the KEY's own offset, not the line's: a one-line
+  // `cell("x", { machine: … })` has its line start before the call opens.
+  const inCell = (at: number): boolean =>
+    spans.length === 0 || spans.some(([s, e]) => at >= s && at < e);
   for (const r of REMOVALS) {
     const re = r.kind === "cell-config"
       ? new RegExp(`(^|[{,\\s])${r.key}\\s*:`)
       : r.pattern; // an API shape names its own pattern, or is not textual
     if (!re) continue;
-    const i = lines.findIndex((l) => re.test(l));
+    const i = lines.findIndex((l, n) => {
+      const m = re.exec(l);
+      if (!m) return false;
+      if (r.kind !== "cell-config") return true;
+      // The key itself, past the leading delimiter the pattern also matched.
+      return inCell(lineStart[n]! + m.index + m[0].indexOf(r.key));
+    });
     if (i >= 0) hits.push({ removal: r, line: i + 1, text: raw[i]!.trim() });
   }
   return hits.sort((a, b) => a.line - b.line);
+}
+
+/** Offsets `[start, end)` of every `cell(...)` call's argument list in MASKED
+ *  code (strings and comments already blanked, so brackets inside them do not
+ *  count). A generic call — `cell<S>(` — is one too. Unbalanced input ends the
+ *  last span at end of text rather than dropping it. */
+export function _cellCallSpans(code: string): [number, number][] {
+  const spans: [number, number][] = [];
+  const open = /\bcell\s*(?:<[^()]*>)?\s*\(/g;
+  let m: RegExpExecArray | null;
+  while ((m = open.exec(code))) {
+    const start = m.index + m[0].length;
+    let depth = 1;
+    let i = start;
+    for (; i < code.length && depth > 0; i++) {
+      const ch = code[i];
+      if (ch === "(" || ch === "[" || ch === "{") depth++;
+      else if (ch === ")" || ch === "]" || ch === "}") depth--;
+    }
+    spans.push([start, i]);
+    open.lastIndex = i;
+  }
+  return spans;
 }
 
 /** Removed top-level `deno.json` keys this config still carries. */

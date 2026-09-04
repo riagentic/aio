@@ -47,7 +47,7 @@ export type Kind =
   | "diag" // S→C — diagnostic event
   | "cdiag" // C→S — client degraded() escalation/recovery (health visibility)
   | "cfg" // S→C — resolved client config (syncCells/callTimeouts/renderBudget)
-  | "graph-error" // S→C — dev: graph-validator errors (overlay)
+  | "graph-error" // S→C — dev: graph-validator errors; SUPPRESSES the reload (the build is red) and paints the overlay
   | "graph-clear" // S→C — dev: graph errors fixed
   | "tt-state" // S→C — time-travel panel state
   | "tt-cmd" // C→S — time-travel command {cmd}

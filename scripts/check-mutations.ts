@@ -69,6 +69,15 @@ export type Mutation = {
 export const LEDGER: readonly Mutation[] = [
   {
     what:
+      "the Electron main process is generated source, and one JS escape written once instead of twice leaves main.cjs with a string literal broken across two lines \u2014 no app using the shell can open a window, and nothing between the generator and a human launching the product would have said so (cc \u00a75.4)",
+    file: "src/electron/electron-uds.ts",
+    find: "} }) + '\\\\n');",
+    replace: "} }) + '\\n');",
+    test: "tests/generated-scripts-parse.test.ts",
+    filter: "generated scripts: every standalone script parses",
+  },
+  {
+    what:
       "retireData stops moving the profile and the new build boots on the OLD data it was blocked for \u2014 the operator asked for a fresh start and got a migration nobody vetted, on the code path where being wrong costs a user their data",
     file: "src/server/updates-retire.ts",
     find: "    await Deno.rename(dataDir, archive);",

@@ -210,6 +210,11 @@ const FAST: [string, string[]][] = [
   ["lint:aio", ["deno", "task", "lint:aio"]],
   ["check:boundaries", ["deno", "task", "check:boundaries"]],
   ["check:silent-catch", ["deno", "task", "check:silent-catch"]],
+  // The other half of what `check:orphans` measures: that gate counts the
+  // directories left on disk AFTER the suite, this one refuses the new call
+  // that would leave one. Counting a leak nobody can stop creating is a gate
+  // that only ever rises.
+  ["check:tempdirs", ["deno", "task", "check:tempdirs"]],
   ["check:placeholders", ["deno", "task", "check:placeholders"]],
   ["check:gated-tests", ["deno", "task", "check:gated-tests"]],
   ["check:lock", ["deno", "task", "check:lock"]],

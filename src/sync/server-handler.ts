@@ -6,13 +6,15 @@ import { _isFrameworkInternalActionType } from "../protocol/action-gate.ts";
 import type { DB } from "../db/types.ts";
 import { takeRejectionFor } from "../state/rejection-tracker.ts";
 import type { HLC, SyncOp } from "./types.ts";
-import { SYNC_DEFAULTS } from "./types.ts";
+import { STALE_OP_REASON, SYNC_DEFAULTS } from "./types.ts";
 import { createHLC, type HLClock } from "./hlc.ts";
-import { compactSyncOps } from "./compact.ts";
+import { compactSyncOps, tombstoneWindowMs } from "./compact.ts";
 import {
   getCompactedTs,
   getLowWater,
   getOpServerTs,
+  hasSyncSnapshot,
+  isKnownOpId,
   loadOpsSince,
   persistOp,
   reserveServerTs,
@@ -68,6 +70,11 @@ export interface SyncHandlerDeps {
    *  snapshot — the log and the snapshot are the only surviving copies of the
    *  data. Undefined ⇒ nothing is quarantined. */
   isQuarantined?: (cell: string) => boolean;
+  /** `sync.offline.retention` for a cell, in ms — how long a client may hold
+   *  an unacked op. Compaction's id-tombstone window is sized from it, so a
+   *  resend after a long offline stretch still hits the dedup instead of
+   *  being applied a second time. Undefined ⇒ the 24h floor. */
+  opRetentionMs?: (cell: string) => number | undefined;
   /** AUTH-1 parity for the sync path: may `user` mutate `cell` via a sync op?
    *  Undefined = no access rules (open). The `action` dispatch path is gated in
    *  aio-server.ts; sync ops route through a different dispatch, so the SAME
@@ -333,6 +340,67 @@ export function createServerSyncHandler(
     return true;
   }
 
+  // ── Staleness: an op older than the tombstone window ──────────────────
+  // Compaction tombstones the ids it deletes so a resend after a lost ack
+  // still dedups, and sweeps the tombstones after `tombstoneWindowMs` (24h,
+  // or the cell's `offline.retention` when longer). That sweep was justified
+  // by the client's retention — "the longest a client may hold an op before
+  // re-sending it" — but the client evicts unconfirmed ops ONLY when its
+  // buffer reaches `pendingCap`, and re-sends every unconfirmed op on every
+  // reconnect whatever its age. So a phone that lost one ack and came back two
+  // days later re-sent the op, the server — its tombstone swept — took it for
+  // a new change, and it was inserted, dispatched, applied a SECOND time,
+  // acked and broadcast. A counter drifted, an append appended twice, and
+  // nothing on either side said so.
+  //
+  // Past the window the server cannot tell such a resend from a genuinely new
+  // change; that is precisely what the tombstone was for. So it does not
+  // guess: an UNKNOWN op (no live row, no standing tombstone — `isKnownOpId`)
+  // stamped older than the window is refused with `op-rejected`, the reason
+  // prefixed `STALE_OP_REASON` so the client drops it from its buffer under
+  // that name and stops re-sending it, and naming `offline.retention` as the
+  // knob that widens the window. A KNOWN op is re-acked exactly as before,
+  // however old — the standing tombstone IS the proof it was applied.
+  //
+  // The threshold carries `maxDrift` of slack. A tombstone is swept when
+  // `compacted_at < now - window`, and the door accepts an op stamped up to
+  // `maxDrift` AHEAD of the server's clock, so the newest op whose tombstone
+  // can already be gone is stamped `now - window + maxDrift`. Refusing only
+  // strictly older ops would leave a `maxDrift`-wide sliver in which a swept
+  // resend is still applied twice.
+  //
+  // Checked INSIDE the cell's lock, right before the persist: the known-id
+  // answer must be read in the same critical section that would insert the
+  // row, or two concurrent deliveries of one old op could be refused by one
+  // path and acked by the other.
+  async function refuseIfStale(
+    opId: string,
+    cell: string,
+    hlc: HLC,
+    socket: WebSocket,
+  ): Promise<boolean> {
+    const window = tombstoneWindowMs(deps.opRetentionMs?.(cell));
+    const age = Date.now() - hlc[0];
+    if (age <= window - SYNC_DEFAULTS.maxDrift) return false;
+    if (await isKnownOpId(deps.db, opId)) return false;
+    const hours = (ms: number) => `${Math.round(ms / 3600_000)}h`;
+    const reason = `${STALE_OP_REASON}: this change is stamped ${hours(age)} ` +
+      `ago, older than the ${hours(window)} this server keeps the record ` +
+      `that tells a resend from a new change. It may already have been ` +
+      `applied (a resend after a lost ack), and applying it now could apply ` +
+      `it twice — so it is refused rather than guessed at. If clients may ` +
+      `stay offline this long, raise sync.offline.retention on "${cell}" ` +
+      `(the record is kept at least that long) — or, if this device's clock ` +
+      `is wrong, correct it; the change can be made again.`;
+    sendTo(
+      socket,
+      enc("op-rejected", { opId, cell, reason }),
+      `op-rejected for ${opId}`,
+    );
+    deps.log.warn(`[sync:server] op ${opId} (${cell}) refused — ${reason}`);
+    return true;
+  }
+
   /** The op's cursor position for an ack. A fresh insert already knows it; a
    *  duplicate (resend after a lost ack) has to ask the store — the row, or
    *  the tombstone if compaction rolled the row over. `null` only when the
@@ -366,6 +434,7 @@ export function createServerSyncHandler(
         getState: () => deps.getCellState(cell),
         serverHlc: clock.now(),
         cellVersion: deps.cellVersion?.(cell) ?? 0,
+        retentionMs: deps.opRetentionMs?.(cell),
         log: deps.log,
         // force: fold current state into the snapshot regardless of op count —
         // the durability path for server-origin writes (see noteServerWrite).
@@ -421,7 +490,22 @@ export function createServerSyncHandler(
       const op = raw;
       if (!syncCells.has(op.cell)) {
         deps.log.warn(
-          `[sync:server] op for unknown cell "${op.cell}" — dropping`,
+          `[sync:server] op for unknown cell "${op.cell}" — rejecting`,
+        );
+        // TELL the client. An op this server can NEVER accept — reachable on
+        // any client/server build skew: an open tab against a redeployed
+        // server, an older Electron/Android bundle — used to be dropped with
+        // nothing said to its origin. The client re-sent it on every
+        // reconnect forever, `onRejected` never fired, and the pending count
+        // never drained. D11: the origin is always told.
+        sendTo(
+          socket,
+          enc("op-rejected", {
+            opId: op.id,
+            cell: op.cell,
+            reason: `unknown cell "${op.cell}" — this server does not sync it`,
+          }),
+          `op-rejected for ${op.id}`,
         );
         return;
       }
@@ -450,6 +534,8 @@ export function createServerSyncHandler(
       }
 
       await withLock(op.cell, async () => {
+        // Under the lock, before the persist — see `refuseIfStale`.
+        if (await refuseIfStale(op.id, op.cell, op.hlc, socket)) return;
         clock.receive(op.hlc);
         const serverHlc = clock.tick();
 
@@ -687,7 +773,25 @@ export function createServerSyncHandler(
             );
             continue;
           }
-          if (!syncCells.has(pending.cell)) continue;
+          if (!syncCells.has(pending.cell)) {
+            // Same door as handleOp, and it was the quieter of the two: this
+            // path carries a reconnect's whole offline queue, so a build skew
+            // parked every queued op here with not one line in the log.
+            deps.log.warn(
+              `[sync:server] pending op for unknown cell "${pending.cell}" — rejecting`,
+            );
+            sendTo(
+              socket,
+              enc("op-rejected", {
+                opId: pending.id,
+                cell: pending.cell,
+                reason:
+                  `unknown cell "${pending.cell}" — this server does not sync it`,
+              }),
+              `op-rejected for pending op ${pending.id}`,
+            );
+            continue;
+          }
           // Same quarantine gate as handleOp: this is the path that carries a
           // reconnect's whole offline queue, so it is the one that would put
           // the most undurable writes into a log nobody can fold.
@@ -705,16 +809,24 @@ export function createServerSyncHandler(
             // re-sent on every reconnect, re-evaluated against the access gate
             // every round. A denial the client never hears about is a
             // leak that looks like a hang.
-            try {
-              socket.send(enc("op-rejected", {
+            sendTo(
+              socket,
+              enc("op-rejected", {
                 opId: pending.id,
                 cell: pending.cell,
                 reason: "access denied",
-              }));
-            } catch { /* client gone */ }
+              }),
+              `op-rejected for pending op ${pending.id}`,
+            );
             continue;
           }
           await withLock(pending.cell, async () => {
+            // The path that carries the OLDEST ops — a reconnect's whole
+            // offline queue — so the one most likely to hold a resend the
+            // store no longer recognises. See `refuseIfStale`.
+            if (
+              await refuseIfStale(pending.id, pending.cell, pending.hlc, socket)
+            ) return;
             clock.receive(pending.hlc);
             const serverHlc = clock.tick();
             let serverTs: number | null = null;
@@ -907,6 +1019,34 @@ export function createServerSyncHandler(
             const cursorBelowCompaction = compactedTs > 0 &&
               (lastServerTs ?? 0) < compactedTs;
 
+            // …and the snapshot this log cannot NAME a position for.
+            //
+            // `compacted_ts = 0` means three different things: no snapshot, a
+            // SEEDED one (`seedSyncSnapshot` leaves sync_meta alone on
+            // purpose, so no live client is forced into a resync), and a row
+            // written before the column existed (the migration adds it
+            // `DEFAULT 0`). The test above read all three as "no snapshot",
+            // so a client with NO cursor took the incremental branch and
+            // rebuilt the cell from its own declared `initialState` plus the
+            // ops — which is not what this log's base is.
+            //
+            // Two live paths, both silent: a `localFirst` cell adopted with
+            // existing KV data painted correctly from the plain `state` frame
+            // and then LOST that data on the first local edit (server kept
+            // it); and after an upgrade from a pre-`compacted_ts` aio, every
+            // reloaded client (browser cursors are session-scoped, so
+            // `lastHlc` is null too and the legacy HLC rule cannot fire)
+            // rebuilt from a base whose ops were already deleted.
+            //
+            // Scoped to a CURSORLESS client, which is exactly the one that
+            // cannot prove coverage: a client holding a cursor took it from
+            // this log after the snapshot was written, so its state already
+            // contains it. That is one snapshot per fresh client per cell —
+            // the same cost a post-compaction catch-up already pays.
+            const cursorless = lastServerTs == null && lastHlc == null;
+            const snapshotUnnamed = cursorless && compactedTs === 0 &&
+              await hasSyncSnapshot(deps.db, cell);
+
             // A cursor ABOVE this log's high-water mark (as it stood before
             // this request wrote anything — `highWaterBefore`) was never
             // issued by this log: `reserveServerTs` IS the durable maximum,
@@ -944,7 +1084,7 @@ export function createServerSyncHandler(
 
             // Client's lastHlc older than low_water → compacted, send snapshot
             if (
-              cursorBelowCompaction || foreign ||
+              cursorBelowCompaction || snapshotUnnamed || foreign ||
               (cellLW && lastHlc &&
                 (lastHlc[0] < cellLW[0] ||
                   (lastHlc[0] === cellLW[0] && lastHlc[1] < cellLW[1])))

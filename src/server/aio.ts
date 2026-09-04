@@ -1641,6 +1641,7 @@ async function _run<S, A, E>(
     persistDebounceMs: config.persistDebounceMs ?? 100,
     dbSchema: config.db,
     syncCellIds,
+    syncRetentionMs: config._syncRetentionMs,
     cellAccess: config._cellAccess,
     cellMigrations: config._cellMigrations,
     _cellVersions: config._cellVersions,
@@ -2269,6 +2270,19 @@ async function _run<S, A, E>(
       // Sync cells' server-origin writes debounce into their snapshot — a
       // clean exit must not leave the last write inside that window.
       await syncHandler?.flushServerWrites();
+      // The manager never rejects (the loop has to survive a bad window), so
+      // the verdict is read back — and on the LAST flush there is no next
+      // window to fix it in. A clean-looking exit that dropped every write
+      // since the first refusal is exactly the shape this line exists to
+      // break: the process is still going down (refusing to exit would strand
+      // the operator), but it says what it is taking with it.
+      const failed = persistence.lastCycleError();
+      if (failed) {
+        log.error(
+          `shutdown: the FINAL persist was refused — state since the last ` +
+            `successful write is NOT on disk. ${failed.message}`,
+        );
+      }
     },
     setShuttingDown: persistence.setShuttingDown,
     diagHooks,
@@ -2508,7 +2522,7 @@ async function _run<S, A, E>(
     dispatch: (action) => appDispatch(action as A),
     app: {
       snapshot: () => app.snapshot!(),
-      loadSnapshot: (json) => app.loadSnapshot!(json),
+      loadSnapshot: (json, opts) => app.loadSnapshot!(json, opts),
     },
     blobs: blobStore,
     vitalsSystem,
@@ -2531,11 +2545,14 @@ async function _run<S, A, E>(
       const failed = persistence.lastCycleError();
       if (failed) throw failed;
     },
+    // The SAME value, read by `/__aio/health` — one verdict, every door.
+    lastPersistError: () => persistence.lastCycleError(),
     shouldPersist,
     scheduleManager,
     // Cell id → method names — trojan `cells` route (amui run-method buttons).
     cellMethods: config._cellMethods ?? {},
     cellAsyncMethods: config._cellAsyncMethods ?? {},
+    cellMethodArity: config._cellMethodArity ?? {},
     cellFields: config._cellFields ?? {},
     asyncDb,
     // In-memory dispatch timeline — the trojan `timeline` route.
@@ -2657,6 +2674,11 @@ async function _run<S, A, E>(
       heap: _heapLine,
       plugins: config._pluginNames,
       dataDir: _dirs.home,
+      // `--db-path` moves the state file OUT of the data dir, and a relative
+      // one resolves against CWD — so the `data` line above was pointing at a
+      // directory the state was not in. Resolved, because "./rel.db" is not an
+      // answer to "where is it".
+      dbFile: config.dbPath ? resolve(config.dbPath) : undefined,
       logs: { dir: _dirs.logs, level: cli.verbose ? "debug" : "info" },
       journal: config.journal
         ? (typeof config.journal === "string" ? config.journal : _dirs.journal)

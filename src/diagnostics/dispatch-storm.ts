@@ -32,6 +32,17 @@ export type StormInfo = {
   seconds: number;
   /** True when the breaker is active — dispatches are being dropped */
   breaking: boolean;
+  /** This is the END of a storm, not the start of one.
+   *
+   *  There was no discriminator, so the handler guessed from `rate === 0` —
+   *  and a storm that ends at ANY non-zero rate (i.e. the ordinary way: the
+   *  rate drops back under the threshold) took the WARN branch. The result was
+   *  a storm warning whose reported rate was BELOW the configured threshold,
+   *  plus a second `dispatch:storm` diagnostic emitted at the moment the
+   *  problem went away. The module's own doc says "`onStorm` fires once when a
+   *  storm starts and once when it ends (rate 0)" — a claim with no test,
+   *  false for the commonest way a storm ends. */
+  ended?: boolean;
 };
 
 type TypeState = {
@@ -90,6 +101,7 @@ export function createStormDetector(
           rate: s.lastRate,
           seconds: s.hotSeconds,
           breaking: false,
+          ended: true,
         });
       }
       s.hotSeconds = 0;

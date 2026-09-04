@@ -161,3 +161,94 @@ export const app = cell("demo", { state: { n: 0 }, machine: { initial: "a" } });
     await Deno.remove(dir, { recursive: true });
   }
 });
+
+// cc §5.2: `am pin ~/code/gen/aio` was refused for an app whose only `machine:`
+// was a key in a UI scope-label map (`src/ui/RunViews.tsx:35`), in a file that
+// also calls `cell(`. The guard matched the text anywhere in the file, and
+// `--force` was the only way past a check that is otherwise exactly right to
+// have. A cell-config key is a key of the object handed to `cell(...)`, and
+// nowhere else.
+Deno.test("preflight: a `machine:` key OUTSIDE the cell config is not a hit", async () => {
+  const dir = await app({
+    "src/ui/RunViews.tsx": `import { cell } from "aio";
+export const views = cell("views", {
+  state: { open: "list" },
+  methods: { show(s: { open: string }, v: string) { s.open = v; } },
+});
+const SCOPE_LABELS: Record<string, { machine: { label: string } }> = {
+  run: { machine: { label: "Machine" } },
+  container: { machine: { label: "Container" } },
+};
+export default function RunViews() { return <div>{SCOPE_LABELS.run.machine.label}</div>; }
+`,
+  });
+  try {
+    const blocking = await preflight(dir, "v1.0.0-alpha76");
+    assertEquals(
+      blocking.filter((b) => b.hit.removal.key === "machine").length,
+      0,
+      `a scope-label map is not a cell config: ${JSON.stringify(blocking)}`,
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("preflight: the same key INSIDE the cell config still hits", async () => {
+  const dir = await app({ "src/cell/app.ts": LEGACY });
+  try {
+    const blocking = await preflight(dir, "v1.0.0-alpha76");
+    assertEquals(blocking.some((b) => b.hit.removal.key === "machine"), true);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+// ── the config half of the preflight reads the file Deno reads ──────────────
+//
+// The source walk above saw every `.ts`; the deno.json check beside it did a
+// raw `JSON.parse` of `deno.json` and nothing else. So a `deno.jsonc` app —
+// or a `deno.json` with one `//` comment, which Deno accepts — got NO config
+// preflight: a removed top-level key (`target`) was silently not seen, the
+// pin moved, and the app died at boot on the framework the tool had just
+// called fine. `cmdPin` accepted both names at its door; the check behind the
+// door read only one. `readDenoJson` is THE reader now.
+const target = REMOVALS.find((r) =>
+  r.key === "target" && r.kind === "deno-json"
+)!;
+
+const LEGACY_CONFIG = `{
+  // the pre-alpha70 spelling of the client key
+  "target": "browser",
+}
+`;
+
+Deno.test("preflight: a deno.jsonc app is refused by name, exactly as deno.json is", async () => {
+  const dir = await app({ "deno.jsonc": LEGACY_CONFIG, "src/cell.ts": MODERN });
+  try {
+    const blocking = await preflight(dir, "main");
+    assertEquals(blocking.length, 1, JSON.stringify(blocking));
+    assertEquals(blocking[0]!.hit.removal.key, "target");
+    assertEquals(
+      blocking[0]!.where,
+      "deno.jsonc:3",
+      "file:line, the real file",
+    );
+    assertStringIncludes(blocking[0]!.hit.text, '"target"');
+    // …and moving BACK to a version that still runs it stays silent.
+    assertEquals(await preflight(dir, target.lastGood), []);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("preflight: a deno.json with a comment is read the way Deno reads it", async () => {
+  const dir = await app({ "deno.json": LEGACY_CONFIG, "src/cell.ts": MODERN });
+  try {
+    const blocking = await preflight(dir, "main");
+    assertEquals(blocking.length, 1, JSON.stringify(blocking));
+    assertEquals(blocking[0]!.where, "deno.json:3");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});

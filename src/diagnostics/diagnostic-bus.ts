@@ -75,12 +75,26 @@ const DEDUP_WINDOW_MS = 5_000;
  * Reset all state and set dev mode.
  * Must be called before any other diagnostic function.
  */
-export function initDiagnosticBus(dev: boolean): void {
+export function initDiagnosticBus(
+  dev: boolean,
+  opts: { keepListeners?: boolean } = {},
+): void {
   _dev = dev;
   _ring = new Array(RING_CAP);
   _head = 0;
   _count = 0;
-  _listeners = new Set();
+  // `keepListeners` exists because this function does two jobs: it SETS THE
+  // MODE (which the server does, late in boot, once it knows `prod`) and it
+  // RESETS THE BUS (which a test does, to isolate itself). Doing both
+  // unconditionally silently unsubscribed everything registered earlier — and
+  // the earliest subscriber is `initDiagnostics`'s bridge to the structured
+  // logger, so a vitals alert reached no log file at all: not app.log, not
+  // warning.log, only the per-client dev file and the dev WS frame. In
+  // production, where `diagEmit` is a no-op anyway, an alert had NO sink.
+  //
+  // Every bus test called this BEFORE subscribing, which is the reverse of the
+  // product's order — so no test could see it.
+  if (!opts.keepListeners) _listeners = new Set();
   _dedup = new Map();
   _suppressed = new Map();
   _broken = new WeakSet();

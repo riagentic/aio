@@ -5,7 +5,7 @@
 // signals (survive re-render, reset on project switch via resetLogView()).
 import { signal } from "aio/air";
 import type { LogLine, LogSource } from "../manager.ts";
-import { btn, C, chip, mono } from "./style.ts";
+import { btn, C, chip, mono, press } from "./style.ts";
 
 const minLevel = signal<"all" | "info" | "warn" | "error">("all");
 const logQuery = signal("");
@@ -107,7 +107,7 @@ export function LogView(
           {SOURCES.map((s) => (
             <span
               key={s.id}
-              onClick={() => props.onSource(s.id)}
+              {...press(() => props.onSource(s.id))}
               style={pill(props.source === s.id)}
             >
               {s.label}
@@ -118,7 +118,7 @@ export function LogView(
           {LEVELS.map((l) => (
             <span
               key={l.id}
-              onClick={() => minLevel.set(l.id)}
+              {...press(() => minLevel.set(l.id))}
               style={pill(floor === l.id)}
             >
               {l.label}
@@ -126,6 +126,7 @@ export function LogView(
           ))}
         </div>
         <input
+          aria-label="filter"
           value={logQuery.value}
           onInput={(e: Event) =>
             logQuery.set((e.currentTarget as HTMLInputElement).value)}
@@ -150,7 +151,7 @@ export function LogView(
           {props.loading ? "…" : "⟳"}
         </button>
         <span
-          onClick={props.onToggleFollow}
+          {...press(props.onToggleFollow)}
           style={{
             ...chip,
             cursor: "pointer",

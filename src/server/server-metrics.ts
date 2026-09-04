@@ -17,6 +17,8 @@ export interface MetricsInput {
   cells?: Record<string, { errors: number; enabled: boolean }>;
   /** Broadcast payload stats, keyed by CONNECTION id. Summed into two
    *  unlabelled totals — the id is an identity, never a metric dimension. */
+  /** Process-lifetime broadcast totals — see `formatPrometheus`'s use. */
+  broadcastTotals?: { bytes: number; count: number };
   payloads?: Map<
     string,
     { lastPayloadBytes: number; totalBytes: number; count: number }
@@ -66,7 +68,7 @@ export function formatPrometheus(m: MetricsInput): string {
     }
   }
 
-  if (m.payloads && m.payloads.size > 0) {
+  if (m.broadcastTotals || (m.payloads && m.payloads.size > 0)) {
     // ONE unlabelled sum per metric.
     //
     // These carried `kind="<value>"`, and the value was `meta.id` — a
@@ -80,10 +82,20 @@ export function formatPrometheus(m: MetricsInput): string {
     //
     // Per-client detail already exists, in `/__aio/vitals`, where it belongs:
     // it is a snapshot of who is connected right now, not a monotonic series.
-    let bytes = 0, count = 0;
-    for (const p of m.payloads.values()) {
-      bytes += p.totalBytes;
-      count += p.count;
+    // …and MONOTONIC. Summing `payloads` was the fourth thing wrong: that map
+    // is deleted per connection, so the counters reset to zero — and the whole
+    // series disappeared — on every client disconnect. Every browser reload
+    // and every dev-reload reconnect was a counter reset, which makes
+    // `rate()`/`increase()` produce garbage. The process-lifetime accumulator
+    // lives beside the per-connection map in `server-broadcast.ts`; the map
+    // stays for `/__aio/vitals`, which asks a different question.
+    let bytes = m.broadcastTotals?.bytes ?? 0;
+    let count = m.broadcastTotals?.count ?? 0;
+    if (!m.broadcastTotals && m.payloads) {
+      for (const p of m.payloads.values()) {
+        bytes += p.totalBytes;
+        count += p.count;
+      }
     }
     lines.push(
       "# HELP aio_broadcast_bytes_total Total broadcast payload bytes sent to clients",

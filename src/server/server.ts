@@ -69,7 +69,7 @@ import { handleAuthFlow } from "./auth-flows.ts";
 import { stopEsbuild } from "./server-transpile.ts";
 import { createWsManager, isPeerGone } from "./server-ws.ts";
 import { createBroadcaster } from "./server-broadcast.ts";
-import { createStaticHandler } from "./server-static.ts";
+import { createStaticHandler, isShellAsset } from "./server-static.ts";
 import { createFileWatcher } from "./server-watcher.ts";
 import {
   scanServerOnlyImports,
@@ -130,9 +130,46 @@ function _warnProxyBucketCollapse(req: Request): void {
   );
 }
 
+/** The client key for an abuse bucket: the connecting address. One spelling,
+ *  so a second listener cannot grow its own idea of "who is this". */
+function peerKeyOf(info?: Deno.ServeHandlerInfo): string | undefined {
+  const addr = info?.remoteAddr;
+  return addr && "hostname" in addr && typeof addr.hostname === "string"
+    ? addr.hostname
+    : undefined;
+}
+
+let _proxyUnbackedWarned = false;
+/** `trustProxyHeader` is set but nothing in front is writing it. */
+function _warnProxyHeaderUnbacked(
+  header: string,
+  hop: string | undefined,
+  peerKey: string,
+): void {
+  if (_proxyUnbackedWarned) return;
+  // A hop that IS the TCP peer means the request came straight from the
+  // client, which set the header itself.
+  if (hop !== undefined && hop !== peerKey) return;
+  _proxyUnbackedWarned = true;
+  log.warn(
+    "security",
+    `trustProxyHeader: "${header}" is set, but this request ` +
+      `${
+        hop === undefined
+          ? `carried no such header`
+          : `carried it with the connecting address (${hop}) as its last hop`
+      } — so there is no trusted proxy in front, and the abuse bucket (per-IP ` +
+      `auth budget, pairing PIN, WS denylist) is whatever the CALLER says it ` +
+      `is. An attacker mints a fresh bucket per request. Remove ` +
+      `trustProxyHeader unless a proxy OVERWRITES that header (nginx: ` +
+      `proxy_set_header X-Forwarded-For $remote_addr;).`,
+  );
+}
+
 /** Test isolation — re-arm the one-shot security warnings. @internal */
 export function _resetSecurityWarnings(): void {
   _proxyCollapseWarned = false;
+  _proxyUnbackedWarned = false;
   _tokenInUrlWarned = false;
 }
 
@@ -280,8 +317,12 @@ export function createServer(config: ServerConfig): ServerHandle {
   const livePort = (): number => boundPort ?? port;
   const keyCookieName = keyCookieNameFor(config.appId);
 
-  // Diagnostic bus — dev-only event system for surfacing silent failures
-  initDiagnosticBus(!prod);
+  // Diagnostic bus — dev-only event system for surfacing silent failures.
+  //
+  // Mode only: the subscribers registered earlier in boot (the bridge to the
+  // structured logger, the feedback collector) must survive this. See
+  // `initDiagnosticBus`.
+  initDiagnosticBus(!prod, { keepListeners: true });
   // The log DIRECTORY is not a dev feature — the UDS transport writes client
   // log frames whether or not this is prod (uds.ts), and with this call gated
   // behind `!prod` the module kept its default `".aio/log"`: a CWD-RELATIVE
@@ -688,6 +729,7 @@ export function createServer(config: ServerConfig): ServerHandle {
         payloadStats: wsMgr.payloadStats,
         clientBackpressure: clientBP,
         udsClients: config.udsClientCount?.() ?? 0,
+        broadcastTotals: broadcaster.lifetimeBroadcast(),
         rawState: config.trojan
           ? config.trojan.getState() as Record<string, unknown>
           : undefined,
@@ -753,6 +795,14 @@ export function createServer(config: ServerConfig): ServerHandle {
         })),
       sendToWsClient: (idx, msg) => wsMgr.sendToWsClient(idx, msg),
       getRecentErrors: () => staticHandler.getRecentErrors(),
+      getGraphStatus: () =>
+        graphValidation
+          ? {
+            pending: graphValidation.getResult() === null &&
+              !graphValidation.settled,
+            result: graphValidation.getResult(),
+          }
+          : null,
       findUserById: config.users
         ? (id) => Object.values(config.users!).find((u) => u.id === id)
         : undefined,
@@ -859,6 +909,15 @@ export function createServer(config: ServerConfig): ServerHandle {
       const hops = fwd?.split(",") ?? [];
       const last = hops[hops.length - 1]?.trim();
       if (last) clientKey = last;
+      // The MIRROR of the warning below: `trustProxyHeader` set with no proxy
+      // in front. The option was validated only when it FIRED — so an app that
+      // set it "to be safe" and is reached directly took the client's OWN
+      // header (or nothing) as its abuse bucket. A caller then mints a fresh
+      // bucket per request, which defeats the auth budget, the WS denylist and
+      // the 6-digit pairing PIN (brute-forceable inside its 3-minute TTL) in
+      // one move. Warned from EVIDENCE — a real request that carries no
+      // trusted hop, or one that is the TCP peer itself — never from a guess.
+      _warnProxyHeaderUnbacked(config.trustProxyHeader, last, peerKey);
     } else if (_perUserAuth && !config.trustProxyHeader) {
       // Bucket collapse used to be SILENT. Warn from EVIDENCE — a forwarding
       // header on a real request — not from a guess about the deployment.
@@ -1119,6 +1178,21 @@ export function createServer(config: ServerConfig): ServerHandle {
               `that must accept anonymous callers (a webhook receiver) ` +
               `belongs on an app without \`auth\`, or behind its own ` +
               `signature check on a public app.`,
+            { status: 401, headers: extra },
+          );
+        }
+        // The SHELL is public, not the app's FILESYSTEM. Without this every
+        // non-dotfile, non-`*.server.ts` file under baseDir was readable with
+        // no credential, at any depth — `/data/app.db`, `/uploads/*.png`,
+        // `/backup.sql` — while the same paths on a `users:` app answer 401.
+        // See `isShellAsset`.
+        if (!isShellAsset(pathname, !prod)) {
+          return new Response(
+            `Unauthorized — ${pathname} is app DATA, and this app's public ` +
+              `surface is its SHELL (the code, styles and fonts the sign-in ` +
+              `page needs), not its directory. Sign in; publish a ` +
+              `deliberately-public file through \`serveDirs\`; keep private ` +
+              `binaries in the blob store, which is refused here too.`,
             { status: 401, headers: extra },
           );
         }
@@ -1387,14 +1461,21 @@ export function createServer(config: ServerConfig): ServerHandle {
       }, handleRequest);
     } catch (e) {
       if (e instanceof Deno.errors.AddrInUse) {
-        // Loud + fatal: a bind failure usually means another
-        // instance of this app is already running. Refuse to start rather than
-        // run a second cell runtime that could write to the same DB/journal.
+        // Loud + fatal: refuse to start rather than run a second cell runtime
+        // that could write to the same DB/journal.
+        //
+        // It does NOT say "another instance is likely already running" any
+        // more. By the time this throws, `acquireSingletonLock` has already
+        // succeeded — so this app is NOT running twice, and the server knew
+        // that while asserting the opposite. Two deciders, one contradicting
+        // the other, in the message an operator reads while looking at an
+        // unrelated process on the port.
         throw new Error(
-          `port ${port} already in use — another instance is likely already ` +
-            `running. Refusing to start a second cell runtime (it could corrupt ` +
-            `shared persistence). Stop the other instance, or use --port=N for a ` +
-            `separate one.`,
+          `port ${port} already in use — something else is listening on it ` +
+            `(this app's own singleton lock was free, so it is not a second ` +
+            `copy of this app). Refusing to start: a second cell runtime on ` +
+            `shared persistence could corrupt it. Free the port, or use ` +
+            `--port=N.`,
         );
       }
       throw e;
@@ -1414,6 +1495,17 @@ export function createServer(config: ServerConfig): ServerHandle {
         },
       },
       async (req, info) => {
+        // Every response off this listener carries the SAME headers the main
+        // one adds. It bypassed the `_securityHeaders` + `nosniff` wrapper
+        // entirely — a second listener serving the same routes with different
+        // hardening is the shape this file keeps closing elsewhere.
+        const harden = (r: Response): Response => {
+          for (const [k, v] of Object.entries(_securityHeaders)) {
+            if (!r.headers.has(k)) r.headers.set(k, v);
+          }
+          r.headers.set("X-Content-Type-Options", "nosniff");
+          return r;
+        };
         // The Host gate is a security rule, so it holds on BOTH listeners —
         // this one is plain HTTP on loopback, which is exactly what a rebound
         // domain reaches. Same decider, no second copy of the rule.
@@ -1421,11 +1513,11 @@ export function createServer(config: ServerConfig): ServerHandle {
           bindHost: "127.0.0.1",
           allowedOrigins: config.allowedOrigins,
         });
-        if (denied) return denied;
+        if (denied) return harden(denied);
         // Same rule as the main listener: a Host that does not parse is the
         // client's 400, never this server's 500.
         const url = parseRequestUrl(req);
-        if (!url) return malformedHost(req);
+        if (!url) return harden(malformedHost(req));
         // Authenticate trojan requests on localhost — same rules as main server
         if (config.token) {
           const qToken = url.searchParams.get("token");
@@ -1439,7 +1531,12 @@ export function createServer(config: ServerConfig): ServerHandle {
           const validH = hToken !== null &&
             _timingSafeEqual(hToken, config.token);
           if (!validQ && !validH) {
-            return new Response("Unauthorized", { status: 401 });
+            // METERED, like the main listener. This one verified credentials
+            // and never called `recordAuthFail`, so it was an unmetered
+            // guessing oracle for any local process — the one gate the whole
+            // budget exists to be.
+            recordAuthFail(peerKeyOf(info), "invalid token (control listener)");
+            return harden(new Response("Unauthorized", { status: 401 }));
           }
         } else if (_userResolver) {
           // users/resolveUser mode: config.token is unset — still require a
@@ -1452,22 +1549,34 @@ export function createServer(config: ServerConfig): ServerHandle {
               ? (_sessionResolver?.(token) ?? null)
               : await _userResolver(token, fromUrl && url.pathname !== "/ws"))
             : null;
-          if (!user) return new Response("Unauthorized", { status: 401 });
+          if (!user) {
+            if (token) {
+              recordAuthFail(
+                peerKeyOf(info),
+                "invalid token (control listener, per-user)",
+              );
+            }
+            return harden(new Response("Unauthorized", { status: 401 }));
+          }
           if (url.pathname === "/__aio/snapshot" && user.role !== "admin") {
-            return new Response(
-              'Forbidden — /__aio/snapshot exposes unfiltered state and requires role "admin"',
-              { status: 403 },
+            return harden(
+              new Response(
+                'Forbidden — /__aio/snapshot exposes unfiltered state and requires role "admin"',
+                { status: 403 },
+              ),
             );
           }
           const denied = trojanDenialForUserMode(url.pathname, user);
-          if (denied) return denied;
+          if (denied) return harden(denied);
         }
         const { pathname } = url;
         if (pathname.startsWith("/__aio/")) {
-          return staticHandler.serveStatic(pathname, req);
+          return harden(await staticHandler.serveStatic(pathname, req));
         }
-        if (pathname === "/") return new Response("ok", { status: 200 });
-        return new Response("Not Found", { status: 404 });
+        if (pathname === "/") {
+          return harden(new Response("ok", { status: 200 }));
+        }
+        return harden(new Response("Not Found", { status: 404 }));
       },
     );
   }

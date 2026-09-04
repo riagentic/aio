@@ -146,6 +146,19 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
   // before the final persist flush. Committed data already lives on the main
   // isolate; teardown noise dies with this thread.
   let closing = false;
+  /** Has the authoritative slice arrived? Until it does, this isolate holds
+   *  its DEFAULTS, and anything it commits is not a change to ship home.
+   *
+   *  `composed.initAll(...)` used to run at construction — before the `init`
+   *  message — so a `worker: true` cell whose `onInit` dispatches (idiom #1 in
+   *  `docs/state/lifecycle.md`) posted patches to a main isolate that had not
+   *  wired `broadcast`/`broadcastTT` yet: three REDUCE_ERRORs at boot naming
+   *  the internal `__aioWorkerPatch` cell and "Cannot read properties of
+   *  undefined (reading 'broadcastTT')", deterministically, 3 runs of 3. The
+   *  early patch was then discarded and the worker's own state overwritten by
+   *  the seed — so the method's side effect happened TWICE while the state
+   *  recorded it once. */
+  let seeded = false;
 
   // Owned resources acquired by THIS cell, in THIS isolate.
   //
@@ -173,7 +186,7 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
   /** Ship whatever this commit produced. Streamed (not batched to the end of a
    *  call) so `s.status = "working"` before an await reaches clients now. */
   const flush = (): void => {
-    if (closing) {
+    if (closing || !seeded) {
       pending = [];
       return;
     }
@@ -253,11 +266,6 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
     dispatchDeps,
   );
 
-  composed.initAll({
-    dispatch: (a: Msg) => void dispatch(a),
-    getState: () => state,
-  });
-
   self.onmessage = async (ev: MessageEvent<ToWorker>) => {
     const msg = ev.data;
     if (msg.t === "init") {
@@ -277,6 +285,14 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
       // main isolate, so this is the state of record, not our defaults.
       state = { [name]: { ...msg.state } };
       pending = []; // seeding is not a change to broadcast
+      seeded = true;
+      // AFTER the seed, never at construction. `onInit` is allowed to
+      // dispatch, and until this point there was no authoritative state to
+      // dispatch against and no main-isolate wiring to ship the result to.
+      composed.initAll({
+        dispatch: (a: Msg) => void dispatch(a),
+        getState: () => state,
+      });
       post({ t: "ready", cell: name });
       return;
     }

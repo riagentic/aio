@@ -1,5 +1,372 @@
 # Changelog
 
+## v1.0.0-alpha77 — the page the browser was actually served (2026-09-04)
+
+> The public surface is frozen from this release on
+> (`docs/basics/semver-policy.md`): an app that compiles and runs against
+> alpha76 compiles and runs against every later alpha, every beta, and 1.0.0.
+> Nothing in this entry is a migration.
+>
+> The release began with one report — the visual app manager had "stopped
+> working with the last aio" — and the cause is the shape everything else here
+> takes: the dev server's graph validator read `await import('/app.js')` inside
+> the framework's own HTML template as a real import, found `/app.js` in no
+> import map, and served the diagnostic page instead of the app; every gate was
+> green because no test had ever opened the manager in a browser. Then five
+> parallel hunts went over the renderer, the two transports, Electron,
+> state/persistence/sync and build/`am`, each finding proven with a test that is
+> red on the old code. Seventeen audit rounds committed after alpha76 and never
+> released are in the last section. Twenty-eight framework defects, eleven of
+> them silent data or update loss; the surface is byte-identical.
+
+### The visual app manager, and the validator that hid it
+
+- **`amui` was served the diagnostic page.** Its `*.server.ts` re-exports reach
+  the framework's own `server-html-gen.ts`, whose prod HTML template contains
+  `await import('/app.js')` — inside a template literal. The import scanner
+  stripped comments and nothing else, so it read a dynamic import of `/app.js`,
+  which is in no import map, and the walk blocked the app. Every import the
+  validator now walks comes from ONE scanner built on `codeMask`: the
+  `import`/`export` keyword, the `from`, and the specifier's quote must all sit
+  at CODE offsets, so a string, a template or a comment can never contribute an
+  edge. The same scanner sees what the old one could not — a multi-line
+  `import {\n a,\n b\n} from "x"` (invisible before, and elided by esbuild when
+  the bindings are unused, so a typo'd path there reached nobody) and a URL
+  import (its own `//` used to be eaten as a comment).
+- **A missing mapping in a module reached ONLY via dynamic import no longer
+  blocks.** That chunk is loaded by the server through `deno.json`, not by the
+  browser through its import map, so holding it to the browser map was a
+  category error. A lazily-loaded BROWSER chunk with a genuinely missing package
+  is still refused — by the in-memory prod-bundle judge, which follows dynamic
+  imports exactly as `deno task build` does. A specifier that names its own
+  scheme (`https:`, `npm:`, `jsr:`, `data:`) is external, never a missing
+  mapping; `node:` keeps its own category.
+- **`/__aio/trojan/graph`** (dev): the verdict — `pending`, `valid`, `errors[]`
+  — for whoever needs to know whether `/` is the app or the diagnostic page
+  without fetching `/` and guessing from HTML. `pending` is the boot race made
+  visible: validation is async, and until it lands the page is served as the
+  app.
+- **The manager is opened in a real browser now**
+  (`tests/e2e-amui-chromium.test.ts`): boot as `deno task amui` would, wait for
+  the verdict, open headless Chromium, require the sidebar on the live surface,
+  click Rescan through the same trojan route `am trigger` uses. It fails on the
+  old validator with the exact `/app.js` line.
+- **Every warning the manager printed on boot is resolved, not hidden.** Every
+  row, pill and toggle was a bare `<div onClick>` — reachable with a pointer,
+  not from a keyboard; one `press()` helper gives each the click, Enter/Space, a
+  button role and a tab stop. Every input has a label. Keyed lists that sat
+  beside a literal sibling (the cell-health card, the Cells tab, every Metrics
+  card, the chart grid) have a parent of their own. `manager:select` writes a
+  whole project's detail synchronously so the skeleton lands before the first
+  await; on a machine with dozens of apps that is 5–9 ms and the 5 ms effect
+  budget reported an ERROR on every click — raised for that method only, with
+  the reason. A full tab walk on a running app now logs nothing.
+- **The State tab shows each field's JSON size** beside it — a slim bar scaled
+  against the field's siblings plus the number — so the heavy field in a cell is
+  found by eye. Per-cell totals stay on the Metrics tab.
+
+### The renderer (AIR) and the browser client
+
+- **A controlled `<input type="number">` lost the decimal point being typed.**
+  The alpha69 drift check compared strings, so `"1."` ≠ `"1"` counted as drift
+  and any unrelated re-render rewrote the box; `1.05` could not be typed.
+  Numeric inputs compare by value now (the rule React uses); text inputs keep
+  the exact string; empty-vs-value and a refused value are still corrected.
+- **Three documented `use` shapes did nothing.** `use={fn}` was dropped without
+  a word (the doc's own `<input use={autoFocus}>` focused nothing),
+  `use={[fn, value]}` never passed the value, and a returned cleanup function
+  was ignored — listeners and observers stayed attached after unmount. One
+  reader for the list; a non-action value warns in dev. And an inline
+  `use={[fn]}` was torn down and re-run on EVERY re-render (a new array identity
+  each time); actions are compared by content now.
+- **`<input onChange={f} type="file">` listened to the wrong event** depending
+  on prop ORDER: `type` was read before it was written. `type` is written first
+  on an `<input>` whatever the JSX order. And `onChange` beside `onInput`:
+  adding or removing `onInput` next to a stable `onChange` moved the event name
+  without moving the registration — the change handler never fired again, or
+  fired on blur; `onInput={undefined}` counted as present. Both directions are
+  pinned, hydration uses the same rule.
+- **A stale WebSocket `onclose` killed its successor.** Teardown closes ws1; a
+  subscriber returning before the close handshake completes opens ws2; ws1's
+  `onclose` then lands, nulls the only handle to ws2 and schedules ws3 while ws2
+  stays open — every broadcast arrived twice, a patch applied twice inserted
+  twice. A close from a socket that is no longer current returns.
+- **A protocol mismatch is terminal.** `_protoMismatch` set `closed`, but every
+  new subscriber reset it and reopened a socket the server refused again,
+  dropping the queue and rejecting pending calls once per subscriber. A
+  `_terminal` flag; an action sent after the gap rejects by name instead of
+  queueing forever.
+- **`<form nativeSubmit>`** now really opts out of submit interception (the prop
+  landed as an attribute nothing read; `data-native-submit` keeps working).
+- **The missing-keys warning stops accusing hand-written siblings.** Four
+  `<div>` panes written literally in the TSX warned "4 <div> children without
+  keys" on every boot — positional reconciliation of literal siblings is always
+  right. `flattenChildren` marks the vnodes that came out of a nested array (a
+  `.map` result) and only those are counted, the rule React applies; `jsxs`
+  spreads its own static children while `jsx` hands an array child on as one
+  nested array. Both keys warnings now say WHERE — the parent as `tag#id.class`
+  and the first text each child renders — and dedupe per SITE, so three
+  offending sites report on the first boot instead of one at a time.
+
+### Transport — WebSocket and UDS
+
+- **Buffered patches were applied TWICE after an out-of-band full state**, on
+  both transports, at all three doors (connect, `subs`, `resync`). A server-side
+  write (a timer, an effect, server code calling `cell.method()`) in the 50 ms
+  throttle window; a client that connects, re-subscribes or resyncs in that
+  window gets a snapshot that already holds the write, then the trailing edge
+  sends the same patch — Immer splices the `add`, server `["one","two"]`, client
+  `["one","two","two"]`, in range, health green, and `resync` re-created the
+  desync it exists to repair. The coalescers drain before every out-of-band
+  snapshot.
+- **One starved client never reached `/__aio/health`.** A `forUser` view that
+  throws for one user (or a BigInt in the one cell a window subscribes to): that
+  client received no state again, and health stayed green while anyone else was
+  connected — `fail()`/`ok()` ran per CLIENT inside the flush loop, so the
+  consecutive counter never got past one. The verdict is collected across the
+  round and settled once.
+- **A force round whose snapshot failed left no `needsFull` debt**, so the next
+  round sent a patch on a base that never saw a "full"-strategy change. The one
+  lost-round path that did not record the debt does now.
+- **A pending `am surface`/`am trigger`/`am client` reply is settled on
+  disconnect** — it used to wait the full reply ceiling and then diagnose "the
+  window is not VISIBLE / main thread busy" for a client that was simply gone.
+- **The `ws:write-backlog` alarm outlived the stalled peer** (UDS already
+  cleared its half): after the one wedged tab closed, health kept reporting "a
+  client is not draining" — forever if it had been the only client.
+- **The framework's own client was reported as an attacker on every async
+  call.** `bindCellReactive` tags each async method dispatch with
+  `payload._callId`; the server re-mints it unconditionally and the sanitizer
+  logged `client sent trusted field(s) payload._callId … stripped` — one WARN
+  every 9 s in the app manager, forever, on both transports. Stripped silently
+  now; `_user`, `_source`, `_syncOp`, the in-flight marker and `payload._origin`
+  stay loud.
+- **The first document of a connection received two identical `state` frames**
+  (accept + the `subs` reply), on both transports — the largest frame the
+  transport sends, twice, before the first render, and counted twice by every
+  per-frame instrument. The `subs` reply is skipped only when the peer already
+  holds exactly that text; a narrowing `subs` and every `resync` still get
+  theirs.
+
+### Electron
+
+- **A packaged window lost `cfg` and `proto` on every reload.** The server sends
+  them once per CONNECTION at accept; the socket belongs to the main process and
+  outlives documents; a reload re-seeded state only. The new document had no
+  `syncCells` (every localFirst call round-tripped), no `callTimeouts`, no
+  `renderBudget`. Dev never showed it — its shell embeds the same keys. The
+  relay caches both and re-seeds a committed document in accept order, never
+  duplicating a frame still queued. Proven on real Electron 44 from disk
+  (`tests/electron-reload-cfg-e2e.test.ts`, in `test:electron`).
+- **The `--no-sandbox` fallback never applied in dev** — it stat'd the sandbox
+  helper beside the Node SHIM, not the real binary — so on a userns-restricted
+  box (Ubuntu 24.04+, containers) `deno task dev` opened no window. Fixed the
+  obvious way, it then applied on every userns-CAPABLE box for nothing; the
+  fallback is gated on measured userns availability (sysctls, then
+  `unshare -U`).
+- **The stall detector reported "down" for a window that was loading.** A first
+  load over 5 s with frames arriving fired `__aio:close` and a `cdiag down` —
+  `am status` and health said down — then "up" when the page simply arrived. A
+  stall needs a victim: a gate closed on a document that was listening. A slow
+  load is one INFO line, and the 15 s mount watchdog stays the instrument for a
+  page that never arrives.
+
+### State, persistence and sync
+
+- **An in-flight write drained at shutdown was dropped from SQLite.** Shutdown
+  sets `shuttingDown` BEFORE `dispatch.drain()`; every commit the drain admits
+  reached `schedulePersist`, which returned early without folding the patches
+  into the dirty hint; the final flush planned from the narrower hint, the
+  in-place row update changed no count, and `plan.commit()` advanced the
+  baseline past it forever. Acked, gone, `lastCycleError()` null. The hint is
+  folded before the shutdown gate; only the timer is shutdown's business.
+- **Re-arming after an overlapping commit threw the row hint away**: the cycle's
+  `finally` re-armed through `schedulePersist()` with no patches, which spells
+  "unhinted commit" and nulls the hint, so under steady load every other window
+  took the O(state) identity pass. An internal `_arm()` arms only the timer; a
+  probe counts hinted vs full passes and pins it.
+- **A resend past the tombstone sweep was applied a second time.** A client
+  evicts stale unconfirmed ops only at `pendingCap`, and `requestSync` re-sends
+  every pending op regardless of age; after the tombstone window a returning op
+  was unknown again — inserted, dispatched, acked, broadcast. An UNKNOWN op
+  stamped older than `max(24h, retention)` minus the drift slack is refused as
+  `stale-beyond-retention`; a known op is re-acked as before; the client drops
+  the refused op through `onDrop`/`onRejected` and never re-sends it.
+  `docs/persistence/crdt.md` says so beside `offline.retention`.
+
+### Build, the app manager and `doctor`
+
+- **The generated systemd unit passed five junk words to the binary.**
+  `ExecStart=… # adjust path after install` — systemd has no trailing-comment
+  syntax, so the binary received the comment as arguments (aio passes bare words
+  through, so it booted and nothing said the unit was wrong), and
+  `RestartPreventExitStatus=143 # …` logged "Failed to parse value" six times.
+  Comments on their own lines; `docs/deploy/updates.md`'s hand-written unit had
+  the same defect and lost its `Restart=` entirely. `systemd-analyze verify`
+  runs where present.
+- **The `cli` target shipped with no build stamp and no `--v8-flags`**; its
+  `--version` told the user to run the command that produced it, and
+  `build.v8Flags` was silently ignored. One `cliCompileArgs()` built on the
+  shared `compileArgs`. And a `cli` binary that could not boot still got ✓ — the
+  space-in-path class was closed for every other target and `buildCli` never
+  smoke-ran; it runs the artifact with `--help` now.
+- **`aio doctor` said "create deno.json" for a valid `deno.jsonc`** (or a
+  `deno.json` with one `//` comment), exit 1, every other check skipped. It
+  reads through THE reader every other command uses; an unparsable file is
+  named, never called absent.
+- **`am start` ran the child from `am`'s cwd** while recording `projectRoot()`
+  in the launch record, so a relative `--db-path` resolved a directory below
+  where every reader of the record looked. One value, both places.
+- **`am pin` preflight read only `deno.json`** with a raw `JSON.parse`, so a
+  `deno.jsonc` app got no preflight at all and `am pin <ver>` died half-pinned
+  on NotFound; `syncFrameworkDeps` threw AFTER the pin was written on a
+  commented `deno.json`. All three go through the JSONC-aware reader and edit
+  the file they found.
+
+### Gates
+
+- `check:tempdirs` ceiling 807 → 793: every test added this release (and the
+  graph-validator suite) goes through `src/testing/temp-dir.ts`.
+- `check:bundle-size` ceiling 62 → 64 KB gz (measured 63.5) — itemised in
+  `tests/bundle-size.test.ts`: the stale-socket and terminal-mismatch guards,
+  the number-input and `onChange` rules, the array-child mark behind the keys
+  warning, and the client half of the stale-op refusal. Every doc that quotes
+  the size quotes the measured one.
+- `test:electron` runs the reload-cfg e2e on real Electron.
+- Four gates were red at the alpha76 tag and stayed red through every "all gates
+  green" claim since, because nobody ran `check:release` on the final tree: the
+  lab's electron scenario required the menu entry's `Exec=` to START with the
+  install path, which run.sh stopped doing in alpha73 when it wrapped the
+  AppImage in a private-`TMPDIR` shell (the path is inside the line now, and
+  that is what the check reads); the run.sh onboarding e2e read the first word
+  "built" in the build log (since alpha76 that names `dist/app.js`, a file the
+  build embeds and removes) instead of the final `✓ built <artifact>` line;
+  `check:sanitizers` accepts an `aio-ok:` reason on the opt-out's line or the
+  line above, and two Electron e2e tests had theirs two lines above; and two
+  worker e2e tests spawned their app without `childEnv()`, leaving
+  `~/.cell-worker-e2e` behind for `check:home-clean` to find. All four fixed at
+  the source; `check:release` is green on this tree, fast and heavy tiers.
+
+### Committed after alpha76 and never released — the audit rounds
+
+Seventeen commits, each a hunt with every finding mutation-proven; summarised
+here because this is the first entry they appear in.
+
+- **The instrument said the write landed (fifty audits).** `_reportRefusedCell`
+  used one `Set` to stop log spam AND to gate the durability verdict, so
+  `am persist` answered `{"ok":true}` forever while nothing reached disk;
+  `/__aio/health` carries `persist: { ok }` and goes degraded; `am stop` takes
+  the flush verdict before the door closes and exits 1 naming the cell;
+  `am snapshot load wrong.json` no longer replaces the whole state and reports
+  loaded (unknown AND missing cells refused by name, `--force` the override);
+  `am watch` watches; `am dispatch` refuses a call that states no argument list;
+  `am profile` no longer hands a loopback-only app's `.aioapp` the LAN IP;
+  unserializable state is named by path at every door; `-1` is never printed as
+  a byte count; `check:tempdirs` exists.
+- **A refused persistence window is retried WHOLE.** `_planSqlite` consumed and
+  cleared the dirty hint at plan time; a refused window (UNIQUE, NOT NULL, a
+  dangling `ref()`, "database is locked", disk full) then narrowed the next hint
+  and `plan.commit()` advanced past the row — silent, permanent loss on the
+  `db:` path from every ordinary transient refusal. Also: SQLITE_FULL's real
+  message is classified as disk-full; `am persist` no longer reports a landed
+  write as failed over a wire-fidelity notice; a quarantined database takes its
+  `-wal`/`-shm` with it.
+- **An answer `am` gives is acted on without a human reading it.** A 0-byte lock
+  file from a crash mid-write bricked the app ("already running (pid 0)");
+  `am health` was blind on a socket-only app and credulous about a stranger's
+  server on the port; `am status --port` ignored `--port`; numeric flags were
+  unbounded (`--wait=-5`, `--lines=0` printed everything);
+  `am timetravel
+  <typo>` and an out-of-range `goto` acked and did nothing;
+  `am auth revoke
+  <nonexistent>` reported success on the incident command.
+- **The tests can see the failures they claim to catch.** `testCell` passed a
+  fire-and-forget failure green when the test never called `settle()`; `testUI`
+  dropped every render error after the first and kept stale content;
+  `check:boundaries` was blind to `new Worker(new URL(…))` and
+  `import.meta.resolve(…)`; Deno 2.9 made the leak sanitizers opt-in and the
+  gate that ratcheted them ran nothing — said plainly now, tracked in `todo.md`.
+  A `worker: true` cell whose `onInit` dispatches crashed the main loop three
+  times at boot; an async call to a closed worker cell hung 30 s and then
+  claimed the method may still be running; schedule content (a cron that can
+  never fire) is refused before the app opens persistence.
+- **The instruments report what is true.** One slow reduce graded the loop
+  "degraded" forever (never windowed); `am timeline` printed a redacted cell's
+  secret when a non-redacted method in the same cell touched it; the broadcast
+  Prometheus counters reset on every reload; `memoryMonitor` was declared, off
+  by default, and read by nobody so it ran every 10 s in prod; the
+  dispatch-storm detector reported a storm's recovery as a new storm;
+  `am dispatch cell.method k=v` passed no arguments and acked.
+- **Five blockers where one rule was an allowlist.** Every streaming response
+  outside five content types was buffered to its end (an endless `text/plain`
+  stream returned nothing); one uncloneable `blocking()` argument leaked a pool
+  slot forever; a `serverFn` proxy was an accidental thenable that hung boot;
+  `am remove <name>` deleted ANY directory under the install root;
+  `am stop
+  --wait` SIGKILLed a socket-only app mid-shutdown; the diagnostic
+  bus's bridge to the logger was destroyed at boot. Static paths percent-decode;
+  static responses answer conditional requests.
+- **The TOFU guard runs, a rebuild keeps its rollback.** "Never pin a key
+  learned over plain http" was never invoked; a same-version rebuild overwrote
+  its own rollback and then "rolled back" to the build that had just failed;
+  `electron-zip` releases were never smoke-tested; `am publish --data` was
+  advertised and read nowhere.
+- **The commit boundary says what a value becomes.** An accessor assigned into
+  state survived a sync commit (a value that changes with no write, no patch); a
+  cyclic value took the async path down after 330 ms of recursion; the
+  post-settle seal was two microtasks late, so a write after
+  `await
+  cell.method()` returned still committed.
+- **A green build never ships a binary that cannot boot.** A project path with a
+  space (or any non-ASCII) produced a 100% dud with ✓ (`deno compile`
+  percent-encodes twice); the compile step runs the artifact. A refused start
+  rotated the LIVE instance's logs. The boot report names the real `db` path.
+- **The shell is public, not the directory.** `auth: true` served the whole app
+  directory to anonymous callers (`/data/app.db`, `/backup.sql`); the login
+  route refused a VALID credential while over budget (12 failed logins took
+  login offline for everyone behind a proxy); anonymous signup was unbounded; a
+  blob's Content-Type came from the uploaded filename (`evil.html` ran in the
+  app's origin); `/__aio/client-error` was an anonymous cross-origin log writer;
+  the TLS control listener skipped the budget and the security headers; two
+  cookie readers gave two answers; `trustProxyHeader` was validated only when it
+  fired.
+- **The base a client could not rebuild.** A seeded sync snapshot never reached
+  the cursorless client it exists for (a `localFirst` cell lost its adopted data
+  on the first local edit); the tombstone window was a fixed 24 h against a
+  per-cell `retention` of "7d"; an op the server could never accept was dropped
+  with nothing said; set-add, set-remove and lww-per-key were not commutative; a
+  cell whose catch-up carried nothing stayed "syncing" forever; `getLW`
+  fabricated the server's watermark from the client clock; `sync.onSync` was
+  declared, documented and called from nowhere.
+- **A lost broadcast round is recovered.** A round that threw was lost for every
+  client with nobody owed a full state (Immer splices, health green);
+  `applyWirePatches` refuses an op the state cannot describe so the client
+  resyncs; `wsLimits.*` was never validated (`NaN` turned every DoS guard off);
+  three guards existed on WS and not on UDS; `proto-err` was declared and never
+  sent; `graph-error` reloaded into the broken build; a refused `sfn` write
+  waited 30 s to be misdiagnosed. `tests/inline-scripts-parse.test.ts` parses
+  every hand-written script inside a template literal.
+- **Four silent renderer boundary defects.** Hydration kept a server-only
+  attribute forever (`disabled` in the markup left the button dead); `htmlFor`
+  never became `for`; `<foreignObject>` children were created in the SVG
+  namespace; `class` and `className` on one element rendered differently per
+  path. `ui.present()`/`ui.absent()` ask the same question `click()` does.
+- **The UI stopped updating and everything said it was fine.** One in-app route
+  change killed the server→client downlink for the life of the document (a
+  stop-latch whose clearing event never came) — measured on real Electron and
+  fixed to Electron's MEASURED event order, with a stalled relay loud in the
+  window and at `/__aio/health`; `am cost` read 0 bytes/s on the default desktop
+  transport; `useRaf` died on a throwing frame; two dropped-delta paths never
+  asked for a resync; "subscribe to nothing" was a valid subscription; neither
+  broadcaster ever called `degraded().ok()`; a thrown UDS round was silent
+  divergence; a setup throw cost the app its connection; a lazy module with no
+  default export hung forever. The root-path reload exemption became "same url
+  as the document on screen = reload".
+- **The public surface is FROZEN** — declared 2026-09-04, effective here:
+  `check:api` names the additive shapes and says outright that "provably
+  source-compatible" is not an exception; `tests/surface-is-frozen.test.ts`
+  keeps the policy, the upgrade README and the deprecation lifecycle true.
+
 ## v1.0.0-alpha76 — the thing that reported success (2026-09-03)
 
 > Fourteen independent randomized audits were run against the framework, each

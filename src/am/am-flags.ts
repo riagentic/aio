@@ -63,7 +63,7 @@ export const PASSTHROUGH: Readonly<Record<string, string>> = {
   dev: "= deno task dev — flags go to the app",
   build: "= deno task build — fleet flags go to the build",
   compile: "= deno task compile — flags go to the build",
-  publish: "release flags (--dir --channel --notes --targets --key …)",
+  publish: "release flags (--dir --channel --notes --targets --key --data …)",
   create: "scaffold flags (--template --target --mirror --dir …)",
   lab: "VM flags (--ram --cpus --disk --apk --tunnel …)",
   ui: "flags are forwarded to amui (`am ui --client=browser`)",
@@ -109,7 +109,13 @@ export const VERB_FLAGS: Readonly<Record<string, readonly string[]>> = {
   sql: [],
   tables: [],
   schedules: [],
-  logs: ["--level"],
+  // `--level` was listed here and REFUSED by the command (`logFlagError`
+  // rejects every stray `-…`): the central gate permitted a flag the verb
+  // does not take, and the two tests around this table pin "every gated verb
+  // refuses --zzz" and "every verb appears in the table" — neither half can
+  // see an entry the command rejects. A level is a filter word: `am logs
+  // error`.
+  logs: [],
   errors: [],
   metrics: [],
   cost: ["--keys", "--cell", "--window"],

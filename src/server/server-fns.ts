@@ -79,6 +79,16 @@ export function serverFn<T extends FnMap>(ns: string): Remote<T> {
   return new Proxy({} as Remote<T>, {
     get(_t, prop) {
       if (typeof prop !== "string") return undefined;
+      // NOT a thenable. The trap returns a callable for ANY string prop, so
+      // `await getApi()` (a normal shape — resolving the proxy inside an async
+      // function, or during boot) invoked `then(resolve, reject)`, which
+      // returned a rejected promise and called NEITHER callback: the await
+      // never settled AND an unhandled rejection was raised naming a
+      // namespace that is registered perfectly well. Boot-time rejections are
+      // fatal, so the hang came with a crash and a misleading message.
+      if (prop === "then" || prop === "catch" || prop === "finally") {
+        return undefined;
+      }
       return (...args: unknown[]) => {
         const fns = _registry.get(ns);
         // Own-property only — never resolve inherited Object.prototype members

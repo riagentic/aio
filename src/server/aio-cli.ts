@@ -11,7 +11,7 @@ import { findFreePort } from "./paths.ts";
 import { BUILD_BOOL_FLAGS, BUILD_VALUE_FLAGS } from "../build/build-flags.ts";
 
 /** Framework version — printed by --version, checked in tests */
-export const VERSION = "1.0.0-alpha76";
+export const VERSION = "1.0.0-alpha77";
 
 /** What `--version` prints: what this artifact IS, and what it was built with.
  *

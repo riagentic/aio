@@ -60,6 +60,22 @@ export type LogConfig = {
  *  unmapped bare import is a blank screen. The API depends on the shape; only
  *  the server ever depends on the class. */
 export interface LogSink {
+  /** A vitals measurement, into `perf.log`/`debug.log` under the
+   *  `vitals:<layer>` category.
+   *
+   *  Optional because a sink is free not to have one — but it is the ONLY
+   *  writer of vitals measurements into a log file, and it had no caller at
+   *  all: a producer with no caller, a consumer with no caller, and a green
+   *  test proving the producer worked. `check:dead-wiring` cannot see it
+   *  because these are class methods, not module exports. */
+  vitals?: (
+    layer: "render" | "transport" | "loop",
+    status: string,
+    measured: number,
+    threshold: number,
+    hint?: { cause: string; suggestion: string; severity: string },
+  ) => void;
+
   readonly logDir: string;
   pub(
     lvl: LogLevel,

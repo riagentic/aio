@@ -39,6 +39,24 @@ export const MIN_COMPRESS_BYTES = 860;
  *  download from becoming a heap spike. Bigger bodies pass through untouched. */
 export const MAX_BUFFER_BYTES = 8 * 1024 * 1024;
 
+/** …and above this many MILLISECONDS, likewise: a response that has not
+ *  finished by now is a STREAM, whatever its content type says.
+ *
+ *  `isStreamingType` is an allowlist of five types someone thought of, and it
+ *  was the whole correctness boundary — so every other streaming shape was
+ *  buffered until it ended: a `text/plain` log tail never arrived at all (not
+ *  one byte, not even the status line), a streaming `text/html` SSR render
+ *  measured TTFB == total, and an endless one hung the request forever while
+ *  quietly accumulating chunks in memory after the client had gone. That is
+ *  verbatim the failure `isStreamingType`'s own docstring says it prevents.
+ *
+ *  A time bound makes the allowlist an OPTIMISATION (skip the read entirely
+ *  for a type we already know) instead of the thing correctness rests on. A
+ *  body slow enough to trip this is simply not compressed, which is a
+ *  graceful degradation; `bufferUpTo` replays what it read, so nothing is
+ *  ever truncated. */
+export const MAX_BUFFER_MS = 100;
+
 /** Brotli quality for on-the-fly compression. Measured on the real 162 KB
  *  counter bundle: q5 → 56.1 KB in 3.4 ms, gzip → 59.1 KB in 5.8 ms, q11 →
  *  51.6 KB in 133 ms. q5 is both smaller AND faster than gzip; q11 belongs to
@@ -88,33 +106,55 @@ export function isStreamingType(contentType: string | null): boolean {
 async function bufferUpTo(
   body: ReadableStream<Uint8Array>,
   max: number,
+  maxMs: number = MAX_BUFFER_MS,
 ): Promise<{ bytes: Bytes } | { stream: ReadableStream<Uint8Array> }> {
   const reader = body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
+  const deadline = Date.now() + maxMs;
+
+  /** Everything read so far, then the untouched remainder. `inFlight` is the
+   *  read that was already issued when we gave up — awaiting it in the first
+   *  pull is what makes handing the body back TOTAL rather than lossy. */
+  const handOff = (
+    inFlight: Promise<ReadableStreamReadResult<Uint8Array>> | null,
+  ): ReadableStream<Uint8Array> => {
+    let first = inFlight;
+    return new ReadableStream<Uint8Array>({
+      start(c) {
+        for (const ch of chunks) c.enqueue(ch);
+      },
+      async pull(c) {
+        const r = first ? await first : await reader.read();
+        first = null;
+        if (r.done) c.close();
+        else if (r.value) c.enqueue(r.value);
+      },
+      cancel(reason) {
+        return reader.cancel(reason);
+      },
+    });
+  };
+
   while (true) {
-    const { done, value } = await reader.read();
+    const pending = reader.read();
+    const left = deadline - Date.now();
+    if (left <= 0) return { stream: handOff(pending) };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const raced = await Promise.race([
+      pending,
+      new Promise<"aio-timeout">((r) => {
+        timer = setTimeout(() => r("aio-timeout"), left);
+      }),
+    ]);
+    clearTimeout(timer);
+    if (raced === "aio-timeout") return { stream: handOff(pending) };
+    const { done, value } = raced;
     if (done) break;
     if (!value) continue;
     chunks.push(value);
     total += value.byteLength;
-    if (total > max) {
-      // Hand back everything read so far, then the untouched remainder.
-      const rest = new ReadableStream<Uint8Array>({
-        start(c) {
-          for (const ch of chunks) c.enqueue(ch);
-        },
-        async pull(c) {
-          const { done, value } = await reader.read();
-          if (done) c.close();
-          else if (value) c.enqueue(value);
-        },
-        cancel(reason) {
-          return reader.cancel(reason);
-        },
-      });
-      return { stream: rest };
-    }
+    if (total > max) return { stream: handOff(null) };
   }
   const out = new Uint8Array(total) as Bytes;
   let at = 0;
@@ -383,7 +423,28 @@ export async function encodeResponse(
   if (isStreamingType(ct)) return resp;
   // Nothing to gain: images, fonts, wasm, archives and video are compressed
   // already, and re-encoding them costs CPU for bytes back.
-  if (!isCompressible(ct)) return resp;
+  //
+  // …but a 304 is CORRECTNESS, not an optimisation, and this early return sat
+  // ABOVE the conditional-request block — so every incompressible response
+  // went out with `no-cache` and no validator, i.e. a full re-download of
+  // every image, font and video on every page load. Answer the conditional
+  // request first, using the tag the HANDLER supplied (the static path now
+  // sets a weak mtime/size one for binaries). Never hash here: buffering a
+  // video to hash it is the cost this early return exists to avoid.
+  if (!isCompressible(ct)) {
+    const handlerTag = resp.headers.get("ETag");
+    if (
+      handlerTag && !cacheControl.includes("no-store") &&
+      etagMatches(req.headers.get("If-None-Match"), handlerTag)
+    ) {
+      const h = new Headers(resp.headers);
+      h.delete("Content-Length");
+      h.delete("Content-Encoding");
+      void resp.body?.cancel();
+      return new Response(null, { status: 304, headers: h });
+    }
+    return resp;
+  }
   if (!resp.body) return resp;
 
   // Deno does NOT put `Content-Length` on an in-process Response — it is added

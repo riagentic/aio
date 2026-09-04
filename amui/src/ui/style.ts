@@ -78,3 +78,30 @@ export function fmtUptime(sec: number | null): string {
 export function fmtBytes(n: number | null | undefined): string {
   return n === null || n === undefined ? "—" : bytes(n);
 }
+
+/** Everything a clickable non-button element needs to be reachable without a
+ *  mouse: the click, Enter/Space as the same click, a button role for
+ *  assistive tech, and a tab stop. Spread it: `<div {...press(fn)}>`.
+ *
+ *  Every row, pill and toggle in this UI was a bare `<div onClick>` — fine
+ *  with a pointer, unreachable from a keyboard, and the renderer said so on
+ *  every boot (`[aio-dev] <div> has onClick but no keyboard handler`). One
+ *  helper, so the fix cannot drift per site. */
+export function press(fn: () => void): {
+  onClick: () => void;
+  onKeyDown: (e: KeyboardEvent) => void;
+  role: "button";
+  tabIndex: 0;
+} {
+  return {
+    onClick: fn,
+    onKeyDown: (e: KeyboardEvent) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        fn();
+      }
+    },
+    role: "button",
+    tabIndex: 0,
+  };
+}

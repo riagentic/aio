@@ -30,7 +30,7 @@ import {
   stack,
 } from "./am-output.ts";
 import { resolveAioRoot, withoutAioFlag } from "./am-cmd-link.ts";
-import { join, relative, resolve } from "@std/path";
+import { basename, join, relative, resolve } from "@std/path";
 import {
   compareVersions,
   currentLink,
@@ -49,7 +49,11 @@ import {
   syncFrameworkDeps,
   writePin,
 } from "./am-versions.ts";
-import { DENO_JSON_NAMES, LOCAL_PIN_FILE } from "../server/deno-json.ts";
+import {
+  DENO_JSON_NAMES,
+  LOCAL_PIN_FILE,
+  readDenoJson,
+} from "../server/deno-json.ts";
 import {
   isPathPin,
   linkSatisfiesPin,
@@ -289,18 +293,25 @@ export async function preflight(
 ): Promise<Blocker[]> {
   const blocking: Blocker[] = [];
   // deno.json first: a removed top-level key (`target`) is a config fact the
-  // source walk below cannot see.
+  // source walk below cannot see. Through THE reader (`readDenoJson`): both
+  // names Deno accepts, parsed as JSONC. A raw `JSON.parse` of `deno.json`
+  // and nothing else meant a `deno.jsonc` app — or a `deno.json` with one
+  // `//` comment — got NO config preflight at all: the removed key was
+  // silently not seen, the pin moved, and the app died at boot on the
+  // framework the tool had just called fine. `cmdPin` already accepted both
+  // names at its door; the check behind the door read only one.
   try {
-    const djPath = join(appDir, "deno.json");
-    const raw = await Deno.readTextFile(djPath);
-    const dj = JSON.parse(raw) as Record<string, unknown>;
-    for (const removal of removalsInDenoJson(dj)) {
+    const found = await readDenoJson(appDir);
+    if (!found) throw new Deno.errors.NotFound("no deno.json");
+    const raw = await Deno.readTextFile(found.path);
+    const file = basename(found.path);
+    for (const removal of removalsInDenoJson(found.config)) {
       if (stillAccepts(ref, removal.lastGood)) continue;
       const line = raw.split("\n").findIndex((l) =>
         new RegExp(`"${removal.key}"\\s*:`).test(l)
       );
       blocking.push({
-        where: `deno.json:${line + 1}`,
+        where: `${file}:${line + 1}`,
         hit: {
           removal,
           line: line + 1,

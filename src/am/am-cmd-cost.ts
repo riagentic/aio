@@ -16,7 +16,7 @@ import type { GlobalFlags } from "./am-types.ts";
 import { out, outError } from "./am-output.ts";
 import { amCtx } from "./am-utils.ts";
 import { trojanGet } from "./am-http.ts";
-import { bytes } from "../diagnostics/fmt.ts";
+import { bytes, bytesOrUnserializable } from "../diagnostics/fmt.ts";
 
 type KeyCost = {
   key: string;
@@ -105,7 +105,10 @@ export function renderCost(
       bytes: fmtRate(c.bytesPerSec),
       mean: fmtBytes(c.meanBytes),
       p95: fmtMs(c.p95ReduceMs),
-      state: fmtBytes(r.stateBytes[c.cell] ?? 0),
+      // NOT `fmtBytes`: the unserializable sentinel is negative, which that
+      // renders as `—` (= "nothing measured"). It is the loudest fact on the
+      // row and read as the quietest.
+      state: bytesOrUnserializable(r.stateBytes[c.cell] ?? 0),
       keys: keyText,
       full: c.fullResends,
     };

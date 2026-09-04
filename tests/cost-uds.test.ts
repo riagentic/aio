@@ -18,6 +18,9 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { createCostMeter } from "../src/vitals/cost-meter.ts";
 import { attributeRound } from "../src/server/server-broadcast.ts";
 import type { PatchEntry } from "../src/protocol/broadcast-utils.ts";
+import { createUDSListener } from "../src/server/aio.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { join } from "@std/path";
 
 const PATCHES: PatchEntry[] = [
   {
@@ -224,4 +227,142 @@ Deno.test("metrics: aio_clients_connected counts BOTH transports", () => {
     !wsOnly.includes("Connected WebSocket clients"),
     "the old help text claimed a transport the gauge no longer means",
   );
+});
+
+// ── The other half: the BYTES on the wire ────────────────────────────────
+//
+// Attribution (above) answers "which cell pushed". The wire totals answer "how
+// much went out", and on UDS they were never measured at all: `recordSend` was
+// wired to the WS `socket.send` wrapper only, so `am cost` printed
+// `bytes/s 0` for every cell on the DEFAULT desktop transport.
+//
+// That is worse than unmeasured. A field report hunting a suspected re-render
+// storm in an Electron app asked the tool built for exactly that, was told
+// `0 bytes/s`, and concluded the server was quiet. It was not — a 5-second
+// poller was reassigning a ~100 KB array on every tick, found through
+// `am timeline` instead. A measured zero and an unmeasured one must not print
+// the same number.
+//
+// Held to the same standard as the WS path (`cost-wire-accuracy.test.ts`):
+// what the meter reports must EQUAL what a real socket received.
+Deno.test("cost: UDS wire bytes equal what the socket actually received", async () => {
+  const dir = await tempDir("cost-uds-");
+  const socketPath = join(dir, "cost.sock");
+  const meter = createCostMeter();
+  let state = { balances: { sol: 1 } };
+  const uds = createUDSListener(
+    socketPath,
+    () => state,
+    () => {},
+    () => {},
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    meter,
+  );
+  const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+  let received = 0;
+  const reader = conn.readable.getReader();
+  (async () => {
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        received += value.byteLength;
+      }
+    } catch { /* aio-ok: the socket closes at the end of the test */ }
+  })();
+  try {
+    await new Promise((r) => setTimeout(r, 100)); // handshake frames
+    state = { balances: { sol: 2 } };
+    uds.broadcastState(true);
+    await new Promise((r) => setTimeout(r, 150));
+
+    const r = meter.report({ windowSec: 60 });
+    assert(
+      r.wire.totalBytes > 0,
+      "the desktop transport reported ZERO bytes — a measured zero and an " +
+        "unmeasured one must not print the same number",
+    );
+    assertEquals(
+      r.wire.totalBytes,
+      received,
+      `the meter must count what the socket got: reported ${r.wire.totalBytes}, ` +
+        `received ${received}`,
+    );
+    // NOT asserted here: `clients`. That count comes from `attributeRound` in
+    // the app's broadcast path (covered by the first tests in this file); a
+    // bare listener has no broadcaster, so asserting it here would be testing
+    // wiring this harness deliberately does not build.
+  } finally {
+    try {
+      await reader.cancel();
+    } catch { /* aio-ok: already closed */ }
+    try {
+      conn.close();
+    } catch { /* aio-ok: already closed */ }
+    uds.shutdown();
+    await dropTempDir(dir);
+  }
+});
+
+// An ack is 40 bytes; a full state can be 8 KB. Counting a wall of acks as
+// "the whole state went out" is a plausible headline that is wrong, and people
+// act on those. The WS path classifies by the envelope's kind read EXACTLY;
+// this pins that UDS uses the same classifier and not a substring match — a
+// patch payload can carry the literal `"t":"state"` in its own data.
+Deno.test("cost: a UDS frame is classified by its envelope, not by substring", async () => {
+  const dir = await tempDir("cost-uds-kind-");
+  const socketPath = join(dir, "kind.sock");
+  const meter = createCostMeter();
+  // The trap: a full-state frame whose PAYLOAD contains the text of a patches
+  // envelope. Classified by substring it would be counted as a patch.
+  let state = { note: { text: '{"v":2,"t":"patches","d":[]}' } };
+  const uds = createUDSListener(
+    socketPath,
+    () => state,
+    () => {},
+    () => {},
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    meter,
+  );
+  const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+  const reader = conn.readable.getReader();
+  (async () => {
+    try {
+      for (;;) if ((await reader.read()).done) break;
+    } catch { /* aio-ok: closed at teardown */ }
+  })();
+  try {
+    await new Promise((r) => setTimeout(r, 100));
+    state = { note: { text: '{"v":2,"t":"patches","d":[]}!' } };
+    uds.broadcastState(true); // force → a FULL state frame
+    await new Promise((r) => setTimeout(r, 150));
+    const r = meter.report({ windowSec: 60 });
+    assert(
+      r.wire.byKind.full > 0 && r.wire.byKind.patch === 0,
+      `a forced full send must count as a full resend, not a patch: ${
+        JSON.stringify(r.wire.byKind)
+      }`,
+    );
+  } finally {
+    try {
+      await reader.cancel();
+    } catch { /* aio-ok: already closed */ }
+    try {
+      conn.close();
+    } catch { /* aio-ok: already closed */ }
+    uds.shutdown();
+    await dropTempDir(dir);
+  }
 });

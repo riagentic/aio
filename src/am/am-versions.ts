@@ -35,6 +35,7 @@
 import {
   LOCAL_PIN_FILE,
   readDenoJson,
+  readDenoJsonSync,
   readFrameworkPin,
 } from "../server/deno-json.ts";
 import { compareVersions as compareRawVersions } from "../server/updates-core.ts";
@@ -460,7 +461,12 @@ async function ensureGitIgnored(appDir: string, entry: string): Promise<void> {
  *  A targeted text edit rather than a JSON round-trip: the app's config is the
  *  developer's file, and reformatting it as a side effect of pinning is rude. */
 async function writeDenoJsonPin(appDir: string, ref: string): Promise<void> {
-  const path = join(appDir, "deno.json");
+  // WHICH file: the one Deno reads (`DENO_JSON_NAMES`, first match) — so a
+  // `deno.jsonc` app gets its pin written INTO deno.jsonc. Hardcoding
+  // `deno.json` here made `am pin <ver>` on such an app provision the
+  // version, relink dep/aio, and then die on NotFound — half-pinned, with a
+  // stack trace where the report should be.
+  const path = readDenoJsonSync(appDir)?.path ?? join(appDir, "deno.json");
   const raw = await Deno.readTextFile(path);
   const line = `  "aioVersion": ${JSON.stringify(ref)}`;
   const existing = /^\s*"aioVersion"\s*:\s*"[^"]*"\s*,?\s*$/m;
@@ -557,14 +563,15 @@ export async function syncFrameworkDeps(
   } catch {
     return []; // no readable framework config — nothing authoritative to copy
   }
-  const appPath = join(appDir, "deno.json");
-  let raw: string;
-  try {
-    raw = await Deno.readTextFile(appPath);
-  } catch {
-    return [];
-  }
-  const app = JSON.parse(raw) as { imports?: Record<string, string> };
+  // THE reader, for the same reason as `writeDenoJsonPin`: both names, JSONC.
+  // A `deno.json` with one `//` comment used to throw out of `JSON.parse`
+  // here — AFTER the pin was written — and `cmdPin` reported the sync as
+  // failed; a `deno.jsonc` app silently got no sync at all.
+  const found = await readDenoJson(appDir);
+  if (!found) return [];
+  const appPath = found.path;
+  const raw = await Deno.readTextFile(appPath);
+  const app = found.config as { imports?: Record<string, string> };
   const have = app.imports ?? {};
   const changes: DepChange[] = [];
   let out = raw;

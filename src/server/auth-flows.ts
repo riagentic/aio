@@ -28,6 +28,8 @@ import type { SessionStore } from "./sessions.ts";
 import {
   authFailBudgetExceeded,
   bearerToken,
+  chargeAuthWork,
+  chargeSignup,
   recordAuthFail,
   SESSION_COOKIE,
   sessionTokenFromCookie,
@@ -224,8 +226,20 @@ export async function handleAuthFlow(
   switch (route.slice(5)) {
     case "signup": {
       if (!cfg.signup) return json(403, { error: "signup_disabled" });
-      if (authFailBudgetExceeded(clientKey)) {
+      // A SUCCESSFUL signup records no failure, so the failure budget never
+      // throttled it: 60 anonymous signups in 665 ms — 60 PBKDF2-600k runs, 60
+      // permanent rows, 60 real `role:"user"` sessions. Two budgets, because
+      // there are two costs: the hashing work, and the account itself.
+      if (!chargeAuthWork(clientKey)) {
         return json(429, { error: "too_many_attempts" });
+      }
+      // …and `chargeSignup` is ALSO the id-enumeration bound this route used
+      // the failure budget for: it charges every ATTEMPT, collisions included,
+      // so 10 per hour is a far tighter cap on probing than 10 failures in
+      // five minutes — and it does not let someone else's failed LOGINS refuse
+      // a stranger's signup.
+      if (!chargeSignup(clientKey)) {
+        return json(429, { error: "too_many_accounts" });
       }
       const b = body();
       const id = str(b?.id), password = str(b?.password);
@@ -274,7 +288,19 @@ export async function handleAuthFlow(
     }
 
     case "login": {
-      if (authFailBudgetExceeded(clientKey)) {
+      // The WORK budget, not the failure budget. `docs/auth/auth.md` states
+      // the invariant this route was breaking: "The budget throttles failed
+      // authentication, never service. A request that presents a VALID
+      // credential is served regardless of the budget." Checking the failure
+      // budget FIRST made 12 failed logins for a nonexistent id take the whole
+      // app's login offline for five minutes — and behind the reverse proxy
+      // the docs prescribe without `trustProxyHeader`, every client shares one
+      // bucket, so those 12 requests are an outage for everyone.
+      //
+      // What the old order bought was "do not run PBKDF2 while over budget",
+      // and that is what `chargeAuthWork` is: a cap on the WORK, which a
+      // correct password does not have to pay for with a refusal.
+      if (!chargeAuthWork(clientKey)) {
         return json(429, { error: "too_many_attempts" });
       }
       const b = body();
@@ -288,6 +314,12 @@ export async function handleAuthFlow(
       }
       if (!verified) {
         recordAuthFail(clientKey, `login failed for id=${id}`);
+        // Over budget AND wrong: "back off" rather than "wrong password" —
+        // the same rule the HTTP gate applies, and the only place the failure
+        // budget may refuse.
+        if (authFailBudgetExceeded(clientKey)) {
+          return json(429, { error: "too_many_attempts" });
+        }
         return json(401, { error: "invalid_credentials" });
       }
       const rec = cfg.users.get(id);
@@ -312,7 +344,11 @@ export async function handleAuthFlow(
     }
 
     case "totp": {
-      if (authFailBudgetExceeded(clientKey)) {
+      // Work budget first, failure budget only for a WRONG code — same rule as
+      // `login` (docs/auth/auth.md: a valid credential is served regardless of
+      // the budget). A user with a correct code must not be locked out by
+      // someone else's failed attempts from the same address.
+      if (!chargeAuthWork(clientKey)) {
         return json(429, { error: "too_many_attempts" });
       }
       const b = body();
@@ -326,6 +362,9 @@ export async function handleAuthFlow(
       const secret = cfg.users.totpSecret(stored.subject);
       if (!secret?.enabled || !(await verifyTotp(secret.secret, code))) {
         recordAuthFail(clientKey, `totp failed for id=${stored.subject}`);
+        if (authFailBudgetExceeded(clientKey)) {
+          return json(429, { error: "too_many_attempts" });
+        }
         return json(401, { error: "invalid_code" });
       }
       const rec = cfg.users.get(stored.subject);
@@ -349,8 +388,10 @@ export async function handleAuthFlow(
       // request, unthrottled: a stolen session could brute-force the OLD
       // password here at full speed, and anyone could use it as a CPU pump
       //. The account lockout alone is not the answer; this is the gate
-      // that makes guessing expensive per SOURCE, not per account.
-      if (authFailBudgetExceeded(clientKey)) {
+      // that makes guessing expensive per SOURCE, not per account. It bounds
+      // the WORK, so a correct old password is still served — the failure
+      // budget decides only what a wrong one is answered with.
+      if (!chargeAuthWork(clientKey)) {
         return json(429, { error: "too_many_attempts" });
       }
       const b = body();
@@ -360,6 +401,9 @@ export async function handleAuthFlow(
       if (ok === "locked") return json(423, { error: "account_locked" });
       if (!ok) {
         recordAuthFail(clientKey, `password change failed for id=${user.id}`);
+        if (authFailBudgetExceeded(clientKey)) {
+          return json(429, { error: "too_many_attempts" });
+        }
         return json(401, { error: "invalid_credentials" });
       }
       try {
@@ -518,10 +562,11 @@ export async function handleAuthFlow(
       // (`am auth rm`) was the only way back. Enabling was strictly easier
       // than disabling, which inverts the whole point of a second factor.
       //
-      // Same shape as totp/disable: password re-auth, on the same per-IP
+      // Same shape as totp/disable: password re-auth, on the same per-IP WORK
       // budget (this route verifies a password, so it must not be an
-      // unthrottled PBKDF2 pump either).
-      if (authFailBudgetExceeded(clientKey)) {
+      // unthrottled PBKDF2 pump either) — bounding the work, not refusing a
+      // correct one.
+      if (!chargeAuthWork(clientKey)) {
         return json(429, { error: "too_many_attempts" });
       }
       const b = body();
@@ -533,6 +578,9 @@ export async function handleAuthFlow(
       if (ok === "locked") return json(423, { error: "account_locked" });
       if (!ok) {
         recordAuthFail(clientKey, `totp enable failed for id=${user.id}`);
+        if (authFailBudgetExceeded(clientKey)) {
+          return json(429, { error: "too_many_attempts" });
+        }
         return json(401, { error: "invalid_credentials" });
       }
       if (!(await verifyTotp(staged.secret, code))) {
@@ -546,8 +594,9 @@ export async function handleAuthFlow(
     case "totp/disable": {
       const user = caller();
       if (!user) return json(401, { error: "login_required" });
-      // Verifies a password → same per-IP budget as every other such route.
-      if (authFailBudgetExceeded(clientKey)) {
+      // Verifies a password → same per-IP WORK budget as every other such
+      // route: bound the hashing, serve a correct password.
+      if (!chargeAuthWork(clientKey)) {
         return json(429, { error: "too_many_attempts" });
       }
       const b = body();

@@ -60,6 +60,9 @@ jobs:
       - name: Silent catch (no swallowed errors)
         run: deno task check:silent-catch
 
+      - name: Temp dirs (no test directory left unswept)
+        run: deno task check:tempdirs
+
       - name: Placeholders (no ${…} that never interpolates)
         run: deno task check:placeholders
 

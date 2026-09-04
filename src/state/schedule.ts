@@ -104,6 +104,10 @@ function describeValue(v: unknown): string {
  *  it. The `ScheduleDef` type catches none of this for the app that ships it,
  *  because the dev server transpiles without type-checking — the type protects
  *  this repo, not the user. So the check exists at runtime, and it runs first. */
+/** The characters a schedule id may hold — ONE home, shared by the config
+ *  validator and the runtime's own `validateId`. */
+export const VALID_SCHEDULE_ID = /^[\w\-:.]+$/;
+
 export function validateSchedules(defs: readonly unknown[]): void {
   // Not an array: `schedules: {}` has no `length`, so a call site guarding on
   // `schedules?.length` skips it and the whole config is silently ignored,
@@ -133,6 +137,23 @@ export function validateSchedules(defs: readonly unknown[]): void {
       throw teachableError(
         `${at()}.id is ${describeValue(d.id)}, not a non-empty string`,
         "give the schedule an id — it is the handle schedule.cancel(id) uses",
+        SCHEDULE_DOC,
+      );
+    }
+    // CONTENT, not just type. The validator's own doc-comment says why it
+    // exists: `every: "5m"` used to throw out of `scheduleManager.start()`
+    // AFTER persistence was open, the port bound, cell init run and `started`
+    // logged — a half-started app under a restart supervisor. That is still
+    // exactly what happened for everything it did not check: an id with a
+    // space, an unparseable cron, a cron that can never fire, an unparseable
+    // `at` — all four statically knowable, all four arriving as a bare
+    // `Uncaught (in promise)` with no fix line and no doc link, after
+    // `app started`.
+    if (!VALID_SCHEDULE_ID.test(d.id)) {
+      throw teachableError(
+        `${at(d.id)}.id contains characters an id cannot hold`,
+        "ids are alphanumerics, hyphens, colons, dots and underscores — no " +
+          "spaces (it is the handle schedule.cancel(id) takes)",
         SCHEDULE_DOC,
       );
     }
@@ -225,6 +246,39 @@ export function validateSchedules(defs: readonly unknown[]): void {
         trigger === "at"
           ? 'at takes an ISO timestamp, e.g. "2026-01-01T09:00:00Z"'
           : 'cron takes an expression, e.g. "0 9 * * *"',
+        SCHEDULE_DOC,
+      );
+    }
+    if (trigger === "cron" && typeof value === "string" && value) {
+      let fields;
+      try {
+        fields = parseCron(value);
+      } catch (e) {
+        throw teachableError(
+          `${at(d.id)}.cron is not a cron expression: ${
+            e instanceof Error ? e.message : e
+          }`,
+          "five space-separated fields: minute hour day-of-month month " +
+            'day-of-week, e.g. "0 9 * * *"',
+          SCHEDULE_DOC,
+        );
+      }
+      if (!cronDayReachable(fields)) {
+        throw teachableError(
+          `${at(d.id)}.cron "${value}" can never fire`,
+          "its day-of-month does not exist in the month it names — check the " +
+            "third and fourth fields",
+          SCHEDULE_DOC,
+        );
+      }
+    }
+    if (
+      trigger === "at" && typeof value === "string" && value &&
+      Number.isNaN(new Date(value).getTime())
+    ) {
+      throw teachableError(
+        `${at(d.id)}.at is not a time this can read: ${JSON.stringify(value)}`,
+        'at takes an ISO timestamp, e.g. "2026-01-01T09:00:00Z"',
         SCHEDULE_DOC,
       );
     }
@@ -818,10 +872,9 @@ export function createScheduleManager(
   // dropped by every cancel/replace, so a pending retry can tell.
   const epochs = new Map<string, number>();
   let epochSeq = 0;
-  const VALID_ID = /^[\w\-:.]+$/;
 
   function validateId(id: string): void {
-    if (!id || !VALID_ID.test(id)) {
+    if (!id || !VALID_SCHEDULE_ID.test(id)) {
       throw new Error(
         `invalid schedule id: ${
           JSON.stringify(id)

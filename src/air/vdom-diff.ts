@@ -4,6 +4,7 @@
 import { bindSignalProps } from "./signal-binding.ts";
 import { isDevMode } from "../state/dev-flag.ts";
 import {
+  _actionsChanged,
   _applyActions,
   _bindSignalText,
   _cleanupActions,
@@ -41,6 +42,7 @@ import {
   _LAZY_PENDING,
   _Null,
   _SignalText,
+  childSvgMode,
   ErrorBoundary,
   Fragment,
   Portal,
@@ -623,7 +625,10 @@ function _diffElement(
     if (nv.props.ref) _attachRef(nv.props.ref, dom, _componentName(nv.tag));
   }
 
-  if (nv.props.use !== ov.props.use) {
+  // By content, not identity: `use={[fn]}` is a new array every render, and
+  // identity re-ran (and tore down) the actions on every re-render of the
+  // component that wrote them. See `_actionsChanged`.
+  if (_actionsChanged(nv.props.use, ov.props.use)) {
     _cleanupActions(dom);
     if (nv.props.use) _applyActions(dom, nv.props.use);
   }
@@ -645,7 +650,13 @@ function _diffElement(
       }
     }
   } else {
-    _diffChildren(dom, nv.children, rawWas ? [] : ov.children, ctx, nowSvg);
+    _diffChildren(
+      dom,
+      nv.children,
+      rawWas ? [] : ov.children,
+      ctx,
+      childSvgMode(tag, nowSvg),
+    );
   }
 
   // Props that only take effect once the children exist (`<select value>`) —

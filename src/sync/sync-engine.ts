@@ -2,7 +2,7 @@
 import { enc } from "../protocol/envelope.ts";
 import { randomUuid } from "../rand.ts";
 import type { HLC, SyncConfig, SyncOp, SyncStatus } from "./types.ts";
-import { SYNC_DEFAULTS } from "./types.ts";
+import { STALE_OP_REASON, SYNC_DEFAULTS } from "./types.ts";
 import type { OpBuffer } from "./op-buffer.ts";
 import { compareHLC, createHLC, type HLClock } from "./hlc.ts";
 import {
@@ -231,6 +231,11 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
   // exactly the misordering the gate exists to prevent. Self-healing: a lost
   // response leaves the gate shut only until the next request is answered.
   let _reqSeq = 0;
+  /** When the outstanding catch-up was SENT — `onSync`'s `elapsed`. */
+  let _reqSentAt = 0;
+  /** Conflicts seen per cell since its last catch-up completed — `onSync`'s
+   *  `conflicts`. Reset when the callback fires. */
+  const _conflictsSince = new Map<string, number>();
   /** Hold `item` until the outstanding catch-up for `cell` lands; false when
    *  there is none (or the hold is full) and the caller must apply it now. */
   function hold(cell: string, item: Deferred): boolean {
@@ -609,6 +614,12 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         });
       }
       if (mergedView) deps.onStateUpdate(op.cell, mergedView);
+      if (conflicts.length > 0) {
+        _conflictsSince.set(
+          op.cell,
+          (_conflictsSince.get(op.cell) ?? 0) + conflicts.length,
+        );
+      }
       if (conflicts.length > 0 && onConflict) {
         try {
           onConflict(conflicts);
@@ -671,8 +682,18 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
 
     handleRejection(cell, opId, reason) {
       return withLock(cell, async () => {
-        // Drop the rejected op — it will never be confirmed.
-        await deps.buffer.pruneStale(cell, opId);
+        // Drop the rejected op — it will never be confirmed. A refusal for
+        // staleness is the one rejection that is ALSO an abandoned local
+        // change (the server could not tell a resend from a new op — see
+        // STALE_OP_REASON), so it leaves through `onDrop` under that name,
+        // the channel every other abandoned change leaves through; every
+        // other reason keeps the silent prune, since `onRejected` below is
+        // already the app's word on it.
+        if (reason.startsWith(STALE_OP_REASON) && deps.buffer.dropStale) {
+          await deps.buffer.dropStale(cell, opId);
+        } else {
+          await deps.buffer.pruneStale(cell, opId);
+        }
         await rebaseCell(cell);
         // D11: silent rejection is a blank-screen-class bug — always loud.
         log.error(
@@ -738,8 +759,15 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
       // Resolve per-cell lowWater (supports both single HLC and per-cell map)
       const lw = response.lowWater;
       const isPerCell = lw && !Array.isArray(lw) && typeof lw === "object";
-      const getLW = (f: string): HLC =>
-        isPerCell ? (lw as Record<string, HLC>)[f] ?? clock.now() : lw as HLC;
+      // `null`, never a fabricated one. The miss used to fall back to
+      // `clock.now()` — the CLIENT's own freshly-ticked HLC stored as "the
+      // server's low water", and a map miss mutating the HLC as a side effect.
+      // A watermark is the server's statement about its log; when the server
+      // did not make one, the honest answer is to keep the cursor we have.
+      const getLW = (f: string): HLC | null =>
+        isPerCell
+          ? (lw as Record<string, HLC>)[f] ?? null
+          : (lw as HLC) ?? null;
 
       // The catch-up has landed: take everything it held and fold it WITH the
       // response, in one ordered batch per cell (see `hold` and the batch
@@ -787,7 +815,16 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
       if (answersLatest) _catchup.clear();
 
       // Process each affected cell: snapshot → ops → rebase (all under one lock)
+      //
+      // EVERY declared cell, not just the ones this response carried
+      // something for. `requestSync` sets all of them to "syncing" before the
+      // send, and only `foldCell` puts a cell back — so a cell with nothing to
+      // catch up (the ordinary first launch of a new sync app: an empty
+      // response for every cell) stayed "syncing" forever. `foldCell` is a
+      // no-op for a cell with no snapshot, no ops and nothing held; what it
+      // still does is answer the question the status is for.
       const affected = new Set([
+        ...Object.keys(deps.cells),
         ...snapshots.keys(),
         ...opsByCell.keys(),
         ...held.keys(),
@@ -928,7 +965,12 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
               }
             }
           }
-          if (newLastHlc && !_foldFailed.has(cell)) {
+          const respTs = response.lastServerTs?.[cell];
+          // A response can advance the server_ts cursor without carrying an
+          // HLC watermark (a snapshot for a never-compacted cell) — that is
+          // still a cursor worth saving, and gating the whole meta write on
+          // the HLC would drop it.
+          if ((newLastHlc || respTs != null) && !_foldFailed.has(cell)) {
             // Per-cell cursor from the server; preserve the stored one when
             // the response doesn't cover this cell — overwriting with
             // undefined would regress to the ambiguous HLC cursor and cause
@@ -937,11 +979,11 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
             // order would otherwise rewind lastServerTs and re-deliver every
             // op between the two cursors on the next catch-up.
             const prev = await deps.buffer.getMeta(cell);
-            const lastHlc =
-              prev?.lastHlc && compareHLC(prev.lastHlc, newLastHlc) > 0
-                ? prev.lastHlc
-                : newLastHlc;
-            const respTs = response.lastServerTs?.[cell];
+            const lastHlc = !newLastHlc
+              ? prev?.lastHlc ?? null
+              : prev?.lastHlc && compareHLC(prev.lastHlc, newLastHlc) > 0
+              ? prev.lastHlc
+              : newLastHlc;
             const lastServerTs = respTs != null &&
                 (resetCells.has(cell) || respTs > (prev?.lastServerTs ?? 0))
               ? respTs
@@ -964,6 +1006,28 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
             status: online ? "online" : "offline",
             lastSync: Date.now(),
           });
+          // The catch-up for this cell is DONE — tell the app, which is what
+          // `sync.onSync` is documented (with a code example) to be for. It
+          // was declared in `SyncConfig`, normalized by `normalizeSyncConfig`,
+          // written into the docs' own example… and called from nowhere: a
+          // documented callback that never fired. Error-guarded like every
+          // other app hook — an app's throw must not take the fold down.
+          const onSync = deps.cells[cell]?.onSync;
+          if (onSync) {
+            const conflicts = _conflictsSince.get(cell) ?? 0;
+            _conflictsSince.delete(cell);
+            try {
+              onSync({
+                merged: ops.length + heldItems.length + (snap ? 1 : 0),
+                conflicts,
+                elapsed: _reqSentAt ? Date.now() - _reqSentAt : 0,
+                status: statuses.get(cell)?.status ?? "online",
+                pending: statuses.get(cell)?.pending ?? 0,
+              });
+            } catch (e) {
+              deps.log?.warn(`[sync] onSync callback threw: ${e}`);
+            }
+          }
         });
       }
 
@@ -1083,6 +1147,7 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
       // response left to open it.
       for (const cell of Object.keys(deps.cells)) _catchup.add(cell);
       const reqId = ++_reqSeq;
+      _reqSentAt = Date.now();
       try {
         deps.send(enc("sync-req", {
           clientId: deps.clientId,

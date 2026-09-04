@@ -9,13 +9,15 @@ import {
 } from "./signal-binding.ts";
 import {
   _attrNS,
+  _classProp,
   _controlDrifted,
   _propAttr,
   _RESERVED_PROPS,
   _writeProp,
 } from "./prop-write.ts";
-import { svgAttrName as _attrName } from "./ssr-utils.ts";
+import { attrNameOf as _attrName } from "./ssr-utils.ts";
 import { _DOM_PROPS } from "./vdom-types.ts";
+import { isDevMode } from "../state/dev-flag.ts";
 import {
   _CHANGE_TARGETS,
   _DELEGATED_EVENTS,
@@ -90,29 +92,34 @@ export function applyProps(
   next: Record<string, unknown>,
   prev: Record<string, unknown>,
 ): void {
-  // AIO-166: detect onChange+onInput collision on form elements
-  const _hasOnInput = "onInput" in next && _CHANGE_TARGETS.has(el.tagName);
+  // AIO-166: detect onChange+onInput collision on form elements. A FUNCTION,
+  // not a key: `onInput={cond ? f : undefined}` is the ordinary way to attach
+  // a handler conditionally, and `"onInput" in next` counted the undefined as
+  // present — flipping `onChange` to native `change` (fires on blur) for a
+  // component that has no onInput at all.
+  const _hasOnInput = typeof next.onInput === "function" &&
+    _CHANGE_TARGETS.has(el.tagName);
+  const _hadOnInput = typeof prev.onInput === "function" &&
+    _CHANGE_TARGETS.has(el.tagName);
+  // The event `onChange` was REGISTERED under last time — read now, before the
+  // `type` write below can change the answer (`el.type` is an input to it).
+  const prevChangeEvt = typeof prev.onChange === "function"
+    ? _mapEventName("change", el, _hadOnInput)
+    : null;
+  // Two props, one attribute — the write below is last-wins; dev says so.
+  if (isDevMode()) _classProp(next);
 
   // Remove old props not in next
   for (const k of Object.keys(prev)) {
     if (_RESERVED_PROPS.has(k)) continue;
     if (!(k in next)) {
       if (k.startsWith("on")) {
-        const evt = _mapEventName(
-          k.slice(2).toLowerCase(),
-          el,
-          k === "onChange" ? _hasOnInput : undefined,
-        );
-        if (_DELEGATED_EVENTS.has(evt)) {
-          // Also removeEventListener in case it was per-element fallback (AIO-154)
-          const wrapped = _getWrapped(el, evt);
-          if (wrapped) el.removeEventListener(evt, wrapped);
-          _deleteWrapped(el, evt);
-        } else {
-          const wrapped = _getWrapped(el, evt);
-          el.removeEventListener(evt, wrapped ?? prev[k] as EventListener);
-          _deleteWrapped(el, evt);
-        }
+        // The name it was registered UNDER (prev's context) — not the name
+        // next's props would give it.
+        const evt = k === "onChange" && prevChangeEvt
+          ? prevChangeEvt
+          : _mapEventName(k.slice(2).toLowerCase(), el);
+        _dropListener(el, evt, prev[k] as EventListener);
       } else if (k === "className") {
         el.removeAttribute("class");
       } else if (k === "style") {
@@ -151,14 +158,54 @@ export function applyProps(
     }
   }
 
-  // Set new/changed props
-  for (const [k, v] of Object.entries(next)) {
+  // `type` FIRST, whatever order the JSX wrote it in. Every other prop on an
+  // <input> is interpreted through its type: `onChange` is remapped to
+  // `input` unless the type says `change` is the real event (a file picker),
+  // and the browser sanitizes `value` against the type it has at assignment.
+  // Props are applied in source order, so `<input onChange={f} type="file">`
+  // wired `f` to `input` — the element still said `type="text"` when the
+  // handler was mapped — while `<input type="file" onChange={f}>` wired it to
+  // `change`. Two orderings of the same props, two different elements, and
+  // the first one's handler "simply never fired" under `testUI`. One rule:
+  // the type is set before anything that depends on it.
+  const nextType = next.type;
+  if (
+    typeof nextType === "string" && el.tagName === "INPUT" &&
+    prev.type !== nextType
+  ) {
+    _writeProp(el, "type", nextType, prev.type);
+  }
+
+  // Set new/changed props. `onChange` goes LAST: its event name depends on
+  // whether `onInput` is present, and the two share the `input` slot in the
+  // per-element listener map, so whichever is written second wins the slot.
+  // With `onChange` last it can see the slot `onInput` just took and not
+  // delete it while moving itself out of the way.
+  const entries = Object.entries(next);
+  const ci = entries.findIndex(([k]) => k === "onChange");
+  if (ci >= 0 && ci < entries.length - 1) {
+    entries.push(entries.splice(ci, 1)[0]!);
+  }
+  for (const [k, v] of entries) {
     if (_RESERVED_PROPS.has(k)) continue;
+    if (k === "type" && nextType === v && el.tagName === "INPUT") continue;
     const rv = resolveSignalProp(v);
     if (isSignal(v)) continue; // Signal binding handles ongoing updates via effect
+    // An `onChange` whose EVENT NAME moved — `onInput` arrived or left beside
+    // it, or the input's `type` changed — is a different registration even
+    // when the handler is the same function. The identity skip used to keep
+    // it under the old name: with `onInput` added next to a stable `onChange`
+    // the new `input` entry overwrote it and the change handler never fired
+    // again; with `onInput` removed the handler stayed on native `change` and
+    // fired on blur instead of per keystroke. Silent both ways.
+    const changeMoved = k === "onChange" && prevChangeEvt !== null &&
+      typeof rv === "function" &&
+      prevChangeEvt !== _mapEventName("change", el, _hasOnInput);
     // The last vnode is not evidence about a CONTROLLED prop — the user may
     // have moved it since. See _controlDrifted.
-    if (prev[k] === rv && !_controlDrifted(el, k, rv)) continue;
+    if (!changeMoved && prev[k] === rv && !_controlDrifted(el, k, rv)) {
+      continue;
+    }
 
     if (k.startsWith("on")) {
       const evt = _mapEventName(
@@ -166,6 +213,12 @@ export function applyProps(
         el,
         k === "onChange" ? _hasOnInput : undefined,
       );
+      // Retire the registration under the OLD name — unless that slot is
+      // `input` and `onInput` now owns it (it was written before this, see
+      // the ordering above); then there is nothing of ours left there.
+      if (changeMoved && !(prevChangeEvt === "input" && _hasOnInput)) {
+        _dropListener(el, prevChangeEvt!, prev[k] as EventListener);
+      }
       // AIO-106: null/false handler = removal only, don't wrap non-function
       if (rv == null || rv === false) {
         if (!_DELEGATED_EVENTS.has(evt)) {
@@ -213,6 +266,23 @@ export function applyProps(
   // back to the state's value at all. This is the diff's per-render hook, so
   // the re-assert happens here — the decider is shared, not copied.
   reassertControlledSignalProps(el, next);
+}
+
+/** Retire the listener registered under `evt` — delegated (map entry, plus
+ *  the per-element fallback AIO-154 may have added) or per-element. */
+function _dropListener(
+  el: HTMLElement,
+  evt: string,
+  prevHandler: EventListener | undefined,
+): void {
+  const wrapped = _getWrapped(el, evt);
+  if (_DELEGATED_EVENTS.has(evt)) {
+    if (wrapped) el.removeEventListener(evt, wrapped);
+  } else {
+    const fallback = wrapped ?? prevHandler;
+    if (fallback) el.removeEventListener(evt, fallback);
+  }
+  _deleteWrapped(el, evt);
 }
 
 /** A style object with its signal-valued declarations dropped — those have

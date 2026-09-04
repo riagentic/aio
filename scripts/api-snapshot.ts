@@ -881,12 +881,25 @@ async function main(): Promise<void> {
     }
     console.error(
       breaking.length
-        ? "This removes or reshapes public surface. aio is additive-only since " +
-          "alpha70: a compat break is a DECISION, not a regeneration. Get it " +
-          "approved, write the upgrade guide and the removals registry row, " +
-          "THEN `deno task update:api`.\n" +
-          "Nothing to break? Mark the symbol `@experimental` and it carries no " +
-          "promise — the snapshot already tracks that per symbol."
+        ? "This removes or reshapes public surface, and aio's surface is " +
+          "FROZEN: code that compiles against alpha76 must keep compiling " +
+          "against every later alpha, every beta, and 1.0. There is no " +
+          "approval path any more — the seven retirements in alpha76 were the " +
+          "last, and the removals registry is closed.\n" +
+          "So this is not a thing to get signed off; it is a thing to do " +
+          "differently. Find the ADDITIVE shape:\n" +
+          "  • a capability that would reshape a signature becomes a NEW DOOR " +
+          "— a new route, a new flag, an internal type the public one does " +
+          "not mention.\n" +
+          "  • a value that needs a new spelling gains one; the old spelling " +
+          "keeps working, forever.\n" +
+          '  • "but this widening is provably source-compatible" is not an ' +
+          "exception. Adding an optional trailing parameter IS assignable in " +
+          "both directions, and it is still refused here — the value of the " +
+          "promise is that it has none.\n" +
+          "Genuinely nothing to break (nobody can be holding it yet)? Mark " +
+          "the symbol `@experimental` and it carries no promise — the " +
+          "snapshot tracks that per symbol."
         : "Additive only. Regenerate with `deno task update:api`, review the " +
           "diff, and commit it.",
     );

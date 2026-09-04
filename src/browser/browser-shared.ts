@@ -97,6 +97,48 @@ export const _cfgSink: {
   apply: ((cfg: Record<string, unknown>) => void) | null;
 } = { apply: null };
 
+/** One graph-validator error, as `server-watcher.ts` sends them. */
+type GraphError = {
+  file?: string;
+  line?: number;
+  message?: string;
+  fix?: string;
+};
+
+const GRAPH_OVERLAY_ID = "aio-graph-errors";
+
+/** Put the graph-validator's refusal ON THE PAGE, and keep it there until the
+ *  graph goes green (`graph-clear` reloads).
+ *
+ *  The frame is documented as feeding an overlay; no overlay existed, so the
+ *  payload had no reader anywhere in the codebase — the server terminal had
+ *  the errors and the browser had a reload loop into the broken build.
+ *
+ *  Deliberately plain: this ships in every bundle, dev and prod, and the
+ *  detail is already in the console line above it. */
+function _showGraphErrors(payload: unknown): void {
+  const errors: GraphError[] = Array.isArray(payload) ? payload : [];
+  const lines = errors.map((e) =>
+    `${e.file ?? "?"}${e.line ? `:${e.line}` : ""} — ${e.message ?? ""}${
+      e.fix ? `\n  FIX: ${e.fix}` : ""
+    }`
+  );
+  for (const l of lines) console.error(`[aio:graph] ${l}`);
+  if (typeof document === "undefined" || !document.body) return;
+  const el = document.getElementById(GRAPH_OVERLAY_ID) ??
+    document.body.appendChild(document.createElement("pre"));
+  el.id = GRAPH_OVERLAY_ID;
+  el.setAttribute(
+    "style",
+    "position:fixed;inset:0;z-index:2147483647;overflow:auto;margin:0;" +
+      "padding:24px;background:#1b1014;color:#ffd9df;white-space:pre-wrap",
+  );
+  el.textContent =
+    "aio: the import graph is invalid — the page was NOT reloaded.\n\n" +
+    (lines.join("\n\n") || "(the server sent no detail)") +
+    "\n\nThis clears itself when the graph goes green.";
+}
+
 export function handleControlFrame(
   f: Frame,
   bootId: { current: string | null },
@@ -134,9 +176,16 @@ export function handleControlFrame(
       return true;
     }
     case "graph-error":
+      // The server sends this INSTEAD of a reload — the graph is red, so the
+      // build the reload would fetch is the broken one. Every client handler
+      // reloaded anyway, which defeated the suppression the sender's own
+      // comment states, dropped the error payload on the floor, and left the
+      // developer looking at a page that reloads into the same failure with
+      // nothing on screen to say why.
+      _showGraphErrors(f.d);
+      return true;
     case "graph-clear":
-      // Dev overlay owns these; a bundle without the overlay reloads to
-      // pick up the corrected build.
+      // Red → green: the corrected build is worth fetching.
       location.reload();
       return true;
     // A3: version hellos on transports without their own handler (IPC —

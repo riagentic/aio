@@ -775,11 +775,76 @@ export async function runDenoCompile(cfg: BuildConfig): Promise<boolean> {
       stdout: "inherit",
       stderr: "inherit",
     }).output();
-    if (result.code === 0) compiled(compileTarget, root);
-    return result.code === 0;
+    if (result.code !== 0) return false;
+    // …and then RUN IT. `deno compile` exiting 0 is not the same claim as "the
+    // artifact boots", and the gap is reachable: a project path containing a
+    // SPACE (or any non-ASCII) makes the embedded npm module paths
+    // percent-encoded TWICE (`%2520` where the importer says `%20`), so
+    // nothing resolves and every flag — `--version` included — dies with
+    // ERR_MODULE_NOT_FOUND. 100% dud, never intermittent, and `deno task dev`
+    // in the same directory works fine, so only the shipped binary is dead.
+    // The build said ✓ and `deno task doctor` said "15 checks passed".
+    //
+    // `ship.ts` already has this rule (`notRunnable`, via
+    // `--aio-data-contract`) — it just ran one step too late, after a green
+    // build had been handed to a human. Same carve-out as ship's: a
+    // cross-compiled artifact is not runnable HERE, and that is not a defect.
+    const smoke = await smokeRunArtifact(compileTarget, cfg.targetTriple);
+    if (smoke) {
+      console.error(smoke);
+      return false;
+    }
+    compiled(compileTarget, root);
+    return true;
   });
 
   return ok;
+}
+
+/** Why the freshly compiled `bin` is not a runnable program, or null when it
+ *  is. Cross-compiled targets are skipped: they are not runnable on THIS
+ *  machine, which is not a defect.
+ *
+ *  `probe` is the flag the artifact is asked — the one path the TARGET
+ *  guarantees terminates. `--version` for a binary whose entry is `aio.run()`
+ *  (aio answers it before anything boots); `--help` for the `cli` target,
+ *  whose entry is the app's own program and may parse its own argv first —
+ *  `aio/cli`'s `args()` answers `--help` unconditionally, but forwards
+ *  `--version` when the spec declares none, and a spec with `commands:` then
+ *  refuses with "missing command" (exit 2) for a binary that is perfectly
+ *  fine. Exported for the CLI builder and for the test that pins the probe. */
+export async function smokeRunArtifact(
+  bin: string,
+  targetTriple?: string,
+  probe: readonly string[] = ["--version"],
+): Promise<string | null> {
+  if (targetTriple && targetTriple !== Deno.build.target) return null;
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 60_000);
+  const shown = `${bin} ${probe.join(" ")}`;
+  try {
+    const out = await new Deno.Command(bin, {
+      args: [...probe],
+      stdout: "piped",
+      stderr: "piped",
+      signal: ac.signal,
+    }).output();
+    if (out.success) return null;
+    const tail = new TextDecoder().decode(out.stderr).trim().split("\n")
+      .slice(-4).join("\n       ");
+    return `✗ ${bin} compiled, but does not run: \`${shown}\` exited ` +
+      `${out.code}.\n       ${tail}\n` +
+      `       This is a BROKEN BUILD. A path containing a space or a ` +
+      `non-ASCII character is the known cause (the embedded npm paths are ` +
+      `percent-encoded twice and resolve to nothing) — move the project to a ` +
+      `plain-ASCII path with no spaces and rebuild.`;
+  } catch (e) {
+    return `✗ ${bin} compiled, but could not be executed at all (${
+      e instanceof Error ? e.message : e
+    }). This is a BROKEN BUILD.`;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** Read the bundle that is about to be embedded and say which of the asset
@@ -896,22 +961,31 @@ export async function writeServiceFile(cfg: BuildConfig): Promise<void> {
     /[\u0000-\u001f\u007f]/g,
     " ",
   ).trim();
+  // COMMENTS ON THEIR OWN LINES, never after a directive. systemd has no
+  // trailing-comment syntax: a `#` after `ExecStart=` is part of the command
+  // line, so `# adjust path after install` shipped as FIVE extra argv words
+  // (`#`, `adjust`, `path`, `after`, `install`) to every service the build
+  // wrote, and `RestartPreventExitStatus=143   # aio.stop() …` made systemd log
+  // "Failed to parse value, ignoring: #" six times on every daemon-reload
+  // (measured with `systemd-analyze verify`, systemd 255). aio's own parser
+  // passes bare words through to the app, so the service booted and nothing
+  // said the unit was wrong — a broken file that happens to work.
   const unit = `[Unit]
 Description=${safeTitle || binaryName} (aio)
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/${binaryName} ${
-    execFlags.join(" ")
-  }  # adjust path after install
+# Adjust the path after install (sudo cp ${binaryName} /usr/local/bin/).
+ExecStart=/usr/local/bin/${binaryName} ${execFlags.join(" ")}
 # Restart=always, not on-failure: an aio app that updates ITSELF stops with a
 # clean exit code 0 on purpose, so the supervisor starts the new binary. Under
 # on-failure systemd treats that as "it meant to stop" and leaves the service
 # DOWN — every successful auto-update took the app offline until someone
 # noticed.
 Restart=always
-RestartPreventExitStatus=143   # aio.stop() exits 143 to stay down
+# aio.stop() exits 143 to stay down.
+RestartPreventExitStatus=143
 RestartSec=5
 # BUILD-MACHINE VALUE — this came from the machine that built the binary, not
 # from the host you are installing on. Set it to the account this service

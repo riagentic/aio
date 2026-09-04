@@ -59,14 +59,14 @@ the supported hand-off for any parent build.
 
 ## Diagnostics and tests
 
-| Variable               | Read by      | Effect                                                                        |
-| ---------------------- | ------------ | ----------------------------------------------------------------------------- |
-| `AIO_DEBUG=1`          | CLIs         | Keep the stack trace on an error that would otherwise print one line and exit |
-| `AIO_DEV`              | `install.sh` | Marks a development checkout so `am upgrade` leaves it alone                  |
-| `AIO_AM_NO_DELEGATE=1` | `am`         | Do not delegate to the app's pinned aio — run this `am`                       |
-| `AIO_CDP=1`            | app          | Open a CDP port so `am shot` can attach                                       |
-| `AIO_TEST_NAMES=all`   | `testUI`     | Print every semantic name the harness resolved, not just the misses           |
-| `AIO_TEST_DISPLAY`     | test helper  | Set by the test display helper; tells `open-external` it is inside a harness  |
+| Variable               | Read by          | Effect                                                                            |
+| ---------------------- | ---------------- | --------------------------------------------------------------------------------- |
+| `AIO_DEBUG=1`          | `deno task ship` | Keep the stack trace on a ship error that would otherwise print one line and exit |
+| `AIO_DEV`              | `install.sh`     | Marks a development checkout so `am upgrade` leaves it alone                      |
+| `AIO_AM_NO_DELEGATE=1` | `am`             | Do not delegate to the app's pinned aio — run this `am`                           |
+| `AIO_CDP=1`            | app              | Open a CDP port so `am shot` can attach                                           |
+| `AIO_TEST_NAMES=all`   | `testUI`         | Print every semantic name the harness resolved, not just the misses               |
+| `AIO_TEST_DISPLAY`     | test helper      | Set by the test display helper; tells `open-external` it is inside a harness      |
 
 ## Not aio's
 

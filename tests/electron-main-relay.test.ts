@@ -40,7 +40,11 @@ ctrl.on('data', (d) => {
         for (const f of (wcH['will-navigate'] || [])) f(evt, m.url);
         ev({ ev: 'navigate', id: m.id, url: m.url, prevented });
       }
-      else if (m.cmd === 'wc') for (const f of (wcH[m.event] || [])) f(...(m.args || []));
+      else if (m.cmd === 'wc') {
+        // A committed navigation is what moves the document's url.
+        if (m.event === 'did-navigate' && m.args && m.args[1]) _curUrl = m.args[1];
+        for (const f of (wcH[m.event] || [])) f(...(m.args || []));
+      }
       else if (m.cmd === 'ipc') for (const f of (ipcH[m.channel] || [])) f({}, m.arg);
       else if (m.cmd === 'app') for (const f of (appH[m.event] || [])) f();
       else if (m.cmd === 'proto') {
@@ -68,8 +72,12 @@ ctrl.on('data', (d) => {
     } catch (e) { ev({ ev: 'done', id: m.id, error: String(e) }); }
   }
 });
+let _curUrl = '';
 const webContents = {
   on: (e, fn) => { (wcH[e] = wcH[e] || []).push(fn); },
+  // What the shell reads to tell a RELOAD (same url) from a route change.
+  getURL: () => _curUrl,
+  isLoading: () => false,
   send: (channel, arg) => ev({ ev: 'send', channel, arg }),
   setWindowOpenHandler: () => {},
   session: { clearCache: () => Promise.resolve(), clearStorageData: () => Promise.resolve() },
@@ -78,7 +86,7 @@ const webContents = {
 class BrowserWindow {
   constructor(o) { this.opts = o; this.webContents = webContents; }
   on() {} center() {} setIcon() {} setMenuBarVisibility() {}
-  loadURL(u) { ev({ ev: 'loadURL', url: u }); }
+  loadURL(u) { _curUrl = u; ev({ ev: 'loadURL', url: u }); }
   isDestroyed() { return false; }
   getBounds() { return { x: 0, y: 0, width: 800, height: 600 }; }
 }
@@ -201,14 +209,24 @@ async function startMain(
     join(dir, "deno.json"),
     JSON.stringify({ nodeModulesDir: "manual" }),
   );
-  await Deno.writeTextFile(
-    join(dir, "main.cjs"),
-    electronMainScriptUDS("http://127.0.0.1:1/", sockPath, {
-      title: opts.title ?? "harness",
-      httpSocketPath: opts.httpSocketPath,
-      baseDir: opts.baseDir,
-    }),
-  );
+  const script = electronMainScriptUDS("http://127.0.0.1:1/", sockPath, {
+    title: opts.title ?? "harness",
+    httpSocketPath: opts.httpSocketPath,
+    baseDir: opts.baseDir,
+  });
+  // FAIL LOUD, NEVER HANG. The generated program is a template literal
+  // assembled from a dozen fragments, and one stray backslash or backtick in
+  // any of them is a SyntaxError in main.cjs — which made the child exit
+  // before it ever dialled the control socket, and `ctrl.accept()` below wait
+  // for it forever. A whole suite that hangs on a typo reports nothing at all.
+  // `new Function` parses the CJS text (require is just an identifier to it)
+  // and throws the parser's own message, with the line, instead.
+  try {
+    new Function(script);
+  } catch (e) {
+    throw new Error(`the generated main.cjs does not parse — ${e}`);
+  }
+  await Deno.writeTextFile(join(dir, "main.cjs"), script);
 
   const ctrlPath = join(dir, "ctrl.sock");
   const ctrl = Deno.listen({ transport: "unix", path: ctrlPath });
@@ -230,7 +248,17 @@ async function startMain(
   drain(proc.stdout, stdout);
   drain(proc.stderr, stderr);
 
-  const conn = await ctrl.accept();
+  // …and a child that dies at runtime before dialling in (a throw at module
+  // scope, a missing stub method) must fail with ITS stderr, not hang here.
+  const conn = await Promise.race([
+    ctrl.accept(),
+    proc.status.then((st) => {
+      throw new Error(
+        `main.cjs exited (code ${st.code}) before connecting to the harness:\n` +
+          stderr.join("") + stdout.join(""),
+      );
+    }),
+  ]);
   const events: Ev[] = [];
   const writer = conn.writable.getWriter();
   (async () => {
@@ -301,12 +329,51 @@ async function startMain(
         event: "did-fail-load",
         args: [{}, code, code === -3 ? "ERR_ABORTED" : "ERR_FAILED", url, true],
       }),
+    /** A navigation that REPLACES the document (a reload, a load of a new URL).
+     *  Positional legacy signature: (event, url, isInPlace, isMainFrame). */
     startNavigation: () =>
       cmd({
         cmd: "wc",
         event: "did-start-navigation",
         args: [{}, "", false, true],
       }),
+    /** A SAME-DOCUMENT navigation — history.pushState / replaceState / a hash
+     *  change. `isInPlace` is true and no new document loads, so no second
+     *  `__aio:ready` is ever coming. This is what the ROUTER does after the
+     *  shell relays a vetoed click back to it. `details` also drives the
+     *  MODERN Electron signature, where the flag arrives as
+     *  `event.isSameDocument` rather than positionally. */
+    samePageNavigation: (details = false, url = "aio://app/activity") =>
+      cmd({
+        cmd: "wc",
+        event: "did-start-navigation",
+        args: details
+          ? [{ url, isSameDocument: true, isMainFrame: true }]
+          : [{}, url, true, true],
+      }),
+    /** The document's navigation COMMITTED — a real load reached a new
+     *  document. A vetoed navigation never gets here (measured). */
+    didNavigate: (url = "aio://app/") =>
+      cmd({ cmd: "wc", event: "did-navigate", args: [{}, url] }),
+    /** A click on a link, EXACTLY as Electron 44 emits it (measured, see the
+     *  header): `did-start-navigation` first — cross-document, main frame —
+     *  and THEN `will-navigate`, where the shell decides. Returns whether the
+     *  shell vetoed it. For an in-app link nothing else follows: no
+     *  did-fail-load, no did-navigate, no new document. `legacy` drives the
+     *  positional did-start-navigation signature instead of the details
+     *  object. */
+    async clickLink(url: string, legacy = false) {
+      await cmd({
+        cmd: "wc",
+        event: "did-start-navigation",
+        args: legacy
+          ? [{}, url, false, true]
+          : [{ url, isSameDocument: false, isMainFrame: true }],
+      });
+      const id = await cmd({ cmd: "wc", event: "will-navigate", url });
+      const r = events.find((e) => e.ev === "navigate" && e.id === id)!;
+      return r.prevented as boolean;
+    },
     send: (json: string) =>
       cmd({ cmd: "ipc", channel: "__aio:send", arg: json }),
     /** One request through the captured protocol.handle('aio') callback. */
@@ -454,8 +521,10 @@ Deno.test("electron main: frames during a reload are not silently dropped", asyn
     await main.finishLoad();
     await main.waitFor(() => main.msgs().length >= 1);
 
-    // Ctrl+R: a new main-frame document starts loading.
+    // Ctrl+R: a new main-frame document starts loading … and COMMITS. (The
+    // re-seed happens at the commit, which a vetoed navigation never reaches.)
     await main.startNavigation();
+    await main.didNavigate("aio://app/");
     await srv.writeLine(
       '{"v":2,"t":"patches","d":[{"op":"add","path":["/xs/0"],"value":"a"}]}',
     );
@@ -809,16 +878,19 @@ Deno.test("electron main: relay fuzz — nothing lost, reordered or corrupted", 
       });
 
       // I2 — strictly increasing, with ONE sanctioned exception: a main-frame
-      // navigation re-hands the newest snapshot to the fresh document, so a
-      // `state` frame already delivered may appear again. Everything else
-      // going backwards, repeating, or arriving twice is a reordering bug.
+      // navigation re-hands the fresh document what it missed — the newest
+      // snapshot, and the connection's `proto` hello and `cfg` frame (sent
+      // once at accept, to a document that is gone) — so one of each may
+      // appear again, at most once per navigation. Everything else going
+      // backwards, repeating, or arriving twice is a reordering bug.
+      const RESEEDED = new Set(["state", "proto", "cfg"]);
       const seen = new Set<number>();
-      let replays = 0;
+      const replays = new Map<string, number>();
       let last = -1;
       for (const cur of delivered) {
-        const isReplay = cur.t === "state" && seen.has(cur.d.seq);
+        const isReplay = RESEEDED.has(cur.t) && seen.has(cur.d.seq);
         if (isReplay) {
-          replays++;
+          replays.set(cur.t, (replays.get(cur.t) ?? 0) + 1);
           continue; // a re-seed does not advance the stream
         }
         assert(
@@ -829,10 +901,12 @@ Deno.test("electron main: relay fuzz — nothing lost, reordered or corrupted", 
         seen.add(cur.d.seq);
       }
       const navigations = trail.filter((t) => t === "navigate(main)").length;
-      assert(
-        replays <= navigations,
-        `I2 ${replays} snapshot replays for ${navigations} navigations${ctx()}`,
-      );
+      for (const [kind, n] of replays) {
+        assert(
+          n <= navigations,
+          `I2 ${n} ${kind} replays for ${navigations} navigations${ctx()}`,
+        );
+      }
 
       // I3 — connection-scoped frames are irreplaceable; none may vanish.
       const got = new Set(delivered.map((f) => f.d.seq));
@@ -1070,4 +1144,387 @@ Deno.test("electron aio://: FROM_DISK serves dist/ and falls through to the sock
     const miss = await main.proto("aio://app/nft-image/abc");
     assertEquals(miss.status, 404);
   }, { baseDir: mkDist });
+});
+
+// ── cc §5.1 / §5.2 / §5.3 — ONE in-app route change killed the downlink ──
+//
+// The sequence below is what REAL Electron 44 emits for a click on an in-app
+// link, measured (scratch probe, 2026-09-04) rather than assumed:
+//
+//     did-start-navigation  { isSameDocument: false, isMainFrame: true }
+//     will-navigate         → the shell vetoes and relays the url in-app
+//     did-stop-loading      — and nothing else. No did-fail-load. Ever.
+//
+// did-start-navigation fires FIRST and as a cross-document navigation; the
+// shell closed the relay on it and then vetoed the navigation, so the old
+// document stayed with its relay closed for the rest of its life. A first fix
+// guarded on isSameDocument and passed — because this stub fired the events
+// in the order the fix expected. The reporter measured 17 frames pushed and 0
+// received on the real shell, with both tests green: "the test double and
+// Electron disagree on the one event the fix depends on, and the suite reports
+// the disagreement as success." This is that harness, corrected to the wire.
+// The REAL shell is driven in tests/electron-route-change-e2e.test.ts.
+//
+// URLs below are on the harness page's origin (http://127.0.0.1:1 — the
+// zero-port aio://app/ shell is a separate opt-in, see the aio:// tests): a
+// url on another origin is EXTERNAL to the shell and never reaches the
+// in-app path this section is about.
+for (const legacy of [false, true]) {
+  Deno.test(
+    `electron main: an in-app link click keeps the downlink (${
+      legacy ? "legacy positional" : "modern details"
+    } signature)`,
+    async () => {
+      await withHarness(async (srv, main) => {
+        await srv.writeLine('{"v":2,"t":"state","d":{"n":1}}');
+        await main.rendererReady();
+        await main.finishLoad();
+        await main.didNavigate("http://127.0.0.1:1/");
+        await main.waitFor(() => main.msgs().length >= 1);
+        const before = main.msgs().length;
+
+        // The click, in Electron's order: the gate closes, THEN the veto.
+        assertEquals(
+          await main.clickLink("http://127.0.0.1:1/settings", legacy),
+          true,
+          "an in-app link must be vetoed and relayed, not loaded",
+        );
+        // …then the router pushState()s, which is a same-document navigation.
+        await main.samePageNavigation(!legacy, "http://127.0.0.1:1/settings");
+
+        // The server keeps talking. Every one of these has to arrive — with no
+        // did-fail-load and no new document, nothing else will ever reopen
+        // the relay if the veto did not.
+        await srv.writeLine('{"v":2,"t":"state","d":{"n":2}}');
+        await srv.writeLine('{"v":2,"t":"ui-surface","d":{"id":"q1"}}');
+        await main.waitFor(() => main.msgs().length >= before + 2, 3000).catch(
+          () => {},
+        );
+        const after = main.msgs().slice(before).map(kindOf);
+        assert(
+          after.includes("state") && after.includes("ui-surface"),
+          `the downlink died on an in-app link click — after it the renderer ` +
+            `received ${JSON.stringify(after)}. The document was never ` +
+            `replaced, so nothing will ever send __aio:ready again.`,
+        );
+      });
+    },
+  );
+}
+
+// A reload is the ONE same-app navigation that must go through: it is how the
+// dev live-reload works and the only way a page gets a new document. Measured:
+// location.reload() reaches will-navigate carrying the CURRENT url. The shell
+// used to exempt the root PATH instead, so a reload on /settings was vetoed —
+// dev reload silently did nothing off the home page, and stalled the relay.
+Deno.test("electron main: a reload of the CURRENT url is allowed on any route", async () => {
+  await withHarness(async (_srv, main) => {
+    await main.rendererReady();
+    await main.finishLoad();
+    await main.didNavigate("http://127.0.0.1:1/settings"); // the document on screen
+    assertEquals(
+      await main.clickLink("http://127.0.0.1:1/settings"),
+      false,
+      "a navigation to the url already on screen is a reload and must not be vetoed",
+    );
+  });
+});
+
+// …and navigating HOME is a route change like any other. The root-path
+// exemption reloaded the whole window — a white flash, a re-mounted tree, a
+// new connection — on every app's most frequent navigation; a field report
+// renamed its home page to /chat to escape it (cc §5.3, ask 4).
+Deno.test("electron main: navigating to / from another route is in-app, not a reload", async () => {
+  await withHarness(async (srv, main) => {
+    await srv.writeLine('{"v":2,"t":"state","d":{"n":1}}');
+    await main.rendererReady();
+    await main.finishLoad();
+    await main.didNavigate("http://127.0.0.1:1/settings");
+    await main.waitFor(() => main.msgs().length >= 1);
+    const before = main.msgs().length;
+    assertEquals(
+      await main.clickLink("http://127.0.0.1:1/"),
+      true,
+      "home is a route, not a reload",
+    );
+    await srv.writeLine('{"v":2,"t":"state","d":{"n":2}}');
+    await main.waitFor(() => main.msgs().length > before, 3000).catch(() => {});
+    assert(
+      main.msgs().slice(before).map(kindOf).includes("state"),
+      "…and the downlink survives it",
+    );
+  });
+});
+
+// The FIRST load has no document to compare against; the old root rule stands
+// there so an http://127.0.0.1:1/ boot is never vetoed before it begins.
+Deno.test("electron main: with no document yet, the root is still allowed through", async () => {
+  await withHarness(async (_srv, main) => {
+    assertEquals(await main.clickLink("http://127.0.0.1:1/"), false);
+  });
+});
+
+// A stalled relay must be SAID where it can be seen: the window gets the
+// dropped-socket signal (its banner shows instead of a frozen page claiming to
+// be connected) and the server hears a client degradation for /__aio/health
+// and `am status`. Then the heal is reported the same way. (cc §5.3, asks 2+3.)
+Deno.test({
+  name:
+    "electron main: a stalled relay reaches the window and the server, and reports its heal",
+  sanitizeOps: false, // aio-ok: the stall detector has a real 5s window; waiting it out IS the test
+  sanitizeResources: false, // aio-ok: see above
+  fn: async () => {
+    await withHarness(async (srv, main) => {
+      await main.rendererReady();
+      await main.finishLoad();
+      await main.didNavigate("http://127.0.0.1:1/");
+      await main.startNavigation(); // the gate closes …
+      await new Promise((r) => setTimeout(r, 5300));
+      const inboundBefore = srv.inbound.length;
+      await srv.writeLine('{"v":2,"t":"state","d":{"n":9}}'); // … and a frame queues behind it
+      await main.waitFor(
+        () =>
+          srv.inbound.slice(inboundBefore).some((l) => l.includes('"cdiag"')) &&
+          main.channels().includes("__aio:close"),
+        3000,
+      );
+      const down = srv.inbound.slice(inboundBefore).find((l) =>
+        l.includes('"cdiag"')
+      )!;
+      assert(
+        down.includes('"kind":"down"') && down.includes("electron:relay"),
+        down,
+      );
+      // The heal: the document was in fact still there (a vetoed navigation).
+      await main.clickLink("http://127.0.0.1:1/x");
+      await main.waitFor(
+        () => srv.inbound.some((l) => l.includes('"kind":"up"')),
+        3000,
+      );
+    });
+  },
+});
+
+// The other half of the same rule: a navigation that DOES replace the document
+// must still clear readiness, or a brand-new document is handed frames its
+// renderer never registered listeners for.
+Deno.test("electron main: a real document navigation still gates on the new renderer", async () => {
+  await withHarness(async (srv, main) => {
+    await main.rendererReady();
+    await main.finishLoad();
+    await srv.writeLine('{"v":2,"t":"state","d":{"n":1}}');
+    await main.waitFor(() => main.msgs().length >= 1);
+    const before = main.msgs().length;
+
+    await main.startNavigation(); // a real load — the document is going away
+    await main.didNavigate("aio://app/next");
+    await srv.writeLine('{"v":2,"t":"ui-surface","d":{"id":"q2"}}');
+    await new Promise((r) => setTimeout(r, 300));
+    assertEquals(
+      main.msgs().length,
+      before,
+      "frames must WAIT for the new document to signal ready",
+    );
+
+    await main.rendererReady(); // the new document arrives
+    await main.waitFor(() => main.msgs().length > before);
+    assert(
+      main.msgs().slice(before).map(kindOf).includes("ui-surface"),
+      "and then everything queued is delivered",
+    );
+  });
+});
+
+// The guarantee `tests/aio26-electron-replay.test.ts` asserts on the SOURCE —
+// "a main-frame navigation re-seeds the queue with the last snapshot" — proved
+// on the real relay instead. A string test measures how the code is written; a
+// new document either receives that snapshot or it does not.
+//
+// Why it matters: a new document starts with NO base state, so a queued DELTA
+// is meaningless to it. Handing one over would apply a patch to `{}` — Immer's
+// out-of-range array `add` splices rather than throwing, so the result is not
+// an error, it is a silently wrong list.
+Deno.test("electron main: a new document is re-seeded with the last snapshot, never a delta", async () => {
+  await withHarness(async (srv, main) => {
+    await main.rendererReady();
+    await main.finishLoad();
+    await srv.writeLine('{"v":2,"t":"state","d":{"n":1}}');
+    await main.waitFor(() => main.msgs().length >= 1);
+
+    // A delta arrives, then the document goes away before a newer one loads.
+    await srv.writeLine('{"v":2,"t":"patches","d":[{"op":"replace"}]}');
+    await main.waitFor(() => main.msgs().length >= 2);
+    const before = main.msgs().length;
+
+    await main.startNavigation(); // a REAL document navigation …
+    await main.didNavigate("aio://app/next"); // … that COMMITTED
+    await new Promise((r) => setTimeout(r, 100));
+    assertEquals(
+      main.msgs().length,
+      before,
+      "nothing may reach a document that is going away",
+    );
+
+    await main.rendererReady(); // the new document announces itself
+    await main.waitFor(() => main.msgs().length > before);
+    const delivered = main.msgs().slice(before).map(kindOf);
+    assertEquals(
+      delivered,
+      ["state"],
+      `a fresh document must be handed the SNAPSHOT and nothing else: the ` +
+        `delta queued before the navigation assumes a base this document ` +
+        `does not have, and replaying it applies a patch to {} — Immer's ` +
+        `out-of-range array \`add\` SPLICES rather than throwing, so the ` +
+        `result is not an error, it is a silently wrong list. ` +
+        `Got ${JSON.stringify(delivered)}`,
+    );
+  });
+});
+
+// ── The reload of a PACKAGED window: proto and cfg are connection-scoped, the
+//    document is not ────────────────────────────────────────────────────────
+//
+// The server writes `proto` and `cfg` ONCE, at accept (src/server/uds.ts): the
+// socket belongs to the main process and outlives every document, so a reload
+// — Ctrl+R (tmplKeyboardShortcuts), Ctrl+Shift+Del, the app's own
+// location.reload() — never reaches the server as a new connection. The relay
+// re-seeded the fresh document with the last SNAPSHOT and nothing else, so
+// the reloaded page had state and no config. On the packaged aio:// shell
+// `cfg` is the ONLY way the page learns `syncCells` (localFirst adoption —
+// sync-cells.ts reads `__aioConfig.syncCells`), `callTimeouts` and
+// `renderBudget`: udsProdHTML embeds none of them, by design ("the cfg frame
+// fills them at connect"). After one Ctrl+R every localFirst cell silently
+// went back to round-tripping through the server and every awaited call ran
+// on the default ceiling — dev (whose shell embeds the same keys) never saw
+// it. A new document must be handed the hello and the config it missed, and
+// in accept order: proto, cfg, then the snapshot.
+Deno.test("electron main: a reloaded document is re-seeded with the connection's proto and cfg, in accept order", async () => {
+  await withHarness(async (srv, main) => {
+    await srv.writeLine('{"v":2,"t":"proto","d":{"v":2,"min":2}}');
+    await srv.writeLine('{"v":2,"t":"cfg","d":{"callTimeouts":{"a":1}}}');
+    await srv.writeLine('{"v":2,"t":"state","d":{"n":1}}');
+    await main.startNavigation(); // loadURL's own navigation …
+    await main.didNavigate("aio://app/"); // … commits
+    await main.rendererReady();
+    await main.finishLoad();
+    await main.waitFor(() => main.msgs().length >= 3);
+    assertEquals(
+      main.msgs().map(kindOf),
+      ["proto", "cfg", "state"],
+      "the first document gets the accept-time frames exactly once",
+    );
+    const before = main.msgs().length;
+
+    // Ctrl+R: a NEW document on the SAME connection. The server hears nothing.
+    await main.startNavigation();
+    await main.didNavigate("aio://app/");
+    await main.rendererReady();
+    await main.waitFor(() => main.msgs().length > before);
+    await new Promise((r) => setTimeout(r, 150));
+    assertEquals(
+      main.msgs().slice(before).map(kindOf),
+      ["proto", "cfg", "state"],
+      "a reloaded document must receive the connection's hello and config " +
+        "again, before its snapshot — the server sent them once, at accept, " +
+        "to a document that no longer exists",
+    );
+  });
+});
+
+// …and a cfg that is still QUEUED when the document changes is delivered once,
+// not twice: the re-seed fills a gap, it never duplicates a frame in flight.
+Deno.test("electron main: the proto/cfg re-seed never duplicates a frame still in the queue", async () => {
+  await withHarness(async (srv, main) => {
+    await srv.writeLine('{"v":2,"t":"proto","d":{"v":2,"min":2}}');
+    await srv.writeLine('{"v":2,"t":"cfg","d":{"callTimeouts":{"a":1}}}');
+    await srv.writeLine('{"v":2,"t":"state","d":{"n":1}}');
+    await new Promise((r) => setTimeout(r, 150));
+    // The frames are queued (no document has signalled ready) when the
+    // initial navigation commits.
+    await main.startNavigation();
+    await main.didNavigate("aio://app/");
+    await main.rendererReady();
+    await main.waitFor(() => main.msgs().length >= 3);
+    await new Promise((r) => setTimeout(r, 150));
+    assertEquals(main.msgs().map(kindOf), ["proto", "cfg", "state"]);
+  });
+});
+
+// ── The instrument must report what is TRUE: a slow load is not a stall ──
+//
+// The gate closes on loadURL's own navigation, before any document has ever
+// signalled ready. A busy app's frames arrive while a large bundle parses;
+// after 5 s the detector declared a stall — "down" to /__aio/health, the
+// dropped-socket signal to a page that had no listener yet — and "up" when
+// the page simply arrived. A client that is provably loading was reported
+// down. Now: no victim, no stall. One info line says the load is slow.
+Deno.test({
+  name:
+    "electron main: a slow FIRST load with frames arriving is not a stall — no __aio:close, no cdiag down",
+  sanitizeOps: false, // aio-ok: the detector's window is a real 5s; the test has to outlast it
+  sanitizeResources: false, // aio-ok: see above
+  fn: async () => {
+    await withHarness(async (srv, main) => {
+      await main.startNavigation(); // loadURL — no document has ever been ready
+      for (let i = 1; i <= 6; i++) {
+        await srv.writeLine(`{"v":2,"t":"state","d":{"n":${i}}}`);
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      assert(
+        !main.channels().includes("__aio:close"),
+        "a loading document must not be sent the dropped-socket signal",
+      );
+      assert(
+        !srv.inbound.some((l) => l.includes('"cdiag"')),
+        `the server must not hear "down" for a client that is loading: ${
+          srv.inbound.filter((l) => l.includes("cdiag")).join("\n")
+        }`,
+      );
+      const said = main.stderr.join("") + main.stdout.join("");
+      assert(!said.includes("has not signalled ready"), said);
+      assert(
+        said.includes("still loading after"),
+        `the slow load is observed, once, as a load: ${said}`,
+      );
+      // …and when the document arrives it gets the newest snapshot, as ever.
+      await main.rendererReady();
+      await main.waitFor(() => main.msgs().length >= 1);
+      assertEquals(main.msgs().map(kindOf), ["state"]);
+      assert(main.msgs()[0]!.includes('"n":6'));
+      assert(
+        !srv.inbound.some((l) => l.includes('"cdiag"')),
+        "no heal either — nothing was ever down",
+      );
+    });
+  },
+});
+
+// The same truth after a RELOAD: once the navigation commits, the old
+// document is gone and the new one will announce itself — waiting for it is a
+// load. (The stall is the gap before a commit: gate closed on a listening
+// document, no commit, no veto — the existing stall test above.)
+Deno.test({
+  name:
+    "electron main: a slow reload (navigation committed) is not a stall either",
+  sanitizeOps: false, // aio-ok: see above
+  sanitizeResources: false, // aio-ok: see above
+  fn: async () => {
+    await withHarness(async (srv, main) => {
+      await srv.writeLine('{"v":2,"t":"state","d":{"n":1}}');
+      await main.rendererReady();
+      await main.finishLoad();
+      await main.didNavigate("http://127.0.0.1:1/");
+      await main.waitFor(() => main.msgs().length >= 1);
+      await main.startNavigation(); // Ctrl+R: the gate closes on a live document …
+      await main.didNavigate("http://127.0.0.1:1/"); // … and the new document COMMITS
+      await new Promise((r) => setTimeout(r, 5300));
+      await srv.writeLine('{"v":2,"t":"state","d":{"n":2}}');
+      await new Promise((r) => setTimeout(r, 200));
+      assert(
+        !srv.inbound.some((l) => l.includes('"cdiag"')) &&
+          !main.channels().slice(1).includes("__aio:close"),
+        "a committed reload that is slow to signal ready is a load, not a stall",
+      );
+    });
+  },
 });

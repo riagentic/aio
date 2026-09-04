@@ -37,6 +37,7 @@ import {
   writeLock,
 } from "../server/single-instance-lock.ts";
 import { EXIT_WAIT_MS } from "../server/shutdown-budget.ts";
+import { HEY } from "../diagnostics/fmt.ts";
 import { VERSION } from "../server/aio-cli.ts";
 import {
   block,
@@ -154,6 +155,10 @@ const SINGLETON_WAIT_MS = EXIT_WAIT_MS;
 /** Default for `--wait` on stop/restart, in seconds — the same budget. */
 const STOP_WAIT_DEFAULT_S = Math.ceil(SINGLETON_WAIT_MS / 1000);
 const POLL_INTERVAL_MS = 200;
+/** How long `am watch` waits after the last FS event before restarting. One
+ *  editor save fires several events across several files; restarting on each
+ *  would restart the app three times for one keystroke. */
+const WATCH_DEBOUNCE_MS = 250;
 /** How long `am start` waits before asking whether the child it just spawned
  *  is still there. A failed exec is reaped in single-digit milliseconds; a
  *  real boot takes far longer than this, so the check can only ever catch a
@@ -628,6 +633,15 @@ export async function cmdStart(
   const spec = detachedSpawnSpec(Deno.build.os, denoArgs, logFile);
   const proc = new Deno.Command(spec.cmd, {
     args: spec.args,
+    // THE cwd the launch record above claims — the same value, not a second
+    // decision. Without it the child inherited am's OWN cwd: `cd src && am
+    // start` recorded `cwd: <root>` in launch.json and the lock (which `am
+    // restart`, `am doctor` and `foreignCheckout` read as where the app runs)
+    // while the process actually ran from `<root>/src` — so a relative
+    // `--db-path=data.db` or `--tls-cert=certs/x.pem` resolved one directory
+    // below where every reader of the record said it would, and the state
+    // landed in a file `am data`/`am backup` never looked at.
+    cwd,
     stdin: "null",
     stdout: "piped",
     stderr: "null",
@@ -761,6 +775,19 @@ export async function cmdStart(
     if (!isProcessAlive(pid)) break; // died early
     if (livePort === undefined) {
       const written = readPid(appId); // our own child's lock — see above
+      // A SOCKET-ONLY app never binds a port, and `port: 0` is falsy — so
+      // `livePort` never resolved, the loop always ran out, and `am start`
+      // exited 1 with "not responding on port 0 after 10s" for a desktop app
+      // (the default `--client=electron` shape) that had started perfectly.
+      // `am start && am open` could not work at all. Its socket is the door;
+      // ask that, exactly as `am status` and `am stop` already do.
+      if (written?.socketPath && !written.port) {
+        if (await isSocketAlive(written.socketPath)) {
+          healthy = true;
+          break;
+        }
+        continue; // listening not yet — keep waiting
+      }
       if (written?.port) livePort = written.port;
       else continue; // not far enough into boot to have chosen one
     }
@@ -1060,17 +1087,45 @@ export function thisProjectAppId(): string | undefined {
 
 /** Stop one app. Returns what happened instead of exiting, so `--all` can carry
  *  on through a failure and report every app rather than dying on the first. */
+/** The LAST chance to learn whether this app's state is on disk.
+ *
+ *  `am stop` exits 0 as soon as the app agrees to stop, and that exit code is
+ *  the operator's final signal before the process is gone — so a shutdown that
+ *  loses every write since the first refused persist window used to be
+ *  indistinguishable from a clean one. The shutdown flush cannot report back
+ *  (the reply leaves before it runs), so the verdict is taken BEFORE the door
+ *  closes, through the one route whose whole contract is durability.
+ *
+ *  Returns the refusal message, or null when the state is on disk — or when
+ *  this app has no persist route to ask (a production build, an older app, a
+ *  transport that is already gone). Only a route that answered and REFUSED is
+ *  a verdict; "I could not ask" is not data loss and must not be reported as
+ *  it. */
+async function finalPersistVerdict(
+  port: number,
+  appId: string,
+): Promise<string | null> {
+  const r = await trojanPost(port, "persist", undefined, appId);
+  if (r.ok) return null;
+  // `persist failed: …` is the trojan route's own wording for "the cycle
+  // reported a failure" (a 500). Everything else — 404, 501 "persistence not
+  // available", a connection error — means the question could not be put.
+  return /persist failed:/.test(r.error) ? r.error : null;
+}
+
 async function stopOne(
   target: StopTarget,
   flags: GlobalFlags,
 ): Promise<
-  | { ok: true; appId: string; pid?: number; port: number }
+  | { ok: true; appId: string; pid?: number; port: number; unsaved?: string }
   | { ok: false; appId: string; error: string }
 > {
   const { appId, port, pf } = target;
 
   // Mark as stopping
   if (pf) writeLock({ ...pf, status: "stopping" });
+
+  const unsaved = await finalPersistVerdict(port, appId);
 
   // Try graceful shutdown via trojan API, fall back to SIGTERM
   const result = await trojanPost(port, "shutdown", undefined, appId);
@@ -1090,23 +1145,43 @@ async function stopOne(
 
   // Without --wait: return immediately, user checks with `am status`
   if (flags.wait === undefined) {
-    return { ok: true, appId, pid: pf?.pid, port };
+    return {
+      ok: true,
+      appId,
+      pid: pf?.pid,
+      port,
+      ...(unsaved ? { unsaved } : {}),
+    };
   }
 
   // With --wait: poll until dead, then force kill if needed
   const timeout = (flags.wait || STOP_WAIT_DEFAULT_S) * 1000;
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
-    if (pf && !isProcessAlive(pf.pid)) break;
-    try {
-      const ctrlPort = resolveControlPort(port, appId);
-      const resp = await fetch(`http://127.0.0.1:${ctrlPort}/`, {
-        signal: AbortSignal.timeout(QUICK_TIMEOUT_MS),
-      });
-      await resp.body?.cancel();
-    } catch {
-      break;
-    } // connection refused = dead
+    if (pf) {
+      // THE PID IS THE ANSWER when we have one. The loop used to probe HTTP
+      // as well and treat any transport error as "dead" — but a `port: 0`
+      // app (the default desktop shape: `--client=electron` binds a unix
+      // socket and no network interface) has no HTTP door at all, so the
+      // first probe always threw, the loop broke out at once, and the
+      // still-alive process was SIGTERM+SIGKILLed with grace 0. Measured:
+      // `--wait` on a UDS app returned in 0.57s and the app's `onStop` never
+      // finished, while the same app WITHOUT `--wait` shut down cleanly.
+      // `--wait` is the flag a script uses to be safe; it was the only one
+      // that truncated shutdown. `am restart` forces it, so it inherited it.
+      if (!isProcessAlive(pf.pid)) break;
+    } else {
+      // No pid to watch — the HTTP probe is the only evidence there is.
+      try {
+        const ctrlPort = resolveControlPort(port, appId);
+        const resp = await fetch(`http://127.0.0.1:${ctrlPort}/`, {
+          signal: AbortSignal.timeout(QUICK_TIMEOUT_MS),
+        });
+        await resp.body?.cancel();
+      } catch {
+        break;
+      } // connection refused = dead
+    }
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
   }
 
@@ -1115,7 +1190,13 @@ async function stopOne(
     await killProcess(pf.pid, 0, pf); // already waited gracefully
   }
   removePid(appId, pf);
-  return { ok: true, appId, pid: pf?.pid, port };
+  return {
+    ok: true,
+    appId,
+    pid: pf?.pid,
+    port,
+    ...(unsaved ? { unsaved } : {}),
+  };
 }
 
 export async function cmdStop(
@@ -1177,11 +1258,13 @@ export async function cmdStop(
       );
     }
     const failed = results.filter((r) => !r.ok);
+    const lost = results.filter((r) => r.ok && r.unsaved);
     if (mode === "pretty") {
       for (const r of results) {
         out(
           r.ok
-            ? `${waited ? "stopped" : "stopping"} ${r.appId}`
+            ? `${waited ? "stopped" : "stopping"} ${r.appId}` +
+              (r.unsaved ? `\n  ⚠ NOT SAVED — ${r.unsaved}` : "")
             : `✗ ${r.appId}: ${r.error}`,
           mode,
         );
@@ -1190,8 +1273,9 @@ export async function cmdStop(
       out({ root, stopped: results }, mode);
     }
     // Non-zero when ANY app is still up: a script that stops a fleet and reads
-    // exit 0 is entitled to believe the fleet is down.
-    if (failed.length) Deno.exit(1);
+    // exit 0 is entitled to believe the fleet is down. Same for an app whose
+    // state did not reach disk — the data is what the fleet was for.
+    if (failed.length || lost.length) Deno.exit(1);
     return;
   }
 
@@ -1207,14 +1291,30 @@ export async function cmdStop(
   }
   out(
     mode === "pretty"
-      ? waited
+      ? (waited
         ? `stopped ${r.appId}`
-        : `stopping ${r.appId} (pid ${r.pid ?? "?"}, port ${r.port})`
+        : `stopping ${r.appId} (pid ${r.pid ?? "?"}, port ${r.port})`) +
+        (r.unsaved ? `\n  ⚠ NOT SAVED — ${r.unsaved}` : "")
       : waited
-      ? { appId: r.appId, status: "stopped" }
-      : { appId: r.appId, status: "stopping", pid: r.pid, port: r.port },
+      ? {
+        appId: r.appId,
+        status: "stopped",
+        ...(r.unsaved ? { unsaved: r.unsaved } : {}),
+      }
+      : {
+        appId: r.appId,
+        status: "stopping",
+        pid: r.pid,
+        port: r.port,
+        ...(r.unsaved ? { unsaved: r.unsaved } : {}),
+      },
     mode,
   );
+  // The app is stopping either way — but the exit code stops claiming the data
+  // went with it. This is the operator's LAST signal before the process is
+  // gone, and it read 0 through total loss of every write since the first
+  // refused window.
+  if (r.unsaved) Deno.exit(1);
 }
 
 export async function cmdRestart(
@@ -1367,27 +1467,101 @@ export async function cmdRestart(
   await cmdStart(launchArgs, flags);
 }
 
+/** Which directory `am watch` watches — the first POSITIONAL argument.
+ *
+ *  `watch` is a PASSTHROUGH verb (its surplus flags are forwarded to the app,
+ *  exactly as `start`'s are), so the central unknown-flag gate does not run for
+ *  it — and `args[0]` used to be taken as the directory whatever it was:
+ *  `am watch --zzz` answered `{"watching":"--zzz"}` and then watched nothing.
+ *  A flag is never a path. Pure, so both readings are a unit test. */
+export function watchTargetDir(args: readonly string[]): string {
+  return args.find((a) => !a.startsWith("-")) ?? "src";
+}
+
+/** File extensions a change to which restarts the app.
+ *
+ *  `.tsx` is included even though the dev server hot-reloads client JSX over
+ *  the WebSocket: `am watch`'s contract is "restart on a source change", a
+ *  restart delivers the new UI too, and a rule that silently exempts half the
+ *  extensions in its own help line is the defect this command already had. */
+const WATCH_EXT = new Set([".ts", ".tsx"]);
+
 export async function cmdWatch(
   args: string[],
   flags: GlobalFlags,
 ): Promise<void> {
   const mode = detectMode(flags);
   const appId = resolveAmAppId(flags.app);
-  const watchDir = args[0] ?? "src";
-  out(
-    mode === "pretty"
-      ? `watching ${watchDir}/ for changes…`
-      : { watching: watchDir },
-    mode,
-  );
+  const watchDir = watchTargetDir(args);
+
+  // A directory that is not there is refused, not reported as watched. This
+  // accepted any string — `am watch /definitely/not/a/dir` printed
+  // `{"watching":"/definitely/not/a/dir"}` and hung forever.
+  let dirOk = false;
+  try {
+    dirOk = Deno.statSync(watchDir).isDirectory;
+  } catch {
+    // aio-ok: a missing or unreadable path IS the refusal below, which names
+    // it and the cwd — re-raising the raw stat error says less.
+  }
+  if (!dirOk) {
+    outError(
+      `am watch: "${watchDir}" is not a directory (cwd: ${Deno.cwd()}). ` +
+        `Pass the directory to watch, e.g. \`am watch src\`.`,
+      mode,
+    );
+    Deno.exit(1);
+  }
 
   // Start initially if not already running
   if (!liveLock(appId)) await cmdStart([], flags); // never a double start
 
-  // Auto-restart disabled — server.ts handles UI live reload (.tsx/.css/.html/.svg)
-  // via WebSocket without killing the process. Backend .ts changes require manual restart.
-  // Keep the process alive so the initial cmdStart above isn't orphaned.
-  await new Promise(() => {});
+  out(
+    mode === "pretty"
+      ? `watching ${watchDir}/ for .ts/.tsx changes — restarting on save…`
+      : { watching: watchDir, extensions: [...WATCH_EXT], appId },
+    mode,
+  );
+
+  // Coalesce the burst an editor save produces (write + rename + chmod, often
+  // several files) into ONE restart, and never overlap two restarts: a save
+  // during a restart schedules the next one instead of racing it.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let restarting = false;
+  let again = false;
+  const restart = async () => {
+    if (restarting) {
+      again = true;
+      return;
+    }
+    restarting = true;
+    try {
+      do {
+        again = false;
+        await cmdRestart([], flags);
+      } while (again);
+    } catch (e) {
+      // A failed restart leaves the OLD app running (or none) — either way the
+      // watch keeps going, because the next save is the fix.
+      outError(`am watch: restart failed — ${e}`, mode);
+    } finally {
+      restarting = false;
+    }
+  };
+
+  for await (const ev of Deno.watchFs(watchDir, { recursive: true })) {
+    if (ev.kind === "access") continue;
+    const hit = ev.paths.find((p) => {
+      const dot = p.lastIndexOf(".");
+      return dot >= 0 && WATCH_EXT.has(p.slice(dot));
+    });
+    if (!hit) continue;
+    if (timer !== undefined) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = undefined;
+      void restart();
+    }, WATCH_DEBOUNCE_MS);
+  }
 }
 
 export async function cmdStatus(
@@ -1434,7 +1608,23 @@ export async function cmdStatus(
     }
   }
 
-  const appId = resolveAmAppId(flags.app);
+  // `--port` is a GLOBAL flag that `stop` and `kill` honour and `status`
+  // ignored — so from one app's directory, `am status --port=<another app's
+  // port>` reported on the WRONG app with exit 0, while `am stop --port=` the
+  // same number correctly targeted the other one. `resolveLockTarget`'s own
+  // comment states the rule: "a flag the help lists as global, silently
+  // ignored by one verb of three, is worse than a flag that does not exist".
+  let appId = resolveAmAppId(flags.app);
+  if (flags.port !== undefined) {
+    const t = resolveLockTarget(flags);
+    if (t.kind === "target") appId = t.target.appId;
+    else if (t.kind === "none") {
+      outError(t.error, mode);
+      Deno.exit(1);
+    }
+    // `probe`: nothing of ours holds that port — fall through to the
+    // stopped/probe reporting below with the cwd's own id.
+  }
   // Wherever the instance's home is: `am status` and `am instances` read the
   // same fact, so they can never disagree about an `appDir`-homed app again.
   const pf = liveLock(appId);
@@ -1525,13 +1715,23 @@ export async function cmdStatus(
         uptime: number;
         connections: number;
         schedules: number;
+        cells?: Record<string, number>;
+        unserializable?: string[];
       };
       if (mode === "pretty") {
         const uds = pf.socketPath ? `, transport uds (${pf.socketPath})` : "";
+        // A cell JSON refuses is a cell that is NOT reaching disk, on every
+        // window, forever. `am status` used to carry it as `cells: {todo: -1}`
+        // — a number read as a size, next to the one that matters.
+        const bad = m.unserializable?.length
+          ? `\n  ${HEY} ${
+            m.unserializable.join(", ")
+          }: state cannot be serialized — NOT being persisted. See \`am logs error\`.`
+          : "";
         out(
           `${appId}: started (pid ${pf.pid}, port ${port}, uptime ${
             formatUptime(m.uptime)
-          }, ${m.connections} connections${uds})`,
+          }, ${m.connections} connections${uds})${bad}`,
           mode,
         );
       } else {

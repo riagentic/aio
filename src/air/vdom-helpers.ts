@@ -76,20 +76,96 @@ export function _unbindSignalText(vnode: VNode): void {
 // ── Action cleanup handles per element ──────────────────────────────
 const _actionCleanups = new WeakMap<HTMLElement, (() => void)[]>();
 
+/** The `use` prop as a list of actions, each with the arguments it is called
+ *  with after the element — or null when the prop is not an action at all.
+ *
+ *  ONE reading of the prop, shared by the runner and by the diff's "did the
+ *  actions change" question. The docs (docs/ui/air-advanced.md) promise three
+ *  shapes — `use={fn}`, `use={[fn, value]}` calling `fn(el, value)`, and
+ *  `use={[a, b]}` running both — and the runner used to honour only the last:
+ *  a bare function was dropped without a word (`<input use={autoFocus}>`, the
+ *  doc's own first example, focused nothing), and the value in `[tooltip,
+ *  "text"]` never reached `tooltip`. Both were silent — no throw, no warning,
+ *  a directive that "simply does nothing". The rule: every function in the
+ *  list is an action, and the non-functions that FOLLOW it are its arguments. */
+export function _actionList(
+  actions: unknown,
+): { fn: (...a: unknown[]) => unknown; args: unknown[] }[] | null {
+  const list = typeof actions === "function"
+    ? [actions]
+    : Array.isArray(actions)
+    ? actions
+    : null;
+  if (!list) return null;
+  const out: { fn: (...a: unknown[]) => unknown; args: unknown[] }[] = [];
+  for (const item of list) {
+    if (typeof item === "function") {
+      out.push({ fn: item as (...a: unknown[]) => unknown, args: [] });
+    } else if (out.length > 0) {
+      out[out.length - 1]!.args.push(item);
+    }
+  }
+  return out;
+}
+
+/** True when two `use` props describe DIFFERENT actions.
+ *
+ *  Compared by CONTENT, not by identity. `use={[autoFocus]}` is a fresh array
+ *  on every render, and an identity check made the diff tear the actions down
+ *  and run them again on each re-render of the component that wrote them — a
+ *  `use={[initEditor]}` destroyed and rebuilt its editor on every keystroke of
+ *  an unrelated input in the same component, and the docs' "cleanup on
+ *  unmount" promise ran on every parent update instead. Same functions, same
+ *  arguments: same actions, nothing to redo. */
+export function _actionsChanged(next: unknown, prev: unknown): boolean {
+  if (next === prev) return false;
+  const a = _actionList(next);
+  const b = _actionList(prev);
+  if (!a || !b) return a !== b;
+  if (a.length !== b.length) return true;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i]!;
+    const y = b[i]!;
+    if (x.fn !== y.fn || x.args.length !== y.args.length) return true;
+    for (let j = 0; j < x.args.length; j++) {
+      if (!Object.is(x.args[j], y.args[j])) return true;
+    }
+  }
+  return false;
+}
+
 /** Run action functions and store cleanup handles. */
 export function _applyActions(el: HTMLElement, actions: unknown): void {
-  if (!Array.isArray(actions)) return;
+  const list = _actionList(actions);
+  if (!list) {
+    // Not a function and not a list of them — the prop cannot mean anything,
+    // and it used to be skipped in silence. Observe-only: prod still skips.
+    if (actions != null && actions !== false) {
+      _devWarn(
+        "use-not-action",
+        `A \`use\` prop holds ${typeof actions} — it must be an action function, or an array of them (with ` +
+          `their arguments). Nothing was applied.`,
+      );
+    }
+    return;
+  }
   // Dispose any prior action cleanups before overwriting — defends against
   // callers that re-apply actions without an explicit cleanup step (the diff
   // path cleans up first, but hydration/re-render paths may not).
   _cleanupActions(el);
   const cleanups: (() => void)[] = [];
-  for (const action of actions) {
-    if (typeof action !== "function") continue;
+  for (const { fn, args } of list) {
     try {
-      const result =
-        (action as (node: HTMLElement) => { cleanup?(): void } | void)(el);
-      if (result && typeof result.cleanup === "function") {
+      const result = fn(el, ...args) as
+        | { cleanup?(): void }
+        | (() => void)
+        | void;
+      // Two spellings of "here is my teardown": the `{ cleanup }` object the
+      // NodeAction type names, and the bare function the docs show. Only the
+      // first was honoured, so a documented cleanup never ran and the
+      // listener/observer it released stayed attached to a removed element.
+      if (typeof result === "function") cleanups.push(result);
+      else if (result && typeof result.cleanup === "function") {
         cleanups.push(result.cleanup);
       }
     } catch (e) {

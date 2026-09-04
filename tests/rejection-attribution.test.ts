@@ -104,7 +104,11 @@ function harness() {
 }
 
 let seq = 0;
-const hlc = (): HLC => [1000 + ++seq, 0, "c1"];
+// Stamped relative to NOW: an UNKNOWN op stamped older than the server's
+// tombstone window is refused by name (`STALE_OP_REASON`), and an epoch-era
+// literal is an ordering label, not "an op from 1970".
+const T0 = Date.now();
+const hlc = (): HLC => [T0 + ++seq, 0, "c1"];
 
 Deno.test("D11: a REFUSED op stays refused when another cell's dispatch interleaves", async () => {
   const h = harness();

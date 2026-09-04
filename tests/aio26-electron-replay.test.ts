@@ -61,19 +61,44 @@ Deno.test("aio26: a reloading renderer is re-seeded with the last full state", (
   // renderer). tests/electron-main-relay.test.ts proves the behaviour.
   const navIdx = script.indexOf("'did-start-navigation'");
   assertEquals(navIdx > -1, true, "script must handle did-start-navigation");
-  const afterNav = script.slice(navIdx, navIdx + 700);
+  // Bounded by the NEXT handler registration, not by a character radius: a
+  // fixed window measures how much COMMENT sits between the two lines, so
+  // explaining the handler better made this test fail. (It did — the
+  // same-document guard's comment pushed the re-seed to +834 of a 700 window.)
+  const navEnd = script.indexOf("win.webContents.on(", navIdx);
+  const afterNav = script.slice(
+    navIdx,
+    navEnd > navIdx ? navEnd : navIdx + 2000,
+  );
   assertEquals(
-    afterNav.includes("rendererReady = false") &&
-      afterNav.includes("_pending.push({ k: 'state', line: lastFullState })"),
+    afterNav.includes("rendererReady = false"),
     true,
-    "a main-frame navigation must re-seed the queue with the last snapshot",
+    "a main-frame navigation must close the gate",
+  );
+  // The re-seed lives at the COMMIT (`did-navigate`), not at the start: a
+  // vetoed navigation starts and never commits, and destroying the queue of a
+  // document that then stayed was half of cc §5.1.
+  // Anchored on the relay's OWN did-navigate handler: the renderer-diagnostics
+  // template registers one too (the mount watchdog), earlier in the script.
+  const commitAt = script.indexOf("// The document REALLY changed.");
+  assertEquals(commitAt > -1, true, "the relay must handle did-navigate");
+  const commitIdx = script.indexOf("'did-navigate'", commitAt);
+  const commitEnd = script.indexOf("win.webContents.on(", commitIdx + 1);
+  const afterCommit = script.slice(
+    commitIdx,
+    commitEnd > commitIdx ? commitEnd : commitIdx + 2000,
+  );
+  assertEquals(
+    afterCommit.includes("_pending.push({ k: 'state', line: lastFullState })"),
+    true,
+    "a COMMITTED navigation must re-seed the queue with the last snapshot",
   );
   // And a stale DELTA must never survive into the new document.
   assertEquals(
-    afterNav.includes("pk === 'state' || pk === 'patches'") &&
-      afterNav.includes("_pending.splice(i, 1)"),
+    afterCommit.includes("pk === 'state' || pk === 'patches'") &&
+      afterCommit.includes("_pending.splice(i, 1)"),
     true,
-    "queued state/patches must be dropped for a fresh document",
+    "queued state/patches must be dropped for a fresh document — at its COMMIT",
   );
 });
 

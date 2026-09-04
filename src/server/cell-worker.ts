@@ -244,16 +244,29 @@ export function createCellWorker(
       });
     },
     call(action: Msg): Promise<unknown> {
-      if (closed) {
-        return Promise.reject(
-          new Error(
-            `[aio] cell worker "${name}" is closed — action "${action.type}" was not applied`,
-          ),
-        );
-      }
-      const id = ++seq;
       const callId = (action as { payload?: { _callId?: string } }).payload
         ?._callId;
+      if (closed) {
+        const err = new Error(
+          `[aio] cell worker "${name}" is closed — action "${action.type}" was not applied`,
+        );
+        // An ASYNC method's caller awaits the REGISTRY promise (`_callId`), not
+        // this one — so rejecting only the transport left that caller hanging
+        // for the full 30 s call ceiling and then telling it the opposite of
+        // what happened ("the METHOD did not give up — it may still be
+        // running, and if it finishes its writes will still commit"). Nothing
+        // ran. Same shape the clone-failure branch 30 lines below was fixed
+        // for, and reachable BY DESIGN: shutdown closes the worker pool before
+        // it closes dispatch and the HTTP server, so there is a deliberate
+        // window in which the server still accepts calls and every worker cell
+        // is closed.
+        if (callId) {
+          resolveCall(callId, undefined, err);
+          return Promise.resolve(undefined);
+        }
+        return Promise.reject(err);
+      }
+      const id = ++seq;
       const p = new Promise<unknown>((resolve, reject) => {
         inflight.set(id, { resolve, reject, callId });
       });

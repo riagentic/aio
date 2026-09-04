@@ -166,7 +166,11 @@ export const _unfreezableWarned = new Set<string>();
  *  on these values (a Date's time and a typed array's bytes live in internal
  *  slots and a typed array cannot be frozen at all), so the silence has to be
  *  broken by saying so. */
-function noteUnfreezable(kind: string, what: string, fix: string): void {
+export function noteUnfreezable(
+  kind: string,
+  what: string,
+  fix: string,
+): void {
   if (_unfreezableWarned.has(kind)) return;
   _unfreezableWarned.add(kind);
   log.warn(
@@ -176,6 +180,40 @@ function noteUnfreezable(kind: string, what: string, fix: string): void {
       `looking correct in this process. Assign a NEW value instead of ` +
       `mutating in place (${fix}) (logged once per kind).`,
   );
+}
+
+/** Report the shapes a value LOSES on the way into async-method state.
+ *
+ *  The async write path clones what it installs (`ownedValue`), and cloning
+ *  flattens exactly the two shapes `deepFreeze` warns about on the sync path:
+ *  a class instance becomes a plain object (`s.obj.inst instanceof A` differs
+ *  by the `async` keyword), and an accessor collapses to the value it happened
+ *  to return. Sync warned and async said nothing at all, so the quieter half
+ *  of a divergence was also the invisible one. Same notice, both paths. */
+export function noteMaterialized(v: unknown): void {
+  if (v === null || typeof v !== "object" || Array.isArray(v)) return;
+  const proto = Object.getPrototypeOf(v);
+  if (proto !== null && proto !== Object.prototype) {
+    const name =
+      (proto as { constructor?: { name?: string } } | null)?.constructor
+        ?.name ?? "non-plain";
+    noteUnfreezable(
+      name,
+      `${name} instance`,
+      `s.acct = { ...plain fields } — keep behaviour in methods`,
+    );
+    return;
+  }
+  for (const [k, d] of Object.entries(Object.getOwnPropertyDescriptors(v))) {
+    if (d.get || d.set) {
+      noteUnfreezable(
+        `accessor:${k}`,
+        `a get/set accessor ("${k}") — it is flattened to whatever it ` +
+          `returned at write time here, and KEPT LIVE by a sync method`,
+        `s.x = { ...s.x, ${k}: <the value> } — compute it in a method, not on read`,
+      );
+    }
+  }
 }
 
 /** THE deep freeze — one implementation for the three sites that had their own
@@ -253,6 +291,36 @@ export function deepFreeze<T>(
         name,
         `${name} instance`,
         `s.acct = { ...plain fields } — keep behaviour in methods`,
+      );
+    }
+  }
+  // An ACCESSOR is the one shape here that survives freezing AND keeps
+  // changing. `Object.freeze` makes the property non-configurable and leaves
+  // the getter in place, so `Object.isFrozen(state)` is true while every read
+  // returns a different value — committed state that changes with no write, no
+  // patch and no broadcast, so what a client receives depends on when
+  // serialization happened. Measured: `JSON.stringify` of the same committed
+  // slice, twice, gave `{"live":11}` then `{"live":12}`.
+  //
+  // It is also the one shape `deepFreeze` did not name, while enumerating
+  // typed arrays, Dates, Maps/Sets and class instances by name directly above
+  // — a checker silent about exactly the case it cannot handle. (The async
+  // path materializes accessors away via `cloneState`, so the same method body
+  // commits a different KIND of state depending on the `async` keyword; making
+  // the two agree is a compat break and is deliberately NOT done here.)
+  //
+  // Reading through `getOwnPropertyDescriptors` rather than `Object.values`:
+  // asking for the VALUE would invoke the getter, which is the side effect
+  // being reported.
+  for (
+    const [k, d] of Object.entries(Object.getOwnPropertyDescriptors(obj))
+  ) {
+    if (d.get || d.set) {
+      noteUnfreezable(
+        `accessor:${k}`,
+        `a get/set accessor ("${k}") — freezing keeps it, so committed state ` +
+          `changes with no write, no patch and no broadcast`,
+        `s.x = { ...s.x, ${k}: <the value> } — compute it in a method, not on read`,
       );
     }
   }

@@ -320,15 +320,15 @@ rather than a variable.
 
 | Bundle                                                      | gzip      | brotli |
 | ----------------------------------------------------------- | --------- | ------ |
-| aio: render a component                                     | 59 KB     | 51 KB  |
-| aio: + one cell (the counter app)                           | 61 KB     | 53 KB  |
+| aio: render a component                                     | 63 KB     | 55 KB  |
+| aio: + one cell (the counter app)                           | 64 KB     | 56 KB  |
 | React + Redux Toolkit + Router + a WS client + a sync layer | ~75-90 KB | —      |
 
 ### Verdict: ⚠️ Bigger than a view layer, smaller than the stack it replaces
 
 If you want a renderer, AIR is the wrong size — Solid is 8x smaller and does
 that job. If you want state that is persisted, synced, offline-queued and
-reactive in the browser without assembling five libraries, 61 KB is the whole
+reactive in the browser without assembling five libraries, 64 KB is the whole
 thing. Judge it against the second list, not the first.
 
 Since alpha72 the server compresses and revalidates, so the counter app is 50 KB
@@ -432,7 +432,7 @@ React implementation.
 | Routing                          | ✅    | Built-in, server-integrated                                  |
 | SSR — hydration cost             | ❌    | Full hydration (Qwik has resumability)                       |
 | SSR — mismatch safety            | ✅    | Safe fallback vs React's patch-in-place                      |
-| Bundle size                      | ⚠️    | 60 KB gzipped — the whole client, not a view layer (see §14) |
+| Bundle size                      | ⚠️    | 63 KB gzipped — the whole client, not a view layer (see §14) |
 | React compat layer               | ✅    | Full coverage incl. useId, onChange compat                   |
 | Batteries included               | ✅    | Forms, animation, virtual list, async data                   |
 | Concurrent rendering             | ❌    | No priority scheduling                                       |

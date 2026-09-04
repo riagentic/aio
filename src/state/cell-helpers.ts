@@ -21,6 +21,18 @@ import type {
  *
  *  A method is assigned as a data property; a state getter is an accessor. The
  *  descriptor tells them apart without touching a value. */
+/** How a dispatched action names its cell and method: `cell:method`, and
+ *  `cell.method` as the alternate spelling every control surface accepts.
+ *
+ *  ONE regex, because two homes had already drifted: the trojan route
+ *  normalises with `/[:.]/` (its comment names the dot form explicitly) while
+ *  `am dispatch`'s payload shaper tested only `:` — so `am dispatch
+ *  counter.setTitle a=b` was a cell method everywhere EXCEPT where the payload
+ *  is shaped. The method got `undefined`, the key was DELETED from state, `am`
+ *  answered `{"ok":true}`, and the app's own `PERSIST_ERROR` about it never
+ *  reached the caller. */
+export const CELL_METHOD_SEP = /[:.]/;
+
 export function nameIsTaken(obj: object, key: string): boolean {
   const d = Object.getOwnPropertyDescriptor(obj, key);
   return !!d && typeof d.value === "function";

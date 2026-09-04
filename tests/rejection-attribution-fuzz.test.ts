@@ -122,7 +122,9 @@ Deno.test("D11 property: acked ⟺ applied, op-rejected ⟺ refused", async () =
   const rnd = () =>
     (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
   const pick = (n: number) => Math.floor(rnd() * n);
-  let clock = 1000;
+  // Relative to NOW — see STALE_OP_REASON: an epoch-era stamp would be
+  // refused as older than the tombstone window before it reached dispatch.
+  let clock = Date.now();
   const hlc = (): HLC => [clock++, 0, "c1"];
 
   for (let round = 0; round < ROUNDS; round++) {

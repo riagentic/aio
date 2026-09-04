@@ -498,6 +498,9 @@ export type AioConfig<S, A, E> = {
    *  the list the page shell hands the browser (which cannot derive a
    *  compose-time decision from the cell definitions). */
   _syncCellIds?: string[];
+  /** Per-cell `sync.offline.retention`, in ms — how long a client may hold an
+   *  unacked op. Compaction sizes its id-tombstone window from it. */
+  _syncRetentionMs?: Record<string, number>;
   /** Ids of the cells that actually WRITE to the store (`persist` is not
    *  `"none"`). Not part of the data contract — the contract holds only the
    *  cells that made a version promise — but `aio ship` needs both numbers to
@@ -538,6 +541,9 @@ export type AioConfig<S, A, E> = {
   _cellMethods?: Record<string, string[]>;
   /** @internal Cell id → async method names (the `_callId`-settling ones). */
   _cellAsyncMethods?: Record<string, string[]>;
+  /** @internal Cell id → method name → required argument count. Methods-form
+   *  cells only — the trojan `dispatch` route refuses a SHORT call with it. */
+  _cellMethodArity?: Record<string, Record<string, number>>;
   /** Internal: per-cell, per-field { persisted, ui } flags — trojan `fields`. */
   _cellFields?: CellFieldFlags;
 };
@@ -553,6 +559,15 @@ export type AioApp<S = unknown, A = unknown> = {
   dispatch: (action: A) => Promise<unknown>;
   getState: () => S;
   snapshot?: () => string; // server-only (undefined in standalone)
+  /** Replace the WHOLE state from a snapshot.
+   *
+   *  Refuses a file whose cell set does not match this app's — the restore
+   *  path's one unrecoverable mistake (loading another app's snapshot used to
+   *  wipe every cell and report success). The `--force` override lives on the
+   *  OPERATOR doors (`am snapshot load --force`, `POST /__aio/snapshot?force=1`,
+   *  `POST /__aio/trojan/snapshot/force`), not in this signature: surface
+   *  compatibility is absolute, so a capability is added as a new door rather
+   *  than by reshaping a signature an app may already hold. */
   loadSnapshot?: (json: string) => void; // server-only (undefined in standalone)
   db?: DB; // async SQLite — query/execute/transaction (undefined in standalone)
   /** Content-addressed binary store (tier ③ — docs/persistence/big-data.md).

@@ -109,9 +109,16 @@ Deno.test("parseSubs: string array returns Set", () => {
   assertEquals(result!.has("auth"), true);
 });
 
-Deno.test("parseSubs: filters non-string entries", () => {
-  const result = parseSubs(JSON.stringify(["counter", 42, null, "auth"]));
-  assertEquals(result!.size, 2);
+// A PARTIALLY understood frame must not be applied. Skipping the entries it
+// could not read left the client believing it was subscribed to something the
+// server never granted — and `[42]` alone produced an EMPTY set, which is the
+// dead-client case below arrived at without an empty array.
+Deno.test("parseSubs: a non-string path refuses the WHOLE frame", () => {
+  assertEquals(
+    parseSubs(JSON.stringify(["counter", 42, null, "auth"])),
+    undefined,
+  );
+  assertEquals(parseSubs(JSON.stringify([42])), undefined);
 });
 
 Deno.test("parseSubs: non-array returns undefined", () => {
@@ -122,10 +129,19 @@ Deno.test("parseSubs: invalid JSON returns undefined", () => {
   assertEquals(parseSubs("not json"), undefined);
 });
 
-Deno.test("parseSubs: empty array returns empty Set", () => {
-  const result = parseSubs(JSON.stringify([]));
-  assertEquals(result instanceof Set, true);
-  assertEquals(result!.size, 0);
+// "Subscribe to NOTHING" is a dead client, not a subscription.
+//
+// An empty Set makes `filterPatchesBySubs` return nothing for every cell, so
+// the connection receives no delta for the rest of its life while `connected`
+// stays true and nothing is logged anywhere. `docs/ui/reactivity-tracking.md`
+// names this exact shape one layer up — "There is no symptom. A component that
+// subscribes to nothing renders correctly, once" — and the two caps in
+// `parseSubs` already refuse WHOLE for that stated reason.
+//
+// `undefined` means "no change", so the connection keeps what it had (a fresh
+// one: the wildcard) instead of going dark.
+Deno.test("parseSubs: an EMPTY list is refused, not honoured as 'send nothing'", () => {
+  assertEquals(parseSubs(JSON.stringify([])), undefined);
 });
 
 // ── the subs frame is client-supplied, and was unbounded ─────────────

@@ -1765,7 +1765,12 @@ Deno.test({
       {
         const resp = await fetch(`${url}/__aio/client-error`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          // The same CSRF header every other control POST carries. Without it
+          // this was a SIMPLE cross-origin request (a `text/plain` body needs
+          // no preflight), so any page a developer happened to visit could
+          // forge lines in the operator's terminal — a convincing "BLANK
+          // SCREEN" report included — and fill disk at 1 MB a request.
+          headers: { "Content-Type": "application/json", "X-AIO": "1" },
           body: JSON.stringify({
             message: "test error",
             stack: "Error: test\n  at App.tsx:1:1",
@@ -1777,11 +1782,26 @@ Deno.test({
         assertEquals(typeof classified.label, "string");
       }
 
+      // ── /__aio/client-error: no X-AIO header → refused ──
+      {
+        const resp = await fetch(`${url}/__aio/client-error`, {
+          method: "POST",
+          headers: { "Content-Type": "text/plain" },
+          body: JSON.stringify({ message: "forged" }),
+        });
+        assertEquals(
+          resp.status,
+          403,
+          "a cross-origin page must not be able to write the operator's log",
+        );
+        await resp.body?.cancel();
+      }
+
       // ── /__aio/client-error: malformed body → still 204 ──
       {
         const resp = await fetch(`${url}/__aio/client-error`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "X-AIO": "1" },
           body: "not-json{{{",
         });
         assertEquals(resp.status, 204);

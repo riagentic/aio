@@ -61,10 +61,24 @@ function methodThrew(
   // than depending on a prefix that had to go.
   const immer = /^\[Immer\] (Object\.\w+)\(\) cannot be used on an Immer draft/
     .exec(orig);
+  // Immer's internal field names leaking into an app's error text. A draft is
+  // a Proxy whose `ownKeys` trap must report its own bookkeeping slot, so
+  // `Object.freeze(s.obj)` — an ordinary thing to try — surfaced as
+  // "'ownKeys' on proxy: trap result did not include 'type_'", under a hint
+  // about `.map()`/spread that has nothing to do with it. `type_` is not a
+  // word the app author wrote or can look up.
+  const ownKeys = /trap result did not include '(type_|scope_|base_|copy_)'/
+    .test(orig);
   const message = immer
     ? `[${cellName}:${methodName}] ${immer[1]}(…) cannot be used on cell ` +
       `state — an async method's live state refuses it too. Assign instead: ` +
       `s.field = value.`
+    : ownKeys
+    ? `[${cellName}:${methodName}] this method called Object.freeze / ` +
+      `Object.seal / Object.preventExtensions on cell state. Cell state is ` +
+      `ALREADY frozen once the method returns — freezing the draft breaks ` +
+      `the draft itself. Drop the call; if you wanted a snapshot to keep, ` +
+      `copy it: const snap = structuredClone(s.field).`
     : `${orig}${hint}`;
   // The hint is guidance about THIS failure (an illegal cross-cell write), so
   // it belongs with the message; the framework's own name does not.

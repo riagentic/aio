@@ -49,7 +49,9 @@ function createTestDb(): DB {
 
 const opFrame = (id: string, cell: string) => ({
   id,
-  hlc: [1000, 0, "client-a"] as HLC,
+  // Stamped NOW — an unknown op stamped older than the tombstone window is
+  // refused by name (`STALE_OP_REASON`); this fixture is not about age.
+  hlc: [Date.now(), 0, "client-a"] as HLC,
   cell,
   action: "add",
   payload: { text: "x" },

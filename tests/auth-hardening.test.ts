@@ -150,13 +150,32 @@ Deno.test("budget: a VALID credential is served while the key is over budget", a
     });
     await burnBudget(b);
 
-    // The attack's own channel is still throttled…
+    // The attack's own channel is still throttled: a WRONG password over
+    // budget is answered "back off", not "wrong password".
     const throttled = await b.post("login", {
+      id: "alice",
+      password: "definitely-not-it",
+    });
+    assertEquals(throttled.status, 429, "a failed guess stays throttled");
+    await throttled.body?.cancel();
+
+    // …but the CORRECT password is served, which is the invariant
+    // `docs/auth/auth.md` states: "The budget throttles failed
+    // authentication, never service. A request that presents a VALID
+    // credential is served regardless of the budget." This route used to
+    // check the budget BEFORE verifying anything, so 12 failed logins for
+    // nonexistent ids locked the real user out for five minutes — and behind
+    // the reverse proxy the docs prescribe without `trustProxyHeader`, every
+    // client shares one bucket, so it locked out everyone. What that order
+    // bought — "do not run PBKDF2 while over budget" — is now its own thing
+    // (`chargeAuthWork`), which bounds the WORK without refusing a correct
+    // password.
+    const good = await b.post("login", {
       id: "alice",
       password: "password123",
     });
-    assertEquals(throttled.status, 429, "credential CHECKING stays throttled");
-    await throttled.body?.cancel();
+    assertEquals(good.status, 200, "a VALID login is served while over budget");
+    await good.body?.cancel();
 
     // …but nothing the victim does with a credential they already hold is.
     const shell = await fetch(`${b.base}/`, {
@@ -850,6 +869,45 @@ Deno.test("auth responses carry Cache-Control: no-store", async () => {
     });
     assertEquals(me.headers.get("cache-control"), "no-store");
     await me.body?.cancel();
+  } finally {
+    await b.close();
+  }
+});
+
+// ── The signup flood, and the budgets that bound it ────────────────────
+//
+// A SUCCESSFUL signup records no failure, so the failure budget never
+// throttled it: 60 anonymous signups landed in 665 ms — 60 PBKDF2-600k runs,
+// 60 permanent `users` rows, and 60 real sessions, i.e. anonymous →
+// `role:"user"` at will, reaching every `access: true` cell. `signup: true` is
+// the default, and every OTHER verifying route carries a budget explicitly "so
+// it is not an unthrottled PBKDF2 pump".
+Deno.test("budget: anonymous signup is bounded, and the shell stays served", async () => {
+  const b = await boot("signup-flood");
+  try {
+    const codes: Record<number, number> = {};
+    for (let i = 0; i < 40; i++) {
+      const r = await b.post("signup", {
+        id: `flood-${i}`,
+        password: "password123",
+      });
+      codes[r.status] = (codes[r.status] ?? 0) + 1;
+      await r.body?.cancel();
+    }
+    assert(
+      (codes[429] ?? 0) > 0,
+      `40 anonymous signups were all accepted: ${JSON.stringify(codes)}`,
+    );
+    assert(
+      (codes[201] ?? 0) > 0 && (codes[201] ?? 0) <= 12,
+      `the cap should admit a handful, not none and not all: ${
+        JSON.stringify(codes)
+      }`,
+    );
+    // A refused signup must not take the app off the air for everyone else.
+    const shell = await fetch(`${b.base}/`);
+    assertEquals(shell.status, 200, "the shell is not collateral");
+    await shell.body?.cancel();
   } finally {
     await b.close();
   }

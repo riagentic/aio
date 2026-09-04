@@ -948,3 +948,32 @@ Deno.test({
     }
   },
 });
+
+Deno.test("StateOverview: every field shows its JSON size beside it (SSR)", async () => {
+  const { sizeOf, StateOverview } = await import("./ui/state-view.tsx");
+  // The size is what the wire and SQLite carry — the JSON bytes, not V8's.
+  assertEquals(sizeOf(null), 4);
+  assertEquals(sizeOf("ab"), 4); // "ab" with its quotes
+  assertEquals(sizeOf({ a: 1 }), 7); // {"a":1}
+  assertEquals(sizeOf(undefined), 0);
+  assertEquals(sizeOf({ big: 10n }), -1); // BigInt — unserializable, shown as such
+  const state = {
+    counter: { count: 1, note: "x".repeat(2048) },
+    other: { rows: [] },
+  };
+  const html = renderToString(h(StateOverview, { state, fields: null }));
+  // Field sizes: the 2 KB note, the 1-byte count, the 2-byte empty array.
+  assertStringIncludes(html, "2.0 KB");
+  assertStringIncludes(html, "1 B");
+  assertStringIncludes(html, "2 B");
+  // Named per field (the tooltip), never per cell — cell totals are the
+  // Metrics tab's.
+  assertStringIncludes(html, "note: 2.0 KB as JSON");
+  assert(!html.includes("counter: "), "no per-cell total here");
+  // An unserializable value is said, not hidden, and does not poison siblings.
+  const bad = renderToString(
+    h(StateOverview, { state: { c: { ok: 1, nope: 10n } }, fields: null }),
+  );
+  assertStringIncludes(bad, "unserializable");
+  assertStringIncludes(bad, "1 B");
+});

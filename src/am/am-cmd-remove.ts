@@ -94,6 +94,28 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
+/** Is the directory under `installRoot()` named `name` an aio INSTALL, rather
+ *  than just a directory that happens to live there?
+ *
+ *  `~/app` (and `AIO_INSTALL_ROOT`) is a plain directory a person may keep
+ *  anything in. "Installed" was defined as "a directory exists there" — no
+ *  record, no marker — so `am installed` listed the machine's `lmstudio`,
+ *  `obsidian`, `discord`, `mega` and `ledger` folders, and `am remove
+ *  <any-of-them>` recursively deleted one with exit 0 and no confirmation.
+ *  `am upgrade` already requires a record ("no install record for X"); one
+ *  fact, two homes, and the destructive verb had the looser one. The two
+ *  existing guards (`appNameError`, "THE SECOND GUARD") both check the path's
+ *  SHAPE; neither checks membership.
+ *
+ *  Evidence, any one of: an install record; the stable launcher aio writes
+ *  (`<dir>/<name>`); or a `versions/` directory (the rollback layout). */
+export async function isAioInstall(name: string): Promise<boolean> {
+  if (await readRecord(name) !== null) return true;
+  const p = installedAppPaths(name);
+  if (await exists(p.stable)) return true;
+  return await exists(join(p.dir, "versions"));
+}
+
 /** Every path an install created, and whether it is there. Pure enough to
  *  print before anything is deleted. */
 export async function installedFootprint(name: string): Promise<
@@ -179,6 +201,26 @@ export async function cmdRemove(
     );
     Deno.exit(1);
   }
+
+  // MEMBERSHIP, before the recursive delete. See `isAioInstall`.
+  // Only when a directory is actually THERE: with none, "nothing installed as
+  // …, its data is still at …" is the answer a person is looking for, and it
+  // already exists below.
+  if (
+    !flags.force && await exists(installedAppPaths(name).dir) &&
+    !await isAioInstall(name)
+  ) {
+    outError(
+      `"${name}" is a directory under ${installRoot()}, but it is not an aio ` +
+        `install: no install record, no launcher, no versions/. Refusing to ` +
+        `delete it — this command runs a recursive remove, and that directory ` +
+        `is not aio's.\n` +
+        `  If it really is one (a very old install), re-run with --force.`,
+      mode,
+    );
+    Deno.exit(1);
+  }
+
   if (gate === "ask") {
     const answer = prompt(
       `DELETE ${dataDir} — state, logs, keys, user files? There is no undo.\n` +
@@ -307,6 +349,10 @@ export async function cmdInstalled(
         }
       } catch { /* no versions/ (an older install) — still list the app */ }
       const rec = await readRecord(e.name);
+      // Only aio's own — `installRoot()` is a plain directory a person keeps
+      // other things in, and listing them here is what made `am remove` look
+      // like it had a right to delete them.
+      if (!await isAioInstall(e.name)) continue;
       apps.push({
         name: e.name,
         path: join(root, e.name),

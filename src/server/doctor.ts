@@ -14,7 +14,12 @@ import {
   pinnedFrameworkPath,
 } from "./framework-pin.ts";
 import { VERSION } from "./aio-cli.ts";
-import { LOCAL_PIN_FILE, readFrameworkPin } from "./deno-json.ts";
+import {
+  DENO_JSON_NAMES,
+  LOCAL_PIN_FILE,
+  readDenoJson,
+  readFrameworkPin,
+} from "./deno-json.ts";
 import { buildContext } from "../../aiol/context.ts";
 import {
   checkCells,
@@ -115,14 +120,33 @@ export async function runDoctor(
 ): Promise<{ checks: Check[]; ok: boolean }> {
   const checks: Check[] = [];
   let cfg: DenoJson | null = null;
+  // THE reader (`readDenoJson`): both names Deno accepts, parsed as JSONC.
+  // This used to be a raw `JSON.parse` of `${dir}/deno.json` and nothing
+  // else, so a `deno.jsonc` app — or a `deno.json` with one `//` comment,
+  // which Deno, the scaffold, `am` and every other aio reader accept — was
+  // answered "deno.json readable: FAIL — create <dir>/deno.json — see
+  // quickstart", exit 1, with every other check skipped. The one tool whose
+  // job is to say whether the config is right said the config did not exist.
+  // "Absent" and "does not parse" are different facts, and the second one
+  // names the file and the cause (`parseDenoJson`) rather than the fix for
+  // the first.
   try {
-    const raw = await Deno.readTextFile(`${dir}/deno.json`);
-    cfg = JSON.parse(raw) as DenoJson;
-  } catch {
+    const found = await readDenoJson(dir);
+    if (found === null) {
+      checks.push({
+        name: "deno.json readable",
+        ok: false,
+        fix: `create ${dir}/deno.json — see quickstart`,
+      });
+      return { checks, ok: false };
+    }
+    cfg = found.config as DenoJson;
+  } catch (e) {
     checks.push({
       name: "deno.json readable",
       ok: false,
-      fix: `create ${dir}/deno.json — see quickstart`,
+      fix: `${e instanceof Error ? e.message : String(e)} — fix the file ` +
+        `(${DENO_JSON_NAMES.join(" or ")}) so Deno can parse it`,
     });
     return { checks, ok: false };
   }

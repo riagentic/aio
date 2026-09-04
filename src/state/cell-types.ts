@@ -255,6 +255,16 @@ export type CellAio<
   /** Names of the async methods (a `Set` — `has(key)`); `undefined` for cells
    *  with no methods at all. */
   asyncMethods?: Set<string>;
+  /** Method name → how many arguments it REQUIRES (`fn.length - 1`, the state
+   *  draft dropped). Present only for methods-form cells, where the positional
+   *  `{ args: [...] }` envelope makes the count meaningful.
+   *
+   *  It is what lets a door refuse a SHORT call. `am dispatch todo:add` with
+   *  no text ran `add(s, undefined)`, wrote a row whose declared `text` was
+   *  gone, answered `{"ok":true}`, and the persist guard only noticed
+   *  downstream. Required-only: a default or a rest parameter ends `fn.length`,
+   *  so an EXTRA argument is not knowably wrong and is not refused. */
+  methodArity?: Record<string, number>;
   /** cancelOn config — method → trigger actions (registered at compose time).
    *  `"self"` (bare or in the list) resolves to the method's own action type. */
   cancelTriggers?: Record<

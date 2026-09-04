@@ -78,6 +78,10 @@ export interface GraphValidationHandle {
   done: Promise<void>;
   getResult: () => GraphResult | null;
   setResult: (r: GraphResult) => void;
+  /** True once the boot validation has finished — or never ran (no UI
+   *  entry). Distinguishes "no verdict yet" from "no verdict ever" for the
+   *  trojan `graph` route; `getResult()` alone is null in both cases. */
+  settled: boolean;
   /** The in-memory prod-bundle judge, cached by graph hash — the watcher
    *  re-runs validation through the SAME one so an unchanged graph costs
    *  nothing on reload. */
@@ -103,6 +107,7 @@ export function startGraphValidation(
       done: Promise.resolve(),
       getResult: () => graphResult,
       setResult: set,
+      settled: true,
     };
   }
 
@@ -221,5 +226,19 @@ export function startGraphValidation(
   const setResult = (r: GraphResult) => {
     graphResult = r;
   };
-  return { done, getResult: () => graphResult, setResult, prodGraph };
+  let settled = false;
+  done.then(() => {
+    settled = true;
+  }, () => {
+    settled = true;
+  });
+  return {
+    done,
+    getResult: () => graphResult,
+    setResult,
+    prodGraph,
+    get settled() {
+      return settled;
+    },
+  };
 }
