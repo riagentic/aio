@@ -12,6 +12,7 @@
 // server cell and nothing on a client one. A stated parity contract, broken in
 // the direction that is silent: no throw, no warning, just `undefined` where a
 // value was.
+import { _resetSubs } from "../src/state/state-subs.ts";
 import { assert, assertEquals } from "@std/assert";
 import { cell } from "../src/state/cell-create.ts";
 import {
@@ -63,6 +64,7 @@ Deno.test("client cell: a sync method's return value reaches its caller", async 
   );
   // The mutation half must not have regressed while the return was added.
   assertEquals(counter.n, 7);
+  _resetSubs(); // the reactive reads armed the subscription sync
 });
 
 Deno.test("client cell: the returned value is the RAW value, not a JSON round-trip", async () => {

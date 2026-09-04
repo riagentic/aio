@@ -28,6 +28,7 @@ function freePort(): number {
  *  wolf is one people learn to re-run instead of read. Real boot failures
  *  (a throw, a missing module, a port already held) surface immediately and
  *  do not wait this out. */
+const EXPIRED = Symbol("expired");
 async function waitFor<T>(
   what: string,
   fn: () => Promise<T | null>,
@@ -35,12 +36,37 @@ async function waitFor<T>(
 ): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const v = await fn().catch(() => null);
-    if (v !== null) return v;
+    // Race the ATTEMPT, not only the gap between attempts. The deadline used
+    // to be tested solely at the top of this loop, so ONE `fn()` that never
+    // settles defeated it completely — and there is a `fn()` here that does
+    // exactly that: `await cli.ready` against a server that never came up,
+    // the shape `connectCli` documents ("`ready` unsettled … reads as a
+    // hang"). Measured: the spawned child had already exited, the runner sat
+    // on this one test for over ten minutes, and the 60s bound this helper
+    // exists for never ran. A timeout that a hang can switch off is not one.
+    let timer: number | undefined;
+    const expire = new Promise<typeof EXPIRED>((r) => {
+      timer = setTimeout(
+        () => r(EXPIRED),
+        Math.max(0, deadline - Date.now()),
+      ) as unknown as number;
+    });
+    const v = await Promise.race([fn().catch(() => null), expire]);
+    if (timer !== undefined) clearTimeout(timer);
+    if (v === EXPIRED) break;
+    if (v !== null) return v as T;
     await new Promise((r) => setTimeout(r, 200));
   }
-  throw new Error(`timeout waiting for ${what}`);
+  throw new Error(`timeout waiting for ${what} after ${timeoutMs}ms`);
 }
+
+/** Why a spawned example is not answering — filled in as soon as it exits.
+ *
+ *  `stderr: "null"` threw the child's own account of its failure away, so a
+ *  boot that crashed and a boot that is merely slow looked identical from
+ *  here: the test waited out its bound (or, before the fix above, forever) and
+ *  reported "timeout", naming nothing. The child says why it died; keep it. */
+const _why = new WeakMap<Deno.ChildProcess, { text: string }>();
 
 function spawnExample(
   target: string,
@@ -48,14 +74,44 @@ function spawnExample(
   args: string[],
   opts: { stdin?: "piped"; stdout?: "piped" } = {},
 ): Deno.ChildProcess {
-  return new Deno.Command(Deno.execPath(), {
+  const proc = new Deno.Command(Deno.execPath(), {
     env: { DENO_COVERAGE_DIR: _childCovDir },
     args: ["run", "-A", "--unstable-kv", entry, ...args],
     cwd: dir(target),
     stdin: opts.stdin ?? "null",
     stdout: opts.stdout ?? "null",
-    stderr: "null",
+    stderr: "piped",
   }).spawn();
+  const box = { text: "" };
+  _why.set(proc, box);
+  // Drained continuously: a piped stream nobody reads fills its pipe buffer
+  // and blocks the child — which would be a hang of our own making.
+  (async () => {
+    try {
+      for await (const chunk of proc.stderr) {
+        box.text += new TextDecoder().decode(chunk);
+        if (box.text.length > 8000) box.text = box.text.slice(-8000);
+      }
+    } catch {
+      // aio-ok: the stream ends when the child does; that IS the outcome.
+    }
+  })();
+  proc.status.then((st) => {
+    if (!st.success) {
+      box.text = `the example process EXITED (code ${st.code}${
+        st.signal ? `, signal ${st.signal}` : ""
+      }) before it answered.\n${box.text}`;
+    }
+  }).catch(() => {
+    // aio-ok: `kill()` below settles this the ordinary way.
+  });
+  return proc;
+}
+
+/** The child's account, for a failure message that names a cause. */
+function why(proc: Deno.ChildProcess): string {
+  const t = _why.get(proc)?.text.trim();
+  return t ? `\n--- the example said ---\n${t}` : "";
 }
 
 async function kill(proc: Deno.ChildProcess): Promise<void> {
@@ -76,8 +132,14 @@ async function smokeServerExample(
     const cli = await waitFor(
       `${target} server`,
       async () => {
+        // `readyTimeoutMs` is the framework's own answer to "a first connect
+        // that never happens", and the scaffolded client sets it — this test
+        // did not, so every attempt retried in the background forever instead
+        // of returning an answer. Bounded per attempt; `waitFor` owns the
+        // total.
         const c = connectCli<{ counter: { count: number } }>(
           `http://localhost:${port}`,
+          { readyTimeoutMs: 5_000 },
         );
         try {
           await c.ready;
@@ -87,7 +149,9 @@ async function smokeServerExample(
           return null;
         }
       },
-    );
+    ).catch((e: unknown) => {
+      throw new Error(`${(e as Error).message}${why(proc)}`);
+    });
     try {
       const before = cli.state!.counter.count;
       const bumped = new Promise<number>((resolve) => {

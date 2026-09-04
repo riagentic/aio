@@ -52,7 +52,6 @@ import {
 } from "../vitals/types.ts";
 import { formatDiagEvent } from "../vitals/diag-formatter.ts";
 import type { DiagEvent } from "../vitals/types.ts";
-import { resetTT as _resetTT } from "../air/time-travel-panel.ts";
 import { wrapTransport } from "../protocol/transport-shared.ts";
 
 // ── Re-export state-core types/functions needed by browser-air.ts ───
@@ -455,7 +454,24 @@ function _flushSyncPending(
   const pending = _syncPending.splice(0);
   for (const a of pending) {
     if (route && route(a)) continue;
-    _clientSend?.(a);
+    try {
+      _clientSend?.(a);
+    } catch (err) {
+      // ONE action must not abandon the ones behind it. A throw out of the
+      // send means the frame could not be BUILT (a transport that refuses the
+      // write queues instead of throwing — browser-air-transport's `_send`
+      // catches that itself), so this action can never be delivered: say so,
+      // and keep flushing. The bare loop dropped every later action in the
+      // boot-window buffer in silence — the same shape the offline queues were
+      // both fixed for.
+      console.error(
+        `[aio] ${a.type} was buffered during the sync-engine boot window and ` +
+          `could not be sent (${
+            err instanceof Error ? err.message : String(err)
+          }). It is dropped; the ${pending.length - pending.indexOf(a) - 1} ` +
+          `action(s) buffered after it are unaffected.`,
+      );
+    }
   }
 }
 

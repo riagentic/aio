@@ -253,6 +253,7 @@ Deno.test("kill(): a grandchild does not survive its parent", async () => {
   assert(alive(grandchild), "fixture inert — the grandchild never started");
 
   await kill(proc);
+  await proc.stdout.cancel(); // the pipe outlives the process until closed
   await new Promise((r) => setTimeout(r, 300));
   assertEquals(
     alive(grandchild),
@@ -287,6 +288,7 @@ Deno.test("killProcess: a hung app does not orphan the window it opened", async 
   // Short grace: the point is the SIGKILL path, not the wait.
   await killProcess(proc.pid, 300);
   await proc.status.catch(() => {});
+  await proc.stdout.cancel(); // the pipe outlives the process until closed
   await new Promise((r) => setTimeout(r, 300));
 
   assertEquals(

@@ -10,6 +10,7 @@
 // These assertions are ANNOTATIONS as much as expectations: each `const x: T =`
 // is a compile-time claim, and `deno test` type-checks the file, so a return
 // type that regresses to `unknown` fails here before any assertion runs.
+import { sleepFor } from "./within.ts";
 import { assertEquals } from "@std/assert";
 import { race, sleep, until } from "../src/state/async-helpers.ts";
 
@@ -34,7 +35,9 @@ Deno.test("race: narrowing on winner narrows value with it", async () => {
 });
 
 Deno.test("race: the number-as-sleep branch wins with an undefined value", async () => {
-  const r = await race({ slow: sleep(5_000), timeout: 20 });
+  const slow = sleepFor(5_000);
+  const r = await race({ slow, timeout: 20 });
+  slow.cancel(); // the loser is the test's to stop
   if (r.winner !== "timeout") throw new Error(`slow branch won: ${r.winner}`);
   const v: undefined = r.value;
   assertEquals(v, undefined);

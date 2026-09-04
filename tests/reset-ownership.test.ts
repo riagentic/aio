@@ -54,6 +54,15 @@ const OWNERS: Record<string, [Owner, string]> = {
   _resetReturnEffectHints: ["RUNTIME", "warn dedup — order-dependent unreset"],
   _resetArrayRefStats: ["RUNTIME", "diagnostic counters"],
   _resetPerfThrottle: ["RUNTIME", "error-report throttle"],
+  _resetActionWarnings: ["RUNTIME", "warn dedup — order-dependent unreset"],
+  _resetSwallowedRefusals: [
+    "RUNTIME",
+    "warn dedup — order-dependent unreset",
+  ],
+  _resetShortCallWarnings: [
+    "RUNTIME",
+    "warn dedup — order-dependent unreset",
+  ],
 
   // ── owned by a lifecycle in src/ ────────────────────────────────
   _resetSignals: ["LIFECYCLE", "state-core / standalone boot"],

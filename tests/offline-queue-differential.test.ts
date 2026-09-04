@@ -18,6 +18,7 @@
 //
 // A path that grows its own queue, its own cap handling, or its own drop
 // order goes red here without anyone having to notice it by reading.
+import { _teardownNow } from "../src/browser/protocol-subscription.ts";
 import { assertEquals } from "@std/assert";
 import {
   _registerAck,
@@ -229,6 +230,7 @@ Deno.test("offline-queue differential: the browser path IS the shared policy on 
       assertEquals(got, want, `seed ${seed} (${evs.length} events)`);
     }
   } finally {
+    _teardownNow(); // the last close scheduled a reconnect — a test owns its client
     if (prevWS === undefined) delete g.WebSocket;
     else g.WebSocket = prevWS;
     if (!prevLoc) delete g.location;

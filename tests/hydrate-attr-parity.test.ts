@@ -98,7 +98,7 @@ const CASES: Array<[string, Record<string, unknown>]> = [
   ["circle", { strokeWidth: 2, stopColor: "red" }],
 ];
 
-Deno.test("hydrate: matching server markup produces NO divergence warning", () => {
+Deno.test("hydrate: matching server markup produces NO divergence warning", async () => {
   const { doc, cleanup } = env();
   try {
     for (const [tag, props] of CASES) {
@@ -123,11 +123,11 @@ Deno.test("hydrate: matching server markup produces NO divergence warning", () =
       host.remove();
     }
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
-Deno.test("hydrate: a REAL divergence still warns (the control)", () => {
+Deno.test("hydrate: a REAL divergence still warns (the control)", async () => {
   const { doc, cleanup } = env();
   try {
     const App = () => h("div", { className: "client", style: "color:red" });
@@ -145,11 +145,11 @@ Deno.test("hydrate: a REAL divergence still warns (the control)", () => {
       `both diverged attributes must be named: ${warns[0]}`,
     );
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
-Deno.test("SSR writes a boolean form attribute as the bare token, like mount", () => {
+Deno.test("SSR writes a boolean form attribute as the bare token, like mount", async () => {
   const { doc, cleanup } = env();
   try {
     // The bug this pins: `readOnly` is the one `_DOM_PROPS` entry whose
@@ -173,11 +173,11 @@ Deno.test("SSR writes a boolean form attribute as the bare token, like mount", (
       );
     }
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
-Deno.test("a cleared style leaves no empty style attribute (mount == SSR)", () => {
+Deno.test("a cleared style leaves no empty style attribute (mount == SSR)", async () => {
   const { doc, cleanup } = env();
   try {
     for (const v of [null, false, undefined]) {
@@ -195,6 +195,6 @@ Deno.test("a cleared style leaves no empty style attribute (mount == SSR)", () =
       host.remove();
     }
   } finally {
-    cleanup();
+    await cleanup();
   }
 });

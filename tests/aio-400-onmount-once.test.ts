@@ -32,7 +32,7 @@ Deno.test("onMount fires once for a wrapper-with-children across parent re-rende
   }
   assertEquals(mounts, 1);
   t.unmount();
-  win.happyDOM.close();
+  await win.happyDOM.close();
 });
 
 Deno.test("onMount fires once even with a stable key and a sibling signal", async () => {
@@ -57,7 +57,7 @@ Deno.test("onMount fires once even with a stable key and a sibling signal", asyn
   await new Promise((r) => setTimeout(r, 3));
   assertEquals(mounts, 1);
   t.unmount();
-  win.happyDOM.close();
+  await win.happyDOM.close();
 });
 
 Deno.test("onCleanup (from onMount) fires once, only on unmount — not per re-render", async () => {
@@ -81,7 +81,7 @@ Deno.test("onCleanup (from onMount) fires once, only on unmount — not per re-r
   assertEquals(cleanups, 0); // still mounted
   t.unmount();
   assertEquals(cleanups, 1);
-  win.happyDOM.close();
+  await win.happyDOM.close();
 });
 
 Deno.test("AIO-390 preserved: ref is committed when onMount runs", async () => {
@@ -97,5 +97,5 @@ Deno.test("AIO-390 preserved: ref is committed when onMount runs", async () => {
   const t = testComponent(App, { document: doc });
   assertEquals(tagInMount, "CANVAS");
   t.unmount();
-  win.happyDOM.close();
+  await win.happyDOM.close();
 });

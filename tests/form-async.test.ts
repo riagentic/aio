@@ -211,5 +211,5 @@ Deno.test("form.bind(): reset() puts the DOM back, and the value is a snapshot",
   assertEquals(input.value, "start", "reset() must clear the DOM too");
 
   _unmount(handle);
-  win.happyDOM.close();
+  await win.happyDOM.close();
 });

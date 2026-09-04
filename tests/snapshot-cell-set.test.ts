@@ -102,6 +102,7 @@ Deno.test("am snapshot load: the WRONG app's file is refused, state untouched", 
     // `--force` is the operator saying they meant it — the same body, loaded.
     const forced = await postSnapshot(port, { nosuchcell: { x: 1 } }, true);
     assertEquals(forced.status, 200);
+    await forced.body?.cancel();
     assertEquals(
       (app.getState() as Record<string, unknown>).nosuchcell,
       { x: 1 },
@@ -143,6 +144,7 @@ Deno.test("am snapshot load: an app's OWN snapshot still round-trips", async () 
 
     const resp = await postSnapshot(port, JSON.parse(saved));
     assertEquals(resp.status, 200);
+    await resp.body?.cancel();
     assertEquals(
       (app.getState() as { rt_todo: { items: number[] } }).rt_todo.items,
       [1],

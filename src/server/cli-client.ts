@@ -20,6 +20,7 @@ import {
   v1PeerReason,
   wireError,
 } from "../protocol/envelope.ts";
+import { encodeAction } from "../state/action-encode.ts";
 import { bindCell } from "../state/cell-catalog.ts";
 import { _releaseCellBindings } from "../state/cell-reactive.ts";
 import type { CellDef, Msg } from "../state/cell-types.ts";
@@ -214,8 +215,13 @@ export function connectCli<S>(
   function _trySend(
     action: { type: string; payload?: unknown },
   ): { written: boolean; queued: boolean } {
+    // ENCODE BEFORE DECIDING WHERE IT GOES. Only the connected branch used to
+    // encode, so a value JSON cannot carry threw at the call site when
+    // connected and was queued in silence when not — the same action, two
+    // answers, and the queued one poisoned the drain below for good.
+    const frame = encodeAction(action);
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(enc("action", action));
+      ws.send(frame);
       return { written: true, queued: false };
     }
     if (queue.length < WS_MAX_QUEUE) {
@@ -332,9 +338,38 @@ export function connectCli<S>(
       const q = [...queue];
       queue.length = 0;
       _queueNoted = false;
-      for (const a of q) {
-        socket.send(enc("action", a));
+      for (let i = 0; i < q.length; i++) {
+        const a = q[i]!;
         const cid = (a as { cid?: string }).cid;
+        // Two failures, two answers. A frame that cannot be BUILT can never be
+        // sent, so it is dropped alone and its caller told; a transport that
+        // refuses the WRITE is offline, so the remainder goes back in the
+        // queue at its place in line. The bare loop had neither: one throw
+        // abandoned every action behind it and left their callers pending.
+        let frame: string;
+        try {
+          frame = encodeAction(a);
+        } catch (err) {
+          if (cid) {
+            _pending.reject(
+              cid,
+              err instanceof Error ? err : new Error(String(err)),
+            );
+          }
+          continue;
+        }
+        try {
+          socket.send(frame);
+        } catch (err) {
+          queue.unshift(...q.slice(i));
+          log.warn(
+            "cli",
+            `the queue flush stopped after ${i} of ${q.length} action(s) — ` +
+              `the socket refused the write (${err}); the rest are back in ` +
+              `the queue, in order, and go out on the next connection`,
+          );
+          return;
+        }
         if (cid) _pending.armTimer(cid);
       }
     };
@@ -526,9 +561,21 @@ export function connectCli<S>(
             methodKey: ackMethodKey(action),
             deferTimer: true,
           });
-          const sent = _trySend(
-            { ...action, cid } as { type: string; payload?: unknown },
-          );
+          let sent: { written: boolean; queued: boolean };
+          try {
+            sent = _trySend(
+              { ...action, cid } as { type: string; payload?: unknown },
+            );
+          } catch (err) {
+            // The frame could not be built. Reject the call the same way the
+            // full-queue branch below does — leaving `cid` registered with no
+            // timer armed is a promise that never settles.
+            _pending.reject(
+              cid,
+              err instanceof Error ? err : new Error(String(err)),
+            );
+            return ackd;
+          }
           if (sent.written) _pending.armTimer(cid);
           // Queued while offline: the ack clock must not run against a call
           // that has not been written yet, and if we close still holding it,
@@ -650,10 +697,20 @@ export function connectCliUDS<S>(
   function _udsTrySend(
     action: { type: string; payload?: unknown },
   ): { written: boolean; queued: boolean } {
+    // Encoded before the branch, for the reason `_trySend` gives.
+    const frame = encodeAction(action);
     if (writer) {
-      writer.write(encoder.encode(enc("action", action) + "\n")).catch(
-        () => {},
-      );
+      writer.write(encoder.encode(frame + "\n")).catch((e) => {
+        // A refused write is not a delivered action. The caller's ack clock is
+        // already running, so it heard "the server never confirmed the call"
+        // 15s later about a frame that never left this process — say which
+        // action, and now.
+        log.warn(
+          "cli",
+          `the UDS write for "${action.type}" failed (${e}) — the action was ` +
+            `NOT delivered`,
+        );
+      });
       return { written: true, queued: false };
     }
     if (queue.length < WS_MAX_QUEUE) {
@@ -695,10 +752,28 @@ export function connectCliUDS<S>(
         queue.length = 0;
         _udsQueueNoted = false;
         for (const a of q) {
-          writer!.write(encoder.encode(enc("action", a) + "\n")).catch(
-            () => {},
-          );
           const cid = (a as { cid?: string }).cid;
+          let frame: string;
+          try {
+            frame = encodeAction(a);
+          } catch (err) {
+            // Cannot be built, so it can never be sent: drop this one, tell
+            // its caller, keep flushing the rest (see connectCli's drain).
+            if (cid) {
+              _udsPending.reject(
+                cid,
+                err instanceof Error ? err : new Error(String(err)),
+              );
+            }
+            continue;
+          }
+          writer!.write(encoder.encode(frame + "\n")).catch((e) => {
+            log.warn(
+              "cli",
+              `the UDS write for "${a.type}" failed during the queue flush ` +
+                `(${e}) — the action was NOT delivered`,
+            );
+          });
           if (cid) _udsPending.armTimer(cid);
         }
 
@@ -880,9 +955,18 @@ export function connectCliUDS<S>(
             methodKey: ackMethodKey(action),
             deferTimer: true,
           });
-          const sent = _udsTrySend(
-            { ...action, cid } as { type: string; payload?: unknown },
-          );
+          let sent: { written: boolean; queued: boolean };
+          try {
+            sent = _udsTrySend(
+              { ...action, cid } as { type: string; payload?: unknown },
+            );
+          } catch (err) {
+            _udsPending.reject(
+              cid,
+              err instanceof Error ? err : new Error(String(err)),
+            );
+            return ackd;
+          }
           if (sent.written) _udsPending.armTimer(cid);
           else if (!sent.queued) {
             _udsPending.reject(

@@ -50,6 +50,15 @@ import { installCrashHandler } from "../src/diagnostics/crash-handler.ts";
 const SRC = join(dirname(fromFileUrl(import.meta.url)), "..", "src");
 const settle = (ms = 120) => new Promise((r) => setTimeout(r, ms));
 const modeOf = async (p: string) => ((await Deno.stat(p)).mode ?? 0) & 0o777;
+/** A logger a test builds by hand is a logger the test stops: `init()` arms
+ *  the heartbeat interval, and `onStop()`'s own "stopped" line queues a
+ *  flush — both are gone before the op sanitizer looks, or the test is the
+ *  leak it audits. */
+async function stopLogger(l: AioLogger | null): Promise<void> {
+  if (!l) return;
+  l.onStop();
+  await l.flush();
+}
 
 // ── 1. the client log was world-readable ─────────────────────────────
 
@@ -113,9 +122,10 @@ Deno.test("client log: a file left loose by an older build is tightened", async 
 Deno.test("logs: the log directory itself is owner-only", async () => {
   if (Deno.build.os === "windows") return;
   const base = await Deno.makeTempDir({ prefix: "aio-logdir-mode-" });
+  let logger: AioLogger | null = null;
   try {
     const dir = join(base, "log");
-    const logger = new AioLogger({ dir, level: "info", console: false });
+    logger = new AioLogger({ dir, level: "info", console: false });
     await logger.init();
     assertEquals(
       await modeOf(dir),
@@ -125,6 +135,7 @@ Deno.test("logs: the log directory itself is owner-only", async () => {
     );
     await logger.flush();
   } finally {
+    await stopLogger(logger);
     await Deno.remove(base, { recursive: true }).catch(() => {});
   }
 });
@@ -344,8 +355,9 @@ Deno.test("degraded: name and lastError are capped, like the client-side twin", 
 
 Deno.test("logger: a single line cannot be unbounded", async () => {
   const dir = await Deno.makeTempDir({ prefix: "aio-logline-" });
+  let logger: AioLogger | null = null;
   try {
-    const logger = new AioLogger({ dir, level: "info", console: false });
+    logger = new AioLogger({ dir, level: "info", console: false });
     await logger.init();
     logger.pub("error", "test", "boom " + "M".repeat(200_000));
     await logger.flush();
@@ -358,15 +370,17 @@ Deno.test("logger: a single line cannot be unbounded", async () => {
     );
     assertStringIncludes(text, "truncated");
   } finally {
+    await stopLogger(logger);
     await Deno.remove(dir, { recursive: true }).catch(() => {});
   }
 });
 
 Deno.test("logger: logBudget is enforced DURING the run, not only at the next boot", async () => {
   const dir = await Deno.makeTempDir({ prefix: "aio-logbudget-" });
+  let logger: AioLogger | null = null;
   try {
     const budget = 128 * 1024;
-    const logger = new AioLogger({
+    logger = new AioLogger({
       dir,
       level: "info",
       console: false,
@@ -393,6 +407,7 @@ Deno.test("logger: logBudget is enforced DURING the run, not only at the next bo
         `${budget / 1024}KB budget — nothing rotated mid-run`,
     );
   } finally {
+    await stopLogger(logger);
     await Deno.remove(dir, { recursive: true }).catch(() => {});
   }
 });

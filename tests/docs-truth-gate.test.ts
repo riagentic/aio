@@ -14,6 +14,7 @@
 // that stops biting fails HERE rather than the next time someone reads a page.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import {
+  anchorIssues,
   commandIssues,
   type DocFile,
   entryOf,
@@ -21,6 +22,7 @@ import {
   loadAndroidAlias,
   loadSurface,
   loadTaskNames,
+  pageLinkIssues,
   symbolIssues,
 } from "../scripts/check-docs.ts";
 
@@ -221,6 +223,62 @@ Deno.test("gate leaves counter-example prose alone but checks fences", async () 
   );
 });
 
+// ── Links between pages ───────────────────────────────────────────────
+//
+// The anchor check only ever saw links that CARRY a `#heading`. The plain
+// spelling — `[the guide](../basics/gone.md)`, 567 of the 567 page links in
+// this repo — was read by nothing, so a moved or renamed page broke every
+// reference to it in silence while the gate reported "all land" about the half
+// it looked at. Both shapes now share ONE existence rule.
+
+const NOTHING = () => false;
+
+Deno.test("page links: a dead one is caught, a live one is not", () => {
+  const docs: DocFile[] = [
+    {
+      rel: "docs/a/one.md",
+      lines: ["see [two](../b/two.md) and [gone](./x.md)"],
+    },
+    { rel: "docs/b/two.md", lines: ["# Two"] },
+  ];
+  const issues = pageLinkIssues(docs, NOTHING);
+  assertEquals(issues.length, 1, issues.join("\n"));
+  assertStringIncludes(issues[0]!, "./x.md");
+  assertStringIncludes(issues[0]!, "no such page");
+});
+
+Deno.test("page links: a fence teaches, it does not link", () => {
+  const docs: DocFile[] = [{
+    rel: "docs/a/one.md",
+    lines: ["```md", "[gone](./nope.md)", "```"],
+  }];
+  assertEquals(pageLinkIssues(docs, NOTHING), []);
+});
+
+Deno.test("page links: http(s) targets are somebody else's problem", () => {
+  const docs: DocFile[] = [{
+    rel: "docs/a/one.md",
+    lines: ["[spec](https://example.test/thing.md)"],
+  }];
+  assertEquals(pageLinkIssues(docs, NOTHING), []);
+});
+
+Deno.test("both link checks share ONE existence rule", () => {
+  // A page OUTSIDE the walked doc set (CHANGELOG.md) is a real file. Calling it
+  // missing is a false alarm, and two deciders for "does this page exist" is
+  // how one of them starts lying.
+  const docs: DocFile[] = [{
+    rel: "docs/a/one.md",
+    lines: ["[log](../../CHANGELOG.md) and [entry](../../CHANGELOG.md#v1)"],
+  }];
+  const exists = (rel: string) => rel === "CHANGELOG.md";
+  assertEquals(pageLinkIssues(docs, exists), []);
+  assertEquals(anchorIssues(docs, exists), []);
+  // …and with no such file, BOTH say so.
+  assertEquals(pageLinkIssues(docs, NOTHING).length, 1);
+  assertEquals(anchorIssues(docs, NOTHING).length, 1);
+});
+
 // ── The real tree ─────────────────────────────────────────────────────
 
 Deno.test("check:docs is green on the real docs tree", async () => {
@@ -235,4 +293,5 @@ Deno.test("check:docs is green on the real docs tree", async () => {
   assertEquals(code, 0, `check:docs failed:\n${out}`);
   assertStringIncludes(out, "Commands in docs: all resolve");
   assertStringIncludes(out, "Symbols in docs: all resolve");
+  assertStringIncludes(out, "Page links ([text](page.md)): all land");
 });

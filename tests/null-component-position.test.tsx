@@ -97,7 +97,7 @@ testUI(
   },
 );
 
-Deno.test("SSR and hydration agree about an absent component's position", () => {
+Deno.test("SSR and hydration agree about an absent component's position", async () => {
   const win = new Window({ url: "https://localhost" });
   const doc = win.document as unknown as Document;
   _setDocument(doc);
@@ -128,6 +128,6 @@ Deno.test("SSR and hydration agree about an absent component's position", () => 
     _unmount(hy);
     host.remove();
   } finally {
-    win.happyDOM.close();
+    await win.happyDOM.close();
   }
 });

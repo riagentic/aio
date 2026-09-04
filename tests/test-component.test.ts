@@ -5,7 +5,7 @@ import { h } from "../src/air/vdom.ts";
 import { onMount, useRef } from "../src/air/renderer-lifecycle.ts";
 import { testComponent } from "../src/testing/test-component.ts";
 
-Deno.test("testComponent: mounts, exposes html, unmounts", () => {
+Deno.test("testComponent: mounts, exposes html, unmounts", async () => {
   const win = new Window({ url: "https://localhost" });
   const App = () => h("div", null, "hi");
   const t = testComponent(App, {
@@ -13,10 +13,10 @@ Deno.test("testComponent: mounts, exposes html, unmounts", () => {
   });
   assertEquals(t.html(), "<div>hi</div>");
   t.unmount();
-  win.happyDOM.close();
+  await win.happyDOM.close();
 });
 
-Deno.test("testComponent: ref + onMount work through the public harness", () => {
+Deno.test("testComponent: ref + onMount work through the public harness", async () => {
   const win = new Window({ url: "https://localhost" });
   let tag: string | null = null;
   const App = () => {
@@ -31,7 +31,7 @@ Deno.test("testComponent: ref + onMount work through the public harness", () => 
   });
   assertEquals(tag, "CANVAS");
   t.unmount();
-  win.happyDOM.close();
+  await win.happyDOM.close();
 });
 
 Deno.test("testComponent: throws a clear error without a document", () => {

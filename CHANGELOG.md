@@ -1,5 +1,556 @@
 # Changelog
 
+## Unreleased — towards v1.0.0-beta1
+
+> The surface stays frozen; everything here is a fix or an addition. Collected
+> until beta1 is cut, in the order it landed.
+
+- **Every client action goes through ONE door, and that door says what the wire
+  does to it.** `serverFn` arguments have been vetted since alpha76 — refused
+  when JSON cannot carry them, warned about when JSON changes them. Cell-method
+  dispatch and CRDT ops cross the identical wire and were vetted nowhere, so
+  `cell.due(new Date())` stored a Date under `testCell` (which crosses no wire)
+  and an ISO string in a browser, with nothing said in either place: the
+  framework's own green-test-broken-prod shape, inside the framework. All four
+  doors — `state-transport.send`, the AIR transport's `_send`, the CLI client's
+  WS and UDS sends, and the sync engine's local-op path — build their frame
+  through `state/action-encode.ts` now. It REFUSES a payload JSON cannot carry
+  at all (a BigInt, a cycle) naming the action, instead of throwing
+  `Do not know how to serialize a BigInt` from inside a transport; and in DEV
+  only — prod is byte-for-byte what it was — it names every value the wire is
+  about to change, with the path and the conversion
+  (`todos:due.args[0].at: Date → string`), once per shape so a per-keystroke
+  method cannot flood. `untracked` v2 note: JSON is the reason, and only a new
+  wire codec can remove the loss itself.
+- **Three offline queues held actions that could never be sent, and lost the
+  ones behind them.** Each encoded only when CONNECTED, so an undeliverable
+  action was refused at the call site online and accepted in silence offline —
+  then threw on the flush. The isomorphic core's queue and the CLI client's two
+  queues drained first and sent second, so one throw lost every action after it
+  with their callers left pending — the exact bug their browser twin
+  (`_flushPending`) had already been fixed for, in the two places that had not.
+  The sync engine buffered an op that then failed its localStorage write with a
+  quota-shaped message blaming the browser, and was retried on every reconnect
+  for the life of the app. Every flush now tells a frame that cannot be BUILT
+  (dropped alone, its caller told) from a transport that refuses the WRITE (the
+  remainder goes back in the queue, in order, for the next open); the
+  sync-engine boot-window buffer got the same guard, and the AIR transport
+  rejects a refused call's pending ack instead of leaving it unsettled with no
+  timer armed. `tests/offline-queue-flush-loss.test.ts`,
+  `tests/cli-client-poison-action.test.ts`,
+  `tests/sync/op-payload-vetting.test.ts`,
+  `tests/sync-boot-flush-throw.test.ts`.
+- **`am` dropped releases the app's own updater was already offering.** The
+  ORDER of two version strings was unified once (`am-versions.compareVersions`
+  delegates to `updates-core`, after the two disagreed on 22 of 24 tried pairs);
+  the FILTER in front of it was left behind, with its own stricter regex.
+  Measured on tags a real publisher produces, `am` dropped `v1.2.3+build1`,
+  `v1.2.3-rc.1+abc`, `v2.0.0-RC1` and `v1.0.0-alpha77.1` — every one of which
+  the updater orders fine. A dropped tag raises nothing: `am pin latest` simply
+  answers with an older release and `am upgrade` says the app is current while
+  the app updates itself. `parseVersion` asks `isComparableVersion` now — one
+  decider, both sides — `tests/am-version-orderability.test.ts`.
+- **`testBrowser`'s not-found test launched a real browser and abandoned it.**
+  It passed `browserPath: undefined`, which falls through to `findChromium()`,
+  so on any machine that HAS a browser it spawned one at `http://127.0.0.1:1/`,
+  never awaited the promise and never closed it — a leaked child process and
+  profile directory per suite run, reported by the sanitizers against whichever
+  test came next — while both of its assertions were guarded by
+  `findChromium() === null`, so on those same machines it asserted nothing. It
+  passes a falsy path now and reaches the branch it is about, everywhere.
+- **One window teardown, because `close()` resolving is not the end.** Measured
+  in happy-dom 17.6.3: an `Immediate` scheduled by the window can run after
+  `close()` resolves and re-arm the async-task manager's settle timer, which
+  then outlives the test. `tests/router-link-browser-owned.test.ts` failed that
+  way in roughly two runs out of five ON ITS OWN — a flaky leak floor, which is
+  worse than none, because it teaches a reader that red means nothing. Every
+  awaited window teardown (the `testUI` harness included) goes through
+  `src/testing/close-window.ts`, which closes and then yields one macrotask turn
+  so the timer fires inside the test that owns it.
+- **Two functions named `isDevMode`, one import apart, answering different
+  questions.** `state/dev-flag.ts` reads `__aioDev` ("are dev diagnostics on");
+  the one in `diagnostics/logger-types.ts` asked
+  `import.meta.url.startsWith("file:///")` ("am I running from source"). The
+  whole point of dev-flag.ts is that the first question has ONE decider, and a
+  same-named neighbour is how a later edit picks the wrong one. Renamed to
+  `isRunningFromSource` — internal, no surface change.
+- **An error report wrote the app's WHOLE STATE into the log file.** The console
+  box has always capped the snapshot it prints at 200 characters, deliberately
+  and with a comment; the structured payload beside it (`err.toJSON()`, handed
+  to the logger) carried the same snapshot uncapped. So one report answered the
+  same question two ways, and the unbounded half was the one nobody watches on a
+  server. Any client can reach a reducer throw (a deeply nested argument
+  overflows the stack inside the reducer — caught and reported as
+  `REDUCE_ERROR`, which is correct), and each report then wrote the live state:
+  megabytes per error on an app holding ten thousand rows, and an error that
+  repeats fills the disk while the console stays tidy. The logged snapshot is
+  bounded now, and says what it dropped — which cells, and how many bytes each;
+  the `onError` hook and the feedback capture still receive it whole.
+  `tests/error-log-snapshot-bounded.test.ts`.
+- **A torn-down client left a listener on `document`.** The time-travel panel
+  binds `keydown` to `document` the first time a `tt-state` frame arrives and
+  puts a node in the DOM; `resetTT` removes both, and nothing called it. Its doc
+  comment said "called from browser.ts _reset() and teardown" — `browser.ts` has
+  not existed since the alpha52 decomposition — and the one import of it was
+  spelled `resetTT as _resetTT`, which is the exact alias `deno lint`'s
+  `no-unused-vars` is documented to ignore. Type-checked, linted, documented and
+  dead: one leaked listener and one orphaned node per teardown, in every route
+  change and re-mount. Wired into the client teardown, pinned by
+  `tests/teardown-timetravel-listener.test.ts`, and the CLASS is closed:
+  `check:dead-wiring` now refuses an `_`-aliased import nothing uses — the one
+  dead wiring the language tools cannot see, since the alias is what silences
+  the lint. (Six other aliased imports in `src/` were all genuinely used.)
+  Wiring it also exposed the reason it could not simply be switched on: the
+  teardown runs from a 300 ms grace TIMER, and the document can be replaced or
+  removed between that timer arming and firing — a window closing, an Electron
+  re-mount, a test tearing its DOM down first. A bare `document` reference threw
+  a `ReferenceError` out of the timer callback, which nothing can catch: it
+  failed a whole test FILE that never touched time travel. `resetTT` drops its
+  own handle whether or not a document is still there — a listener on a document
+  nobody holds any more keeps nothing alive.
+- **`_reset()` did not clear the state-shape memory, and four tests said it
+  did.** `_resetInitialShapeKeys`'s own comment read "for `_reset()`" and
+  nothing called it, so a client that started over kept comparing every frame
+  against the shape of the run before — and in the suite, one test's state
+  leaked into the next. It was invisible because all four tests in
+  `tests/aio33-state-integrity.test.ts` threw away the function's return value
+  and asserted nothing: one of them even said in a comment that "_diagEmit fires
+  but function completes without error". Deleting the whole missing-key loop
+  kept them green. They assert the returned keys now (the rewrite failed
+  immediately, which is how the reset bug surfaced), the reset happens in
+  `_resetMessageState` where it belongs — the same fact as "the next full state
+  re-baselines" — and `check:vacuous`'s ledger drops 135 → 131.
+- **`check:docs` read one of the two ways docs link to each other.** The anchor
+  check only sees a link that carries a `#heading`; a plain
+  `[the guide](../basics/gone.md)` — 567 of the 567 page links in this repo —
+  was read by nothing, so a moved or renamed page broke every reference to it in
+  silence while the gate reported "all land" about the half it looked at. Both
+  shapes now share ONE existence rule, which also stops the anchor check calling
+  a real file outside the walked doc set (`../CHANGELOG.md`) missing. Measured
+  when it landed: 0 dead links — the hole was empty and nothing was holding it
+  that way.
+- **A test helper's timeout could be switched off by the very hang it was for.**
+  `tests/examples.test.ts`'s `waitFor` checked its deadline only BETWEEN
+  attempts, so one attempt that never settled waited forever — and it had one:
+  `await cli.ready` against a server that never came up, the exact shape
+  `connectCli` documents ("`ready` unsettled … reads as a hang"). Measured this
+  session: the spawned example had already exited, the runner sat on one test
+  for over ten minutes, its 60-second bound never ran, and an eighteen-minute
+  suite produced no result and no error. Three fixes, each independently right:
+  the attempt is raced against the remaining time; the client gets the
+  `readyTimeoutMs` the framework's own scaffolded client already sets; and the
+  spawned example's `stderr` is kept instead of sent to `null`, so the failure
+  now reads `the example process EXITED (code 3) before it answered` followed by
+  what the child said, rather than `timeout`, naming nothing.
+- **`check:orphans` was on its way to red at no defect.** `deno task test`
+  resets `.aio-test-home` so no run inherits another's app DATA — and the
+  per-run LOCK directories beside it (`$XDG_RUNTIME_DIR/aio-*`, one per scoped
+  app home) were cleared by nothing at all. Measured on this machine: 664 of
+  them against a ceiling of 400, climbing by a couple of hundred per run. A gate
+  that goes red without a defect is the one failure a gate must not have: the
+  real orphan it exists for — the five-hour ghost app in its own header — would
+  be reported among six hundred false ones and read as more of the same.
+  `check-orphans.ts --clean-stale` sweeps only lock dirs with no live lock in
+  them (no process signalled, no temp home removed), and the `test` task runs it
+  right after the reset, where "no run inherits another's" was already the rule.
+- **A happy-dom window a test constructs is a resource the test owns — and 11
+  files construct one and close nothing.** `tests/sync-lazy-load.test.ts` built
+  two and discarded both (`new Window({…})` with the result unassigned); it had
+  leaked since the day it was written and only failed when the ordering shifted,
+  at which point the sanitizer reported it against the test that ran next. That
+  is the second time this class has cost a full suite run in one session, in two
+  different files, and both times it read as an unrelated test failing. The one
+  that failed is fixed; the class is now counted and may only shrink
+  (`tests/happy-dom-window-hygiene.test.ts`): 11 files named that close NOTHING,
+  and 80 that close with `happyDOM.close()` rather than the one teardown that
+  also yields the macrotask turn happy-dom needs after it. The remaining 11
+  build their window inside a `const doc = () => new
+  Window().document`
+  factory, so fixing them is a restructure per call site rather than a rename —
+  recorded rather than swept, and red the moment a twelfth appears.
+- **A dispatch storm that STOPPED was never reported as over.** The detector's
+  own doc promised "`onStorm` fires once when a storm starts and once when it
+  ends (rate 0)", and the `rate 0` ending — the commonest real recovery: the
+  feedback loop is fixed, the watcher stops — emitted nothing at all. `roll`
+  runs only inside `track(type)`, so a type nobody dispatches again never closes
+  its bucket: `onStorm` never fired its end, `storming()` went on naming the
+  type, and the operator's last word in the log was
+  `DISPATCH_STORM: … fired 40×/s`, forever. Measured: five seconds after the
+  last dispatch, `storming()` still answered `["a:b"]`. The detector stays
+  dispatch-driven — no timer is armed per app — and a storm is now closed on the
+  next dispatch of ANY type, or the next `storming()`, both of which are clock
+  reads. An app that never storms pays one integer test per dispatch, which is
+  what lets the sweep sit on the hot path.
+  - The OTHER ending (dropping under the threshold at a non-zero rate) was fixed
+    earlier by the `ended` flag — and had no test at all, so deleting the flag
+    went unnoticed. That is the trap the flag's own comment names, "a claim with
+    no test". Both endings are pinned now.
+  - `createStormDetector`'s doc comment still taught the false "(rate 0)" claim
+    four lines under the comment explaining why it was false.
+- **Creating an action log started a file read nobody waited for.**
+  `createActionLog` counted the existing file's lines in its constructor and put
+  that `Deno.readTextFile` on the write queue, where nothing awaits it until
+  someone appends or flushes — so a process (or a test) that made a log and
+  wrote nothing left the read in flight at exit. It is the same shape as the
+  post-`final` write two comments below it in the same file — "a file write
+  nobody would wait for, landing in the next process's — or the next test's —
+  time" — which had already been fixed; the constructor read was the copy left.
+  Found because `--sanitize-ops` reported it against whichever test ran next:
+  `tests/diagnostics/mod.test.ts` and `tests/spawn.test.ts` each pass ALONE and
+  failed together, two runs in three. The count is taken on first use now
+  (append or flush), which is also simply correct — it exists to enforce `max`,
+  so nothing needs it until then.
+  - The first version of this counted only on APPEND and quietly unbounded the
+    log: a log opened over a file an earlier run left oversized, then flushed
+    with nothing appended, never learned how many lines were already there.
+    `tests/diagnostics/sink-containment.test.ts` caught it in the same minute.
+- **A cell named `status` emptied the Prometheus scrape.** `getHealth` is typed
+  `() => unknown` and two shapes are accepted — the full health document and a
+  bare cells map from a host supplying its own — and which one arrived was a
+  guess on a key NAME. Both spellings of that guess have been wrong: keyed on
+  `cells`, a document for an app with no composed cells was read as the map and
+  `status`/`version`/`pid` became cell rows (fixed once, that way); keyed on
+  `status`, a bare cells map for an app with a cell NAMED `status` reads as a
+  document, `doc.cells` is undefined, and EVERY cell row disappears from the
+  scrape — silently, because a target with no cell series looks exactly like an
+  app with no cells. `healthCells` decides on the VALUES now (a cells map's
+  values are all `{ enabled, errors }` rows; a document's top-level values never
+  are), so no cell name can fool it because no cell name is consulted. Both
+  shapes still work and the third case works too.
+  `tests/health-shape-is-structural.test.ts`.
+- **A call with too FEW arguments now says so.** Measured on a running app:
+  `{"type":"c:addTwo","payload":{"args":["one"]}}` for `addTwo(s, a, b)`
+  answered `{"ok":true}` and wrote `{"a":"one"}` — the declared field simply
+  absent from the row, on every client's screen, with the persist guard naming
+  the damage one window later. TypeScript catches this for an in-process call;
+  nothing did for a call that arrives as DATA (`am dispatch`, the trojan route,
+  a stale client after a signature change). The audited shapes — no `args` at
+  all — were already refused; a SHORT but present list was not. It warns at
+  `methodArgs`, "the one place both method kinds pass through", so sync, async
+  and every transport get the identical answer, once per method and count (a
+  stale client repeats the same call forever). A WARNING rather than a refusal
+  because `fn.length` stops at the first defaulted parameter, so a method that
+  defaults in its BODY (`reset(s, to) { to ??= 0 }`) reads as requiring an
+  argument it does not — and refusing on the count would break a call that works
+  today. The warning names the spelling that CAN be told apart (`(s, to = 0)`),
+  so following it settles the ambiguity instead of silencing it.
+  `tests/short-call-warns.test.ts`.
+- **A refused write can now answer the in-process caller the way the wire
+  already does** — `aio.run({ refusalsReject: true })`. Measured on one app, one
+  cell, one method: over the wire the ack is
+  `{ ok: false, code: "ACTION_REFUSED" }` and the `await` rejects; the same call
+  in process resolved `undefined` with the state unchanged. The method DID run —
+  the refusal came after it — so the branch that rejects was skipped, and the
+  same app code got two answers to "did my write land".
+  - The flag is OFF by default and nothing changes for an app that does not set
+    it: an app doing `await c.method(); if (c.x !== want) …` in process would
+    otherwise get a rejection where it had a value.
+  - With it off, DEV warns once per method that the refusal was swallowed and
+    names the flag, so the divergence is discoverable rather than surprising.
+  - The two validate paths (methods-form and machine-form) each had their own
+    copy of "report, record, return unchanged", and the flag reached one of them
+    — the same drift one layer down. They are one `refuseValidation` now.
+    `tests/refusal-reaches-the-caller.test.ts` pins all three: the default is
+    untouched, the flag agrees with the wire, and dev says so either way.
+- **The trojan dispatch answered `ok: true` for a write the validator refused.**
+  `action-ack.ts` calls itself "ONE decider for 'did this action actually DO
+  anything?', shared by every transport that acks a client call (server-ws.ts,
+  uds.ts)", and its header names the four failures it exists for — a method the
+  cell no longer has, a cell never booted, a cell its breaker disabled, and **a
+  `validate` hook that refused the change** — because `dispatch` resolves
+  whether or not anything ran. The TROJAN route is the third transport that acks
+  a call (it is what `am dispatch`, amui and any agent reading the JSON believe)
+  and it never asked. Measured: a write `validate` refused answered
+  `{"ok":true,"unsaved":null}` with the state unchanged, against the rule this
+  same file states in its time-travel arm — "ok:true must mean EXECUTED". It
+  asks the one decider now and answers 409 with the validator's own words.
+  `tests/trojan-dispatch-refusal.test.ts`.
+- **The shutdown budget the docs QUOTE is now pinned to the one the code
+  spends.** `docs/persistence/how-it-works.md` does not merely mention those
+  numbers, it tells operators to size a supervisor from them: "anything that
+  waits for an aio app to exit before escalating to SIGKILL must wait at least
+  `SHUTDOWN_BUDGET_MS` (3 s + 5 s), or it cuts a legitimate final flush short".
+  A `TimeoutStopSec` is written from that sentence, so a constant that moves
+  while the sentence does not starts SIGKILLing legitimate final flushes —
+  losing the last persist window, silently, on machines nobody is watching. That
+  drift has already happened once here, between `am` and the runtime
+  (`shutdown-budget.ts`'s own header records it); the copy in `am` was removed
+  by making one decider, and the DOC was the copy left over — with no test
+  referencing these constants at all.
+  `tests/docs-shutdown-budget-agrees.test.ts` reads the prose and compares, and
+  was verified by moving the constant and watching it name both numbers.
+- **A journaling app's first boot warned about durability, twice, for nothing.**
+  `setWatermark` reads the journal to keep its unpersisted tail, and a journal
+  that has never been appended to has no file — so the read threw `NotFound`
+  into the catch below it and said
+  `could not compact <path> … the file keeps
+  growing until this succeeds`,
+  about a file that does not exist and is not growing. Measured on a fresh
+  `journal: true` app: twice, before any action was dispatched, so a developer's
+  first sight of the feature was a durability warning about data they did not
+  have. A warning that fires when nothing is wrong is how the ones that matter
+  come to be ignored — and the SAME message, on a journal that really cannot be
+  compacted, is one that must be read. That case is pinned beside the new
+  silence.
+- **`am replay` restated an empty journal instead of explaining it.** The
+  journal is the crash-recovery TAIL — every snapshot compacts away everything
+  at or below the watermark — so a healthy app's live journal is empty nearly
+  always, and `am replay` answered `no journal entries in range` every time.
+  Accurate, and it taught nothing about why or where a journal worth replaying
+  comes from. It now says the journal holds only what is not yet in a snapshot,
+  and points at `--from=<path>` or `persist: false`; a range that misses rows
+  the journal DOES hold names the range that has them.
+- **An `allowedOrigins` entry that can never match was accepted in silence.**
+  The allowlist reads four spellings — `"*"`, a bare hostname, a `host:port`, or
+  a full origin — and anything else never compares equal to anything, so a typo
+  is INERT: the operator believes they widened access, the app refuses their
+  client anyway, and the refusal points at "the same list the WebSocket origin
+  check reads" — a list whose entry does nothing. Measured:
+  `allowedOrigins: ["not a url at all"]` booted without a word, and so did an
+  empty string (the shape a template leaves behind). A boot warning names the
+  entry and the four spellings now. The predicate lives beside
+  `allowlistAdmits`, because a second copy of that grammar is exactly how the
+  Host check and the WS Origin check drifted apart once already; a test asserts
+  the two agree entry by entry. A warning, never a refusal — an app with a stale
+  junk entry boots today and must keep booting.
+- **`state: undefined` crashed with a TypeError from three frames down.** `null`
+  and `undefined` were EXEMPT from `cell()`'s plain-object guard, and they are
+  the two it is most needed for: `state` is required, so reaching that point
+  with nothing means the value evaluated to nothing — `state: INITIAL` where
+  `INITIAL` comes from a module that has not finished initialising is the
+  everyday way, and a circular import produces exactly it. The author got
+  `TypeError: Cannot convert undefined or null to object` out of
+  `installDefaultStateGetters`, naming neither the cell nor the cause. It names
+  both now, and says that `{}` is how to spell "no fields yet".
+- **Three ways the CLI answered a mistake with a crash or with silence.** Found
+  by typing wrong things at a real app, which is what its users do:
+  - **A flag typo read as a framework crash.** The message `parseCli` throws is
+    carefully teachable — it names the flag, offers `appFlags`, and explains why
+    a bare `--` cannot help a compiled binary — and it reached the user wrapped
+    in `error: Uncaught (in promise)` under five frames of aio internals. That
+    exact shape is quoted from a field report at the head of
+    `tests/app-flags.test.ts`; the report's other half (an app could not declare
+    its own verbs) was fixed then, the presentation was not. It prints the two
+    lines and exits 1 now — `libraryMode` keeps the throw, which is what that
+    flag is for, and the precedent is `judgePendingUpdate` ending the process
+    under the same guard for the same kind of fatal pre-boot condition.
+  - **`--tls-cert`/`--tls-key` were accepted and silently ignored** on a
+    loopback app. TLS is only consulted when a server is EXPOSED, so the files
+    were never opened — a missing path or a typo was not noticed either.
+    Measured: `--tls-cert=/nope/cert.pem --tls-key=/nope/key.pem` booted, served
+    plain HTTP, and said nothing about either path. `--no-tls` has warned about
+    precisely this since it was written ("something that does nothing must say
+    so"); the cert pair now gets the same sentence, naming which spelling was
+    used. A warning, not a refusal: a launcher that always passes the pair and
+    adds `--expose` conditionally is legitimate.
+  - **An unbindable `--host=` dumped a `URIError` from Deno's TLS internals.**
+    The port-in-use case in the same `catch` has been teachable for releases;
+    this is the other way that one call fails, and the likelier typo — a
+    non-loopback host is also treated as `--expose`, so it is not harmless. It
+    now says what could not be bound, why, what `--host=` takes, and still
+    carries what the platform said.
+- **`am timetravel goto` moved nothing and said `ok:true`, and the number it
+  takes was called the wrong thing everywhere.** `travelTo` matches by entry ID
+  (`entries.findIndex((e) => e.id === id)`) and returns the state unchanged for
+  a miss; the route had already answered ok. Meanwhile `am help`, the CLI's own
+  range message and `docs/clients/app-manager.md` all called that number an
+  INDEX. The two agree only while ids happen to equal positions — a history that
+  has never been trimmed — and `resume` truncates while the 2000-entry window
+  rolls, so after any real session the same number means a different entry or
+  none. Measured against a running app: ids `[0,4,5]`, `am tt goto 2` answered
+  ok and moved nothing. The route refuses an id no entry carries now, listing
+  the ids the app holds, and all three places say `id`. The rule was already
+  written ten lines above, about a different command: "ok:true must mean
+  EXECUTED". `tests/tt-goto-miss.test.ts`.
+- **`check:orphans` could not see the ghost it exists for.** Two holes, both
+  measured on this machine, where two apps had been holding ports for two days
+  and eighteen hours while the gate reported "no orphaned aio processes":
+  - a lock in the SHARED dir was skipped wholesale as "the machine's real apps"
+    — but a test or session that spawns an app without `childEnv()` gets the
+    default home, so its lock lands there too and could never be reported. A
+    real app does not live in a temp directory: a shared-dir lock whose recorded
+    `cwd` or `home` is under a temp root is a leftover, and nothing else there
+    is touched.
+  - "another suite is mid-run, and its apps are its business" had no clock, so a
+    ghost whose PARENT was also a ghost stayed exempt for as long as both
+    survived. A suite runs for minutes; past a four-hour grace, a live app in a
+    scoped or temp-rooted lock dir is a leftover no matter who started it.
+- **The orphan-directory ceiling drops 400 → 200.** With `--clean-stale` running
+  at the start of every suite, a run now leaves ~90 (measured twice). 400 was
+  chosen when nothing swept them and the count climbed by a couple of hundred
+  per run; a ceiling far above the real number is one that rots, and a win that
+  is not locked in is not one.
+- **Two fuzzers now refuse a run in which they fuzzed nothing.** Both check
+  their invariants inside loops over collections the fuzz itself fills — the
+  auth fuzzer over dead tokens, live sessions and removed accounts; the `own`
+  churn fuzzer over disposals and reported errors. If a step mix ever stopped
+  producing that state, the loop body would never execute, the invariant would
+  be checked ZERO times, and the run would still report "N ops, 0 violations"
+  (the `own` one printed `disposals=…` to a log line nobody reads). A fuzzer
+  that fuzzes nothing is the most confident kind of empty test, and
+  `check:vacuous` flags the shape but cannot tell it from the real thing without
+  running it. Both count their own coverage now and fail naming the invariant
+  that went dark — measured at the shipped seeds: auth I1 140, I2 51, I9 2, I12
+  3, I13 5; `own` 24 000 ops and 7 686 disposals. Verified by deleting a counter
+  and watching the run go red. `check:vacuous` 131 → 124, the seven loops
+  silenced in place against the assertion that now guards them rather than left
+  on the ledger.
+- **The leak sanitizers are on.** Deno 2.9 made `--sanitize-ops` and
+  `--sanitize-resources` opt-in and no aio task passed them, so the suite had no
+  leak floor at all — a test could leave a timer, a socket, a file, a watcher or
+  a child behind and stay green. Measured first: 729 of 7210 tests failed with
+  the flags on, dominated by two framework timers (a finished async call's
+  half-way heartbeat, 207; the checkpoint debounce re-armed after the final
+  flush, 269). Fixed at the source, each pinned by
+  `tests/sanitizer-leak-floor.test.ts`, which holds without the flags: every
+  completed async call disarmed its heartbeat late; the checkpoint re-armed on
+  the teardown dispatches; **a boot that refused left everything started before
+  the refusal running** — the lock, the vitals sampler, the logger heartbeat,
+  the SQLite worker, the pool — so `aio.run` now unwinds each boot step in
+  reverse; a throwing user `onStop` skipped the logger teardown; process-wide
+  SIGINT/SIGTERM/SIGHUP listeners are released with the last runtime;
+  `race({ timeout })` kept the losing timer armed (a CLI with its answer would
+  not exit); a drain that sealed with effects running left their hard-timeout
+  timers; the browser transport's reconnect timer outlived teardown; `testUI`
+  opened a real WebSocket to the happy-dom origin for any `useAio()` component.
+  The `test`, `test:core` and `check:coverage` tasks carry the flags,
+  `check:sanitizers` goes red if a task drops them, and `docs/testing/README.md`
+  says what is true (including that on Deno 2.9.6 a per-test
+  `sanitizeOps: false` is not honoured under `--sanitize-ops`, so an ops leak is
+  fixed, never opted out). Six resource opt-outs remain, all one reason: esbuild
+  owns its transpile child's handle. The first full run with the floor on found
+  one more: `am surface --server` rendered its inspection window and closed it
+  without awaiting, so the window's timers outlived every call — one leak per
+  inspection on a long-running server. Awaited now.
+- **`check:release` names the tests that failed and keeps every gate's full
+  log.** Its report kept an eight-line tail per gate; the tail of an
+  eighteen-minute suite is type-check chatter, and the test that failed was
+  twelve thousand lines up, so a red `test` gate meant re-running the whole
+  suite by hand to learn a name (a trap this project had already recorded
+  twice). The runner now harvests `… FAILED` lines from the stream as it goes by
+  and lists them in the verdict, and every gate's output is streamed to
+  `.aio/release-check/<gate>.log`, kept even when the gate hangs and is killed.
+- **A tag is cut only from the tree `check:release` ran on.** `check:release`
+  now writes `.aio/release-stamp.json` on full success, keyed by the hash of the
+  working tree (`git write-tree` through a throwaway index — untracked files
+  count, ignored ones do not), and `deno task check:release-stamp` refuses
+  unless the tree at hand is the stamped one for the declared version. The
+  release squash keeps the same tree and therefore the same stamp; one edit
+  after the check invalidates it. Four gates were red at the alpha76 tag while
+  every note since said "green" — a stale green reads like a current one until
+  the tree itself is the key. `.katana/release.md` lists the new gate.
+- **`check:lock` reads imports through `codeMask`.** The scanner stripped
+  comment lines and trailing `//` by regex, so a specifier the code merely talks
+  about — in a string, a template the linter builds, a regex literal matching
+  import statements — could make the gate lie, and a real import on a line
+  shared with a comment could hide. Same decider as the graph validator now;
+  pinned by `tests/lock-is-pinned.test.ts`.
+- **Three `op-rejected` sends in the sync server were silent when the socket
+  refused them** (`/* client gone */`). They go through the file's own `sendTo`
+  now: debug when the peer is already gone, a warning naming the lost frame when
+  the socket was open. `check:silent-catch` ceiling 335 → 332.
+- **`amui` lists running apps by default, with an `all` switch.** A machine that
+  has built forty aio apps showed forty stopped entries and the two that
+  mattered somewhere in the middle. `running (N)` / `all (M)` sits under the
+  search box, the choice is remembered per browser, a search always looks at
+  every app, and the selected app stays visible either way; with nothing running
+  the list says so and offers `show all`. Start, Tasks and Codebase keep working
+  on stopped apps — they are one click away, not gone.
+- **`am restart` swallowed a refused final write and never restarted the app.**
+  It ran `cmdStop` in quiet mode, whose `exit 1` fired inside restart: the app
+  stopped, the `NOT SAVED` verdict was swallowed, nothing came back up, and
+  `am watch` lost its watcher the same way. Restart prints the verdict and still
+  restarts; `am watch` keeps watching.
+- **`am snapshot load` said "loaded" before the write.** `loadSnapshot` only
+  scheduled the persist; the reply and the exit code left first. The trojan
+  route flushes and carries a refusal as `unsaved`; `am` prints `NOT SAVED` and
+  exits 1.
+- **The dispatch ack now says what it means, and carries the verdict.**
+  `ok: true` means APPLIED — the method ran, the commit is broadcast — and never
+  meant "on disk"; the docs say so now. The reply also carries `unsaved` (the
+  persistence verdict health reads, no flush forced) so an agent reading the
+  JSON is told when the write path is refusing; an older server omits the field
+  and `am` asks health instead.
+- **A dead journal never reached health.** A refused append reported
+  `PERSIST_ERROR` and flushed at once (the write landed in the snapshot), but
+  `/__aio/health` stayed "healthy" while every action was unrecoverable from the
+  journal. Health goes `degraded` on the first refusal and recovers on the next
+  landed append; a flush that itself throws in that path is a loud error, not a
+  swallowed promise.
+- **The durability contract is a catalog with a test.** Every door that answers
+  after a write — `am persist`, `stop`, `restart`, `snapshot`, `dispatch`, the
+  trojan routes, the journal, the shutdown flush, updates — has a row in
+  `tests/durability-verdict-catalog.test.ts` naming the verdict it consults, so
+  the next door added without one is caught. The shutdown flush's choice (log +
+  `am stop` exits 1; the process itself exits 0) is documented in
+  `docs/persistence/how-it-works.md`.
+- **A rollback that fails twice says where the artifact went.** On the flat
+  layout, when `previous → current` fails and putting the failed build back
+  fails too, the user was left with an EMPTY `current`, the failed build at
+  `<current>.failed-<timestamp>` named nowhere, and an error about the second
+  rename only; the boot log then claimed `current` still held the old build.
+  Every failure exit names all three paths and the one command that recovers
+  (`mv`, or `ln -sfn` on the versioned layout where a `.rollback` link is left
+  behind). Five tests force real kernel refusals (a read-only parent, a
+  cross-filesystem move, a foreign `.rollback` directory).
+- **README says where aio is proven**: Linux server, browser, Electron AppImage
+  and the fresh-Ubuntu lab are release gates; the Windows scripts run under
+  Wine; a real Windows or macOS machine, an Android device and iOS are not gates
+  yet, and `deno task check:proof` prints the measured matrix.
+- **A `testCell` test that scheduled nothing no longer passes for it.** A
+  framework effect — `schedule.after/every/at/cron`, `own.set/dispose` — has no
+  clock and no resource table in `testCell`, and the root executor has refused
+  one by name since alpha77. But it only refuses what something EXECUTES, and a
+  test that asserts on state and never calls `settle()` executes nothing: that
+  is the shape most tests have, so it was the shape that stayed silent.
+  `s.$do(schedule.after(…))` armed no timer, `own.set()` leaked its factory into
+  the pending map, and the test was green — the harness more permissive than
+  production, the one direction this project forbids. An emitted framework
+  effect that the test neither ran nor READ is now refused at the end of the
+  test too, with the same message naming `bootCells`/`testUI`. Reading it is
+  asserting on it, so `t.getEffects()`, `t.expect.effects` and
+  `t.expect.effectCount` all leave it alone — one definition of "the test looked
+  at it", shared by every door, per effect rather than per test, so an early
+  read cannot silence a later dispatch. The ledger spans every dispatch, not
+  just the last: `t.send.increment(); t.send.reset();` — a method that schedules
+  followed by one that does not — used to drop the effect out of view before the
+  check could see it, which is the ordinary multi-dispatch test, so it was most
+  of them. Measured on a freshly scaffolded counter app whose `increment()`
+  armed an idle-reset: the generated starter test passed green with no timer
+  armed.
+- **`schedule.poll` and `schedule.backoff` name their OWN option when it is not
+  a duration.** The declarative `aio.run({ schedules })` refuses `every: "5m"`
+  by name and teaches the fix; the imperative helpers did the arithmetic first,
+  so an unset config value or a CLI-style string became `NaN` and travelled —
+  surfacing much later as `schedule.after '<id>': ms must be finite`, naming an
+  API the app never called and a key it never wrote. Non-finite always threw; it
+  threw the wrong sentence, somewhere else. `base`, `every`, `factor` and `max`
+  are now checked where they are written. Every valid shape keeps the exact
+  delay it produced before. Related: `NaN` and `Infinity` no longer render as
+  `number null` in a schedule refusal (`JSON.stringify` maps both to `null`) —
+  the two likeliest bad durations are the ones these validators exist to catch.
+- **An app that comes back from a crash now says so.** A graceful shutdown
+  removes the single-instance lock, so a lock whose owner is dead is proof the
+  last run ended abruptly — SIGKILL, an OOM kill, a power cut. Persistence is
+  debounced, so whatever was committed inside the last window died with the
+  process, and the app then boots looking perfectly healthy, quietly older than
+  it was. Measured on a scaffolded counter driven through `am`: `-9` at kill
+  time, `-8` after the restart, and not one line logged. The two sibling reclaim
+  paths in the same function — an unreadable lock, a zombie listener — both
+  already spoke; the commonest of the three was the mute one. It now warns with
+  the dead pid and the knob that closes the window (`journal: true`, verified
+  end to end: with the journal on, the same SIGKILL loses nothing). A clean
+  restart stays silent.
+- **A test whose NAME was the only thing making a claim.**
+  `counter buttons
+  carry t= names, so they surface as MinusButton/PlusButton`
+  asserted only that the generated TSX contains `t="minus"` — and the sentence
+  it was named for is false: a `t=` name is taken VERBATIM, which is the whole
+  point of writing one. Driving a scaffolded app through `am surface` says
+  `minus`, `ResetButton`, `plus`. Those three are what a user types into
+  `am trigger` and `ui.App.*`, so the test now renders the scaffold's three
+  buttons and clicks them by those names.
+
 ## v1.0.0-alpha77 — the page the browser was actually served (2026-09-04)
 
 > The public surface is frozen from this release on

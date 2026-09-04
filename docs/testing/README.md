@@ -51,13 +51,19 @@ compiled binary that re-execs itself, a Wine or VM child). Everything else
 cleans up — await what you started, close what you opened, `await using` what
 has a disposer.
 
-**They are currently OFF, and that is the honest state.** Deno 2.9 made
-`--sanitize-ops` / `--sanitize-resources` opt-**in** (they used to be on by
-default) and no aio task passes them, so the suite has no leak floor right now:
-measured on 2026-09-04, turning them on reds **702 of 7009** tests, mostly
-booted test apps that leave their file watcher behind. `check:sanitizers` says
-so on every run and `todo.md` carries the work. Until it is done, the ratchet
-above freezes opt-outs from a mechanism that is not running.
+**They run.** Deno 2.9 made `--sanitize-ops` / `--sanitize-resources` opt-**in**
+(they used to be on by default), so the leak-floor tasks — `test`, `test:core`
+and `check:coverage` — pass them explicitly, and `deno task check:sanitizers`
+goes red if a task drops them. A bare `deno test -A tests/x.test.ts` runs
+without the flags; a test that pins a teardown sets
+`sanitizeOps: true, sanitizeResources: true` on itself so the floor holds from
+any invocation (`tests/sanitizer-leak-floor.test.ts` is the shape). For a "did
+it hang?" race against a deadline use `within()` from `tests/within.ts` — a bare
+`Promise.race([work, sleep])` leaves the losing timer armed, and the sanitizer
+names it. Measured on Deno 2.9.6: under `--sanitize-ops` a per-test
+`sanitizeOps: false` is NOT honoured (the flag wins), while
+`sanitizeResources: false` is — so an op leak has to be fixed, and only a
+resource the test genuinely cannot close (esbuild's service child) is opted out.
 
 ## Driving the app you are running
 

@@ -247,13 +247,21 @@ export function buildLegacyConfig(
           getState: () => appRef.current!.getState(),
         });
       }
-      if (fc.onStop) await fc.onStop();
-      logger?.onStop();
-      // Drain in-flight writes before clearing the singleton. Without this,
-      // the final "stopped" entry + any late error logs race the process exit
-      // and can be lost (F-3).
-      await logger?.flush();
-      setLogger(null);
+      try {
+        if (fc.onStop) await fc.onStop();
+      } finally {
+        // ALWAYS — a hook that throws (a dispatch from `onStop` is refused,
+        // and an app that awaits it throws) used to skip everything below:
+        // the heartbeat interval stayed armed and the "stopped" line was
+        // never written, so the one shutdown that had something to report
+        // was the one that kept the process alive and said nothing.
+        logger?.onStop();
+        // Drain in-flight writes before clearing the singleton. Without this,
+        // the final "stopped" entry + any late error logs race the process
+        // exit and can be lost (F-3).
+        await logger?.flush();
+        setLogger(null);
+      }
     },
     onRestore: onRestore as AioConfig<
       Record<string, unknown>,

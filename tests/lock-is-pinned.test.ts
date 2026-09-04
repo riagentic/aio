@@ -68,3 +68,23 @@ Deno.test("lock: this repo's own deno.lock has no open-ended request", async () 
 // The whole-tree sweep is `deno task check:lock`, which runs in CI and in
 // release-check.ts — repeating it here would be a second decider for the same
 // question, and the two would drift.
+
+Deno.test("unpinnedImports: a specifier the code talks ABOUT is not an import", () => {
+  // Comments, strings, templates and regex literals — every non-code home a
+  // specifier can have. The scanner reads offsets through codeMask now; the
+  // old line-stripper only knew about comments.
+  const src = [
+    `// import { x } from "npm:left-pad";`,
+    `/* import("jsr:@std/assert") */`,
+    `const s = "from 'npm:react'";`,
+    'const t = `import "npm:esbuild"`;',
+    `const re = /from "npm:[^"]+"/;`,
+    `const doc = "see import('npm:chalk') in the guide";`,
+  ].join("\n");
+  assertEquals(unpinnedImports(src), []);
+});
+
+Deno.test("unpinnedImports: a real import beside a comment on the same line still counts", () => {
+  const src = `import { x } from "npm:left-pad"; // pinned? no`;
+  assertEquals(unpinnedImports(src), ["npm:left-pad"]);
+});

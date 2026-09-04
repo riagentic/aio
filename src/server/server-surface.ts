@@ -94,6 +94,16 @@ export async function renderHeadlessSurface(
   } catch (e) {
     return { ok: false, error: `surface: server-side render failed: ${e}` };
   } finally {
-    win?.happyDOM?.close()?.catch?.(() => {});
+    // AWAITED: the window's own timers (happy-dom's) must be gone before this
+    // returns. A fire-and-forget close left them running past the caller —
+    // exactly what the leak sanitizers report as a timer that outlived the
+    // test, and what a long-running server accumulates one inspection at a
+    // time.
+    try {
+      await win?.happyDOM?.close();
+    } catch {
+      // aio-ok: teardown of a transient inspection window — the surface (or
+      // the render error) was already returned above; nothing else to say
+    }
   }
 }

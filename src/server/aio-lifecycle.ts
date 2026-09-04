@@ -15,7 +15,12 @@ import { type BootExtras, bootLines, buildFacts } from "./boot-facts.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { discoverySupported, startDiscoveryResponder } from "./discovery.ts";
 import { instances, isProcessAlive } from "./single-instance-lock.ts";
-import { shutdownAllRuntimes, stopProcess } from "./shutdown.ts";
+import {
+  hasProcessListener,
+  installProcessListener,
+  shutdownAllRuntimes,
+  stopProcess,
+} from "./shutdown.ts";
 import { generatePin } from "./pairing.ts";
 import { appKeyPath } from "./app-key.ts";
 import { type Log, log as globalLog } from "../diagnostics/logger-api.ts";
@@ -32,8 +37,6 @@ import {
 } from "./dev-restart.ts";
 import { count } from "../diagnostics/fmt.ts";
 
-/** One SIGHUP guard per process — see the headless branch in startLifecycle. */
-let _sighupGuarded = false;
 /** One parent watch per process — see `AIO_PARENT_PID` in startLifecycle. */
 let _parentWatched = false;
 
@@ -633,15 +636,14 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     // and a handler per aio.run() would accumulate for its lifetime. Guarded
     // once per process otherwise — several apps in one process (the supported
     // disjoint-multi-app pattern) need one listener, not one each.
-    if (!libraryMode && !_sighupGuarded) {
-      _sighupGuarded = true;
-      try {
-        Deno.addSignalListener("SIGHUP", () => {
-          log.debug(
-            "SIGHUP ignored — headless apps outlive their parent shell",
-          );
-        });
-      } catch { /* not supported on this platform (Windows) */ }
+    // Through the process registry, so the last app to close removes it
+    // (a platform without SIGHUP — Windows — simply installs nothing).
+    if (!libraryMode && !hasProcessListener("SIGHUP")) {
+      installProcessListener("SIGHUP", () => {
+        log.debug(
+          "SIGHUP ignored — headless apps outlive their parent shell",
+        );
+      });
     }
   } else if (useElectron && !hasDesktopSession()) {
     // A desktop app on a machine with no desktop. Launching Electron here

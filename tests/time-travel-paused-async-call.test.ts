@@ -11,6 +11,7 @@
 // sends, then the table of refusal kinds × sync/async × entry point, each
 // asserting the caller settles within 100ms with the door's own reason — and
 // never with "may still be running", which is only true of a method that ran.
+import { within } from "./within.ts";
 import { assert, assertRejects, assertStringIncludes } from "@std/assert";
 import { aio, cell } from "../mod.ts";
 import { dec, enc } from "../src/protocol/envelope.ts";
@@ -198,12 +199,11 @@ Deno.test("WS: an unknown method, unknown cell, or framework-internal type is an
       for (const isAsync of [false, true]) {
         const tag = `${label} (${isAsync ? "async" : "sync"} shape)`;
         const t0 = performance.now();
-        const outcome = await Promise.race([
+        const outcome = await within(
           wsCall(ws, type, { async: isAsync }).then(() => "ok", (e) => e),
-          new Promise<Error>((r) =>
-            setTimeout(() => r(new Error("NO ACK within 300ms")), 300)
-          ),
-        ]);
+          300,
+          new Error("NO ACK within 300ms"),
+        );
         const took = performance.now() - t0;
         const msg = outcome === "ok"
           ? "ok"

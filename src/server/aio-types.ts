@@ -770,6 +770,21 @@ export type CellsConfig = {
    *  stays fatal. Set `false` for fail-fast under a supervisor that restarts
    *  you on purpose. */
   guardDispatches?: boolean;
+  /** Answer an in-process caller the way the WIRE already answers: a write the
+   *  reduce REFUSED (a `validate` hook, a machine guard) rejects
+   *  `await cell.method()` instead of resolving.
+   *
+   *  Measured on one app, one cell, one method: over the wire the ack is
+   *  `{ ok: false, code: "ACTION_REFUSED" }` and the await rejects; the same
+   *  call in process resolved `undefined` with the state unchanged. The method
+   *  DID run — the refusal came after it — so the branch that rejects was
+   *  skipped, and the same app code got two answers to "did my write land".
+   *
+   *  Opt-in, because it cannot be the default in 1.x: an app that does
+   *  `await c.method(); if (c.x !== want) …` in process would get a rejection
+   *  where it had a value. Dev warns once per method whenever a refusal is
+   *  swallowed, so the divergence is discoverable either way. Default: false. */
+  refusalsReject?: boolean;
   /** Durable action journal: every committed action is appended to
    *  a durable log; on the next boot the actions after the last snapshot are
    *  replayed on top of it, so a SIGKILL / power cut in the persist debounce

@@ -284,8 +284,11 @@ Deno.test("blobs over HTTP: 200, Content-Length, immutable caching, Range 206/41
   await cond.body?.cancel();
 
   // Unknown + malformed ids: same 404 (no probe surface).
-  assertEquals((await srv.fetch(BLOB_URL_PREFIX + "0".repeat(64))).status, 404);
-  assertEquals((await srv.fetch(BLOB_URL_PREFIX + "not-an-id")).status, 404);
+  for (const id of ["0".repeat(64), "not-an-id"]) {
+    const missing = await srv.fetch(BLOB_URL_PREFIX + id);
+    assertEquals(missing.status, 404);
+    await missing.body?.cancel();
+  }
 
   // Bytes are read-only over HTTP.
   const post = await srv.fetch(url, { method: "POST", body: "x" });

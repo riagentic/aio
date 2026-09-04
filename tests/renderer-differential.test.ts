@@ -586,7 +586,7 @@ Deno.test("differential: every node kind the generator makes, a mutation can cha
   );
 });
 
-Deno.test("differential: incremental diff renders what a fresh render would", () => {
+Deno.test("differential: incremental diff renders what a fresh render would", async () => {
   const win = new Window({ url: "https://localhost" });
   const doc = win.document as unknown as Document;
   const warnings: string[] = [];
@@ -641,7 +641,7 @@ Deno.test("differential: incremental diff renders what a fresh render would", ()
   } finally {
     setDevMode(false);
     console.warn = origWarn;
-    win.happyDOM.close();
+    await win.happyDOM.close();
   }
   // A fuzzer that explored nothing is a vacuous green (see fuzz-seed.ts).
   assert(
@@ -652,7 +652,7 @@ Deno.test("differential: incremental diff renders what a fresh render would", ()
   );
 });
 
-Deno.test("differential: SSR + hydrate + diff renders what mount would", () => {
+Deno.test("differential: SSR + hydrate + diff renders what mount would", async () => {
   const win = new Window({ url: "https://localhost" });
   const doc = win.document as unknown as Document;
   let hydrated = 0, fellBack = 0;
@@ -706,7 +706,7 @@ Deno.test("differential: SSR + hydrate + diff renders what mount would", () => {
       }
     }
   } finally {
-    win.happyDOM.close();
+    await win.happyDOM.close();
   }
   // If every round fell back to a full render, this suite proved only that the
   // fallback works — the hydrate path itself would be untested.
@@ -744,7 +744,7 @@ function strip(s: Spec): any {
 // them. The shape that broke it was the most ordinary one there is — two
 // adjacent text children (`{"Hello "}{name}`), which HTML parsing merges into a
 // single node that the hydrator then could not split.
-Deno.test("differential: hydrate ADOPTS the server's markup — no fallback, no node re-created", () => {
+Deno.test("differential: hydrate ADOPTS the server's markup — no fallback, no node re-created", async () => {
   const win = new Window({ url: "https://localhost" });
   const doc = win.document as unknown as Document;
   let elementsAdopted = 0, clicksProven = 0;
@@ -848,7 +848,7 @@ Deno.test("differential: hydrate ADOPTS the server's markup — no fallback, no 
       );
     }
   } finally {
-    win.happyDOM.close();
+    await win.happyDOM.close();
   }
   // Negative evidence is worthless if the sweep touched nothing.
   assert(
@@ -912,7 +912,7 @@ Deno.test("differential: renderToStream emits exactly what renderToString does",
 // server rendered). Every difference was silent and none of it was reachable
 // from a test that used only one of the two forms — so the equivalence is
 // asserted directly, for every prop shape the fuzzer knows plus the SVG ones.
-Deno.test("differential: a signal-valued prop renders exactly what the plain value does", () => {
+Deno.test("differential: a signal-valued prop renders exactly what the plain value does", async () => {
   const win = new Window({ url: "https://localhost" });
   const doc = win.document as unknown as Document;
   let compared = 0;
@@ -964,7 +964,7 @@ Deno.test("differential: a signal-valued prop renders exactly what the plain val
       }
     }
   } finally {
-    win.happyDOM.close();
+    await win.happyDOM.close();
   }
   assert(compared >= 15, `only ${compared} prop shapes compared`);
 });
@@ -1117,7 +1117,7 @@ function normAttrOrder(html: string): string {
   );
 }
 
-Deno.test("differential: a keyed diff MOVES the node it already has — never re-creates it", () => {
+Deno.test("differential: a keyed diff MOVES the node it already has — never re-creates it", async () => {
   const win = new Window({ url: "https://localhost" });
   const doc = win.document as unknown as Document;
   let identitiesChecked = 0;
@@ -1179,7 +1179,7 @@ Deno.test("differential: a keyed diff MOVES the node it already has — never re
     }
   } finally {
     _stampSid = false;
-    win.happyDOM.close();
+    await win.happyDOM.close();
   }
   assert(
     identitiesChecked > ROUNDS * STEPS,
@@ -1286,7 +1286,7 @@ const FORM_CASES: FormCase[] = [
   },
 ];
 
-Deno.test("differential: a form control holds the same live state after SSR+hydrate as after mount", () => {
+Deno.test("differential: a form control holds the same live state after SSR+hydrate as after mount", async () => {
   const win = new Window({ url: "https://localhost" });
   const doc = win.document as unknown as Document;
   try {
@@ -1342,7 +1342,7 @@ Deno.test("differential: a form control holds the same live state after SSR+hydr
       }
     }
   } finally {
-    win.happyDOM.close();
+    await win.happyDOM.close();
   }
 });
 
@@ -1378,7 +1378,7 @@ const REMOVAL_CASES: Array<[string, Record<string, unknown>, string[]]> = [
   }, ["value", "checked", "disabled"]],
 ];
 
-Deno.test("differential: removing a prop leaves the control where a fresh render of the same model puts it", () => {
+Deno.test("differential: removing a prop leaves the control where a fresh render of the same model puts it", async () => {
   const win = new Window({ url: "https://localhost" });
   const doc = win.document as unknown as Document;
   try {
@@ -1418,7 +1418,7 @@ Deno.test("differential: removing a prop leaves the control where a fresh render
       }
     }
   } finally {
-    win.happyDOM.close();
+    await win.happyDOM.close();
   }
 });
 
@@ -1446,7 +1446,7 @@ Deno.test("differential: removing a prop leaves the control where a fresh render
 const Boom = CThrow;
 const Pending = CPending;
 
-Deno.test("differential: a boundary showing a fallback keeps its slot and patches its nodes", () => {
+Deno.test("differential: a boundary showing a fallback keeps its slot and patches its nodes", async () => {
   const win = new Window({ url: "https://localhost" });
   const doc = win.document as unknown as Document;
   const warnings: string[] = [];
@@ -1578,7 +1578,7 @@ Deno.test("differential: a boundary showing a fallback keeps its slot and patche
   } finally {
     setDevMode(false);
     console.warn = origWarn;
-    win.happyDOM.close();
+    await win.happyDOM.close();
   }
 });
 
@@ -1591,7 +1591,7 @@ Deno.test("differential: a boundary showing a fallback keeps its slot and patche
 // over it. The replay then walked one node too far and removed the boundary's
 // NEXT SIBLING: keyed rows inside an `<ErrorBoundary>` that start throwing
 // silently deleted the element after the boundary, and nothing said so.
-Deno.test("differential: a boundary that falls back removes its own region and nothing else", () => {
+Deno.test("differential: a boundary that falls back removes its own region and nothing else", async () => {
   const win = new Window({ url: "https://localhost" });
   const doc = win.document as unknown as Document;
   try {
@@ -1633,7 +1633,7 @@ Deno.test("differential: a boundary that falls back removes its own region and n
       );
     }
   } finally {
-    win.happyDOM.close();
+    await win.happyDOM.close();
   }
 });
 
@@ -2204,7 +2204,7 @@ type XRun = {
   rawHtmlElements: number;
 };
 
-function runExtended(mode: "diff" | "hydrate"): XRun {
+async function runExtended(mode: "diff" | "hydrate"): Promise<XRun> {
   const win = new Window({ url: "https://localhost" });
   const doc = win.document as unknown as Document;
   const listeners = xListenerCounter(win, doc);
@@ -2377,7 +2377,7 @@ function runExtended(mode: "diff" | "hydrate"): XRun {
     setDevMode(false);
     console.warn = origWarn;
     listeners.restore();
-    win.happyDOM.close();
+    await win.happyDOM.close();
   }
   return {
     rounds,
@@ -2444,12 +2444,12 @@ function assertExercised(run: XRun, mode: "diff" | "hydrate"): void {
   }
 }
 
-Deno.test("extended differential: portals, signal children, refs, handlers and raw html", () => {
-  assertExercised(runExtended("diff"), "diff");
+Deno.test("extended differential: portals, signal children, refs, handlers and raw html", async () => {
+  assertExercised(await runExtended("diff"), "diff");
 });
 
-Deno.test("extended differential: the same alphabet through SSR + hydrate", () => {
-  assertExercised(runExtended("hydrate"), "hydrate");
+Deno.test("extended differential: the same alphabet through SSR + hydrate", async () => {
+  assertExercised(await runExtended("hydrate"), "hydrate");
 });
 
 // The extended alphabet checks itself, for the same reason the base one does:
@@ -2493,7 +2493,7 @@ Deno.test("extended differential: every node kind the generator makes, a mutatio
 // portal dragged its nodes to the FRONT of the target, over the first portal's
 // content, and closing one could delete the other's text. Each portal now opens
 // its region with an anchor comment in the target (see `VNode._anchor`).
-Deno.test("a portal shares a target without touching the other portal's nodes", () => {
+Deno.test("a portal shares a target without touching the other portal's nodes", async () => {
   const win = new Window({ url: "https://localhost" });
   const doc = win.document as unknown as Document;
   try {
@@ -2540,6 +2540,6 @@ Deno.test("a portal shares a target without touching the other portal's nodes", 
     _diff(host, null, v2, { doc });
     assertEquals(target.innerHTML, "", "portal content leaked in the target");
   } finally {
-    win.happyDOM.close();
+    await win.happyDOM.close();
   }
 });

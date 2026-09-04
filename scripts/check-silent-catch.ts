@@ -40,14 +40,14 @@ import { codeText } from "../src/diagnostics/code-mask.ts";
 // (`sync/server-handler.ts`) became one `sendTo` that names the frame it could
 // not deliver, and the five harness swallows in `src/testing/` were either
 // made loud or justified in place.
-const CEILING = 335;
+const CEILING = 331;
 
 /** The budget for the PROMISE spelling, counted separately.
  *
  *  Separately because the two are one rule but not one number: folding 102
  *  pre-existing swallows into `CEILING` would move it upward, and this file's
  *  own contract is that it only ever moves down. Two ratchets, both falling. */
-const HANDLER_CEILING = 95;
+const HANDLER_CEILING = 92;
 
 const ROOT = new URL("../src/", import.meta.url).pathname;
 

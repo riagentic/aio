@@ -3,6 +3,7 @@
 // behind another has not been posted yet: it was neither awaited nor aborted,
 // `terminate()` killed the worker under it, and its promise never settled. On
 // a dirty shutdown that is the most recent state change, lost silently.
+import { within } from "./within.ts";
 import { assert, assertEquals } from "@std/assert";
 import { createDB } from "../src/server-entry.ts";
 
@@ -26,12 +27,7 @@ Deno.test("db.close(): writes queued behind the writer lock still land", async (
 
     // Every promise settled (none left hanging forever).
     const settled = await Promise.all(
-      writes.map((p) =>
-        Promise.race([
-          p.then(() => "ok", () => "err"),
-          new Promise((r) => setTimeout(() => r("HUNG"), 2000)),
-        ])
-      ),
+      writes.map((p) => within(p.then(() => "ok", () => "err"), 2000, "HUNG")),
     );
     assert(!settled.includes("HUNG"), `no write may hang: ${settled}`);
 

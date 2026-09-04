@@ -11,6 +11,7 @@ import {
   type WirePatch as Patch,
 } from "../protocol/patch-ops.ts";
 import { enc } from "../protocol/envelope.ts";
+import { _resetInitialShapeKeys } from "../protocol/protocol-diagnostics.ts";
 import { _BLOCKED_KEYS } from "./state-array-utils.ts";
 import {
   _applyFullState,
@@ -217,6 +218,14 @@ export function isInitialStateReceived(): boolean {
 /** Reset message handler state (for test isolation). */
 export function _resetMessageState(): void {
   _initialStateReceived = false;
+  // The state-SHAPE memory is the same fact as `_initialStateReceived`: after
+  // a reset the next full state re-baselines, so the shape it is compared
+  // against must be the one that arrives, not the one from the run before.
+  // `_resetInitialShapeKeys`'s own doc comment said "for _reset()" and nothing
+  // called it — while a test named "reset clears initial shape" passed by
+  // asserting nothing. A client that started over kept reporting
+  // `state-shape-drift` for keys of a state it had already forgotten.
+  _resetInitialShapeKeys();
   if (_readyTimeout !== null) {
     clearTimeout(_readyTimeout);
     _readyTimeout = null;

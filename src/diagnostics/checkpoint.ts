@@ -238,8 +238,24 @@ export function createCheckpoint(
     }
   }
 
+  // Set by `flush()` — the shutdown flush. After it, nothing will ever flush
+  // again, so a debounce armed by a later observe is a timer with no owner.
+  let final = false;
+
   /** Schedule a debounced write. */
   function schedule(data: CheckpointData): void {
+    if (final) {
+      // The shutdown flush has run and the app STILL dispatched — its own
+      // Phase 5 does (`onStop` → every cell's `onDestroy`, the "wipe secrets
+      // on the way out" hook). A debounce armed here outlives the app: the
+      // unref below stopped it holding the process, but it is still a live
+      // timer — the op sanitizer names it in every test that closes an app
+      // with a diagnostics checkpoint on. Dropped, not written: the flush
+      // already recorded the app's final state, and what Phase 5 dispatches
+      // is teardown (destroyed cells back at their initials) — a checkpoint
+      // of THAT would tell the next boot the app held nothing.
+      return;
+    }
     pending = data;
     if (debounceMs <= 0) {
       // Consumed, not left behind: `pending` outliving its own write made
@@ -281,6 +297,7 @@ export function createCheckpoint(
    *  reported, never thrown — a diagnostic must not fail the shutdown it is
    *  trying to record. */
   async function flush(): Promise<void> {
+    final = true; // see `schedule`: from here on a write is immediate
     if (timer) clearTimeout(timer);
     timer = null;
     const data = pending;

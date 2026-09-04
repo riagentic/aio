@@ -150,6 +150,8 @@ Deno.test({
 
     let failures = 0;
     let ops = 0;
+    /** Loop-guarded invariant coverage, across every round — see `hit` below. */
+    const allHits: Record<string, number> = {};
     try {
       for (let round = 0; round < ROUNDS; round++) {
         let seed = (SEED + round * 7919) & 0x7fffffff;
@@ -432,7 +434,9 @@ Deno.test({
               // I9 — with the budget exhausted, a credential the victim
               // ALREADY holds still works. (This is the whole-app DoS.)
               for (const other of accts) {
+                // aio-ok: counted as I9 — the coverage step refuses a dark run.
                 for (const tk of other.live) {
+                  hit("I9");
                   const r = await fetch(base + "/", {
                     headers: { authorization: `Bearer ${tk}` },
                   });
@@ -474,7 +478,9 @@ Deno.test({
               const next = a.role === "admin" ? "user" : "admin";
               users.setRole(a.id, next);
               a.role = next;
+              // aio-ok: counted as I12 — the coverage step refuses a dark run.
               for (const tk of a.live) {
+                hit("I12");
                 const who = await me(tk);
                 assertEquals(who?.role, next, "live session sees the new role");
               }
@@ -501,16 +507,36 @@ Deno.test({
           }
         };
 
+        /** How many times each LOOP-GUARDED invariant actually ran.
+         *
+         *  Five assertions here sit inside a `for … of` over a set the fuzz
+         *  fills (`dead`, `a.live`, `other.live`, `gone`). If a step mix ever
+         *  stops producing those — a reordering, a tightened guard, a shorter
+         *  run — the loop body never executes, the invariant is checked ZERO
+         *  times, and this test still reports "N ops, 0 violations". A fuzzer
+         *  that fuzzes nothing is the most confident kind of empty test, and
+         *  `check:vacuous` flags the shape but cannot tell it from the real
+         *  thing without running it. So the run counts its own coverage and
+         *  REFUSES one in which an invariant went dark. Measured the day this
+         *  landed: I1 140, I2 51, I9 2, I12 3, I13 5. */
+        const hit = (id: string): void => {
+          allHits[id] = (allHits[id] ?? 0) + 1;
+        };
+
         /** The invariants that hold after EVERY step. */
         const check = async (): Promise<void> => {
           // I1 — dead tokens are dead, forever.
+          // aio-ok: counted as I1 — the coverage step refuses a dark run.
           for (const [tk, owner] of dead) {
             if (tk.startsWith("used-reset:")) continue;
+            hit("I1");
             assertEquals(await me(tk), null, `dead token of ${owner} revived`);
           }
           for (const a of accts) {
             // I2 — a live token is that user, and only that user.
+            // aio-ok: counted as I2 — the coverage step refuses a dark run.
             for (const tk of a.live) {
+              hit("I2");
               const who = await me(tk);
               assertEquals(who?.id, a.id, `token of ${a.id} resolved wrong`);
               assertEquals(who?.role, a.role);
@@ -526,7 +552,9 @@ Deno.test({
           // I13 — a deleted account authenticates NOWHERE. Its sessions are
           // covered by I1 above (they are in `dead`); this is the rest of it:
           // no row, and its password cannot log in again.
+          // aio-ok: counted as I13 — the coverage step refuses a dark run.
           for (const g of gone) {
+            hit("I13");
             assertEquals(users.get(g.id), null, `${g.id} came back`);
             _resetAuthFails();
             const r = await post("login", { id: g.id, password: g.password });
@@ -600,6 +628,19 @@ Deno.test({
       }
       await t.step(`${ops} ops over ${ROUNDS} seed(s), 0 violations`, () => {
         assertEquals(failures, 0);
+      });
+      await t.step("every loop-guarded invariant actually ran", () => {
+        const dark = ["I1", "I2", "I9", "I12", "I13"].filter((k) =>
+          !allHits[k]
+        );
+        assertEquals(
+          dark,
+          [],
+          `checked ZERO times: ${dark.join(", ")} — the fuzz stopped ` +
+            `producing the state they read (dead tokens, live sessions, ` +
+            `removed accounts), so "0 violations" says nothing about them. ` +
+            `Coverage this run: ${JSON.stringify(allHits)}`,
+        );
       });
     } finally {
       _resetAuthFails();

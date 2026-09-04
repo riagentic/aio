@@ -132,11 +132,15 @@ Deno.test({
     const sa = await import("../src/standalone-air.ts");
     const { cell } = sa;
     sa._reset();
+    // Deaf to its abort SIGNAL by design — the claim is that close() does
+    // not wait for it. It stops on a flag the TEST flips once the claim is
+    // made, so its timers and its call registration end inside the test.
+    let stop = false;
     const deaf = cell("sadeaf", {
       state: { chunks: [] as string[], status: "idle" } as Doc,
       methods: {
         async grind(s: Doc) {
-          for (let i = 0; i < 4000; i++) await sleep(5);
+          while (!stop) await sleep(5);
           s.status = "done";
         },
       },
@@ -159,7 +163,8 @@ Deno.test({
         elapsed < 6000,
         `close() waited ${elapsed}ms on a method that ignores its signal`,
       );
-      void call;
+      stop = true;
+      await call; // the deaf method is the test's — it ends here
     } finally {
       sa._reset();
       storage.clear();

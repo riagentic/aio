@@ -159,6 +159,21 @@ The one way to know state is on disk is a flush that has completed: aio runs one
 on a clean shutdown (below), and `journal: true` closes the window from the
 other side by making the actions themselves recoverable.
 
+### The shutdown flush, and who hears its verdict
+
+A clean shutdown (`am stop`, SIGTERM, `app.close()`) runs one last flush before
+the door closes. If SQLite refuses that final write, the refusal is logged as an
+error, `/__aio/health` reports `persist: { ok: false }` for as long as the
+process is still answering, and **`am stop` exits 1 naming the cell** —
+`am
+stop` is the operator's door and the one that returns the verdict. The
+process itself still exits 0 and `app.close()` still resolves: the process is
+leaving either way, and an exit code nobody reads is not a verdict. The same
+rule covers `am restart` (it prints `NOT SAVED` and still restarts) and
+`am snapshot load` (it flushes and reports `unsaved` before it says loaded).
+`journal: true` is the other half: a refused write is recoverable from the
+actions themselves on the next boot.
+
 ### What the SQLite settings buy
 
 aio opens `state.db` with `journal_mode = WAL` and `synchronous = NORMAL`

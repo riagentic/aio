@@ -19,6 +19,7 @@
 // CSRF-protected (X-AIO header on POST), rate-limited.
 import { CELL_METHOD_SEP } from "../state/cell-helpers.ts";
 import { serializeReturn } from "../protocol/return-value.ts";
+import { _dispatchRefusal } from "./action-ack.ts";
 import {
   CONTROL_MAX_BODY,
   declaresOverLimit,
@@ -115,6 +116,9 @@ export interface TrojanDeps {
   ) => { found: true; promise: Promise<Response> } | { found: false };
   /** Recent transpile errors (dev mode) */
   getRecentErrors: () => unknown[];
+  /** The persistence verdict as health reads it (no flush) — see
+   *  `ServerConfig.lastPersistError`. */
+  lastPersistError?: () => Error | null;
   /** The dev server's import-graph verdict — what decides whether `/` is the
    *  app or the diagnostic page. `pending` while the boot validation is still
    *  running (the page is served as the app meanwhile), `null` in prod and
@@ -755,16 +759,43 @@ async function handlePost(
           }`,
         );
       }
+      // …UNLESS THE REDUCE REFUSED IT. `dispatch` resolves whether or not
+      // anything ran, so this route answered `ok: true` for a method the cell
+      // no longer has, a cell that was never booted, a disabled cell and a
+      // `validate` refusal alike — the four failures `action-ack.ts` exists
+      // for. That file calls itself "ONE decider … shared by every transport
+      // that acks a client call (server-ws.ts, uds.ts)", and this is the third
+      // such transport: it is what `am dispatch`, amui and any agent reading
+      // the JSON believe. Measured: a write the validator refused answered
+      // `{"ok":true,"unsaved":null}` with the state unchanged — against this
+      // file's own rule, stated in its time-travel arm, that "ok:true must
+      // mean EXECUTED".
+      const refused = _dispatchRefusal(action);
+      if (refused) return err(refused.message, 409);
       // The method's return value rides back exactly as it does over the WS
       // ack (`serializeReturn`: JSON round-trip, lossy conversions warned).
       // `{ok:true}` alone told a caller the method RAN and nothing about what
       // it said — `am dispatch` printed "dispatched" for a method that
       // returned an error object (a field report, §6).
       const ret = serializeReturn(returned, action.type);
+      // `ok` means APPLIED. Whether the write path is refusing right now is
+      // a separate fact, and it is said here — the verdict health reads, no
+      // flush forced — so `am dispatch` and an agent reading the JSON get
+      // `unsaved` in the same reply instead of guessing from `ok`. `null`
+      // spells "consulted, nothing refused"; an older server omits the field
+      // and `am` asks health instead.
+      const persistErr = deps.lastPersistError
+        ? deps.lastPersistError()
+        : undefined;
       return json({
         ok: true,
         ...(ret.value !== undefined ? { result: ret.value } : {}),
         ...(ret.dropped ? { resultDropped: true } : {}),
+        ...(persistErr === undefined ? {} : {
+          unsaved: persistErr
+            ? `${PERSIST_REFUSED} ${persistErr.message}`
+            : null,
+        }),
       });
     } catch {
       return err("invalid JSON");
@@ -820,7 +851,14 @@ async function handlePost(
         // a load that destroys the state had no other reason to give.
         return err(e instanceof Error ? e.message : String(e));
       }
-      return json({ ok: true });
+      // The restore is in memory and on every screen by now, so the reply
+      // cannot say "no" — but "loaded" used to leave before the write, and a
+      // restore is the one write whose whole point is the disk. Close the
+      // window here, and carry a refusal as `unsaved` (the field `am stop`
+      // already speaks) so `am snapshot load` can say NOT SAVED and exit 1
+      // instead of "loaded" over a store still holding the pre-restore rows.
+      const unsaved = await _persistVerdict(trojan);
+      return json({ ok: true, ...(unsaved ? { unsaved } : {}) });
     } catch {
       return err("invalid JSON");
     }
@@ -847,11 +885,39 @@ async function handlePost(
       if (cmd === "goto") {
         if (typeof arg !== "number" || !Number.isInteger(arg) || arg < 0) {
           return err(
-            `goto takes a whole history index from 0, got ${
+            `goto takes a whole history id from 0, got ${
               JSON.stringify(
                 arg,
               )
             }`,
+          );
+        }
+        // AND THE ENTRY HAS TO EXIST. `travelTo` matches by entry ID and
+        // returns the state unchanged for a miss ("invalid id — no-op"), so
+        // this route answered ok:true for a number that moved nothing — the
+        // rule stated ten lines above, about a different command, is that
+        // "ok:true must mean EXECUTED". Worse, every word of the surface
+        // called this number an INDEX (`am help`, the CLI's own range
+        // message, docs/clients/app-manager.md) while the lookup is by id:
+        // the two agree only until `resume` truncates or the 2000-entry
+        // window rolls, and then the same number silently means a different
+        // entry — or none.
+        const hist = trojan.getTTHistory?.() as
+          | { entries?: { id: number }[] }
+          | undefined;
+        const ids = hist?.entries?.map((e) => e.id) ?? [];
+        if (ids.length > 0 && !ids.includes(arg)) {
+          return err(
+            `no history entry with id ${arg} — \`am actions\` lists the ids ` +
+              `this app currently holds (${
+                ids.length > 6
+                  ? `${ids.slice(0, 3).join(", ")} … ${
+                    ids.slice(-3).join(", ")
+                  }`
+                  : ids.join(", ")
+              }). They are IDS, not positions: the window rolls and \`resume\` ` +
+              `truncates, so the two stop matching after any real session.`,
+            404,
           );
         }
         deps.onTTCommand("goto", arg);
@@ -942,14 +1008,8 @@ async function handlePost(
     if (!trojan.forcePersist) return err("persistence not available", 501);
     // Awaited: `ok: true` is the claim "it is on disk", so the reply waits
     // for the write — and a refused write is a 500, not a "persisted".
-    try {
-      await trojan.forcePersist();
-    } catch (e) {
-      return err(
-        `persist failed: ${e instanceof Error ? e.message : String(e)}`,
-        500,
-      );
-    }
+    const unsaved = await _persistVerdict(trojan);
+    if (unsaved) return err(unsaved, 500);
     return json({ ok: true });
   }
 
@@ -998,6 +1058,34 @@ async function handlePost(
   }
 
   return err("not found", 404);
+}
+
+/** How a refused write is WORDED on the wire — `persist failed: <reason>`.
+ *
+ *  `am` reads the verdict by this prefix (`finalPersistVerdict` in
+ *  am-cmd-process.ts): a 500 that starts with it is "the cycle reported a
+ *  failure"; anything else (404, 501, a dead transport) is "the question
+ *  could not be put", which is not data loss and is never reported as it.
+ *  One spelling, so the two sides cannot drift — a key in two of three
+ *  surfaces is the trap this repo names first. */
+export const PERSIST_REFUSED = "persist failed:";
+
+/** Close the debounce window NOW and answer for it: `null` when the write
+ *  landed — or when there is no persistence to ask — else the refusal, worded
+ *  as {@linkcode PERSIST_REFUSED}. ONE reader of the verdict for every door
+ *  that promises the disk (`persist`, `snapshot`): `forcePersist` is the
+ *  awaited flush and it rejects with `lastCycleError()` (aio.ts), so this is
+ *  the one place a rejection becomes words. */
+async function _persistVerdict(
+  trojan: TrojanDeps["trojan"],
+): Promise<string | null> {
+  if (!trojan.forcePersist) return null;
+  try {
+    await trojan.forcePersist();
+    return null;
+  } catch (e) {
+    return `${PERSIST_REFUSED} ${e instanceof Error ? e.message : String(e)}`;
+  }
 }
 
 /** The `<cell>:<method>` whose METHOD half is closest to a bare type — a

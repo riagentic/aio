@@ -253,10 +253,18 @@ Deno.test({
       payload: { args: [4] },
     });
     assert(r.ok, JSON.stringify(r));
-    assertEquals(r.data, { ok: true, result: { n: 5, doubled: 10 } });
+    // `unsaved: null` is the persistence verdict, consulted and clear — the
+    // reply says APPLIED and, separately, that the write path is not refusing
+    // (a refusal would be a `persist failed: …` string). Additive: an older
+    // server omits it and `am` asks health instead.
+    assertEquals(r.data, {
+      ok: true,
+      result: { n: 5, doubled: 10 },
+      unsaved: null,
+    });
     const none = await trojanPost(port, "dispatch", { type: "calc:nothing" });
     assert(none.ok);
-    assertEquals(none.data, { ok: true });
+    assertEquals(none.data, { ok: true, unsaved: null });
   },
 });
 

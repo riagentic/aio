@@ -39,7 +39,7 @@
 // and it is the MUTATION, not the assignment, that is lossy.
 
 import { log } from "../diagnostics/logger-api.ts";
-import { isDevMode } from "../diagnostics/logger-types.ts";
+import { isRunningFromSource } from "../diagnostics/logger-types.ts";
 
 /** What JSON would do to this value, or null when it survives intact. */
 export type WireLoss = { path: string; kind: string; lost: string };
@@ -163,7 +163,7 @@ export function warnWireLoss(
   // matches neither and pays one boolean. The message is observe-only, so
   // showing it in both is the allowed half of the dev/prod split.
   if (
-    !(globalThis as Record<string, unknown>).__aioDev && !isDevMode()
+    !(globalThis as Record<string, unknown>).__aioDev && !isRunningFromSource()
   ) return;
   for (const p of patches) {
     // `String(seg)`, never `join` — an Immer patch path carries the KEY, and a

@@ -79,12 +79,25 @@ export function until(
 export async function race<T extends Record<string, Promise<unknown> | number>>(
   branches: T,
 ): Promise<RaceResult<T>> {
+  // A `timeout: ms` branch is a timer, and a timer that LOST the race used to
+  // stay armed until it fired: `race({ paid: until(...), timeout: 30_000 })`
+  // won by `paid` in 50 ms kept the process alive for the other 29.95 s —
+  // a CLI command that had its answer and would not exit, a test the op
+  // sanitizer fails. The promise branches are the app's to stop (`s.$signal`);
+  // the timers are ours, and every one is cleared once a winner is known.
+  const timers: ReturnType<typeof setTimeout>[] = [];
   const entries = Object.entries(branches).map(([key, v]) =>
     typeof v === "number"
-      ? sleep(v).then(() => ({ winner: key, value: undefined }))
+      ? new Promise<void>((r) => {
+        timers.push(setTimeout(r, v));
+      }).then(() => ({ winner: key, value: undefined }))
       : (v as Promise<unknown>).then((value) => ({ winner: key, value }))
   );
-  return await Promise.race(entries) as RaceResult<T>;
+  try {
+    return await Promise.race(entries) as RaceResult<T>;
+  } finally {
+    for (const t of timers) clearTimeout(t);
+  }
 }
 
 /** What {@linkcode race} resolves to: ONE member per branch, so narrowing on

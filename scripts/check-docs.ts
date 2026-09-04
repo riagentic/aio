@@ -194,10 +194,24 @@ async function main(): Promise<void> {
   );
   // Structure the docs promise about EACH OTHER (a `page.md#heading` link),
   // about the SERVER (a `/__aio/…` path), and about a SCRIPT (a `--flag`).
-  const anchorIss = anchorIssues(await readAllDocs());
+  const allDocs = await readAllDocs();
+  const onDisk = (rel: string): boolean => {
+    try {
+      return Deno.statSync(SRC(rel)).isFile;
+    } catch {
+      return false; // aio-ok: absence IS the answer this predicate exists to give
+    }
+  };
+  const anchorIss = anchorIssues(allDocs, onDisk);
   console.log(
     `Anchors (page.md#heading): ${
       anchorIss.length ? `${anchorIss.length} dangling` : "all land"
+    }`,
+  );
+  const linkIss = pageLinkIssues(allDocs, onDisk);
+  console.log(
+    `Page links ([text](page.md)): ${
+      linkIss.length ? `${linkIss.length} dead` : "all land"
     }`,
   );
   const routeIss = routeIssues(docs, await loadRoutes());
@@ -278,6 +292,12 @@ async function main(): Promise<void> {
     fatal.push(
       `\nLinks to headings that do not exist (must fix — the reader clicks ` +
         `these; anchors follow GitHub's slug rule):\n${anchorIss.join("\n")}`,
+    );
+  }
+  if (linkIss.length) {
+    fatal.push(
+      `\nLinks to pages that do not exist (must fix — the reader clicks ` +
+        `these and lands on nothing):\n${linkIss.join("\n")}`,
     );
   }
   if (routeIss.length) {
@@ -1006,10 +1026,23 @@ export function headingSlugs(lines: string[]): Set<string> {
 
 /** `[text](page.md#anchor)` / `[text](#anchor)` — the target and the anchor. */
 const ANCHOR_LINK = /\]\(<?([^)\s#>]*)#([^)\s>]+)>?\)/g;
+/** A link to a PAGE, with or without an anchor. `ANCHOR_LINK` only matches
+ *  links that CARRY a `#…`, so `[the guide](../basics/gone.md)` — the ordinary
+ *  spelling, and 567 of the 567 page links in this repo — was checked by
+ *  nothing at all. A gate that reads one shape of a two-shape thing is a gate
+ *  with a hole the size of the next rename.
+ *
+ *  Deliberately NOT matching an anchored link: `anchorIssues` already reports
+ *  "no such page" for those, through the same `exists` rule. Two checks, no
+ *  overlap, so a missing page is named once. */
+const PAGE_LINK = /\]\(<?([^)\s#>]+\.md)>?\)/g;
 
 /** `docs` are REPO-relative here (`docs/state/methods.md`, `README.md`) so a
  *  `../README.md#x` from inside docs/ resolves. */
-export function anchorIssues(docs: DocFile[]): string[] {
+export function anchorIssues(
+  docs: DocFile[],
+  exists: (rel: string) => boolean = () => false,
+): string[] {
   const byRel = new Map(docs.map((d) => [d.rel, d]));
   const slugs = new Map<string, Set<string>>();
   const slugsOf = (rel: string): Set<string> => {
@@ -1038,7 +1071,14 @@ export function anchorIssues(docs: DocFile[]): string[] {
         if (!target.endsWith(".md")) continue;
         const loc = `  ${rel}:${i + 1}`;
         if (!byRel.has(target)) {
-          out.push(`${loc}  links ${file}#${anchor} — no such page`);
+          // ONE rule for "does this page exist", shared with `pageLinkIssues`:
+          // a target outside the walked doc set (`../CHANGELOG.md`) is a real
+          // file, and calling it missing here would be a false alarm. Its
+          // HEADINGS are unknown, so the anchor itself goes unchecked — which
+          // is the honest answer, not a guess.
+          if (!exists(target)) {
+            out.push(`${loc}  links ${file}#${anchor} — no such page`);
+          }
           continue;
         }
         const want = decodeURIComponent(anchor).toLowerCase();
@@ -1059,6 +1099,43 @@ export function anchorIssues(docs: DocFile[]): string[] {
 }
 
 /** EVERY page, historical dirs included, keyed repo-relative. */
+/** Every `[text](page.md)` link lands on a page that exists.
+ *
+ *  The anchor check above only sees links that carry a `#heading`. Plain page
+ *  links — the common spelling — were read by nothing, so a moved or renamed
+ *  page broke every reference to it in silence, and the docs gate went on
+ *  saying "all land" about the half it looked at. Measured when this landed:
+ *  567 page links, 0 dead — the hole was empty, and nothing was holding it
+ *  that way.
+ *
+ *  `exists` is injected so the pure list of docs stays testable; it also lets a
+ *  link out of the walked set (`../CHANGELOG.md`) be real rather than missing. */
+export function pageLinkIssues(
+  docs: DocFile[],
+  exists: (rel: string) => boolean,
+): string[] {
+  const byRel = new Set(docs.map((d) => d.rel));
+  const out: string[] = [];
+  for (const { rel, lines } of docs) {
+    let fenced = false;
+    lines.forEach((line, i) => {
+      if (/^\s*(```|~~~)/.test(line)) {
+        fenced = !fenced;
+        return;
+      }
+      if (fenced) return;
+      for (const m of line.matchAll(PAGE_LINK)) {
+        const href = (m as unknown as [string, string])[1];
+        if (/^[a-z][a-z0-9+.-]*:/i.test(href)) continue; // http(s)://…
+        const target = new URL(href, `file:///${rel}`).pathname.slice(1);
+        if (byRel.has(target) || exists(target)) continue;
+        out.push(`  ${rel}:${i + 1}  links ${href} — no such page`);
+      }
+    });
+  }
+  return out;
+}
+
 export async function readAllDocs(): Promise<DocFile[]> {
   const out: DocFile[] = [];
   for await (

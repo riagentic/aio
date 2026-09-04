@@ -481,3 +481,85 @@ Deno.test("unknownBuildKeys: the object form of targets is checked one level dee
   // The ARRAY form has no overrides to check.
   assertEquals(unknownBuildKeysSync({ targets: ["server"] }), []);
 });
+
+// ── an allowedOrigins entry that no request can ever match ──────────────
+//
+// The allowlist reads four spellings — `"*"`, a bare hostname, a `host:port`,
+// or a full origin — and anything else never compares equal to anything. So a
+// typo'd entry is INERT: the operator believes they widened access, the app
+// refuses their client anyway, and the refusal points them at "the same list
+// the WebSocket origin check reads" — a list whose entry does nothing.
+// Fail-closed, and silent, which is the half that costs an afternoon.
+//
+// Measured before this landed: `allowedOrigins: ["not a url at all"]` booted
+// without a word. A warning, never a refusal — an app with a stale junk entry
+// boots today and must keep booting.
+Deno.test("allowedOrigins: an entry that matches nothing is named", () => {
+  _resetConfigConflicts();
+  const cs = configConflicts({ allowedOrigins: ["not a url at all"] });
+  assertEquals(cs.length, 1, JSON.stringify(cs));
+  assertEquals(cs[0]!.level, "warn", "a junk entry must not refuse the boot");
+  assertStringIncludes(cs[0]!.what, "not a url at all");
+  assertStringIncludes(cs[0]!.what, "was NOT widened");
+  assertStringIncludes(cs[0]!.fix, "host:port");
+});
+
+Deno.test("allowedOrigins: every documented spelling is silent", () => {
+  _resetConfigConflicts();
+  assertEquals(
+    configConflicts({
+      allowedOrigins: [
+        "*",
+        "app.example.com",
+        "app.example.com:8443",
+        "https://app.example.com",
+        "https://app.example.com:8443",
+        "  App.Example.com  ", // trimmed and case-folded by the matcher
+      ],
+    }),
+    [],
+  );
+});
+
+Deno.test("allowedOrigins: the empty entry is inert too, and says so", () => {
+  _resetConfigConflicts();
+  // The matcher `continue`s past `""`, so it is a mistake that reads as a
+  // deliberate blank — exactly the kind of entry a template leaves behind.
+  const cs = configConflicts({ allowedOrigins: ["ok.example.com", ""] });
+  assertEquals(cs.length, 1);
+  assertStringIncludes(cs[0]!.what, '""');
+});
+
+Deno.test("allowedOrigins: the grammar has ONE decider", async () => {
+  // A second copy of the four spellings is how the Host check and the WS
+  // Origin check came to disagree once already (see `allowlistAdmits`). The
+  // validator must therefore agree with the MATCHER on every entry: anything
+  // it calls inert must admit nothing, and anything it passes must admit its
+  // own host.
+  const { allowlistAdmits, inertAllowlistEntries } = await import(
+    "../src/server/server-auth.ts"
+  );
+  const cases = [
+    "*",
+    "app.example.com",
+    "app.example.com:8443",
+    "https://app.example.com",
+    "not a url at all",
+    "",
+    "http://",
+  ];
+  for (const e of cases) {
+    const inert = inertAllowlistEntries([e]).length > 0;
+    const admitsSomething = allowlistAdmits([e], {
+      hostname: "app.example.com",
+      hostPort: "app.example.com:8443",
+      origin: "https://app.example.com",
+    });
+    if (inert) {
+      assert(
+        !admitsSomething,
+        `${JSON.stringify(e)} was called inert but the matcher admits with it`,
+      );
+    }
+  }
+});

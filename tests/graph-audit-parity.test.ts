@@ -604,6 +604,7 @@ Deno.test("evaluateBundle: a browser's globals, not a worker's — Buffer/proces
 Deno.test({
   name: "graph: a UI entry with no default export names the FILE and the EDIT",
   sanitizeOps: false, // aio-ok: esbuild's service is a shared child stopped once per test
+  sanitizeResources: false, // aio-ok: same esbuild service
   fn: async () => {
     const dir = await makeApp({
       "App.tsx": `export function App() { return <div>hi</div>; }\n`,

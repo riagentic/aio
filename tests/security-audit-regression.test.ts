@@ -265,6 +265,8 @@ Deno.test("logs: the app log and its directory are owner-only", async () => {
     0o600,
     "the app log carries share links and boot secrets — it must be owner-only",
   );
+  logger.onStop(); // the heartbeat interval is the logger's
+  await logger.flush();
   await Deno.remove(dir, { recursive: true });
 });
 

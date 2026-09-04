@@ -41,7 +41,9 @@ AMUI_ROOTS=/work/apps:/experiments deno task amui
 
 ## What it does
 
-**Sidebar** — every aio project (running ● / stopped ○), searchable; a button to
+**Sidebar** — the RUNNING aio projects by default, or every discovered one with
+the `all` switch (remembered per browser; a search always looks at all of them,
+and the selected project stays listed), running ● / stopped ○; a button to
 scaffold a new app (`am create`). amui is an aio app too, so it lists **itself**
 — every monitoring surface (cells, state, metrics, logs) works on it. Only its
 lifecycle is off-limits: the detail view shows a `★ this is amui` marker instead

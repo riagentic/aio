@@ -16,6 +16,7 @@ import {
   _watchUnobservedCalls,
   type CallFailureLedger,
 } from "./test-strict.ts";
+import { closeWindow } from "./close-window.ts";
 // Server-touching, so NOT in test-strict.ts — see boot-refusals.ts.
 import {
   _refuseUnsafeCells,
@@ -836,11 +837,17 @@ type PartialMount = {
 
 /** Undo a mount that threw halfway — the same steps `dispose()` runs, in the
  *  same order. Every step is independent: one failing must not strand the
- *  rest, and the original error is what the test needs to see. */
-function _teardownPartialMount(p: PartialMount): void {
-  const step = (what: string, fn: () => void) => {
+ *  rest, and the original error is what the test needs to see.
+ *
+ *  Awaited, window close included: a refused mount (`testUI` says no to a
+ *  credential-bearing cell, a component that throws) used to close its
+ *  happy-dom window fire-and-forget, and happy-dom's abort-all-tasks arms a
+ *  timer the test then ended on top of — so every test that asserts a
+ *  refusal was a test that leaked, and the harness itself was what leaked. */
+async function _teardownPartialMount(p: PartialMount): Promise<void> {
+  const step = async (what: string, fn: () => void | Promise<void>) => {
     try {
-      fn();
+      await fn();
     } catch (e) {
       // Loud, not silent: teardown of a failed mount that itself fails leaves
       // the process dirty, and the NEXT test pays for it. The mount's own
@@ -852,19 +859,17 @@ function _teardownPartialMount(p: PartialMount): void {
       );
     }
   };
-  step("unmount", () => p.unmount?.());
-  step("runtime reset", () => p.reset?.());
-  step("window close", () => {
-    p.window?.happyDOM?.close()?.catch?.(() => {
-      // aio-ok: happy-dom teardown is fire-and-forget here exactly as it is in
-      // `unmount()`; the mount's own error is the one that must surface.
-    });
+  await step("unmount", () => p.unmount?.());
+  await step("runtime reset", () => p.reset?.());
+  await step("window close", async () => {
+    const win = p.window;
     p.window = null;
+    await closeWindow(win);
   });
-  step("globals", () => {
+  await step("globals", () => {
     for (const key of p.owned.splice(0)) delete (globalThis as AnyDoc)[key];
   });
-  for (const restore of p.restore.splice(0)) step("restore", restore);
+  for (const restore of p.restore.splice(0)) await step("restore", restore);
 }
 
 async function _mountTestUI(
@@ -877,7 +882,7 @@ async function _mountTestUI(
   try {
     return await _buildTestUI(App, opts, partial);
   } catch (e) {
-    _teardownPartialMount(partial);
+    await _teardownPartialMount(partial);
     throw e;
   }
 }
@@ -1241,6 +1246,18 @@ async function _buildTestUI(
   // every observation), so each mount starts fresh — otherwise the FIRST test
   // in a file gets the warning and every later one is silent about its own.
   _resetSurfaceWarnings();
+  // No transport for the length of the mount: the cells are local, and a
+  // `useAio()` in the tree must not open a socket to the happy-dom origin
+  // (see `_withoutTransport`). Restored on unmount/dispose, and after a
+  // mount that threw.
+  {
+    const { _withoutTransport } = await import(
+      "../browser/protocol-subscription.ts"
+    );
+    const restoreTransport = _withoutTransport();
+    _restoreGlobals.push(restoreTransport);
+    partial.restore.push(restoreTransport);
+  }
   _setDocument(doc);
   const root = doc.createElement("div");
   doc.body.appendChild(root);
@@ -2203,7 +2220,7 @@ async function _buildTestUI(
         resetRuntime?.();
         _resetAioRuntime(); // see unmount() — process-global residue
         if (ownedWindow) {
-          await ownedWindow.happyDOM?.close();
+          await closeWindow(ownedWindow);
           ownedWindow = null;
           partial.window = null;
         }

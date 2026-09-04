@@ -1,6 +1,6 @@
 // testServer() + testBrowser() — the two harnesses apps otherwise hand-roll
 // (libraryMode boot; headless-chromium lifecycle). a field report.
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 import { cell } from "../src/state/cell-create.ts";
 import { route } from "../src/server/route.ts";
 import {
@@ -52,18 +52,23 @@ Deno.test("testServer: honors an explicit port + persist override", async () => 
 });
 
 Deno.test("testBrowser: throws a clear error when no browser is found", () => {
-  let threw = "";
-  try {
-    // an impossible path forces the not-found branch deterministically
-    testBrowser("http://127.0.0.1:1/", { browserPath: undefined });
-    // findChromium may still find one on this machine — only assert when absent
-    if (findChromium() === null) throw new Error("should have thrown");
-  } catch (e) {
-    threw = (e as Error).message;
-  }
-  if (findChromium() === null) {
-    assert(threw.includes("no headless Chromium"), threw);
-  }
+  // `""` is a FALSY path, so `opts.browserPath ?? findChromium()` keeps it and
+  // the not-found branch runs on every machine.
+  //
+  // The previous form passed `browserPath: undefined`, which falls through to
+  // `findChromium()` — so on any machine that HAS a browser (this one, CI, the
+  // machine the e2e chromium tests need) it LAUNCHED one against
+  // http://127.0.0.1:1/, never awaited the promise, never closed it: a leaked
+  // child process and a leaked profile directory on every suite run, surfacing
+  // as a sanitizer failure in whichever test happened to run next. And both of
+  // its assertions were guarded by `findChromium() === null`, so on those same
+  // machines it asserted NOTHING. A test that only checks something where it
+  // cannot run is the vacuous half of the same bug.
+  assertThrows(
+    () => void testBrowser("http://127.0.0.1:1/", { browserPath: "" }),
+    Error,
+    "no headless Chromium",
+  );
 });
 
 Deno.test({
