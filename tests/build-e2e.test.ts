@@ -1132,7 +1132,12 @@ Deno.test({
         dir,
         "build",
         "--targets=cli",
-        `--platforms=host,${foreign}`,
+        // macOS is always in the set: its Mach-O magic is the third format
+        // this test claims to settle, and nothing in the repo had ever
+        // compiled for darwin — the platform table was unit-tested, the
+        // artifact never produced. `--platforms=macos` was offered in help
+        // and docs on the strength of a lookup table.
+        `--platforms=host,${foreign},macos-arm64`,
       );
       assertEquals(r.code, 0, `cross build failed:\n${r.out}\n${r.err}`);
 
@@ -1155,37 +1160,63 @@ Deno.test({
       assertEquals(manifest.builtOn, hostPlatform(), "manifest names the host");
       assertEquals(
         manifest.targets.map((t) => t.platform).sort(),
-        [foreign, hostPlatform()].sort(),
+        [foreign, hostPlatform(), "macos-arm64"].sort(),
         "one entry per platform",
       );
 
-      const cross = manifest.targets.find((t) => t.platform === foreign)!;
-      assertEquals(cross.ok, true);
-      assertEquals(cross.host, false, "it is flagged as NOT runnable here");
-      assert(cross.triple, "and records the triple it was built for");
-      const file = cross.artifacts[0]?.file;
-      assert(file, "the cross build produced an artifact");
-      assert(
-        file!.includes(foreign),
-        `a cross artifact must name its platform: ${file}`,
-      );
+      for (const platform of [foreign, "macos-arm64"]) {
+        const cross = manifest.targets.find((t) => t.platform === platform)!;
+        assertEquals(cross.ok, true, `${platform} built`);
+        assertEquals(
+          cross.host,
+          false,
+          `${platform} is flagged as NOT runnable here`,
+        );
+        assert(cross.triple, `${platform} records the triple it was built for`);
+        const file = cross.artifacts[0]?.file;
+        assert(file, `the ${platform} cross build produced an artifact`);
+        assert(
+          file!.includes(platform),
+          `a cross artifact must name its platform: ${file}`,
+        );
 
-      // The decisive check: the bytes are the FOREIGN platform's format.
-      const bytes = await Deno.readFile(join(dist, file!));
-      if (foreign === "windows") {
-        assertEquals([bytes[0], bytes[1]], [0x4d, 0x5a], "PE files start MZ");
-        const peOff = new DataView(bytes.buffer).getUint32(0x3c, true);
-        assertEquals(
-          [bytes[peOff], bytes[peOff + 1], bytes[peOff + 2], bytes[peOff + 3]],
-          [0x50, 0x45, 0x00, 0x00],
-          "…and carry a PE\\0\\0 header — this is not a renamed host binary",
-        );
-      } else {
-        assertEquals(
-          [bytes[0], bytes[1], bytes[2], bytes[3]],
-          [0x7f, 0x45, 0x4c, 0x46],
-          "ELF magic — this is not a renamed host binary",
-        );
+        // The decisive check: the bytes are the FOREIGN platform's format.
+        const bytes = await Deno.readFile(join(dist, file!));
+        if (platform === "windows") {
+          assertEquals([bytes[0], bytes[1]], [0x4d, 0x5a], "PE files start MZ");
+          const peOff = new DataView(bytes.buffer).getUint32(0x3c, true);
+          assertEquals(
+            [
+              bytes[peOff],
+              bytes[peOff + 1],
+              bytes[peOff + 2],
+              bytes[peOff + 3],
+            ],
+            [0x50, 0x45, 0x00, 0x00],
+            "…and carry a PE\\0\\0 header — this is not a renamed host binary",
+          );
+        } else if (platform === "macos-arm64") {
+          // Measured on a real cross build, not recalled: MH_MAGIC_64 stored
+          // little-endian, then cputype CPU_TYPE_ARM64 (0x0100000C). An x86_64
+          // Mach-O carries 0x01000007 there, so this also refuses a Mach-O
+          // built for the wrong ARCH — which a magic-only check would pass.
+          assertEquals(
+            [bytes[0], bytes[1], bytes[2], bytes[3]],
+            [0xcf, 0xfa, 0xed, 0xfe],
+            "Mach-O 64-bit magic — this is not a renamed host binary",
+          );
+          assertEquals(
+            [bytes[4], bytes[5], bytes[6], bytes[7]],
+            [0x0c, 0x00, 0x00, 0x01],
+            "…and its cputype is arm64, not the x86_64 Mac target",
+          );
+        } else {
+          assertEquals(
+            [bytes[0], bytes[1], bytes[2], bytes[3]],
+            [0x7f, 0x45, 0x4c, 0x46],
+            "ELF magic — this is not a renamed host binary",
+          );
+        }
       }
 
       // The host artifact is still the bare name, and still runs.

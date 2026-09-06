@@ -16,8 +16,17 @@
 //   • that every queued action either replays or its caller is rejected —
 //     nothing is silently lost, nothing is both.
 //
-// A path that grows its own queue, its own cap handling, or its own drop
-// order goes red here without anyone having to notice it by reading.
+// A path built on THIS FACTORY that grows its own cap handling or drop order
+// goes red here without anyone having to notice it by reading.
+//
+// What it cannot see, said plainly so the claim is not larger than the test:
+// `connectCli` / `connectCliUDS` keep their OWN arrays, because the factory
+// rejects a dropped action through the module-level `_ackSink` — the browser's
+// singleton — while a CLI client registers acks per connection on purpose (D2).
+// They follow the same policy, and that is pinned by hand in
+// `tests/transport-exactly-once.test.ts` ("a full queue drops the OLDEST").
+// This file's docstring used to promise it covered them; it never did, and
+// they had held the OPPOSITE policy the whole time.
 import { _teardownNow } from "../src/browser/protocol-subscription.ts";
 import { assertEquals } from "@std/assert";
 import {

@@ -75,7 +75,18 @@ Deno.test("singleton refusal: names how to stop it, and the appId/data-home coll
     takeover: false,
   });
   assertStringIncludes(msg, "Already running: todo");
-  assertStringIncludes(msg, "am stop todo");
+  // `am stop todo` was asserted here for a long time, and it does not stop it:
+  // the positional argument of `am stop` is a COMPONENT label (deno.json →
+  // build.targets), so a single-app project answers "this project declares no
+  // components, so \"todo\" names nothing" and the app keeps running. MEASURED
+  // against a live example app: exit 1, process still up; `--app=` works from
+  // any directory. The test name always said "names how to stop it" — the
+  // assertion just checked a different string than the claim.
+  assertStringIncludes(msg, "am stop --app=todo");
+  assert(
+    !/am stop todo/.test(msg),
+    "the positional form names a component, not an app",
+  );
   assertStringIncludes(msg, "kill 4242");
   assertStringIncludes(msg, "--takeover");
   // The trap: `--port` looks like the fix and is not.

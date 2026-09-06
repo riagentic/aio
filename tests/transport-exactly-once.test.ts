@@ -231,6 +231,55 @@ Deno.test({
   },
 });
 
+// WHICH action survives a full queue is the whole point of the policy, and no
+// test said. `state/offline-queue.ts` settled it for the browser and the core
+// — at cap the OLDEST goes, newest intent wins — after they were caught
+// disagreeing. This file's clients kept a THIRD queue with the OPPOSITE rule:
+// they refused the NEWEST, so a client that fell behind replayed stale intent
+// and threw away the freshest, which for a control client is the one that
+// matters. The differential fuzzer that claims "a path that grows its own
+// queue goes red here" cannot see this path — it fuzzes the two shared-factory
+// instances.
+Deno.test({
+  name:
+    "uds: a full queue drops the OLDEST, not the newest — newest intent wins",
+  async fn() {
+    const cli = connectCliUDS<{ n: number }>(
+      `/tmp/aio-nonexistent-${crypto.randomUUID()}.sock`,
+      { ackTimeoutMs: 30_000 },
+    );
+    const box = counterCell();
+    cli.bind(box);
+    // 105 calls, each identifiable by its `by` argument: 1..105.
+    const calls = Array.from({ length: 105 }, (_, i) => track(box.bump(i + 1)));
+    await tick(50);
+    const settledIdx = calls
+      .map((c, i) => (c.done ? i : -1))
+      .filter((i) => i >= 0);
+    assertEquals(
+      settledIdx.length,
+      5,
+      "exactly the 5 over the 100-deep cap settle at once",
+    );
+    // …and they are the FIRST five, the oldest — not the last five.
+    assertEquals(
+      settledIdx,
+      [0, 1, 2, 3, 4],
+      "the oldest queued actions are the ones dropped",
+    );
+    for (const i of settledIdx) {
+      const c = calls[i]!;
+      assert(!c.ok, "a dropped action must not resolve as success");
+      assert(
+        /NOT sent|queue full/i.test(String((c.value as Error).message)),
+        `the reason must name the discard: ${(c.value as Error).message}`,
+      );
+    }
+    cli.close();
+    await tick(10);
+  },
+});
+
 Deno.test({
   name: "uds: an over-cap action is rejected IMMEDIATELY with the real reason",
   async fn() {

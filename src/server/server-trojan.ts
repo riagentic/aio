@@ -192,6 +192,22 @@ function numParam(
 }
 
 /** Main trojan route handler — returns Response or null if path not matched */
+/** The refusal every bounded control-plane body shares.
+ *
+ *  Four routes read a bounded body and all four answered "<x> body too large"
+ *  — a limit with no number, the same gap the trojan's rate limit had: this is
+ *  a message an OPERATOR meets through `am`, and it cannot be acted on. The
+ *  request's true size is deliberately NOT known here (the read aborts AT the
+ *  cap — that is the point of the bound), but "what may I send?" is
+ *  answerable, and it is the half that matters. One sentence, four callers. */
+export function tooLargeMessage(what: string): string {
+  return `${what} body is over the control plane's ${
+    CONTROL_MAX_BODY / 1024 / 1024
+  } MB cap — the read stops there, so NOTHING was executed. Send a smaller ` +
+    `payload: the control plane carries commands, not bulk data (write the ` +
+    `data through the app itself, or point it at a file it can read).`;
+}
+
 export function handleTrojan(
   pathname: string,
   req: Request | undefined,
@@ -249,7 +265,21 @@ export function handleTrojan(
     }, 1000);
   }
   if (_trojanReqCount > TROJAN_RATE_LIMIT) {
-    return err("rate limit exceeded", 429);
+    // SAY THE LIMIT. The two sibling limiters both do — client-log names
+    // `>${MAX_RATE} msg/s`, the WS fuse names the rate, the client count and
+    // the cap — and this is the one an OPERATOR meets, through `am`, where a
+    // bare "rate limit exceeded" reads as a broken tool: no number, no cause,
+    // and no hint that it clears by itself a second later. MEASURED: 700
+    // dispatches in a loop, then `am state` answered
+    // `{"error":"rate limit exceeded"}` with nothing else to go on.
+    return err(
+      `rate limit exceeded — the trojan control plane accepts ` +
+        `${TROJAN_RATE_LIMIT} requests/sec across ALL of its endpoints, and ` +
+        `${_trojanReqCount} arrived this second. It clears on its own at the ` +
+        `next second; a script calling \`am\` in a tight loop is the usual ` +
+        `cause, so space the calls out or do the work in one dispatch.`,
+      429,
+    );
   }
 
   const { trojan } = deps;
@@ -570,7 +600,7 @@ async function handlePost(
   if (route === "dispatch") {
     try {
       const body = await readBounded(req, CONTROL_MAX_BODY);
-      if (body === null) return err("action body too large", 413);
+      if (body === null) return err(tooLargeMessage("action"), 413);
       const action = JSON.parse(body);
       if (!action || typeof action.type !== "string") {
         return err("missing type field");
@@ -809,7 +839,7 @@ async function handlePost(
     }
     try {
       const rawBody = await readBounded(req, CONTROL_MAX_BODY);
-      if (rawBody === null) return err("trigger body too large", 413);
+      if (rawBody === null) return err(tooLargeMessage("trigger"), 413);
       const body = JSON.parse(rawBody);
       if (typeof body?.path !== "string" || typeof body?.action !== "string") {
         return err("body must be { path, action, text?, key? }", 400);
@@ -868,7 +898,7 @@ async function handlePost(
     if (!deps.onTTCommand) return err("time-travel not active", 501);
     try {
       const body = await readBounded(req, CONTROL_MAX_BODY);
-      if (body === null) return err("time-travel body too large", 413);
+      if (body === null) return err(tooLargeMessage("time-travel"), 413);
       const { cmd, arg } = JSON.parse(body);
       if (!cmd || typeof cmd !== "string") return err("missing cmd field");
       // A CLOSED vocabulary, refused by name. This acked any string, so
@@ -932,7 +962,7 @@ async function handlePost(
     if (!trojan.sqlQuery) return err("SQLite not configured", 501);
     try {
       const body = await readBounded(req, CONTROL_MAX_BODY);
-      if (body === null) return err("query body too large", 413);
+      if (body === null) return err(tooLargeMessage("query"), 413);
       const { query } = JSON.parse(body);
       if (!query || typeof query !== "string") {
         return err("missing query field");

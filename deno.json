@@ -106,7 +106,7 @@
     ]
   },
   "tasks": {
-    "test": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno run --allow-read --allow-write --allow-env scripts/reset-test-home.ts && deno run -A scripts/check-orphans.ts --clean-stale && AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno test -A --sanitize-ops --sanitize-resources tests/ amui/src/ && deno run -A scripts/check-orphans.ts",
+    "test": "deno task check:ratchets && AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno run --allow-read --allow-write --allow-env scripts/reset-test-home.ts && deno run -A scripts/check-orphans.ts --clean-stale && AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno test -A --sanitize-ops --sanitize-resources tests/ amui/src/ && deno run -A scripts/check-orphans.ts",
     "check:orphans": "deno run -A scripts/check-orphans.ts",
     "clean:tmp": "deno run -A scripts/check-orphans.ts --clean",
     "test:onboard": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home AIO_ONBOARD_E2E=1 deno test -A --no-check=remote tests/onboarding-e2e.test.ts tests/run-sh-e2e.test.ts",
@@ -132,6 +132,7 @@
     "check:boundaries": "deno run --allow-read scripts/check-boundaries.ts",
     "check:silent-catch": "deno run --allow-read scripts/check-silent-catch.ts",
     "check:tempdirs": "deno run --allow-read scripts/check-temp-dirs.ts",
+    "check:ratchets": "deno run --allow-read scripts/check-temp-dirs.ts && deno run --allow-read scripts/check-vacuous.ts && deno run --allow-read scripts/check-dead-wiring.ts && deno run --allow-read scripts/check-silent-catch.ts && deno run --allow-read scripts/check-log-prefix.ts && deno run --allow-read scripts/check-gated-tests.ts && deno run --allow-read scripts/check-placeholders.ts",
     "check:placeholders": "deno run --allow-read scripts/check-placeholders.ts",
     "check:gated-tests": "deno run --allow-read scripts/check-gated-tests.ts",
     "check:lock": "deno run --allow-read scripts/check-lock.ts",
@@ -150,8 +151,8 @@
     "bench": "deno run -A --v8-flags=--expose-gc scripts/bench.ts",
     "check:bench": "deno run -A --v8-flags=--expose-gc scripts/check-bench.ts",
     "check:proof": "deno run -A scripts/proof.ts",
-    "soak": "deno run -A scripts/soak.ts --minutes=10",
-    "soak:72h": "deno run -A scripts/soak.ts --minutes=4320",
+    "soak": "deno run -A --v8-flags=--expose-gc scripts/soak.ts --minutes=10",
+    "soak:72h": "deno run -A --v8-flags=--expose-gc scripts/soak.ts --minutes=4320",
     "update:api": "deno run --allow-read --allow-write --allow-run scripts/api-snapshot.ts",
     "example": "deno run -A examples/counter/app.ts",
     "am": "deno run -A src/am.ts",

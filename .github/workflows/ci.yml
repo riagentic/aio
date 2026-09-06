@@ -117,6 +117,12 @@ jobs:
       # test can see it, and so a left-behind process is a red step by name.
       - name: Orphans (nothing the suite started is still serving)
         run: deno task check:orphans
+      # Report-only by design (`--require` is beta's job): a release cut on
+      # Linux cannot be blocked by a Mac it does not have. Printed so the
+      # matrix is SEEN — `.katana/beta.md` requires every row to be proven or
+      # waiting on hardware, and nothing was running it at all.
+      - name: Physical proof matrix (report)
+        run: deno task check:proof
 
   # The real-browser e2e (`tests/e2e-ui-chromium.test.ts` and friends) is
   # `ignore`d when no Chromium is on the machine — so without this job it was

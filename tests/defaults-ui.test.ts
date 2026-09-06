@@ -1,4 +1,4 @@
-import { assertEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 import { cell } from "../src/state/cell-create.ts";
 import { composeCellsWiring } from "../src/server/aio-composition.ts";
 import { _resetAioRuntime } from "../src/state/runtime-reset.ts";
@@ -232,6 +232,52 @@ const UI_SHAPES: { label: string; ui: unknown; hides: boolean }[] = [
     hides: false,
   },
 ];
+
+// …and NOTHING tied that list to the shape space it claims to cover. Every
+// key of `CellVisibility` is in it today, by hand; the day a fifth key is added
+// the enumeration silently stops being one, the property tests below keep
+// passing, and the sentence above ("a new shape added later either lands in one
+// of these buckets or fails here") quietly becomes false. An enumeration IS the
+// guarantee, so the enumeration needs a guard of its own.
+Deno.test("ui property: UI_SHAPES covers every key CellVisibility accepts", () => {
+  const src = Deno.readTextFileSync(
+    new URL("../src/state/cell-types.ts", import.meta.url),
+  );
+  const start = src.indexOf("export type CellVisibility<");
+  assert(start >= 0, "CellVisibility moved — this guard reads the wrong file");
+  const open = src.indexOf("| {", start);
+  const end = src.indexOf("\n};", open);
+  assert(
+    open >= 0 && end > open,
+    "could not read CellVisibility's object form",
+  );
+  const declared = [
+    ...src.slice(open, end).matchAll(/^ {2}(\w+)\??:/gm),
+  ].map((m) => m[1]!);
+
+  // VERIFY THE INSTRUMENT FIRST: a parse that found nothing would make every
+  // assertion below vacuously true — the exact way a guard like this rots.
+  assert(
+    declared.length >= 4,
+    `parsed ${declared.length} keys from CellVisibility — the parse broke, ` +
+      `so this test proves nothing`,
+  );
+
+  const covered = new Set<string>();
+  for (const s of UI_SHAPES) {
+    if (s.ui && typeof s.ui === "object") {
+      for (const k of Object.keys(s.ui)) covered.add(k);
+    }
+  }
+  const missing = declared.filter((k) => !covered.has(k));
+  assertEquals(
+    missing,
+    [],
+    `CellVisibility accepts ${missing.join(", ")}, and no UI_SHAPES entry ` +
+      `exercises it — add each one with its \`hides\` verdict, or the property ` +
+      `tests below cover less than they say they do`,
+  );
+});
 
 function cellWith(id: string, ui: unknown, sync?: boolean) {
   return cell(id, {
