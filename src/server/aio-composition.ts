@@ -649,6 +649,27 @@ function buildUIStateGetter(composed: ComposedCells): UIStateResult {
             structuredClone(result[cellName] as Record<string, unknown>),
             user as AccessUser | undefined,
           );
+          // An ASYNC filter is the third sibling, and it was the only silent
+          // one. A Promise is an object and is not an array, so it sailed past
+          // the check below, landed in the UI state, and reached the wire as
+          // `{}` — every client seeing that cell EMPTY, for the life of the
+          // process, with nothing logged. Nothing leaked (JSON drops it), but
+          // "the cell is blank and no one will say why" is the outcome this
+          // project treats as worse than a crash. Filtering runs inside the
+          // broadcast, which cannot await, so there is no version of this that
+          // works: say which mistake it is, by name.
+          if (typeof (view as { then?: unknown } | null)?.then === "function") {
+            delete result[cellName];
+            log.error(
+              `[${cellName}] visible.forUser is ASYNC — it returned a Promise, ` +
+                `not a state object. Broadcast filtering cannot await, so the ` +
+                `Promise would reach every client as {}. Make the filter ` +
+                `synchronous (read what it needs from the state it is handed, ` +
+                `or precompute the value in a method) — omitting the cell for ` +
+                `this client (fail closed).`,
+            );
+            continue;
+          }
           // Same rule as a throw: a filter that did not return a state object
           // did not decide what this client may see. (A missing `return` in an
           // arrow body with braces is the everyday way to land here.)

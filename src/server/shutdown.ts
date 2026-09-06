@@ -2,6 +2,7 @@
 // Extracted from aio.ts. Order is critical: persist → diag → vitals → hooks → services → DB.
 
 import type { Log } from "../diagnostics/logger-api.ts";
+import { flushClientLog } from "./client-log.ts";
 import { _blockingInFlight, blocking } from "../state/blocking.ts";
 import { _setUserStopHookActive } from "../state/dispatch.ts";
 import {
@@ -469,6 +470,13 @@ export function createShutdownOrchestrator(
         );
       }
     }
+
+    // Phase 3b: the client log. `writeClientLog` is fire-and-forget by design
+    // (a renderer's line must never wait on disk), so nothing else can tell
+    // whether the last lines landed — or whether the 0600 mode fix that rides
+    // with the first write ran. Both are cheap to wait for and neither is
+    // recoverable after exit.
+    await phase(log, "client log", tLeft, () => flushClientLog());
 
     // Phase 4: Vitals cleanup
     await phase(log, "vitals", tLeft, () => {

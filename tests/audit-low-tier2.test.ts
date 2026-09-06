@@ -102,9 +102,20 @@ Deno.test("L23: the runtime --client=<kind> selects the client log too", async (
       "client.log",
     ),
   );
+  // The control: no client flag must resolve to a SERVER log. Which one is
+  // ambient — `logPathFor` returns the first that EXISTS (stdout.log, then
+  // app.log), so pinning the filename made this assert a fact about the
+  // machine: green on a clean CI home, red on any developer box that had ever
+  // run the app and so had an app.log but no stdout.log. The contract L23 is
+  // about is which FAMILY the flag selects, and that is hermetic.
+  const noFlag = logPathFor(parseGlobalFlags(["log"]).flags);
   assert(
-    logPathFor(parseGlobalFlags(["log"]).flags).includes("stdout.log"),
-    "and with no client flag at all it is still the server log",
+    !noFlag.includes("client.log"),
+    `and with no client flag at all it is still the server log: ${noFlag}`,
+  );
+  assert(
+    /stdout\.log|app\.log|\.aio\.log/.test(noFlag),
+    `…and it is one of the server logs: ${noFlag}`,
   );
 });
 

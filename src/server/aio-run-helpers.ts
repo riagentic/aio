@@ -451,7 +451,14 @@ export function _alreadyRunningMessage(o: {
   }: ${o.appId}${where}${who} (home ${o.home})`;
   if (o.takeover) return head; // --takeover already tried; the rest is noise
   return head + `\n` +
-    `  Stop it: \`am stop ${o.appId}\`${
+    // `am stop <appId>` does NOT work: `stop`'s positional argument is a
+    // COMPONENT label (deno.json → build.targets), so in the ordinary
+    // single-app project it answers "this project declares no components, so
+    // \"<appId>\" names nothing" and the app keeps running — advice that fails
+    // in the one message every operator meets when two apps collide. `--app=`
+    // is the flag that targets an app by id, and it works from ANY directory
+    // (measured from /tmp against a running app: exit 0, stopped).
+    `  Stop it: \`am stop --app=${o.appId}\`${
       o.pid > 0 ? ` (or \`kill ${o.pid}\`)` : ""
     }, or re-run with \`--takeover\`.\n` +
     `  \`--port=N\` does NOT help: the lock is on the appId, not the port.\n` +

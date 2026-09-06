@@ -550,28 +550,248 @@
   `minus`, `ResetButton`, `plus`. Those three are what a user types into
   `am trigger` and `ui.App.*`, so the test now renders the scaffold's three
   buttons and clicks them by those names.
+- **A port is not an identity: the CLI client no longer flushes its queue into a
+  stranger.** A dev server takes a FREE port, so an app that dies can have its
+  port taken by a different app — and `connectCli` would reconnect to it, flush
+  the offline queue into that app's database, and resolve every one of those
+  calls as success. Measured with two scaffolded apps sharing one port: two
+  decrements queued for app A landed in app B, whose counter went 0 → -2, with
+  nothing said anywhere. The browser transport has scoped its offline queue by
+  appId since the same thing happened there; this transport carried no identity
+  at all. The client now learns which app answered (from `/__aio/health`, a
+  public route that already carries `appId` — no protocol change, no new option)
+  and verifies it before REOPENING. A mismatch is refused and named, with the
+  queue held rather than delivered; when the original app returns the queue
+  flushes as it always did (verified: the same restart still lands both
+  actions). A first connect is never delayed by the check, and every way of not
+  knowing — an older server, auth, an untrusted certificate — means "no opinion"
+  and leaves behaviour exactly as it was. `connectCliUDS` needs none of this:
+  its socket path is `<appId>.sock`, so it is identity-scoped already.
+- **Three offline queues, one drop policy at last.** `state/offline-queue.ts`
+  exists because the browser transport and the isomorphic core once held
+  OPPOSITE rules at cap — the core refused the NEWEST action, keeping stale
+  intent and throwing away the freshest, while the browser evicted the oldest
+  and rejected its ack. `connectCli` and `connectCliUDS` were a third and fourth
+  queue still holding the refused-the-newest rule, so a CLI client that fell 100
+  actions behind replayed stale intent and lost the newest — which for a control
+  client is the one that matters. Both now evict the OLDEST and reject THAT
+  caller immediately, in the same words. They keep their own arrays for a real
+  reason (the factory settles a dropped action through the module-level ack
+  sink, which is the browser's singleton, while a CLI client registers acks per
+  connection on purpose): three queues, two implementations, one policy. The
+  branch that used to reject the newest caller is gone — it was unreachable the
+  moment the policy changed. Related: the differential fuzzer's docstring
+  claimed "a path that grows its own queue … goes red here"; it fuzzes the two
+  factory instances and never saw these, and now says so.
+- **An `async visible.forUser` blanked the cell instead of saying so.** A
+  per-user filter that throws, and one that forgets to return, both fail closed
+  with a named error. An ASYNC one — the everyday slip, since the body often
+  wants to await something — returned a Promise, which is an object and is not
+  an array, so it sailed past the "did it return a state object" check, landed
+  in the UI state and reached the wire as `{}`. Every client saw that cell EMPTY
+  for the life of the process, with nothing logged. Nothing leaked (JSON drops a
+  Promise), but a blank cell no one can explain is the outcome this project
+  ranks below a crash. It now takes the same fail-closed path as its two
+  siblings, and the message names the actual mistake: broadcast filtering cannot
+  await, so make the filter synchronous.
+- **The enumeration that "makes the CLASS unshippable" now has a guard of its
+  own.** `defaults-ui.test.ts` walks every `ui` shape and proves that one which
+  hides state is never broadcast raw and never combined with `sync`, and says in
+  as many words that "a new shape added later either lands in one of these
+  buckets or fails here". Nothing tied that hand-written list to
+  `CellVisibility`: all four of its keys are covered today, by hand, and the day
+  a fifth is added the enumeration silently stops being one while every test
+  keeps passing. The list is now checked against the type's own keys — and the
+  guard verifies its own parse first, since a parse that found nothing would
+  make it vacuously green.
+- **Five examples were one app.** `counter`, `todo`, `contacts`, `disk` and
+  `updates` shipped without a config of their own, and they live INSIDE this
+  repo — so the nearest deno.json is the framework's and each of them booted as
+  appId `"aio"`: one identity, one lock, one `~/.aio`, one `state.db`, shared
+  between five different apps. Starting the counter example while the updates
+  example ran produced
+  `[AIO] Already running: aio … the appId also picks the
+  data home, so both would read and write one database`.
+  The framework diagnosed its own examples correctly, in its own words. Each now
+  carries the `deno.json` a real project has — the same shape `cli-tool/` and
+  `targets/*` already used — so `cd examples/counter && deno task dev` is
+  `ex-counter` in `~/.ex-counter`. Not an `appId` in `aio.run()`: `counter` and
+  `todo` must stay byte-identical to what `am create` writes, and a scaffolded
+  app has no business hard-coding an id its own config already carries. A new
+  test walks every runnable example, resolves identity the way aio does (nearest
+  deno.json at or above the entry) and fails on one that inherits the
+  framework's, or on two that claim one name.
+- **The fourth fold path was the silent one.** Four places apply a sync reducer:
+  an ack, a catch-up batch, a broadcast — and `rebase`, which replays the
+  client's OWN unconfirmed ops on every ack, remote op and reconnect. The first
+  three each report a fold they could not apply
+  (`D11: silent rejection
+  is a blank-screen-class bug — always loud`).
+  `rebase` returned the fact in `RebaseResult.dropped` and **no caller anywhere
+  read it**, so a sync method that cannot replay its own payload dropped the
+  user's unsent change out of the optimistic view and said nothing. `rebase` now
+  separates the contract's `null` no-op from a reducer that could not apply the
+  op (`notApplied`, an additive field carrying which of the two failures it
+  was), and the engine reports those through the SAME two reporters the other
+  three paths use — same wording, same once-per-key dedup. A `null` no-op stays
+  silent, because that one is the contract working.
+- **`SyncStatus.pending` now means what it documents.** Its contract is "Ops
+  still waiting for an ack"; it was set from `rebase().surviving.length`, which
+  is a different fact — ops that FOLDED cleanly. The two differ for every op the
+  reducer answered with the documented `null` no-op, so an app that uses no-ops
+  was told nothing was awaiting an ack while the buffer still held ops. It is
+  the buffer's unconfirmed count now.
+- **`am dispatch` refuses the `--args` flag written as a positional value.**
+  `--args` is a FLAG; typed positionally instead —
+  `am dispatch counter:increment '{"args":[0]}'` — each positional value is
+  JSON-parsed, so the wrapper itself became argument one and the payload the
+  double wrap `{ args: [ { args: [0] } ] }`. Measured on the counter example:
+  the method got an object where it expected a number, `s.count += by` turned
+  `count` into the string `"2[object Object]"`, the dispatch answered
+  `{"ok":true}`, and the app ran on until the NEXT boot — where the persist
+  shape-drift check refused it, a restart late and about something else. The
+  shape is unmistakable (an object whose only key is `args`, holding an array)
+  and no method meaningfully takes it, so it is refused at the keystroke that
+  meant something else, naming both the command that was meant (`--args=[0]`)
+  and the escape hatch for an app that really wants that object
+  (`--args='[{"args":[0]}]'`). An object argument of any other shape, and every
+  ordinary positional call, is untouched.
+- **The trojan's rate limit now says its own number.** It answered a bare
+  `{"error":"rate limit exceeded"}` — no cap, no count, and no hint that it
+  clears by itself a second later, which from `am state` reads as a broken tool
+  rather than a limiter doing its job. It is the one an OPERATOR meets; the two
+  sibling limiters, which nobody sees, both name their numbers (`client-log`:
+  `>${MAX_RATE} msg/s`; the WS fuse: the rate, the client count and the cap).
+  Measured by driving 700 dispatches at a live app in a loop. It now names the
+  cap (100 requests/sec across ALL trojan endpoints), how many actually arrived,
+  that it clears on its own at the next second, and the usual cause — a script
+  calling `am` in a tight loop.
+- **The most-seen refusal told you to run a command that fails.** Two apps
+  colliding on an appId print "Already running: <id> — Stop it: am stop <id>".
+  But the positional argument of `am stop` is a COMPONENT label (deno.json →
+  `build.targets`), so in the ordinary single-app project that command answers
+  "this project declares no components, so <id> names nothing" and the app keeps
+  running. Measured against a live example: exit 1, process still up. `--app=`
+  is the flag that targets an app by id, and it works from ANY directory
+  (measured from /tmp: exit 0, stopped). The refusal — and the two `am data`
+  warnings that gave the same advice — now name the form that works, and a guard
+  refuses any source that interpolates an app id into the component slot again.
+- **`am create` accepted six flags; four surfaces disagreed about which.** The
+  parser takes `--template --target --aio-version --mirror --jsr --force`; the
+  refusal on an unknown flag named all six; `am help create` named one (then
+  two); and `am-flags.ts`'s ungated-verb note advertised a `--dir` the command
+  REFUSES by name ("there is no --dir; cd where you want it first"). The list
+  lives once now, in the same leaf as TEMPLATES and TARGETS, and both the help
+  and the refusal read it.
+- **The soak gate failed a healthy app.** `deno task soak` — the 10-minute run
+  the file itself offers as the CI-friendly one, and the short form of a named
+  beta gate — measured a least-squares line through raw `heapUsed`. That is not
+  the retained set: V8's old space climbs between major collections and drops
+  when one runs, so the signal is a sawtooth and the line measures where the
+  window happened to start and end in that cycle. Measured on this app, with no
+  leak: **1.521 MB/min over 10 minutes (FAIL), 0.491 over 27 minutes (pass,
+  barely)** — and the post-GC floor across those 27 minutes went 21, 41, 54, 30,
+  40, 28, 44, 30, 30 MB: up and down, never a trend. A gate that cries wolf is
+  worse than no gate; the first red is investigated and the second is ignored.
+  It now forces a collection before each sample (`deno task soak` passes
+  `--v8-flags=--expose-gc`), so the number IS the retained set: the same app,
+  same 10 minutes, same 11975 frames now reads **−0.065 MB/min, PASS**, on a
+  signal that sits flat at 27 MB instead of swinging between 21 and 76. Without
+  the flag it falls back to the floor of each window — the same quantity read
+  off the sawtooth — with the window sized to the run so a short soak still gets
+  a verdict, and it names which method it used and refuses a verdict on too few
+  points rather than guessing.
 
-## v1.0.0-alpha77 — the page the browser was actually served (2026-09-04)
+- **A frame the server DROPS now settles the call it was carrying.** The four
+  limit drops on the WebSocket — the global fuse, the per-client message budget,
+  an oversize frame, the byte budget — answered on the `diag` channel alone.
+  Every client routes that to a log, and it carries no `cid`, so it could settle
+  nothing: the caller waited out its full ack ceiling and was then told the
+  server "never confirmed the call: it may still be running (its writes can
+  commit later)". It was not running and never would be — the server had already
+  decided, and said so where the call could not hear it. Measured against a live
+  app: 250 sequential `await cell.method()` calls over one socket, **248
+  applied**, two callers hung to their ceiling and lost their writes silently.
+  `refuseAction` a few lines below states this exact rule for the refusals that
+  happen AFTER parsing ("A refused frame that carries a cid is TOLD… then
+  blaming a server that 'never confirmed the call'"); these four happen BEFORE
+  it. They now send a failure ack for the dropped frame's cid, so the caller
+  learns immediately and by reason. ONE EXPLANATION PER RUN, ONE SETTLEMENT PER
+  CALL: the diag stays once-per-window (a tripped budget drops many frames and
+  identical lines bury the one that explains it), while every dropped frame
+  settles its own call — with both once-only, two of four dropped callers still
+  hung. The cid is read with a bounded scan, on the drop path only, and skipped
+  entirely for an oversize frame so a refusal cannot become work.
 
-> The public surface is frozen from this release on
-> (`docs/basics/semver-policy.md`): an app that compiles and runs against
-> alpha76 compiles and runs against every later alpha, every beta, and 1.0.0.
-> Nothing in this entry is a migration.
->
-> The release began with one report — the visual app manager had "stopped
-> working with the last aio" — and the cause is the shape everything else here
-> takes: the dev server's graph validator read `await import('/app.js')` inside
-> the framework's own HTML template as a real import, found `/app.js` in no
-> import map, and served the diagnostic page instead of the app; every gate was
-> green because no test had ever opened the manager in a browser. Then five
-> parallel hunts went over the renderer, the two transports, Electron,
-> state/persistence/sync and build/`am`, each finding proven with a test that is
-> red on the old code. Seventeen audit rounds committed after alpha76 and never
-> released are in the last section. Twenty-eight framework defects, eleven of
-> them silent data or update loss; the surface is byte-identical.
+- **A refused table write now says what shape the row was.** The db layer
+  already names a great deal on a refusal — the SQLite error, the statement
+  index within the transaction, that statement's SQL, and that the whole
+  transaction rolled back. What it gives for the VALUES is a count, so the one
+  thing a reader cannot see is the mistake itself: an `id` arriving as a string
+  where the table declares an integer key. Measured by crash-testing a db-backed
+  cell whose `pk()` column was handed `"r1"` — the app accepted 400 writes,
+  reported success to every caller, and restored `[]`. The framework's HANDLING
+  of that is right (the table half fails alone so the snapshot still lands, the
+  state stays in memory, the batch is retried whole every window and lands the
+  moment the value is fixed) — but "the moment the value is fixed" is
+  unreachable if the value cannot be seen. The refusal now adds the table(s) and
+  the row's shape by TYPE — never its values, because a log is not a place for
+  user data.
 
-### The visual app manager, and the validator that hid it
+- **The client log's writes were unreachable, and its mode fix could outlive
+  them.** `writeClientLog` is fire-and-forget on purpose — a renderer's line
+  must never wait on disk — but nothing tracked the resulting write, so no
+  caller could tell whether the last lines landed. The 0600 chmod that rides
+  with the first write was detached even from that: fired inside the write's
+  `.then` and never returned, so a process exiting in between left the file at
+  the mode the code exists to correct. The op sanitizer said it first, under
+  load — "An async operation to change the permissions of a file was started in
+  this test, but never completed". The chmod is part of the chain now, the chain
+  is tracked, and `flushClientLog()` drains it; shutdown awaits it beside the
+  other diagnostics. Callers are unchanged: still no await, still no line lost
+  to one.
 
+- **`am shot --zzz` offered a flag that fails when used.** `--pose` sat in the
+  flag table, so the gate replied "shot takes: --full --out --pose" — while
+  `am shot --pose` answers "not supported: the app decides its own camera". It
+  was listed for a good reason (the gate must let it through, or the command's
+  better message never runs) and paid for it in the wrong place. A third state
+  now says so: recognised, refused, NOT offered. The table's own note already
+  recorded the mirror-image mistake for `--level` and said the two tests around
+  it could see neither half — this is that half, with a guard that nothing is
+  both offered and refused.
+
+- **`am help create` could not answer "how do I make an electron app?"** It
+  listed `--template` and never mentioned `--target` at all, while the usage
+  line printed on misuse listed all five values — so the command accepted
+  `--target=electron` and its own help could not say so. (Found because someone
+  asked.) `TARGETS` now lives beside `TEMPLATES` in the leaf `am-help-text.ts`,
+  whose header already recorded this exact lesson for templates — "where the
+  template list finally stops being written twice" — and the help interpolates
+  it, so the two cannot drift. `am create` re-exports it, and the help block now
+  says what each target costs: browser needs no toolchain, electron
+  auto-installs Electron, android needs the Android SDK + Gradle.
+
+- **Two messages named an `am` command that does not run.** Following on from
+  the `am stop <id>` fix, the same question asked mechanically: an error opened
+  with `am tt goto:` — but `am tt` was removed in alpha70, so typing it answers
+  "`am tt` is spelled `am timetravel` now", an error inside an error. And
+  `definePlugin` said a plugin's name is what "a collision message, a boot line
+  and `am plugins`" call it; `am plugins` has never been a command, and `am`
+  answers "unknown command: plugins". Both now name what actually exists. A
+  guard reads the retired-verb registry `am` itself answers from and refuses any
+  current source or doc that suggests one — history is left alone (release
+  notes, upgrade guides and dated specs record what was true then, and editing
+  them would make them lie about the version they document).
+
+- **Four more limits that would not say their number.** Every bounded
+  control-plane body answered `<x> body too large`: no cap, nothing to act on —
+  the same gap as the rate limit above, four times in the same file, on the
+  routes behind `am dispatch`, `am trigger`, `am timetravel` and `am sql`. One
+  shared sentence now names the 1 MB cap, says NOTHING was executed, and points
+  at the right tool (the control plane carries commands, not bulk data). The
+  request's true size stays unknown on purpose — the read aborts at the cap,
+  which is the point of the bound.
 - **`amui` was served the diagnostic page.** Its `*.server.ts` re-exports reach
   the framework's own `server-html-gen.ts`, whose prod HTML template contains
   `await import('/app.js')` — inside a template literal. The import scanner

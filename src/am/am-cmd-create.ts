@@ -49,14 +49,11 @@ export type { Template };
  *  auto-installs Electron on first run; `android` needs the Android SDK +
  *  Gradle (the one toolchain aio can't fetch for you); `cli`/`server` are
  *  headless (`server` was spelled `service` before alpha52). */
-export const TARGETS = [
-  "browser",
-  "electron",
-  "android",
-  "cli",
-  "server",
-] as const;
-export type Target = (typeof TARGETS)[number];
+// Imported AND re-exported: a bare `export … from` re-export does not bind the
+// names in THIS module's scope, and this file uses both (`--target=` parsing,
+// the CreateArgs field). Callers keep importing them from here as before.
+import { CREATE_FLAGS, type Target, TARGETS } from "./am-help-text.ts";
+export { type Target, TARGETS };
 
 const DEFAULT_TARGET: Target = "browser";
 
@@ -139,9 +136,7 @@ export function parseCreateArgs(args: string[]): CreateOpts {
       // since alpha70; this is the same rule, in the verb people run first.
       throw new Error(
         `am create: unknown flag ${a.split("=")[0]}\n` +
-          `  accepted: --template=<${TEMPLATES.join("|")}>, --target=<${
-            TARGETS.join("|")
-          }>, --aio-version=<v>, --mirror[=<path>], --jsr, --force\n` +
+          `  accepted: ${CREATE_FLAGS.join(", ")}\n` +
           `  the app is created in ./<name> — there is no --dir; cd where you ` +
           `want it first.`,
       );

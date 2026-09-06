@@ -1612,15 +1612,31 @@ export function createServer(config: ServerConfig): ServerHandle {
   // ── Zombie-server guard (watcher-loop field report #4) ──
   // Event-loop starvation once killed the HTTP listener while the process kept
   // spinning (alive-but-dead). Crash loudly instead so a supervisor restarts us.
+  //
+  // It watched `.then(onFulfilled)` only, so it saw the listener ending
+  // CLEANLY and missed it ending BADLY — which is the way it actually ends.
+  // Measured under `ulimit -n 128`: the accept loop threw "Too many open
+  // files", `finished` rejected, the guard never ran, and the rejection was
+  // reported by the crash handler as an unhandled rejection. The process then
+  // sat there alive with cells running and NOTHING listening — `ss` showed no
+  // socket, every request failed, and no supervisor had a reason to restart
+  // it. A guard that only covers the harmless half is the shape it exists to
+  // prevent. (`detail` was `String()` — the empty string — so even the half it
+  // did cover named no reason.)
   let _shuttingDown = false;
-  httpServer.finished.then(() => {
+  const _listenerDied = (why: unknown): void => {
     if (_shuttingDown) return;
     log.error(
       "[aio] FATAL: HTTP listener died unexpectedly — exiting so a supervisor can restart (zombie-server guard)",
-      { detail: String() },
+      {
+        detail: why === undefined
+          ? "the accept loop ended without an error"
+          : String(why),
+      },
     );
     Deno.exit(1);
-  });
+  };
+  httpServer.finished.then(() => _listenerDied(undefined), _listenerDied);
   // Event-loop stall detector: a 1s timer that arrives seconds late means the
   // loop was blocked (sync-write storms, runaway reducers). Named diagnostic
   // beats downstream symptoms.

@@ -2450,6 +2450,28 @@ async function _runPhases<S, A, E>(
           `shutdown: the FINAL persist was refused — state since the last ` +
             `successful write is NOT on disk. ${failed.message}`,
         );
+      } else if (shouldPersist) {
+        // A clean verdict from the HANDLE is not a fact about the disk. Delete
+        // the database out from under a running app (a cleared tmp dir, a
+        // container volume that was not really persistent, `am remove --data
+        // --force`) and POSIX keeps the inode alive for the open fd: SQLite
+        // commits happily into a file no path can reach. Measured: every
+        // window after the deletion reported success, `lastCycleError()` stayed
+        // null, and the app exited `errors=0` having lost every write since.
+        // Existence is the cheapest fact that catches it, and this is the one
+        // moment it costs nothing — there is no next window to notice in.
+        const dbFile = config.dbPath ? resolve(config.dbPath) : _dirs.stateDb;
+        const gone = await Deno.stat(dbFile).then(
+          () => false,
+          (e) => e instanceof Deno.errors.NotFound,
+        );
+        if (gone) {
+          log.error(
+            `shutdown: the database file is GONE (${dbFile}) — it was deleted ` +
+              `while the app was running, so writes since then committed into ` +
+              `an unlinked file and NONE of them are on disk.`,
+          );
+        }
       }
     },
     setShuttingDown: persistence.setShuttingDown,

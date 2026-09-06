@@ -139,3 +139,82 @@ Deno.test("M1: a failed fold is reported, never silent", async () => {
     `the failure must name the cell and the op — got ${JSON.stringify(lines)}`,
   );
 });
+
+// The FOURTH fold path. Ack, catch-up and broadcast each report a fold they
+// could not apply; rebase — replaying the client's OWN unconfirmed ops — put
+// the fact in `RebaseResult.dropped`, which no caller read. So a sync method
+// that cannot replay its own payload lost the user's unsent change from the
+// optimistic view, stopped being counted in `pending`, and said nothing.
+Deno.test("M1: a fold that fails during REBASE is reported too", async () => {
+  // succeeds for the peer's op, fails for the client's own queued one
+  const { engine, buffer } = makeEngine((s, action) =>
+    action === "mine" ? REDUCER_FAILED : { ...s, seen: true }
+  );
+  await buffer.add({
+    id: "own-op",
+    cell: CELL,
+    action: "mine",
+    payload: {},
+    hlc: [1, 0, "me"] as HLC,
+    confirmed: false,
+  });
+  // any remote op rebases the cell over the unconfirmed queue
+  const lines = await captureConsoleAsync(async () => {
+    await engine.handleRemoteOp(peerOp("peer-1", 40));
+  });
+  assert(
+    lines.some((m) => m.includes("own-op") && m.includes("rebase")),
+    `the rebase failure must name the op and the path — got ${
+      JSON.stringify(lines)
+    }`,
+  );
+});
+
+// …and a `null` no-op during rebase is the contract working, not a failure.
+Deno.test("M1: a null no-op during REBASE stays silent", async () => {
+  const { engine, buffer } = makeEngine((s, action) =>
+    action === "mine" ? null : { ...s, seen: true }
+  );
+  await buffer.add({
+    id: "own-noop",
+    cell: CELL,
+    action: "mine",
+    payload: {},
+    hlc: [1, 0, "me"] as HLC,
+    confirmed: false,
+  });
+  const quiet = await captureConsoleAsync(async () => {
+    await engine.handleRemoteOp(peerOp("peer-2", 41));
+  });
+  assertEquals(
+    quiet.filter((m) => m.includes("own-noop")),
+    [],
+    "a documented no-op must not be reported as a broken reducer",
+  );
+});
+
+// `SyncStatus.pending` is documented as "Ops still waiting for an ack". It was
+// set from `rebase().surviving.length` — ops that FOLDED cleanly, a different
+// fact — so every op the reducer answered with the documented `null` no-op was
+// missing from the count while it sat in the buffer awaiting its ack.
+Deno.test("M1: pending counts ops awaiting an ack, including a no-op's", async () => {
+  const { engine, buffer } = makeEngine((s, action) =>
+    action === "mine" ? null : { ...s, seen: true }
+  );
+  for (const id of ["n1", "n2"]) {
+    await buffer.add({
+      id,
+      cell: CELL,
+      action: "mine",
+      payload: {},
+      hlc: [1, 0, "me"] as HLC,
+      confirmed: false,
+    });
+  }
+  await engine.handleRemoteOp(peerOp("peer-3", 42));
+  assertEquals(
+    engine.getStatus(CELL).pending,
+    2,
+    "two unconfirmed ops are waiting for an ack, whatever the reducer did with them",
+  );
+});

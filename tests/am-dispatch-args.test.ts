@@ -11,11 +11,12 @@
 // `--args='["192.168.1.9"]'` is that spelling. These tests pin it end-to-end
 // against a real app over the real trojan, and pin every pre-existing form
 // unchanged beside it (compat is not a claim, it is a row in this table).
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { cell } from "../src/state/cell-create.ts";
 import { testServer } from "../src/testing/server-test.ts";
 import { _resetInstanceVerify } from "../src/am/am-http.ts";
 import {
+  argsFlagAsPositional,
   cmdDispatch,
   DISPATCH_USAGE,
   parseArgsFlag,
@@ -220,5 +221,47 @@ Deno.test("am help documents the forms that actually work", () => {
   assert(
     DISPATCH_USAGE.includes(`"payload":{"args":["192.168.1.9"]}`),
     DISPATCH_USAGE,
+  );
+});
+
+// `--args` is a FLAG. Written positionally instead —
+// `am dispatch counter:increment '{"args":[0]}'` — each positional value is
+// JSON-parsed, so the wrapper itself becomes argument one and the payload is
+// the double wrap `{ args: [ { args: [0] } ] }`. MEASURED on the counter
+// example: `s.count += by` turned `count` into the string "2[object Object]",
+// the dispatch answered `{"ok":true}`, and the app ran on until the NEXT boot,
+// where the persist shape-drift check refused it — a corruption reported a
+// restart late, by a check about something else.
+Deno.test("am dispatch: the --args wrapper passed positionally is refused, by name", () => {
+  const msg = argsFlagAsPositional(
+    "counter:increment",
+    ['{"args":[0]}'],
+    [{ args: [0] }],
+  );
+  assert(msg, "the double wrap must be refused");
+  assertStringIncludes(msg, "--args");
+  // the way out has to be in the message, and has to be the RIGHT command
+  assertStringIncludes(msg, "am dispatch counter:increment --args=[0]");
+  // …and the escape hatch for an app that really means that object
+  assertStringIncludes(msg, `--args='[{"args":[0]}]'`);
+});
+
+Deno.test("am dispatch: ordinary positional args are untouched", () => {
+  assertEquals(argsFlagAsPositional("c:m", ["3"], [3]), null);
+  assertEquals(argsFlagAsPositional("c:m", ["a", "b"], ["a", "b"]), null);
+  // an object argument that is NOT the wrapper shape stays legal
+  assertEquals(
+    argsFlagAsPositional("c:m", ['{"host":"h"}'], [{ host: "h" }]),
+    null,
+  );
+  // `args` alongside another key is a real payload, not the flag's shape
+  assertEquals(
+    argsFlagAsPositional("c:m", ['{"args":[1],"n":2}'], [{ args: [1], n: 2 }]),
+    null,
+  );
+  // `args` that is not an array is not the flag's shape either
+  assertEquals(
+    argsFlagAsPositional("c:m", ['{"args":"x"}'], [{ args: "x" }]),
+    null,
   );
 });

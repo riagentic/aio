@@ -101,9 +101,11 @@ export function definePlugin(p: Plugin): Plugin {
   if (!p.name || typeof p.name !== "string") {
     throw new Error(
       `definePlugin: every plugin needs a \`name\` — it is what a collision ` +
-        `message, a boot line and \`am plugins\` call it. Got ${
-          JSON.stringify(p.name)
-        }.`,
+        // `am plugins` is not a command — `am` answers "unknown command:
+        // plugins". Name the two places that DO carry the name (this type's
+        // own doc says exactly those two) rather than a third that never
+        // existed.
+        `message and a boot line call it. Got ${JSON.stringify(p.name)}.`,
     );
   }
   return p;

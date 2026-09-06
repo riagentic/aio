@@ -323,8 +323,26 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     const confirmedState = deps.getConfirmedState()[cell] ?? {};
     const unconfirmed = await deps.buffer.getUnconfirmed(cell);
     const result = rebase(confirmedState, unconfirmed, deps.reducer);
+    // The op the client itself is holding could not be replayed. Ack,
+    // catch-up and broadcast have always said so; rebase returned the fact in
+    // `dropped` and NOTHING read it, so the one path replaying the user's own
+    // unsent changes was the only silent one — the change simply left the
+    // optimistic view, and `pending` (below) stopped counting it. Same two
+    // reporters as the other three paths, so the wording and the once-per-key
+    // dedup are shared rather than re-invented.
+    for (const { op, why } of result.notApplied) {
+      if (why === "failed") foldFailure(cell, op.id, op.action, "rebase");
+      else _warnUndefReducer(cell, op.action);
+    }
     deps.onStateUpdate(cell, result.optimistic);
-    updateStatus(cell, { pending: result.surviving.length });
+    // `pending` is documented as "ops still waiting for an ack" (SyncStatus),
+    // and that is `unconfirmed` — the buffer's own list. It was
+    // `surviving.length`, which is a different fact: ops that FOLDED cleanly.
+    // The two differ for every op the reducer returned `null` for — the
+    // documented no-op contract — so an app that uses no-ops was told 0 ops
+    // were awaiting an ack while the buffer held some, and the same
+    // under-count hid an op the reducer could not replay.
+    updateStatus(cell, { pending: unconfirmed.length });
     return result.optimistic;
   }
 
