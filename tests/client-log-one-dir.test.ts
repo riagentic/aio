@@ -9,7 +9,9 @@
 import { assert, assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import {
+  _pendingWrites,
   disposeClientLog,
+  flushClientLog,
   initClientLog,
   writeClientLog,
 } from "../src/server/client-log.ts";
@@ -84,4 +86,52 @@ Deno.test("client log: nothing else invents a client.log location", async () => 
     [],
     "these hardcode a client.log path instead of asking the logger",
   );
+});
+
+// `writeClientLog` is fire-and-forget on purpose — a renderer's line must never
+// wait on disk — so NOTHING could tell whether the last lines landed, or
+// whether the 0600 mode fix that rides with the first write ran. The op
+// sanitizer said so first, under load: "An async operation to change the
+// permissions of a file was started in this test, but never completed."
+// Detached from the write's chain, that chmod could also lose a race with
+// process exit, leaving the file at the mode the code exists to correct.
+Deno.test("client log: the write and its mode fix are drainable", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "aio-clientflush-" });
+  try {
+    initClientLog(dir);
+    const entry = (msg: string) =>
+      ({ ts: Date.now(), level: "info", msg }) as Parameters<
+        typeof writeClientLog
+      >[1];
+    writeClientLog(0, entry("first line"));
+    writeClientLog(0, entry("second line"));
+    // The tracking must EXIST — asserting only after the flush would pass even
+    // if flushClientLog() drained nothing, because the write usually lands
+    // first. (Measured: the mutation that stopped tracking left this test
+    // green until this line was added.)
+    assertEquals(_pendingWrites(), 2, "both writes are in flight and tracked");
+
+    // The whole point: one await, and everything issued so far is on disk.
+    await flushClientLog();
+    assertEquals(_pendingWrites(), 0, "and the flush drained them");
+
+    const path = join(dir, "client.log");
+    const text = await Deno.readTextFile(path);
+    assert(text.includes("first line"), text);
+    assert(text.includes("second line"), text);
+
+    if (Deno.build.os !== "windows") {
+      const mode = (await Deno.stat(path)).mode! & 0o777;
+      assertEquals(
+        mode,
+        0o600,
+        "the mode fix rides with the write, so draining the write drains it",
+      );
+    }
+    // …and a flush with nothing pending returns rather than hanging.
+    await flushClientLog();
+  } finally {
+    disposeClientLog();
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
+  }
 });

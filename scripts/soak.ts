@@ -102,7 +102,32 @@ const churn = setInterval(() => {
   clients[idx] = client();
 }, 5000);
 
+/** A leak is a RETAINED set that grows. `heapUsed` is not that: V8's old space
+ *  climbs between major GCs and drops when one runs, so the raw signal is a
+ *  sawtooth and a least-squares line through it measures where the window
+ *  happened to start and end in that cycle.
+ *
+ *  MEASURED on this very app, with no leak: 1.521 MB/min over 10 minutes
+ *  (FAIL — and 10 minutes is `deno task soak`, the duration this file offers
+ *  as the CI-friendly one), 0.491 MB/min over 27 minutes (pass, barely). The
+ *  post-GC FLOOR over the same 27 minutes went 21, 41, 54, 30, 40, 28, 44, 30,
+ *  30 MB — up and down, never a trend. A gate that fails a healthy app is
+ *  worse than no gate: the first red is investigated, the second is ignored,
+ *  and the leak it was written for arrives to an audience that has stopped
+ *  believing it.
+ *
+ *  So: force a collection before sampling when the runtime allows it, and the
+ *  number IS the retained set. `deno task soak` passes
+ *  `--v8-flags=--expose-gc` for exactly this. Without it, fall back to the
+ *  floor of each window, which is the same quantity read off the sawtooth. */
+const gc = (globalThis as { gc?: () => void }).gc;
+/** Filled in at the verdict, once the fallback's bucket width is known — a
+ *  banner that names a window size the run did not use is the same defect as
+ *  any other message that describes something it is not doing. */
+let MEASURE = gc ? "post-GC heap" : "the floor of each window";
+
 const sampler = setInterval(() => {
+  gc?.();
   const heap = Deno.memoryUsage().heapUsed / (1024 * 1024);
   samples.push({ t: (Date.now() - t0) / 60_000, heap });
   const last = samples[samples.length - 1]!;
@@ -118,12 +143,32 @@ clearInterval(sampler);
 for (const ws of clients) ws.close();
 
 // least-squares slope over the post-warmup window (skip first third)
-const window = samples.slice(Math.floor(samples.length / 3));
-const n = window.length;
-const mt = window.reduce((a, s) => a + s.t, 0) / n;
-const mh = window.reduce((a, s) => a + s.heap, 0) / n;
-const slope = window.reduce((a, s) => a + (s.t - mt) * (s.heap - mh), 0) /
-  window.reduce((a, s) => a + (s.t - mt) ** 2, 0);
+const postWarmup = samples.slice(Math.floor(samples.length / 3));
+/** The retained set per window. With a forced GC every sample already IS it;
+ *  without one, the MINIMUM of each 3-minute window is the floor of the
+ *  sawtooth, which is the closest thing to a post-collection reading that a
+ *  process without `--expose-gc` can observe. */
+const series: { t: number; heap: number }[] = gc ? postWarmup : (() => {
+  // Bucket width scales with the run: ~8 points whatever the duration, so a
+  // 10-minute soak still gets a verdict (a fixed 3-minute bucket left it with
+  // two points and "not enough samples", which is a different way to be
+  // useless).
+  const span = (postWarmup.at(-1)?.t ?? 0) - (postWarmup[0]?.t ?? 0);
+  const width = Math.max(1, span / 8);
+  MEASURE = `the floor of each ${width.toFixed(1)}-minute window`;
+  const floors = new Map<number, { t: number; heap: number }>();
+  for (const s of postWarmup) {
+    const b = Math.floor(s.t / width) * width;
+    const cur = floors.get(b);
+    if (!cur || s.heap < cur.heap) floors.set(b, { t: b, heap: s.heap });
+  }
+  return [...floors.values()].sort((a, b) => a.t - b.t);
+})();
+const n = series.length;
+const mt = series.reduce((a, s) => a + s.t, 0) / n;
+const mh = series.reduce((a, s) => a + s.heap, 0) / n;
+const slope = series.reduce((a, s) => a + (s.t - mt) * (s.heap - mh), 0) /
+  series.reduce((a, s) => a + (s.t - mt) ** 2, 0);
 
 // Did the load actually LAND? `sent` counts frames written to a socket, which
 // is not the same claim — for five alphas every one of them was refused at the
@@ -134,7 +179,10 @@ const soakState = counter as unknown as { count: number; notes: string[] };
 const landed = soakState.notes.length;
 console.log(
   `\n[soak] ${minutes}min done — ${sent} frames sent, ${soakState.count} ticks, ` +
-    `heap slope ${slope.toFixed(3)} MB/min (limit ${GROWTH_LIMIT_MB_PER_MIN})`,
+    `heap slope ${
+      slope.toFixed(3)
+    } MB/min (limit ${GROWTH_LIMIT_MB_PER_MIN}, ` +
+    `measured on ${MEASURE} over ${n} points)`,
 );
 
 await app.close();
@@ -154,7 +202,11 @@ if (!Number.isFinite(slope) || n < 6) {
   Deno.exit(2);
 }
 if (slope > GROWTH_LIMIT_MB_PER_MIN) {
-  console.error("[soak] FAIL: sustained heap growth — likely leak");
+  console.error(
+    `[soak] FAIL: sustained growth of the RETAINED set (${
+      slope.toFixed(3)
+    } MB/min, measured on ${MEASURE}) — likely leak`,
+  );
   Deno.exit(1);
 }
 console.log("[soak] PASS: no sustained heap growth");

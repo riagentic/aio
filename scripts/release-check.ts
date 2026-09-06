@@ -305,6 +305,11 @@ const HEAVY: [string, string[]][] = [
   // failure here is readable even when the culprit is something else you have
   // running on this machine.
   ["check:orphans", ["deno", "task", "check:orphans"]],
+  // Report-only: the physical proof matrix cannot BLOCK a release cut on Linux
+  // (a Mac it does not have would fail it), but a release that never prints it
+  // is a release nobody checked it against. `.katana/beta.md` requires every
+  // row to be proven or waiting on hardware/time; `--require` is beta's job.
+  ["check:proof", ["deno", "task", "check:proof"]],
   // ~30 s: breaks each load-bearing invariant on purpose and requires its
   // named test to go red. Heavy because it runs `deno test` twice per entry,
   // not because it is slow to fail.

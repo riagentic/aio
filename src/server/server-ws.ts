@@ -374,6 +374,65 @@ export function createWsManager(deps: WsDeps): WsManager {
     } catch { /* aio-ok: the socket is gone — the log line is the record */ }
   };
 
+  /** The `cid` of a frame we are about to DROP, when it carries one.
+   *
+   *  `refuseAction` below states the rule this restores: "A refused frame that
+   *  carries a cid is TOLD. The client registered an ack for it, so a silent
+   *  return left `await cell.method()` waiting to its ceiling for a method
+   *  that was never dispatched — then blaming a server that 'never confirmed
+   *  the call'." That was applied to the refusals that happen AFTER parsing;
+   *  the four limit drops above it happen BEFORE, and used the `diag` channel
+   *  alone — which every client routes to a log, and which carries no cid, so
+   *  it can settle nothing.
+   *
+   *  MEASURED: 250 sequential `await cell.method()` calls over one socket —
+   *  248 applied, and 2 frames dropped by the per-client budget. Those two
+   *  callers waited out the full ack ceiling and were then told the server
+   *  "never confirmed the call: it may still be running (its writes can commit
+   *  later)". It was not running and never would; the server had already
+   *  decided, and said so where the call could not hear it.
+   *
+   *  A scan, not a parse: this runs only on a path that is already dropping
+   *  the frame, and must not turn an oversized frame into work. */
+  const _CID_SCAN = 64 * 1024;
+  const _CID_RE = /"cid":"([A-Za-z0-9._:-]{1,64})"/;
+  const _droppedCid = (data: unknown): string | null => {
+    if (typeof data !== "string") return null;
+    // The BUDGET is bounded, not the frame. A length cap on the input meant
+    // the frame refused for being TOO LARGE — the one case that most needs
+    // its caller settled — was the one case whose cid was never read, so a
+    // 1 MB call hung forever while every smaller refusal answered. Found by
+    // fuzzing the door: 26 of 27 malformed frames settled, and the 1 MB one
+    // did not. A cid rides beside `type` inside `d`, so it is near one end or
+    // the other; scan both ends and stay O(128 KB) whatever arrives.
+    if (data.length <= _CID_SCAN * 2) return _CID_RE.exec(data)?.[1] ?? null;
+    return _CID_RE.exec(data.slice(0, _CID_SCAN))?.[1] ??
+      _CID_RE.exec(data.slice(-_CID_SCAN))?.[1] ?? null;
+  };
+
+  /** Refuse a frame AND settle the call it was carrying. The diag explains the
+   *  server-wide situation (another client may be the cause); the ack error is
+   *  what stops one caller hanging for a frame that is already gone. */
+  const settleDroppedCall = (
+    socket: WebSocket,
+    data: unknown,
+    message: string,
+  ): void => {
+    const cid = _droppedCid(data);
+    if (cid) _sendAckErr(socket, cid, new Error(message));
+  };
+
+  const refuseFrameWithCall = (
+    socket: WebSocket,
+    data: unknown,
+    kind: string,
+    message: string,
+    hint: string,
+  ): void => {
+    refuse(socket, kind, message, hint);
+    settleDroppedCall(socket, data, message);
+  };
+
   /** One "fuse tripped" line per window, not one per dropped frame. */
   let _globalFuseReported = false;
   let _globalRateTimer: ReturnType<typeof setTimeout> | undefined;
@@ -982,8 +1041,9 @@ export function createWsManager(deps: WsDeps): WsManager {
       // Told to the sender EVERY time, unlike the log line: the fuse is
       // server-wide, so this client may be an innocent bystander and has no
       // other way to learn its frame is gone.
-      refuse(
+      refuseFrameWithCall(
         socket,
+        e.data,
         "global-rate",
         `this frame was dropped: the server is over its total frame budget ` +
           `(${globalCap}/sec across ${count(connections.size, "client")})`,
@@ -1019,16 +1079,27 @@ export function createWsManager(deps: WsDeps): WsManager {
       // The drops BEFORE the threshold used to be silent on both ends — the
       // client sends fire-and-forget, so its message simply vanished. It now
       // learns on the first one, while it still has a socket to hear on.
+      //
+      // ONE EXPLANATION PER RUN, ONE SETTLEMENT PER CALL. The diag is
+      // deliberately once — a tripped budget drops many frames and many
+      // identical lines bury the one that explains it. The ack is NOT: each
+      // dropped frame is a DIFFERENT `await cell.method()`, and a caller the
+      // server has already decided against must not wait out its ceiling to be
+      // told the fate is unknown. Measured with both halves once-only: two of
+      // four dropped callers still hung for the full 8s and were told the call
+      // "may still be running (its writes can commit later)".
+      const dropMsg = `this frame was dropped: this connection is over its ` +
+        `budget of ${wsRateLimit} messages/sec`;
       if (meta.consecutiveDrops === 1) {
         refuse(
           socket,
           "rate",
-          `this frame was dropped: this connection is over its budget of ` +
-            `${wsRateLimit} messages/sec`,
+          dropMsg,
           `raise it with aio.run({ wsLimits: { messagesPerSec: N } }), or ` +
             `batch — ${CONSECUTIVE_DROP_THRESHOLD} in a row closes the socket`,
         );
       }
+      settleDroppedCall(socket, e.data, dropMsg);
       return;
     }
 
@@ -1069,8 +1140,9 @@ export function createWsManager(deps: WsDeps): WsManager {
           }),
         );
       } catch { /* client gone */ }
-      refuse(
+      refuseFrameWithCall(
         socket,
+        e.data,
         "too-large",
         `this frame was dropped: ${e.data.length} bytes is over the ` +
           `${wsMaxMessage}-byte limit`,
@@ -1092,8 +1164,9 @@ export function createWsManager(deps: WsDeps): WsManager {
         ts: Date.now(),
         source: "server-ws",
       });
-      refuse(
+      refuseFrameWithCall(
         socket,
+        e.data,
         "byte-rate",
         `this frame was dropped: the connection is over its byte budget (${
           (wsBytesPerSec / 1_000_000).toFixed(1)

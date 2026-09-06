@@ -44,6 +44,19 @@ export type SyncReducer = (
 export interface RebaseResult {
   optimistic: Record<string, unknown>;
   dropped: SyncOp[];
+  /** The subset of `dropped` the reducer could NOT apply, with which kind of
+   *  failure it was — `"failed"` (it threw: `REDUCER_FAILED`) or
+   *  `"undefined"` (a buggy reducer returned nothing). A `null` return is the
+   *  contract's no-op and is deliberately NOT here.
+   *
+   *  It is a separate list because the two facts leave through different
+   *  channels: a no-op is normal and silent, a reducer that cannot replay the
+   *  client's own payload is the "blank-screen-class" bug D11 names, and the
+   *  three OTHER paths that fold an op (ack, catch-up, broadcast) have always
+   *  said so. Rebase collapsed both into `dropped`, which no caller read — so
+   *  the one path replaying the USER's unsent changes was the only silent
+   *  one. */
+  notApplied: { op: SyncOp; why: "failed" | "undefined" }[];
   surviving: SyncOp[];
 }
 
@@ -60,12 +73,18 @@ export function rebase(
   reducer: SyncReducer,
 ): RebaseResult {
   if (unconfirmed.length === 0) {
-    return { optimistic: confirmed, dropped: [], surviving: [] };
+    return {
+      optimistic: confirmed,
+      dropped: [],
+      notApplied: [],
+      surviving: [],
+    };
   }
 
   // Deep-clone to prevent reducer from corrupting the confirmed ground truth
   let state = structuredClone(confirmed);
   const dropped: SyncOp[] = [];
+  const notApplied: { op: SyncOp; why: "failed" | "undefined" }[] = [];
   const surviving: SyncOp[] = [];
 
   for (const op of unconfirmed) {
@@ -81,11 +100,17 @@ export function rebase(
       // the reducer cannot apply must not become the fold's state, and must
       // not count as surviving (it would be replayed on every later rebase).
       dropped.push(op);
+      if (next !== null) {
+        notApplied.push({
+          op,
+          why: next === REDUCER_FAILED ? "failed" : "undefined",
+        });
+      }
     } else {
       state = next;
       surviving.push(op);
     }
   }
 
-  return { optimistic: state, dropped, surviving };
+  return { optimistic: state, dropped, notApplied, surviving };
 }

@@ -6,7 +6,11 @@
 // temp dir and boots it for real.
 import { assert, assertEquals } from "@std/assert";
 import { stopChild } from "./stop-child.ts";
-import { childCoverageDir } from "../src/testing/temp-dir.ts";
+import {
+  childCoverageDir,
+  dropTempDir,
+  tempDir,
+} from "../src/testing/temp-dir.ts";
 const _childCovDir = childCoverageDir();
 
 const ROOT = new URL("..", import.meta.url).pathname;
@@ -31,7 +35,7 @@ async function waitFor<T>(fn: () => Promise<T | null>): Promise<T> {
 Deno.test({
   name: "zero-config: import cell + aio.run() boots a full app",
   async fn() {
-    const dir = await Deno.makeTempDir({ prefix: "aio-zero-" });
+    const dir = await tempDir("aio-zero-");
     await Deno.mkdir(`${dir}/src`);
     await Deno.writeTextFile(
       `${dir}/deno.json`,
@@ -96,7 +100,7 @@ await aio.run(); // everything inferred`,
     } finally {
       await stopChild(proc, { quiet: true });
       await proc.stdout.cancel();
-      await Deno.remove(dir, { recursive: true }).catch(() => {});
+      await dropTempDir(dir);
     }
   },
 });

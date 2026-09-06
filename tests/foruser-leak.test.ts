@@ -27,7 +27,13 @@
 // per-user filter must not be bypassed by ANY path that reaches a socket —
 // the patch strategy, a filter that THROWS, the getUIState memo, or CRDT sync.
 // Each of those was a separate hole; each one below is the wire-level proof.
-import { assert, assertEquals, assertThrows } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
+import { getLogger, setLogger } from "../src/diagnostics/logger-api.ts";
 import { cell } from "../src/state/cell-create.ts";
 import { composeCellsWiring } from "../src/server/aio-composition.ts";
 import { createBroadcaster } from "../src/server/server-broadcast.ts";
@@ -559,4 +565,61 @@ Deno.test("forUser: a filter that returns nothing omits the cell too", () => {
   ) as Record<string, unknown>;
   assertEquals("no-return-filter" in ui, false);
   _resetAioRuntime();
+});
+
+// The third sibling, and the only silent one. A Promise is an object and is not
+// an array, so an ASYNC filter sailed past the "did it return a state object"
+// check, landed in the UI state, and reached the wire as `{}` — every client
+// seeing that cell EMPTY for the life of the process, with nothing logged.
+// MEASURED before the fix: `{"fu":{}}`, and `[object Promise]` in the slice.
+// Nothing leaked (JSON drops a Promise), but a blank cell nobody explains is
+// the outcome this project ranks below a crash.
+Deno.test("forUser: an ASYNC filter omits the cell and says which mistake it is", () => {
+  _resetAioRuntime();
+  const errors: string[] = [];
+  const prev = getLogger();
+  setLogger(
+    {
+      logDir: "",
+      pub: (lvl: string, cat: string, msg?: string) => {
+        if (lvl === "error") errors.push(msg ?? cat);
+      },
+      perf: () => {},
+      flush: () => Promise.resolve(),
+      // deno-lint-ignore no-explicit-any
+    } as any,
+  );
+  try {
+    const c = cell("async-filter", {
+      state: { rows: ["PRIVATE"], ok: 1 },
+      // deno-lint-ignore no-explicit-any
+      visible: { forUser: (async (s: any) => ({ ok: s.ok })) as any },
+      methods: { noop() {} },
+    });
+    // deno-lint-ignore no-explicit-any
+    const wiring = composeCellsWiring({ cellEntries: [c] as any });
+    const ui = wiring.autoGetUIState!(
+      { "async-filter": { rows: ["PRIVATE"], ok: 1 } },
+      { id: "u1", role: "user" },
+    ) as Record<string, unknown>;
+
+    // fail closed — not an empty object, not a Promise, ABSENT
+    assertEquals("async-filter" in ui, false);
+    // …and the wire never carries a Promise dressed as state
+    assertEquals(JSON.stringify(ui), "{}");
+
+    const hit = errors.find((e) => e.includes("visible.forUser is ASYNC"));
+    assertEquals(
+      typeof hit,
+      "string",
+      `no error named the async filter; errors were:\n${
+        errors.join("\n") || "(none)"
+      }`,
+    );
+    assertStringIncludes(hit!, "async-filter");
+    assertStringIncludes(hit!, "cannot await");
+  } finally {
+    setLogger(prev);
+    _resetAioRuntime();
+  }
 });

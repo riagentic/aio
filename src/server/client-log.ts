@@ -91,8 +91,25 @@ export function writeClientLog(
 /** Cleanup resources on shutdown — clears rate timer and tracking map. */
 /** Test hook: how many per-client rate slots are live right now. A long-running
  *  server must not accumulate one per connection ever made. */
+/** @internal Writes still in flight — the seam that lets a test prove the
+ *  tracking exists rather than racing it. Without it, a `flushClientLog()`
+ *  that tracked NOTHING would return instantly and the assertions after it
+ *  would still pass, because the write usually lands first: a test that cannot
+ *  fail. Same shape as `_rateSlotCount` below. */
+export function _pendingWrites(): number {
+  return _pending.size;
+}
+
 export function _rateSlotCount(): number {
   return _rate.size;
+}
+
+/** Wait for every in-flight client-log write (and the mode fix that rides
+ *  with it). Shutdown awaits this; a test can too. */
+export async function flushClientLog(): Promise<void> {
+  while (_pending.size > 0) {
+    await Promise.allSettled([..._pending]);
+  }
 }
 
 export function disposeClientLog(): void {
@@ -105,6 +122,11 @@ export function disposeClientLog(): void {
 }
 
 // ── Internals ─────────────────────────────────────────────────────────
+
+/** Write chains in flight. `_append` is deliberately not awaited by its
+ *  callers, so without this nothing could tell whether the last line reached
+ *  the disk — not shutdown, and not a test. */
+const _pending = new Set<Promise<unknown>>();
 
 function _append(line: string): void {
   const path = `${_logDir}/client.log`;
@@ -122,17 +144,34 @@ function _append(line: string): void {
   // per file per boot; best-effort, because Windows and mode-less filesystems
   // have nothing to set and losing the renderer's voice over a chmod would be
   // the worse trade.
-  Deno.writeTextFile(path, line, { append: true, mode: 0o600 }).then(() => {
-    _writeErrors = 0; // reset on success
-    if (!_modeFixed) {
-      _modeFixed = true;
-      if (Deno.build.os !== "windows") Deno.chmod(path, 0o600).catch(() => {});
-    }
-  }).catch((e) => {
-    if (_writeErrors < 3) {
-      _writeErrors++;
-      log.error(`[client-log] write failed for ${path}: ${e}`);
-    }
+  // RETURNED, not fired and forgotten: the chmod is part of the write's chain,
+  // so draining the chain drains it too. Detached, it outlived the write — the
+  // op sanitizer caught it under load ("An async operation to change the
+  // permissions of a file was started in this test, but never completed"), and
+  // the same detachment means a process exiting between the write and the
+  // chmod leaves the file at the mode this code exists to correct.
+  const done = Deno.writeTextFile(path, line, { append: true, mode: 0o600 })
+    .then(() => {
+      _writeErrors = 0; // reset on success
+      if (!_modeFixed) {
+        _modeFixed = true;
+        if (Deno.build.os !== "windows") {
+          return Deno.chmod(path, 0o600).catch(() => {});
+        }
+      }
+    }).catch((e) => {
+      if (_writeErrors < 3) {
+        _writeErrors++;
+        log.error(`[client-log] write failed for ${path}: ${e}`);
+      }
+    });
+  // Callers stay fire-and-forget (losing the renderer's voice to an await
+  // would be the worse trade), but the work is now REACHABLE — see
+  // `flushClientLog`, which shutdown awaits so the last lines a renderer sent
+  // are on disk before the process goes.
+  _pending.add(done);
+  void done.finally(() => {
+    _pending.delete(done);
   });
 }
 

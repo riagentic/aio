@@ -1,6 +1,6 @@
 import { assertEquals } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
-import { rebase } from "../../src/sync/rebase.ts";
+import { rebase, REDUCER_FAILED } from "../../src/sync/rebase.ts";
 import type { SyncOp } from "../../src/sync/types.ts";
 
 function testReducer(
@@ -117,5 +117,55 @@ describe("rebase", () => {
     ];
     const result = rebase({}, unconfirmed, testReducer);
     assertEquals(result.optimistic, { a: 10, b: 2 });
+  });
+});
+
+// A `null` return is the contract's no-op. `undefined` and REDUCER_FAILED mean
+// the reducer could NOT apply the op — the "blank-screen-class" bug D11 names,
+// and the three other paths that fold an op (ack, catch-up, broadcast) have
+// always reported it. Rebase collapsed all three into `dropped`, which no
+// caller read, so the ONE path replaying the user's own unsent changes was the
+// only silent one: the change left the optimistic view and `pending` stopped
+// counting it, with nothing logged.
+describe("rebase: a no-op and a broken reducer are different facts", () => {
+  const op = (id: string, action: string): SyncOp => ({
+    id,
+    cell: "test",
+    action,
+    payload: {},
+    hlc: [Date.now(), 0, "c1"],
+    confirmed: false,
+  });
+
+  it("separates them, and a null no-op is NOT reported", () => {
+    const r = rebase(
+      { count: 0 },
+      [op("a", "noop"), op("b", "undef"), op("c", "threw"), op("d", "ok")],
+      (s, action) => {
+        if (action === "noop") return null;
+        if (action === "undef") return undefined as never;
+        if (action === "threw") return REDUCER_FAILED;
+        return { ...s, ok: true };
+      },
+    );
+    assertEquals(r.dropped.map((o) => o.id), ["a", "b", "c"]);
+    assertEquals(r.surviving.map((o) => o.id), ["d"]);
+    // only the two the reducer could not apply, each with WHICH failure
+    assertEquals(r.notApplied.map((n) => [n.op.id, n.why]), [
+      ["b", "undefined"],
+      ["c", "failed"],
+    ]);
+  });
+
+  it("an empty rebase reports nothing", () => {
+    const r = rebase({ count: 1 }, [], () => null);
+    assertEquals(r.notApplied, []);
+    assertEquals(r.dropped, []);
+  });
+
+  it("a clean rebase reports nothing", () => {
+    const r = rebase({ count: 0 }, [op("x", "set")], (s) => ({ ...s, x: 1 }));
+    assertEquals(r.notApplied, []);
+    assertEquals(r.surviving.length, 1);
   });
 });

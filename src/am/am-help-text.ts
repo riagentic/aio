@@ -14,10 +14,51 @@
 export const TEMPLATES = ["counter", "todo", "cli"] as const;
 export type Template = (typeof TEMPLATES)[number];
 
+/** THE build targets: what `am create --target=` accepts, and what the help
+ *  offers. `am-cmd-create.ts` re-exports this as its own — the same shape
+ *  TEMPLATES uses above, and for the same reason. The help line USED to omit
+ *  `--target` entirely while the usage line (printed on misuse) listed all
+ *  five, so `am help create` could not answer "how do I create an electron
+ *  app?" — the question that found this. One home, named in both places. */
+export const TARGETS = [
+  "browser",
+  "electron",
+  "android",
+  "cli",
+  "server",
+] as const;
+export type Target = (typeof TARGETS)[number];
+
+/** What `am create` accepts — ONE list, read by the refusal on an unknown flag
+ *  and by the help.
+ *
+ *  There were four surfaces and four answers: the parser took six flags, the
+ *  refusal named all six, `am help create` named one, and `am-flags.ts`'s
+ *  ungated-verb note advertised a `--dir` the command REFUSES by name ("there
+ *  is no --dir; cd where you want it first"). For the verb people run first.
+ *  Same fix as TEMPLATES and TARGETS above: one home, interpolated. */
+export const CREATE_FLAGS: readonly string[] = [
+  `--template=<${TEMPLATES.join("|")}>`,
+  `--target=<${TARGETS.join("|")}>`,
+  "--aio-version=<v>",
+  "--mirror[=<path>]",
+  "--jsr",
+  "--force",
+];
+
 export const HELP_TEXT = `Onboard:
-  create <name> [--template=${
-  TEMPLATES.join("|")
-}]  Scaffold a new aio app (runnable + buildable)
+  create <name> [flags]   Scaffold a new aio app (runnable + buildable), in
+                          ./<name> — there is no --dir, cd first. Flags:
+                            ${
+  CREATE_FLAGS.join("\n                            ")
+}
+                          --target picks what \`deno task dev\`/\`compile\`
+                          produce by default: browser needs no toolchain,
+                          electron auto-installs Electron, android needs the
+                          Android SDK + Gradle. --aio-version pins the
+                          framework (a release tag, or "main"); --mirror
+                          imports from a local aio checkout; --jsr pins JSR
+                          imports instead of the source default.
   upgrade [<app>|<dir>]   Update am itself to the latest release. One verb,
                           the object says which: "am upgrade <app>" upgrades
                           an installed APP; "am upgrade <checkout-dir>"

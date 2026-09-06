@@ -312,6 +312,43 @@ export const DISPATCH_USAGE = `usage: am dispatch <cell:method> [args…]
   am dispatch --body='{"type":"conn:setHost","payload":{"args":["192.168.1.9"]}}'   the whole envelope
 values are auto-parsed as JSON when possible (numbers, booleans, arrays), else kept as strings`;
 
+/** The `--args` FLAG's value, written as a POSITIONAL argument instead.
+ *
+ *  `am dispatch counter:increment '{"args":[0]}'` parses to an object and is
+ *  passed as ONE argument, so the payload becomes the double wrap
+ *  `{ args: [ { args: [0] } ] }` and the method receives the wrapper where it
+ *  expected a number. MEASURED on the counter example: `s.count += by` made
+ *  `count` the string `"2[object Object]"`, the dispatch answered
+ *  `{"ok":true}`, and the app ran on until the NEXT boot, where the persist
+ *  shape-drift check finally refused it — a corruption reported a restart
+ *  late, by a check about something else.
+ *
+ *  The shape is unmistakable (an object whose only key is `args`, holding an
+ *  array) and no method meaningfully takes it, so it is refused at the
+ *  keystroke that meant something else. An app that genuinely wants that
+ *  object still has `--args='[{"args":[…]}]'`, which the refusal names.
+ *
+ *  Returns the refusal text, or null when the arguments are fine. */
+export function argsFlagAsPositional(
+  type: string,
+  rest: string[],
+  parsed: unknown[],
+): string | null {
+  const at = parsed.findIndex((v) =>
+    !!v && typeof v === "object" && !Array.isArray(v) &&
+    Object.keys(v as Record<string, unknown>).length === 1 &&
+    Array.isArray((v as { args?: unknown }).args)
+  );
+  if (at === -1) return null;
+  const inner = JSON.stringify((parsed[at] as { args: unknown[] }).args);
+  return `argument ${at + 1} is \`${rest[at]}\` — that is the shape of the ` +
+    `\`--args\` FLAG, passed as a positional value, so the method would ` +
+    `receive the wrapper object itself instead of the arguments inside it.\n` +
+    `  did you mean: am dispatch ${type} --args=${inner}\n` +
+    `  or, to pass that object as a real argument: ` +
+    `am dispatch ${type} --args='[${rest[at]}]'`;
+}
+
 /** Parse `--args` — a JSON ARRAY of positional arguments for a cell method.
  *
  *  Pure, and loud on both near-misses: `--args='"x"'` and `--args='{"host":…}'`
@@ -434,6 +471,11 @@ export async function cmdDispatch(
             return a;
           }
         });
+        const refusal = argsFlagAsPositional(type!, rest, parsed);
+        if (refusal) {
+          outError(refusal, mode);
+          Deno.exit(1);
+        }
         action = { type, payload: { args: parsed } };
       }
     }
@@ -579,7 +621,11 @@ export async function cmdTT(args: string[], flags: GlobalFlags): Promise<void> {
   }
   if (cmd === "goto" && (!Number.isInteger(arg) || (arg as number) < 0)) {
     outError(
-      `am tt goto: ${args[1]} is not a history id — ids are whole numbers ` +
+      // `am tt` was REMOVED in alpha70 and the CLI refuses it by name, so a
+      // message that leads with it hands the reader a command that answers
+      // "`am tt` is spelled `am timetravel` now" — an error inside an error.
+      `am timetravel goto: ${args[1]} is not a history id — ids are whole ` +
+        `numbers ` +
         `from 0, and \`am actions\` lists the ones this app holds. They are ` +
         `IDS, not positions in that list: the window rolls and \`resume\` ` +
         `truncates, so the two stop matching after any real session. (A ` +

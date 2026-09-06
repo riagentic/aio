@@ -20,6 +20,7 @@ import { assert, assertEquals } from "@std/assert";
 // @ts-ignore node:sqlite types unavailable when an old @types/node shadows them
 import { DatabaseSync } from "node:sqlite";
 import { join } from "@std/path";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const REPO = new URL("..", import.meta.url).pathname;
 const MOD = new URL("../mod.ts", import.meta.url).href;
@@ -31,13 +32,12 @@ function freePort(): number {
   return port;
 }
 
-/** Run one "build" of an app against `dir` and return what it printed. */
-async function phase(
+/** Write one runnable "build" of an app against `dir`. */
+async function phaseFile(
   dir: string,
   appId: string,
   body: string,
-  args: string[] = [],
-): Promise<{ code: number; out: string; err: string }> {
+): Promise<string> {
   const file = join(dir, `phase-${crypto.randomUUID().slice(0, 8)}.ts`);
   await Deno.writeTextFile(
     file,
@@ -48,6 +48,17 @@ const PORT = ${freePort()};
 ${body}
 `,
   );
+  return file;
+}
+
+/** Run one "build" of an app against `dir` and return what it printed. */
+async function phase(
+  dir: string,
+  appId: string,
+  body: string,
+  args: string[] = [],
+): Promise<{ code: number; out: string; err: string }> {
+  const file = await phaseFile(dir, appId, body);
   const p = new Deno.Command(Deno.execPath(), {
     args: ["run", "-A", "--config", join(REPO, "deno.json"), file, ...args],
     env: { AIO_APPS_DIR: dir, NO_COLOR: "1" },
@@ -280,6 +291,127 @@ Deno.test({
       );
     } finally {
       await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
+// A migration is the one boot that REWRITES money. If the process dies inside
+// it, the next boot must either migrate cleanly or find untouched v1 data —
+// never a version stamped over data that was never converted (which reads back
+// as the cell's initialState: a silent wipe), and never a second conversion
+// over already-converted data (101 cents -> $1.01 -> $0.0101).
+//
+// The kill is aimed by the migration itself, not by a guessed millisecond:
+// `onMigrate` writes a flag file and then holds, so the SIGKILL provably lands
+// in the window. A timing sweep that lands after boot proves nothing.
+const V2_SIGNALLING = (holdMs: number) =>
+  `const wallet = cell("wallet", {
+  version: 2,
+  state: { dollars: 0 },
+  onMigrate(s: Record<string, unknown>, _from: number) {
+    Deno.writeTextFileSync(DIR + "/migrating", "1");
+    const until = Date.now() + ${holdMs};
+    while (Date.now() < until) { /* hold the crash window open */ }
+    return { dollars: (s.cents as number ?? 0) / 100 };
+  },
+  methods: { set(s: { dollars: number }, n: number) { s.dollars = n; } },
+});
+`;
+
+Deno.test({
+  name:
+    "migrate: a crash inside onMigrate never stamps the version over unconverted data, and never migrates twice",
+  fn: async () => {
+    const cases = [
+      { at: "inside onMigrate", hold: 4000, killAfterFlag: 0 },
+      { at: "just after onMigrate returned", hold: 100, killAfterFlag: 300 },
+    ];
+    for (const c of cases) {
+      const dir = await tempDir("aio-migrate-crash-");
+      const appId = "app";
+      try {
+        // v1 writes real money.
+        const p1 = await phase(
+          dir,
+          appId,
+          V1 + BOOT() + `await wallet.set(101);\n` + REPORT,
+        );
+        assertEquals(p1.code, 0, p1.err);
+        assert(p1.out.includes(`"cents":101`), p1.out);
+
+        // v2 boots and dies in the migration window.
+        const file = await phaseFile(
+          dir,
+          appId,
+          V2_SIGNALLING(c.hold) + BOOT() + `console.log("READY");\n` +
+            `await new Promise(() => {});\n`,
+        );
+        const child = new Deno.Command(Deno.execPath(), {
+          args: ["run", "-A", "--config", join(REPO, "deno.json"), file],
+          env: { AIO_APPS_DIR: dir, NO_COLOR: "1" },
+          stdout: "piped",
+          stderr: "piped",
+        }).spawn();
+
+        const flag = join(dir, "migrating");
+        const deadline = Date.now() + 30_000;
+        let entered = false;
+        while (Date.now() < deadline) {
+          if (await Deno.stat(flag).then(() => true, () => false)) {
+            entered = true;
+            break;
+          }
+          await new Promise((r) => setTimeout(r, 5));
+        }
+        if (c.killAfterFlag) {
+          await new Promise((r) => setTimeout(r, c.killAfterFlag));
+        }
+        child.kill("SIGKILL");
+        const dead = await child.output();
+        // Verify the INSTRUMENT before trusting the result.
+        assert(entered, `${c.at}: onMigrate never ran, so nothing was tested`);
+        assert(!dead.success, `${c.at}: the child was supposed to be killed`);
+
+        // The disk, right now, is the real claim: it must never say "v2" while
+        // holding data nothing converted. A boot that read that would hand the
+        // app its initialState and then persist the wipe.
+        const vOn = storedVersions(dir, appId).wallet;
+        const sOn =
+          (storedState(dir) as { wallet?: Record<string, unknown> }).wallet ??
+            {};
+        const raw = JSON.stringify({ version: vOn, state: sOn });
+        if (c.killAfterFlag === 0) {
+          assert(
+            vOn !== 2,
+            `${c.at}: onMigrate never returned, so v2 cannot be stamped: ${raw}`,
+          );
+        }
+        if (vOn === 2) {
+          assertEquals(
+            sOn.dollars,
+            1.01,
+            `${c.at}: stamped v2 over unconverted data: ${raw}`,
+          );
+        } else {
+          assertEquals(
+            sOn.cents,
+            101,
+            `${c.at}: the pre-migration data must survive: ${raw}`,
+          );
+        }
+
+        // The next boot is the only thing that matters.
+        const p3 = await phase(dir, appId, V2 + BOOT() + REPORT);
+        assertEquals(p3.code, 0, `${c.at}: ${p3.err}`);
+        assert(
+          p3.out.includes(`"dollars":1.01`),
+          `${c.at}: the money must migrate exactly once (0 = stamped over ` +
+            `unconverted data, 0.0101 = migrated twice): ${p3.out}`,
+        );
+        assertEquals(storedVersions(dir, appId).wallet, 2, c.at);
+      } finally {
+        await dropTempDir(dir);
+      }
     }
   },
 });

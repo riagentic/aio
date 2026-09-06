@@ -11,11 +11,12 @@ import {
   didYouMean,
   GLOBAL_FLAGS,
   PASSTHROUGH,
+  RECOGNISED_NOT_OFFERED,
   unknownFlagError,
   unknownFlags,
   VERB_FLAGS,
 } from "../src/am/am-flags.ts";
-import { TEMPLATES } from "../src/am/am-help-text.ts";
+import { CREATE_FLAGS, TARGETS, TEMPLATES } from "../src/am/am-help-text.ts";
 import {
   cmdHelp,
   HELP_TEXT,
@@ -182,6 +183,68 @@ Deno.test("am help: the compact form still documents the global flags", () => {
 Deno.test("am help: the template list is the one am create accepts", () => {
   assertStringIncludes(
     helpBlock(HELP_TEXT, "create")!,
-    `--template=${TEMPLATES.join("|")}`,
+    `--template=<${TEMPLATES.join("|")}>`,
   );
+});
+
+// …and `--target` was not in the help AT ALL, while the usage line printed on
+// misuse listed all five. So `am help create` could not answer "how do I
+// create an electron app?" — which is exactly how this was found: someone
+// asked. TARGETS now lives beside TEMPLATES in am-help-text.ts and the help
+// interpolates it, so the two cannot drift.
+Deno.test("am help: the target list is the one am create accepts", () => {
+  const block = helpBlock(HELP_TEXT, "create")!;
+  assertStringIncludes(block, `--target=<${TARGETS.join("|")}>`);
+  // the question that found it must be answerable from this block alone
+  assertStringIncludes(block, "electron");
+});
+
+// A flag the gate OFFERS must not be one the command refuses. `--pose` was in
+// `VERB_FLAGS.shot`, so `am shot --zzz` replied "shot takes: --full --out
+// --pose" — advertising a flag whose only behaviour is to answer "--pose is
+// not supported: the app decides its own camera". The table's own note records
+// the mirror-image mistake for `--level` (listed there, refused by the verb)
+// and says the two tests around it can see neither half. This is that half.
+Deno.test("am flags: nothing is both offered and refused", () => {
+  const entries = Object.entries(RECOGNISED_NOT_OFFERED);
+  // Count the checks and assert the count: a map that emptied would otherwise
+  // make every assertion below vacuous, which `check:vacuous` caught in the
+  // first version of this test.
+  assert(entries.length > 0, "RECOGNISED_NOT_OFFERED is empty");
+  let checked = 0;
+  for (const [cmd, refused] of entries) {
+    const offered = VERB_FLAGS[cmd] ?? [];
+    assert(refused.length > 0, `${cmd} lists no refused flags`);
+    for (const f of refused) {
+      assert(
+        !offered.includes(f),
+        `${cmd} both offers and refuses ${f} — "…takes:" must not name it`,
+      );
+    }
+    // …and the gate must still let them through, or the command never gets to
+    // give the better message.
+    assertEquals(unknownFlags(cmd, refused), []);
+    checked += refused.length;
+  }
+  assertEquals(checked, 1, "one flag is recognised-but-not-offered today");
+});
+
+Deno.test("am flags: `am shot --pose` reaches the command, not the gate", () => {
+  assertEquals(unknownFlags("shot", ["--pose"]), []);
+  const msg = unknownFlagError("shot", ["--zzz"])!;
+  assertStringIncludes(msg, "shot takes: --full --out");
+  assert(!msg.includes("--pose"), `the gate still offers --pose:\n${msg}`);
+});
+
+// `am create`'s accepted set had FOUR surfaces and four answers: the parser
+// took six flags, the refusal named six, `am help create` named one, and
+// am-flags.ts's ungated note advertised a `--dir` the command refuses by name.
+// One list now, read by both the help and the refusal.
+Deno.test("am help: create's flag list is the one create accepts", () => {
+  const block = helpBlock(HELP_TEXT, "create")!;
+  for (const f of CREATE_FLAGS) assertStringIncludes(block, f);
+  // the question a reader actually arrives with
+  assertStringIncludes(block, "electron");
+  // …and the flag that does NOT exist stays named as absent
+  assertStringIncludes(block, "there is no --dir");
 });

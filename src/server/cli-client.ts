@@ -152,6 +152,49 @@ function _readyDeadline<S>(
   };
 }
 
+/** ONE cap policy for this file's two hand-written queues, the same one the
+ *  shared factory uses (`state/offline-queue.ts`): at cap the OLDEST queued
+ *  action is dropped — newest intent wins — and ITS caller is rejected NOW,
+ *  rather than waiting out an ack timeout for a frame that was discarded
+ *  locally.
+ *
+ *  Why this file has its own queues at all: the shared factory rejects a
+ *  dropped action through the module-level `_ackSink`, which is the BROWSER's
+ *  singleton. A CLI client registers acks PER CONNECTION on purpose (D2: one
+ *  client's disconnect must never settle another client's calls), so it cannot
+ *  use that sink. The implementation has to be separate; the policy does not.
+ *
+ *  It used to refuse the NEWEST action instead — keeping stale intent and
+ *  throwing away the freshest, which is exactly the shape `offline-queue.ts`
+ *  was written to end between the browser and the core. Three queues, two
+ *  implementations, one policy. */
+function _pushDroppingOldest(
+  queue: Array<{ type: string; payload?: unknown }>,
+  pending: { reject(cid: string, err: Error): boolean },
+  transport: string,
+  action: { type: string; payload?: unknown },
+): void {
+  while (queue.length >= WS_MAX_QUEUE) {
+    const dropped = queue.shift()!;
+    const cid = (dropped as { cid?: string }).cid;
+    if (cid) {
+      pending.reject(
+        cid,
+        new Error(
+          `action dropped — offline queue full (${WS_MAX_QUEUE}); a newer ` +
+            `action took its place, so this one was NOT sent`,
+        ),
+      );
+    }
+    log.warn(
+      "cli",
+      `${transport} queue full (${WS_MAX_QUEUE}) — dropped the oldest queued ` +
+        `action ("${dropped.type}") to make room for "${action.type}"`,
+    );
+  }
+  queue.push(action);
+}
+
 /** Connect a CLI process to a running aio app as a real client: live state,
  *  method calls, and reconnect with the offline queue — the terminal twin of a
  *  browser client. */
@@ -193,6 +236,19 @@ export function connectCli<S>(
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   const queue: Array<{ type: string; payload?: unknown }> = [];
   const listeners = new Set<(state: S) => void>();
+  /** Which app answered on this URL, learned on the first connect.
+   *
+   *  A port is not an identity. A dev server takes a FREE port, so an app that
+   *  dies can have its port taken by a DIFFERENT app — and this client would
+   *  reconnect, flush the offline queue into a stranger's database and resolve
+   *  every one of those calls as success. MEASURED with two scaffolded apps
+   *  sharing one port: two decrements queued for app A landed in app B, whose
+   *  counter went 0 → -2, with nothing said anywhere. The browser transport
+   *  already scopes its offline queue by appId for exactly this reason (see
+   *  `AioWindow.__aioConfig.appId`); this transport carried no identity at all.
+   */
+  let peerAppId: string | undefined;
+  let _wrongPeerNoted: string | undefined;
   // One registry PER CONNECTION (not the browser's module-level singleton):
   // `connectCli` can be called more than once in a process, and one client's
   // disconnect must never settle another's pending calls (D2).
@@ -224,16 +280,9 @@ export function connectCli<S>(
       ws.send(frame);
       return { written: true, queued: false };
     }
-    if (queue.length < WS_MAX_QUEUE) {
-      queue.push(action);
-      _noteQueued();
-      return { written: false, queued: true };
-    }
-    log.warn(
-      "cli",
-      `offline queue full (${WS_MAX_QUEUE}) — action "${action.type}" was NOT sent`,
-    );
-    return { written: false, queued: false };
+    _pushDroppingOldest(queue, _pending, "offline", action);
+    _noteQueued();
+    return { written: false, queued: true };
   }
 
   /** Say — once per offline period — that actions are being held rather than
@@ -261,9 +310,94 @@ export function connectCli<S>(
   ready.catch(() => {});
 
   let connecting = false;
+  /** The appId this URL currently answers with, or undefined if it cannot be
+   *  learned. `/__aio/health` is a public route and already carries `appId`,
+   *  so this needs no protocol change and no new option. EVERY failure — an
+   *  older server without the field, auth, an untrusted certificate, a refused
+   *  connection — returns undefined, which means "no opinion" and leaves
+   *  behaviour exactly as it was. */
+  async function _peerIdentity(
+    token: string | undefined,
+  ): Promise<string | undefined> {
+    try {
+      const parsed = new URL(url);
+      const scheme = parsed.protocol === "https:" || parsed.protocol === "wss:"
+        ? "https:"
+        : "http:";
+      const t = token ?? parsed.searchParams.get("token") ?? undefined;
+      const res = await fetch(
+        `${scheme}//${parsed.host}/__aio/health${t ? `?token=${t}` : ""}`,
+      );
+      if (!res.ok) {
+        await res.body?.cancel();
+        return undefined;
+      }
+      const body = await res.json() as { appId?: unknown };
+      return typeof body.appId === "string" && body.appId
+        ? body.appId
+        : undefined;
+    } catch {
+      // aio-ok: no opinion — the check degrades to the old behaviour.
+      return undefined;
+    }
+  }
+
+  /** Learn who we are talking to, once, without delaying the first connect. */
+  function _rememberPeer(token: string | undefined): void {
+    if (peerAppId !== undefined) return;
+    _peerIdentity(token).then((id) => {
+      if (id && peerAppId === undefined) peerAppId = id;
+    });
+  }
+
+  /** May we reopen? Asked only on a RECONNECT, and only once an identity is
+   *  known — a first connect is never delayed by this. */
+  async function _sameAppAsBefore(
+    token: string | undefined,
+  ): Promise<boolean> {
+    const now = await _peerIdentity(token);
+    if (now === undefined || now === peerAppId) return true;
+    if (_wrongPeerNoted !== now) {
+      _wrongPeerNoted = now;
+      log.error(
+        "cli",
+        `${url} is now served by a DIFFERENT app ("${now}", was ` +
+          `"${peerAppId}") — the port was reused. NOT reconnecting: ` +
+          `${queue.length} queued action(s) belong to "${peerAppId}" and ` +
+          `would be written into "${now}". Still retrying in case the ` +
+          `original app comes back; point this client at the right URL, or ` +
+          `close() it to reject what is queued.`,
+      );
+    }
+    return false;
+  }
+
   function connect(): void {
     if (ws || closed || connecting) return;
     const t = opts?.token;
+    // A reconnect to a KNOWN peer is verified first; a first connect is not
+    // (there is nothing yet to compare, and nothing yet to protect).
+    if (wasConnected && peerAppId !== undefined) {
+      connecting = true;
+      Promise.resolve()
+        .then(() => typeof t === "function" ? t() : t)
+        .then(async (tok) => {
+          const ok = await _sameAppAsBefore(tok);
+          connecting = false;
+          if (ws || closed) return;
+          if (ok) return _openSocket(tok);
+          reconnectTimer = setTimeout(connect, backoffDelay(retry));
+          retry++;
+        })
+        .catch((e) => {
+          connecting = false;
+          if (closed) return;
+          log.error("cli", `token() failed: ${e} — retrying`);
+          reconnectTimer = setTimeout(connect, backoffDelay(retry));
+          retry++;
+        });
+      return;
+    }
     if (typeof t !== "function") return _openSocket(t);
     // A function token is resolved fresh before EVERY (re)connect — this is
     // the whole point (an expiring assertion must not be frozen at connect
@@ -316,6 +450,7 @@ export function connectCli<S>(
     socket.onopen = () => {
       retry = 0;
       wasConnected = true;
+      _rememberPeer(explicitToken);
       // A3: announce our wire-protocol version before anything else.
       socket.send(enc("proto", protoHello(VERSION, stampedAppVersion())));
       stopHeartbeat();
@@ -581,15 +716,13 @@ export function connectCli<S>(
           // that has not been written yet, and if we close still holding it,
           // close() rejects it rather than reporting a success that never
           // happened.
-          if (!sent.queued && !sent.written) {
-            _pending.reject(
-              cid,
-              new Error(
-                "not connected and the offline queue is full — the action " +
-                  "was NOT sent",
-              ),
-            );
-          }
+          //
+          // There is no third outcome to handle here any more. `_trySend`
+          // either writes or queues — a full queue now evicts the OLDEST entry
+          // and rejects THAT caller inside `_pushDroppingOldest`, so the branch
+          // that used to reject this one was unreachable dead code the moment
+          // the policy changed. The only other failure, a frame that cannot be
+          // built, is rejected in the `catch` above.
           return ackd;
         };
         (dispatch as unknown as Record<symbol, boolean>)[SETTLES_CALLS] = true;
@@ -713,24 +846,17 @@ export function connectCliUDS<S>(
       });
       return { written: true, queued: false };
     }
-    if (queue.length < WS_MAX_QUEUE) {
-      queue.push(action);
-      if (!_udsQueueNoted) {
-        _udsQueueNoted = true;
-        log.warn(
-          "cli",
-          `UDS offline — actions are queued in memory (max ` +
-            `${WS_MAX_QUEUE}) and sent on reconnect; awaited calls stay ` +
-            `pending until then, and close() rejects whatever is still queued`,
-        );
-      }
-      return { written: false, queued: true };
+    _pushDroppingOldest(queue, _udsPending, "UDS offline", action);
+    if (!_udsQueueNoted) {
+      _udsQueueNoted = true;
+      log.warn(
+        "cli",
+        `UDS offline — actions are queued in memory (max ` +
+          `${WS_MAX_QUEUE}) and sent on reconnect; awaited calls stay ` +
+          `pending until then, and close() rejects whatever is still queued`,
+      );
     }
-    log.warn(
-      "cli",
-      `UDS offline queue full (${WS_MAX_QUEUE}) — action "${action.type}" was NOT sent`,
-    );
-    return { written: false, queued: false };
+    return { written: false, queued: true };
   }
 
   function connect(): void {

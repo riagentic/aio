@@ -7,6 +7,7 @@ import {
   checkTableShape,
   type DirtyHint,
   planTablesIncremental,
+  refusedWriteDetail,
   type TableIndex,
 } from "../db/state-sync.ts";
 import type { CellPatches } from "./aio-dispatch.ts";
@@ -939,7 +940,11 @@ export function createPersistenceManager(
         // Nothing advanced: both baselines still describe the last COMMITTED
         // state, so the next cycle retries the whole thing — which it can only
         // do with the hint cleared. See `_forceFullTablePass`.
-        log.error(`persist: failed to save — ${e}`);
+        log.error(
+          `persist: failed to save — ${e}${
+            refusedWriteDetail(sql?.stmts ?? [])
+          }`,
+        );
         _forceFullTablePass();
         _reportPersistError(e);
       }
@@ -980,7 +985,11 @@ export function createPersistenceManager(
         if (sql.stmts.length) await asyncDb!.transaction(sql.stmts);
         sql.commit();
       } catch (e) {
-        log.error(`persist: sqlite sync failed — ${e}`);
+        log.error(
+          `persist: sqlite sync failed — ${e}${
+            refusedWriteDetail(sql?.stmts ?? [])
+          }`,
+        );
         _forceFullTablePass();
         _reportPersistError(e);
       }

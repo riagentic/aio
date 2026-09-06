@@ -243,7 +243,7 @@ export function cmdBackup(args: string[], flags: GlobalFlags): void {
   if (pid !== null && !force) {
     outError(
       `"${appId}" is running (pid ${pid}) — copying a live SQLite database can ` +
-        `capture a torn write. Run "am stop ${appId}" first, or ` +
+        `capture a torn write. Run "am stop --app=${appId}" first, or ` +
         `"am backup --force" to accept the risk.`,
       mode,
     );
@@ -329,7 +329,7 @@ export function cmdRestore(args: string[], flags: GlobalFlags): void {
     // Not overridable: the running app has the databases open and would write
     // its in-memory pages over whatever we just restored.
     outError(
-      `"${appId}" is running (pid ${pid}) — run "am stop ${appId}" first`,
+      `"${appId}" is running (pid ${pid}) — run "am stop --app=${appId}" first`,
       mode,
     );
     Deno.exit(1);

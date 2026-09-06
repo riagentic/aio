@@ -271,6 +271,48 @@ export async function loadTables(
 }
 
 /** What `v` is, in words a developer can match to their own code. */
+/** The one thing a refused table write could NOT say about itself: the shape
+ *  of the row it tried to send.
+ *
+ *  The db layer already names a great deal — "datatype mismatch / in a
+ *  transaction of 17 statements, at statement 1 / sql: INSERT INTO rows (id,
+ *  name) VALUES (?, ?) / params: 2 / (the whole transaction was rolled back)".
+ *  What it gives for the VALUES is a count. So the reader knows a row was
+ *  refused and which statement refused it, and still cannot see that `id`
+ *  arrived as a string where the table declares an integer key — which is the
+ *  whole of the mistake. MEASURED with a `pk()` column handed `"r1"`: the app
+ *  accepted 400 writes, reported success to every caller, and restored `[]`.
+ *
+ *  TYPES, never values: this goes to a log and a row is user data. The column
+ *  NAMES come from the statement's own SQL, the shapes from `typeof`.
+ *
+ *  The READ path (`loadTables`) names the table and column on the way in;
+ *  this is the missing half of the same courtesy on the way out. */
+export function refusedWriteDetail(
+  stmts: readonly { sql: string; params?: unknown[] }[],
+): string {
+  const tables = new Set<string>();
+  let shape = "";
+  for (const st of stmts) {
+    const t = /\b(?:INTO|UPDATE|FROM)\s+"?([A-Za-z_][\w]*)"?/i.exec(st.sql);
+    if (t) tables.add(t[1]!);
+    if (shape) continue;
+    const cols = /\(([^)]+)\)\s*VALUES/i.exec(st.sql)?.[1];
+    if (!cols || !st.params?.length) continue;
+    const names = cols.split(",").map((c) => c.trim().replace(/^"|"$/g, ""));
+    shape = names
+      .map((n, i) => `${n}: ${typeName(st.params![i])}`)
+      .join(", ");
+  }
+  if (tables.size === 0) return "";
+  const which = [...tables].map((t) => `"${t}"`).join(", ");
+  return ` — the refused batch writes table(s) ${which}` +
+    (shape ? `; the row shape it sent was (${shape})` : "") +
+    `. Compare those with the column types the table declares; the state ` +
+    `stays in memory and the batch is retried whole every window, so it ` +
+    `lands the moment the value is fixed.`;
+}
+
 function typeName(v: unknown): string {
   if (v === null) return "null";
   if (Array.isArray(v)) return "an array";

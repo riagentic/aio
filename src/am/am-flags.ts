@@ -64,7 +64,12 @@ export const PASSTHROUGH: Readonly<Record<string, string>> = {
   build: "= deno task build — fleet flags go to the build",
   compile: "= deno task compile — flags go to the build",
   publish: "release flags (--dir --channel --notes --targets --key --data …)",
-  create: "scaffold flags (--template --target --mirror --dir …)",
+  // NOT `--dir`: `am create` refuses it by name ("there is no --dir; cd where
+  // you want it first"), and a note advertising a refused flag is the same
+  // defect as a help omitting a real one. The full list lives in
+  // am-help-text.ts (CREATE_FLAGS) and is printed by both the help and the
+  // refusal.
+  create: "scaffold flags (--template --target --aio-version --mirror --jsr)",
   lab: "VM flags (--ram --cpus --disk --apk --tunnel …)",
   ui: "flags are forwarded to amui (`am ui --client=browser`)",
   upgrade: "hands off to the installer for am / an app / a checkout",
@@ -105,7 +110,9 @@ export const VERB_FLAGS: Readonly<Record<string, readonly string[]>> = {
   surface: ["--full", "--component", "--path", "--depth"],
   trigger: [],
   where: [],
-  shot: ["--full", "--out", "--pose"],
+  // `--pose` is NOT here: cmdShot refuses it by name with a better message,
+  // and this list is what "shot takes:" prints. See RECOGNISED_NOT_OFFERED.
+  shot: ["--full", "--out"],
   sql: [],
   tables: [],
   schedules: [],
@@ -149,6 +156,22 @@ export function flagName(arg: string): string | null {
 
 /** Every `--flag` in `argv` this verb does not accept, in order. Empty for a
  *  passthrough verb, and for anything after a bare `--`. Pure. */
+/** Flags a verb RECOGNISES only in order to refuse them WELL — let through the
+ *  central gate so the command's own message is the one the user reads, but
+ *  never advertised in "…takes:".
+ *
+ *  `--pose` was in `VERB_FLAGS.shot` for the first half of that (cmdShot
+ *  answers "the app decides its own camera. Expose a cell method … then
+ *  `am shot`"), and paid the second: `am shot --zzz` replied "shot takes:
+ *  --full --out --pose", offering a flag that fails when used. The table's own
+ *  note records the mirror-image mistake for `--level` — listed there and
+ *  refused by the command — and says the two tests around this table cannot
+ *  see either half. This map is the missing third state: recognised, refused,
+ *  not offered. */
+export const RECOGNISED_NOT_OFFERED: Record<string, readonly string[]> = {
+  shot: ["--pose"],
+};
+
 export function unknownFlags(
   command: string,
   argv: readonly string[],
@@ -162,6 +185,9 @@ export function unknownFlags(
     const name = flagName(a);
     if (name === null) continue;
     if (GLOBAL_FLAGS.includes(name) || known.includes(name)) continue;
+    // Recognised so the COMMAND can refuse it with the better sentence; the
+    // "…takes:" line never names these, so nothing is offered that fails.
+    if ((RECOGNISED_NOT_OFFERED[command] ?? []).includes(name)) continue;
     bad.push(name);
   }
   return bad;
