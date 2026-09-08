@@ -1,6 +1,6 @@
 {
   "name": "@riagentic/aio",
-  "version": "1.0.0-alpha77",
+  "version": "1.0.0-beta1",
   "appId": "aio",
   "exports": {
     ".": "./mod.ts",
@@ -11,6 +11,7 @@
     "./server": "./src/server-entry.ts",
     "./state-core": "./src/state-core.ts",
     "./db": "./src/db/mod.ts",
+    "./log": "./src/diagnostics/logger.ts",
     "./extras": "./src/extras/mod.ts",
     "./sync": "./src/sync/mod.ts",
     "./testing": "./src/cell-test.ts",
@@ -67,6 +68,7 @@
     "aio/ui": "./src/ui/mod.ts",
     "aio/jsx-runtime": "./src/jsx-runtime.ts",
     "aio/db": "./src/db/mod.ts",
+    "aio/log": "./src/diagnostics/logger.ts",
     "aio/server": "./src/server-entry.ts",
     "aio/state-core": "./src/state-core.ts",
     "aio/extras": "./src/extras/mod.ts",

@@ -81,7 +81,7 @@ export type CellInfo = {
   /** `version: N` — what makes this cell visible to the update data gate. */
   hasVersion: boolean;
   /** `persist: false` — this cell keeps nothing on disk. */
-  persistFalse: boolean;
+  noPersist: boolean;
   /** `worker: true` — this cell's methods run on their own thread. */
   isWorker: boolean;
   stateKeys: string[];

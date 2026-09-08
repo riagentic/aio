@@ -10,8 +10,21 @@ import { removalMessage, removalOf } from "../state/removals.ts";
 import { findFreePort } from "./paths.ts";
 import { BUILD_BOOL_FLAGS, BUILD_VALUE_FLAGS } from "../build/build-flags.ts";
 
-/** Framework version — printed by --version, checked in tests */
-export const VERSION = "1.0.0-alpha77";
+/** Framework version — printed by --version, checked in tests.
+ *
+ *  Annotated `: string` on purpose. Left to inference this is the LITERAL type
+ *  `"1.0.0-beta1"`, which lands in the public API snapshot — so every release
+ *  bump reported itself to `check:api` as a BREAKING signature change, at the
+ *  exact moment the release is being cut and the tempting move is to regenerate
+ *  and stop reading. A gate that cries wolf on the one action that always
+ *  happens is the crying-wolf pattern this project spends its time removing.
+ *
+ *  Nobody can be holding the literal: `const x: "1.0.0-alpha77" = VERSION` is
+ *  the only shape that breaks, and it is not a thing anyone writes. The
+ *  annotation is a WIDENING for every consumer — with the literal type,
+ *  `VERSION === "1.0.0-alpha76"` was a compile error for having no overlap;
+ *  now it is an ordinary comparison. */
+export const VERSION: string = "1.0.0-beta1";
 
 /** What `--version` prints: what this artifact IS, and what it was built with.
  *

@@ -33,6 +33,16 @@ export const tmp = cell("tmp", {
   state: { n: 0 },
   methods: { inc(s: { n: number }) { s.n++; } },
 });
+export const toast = cell("toast", {
+  persist: "none",
+  state: { msg: "" },
+  methods: { say(s: { msg: string }, m: string) { s.msg = m; } },
+});
+export const gallery = cell("gallery", {
+  scope: "client",
+  state: { zoom: 1 },
+  methods: { zoomIn(s: { zoom: number }) { s.zoom += 1; } },
+});
 `;
 
 async function project(updates: boolean): Promise<string> {
@@ -67,8 +77,24 @@ Deno.test("aiol: an updating app is told which cells the data gate cannot protec
     assert(msg.includes("vault"), msg);
     // NOT the one that declares a version…
     assert(!msg.includes("prefs"), `a versioned cell is covered: ${msg}`);
-    // …and NOT the one that keeps nothing on disk.
+    // …and NOT the ones that keep nothing on disk, in any of the three ways
+    // there are to say so. Reading only `persist: false` reported 18 of one
+    // wallet's 44 cells as unversioned persisters: 17 said `persist: "none"` —
+    // the spelling `docs/state/cells.md` uses and `am` prints back — and the
+    // last was `scope: "client"`, which cannot reach the persist layer at all.
+    // None of them persisted anything. The cost is not the miscount: this
+    // warning is the ONLY signal for a persisted cell whose shape moves across
+    // a release with no version, so drowning it in false positives means the
+    // day a real one appears it looks exactly like the noise people skip.
     assert(!msg.includes("tmp"), `persist: false has no data to gate: ${msg}`);
+    assert(
+      !msg.includes("toast"),
+      `persist: "none" is the SAME declaration as persist: false: ${msg}`,
+    );
+    assert(
+      !msg.includes("gallery"),
+      `a scope: "client" cell never reaches the persist layer: ${msg}`,
+    );
     // The fix is in the message, including that the first stamp is free —
     // otherwise the reader reasonably fears it triggers a migration.
     assert(msg.includes("version: 1"), msg);

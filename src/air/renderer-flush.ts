@@ -19,6 +19,11 @@ import {
 } from "./renderer-state.ts";
 import { _rerenderComponent } from "./renderer-rerender.ts";
 import { _reportHookError } from "./hook-error.ts";
+import { onCleanup } from "./renderer-lifecycle.ts";
+import { auditContrast } from "./contrast-audit.ts";
+import { auditIdSelectors } from "./selector-audit.ts";
+import { runTrackedLifecycle } from "./untracked-read.ts";
+import { isDevMode } from "../state/dev-flag.ts";
 
 // ── afterRender queue (per-root isolated) ────────────────────────────
 
@@ -38,6 +43,7 @@ export function afterRender(fn: () => void): void {
     _activeRoot.afterRenderQueue.push({
       fn,
       component: _currentCollector?._component,
+      renderDeps: _currentCollector?._renderDeps ?? null,
     });
     return;
   }
@@ -96,7 +102,19 @@ function _flushMounts(root: RootState): void {
       // of its siblings or collapse the surface.
       for (const cb of entry.cbs) {
         try {
-          cb();
+          // A RETURNED function is the callback's cleanup. We are inside the
+          // mount flush with this instance as the collector, so `onCleanup`
+          // files it under `mountCleanupCallbacks` — unmount-only, never
+          // re-render — which is precisely the lifetime React/Solid/Svelte/Vue
+          // give a returned disposer. Dropping it (what happened before) is
+          // invisible: the type permits it and the leak is a timer nobody sees.
+          const disposer = runTrackedLifecycle(
+            "onMount",
+            entry.component,
+            inst.deps,
+            cb as () => unknown,
+          );
+          if (typeof disposer === "function") onCleanup(disposer as () => void);
         } catch (e) {
           _reportHookError("onMount", e, entry.component);
         }
@@ -125,13 +143,38 @@ export function _flushAfterRender(root: RootState): void {
     _flushMounts(root);
   }
   const cbs = root.afterRenderQueue;
-  if (cbs.length === 0) return;
-  root.afterRenderQueue = [];
-  for (const entry of cbs) {
+  if (cbs.length > 0) {
+    root.afterRenderQueue = [];
+    for (const entry of cbs) {
+      try {
+        runTrackedLifecycle(
+          "afterRender",
+          entry.component,
+          entry.renderDeps,
+          entry.fn,
+        );
+      } catch (e) {
+        _reportHookError("afterRender", e, entry.component);
+      }
+    }
+  }
+  // Colour, on the COMMITTED tree — the one dimension aio ships an opinion
+  // about and then never measured. Dev only, throttled and capped inside, and
+  // silent wherever it cannot compute a colour (see contrast-audit.ts). Runs
+  // last because it reads what everything above has just painted.
+  if (isDevMode()) {
     try {
-      entry.fn();
-    } catch (e) {
-      _reportHookError("afterRender", e, entry.component);
+      const el = root.root as unknown as Element;
+      auditContrast(el);
+      // …and that the app's own CSS is aimed at elements that exist. The
+      // `#root` contract is silent and its failure is invisible: one field
+      // report styled `#app`, broke the height chain at the top, and spent
+      // hours believing correct geometry code was wrong while every `am`
+      // command reported perfect health.
+      const doc = (el as unknown as { ownerDocument?: Document }).ownerDocument;
+      if (doc) auditIdSelectors(doc, (el as { id?: string }).id || "root");
+    } catch {
+      // A dev nicety must never be able to break a render.
     }
   }
 }

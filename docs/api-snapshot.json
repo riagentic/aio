@@ -5,7 +5,10 @@
       "symbols": {
         "Access": {
           "kind": "typeAlias",
-          "sig": "a8a8be406ddf2e6c"
+          "sig": "a8a8be406ddf2e6c",
+          "sigs": [
+            "a8a8be406ddf2e6c"
+          ]
         },
         "aio": {
           "kind": "variable",
@@ -14,7 +17,10 @@
             "run": "req:44136fa355b3678a",
             "stop": "req:005d95a066313783",
             "restart": "req:bec2ddcde05dc1f1"
-          }
+          },
+          "sigs": [
+            "ac3004c539c83f6b"
+          ]
         },
         "AioApp": {
           "kind": "typeAlias",
@@ -32,8 +38,16 @@
             "close": "req:005d95a066313783",
             "mode": "opt:929ba91d3ed9af28",
             "port": "opt:f6522636230fa080",
-            "cells": "opt:63962a512c50bd72"
-          }
+            "cells": "opt:object",
+            "cells.enable": "req:0f6a074c83562853",
+            "cells.disable": "req:0f6a074c83562853",
+            "cells.status": "req:081efb995c20d00d",
+            "cells.health": "req:a9cb76c34fb893b8",
+            "cells.list": "req:bc28822da39b691e"
+          },
+          "sigs": [
+            "62565cfc8ffb2a0f"
+          ]
         },
         "AioError": {
           "kind": "class",
@@ -51,11 +65,17 @@
             "tip": "req:45f5708832991720",
             "toString": "req:2bbd5f6471f2d006",
             "toJSON": "req:fab6b1398ea3241b"
-          }
+          },
+          "sigs": [
+            "da235437e1afa2c7"
+          ]
         },
         "AioErrorCode": {
           "kind": "typeAlias",
-          "sig": "638671c7129541f8"
+          "sig": "638671c7129541f8",
+          "sigs": [
+            "638671c7129541f8"
+          ]
         },
         "AioMeta": {
           "kind": "typeAlias",
@@ -66,19 +86,31 @@
             "height": "opt:f6522636230fa080",
             "childWindows": "opt:0ecca0fe3beba89b",
             "chrome": "opt:0cb8e5493e58cfb7"
-          }
+          },
+          "sigs": [
+            "fdb15d5f42e5d271"
+          ]
         },
         "AioUser": {
           "kind": "typeAlias",
-          "sig": "cd4c2b619920db14"
+          "sig": "cd4c2b619920db14",
+          "sigs": [
+            "cd4c2b619920db14"
+          ]
         },
         "AsyncMethod": {
           "kind": "typeAlias",
-          "sig": "bd99017cafff3a3b"
+          "sig": "bd99017cafff3a3b",
+          "sigs": [
+            "bd99017cafff3a3b"
+          ]
         },
         "authClient": {
           "kind": "variable",
-          "sig": "b778e51ff0b2684e"
+          "sig": "b778e51ff0b2684e",
+          "sigs": [
+            "b778e51ff0b2684e"
+          ]
         },
         "AuthFeatures": {
           "kind": "typeAlias",
@@ -88,11 +120,17 @@
             "oidc": "req:0ecca0fe3beba89b",
             "totp": "req:0ecca0fe3beba89b",
             "mail": "req:0ecca0fe3beba89b"
-          }
+          },
+          "sigs": [
+            "05d3140c1c899cab"
+          ]
         },
         "AuthOptions": {
           "kind": "typeAlias",
-          "sig": "d7099d4c35e2b5b6"
+          "sig": "d7099d4c35e2b5b6",
+          "sigs": [
+            "d7099d4c35e2b5b6"
+          ]
         },
         "AuthUserRecord": {
           "kind": "interface",
@@ -103,7 +141,10 @@
             "email": "req:cb5114588202887c",
             "verified": "req:0ecca0fe3beba89b",
             "totpEnabled": "req:0ecca0fe3beba89b"
-          }
+          },
+          "sigs": [
+            "60d486d14ce02d44"
+          ]
         },
         "bindCell": {
           "kind": "function",
@@ -113,11 +154,18 @@
             "param1": "req:ae1421b20bf6ce94|1a06b29ab8ddf218~fnOrConstructor",
             "param2": "req:f079b42afa65644b|bbd8fbcde554066a~fnOrConstructor",
             "return": "req:b5f6ae1b8a43e31d"
-          }
+          },
+          "sigs": [
+            "37d0c31ad871791d"
+          ]
         },
         "blocking": {
           "kind": "function+namespace",
-          "sig": "3bb310eee8c46842"
+          "sig": "3bb310eee8c46842",
+          "sigs": [
+            "c79ce6c9798d9a08",
+            "b9806ed43c38ad8e"
+          ]
         },
         "bytes": {
           "kind": "function",
@@ -125,11 +173,18 @@
           "members": {
             "param0": "req:be1856ed7cd18fe5|b3d9da3d9fc5eb30~number",
             "return": "req:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "3c551d6727aad5e5"
+          ]
         },
         "call": {
           "kind": "function",
-          "sig": "b1d462c046f3c5f1"
+          "sig": "b1d462c046f3c5f1",
+          "sigs": [
+            "72e77ac2826f582c",
+            "d1736960ff7e8961"
+          ]
         },
         "CallOptions": {
           "kind": "typeAlias",
@@ -137,15 +192,25 @@
           "members": {
             "timeoutMs": "opt:f6522636230fa080",
             "retries": "opt:f6522636230fa080"
-          }
+          },
+          "sigs": [
+            "4ba6b0574897514f"
+          ]
         },
         "Catalog": {
           "kind": "typeAlias",
-          "sig": "c35d068f9a9dec2a"
+          "sig": "c35d068f9a9dec2a",
+          "sigs": [
+            "c35d068f9a9dec2a"
+          ]
         },
         "cell": {
           "kind": "function",
-          "sig": "bbb06d7db27f8b3f"
+          "sig": "bbb06d7db27f8b3f",
+          "sigs": [
+            "fc616a242224bc4d",
+            "72467cbfff9a38c2"
+          ]
         },
         "CellAio": {
           "kind": "typeAlias",
@@ -190,7 +255,10 @@
             "onRestore": "opt:0fe4c0d4b3d589c1",
             "bound": "req:0ecca0fe3beba89b",
             "stateType": "opt:754ca6fcde94b4a0"
-          }
+          },
+          "sigs": [
+            "15168801ebf45164"
+          ]
         },
         "CellDef": {
           "kind": "typeAlias",
@@ -199,23 +267,38 @@
             "typeParams": "req:d86095bd55768b7a",
             "__aio": "req:ade470f5117f11ce",
             "fx": "opt:2bee5342074038c9"
-          }
+          },
+          "sigs": [
+            "fd9aac3b158cdfde"
+          ]
         },
         "CellEffect": {
           "kind": "typeAlias",
-          "sig": "4d7e26aa0579de8f"
+          "sig": "4d7e26aa0579de8f",
+          "sigs": [
+            "4d7e26aa0579de8f"
+          ]
         },
         "CellEntry": {
           "kind": "typeAlias",
-          "sig": "e1b265a9a71b203a"
+          "sig": "e1b265a9a71b203a",
+          "sigs": [
+            "e1b265a9a71b203a"
+          ]
         },
         "CellFieldFilter": {
           "kind": "typeAlias",
-          "sig": "45fd3c12426fca6e"
+          "sig": "45fd3c12426fca6e",
+          "sigs": [
+            "45fd3c12426fca6e"
+          ]
         },
         "CellMethods": {
           "kind": "typeAlias",
-          "sig": "0fcc7cc312ab4ba1"
+          "sig": "0fcc7cc312ab4ba1",
+          "sigs": [
+            "0fcc7cc312ab4ba1"
+          ]
         },
         "CellsConfig": {
           "kind": "typeAlias",
@@ -224,7 +307,10 @@
             "appId": "opt:2fb40568533c1a6d",
             "cells": "opt:58dbae2820cab862",
             "localFirst": "opt:0ecca0fe3beba89b",
-            "cellDefaults": "opt:1e7c8fad31c3418f",
+            "cellDefaults": "opt:object",
+            "cellDefaults.visible": "opt:84ca4f7bd30471b0",
+            "cellDefaults.ui": "opt:84ca4f7bd30471b0",
+            "cellDefaults.persist": "opt:fa26d3759ebd094a",
             "port": "opt:f6522636230fa080",
             "host": "opt:2fb40568533c1a6d",
             "expose": "opt:0ecca0fe3beba89b",
@@ -298,7 +384,10 @@
             "diagnostics": "opt:3354b9d4e92eac8d",
             "dispatchStorm": "opt:67f5e6939e59f2f3",
             "onCheckpointRestore": "opt:bc30aaf8d4dd00e2"
-          }
+          },
+          "sigs": [
+            "3f4f147c1fec07c3"
+          ]
         },
         "CellStatus": {
           "kind": "typeAlias",
@@ -310,11 +399,17 @@
             "errors": "req:f6522636230fa080",
             "lastAction": "opt:2fb40568533c1a6d",
             "lastActionAt": "opt:f6522636230fa080"
-          }
+          },
+          "sigs": [
+            "006638935f472535"
+          ]
         },
         "CellVisibility": {
           "kind": "typeAlias",
-          "sig": "eb55d5481a86ef3c"
+          "sig": "eb55d5481a86ef3c",
+          "sigs": [
+            "eb55d5481a86ef3c"
+          ]
         },
         "CircuitBreakerConfig": {
           "kind": "typeAlias",
@@ -323,7 +418,10 @@
             "maxErrors": "opt:f6522636230fa080",
             "onTrip": "opt:3eaac478b30fe316",
             "window": "opt:f6522636230fa080"
-          }
+          },
+          "sigs": [
+            "4e8699126298f2a5"
+          ]
         },
         "CliApp": {
           "kind": "typeAlias",
@@ -333,7 +431,10 @@
             "state": "req:c82b04f1e64e54b4",
             "connected": "req:b0d796a0bdd3e6b1",
             "ready": "req:5dd8f15d4433c53e"
-          }
+          },
+          "sigs": [
+            "80eeda6bdc6fabdd"
+          ]
         },
         "ColumnDef": {
           "kind": "typeAlias",
@@ -345,7 +446,10 @@
             "nullable": "opt:0ecca0fe3beba89b",
             "unique": "opt:0ecca0fe3beba89b",
             "default": "opt:7740b48bf488c3ff"
-          }
+          },
+          "sigs": [
+            "bc1aa830b9573c3f"
+          ]
         },
         "ColumnOpts": {
           "kind": "typeAlias",
@@ -354,7 +458,10 @@
             "nullable": "opt:0ecca0fe3beba89b",
             "unique": "opt:0ecca0fe3beba89b",
             "default": "opt:7740b48bf488c3ff"
-          }
+          },
+          "sigs": [
+            "93466c61bc97388a"
+          ]
         },
         "composeCells": {
           "kind": "function",
@@ -363,7 +470,10 @@
             "param0": "req:70315651f3ed72de|c142763d8effe77e~array",
             "param1": "opt:b23e40dc2716d043|18ab6917e2283081~typeLiteral",
             "return": "req:3ef5969610274a3e"
-          }
+          },
+          "sigs": [
+            "80e4667aa0326146"
+          ]
         },
         "ComposedCells": {
           "kind": "typeAlias",
@@ -377,9 +487,18 @@
             "cellNames": "req:6941c580c10685fb",
             "initAll": "req:4496d51d93bc30b4",
             "destroyAll": "req:4496d51d93bc30b4",
-            "registry": "req:252f1d7088b83e91",
+            "registry": "req:object",
+            "registry.enable": "req:82014ecb95af1b5b",
+            "registry.disable": "req:82014ecb95af1b5b",
+            "registry.isEnabled": "req:7bd4c61d6b1b5995",
+            "registry.status": "req:060dc37fbc4bf658",
+            "registry.health": "req:07c2d8046055c98a",
+            "registry.setOnDisable": "req:e630f52e3cf4429d",
             "lastBreakdown": "opt:ab7dc8883ae66212"
-          }
+          },
+          "sigs": [
+            "76c4ea372e59a95b"
+          ]
         },
         "CookieOptions": {
           "kind": "interface",
@@ -392,7 +511,10 @@
             "httpOnly": "opt:0ecca0fe3beba89b",
             "secure": "opt:0ecca0fe3beba89b",
             "sameSite": "opt:b35a82269f1549b6"
-          }
+          },
+          "sigs": [
+            "fca122a526af8b9a"
+          ]
         },
         "count": {
           "kind": "function",
@@ -402,7 +524,10 @@
             "param1": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "param2": "req:541d28394b2791fb|",
             "return": "req:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "f069a348bb5e6c5d"
+          ]
         },
         "createAuthClient": {
           "kind": "function",
@@ -410,11 +535,23 @@
           "members": {
             "param0": "req:8c6e85e71e8e9202|",
             "return": "req:cc08dc5f61ab1f65"
-          }
+          },
+          "sigs": [
+            "778c0eb6c0e4bf89"
+          ]
         },
         "createSelector": {
           "kind": "function",
-          "sig": "750f3eefd5ec534c"
+          "sig": "750f3eefd5ec534c",
+          "sigs": [
+            "7aa6132bcbd49cac",
+            "8744d84fcfe13433",
+            "577f61de16526bc8",
+            "c4fd861cb564ce43",
+            "a246b6fae51e0e2f",
+            "0c11d63c3e84c339",
+            "49dc48b61b404534"
+          ]
         },
         "DB": {
           "kind": "interface",
@@ -427,7 +564,10 @@
             "checkIntegrity": "opt:2c3423570a053884",
             "close": "req:ea8fb37f7482dd65",
             "lastWriterError": "opt:3ff0a9643cccdf3d"
-          }
+          },
+          "sigs": [
+            "81a592365152399c"
+          ]
         },
         "DbMapping": {
           "kind": "typeAlias",
@@ -436,7 +576,10 @@
             "table": "req:0bac273c7076dbba",
             "shape": "opt:e66f357bde2fd3d0",
             "path": "opt:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "56f2a8ab3b864d5e"
+          ]
         },
         "DBOpts": {
           "kind": "typeAlias",
@@ -446,7 +589,10 @@
             "pragmas": "opt:6941c580c10685fb",
             "requestTimeoutMs": "opt:f6522636230fa080",
             "readers": "opt:f6522636230fa080"
-          }
+          },
+          "sigs": [
+            "ea81cfaacd4e393a"
+          ]
         },
         "definePlugin": {
           "kind": "function",
@@ -454,7 +600,10 @@
           "members": {
             "param0": "req:bed34b9c841708bb|b62e372aa2b341f2~Plugin",
             "return": "req:c166bb79abb82ed6"
-          }
+          },
+          "sigs": [
+            "80717c6c616b3d6e"
+          ]
         },
         "degraded": {
           "kind": "function",
@@ -463,7 +612,10 @@
             "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "param1": "req:e356a780a3eee0d7|",
             "return": "req:dd2cf0d2ff77f51b"
-          }
+          },
+          "sigs": [
+            "d94736b26420d9c2"
+          ]
         },
         "Degraded": {
           "kind": "typeAlias",
@@ -471,18 +623,27 @@
           "members": {
             "failures": "req:dfcf8bb3a2454f51",
             "isDegraded": "req:b0d796a0bdd3e6b1"
-          }
+          },
+          "sigs": [
+            "1faaad3e09281f6f"
+          ]
         },
         "degradedReport": {
           "kind": "function",
           "sig": "c1de0073ea60bc2e",
           "members": {
             "return": "req:a222e8cecc5a851b"
-          }
+          },
+          "sigs": [
+            "4c717ab921134bf3"
+          ]
         },
         "DiagnosticsConfig": {
           "kind": "typeAlias",
-          "sig": "d8e61ef60e86436c"
+          "sig": "d8e61ef60e86436c",
+          "sigs": [
+            "d8e61ef60e86436c"
+          ]
         },
         "DiagnosticsOptions": {
           "kind": "typeAlias",
@@ -498,11 +659,17 @@
             "console": "opt:0ecca0fe3beba89b",
             "vitals": "opt:98001a20b4f7a0a2",
             "diagnosticBus": "opt:0ecca0fe3beba89b"
-          }
+          },
+          "sigs": [
+            "5877aaf8ca6f2216"
+          ]
         },
         "DirectCalling": {
           "kind": "typeAlias",
-          "sig": "4c85168aa664ea92"
+          "sig": "4c85168aa664ea92",
+          "sigs": [
+            "4c85168aa664ea92"
+          ]
         },
         "dur": {
           "kind": "function",
@@ -510,7 +677,10 @@
           "members": {
             "param0": "req:be1856ed7cd18fe5|b3d9da3d9fc5eb30~number",
             "return": "req:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "04545042bd0b0b9b"
+          ]
         },
         "errorCode": {
           "kind": "function",
@@ -518,18 +688,27 @@
           "members": {
             "param0": "req:8a0195ffd96928c3|e2e9e83e047a6f75~unknown",
             "return": "req:0e003c5299ca0f9a"
-          }
+          },
+          "sigs": [
+            "b5d318ba84b54b13"
+          ]
         },
         "FeedbackInput": {
           "kind": "typeAlias",
-          "sig": "034c20cfae5ff364"
+          "sig": "034c20cfae5ff364",
+          "sigs": [
+            "034c20cfae5ff364"
+          ]
         },
         "generateTotpSecret": {
           "kind": "function",
           "sig": "6ef6486f1aff326f",
           "members": {
             "return": "req:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "5f76d1167b9cb1ef"
+          ]
         },
         "integer": {
           "kind": "function",
@@ -537,22 +716,34 @@
           "members": {
             "param0": "opt:5d2b1acdf65566c2|fce806814100d6ad~ColumnOpts",
             "return": "req:d784e91d36d3d121"
-          }
+          },
+          "sigs": [
+            "29b33240a2e9803e"
+          ]
         },
         "isCellWorker": {
           "kind": "function",
           "sig": "209ed045c0221c65",
           "members": {
             "return": "req:0ecca0fe3beba89b"
-          }
+          },
+          "sigs": [
+            "bf98f51ba05d3216"
+          ]
         },
         "JSX": {
           "kind": "namespace",
-          "sig": "db229a2ed409f674"
+          "sig": "db229a2ed409f674",
+          "sigs": [
+            "db229a2ed409f674"
+          ]
         },
         "JsxElement": {
           "kind": "typeAlias",
-          "sig": "c4b91168d09f8262"
+          "sig": "c4b91168d09f8262",
+          "sigs": [
+            "c4b91168d09f8262"
+          ]
         },
         "JsxIntrinsicAttributes": {
           "kind": "interface",
@@ -560,7 +751,10 @@
           "members": {
             "key": "opt:60d81f7053bb0224",
             "t": "opt:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "4b312cc4e9d59b19"
+          ]
         },
         "JsxIntrinsicElements": {
           "kind": "interface",
@@ -632,15 +826,24 @@
             "animate": "req:0cb2e1e18ccf739f",
             "animateTransform": "req:0cb2e1e18ccf739f",
             "set": "req:0cb2e1e18ccf739f"
-          }
+          },
+          "sigs": [
+            "7933329161a68efd"
+          ]
         },
         "JsxNode": {
           "kind": "typeAlias",
-          "sig": "64b2f9154f3948de"
+          "sig": "64b2f9154f3948de",
+          "sigs": [
+            "64b2f9154f3948de"
+          ]
         },
         "log": {
           "kind": "variable",
-          "sig": "e3f864a5a3765e6b"
+          "sig": "e3f864a5a3765e6b",
+          "sigs": [
+            "e3f864a5a3765e6b"
+          ]
         },
         "Log": {
           "kind": "interface",
@@ -651,7 +854,10 @@
             "info": "req:25c35974267ffc26",
             "warn": "req:25c35974267ffc26",
             "error": "req:25c35974267ffc26"
-          }
+          },
+          "sigs": [
+            "ffd7c0af1bc353aa"
+          ]
         },
         "LogConfig": {
           "kind": "typeAlias",
@@ -665,11 +871,17 @@
             "backupLogs": "opt:0ecca0fe3beba89b",
             "backupKeep": "opt:f6522636230fa080",
             "logBudget": "opt:f6522636230fa080"
-          }
+          },
+          "sigs": [
+            "1478e5ddaf426ed9"
+          ]
         },
         "LogLevel": {
           "kind": "typeAlias",
-          "sig": "2d194fddf92d9bd7"
+          "sig": "2d194fddf92d9bd7",
+          "sigs": [
+            "2d194fddf92d9bd7"
+          ]
         },
         "MemoryConfig": {
           "kind": "typeAlias",
@@ -683,11 +895,17 @@
             "machineWarnFraction": "opt:f6522636230fa080",
             "growthReportRatio": "opt:f6522636230fa080",
             "onMemoryPressure": "opt:a463ef41bbec87cf"
-          }
+          },
+          "sigs": [
+            "25d2f011674e9e48"
+          ]
         },
         "Method": {
           "kind": "typeAlias",
-          "sig": "7e82fa22d93957ca"
+          "sig": "7e82fa22d93957ca",
+          "sigs": [
+            "7e82fa22d93957ca"
+          ]
         },
         "MethodDraftMeta": {
           "kind": "typeAlias",
@@ -698,14 +916,20 @@
             "$commit": "req:0d6a4ba97f81ee81",
             "$live": "req:432f010c9f2192b5",
             "$do": "req:5d6f1992056985b5"
-          }
+          },
+          "sigs": [
+            "e66598c4dfe9667e"
+          ]
         },
         "MethodDraftServed": {
           "kind": "typeAlias",
           "sig": "94a71464cefd5a2a",
           "members": {
             "$do": "req:5d6f1992056985b5"
-          }
+          },
+          "sigs": [
+            "94a71464cefd5a2a"
+          ]
         },
         "MethodsCellConfig": {
           "kind": "typeAlias",
@@ -731,7 +955,10 @@
             "onRestore": "opt:e8a079d4832ed591",
             "onInit": "opt:167cda2b8419caf2",
             "onDestroy": "opt:6190ad991ab4d7a0"
-          }
+          },
+          "sigs": [
+            "c99908ed6b3de6b3"
+          ]
         },
         "Msg": {
           "kind": "typeAlias",
@@ -742,23 +969,38 @@
             "payload": "req:62c4a574242b82f7",
             "_source": "opt:d8f5968a19aed575",
             "_inflight": "opt:0ad1e428adc65d4b"
-          }
+          },
+          "sigs": [
+            "3fd23a6aa59672df"
+          ]
         },
         "own": {
           "kind": "variable",
-          "sig": "c9fc6626a35e0b2c"
+          "sig": "c9fc6626a35e0b2c",
+          "sigs": [
+            "c9fc6626a35e0b2c"
+          ]
         },
         "OwnDisposer": {
           "kind": "typeAlias",
-          "sig": "f90f75109eab2b71"
+          "sig": "f90f75109eab2b71",
+          "sigs": [
+            "f90f75109eab2b71"
+          ]
         },
         "OwnEffect": {
           "kind": "typeAlias",
-          "sig": "a142d3509098eddc"
+          "sig": "a142d3509098eddc",
+          "sigs": [
+            "a142d3509098eddc"
+          ]
         },
         "OwnResource": {
           "kind": "typeAlias",
-          "sig": "8dc34844b66acff0"
+          "sig": "8dc34844b66acff0",
+          "sigs": [
+            "8dc34844b66acff0"
+          ]
         },
         "PerfBudget": {
           "kind": "typeAlias",
@@ -767,14 +1009,20 @@
             "reduce": "opt:f6522636230fa080",
             "effect": "opt:f6522636230fa080",
             "methods": "opt:dd47888dca90faf5"
-          }
+          },
+          "sigs": [
+            "7876e43b314a7b17"
+          ]
         },
         "pk": {
           "kind": "function",
           "sig": "31d60dc050fc7c42",
           "members": {
             "return": "req:d784e91d36d3d121"
-          }
+          },
+          "sigs": [
+            "f2c5fc4d8a7e69e3"
+          ]
         },
         "Plugin": {
           "kind": "interface",
@@ -783,7 +1031,10 @@
             "extends": "req:d2efdd17f824512a",
             "name": "req:2fb40568533c1a6d",
             "setup": "opt:48000bbcf0891651"
-          }
+          },
+          "sigs": [
+            "e7ac707bd7251da3"
+          ]
         },
         "PluginContribution": {
           "kind": "interface",
@@ -799,7 +1050,10 @@
             "onDisconnect": "opt:a3e7beeebab085bf",
             "onStart": "opt:a6ef3ebb0961c0bc",
             "onStop": "opt:0e41c174ef00bcab"
-          }
+          },
+          "sigs": [
+            "4607fab583d6d5ab"
+          ]
         },
         "PluginSetupContext": {
           "kind": "interface",
@@ -808,7 +1062,10 @@
             "appId": "req:2fb40568533c1a6d",
             "dev": "req:0ecca0fe3beba89b",
             "plugins": "req:1a1f5c423a7cdab2"
-          }
+          },
+          "sigs": [
+            "8e0cd1c928185075"
+          ]
         },
         "QueryOpts": {
           "kind": "typeAlias",
@@ -818,7 +1075,10 @@
             "orderBy": "opt:2776d4bd9e505f08",
             "limit": "opt:f6522636230fa080",
             "offset": "opt:f6522636230fa080"
-          }
+          },
+          "sigs": [
+            "8c0b4041769e437c"
+          ]
         },
         "QueryResult": {
           "kind": "typeAlias",
@@ -828,7 +1088,10 @@
             "rows": "req:89973303b5dd2457",
             "changes": "req:f6522636230fa080",
             "lastInsertRowId": "req:eb16a6d265ab0c1d"
-          }
+          },
+          "sigs": [
+            "4d451b3b1c2af191"
+          ]
         },
         "race": {
           "kind": "function",
@@ -837,15 +1100,24 @@
             "param0": "req:6783a03963cfffb9|293ac4e170914719~T",
             "return": "req:27c802ce78c66762",
             "typeParams": "req:4aaac69f754cd508"
-          }
+          },
+          "sigs": [
+            "8c1fd96698286451"
+          ]
         },
         "RaceResult": {
           "kind": "typeAlias",
-          "sig": "1beeff3853fc2a4f"
+          "sig": "1beeff3853fc2a4f",
+          "sigs": [
+            "1beeff3853fc2a4f"
+          ]
         },
         "RawRouteHandler": {
           "kind": "typeAlias",
-          "sig": "9db2476cc42d2226"
+          "sig": "9db2476cc42d2226",
+          "sigs": [
+            "9db2476cc42d2226"
+          ]
         },
         "real": {
           "kind": "function",
@@ -853,7 +1125,10 @@
           "members": {
             "param0": "opt:5d2b1acdf65566c2|fce806814100d6ad~ColumnOpts",
             "return": "req:d784e91d36d3d121"
-          }
+          },
+          "sigs": [
+            "29b33240a2e9803e"
+          ]
         },
         "ref": {
           "kind": "function",
@@ -862,15 +1137,24 @@
             "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "param1": "opt:5d2b1acdf65566c2|fce806814100d6ad~ColumnOpts",
             "return": "req:d784e91d36d3d121"
-          }
+          },
+          "sigs": [
+            "496789ac3b08d4f1"
+          ]
         },
         "ResolveUserFn": {
           "kind": "typeAlias",
-          "sig": "76c4cc5d499af5de"
+          "sig": "76c4cc5d499af5de",
+          "sigs": [
+            "76c4cc5d499af5de"
+          ]
         },
         "RestartPlan": {
           "kind": "typeAlias",
-          "sig": "c9a4737f94154510"
+          "sig": "c9a4737f94154510",
+          "sigs": [
+            "c9a4737f94154510"
+          ]
         },
         "route": {
           "kind": "function",
@@ -879,7 +1163,10 @@
             "param0": "req:47044a5e2cad0ebd|83d9b296b1ebb2a9~fnOrConstructor",
             "param1": "req:0554a7ee8d28a099|",
             "return": "req:be3c559ff6ba9b73"
-          }
+          },
+          "sigs": [
+            "34e06af4915c3d7e"
+          ]
         },
         "RouteContext": {
           "kind": "interface",
@@ -896,14 +1183,20 @@
             "json": "req:cd99d6a82608cfc8",
             "text": "req:e31d4af53febf07c",
             "redirect": "req:04ce9f0db7ca5c35"
-          }
+          },
+          "sigs": [
+            "ac3f6f417a920c84"
+          ]
         },
         "RouteOptions": {
           "kind": "interface",
           "sig": "0f8471883432965c",
           "members": {
             "method": "opt:882605cb85bcbb8c"
-          }
+          },
+          "sigs": [
+            "0f8471883432965c"
+          ]
         },
         "schedule": {
           "kind": "variable",
@@ -917,15 +1210,24 @@
             "poll": "req:44136fa355b3678a",
             "next": "req:237c16b1561d147c",
             "cancel": "req:5435f664a78acd03"
-          }
+          },
+          "sigs": [
+            "705b99d44223d7bd"
+          ]
         },
         "ScheduleDef": {
           "kind": "typeAlias",
-          "sig": "877949ab993b041a"
+          "sig": "877949ab993b041a",
+          "sigs": [
+            "877949ab993b041a"
+          ]
         },
         "ScheduleEffect": {
           "kind": "typeAlias",
-          "sig": "22abfd1632d227e0"
+          "sig": "22abfd1632d227e0",
+          "sigs": [
+            "22abfd1632d227e0"
+          ]
         },
         "ScopedApp": {
           "kind": "typeAlias",
@@ -935,7 +1237,10 @@
             "dispatch": "req:75a09fad1d58c5fb",
             "getState": "req:122133b57c7f3410",
             "getFullState": "opt:b9ff0dae8888ff90"
-          }
+          },
+          "sigs": [
+            "f072feaddc6adb61"
+          ]
         },
         "SecurityConfig": {
           "kind": "interface",
@@ -948,15 +1253,24 @@
             "hsts": "opt:9265728875d24c4f",
             "permissionsPolicy": "opt:2fb40568533c1a6d",
             "compress": "opt:0ecca0fe3beba89b"
-          }
+          },
+          "sigs": [
+            "bfbd7c975d0f675e"
+          ]
         },
         "Selector": {
           "kind": "typeAlias",
-          "sig": "442cb03055401d58"
+          "sig": "442cb03055401d58",
+          "sigs": [
+            "442cb03055401d58"
+          ]
         },
         "SelectorDef": {
           "kind": "typeAlias",
-          "sig": "d47f3962a0a8b75c"
+          "sig": "d47f3962a0a8b75c",
+          "sigs": [
+            "d47f3962a0a8b75c"
+          ]
         },
         "self": {
           "kind": "function",
@@ -965,22 +1279,32 @@
             "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "param1": "opt:48e3f01ef4cb7248|dddb2f651bac9222~array",
             "return": "req:e76bf68fec16bac1"
-          }
+          },
+          "sigs": [
+            "376098572a985bca"
+          ]
         },
         "SelfAction": {
           "kind": "typeAlias",
           "sig": "1ea9ecfb43edaa63",
           "members": {
             "type": "req:2e5d8726f8f26e7f",
-            "payload": "req:c528f986bde6535b"
-          }
+            "payload": "req:object",
+            "payload.args": "req:22253390033b0b01"
+          },
+          "sigs": [
+            "1ea9ecfb43edaa63"
+          ]
         },
         "serverAuth": {
           "kind": "function",
           "sig": "92e7adb6fce7413b",
           "members": {
             "return": "req:8b34e2334b4555e9"
-          }
+          },
+          "sigs": [
+            "f7d80fce971aa42a"
+          ]
         },
         "serverFn": {
           "kind": "function",
@@ -989,7 +1313,10 @@
             "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "return": "req:3ce35dd87c8ee1b7",
             "typeParams": "req:0cc36f35257b0011"
-          }
+          },
+          "sigs": [
+            "4b4da5cc06396a7d"
+          ]
         },
         "serverFns": {
           "kind": "function",
@@ -1000,14 +1327,20 @@
             "param2": "opt:0aceed0c1de30961|2a8636890ef2c3d4~typeLiteral",
             "return": "req:a2ae1b0502be39ef",
             "typeParams": "req:0cc36f35257b0011"
-          }
+          },
+          "sigs": [
+            "e1a29f278ab5b88d"
+          ]
         },
         "serverRequest": {
           "kind": "function",
           "sig": "f003cb725b4bb51f",
           "members": {
             "return": "req:cc971e79ab960794"
-          }
+          },
+          "sigs": [
+            "b2a142c8c758809a"
+          ]
         },
         "ServerRequest": {
           "kind": "interface",
@@ -1019,14 +1352,20 @@
             "url": "req:9081d68fba9c8c8c",
             "method": "req:9081d68fba9c8c8c",
             "via": "req:464f511f36c8b2fb"
-          }
+          },
+          "sigs": [
+            "5b415051fe4713fb"
+          ]
         },
         "serverUser": {
           "kind": "function",
           "sig": "38ecba1f841a979e",
           "members": {
             "return": "req:42d33ed546d9e042"
-          }
+          },
+          "sigs": [
+            "6234204564bff1a7"
+          ]
         },
         "SessionInfo": {
           "kind": "interface",
@@ -1034,7 +1373,10 @@
           "members": {
             "extends": "req:c6843d1a2434ea53",
             "expiresAt": "req:f6522636230fa080"
-          }
+          },
+          "sigs": [
+            "588ed930e3ad95c9"
+          ]
         },
         "SessionStore": {
           "kind": "interface",
@@ -1048,7 +1390,10 @@
             "count": "req:8bf6ce4e8cc99815",
             "onRevoked": "req:d22d635420295a02",
             "close": "req:d831502f3c16c146"
-          }
+          },
+          "sigs": [
+            "16feed4f6449eed0"
+          ]
         },
         "sleep": {
           "kind": "function",
@@ -1056,11 +1401,17 @@
           "members": {
             "param0": "req:be1856ed7cd18fe5|b3d9da3d9fc5eb30~number",
             "return": "req:f9848a8ce1853551"
-          }
+          },
+          "sigs": [
+            "12d3d33cafdcce9f"
+          ]
         },
         "StateOf": {
           "kind": "typeAlias",
-          "sig": "549a0ca05f80712c"
+          "sig": "549a0ca05f80712c",
+          "sigs": [
+            "549a0ca05f80712c"
+          ]
         },
         "StormConfig": {
           "kind": "typeAlias",
@@ -1069,11 +1420,17 @@
             "rate": "opt:f6522636230fa080",
             "sustain": "opt:f6522636230fa080",
             "breaker": "opt:0ecca0fe3beba89b"
-          }
+          },
+          "sigs": [
+            "a4f0f869b5a86cbc"
+          ]
         },
         "SyncMethod": {
           "kind": "typeAlias",
-          "sig": "3212cf4eecd7a534"
+          "sig": "3212cf4eecd7a534",
+          "sigs": [
+            "3212cf4eecd7a534"
+          ]
         },
         "table": {
           "kind": "function",
@@ -1081,7 +1438,10 @@
           "members": {
             "param0": "req:4c5e621a066419c8|f2ba5da0ee35d72c~Record",
             "return": "req:0bac273c7076dbba"
-          }
+          },
+          "sigs": [
+            "0bd5f4d6bd493fca"
+          ]
         },
         "TableDef": {
           "kind": "typeAlias",
@@ -1089,7 +1449,10 @@
           "members": {
             "columns": "req:c43a8c5caca44067",
             "shape": "opt:e66f357bde2fd3d0"
-          }
+          },
+          "sigs": [
+            "e698490fa0a649d5"
+          ]
         },
         "text": {
           "kind": "function",
@@ -1097,7 +1460,10 @@
           "members": {
             "param0": "opt:5d2b1acdf65566c2|fce806814100d6ad~ColumnOpts",
             "return": "req:d784e91d36d3d121"
-          }
+          },
+          "sigs": [
+            "29b33240a2e9803e"
+          ]
         },
         "totpUri": {
           "kind": "function",
@@ -1107,11 +1473,17 @@
             "param1": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "param2": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "return": "req:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "b333678b345af9f1"
+          ]
         },
         "Tx": {
           "kind": "typeAlias",
-          "sig": "d6d59f832bb71a3e"
+          "sig": "d6d59f832bb71a3e",
+          "sigs": [
+            "d6d59f832bb71a3e"
+          ]
         },
         "UiConfig": {
           "kind": "typeAlias",
@@ -1128,11 +1500,17 @@
             "dir": "opt:64280ffe426f7d01",
             "chrome": "opt:0cb8e5493e58cfb7",
             "theme": "opt:b516670a54a1b089"
-          }
+          },
+          "sigs": [
+            "e619a9f7801b6163"
+          ]
         },
         "UiTheme": {
           "kind": "typeAlias",
-          "sig": "d84ff6298f58363b"
+          "sig": "d84ff6298f58363b",
+          "sigs": [
+            "d84ff6298f58363b"
+          ]
         },
         "until": {
           "kind": "function",
@@ -1141,7 +1519,10 @@
             "param0": "req:98ff24cca61b0c3d|c2e0f463c4224b93~fnOrConstructor",
             "param1": "req:e4d1f44eaa64737d|",
             "return": "req:f9848a8ce1853551"
-          }
+          },
+          "sigs": [
+            "bec4d4cc2bd4cbbf"
+          ]
         },
         "UntilOptions": {
           "kind": "interface",
@@ -1151,7 +1532,10 @@
             "intervalMs": "opt:f6522636230fa080",
             "signal": "opt:0dd466a47c7c7eec",
             "msg": "opt:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "c667e49d838a089e"
+          ]
         },
         "UntilTimeoutError": {
           "kind": "class",
@@ -1159,11 +1543,17 @@
           "members": {
             "constructor": "req:341e3423d13884a9",
             "extends": "req:a3f73ac510848cc4"
-          }
+          },
+          "sigs": [
+            "56d3fdd07cea962f"
+          ]
         },
         "UpdatesInput": {
           "kind": "typeAlias",
-          "sig": "cfb871764f9f427d"
+          "sig": "cfb871764f9f427d",
+          "sigs": [
+            "cfb871764f9f427d"
+          ]
         },
         "UserStore": {
           "kind": "interface",
@@ -1188,7 +1578,10 @@
             "issueToken": "req:7797009481be96e1",
             "consumeToken": "req:04f0670f4a573078",
             "close": "req:d831502f3c16c146"
-          }
+          },
+          "sigs": [
+            "6c7d2236349f9de5"
+          ]
         },
         "verifyTotp": {
           "kind": "function",
@@ -1197,11 +1590,17 @@
             "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "param1": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "return": "req:34626561d9c87167"
-          }
+          },
+          "sigs": [
+            "53917a4a93edd9a9"
+          ]
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "6ad5fcbca2cfebd1"
+          "sig": "151b216e0fdfdb2f",
+          "sigs": [
+            "151b216e0fdfdb2f"
+          ]
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -1214,11 +1613,17 @@
             "pressure": "opt:c1342dced985cf85",
             "onVitalAlert": "opt:fb70394753e1662c",
             "onDiagnostic": "opt:faa9f981b2adf35b"
-          }
+          },
+          "sigs": [
+            "5af12f7e87a960c2"
+          ]
         },
         "WhereClause": {
           "kind": "typeAlias",
-          "sig": "3b038cab896c0657"
+          "sig": "3b038cab896c0657",
+          "sigs": [
+            "3b038cab896c0657"
+          ]
         },
         "WhereOp": {
           "kind": "typeAlias",
@@ -1231,7 +1636,10 @@
             "ne": "opt:7740b48bf488c3ff",
             "like": "opt:2fb40568533c1a6d",
             "in": "opt:22253390033b0b01"
-          }
+          },
+          "sigs": [
+            "4067766e51a5886e"
+          ]
         },
         "WsLimits": {
           "kind": "typeAlias",
@@ -1240,7 +1648,10 @@
             "maxMessageBytes": "opt:f6522636230fa080",
             "messagesPerSec": "opt:f6522636230fa080",
             "bytesPerSec": "opt:f6522636230fa080"
-          }
+          },
+          "sigs": [
+            "73b802d56abe260e"
+          ]
         }
       }
     },
@@ -1258,7 +1669,10 @@
             "fix": "opt:2fb40568533c1a6d",
             "safeFix": "opt:931d681dd503fb96",
             "manual": "opt:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "fa4758707dcbab94"
+          ]
         },
         "lintProject": {
           "kind": "function",
@@ -1266,7 +1680,10 @@
           "members": {
             "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "return": "req:9037297497d18e47"
-          }
+          },
+          "sigs": [
+            "e4de5acf45ecfc74"
+          ]
         },
         "LintReport": {
           "kind": "typeAlias",
@@ -1274,8 +1691,14 @@
           "members": {
             "issues": "req:b4223cde575957ed",
             "passed": "req:6941c580c10685fb",
-            "stats": "req:4591c7d6b2a15a34"
-          }
+            "stats": "req:object",
+            "stats.filesScanned": "req:f6522636230fa080",
+            "stats.cellsFound": "req:f6522636230fa080",
+            "stats.testsFound": "req:f6522636230fa080"
+          },
+          "sigs": [
+            "885e5c14fd05a2f0"
+          ]
         },
         "printReport": {
           "kind": "function",
@@ -1286,15 +1709,24 @@
             "param2": "req:f44dcdd9f8adaf90|",
             "param3": "req:d7e621086206a7f9|",
             "return": "req:b5f6ae1b8a43e31d"
-          }
+          },
+          "sigs": [
+            "3f4963fafaf0a7c7"
+          ]
         },
         "SafeFixFn": {
           "kind": "typeAlias",
-          "sig": "f8dd9b5af167ddfc"
+          "sig": "f8dd9b5af167ddfc",
+          "sigs": [
+            "f8dd9b5af167ddfc"
+          ]
         },
         "Severity": {
           "kind": "typeAlias",
-          "sig": "849c0f0fefdeea5f"
+          "sig": "849c0f0fefdeea5f",
+          "sigs": [
+            "849c0f0fefdeea5f"
+          ]
         }
       }
     },
@@ -1306,7 +1738,10 @@
           "members": {
             "param0": "req:c921f2c8abed9b77|c1d58a2d45e92ab6~fnOrConstructor",
             "return": "req:b5f6ae1b8a43e31d"
-          }
+          },
+          "sigs": [
+            "ab8dee5e9b6487f0"
+          ]
         },
         "batch": {
           "kind": "function",
@@ -1314,11 +1749,17 @@
           "members": {
             "param0": "req:c921f2c8abed9b77|c1d58a2d45e92ab6~fnOrConstructor",
             "return": "req:b5f6ae1b8a43e31d"
-          }
+          },
+          "sigs": [
+            "ab8dee5e9b6487f0"
+          ]
         },
         "ComponentFn": {
           "kind": "typeAlias",
-          "sig": "4fd91f7fe3436040"
+          "sig": "4fd91f7fe3436040",
+          "sigs": [
+            "4fd91f7fe3436040"
+          ]
         },
         "ComponentTreeNode": {
           "kind": "interface",
@@ -1330,7 +1771,10 @@
             "signalCount": "req:f6522636230fa080",
             "children": "req:b5003bf9cd193473",
             "lastRenderMs": "req:f6522636230fa080"
-          }
+          },
+          "sigs": [
+            "7987dff4d070bc91"
+          ]
         },
         "computed": {
           "kind": "function",
@@ -1339,7 +1783,10 @@
             "param0": "req:d374037b0221a281|39fc1d00c13c605f~fnOrConstructor",
             "return": "req:4268aab1cf50d4a1",
             "typeParams": "req:ddf4493b60497953"
-          }
+          },
+          "sigs": [
+            "7de87cdab942ce10"
+          ]
         },
         "Computed": {
           "kind": "interface",
@@ -1349,21 +1796,30 @@
             "_subscribers": "req:223bd8d0170b8c97",
             "get": "req:5307b9601960c9b1",
             "peek": "req:5307b9601960c9b1"
-          }
+          },
+          "sigs": [
+            "5cd48312b81fec18"
+          ]
         },
         "connectAioDevTools": {
           "kind": "function",
           "sig": "0f1c2b0496d8737a",
           "members": {
             "return": "req:0633411c3090f118"
-          }
+          },
+          "sigs": [
+            "b21ab58241594cb4"
+          ]
         },
         "connectReduxDevTools": {
           "kind": "function",
           "sig": "ff0cb91d2aded3d3",
           "members": {
             "return": "req:b5f6ae1b8a43e31d"
-          }
+          },
+          "sigs": [
+            "caa3438d820c60c5"
+          ]
         },
         "Context": {
           "kind": "interface",
@@ -1372,7 +1828,10 @@
             "_id": "req:5ba82df8ab4c02be",
             "_default": "req:64d08f80171c9a72",
             "Provider": "req:89f61ad72e13a408"
-          }
+          },
+          "sigs": [
+            "32d64e388da33385"
+          ]
         },
         "createContext": {
           "kind": "function",
@@ -1381,7 +1840,10 @@
             "param0": "req:5619caf494885e5e|e3c6c7498fe66211~T",
             "return": "req:e4d8a59143e03096",
             "typeParams": "req:ddf4493b60497953"
-          }
+          },
+          "sigs": [
+            "9825d7155666c2bc"
+          ]
         },
         "Defer": {
           "kind": "function",
@@ -1389,7 +1851,10 @@
           "members": {
             "param0": "req:45a261c711eca621|55ad367c7184c73d~DeferProps",
             "return": "req:c14ff19b4055d02a"
-          }
+          },
+          "sigs": [
+            "50325d1d75922170"
+          ]
         },
         "DeferProps": {
           "kind": "interface",
@@ -1402,11 +1867,17 @@
             "error": "opt:4b5aae1d7d8ce864",
             "loadingMinMs": "opt:f6522636230fa080",
             "componentProps": "opt:43c27b1501a10616"
-          }
+          },
+          "sigs": [
+            "fd975cbef34bdb58"
+          ]
         },
         "DeferTrigger": {
           "kind": "typeAlias",
-          "sig": "26eee104f946b26a"
+          "sig": "26eee104f946b26a",
+          "sigs": [
+            "26eee104f946b26a"
+          ]
         },
         "DevToolsHandle": {
           "kind": "interface",
@@ -1417,23 +1888,33 @@
             "totalRenders": "req:dfcf8bb3a2454f51",
             "connected": "req:b0d796a0bdd3e6b1",
             "disconnect": "req:d831502f3c16c146"
-          }
+          },
+          "sigs": [
+            "446880ae34185f1e"
+          ]
         },
         "DimensionsState": {
           "kind": "interface",
           "sig": "768cfb6ba362d7b6",
           "members": {
-            "ref": "req:75530e1bd45d5eb9",
+            "ref": "req:object",
+            "ref.current": "req:a5494be6b698d8ca",
             "width": "req:d81b117de2092dd7",
             "height": "req:d81b117de2092dd7"
-          }
+          },
+          "sigs": [
+            "768cfb6ba362d7b6"
+          ]
         },
         "disconnectReduxDevTools": {
           "kind": "function",
           "sig": "ff0cb91d2aded3d3",
           "members": {
             "return": "req:b5f6ae1b8a43e31d"
-          }
+          },
+          "sigs": [
+            "caa3438d820c60c5"
+          ]
         },
         "effect": {
           "kind": "function",
@@ -1441,7 +1922,10 @@
           "members": {
             "param0": "req:9187e4d5b30a1caa|b119ba689df454b9~fnOrConstructor",
             "return": "req:cb4e735bb1e34533"
-          }
+          },
+          "sigs": [
+            "19b1905af1d537b0"
+          ]
         },
         "ErrorBoundary": {
           "kind": "variable",
@@ -1454,7 +1938,10 @@
             "param0": "req:97fca23750feeb20|",
             "param1": "req:97fca23750feeb20|",
             "return": "req:44136fa355b3678a"
-          }
+          },
+          "sigs": [
+            "439aedae0300971b"
+          ]
         },
         "FieldArrayState": {
           "kind": "interface",
@@ -1466,7 +1953,10 @@
             "move": "req:6818582eb81f37cf",
             "set": "req:d043084f04bf5b5d",
             "reset": "req:d831502f3c16c146"
-          }
+          },
+          "sigs": [
+            "2dc3b5cc8500e463"
+          ]
         },
         "FieldState": {
           "kind": "interface",
@@ -1480,7 +1970,10 @@
             "set": "req:1f105f968df09f46",
             "touch": "req:d831502f3c16c146",
             "reset": "req:d831502f3c16c146"
-          }
+          },
+          "sigs": [
+            "ca03bb9a12bf81d1"
+          ]
         },
         "FormState": {
           "kind": "interface",
@@ -1493,7 +1986,10 @@
             "validate": "req:538c653b6b4690ef",
             "reset": "req:d831502f3c16c146",
             "bind": "req:bcdf56e8ea80c53a"
-          }
+          },
+          "sigs": [
+            "8e3015f4e4323c35"
+          ]
         },
         "Fragment": {
           "kind": "variable",
@@ -1507,7 +2003,10 @@
             "param1": "req:492f7a09e81aaf5d|9c9b1d3e8bfba8bc~Record+e47c90b8d1952424~null",
             "param2": "opt:30dc517bf5419b33|09a9cb12a3ad6545~array",
             "return": "req:aba403b6ecb255cd"
-          }
+          },
+          "sigs": [
+            "0e4a1a77d343e464"
+          ]
         },
         "hydrate": {
           "kind": "function",
@@ -1516,14 +2015,20 @@
             "param0": "req:abc1283ec898877a|8cf901bb93165a7b~any",
             "param1": "req:c618e29e2dcc4723|53df071fd8bccd1c~ComponentFn",
             "return": "req:2f0a1fb09c036c67"
-          }
+          },
+          "sigs": [
+            "f29b064ca2acbe42"
+          ]
         },
         "isConnectionDegraded": {
           "kind": "function",
           "sig": "209ed045c0221c65",
           "members": {
             "return": "req:0ecca0fe3beba89b"
-          }
+          },
+          "sigs": [
+            "bf98f51ba05d3216"
+          ]
         },
         "island": {
           "kind": "function",
@@ -1532,7 +2037,10 @@
             "param0": "req:1f582f4e36616f39|7b645e669bbe2e2c~IslandConfig",
             "return": "req:22903365d58df40d",
             "typeParams": "req:7770e11f9c14ba50"
-          }
+          },
+          "sigs": [
+            "fdb84810f63a4393"
+          ]
         },
         "IslandConfig": {
           "kind": "interface",
@@ -1543,7 +2051,10 @@
             "props": "req:b9ff0dae8888ff90",
             "loading": "opt:baa90585785b90fc",
             "cacheKey": "opt:60d81f7053bb0224"
-          }
+          },
+          "sigs": [
+            "f87d43ee8783236c"
+          ]
         },
         "IslandHandle": {
           "kind": "interface",
@@ -1551,7 +2062,10 @@
           "members": {
             "update": "req:c5d287ed4f8c1a42",
             "unmount": "req:d831502f3c16c146"
-          }
+          },
+          "sigs": [
+            "92d45bf2eaa1d538"
+          ]
         },
         "lazy": {
           "kind": "function",
@@ -1560,7 +2074,10 @@
             "param0": "req:77e846ee0666b935|17dc96272f0b9911~fnOrConstructor",
             "return": "req:9d108d81eeba3cab",
             "typeParams": "req:331b9d4208e13ec5"
-          }
+          },
+          "sigs": [
+            "334f5d1c772d93d6"
+          ]
         },
         "Link": {
           "kind": "function",
@@ -1568,7 +2085,10 @@
           "members": {
             "param0": "req:39c2fed871ca726b|db86056ee7bdd140~LinkProps",
             "return": "req:0570dc44ff1f8156"
-          }
+          },
+          "sigs": [
+            "256c638df1bb14a9"
+          ]
         },
         "LinkProps": {
           "kind": "typeAlias",
@@ -1582,7 +2102,10 @@
             "children": "opt:e52f1e63a23820ff",
             "className": "opt:2fb40568533c1a6d",
             "style": "opt:43c27b1501a10616"
-          }
+          },
+          "sigs": [
+            "cb37a3070d3a45f4"
+          ]
         },
         "memo": {
           "kind": "function",
@@ -1592,7 +2115,10 @@
             "param1": "opt:b00238182c301b63|7deef179fd10fe78~fnOrConstructor",
             "return": "req:344c7f78ff146b48",
             "typeParams": "req:331b9d4208e13ec5"
-          }
+          },
+          "sigs": [
+            "e3c34d76a25e51be"
+          ]
         },
         "mount": {
           "kind": "function",
@@ -1601,14 +2127,20 @@
             "param0": "req:abc1283ec898877a|8cf901bb93165a7b~any",
             "param1": "req:c618e29e2dcc4723|53df071fd8bccd1c~ComponentFn",
             "return": "req:2f0a1fb09c036c67"
-          }
+          },
+          "sigs": [
+            "f29b064ca2acbe42"
+          ]
         },
         "MountHandle": {
           "kind": "interface",
           "sig": "da446580845f1b00",
           "members": {
             "_flush": "req:d831502f3c16c146"
-          }
+          },
+          "sigs": [
+            "da446580845f1b00"
+          ]
         },
         "navigate": {
           "kind": "function",
@@ -1617,7 +2149,10 @@
             "param0": "req:8443661aab132f15|336e2b46aff6c271~string+b3d9da3d9fc5eb30~number",
             "param1": "opt:6d7e12130fd3e2a3|4859e981dc7cd59a~typeLiteral",
             "return": "req:b5f6ae1b8a43e31d"
-          }
+          },
+          "sigs": [
+            "3f317a4c26ee36c3"
+          ]
         },
         "NavLink": {
           "kind": "function",
@@ -1625,11 +2160,17 @@
           "members": {
             "param0": "req:2658a9cd7821f77e|5277c078f64bd41a~intersection",
             "return": "req:0570dc44ff1f8156"
-          }
+          },
+          "sigs": [
+            "80034049eb3e18ea"
+          ]
         },
         "NodeAction": {
           "kind": "typeAlias",
-          "sig": "f2a4c206a9fba7c6"
+          "sig": "f2a4c206a9fba7c6",
+          "sigs": [
+            "f2a4c206a9fba7c6"
+          ]
         },
         "on": {
           "kind": "function",
@@ -1639,7 +2180,10 @@
             "param1": "req:9dba740a75894451|9fd3486ab7533423~fnOrConstructor",
             "return": "req:97f6d0647f4a9786",
             "typeParams": "req:ddf4493b60497953"
-          }
+          },
+          "sigs": [
+            "ff29b8583e708d39"
+          ]
         },
         "onCleanup": {
           "kind": "function",
@@ -1647,7 +2191,10 @@
           "members": {
             "param0": "req:c921f2c8abed9b77|c1d58a2d45e92ab6~fnOrConstructor",
             "return": "req:b5f6ae1b8a43e31d"
-          }
+          },
+          "sigs": [
+            "ab8dee5e9b6487f0"
+          ]
         },
         "onGlobalKey": {
           "kind": "function",
@@ -1657,7 +2204,10 @@
             "param1": "req:b47d663f0b4999bc|e3c44f053ac04956~fnOrConstructor",
             "param2": "req:8bd6d0acc813ba3d|",
             "return": "req:b5f6ae1b8a43e31d"
-          }
+          },
+          "sigs": [
+            "e4fee031098d6b86"
+          ]
         },
         "onMount": {
           "kind": "function",
@@ -1665,14 +2215,20 @@
           "members": {
             "param0": "req:c921f2c8abed9b77|c1d58a2d45e92ab6~fnOrConstructor",
             "return": "req:b5f6ae1b8a43e31d"
-          }
+          },
+          "sigs": [
+            "ab8dee5e9b6487f0"
+          ]
         },
         "Outlet": {
           "kind": "function",
           "sig": "01a2a1630b00bd2e",
           "members": {
             "return": "req:c14ff19b4055d02a"
-          }
+          },
+          "sigs": [
+            "2fd113b7eb1f945f"
+          ]
         },
         "page": {
           "kind": "function",
@@ -1682,7 +2238,10 @@
             "param1": "req:bcca4557a33fee07|4bca572214140688~Record",
             "return": "req:c14ff19b4055d02a",
             "typeParams": "req:3d442d158d8944dc"
-          }
+          },
+          "sigs": [
+            "1731012f7b3426a7"
+          ]
         },
         "Portal": {
           "kind": "variable",
@@ -1695,7 +2254,10 @@
             "param0": "req:6b28a099877e7349|debfb8f201768be4~ReactIslandConfig",
             "return": "req:22903365d58df40d",
             "typeParams": "req:331b9d4208e13ec5"
-          }
+          },
+          "sigs": [
+            "c6d622aa0981757c"
+          ]
         },
         "ReactIslandConfig": {
           "kind": "interface",
@@ -1707,7 +2269,10 @@
             "props": "opt:65ca2ee090854e6c",
             "loading": "opt:baa90585785b90fc",
             "cacheKey": "opt:60d81f7053bb0224"
-          }
+          },
+          "sigs": [
+            "38484d590b474238"
+          ]
         },
         "Redirect": {
           "kind": "function",
@@ -1715,11 +2280,17 @@
           "members": {
             "param0": "req:26861d1dd4b1939b|cc981f9241f3fb75~typeLiteral",
             "return": "req:b81aacb2df32c7d6"
-          }
+          },
+          "sigs": [
+            "29c33bc0cb81312c"
+          ]
         },
         "Ref": {
           "kind": "typeAlias",
-          "sig": "215ad0a28c91f211"
+          "sig": "215ad0a28c91f211",
+          "sigs": [
+            "215ad0a28c91f211"
+          ]
         },
         "RenderEvent": {
           "kind": "interface",
@@ -1730,7 +2301,10 @@
             "durationMs": "req:f6522636230fa080",
             "trigger": "req:eb5936d34c58a100",
             "signalNames": "opt:6941c580c10685fb"
-          }
+          },
+          "sigs": [
+            "b0af3a665a1747e2"
+          ]
         },
         "renderToStream": {
           "kind": "function",
@@ -1738,7 +2312,10 @@
           "members": {
             "param0": "req:db1f3454b1ecdf8d|336e2b46aff6c271~string+6aa3b7f779609e8d~VNode+b3d9da3d9fc5eb30~number+e47c90b8d1952424~null",
             "return": "req:2b09cfd8328d90bf"
-          }
+          },
+          "sigs": [
+            "990c58fd0f2e92a4"
+          ]
         },
         "renderToString": {
           "kind": "function",
@@ -1746,7 +2323,10 @@
           "members": {
             "param0": "req:629be5c887573fb8|336e2b46aff6c271~string+b3d9da3d9fc5eb30~number+dcc1cef5c3fde277~VNode+e47c90b8d1952424~null",
             "return": "req:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "3ae59510a1c4ce46"
+          ]
         },
         "resource": {
           "kind": "function",
@@ -1756,7 +2336,10 @@
             "param1": "req:871f63c53dcd8163|20c885db09641fec~fnOrConstructor",
             "return": "req:7e69afdb49fae029",
             "typeParams": "req:d9567d0956c124f8"
-          }
+          },
+          "sigs": [
+            "e84bc180f6ad39f8"
+          ]
         },
         "Resource": {
           "kind": "interface",
@@ -1769,7 +2352,10 @@
             "refetch": "req:d831502f3c16c146",
             "mutate": "req:71c5333690ac3291",
             "dispose": "req:d831502f3c16c146"
-          }
+          },
+          "sigs": [
+            "80d7d4ce1e797056"
+          ]
         },
         "Route": {
           "kind": "function",
@@ -1777,11 +2363,17 @@
           "members": {
             "param0": "req:56c51f9552800e07|6c7a3f1a07559a0c~RouteProps",
             "return": "req:c14ff19b4055d02a"
-          }
+          },
+          "sigs": [
+            "e152ad84af883a70"
+          ]
         },
         "routePath": {
           "kind": "variable",
-          "sig": "25af382826e46704"
+          "sig": "25af382826e46704",
+          "sigs": [
+            "25af382826e46704"
+          ]
         },
         "RouteProps": {
           "kind": "typeAlias",
@@ -1791,11 +2383,17 @@
             "index": "opt:0ecca0fe3beba89b",
             "element": "opt:9c85e1945deef6e9",
             "children": "opt:e52f1e63a23820ff"
-          }
+          },
+          "sigs": [
+            "d59808829d7dfde7"
+          ]
         },
         "routeSearch": {
           "kind": "variable",
-          "sig": "facb01e23e9f64d1"
+          "sig": "facb01e23e9f64d1",
+          "sigs": [
+            "facb01e23e9f64d1"
+          ]
         },
         "RouteState": {
           "kind": "typeAlias",
@@ -1806,7 +2404,10 @@
             "params": "req:db7287b4b16fa10d",
             "search": "req:119d419b8296215c",
             "matched": "req:0ecca0fe3beba89b"
-          }
+          },
+          "sigs": [
+            "f44421bc5b3d4836"
+          ]
         },
         "scale": {
           "kind": "function",
@@ -1815,7 +2416,10 @@
             "param0": "req:97fca23750feeb20|",
             "param1": "req:97fca23750feeb20|",
             "return": "req:44136fa355b3678a"
-          }
+          },
+          "sigs": [
+            "439aedae0300971b"
+          ]
         },
         "setDevMode": {
           "kind": "function",
@@ -1823,7 +2427,10 @@
           "members": {
             "param0": "req:fd4518673f21e768|c06d55bc013d117a~boolean+f6068006b7c3c2bf~\"auto\"",
             "return": "req:b5f6ae1b8a43e31d"
-          }
+          },
+          "sigs": [
+            "5b66ad2b2838bc2e"
+          ]
         },
         "Show": {
           "kind": "function",
@@ -1832,7 +2439,10 @@
             "param0": "req:e78f209f989ec84d|3aee49d8d089df70~typeLiteral",
             "return": "req:c14ff19b4055d02a",
             "typeParams": "req:ddf4493b60497953"
-          }
+          },
+          "sigs": [
+            "739467951ac33e5b"
+          ]
         },
         "signal": {
           "kind": "function",
@@ -1842,7 +2452,10 @@
             "param1": "opt:2a7be51d5cf1612f|336e2b46aff6c271~string+b6aaa33b68e6f5ec~typeLiteral",
             "return": "req:bd418a745ff91a5a",
             "typeParams": "req:ddf4493b60497953"
-          }
+          },
+          "sigs": [
+            "4348783142d132bf"
+          ]
         },
         "Signal": {
           "kind": "interface",
@@ -1857,7 +2470,10 @@
             "update": "req:69feb1b81839cb58",
             "peek": "req:399d9f47a7b26029",
             "subscribe": "req:fbc609940c23c6de"
-          }
+          },
+          "sigs": [
+            "d3e94febe45f26d5"
+          ]
         },
         "SignIn": {
           "kind": "function",
@@ -1865,7 +2481,10 @@
           "members": {
             "param0": "req:bd91e25abf7e70b1|",
             "return": "req:df9e68ff8b581ce9"
-          }
+          },
+          "sigs": [
+            "1841a305fb5be354"
+          ]
         },
         "SignInProps": {
           "kind": "interface",
@@ -1878,14 +2497,20 @@
             "forgot": "opt:0ecca0fe3beba89b",
             "ssoLabel": "opt:2fb40568533c1a6d",
             "style": "opt:13f82d5fa6ff79be"
-          }
+          },
+          "sigs": [
+            "c232d2fdf223c00a"
+          ]
         },
         "signOut": {
           "kind": "function",
           "sig": "f770770ab082dc0c",
           "members": {
             "return": "req:f9848a8ce1853551"
-          }
+          },
+          "sigs": [
+            "879dd067e93326c6"
+          ]
         },
         "slide": {
           "kind": "function",
@@ -1894,7 +2519,10 @@
             "param0": "req:97fca23750feeb20|",
             "param1": "req:97fca23750feeb20|",
             "return": "req:44136fa355b3678a"
-          }
+          },
+          "sigs": [
+            "439aedae0300971b"
+          ]
         },
         "SpringConfig": {
           "kind": "interface",
@@ -1905,7 +2533,10 @@
             "damping": "opt:f6522636230fa080",
             "mass": "opt:f6522636230fa080",
             "precision": "opt:f6522636230fa080"
-          }
+          },
+          "sigs": [
+            "347557dc22127a0a"
+          ]
         },
         "SpringValue": {
           "kind": "interface",
@@ -1916,7 +2547,10 @@
             "to": "req:2ce8b2ae77baab69",
             "set": "req:583476b3d6389291",
             "dispose": "req:d831502f3c16c146"
-          }
+          },
+          "sigs": [
+            "4e73e33d8a25f31c"
+          ]
         },
         "Suspense": {
           "kind": "variable",
@@ -1930,7 +2564,10 @@
             "param1": "opt:645cbef2123516b4|e4771cace2a87d0b~typeLiteral",
             "return": "req:ad7683837052e3ad",
             "typeParams": "req:ffca887b611074ca"
-          }
+          },
+          "sigs": [
+            "b6aebb70381dd333"
+          ]
         },
         "Transition": {
           "kind": "function",
@@ -1938,11 +2575,17 @@
           "members": {
             "param0": "req:0f12f444318d74bc|bf8f94aca200880e~TransitionProps",
             "return": "req:c14ff19b4055d02a"
-          }
+          },
+          "sigs": [
+            "ec3dc7e6cf1757f6"
+          ]
         },
         "TransitionFn": {
           "kind": "typeAlias",
-          "sig": "fbeb6a22523e7702"
+          "sig": "fbeb6a22523e7702",
+          "sigs": [
+            "fbeb6a22523e7702"
+          ]
         },
         "TransitionGroup": {
           "kind": "function",
@@ -1950,7 +2593,10 @@
           "members": {
             "param0": "req:5652140f2a619810|09d71ffb0b38f97f~TransitionGroupProps",
             "return": "req:0570dc44ff1f8156"
-          }
+          },
+          "sigs": [
+            "f686b63051bb8879"
+          ]
         },
         "TransitionGroupProps": {
           "kind": "interface",
@@ -1962,7 +2608,10 @@
             "flip": "opt:0ecca0fe3beba89b",
             "flipDuration": "opt:f6522636230fa080",
             "children": "req:4366d831ba29893b"
-          }
+          },
+          "sigs": [
+            "61151ebc081169f0"
+          ]
         },
         "TransitionOptions": {
           "kind": "interface",
@@ -1971,7 +2620,10 @@
             "duration": "opt:f6522636230fa080",
             "delay": "opt:f6522636230fa080",
             "easing": "opt:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "73c015910ab27056"
+          ]
         },
         "TransitionProps": {
           "kind": "interface",
@@ -1981,7 +2633,10 @@
             "exit": "opt:3f35898774ede21b",
             "options": "opt:6799d57aa38052b4",
             "children": "req:47c62645575aa019"
-          }
+          },
+          "sigs": [
+            "d2b8945c90ed7e8b"
+          ]
         },
         "TransitionResult": {
           "kind": "interface",
@@ -1992,7 +2647,10 @@
             "easing": "opt:2fb40568533c1a6d",
             "css": "opt:9bc3396fce085c71",
             "tick": "opt:49ca2388887ae4d8"
-          }
+          },
+          "sigs": [
+            "73cea33af42d94fd"
+          ]
         },
         "untrack": {
           "kind": "function",
@@ -2001,7 +2659,10 @@
             "param0": "req:01cea679a235e1bd|311faf3b239faae5~fnOrConstructor",
             "return": "req:4d661dfd3b89db0b",
             "typeParams": "req:ddf4493b60497953"
-          }
+          },
+          "sigs": [
+            "026c638e498bf031"
+          ]
         },
         "useAio": {
           "kind": "function",
@@ -2009,14 +2670,20 @@
           "members": {
             "return": "req:8f36e961d3d655be",
             "typeParams": "req:20d48bee3fec3a4b"
-          }
+          },
+          "sigs": [
+            "6e88f1c4b02e8fdc"
+          ]
         },
         "useConnected": {
           "kind": "function",
           "sig": "209ed045c0221c65",
           "members": {
             "return": "req:0ecca0fe3beba89b"
-          }
+          },
+          "sigs": [
+            "bf98f51ba05d3216"
+          ]
         },
         "useContext": {
           "kind": "function",
@@ -2025,7 +2692,10 @@
             "param0": "req:1ccdc6f281f6ecee|82bcc371d5454b4f~Context",
             "return": "req:35a90cff33ad6b95",
             "typeParams": "req:ddf4493b60497953"
-          }
+          },
+          "sigs": [
+            "7f3641ccebfa2118"
+          ]
         },
         "useContextSelector": {
           "kind": "function",
@@ -2035,14 +2705,20 @@
             "param1": "req:cb152ce614d64c94|160fce76e6a39d4e~fnOrConstructor",
             "return": "req:93ba22b1b2bd16cb",
             "typeParams": "req:4ff5a71cb6ea0fc9"
-          }
+          },
+          "sigs": [
+            "954e31bcf22ee55c"
+          ]
         },
         "useDimensions": {
           "kind": "function",
           "sig": "4d5f216237f82ce4",
           "members": {
             "return": "req:28317fb175488bdb"
-          }
+          },
+          "sigs": [
+            "bbab9780385f54ba"
+          ]
         },
         "useFieldArray": {
           "kind": "function",
@@ -2051,7 +2727,10 @@
             "param0": "req:0c86e5969f854229|",
             "return": "req:62811b6322f8ef7e",
             "typeParams": "req:ddf4493b60497953"
-          }
+          },
+          "sigs": [
+            "c30d2251fbed890f"
+          ]
         },
         "useForm": {
           "kind": "function",
@@ -2061,14 +2740,20 @@
             "param1": "opt:518e69d82ef88779|1684241eccf1c966~FormOptions",
             "return": "req:f971caf7902f26fb",
             "typeParams": "req:fac0c10dfb585721"
-          }
+          },
+          "sigs": [
+            "213ff40e0963a472"
+          ]
         },
         "useId": {
           "kind": "function",
           "sig": "6ef6486f1aff326f",
           "members": {
             "return": "req:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "5f76d1167b9cb1ef"
+          ]
         },
         "useInterval": {
           "kind": "function",
@@ -2078,7 +2763,10 @@
             "param1": "req:be1856ed7cd18fe5|b3d9da3d9fc5eb30~number",
             "param2": "req:a3c1d9a108e7bd1f|",
             "return": "req:b5f6ae1b8a43e31d"
-          }
+          },
+          "sigs": [
+            "4c19b73b135966f7"
+          ]
         },
         "useLocal": {
           "kind": "function",
@@ -2087,18 +2775,27 @@
             "param0": "req:19057cd2afc40ff5|be268208f936c9c1~T",
             "return": "req:b43f21829935f678",
             "typeParams": "req:ddf4493b60497953"
-          }
+          },
+          "sigs": [
+            "0c84bc3d31991392"
+          ]
         },
         "UseLocalResult": {
           "kind": "typeAlias",
-          "sig": "ac8423c036b6d8fd"
+          "sig": "ac8423c036b6d8fd",
+          "sigs": [
+            "ac8423c036b6d8fd"
+          ]
         },
         "useNavigate": {
           "kind": "function",
           "sig": "ff98f6f93acc5f30",
           "members": {
             "return": "req:f16f4bd129975da4"
-          }
+          },
+          "sigs": [
+            "869f4a357cd8e227"
+          ]
         },
         "useOptimistic": {
           "kind": "function",
@@ -2108,7 +2805,10 @@
             "param1": "req:d0b330c484ca2985|043b3f2eab997923~fnOrConstructor",
             "return": "req:2b5d5755aba68e00",
             "typeParams": "req:8054624bf6aff81f"
-          }
+          },
+          "sigs": [
+            "a7580e2beb939cdc"
+          ]
         },
         "useProjection": {
           "kind": "function",
@@ -2118,7 +2818,10 @@
             "param1": "opt:a8c66f838a06c264|dddb2f651bac9222~array",
             "return": "req:2c4c1ae449467cab",
             "typeParams": "req:ddf4493b60497953"
-          }
+          },
+          "sigs": [
+            "a21e62e527c98b16"
+          ]
         },
         "useRaf": {
           "kind": "function",
@@ -2127,7 +2830,10 @@
             "param0": "req:921111f7bbceb2b3|1baeba0b8361c091~fnOrConstructor",
             "param1": "req:a3c1d9a108e7bd1f|",
             "return": "req:b5f6ae1b8a43e31d"
-          }
+          },
+          "sigs": [
+            "4d26e8f62cc2fe69"
+          ]
         },
         "useRef": {
           "kind": "function",
@@ -2136,16 +2842,19 @@
             "param0": "req:bdfea5151ff128ab|001e7a5910038f98~T",
             "return": "req:4c5ab64f0b7f108c",
             "typeParams": "req:ddf4493b60497953"
-          }
+          },
+          "sigs": [
+            "5a98b0670cb3893a"
+          ]
         },
         "useRoute": {
           "kind": "function",
-          "sig": "16f05f3fd0939210",
-          "members": {
-            "param0": "opt:f6c2bce213147f9c|336e2b46aff6c271~string",
-            "return": "req:0a9f66f861814061",
-            "typeParams": "req:94cbe3ebb2c406ce"
-          }
+          "sig": "c818c331c0291524",
+          "sigs": [
+            "4d2e4ad363ad5352",
+            "0fc8cf1366f372b1",
+            "4d2e4ad363ad5352"
+          ]
         },
         "useSignal": {
           "kind": "function",
@@ -2154,7 +2863,10 @@
             "param0": "req:0c1ef70ff4f8b00e|44c0565c8569f560~T",
             "return": "req:02fbe8d90fe707a3",
             "typeParams": "req:ddf4493b60497953"
-          }
+          },
+          "sigs": [
+            "cca2ea27e1bb1a19"
+          ]
         },
         "useSpring": {
           "kind": "function",
@@ -2162,21 +2874,30 @@
           "members": {
             "param0": "req:d54c537830efbc20|",
             "return": "req:d6e1da88a187a252"
-          }
+          },
+          "sigs": [
+            "134bd0e1426c045e"
+          ]
         },
         "useTimeTravel": {
           "kind": "function",
           "sig": "d38328d64f55e879",
           "members": {
             "return": "req:932be1699cd80e8c"
-          }
+          },
+          "sigs": [
+            "413c5925edb99da7"
+          ]
         },
         "useUser": {
           "kind": "function",
           "sig": "9fa6bdf29897779c",
           "members": {
             "return": "req:34df424b276e40b7"
-          }
+          },
+          "sigs": [
+            "00fc10400aff1110"
+          ]
         },
         "useVirtualList": {
           "kind": "function",
@@ -2185,15 +2906,24 @@
             "param0": "req:22f9b4fa4af18e41|9459b0d2c90f24d2~VirtualListConfig",
             "return": "req:99215c823df2398a",
             "typeParams": "req:ddf4493b60497953"
-          }
+          },
+          "sigs": [
+            "9d76950185dde88b"
+          ]
         },
         "ValidationRule": {
           "kind": "typeAlias",
-          "sig": "d6b57c53f8ad633a"
+          "sig": "d6b57c53f8ad633a",
+          "sigs": [
+            "d6b57c53f8ad633a"
+          ]
         },
         "VChild": {
           "kind": "typeAlias",
-          "sig": "ee6d84d3ae547565"
+          "sig": "ee6d84d3ae547565",
+          "sigs": [
+            "ee6d84d3ae547565"
+          ]
         },
         "VirtualListConfig": {
           "kind": "interface",
@@ -2203,8 +2933,12 @@
             "itemHeight": "req:f6522636230fa080",
             "containerHeight": "req:f6522636230fa080",
             "overscan": "opt:f6522636230fa080",
-            "containerRef": "opt:75530e1bd45d5eb9"
-          }
+            "containerRef": "opt:object",
+            "containerRef.current": "req:a5494be6b698d8ca"
+          },
+          "sigs": [
+            "3fe2e3c0c0fa554a"
+          ]
         },
         "VirtualListState": {
           "kind": "interface",
@@ -2213,12 +2947,16 @@
             "visible": "req:412c4ff1ed9541ff",
             "totalHeight": "req:dfcf8bb3a2454f51",
             "scrollTop": "req:dfcf8bb3a2454f51",
-            "containerRef": "opt:f187703d18cda518",
+            "containerRef": "opt:object",
+            "containerRef.current": "req:a5494be6b698d8ca",
             "containerStyle": "req:0c631c961978893b",
             "innerStyle": "req:0c631c961978893b",
             "onScroll": "req:ff8a2cf530438d0f",
             "scrollToIndex": "req:8c3dc9ea23aa6066"
-          }
+          },
+          "sigs": [
+            "d0656fead7d5c299"
+          ]
         },
         "VNode": {
           "kind": "interface",
@@ -2235,7 +2973,10 @@
             "_sig": "opt:32f06f5df1fbde93",
             "_unbind": "opt:97f6d0647f4a9786",
             "_anchor": "opt:5b5ebe0f359d8d51"
-          }
+          },
+          "sigs": [
+            "175276eeb8bbdb8f"
+          ]
         },
         "watch": {
           "kind": "function",
@@ -2246,14 +2987,20 @@
             "param2": "opt:2bd9a0fd2b3c413c|1b61bd8e369baaa3~WatchOptions",
             "return": "req:97f6d0647f4a9786",
             "typeParams": "req:ddf4493b60497953"
-          }
+          },
+          "sigs": [
+            "3e478234329bf71a"
+          ]
         },
         "WatchOptions": {
           "kind": "interface",
           "sig": "ea34dec8acbad2a6",
           "members": {
             "immediate": "opt:0ecca0fe3beba89b"
-          }
+          },
+          "sigs": [
+            "ea34dec8acbad2a6"
+          ]
         }
       }
     },
@@ -2267,7 +3014,10 @@
             "param1": "opt:a8c66f838a06c264|dddb2f651bac9222~array",
             "return": "req:5735b1a0dd3aa0f1",
             "typeParams": "req:ddf4493b60497953"
-          }
+          },
+          "sigs": [
+            "a693ee84847cdfd7"
+          ]
         },
         "useEffect": {
           "kind": "function",
@@ -2276,7 +3026,10 @@
             "param0": "req:4509061b8b16ec65|3401859efeb750d0~fnOrConstructor",
             "param1": "opt:a8c66f838a06c264|dddb2f651bac9222~array",
             "return": "req:b5f6ae1b8a43e31d"
-          }
+          },
+          "sigs": [
+            "f98cd816e4d7e4a3"
+          ]
         },
         "useMemo": {
           "kind": "function",
@@ -2286,7 +3039,10 @@
             "param1": "opt:a8c66f838a06c264|dddb2f651bac9222~array",
             "return": "req:4081745670bb80df",
             "typeParams": "req:ddf4493b60497953"
-          }
+          },
+          "sigs": [
+            "cd836dd611e13a39"
+          ]
         },
         "useRef": {
           "kind": "variable",
@@ -2299,7 +3055,10 @@
             "param0": "req:5877c13ce64b2559|87399cfadddd8e82~T+e1931086287d113b~parenthesized",
             "return": "req:ed3e69690d31d2de",
             "typeParams": "req:ddf4493b60497953"
-          }
+          },
+          "sigs": [
+            "1977d561648661bc"
+          ]
         }
       }
     },
@@ -2311,7 +3070,10 @@
           "members": {
             "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "return": "req:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "d710e0e57d092bd6"
+          ]
         }
       }
     },
@@ -2328,7 +3090,10 @@
             "state": "req:2fb40568533c1a6d",
             "emulator": "req:0ecca0fe3beba89b",
             "model": "req:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "6c5503f4276afd96"
+          ]
         },
         "pickApk": {
           "kind": "function",
@@ -2337,7 +3102,10 @@
             "param0": "req:7f596a8fb3a25b26|9a209b0711b20cd4~typeOperator",
             "param1": "opt:f6c2bce213147f9c|336e2b46aff6c271~string",
             "return": "req:4879744198ab2913"
-          }
+          },
+          "sigs": [
+            "71173a4413189d70"
+          ]
         },
         "pickDevice": {
           "kind": "function",
@@ -2346,7 +3114,10 @@
             "param0": "req:7bf16926fede6461|0d05e42e747af8ef~typeOperator",
             "param1": "req:ef057a085411057c|d9c10d3fec90d81f~typeLiteral",
             "return": "req:126b655db9722a85"
-          }
+          },
+          "sigs": [
+            "ff035c1d21046a5a"
+          ]
         }
       }
     },
@@ -2358,7 +3129,10 @@
           "members": {
             "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "return": "req:edc4951acc3aa2cc"
-          }
+          },
+          "sigs": [
+            "bf124004418f2e25"
+          ]
         },
         "build": {
           "kind": "function",
@@ -2366,7 +3140,10 @@
           "members": {
             "param0": "opt:f62db369f03b6e74|39d55690041822c9~BuildConfig",
             "return": "req:f9848a8ce1853551"
-          }
+          },
+          "sigs": [
+            "b60f9a2e277a8c28"
+          ]
         },
         "Capabilities": {
           "kind": "typeAlias",
@@ -2379,7 +3156,10 @@
             "env": "req:0ecca0fe3beba89b",
             "run": "req:0ecca0fe3beba89b",
             "sys": "req:0ecca0fe3beba89b"
-          }
+          },
+          "sigs": [
+            "42d003b7d0eff5cb"
+          ]
         },
         "compileArgs": {
           "kind": "function",
@@ -2387,14 +3167,20 @@
           "members": {
             "param0": "req:314e981caddea141|210e04f668714e88~typeLiteral",
             "return": "req:6941c580c10685fb"
-          }
+          },
+          "sigs": [
+            "2f06ae925e128c66"
+          ]
         },
         "dbWorkerInclude": {
           "kind": "function",
           "sig": "6606220ff3a58d02",
           "members": {
             "return": "req:6941c580c10685fb"
-          }
+          },
+          "sigs": [
+            "b793ef98e44da966"
+          ]
         },
         "scanCapabilities": {
           "kind": "function",
@@ -2402,7 +3188,10 @@
           "members": {
             "param0": "req:87de309c2d8442f2|75ee3e08091a789c~array",
             "return": "req:6e8db6dd75a3971c"
-          }
+          },
+          "sigs": [
+            "08b8cdad1523fb2b"
+          ]
         },
         "v8FlagsArg": {
           "kind": "function",
@@ -2410,7 +3199,10 @@
           "members": {
             "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "return": "req:edc4951acc3aa2cc"
-          }
+          },
+          "sigs": [
+            "bf124004418f2e25"
+          ]
         }
       }
     },
@@ -2421,7 +3213,10 @@
           "sig": "6a6135fee2f5d6ac",
           "members": {
             "return": "req:33d759dfa80bf30e"
-          }
+          },
+          "sigs": [
+            "b88f80c6f5bc84c4"
+          ]
         },
         "normalizeTargets": {
           "kind": "function",
@@ -2430,7 +3225,10 @@
             "param0": "req:75b829e48e1b59b3|803a222e6f9417da~undefined+a16bff8fef558daa~array+b9337324ec0c2cde~Record",
             "param1": "opt:f6c2bce213147f9c|336e2b46aff6c271~string",
             "return": "req:0acbcb2b82c6e4b7"
-          }
+          },
+          "sigs": [
+            "7266514c5dbe3b19"
+          ]
         },
         "ResolvedTarget": {
           "kind": "interface",
@@ -2442,7 +3240,10 @@
             "ui": "opt:2fb40568533c1a6d",
             "appName": "opt:2fb40568533c1a6d",
             "platforms": "opt:6941c580c10685fb"
-          }
+          },
+          "sigs": [
+            "f6dbbad07731f24d"
+          ]
         },
         "targetForFlags": {
           "kind": "function",
@@ -2450,7 +3251,10 @@
           "members": {
             "param0": "req:97ef4ed1783bf07b|dfa2c59f3b81d9cb~typeOperator",
             "return": "req:cb5114588202887c"
-          }
+          },
+          "sigs": [
+            "62a9f1ea35bc0a06"
+          ]
         },
         "TargetOverride": {
           "kind": "interface",
@@ -2461,11 +3265,17 @@
             "ui": "opt:2fb40568533c1a6d",
             "name": "opt:2fb40568533c1a6d",
             "platforms": "opt:6941c580c10685fb"
-          }
+          },
+          "sigs": [
+            "f6307e16f1ec0583"
+          ]
         },
         "TARGETS": {
           "kind": "variable",
-          "sig": "87f729d7048bfa2b"
+          "sig": "87f729d7048bfa2b",
+          "sigs": [
+            "87f729d7048bfa2b"
+          ]
         }
       }
     },
@@ -2479,7 +3289,10 @@
             "param1": "req:1147a07f80373f38|",
             "return": "req:6d2e56634069fd68",
             "typeParams": "req:1e53f3d774a8eeb8"
-          }
+          },
+          "sigs": [
+            "b37fe724a04adb8b"
+          ]
         },
         "ArgsOptions": {
           "kind": "typeAlias",
@@ -2487,7 +3300,10 @@
           "members": {
             "argv": "opt:1a1f5c423a7cdab2",
             "io": "opt:05ef30584a4acc84"
-          }
+          },
+          "sigs": [
+            "bcfcd6ca39a1d018"
+          ]
         },
         "ArgsSpec": {
           "kind": "typeAlias",
@@ -2500,7 +3316,10 @@
             "positional": "opt:1a1f5c423a7cdab2",
             "rest": "opt:2fb40568533c1a6d",
             "flags": "opt:35f259cce675d5b5"
-          }
+          },
+          "sigs": [
+            "0eff7f506d888b53"
+          ]
         },
         "CliExit": {
           "kind": "class",
@@ -2508,7 +3327,10 @@
           "members": {
             "constructor": "req:dd133a0b8026afe1",
             "extends": "req:a3f73ac510848cc4"
-          }
+          },
+          "sigs": [
+            "f2def3b67fb37f4e"
+          ]
         },
         "CliIO": {
           "kind": "typeAlias",
@@ -2516,11 +3338,17 @@
           "members": {
             "tty": "req:0ecca0fe3beba89b",
             "color": "req:0ecca0fe3beba89b"
-          }
+          },
+          "sigs": [
+            "d63860cbb57719bc"
+          ]
         },
         "Column": {
           "kind": "typeAlias",
-          "sig": "2314f1bc93af2a37"
+          "sig": "2314f1bc93af2a37",
+          "sigs": [
+            "2314f1bc93af2a37"
+          ]
         },
         "confirm": {
           "kind": "function",
@@ -2529,14 +3357,20 @@
             "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "param1": "req:aee16ff6dbe23ed4|",
             "return": "req:34626561d9c87167"
-          }
+          },
+          "sigs": [
+            "1975a7adc7dc2987"
+          ]
         },
         "defaultIO": {
           "kind": "function",
           "sig": "e2aa7a6266667d1d",
           "members": {
             "return": "req:36f292ec5e5679f3"
-          }
+          },
+          "sigs": [
+            "043c0d94ac8abb41"
+          ]
         },
         "EXIT": {
           "kind": "variable",
@@ -2545,7 +3379,10 @@
             "ok": "req:f6522636230fa080",
             "error": "req:f6522636230fa080",
             "usage": "req:f6522636230fa080"
-          }
+          },
+          "sigs": [
+            "0be19f82dcbb10b3"
+          ]
         },
         "fail": {
           "kind": "function",
@@ -2554,7 +3391,10 @@
             "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "param1": "req:1ba86e5579c8b72a|",
             "return": "req:a883c3f68095413d"
-          }
+          },
+          "sigs": [
+            "32aa3ba1bcee1a52"
+          ]
         },
         "FailOptions": {
           "kind": "typeAlias",
@@ -2563,7 +3403,10 @@
             "code": "opt:f6522636230fa080",
             "json": "opt:0ecca0fe3beba89b",
             "io": "opt:05ef30584a4acc84"
-          }
+          },
+          "sigs": [
+            "18b3f1270d15fbac"
+          ]
         },
         "FlagSpec": {
           "kind": "typeAlias",
@@ -2574,7 +3417,10 @@
             "short": "opt:2fb40568533c1a6d",
             "default": "opt:5222b88b901e0099",
             "required": "opt:0ecca0fe3beba89b"
-          }
+          },
+          "sigs": [
+            "09a532f4526f137b"
+          ]
         },
         "helpText": {
           "kind": "function",
@@ -2582,7 +3428,10 @@
           "members": {
             "param0": "req:0e8ed73b67c32223|a415e85dafa6fc5f~ArgsSpec",
             "return": "req:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "f6c8129a167c7a81"
+          ]
         },
         "InputClosedError": {
           "kind": "class",
@@ -2591,7 +3440,10 @@
             "constructor": "req:344289547579e055",
             "extends": "req:a3f73ac510848cc4",
             "code": "req:dfcf8bb3a2454f51"
-          }
+          },
+          "sigs": [
+            "5f537805adc368cc"
+          ]
         },
         "NoTerminalError": {
           "kind": "class",
@@ -2600,7 +3452,10 @@
             "constructor": "req:2424c6f6c17e25f9",
             "extends": "req:a3f73ac510848cc4",
             "code": "req:dfcf8bb3a2454f51"
-          }
+          },
+          "sigs": [
+            "071551b19232e602"
+          ]
         },
         "Parsed": {
           "kind": "typeAlias",
@@ -2613,7 +3468,10 @@
             "rest": "req:6941c580c10685fb",
             "json": "req:0ecca0fe3beba89b",
             "help": "req:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "46d35bf3e353dc06"
+          ]
         },
         "password": {
           "kind": "function",
@@ -2622,7 +3480,10 @@
             "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "param1": "req:a9ac58eb62d6d347|",
             "return": "req:7538b8048664c9b7"
-          }
+          },
+          "sigs": [
+            "d3d19e8938c25068"
+          ]
         },
         "plainWidth": {
           "kind": "function",
@@ -2630,7 +3491,10 @@
           "members": {
             "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "return": "req:f6522636230fa080"
-          }
+          },
+          "sigs": [
+            "cb92e416f0b33b28"
+          ]
         },
         "progress": {
           "kind": "function",
@@ -2639,11 +3503,17 @@
             "param0": "req:be1856ed7cd18fe5|b3d9da3d9fc5eb30~number",
             "param1": "req:f131a87df3066176|",
             "return": "req:fd70f0855e24821e"
-          }
+          },
+          "sigs": [
+            "4d140fef5f3be62c"
+          ]
         },
         "Progress": {
           "kind": "typeAlias",
-          "sig": "374e6a7e88f57699"
+          "sig": "374e6a7e88f57699",
+          "sigs": [
+            "374e6a7e88f57699"
+          ]
         },
         "ProgressOptions": {
           "kind": "typeAlias",
@@ -2652,7 +3522,10 @@
             "label": "opt:2fb40568533c1a6d",
             "width": "opt:f6522636230fa080",
             "io": "opt:05ef30584a4acc84"
-          }
+          },
+          "sigs": [
+            "8c1c813d9450ca1f"
+          ]
         },
         "prompt": {
           "kind": "function",
@@ -2661,14 +3534,20 @@
             "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "param1": "req:b75b87088df7e8fc|",
             "return": "req:7538b8048664c9b7"
-          }
+          },
+          "sigs": [
+            "f8cd97dc732697b6"
+          ]
         },
         "PromptOptions": {
           "kind": "typeAlias",
           "sig": "c05db95468e8743b",
           "members": {
             "io": "opt:05ef30584a4acc84"
-          }
+          },
+          "sigs": [
+            "c05db95468e8743b"
+          ]
         },
         "readLine": {
           "kind": "function",
@@ -2676,7 +3555,10 @@
           "members": {
             "param0": "req:fdbad43ca21ad333|29784efe3fa38373~CliIO",
             "return": "req:ee5ffe333ca6cb70"
-          }
+          },
+          "sigs": [
+            "05b0f0bb6ddd5fe1"
+          ]
         },
         "select": {
           "kind": "function",
@@ -2687,7 +3569,10 @@
             "param2": "req:c51d2fe8042b909a|",
             "return": "req:6991d82af261080e",
             "typeParams": "req:1b4f96f49325e3a6"
-          }
+          },
+          "sigs": [
+            "26358568305b62fe"
+          ]
         },
         "spinner": {
           "kind": "function",
@@ -2696,11 +3581,17 @@
             "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "param1": "req:82786f84daf1ecd4|",
             "return": "req:fd3640fce1693ec4"
-          }
+          },
+          "sigs": [
+            "363200a1cbae9a87"
+          ]
         },
         "Spinner": {
           "kind": "typeAlias",
-          "sig": "2632bc881d6063e7"
+          "sig": "2632bc881d6063e7",
+          "sigs": [
+            "2632bc881d6063e7"
+          ]
         },
         "SpinnerOptions": {
           "kind": "typeAlias",
@@ -2708,15 +3599,24 @@
           "members": {
             "intervalMs": "opt:f6522636230fa080",
             "io": "opt:05ef30584a4acc84"
-          }
+          },
+          "sigs": [
+            "3093a17e81f8abf2"
+          ]
         },
         "style": {
           "kind": "variable",
-          "sig": "eba5385d7a3832c0"
+          "sig": "eba5385d7a3832c0",
+          "sigs": [
+            "eba5385d7a3832c0"
+          ]
         },
         "Style": {
           "kind": "typeAlias",
-          "sig": "63b821e00a768916"
+          "sig": "63b821e00a768916",
+          "sigs": [
+            "63b821e00a768916"
+          ]
         },
         "styleWith": {
           "kind": "function",
@@ -2724,7 +3624,10 @@
           "members": {
             "param0": "req:1f215fdfb1732c17|c06d55bc013d117a~boolean",
             "return": "req:7128913ec166d0d3"
-          }
+          },
+          "sigs": [
+            "c2392c487e4c3f97"
+          ]
         },
         "table": {
           "kind": "function",
@@ -2734,7 +3637,10 @@
             "param1": "req:66f94d0a7ca2c0cf|",
             "return": "req:2fb40568533c1a6d",
             "typeParams": "req:32c431a130a71f30"
-          }
+          },
+          "sigs": [
+            "35efb21004c8f70b"
+          ]
         },
         "TableOptions": {
           "kind": "typeAlias",
@@ -2743,7 +3649,10 @@
             "typeParams": "req:c11adbdbdd894646",
             "columns": "opt:465be3466f7dff13",
             "color": "opt:0ecca0fe3beba89b"
-          }
+          },
+          "sigs": [
+            "d4da63220bf20100"
+          ]
         },
         "testIO": {
           "kind": "function",
@@ -2751,11 +3660,17 @@
           "members": {
             "param0": "req:34426c89a34a9732|",
             "return": "req:a7ac7a5f90b11d0a"
-          }
+          },
+          "sigs": [
+            "fff02d8aa643737f"
+          ]
         },
         "TestIO": {
           "kind": "typeAlias",
-          "sig": "c8202cac64187faf"
+          "sig": "c8202cac64187faf",
+          "sigs": [
+            "c8202cac64187faf"
+          ]
         },
         "watch": {
           "kind": "function",
@@ -2765,22 +3680,34 @@
             "param1": "req:7fa19fc75140b9b9|83347c24e173416a~fnOrConstructor",
             "param2": "req:ef637e611e130cf1|",
             "return": "req:d57124dd97fe78cb"
-          }
+          },
+          "sigs": [
+            "09089d0339dd3ae5"
+          ]
         },
         "Watch": {
           "kind": "typeAlias",
-          "sig": "4f9bba65c2ca2e4e"
+          "sig": "4f9bba65c2ca2e4e",
+          "sigs": [
+            "4f9bba65c2ca2e4e"
+          ]
         },
         "Watchable": {
           "kind": "typeAlias",
-          "sig": "60550cee971b3883"
+          "sig": "60550cee971b3883",
+          "sigs": [
+            "60550cee971b3883"
+          ]
         },
         "WatchOptions": {
           "kind": "typeAlias",
           "sig": "c05db95468e8743b",
           "members": {
             "io": "opt:05ef30584a4acc84"
-          }
+          },
+          "sigs": [
+            "c05db95468e8743b"
+          ]
         }
       }
     },
@@ -2797,7 +3724,10 @@
             "checkIntegrity": "opt:2c3423570a053884",
             "close": "req:ea8fb37f7482dd65",
             "lastWriterError": "opt:3ff0a9643cccdf3d"
-          }
+          },
+          "sigs": [
+            "81a592365152399c"
+          ]
         },
         "DBOpts": {
           "kind": "typeAlias",
@@ -2807,7 +3737,10 @@
             "pragmas": "opt:6941c580c10685fb",
             "requestTimeoutMs": "opt:f6522636230fa080",
             "readers": "opt:f6522636230fa080"
-          }
+          },
+          "sigs": [
+            "ea81cfaacd4e393a"
+          ]
         },
         "QueryResult": {
           "kind": "typeAlias",
@@ -2817,11 +3750,17 @@
             "rows": "req:89973303b5dd2457",
             "changes": "req:f6522636230fa080",
             "lastInsertRowId": "req:eb16a6d265ab0c1d"
-          }
+          },
+          "sigs": [
+            "4d451b3b1c2af191"
+          ]
         },
         "ReactiveDB": {
           "kind": "typeAlias",
-          "sig": "ca20e1cc4562491d"
+          "sig": "ca20e1cc4562491d",
+          "sigs": [
+            "ca20e1cc4562491d"
+          ]
         },
         "ReactiveQuery": {
           "kind": "typeAlias",
@@ -2830,11 +3769,17 @@
             "typeParams": "req:db44b48a258f92f8",
             "rows": "req:af4c4ed13fb04e3f",
             "tables": "req:80c8f95ee374d100"
-          }
+          },
+          "sigs": [
+            "f6c36923a5dd3ea4"
+          ]
         },
         "Tx": {
           "kind": "typeAlias",
-          "sig": "d6d59f832bb71a3e"
+          "sig": "d6d59f832bb71a3e",
+          "sigs": [
+            "d6d59f832bb71a3e"
+          ]
         }
       }
     },
@@ -2849,7 +3794,10 @@
           "members": {
             "param0": "req:86b919a35a7d03b1|",
             "return": "req:b0f1949ecc566002"
-          }
+          },
+          "sigs": [
+            "c37ab954edf97f21"
+          ]
         }
       }
     },
@@ -2860,7 +3808,10 @@
       "symbols": {
         "ActionSource": {
           "kind": "typeAlias",
-          "sig": "23ca71606f56ddd4"
+          "sig": "23ca71606f56ddd4",
+          "sigs": [
+            "23ca71606f56ddd4"
+          ]
         },
         "AioErrorContext": {
           "kind": "typeAlias",
@@ -2875,19 +3826,31 @@
             "machineState": "opt:2fb40568533c1a6d",
             "callStack": "opt:6941c580c10685fb",
             "repeatOffender": "opt:0ecca0fe3beba89b"
-          }
+          },
+          "sigs": [
+            "52cbdcba2f0fd6f1"
+          ]
         },
         "AioErrorSource": {
           "kind": "typeAlias",
-          "sig": "9323f69681edc2f3"
+          "sig": "9323f69681edc2f3",
+          "sigs": [
+            "9323f69681edc2f3"
+          ]
         },
         "CellExecuteFn": {
           "kind": "typeAlias",
-          "sig": "38f86e5aadb3a67b"
+          "sig": "38f86e5aadb3a67b",
+          "sigs": [
+            "38f86e5aadb3a67b"
+          ]
         },
         "CellReduceFn": {
           "kind": "typeAlias",
-          "sig": "bab2fd30f6297dbe"
+          "sig": "bab2fd30f6297dbe",
+          "sigs": [
+            "bab2fd30f6297dbe"
+          ]
         },
         "CellStateSize": {
           "kind": "typeAlias",
@@ -2895,8 +3858,13 @@
           "members": {
             "name": "req:2fb40568533c1a6d",
             "bytes": "req:f6522636230fa080",
-            "largestField": "opt:a8398e0e38b0a782"
-          }
+            "largestField": "opt:object",
+            "largestField.key": "req:2fb40568533c1a6d",
+            "largestField.entries": "opt:f6522636230fa080"
+          },
+          "sigs": [
+            "30637abd8920251c"
+          ]
         },
         "checkCells": {
           "kind": "function",
@@ -2911,7 +3879,10 @@
             "param6": "req:c34f790b409809e9|",
             "param7": "opt:f6c2bce213147f9c|336e2b46aff6c271~string",
             "return": "req:84db7916dcd223b0"
-          }
+          },
+          "sigs": [
+            "2c7b1fc3ff2689ea"
+          ]
         },
         "CheckpointData": {
           "kind": "typeAlias",
@@ -2921,7 +3892,10 @@
             "state": "req:43c27b1501a10616",
             "recentActions": "req:6941c580c10685fb",
             "cells": "req:6094e2793c47a68b"
-          }
+          },
+          "sigs": [
+            "af564f3e397a1901"
+          ]
         },
         "CliFlags": {
           "kind": "typeAlias",
@@ -2955,7 +3929,10 @@
             "logBudget": "opt:f6522636230fa080",
             "noDataMigrate": "opt:0ecca0fe3beba89b",
             "cdp": "opt:8daa393fece80d5f"
-          }
+          },
+          "sigs": [
+            "321650fe8d8c6506"
+          ]
         },
         "createSliceSelector": {
           "kind": "function",
@@ -2964,11 +3941,17 @@
             "param0": "req:560f611523a7dc5e|0efcbd9e698c3301~Selector",
             "return": "req:59ea31bea80d64fa",
             "typeParams": "req:d9567d0956c124f8"
-          }
+          },
+          "sigs": [
+            "ba61ca292b4ec100"
+          ]
         },
         "Creators": {
           "kind": "typeAlias",
-          "sig": "2f88112d9fcc6e74"
+          "sig": "2f88112d9fcc6e74",
+          "sigs": [
+            "2f88112d9fcc6e74"
+          ]
         },
         "deepFreeze": {
           "kind": "function",
@@ -2978,7 +3961,10 @@
             "param1": "req:c1d799122b899f5e|",
             "return": "req:0d6de75b7376b3c0",
             "typeParams": "req:ddf4493b60497953"
-          }
+          },
+          "sigs": [
+            "888f7ff223f04806"
+          ]
         },
         "DiagEvent": {
           "kind": "typeAlias",
@@ -2989,7 +3975,10 @@
             "summary": "req:2fb40568533c1a6d",
             "detail": "req:be3305ddadf7ab19",
             "timestamp": "req:f6522636230fa080"
-          }
+          },
+          "sigs": [
+            "70e0a8ba11c6b06c"
+          ]
         },
         "DiagEventDetail": {
           "kind": "typeAlias",
@@ -3006,11 +3995,17 @@
             "payloadBytes": "opt:f6522636230fa080",
             "bytesPerSec": "opt:f6522636230fa080",
             "hint": "opt:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "42022b5b0c34578c"
+          ]
         },
         "InstanceInfo": {
           "kind": "typeAlias",
-          "sig": "cb879f199f25d585"
+          "sig": "cb879f199f25d585",
+          "sigs": [
+            "cb879f199f25d585"
+          ]
         },
         "instances": {
           "kind": "function",
@@ -3018,7 +4013,10 @@
           "members": {
             "param0": "opt:f6c2bce213147f9c|336e2b46aff6c271~string",
             "return": "req:0372046165388f2e"
-          }
+          },
+          "sigs": [
+            "87a1603c1f4c3c33"
+          ]
         },
         "isScheduleEffect": {
           "kind": "function",
@@ -3026,7 +4024,10 @@
           "members": {
             "param0": "req:8a0195ffd96928c3|e2e9e83e047a6f75~unknown",
             "return": "req:80e94ba4212f04a9"
-          }
+          },
+          "sigs": [
+            "877c0213ed8e3f2e"
+          ]
         },
         "LayerThreshold": {
           "kind": "typeAlias",
@@ -3035,7 +4036,10 @@
             "degraded": "req:f6522636230fa080",
             "warning": "req:f6522636230fa080",
             "frozen": "req:f6522636230fa080"
-          }
+          },
+          "sigs": [
+            "bb6112e42a87a8f0"
+          ]
         },
         "Lint": {
           "kind": "typeAlias",
@@ -3045,7 +4049,10 @@
             "warn": "req:6941c580c10685fb",
             "hint": "req:6941c580c10685fb",
             "fail": "req:6941c580c10685fb"
-          }
+          },
+          "sigs": [
+            "d41a240243dc9182"
+          ]
         },
         "LockData": {
           "kind": "typeAlias",
@@ -3060,12 +4067,18 @@
             "home": "opt:2fb40568533c1a6d",
             "socketPath": "opt:2fb40568533c1a6d",
             "trojanPort": "opt:f6522636230fa080",
-            "discovery": "opt:0fd5364811e5e65c",
+            "discovery": "opt:object",
+            "discovery.title": "opt:2fb40568533c1a6d",
+            "discovery.tls": "req:0ecca0fe3beba89b",
+            "discovery.needsAuth": "req:0ecca0fe3beba89b",
             "aioVersion": "opt:2fb40568533c1a6d",
             "cdpPort": "opt:f6522636230fa080",
             "client": "opt:2fb40568533c1a6d",
             "startToken": "opt:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "4e3f65962ff82018"
+          ]
         },
         "markAsync": {
           "kind": "function",
@@ -3074,7 +4087,10 @@
             "param0": "req:22728b4076ebe5a1|0f37ce0be68ca0bd~T",
             "return": "req:344736eda5af96aa",
             "typeParams": "req:fa5551153f99c86a"
-          }
+          },
+          "sigs": [
+            "3c8e7472b3444eb0"
+          ]
         },
         "MemoryReport": {
           "kind": "typeAlias",
@@ -3091,7 +4107,10 @@
             "trend": "req:c296607a2fda9ba7",
             "reason": "req:54eaec92d9f4779d",
             "machinePct": "req:f6522636230fa080"
-          }
+          },
+          "sigs": [
+            "3f0d80955c47aac5"
+          ]
         },
         "parseCli": {
           "kind": "function",
@@ -3099,11 +4118,17 @@
           "members": {
             "param0": "req:8ad1e7384b75a121|",
             "return": "req:b2cf8daf9c8c690d"
-          }
+          },
+          "sigs": [
+            "0abb80a861f86b6d"
+          ]
         },
         "PerfCheck": {
           "kind": "typeAlias",
-          "sig": "a00f2ba0f709bee6"
+          "sig": "a00f2ba0f709bee6",
+          "sigs": [
+            "a00f2ba0f709bee6"
+          ]
         },
         "readLock": {
           "kind": "function",
@@ -3111,7 +4136,10 @@
           "members": {
             "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "return": "req:415a33d4420af372"
-          }
+          },
+          "sigs": [
+            "ff4795a304c08371"
+          ]
         },
         "ReduceBreakdown": {
           "kind": "typeAlias",
@@ -3122,7 +4150,10 @@
             "spread": "req:f6522636230fa080",
             "routing": "req:f6522636230fa080",
             "listeners": "req:f6522636230fa080"
-          }
+          },
+          "sigs": [
+            "79cf47368c05a016"
+          ]
         },
         "RenderBudget": {
           "kind": "typeAlias",
@@ -3130,7 +4161,10 @@
           "members": {
             "staleness": "opt:f6522636230fa080",
             "pendingPatches": "opt:f6522636230fa080"
-          }
+          },
+          "sigs": [
+            "7294918a1caec834"
+          ]
         },
         "resolveAppId": {
           "kind": "function",
@@ -3138,11 +4172,17 @@
           "members": {
             "param0": "opt:f6c2bce213147f9c|336e2b46aff6c271~string",
             "return": "req:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "130e4dad205a6da2"
+          ]
         },
         "SingletonMode": {
           "kind": "typeAlias",
-          "sig": "b3159f1c4b221ecf"
+          "sig": "b3159f1c4b221ecf",
+          "sigs": [
+            "b3159f1c4b221ecf"
+          ]
         },
         "teachableError": {
           "kind": "function",
@@ -3152,7 +4192,10 @@
             "param1": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "param2": "opt:f6c2bce213147f9c|336e2b46aff6c271~string",
             "return": "req:18b6cd47afe08fa3"
-          }
+          },
+          "sigs": [
+            "e8e2d7196c8228fc"
+          ]
         },
         "teachMessage": {
           "kind": "function",
@@ -3162,7 +4205,10 @@
             "param1": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "param2": "opt:f6c2bce213147f9c|336e2b46aff6c271~string",
             "return": "req:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "31ccdd746686e464"
+          ]
         },
         "VitalAlert": {
           "kind": "typeAlias",
@@ -3177,7 +4223,10 @@
             "hint": "req:d52eb4fdc13de042",
             "ts": "req:f6522636230fa080",
             "correlationId": "opt:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "f8dae19aead2eda0"
+          ]
         },
         "VitalHint": {
           "kind": "typeAlias",
@@ -3187,15 +4236,24 @@
             "evidence": "req:6941c580c10685fb",
             "suggestion": "req:2fb40568533c1a6d",
             "severity": "req:cd29988d50009681"
-          }
+          },
+          "sigs": [
+            "97a35bf0a287e37a"
+          ]
         },
         "VitalLayer": {
           "kind": "typeAlias",
-          "sig": "5d852b5beaf6d0d5"
+          "sig": "5d852b5beaf6d0d5",
+          "sigs": [
+            "5d852b5beaf6d0d5"
+          ]
         },
         "VitalStatus": {
           "kind": "typeAlias",
-          "sig": "88f4afc6b902226b"
+          "sig": "88f4afc6b902226b",
+          "sigs": [
+            "88f4afc6b902226b"
+          ]
         },
         "VitalThresholds": {
           "kind": "typeAlias",
@@ -3205,7 +4263,10 @@
             "transport": "req:26b6889d9b7005a7",
             "loop": "req:26b6889d9b7005a7",
             "queue": "req:26b6889d9b7005a7"
-          }
+          },
+          "sigs": [
+            "0de3a59e3ede7160"
+          ]
         }
       }
     },
@@ -3213,11 +4274,17 @@
       "symbols": {
         "feedback": {
           "kind": "variable",
-          "sig": "e714bb584a50e48c"
+          "sig": "e714bb584a50e48c",
+          "sigs": [
+            "e714bb584a50e48c"
+          ]
         },
         "FeedbackCell": {
           "kind": "typeAlias",
-          "sig": "a47ab7d72b95c733"
+          "sig": "a47ab7d72b95c733",
+          "sigs": [
+            "a47ab7d72b95c733"
+          ]
         },
         "FeedbackState": {
           "kind": "typeAlias",
@@ -3228,11 +4295,17 @@
             "last": "req:0e764c5ae56617fb",
             "pending": "req:f6522636230fa080",
             "error": "req:cb5114588202887c"
-          }
+          },
+          "sigs": [
+            "46ed4dd09c6a71a5"
+          ]
         },
         "FeedbackStatus": {
           "kind": "typeAlias",
-          "sig": "2f6b9530f485d1cf"
+          "sig": "2f6b9530f485d1cf",
+          "sigs": [
+            "2f6b9530f485d1cf"
+          ]
         },
         "Report": {
           "kind": "typeAlias",
@@ -3244,19 +4317,39 @@
             "title": "req:2fb40568533c1a6d",
             "body": "opt:2fb40568533c1a6d",
             "contact": "opt:2fb40568533c1a6d",
-            "app": "req:cddfbeaf22cd510e",
-            "environment": "req:cf242ea74952ca19",
+            "app": "req:object",
+            "app.id": "req:2fb40568533c1a6d",
+            "app.version": "req:2fb40568533c1a6d",
+            "app.aio": "req:2fb40568533c1a6d",
+            "app.build": "req:c44b17ee1cd53c98",
+            "app.target": "req:bc79e46d97ee746a",
+            "app.artifact": "req:2fb40568533c1a6d",
+            "app.platform": "req:2fb40568533c1a6d",
+            "app.runtime": "req:2fb40568533c1a6d",
+            "app.channel": "opt:2fb40568533c1a6d",
+            "app.commit": "opt:2fb40568533c1a6d",
+            "environment": "req:object",
+            "environment.dataDir": "req:2fb40568533c1a6d",
+            "environment.exposed": "req:0ecca0fe3beba89b",
+            "environment.persist": "req:0ecca0fe3beba89b",
+            "environment.cells": "req:6941c580c10685fb",
             "state": "opt:43c27b1501a10616",
             "redactedCells": "opt:6941c580c10685fb",
             "timeline": "opt:7d47ff0a9f7bf4ac",
             "diagnostics": "opt:d3c03037da5fdac5",
             "logs": "opt:6941c580c10685fb",
             "truncated": "opt:6941c580c10685fb"
-          }
+          },
+          "sigs": [
+            "fe6ed016366e741d"
+          ]
         },
         "ReportKind": {
           "kind": "typeAlias",
-          "sig": "f3fd1fce8fca7a78"
+          "sig": "f3fd1fce8fca7a78",
+          "sigs": [
+            "f3fd1fce8fca7a78"
+          ]
         },
         "ReportSources": {
           "kind": "typeAlias",
@@ -3276,7 +4369,10 @@
             "getTimeline": "opt:6ffb5a87409e1740",
             "redact": "opt:847e053ae93a2268",
             "visible": "opt:cc62c3e198e8285a"
-          }
+          },
+          "sigs": [
+            "878f7c73ffb8584c"
+          ]
         },
         "SubmittedReport": {
           "kind": "typeAlias",
@@ -3286,7 +4382,10 @@
             "path": "req:2fb40568533c1a6d",
             "createdAt": "req:2fb40568533c1a6d",
             "delivered": "req:0ecca0fe3beba89b"
-          }
+          },
+          "sigs": [
+            "2d089fc9a103e734"
+          ]
         }
       }
     },
@@ -3294,7 +4393,10 @@
       "symbols": {
         "AirEvent": {
           "kind": "typeAlias",
-          "sig": "8f42e0e209205a30"
+          "sig": "8f42e0e209205a30",
+          "sigs": [
+            "8f42e0e209205a30"
+          ]
         },
         "Fragment": {
           "kind": "variable",
@@ -3308,15 +4410,24 @@
             "param1": "req:492f7a09e81aaf5d|9c9b1d3e8bfba8bc~Record+e47c90b8d1952424~null",
             "param2": "opt:8443661aab132f15|336e2b46aff6c271~string+b3d9da3d9fc5eb30~number",
             "return": "req:aacad5381864ddb5"
-          }
+          },
+          "sigs": [
+            "55306aa9b01ffeef"
+          ]
         },
         "JSX": {
           "kind": "namespace",
-          "sig": "db229a2ed409f674"
+          "sig": "db229a2ed409f674",
+          "sigs": [
+            "db229a2ed409f674"
+          ]
         },
         "JsxElement": {
           "kind": "typeAlias",
-          "sig": "c4b91168d09f8262"
+          "sig": "c4b91168d09f8262",
+          "sigs": [
+            "c4b91168d09f8262"
+          ]
         },
         "JsxIntrinsicAttributes": {
           "kind": "interface",
@@ -3324,7 +4435,10 @@
           "members": {
             "key": "opt:60d81f7053bb0224",
             "t": "opt:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "4b312cc4e9d59b19"
+          ]
         },
         "JsxIntrinsicElements": {
           "kind": "interface",
@@ -3396,11 +4510,17 @@
             "animate": "req:0cb2e1e18ccf739f",
             "animateTransform": "req:0cb2e1e18ccf739f",
             "set": "req:0cb2e1e18ccf739f"
-          }
+          },
+          "sigs": [
+            "7933329161a68efd"
+          ]
         },
         "JsxNode": {
           "kind": "typeAlias",
-          "sig": "64b2f9154f3948de"
+          "sig": "64b2f9154f3948de",
+          "sigs": [
+            "64b2f9154f3948de"
+          ]
         },
         "jsxs": {
           "kind": "function",
@@ -3410,7 +4530,142 @@
             "param1": "req:492f7a09e81aaf5d|9c9b1d3e8bfba8bc~Record+e47c90b8d1952424~null",
             "param2": "opt:8443661aab132f15|336e2b46aff6c271~string+b3d9da3d9fc5eb30~number",
             "return": "req:aacad5381864ddb5"
-          }
+          },
+          "sigs": [
+            "55306aa9b01ffeef"
+          ]
+        }
+      }
+    },
+    "./log": {
+      "symbols": {
+        "AioLogger": {
+          "kind": "class",
+          "sig": "de81f0e0eafb7e9f",
+          "members": {
+            "constructor": "req:a64bb8763f452823",
+            "cfg": "req:3fc1d400a7cf19c1",
+            "dir": "req:3bea535eabd65414",
+            "appName": "req:3bea535eabd65414",
+            "redact": "req:727f1268a6f46fd6",
+            "lastStatus": "req:de535c59784f8fae",
+            "stats": "req:object",
+            "stats.dispatched": "req:f6522636230fa080",
+            "stats.errors": "req:f6522636230fa080",
+            "stats.start": "req:44136fa355b3678a",
+            "heartbeatTimer": "opt:e97b470e9914dd0e",
+            "ready": "req:885cb31d772d5171",
+            "_writeErrors": "req:f07e6ada4a1aa386",
+            "_buffers": "req:83a4563b429f5bce",
+            "_flushTimer": "req:d8b74fa4b37bab99",
+            "_pending": "req:a0e45b6825a2632b",
+            "_lastLine": "req:63289c0f943f7c51",
+            "FLUSH_MS": "req:09f98fa0d462f4e5",
+            "MAX_BUFFERED": "req:09f98fa0d462f4e5",
+            "MAX_LINE": "req:09f98fa0d462f4e5",
+            "_preInit": "req:47186976996fb252",
+            "_preInitDropped": "req:f07e6ada4a1aa386",
+            "MAX_PREINIT": "req:09f98fa0d462f4e5",
+            "_modeFixed": "req:fe5c67956436d75e",
+            "_bytesSinceBudget": "req:f07e6ada4a1aa386",
+            "_budgetBusy": "req:885cb31d772d5171",
+            "_writeErrorsSuppressed": "req:f07e6ada4a1aa386",
+            "_linesLost": "req:f07e6ada4a1aa386",
+            "REPORT_FIRST": "req:09f98fa0d462f4e5",
+            "REPORT_EVERY": "req:09f98fa0d462f4e5",
+            "logDir": "req:5305257173656a02",
+            "init": "req:c70b09ae1f30630d",
+            "onStart": "req:843970e2582cf977",
+            "onStop": "req:b2de6139d2c7d198",
+            "observe": "req:d477a61d39fdef3c",
+            "pub": "req:9a0bbf13ec669bd3",
+            "perf": "req:86b5a9948065ab92",
+            "vitals": "req:ad44dfeb599f413c",
+            "vitalsSummary": "req:fb560fc502c6a15d",
+            "heartbeat": "req:02496fbc87e1647d",
+            "emit": "req:725a114312d65d74",
+            "path": "req:c9721d1ccf66c198",
+            "_capLine": "req:e62513cedca2fb0d",
+            "write": "req:993b06a0300c76d2",
+            "_tighten": "req:71f837cd28ceef7a",
+            "_flushBuffers": "req:02496fbc87e1647d",
+            "budgetCheckEvery": "req:3dd84a049eeaafd7",
+            "_maybeBudgetPass": "req:02496fbc87e1647d",
+            "_budgetPass": "req:c2c7ab26afc62123",
+            "_ownLiveBytes": "req:5b12dccf50b1eb23",
+            "_noteWriteFailure": "req:dd7951e55abe601b",
+            "_noteWriteSuccess": "req:02496fbc87e1647d",
+            "flush": "req:0558b148f32331c2"
+          },
+          "sigs": [
+            "de81f0e0eafb7e9f"
+          ]
+        },
+        "getLogger": {
+          "kind": "function",
+          "sig": "912a88c08e045975",
+          "members": {
+            "return": "req:25fb3769169d4670"
+          },
+          "sigs": [
+            "0f4cedd78ad0cb83"
+          ]
+        },
+        "log": {
+          "kind": "variable",
+          "sig": "e3f864a5a3765e6b",
+          "sigs": [
+            "e3f864a5a3765e6b"
+          ]
+        },
+        "Log": {
+          "kind": "interface",
+          "sig": "ffd7c0af1bc353aa",
+          "members": {
+            "trace": "req:25c35974267ffc26",
+            "debug": "req:25c35974267ffc26",
+            "info": "req:25c35974267ffc26",
+            "warn": "req:25c35974267ffc26",
+            "error": "req:25c35974267ffc26"
+          },
+          "sigs": [
+            "ffd7c0af1bc353aa"
+          ]
+        },
+        "LogConfig": {
+          "kind": "typeAlias",
+          "sig": "1478e5ddaf426ed9",
+          "members": {
+            "level": "opt:7226aa0f8f73310a",
+            "dir": "opt:2fb40568533c1a6d",
+            "console": "opt:0ecca0fe3beba89b",
+            "heartbeat": "opt:f6522636230fa080",
+            "suppressTypes": "opt:6941c580c10685fb",
+            "backupLogs": "opt:0ecca0fe3beba89b",
+            "backupKeep": "opt:f6522636230fa080",
+            "logBudget": "opt:f6522636230fa080"
+          },
+          "sigs": [
+            "1478e5ddaf426ed9"
+          ]
+        },
+        "LogLevel": {
+          "kind": "typeAlias",
+          "sig": "2d194fddf92d9bd7",
+          "sigs": [
+            "2d194fddf92d9bd7"
+          ]
+        },
+        "setLogger": {
+          "kind": "function",
+          "sig": "5daceb0b703abf1a",
+          "members": {
+            "param0": "req:6cc780e7da22290e|d5a6a420661952db~LogSink+e47c90b8d1952424~null",
+            "return": "req:b5f6ae1b8a43e31d"
+          },
+          "sigs": [
+            "0a070fa5f55cb763"
+          ]
         }
       }
     },
@@ -3423,7 +4678,10 @@
             "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "param1": "opt:f6c2bce213147f9c|336e2b46aff6c271~string",
             "return": "req:5044457af8c6df85"
-          }
+          },
+          "sigs": [
+            "0ae2e32c7b0a2abf"
+          ]
         },
         "AppDirs": {
           "kind": "typeAlias",
@@ -3442,7 +4700,10 @@
             "appKey": "req:2fb40568533c1a6d",
             "meta": "req:2fb40568533c1a6d",
             "launch": "req:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "c373a4f479975d72"
+          ]
         },
         "AppMeta": {
           "kind": "typeAlias",
@@ -3453,14 +4714,20 @@
             "app": "opt:2fb40568533c1a6d",
             "createdAt": "req:2fb40568533c1a6d",
             "updatedAt": "req:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "fa302fc2d813d586"
+          ]
         },
         "appVersion": {
           "kind": "function",
           "sig": "53b24c9e8245c9fa",
           "members": {
             "return": "req:7538b8048664c9b7"
-          }
+          },
+          "sigs": [
+            "52dce3fd53013544"
+          ]
         },
         "BlobInfo": {
           "kind": "typeAlias",
@@ -3469,7 +4736,10 @@
             "id": "req:2fb40568533c1a6d",
             "size": "req:f6522636230fa080",
             "name": "opt:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "6bf65597d79be13c"
+          ]
         },
         "BlobStore": {
           "kind": "interface",
@@ -3482,7 +4752,10 @@
             "url": "req:9a9bf81199d1cefe",
             "delete": "req:4c212a55d905453f",
             "list": "req:1246e00a3d3cf2a8"
-          }
+          },
+          "sigs": [
+            "d9c6c11b88650ef0"
+          ]
         },
         "connectCli": {
           "kind": "function",
@@ -3492,7 +4765,10 @@
             "param1": "opt:81f54cb08348218c|a4b77b04795ab0e5~typeLiteral",
             "return": "req:3ddc61aefe6c98cc",
             "typeParams": "req:74bee5470c014880"
-          }
+          },
+          "sigs": [
+            "cb931ebd1f419bc1"
+          ]
         },
         "connectCliUDS": {
           "kind": "function",
@@ -3502,7 +4778,26 @@
             "param1": "opt:200cfad85f677278|71845a09680b0eb8~typeLiteral",
             "return": "req:f0f59b743e6e52c4",
             "typeParams": "req:74bee5470c014880"
-          }
+          },
+          "sigs": [
+            "2e28a6f8d745a2c5"
+          ]
+        },
+        "CookieOptions": {
+          "kind": "interface",
+          "sig": "fca122a526af8b9a",
+          "members": {
+            "path": "opt:2fb40568533c1a6d",
+            "domain": "opt:2fb40568533c1a6d",
+            "maxAge": "opt:f6522636230fa080",
+            "expires": "opt:27d39c19488dbec8",
+            "httpOnly": "opt:0ecca0fe3beba89b",
+            "secure": "opt:0ecca0fe3beba89b",
+            "sameSite": "opt:b35a82269f1549b6"
+          },
+          "sigs": [
+            "fca122a526af8b9a"
+          ]
         },
         "createDB": {
           "kind": "function",
@@ -3511,7 +4806,10 @@
             "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "param1": "req:1a908633b9ff0d05|",
             "return": "req:638ce7fb8179d197"
-          }
+          },
+          "sigs": [
+            "105f5f466f8b6f5c"
+          ]
         },
         "DB": {
           "kind": "interface",
@@ -3524,7 +4822,10 @@
             "checkIntegrity": "opt:2c3423570a053884",
             "close": "req:ea8fb37f7482dd65",
             "lastWriterError": "opt:3ff0a9643cccdf3d"
-          }
+          },
+          "sigs": [
+            "81a592365152399c"
+          ]
         },
         "DBOpts": {
           "kind": "typeAlias",
@@ -3534,11 +4835,17 @@
             "pragmas": "opt:6941c580c10685fb",
             "requestTimeoutMs": "opt:f6522636230fa080",
             "readers": "opt:f6522636230fa080"
-          }
+          },
+          "sigs": [
+            "ea81cfaacd4e393a"
+          ]
         },
         "DEFAULT_PRAGMAS": {
           "kind": "variable",
-          "sig": "68b3405a06dc5203"
+          "sig": "68b3405a06dc5203",
+          "sigs": [
+            "68b3405a06dc5203"
+          ]
         },
         "initSchema": {
           "kind": "function",
@@ -3547,7 +4854,10 @@
             "param0": "req:2efb9709d1d359e8|81d8d29a0984c0d3~DB",
             "param1": "req:2bd9bcbcc54b7701|c721ff394f49f0df~Record",
             "return": "req:f9848a8ce1853551"
-          }
+          },
+          "sigs": [
+            "32439911a84095bc"
+          ]
         },
         "loadTables": {
           "kind": "function",
@@ -3556,7 +4866,10 @@
             "param0": "req:2efb9709d1d359e8|81d8d29a0984c0d3~DB",
             "param1": "req:2bd9bcbcc54b7701|c721ff394f49f0df~Record",
             "return": "req:9fe0c5feec0e6654"
-          }
+          },
+          "sigs": [
+            "2993635d39550658"
+          ]
         },
         "openBlobStore": {
           "kind": "function",
@@ -3565,7 +4878,10 @@
             "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "param1": "opt:f6c2bce213147f9c|336e2b46aff6c271~string",
             "return": "req:8b91d382c62c4cbc"
-          }
+          },
+          "sigs": [
+            "29a7b052580ffe87"
+          ]
         },
         "openExternal": {
           "kind": "function",
@@ -3573,14 +4889,31 @@
           "members": {
             "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "return": "req:f9848a8ce1853551"
-          }
+          },
+          "sigs": [
+            "c96dd57504ef2334"
+          ]
+        },
+        "parseCookies": {
+          "kind": "function",
+          "sig": "bca9170da6fd9185",
+          "members": {
+            "param0": "req:24602d67446130ef|336e2b46aff6c271~string+e47c90b8d1952424~null",
+            "return": "req:09b94ba87da5c3f0"
+          },
+          "sigs": [
+            "32e81b9835e732f4"
+          ]
         },
         "peerHello": {
           "kind": "function",
           "sig": "e9135d16f114bed7",
           "members": {
             "return": "req:ebd8aba1b94835b7"
-          }
+          },
+          "sigs": [
+            "f7652db6d1c9613a"
+          ]
         },
         "pickDirectory": {
           "kind": "function",
@@ -3588,11 +4921,19 @@
           "members": {
             "param0": "req:572194c1e4bd20e3|",
             "return": "req:ee5ffe333ca6cb70"
-          }
+          },
+          "sigs": [
+            "fad946a24b805dc4"
+          ]
         },
         "pickFile": {
           "kind": "function",
-          "sig": "ae56d1c02918675e"
+          "sig": "ae56d1c02918675e",
+          "sigs": [
+            "6a104401c3817d8c",
+            "d38ce5fb3719bcf2",
+            "cbca77eff0b035f5"
+          ]
         },
         "PickFilter": {
           "kind": "typeAlias",
@@ -3600,7 +4941,10 @@
           "members": {
             "name": "req:2fb40568533c1a6d",
             "extensions": "req:6941c580c10685fb"
-          }
+          },
+          "sigs": [
+            "1715b892dcecbb4e"
+          ]
         },
         "PickOptions": {
           "kind": "typeAlias",
@@ -3609,7 +4953,10 @@
             "title": "opt:2fb40568533c1a6d",
             "startIn": "opt:2fb40568533c1a6d",
             "filters": "opt:44aad2968a316880"
-          }
+          },
+          "sigs": [
+            "c2f89602c949ad94"
+          ]
         },
         "QueryResult": {
           "kind": "typeAlias",
@@ -3619,7 +4966,17 @@
             "rows": "req:89973303b5dd2457",
             "changes": "req:f6522636230fa080",
             "lastInsertRowId": "req:eb16a6d265ab0c1d"
-          }
+          },
+          "sigs": [
+            "4d451b3b1c2af191"
+          ]
+        },
+        "RawRouteHandler": {
+          "kind": "typeAlias",
+          "sig": "9db2476cc42d2226",
+          "sigs": [
+            "9db2476cc42d2226"
+          ]
         },
         "reactiveDB": {
           "kind": "function",
@@ -3627,11 +4984,17 @@
           "members": {
             "param0": "req:2efb9709d1d359e8|81d8d29a0984c0d3~DB",
             "return": "req:0ea7ae1e43553692"
-          }
+          },
+          "sigs": [
+            "cd14c8c7da9427c3"
+          ]
         },
         "ReactiveDB": {
           "kind": "typeAlias",
-          "sig": "ca20e1cc4562491d"
+          "sig": "ca20e1cc4562491d",
+          "sigs": [
+            "ca20e1cc4562491d"
+          ]
         },
         "ReactiveQuery": {
           "kind": "typeAlias",
@@ -3640,7 +5003,77 @@
             "typeParams": "req:db44b48a258f92f8",
             "rows": "req:af4c4ed13fb04e3f",
             "tables": "req:80c8f95ee374d100"
-          }
+          },
+          "sigs": [
+            "f6c36923a5dd3ea4"
+          ]
+        },
+        "route": {
+          "kind": "function",
+          "sig": "a3c0d8d3a76a575d",
+          "members": {
+            "param0": "req:47044a5e2cad0ebd|83d9b296b1ebb2a9~fnOrConstructor",
+            "param1": "req:0554a7ee8d28a099|",
+            "return": "req:be3c559ff6ba9b73"
+          },
+          "sigs": [
+            "34e06af4915c3d7e"
+          ]
+        },
+        "RouteContext": {
+          "kind": "interface",
+          "sig": "ac3f6f417a920c84",
+          "members": {
+            "req": "req:6b7361d3ba49c557",
+            "url": "req:51b2c4ea7271dadd",
+            "params": "req:09b94ba87da5c3f0",
+            "query": "req:119d419b8296215c",
+            "user": "opt:8c82b1e4abadd4d0",
+            "ip": "opt:2fb40568533c1a6d",
+            "cookies": "req:09b94ba87da5c3f0",
+            "setCookie": "req:2aa6fb0afe1fc149",
+            "json": "req:cd99d6a82608cfc8",
+            "text": "req:e31d4af53febf07c",
+            "redirect": "req:04ce9f0db7ca5c35"
+          },
+          "sigs": [
+            "ac3f6f417a920c84"
+          ]
+        },
+        "RouteMatch": {
+          "kind": "interface",
+          "sig": "649894011fcb413c",
+          "members": {
+            "params": "req:09b94ba87da5c3f0",
+            "user": "opt:8c82b1e4abadd4d0",
+            "ip": "opt:2fb40568533c1a6d"
+          },
+          "sigs": [
+            "649894011fcb413c"
+          ]
+        },
+        "RouteOptions": {
+          "kind": "interface",
+          "sig": "0f8471883432965c",
+          "members": {
+            "method": "opt:882605cb85bcbb8c"
+          },
+          "sigs": [
+            "0f8471883432965c"
+          ]
+        },
+        "serializeCookie": {
+          "kind": "function",
+          "sig": "56ee07a753a7333c",
+          "members": {
+            "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
+            "param1": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
+            "param2": "req:32f9f08534909320|",
+            "return": "req:2fb40568533c1a6d"
+          },
+          "sigs": [
+            "b831bda452c9df2e"
+          ]
         },
         "spawn": {
           "kind": "function",
@@ -3649,7 +5082,10 @@
             "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "param1": "req:a1a56e21f8a5115b|",
             "return": "req:7a2ba29265cd31a9"
-          }
+          },
+          "sigs": [
+            "15b7506687bef95d"
+          ]
         },
         "SpawnHandle": {
           "kind": "typeAlias",
@@ -3658,7 +5094,10 @@
             "pid": "req:dfcf8bb3a2454f51",
             "status": "req:4549deebed0a5f66",
             "paused": "req:b0d796a0bdd3e6b1"
-          }
+          },
+          "sigs": [
+            "9b77e51058f14b7e"
+          ]
         },
         "SpawnOptions": {
           "kind": "typeAlias",
@@ -3670,7 +5109,10 @@
             "onLine": "opt:bfad7666f1f93840",
             "signal": "opt:0dd466a47c7c7eec",
             "killGraceMs": "opt:f6522636230fa080"
-          }
+          },
+          "sigs": [
+            "02a8319c2de34e67"
+          ]
         },
         "SpawnStatus": {
           "kind": "typeAlias",
@@ -3679,7 +5121,10 @@
             "code": "req:f6522636230fa080",
             "signal": "req:99e24305f7e780a8",
             "success": "req:0ecca0fe3beba89b"
-          }
+          },
+          "sigs": [
+            "809c6bc0ca3e0ca9"
+          ]
         },
         "syncTables": {
           "kind": "function",
@@ -3690,11 +5135,17 @@
             "param2": "req:0a4bc3451690a851|9c9b1d3e8bfba8bc~Record",
             "param3": "req:0a4bc3451690a851|9c9b1d3e8bfba8bc~Record",
             "return": "req:f9848a8ce1853551"
-          }
+          },
+          "sigs": [
+            "efcf973c60a0da6b"
+          ]
         },
         "Tx": {
           "kind": "typeAlias",
-          "sig": "d6d59f832bb71a3e"
+          "sig": "d6d59f832bb71a3e",
+          "sigs": [
+            "d6d59f832bb71a3e"
+          ]
         }
       }
     },
@@ -3706,7 +5157,10 @@
           "members": {
             "param0": "req:c754ff99ad98f260|fb9c9d0d23267cd8~Uint8Array",
             "return": "req:cb5114588202887c"
-          }
+          },
+          "sigs": [
+            "26e93de95a7fbee1"
+          ]
         },
         "buildShipManifest": {
           "kind": "function",
@@ -3714,7 +5168,10 @@
           "members": {
             "param0": "req:43d66d050c6a3b7e|a89c8262538ea5de~typeLiteral",
             "return": "req:508ab3f54e202014"
-          }
+          },
+          "sigs": [
+            "2a87d56a8757974f"
+          ]
         },
         "CellContract": {
           "kind": "typeAlias",
@@ -3722,7 +5179,10 @@
           "members": {
             "version": "req:f6522636230fa080",
             "migratesFrom": "req:f6522636230fa080"
-          }
+          },
+          "sigs": [
+            "ed73536ca3ee2457"
+          ]
         },
         "DataContract": {
           "kind": "typeAlias",
@@ -3730,7 +5190,10 @@
           "members": {
             "schema": "req:f6522636230fa080",
             "cells": "req:e7a7360878f3dfa9"
-          }
+          },
+          "sigs": [
+            "ea78670033e797b3"
+          ]
         },
         "declaredTargetKinds": {
           "kind": "function",
@@ -3738,7 +5201,10 @@
           "members": {
             "param0": "req:0a4bc3451690a851|9c9b1d3e8bfba8bc~Record",
             "return": "req:0cf28175dd53b68c"
-          }
+          },
+          "sigs": [
+            "71096c64db53c4a0"
+          ]
         },
         "defaultKeyPath": {
           "kind": "function",
@@ -3746,14 +5212,20 @@
           "members": {
             "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "return": "req:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "19221b6195fd754a"
+          ]
         },
         "generateSigningKey": {
           "kind": "function",
           "sig": "3fa468fe7e07a2c0",
           "members": {
             "return": "req:b20d815d6db15709"
-          }
+          },
+          "sigs": [
+            "73cd503e1e1d55ca"
+          ]
         },
         "githubWorkflow": {
           "kind": "function",
@@ -3761,7 +5233,10 @@
           "members": {
             "param0": "req:c9b76f66de802abb|bf6b8c694fd59cab~typeLiteral",
             "return": "req:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "d1677584fb987bb8"
+          ]
         },
         "isUpdateTarget": {
           "kind": "function",
@@ -3769,7 +5244,10 @@
           "members": {
             "param0": "req:8a0195ffd96928c3|e2e9e83e047a6f75~unknown",
             "return": "req:618326e9bc621d42"
-          }
+          },
+          "sigs": [
+            "6c8252c2932b6a98"
+          ]
         },
         "keyFingerprint": {
           "kind": "function",
@@ -3777,7 +5255,10 @@
           "members": {
             "param0": "req:527e9935ffffeebe|b2c6aa16f8d5ce41~JsonWebKey",
             "return": "req:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "b186e92907a40bae"
+          ]
         },
         "manifestCore": {
           "kind": "function",
@@ -3785,7 +5266,10 @@
           "members": {
             "param0": "req:6a8041bcd05b19a6|f1917d2190e69ac0~ShipManifest",
             "return": "req:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "c33c963b9361b657"
+          ]
         },
         "manifestFileName": {
           "kind": "function",
@@ -3793,7 +5277,10 @@
           "members": {
             "param0": "req:7b8f9412a7cfe1a5|197d9814f128a601~typeLiteral",
             "return": "req:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "9826547583b97ba6"
+          ]
         },
         "parseDataContract": {
           "kind": "function",
@@ -3802,7 +5289,10 @@
             "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "param1": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "return": "req:6e54c70ce51be848"
-          }
+          },
+          "sigs": [
+            "c595cf1f3ce53e3f"
+          ]
         },
         "parseSigningKey": {
           "kind": "function",
@@ -3811,11 +5301,17 @@
             "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "param1": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "return": "req:a3b449498b438d39"
-          }
+          },
+          "sigs": [
+            "d4fb71e3212ff7eb"
+          ]
         },
         "SAFE_TOKEN": {
           "kind": "variable",
-          "sig": "31106cff66da787c"
+          "sig": "31106cff66da787c",
+          "sigs": [
+            "31106cff66da787c"
+          ]
         },
         "safeTokenReason": {
           "kind": "function",
@@ -3824,7 +5320,10 @@
             "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "param1": "req:8a0195ffd96928c3|e2e9e83e047a6f75~unknown",
             "return": "req:cb5114588202887c"
-          }
+          },
+          "sigs": [
+            "3c7c6703dfdf3471"
+          ]
         },
         "sha256Hex": {
           "kind": "function",
@@ -3832,7 +5331,10 @@
           "members": {
             "param0": "req:c754ff99ad98f260|fb9c9d0d23267cd8~Uint8Array",
             "return": "req:7538b8048664c9b7"
-          }
+          },
+          "sigs": [
+            "8735b9763afefd0a"
+          ]
         },
         "shipApp": {
           "kind": "function",
@@ -3840,7 +5342,10 @@
           "members": {
             "param0": "req:f2333f106c36d2c9|08bab76057ef06e7~typeLiteral",
             "return": "req:508ab3f54e202014"
-          }
+          },
+          "sigs": [
+            "78042db2cd06f278"
+          ]
         },
         "ShipExpectations": {
           "kind": "typeAlias",
@@ -3849,11 +5354,16 @@
             "name": "opt:2fb40568533c1a6d",
             "channel": "opt:2fb40568533c1a6d",
             "target": "opt:a036f8fe16180c9e",
-            "platform": "opt:d074d333e5654637",
+            "platform": "opt:object",
+            "platform.os": "req:2fb40568533c1a6d",
+            "platform.arch": "req:2fb40568533c1a6d",
             "key": "opt:8ac579d9b15c041f",
             "keys": "opt:9762f1d3561fa9bf",
             "allowUnsigned": "opt:0ecca0fe3beba89b"
-          }
+          },
+          "sigs": [
+            "b238db4c192a77b7"
+          ]
         },
         "ShipManifest": {
           "kind": "typeAlias",
@@ -3870,7 +5380,9 @@
             "runFlags": "req:6941c580c10685fb",
             "channel": "req:2fb40568533c1a6d",
             "target": "req:a036f8fe16180c9e",
-            "platform": "req:d074d333e5654637",
+            "platform": "req:object",
+            "platform.os": "req:2fb40568533c1a6d",
+            "platform.arch": "req:2fb40568533c1a6d",
             "url": "opt:2fb40568533c1a6d",
             "releasedAt": "req:2fb40568533c1a6d",
             "notes": "opt:2fb40568533c1a6d",
@@ -3878,15 +5390,24 @@
             "data": "opt:6e54c70ce51be848",
             "signature": "opt:2fb40568533c1a6d",
             "publicKey": "opt:8ac579d9b15c041f"
-          }
+          },
+          "sigs": [
+            "10b11f020730bd62"
+          ]
         },
         "UPDATE_TARGETS": {
           "kind": "variable",
-          "sig": "078e0f91383eabb4"
+          "sig": "078e0f91383eabb4",
+          "sigs": [
+            "078e0f91383eabb4"
+          ]
         },
         "UpdateTarget": {
           "kind": "typeAlias",
-          "sig": "c30e8a3809a5b7e8"
+          "sig": "c30e8a3809a5b7e8",
+          "sigs": [
+            "c30e8a3809a5b7e8"
+          ]
         },
         "verifyManifestClaims": {
           "kind": "function",
@@ -3895,7 +5416,10 @@
             "param0": "req:6a8041bcd05b19a6|f1917d2190e69ac0~ShipManifest",
             "param1": "req:e4852ee860f7d074|",
             "return": "req:bf6f14574cd6f447"
-          }
+          },
+          "sigs": [
+            "a95363e500d429b8"
+          ]
         },
         "verifyShipManifest": {
           "kind": "function",
@@ -3905,7 +5429,10 @@
             "param1": "req:6a8041bcd05b19a6|f1917d2190e69ac0~ShipManifest",
             "param2": "req:e4852ee860f7d074|",
             "return": "req:bf6f14574cd6f447"
-          }
+          },
+          "sigs": [
+            "19c4cc6610f5e159"
+          ]
         }
       }
     },
@@ -3918,14 +5445,20 @@
             "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "param1": "opt:abc1283ec898877a|8cf901bb93165a7b~any",
             "return": "req:ef622e7c58b24793"
-          }
+          },
+          "sigs": [
+            "289c6be54e91b636"
+          ]
         },
         "getStateSignal": {
           "kind": "function",
           "sig": "73cc3c4f1d53bf3f",
           "members": {
             "return": "req:8408452832d1ef7b"
-          }
+          },
+          "sigs": [
+            "cd006557dddde98b"
+          ]
         },
         "handleMessage": {
           "kind": "function",
@@ -3933,14 +5466,20 @@
           "members": {
             "param0": "req:abc1283ec898877a|8cf901bb93165a7b~any",
             "return": "req:749f11d8150866e2"
-          }
+          },
+          "sigs": [
+            "d519eb426d099d20"
+          ]
         },
         "ready": {
           "kind": "function",
           "sig": "d146c7a9b1c05fb1",
           "members": {
             "return": "req:9ab53fde76403afc"
-          }
+          },
+          "sigs": [
+            "0af222a1776d2a68"
+          ]
         },
         "send": {
           "kind": "function",
@@ -3948,7 +5487,10 @@
           "members": {
             "param0": "req:2035c7f316ba6082|3bdffdb89f9eaf85~typeLiteral",
             "return": "req:0ecca0fe3beba89b"
-          }
+          },
+          "sigs": [
+            "c9945c15c75de717"
+          ]
         },
         "setTransport": {
           "kind": "function",
@@ -3956,7 +5498,10 @@
           "members": {
             "param0": "req:f97097dc635518f4|e47c90b8d1952424~null+f43efa6f6b3a9691~importType",
             "return": "req:b5f6ae1b8a43e31d"
-          }
+          },
+          "sigs": [
+            "cc706c56dc34036f"
+          ]
         },
         "Transport": {
           "kind": "interface",
@@ -3964,7 +5509,10 @@
           "members": {
             "send": "req:0fbc02f4ba4eb53f",
             "close": "req:d831502f3c16c146"
-          }
+          },
+          "sigs": [
+            "b03ad48003facb26"
+          ]
         }
       }
     },
@@ -3972,11 +5520,17 @@
       "symbols": {
         "HLC": {
           "kind": "typeAlias",
-          "sig": "ad43865540693aa7"
+          "sig": "ad43865540693aa7",
+          "sigs": [
+            "ad43865540693aa7"
+          ]
         },
         "MergeStrategy": {
           "kind": "typeAlias",
-          "sig": "adfcea5155c10f47"
+          "sig": "adfcea5155c10f47",
+          "sigs": [
+            "adfcea5155c10f47"
+          ]
         },
         "normalizeSyncConfig": {
           "kind": "function",
@@ -3984,7 +5538,10 @@
           "members": {
             "param0": "req:e301462610a4d9ec|ac88a0436639374c~{\"kind\":\"boolean\",\"boolean\":true+b1f4c56ed1b2927e~Partial",
             "return": "req:1da30fd84c46780a"
-          }
+          },
+          "sigs": [
+            "c7b082c464608bf9"
+          ]
         },
         "SyncConfig": {
           "kind": "interface",
@@ -3992,11 +5549,15 @@
           "members": {
             "merge": "req:47a19ca948253280",
             "identity": "req:09b94ba87da5c3f0",
-            "offline": "req:fc35ad2f15947581",
+            "offline": "req:object",
+            "offline.retention": "req:2fb40568533c1a6d",
             "onConflict": "opt:88dfd1004b8b15c5",
             "onSync": "opt:9729a415b5bf8466",
             "onRejected": "opt:3ef156cda042b787"
-          }
+          },
+          "sigs": [
+            "22818c712ec98cdc"
+          ]
         },
         "SyncConflict": {
           "kind": "interface",
@@ -4006,7 +5567,10 @@
             "local": "req:7740b48bf488c3ff",
             "remote": "req:7740b48bf488c3ff",
             "resolution": "req:b3ca66037c9b53d5"
-          }
+          },
+          "sigs": [
+            "979b03ebd9130f0a"
+          ]
         },
         "SyncStats": {
           "kind": "interface",
@@ -4017,7 +5581,10 @@
             "elapsed": "req:f6522636230fa080",
             "status": "opt:88bf3f3186ccd874",
             "pending": "opt:f6522636230fa080"
-          }
+          },
+          "sigs": [
+            "7f392d0ffad593aa"
+          ]
         },
         "SyncStatus": {
           "kind": "interface",
@@ -4026,7 +5593,10 @@
             "status": "req:49ec3b47dd978d35",
             "pending": "req:f6522636230fa080",
             "lastSync": "req:f6522636230fa080"
-          }
+          },
+          "sigs": [
+            "79dbcfd6191da752"
+          ]
         }
       }
     },
@@ -4039,7 +5609,10 @@
             "param0": "req:d2b933bdb66a06ee|ef30d9ad5489c3e8~array",
             "param1": "req:8f084075c4f4f9aa|",
             "return": "req:b7e32cb6dc65132d"
-          }
+          },
+          "sigs": [
+            "1ea511e7a7ba8cc3"
+          ]
         },
         "BootHandle": {
           "kind": "interface",
@@ -4049,7 +5622,10 @@
             "settle": "req:ea8fb37f7482dd65",
             "dispose": "req:d831502f3c16c146",
             "[Symbol.dispose]": "req:f05ae2c283690f69"
-          }
+          },
+          "sigs": [
+            "922612f74bd17778"
+          ]
         },
         "Cassette": {
           "kind": "typeAlias",
@@ -4057,7 +5633,10 @@
           "members": {
             "mode": "req:ce9103272ecebdee",
             "frames": "req:5423263c5b9aea4e"
-          }
+          },
+          "sigs": [
+            "f1fb98bdbb5998e7"
+          ]
         },
         "CassetteFrame": {
           "kind": "typeAlias",
@@ -4069,11 +5648,17 @@
             "ok": "req:0ecca0fe3beba89b",
             "value": "opt:7740b48bf488c3ff",
             "error": "opt:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "5e1befb6216d58ef"
+          ]
         },
         "CassetteMode": {
           "kind": "typeAlias",
-          "sig": "1023dc9f0cb35c9d"
+          "sig": "1023dc9f0cb35c9d",
+          "sigs": [
+            "1023dc9f0cb35c9d"
+          ]
         },
         "createCassette": {
           "kind": "function",
@@ -4082,7 +5667,10 @@
             "param0": "req:36f287e9cb8d6a53|5c18d7d47da2fc3e~CassetteMode",
             "param1": "req:5ec451b82a5a1f18|",
             "return": "req:a73f83bd084f6e27"
-          }
+          },
+          "sigs": [
+            "110dfb8bb915df87"
+          ]
         },
         "ensureAppDirs": {
           "kind": "function",
@@ -4090,21 +5678,30 @@
           "members": {
             "param0": "req:03e9c660a2f427b6|e62bc62997c39dae~AppDirs",
             "return": "req:b5f6ae1b8a43e31d"
-          }
+          },
+          "sigs": [
+            "33f6e2850d52d17b"
+          ]
         },
         "findChromium": {
           "kind": "function",
           "sig": "3140c463ae84346b",
           "members": {
             "return": "req:cb5114588202887c"
-          }
+          },
+          "sigs": [
+            "48e2284d8b32e64e"
+          ]
         },
         "freePort": {
           "kind": "function",
           "sig": "326f2828fc16dd8d",
           "members": {
             "return": "req:f6522636230fa080"
-          }
+          },
+          "sigs": [
+            "f42cf68dae612ac8"
+          ]
         },
         "generateUITypes": {
           "kind": "function",
@@ -4113,7 +5710,10 @@
             "param0": "req:0dd4e066addd82a3|4a068b585f78d017~UISurfaceNode",
             "param1": "req:dfcf0e50476cbc22|",
             "return": "req:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "40d4c1ce66e2baea"
+          ]
         },
         "GraphResult": {
           "kind": "typeAlias",
@@ -4125,7 +5725,10 @@
             "eager": "req:0cf28175dd53b68c",
             "durationMs": "req:f6522636230fa080",
             "bundleMs": "opt:f6522636230fa080"
-          }
+          },
+          "sigs": [
+            "7c0cf7a70c73be3f"
+          ]
         },
         "HarnessBootOptions": {
           "kind": "typeAlias",
@@ -4134,7 +5737,10 @@
             "cellDefaults": "opt:0c4fa55e7637b196",
             "localFirst": "opt:0ecca0fe3beba89b",
             "perfBudget": "opt:05b89f57abeea2fa"
-          }
+          },
+          "sigs": [
+            "78e0e442abd633b1"
+          ]
         },
         "KeyModifiers": {
           "kind": "interface",
@@ -4144,7 +5750,10 @@
             "metaKey": "opt:0ecca0fe3beba89b",
             "altKey": "opt:0ecca0fe3beba89b",
             "shiftKey": "opt:0ecca0fe3beba89b"
-          }
+          },
+          "sigs": [
+            "48373a21e66eae2f"
+          ]
         },
         "openCassette": {
           "kind": "function",
@@ -4153,7 +5762,10 @@
             "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "param1": "req:c3cbf57cfa893e10|",
             "return": "req:e38696510c165f90"
-          }
+          },
+          "sigs": [
+            "33d6cc02396d723c"
+          ]
         },
         "Patch": {
           "kind": "typeAlias",
@@ -4162,7 +5774,10 @@
             "op": "req:0d4a00d8554c4880",
             "path": "req:18cd94685a51f69a",
             "value": "opt:7740b48bf488c3ff"
-          }
+          },
+          "sigs": [
+            "1cebbba90c0cd609"
+          ]
         },
         "registerAppDirs": {
           "kind": "function",
@@ -4171,7 +5786,10 @@
             "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "param1": "req:03e9c660a2f427b6|e62bc62997c39dae~AppDirs",
             "return": "req:b5f6ae1b8a43e31d"
-          }
+          },
+          "sigs": [
+            "4f61d91d33ebbfdf"
+          ]
         },
         "setDocument": {
           "kind": "function",
@@ -4179,7 +5797,10 @@
           "members": {
             "param0": "req:b99bd0a415f4b47f|a99c18066fd88060~AnyDoc",
             "return": "req:b5f6ae1b8a43e31d"
-          }
+          },
+          "sigs": [
+            "a734433271a78bea"
+          ]
         },
         "smoke": {
           "kind": "function",
@@ -4187,7 +5808,10 @@
           "members": {
             "param0": "req:41763cff0375c72b|",
             "return": "req:c41c9b12b4a74b6d"
-          }
+          },
+          "sigs": [
+            "dca935e6680579d7"
+          ]
         },
         "SmokeResult": {
           "kind": "interface",
@@ -4196,11 +5820,17 @@
             "checked": "req:6941c580c10685fb",
             "graph": "req:e3f56e34483508a7",
             "durationMs": "req:f6522636230fa080"
-          }
+          },
+          "sigs": [
+            "76cf7f439068e7f6"
+          ]
         },
         "TestableComponent": {
           "kind": "typeAlias",
-          "sig": "baccc5f3556b2da7"
+          "sig": "baccc5f3556b2da7",
+          "sigs": [
+            "baccc5f3556b2da7"
+          ]
         },
         "testApps": {
           "kind": "function",
@@ -4208,7 +5838,10 @@
           "members": {
             "param0": "req:4983cc5e285526a5|e877c163114dc854~Record",
             "return": "req:11bb705bb5fcdbba"
-          }
+          },
+          "sigs": [
+            "9fc809867bdbc3a6"
+          ]
         },
         "TestApps": {
           "kind": "interface",
@@ -4219,7 +5852,10 @@
             "connect": "req:4e5873cdbfec505b",
             "close": "req:ea8fb37f7482dd65",
             "[Symbol.asyncDispose]": "req:d6f6c436019dcb67"
-          }
+          },
+          "sigs": [
+            "841c2b5afb5629f8"
+          ]
         },
         "testBrowser": {
           "kind": "function",
@@ -4228,7 +5864,10 @@
             "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "param1": "req:d7e2fb7a0207a8fe|",
             "return": "req:8c7254b7904d14ff"
-          }
+          },
+          "sigs": [
+            "de3050973046dcdc"
+          ]
         },
         "TestBrowser": {
           "kind": "interface",
@@ -4237,11 +5876,19 @@
             "proc": "req:c227f0f94f0dea47",
             "close": "req:ea8fb37f7482dd65",
             "[Symbol.asyncDispose]": "req:d6f6c436019dcb67"
-          }
+          },
+          "sigs": [
+            "e55f937371bb2fc0"
+          ]
         },
         "testCell": {
           "kind": "function",
-          "sig": "bccc6199da4b6117"
+          "sig": "bccc6199da4b6117",
+          "sigs": [
+            "5c22c3f7127cfe9b",
+            "ffce146f9b58988e",
+            "f1b8e22a8402c18b"
+          ]
         },
         "TestClient": {
           "kind": "interface",
@@ -4256,7 +5903,10 @@
             "onPatch": "req:a93253ef40f7f515",
             "waitForPatch": "req:c94bddb1075eb9b3",
             "call": "req:2f09db8a5f7249ab"
-          }
+          },
+          "sigs": [
+            "1a1aef24088e89e2"
+          ]
         },
         "testComponent": {
           "kind": "function",
@@ -4265,7 +5915,10 @@
             "param0": "req:1907365abec30621|15aabd980786fdd3~ComponentFn",
             "param1": "req:b26a3479e6fed7b1|",
             "return": "req:0ad6053cb4911f9f"
-          }
+          },
+          "sigs": [
+            "b94ae86a5c1d7698"
+          ]
         },
         "TestComponentHandle": {
           "kind": "interface",
@@ -4274,7 +5927,10 @@
             "root": "req:8534daf2b40dc0fe",
             "html": "req:15032d1a67723501",
             "unmount": "req:d831502f3c16c146"
-          }
+          },
+          "sigs": [
+            "d82bfd6f8f16ea8e"
+          ]
         },
         "TestComponentOptions": {
           "kind": "interface",
@@ -4282,25 +5938,39 @@
           "members": {
             "document": "opt:42a1ada9bcefe9fc",
             "root": "opt:8534daf2b40dc0fe"
-          }
+          },
+          "sigs": [
+            "9bcf8d9ec1fd4978"
+          ]
         },
         "TestContext": {
           "kind": "typeAlias",
-          "sig": "eb39657f5b093bea",
+          "sig": "952595e8daeb8403",
           "members": {
             "typeParams": "req:adfd33af49ae6930",
             "init": "req:fbe33cebfd7ca5a4",
             "destroy": "req:97f6d0647f4a9786",
             "send": "req:93d35a452131b3aa",
-            "expect": "req:6abc2786ed5f4660",
+            "expect": "req:object",
+            "expect.state": "req:373133597e19a1d8",
+            "expect.status": "req:e955c9fc50708f07",
+            "expect.effects": "req:31e04bd66710cd1a",
+            "expect.effectCount": "req:05db8941fbfaa4ac",
+            "expect.invariant": "req:abb68e47b92d7313",
+            "expect.rejects": "opt:e3288216562cece1",
+            "expect.throws": "opt:78a6d16100fecf9f",
             "as": "req:bfa4a6dcce0fc27a",
             "state": "req:7bd9bc74153c93e3",
             "getState": "req:c05c3faf22ed65b6",
             "getEffects": "req:d2c0a94cb1f1475d",
             "randomActions": "req:05db8941fbfaa4ac",
+            "fuzz": "opt:ea4a73c627ff6990",
             "runEffects": "req:97f6d0647f4a9786",
             "settle": "req:6b538452526be00a"
-          }
+          },
+          "sigs": [
+            "952595e8daeb8403"
+          ]
         },
         "testGen": {
           "kind": "function",
@@ -4309,7 +5979,10 @@
             "param0": "req:5b2e5de8c63fb99a|4732499c0fdbf817~ComponentFn",
             "param1": "req:2e44d36aa2922314|",
             "return": "req:7538b8048664c9b7"
-          }
+          },
+          "sigs": [
+            "449a255bc86ff508"
+          ]
         },
         "testMultiClient": {
           "kind": "function",
@@ -4318,7 +5991,10 @@
             "param0": "req:50cd23186356f24c|4e5f4ef9233281d2~TestServerConfig",
             "param1": "req:2d7033a301192802|",
             "return": "req:d53b048e2047ab75"
-          }
+          },
+          "sigs": [
+            "668747b6620d5c23"
+          ]
         },
         "TestMultiClient": {
           "kind": "interface",
@@ -4331,7 +6007,10 @@
             "dispatchAll": "req:adfcde436a0cb60e",
             "close": "req:ea8fb37f7482dd65",
             "[Symbol.asyncDispose]": "req:d6f6c436019dcb67"
-          }
+          },
+          "sigs": [
+            "872593272c5ececf"
+          ]
         },
         "testServer": {
           "kind": "function",
@@ -4340,7 +6019,10 @@
             "param0": "req:7608c2ede09ffc22|3b1fb55050a34ad0~TestServerConfig",
             "return": "req:d5d81ef8c232975f",
             "typeParams": "req:0446298fa06e375a"
-          }
+          },
+          "sigs": [
+            "fdf2c8007a21add7"
+          ]
         },
         "TestServer": {
           "kind": "interface",
@@ -4353,19 +6035,34 @@
             "state": "req:52927744a518852b",
             "close": "req:ea8fb37f7482dd65",
             "[Symbol.asyncDispose]": "req:d6f6c436019dcb67"
-          }
+          },
+          "sigs": [
+            "5f3bf9056626145f"
+          ]
         },
         "TestServerConfig": {
           "kind": "typeAlias",
-          "sig": "c5298acbb5b2c9f4"
+          "sig": "c5298acbb5b2c9f4",
+          "sigs": [
+            "c5298acbb5b2c9f4"
+          ]
         },
         "testUI": {
           "kind": "function",
-          "sig": "77ede55ef46b6732"
+          "sig": "77ede55ef46b6732",
+          "sigs": [
+            "a210cc823cf07314",
+            "a92f47afe777db72",
+            "2bbf41fdafa18a36",
+            "4f13c036df20a539"
+          ]
         },
         "TestUI": {
           "kind": "typeAlias",
-          "sig": "9beaddf43123cdb6"
+          "sig": "9beaddf43123cdb6",
+          "sigs": [
+            "9beaddf43123cdb6"
+          ]
         },
         "TestUIOptions": {
           "kind": "interface",
@@ -4382,12 +6079,20 @@
             "user": "opt:c5817ece372e4982",
             "enforceAccess": "opt:0ecca0fe3beba89b",
             "authFeatures": "opt:5635828a0d20f0b2",
-            "viewport": "opt:d61e57033cb88617"
-          }
+            "viewport": "opt:object",
+            "viewport.width": "req:f6522636230fa080",
+            "viewport.height": "req:f6522636230fa080"
+          },
+          "sigs": [
+            "949bbdb405dcb02b"
+          ]
         },
         "TestWorkerMode": {
           "kind": "typeAlias",
-          "sig": "fb0261171940c183"
+          "sig": "fb0261171940c183",
+          "sigs": [
+            "fb0261171940c183"
+          ]
         },
         "totpCode": {
           "kind": "function",
@@ -4396,11 +6101,17 @@
             "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
             "param1": "req:5dae244747c5c2f5|",
             "return": "req:7538b8048664c9b7"
-          }
+          },
+          "sigs": [
+            "aa613b915b867e7d"
+          ]
         },
         "UIComponentHandle": {
           "kind": "typeAlias",
-          "sig": "ac152a95b0130810"
+          "sig": "ac152a95b0130810",
+          "sigs": [
+            "ac152a95b0130810"
+          ]
         },
         "UIElementHandle": {
           "kind": "interface",
@@ -4429,7 +6140,10 @@
             "clear": "req:ea8fb37f7482dd65",
             "scroll": "req:1df43ad56c7aa7ec",
             "dragTo": "req:4d2efd97471c3056"
-          }
+          },
+          "sigs": [
+            "3294c0d14c1d294e"
+          ]
         },
         "UIElementInfo": {
           "kind": "typeAlias",
@@ -4447,11 +6161,17 @@
             "path": "req:2fb40568533c1a6d",
             "_vnode": "opt:aba403b6ecb255cd",
             "_el": "opt:e21f3629ed25788f"
-          }
+          },
+          "sigs": [
+            "84e8fba4b7396352"
+          ]
         },
         "UIKind": {
           "kind": "typeAlias",
-          "sig": "031f2c520ecb2070"
+          "sig": "031f2c520ecb2070",
+          "sigs": [
+            "031f2c520ecb2070"
+          ]
         },
         "UISurfaceNode": {
           "kind": "typeAlias",
@@ -4465,7 +6185,10 @@
             "children": "req:d26754c720e1e77c",
             "text": "req:2fb40568533c1a6d",
             "_dom": "opt:8534daf2b40dc0fe"
-          }
+          },
+          "sigs": [
+            "0a19f10bfe3db3fc"
+          ]
         }
       }
     },
@@ -4477,7 +6200,10 @@
           "members": {
             "param0": "req:3af1c716fac9af21|84d206f077c902d6~AlertProps",
             "return": "req:df9e68ff8b581ce9"
-          }
+          },
+          "sigs": [
+            "7b8ac8035de43625"
+          ]
         },
         "AlertProps": {
           "kind": "interface",
@@ -4488,7 +6214,10 @@
             "title": "opt:6c07231efa1e49da",
             "children": "opt:6c07231efa1e49da",
             "onDismiss": "opt:97f6d0647f4a9786"
-          }
+          },
+          "sigs": [
+            "fabd202085a1bda1"
+          ]
         },
         "Avatar": {
           "kind": "function",
@@ -4496,7 +6225,10 @@
           "members": {
             "param0": "req:73b4c105d3fdfa33|25642391f6515fae~AvatarProps",
             "return": "req:df9e68ff8b581ce9"
-          }
+          },
+          "sigs": [
+            "250e57f22adc3ec4"
+          ]
         },
         "AvatarProps": {
           "kind": "interface",
@@ -4507,7 +6239,10 @@
             "src": "opt:2fb40568533c1a6d",
             "size": "opt:f6522636230fa080",
             "color": "opt:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "25280ab4ca02754d"
+          ]
         },
         "Breadcrumb": {
           "kind": "function",
@@ -4515,7 +6250,10 @@
           "members": {
             "param0": "req:235d5bae52977a13|ede061c8b3f7eff8~BreadcrumbProps",
             "return": "req:df9e68ff8b581ce9"
-          }
+          },
+          "sigs": [
+            "a5375c783ab951ff"
+          ]
         },
         "BreadcrumbProps": {
           "kind": "interface",
@@ -4524,7 +6262,10 @@
             "extends": "req:c6756c8ceacc8633",
             "items": "req:93eb11a80df275d2",
             "separator": "opt:6c07231efa1e49da"
-          }
+          },
+          "sigs": [
+            "397be6b5edce6088"
+          ]
         },
         "Button": {
           "kind": "function",
@@ -4532,7 +6273,10 @@
           "members": {
             "param0": "req:15a5f177b7badb5b|fce0c04b6662402f~ButtonProps",
             "return": "req:df9e68ff8b581ce9"
-          }
+          },
+          "sigs": [
+            "6ce6d6dbea715c49"
+          ]
         },
         "ButtonProps": {
           "kind": "interface",
@@ -4545,7 +6289,10 @@
             "disabled": "opt:0ecca0fe3beba89b",
             "onClick": "opt:5a93c8a0ff135833",
             "children": "opt:6c07231efa1e49da"
-          }
+          },
+          "sigs": [
+            "69c3d736b38ae70b"
+          ]
         },
         "Card": {
           "kind": "function",
@@ -4553,7 +6300,10 @@
           "members": {
             "param0": "req:fa895178ab52b06e|30ca03d60c86047e~CardProps",
             "return": "req:df9e68ff8b581ce9"
-          }
+          },
+          "sigs": [
+            "65b4f4f5bfbeafd4"
+          ]
         },
         "CardProps": {
           "kind": "interface",
@@ -4563,7 +6313,10 @@
             "title": "opt:6c07231efa1e49da",
             "footer": "opt:6c07231efa1e49da",
             "children": "opt:6c07231efa1e49da"
-          }
+          },
+          "sigs": [
+            "a67a2fb7e7c638fb"
+          ]
         },
         "Checkbox": {
           "kind": "function",
@@ -4571,7 +6324,10 @@
           "members": {
             "param0": "req:77e2485901220a26|16714e09db5c5d17~CheckboxProps",
             "return": "req:df9e68ff8b581ce9"
-          }
+          },
+          "sigs": [
+            "528c07587e46827d"
+          ]
         },
         "CheckboxProps": {
           "kind": "interface",
@@ -4582,7 +6338,10 @@
             "disabled": "opt:0ecca0fe3beba89b",
             "label": "opt:6c07231efa1e49da",
             "onChange": "opt:3b9bae430f1006ab"
-          }
+          },
+          "sigs": [
+            "4c01a7276add6817"
+          ]
         },
         "Column": {
           "kind": "interface",
@@ -4593,7 +6352,10 @@
             "render": "opt:cd87f3a0ec6a171a",
             "align": "opt:166aba0f1f0cd86d",
             "width": "opt:60d81f7053bb0224"
-          }
+          },
+          "sigs": [
+            "ed2514c14d9e6094"
+          ]
         },
         "Confirm": {
           "kind": "function",
@@ -4601,7 +6363,10 @@
           "members": {
             "param0": "req:222ff6bc98561c1a|a49ff70a448cc49b~ConfirmProps",
             "return": "req:1b5f21f1131af291"
-          }
+          },
+          "sigs": [
+            "fc9b58c0983774e7"
+          ]
         },
         "ConfirmButton": {
           "kind": "function",
@@ -4609,7 +6374,10 @@
           "members": {
             "param0": "req:74ffb0c5b5408c9f|d11f107dc4a07458~ConfirmButtonProps",
             "return": "req:df9e68ff8b581ce9"
-          }
+          },
+          "sigs": [
+            "3ab2edaf96b6abaa"
+          ]
         },
         "ConfirmButtonProps": {
           "kind": "interface",
@@ -4621,7 +6389,10 @@
             "confirmTitle": "opt:6c07231efa1e49da",
             "confirmLabel": "opt:2fb40568533c1a6d",
             "cancelLabel": "opt:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "d6acf453101fecac"
+          ]
         },
         "ConfirmProps": {
           "kind": "interface",
@@ -4636,7 +6407,10 @@
             "confirmLabel": "opt:2fb40568533c1a6d",
             "cancelLabel": "opt:2fb40568533c1a6d",
             "danger": "opt:0ecca0fe3beba89b"
-          }
+          },
+          "sigs": [
+            "9c10e9161954d813"
+          ]
         },
         "Crumb": {
           "kind": "interface",
@@ -4645,7 +6419,10 @@
             "label": "req:6c07231efa1e49da",
             "href": "opt:2fb40568533c1a6d",
             "onClick": "opt:5a93c8a0ff135833"
-          }
+          },
+          "sigs": [
+            "4080f49c3ce4dbd3"
+          ]
         },
         "EmptyState": {
           "kind": "function",
@@ -4653,7 +6430,10 @@
           "members": {
             "param0": "req:06237ad047b28c8f|76b47ebf5493d3f6~EmptyStateProps",
             "return": "req:df9e68ff8b581ce9"
-          }
+          },
+          "sigs": [
+            "2082680b5f6fd236"
+          ]
         },
         "EmptyStateProps": {
           "kind": "interface",
@@ -4664,7 +6444,10 @@
             "title": "req:6c07231efa1e49da",
             "description": "opt:6c07231efa1e49da",
             "action": "opt:6c07231efa1e49da"
-          }
+          },
+          "sigs": [
+            "e97416070662a72b"
+          ]
         },
         "Field": {
           "kind": "function",
@@ -4672,7 +6455,10 @@
           "members": {
             "param0": "req:5cc54a8f47c18466|433a3bc5002d3576~FieldProps",
             "return": "req:df9e68ff8b581ce9"
-          }
+          },
+          "sigs": [
+            "d719d103a098e913"
+          ]
         },
         "FieldProps": {
           "kind": "interface",
@@ -4684,7 +6470,10 @@
             "error": "opt:cb5114588202887c",
             "required": "opt:0ecca0fe3beba89b",
             "children": "opt:6c07231efa1e49da"
-          }
+          },
+          "sigs": [
+            "7613720efb0fc4fb"
+          ]
         },
         "Fragment": {
           "kind": "variable",
@@ -4696,7 +6485,10 @@
           "members": {
             "param0": "req:5f55081b435e9306|167d84383e94f20d~InputProps",
             "return": "req:df9e68ff8b581ce9"
-          }
+          },
+          "sigs": [
+            "67b132d2f9b2a1fe"
+          ]
         },
         "InputProps": {
           "kind": "interface",
@@ -4710,7 +6502,10 @@
             "invalid": "opt:0ecca0fe3beba89b",
             "onInput": "opt:2a7fd4e8a069cdc8",
             "onChange": "opt:2a7fd4e8a069cdc8"
-          }
+          },
+          "sigs": [
+            "03b64e10f1e8821e"
+          ]
         },
         "Markdown": {
           "kind": "function",
@@ -4718,7 +6513,10 @@
           "members": {
             "param0": "req:fa3ee9e6c6f3e5e6|0731fae4234aeecc~MarkdownProps",
             "return": "req:df9e68ff8b581ce9"
-          }
+          },
+          "sigs": [
+            "bbbec8b6397dbab4"
+          ]
         },
         "MarkdownProps": {
           "kind": "interface",
@@ -4726,7 +6524,10 @@
           "members": {
             "source": "req:2fb40568533c1a6d",
             "class": "opt:2fb40568533c1a6d"
-          }
+          },
+          "sigs": [
+            "f71d4f22bcf79326"
+          ]
         },
         "Menu": {
           "kind": "function",
@@ -4734,7 +6535,10 @@
           "members": {
             "param0": "req:1f1d14256af6bc16|c619160a282a8d37~MenuProps",
             "return": "req:df9e68ff8b581ce9"
-          }
+          },
+          "sigs": [
+            "f3df05715c23169e"
+          ]
         },
         "MenuItem": {
           "kind": "interface",
@@ -4744,7 +6548,10 @@
             "label": "req:6c07231efa1e49da",
             "disabled": "opt:0ecca0fe3beba89b",
             "danger": "opt:0ecca0fe3beba89b"
-          }
+          },
+          "sigs": [
+            "6904b1432b863321"
+          ]
         },
         "MenuProps": {
           "kind": "interface",
@@ -4755,7 +6562,10 @@
             "items": "req:354e5a699e2984a2",
             "label": "opt:2fb40568533c1a6d",
             "onSelect": "opt:45c5d5ca67ee2ef5"
-          }
+          },
+          "sigs": [
+            "2358663ddb8940c6"
+          ]
         },
         "Modal": {
           "kind": "function",
@@ -4763,7 +6573,10 @@
           "members": {
             "param0": "req:016b59126b9d8769|303311854aa0c318~ModalProps",
             "return": "req:1b5f21f1131af291"
-          }
+          },
+          "sigs": [
+            "a68ce450963e9557"
+          ]
         },
         "ModalProps": {
           "kind": "interface",
@@ -4776,7 +6589,10 @@
             "footer": "opt:6c07231efa1e49da",
             "dismissable": "opt:0ecca0fe3beba89b",
             "children": "opt:6c07231efa1e49da"
-          }
+          },
+          "sigs": [
+            "47982a987b1f79c2"
+          ]
         },
         "Pagination": {
           "kind": "function",
@@ -4784,7 +6600,10 @@
           "members": {
             "param0": "req:50223e97a290baf6|077a1f96560568c9~PaginationProps",
             "return": "req:df9e68ff8b581ce9"
-          }
+          },
+          "sigs": [
+            "90200c8baa5d21aa"
+          ]
         },
         "PaginationProps": {
           "kind": "interface",
@@ -4795,7 +6614,10 @@
             "pages": "req:f6522636230fa080",
             "onPage": "req:2c85a159df41fc7c",
             "window": "opt:f6522636230fa080"
-          }
+          },
+          "sigs": [
+            "dfdbae098279860d"
+          ]
         },
         "Progress": {
           "kind": "function",
@@ -4803,7 +6625,10 @@
           "members": {
             "param0": "req:7ddb0478eb7f1174|fdc5fc026e59b775~ProgressProps",
             "return": "req:df9e68ff8b581ce9"
-          }
+          },
+          "sigs": [
+            "9f665d003c873313"
+          ]
         },
         "ProgressProps": {
           "kind": "interface",
@@ -4814,7 +6639,10 @@
             "max": "opt:f6522636230fa080",
             "label": "opt:2fb40568533c1a6d",
             "showValue": "opt:0ecca0fe3beba89b"
-          }
+          },
+          "sigs": [
+            "76248e64b1de9106"
+          ]
         },
         "RadioGroup": {
           "kind": "function",
@@ -4822,7 +6650,10 @@
           "members": {
             "param0": "req:1e9e7c7baa90c77d|5e788aa29815870b~RadioGroupProps",
             "return": "req:df9e68ff8b581ce9"
-          }
+          },
+          "sigs": [
+            "8b3c868bac00531b"
+          ]
         },
         "RadioGroupProps": {
           "kind": "interface",
@@ -4835,7 +6666,10 @@
             "name": "opt:2fb40568533c1a6d",
             "disabled": "opt:0ecca0fe3beba89b",
             "onChange": "opt:2a7fd4e8a069cdc8"
-          }
+          },
+          "sigs": [
+            "1e9d63f02ee09207"
+          ]
         },
         "RadioOption": {
           "kind": "interface",
@@ -4844,7 +6678,10 @@
             "value": "req:2fb40568533c1a6d",
             "label": "req:6c07231efa1e49da",
             "disabled": "opt:0ecca0fe3beba89b"
-          }
+          },
+          "sigs": [
+            "9b6d63d9dd02e2fa"
+          ]
         },
         "Row": {
           "kind": "function",
@@ -4852,7 +6689,10 @@
           "members": {
             "param0": "req:37d92527aff77a4e|1ac49c4f951df211~StackProps",
             "return": "req:df9e68ff8b581ce9"
-          }
+          },
+          "sigs": [
+            "4c47f58cec5d26bb"
+          ]
         },
         "Select": {
           "kind": "function",
@@ -4860,7 +6700,10 @@
           "members": {
             "param0": "req:12bdb554c62844dd|8b5f5d1d90cccf90~SelectProps",
             "return": "req:df9e68ff8b581ce9"
-          }
+          },
+          "sigs": [
+            "559b24bd2286a7e1"
+          ]
         },
         "SelectOption": {
           "kind": "interface",
@@ -4869,7 +6712,10 @@
             "value": "req:2fb40568533c1a6d",
             "label": "opt:2fb40568533c1a6d",
             "disabled": "opt:0ecca0fe3beba89b"
-          }
+          },
+          "sigs": [
+            "30fd224b2b1f1528"
+          ]
         },
         "SelectProps": {
           "kind": "interface",
@@ -4881,7 +6727,10 @@
             "disabled": "opt:0ecca0fe3beba89b",
             "invalid": "opt:0ecca0fe3beba89b",
             "onChange": "opt:2a7fd4e8a069cdc8"
-          }
+          },
+          "sigs": [
+            "4f3be0e50250c078"
+          ]
         },
         "Skeleton": {
           "kind": "function",
@@ -4889,7 +6738,10 @@
           "members": {
             "param0": "req:90b8aa6e2557be80|6086779236d37589~SkeletonProps",
             "return": "req:df9e68ff8b581ce9"
-          }
+          },
+          "sigs": [
+            "2bd9d77ffc885a8a"
+          ]
         },
         "SkeletonProps": {
           "kind": "interface",
@@ -4900,7 +6752,10 @@
             "height": "opt:60d81f7053bb0224",
             "circle": "opt:0ecca0fe3beba89b",
             "lines": "opt:f6522636230fa080"
-          }
+          },
+          "sigs": [
+            "2fa94532d53fe0c0"
+          ]
         },
         "Spinner": {
           "kind": "function",
@@ -4908,7 +6763,10 @@
           "members": {
             "param0": "req:9c26d55a39ec2ed7|",
             "return": "req:df9e68ff8b581ce9"
-          }
+          },
+          "sigs": [
+            "8b6fd16ce0c93266"
+          ]
         },
         "Stack": {
           "kind": "function",
@@ -4916,7 +6774,10 @@
           "members": {
             "param0": "req:37d92527aff77a4e|1ac49c4f951df211~StackProps",
             "return": "req:df9e68ff8b581ce9"
-          }
+          },
+          "sigs": [
+            "4c47f58cec5d26bb"
+          ]
         },
         "StackProps": {
           "kind": "interface",
@@ -4926,7 +6787,10 @@
             "gap": "opt:5017b79b55cec69b",
             "align": "opt:2fb40568533c1a6d",
             "children": "opt:6c07231efa1e49da"
-          }
+          },
+          "sigs": [
+            "e5cf331c3815d0e4"
+          ]
         },
         "Switch": {
           "kind": "function",
@@ -4934,7 +6798,10 @@
           "members": {
             "param0": "req:08c031b2513e2e28|3865747f595da783~SwitchProps",
             "return": "req:df9e68ff8b581ce9"
-          }
+          },
+          "sigs": [
+            "b0ee4f25f8efe3ab"
+          ]
         },
         "SwitchProps": {
           "kind": "interface",
@@ -4945,7 +6812,10 @@
             "disabled": "opt:0ecca0fe3beba89b",
             "label": "opt:6c07231efa1e49da",
             "onChange": "opt:3b9bae430f1006ab"
-          }
+          },
+          "sigs": [
+            "4c01a7276add6817"
+          ]
         },
         "TabItem": {
           "kind": "interface",
@@ -4955,7 +6825,10 @@
             "label": "req:6c07231efa1e49da",
             "disabled": "opt:0ecca0fe3beba89b",
             "children": "opt:6c07231efa1e49da"
-          }
+          },
+          "sigs": [
+            "d7568ae2314484e2"
+          ]
         },
         "Table": {
           "kind": "function",
@@ -4964,7 +6837,10 @@
             "param0": "req:59ae3197aedee1e7|0720425a263eeab2~TableProps",
             "return": "req:df9e68ff8b581ce9",
             "typeParams": "req:8f358ff0c2966f26"
-          }
+          },
+          "sigs": [
+            "7ae917c37abc1db2"
+          ]
         },
         "TableProps": {
           "kind": "interface",
@@ -4976,7 +6852,10 @@
             "getKey": "opt:0e2cb49fdde20079",
             "empty": "opt:6c07231efa1e49da",
             "onRowClick": "opt:cf351374f4d9d765"
-          }
+          },
+          "sigs": [
+            "436421718889da1e"
+          ]
         },
         "Tabs": {
           "kind": "function",
@@ -4984,7 +6863,10 @@
           "members": {
             "param0": "req:cab76e767cd9e1e1|f815a4d2b23bb219~TabsProps",
             "return": "req:df9e68ff8b581ce9"
-          }
+          },
+          "sigs": [
+            "55f9c7be0cee97ae"
+          ]
         },
         "TabsProps": {
           "kind": "interface",
@@ -4995,7 +6877,10 @@
             "value": "opt:2fb40568533c1a6d",
             "label": "opt:2fb40568533c1a6d",
             "onChange": "opt:45c5d5ca67ee2ef5"
-          }
+          },
+          "sigs": [
+            "955f5964ccac9b57"
+          ]
         },
         "Textarea": {
           "kind": "function",
@@ -5003,7 +6888,10 @@
           "members": {
             "param0": "req:aff49d4f3606ffe5|21ba7a7918bd391d~TextareaProps",
             "return": "req:df9e68ff8b581ce9"
-          }
+          },
+          "sigs": [
+            "0c514d086bb8c0d1"
+          ]
         },
         "TextareaProps": {
           "kind": "interface",
@@ -5016,7 +6904,10 @@
             "disabled": "opt:0ecca0fe3beba89b",
             "invalid": "opt:0ecca0fe3beba89b",
             "onInput": "opt:2a7fd4e8a069cdc8"
-          }
+          },
+          "sigs": [
+            "045e1f633dcbc52e"
+          ]
         },
         "toast": {
           "kind": "function",
@@ -5025,7 +6916,10 @@
             "param0": "req:6b699ccb48d4102a|3778f57d4f6d4b3f~VChild",
             "param1": "opt:0f9c6bc9f9a6835a|d016b1ad4fdbb0eb~typeLiteral",
             "return": "req:97f6d0647f4a9786"
-          }
+          },
+          "sigs": [
+            "edf32acc92e2f132"
+          ]
         },
         "ToastHost": {
           "kind": "function",
@@ -5033,11 +6927,17 @@
           "members": {
             "param0": "req:9c26d55a39ec2ed7|",
             "return": "req:df9e68ff8b581ce9"
-          }
+          },
+          "sigs": [
+            "8b6fd16ce0c93266"
+          ]
         },
         "ToastVariant": {
           "kind": "typeAlias",
-          "sig": "43818e0b16d772be"
+          "sig": "43818e0b16d772be",
+          "sigs": [
+            "43818e0b16d772be"
+          ]
         },
         "Tooltip": {
           "kind": "function",
@@ -5045,7 +6945,10 @@
           "members": {
             "param0": "req:d28de23f48710b77|babef14e8822f091~TooltipProps",
             "return": "req:df9e68ff8b581ce9"
-          }
+          },
+          "sigs": [
+            "171dcad741db71b9"
+          ]
         },
         "TooltipProps": {
           "kind": "interface",
@@ -5055,18 +6958,27 @@
             "text": "req:2fb40568533c1a6d",
             "placement": "opt:9f3b99ee2038ff8a",
             "children": "opt:6c07231efa1e49da"
-          }
+          },
+          "sigs": [
+            "73b451b93a8a49d4"
+          ]
         },
         "UI_CSS": {
           "kind": "variable",
-          "sig": "151b216e0fdfdb2f"
+          "sig": "151b216e0fdfdb2f",
+          "sigs": [
+            "151b216e0fdfdb2f"
+          ]
         },
         "UiStyles": {
           "kind": "function",
           "sig": "2603d94e2d37fc0a",
           "members": {
             "return": "req:df9e68ff8b581ce9"
-          }
+          },
+          "sigs": [
+            "9c274d94fee52f1d"
+          ]
         }
       }
     },
@@ -5078,7 +6990,10 @@
           "members": {
             "retireData": "opt:0ecca0fe3beba89b",
             "acceptDataLoss": "opt:0ecca0fe3beba89b"
-          }
+          },
+          "sigs": [
+            "e4e48349c10b3ab5"
+          ]
         },
         "AvailableUpdate": {
           "kind": "typeAlias",
@@ -5093,7 +7008,10 @@
             "signed": "req:0ecca0fe3beba89b",
             "keyFingerprint": "req:cb5114588202887c",
             "warnings": "req:6941c580c10685fb"
-          }
+          },
+          "sigs": [
+            "50e2578e4322a47a"
+          ]
         },
         "BlockedUpdate": {
           "kind": "typeAlias",
@@ -5101,18 +7019,27 @@
           "members": {
             "version": "req:2fb40568533c1a6d",
             "blockers": "req:6941c580c10685fb"
-          }
+          },
+          "sigs": [
+            "00223f278dc486fc"
+          ]
         },
         "CheckOptions": {
           "kind": "typeAlias",
           "sig": "b5b29e156f56ab69",
           "members": {
             "dismissed": "req:cb5114588202887c"
-          }
+          },
+          "sigs": [
+            "b5b29e156f56ab69"
+          ]
         },
         "CheckResult": {
           "kind": "typeAlias",
-          "sig": "1685eee8b23cc6e1"
+          "sig": "1685eee8b23cc6e1",
+          "sigs": [
+            "1685eee8b23cc6e1"
+          ]
         },
         "CompatVerdict": {
           "kind": "typeAlias",
@@ -5122,7 +7049,10 @@
             "migrates": "req:0ecca0fe3beba89b",
             "blockers": "req:6941c580c10685fb",
             "warnings": "req:6941c580c10685fb"
-          }
+          },
+          "sigs": [
+            "2d2d636640102202"
+          ]
         },
         "installUpdatesRuntime": {
           "kind": "function",
@@ -5130,15 +7060,24 @@
           "members": {
             "param0": "req:d1342a260ccd2467|1b66688531aca239~UpdatesRuntime+e47c90b8d1952424~null",
             "return": "req:b5f6ae1b8a43e31d"
-          }
+          },
+          "sigs": [
+            "c9aecce4a1638c86"
+          ]
         },
         "updates": {
           "kind": "variable",
-          "sig": "70053f50f0e6fb7f"
+          "sig": "70053f50f0e6fb7f",
+          "sigs": [
+            "70053f50f0e6fb7f"
+          ]
         },
         "UpdatesCell": {
           "kind": "typeAlias",
-          "sig": "2b9ab8c25b01e810"
+          "sig": "2b9ab8c25b01e810",
+          "sigs": [
+            "2b9ab8c25b01e810"
+          ]
         },
         "UpdatesConfig": {
           "kind": "typeAlias",
@@ -5154,15 +7093,24 @@
             "canApply": "opt:841db791a200d26f",
             "allowUnsigned": "opt:0ecca0fe3beba89b",
             "prerelease": "opt:0ecca0fe3beba89b"
-          }
+          },
+          "sigs": [
+            "96dd65c94b6135f7"
+          ]
         },
         "UpdatesInput": {
           "kind": "typeAlias",
-          "sig": "cfb871764f9f427d"
+          "sig": "cfb871764f9f427d",
+          "sigs": [
+            "cfb871764f9f427d"
+          ]
         },
         "UpdateSourceKind": {
           "kind": "typeAlias",
-          "sig": "b15231178a63080d"
+          "sig": "b15231178a63080d",
+          "sigs": [
+            "b15231178a63080d"
+          ]
         },
         "UpdatesRuntime": {
           "kind": "typeAlias",
@@ -5174,7 +7122,10 @@
             "current": "req:cb5114588202887c",
             "currentUnknown": "req:cb5114588202887c",
             "kind": "req:57a69e0e33e08083"
-          }
+          },
+          "sigs": [
+            "4ec46eb56a652656"
+          ]
         },
         "UpdatesState": {
           "kind": "typeAlias",
@@ -5193,11 +7144,17 @@
             "error": "req:cb5114588202887c",
             "dismissed": "req:cb5114588202887c",
             "backupPath": "req:cb5114588202887c"
-          }
+          },
+          "sigs": [
+            "5e1e93344a054692"
+          ]
         },
         "UpdateStatus": {
           "kind": "typeAlias",
-          "sig": "1afe297ea4fd49f5"
+          "sig": "1afe297ea4fd49f5",
+          "sigs": [
+            "1afe297ea4fd49f5"
+          ]
         }
       }
     },
@@ -5392,6 +7349,10 @@
           "sig": "verb"
         },
         "am errors": {
+          "kind": "verb",
+          "sig": "verb"
+        },
+        "am eval": {
           "kind": "verb",
           "sig": "verb"
         },

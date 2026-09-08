@@ -379,6 +379,15 @@ JSON: `aio`, `aioMismatch`.
 Scans lock files, validates each PID is alive, returns active instances with
 appId, port, PID, uptime, home, and cwd.
 
+**`port` is the WS transport port** — `0` for any app on a Unix socket. The
+DevTools port is separate and reported as **`cdpPort`** (a `CDP` column appears
+when any instance has one); it is `null` unless the app was started with
+`--cdp`. Use that one for `am eval`, `am shot` and anything else that drives the
+window. Do not go looking for it in `ss -ltnp`: on a machine running two aio
+apps, that scan is ambiguous and it resolves _silently_ into the other app's DOM
+— a field report lost a long stretch to exactly that, believing its own correct
+routes were broken while every observation was about someone else's window.
+
 **Two apps on one machine mean two `am` targets.** Every `am` command resolves
 ONE app — from `--app=<id>`, else the `deno.json`/entry in the current directory
 — so running `deno task am` from each app's own directory does the right thing,
@@ -820,6 +829,42 @@ instance, as everywhere in `am`.
 
 `--pose=<json>` is **not** supported: the app decides its own camera. Expose a
 cell method that sets the view, drive it with `am dispatch`, then `am shot`.
+
+### Evaluate in the live window (`am eval`)
+
+`am surface` reads the UI **semantically** — components, names, text, values.
+`am eval` reads everything it cannot: **geometry**, **computed styles**, and a
+**fetch from the page's own origin**.
+
+```sh
+am eval 'document.title'
+am eval 'document.querySelector(".stage").getBoundingClientRect()'
+am eval 'getComputedStyle(document.querySelector(".row")).height'
+am eval 'fetch("/api/health").then(r => r.status)'      # promises are awaited
+am eval 'document.body'                                  # a node → name, id, class, rect, text
+am eval '[...document.querySelectorAll(".row")].length'
+am eval --window=1 'location.href'                       # the second window
+```
+
+Same gate as `am shot`: the app must be running with `--cdp`. Nothing new is
+exposed — this drives the port the app already opted into, on 127.0.0.1 only.
+
+The result is JSON (`--json` gives `{value, type, url}`). An expression that
+**throws** exits non-zero and names the exception; it never comes back as a
+quiet `undefined`.
+
+Three things it does for you, each because the raw protocol gets them wrong:
+
+- a **`DOMRect` keeps its numbers** (raw CDP serialises it to `{}`, because its
+  numbers are prototype getters — and geometry is the main reason to reach for
+  this);
+- `{ a: 1 }` is the **object** you wrote, not the labelled block JavaScript
+  reads at statement position;
+- a **DOM node** answers with its name, id, class, rect and first 200 characters
+  of text, rather than the `{}` that `JSON.stringify` gives.
+
+Why it exists: without it, every agent driving an aio app writes the same
+fifteen lines of CDP client. Three field reports did, independently.
 
 ## Manual VM labs (`am lab`)
 

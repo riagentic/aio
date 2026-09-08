@@ -20,6 +20,11 @@ app, that is a bug in aio, not a step you missed.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha77 → **beta1**](from-alpha77-to-beta1.md) — nothing breaks. Nine field
+  reports answered: `route()` and `aio/log` become importable, `onMount` keeps
+  the cleanup you return, a lifecycle read that subscribes to nothing now says
+  so, colour is measured, `am eval` and `cdpPort` arrive, Tailwind has a door,
+  and six `aiol` rules stop firing on correct code
 - [alpha76 → alpha77](from-alpha76-to-alpha77.md) — nothing breaks, and nothing
   ever will again: the surface is frozen. The visual app manager is served its
   app again (the validator read the framework's own HTML template as browser

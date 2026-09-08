@@ -19,6 +19,7 @@ import {
   helpEntryVerbs,
   releaseChannel,
   type Snapshot,
+  type SymbolEntry,
 } from "../scripts/api-snapshot.ts";
 
 const snap = (
@@ -405,4 +406,159 @@ Deno.test("api: the COMMITTED snapshot really carries parameter parts", () => {
     2,
     `setDevMode(enabled: boolean | "auto") should record two parts: ${p0}`,
   );
+});
+
+// ── One level down: a nested object type's own members ───────────────────
+//
+// The per-member digests exist so "adding an optional config key" and
+// "renaming one" stop producing the identical BREAKING verdict. A member whose
+// type is an inline object literal — `expect: { state, status, … }`, a nested
+// config bag — had the same problem one level deeper: the whole thing was one
+// digest, so ADDING an optional assertion to it read as "type changed",
+// BREAKING, and every routine addition looked like a compat break. That is the
+// noise this file's own header says the member digests exist to remove.
+//
+// `extractMembers` now gives the parent a presence marker (`req:object`) and
+// moves its shape into `parent.child` keys. Both directions are pinned here,
+// because a gate that stopped reporting real breaks would be far worse than
+// one that over-reports.
+
+Deno.test("api: an added OPTIONAL member of a nested object is additive", () => {
+  const d = memberDiff(
+    { expect: "req:object", "expect.state": "req:aaa" },
+    {
+      expect: "req:object",
+      "expect.state": "req:aaa",
+      "expect.rejects": "opt:bbb",
+    },
+  );
+  assertEquals(d.length, 1, JSON.stringify(d));
+  assertEquals(
+    d[0]!.breaking,
+    false,
+    `adding an optional assertion must not read as a break: ${d[0]!.line}`,
+  );
+  assertStringIncludes(d[0]!.line, "C.expect.rejects added (optional)");
+});
+
+Deno.test("api: a REMOVED member of a nested object is still BREAKING", () => {
+  const d = memberDiff(
+    { expect: "req:object", "expect.state": "req:aaa" },
+    { expect: "req:object" },
+  );
+  assertEquals(d.length, 1, JSON.stringify(d));
+  assertEquals(d[0]!.breaking, true, d[0]!.line);
+  assertStringIncludes(d[0]!.line, "expect.state");
+});
+
+Deno.test("api: a RESHAPED member of a nested object is still BREAKING", () => {
+  const d = memberDiff(
+    { expect: "req:object", "expect.state": "req:aaa" },
+    { expect: "req:object", "expect.state": "req:zzz" },
+  );
+  assertEquals(d.length, 1, JSON.stringify(d));
+  assertEquals(d[0]!.breaking, true, d[0]!.line);
+});
+
+Deno.test("api: an added REQUIRED member of a nested object is BREAKING", () => {
+  const d = memberDiff(
+    { expect: "req:object" },
+    { expect: "req:object", "expect.state": "req:aaa" },
+  );
+  assertEquals(d.length, 1, JSON.stringify(d));
+  assertEquals(
+    d[0]!.breaking,
+    true,
+    `a required member breaks anyone implementing the type: ${d[0]!.line}`,
+  );
+});
+
+// ── Adding an overload, with the old signature preserved ─────────────────
+//
+// The one signature change that is provably additive, and the main additive
+// move a frozen surface has left. Overload resolution tries declarations in
+// ORDER, so if the previous signature is still there and still first, every
+// call that resolved against it still resolves — the new ones are reachable
+// only by arguments the old one rejected. That is not "probably compatible",
+// it is the language's own rule.
+//
+// Without it the gate held ONE digest for the whole set, so adding an overload
+// beside an untouched one and REPLACING the only one produced the identical
+// BREAKING verdict — and the only way past a failing gate is `update:api`,
+// which erases the record of what changed.
+const overloads = (
+  sig: string,
+  sigs?: string[],
+): SymbolEntry =>
+  ({ kind: "function", sig, ...(sigs ? { sigs } : {}) }) as SymbolEntry;
+
+/** A symbol as it is recorded today: `sigs` always present, one per
+ *  declaration. Both sides must carry them — see the last test in this group. */
+const fn = (...sigs: string[]): SymbolEntry => overloads(sigs.join(""), sigs);
+
+Deno.test("api: an ADDED overload with the old signature first is additive", () => {
+  const d = diffSnapshots(
+    snap({ useRoute: fn("A") } as never),
+    snap({ useRoute: fn("A", "B") } as never),
+  );
+  assertEquals(d.length, 1, JSON.stringify(d));
+  assertEquals(
+    d[0]!.breaking,
+    false,
+    `the old signature is still there verbatim: ${d[0]!.line}`,
+  );
+  assertStringIncludes(d[0]!.line, "gained 1 overload");
+});
+
+Deno.test("api: an overload inserted BEFORE the old one is BREAKING", () => {
+  // The half that makes the rule safe. A new first overload can capture calls
+  // that used to resolve elsewhere — a real break wearing an additive shape.
+  const d = diffSnapshots(
+    snap({ useRoute: fn("A") } as never),
+    snap({ useRoute: fn("B", "A") } as never),
+  );
+  assertEquals(d.length, 1, JSON.stringify(d));
+  assertEquals(d[0]!.breaking, true, d[0]!.line);
+});
+
+Deno.test("api: CHANGING the old signature while adding one is BREAKING", () => {
+  const d = diffSnapshots(
+    snap({ useRoute: fn("A") } as never),
+    snap({ useRoute: fn("A2", "B") } as never),
+  );
+  assertEquals(d.length, 1, JSON.stringify(d));
+  assertEquals(d[0]!.breaking, true, d[0]!.line);
+});
+
+Deno.test("api: REMOVING an overload is BREAKING", () => {
+  const d = diffSnapshots(
+    snap({ useRoute: fn("A", "B") } as never),
+    snap({ useRoute: fn("A") } as never),
+  );
+  assertEquals(d.length, 1, JSON.stringify(d));
+  assertEquals(d[0]!.breaking, true, d[0]!.line);
+});
+
+Deno.test("api: a KIND change is never smuggled in as an overload", () => {
+  const d = diffSnapshots(
+    snap({ x: fn("A") } as never),
+    snap(
+      { x: { kind: "variable", sig: "AB", sigs: ["A", "B"] } } as never,
+    ),
+  );
+  assertEquals(d.length, 1, JSON.stringify(d));
+  assertEquals(d[0]!.breaking, true, d[0]!.line);
+});
+
+Deno.test("api: a snapshot with no `sigs` falls back to BREAKING", () => {
+  // The conservative half. A committed snapshot from before per-declaration
+  // digests existed cannot be read as "the first of" anything, and guessing
+  // there would let a real reshape through wearing an additive shape. One
+  // regeneration gives every symbol its `sigs`; until then, unknown is a break.
+  const d = diffSnapshots(
+    snap({ useRoute: overloads("A") } as never), // no sigs — an old snapshot
+    snap({ useRoute: fn("A", "B") } as never),
+  );
+  assertEquals(d.length, 1, JSON.stringify(d));
+  assertEquals(d[0]!.breaking, true, d[0]!.line);
 });

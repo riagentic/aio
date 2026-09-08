@@ -49,6 +49,22 @@ const OWNERS: Record<string, [Owner, string]> = {
   _resetMethodCancel: ["RUNTIME", "cancellation registry"],
   _resetSubs: ["RUNTIME", "subscription registry"],
   _resetRootSignals: ["RUNTIME", "module-scope signal state"],
+  _resetContrastAudit: [
+    "HARNESS",
+    "the dev contrast audit's per-pair memory — same warn-dedup class as the " +
+    "RUNTIME entries, and it cannot join them: it lives in src/air/ and the " +
+    "one call (_resetAioRuntime) is in src/state/, which may not import air. " +
+    "testUI's mount clears it, which is every UI test",
+  ],
+  _resetSelectorAudit: [
+    "HARNESS",
+    "the #id-selector audit's per-id memory — see _resetContrastAudit",
+  ],
+  _resetUntrackedReadWarnings: [
+    "HARNESS",
+    "the untracked-lifecycle-read memory, keyed per (component, value) — see " +
+    "_resetContrastAudit",
+  ],
   _resetSelectorHints: ["RUNTIME", "warn dedup — order-dependent unreset"],
   _resetTransactionHints: ["RUNTIME", "warn dedup — order-dependent unreset"],
   _resetReturnEffectHints: ["RUNTIME", "warn dedup — order-dependent unreset"],

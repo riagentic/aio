@@ -42,6 +42,18 @@ export interface WatcherDeps {
   /** How long graph validation gets before the reload goes out without it.
    *  Injected only by tests — see {@link GRAPH_TIMEOUT_MS}. */
   graphTimeoutMs?: number;
+  /** The app's own CSS toolchain (`build.css` in deno.json) — Tailwind,
+   *  PostCSS, Sass. Runs BEFORE the reload goes out, so the stylesheet the
+   *  browser fetches is the one this edit produced. Absent for an app that
+   *  declares no step; injected so the watcher stays testable without a
+   *  subprocess.
+   *
+   *  Returns the paths the step WROTE. The watcher needs them: the output is
+   *  a file inside the watched tree, so a step that writes `style.css` wakes
+   *  the watcher, which would run the step, which would write again — a loop
+   *  at save speed. A burst whose changes are all self-written skips the step
+   *  and the sequence terminates. */
+  runCss?: () => Promise<readonly string[]>;
 }
 
 /** Trailing-edge debounce: batch a burst of saves into one reload. */
@@ -101,6 +113,9 @@ function describeChanged(paths: string[]): string {
 
 /** Factory — creates a self-contained file watcher with debouncing and health monitoring */
 export function createFileWatcher(deps: WatcherDeps): FileWatcher {
+  // Paths the CSS step wrote on its last run. A burst consisting only of these
+  // is the step's own echo, not an edit — see `runCss` in WatcherDeps.
+  const cssSelfWritten = new Set<string>();
   const { absBaseDir, debug } = deps;
 
   // --- Debounce state ---
@@ -379,6 +394,14 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
           deps.broadcastWs(enc("graph-clear"));
           deps.onReload?.("reload");
         } else {
+          // The app's CSS toolchain, before the reload — otherwise the browser
+          // fetches the stylesheet from the PREVIOUS edit and the loop looks
+          // broken in the most confusing way available (your change is in the
+          // source, on screen it is not).
+          if (deps.runCss && !changed.every((c) => cssSelfWritten.has(c))) {
+            cssSelfWritten.clear();
+            for (const w of await deps.runCss()) cssSelfWritten.add(w);
+          }
           // Normal reload (no graph issues)
           const signal = wasFullReload ? "reload" : "css";
           debug(`${signal} → broadcasting to clients`);

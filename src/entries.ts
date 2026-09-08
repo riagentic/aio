@@ -30,6 +30,17 @@ export const AIO_ENTRY_PATHS: Readonly<Record<string, string>> = {
   "aio/server": "src/server-entry.ts",
   "aio/state-core": "src/state-core.ts",
   "aio/db": "src/db/mod.ts",
+  // A LEAF: the logger, reachable without the barrel. Measured on a live
+  // trading process — `import { log } from "aio"` pulled 260 aio modules and
+  // 3.7 MB into a service that never draws a pixel (the vdom renderer, the
+  // build system, the Electron target, the CRDT engine), because one file
+  // wanted a logger. The same symbol from this entry costs 13 modules and
+  // 111 KB. That desk pins aio and treats a pin bump as a live-trading change
+  // *because* its import graph was 72% framework; a leaf export is what makes
+  // an upgrade stop being a trading-risk event. `import { log } from "aio"`
+  // keeps working identically — this is a second door, not a move.
+  // `tests/leaf-entries.test.ts` fails if the leaf ever stops being one.
+  "aio/log": "src/diagnostics/logger.ts",
   "aio/extras": "src/extras/mod.ts",
   "aio/sync": "src/sync/mod.ts",
   "aio/testing": "src/cell-test.ts",

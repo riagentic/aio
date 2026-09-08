@@ -11,10 +11,40 @@ Rendering: `import { signal } from "aio/air"`
 Focused imports:
 
 ```ts
+import { Button, Field, Table } from "aio/ui"; // ~30 ready components
 import { createDB } from "aio/server"; // server-only values (SQLite, CLI)
 import { testCell } from "aio/testing"; // Test harness only
+import { log } from "aio/log"; // the logger, as a LEAF (13 modules, not the barrel)
 import { createSelector, schedule } from "aio"; // scheduling + selectors live on the core entry
 ```
+
+### `aio/ui` — the component kit
+
+**Read this before you write a `<button>`.** A field report hand-rolled
+`Switch`, `Progress`, `EmptyState`, `Card`, `Row`/`Stack`, `Select`, `Field` and
+`Button` — plus ~889 lines of CSS — with all of them one import away the whole
+time. They looked for the kit on this page, and it was not here.
+
+```ts
+import { Button, Card, Field, Input, Table, toast, UiStyles } from "aio/ui";
+```
+
+|              |                                                                                      |
+| ------------ | ------------------------------------------------------------------------------------ |
+| **Forms**    | `Button` `Input` `Textarea` `Select` `Checkbox` `RadioGroup` `Switch` `Field`        |
+| **Layout**   | `Card` `Stack` `Row` `Tabs` `Breadcrumb`                                             |
+| **Data**     | `Table` `Pagination` `Markdown` `Avatar`                                             |
+| **Feedback** | `Alert` `Progress` `Spinner` `Skeleton` `EmptyState` `Tooltip` `toast` / `ToastHost` |
+| **Overlay**  | `Modal` `Confirm` `ConfirmButton` `Menu`                                             |
+| **Styles**   | `UiStyles` (render once) · `UI_CSS` (the raw sheet)                                  |
+
+Every component takes the `Common` props (`class`, `id`, `style`, `t`) and
+renders through AIR — no wrapper, no runtime. The kit is
+[deliberately minimal](../ui/kit.md): enough to build a real dashboard without
+importing anything, not a design system.
+
+Styling it is [the theme](../ui/theme.md) — or your own
+[CSS toolchain](../ui/css-toolchain.md).
 
 ### Start Here
 

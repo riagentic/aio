@@ -2,6 +2,7 @@
  * @module
  * Build bundle — esbuild bundling step, freshness cache check, asset copying.
  */
+import { runCssBuild } from "./build-css.ts";
 import { APP_ICON, APP_STYLE, UI_ENTRY } from "../server/app-files.ts";
 import { DENO_JSON_NAMES } from "../server/deno-json.ts";
 import { resolveShare, type ShareRoot } from "../server/app-dirs.ts";
@@ -609,6 +610,20 @@ export async function runBundle(
 
     const stat = await Deno.stat(out);
     staged("dist/app.js", bytes(stat.size));
+  }
+
+  // The app's own CSS toolchain runs FIRST — Tailwind, PostCSS, Sass, anything
+  // that writes `style.css`. It has to be before the copy below, or the build
+  // ships the previous run's stylesheet with every gate green (see
+  // build-css.ts). A failing step fails the BUILD: an unstyled artifact must
+  // not be shippable.
+  {
+    const css = await runCssBuild(root, { throwOnFail: true });
+    // Not `staged()`: this produces a SOURCE file (the app's own style.css),
+    // which the copy below then stages. Labelling it as staged output said
+    // "goes into the binary; not in the final dist/" about a stylesheet that
+    // does exactly the opposite.
+    if (css.ran) step(`css ${css.command}`, `${css.ms}ms`);
   }
 
   // Copy style.css to dist/ -- from THE app dir (cfg.appDir), the same place

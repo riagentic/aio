@@ -45,6 +45,10 @@ README.md
 dep/aio                          <- symlink to the pinned framework (gitignored)
 ```
 
+Your import map already carries every aio entry — including
+[`aio/ui`](../ui/kit.md), ~30 components (`Button`, `Input`, `Field`, `Table`,
+`Card`, `Modal`, `toast`…) you can import today without adding a dependency.
+
 The project is git-initialized, `deno task test` passes as scaffolded, and it
 builds with two tasks — `deno task compile` (a binary for the app's default
 target) and `deno task build --targets=electron|android` (any other target;

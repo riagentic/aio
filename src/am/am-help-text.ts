@@ -40,6 +40,7 @@ export type Target = (typeof TARGETS)[number];
 export const CREATE_FLAGS: readonly string[] = [
   `--template=<${TEMPLATES.join("|")}>`,
   `--target=<${TARGETS.join("|")}>`,
+  "--css=tailwind",
   "--aio-version=<v>",
   "--mirror[=<path>]",
   "--jsr",
@@ -123,8 +124,8 @@ State:
   state [path] [--wait=N]  State query (dot-path, [*] wildcard, {pick})
   state --ui [user]       Server-side UI-state projection (was \`am ui\`; for
                           live client UI use: surface)
-  expect <path> <op> [v]  Assert on state (eq/ne/gt/lt/contains/exists…); e2e; --wait=N
-  record [out] --from=J  Generate a bootCells replay test from a journal
+  expect <path> <op> [v]  ASSERT / TEST / verify state (eq/ne/gt/lt/contains/exists…);\n                          e2e; --wait=N — the check to reach for instead of\n                          piping \`am state\` through a parser
+  record [out] --from=J   GENERATE A TEST — writes a bootCells replay test from\n                          a journal, so a bug you reproduced becomes a test
   dispatch <cell:method> [a b …]  Call a method with POSITIONAL args (setHost "1.2.3.4")
   dispatch … --as-server  Dispatch past the cell access gate — the operator
                           door for a "public read, server-only write" cell.
@@ -135,8 +136,8 @@ State:
   actions                 Time-travel history
 
 Time-travel:
-  timeline [--from=J]     Recent dispatches + payload + state diff (--lines=N)
-  replay [N..M] [--dry]   Re-dispatch a journal range for repro (--from=J)
+  timeline [--from=J]     DEBUG / trace: recent dispatches + payload + state diff\n                          (--lines=N) — what happened, and what it changed
+  replay [N..M] [--dry]   REPRODUCE: re-dispatch a journal range (--from=J)
   timetravel undo|redo    Step back/forward
   timetravel goto <id>    Jump to one entry — the id am actions lists
   timetravel pause|resume Freeze/unfreeze state
@@ -195,6 +196,11 @@ Inspect:
                           type APPENDS to the field, setValue REPLACES it (as in testUI)
   shot [n] [--out=F.png] [--full]  PNG of the live Electron window via CDP — the app
                           must run with --cdp (or AIO_CDP=1); --json → {file,bytes,url}
+  eval '<js>'             Evaluate JS in the live renderer, get JSON back —
+                          geometry, computed styles, a fetch from the page's own
+                          origin: everything \`surface\` cannot see. Promises are
+                          awaited. Needs --cdp, same as shot. --window=N picks
+                          the window.
   where <file>            Which execution context this file runs in, and WHY —
                           the import chain from the UI entry, from the same
                           module graph the dev server walks
@@ -261,6 +267,11 @@ Install (apps that run.sh installed into ~/app/):
 Other:
   version                 Print version
   help                    This message
+
+Driving an app with no human in the loop (agents, CI, scripts): ASSERT with
+        expect, DRIVE with dispatch, READ the UI with surface, DEBUG with
+        timeline, REPRODUCE with replay. Start at docs/AGENTS.md — three field
+        reports finished a whole build before finding these.
 
 --json: machine-readable output for EVERY command — the scripting interface
         (errors included; a non-zero exit still means failed)
