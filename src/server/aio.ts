@@ -2460,8 +2460,18 @@ async function _runPhases<S, A, E>(
         // null, and the app exited `errors=0` having lost every write since.
         // Existence is the cheapest fact that catches it, and this is the one
         // moment it costs nothing — there is no next window to notice in.
+        // `:memory:` is SQLite's SENTINEL for "there is no file", not a path.
+        // Resolving it produced `<cwd>/:memory:`, which of course does not
+        // exist, so every in-memory app ended a clean run with a FATAL-sounding
+        // "the database file is GONE … NONE of them are on disk" — about a
+        // database that was never meant to be on disk. A false alarm in the one
+        // message that must be believed the day it is real is worse than no
+        // message: it is how a reader learns to discount this exact line.
         const dbFile = config.dbPath ? resolve(config.dbPath) : _dirs.stateDb;
-        const gone = await Deno.stat(dbFile).then(
+        const inMemory = config.dbPath === ":memory:" ||
+          config.dbPath === "file::memory:" ||
+          String(config.dbPath ?? "").startsWith(":memory:");
+        const gone = inMemory ? false : await Deno.stat(dbFile).then(
           () => false,
           (e) => e instanceof Deno.errors.NotFound,
         );

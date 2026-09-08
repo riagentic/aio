@@ -8,6 +8,7 @@ import {
   writeDefaultIcon,
 } from "../src/build/build-helpers.ts";
 import { join } from "@std/path";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 // ── resolveSdk (ANDROID_HOME may point at the SDK OR its parent) ──
 
@@ -218,5 +219,43 @@ Deno.test("copyDir: copies files recursively", async () => {
   } finally {
     await Deno.remove(src, { recursive: true });
     await Deno.remove(dst, { recursive: true });
+  }
+});
+
+// A stale symlink from a previous platform pass must not fail the next one.
+//
+// The scratch AppDir is shared by every platform of one `--platforms=…` run.
+// `Deno.symlink` refuses an existing path, so a macOS x64 pass left its
+// `Electron.app` behind and the arm64 pass died copying its own runtime over
+// it — `AlreadyExists: File exists (os error 17): symlink 'A' -> …/Versions/
+// Current`. Only .app bundles carry symlinks at those paths, so only the
+// macOS→macOS-arm64 order hit it: a build that fails on the FOURTH platform and
+// nowhere else reads as a macOS problem rather than a copy bug.
+Deno.test("copyDir: a second pass REPLACES a stale symlink, not fails on it", async () => {
+  const a = await tempDir("aio-copydir-a-");
+  const b = await tempDir("aio-copydir-b-");
+  const dst = await tempDir("aio-copydir-dst-");
+  try {
+    // Two "runtimes", each with a link of the same name pointing elsewhere.
+    await Deno.writeTextFile(join(a, "real-a"), "a");
+    await Deno.symlink("real-a", join(a, "Current"));
+    await Deno.writeTextFile(join(b, "real-b"), "b");
+    await Deno.symlink("real-b", join(b, "Current"));
+
+    await copyDir(a, dst);
+    assertEquals(await Deno.readLink(join(dst, "Current")), "real-a");
+
+    // The second platform pass over the SAME scratch dir.
+    await copyDir(b, dst);
+    assertEquals(
+      await Deno.readLink(join(dst, "Current")),
+      "real-b",
+      "the second pass must win — a stale link from the previous platform is " +
+        "not what this build is packaging",
+    );
+  } finally {
+    await dropTempDir(a);
+    await dropTempDir(b);
+    await dropTempDir(dst);
   }
 });

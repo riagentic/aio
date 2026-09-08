@@ -44,10 +44,56 @@ testCell(counter, "save flow: idle -> saving -> error -> idle", (t) => {
 ```ts
 testCell(counter, "random action fuzzing", (t) => {
   t.init();
-  t.randomActions(100); // dispatch 100 random valid actions
+  const run = t.fuzz({ n: 100 }); // dispatch 100 random valid actions
   t.expect.invariant((s) => typeof s.count === "number");
+  // On failure, `run.seed` replays this exact sequence:
+  //   t.fuzz({ n: 100, seed: 1739284 })
 });
 ```
+
+`t.fuzz` takes the two things a property test needs:
+
+- **`seed`** — omit it and one is generated and returned. An unseeded fuzz that
+  fails cannot be re-run, and the first question is always "is this mine?": one
+  app spent a git worktree and ten runs answering it, which a printed seed
+  answers in one.
+- **`skip`** — leave out the methods this harness cannot run. `testCell` owns no
+  clock, so a boot-only method whose body is `s.$do?.(schedule.every(…))` makes
+  the executor refuse the effect and the test fail on that rather than on any
+  invariant. With 32 action keys and 120 picks, missing such a key has a ~2%
+  chance — so the test does not _sometimes fail_, it sometimes **passes**. Bare
+  method names and full `cell:method` keys both work; skipping every action is
+  an error rather than a silent no-op.
+
+`t.randomActions(n)` is the older, unseeded, unfiltered shorthand and still
+works exactly as before.
+
+### Asserting that a method REFUSES
+
+Validation lives with the data, and a method that refuses does so by throwing.
+`t.expect.rejects` is the assertion for it:
+
+```ts
+import { testCell } from "aio/testing";
+import { contacts } from "./cell/contacts/index.ts";
+
+testCell(contacts, "a nameless contact is refused", async (t) => {
+  await t.expect.rejects(() => t.send.add(""), /name is required/);
+});
+```
+
+The refusal leaves the state alone, so assert that too (`t.expect.state(...)`)
+when the method writes before it validates.
+
+Pass a string or a `RegExp` as the second argument. It is worth doing: a bare
+"it threw" assertion passes just as happily for the _wrong_ refusal — a typo
+throwing `TypeError: cannot read x of undefined` looks identical to the
+validation you meant to test, and the test goes green having proved the opposite
+of what it claims.
+
+`t.expect.throws` is the synchronous half, for a plain helper. Every cell method
+is a sender and returns a promise, so `throws` on one refuses and tells you to
+use `rejects`.
 
 ### Async tests
 
@@ -187,20 +233,23 @@ about failures:
 
 ## TestContext API
 
-| Method                       | Description                                                                                                                                                                                                                                                     |
-| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `t.init(seed?)`              | Reset to initial state, optionally SEEDED: `t.init({ scanning: true })` shallow-merges over the declared initial, so a test starts AT the state under test instead of driving the cell there through real methods. An unknown key throws, listing the real ones |
-| `t.destroy()`                | Reset + set status to 'uninitialized'                                                                                                                                                                                                                           |
-| `t.send.<action>(...args)`   | Dispatch an action — starts immediately, like production. Returns a promise; await it to wait for completion                                                                                                                                                    |
-| `t.expect.state(fn)`         | Assert on cell state slice (incl. your `status` field)                                                                                                                                                                                                          |
-| `t.expect.effects(['name'])` | Assert effect types from last action — use full `'cellName:effectKey'` format, e.g. `'counter:persist'`                                                                                                                                                         |
-| `t.expect.effectCount(n)`    | Assert number of effects from last action                                                                                                                                                                                                                       |
-| `t.expect.invariant(fn)`     | Assert a predicate holds                                                                                                                                                                                                                                        |
-| `t.getState()`               | Get cell state slice                                                                                                                                                                                                                                            |
-| `t.getEffects()`             | Get effects from last dispatched action                                                                                                                                                                                                                         |
-| `t.randomActions(n)`         | Dispatch N random valid actions (property-based testing)                                                                                                                                                                                                        |
-| `t.runEffects()`             | Execute pending effects manually (deprecated — `settle()` now auto-runs effects)                                                                                                                                                                                |
-| `t.settle(ms?)`              | Run pending effects + wait for every call started so far. With ms: also wait out real timers.                                                                                                                                                                   |
+| Method                         | Description                                                                                                                                                                                                                                                     |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `t.init(seed?)`                | Reset to initial state, optionally SEEDED: `t.init({ scanning: true })` shallow-merges over the declared initial, so a test starts AT the state under test instead of driving the cell there through real methods. An unknown key throws, listing the real ones |
+| `t.destroy()`                  | Reset + set status to 'uninitialized'                                                                                                                                                                                                                           |
+| `t.send.<action>(...args)`     | Dispatch an action — starts immediately, like production. Returns a promise; await it to wait for completion                                                                                                                                                    |
+| `t.expect.state(fn)`           | Assert on cell state slice (incl. your `status` field)                                                                                                                                                                                                          |
+| `t.expect.effects(['name'])`   | Assert effect types from last action — use full `'cellName:effectKey'` format, e.g. `'counter:persist'`                                                                                                                                                         |
+| `t.expect.effectCount(n)`      | Assert number of effects from last action                                                                                                                                                                                                                       |
+| `t.expect.invariant(fn)`       | Assert a predicate holds                                                                                                                                                                                                                                        |
+| `t.getState()`                 | Get cell state slice                                                                                                                                                                                                                                            |
+| `t.getEffects()`               | Get effects from last dispatched action                                                                                                                                                                                                                         |
+| `t.expect.rejects(fn, match?)` | Assert an async call is REFUSED; `match` narrows to the message so the wrong refusal cannot pass                                                                                                                                                                |
+| `t.expect.throws(fn, match?)`  | The synchronous half, for a plain helper                                                                                                                                                                                                                        |
+| `t.fuzz({ n, seed?, skip? })`  | Random actions, replayable and filterable — returns `{ seed, actions }`                                                                                                                                                                                         |
+| `t.randomActions(n)`           | Dispatch N random valid actions (property-based testing) — the unseeded shorthand                                                                                                                                                                               |
+| `t.runEffects()`               | Execute pending effects manually (deprecated — `settle()` now auto-runs effects)                                                                                                                                                                                |
+| `t.settle(ms?)`                | Run pending effects + wait for every call started so far. With ms: also wait out real timers.                                                                                                                                                                   |
 
 ## Testing inter-cell coordination
 

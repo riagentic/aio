@@ -20,6 +20,7 @@ import {
   nullSlot,
 } from "./vdom-create.ts";
 import { _componentName } from "./hook-error.ts";
+import { _instanceStack } from "./renderer-state.ts";
 import {
   _hasSignalPropChange,
   applyChildDependentProps,
@@ -543,20 +544,55 @@ function _diffPortal(nv: VNode, ov: VNode, ctx: RenderCtx): void {
  *
  *  `exact` (elements only) additionally requires the region to END with the
  *  last child: an element owns ALL of its childNodes, a fragment does not. */
-function _assertRegionAlignment(
+/** @internal Exported as a test seam: the desync it reports is (correctly)
+ *  hard to provoke through the public renderer, and the CLAIMS this function
+ *  makes — that it names the class, the enclosing component, and the two app
+ *  shapes that cause it, and that two different sites are two findings — are
+ *  about the MESSAGE, not about when the desync happens. A test that drives a
+ *  shape hoping to trip it passes vacuously the day AIR stops tripping. */
+export function _assertRegionAlignment(
   nv: VNode,
   first: Node | null,
   exact: boolean,
 ): void {
   const p = nv.props;
   if (p.ref || p.use || p.dangerouslySetInnerHTML) return;
-  const label = `<${_componentName(nv.tag)}>`;
+  // NAME THE SITE, and key the dedupe by it.
+  //
+  // This said `<span> holds the wrong node at child 0`, keyed
+  // `child-desync-span` — one key for every `<span>` in the application. A
+  // field report's numbers say what that cost: ~180 spans across 25
+  // components, so "a span, somewhere, at child 0" is not a lead, and they
+  // spent two hours bisecting a fuzz run by hand. Worse, they then fixed NINE
+  // real shape instabilities in a row and the warning count stayed at exactly
+  // 1 the whole time, because the first one silenced the rest — which reads as
+  // "nothing I did helped". A count that cannot move is not a diagnostic.
+  //
+  // Everything needed was already in hand at the call site: `nv.props` carries
+  // the class, and the enclosing component is on the instance stack.
+  const cls = typeof nv.props.class === "string"
+    ? nv.props.class
+    : typeof nv.props.className === "string"
+    ? nv.props.className
+    : "";
+  const owner = _instanceStack[_instanceStack.length - 1]?._component;
+  const label = `<${_componentName(nv.tag)}${cls ? ` class="${cls}"` : ""}>` +
+    (owner ? ` inside <${owner}>` : "");
   const bad = (why: string) =>
     _devWarn(
-      `child-desync-${String(nv.tag)}`,
+      `child-desync-${owner ?? "?"}-${String(nv.tag)}-${cls}`,
       `${label} ${why} after diff — the child reconciler desynced (nodes ` +
-        `lost/duplicated, or dynamic text written to the wrong slot). This ` +
-        `is an aio bug; please report the component's child shape.`,
+        `lost/duplicated, or dynamic text written to the wrong slot).\n` +
+        // NOT "this is an aio bug". The reported causes were all app shapes,
+        // and sending the author to file an issue is the wrong answer in the
+        // one message that is supposed to end the hunt. Both shapes below are
+        // idiomatic JSX, which is why a careful codebase hit them nine times.
+        `      The usual cause is a sibling whose NODE COUNT changes between ` +
+        `renders, among static siblings: \`{cond && <Icon/>}\` (a falsy ` +
+        `branch still occupies a slot) or \`{v === "" ? "" : v}\` (an empty ` +
+        `string renders to no node at all). Give the siblings keys, or render ` +
+        `a stable placeholder instead of nothing. If neither applies, this is ` +
+        `an aio bug — please report the component's child shape.`,
     );
   let cursor: Node | null = first;
   for (let i = 0; i < nv.children.length; i++) {

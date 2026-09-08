@@ -3,6 +3,8 @@
 AIO uses **AIR** — a built-in signal-based renderer (63 KB gzipped with the
 client runtime, zero dependencies).
 
+- [Tailwind, PostCSS, Sass](css-toolchain.md) — `build.css`: your CSS toolchain,
+  run before every dev reload and every build.
 - [Component kit](kit.md) — `aio/ui`: button, inputs, field, table, card —
   basic, themeable, cell-bound
 - [React islands](react-islands.md) — run React components inside aio (aio stays

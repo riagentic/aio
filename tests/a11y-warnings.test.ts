@@ -309,3 +309,46 @@ Deno.test("a11y: aria-disabled describes a control, it does not disable it", asy
     false,
   );
 });
+
+// ── The keyboard warning must not ask for a bug ──────────────────────────
+//
+// `<summary>` is natively focusable and Enter/Space dispatches a real `click`,
+// so the handler already runs. Adding the `onKeyDown` this warning asked for
+// fires the toggle TWICE — the suggested fix IS the defect. A field report
+// caught it and named the cost precisely: "by hour four I was skimming warnings
+// instead of reading them." `<label>` and `<option>` are the same rule; both
+// forward activation to something else by spec.
+for (const tag of ["summary", "label", "option", "button", "a", "input"]) {
+  Deno.test({
+    name: `a11y: <${tag}> already activates from the keyboard — no nag`,
+    async fn() {
+      const { root, cleanup } = setup();
+      const warnings = captureWarnings(() => {
+        mount(root, () => h(tag, { onClick: () => {} }, "x"));
+      });
+      assertEquals(
+        warnings.filter((w) => w.includes("no keyboard handler")),
+        [],
+        `the platform activates <${tag}> already; asking for onKeyDown here ` +
+          `adds a double fire, not accessibility`,
+      );
+      await cleanup();
+    },
+  });
+}
+
+Deno.test({
+  name: "a11y: a <div onClick> is still told to handle the keyboard",
+  async fn() {
+    const { root, cleanup } = setup();
+    const warnings = captureWarnings(() => {
+      mount(root, () => h("div", { onClick: () => {} }, "x"));
+    });
+    assertEquals(
+      warnings.some((w) => w.includes("no keyboard handler")),
+      true,
+      "a div is not focusable and does not activate — the rule's real target",
+    );
+    await cleanup();
+  },
+});

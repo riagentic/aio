@@ -114,6 +114,13 @@ export const VALID_BUILD_KEYS = new Set<string>([
   // declare V8 flags, and for a COMPILED binary it is the only channel for a
   // heap ceiling — the flag cannot be raised at run time).
   "v8Flags",
+  // The app's own CSS toolchain (Tailwind, PostCSS, Sass) — a command that
+  // writes `style.css`, run before the stylesheet is read in a build and
+  // before every dev reload. Read by `cssBuildStep` (build/build-css.ts).
+  // aio already made this cheap: the generated theme steps fully aside the
+  // moment `style.css` exists, and Tailwind's output IS a `style.css`, so the
+  // architecture accommodated it long before the ergonomics did.
+  "css",
   // Read by `shipApp` and `am publish`: the release channel this build is
   // stamped with. The stamp outranks the config literal at run time, which is
   // what stops a test build updating itself into the public release.

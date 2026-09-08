@@ -1874,6 +1874,7 @@ export function cmdInstances(_args: string[], flags: GlobalFlags): void {
     // uses to pick an app come first; `home` and `cwd` are paths nobody
     // compares across rows, so they move behind `--long`.
     const long = flags.long === true;
+    const anyCdp = all.some((i) => i.cdpPort);
     const rows = all.map((inst) => ({
       "": mark(inst.status === "started" ? "run" : "warn"),
       APP: inst.appId,
@@ -1883,6 +1884,9 @@ export function cmdInstances(_args: string[], flags: GlobalFlags): void {
       AIO: instanceAioMismatch(inst.aioVersion)
         ? style.yellow(`${inst.aioVersion ?? "?"} ≠`)
         : inst.aioVersion ?? style.dim("?"),
+      // Shown only when SOMETHING has one — a column of dashes for the common
+      // case is noise, and the reader who needs it always has one.
+      ...(anyCdp ? { CDP: inst.cdpPort ? String(inst.cdpPort) : "" } : {}),
       ...(long
         ? { SOCKET: inst.socketPath ?? "", HOME: inst.home, CWD: inst.cwd }
         : {}),
@@ -1917,6 +1921,20 @@ export function cmdInstances(_args: string[], flags: GlobalFlags): void {
         transport: inst.socketPath ? "uds" : "ws",
         ...(inst.socketPath ? { socketPath: inst.socketPath } : {}),
         uptime: Math.round((Date.now() - inst.startedAt) / 1000),
+        // The DevTools port, when the app was started with `--cdp`.
+        //
+        // The lock has recorded it since `am shot` needed it; nothing reported
+        // it, and `port` above is the WS transport port — `0` for any UDS app.
+        // So an agent looking for "the port I can drive this window through"
+        // found either nothing or the wrong number, and the wrong number is the
+        // problem: a field report scanned `ss -ltnp` for an Electron listener,
+        // got ANOTHER aio app's CDP port, and spent a long stretch believing
+        // its own correct routes were broken — every observation after that
+        // point was confidently about someone else's window. Ambiguity that
+        // resolves silently into another app's DOM is the worst shape
+        // available, and an agent has no peripheral vision to catch it.
+        // One field closes it entirely.
+        cdpPort: inst.cdpPort ?? null,
         aio: inst.aioVersion ?? null,
         aioMismatch: instanceAioMismatch(inst.aioVersion),
         home: inst.home,

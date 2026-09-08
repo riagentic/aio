@@ -1606,3 +1606,99 @@ Deno.test({
     }
   },
 });
+
+// ── build.css — the CSS toolchain runs, and its output is what ships ─────
+//
+// Two field reports said the same thing about Tailwind: for a large share of
+// new projects it is the assumed default, and aio's total silence about it
+// ("`grep -ril tailwind docs/ src/` → zero hits") reads as "unsupported" even
+// though nothing was blocked. The architecture already accommodated it — the
+// generated theme steps fully aside the moment `style.css` exists, and
+// Tailwind's output IS a `style.css` — so only the ergonomics were missing.
+//
+// The unit tests prove the helper. Only a real build proves the WIRING, and the
+// wiring is the whole feature: a step that runs AFTER the stylesheet is copied
+// ships the previous run's CSS with every gate green, which is precisely the
+// "pretends to work" failure this project refuses. So this asserts ordering by
+// consequence — the app ships a stylesheet that did not exist before the build.
+Deno.test({
+  name: "build.css: the step runs BEFORE the stylesheet is read",
+  ignore: !GATE,
+  fn: async () => {
+    const dir = await makeApp("counter", "build-e2e-css-");
+    try {
+      const marker = `TW_PROOF_${crypto.randomUUID().slice(0, 8)}`;
+      // A stand-in for `tailwindcss`: the framework's half is running the
+      // command and picking up what it wrote, and that is what is under test.
+      // (Real Tailwind v4 was measured through this path at 28ms; the recipe
+      // is docs/ui/tailwind.md.)
+      const tool = join(dir, "make-css.sh");
+      await Deno.writeTextFile(
+        tool,
+        `#!/bin/sh\nprintf '.${marker}{color:#123456}' > src/style.css\n`,
+      );
+      await Deno.chmod(tool, 0o755);
+      const cfgPath = join(dir, "deno.json");
+      const cfg = JSON.parse(await Deno.readTextFile(cfgPath));
+      cfg.build = { ...(cfg.build ?? {}), css: "./make-css.sh" };
+      await Deno.writeTextFile(cfgPath, JSON.stringify(cfg, null, 2));
+
+      // The test is only meaningful if there is nothing to find beforehand.
+      let pre = true;
+      try {
+        await Deno.stat(join(dir, "src", "style.css"));
+      } catch {
+        pre = false;
+      }
+      assertEquals(pre, false, "the scaffold must ship no stylesheet here");
+
+      const built = await task(dir, "build", "--targets=browser");
+      assertEquals(built.code, 0, built.out + built.err);
+      assertStringIncludes(
+        built.out + built.err,
+        "css ./make-css.sh",
+        "the build must SAY it ran the app's CSS step",
+      );
+      assertStringIncludes(
+        await Deno.readTextFile(join(dir, "src", "style.css")),
+        marker,
+        "the step wrote the app's stylesheet",
+      );
+      assertStringIncludes(
+        built.out + built.err,
+        "style.css",
+        "…and the build then picked it up — ordering, asserted by consequence",
+      );
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
+Deno.test({
+  name: "build.css: a FAILING step fails the build",
+  ignore: !GATE,
+  fn: async () => {
+    // The half that makes the feature safe. An unstyled artifact must not be
+    // shippable: a build that carried on past a broken Tailwind run would ship
+    // the last good stylesheet, or none, and say nothing.
+    const dir = await makeApp("counter", "build-e2e-cssfail-");
+    try {
+      const cfgPath = join(dir, "deno.json");
+      const cfg = JSON.parse(await Deno.readTextFile(cfgPath));
+      cfg.build = {
+        ...(cfg.build ?? {}),
+        css: ["sh", "-c", "echo 'unknown utility class' >&2; exit 3"],
+      };
+      await Deno.writeTextFile(cfgPath, JSON.stringify(cfg, null, 2));
+      const built = await task(dir, "build", "--targets=browser");
+      assert(
+        built.code !== 0,
+        `the build must refuse:\n${built.out}${built.err}`,
+      );
+      assertStringIncludes(built.out + built.err, "unknown utility class");
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});

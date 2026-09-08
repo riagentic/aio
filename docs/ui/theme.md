@@ -14,6 +14,47 @@ await aio.run({ appId: "notekeeper", ui: { theme: "auto" } });
 `am create` writes that line into every new app, so a scaffolded app is a
 finished-looking product the first time it runs.
 
+Using Tailwind, PostCSS or Sass? That contract is what makes them work with no
+adapter at all: their output **is** a `style.css`, so the theme leaves exactly
+when you want it to. One key wires the tool into dev reload and the build — see
+[Tailwind, PostCSS, Sass](css-toolchain.md).
+
+## The app mounts into `#root`
+
+Write this down before you write a stylesheet, because it is the one contract
+here that is silent when you get it wrong:
+
+```html
+<div id="root"></div>
+<!-- the shell. Your component renders inside it. -->
+```
+
+So a height chain, a page grid or a flex container belongs on **`#root`**, not
+on a wrapper of your own:
+
+```css
+html,
+body,
+#root {
+  height: 100%;
+} /* ✅ */
+html,
+body,
+#app {
+  height: 100%;
+} /* ✗ styles nothing */
+```
+
+The failure has no error and no visible cause. One app wrote `#app`, the height
+chain broke at the top, its grid fell back to min-content, a long list stretched
+the page to 6 886 px, and the `<canvas>` inside it sized its own drawing buffer
+to 1824 × 13772 — a view stretched tenfold, for hours, while the frame rate and
+triangle counts stayed perfectly healthy.
+
+**In dev, aio now says so**: a `#id` in your stylesheet that matches no element
+warns once and names `#root`. That warning is the whole diagnosis, and it costs
+production nothing.
+
 ## Why opt-in, and not a default
 
 An app brings CSS in more ways than a shell can see: a `style.css`, a `<style>`
@@ -116,6 +157,13 @@ Writing `<main>` opts into a page container (centred, `--aio-page` wide,
 padded). Apps that want full bleed — a canvas, a map, a game — simply do not use
 it. A `<header>` or `<footer>` at the top level becomes a full-bleed bar whose
 _content_ lines up with `<main>`.
+
+**Or skip the markup entirely.** [`aio/ui`](kit.md) ships ~30 components —
+`Button`, `Input`, `Field`, `Table`, `Card`, `Modal`, `toast` and the rest —
+built on exactly these classes and already in every scaffolded app's import map.
+This is the fork: write `<div class="card stack">`, or write `<Card><Stack>`. A
+field report stood here, chose the markup, and hand-rolled eight components plus
+889 lines of CSS that were one import away.
 
 Five classes are worth knowing:
 

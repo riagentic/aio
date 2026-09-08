@@ -1,9 +1,136 @@
 # Changelog
 
-## Unreleased — towards v1.0.0-beta1
+## v1.0.0-beta1 — the reports answered (2026-09-08)
 
-> The surface stays frozen; everything here is a fix or an addition. Collected
-> until beta1 is cut, in the order it landed.
+> **The surface is frozen and stays frozen.** Everything in this release is a
+> fix or an addition: an app that compiles and runs against alpha76 compiles and
+> runs against beta1. Nothing here is a migration you have to perform.
+>
+> Beta is a QUALITY statement. What earns it: nine field reports from nine real
+> apps — a wallet, a 24/7 trading desk, a Claude Code control surface, a 3D
+> anatomy atlas, an embedded-browser job manager, a llama.cpp desktop app, a
+> video captioner, a live-transcription app and an AI music studio — read end to
+> end, every finding verified against the code, and every one of them fixed,
+> refused in writing, or queued in the open. Ratings ranged 8 to 9 out of 10.
+
+### The round's two shapes
+
+Almost nothing reported was architectural. The findings divide into two
+opposites, and both are now closed at the class rather than the instance:
+
+**A check that fired on correct code.** Six `aiol` rules, two renderer warnings
+and one security heuristic. Each cost its reporter the same thing, in nearly the
+same words — _"by hour four I was skimming warnings instead of reading them"_,
+_"a hint that cannot be discharged becomes noise"_, _"this trains people to skim
+the error list — which is the list that had two genuine errors in it earlier
+this year."_ These are not cosmetic. aio's rules are load-bearing, and a list
+people skim is the list the real one gets missed in.
+
+**A fact the framework knew and did not say.** `#root`, `cdpPort`, an untracked
+lifecycle read, a dropped `onMount` cleanup, `route()`, a colour nobody
+measured. Each produced a WRONG BELIEF — which three reports independently named
+as the one failure class an agent cannot self-correct out of, because there is
+no glance-at-the-screen check.
+
+And the meta-finding, reached independently by two reporters after each had
+withdrawn a complaint on reading the source: **aio's features are consistently
+better than aio's discoverability.** That is why this release ships a docs page
+for agents, intent words on the `am` verbs, and the component kit on the page
+that promises "all exports".
+
+### Answering the reports
+
+- **`route()` was documented, tested, and importable from nowhere.** It opens
+  with 22 lines of docs and three worked examples describing exactly what apps
+  "re-rolled every time" — `:id` params with the decoding hazard handled, a
+  method guard that lets HEAD ride with GET, cookies, a JSON helper — and
+  `import { route } from "aio/server"` was TS2305. One app had four hand-rolled
+  param parsers and had hand-declared `{ params: Record<string, string> }`
+  because `RouteMatch` was unreachable too. It ships from `aio/server` with its
+  types.
+- **`aio/log`, the leaf.** Measured on a live trading process:
+  `import { log } from "aio"` costs 260 aio modules and 3.7 MB in a service that
+  never draws a pixel — the vdom renderer, the build system, the Electron
+  target, the CRDT engine. From `aio/log` the same symbol costs 13 modules and
+  111 KB. The cost was never bytes: that desk treats an aio pin bump as a
+  live-trading change _because_ its import graph is 72% framework.
+  `tests/leaf-entries.test.ts` fails the day the leaf stops being one.
+- **`onMount` threw away the cleanup it was handed.**
+  `return () => clearInterval(t)` type-checks — a `() => void` callback may
+  return anything — and was dropped. A wallet shipped it three times in three
+  components over months: every send dialog it ever opened left an interval
+  waking the loop 2.5×/second for the life of the process, each holding its
+  component's whole closure. Found by eye in an audit; no gate could have caught
+  them. Runtime-only fix, signature unmoved.
+- **A read inside `afterRender`/`onMount` subscribes to nothing — now it says
+  so.** _"The one change I would make to aio before any other."_ The effect runs
+  once and never again; types pass, `aiol` passes, and the feature reports
+  itself to a user as "it works sometimes". One codebase shipped it three times,
+  by an author who had written the explaining comment into two of the earlier
+  ones. Dev now names the value, the component and the consequence.
+- **Nothing measured colour.** aio checks the accessibility of STRUCTURE and
+  shipped a generated colour system it never measured; a defect reached a user
+  through five green gates. A dev-time walk of the committed DOM now composites
+  translucent layers, holds large text to 3:1, never guesses a colour it cannot
+  parse, and distinguishes "no findings" from "could not look".
+- **The `#root` contract.** An app styled `#app`, its own wrapper name; the
+  height chain broke, a list stretched the page to 6 886 px, and a canvas sized
+  its buffer to 1824 × 13772 — a view stretched tenfold for hours while frame
+  rate and triangle counts stayed healthy. A `#id` in your stylesheet matching
+  no element now warns once and NAMES `#root`.
+- **`am eval '<expr>'`** — the most-requested `am` verb, and every report
+  arrived at it by writing it themselves. Geometry, computed styles, and a fetch
+  from the page's own origin: everything `am surface` cannot see. Written
+  against a fake CDP endpoint it would have shipped four confident wrong
+  answers; a real Chromium found every one.
+- **`cdpPort` in `am instances`.** The lock had recorded it all along. One
+  report scanned `ss -ltnp`, got another Electron app's port, and spent a long
+  stretch believing its own correct routes were broken.
+- **A short `am dispatch` says so in the reply.** The framework has always
+  warned — into the server log, while the route answered a clean `ok` to the
+  operator who made the call. An agent never reads that log.
+- **The secret-field heuristic matched substrings** — `key` inside `monkey`,
+  `seed` inside `seedling`. Worse, the tier that REFUSES a boot matched
+  `password` inside `passwordless`, so an app with that field would not start.
+- **`build.css` — a door for Tailwind, PostCSS and Sass.**
+  `grep -ril tailwind
+  docs/ src/` returned zero hits, and silence read as
+  "unsupported". The hard half was already done: the theme steps aside the
+  moment `style.css` exists, and Tailwind's output IS a `style.css`.
+- **Six `aiol` rules that could not be acted on**, including a visibility hint
+  that probed `ui:` — a key `cell()` THROWS on — so the only spelling that could
+  clear it was one the runtime refuses.
+- **`t.expect.rejects` / `t.expect.throws`, `t.fuzz` (seeded, filterable),
+  `t.init()` deep partial, typed route params.**
+
+### One recorded surface change, and it is a widening
+
+`VERSION` is now annotated `export const VERSION: string` instead of inferring
+the literal `"1.0.0-beta1"`. Taken through `update:api --allow-break` and
+recorded here because the gate requires a decision to be written down, not
+absorbed — but it **widens**: `VERSION === "1.0.0-alpha76"` was a compile error
+under the literal type (no overlap) and is now an ordinary comparison, and every
+other use (`String`, `.startsWith`, a key) is unchanged. The only shape that
+could break is `const x: "1.0.0-alpha77" = VERSION`, which is not a thing anyone
+writes.
+
+The reason to take it once: left inferred, the literal is public surface, so
+**every release bump reported itself to `check:api` as a BREAKING signature
+change** — at the exact moment a release is being cut and the tempting move is
+to regenerate and stop reading. A gate that cries wolf on the one action that
+always happens is the pattern this release spends most of its time removing.
+
+### Two gates were wrong, and the gates were fixed
+
+`check:api` called an added optional member of a nested type BREAKING, and an
+added overload BREAKING. Both now classify by provable rules — an overload set
+whose first signature is byte-identical to the previous single one cannot break
+a caller, because overload resolution tries declarations in order. `check:docs`
+could not parse an optional member, so it reported a documented one as
+nonexistent.
+
+> Everything below this line landed before the beta was cut, in the order it
+> landed.
 
 - **Every client action goes through ONE door, and that door says what the wire
   does to it.** `serverFn` arguments have been vetted since alpha76 — refused

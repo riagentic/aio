@@ -654,6 +654,9 @@ async function handlePost(
           404,
         );
       }
+      // How many arguments this call is SHORT by, carried to the reply below.
+      let _shortBy = 0;
+      let _shortRequired = 0;
       if (sepIdx > 0 && Object.keys(methods).length > 0) {
         const cell = action.type.slice(0, sepIdx);
         const method = action.type.slice(sepIdx + 1);
@@ -685,6 +688,21 @@ async function handlePost(
         // Required arguments only. A default or a rest parameter ends
         // `fn.length`, so "too many" is not knowably wrong and stays allowed.
         const required = trojan.cellMethodArity?.()[cell]?.[method];
+        // Remembered for the REPLY, below. The framework already warns about a
+        // short call at `methodArgs` — but it warns into the SERVER LOG, and
+        // this route answers `{"ok":true}` to the operator who made it. An
+        // agent driving a live app never reads that log, so the one place the
+        // fact was needed is the one place it did not reach.
+        _shortBy = 0;
+        _shortRequired = required ?? 0;
+        {
+          const p = action.payload as { args?: unknown } | undefined;
+          if (
+            required !== undefined && required > 0 && Array.isArray(p?.args)
+          ) {
+            _shortBy = Math.max(0, required - p.args.length);
+          }
+        }
         if (required !== undefined && required > 0) {
           const p = action.payload as { args?: unknown } | undefined;
           // ONLY a call that supplies NO argument list at all is refused.
@@ -821,6 +839,27 @@ async function handlePost(
         ok: true,
         ...(ret.value !== undefined ? { result: ret.value } : {}),
         ...(ret.dropped ? { resultDropped: true } : {}),
+        // The call RAN with arguments missing. Not a refusal — `fn.length`
+        // stops at the first defaulted parameter, so a method that fills its
+        // own in (`reset(s, to) { to ??= 0 }`) reports as needing one it does
+        // not, and refusing would break a call that works today. But the
+        // framework KNOWS, and until now it said so only in the server log
+        // while this route answered a clean `ok` to the operator who made the
+        // call. A field report's exact shape: `am dispatch todo:add` wrote a
+        // row whose declared field was simply gone, under `{"ok":true}`.
+        ...(_shortBy > 0
+          ? {
+            short:
+              `${action.type} declares ${_shortRequired} argument${
+                _shortRequired === 1 ? "" : "s"
+              } and this call passed ${
+                _shortRequired - _shortBy
+              } — the missing one${_shortBy === 1 ? " is" : "s are"} ` +
+              `\`undefined\` inside the method. If it fills its own in, give ` +
+              `the parameter a default in the SIGNATURE (\`(s, x = 0)\`), ` +
+              `which is what makes its optionality visible.`,
+          }
+          : {}),
         ...(persistErr === undefined ? {} : {
           unsaved: persistErr
             ? `${PERSIST_REFUSED} ${persistErr.message}`

@@ -110,6 +110,32 @@ export type TestContext<
     effectCount: (n: number) => void;
     /** Assert a predicate holds for current state */
     invariant: (fn: (s: S) => boolean) => void;
+    /** Assert an async call REFUSES — the shape a validating method has.
+     *
+     *  "Validation lives with the data … a method that refuses does so by
+     *  throwing" is documented behaviour with a worked example, and its harness
+     *  had no first-class assertion for it. A field report reached for
+     *  `t.expect.rejects(...)` by analogy with `.state` / `.effects` /
+     *  `.invariant`, got `TS2339: Property 'rejects' does not exist`, and
+     *  imported `assertRejects` instead. The analogy was right; the member was
+     *  missing.
+     *
+     *  ```ts
+     *  await t.expect.rejects(() => t.send.add(""), /name is required/);
+     *  ```
+     *  `match` narrows to the message, so a test cannot pass on the WRONG
+     *  refusal — which is the failure a bare "it threw" assertion allows. */
+    rejects?: (
+      fn: () => unknown,
+      match?: string | RegExp,
+      msg?: string,
+    ) => Promise<Error>;
+    /** The synchronous half of {@link rejects} — a sync method that refuses. */
+    throws?: (
+      fn: () => unknown,
+      match?: string | RegExp,
+      msg?: string,
+    ) => Error;
   };
   /** Run `fn` with `user` as the ambient caller identity, so `serverUser()`
    *  inside a method answers with it — the supported way to test an
@@ -139,8 +165,48 @@ export type TestContext<
   getState: () => S;
   /** Get effects from last dispatched action */
   getEffects: () => (Msg | ScheduleEffect | OwnEffect)[];
-  /** Dispatch N random valid actions (for property-based testing) */
+  /** Dispatch N random valid actions (for property-based testing).
+   *
+   *  Unseeded and unfiltered. {@link fuzz} is the same thing with the two
+   *  things a property test needs — a replayable seed and a skip list — and is
+   *  what to reach for in new tests; this stays exactly as it is. */
   randomActions: (n: number) => void;
+  /** {@link randomActions}, replayable and filterable.
+   *
+   *  TWO field findings, one call.
+   *
+   *  A SEED, because an unseeded fuzzer that fails cannot be re-run. When one
+   *  did, the author "spent a worktree and ten runs establishing whether it was
+   *  mine" — a printed seed answers that in one. Property-based testing solved
+   *  this twenty years ago; `fast-check` prints `Seed: 1234` and you replay it
+   *  exactly. Omit it and one is generated and returned, so a failing run can
+   *  always name the seed that produced it.
+   *
+   *  A SKIP LIST, because a uniform pick over every action key includes the
+   *  boot-only ones. A cell whose 32 methods include one whose whole body is
+   *  `s.$do?.(schedule.every(…))` cannot be fuzzed at all: `testCell` owns no
+   *  clock, so the executor correctly refuses the effect and the test fails on
+   *  that rather than on any invariant. With 32 keys and 120 picks, missing it
+   *  has probability ~2% — so the test does not "sometimes fail", it sometimes
+   *  PASSES. Measured: 10/10 red alone, 5/5 red in the full suite, 0/12 red
+   *  once the boot-only key was excluded.
+   *
+   *  ```ts
+   *  const run = t.fuzz({ n: 120, skip: ["armFolderWatch"] });
+   *  t.expect.invariant((s) => s.total >= 0);
+   *  // on failure: `seed ${run.seed}` replays this exact sequence
+   *  ```
+   */
+  fuzz?: (opts?: {
+    /** How many actions to dispatch. Default 100. */
+    n?: number;
+    /** Replay a previous run exactly. Omitted → generated and returned. */
+    seed?: number;
+    /** Action keys to leave out — boot-only methods, anything that needs a
+     *  clock this harness does not have. Bare method names or full
+     *  `cell:method` keys both work. */
+    skip?: readonly string[];
+  }) => { seed: number; actions: string[] };
   /** Run pending effects (executor). Deprecated — `settle()` now auto-runs effects. */
   runEffects: () => void;
   /** Run effects + wait for async to complete. Replaces `runEffects() + settle()`.
@@ -185,11 +251,84 @@ type CellActionsOf<F> = F extends
  *  resolved return types mirror production `await cell.method(...)`. Actions-form cells (empty SendSurface) keep the loose senders.
  *  (A plain intersection can't narrow: `Promise<unknown> & Promise<R>` awaits
  *  to unknown.) */
-type TestCtxOf<F> = keyof SendSurface<F> extends never
-  ? TestContext<CellStateOf<F>, Catalog<CellNameOf<F>, CellActionsOf<F>>>
+/** Every field optional, all the way down — arrays and non-objects kept whole.
+ *
+ *  `Partial<S>` only reaches the TOP level, so any nested object had to be
+ *  supplied entire. A field report wrote a local `cfg()` helper in two test
+ *  files purely to work around it, and every test that touched config then
+ *  carried five fields it did not care about — exactly the noise that makes a
+ *  test hard to read.
+ *
+ *  An array stays whole on purpose: a "partial array" is not a thing anyone
+ *  means, and merging one index-wise would silently keep elements a fixture
+ *  meant to replace. */
+type DeepPartial<T> = T extends readonly unknown[] ? T
+  : T extends object ? { [K in keyof T]?: DeepPartial<T[K]> }
+  : T;
+
+/** Merge `seed` into `base`, recursing into PLAIN objects only.
+ *
+ *  Safe to adopt under the freeze, and the reason is precise: today `init`
+ *  takes `Partial<S>`, so a nested object must be supplied whole — and when it
+ *  is whole, a deep merge and a replace produce the same result. No test that
+ *  COMPILES today can observe the difference. Anything that is not a plain
+ *  object (an array, a Date, a Map, a class instance) replaces, because
+ *  merging into one is how a fixture silently keeps what it meant to drop. */
+function _deepMergeSeed(
+  base: Record<string, unknown>,
+  seed: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...base };
+  for (const [k, v] of Object.entries(seed)) {
+    const prev = out[k];
+    const bothPlain = _isPlainObject(prev) && _isPlainObject(v);
+    out[k] = bothPlain
+      ? _deepMergeSeed(
+        prev as Record<string, unknown>,
+        v as Record<string, unknown>,
+      )
+      : v;
+  }
+  return out;
+}
+
+function _isPlainObject(v: unknown): boolean {
+  if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
+  const proto = Object.getPrototypeOf(v);
+  return proto === Object.prototype || proto === null;
+}
+
+/** What the harness ALWAYS provides, made required.
+ *
+ *  `TestContext` declares `fuzz`, `expect.rejects` and `expect.throws`
+ *  OPTIONAL, and that is not a hedge — the public surface is frozen, and adding
+ *  a REQUIRED member to a published interface breaks anyone who constructs one
+ *  by hand. That is a break `am fix` cannot repair, so it is not available.
+ *
+ *  The harness does provide them, always, so the type the CALLBACK receives
+ *  says so and nobody has to write `t.fuzz?.(…)` or `t.expect.rejects!(…)`.
+ *  `TestCtxOf` is not exported, so tightening it costs the surface nothing —
+ *  which is the whole shape of "additive under a freeze": the promise stays as
+ *  weak as it was, the thing you actually hold is as strong as it can be. */
+type Provided<T extends { expect: unknown; init: unknown }> =
+  & Omit<T, "expect" | "fuzz" | "init">
+  & { expect: Required<T["expect"]> }
+  & { fuzz: NonNullable<TestContext<never, never>["fuzz"]> }
+  // `init` is DEEP here and shallow on the published `TestContext`. The public
+  // type is frozen — widening a parameter is a signature change the gate
+  // refuses, and rightly, since it cannot prove assignability from a digest.
+  // `TestCtxOf` is private, so the callback holds the better type and the
+  // promise stays exactly as weak as it was.
+  & { init: (seed?: DeepPartial<CellStateOf<T>>) => void };
+
+type TestCtxOf<F> = keyof SendSurface<F> extends never ? Provided<
+    TestContext<CellStateOf<F>, Catalog<CellNameOf<F>, CellActionsOf<F>>>
+  >
   :
     & Omit<
-      TestContext<CellStateOf<F>, Catalog<CellNameOf<F>, CellActionsOf<F>>>,
+      Provided<
+        TestContext<CellStateOf<F>, Catalog<CellNameOf<F>, CellActionsOf<F>>>
+      >,
       "send"
     >
     & { send: SendSurface<F> };
@@ -197,6 +336,34 @@ type TestCtxOf<F> = keyof SendSurface<F> extends never
 /** Test harness for isolated cell testing — wraps Deno.test with typed
  *  helpers. Everything is inferred from the cell ref: state (`t.getState()`,
  *  `t.expect.state`), sender args, and sender RETURN types. */
+/** The refusal an `expect.rejects`/`expect.throws` caught, checked against
+ *  `match` and returned so a test can assert further on it.
+ *
+ *  `match` is what stops the assertion being vacuous. "It threw" passes for the
+ *  WRONG refusal just as happily as for the right one — a typo in a field name
+ *  throwing `TypeError: cannot read x of undefined` looks identical to the
+ *  validation the test was written for, and the test goes green having proved
+ *  the opposite of what it claims. */
+function _matchRefusal(
+  thrown: unknown,
+  match: string | RegExp | undefined,
+  msg: string | undefined,
+): Error {
+  const err = thrown instanceof Error ? thrown : new Error(String(thrown));
+  if (match !== undefined) {
+    const ok = typeof match === "string"
+      ? err.message.includes(match)
+      : match.test(err.message);
+    if (!ok) {
+      throw assertionFailure(
+        `${msg ?? "the call was refused"}, but for a different reason than ` +
+          `expected.\n  expected to match: ${match}\n  actual message:    ${err.message}`,
+      );
+    }
+  }
+  return err;
+}
+
 export function testCell<
   F extends CellDef<string, Creators, Creators, Record<string, unknown>>,
 >(
@@ -504,7 +671,10 @@ export function testCell(
                 `nothing.`,
             );
           }
-          (state as Record<string, unknown>)[prefix] = { ...known, ...seed };
+          (state as Record<string, unknown>)[prefix] = _deepMergeSeed(
+            known,
+            seed,
+          );
         }
         lastEffects = [];
         emittedFramework.length = 0;
@@ -560,6 +730,67 @@ export function testCell(
             );
           }
         },
+        rejects: async (fn, match, msg) => {
+          let thrown: unknown;
+          let returned = false;
+          try {
+            await fn();
+            returned = true;
+          } catch (e) {
+            thrown = e;
+          }
+          if (returned) {
+            throw assertionFailure(
+              `${msg ?? "expected the call to be REFUSED"}, and it resolved. ` +
+                `A validating method refuses by throwing — if this one now ` +
+                `returns instead, the guard is gone. State: ${
+                  formatCellState(state[f.__aio.id] as Record<string, unknown>)
+                }`,
+            );
+          }
+          return _matchRefusal(thrown, match, msg);
+        },
+        throws: (fn, match, msg) => {
+          let thrown: unknown;
+          let returned = false;
+          let value: unknown;
+          try {
+            value = fn();
+            returned = true;
+          } catch (e) {
+            thrown = e;
+          }
+          // EVERY cell method is a sender and returns a promise, so a method
+          // that refuses rejects rather than throwing — and a `throws` here
+          // would report "it returned" while leaving an unhandled rejection to
+          // kill the whole test FILE from outside any test. Naming the right
+          // assertion is the only useful answer.
+          if (
+            returned && value !== null && typeof value === "object" &&
+            typeof (value as { then?: unknown }).then === "function"
+          ) {
+            // Adopt the rejection so it cannot surface as an uncaught error
+            // after this assertion has already failed.
+            (value as Promise<unknown>).catch(() => {});
+            throw assertionFailure(
+              `${
+                msg ?? "expect.throws"
+              } was given a call that returned a PROMISE. Every cell method ` +
+                `is async, so a refusal REJECTS rather than throws — use ` +
+                `\`await t.expect.rejects(...)\`. (\`throws\` is for a ` +
+                `synchronous helper.)`,
+            );
+          }
+          if (returned) {
+            throw assertionFailure(
+              `${msg ?? "expected the call to throw"}, and it returned. ` +
+                `State: ${
+                  formatCellState(state[f.__aio.id] as Record<string, unknown>)
+                }`,
+            );
+          }
+          return _matchRefusal(thrown, match, msg);
+        },
       },
       as: <T>(user: AioUser | undefined, body: () => T): T =>
         runWithUser(user, body),
@@ -571,6 +802,53 @@ export function testCell(
       },
       getState: () => state[f.__aio.id] as Record<string, unknown>,
       getEffects: readEffects,
+      fuzz: (opts) => {
+        const n = opts?.n ?? 100;
+        const seed = opts?.seed ?? (Math.random() * 0x7fffffff) | 0;
+        // `actionKeys` are bare method names; a caller reasonably writes
+        // either that or the `cell:method` key they see in `am dispatch` and
+        // in error messages. Normalise BOTH sides — a skip entry that silently
+        // matches nothing puts the boot-only method back in the fuzz, which is
+        // the exact 2%-flake this option exists to remove, and the caller would
+        // have no way to tell.
+        const bare = (k: string) => k.split(":").pop() ?? k;
+        const skip = new Set((opts?.skip ?? []).map(bare));
+        const keys = (f.__aio.actionKeys as string[]).filter((k) =>
+          !skip.has(bare(k))
+        );
+        if (keys.length === 0) {
+          throw assertionFailure(
+            `fuzz: every action was skipped (${
+              (opts?.skip ?? []).join(", ")
+            }) — there is nothing left to dispatch, so the run would assert ` +
+              `an invariant over a cell nothing touched.`,
+          );
+        }
+        // A tiny deterministic PRNG (mulberry32). The point is REPLAY, not
+        // statistical quality: the same seed must produce the same sequence in
+        // every process, which `Math.random()` cannot promise and which is the
+        // whole difference between "it sometimes fails" and a bug you can look
+        // at twice.
+        let a = (seed >>> 0) || 1;
+        const next = () => {
+          a = (a + 0x6D2B79F5) >>> 0;
+          let t = Math.imul(a ^ (a >>> 15), 1 | a);
+          t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+        const actions: string[] = [];
+        for (let i = 0; i < n; i++) {
+          const key = keys[Math.floor(next() * keys.length)]!;
+          actions.push(key);
+          try {
+            send[key]!();
+          } catch {
+            // aio-ok: see `randomActions` below — a refused transition is the
+            // designed outcome of a fuzz, not a fault to report.
+          }
+        }
+        return { seed, actions };
+      },
       randomActions: (n) => {
         const keys = f.__aio.actionKeys;
         for (let i = 0; i < n; i++) {

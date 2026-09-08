@@ -5,6 +5,7 @@ import {
   composeCells,
   type ComposedCells,
 } from "../state/cell.ts";
+import { isRefusableCredential, looksSecret } from "../state/secret-names.ts";
 import {
   applyCellFieldFilter,
   type CellPatchStrategy,
@@ -103,70 +104,6 @@ function renderFilter(filter: CellFieldFilter): string {
   return "all";
 }
 
-// Field names that usually hold secrets — used for the UI-exposure heuristic.
-//
-// `enc` is matched at a WORD BOUNDARY only, never as a bare substring. As a
-// substring it fires on `latency`, `sequence`, `currency`, `reference`,
-// `influence`, `agency`, `cadence` — ordinary words with an `enc` in the
-// middle. A field report hit it with `lastLatencyMs`, a millisecond count that
-// belongs on screen; a heuristic that cries wolf on measurements teaches
-// people to reach for the escape hatch without reading, which is the one
-// outcome a security warning must never produce.
-//
-// Two patterns because the boundary differs by case: lowercase `enc` counts
-// at the start of a name or after a separator, and a capital `Enc` is a
-// camelCase hump anywhere (`dataEnc`, `seedEncKey`). CAMEL_ENC is
-// deliberately case-SENSITIVE — folding it would match the middle of
-// `latency` again and undo the whole fix.
-const WORD_START_ENC = /(^|[^a-zA-Z])enc/i;
-const CAMEL_ENC = /Enc/;
-const SECRET_FIELD_RE = /secret|priv|key|seed|mnemonic|passphrase|passwo?rd/i;
-
-/** True when a field name mentions a secret-ish concept at all (before the
- *  public-hint and suffix filters below refine it). */
-function _mentionsSecret(key: string): boolean {
-  return WORD_START_ENC.test(key) || CAMEL_ENC.test(key) ||
-    SECRET_FIELD_RE.test(key);
-}
-// Unambiguous CREDENTIAL names — an exposed value is almost certainly a real
-// leak, so this is escalated from a warning to a boot REFUSAL in dev. Compound forms only (private_key, api_key,
-// secret_key, access_token…) so feature names like "secretSanta"/"tokenList"
-// don't false-fatal; bare `secret`/`key`/`token` stay soft warnings. `password`,
-// `passphrase`, `mnemonic` are unambiguous on their own. (SECRET_FIELD_RE missed
-// `password` entirely before this — a silent gap.)
-const HARD_SECRET_RE =
-  /passwo?rd|passphrase|mnemonic|private[_-]?key|api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token/i;
-// …but a "public" hint (pubKey, publicKey) means it's meant to be shared.
-//
-// ANCHORED to a word boundary, because an unanchored /pub(lic)?/i matched the
-// substring ANYWHERE: `pubsubSecretKey`, `republishedApiKey` and
-// `epubPassword` all silently claimed the exemption and walked past a gate
-// that exists to refuse exactly those names. An exemption that any substring
-// can claim is not an exemption, it is a bypass — so the hint has to be the
-// START of the name or the start of a camelCase/underscore/dash word inside
-// it, which is how `pubKey`, `publicKey` and `owner_public_key` are actually
-// spelled and how `pubsub` is not.
-const PUBLIC_HINT_RE =
-  /(?:^|[_-])(?:pub|public|Pub|Public|PUB|PUBLIC)(?![a-z])|[a-z0-9](?:Pub|Public)(?![a-z])/;
-// …and these suffixes mark identifiers/metadata, not the secret itself:
-// seedId, seedPathType, keyName, encMode — nav state, not a leaked secret
-//.
-// …plus MEASUREMENT suffixes: a quantity is a reading, not a credential.
-// `lastLatencyMs` was warned about in a field report — it is a millisecond
-// count from Send to first token and belongs on screen.
-const NONSECRET_SUFFIX_RE =
-  /(Id|Ids|Type|Name|Count|Index|Idx|At|Ref|Kind|Length|Len|Path|Mode|Status|Flag|Enabled|Visible|Label|Order|Version|Ms|Sec|Secs|Seconds|Bytes|Kb|Mb|Gb|Hz|Pct|Percent|Ratio|Rate|Total|Avg|Min|Max|Size|Width|Height|Duration|Elapsed)$/;
-
-/** True when a field NAME looks like it holds a secret meant to stay private.
- *  Skips public-key-style names and identifier/metadata suffixes to avoid the
- *  false positives that made the old heuristic cry wolf. */
-function _looksSecret(key: string): boolean {
-  if (!_mentionsSecret(key)) return false;
-  if (PUBLIC_HINT_RE.test(key)) return false;
-  if (NONSECRET_SUFFIX_RE.test(key)) return false;
-  return true;
-}
-
 /** Dev-safety warnings for field-level visibility config:
  *  #1 an include/exclude key that isn't a top-level state field is a silent
  *     no-op — field filters only match top-level keys; nested/array fields need
@@ -263,11 +200,8 @@ function warnFieldFilters(composed: ComposedCells): void {
         // AIO-426: an unambiguous credential broadcast to every
         // client is a real leak, not a maybe. Guards (public-hint / metadata
         // suffix) still apply so `apiKeyName`, `publicKey` don't trip it.
-        if (
-          HARD_SECRET_RE.test(key) && !PUBLIC_HINT_RE.test(key) &&
-          !NONSECRET_SUFFIX_RE.test(key)
-        ) hardKeys.push(key);
-        else if (_looksSecret(key)) softKeys.push(key);
+        if (isRefusableCredential(key)) hardKeys.push(key);
+        else if (looksSecret(key)) softKeys.push(key);
       }
       const list = (ks: string[]) => `[${ks.map((k) => `"${k}"`).join(", ")}]`;
       // Soft warnings first (non-blocking) so they're still visible if the hard
